@@ -6554,7 +6554,9 @@ struct Wire {
 /// `(stored, failed, settled)` and `(stored, settled, failed)` compile the same
 /// and report opposite things on a page somebody reads to decide whether to run
 /// again. They are named rather than positional.
-#[derive(Debug, Default, PartialEq, Eq)]
+// `Eq` IS GONE because `PricedCount` carries refusal reasons alongside counts
+// and is compared only in assertions. Nothing keys a map on this.
+#[derive(Debug, Default, PartialEq)]
 struct FnoLanded {
     /// Bars written to disk by this run.
     stored: usize,
@@ -6564,6 +6566,12 @@ struct FnoLanded {
     /// did not ask for them. **Not a success and not a failure** — see the
     /// `continue` in [`fno_land`] that counts it.
     settled: usize,
+    /// What pricing produced, or all zeroes when no rate was supplied.
+    ///
+    /// The chain path and the rolling path report the same counts through the
+    /// same type, so one receipt reads the same however the contracts were
+    /// discovered.
+    priced: PricedCount,
     /// The first few reasons, verbatim, capped at five.
     why: Vec<String>,
 }
@@ -6651,6 +6659,13 @@ async fn fno_land(
     // CONTRACTS ATTEMPTED, NOT BARS STORED. See the budget halt below.
     let mut attempted = 0usize;
     let origin = wire.source.endpoint(asked.granularity);
+    // THE SWEPT SLOT, RESOLVED ONCE. A property of the underlying that cannot
+    // change inside one run; resolving it per bar would be the same lookup two
+    // hundred thousand times. `None` means this underlying has no recorded
+    // strike-ladder regime, and pricing is then skipped with that reason rather
+    // than a ladder being guessed at.
+    let slot = pull::pricing::slot_of(asked.underlying);
+    let mut books = SpotBooks::new();
 
     // THE VENDOR'S WINDOW CAP BINDS HERE TOO, AND IT DID NOT.
     //
@@ -6709,17 +6724,22 @@ async fn fno_land(
     let manifest = autopilot::manifest_of(&censuses, wire.store_vendor);
     let months = crate::ladder::months_of(asked.window);
     let timeframe = asked.granularity.store_timeframe();
+    // ONE PROBE, NAMED ONCE. Closing over `manifest` here rather than writing
+    // the chain inline at the call site keeps the resume rule in one place —
+    // `owed_chunks` states that this must be O(1), and a second copy of it is a
+    // second chance for one of them to become a search.
+    let held = |key: &pull::manifest::EntryKey| {
+        manifest
+            .and_then(|m| m.entry(key))
+            .map(|e| e.last_ts_micros)
+    };
 
     'contracts: for found in wanted {
         attempted = attempted.saturating_add(1);
 
         // WHAT THIS CONTRACT STILL OWES — its months, less the ones already
         // held through their last owed day, each narrowed to its resume point.
-        let (chunks, done) = owed_chunks(found, &months, timeframe, asked.window, cap, |key| {
-            manifest
-                .and_then(|m| m.entry(key))
-                .map(|e| e.last_ts_micros)
-        });
+        let (chunks, done) = owed_chunks(found, &months, timeframe, asked.window, cap, held);
         out.settled = out.settled.saturating_add(done);
         if chunks.is_empty() {
             // NOTHING OWED, WHICH IS NEITHER A FETCH NOR A FAILURE. Counting
@@ -6730,20 +6750,16 @@ async fn fno_land(
             continue;
         }
 
-        // ONE CONTRACT IS NOW ONE REQUEST PER CHUNK, and a chunk that refuses
-        // abandons that contract rather than storing a hole. A partially
-        // fetched contract would land some of its months and leave the rest
-        // absent, and with no F&O gap driver yet there is nothing that would
-        // ever come back for them — the month would read complete and be short,
-        // which is the one failure this repository is most careful about.
-        let mut bodies = Vec::with_capacity(chunks.len());
-        let mut refused: Option<String> = None;
-        for chunk in &chunks {
-            // THE GOVERNOR BEFORE EACH REQUEST, not once per contract and not
-            // once for the batch. Two hundred contracts over eight chunks is
-            // sixteen hundred requests, and a budget charged per contract would
-            // be a ceiling observed one time in eight.
-            if let Err(halt) = await_budget(asked.feed, site).await {
+        let bodies = match fetch_chain_chunks(found, &chunks, asked, site, wire).await {
+            Fetched::Bodies(bodies) => bodies,
+            Fetched::ContractRefused(refusal) => {
+                out.failed = out.failed.saturating_add(1);
+                if out.why.len() < 5 {
+                    out.why.push(refusal);
+                }
+                continue;
+            }
+            Fetched::RunHalted(halt) => {
                 out.why.push(halt);
                 // CONTRACTS NOT REACHED, and this line said `wanted.len() -
                 // stored`. `stored` counts BARS and `wanted.len()` counts
@@ -6759,25 +6775,7 @@ async fn fno_land(
                     .saturating_add(wanted.len().saturating_sub(attempted));
                 break 'contracts;
             }
-            let request = pull::chain::request(found, *chunk, asked.granularity);
-            match wire.source.window_async(&request).await {
-                // THE CHUNK'S OWN WINDOW TRAVELS WITH ITS ANSWER, exactly as
-                // the spot path carries it — a body filed under the whole range
-                // would claim months it does not hold.
-                Ok(body) => bodies.push((*chunk, body)),
-                Err(refusal) => {
-                    refused = Some(format!("{}: {refusal}", found.vendor_symbol));
-                    break;
-                }
-            }
-        }
-        if let Some(refusal) = refused {
-            out.failed = out.failed.saturating_add(1);
-            if out.why.len() < 5 {
-                out.why.push(refusal);
-            }
-            continue;
-        }
+        };
         // THE UNDERLYING IS THE SYMBOL AND THE CONTRACT IS THE LEVEL BELOW IT.
         // `pull::ingest` parses `instrument` into a `Symbol` and renders the
         // contract as its own path segment, so passing the vendor's contract
@@ -6840,6 +6838,385 @@ async fn fno_land(
             continue;
         }
         out.stored = out.stored.saturating_add(done.bars_stored);
+
+        // AND NOW THE GREEKS, AFTER THE BARS THEY PRICE.
+        //
+        // Groww's route, and it is a different shape from Dhan's: that vendor
+        // sends `iv` and `spot` beside every bar, so `roll_one` prices from the
+        // answer in hand. Groww sends NEITHER — its candle is a positional
+        // `[ts, o, h, l, c, v]` array by the vendor's own contract — so the
+        // spot must be joined from the index bars and the volatility solved
+        // from the premium. Both need the bars on disk, which they now are.
+        price_chain_contract(
+            found,
+            &chunks,
+            slot,
+            &mut books,
+            asked,
+            site,
+            wire,
+            &mut out.priced,
+        );
+    }
+    out
+}
+
+/// Prices every month one discovered contract just landed, and files them.
+///
+/// Extracted from [`fno_land`] rather than inlined there because that function
+/// is a FETCH loop — governor, chunk, request, land — and pricing is a second
+/// concern that reads the store rather than the wire. Inlining it made the
+/// fetch loop's length the first thing a reader met.
+///
+/// Does nothing at all when no rate was supplied, which is the ordinary case:
+/// see `ingest::FnoRequest::rate` on why this repository will not supply one.
+///
+/// # Cost
+///
+/// O(months) calls to [`price_chain_month`], each O(bars) in the month it
+/// reads. Nothing here reaches the network.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "seven of the eight are the caller's own borrows — the contract, \
+              its chunks, the ladder slot, the shared spot-book cache, the \
+              request, the site and the wire. Bundling them into a struct \
+              would move the same eight names three lines up and add a type \
+              whose only member is this call"
+)]
+fn price_chain_contract(
+    found: &pull::fno::Found,
+    chunks: &[pull::session::Window],
+    slot: Option<pull::pricing::SweptSlot>,
+    books: &mut SpotBooks,
+    asked: &ingest::FnoRequest,
+    site: &Site,
+    wire: &Wire,
+    into: &mut PricedCount,
+) {
+    let (Some(rate), Some(slot), Some(timeframe), Some((strike, contract_side))) = (
+        asked.rate,
+        slot,
+        asked.granularity.store_timeframe(),
+        found.option,
+    ) else {
+        return;
+    };
+    for chunk in chunks {
+        let priced = price_chain_month(
+            ChainMonth {
+                found,
+                chunk: *chunk,
+                timeframe,
+                inputs: PriceInputs {
+                    strike: strike.raw(),
+                    side: contract_side,
+                    expiry: found.expiry,
+                    slot,
+                    rate,
+                    vendor: wire.store_vendor,
+                },
+            },
+            books,
+            asked,
+            site,
+            wire,
+        );
+        into.absorb(&priced);
+    }
+}
+
+/// What asking one contract for its chunks produced.
+///
+/// Three outcomes rather than a `Result`, because the middle one is neither a
+/// success nor the end of the run: a contract the vendor refuses abandons THAT
+/// contract, and a budget halt abandons EVERY remaining one. Collapsing them
+/// into `Err` would make the caller re-derive which it had from the text of the
+/// message.
+enum Fetched {
+    /// Every chunk answered. The chunk's own window travels with its body.
+    Bodies(Vec<(pull::session::Window, pull::fetch::RawWindow)>),
+    /// This contract is abandoned; the run continues.
+    ContractRefused(String),
+    /// The rate budget is exhausted; no further contract is asked for.
+    RunHalted(String),
+}
+
+/// Asks one contract for every chunk it still owes.
+///
+/// # A partial contract is abandoned, not stored
+///
+/// A chunk that refuses ends the contract rather than filing the chunks before
+/// it. A partially fetched contract would land some of its months and leave the
+/// rest absent, and the month would then read complete while being short —
+/// which is the failure this repository is most careful about, because §8's
+/// append-only rule means it cannot be repaired afterwards.
+///
+/// # The governor runs before EACH request
+///
+/// Not once per contract and not once for the batch. Two hundred contracts over
+/// eight chunks is sixteen hundred requests, and a budget charged per contract
+/// would be a ceiling observed one time in eight.
+///
+/// # Cost
+///
+/// One request per chunk, each rate-governed. Nothing here touches the store.
+async fn fetch_chain_chunks(
+    found: &pull::fno::Found,
+    chunks: &[pull::session::Window],
+    asked: &ingest::FnoRequest,
+    site: &Site,
+    wire: &Wire,
+) -> Fetched {
+    let mut bodies = Vec::with_capacity(chunks.len());
+    for chunk in chunks {
+        if let Err(halt) = await_budget(asked.feed, site).await {
+            return Fetched::RunHalted(halt);
+        }
+        let request = pull::chain::request(found, *chunk, asked.granularity);
+        match wire.source.window_async(&request).await {
+            // THE CHUNK'S OWN WINDOW TRAVELS WITH ITS ANSWER, exactly as the
+            // spot path carries it — a body filed under the whole range would
+            // claim months it does not hold.
+            Ok(body) => bodies.push((*chunk, body)),
+            Err(refusal) => {
+                return Fetched::ContractRefused(format!("{}: {refusal}", found.vendor_symbol));
+            }
+        }
+    }
+    Fetched::Bodies(bodies)
+}
+
+/// One index month's spot levels per month, read once and shared.
+///
+/// # Why this is a type and not a bare map
+///
+/// Groww's candles carry no spot, so every option row joins to the index bar at
+/// its own stamp. Two hundred contracts in one month would otherwise read the
+/// same 375 index bars two hundred times to answer the same question —
+/// `docs/07-o1-architecture.md` law 3.
+///
+/// The inner `Option` is a **CACHED ABSENCE**, and that is the part worth
+/// naming: a month whose index is not on disk must be remembered as not on
+/// disk, or every contract re-opens a file that is not there and the miss costs
+/// more than the hit.
+///
+/// # Cost
+///
+/// O(bars) on the first ask for a month, O(1) on every ask after it.
+type SpotBooks = std::collections::HashMap<store::path::YearMonth, Option<pull::pricing::SpotBook>>;
+
+/// Turns one month of stored bars into quotes the model can take.
+///
+/// Every row that cannot become one is COUNTED with its reason rather than
+/// skipped: a bar vanishing between "stored" and "priced" makes two numbers on
+/// one receipt disagree with nothing explaining the gap.
+///
+/// A bar outside the chunk's own days is the one exception, and it is not a
+/// refusal — it was priced by an earlier run, or will be by a later one. See
+/// [`price_chain_month`] on why the filter is there at all.
+///
+/// # Cost
+///
+/// O(bars): one calendar conversion, one hash probe for the spot, one tenor and
+/// one date build each, all O(1).
+fn chain_quotes(
+    bars: &[store::format::Bar],
+    month_of: ChainMonth<'_>,
+    book: &pull::pricing::SpotBook,
+    out: &mut pull::pricing::PricedAll,
+) -> Vec<pull::pricing::Quote> {
+    let (from, to) = (month_of.chunk.from(), month_of.chunk.to());
+    let mut quotes: Vec<pull::pricing::Quote> = Vec::with_capacity(bars.len());
+    for bar in bars {
+        let Ok(at) = pull::session::IstMoment::from_epoch_secs(bar.ts_micros.div_euclid(1_000_000))
+        else {
+            out.refused = out.refused.saturating_add(1);
+            note_price_refusal(
+                out,
+                "a stored bar's stamp is not a moment any calendar places",
+            );
+            continue;
+        };
+        // ONLY THE DAYS THIS RUN FETCHED, and this one is NOT a refusal — the
+        // rest of the month was priced by an earlier run or will be by a later
+        // one. See `price_chain_month` on why the append demands it.
+        let day = at.day();
+        if day < from || day > to {
+            continue;
+        }
+        let Some(spot) = book.at(bar.ts_micros) else {
+            out.refused = out.refused.saturating_add(1);
+            note_price_refusal(
+                out,
+                "no index bar is stored at this option bar's stamp, so it has \
+                 no underlying level to price against. Nothing was borrowed \
+                 from a neighbouring minute",
+            );
+            continue;
+        };
+        let Ok(tenor) = pull::tenor::Tenor::between(bar.ts_micros, month_of.inputs.expiry) else {
+            out.refused = out.refused.saturating_add(1);
+            note_price_refusal(
+                out,
+                "the bar is at or past the moment the contract stopped trading",
+            );
+            continue;
+        };
+        let Some(on) = pull::pricing::trade_day_of(day) else {
+            out.refused = out.refused.saturating_add(1);
+            note_price_refusal(out, "the bar's own day is outside the cost calendar");
+            continue;
+        };
+        quotes.push(pull::pricing::Quote {
+            ts_micros: bar.ts_micros,
+            spot,
+            strike: month_of.inputs.strike,
+            premium: bar.close,
+            tenor,
+            side: month_of.inputs.side,
+            slot: month_of.inputs.slot,
+            on,
+            vendor: month_of.inputs.vendor,
+        });
+    }
+    quotes
+}
+
+/// One contract-month of a discovered chain, and what it takes to price it.
+///
+/// A struct because the alternative is six positional arguments of which three
+/// are small `Copy` values a call site could transpose without the compiler
+/// noticing — the same reason [`PriceInputs`] exists.
+#[derive(Debug, Clone, Copy)]
+struct ChainMonth<'a> {
+    /// The discovered contract.
+    found: &'a pull::fno::Found,
+    /// The window whose bars this run just stored. Never crosses a month.
+    chunk: pull::session::Window,
+    /// The rung the bars were stored at.
+    timeframe: store::path::Timeframe,
+    /// Strike, side, expiry, ladder slot, rate and vendor.
+    inputs: PriceInputs,
+}
+
+/// Prices one contract-month of a chain and files its greeks.
+///
+/// # Why the bars are read back rather than kept
+///
+/// The chain path hands raw vendor bodies to `pull::ingest`, which decodes and
+/// files them; nothing decoded survives back to this caller. Re-reading costs
+/// one open and O(bars) per contract-month — recorded in `docs/06-limits.md`
+/// rather than hidden — and buys a property worth having: **the greeks are
+/// computed from exactly the bytes that landed**, not from what this code
+/// believed it sent.
+///
+/// # Why only the chunk's own days
+///
+/// The `.grk` file is append-only like every other. Pricing the whole month on
+/// a resumed run would build a batch that is not a suffix of what is already
+/// there, and `BarFile::append` would refuse it — correctly. Filtering to the
+/// window this run fetched keeps the sidecar growing in step with the bars.
+///
+/// # Cost
+///
+/// One index-month read per MONTH, cached across contracts, then O(1) per row.
+/// One option-month read per contract-month. Both O(bars); the pricing itself
+/// is O(1) a row.
+fn price_chain_month(
+    month_of: ChainMonth<'_>,
+    books: &mut SpotBooks,
+    asked: &ingest::FnoRequest,
+    site: &Site,
+    wire: &Wire,
+) -> pull::pricing::PricedAll {
+    let mut out = pull::pricing::PricedAll::default();
+    let Ok(month) = month_of.chunk.from().year_month() else {
+        note_price_refusal(&mut out, "the chunk's first day names no month file");
+        return out;
+    };
+
+    // ONE INDEX READ PER MONTH, SHARED BY EVERY CONTRACT IN IT. Two hundred
+    // contracts in one month would otherwise read the same 375 index bars two
+    // hundred times to answer the same question.
+    let book = books
+        .entry(month)
+        .or_insert_with(|| {
+            spot_book_for(
+                site,
+                wire,
+                &month_of.found.underlying,
+                month_of.timeframe,
+                month,
+            )
+        })
+        .as_ref();
+    let Some(book) = book else {
+        note_price_refusal(
+            &mut out,
+            "the underlying's index month is not on disk, so no bar has a spot \
+             level to be priced against. Pull the spot series for this month \
+             first — nothing was invented in its place",
+        );
+        return out;
+    };
+
+    let bars = match read_month_bars(
+        site,
+        wire,
+        &month_of.found.underlying,
+        brutex_core::instrument::Segment::Fno.as_str(),
+        Some(month_of.found.contract),
+        month_of.timeframe,
+        month,
+    ) {
+        Ok(bars) => bars,
+        Err(why) => {
+            note_price_refusal(
+                &mut out,
+                &format!("the bars just written cannot be read back: {why}"),
+            );
+            return out;
+        }
+    };
+
+    let quotes = chain_quotes(&bars, month_of, book, &mut out);
+
+    // NO VOLATILITY IS EVER SENT ON THIS PATH, so every row is solved. The
+    // closure is the same shape `roll_one` uses with Dhan's overlay; here it
+    // answers `None` for every stamp, which is the vendor's actual contract
+    // rather than an omission.
+    let done = pull::pricing::price_all(
+        &quotes,
+        |_| None,
+        month_of.inputs.rate,
+        pull::tenor::YearBasis::Calendar365,
+    );
+    out.rows = done.rows;
+    out.refused = out.refused.saturating_add(done.refused);
+    for why in done.why {
+        note_price_refusal(&mut out, &why);
+    }
+
+    let records = greek_records(&out);
+    if !records.is_empty()
+        && let Some(why) = file_the_greeks(
+            &records,
+            month_of.found.contract,
+            asked,
+            site,
+            wire,
+            month_of.chunk,
+        )
+    {
+        // COUNTED AS REFUSED, NOT SILENT. The rows were computed and could not
+        // be filed, which is a different fact from "could not be computed" and
+        // both belong on the receipt.
+        out.refused = out.refused.saturating_add(out.rows.len());
+        out.rows.clear();
+        note_price_refusal(
+            &mut out,
+            &format!("the greeks were computed and could not be filed: {why}"),
+        );
     }
     out
 }
@@ -7480,6 +7857,104 @@ struct PriceInputs {
 /// **O(rows)**: one `Tenor::between` and one `pull::pricing::price` each, both
 /// O(1). The volatility lookup is one hash probe. Nothing here scans the store
 /// and nothing reaches the network.
+/// Reads back one instrument-month of bars, contract segment included.
+///
+/// # Why not [`crate::bars::open`]
+///
+/// That one hardcodes `contract: None`, which is right for the chart it serves
+/// and wrong here: an option's bars live one level deeper, under the rendered
+/// contract. Passing `None` would look under the UNDERLYING and find the spot
+/// month — a file that exists, opens cleanly, and holds entirely the wrong
+/// instrument. That is the worst shape a bug can take here, so the contract is
+/// a parameter rather than a default.
+///
+/// # Cost
+///
+/// One open and **O(bars)** reads. This is the honest cost of pricing Groww at
+/// all: its candles carry no volatility and no spot, so the only way to price
+/// them is to read what landed. `docs/06-limits.md` carries it.
+fn read_month_bars(
+    site: &Site,
+    wire: &Wire,
+    symbol: &str,
+    segment: &str,
+    contract: Option<brutex_core::instrument::Contract>,
+    timeframe: store::path::Timeframe,
+    month: store::path::YearMonth,
+) -> Result<Vec<store::format::Bar>, String> {
+    let path = store::path::StorePath::new(store::path::PathParts {
+        vendor: wire.store_vendor,
+        exchange: brutex_core::instrument::Exchange::Nse.as_str(),
+        segment,
+        symbol,
+        contract,
+        timeframe,
+        month,
+        file: store::path::FileKind::Bars,
+    })
+    .map_err(|why| why.to_string())?;
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the same fold `pull::ingest` stamps into the header and the \
+                  store verifies on reopen. A different one here would fail to \
+                  open a file this repository wrote, which is the check working"
+    )]
+    let symbol_id = brutex_core::universe::fnv1a(symbol) as u32;
+    // `open_existing`, NEVER `open_or_create`. This is a read, and the
+    // read-write door manufactures six directories and a 32 KiB file for a
+    // month that does not exist — then reports it empty.
+    let file = store::file::BarFile::open_existing(&site.store_root, path, symbol_id)
+        .map_err(|why| why.to_string())?;
+    let n = file.header().n_valid;
+    let mut rows = Vec::with_capacity(usize::try_from(n).unwrap_or(0));
+    for index in 0..n {
+        // A RECORD THAT WILL NOT DECODE STOPS THE READ rather than being
+        // skipped. A hole in the middle of a month would silently shift every
+        // greek after it onto the wrong bar, and the join is by stamp so
+        // nothing downstream would notice.
+        rows.push(file.read_record(index).map_err(|why| why.to_string())?);
+    }
+    Ok(rows)
+}
+
+/// The underlying's level at every stamp of one month.
+///
+/// **This is the whole reason Groww can be priced at all.** Its candles are a
+/// positional `[timestamp, open, high, low, close, volume]` array by the
+/// vendor's own contract — no volatility and no spot — so the level has to come
+/// from the index bars this store already holds, joined by stamp.
+///
+/// `None` when the index month is not held: the option bars then cannot be
+/// priced, which is reported as a refusal per row rather than guessed at.
+///
+/// # Cost
+///
+/// **O(bars) once per month**, then O(1) per option row. With 252 contracts
+/// against 375 index bars that is 375 inserts rather than 94,500 comparisons —
+/// the trade `docs/07-o1-architecture.md` law 3 exists to make.
+fn spot_book_for(
+    site: &Site,
+    wire: &Wire,
+    underlying: &str,
+    timeframe: store::path::Timeframe,
+    month: store::path::YearMonth,
+) -> Option<pull::pricing::SpotBook> {
+    let bars = read_month_bars(
+        site,
+        wire,
+        underlying,
+        // THE INDEX SEGMENT, NOT THE DERIVATIVES ONE. The spot level lives with
+        // the index bars; asking under `FNO` would look beneath a contract that
+        // has no spot series at all.
+        brutex_core::instrument::Segment::Index.as_str(),
+        None,
+        timeframe,
+        month,
+    )
+    .ok()?;
+    Some(pull::pricing::SpotBook::of(&bars))
+}
+
 /// Turns priced rows into the records the `.grk` file holds.
 ///
 /// Pure: no store, no clock, no network. Separated from [`price_group`] because
@@ -8440,6 +8915,7 @@ async fn fno_report(
         failed,
         settled,
         why,
+        priced,
     } = fno_land(&wanted, asked, site, wire).await;
     facts.push(("Bars stored", stored.to_string()));
     // WHAT WAS NOT ASKED FOR, AND WHY THE NUMBER MUST BE ON THE PAGE. A run
@@ -8451,6 +8927,11 @@ async fn fno_report(
             format!("{settled}, resumed rather than refetched"),
         ));
     }
+    // THE SAME ROWS THE ROLLING RECEIPT CARRIES, from the same helper. One
+    // operator reads both pages and the two paths discovered their contracts
+    // differently; the pricing they did is the same fact and reads the same
+    // way, or the difference looks like a difference in the DATA.
+    facts.extend(greek_facts(&priced, asked.rate.is_none()));
 
     if failed == 0 {
         // A RUN THAT ASKED FOR NOTHING DID NOT FETCH ANYTHING, and saying it

@@ -855,6 +855,7 @@ mod tests {
             underlying: underlying.to_owned(),
             contract: Contract::of(kind).expect("an option has a contract segment"),
             expiry,
+            option: Some((Paisa::from_raw(strike), OptionSide::Call)),
         }
     }
 

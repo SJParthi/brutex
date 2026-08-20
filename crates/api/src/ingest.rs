@@ -3187,6 +3187,10 @@ mod tests {
             )
             .expect("an option has a contract segment"),
             expiry: brutex_core::instrument::Expiry::new(2026, 8, 25).expect("a real expiry"),
+            option: Some((
+                brutex_core::price::Paisa::from_raw(2_400_000),
+                brutex_core::instrument::OptionSide::Call,
+            )),
         };
         let chain = pull::chain::Chain {
             expiries: vec!["2026-08-25".to_owned()],

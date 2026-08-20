@@ -5183,3 +5183,53 @@ becomes a rule-4 breach.
 — bounded by what the store contains, not by anything the walk chooses. There is
 no unbounded intermediate: the directory stack holds at most one level's
 subdirectories at a time.
+
+## 88. Pricing a Groww chain re-reads what it just wrote, and that is O(bars)
+
+**Measured cost, not an estimate of one.** `crates/api/src/server.rs`'s
+`price_chain_month` opens two bar files per contract-month and reads every
+record of both: the option month it has just landed, and — the first time any
+contract in that month asks — the underlying's index month.
+
+**Why the re-read exists at all.** The chain path hands raw vendor bodies to
+`pull::ingest`, which decodes and files them. Nothing decoded survives back to
+the caller, so a caller that wants to price has three options and only one of
+them is honest:
+
+| Option | Cost | Why not |
+|---|---|---|
+| Decode the bodies a second time here | O(bars), plus a second decoder | Two parsers for one wire format is two answers to "what did the vendor send", and the one that drifts is the copy nobody remembers exists. |
+| Carry the decoded bars back out of `Ingested` | O(bars) of RESIDENT memory per contract-month | A 5,600-bar month is 313 KB at `RECORD_STRIDE`; two hundred contracts held at once is 63 MB, and `docs/07-o1-architecture.md` law 2 wants the bound in hand. |
+| **Read back what landed** | **O(bars) of I/O, nothing resident** | Chosen. |
+
+The chosen one also buys a property the other two do not: **the greeks are
+computed from exactly the bytes that reached the disk**, not from what this code
+believed it sent.
+
+**The index read is cached and the miss is cached with it.** `SpotBooks` is
+keyed by month and holds `Option<SpotBook>`, so a month whose index is *not* on
+disk is remembered as absent. Without that inner `Option`, two hundred contracts
+in one month would each re-open a file that is not there — and the miss path is
+the expensive one.
+
+**What is O(1) and what is not, stated separately:**
+
+| Operation | Bound |
+|---|---|
+| `SpotBook::at` | **O(1)** — one hash probe |
+| `pull::pricing::price` | **O(1)** — one dated ladder lookup, one `div_euclid`, one closed form |
+| `pull::pricing::solve_iv` | **O(1)** — bounded by `greeks::solver::MAX_ITERATIONS`, and the count spent is returned |
+| `SpotBook::of` | **O(index bars)**, once per month |
+| `read_month_bars` | **O(bars)**, once per contract-month |
+
+So the per-row cost is constant and the per-month cost is linear in what that
+month holds. **It is not O(store):** nothing here walks the census, lists a
+directory, or grows with months this run did not touch.
+
+**Dhan does not pay it.** Its rolling answer carries `iv` and `spot` beside every
+bar, so `roll_one` prices from the answer already in hand and never opens a file
+to do it. The asymmetry is the vendors', not this build's.
+
+**Not measured:** the wall-clock of the re-read against a cold page cache. The
+figures above are record counts and strides, which are exact; the I/O time they
+imply is not claimed.

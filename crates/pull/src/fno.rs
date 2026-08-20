@@ -912,6 +912,25 @@ pub struct Found {
     /// than a value to compare. Recovering it by parsing that segment back
     /// would be re-deriving something this function already had.
     pub expiry: brutex_core::instrument::Expiry,
+    /// The strike and side, for an option — `None` for a future.
+    ///
+    /// # Kept for exactly the reason [`Self::expiry`] is
+    ///
+    /// [`read_contract`] decodes both on the way to building
+    /// [`Self::contract`], and threw them away. A caller that wants to PRICE
+    /// the contract needs them, and a rendered `Contract` is a path segment
+    /// rather than a pair of values to compute with — recovering them by
+    /// parsing that segment back would be re-deriving what this function
+    /// already had, and would be a second parser to disagree with the first.
+    ///
+    /// A tuple rather than two `Option` fields because they are one fact: an
+    /// option has both or the contract is a future and has neither, and two
+    /// independent `Option`s would make "a strike with no side" representable
+    /// when it is not a thing.
+    pub option: Option<(
+        brutex_core::price::Paisa,
+        brutex_core::instrument::OptionSide,
+    )>,
 }
 
 /// The twelve month tokens Groww writes, lower-cased for comparison.
@@ -973,22 +992,29 @@ pub fn read_contract(name: &str, known: brutex_core::instrument::Expiry) -> Opti
     }
     let expiry = known;
     let tail: Vec<&str> = parts.collect();
-    let contract = match tail.as_slice() {
+    let (contract, option) = match tail.as_slice() {
         // A FUTURE: nothing after the expiry but the word.
-        ["FUT"] => {
-            brutex_core::instrument::Contract::of(brutex_core::instrument::Kind::Future { expiry })?
-        }
+        ["FUT"] => (
+            brutex_core::instrument::Contract::of(brutex_core::instrument::Kind::Future {
+                expiry,
+            })?,
+            None,
+        ),
         [strike, side] => {
             let side = match *side {
                 "CE" => brutex_core::instrument::OptionSide::Call,
                 "PE" => brutex_core::instrument::OptionSide::Put,
                 _ => return None,
             };
-            brutex_core::instrument::Contract::of(brutex_core::instrument::Kind::Option {
-                expiry,
-                strike: brutex_core::price::Paisa::from_raw(paisa_of(strike)?),
-                side,
-            })?
+            let strike = brutex_core::price::Paisa::from_raw(paisa_of(strike)?);
+            (
+                brutex_core::instrument::Contract::of(brutex_core::instrument::Kind::Option {
+                    expiry,
+                    strike,
+                    side,
+                })?,
+                Some((strike, side)),
+            )
         }
         _ => return None,
     };
@@ -997,6 +1023,7 @@ pub fn read_contract(name: &str, known: brutex_core::instrument::Expiry) -> Opti
         underlying: underlying.to_owned(),
         contract,
         expiry,
+        option,
     })
 }
 

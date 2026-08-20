@@ -17201,3 +17201,78 @@ closed. Gate 9b asserts what `greeks` depends on, not what depends on it, and
 `crates/greeks/Cargo.toml` is untouched — which also keeps it usable by the
 `tickvault` repository that takes it by git URL. §5's arrow for `pull` is now
 `core costs greeks store telemetry`.
+
+### D-0218 — both feeds price now, and the two paths pay different costs for it
+
+D-0217 gave `greeks` a caller and the commits after it gave the computed greeks
+a file and a call site. **One feed reached that call site.** `roll_one` — Dhan's
+rolling-option path — priced every group it landed; `fno_land` — Groww's chain
+path — priced nothing at all, and the receipt correctly said so by omission,
+which is a receipt nobody would read as a gap.
+
+**The two vendors need different machinery, and this entry is why.**
+
+| | Dhan (rolling) | Groww (chain) |
+|---|---|---|
+| Implied volatility | **sent** as `iv` | **absent** — solved from the premium |
+| Underlying spot | **sent** as `spot` | **absent** — joined from the index bar |
+| Bars available to the caller | decoded, in hand | raw bodies; decoding happens inside `pull::ingest` |
+| Files opened to price | **none** | two per contract-month |
+
+Groww's candle is a positional `[timestamp, open, high, low, close, volume]`
+array by the vendor's own published contract. There is nothing to map, so
+solving is not an optimisation — it is the only route there is.
+
+**`Found` was throwing away the strike and the side.** Its `expiry` field
+already carried a doc arguing exactly this case: *"`read_contract` already
+decodes it on the way to building `Self::contract`, and threw it away… a
+rendered `Contract` is a path segment rather than a value to compare."* The same
+sentence is true of the other two, and pricing needs both. They are kept as one
+`Option<(Paisa, OptionSide)>` rather than two fields, because an option has both
+or the contract is a future and has neither — two independent `Option`s would
+make "a strike with no side" representable when it is not a thing.
+
+**The re-read is a real cost and `docs/06-limits.md` §88 carries it.** Three
+options existed; two of them were worse. Decoding the bodies a second time here
+means two parsers for one wire format. Carrying the decoded bars back out of
+`Ingested` is 63 MB resident for two hundred contract-months at
+`RECORD_STRIDE`, against `docs/07-o1-architecture.md` law 2. Reading back what
+landed costs O(bars) of I/O and nothing resident — and buys the property the
+other two do not: **the greeks are computed from exactly the bytes that reached
+the disk**, not from what this code believed it sent.
+
+**Only the chunk's own days are priced, and the append is why.** The `.grk` file
+is append-only like every other. Pricing a whole month on a resumed run builds a
+batch that is not a suffix of what is there, and `BarFile::append` refuses it —
+correctly. Filtering to the window this run fetched keeps the sidecar growing in
+step with the bars. A bar outside that window is skipped and **not** counted as
+refused: it was priced by an earlier run or will be by a later one, and counting
+it would put a number on the receipt that means nothing.
+
+**The index miss is cached as a miss.** `SpotBooks` holds
+`Option<SpotBook>` per month, so a month whose index is not on disk is
+remembered as absent. Without the inner `Option`, two hundred contracts in one
+month each re-open a file that is not there — and the miss path is the expensive
+one.
+
+**Four functions came out of `fno_land` to keep it under the length gate, and
+three of them earn their place beyond that.** `fetch_chain_chunks` returns a
+three-armed `Fetched` rather than a `Result`, because a contract the vendor
+refuses abandons THAT contract while a budget halt abandons every remaining one,
+and collapsing both into `Err` would make the caller re-derive which it had from
+the text of a message. `price_chain_contract` separates a store-reading concern
+from a wire-reading loop. `chain_quotes` is the per-bar refusal ledger.
+`SpotBooks` is a named type so the cached-absence rule has somewhere to live.
+
+**What this does NOT claim.** No greek has been computed from real vendor data
+on either path. The Dhan overlay that carries `iv` and `spot` has still never
+executed — 749 journal events, none naming an overlay, a rolling request or an
+`iv` — and the Groww path has never run with a rate supplied. Both are built,
+both are tested, neither is proven against a vendor.
+
+**And one gap that is real and is not closed.** If a month's bars were landed by
+an earlier run with no rate, and a later run supplies one, only the later run's
+days are priced: the `.grk` starts partway through a `.bin` that starts at day
+one. §8 forbids prepending, so it cannot be repaired in place. The receipt
+carries "Rows priced" against "Bars stored" so the two numbers are visible
+side by side, which is the honest handling available rather than a fix.
