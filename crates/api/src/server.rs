@@ -7390,7 +7390,7 @@ async fn fno_walk(
         journal,
         broker,
     };
-    let facts = fno_facts(asked, today);
+    let mut facts = fno_facts(asked, today);
 
     // THE TRANSPORT DECIDES THE PATH, AND IT IS ASKED FIRST.
     //
@@ -7445,13 +7445,10 @@ async fn fno_walk(
     // list to ask the vendor for — and the window's end is the right end of it:
     // `parse_fno` has already proved that day is behind today, so the month it
     // names cannot hold a live contract this build would then try to store.
+    // KEPT ONLY FOR THE REFUSAL EVENT BELOW, which names the month it was
+    // working on. The ASK is built per month inside `walk_months` now — one
+    // `Ask` here was the whole one-month bug.
     let month_of = asked.expiry.unwrap_or_else(|| asked.window.to());
-    let ask = pull::fno::Ask {
-        underlying: asked.underlying.as_str().to_owned(),
-        year: month_of.year(),
-        month: month_of.month(),
-        expiry: String::new(),
-    };
 
     // WHICH SHAPE THIS VENDOR ANSWERS IN, and the two are not variations of
     // one request.
@@ -7503,7 +7500,15 @@ async fn fno_walk(
         feed: asked.feed,
         site,
     };
-    match pull::chain::month(asked.feed, &ask, &governed).await {
+    // EVERY MONTH THE WINDOW COVERS, not only its last.
+    //
+    // This asked `chain::month` for ONE month and reported `failed: 0` over an
+    // eight-month window. Measured on disk after such a run: 18 contracts, all
+    // of them expiry 2026-07-28, with January through June never asked about.
+    // `months_to_walk` carries the rule and the evidence.
+    let months = months_to_walk(asked);
+    facts.push(("Months walked", months.len().to_string()));
+    match walk_months(asked.feed, asked.underlying.as_str(), &months, &governed).await {
         Err(why) => {
             // THE WHOLE REASON, WHERE THE STRIDE CANNOT CUT IT.
             //
@@ -7541,6 +7546,102 @@ async fn fno_walk(
         }
         Ok(chain) => fno_report(&page, facts, &chain, asked, site, &wire).await,
     }
+}
+
+/// Every month of the operator's window whose expiries must be asked for.
+///
+/// # The one-month walk this replaces
+///
+/// `fno_walk` asked the vendor for a single month's expiry list — the window's
+/// last settled month — and reported `failed: 0`. That was TRUE and it answered
+/// a narrower question than the operator asked.
+///
+/// Measured on disk 2026-08-20 after a run over 2026-01-01..=2026-08-19: **18
+/// contracts, every one of them expiry `2026-07-28`**. The window spans roughly
+/// thirty weekly expiries; January through June were never asked about, and
+/// nothing in the receipt could say so because the code never formed the intent.
+/// A run that succeeds at a smaller question than it was given is the hardest
+/// failure here to see, precisely because no error exists anywhere.
+///
+/// # When it is still ONE month
+///
+/// An operator who names an expiry is asking about that expiry, and its month is
+/// the only one that can hold it. Widening that would fetch months they did not
+/// ask for.
+///
+/// # Cost
+///
+/// O(months in the window), and each month's walk is `1 + N` governed requests.
+/// `ladder::months_of` is the same list the spot ladder walks, so the two cannot
+/// disagree about which months a window covers.
+fn months_to_walk(asked: &ingest::FnoRequest) -> Vec<store::path::YearMonth> {
+    asked.expiry.map_or_else(
+        || crate::ladder::months_of(asked.window),
+        |named| named.year_month().into_iter().collect(),
+    )
+}
+
+/// Walks every month in `months`, merging what each names into one chain.
+///
+/// # A month that refuses does not end the walk
+///
+/// One month's expiry list failing is not the other seven failing. The refusal
+/// is kept verbatim in `unreadable` — which `fno_report` already prints, and
+/// already refuses to treat as a whole month — so an eight-month walk that lost
+/// one month reports seven months of contracts AND the reason the eighth is
+/// absent. Returning `Err` on the first refusal would discard seven months of
+/// successful discovery over one vendor hiccup.
+///
+/// **`Err` is reserved for a walk that discovered nothing at all**, because that
+/// is the case where there is no partial answer to report and a 502 is the
+/// honest reply.
+///
+/// # Cost
+///
+/// O(months), each `1 + N` governed requests. Nothing here touches the store.
+async fn walk_months<D: pull::chain::Discovery>(
+    feed: pull::vendor::Feed,
+    underlying: &str,
+    months: &[store::path::YearMonth],
+    from: &D,
+) -> Result<pull::chain::Chain, pull::chain::ChainError> {
+    let mut merged = pull::chain::Chain::default();
+    let mut last: Option<pull::chain::ChainError> = None;
+    let mut reached = 0usize;
+    for month in months {
+        let ask = pull::fno::Ask {
+            underlying: underlying.to_owned(),
+            year: month.year(),
+            month: month.month(),
+            expiry: String::new(),
+        };
+        match pull::chain::month(feed, &ask, from).await {
+            Ok(one) => {
+                reached = reached.saturating_add(1);
+                merged.expiries.extend(one.expiries);
+                merged.contracts.extend(one.contracts);
+                merged.unreadable.extend(one.unreadable);
+            }
+            Err(why) => {
+                // NAMED, NOT SWALLOWED. `unreadable` is the field `fno_report`
+                // already prints and already refuses to read as a whole month,
+                // so a month that would not walk travels to the operator by the
+                // route a contract that would not parse already takes.
+                merged.unreadable.push(format!(
+                    "{month}: the expiry list could not be walked — {why}"
+                ));
+                last = Some(why);
+            }
+        }
+    }
+    if reached == 0 {
+        // NOTHING WAS DISCOVERED ANYWHERE. There is no partial answer to
+        // report, so the first refusal is returned and the page answers 502.
+        return Err(last.unwrap_or(pull::chain::ChainError::Lookup(
+            pull::fno::FnoError::NoExpiry,
+        )));
+    }
+    Ok(merged)
 }
 
 /// One contract of the product: build, post, read, name it, file it.
