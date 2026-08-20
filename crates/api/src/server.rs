@@ -2903,7 +2903,7 @@ pub const HTTP_UNAVAILABLE: &str = "THE LOCAL-ARCHIVE PATH RUNS. THE HTTP PATH \
 /// that the figure is chosen rather than measured. Nothing is invented here and
 /// nothing is defaulted: a `None` in a `Budget` field means the vendor
 /// publishes no bound for that span, and `Governor::new` treats it as such.
-fn feed_budgets() -> Vec<Option<pull::rate::Governor>> {
+fn feed_budgets() -> Vec<Option<SharedGovernor>> {
     pull::vendor::Feed::ALL
         .into_iter()
         .map(|feed| match feed.descriptor().transport {
@@ -2912,10 +2912,53 @@ fn feed_budgets() -> Vec<Option<pull::rate::Governor>> {
                 spec.budget.per_minute,
                 spec.budget.per_day,
             )
-            .ok(),
+            .ok()
+            .map(|g| std::sync::Arc::new(std::sync::Mutex::new(g))),
             pull::vendor::Transport::LocalArchive(_) => None,
         })
         .collect()
+}
+
+/// One vendor's rate governor, shared by every path that asks that vendor.
+///
+/// # Why this type exists at all
+///
+/// There were TWO governors per feed: this one, which `await_budget` spent
+/// permits from, and a second built privately inside every `pull::http::
+/// HttpSource`. Both gated and both learned, from different subsets of the same
+/// events — the hazard `crates/pull` invariant P-01 names: *"two separate
+/// `Governor` values … nothing holds the sum of two of them to one ceiling."*
+///
+/// What it cost, measured 2026-08-20: a 429 on the DISCOVERY path halved the
+/// transport's governor and never reached this one, so `await_budget` kept
+/// admitting instantly against an allowance the vendor had already disproved.
+/// The throttle was still obeyed — the transport gates too — but this side's
+/// waits, its budget halt and everything it reported were computed from a
+/// number known to be wrong.
+///
+/// The `Arc` is what makes one instance reachable from both. It is cloned into
+/// each `HttpSource` by `credentialed_source`, so every request on every path —
+/// bars, discovery, rolling — teaches the same governor.
+type SharedGovernor = std::sync::Arc<std::sync::Mutex<pull::rate::Governor>>;
+
+/// This feed's shared governor, for handing to a source that will ask it.
+///
+/// `None` for a feed that declares no HTTP budget — a local archive, or a
+/// vendor whose descriptor names no span. Handing one a governor would enforce
+/// a ceiling nobody wrote down, which §3 rule 1 forbids, and
+/// `HttpSource::sharing` refuses it on its own side too.
+///
+/// # Cost
+///
+/// One lock, one index, one `Arc` clone. O(1), and the lock is released before
+/// the source is built.
+fn shared_governor(site: &Site, feed: pull::vendor::Feed) -> Option<SharedGovernor> {
+    site.budgets
+        .lock()
+        .ok()?
+        .get(feed as usize)?
+        .as_ref()
+        .map(std::sync::Arc::clone)
 }
 
 /// Everything every request renders from, read once at startup.
@@ -2948,7 +2991,7 @@ pub struct Site {
     /// windows and charges all three only if every one affords a permit — that
     /// is a single decision over three numbers, and splitting it would let a
     /// request the day window refused still drain the second window.
-    pub budgets: std::sync::Mutex<Vec<Option<pull::rate::Governor>>>,
+    pub budgets: std::sync::Mutex<Vec<Option<SharedGovernor>>>,
     /// The instrument universe, merged from both masters.
     pub read: Read,
     /// One manifest census per vendor, in [`Vendor::ALL`] order.
@@ -4874,7 +4917,16 @@ async fn await_budget(feed: pull::vendor::Feed, site: &Site) -> Result<(), Strin
                     feed.display()
                 ));
             };
-            governor.admit(monotonic_micros())
+            // ONE LOCK INSIDE ANOTHER, and both are released at the end of this
+            // block. The outer guards the LIST of feeds; the inner guards ONE
+            // feed's state. Taken in this order at every site in this file and
+            // never the other way round, which is what keeps them from
+            // deadlocking — and the inner lock is now the SAME one the
+            // transport takes, which is the whole point of the change.
+            let mut held = governor
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            held.admit(monotonic_micros())
         };
 
         let pull::rate::Verdict::Deny { span, wait_micros } = verdict else {
@@ -5603,10 +5655,13 @@ async fn with_retry(
             // against a fixed budget forever and never learns the vendor's
             // real ceiling -- AIMD with neither the A nor the D.
             Ok(body) => {
-                if let Ok(mut budgets) = site.budgets.lock()
-                    && let Some(Some(g)) = budgets.get_mut(feed as usize)
+                if let Ok(budgets) = site.budgets.lock()
+                    && let Some(Some(shared)) = budgets.get(feed as usize)
                 {
-                    g.record_success();
+                    shared
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .record_success();
                 }
                 return Ok(body);
             }
@@ -5722,10 +5777,13 @@ async fn with_retry(
                             // already tested `throttled` first and reached this
                             // call. Corrected rather than deleted, because the
                             // measurement above is why the branch exists.
-                            if let Ok(mut budgets) = site.budgets.lock()
-                                && let Some(Some(g)) = budgets.get_mut(feed as usize)
+                            if let Ok(budgets) = site.budgets.lock()
+                                && let Some(Some(shared)) = budgets.get(feed as usize)
                             {
-                                g.record_throttled();
+                                shared
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                    .record_throttled();
                             }
                         }
                         tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
@@ -6003,6 +6061,15 @@ async fn broker_window(
     // THE CREDENTIAL AND THE SOCKET, in one place shared with expired F&O
     // discovery. The sequence this replaced is unchanged; it moved.
     let (source, vendor) = credentialed_source(feed, &spec).await?;
+    // AND IT ASKS THIS SITE'S GOVERNOR, not one of its own.
+    //
+    // `HttpSource::new` builds a private governor from the descriptor, which is
+    // right for a caller holding no other and wrong here: this process already
+    // spends permits from `site.budgets`, and leaving the source with its own
+    // makes two instances of one vendor's budget, each learning from a
+    // different subset of the same events. P-01 names the hazard; the
+    // `SharedGovernor` doc names what it cost.
+    let source = source.sharing(shared_governor(site, feed));
     // THE ENDPOINT, NOT ONE REQUEST'S URL. This receipt covers every window of
     // one instrument, and a feed that carries its instrument or its rung as a
     // path segment has a different URL per window — so the honest single value
@@ -7457,7 +7524,12 @@ async fn fno_walk(
     // between here and the walk.
     let wire = match credentialed_source(asked.feed, &spec).await {
         Ok((source, store_vendor)) => Wire {
-            source,
+            // THE SHARED GOVERNOR, and THIS is the path that made the split
+            // cost something. A 429 on the discovery walk halved the source's
+            // private governor and never reached `site.budgets`, so
+            // `await_budget` went on admitting instantly against an allowance
+            // the vendor had already disproved.
+            source: source.sharing(shared_governor(site, asked.feed)),
             spec,
             store_vendor,
         },
@@ -15288,9 +15360,17 @@ mod tests {
         for (slot, feed) in pull::vendor::Feed::ALL.into_iter().enumerate() {
             match feed.descriptor().transport {
                 pull::vendor::Transport::Http(spec) => {
-                    let governor = budgets[slot].as_ref().unwrap_or_else(|| {
+                    let shared = budgets[slot].as_ref().unwrap_or_else(|| {
                         panic!("{} is an HTTP feed and must have a budget", feed.display())
                     });
+                    // THROUGH THE SHARED HANDLE. The budget is an
+                    // `Arc<Mutex<Governor>>` now rather than a `Governor` — one
+                    // instance per vendor, reached by this side AND by every
+                    // `HttpSource` built for that feed, so the two can no
+                    // longer hold different beliefs about one ceiling.
+                    let governor = shared
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     // THE DESCRIPTOR'S NUMBERS, NOT THIS FUNCTION'S. Every one
                     // cites docs/00-charter.md §4, and the unverified figure
                     // says so in the constant's own name.
@@ -15333,6 +15413,81 @@ mod tests {
     /// Measured on the real universe: 785 instruments attempted, 6 reached,
     /// 779 refused for a wait of 0.198 s. A backfill that abandons 99% of its
     /// work rather than waiting a fifth of a second is not automated.
+    /// **ONE GOVERNOR PER VENDOR, REACHED FROM BOTH SIDES.**
+    ///
+    /// There were two: `site.budgets` held one that `await_budget` spent
+    /// permits from, and `HttpSource::new` built a second, private one that the
+    /// transport gated and learned on. Both were complete AIMD, and each saw a
+    /// different subset of the same events — the hazard `crates/pull` invariant
+    /// P-01 names: *"two separate `Governor` values … nothing holds the sum of
+    /// two of them to one ceiling."*
+    ///
+    /// What it cost: a 429 on the DISCOVERY path halved the transport's
+    /// governor and never reached this side's, so `await_budget` went on
+    /// admitting instantly against an allowance the vendor had already
+    /// disproved. The throttle was still obeyed — the transport gates too — but
+    /// every wait, every budget halt and every number this side reported was
+    /// computed from a belief known to be wrong.
+    ///
+    /// The assertion is on IDENTITY, not on equal values: two governors built
+    /// from one descriptor start with identical ceilings, so comparing readings
+    /// would pass over the exact bug. Recording a throttle through one handle
+    /// and reading the lowered allowance through the other is what proves they
+    /// are one object.
+    #[test]
+    fn the_transport_and_the_api_share_one_governor_per_vendor() {
+        let dir = agreeing("sharedgov");
+        let site = site("sharedgov", &dir);
+        let feed = pull::vendor::Feed::Dhan;
+        let pull::vendor::Transport::Http(spec) = feed.descriptor().transport else {
+            panic!("Dhan is an HTTP feed");
+        };
+
+        let shared = shared_governor(&site, feed).expect("Dhan declares a budget");
+        let source =
+            pull::http::HttpSource::new(spec, pull::http::Credential::token("t".to_owned()))
+                .expect("Dhan builds")
+                .sharing(Some(std::sync::Arc::clone(&shared)));
+
+        let ceiling = spec.budget.per_second.expect("Dhan declares one");
+        let of = |g: &SharedGovernor| {
+            g.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .permitted(pull::rate::WindowSpan::Second)
+        };
+        let held = source.governor().expect("the source is governed");
+        assert_eq!(
+            of(&shared),
+            Some(ceiling),
+            "both start at the declared ceiling"
+        );
+        assert_eq!(of(&held), Some(ceiling));
+
+        // A THROTTLE RECORDED THROUGH THE TRANSPORT'S HANDLE...
+        held.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .record_throttled();
+
+        // ...IS VISIBLE THROUGH THE API'S. Before this change it was not, and
+        // that is the whole defect: this side kept spending an allowance the
+        // vendor had already refused.
+        let after = of(&shared);
+        assert_eq!(after, of(&held), "the two handles must read one governor");
+        assert!(
+            after < Some(ceiling),
+            "a throttle through one handle must lower the allowance the other \
+             reads — got {after:?} against a ceiling of {ceiling}"
+        );
+
+        // AND A FEED WITH NO DECLARED BUDGET IS LEFT UNGOVERNED rather than
+        // handed one. Enforcing a ceiling nobody wrote down is the invention
+        // §3 rule 1 forbids.
+        assert!(
+            shared_governor(&site, pull::vendor::Feed::TrueData).is_none(),
+            "a local archive declares no HTTP budget"
+        );
+    }
+
     /// **THE 1 + N WALK CHARGES 1 + N PERMITS, NOT ONE.**
     ///
     /// The regression this exists for, measured 2026-08-20 (journal seq

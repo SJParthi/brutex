@@ -17407,3 +17407,55 @@ them out of the `Ok` arm rather than only out of `Err`, and the receipt carries
 them. A run that partly failed is no longer an `Err` — so without that fold it
 would have become a run that succeeds quietly while having lost groups, which is
 the same §4 failure wearing the opposite mask.
+
+### D-0221 — there were two governors per vendor, and each believed a different ceiling
+
+**The AIMD was correct and the system was still wrong**, which is the whole
+point of this entry. `Governor` implements textbook additive-increase
+multiplicative-decrease — `permitted + 1` on success, `permitted / 2` on a 429,
+floored at one so it can never reach the absorbing state — and three tests prove
+it, including one that halves the allowance and watches success raise it again.
+The operator's own journal shows it working: `per_minute` 250 → 44 → **131** →
+76, decreasing AND recovering.
+
+**There were two of them.**
+
+| | Held by | Permits spent by | Learned from |
+|---|---|---|---|
+| A | `Site::budgets` | `await_budget` | bar-fetch outcomes only |
+| B | `HttpSource`, private | its own `admit` | every path, discovery included |
+
+Both were complete — both gated, both recorded success, both recorded
+throttles — and each observed a different subset of the same events.
+
+**What it cost.** A 429 on the DISCOVERY walk halved B and never reached A. So
+`await_budget` went on admitting instantly against an allowance the vendor had
+already disproved. The throttle was still obeyed, because B gates too — but
+every wait this side computed, its budget halt, and every number it reported
+rested on a belief known to be wrong. The two could not be reconciled by any
+amount of looking at either one.
+
+**`crates/pull` invariant P-01 named the hazard before it bit**, in these words:
+*"What is not bounded: two separate `Governor` values. The type is `Copy`;
+nothing here or in the crate holds the sum of two of them to one ceiling."* It
+was written as a limitation of a proof, and it was describing a live defect.
+
+**The fix is one `Arc<Mutex<Governor>>` per feed.** `feed_budgets` creates it,
+`shared_governor` hands it out, and `HttpSource::sharing` adopts it — so bars,
+discovery and rolling all teach one instance. `HttpSource::new` still builds a
+private one, which remains right for a caller that holds no other; what changed
+is that the server no longer leaves it that way.
+
+A feed declaring no HTTP budget stays ungoverned on both sides. `sharing`
+refuses to install a governor where `new` found none, because enforcing a
+ceiling nobody wrote down is the invention §3 rule 1 forbids.
+
+**The test asserts IDENTITY, not equal readings, and that distinction is the
+test.** Two governors built from one descriptor start with identical ceilings,
+so comparing values would pass over the exact bug. It records a throttle through
+the transport's handle and asserts the lowered allowance is visible through the
+api's — which can only hold if they are one object.
+
+**What this does NOT claim.** The ceilings themselves are unchanged and
+`GROWW_PER_SECOND_UNVERIFIED` is still 8/s, *chosen not measured*. This entry
+fixes which governor learns; it does not fix what it was told to enforce.

@@ -154,7 +154,27 @@ pub struct HttpSource {
     /// `None` for a feed whose descriptor names no bound at all -- an absent
     /// budget is a recorded fact (`CLAUDE.md` §3 rule 1) and must not read as a
     /// ceiling of zero.
-    governor: Option<std::sync::Mutex<crate::rate::Governor>>,
+    /// This feed's rate governor — **shared, not owned**.
+    ///
+    /// # Why an `Arc` and not a plain `Mutex`
+    ///
+    /// It was `Option<Mutex<Governor>>`, private to each `HttpSource`, and the
+    /// api held a SECOND governor per feed that it spent permits from. Two
+    /// instances of one vendor's budget, each observing a different subset of
+    /// the same events — which is the hazard `crates/pull` invariant P-01 names
+    /// in as many words: *"two separate `Governor` values … nothing holds the
+    /// sum of two of them to one ceiling."*
+    ///
+    /// What it cost, measured: a 429 on the DISCOVERY path halved this
+    /// governor and never reached the api's, so `await_budget` went on
+    /// admitting instantly against an allowance the vendor had already
+    /// disproved. The throttle was still obeyed — this governor gates too — but
+    /// the api's waits, its budget halt and its receipt were all computed from
+    /// a number that was wrong.
+    ///
+    /// One `Arc` per feed now, created once and handed to every source built
+    /// for that vendor, so every path teaches the same instance.
+    governor: Option<std::sync::Arc<std::sync::Mutex<crate::rate::Governor>>>,
 }
 
 // The token is the reason this is hand-written. A derived `Debug` prints every
@@ -320,7 +340,7 @@ impl HttpSource {
             spec.budget.per_minute,
             spec.budget.per_day,
         ) {
-            Ok(g) => Some(std::sync::Mutex::new(g)),
+            Ok(g) => Some(std::sync::Arc::new(std::sync::Mutex::new(g))),
             // A ceiling outside the governor's own bounds is a WIRING FAULT in
             // the descriptor, not a runtime condition, and it is refused here
             // rather than silently dropped -- an unenforced budget that reads as
@@ -340,6 +360,37 @@ impl HttpSource {
             client,
             governor,
         })
+    }
+
+    /// Replaces this source's governor with one the caller already holds.
+    ///
+    /// # Why a caller would
+    ///
+    /// So that ONE governor per vendor sees every request, whichever path made
+    /// it. `new` builds a fresh one from the descriptor, which is right for a
+    /// caller that holds no other — a test, a one-shot tool — and wrong for the
+    /// server, which spends permits from a governor of its own and would
+    /// otherwise be teaching a second instance. See the `governor` field and
+    /// P-01 for what that cost.
+    ///
+    /// A source whose feed declares no budget is left ungoverned: handing one a
+    /// governor would enforce a ceiling nobody wrote down, which is the
+    /// invention §3 rule 1 forbids.
+    #[must_use]
+    pub fn sharing(
+        mut self,
+        governor: Option<std::sync::Arc<std::sync::Mutex<crate::rate::Governor>>>,
+    ) -> Self {
+        if self.governor.is_some() {
+            self.governor = governor;
+        }
+        self
+    }
+
+    /// The governor this source gates on, for a caller that must share it.
+    #[must_use]
+    pub fn governor(&self) -> Option<std::sync::Arc<std::sync::Mutex<crate::rate::Governor>>> {
+        self.governor.clone()
     }
 
     /// Waits until this feed's budget admits one more request.
