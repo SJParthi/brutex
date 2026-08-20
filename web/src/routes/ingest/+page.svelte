@@ -2196,7 +2196,56 @@
    * `0.0655` was meant prices every option in the run wrongly, comes out finite
    * everywhere, and errors nowhere downstream.
    */
-  let rateText = $state('');
+  /**
+   * TYPED ONCE, NOT ONCE PER RUN.
+   *
+   * The rate genuinely cannot be derived and genuinely cannot be skipped — see
+   * `pull::pricing::the_rate_materially_moves_a_weekly_which_is_why_it_must_be_supplied`,
+   * which MEASURES it: on a seven-day ATM weekly, implied volatility runs
+   * 0.1776 at r=0% down to 0.1557 at r=12%, a spread of **0.0219**, about a 13%
+   * relative swing. A first version of that test asserted the opposite on the
+   * reasoning that `exp(-r·T)` over seven days is one part in eight hundred;
+   * the reasoning was wrong, because the rate moves the FORWARD and not just
+   * the discount, and 0.23% of forward against a 2.1% expected move is not
+   * small.
+   *
+   * What the same measurement also shows is that it does not have to be
+   * PRECISE: across the plausible 5.5%–8% band the spread is only **0.0046**.
+   * So the operator has to supply one and does not have to agonise over it.
+   *
+   * The friction worth removing is therefore re-typing, not the field. It
+   * persists here the way the theme does in `+layout.svelte`, and a storage
+   * failure is not an error worth a banner — the box simply starts empty and
+   * everything else still works.
+   */
+  const RATE_KEY = 'brutex.riskFreeRate';
+
+  function readRate() {
+    try {
+      const v = localStorage.getItem(RATE_KEY);
+      /* VALIDATED ON THE WAY OUT, not trusted because it came from us. The
+         server refuses anything outside ±1.0 by name, and a stored value that
+         would be refused is worse than none: it looks like a setting that
+         works. */
+      if (v && Number.isFinite(Number(v)) && Math.abs(Number(v)) <= 1) return v;
+      return '';
+    } catch {
+      return '';
+    }
+  }
+
+  let rateText = $state(readRate());
+
+  $effect(() => {
+    const v = rateText.trim();
+    try {
+      if (v) localStorage.setItem(RATE_KEY, v);
+      else localStorage.removeItem(RATE_KEY);
+    } catch {
+      /* Private browsing, or storage disabled. The rate still travels with
+         this run; it just will not be there for the next one. */
+    }
+  });
   /** The refusal a typed string earned, per field. Cleared the moment one takes. */
   /** @type {{ from: string | null, to: string | null }} */
   let typedErr = $state({ from: null, to: null });

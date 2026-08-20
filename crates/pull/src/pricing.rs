@@ -997,7 +997,91 @@ mod tests {
         );
     }
 
-    /// A rate with no source does not compile into existence.
+    /// A rate with no source does not compile into existence.    /// **HOW MUCH DOES THE RATE ACTUALLY MOVE THE ANSWER?**
+    ///
+    /// The operator has to type it, `docs/00-charter.md` records none, and
+    /// [`Rate`] refuses to invent one — so the honest thing is to MEASURE what
+    /// that friction buys rather than assert that it matters.
+    ///
+    /// Black-Scholes discounts by `exp(-r·T)`. On a seven-day weekly `T` is
+    /// 0.0199 years, so the entire discount at 6.5% is `exp(-0.00129)` — about
+    /// one part in eight hundred. This measures the spread across a band wider
+    /// than any rate India has printed in living memory and asserts it, so the
+    /// number is a fact in the suite rather than a claim in a comment.
+    ///
+    /// # The answer is that it matters, and the first version of this test
+    /// asserted the opposite
+    ///
+    /// It was written to prove the rate was a formality — `exp(-r·T)` over
+    /// seven days at 6.5% is about one part in eight hundred, so the discount
+    /// looked negligible. **Measured: 0.1557 to 0.1776 across 0–12%, a spread
+    /// of 0.0219 — a 14% relative swing in implied volatility.** The assertion
+    /// `spread < 0.02` failed, and the reasoning behind it was wrong.
+    ///
+    /// Why the discount argument misleads: for an at-the-money option the rate
+    /// moves the FORWARD, `S·e^((r−q)T)`, not just the discount. Over a
+    /// seven-day tenor the expected move is `σ√T ≈ 0.15 × 0.141 ≈ 2.1%`, and a
+    /// 12% rate shifts the forward by 0.23% — **eleven percent of the expected
+    /// move**. A small absolute shift against a small denominator is not small.
+    ///
+    /// So the rate box is not a formality and the operator cannot skip it. This
+    /// test records the sensitivity as a measured fact rather than leaving the
+    /// question to intuition, which got it backwards.
+    #[test]
+    fn the_rate_materially_moves_a_weekly_which_is_why_it_must_be_supplied() {
+        let quote = atm_call();
+        let basis = YearBasis::Calendar365;
+        let iv_at = |bps: u32| {
+            // `f64::from(u32)` is lossless, so no cast lint fires here — the
+            // basis-point count is the input precisely because it keeps the
+            // rate an exact integer until the one division.
+            let annual = f64::from(bps) / 10_000.0;
+            let rate = Rate::measured(annual, basis, RateSource::Operator).expect("plausible");
+            solve_iv(quote, rate, basis).expect("solvable").volatility
+        };
+
+        // THE WIDE BAND: wider than any rate India has printed in living
+        // memory, so this is an upper bound on the error a wrong rate causes.
+        let (at_zero, at_twelve) = (iv_at(0), iv_at(1_200));
+        let wide = at_zero - at_twelve;
+
+        // THE PLAUSIBLE BAND: roughly the range an Indian risk-free rate has
+        // actually occupied. **This is the number that decides whether the
+        // operator's guess has to be a good one**, and it is much the smaller
+        // of the two: a rate anywhere in it lands IV within a few percent.
+        let (at_five_five, at_eight) = (iv_at(550), iv_at(800));
+        let near = at_five_five - at_eight;
+
+        println!(
+            "7-day ATM weekly — IV at r=0%: {at_zero:.4}, r=12%: {at_twelve:.4}, \
+             spread {wide:.4}\n  plausible band r=5.5%..8%: \
+             {at_five_five:.4}..{at_eight:.4}, spread {near:.4}"
+        );
+
+        // IT MATTERS, AND THAT IS THE ASSERTION. If a future change made the
+        // rate genuinely negligible this would fail and the box could go —
+        // the right way round for a claim once made from intuition and wrong.
+        assert!(
+            wide > 0.01,
+            "the rate moved IV by only {wide:.6} across 0–12%, so the operator's \
+             rate box may now be a formality — re-check the reasoning above"
+        );
+
+        // AND IT FALLS AS THE RATE RISES, which is the opposite of what the
+        // first version of this test asserted.
+        //
+        // For a CALL at a FIXED PREMIUM: a higher rate lifts the forward
+        // `S·e^((r−q)T)`, which moves the option further into the money, so
+        // LESS volatility is needed to justify the same price. Getting this sign
+        // backwards would not have been caught by a spread magnitude alone —
+        // which is why the direction is asserted separately.
+        assert!(
+            at_zero > at_twelve && at_five_five > at_eight,
+            "IV must FALL as the rate rises for a call at a fixed premium: \
+             r=0% gave {at_zero:.6} and r=12% gave {at_twelve:.6}"
+        );
+    }
+
     #[test]
     fn a_rate_without_a_citation_is_refused() {
         assert_eq!(
