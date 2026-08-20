@@ -702,9 +702,30 @@ pub async fn conduct(site: Loaded, legs: Vec<Leg>) {
             )));
         }
         let mut failed = false;
-        for chain in flying {
-            // A PANICKED OR CANCELLED CHAIN IS A FAILED CHAIN.
-            failed |= chain.await.unwrap_or(true);
+        for (nth, chain) in flying.into_iter().enumerate() {
+            match chain.await {
+                Ok(chain_failed) => failed |= chain_failed,
+                // A PANICKED OR CANCELLED CHAIN IS A FAILED CHAIN — AND IT IS
+                // NAMED ON THE FEED IT KILLED.
+                //
+                // This read `chain.await.unwrap_or(true)`, which counted a dead
+                // chain as failed and said nothing about WHICH feed died. The
+                // fingerprint of that, measured 2026-08-20: `doing` frozen at
+                // the leg it was on, `finished` still false, `lastError` still
+                // null, no journal record, no socket — indefinitely, because a
+                // task that panics never reaches the code that clears its own
+                // fields. A feed that has stopped is then indistinguishable
+                // from one that is working slowly, which is the confusion this
+                // whole module exists to remove.
+                //
+                // The panic itself goes to STDERR through the panic hook and
+                // never reaches `telemetry`, so this line is the only surface
+                // that can say it happened at all.
+                Err(dead) => {
+                    failed = true;
+                    note_dead_chain(&site, nth, &dead);
+                }
+            }
         }
 
         passes = passes.saturating_add(1);
@@ -742,6 +763,36 @@ pub async fn conduct(site: Loaded, legs: Vec<Leg>) {
     let landed = rows_now(&site).saturating_sub(started_rows);
     let summary = summary_of(passes, retries, landed, stopping(&site));
     with_progress(&site, |progress| progress.finished = Some(summary));
+}
+
+/// Records that one feed's chain stopped abnormally, on the feed it killed.
+///
+/// # The fingerprint this exists to name
+///
+/// A panicking task never reaches the code that clears its own fields, so it
+/// leaves `doing` frozen on the leg it was running, `finished` still false and
+/// `last_error` still null — measured 2026-08-20, alongside no journal record
+/// and no socket, indefinitely. A feed that has STOPPED is then
+/// indistinguishable from one working slowly, which is the confusion this
+/// module exists to remove.
+///
+/// The panic itself goes to standard error through the panic hook and never
+/// reaches `telemetry`, so this is the only surface that can say it happened.
+fn note_dead_chain(site: &Site, nth: usize, dead: &tokio::task::JoinError) {
+    with_progress(site, |progress| {
+        if let Some(feed) = progress.feeds.get_mut(nth) {
+            feed.finished = true;
+            feed.doing = String::new();
+            if feed.last_error.is_none() {
+                feed.last_error = Some(format!(
+                    "this feed's chain stopped abnormally and did not finish its \
+                     legs ({dead}). The reason is on the server's standard error, \
+                     which is the only place a panic is written; nothing already \
+                     stored is affected, and the next pass asks for what is owed."
+                ));
+            }
+        }
+    });
 }
 
 /// What the run did, in a sentence that distinguishes the three ways it can end.
