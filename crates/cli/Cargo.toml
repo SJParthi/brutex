@@ -89,5 +89,32 @@ brutex_core = { path = "../core", package = "core", version = "0.1.0" }
 # prescribes as the affordable one.
 telemetry  = { path = "../telemetry", version = "0.1.0" }
 
+# THE CORES THE SWEEP NEVER USED.
+#
+# `rayon` sat in `[workspace.dependencies]` with **no crate taking the arrow** --
+# an audit grepped every manifest and every source file and found the only
+# mention in the whole tree was `docs/01-architecture.md`, which claimed "data
+# parallel over candidates via rayon". So the sweep was entirely single-threaded
+# and one load-bearing sentence of the architecture document was fiction.
+#
+# GATE 22 DECIDES WHERE THE ARROW MAY GO, AND IT IS NOT WHERE THE DOCUMENT SAID.
+# `PINNED='vocab indicators engine'` pins those three to `vocab` alone, so
+# `crates/engine` -- which holds the candidate loop -- **cannot** take this
+# dependency. Parallelism over CANDIDATES is therefore not expressible without a
+# law change, and this arrow does not attempt one.
+#
+# What it parallelises is the axis `cli` owns: `sweep-all` walks every stored
+# instrument-month, and `docs/07-plan.md` §4 sizes that at ~800 instruments over
+# ~68 months = 54,000 sweeps. Each is wholly independent -- its own file, its own
+# evaluator, its own ladder, its own identity -- so this is embarrassingly
+# parallel work that was being done one core at a time.
+#
+# DETERMINISM IS PRESERVED BY SHAPE, NOT BY LUCK. `CLAUDE.md` §3 rule 5 requires
+# byte-identical output for identical input. rayon's indexed `collect` preserves
+# ORDER, and the `Tally` is folded sequentially over the collected rows afterwards
+# rather than mutated from the workers -- so no result depends on which thread
+# finished first. See `batch::sweep_under`.
+rayon      = { workspace = true }
+
 [lints]
 workspace = true

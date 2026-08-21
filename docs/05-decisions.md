@@ -18206,3 +18206,53 @@ walk filters cadences through `cadence_has_contracts`. For a BANKNIFTY window
 after 2024-11-13, whose weekly was withdrawn by SEBI, the displayed figure is
 therefore double what the walk will issue. The two are computed in different
 scopes and joining them is a change to what `fno_facts` is given, not a `.min`.
+
+### D-0232 — `rayon` was in the manifest, in no crate, and in one architecture claim
+
+**The sweep was entirely single-threaded, and a load-bearing sentence said
+otherwise.** `rayon` sat in `[workspace.dependencies]` with **no crate taking
+the arrow**. An audit grepped every `crates/*/Cargo.toml` and every `.rs` file
+and found the only mention in the whole tree was `docs/01-architecture.md:288`:
+
+> *"`engine` — data parallel over candidates via `rayon`"*
+
+Nothing was parallel over anything.
+
+**Where the arrow may go is decided by gate 22, and it is not where the document
+put it.** Clause A pins `PINNED='vocab indicators engine'` to `vocab` alone, so
+`crates/engine` — which holds the candidate loop — **cannot declare `rayon`**.
+Parallelism over candidates is not expressible without a law change, and this
+entry does not attempt one. The document's claim was not merely unimplemented;
+it named a crate where it could not be implemented.
+
+**The axis `cli` owns.** `batch::sweep_all` walks every stored instrument-month.
+`docs/07-plan.md` §4 sizes that at ~800 instruments over ~68 months = **54,000
+sweeps**, each wholly independent: its own file, its own evaluator, its own
+ladder, its own run identity. Nothing shared, nothing written. It was a `for`
+loop on one core. It is now `par_iter`, and `cli` is on neither gate 22's PINNED
+nor its SWEEP list, so the arrow is legal there.
+
+**§3 rule 5 survives by SHAPE rather than by luck, and two properties are needed
+— either alone is insufficient.**
+
+1. `map(..).collect()` on an **indexed** parallel iterator preserves order, so
+   the `rows` vector is the same sequence whatever order threads finish in.
+2. The `Tally` is folded **sequentially over the collected rows** afterwards,
+   rather than mutated from the workers.
+
+The second required a refactor: `one` took `&mut Tally` and incremented counters
+inside itself, which is exactly the shared mutable state a parallel walk cannot
+have — and worse for this repository, it would have made the totals depend on
+scheduling. Every `Tally` field turned out to be derivable from the `Row` alone
+(a row with a refusal is a refusal; any other was swept, and its `bars`, `kept`
+and `completed` carry the rest), so `one` became pure and `Tally::fold` took the
+counters. A rerun is byte-identical, which is what makes reruns safe.
+
+**What this does NOT claim.** No wall-clock figure. Nothing was benched — the
+speed-up is structural (N independent sweeps on N cores instead of one) and
+§3 rule 6 forbids quoting a measurement nobody took. `crates/cli` still carries
+no `benches/ratio.rs`, which is a separate red gate recorded elsewhere.
+
+`docs/01-architecture.md`'s row is struck through rather than deleted, with the
+reason and the gate that forbids it, and a new row records where the parallelism
+actually is. A stale claim quietly removed teaches nobody why it was wrong.

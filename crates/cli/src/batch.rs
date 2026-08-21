@@ -37,10 +37,28 @@
 //! O(instrument-months) walks, plus the sweep of each. The enumeration itself is
 //! O(entries) and `docs/06-limits.md` §86 declares it. Neither is a rule-4
 //! operation: those five run per bar or per candidate.
+//!
+//! **The months run in PARALLEL, and the totals do not.** Each instrument-month
+//! is wholly independent — its own file, its own evaluator, its own ladder, its
+//! own identity — so the walk is `par_iter`, and wall-clock divides by the core
+//! count rather than the work being done one core at a time as it was.
+//!
+//! The parallelism is over MONTHS and not over candidates, and that is forced
+//! rather than chosen: gate 22 pins `vocab indicators engine` to `vocab` alone,
+//! so `crates/engine`, which holds the candidate loop, cannot take a `rayon`
+//! arrow at all. `docs/01-architecture.md` claimed "data parallel over
+//! candidates via rayon" while **no crate in the workspace took that arrow** —
+//! the sweep was entirely single-threaded. This is the axis `cli` owns.
+//!
+//! §3 rule 5 survives by shape: `collect` on an indexed parallel iterator
+//! preserves order, and [`Tally`] is folded sequentially over the collected rows
+//! afterwards rather than mutated from the workers. No counter and no row
+//! depends on which thread finished first, so a rerun is byte-identical.
 
 use crate::stored;
 use core::fmt::Write as _;
 use engine::Ladder;
+use rayon::prelude::*;
 use runner::Sweeper;
 use store::catalog::{self, Held};
 
@@ -107,6 +125,36 @@ impl Tally {
     const fn reconciles(&self) -> bool {
         self.swept.saturating_add(self.refused) == self.offered
     }
+
+    /// Folds one finished month into the running totals.
+    ///
+    /// # Why this exists, and why it is the thing that makes the walk parallel
+    ///
+    /// The counters used to be incremented from inside [`one`], which took
+    /// `&mut Tally`. That is exactly the shared mutable state a parallel walk
+    /// cannot have — and, worse for this repository, it would have made the
+    /// totals depend on the order threads happened to finish in, which
+    /// `CLAUDE.md` §3 rule 5 forbids reaching the output.
+    ///
+    /// Every field is derivable from the [`Row`] alone: a row with a refusal is
+    /// a refusal, any other row was swept, and its bars, kept and completed
+    /// fields carry the rest. So `one` became pure, the sweep became parallel,
+    /// and the fold stayed **sequential over the collected rows in their
+    /// original order** — which is what keeps a rerun byte-identical.
+    fn fold(&mut self, row: &Row) {
+        if row.refused.is_some() {
+            self.refused = self.refused.saturating_add(1);
+            return;
+        }
+        self.swept = self.swept.saturating_add(1);
+        self.bars = self.bars.saturating_add(row.bars);
+        self.kept = self
+            .kept
+            .saturating_add(u64::try_from(row.kept).unwrap_or(u64::MAX));
+        if !row.completed {
+            self.incomplete = self.incomplete.saturating_add(1);
+        }
+    }
 }
 
 /// Sweeps every stored instrument-month matching `vendor_word` and `rung`.
@@ -164,10 +212,33 @@ fn sweep_under(
         offered: u64::try_from(wanted.len()).unwrap_or(u64::MAX),
         ..Tally::default()
     };
-    let mut rows: Vec<Row> = Vec::with_capacity(wanted.len());
-
-    for held in wanted {
-        rows.push(one(root, held, min_hits, commit, &mut tally));
+    // THE 54,000 SWEEPS, IN PARALLEL, AND STILL BYTE-IDENTICAL.
+    //
+    // Each instrument-month is wholly independent: its own file, its own
+    // evaluator, its own ladder, its own run identity. Nothing is shared and
+    // nothing is written. This was a `for` loop on one core while `rayon` sat in
+    // the workspace manifest with no crate taking the arrow at all.
+    //
+    // WHY THE PARALLELISM IS HERE AND NOT OVER CANDIDATES, which is where the
+    // architecture document claimed it was: gate 22 pins `vocab indicators
+    // engine` to `vocab` alone, so `crates/engine` — which holds the candidate
+    // loop — cannot take a `rayon` dependency. Parallelism over candidates is
+    // not expressible without a law change. This axis is `cli`'s own and needs
+    // none.
+    //
+    // DETERMINISM (§3 rule 5) IS HELD BY SHAPE, NOT BY LUCK. Two properties do
+    // it, and both are needed:
+    //   * `map(..).collect()` on an INDEXED parallel iterator preserves order,
+    //     so `rows` is the same sequence whatever order the threads finish in;
+    //   * the `Tally` is folded SEQUENTIALLY over `rows` below rather than
+    //     mutated from the workers, so no counter depends on scheduling.
+    // A rerun therefore produces the same bytes, which is what makes reruns safe.
+    let rows: Vec<Row> = wanted
+        .par_iter()
+        .map(|held| one(root, held, min_hits, commit))
+        .collect();
+    for row in &rows {
+        tally.fold(row);
     }
 
     Ok(render(
@@ -181,8 +252,11 @@ fn sweep_under(
     ))
 }
 
-/// Sweeps one instrument-month, folding the outcome into `tally`.
-fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str, tally: &mut Tally) -> Row {
+/// Sweeps one instrument-month. Pure: it reads the store and returns a row.
+///
+/// Takes no `&mut Tally`. That parameter was what stopped the walk above being
+/// parallel, and removing it is what `Tally::fold` exists for.
+fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row {
     let label = format!(
         "{} {} {} {}",
         held.vendor.as_str(),
@@ -200,7 +274,6 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str, tally: 
     ) {
         Ok(loaded) => loaded,
         Err(why) => {
-            tally.refused = tally.refused.saturating_add(1);
             return Row {
                 label,
                 bars: 0,
@@ -215,7 +288,6 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str, tally: 
     let mut ev = match crate::evaluator() {
         Ok(ev) => ev,
         Err(why) => {
-            tally.refused = tally.refused.saturating_add(1);
             return Row {
                 label,
                 bars: 0,
@@ -279,15 +351,6 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str, tally: 
             .with("kept", u64::try_from(kept).unwrap_or(u64::MAX))
             .with("completed", completed),
     );
-
-    tally.swept = tally.swept.saturating_add(1);
-    tally.bars = tally.bars.saturating_add(outcome.census.swept);
-    tally.kept = tally
-        .kept
-        .saturating_add(u64::try_from(kept).unwrap_or(u64::MAX));
-    if !completed {
-        tally.incomplete = tally.incomplete.saturating_add(1);
-    }
 
     Row {
         label,

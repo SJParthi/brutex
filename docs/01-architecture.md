@@ -285,7 +285,8 @@ than a scan that returned nothing.
 |---|---|---|
 | `pull` | async, one task per window, a governor between tasks and the vendor | none — each task owns its window |
 | `indicators` | single pass, sequential by construction (state carries forward) | none |
-| `engine` | data parallel over candidates via `rayon` | none — bar bits are read-only, each shard owns its own output |
+| `engine` | ~~data parallel over candidates via `rayon`~~ — **THIS WAS NEVER TRUE, AND IT CANNOT BE.** No crate took the `rayon` arrow at all: an audit grepped every manifest and every source file and found this row was the only mention in the tree, so the ladder was entirely single-threaded. It cannot be made true here either — CI gate 22 pins `vocab indicators engine` to `vocab` alone, so `engine` may not declare `rayon`. Parallelism over candidates needs a law change, not a patch. D-0232 | none — bar bits are read-only, each shard owns its own output |
+| `cli` | data parallel over **instrument-months** in `batch::sweep_under`, via `rayon` | none — each month is its own file, evaluator, ladder and identity. Determinism holds by shape: indexed `collect` preserves order and `Tally` is folded sequentially afterwards, so no output depends on thread scheduling (§3 rule 5). D-0232 |
 | `store` append | one writer, positional writes, commit counter published last | the counter, published with a release store |
 | `api` | async, request-scoped | none |
 
