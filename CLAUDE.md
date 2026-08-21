@@ -103,7 +103,7 @@ CI gate 1 enforces this by walking every tracked file. It is not advisory.
    redistributing one NSE feed publish the same OHLCV at the same timestamps for
    a clean month, at which point `data_digest` is equal and so is every other
    term. Meanwhile `cli`'s own banner told the reader the identity *"names the
-   exact column they came from"*. D-0220 is that entry, and this sentence is
+   exact column they came from"*. D-0225 is that entry, and this sentence is
    that edit.
 4. **Constant per-operation cost.** Bar lookup, condition lookup, mask
    evaluation, duplicate rejection and result append are each O(1). A change
@@ -172,7 +172,7 @@ vocab         <-- indicators · engine
 core costs greeks store telemetry <-- pull
 core pull store telemetry       <-- api
 core costs engine indicators vocab         <-- runner
-core costs engine indicators runner store  <-- cli
+core costs engine indicators runner store telemetry <-- cli
 ```
 
 Thirteen members, and the root `Cargo.toml` `members` list is exactly the
@@ -207,8 +207,18 @@ only binary was `api`, whose dependency set is `core`, `pull`, `store` and
 unreachable from any entry point, and the three render surfaces that display it
 had no caller at all.
 
-`cli` depends on `runner`, `engine`, `indicators`, `costs`, `store` and `core` —
-**six arrows, and `store` is one of them.**
+`cli` depends on `runner`, `engine`, `indicators`, `costs`, `store`, `core` and
+`telemetry` — **seven arrows, and `store` is one of them.**
+
+**`telemetry` is the seventh, and gate 17 is why it is here rather than one crate
+deeper.** Until D-0226 a `sweep-stored` or `sweep-all` run produced no event of
+any kind — not the file it opened, not the bars it read, not a refusal — so the
+`/logs` page covered the pull half of the data path and nothing of the read half.
+Gate 17 silences `vocab engine indicators runner`, because those hold the loops
+and its rule is not "each call is cheap" but "the innermost loop calls nothing at
+all". `cli` holds no loop over bars and none over candidates: it is the
+structural boundary, one event per run and one per instrument-month, which is the
+granularity gate 17's own comment prescribes as the affordable one. D-0226.
 
 It was once deliberately *not*, on the reasoning that the operator's standing
 rule forbade both a vendor pull and the bars already on disk, leaving

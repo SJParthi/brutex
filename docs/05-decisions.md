@@ -17590,71 +17590,6 @@ renders for a site that has never run — answered `"running":true`. Every fresh
 tab would have believed a backfill was in flight. Recorded as invariant A-45.
 
 Invariants A-45 … A-48.
-
-### D-0220 — the run identity named what was computed and not whose data it was
-
-**`CLAUDE.md` §3 rule 3 lists eight terms. The identity now hashes nine.** The
-ninth is `feed`, and this entry is why the law's list grew rather than the code
-being wrong.
-
-**What the eight could not separate.** `blake3(mask ‖ direction ‖ instrument ‖
-timeframe ‖ params ‖ data_digest ‖ vocab_version ‖ commit)` identifies *what was
-computed*. Not one of the eight identifies *whose data it was computed on*. The
-store is keyed by feed — `bars/<vendor>/NSE/INDEX/NIFTY/1min/2026-08.bin` — so
-one instrument-month exists once per vendor, and sweeping two of them is two
-runs.
-
-**Why this looked safe and was not.** Two feeds' bytes for one month almost
-always differ, so `data_digest` separated them **incidentally**. Incidentally is
-not a guarantee. Two vendors redistributing one NSE feed publish the same OHLCV
-at the same timestamps for a clean month; then the digest is equal, and so is
-every other term — same instrument, same rung, same ladder, same commit — and
-the two runs collide on one `RunId`.
-
-**Measured on the operator's own disk**, `store.bak-20260819-092235`:
-
-| file | bytes |
-|---|---|
-| `bars/dhan/NSE/INDEX/NIFTY/1min/2026-08.bin` | 284,768 |
-| `bars/groww/NSE/INDEX/NIFTY/1min/2026-08.bin` | 284,768 |
-
-Same instrument, same rung, same month, two feeds, **identical length** — the
-same record count. The file digests differ, but a file digest covers the header,
-so that is not evidence the *bar payloads* differ. The collision case is the
-ordinary one, not a contrived one.
-
-**And the report already claimed otherwise.** `cli::STORED_PROVENANCE` tells the
-reader that *"the run identity beneath names the exact column they came from"*.
-It did not. A banner asserting a property the code does not hold is the
-failure-wearing-a-success's-clothes shape §4 bans, in the one place §5 says the
-two provenance banners exist to keep straight.
-
-**The value was present and unread the whole time.** `cli::stored::Loaded`
-carries `vendor`, documented as *"the first path segment, never inferred"*, and
-an audit found it had no production reader. The term is taken from the load
-rather than from the operator's argument word, so it names the column on disk.
-
-**Tag 9, appended.** The eight keep their tag numbers. A tag is the only thing
-separating one term's bytes from another's inside the hash, so renumbering would
-silently re-key every run ever computed — §3.8's append-only discipline applied
-to tags rather than to condition bits.
-
-**Adding a term re-keys every run, and that is affordable exactly now.**
-Nothing persists a `RunId`: it is formatted into a report string and never
-written to the store, so there is no recorded corpus to migrate. The same change
-made after run results are stored is a migration, and this entry is the record
-that the window was used deliberately.
-
-**What refuses it.** `runner::identity::two_feeds_with_byte_identical_bars_do_not_collide`
-holds `data_digest` **equal on purpose**, so it fails on any implementation that
-leans on the bytes differing, and asserts the same feed still reproduces its own
-identity so the term discriminates rather than adding noise.
-`every_term_changes_the_identity` gains a ninth arm for the same reason
-`pair_budget` needed one: a term that is written and never read is a term two
-runs can share.
-
-Invariant X-14.
-
 ### D-0224 — the expired-derivative path had no retry, no counts, and no way to finish
 
 Seven locked choices from one audit, recorded together because they were found
@@ -17766,3 +17701,126 @@ line: the F&O route still takes no per-feed seat; `fnowork::gaps` still has no
 production caller, so nothing says which expired contract-months are owed; the
 rolling driver still asks `ORDINALS_ASKED = 1` of three; and `/verify.json` still
 scrubs the manifest log rather than its index.
+
+
+### D-0225 — the run identity named what was computed and not whose data it was
+
+**`CLAUDE.md` §3 rule 3 lists eight terms. The identity now hashes nine.** The
+ninth is `feed`, and this entry is why the law's list grew rather than the code
+being wrong.
+
+**What the eight could not separate.** `blake3(mask ‖ direction ‖ instrument ‖
+timeframe ‖ params ‖ data_digest ‖ vocab_version ‖ commit)` identifies *what was
+computed*. Not one of the eight identifies *whose data it was computed on*. The
+store is keyed by feed — `bars/<vendor>/NSE/INDEX/NIFTY/1min/2026-08.bin` — so
+one instrument-month exists once per vendor, and sweeping two of them is two
+runs.
+
+**Why this looked safe and was not.** Two feeds' bytes for one month almost
+always differ, so `data_digest` separated them **incidentally**. Incidentally is
+not a guarantee. Two vendors redistributing one NSE feed publish the same OHLCV
+at the same timestamps for a clean month; then the digest is equal, and so is
+every other term — same instrument, same rung, same ladder, same commit — and
+the two runs collide on one `RunId`.
+
+**Measured on the operator's own disk**, `store.bak-20260819-092235`:
+
+| file | bytes |
+|---|---|
+| `bars/dhan/NSE/INDEX/NIFTY/1min/2026-08.bin` | 284,768 |
+| `bars/groww/NSE/INDEX/NIFTY/1min/2026-08.bin` | 284,768 |
+
+Same instrument, same rung, same month, two feeds, **identical length** — the
+same record count. The file digests differ, but a file digest covers the header,
+so that is not evidence the *bar payloads* differ. The collision case is the
+ordinary one, not a contrived one.
+
+**And the report already claimed otherwise.** `cli::STORED_PROVENANCE` tells the
+reader that *"the run identity beneath names the exact column they came from"*.
+It did not. A banner asserting a property the code does not hold is the
+failure-wearing-a-success's-clothes shape §4 bans, in the one place §5 says the
+two provenance banners exist to keep straight.
+
+**The value was present and unread the whole time.** `cli::stored::Loaded`
+carries `vendor`, documented as *"the first path segment, never inferred"*, and
+an audit found it had no production reader. The term is taken from the load
+rather than from the operator's argument word, so it names the column on disk.
+
+**Tag 9, appended.** The eight keep their tag numbers. A tag is the only thing
+separating one term's bytes from another's inside the hash, so renumbering would
+silently re-key every run ever computed — §3.8's append-only discipline applied
+to tags rather than to condition bits.
+
+**Adding a term re-keys every run, and that is affordable exactly now.**
+Nothing persists a `RunId`: it is formatted into a report string and never
+written to the store, so there is no recorded corpus to migrate. The same change
+made after run results are stored is a migration, and this entry is the record
+that the window was used deliberately.
+
+**What refuses it.** `runner::identity::two_feeds_with_byte_identical_bars_do_not_collide`
+holds `data_digest` **equal on purpose**, so it fails on any implementation that
+leans on the bytes differing, and asserts the same feed still reproduces its own
+identity so the term discriminates rather than adding noise.
+`every_term_changes_the_identity` gains a ninth arm for the same reason
+`pair_budget` needed one: a term that is written and never read is a term two
+runs can share.
+
+Invariant X-14.
+
+### D-0226 — the sweep had no log, and gate 17 is why it belongs in `cli`
+
+**A `sweep-stored` or `sweep-all` run wrote no event of any kind.** Not the file
+it opened, not the bar count it read, not the identity it computed, not a
+refusal. `crates/cli` declared no `telemetry` arrow and neither `runner` nor
+`engine` holds an emit site, so the `/logs` page covered the pull half of the
+data path and **nothing at all of the read half**. The first question after a
+sweep that found nothing — *"did it even open my month?"* — had no answer
+anywhere in the workspace.
+
+**Why the arrow is on `cli` and not on `runner`.** Gate 17 silences
+`vocab engine indicators runner`. Its reason is arithmetic and it is right: the
+ladder evaluates `(bits & mask) == mask` billions of times, so the rule is not
+*"each call is cheap"* but *"the innermost loop calls nothing at all"*. `runner`
+is on that list precisely because it holds the loop over bars and the loop over
+candidates.
+
+`cli` holds neither. It is the structural boundary — one event per run, one per
+instrument-month — which is the granularity gate 17's own comment prescribes as
+the affordable one:
+
+> *"plain integer counters, incremented in the loop with no atomic and no
+> allocation, emitted ONCE at a structural boundary"*
+
+`crates/cli/src/batch.rs` already stated the same discipline for its report and
+now emits on the same schedule: *"reporting BETWEEN instrument-months, never
+inside one"*. There is no progress bar from inside the ladder and there must not
+be one.
+
+**Where the events go.** `$BRUTEX_LOG_DIR`, else `<store>/logs` — the same
+two-step every other root here uses, so an operator who has moved one has moved
+them all. Beneath the STORE rather than the working directory because a sweep
+started from `/` or from a read-only checkout must still write somewhere, and the
+store root is already required to be writable. Same reasoning as
+`api::served_log_dir`.
+
+**An unwritable directory warns; it does not refuse.** A sweep with no log is
+still a correct sweep, and refusing to compute because a directory is not
+writable trades a whole answer for an audit trail. §4 bans a fallback that
+*hides* a failure — this one names it, printing `events are NOT being recorded:
+<reason>` above the report, on the same screen, so an operator who expected
+events and got none is told why rather than discovering an empty log later.
+
+**Installed in `main.rs`, and that is forced.** `telemetry::install` writes a
+process-wide `OnceLock` and refuses a second call, so a `run` that installed
+would work once and refuse for the rest of the process — and the test binary
+calls `run` many times. `tests/binary.rs` executes the real binary, so the line
+is measured rather than assumed. `telemetry::emit` returns `NotInstalled` rather
+than panicking, which is what makes every call site safe in a test binary that
+never installs.
+
+**What refuses it.**
+`cli::the_log_directory_follows_the_store_unless_it_is_named_outright` drives the
+decision directly — the environment reading stays in `install_log` for the same
+reason `root_from` is split from `store_root`: a test that installed a
+process-wide sink would poison every later test in the same binary, and which one
+won would depend on thread scheduling.

@@ -264,6 +264,22 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str, tally: 
     let depth = outcome.sweep.depth();
     let completed = outcome.sweep.completed();
 
+    // ONE EVENT PER INSTRUMENT-MONTH, which is this module's own stated
+    // granularity: "reporting BETWEEN instrument-months, never inside one".
+    // A 54,000-month walk is hours of CPU, and a line per month is the only
+    // progress signal that is both useful and free — there is no progress bar
+    // from inside the ladder and there must not be one.
+    crate::note(
+        &telemetry::Event::info("cli.sweep", "stored month swept")
+            .with("identity", id.hex().as_str())
+            .with("feed", loaded.vendor.as_str())
+            .with("label", label.as_str())
+            .with("bars", outcome.census.swept)
+            .with("depth", u64::try_from(depth).unwrap_or(u64::MAX))
+            .with("kept", u64::try_from(kept).unwrap_or(u64::MAX))
+            .with("completed", completed),
+    );
+
     tally.swept = tally.swept.saturating_add(1);
     tally.bars = tally.bars.saturating_add(outcome.census.swept);
     tally.kept = tally

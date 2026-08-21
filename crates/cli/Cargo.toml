@@ -71,5 +71,23 @@ costs      = { path = "../costs", version = "0.1.0" }
 store      = { path = "../store", version = "0.1.0" }
 brutex_core = { path = "../core", package = "core", version = "0.1.0" }
 
+# THE LOG THE SWEEP NEVER HAD.
+#
+# Until this arrow, a `sweep-stored` or `sweep-all` run produced **no event of
+# any kind** -- not the file it opened, not the bars it read, not a refusal. The
+# `/logs` page covers the pull half of the data path and had nothing at all from
+# the read half, so the one question an operator asks after a sweep that found
+# nothing -- "did it even open my file?" -- had no answer anywhere.
+#
+# GATE 17 PERMITS THIS, AND THE DISTINCTION IS THE WHOLE REASON THE ARROW IS
+# HERE AND NOT ONE CRATE DEEPER. That gate silences `vocab engine indicators
+# runner`, because those hold the loops: the ladder evaluates `(bits & mask) ==
+# mask` billions of times and its rule is not "each call is cheap" but "the
+# innermost loop calls nothing at all". `cli` holds no loop over bars and no loop
+# over candidates. It is the STRUCTURAL BOUNDARY -- one event per run, one per
+# instrument-month -- which is exactly the granularity gate 17's own comment
+# prescribes as the affordable one.
+telemetry  = { path = "../telemetry", version = "0.1.0" }
+
 [lints]
 workspace = true

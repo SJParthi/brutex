@@ -19,7 +19,7 @@
 //! `mode` is not a term, the charter is the stale copy on that point, and no
 //! decision was invented.
 //!
-//! The ninth term rule 3 does carry is [`Run::feed`], added by **D-0220**. The
+//! The ninth term rule 3 does carry is [`Run::feed`], added by **D-0225**. The
 //! other eight identify *what was computed* and none of them identifies *whose
 //! data it was computed on*. The store is keyed by vendor, so one
 //! instrument-month exists once per feed and sweeping two of them is two runs;

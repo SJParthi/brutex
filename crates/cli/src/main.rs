@@ -36,9 +36,27 @@
 /// rather than written as it is produced, so that every arm of the library is
 /// drivable from a test with no stdout to capture.
 fn main() -> std::process::ExitCode {
+    // THE SINK, INSTALLED BEFORE THE COMMAND RUNS AND NOWHERE ELSE.
+    //
+    // Here rather than inside `cli::run` because the sink is process-wide:
+    // `telemetry::install` refuses a second call, so a `run` that installed
+    // would work once and refuse for the rest of the process — and the test
+    // binary calls `run` many times. `tests/binary.rs` executes THIS file, so
+    // the line is measured rather than assumed, which is the same reason the
+    // `run` call below lives here alone.
+    //
+    // A failure is PRINTED, not fatal. A sweep with no log is still a correct
+    // sweep, and refusing to compute because a directory is unwritable trades a
+    // whole answer for an audit trail. `CLAUDE.md` §4 bans a fallback that
+    // HIDES a failure; this one names it, above the report, on the same screen.
+    let warning = cli::install_log();
+
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut out = String::new();
     let code = cli::run(&args, &mut out);
+    if let Some(why) = warning {
+        println!("{why}");
+    }
     print!("{out}");
     std::process::ExitCode::from(code)
 }

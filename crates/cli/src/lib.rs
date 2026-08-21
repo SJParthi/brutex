@@ -397,6 +397,63 @@ fn root_from(
     )
 }
 
+/// Where the sweep writes its events: `$BRUTEX_LOG_DIR`, else `<store>/logs`.
+///
+/// The same two-step every other root here uses, so an operator who has moved
+/// one has moved them all. Beneath the STORE rather than the working directory
+/// because a sweep started from `/` or from a read-only checkout must still log
+/// somewhere it can write, and the store root is already required to be writable
+/// — the same reasoning `api::served_log_dir` gives for its own fallback.
+fn log_dir_from(
+    explicit: Option<std::ffi::OsString>,
+    store: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    explicit
+        .map(std::path::PathBuf::from)
+        .or_else(|| store.map(|s| s.join("logs")))
+}
+
+/// Installs the process-wide event sink, or says why it could not.
+///
+/// # Why this returns a warning instead of refusing
+///
+/// A sweep with no log is still a correct sweep. Refusing to compute because a
+/// directory is not writable would trade a whole answer for an audit trail,
+/// which is not the bargain `CLAUDE.md` §4 asks for — §4 bans a fallback that
+/// **hides** a failure, and this one names it. The caller prints the returned
+/// line above the report, so an operator who expected events and got none is
+/// told why on the same screen rather than discovering an empty log later.
+///
+/// `None` means a sink is installed and the run is being recorded.
+///
+/// # Errors
+///
+/// Returns the refusal in `telemetry`'s own words — an unwritable directory, or
+/// a sink already installed, which `telemetry::install` refuses rather than
+/// ignores because two sinks on one path each roll the other's file away.
+#[must_use]
+pub fn install_log() -> Option<String> {
+    let dir = log_dir_from(std::env::var_os("BRUTEX_LOG_DIR"), store_root().ok())?;
+    telemetry::install(&telemetry::Config::new(dir))
+        .err()
+        .map(|why| format!("events are NOT being recorded: {why}"))
+}
+
+/// One structural event about a run. **Never called per bar or per candidate.**
+///
+/// Gate 17's rule is that the innermost loop calls nothing at all; this crate
+/// holds no loop over bars and none over candidates, so every call site here is
+/// a boundary — one per run, or one per instrument-month in a batch. That is the
+/// granularity gate 17's own comment prescribes as the affordable one.
+pub(crate) fn note(event: &telemetry::Event<'_>) {
+    // The result is deliberately discarded HERE and only here. `emit` returns
+    // `NotInstalled` rather than panicking when nothing was installed, which is
+    // what makes these call sites safe in a test binary that never installs a
+    // sink — and `install_log` above is the one place that reports the absence,
+    // so reporting it again per event would be noise on every line.
+    let _ = telemetry::emit(event);
+}
+
 /// A vendor's directory word to the vendor, or the list of words that work.
 ///
 /// Walks [`Vendor::ALL`], which is five entries and a compile-time constant, so
@@ -470,6 +527,20 @@ fn sweep_stored_inner(
     let root = store_root()?;
     let loaded = stored::load(&root, vendor, underlying, rung, year, month)?;
 
+    // THE FILE WAS OPENED AND THIS IS WHERE AN OPERATOR LEARNS IT. The question
+    // after a sweep that found nothing is "did it even read my month?", and
+    // until this line nothing in the workspace could answer it.
+    note(
+        &telemetry::Event::info("cli.sweep", "stored month loaded")
+            .with("feed", loaded.vendor.as_str())
+            .with("underlying", underlying)
+            .with("rung", loaded.timeframe)
+            .with("year", u64::from(year))
+            .with("month", u64::from(month))
+            .with("bars", u64::try_from(loaded.bars.len()).unwrap_or(u64::MAX))
+            .with("min_hits", min_hits),
+    );
+
     let mut ev = evaluator().map_err(str::to_owned)?;
     let ladder = Ladder::with_min_hits(min_hits);
     // RANKED, NOT MERELY COUNTED. This was `Sweeper::run`, whose report ends at
@@ -520,6 +591,28 @@ fn sweep_stored_inner(
         loaded.timeframe,
         loaded.bars.len(),
     );
+    // THE ANSWER, KEYED BY THE IDENTITY THAT NAMES IT. Emitted after the walk
+    // and before the render, so a run killed while formatting a large report
+    // still leaves its result in the log. `halted` is the field that separates
+    // "the ladder went extinct" from "a budget stopped it short", which the
+    // count alone cannot say.
+    note(
+        &telemetry::Event::info("cli.sweep", "ladder walked")
+            .with("identity", id.hex().as_str())
+            .with("feed", loaded.vendor.as_str())
+            .with(
+                "depth",
+                u64::try_from(outcome.sweep.depth()).unwrap_or(u64::MAX),
+            )
+            .with("kept", ranked.considered)
+            .with(
+                "ranked",
+                u64::try_from(ranked.top.len()).unwrap_or(u64::MAX),
+            )
+            .with("completed", outcome.sweep.completed())
+            .with("halted", outcome.sweep.halted.is_some()),
+    );
+
     out.push('\n');
     out.push_str(&runner::report::render(&outcome, Some(&id)));
     // THE ANSWER, NOT JUST THE SEARCH. `render` reports how MANY combinations
@@ -1183,8 +1276,8 @@ fn audit_bars(
 mod tests {
     use super::{
         MISUSED, OK, PROVENANCE, STORED_PROVENANCE, USAGE, Vendor, audit_run, audit_stored, auto,
-        auto_with, evaluator_from, parse_min_hits, parse_sessions, parse_vendor, root_from, run,
-        sweep, sweep_stored, sweep_with,
+        auto_with, evaluator_from, log_dir_from, parse_min_hits, parse_sessions, parse_vendor,
+        root_from, run, sweep, sweep_stored, sweep_with,
     };
 
     fn argv(words: &[&str]) -> Vec<String> {
@@ -1466,6 +1559,58 @@ mod tests {
             !text.contains("BARS"),
             "a refusal must not render a census that would read as an empty \
              market: {text}"
+        );
+    }
+
+    /// THE LOG DIRECTORY IS DECIDED WITHOUT TOUCHING THE ENVIRONMENT.
+    ///
+    /// # Why the decision is split out from `install_log`
+    ///
+    /// `telemetry::install` writes a process-wide `OnceLock` and refuses a
+    /// second call, so `install_log` can succeed at most once per test binary —
+    /// a test that drove it would poison every later test in the same process,
+    /// and which test won would depend on thread scheduling. `root_from` is
+    /// split from `store_root` for the identical reason and says so.
+    ///
+    /// So the environment reading stays in `install_log`, which
+    /// `tests/binary.rs` exercises by running the real binary, and the DECISION
+    /// is tested here where it can be driven directly.
+    #[test]
+    fn the_log_directory_follows_the_store_unless_it_is_named_outright() {
+        use std::ffi::OsString;
+        use std::path::PathBuf;
+
+        // AN EXPLICIT DIRECTORY WINS, and it wins even when a store exists —
+        // otherwise an operator who set the variable would silently get the
+        // store's `logs` instead of the path they named.
+        assert_eq!(
+            log_dir_from(
+                Some(OsString::from("/tmp/brutex-events")),
+                Some(PathBuf::from("/srv/store")),
+            ),
+            Some(PathBuf::from("/tmp/brutex-events")),
+        );
+
+        // WITH NO VARIABLE, THE LOG SITS UNDER THE STORE. Beneath the store and
+        // not the working directory, because a sweep started from `/` or from a
+        // read-only checkout must still write somewhere, and the store root is
+        // already required to be writable.
+        assert_eq!(
+            log_dir_from(None, Some(PathBuf::from("/srv/store"))),
+            Some(PathBuf::from("/srv/store/logs")),
+        );
+
+        // WITH NEITHER, THERE IS NOWHERE TO WRITE AND THAT IS `None`, not a
+        // guess at the working directory. `install_log` turns this into the
+        // printed "events are NOT being recorded" line rather than a silent
+        // absence — degrade loudly, per §4.
+        assert_eq!(log_dir_from(None, None), None);
+
+        // AND AN EXPLICIT DIRECTORY STILL WINS WITH NO STORE AT ALL, which is
+        // the case for an operator who has moved the store away entirely.
+        assert_eq!(
+            log_dir_from(Some(OsString::from("/var/log/brutex")), None),
+            Some(PathBuf::from("/var/log/brutex")),
         );
     }
 

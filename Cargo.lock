@@ -171,6 +171,7 @@ dependencies = [
  "indicators",
  "runner",
  "store",
+ "telemetry",
 ]
 
 [[package]]
