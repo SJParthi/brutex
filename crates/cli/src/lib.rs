@@ -835,11 +835,28 @@ const _: () = assert!(
 /// exactly those. Ranking first and filtering second gives the strongest
 /// candidate that is also irredundant — which neither ordering gives alone.
 ///
-/// # Cost
+/// # Cost — and the half of it this comment used to deny
 ///
-/// One `HashSet` build over the closed set, then one pass over `ranked.top`
-/// with an O(1) probe each. Both are bounded by `keep`, not by how many
-/// combinations the sweep produced.
+/// **Only the second half is bounded by `keep`.** This block first read: *"Both
+/// are bounded by `keep`, not by how many combinations the sweep produced."* The
+/// filter over `ranked.top` is — that is `keep` probes, 250 today. The
+/// `closed::closed` call is **not**, and it is the expensive one: `closed.rs`
+/// builds a `HashSet` pre-sized to *every* frequent itemset, a `HashMap` per
+/// level, and a `kept` Vec of every closed set, then this function builds a
+/// second `HashSet` over that. Its own doc states the shape — `O(Σ |F_k| · k)`,
+/// and `UNVERIFIED as a measured figure`.
+///
+/// The scale that makes the difference matter: `crate::rank`'s header prices
+/// 61,125,295 retained combinations at 13 GB, and the ladder's own per-level
+/// ceiling is `1 << 26`. A comment claiming a 12 KB bound on a path that can
+/// allocate gigabytes is exactly the shape `CLAUDE.md` §4 refuses — the number
+/// was not measured, it was assumed from the wrong term.
+///
+/// So, honestly: **the closed walk is `O(sum of |F_k| times k)` in time and
+/// `O(|F|)` in space**,
+/// then O(`keep`) probes. It runs **once per audit run**, between the findings
+/// table and the traded line — not per bar, not per candidate, and not on any
+/// HTTP path, because `CLAUDE.md` §5 gives `api` no `runner` arrow.
 fn closed_by_evidence<'a>(
     ranked: &'a runner::rank::Ranked,
     sweep: &engine::Sweep,

@@ -518,6 +518,11 @@ pub fn walk_forward(
         //
         // Carrying the `ExitPick` costs three small ladders per candidate — the
         // type already existed and already held them for exactly this reason.
+        // Three, not six: the clone goes into `best`, which improves rarely,
+        // rather than into every `scored` row. Each ladder is a `Vec<Ppm>` of
+        // `DEFAULT_RUNGS` = 4, so 32 bytes; the element grows from 56 to 184
+        // bytes inline. `scored` is scoped to the fold body and dropped with it,
+        // so this is a bounded per-fold cost and not unbounded growth.
         let mut scored: Vec<(ConditionMask, i64, ExitPick)> = Vec::with_capacity(closed.kept.len());
         let mut priced: u64 = 0;
         for item in &closed.kept {
@@ -537,10 +542,12 @@ pub fn walk_forward(
                 continue;
             }
             let s = Summary::of(&walk(train, &train_column, &item.mask, horizon, direction));
-            // The pick is built once and used twice: here, so the out-of-sample
-            // pass can apply this candidate's TRAINING exit to the test bars,
-            // and below for the fold's own winner. Built before the `best`
-            // comparison so both see the same value.
+            // The pick is built ONCE and used twice: by the out-of-sample pass,
+            // so it can apply this candidate's TRAINING exit to the test bars,
+            // and by the fold's own winner. Built before the `best` comparison
+            // so both see the same value, and cloned only into `best`, which
+            // improves a handful of times per fold rather than once per
+            // candidate — see the ordering note below.
             let pick = ExitPick {
                 rungs: (cell.stop, cell.target, cell.trail),
                 pessimistic: cell.pessimistic,
@@ -551,15 +558,26 @@ pub fn walk_forward(
             let improves = best
                 .as_ref()
                 .is_none_or(|(_, _, held)| cell.pessimistic > held.pessimistic);
-            scored.push((item.mask, cell.pessimistic, pick.clone()));
             if improves {
-                // The SAME `pick` the vector holds, not a second one built from
-                // the same cell. Two constructions of one value are two things
-                // that can drift apart, and the fold's winner and its row in
-                // `scored` disagreeing about the chosen rungs is exactly the
-                // defect this whole block exists to remove.
-                best = Some((item.mask, s, pick));
+                // CLONED ONLY WHERE A SECOND COPY IS ACTUALLY NEEDED, which is
+                // here and not below.
+                //
+                // This was `scored.push(.., pick.clone())` followed by
+                // `best = Some(.., pick)`, which cloned three ladders on EVERY
+                // candidate — six heap allocations per candidate where three
+                // would do, and the comment beside it charged for three. At the
+                // 11,013-candidate fold this module records, that is 66,078
+                // allocations per fold instead of 33,039.
+                //
+                // Ordering it this way keeps the property the old comment was
+                // protecting: `best` and the row `scored` holds are still ONE
+                // value, cloned from one construction, so the fold's winner and
+                // its entry in the ranked vector cannot disagree about the
+                // chosen rungs. The clone that survives is the rare one — `best`
+                // improves a handful of times per fold, not once per candidate.
+                best = Some((item.mask, s, pick.clone()));
             }
+            scored.push((item.mask, cell.pessimistic, pick));
         }
 
         // The exit came out of the SAME evaluation that chose the combination,
