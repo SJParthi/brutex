@@ -4454,7 +4454,33 @@
           const seen = { fail: 0, never: 0, short: 0, retry: 0, unknown: 0, beyond: 0, ok: 0 };
           for (const ym of windowMonths) {
             const sessions = sessionsByMonth.get(ym) ?? 0;
-            const expect = r.per === null ? null : sessions * r.per;
+            /* SPOT ONLY. A DERIVATIVE MONTH HAS NO DERIVABLE EXPECTATION.
+             *
+             * `sessions * r.per` is the NSE calendar times the bars one session
+             * holds — the right number for ONE continuous series, and the wrong
+             * one for a segment that is a SET of contracts. A month of expired
+             * options is however many strikes traded across however many
+             * expiries; nothing on this page knows that number, and nothing can
+             * until the vendor's discovery call has run.
+             *
+             * Measured on the operator's own screen 2026-08-21: an
+             * `Expired futures · 1 day` row reading `0 / 1,708` — the spot
+             * session count of the window, presented as that row's denominator.
+             * A reader takes `0 / 1,708` as "none of the 1,708 I should have",
+             * when the truthful statement is "I do not know how many there are".
+             * `CLAUDE.md` §4: degrade loudly and name the reason, never invent a
+             * number that reads like a measurement.
+             *
+             * `null` is already the "no expectation" value this row understands
+             * — `r.per === null` produces it for a rung with no per-session
+             * count — and it renders as the unknown verdict rather than as a
+             * shortfall. So the derivative segments take the path the page
+             * already has for "not derivable" instead of a new one.
+             *
+             * The BARS STORED half is unaffected and stays exact: what is on
+             * disk is known, and it is the half worth reading here. */
+            const derivable = s.key === 'spot';
+            const expect = r.per === null || !derivable ? null : sessions * r.per;
             // WITH `s.key` IN IT. Without the segment this probe answered
             // the same number for every segment in the loop.
             const held = barsBySeg.get(`${m.symbol}|${s.key}|${r.dir}|${ym}`);

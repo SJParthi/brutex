@@ -18648,3 +18648,63 @@ cannot promise.
 holds four properties that fail independently — the first leg takes it, the
 second does not and the key does not move, a loser cannot clear it, and only the
 holder can — plus the zero refusal.
+
+### D-0239 — a contract of another series was filed, and a derivative row was graded against the spot calendar
+
+Two mapping faults, both of the shape where nothing errors and the number is
+wrong.
+
+**1. The walk filed a contract it did not ask for.**
+
+`fno::read_contract` binds the exchange token to `_` and reads the underlying out
+of the NAME. Neither was ever compared with what the walk asked for. So a vendor
+answering off-key — one contract of a neighbouring series inside a page of the
+right one — was filed under the underlying **it** named, while the receipt
+reported the underlying the operator asked for.
+
+That is the worst shape a mapping fault takes here. The bars are real, the file
+is well-formed, the counts balance, the receipt reads good — and the series is
+somebody else's. §8's append-only rule means it cannot be corrected afterwards,
+and nothing downstream can detect it: a NIFTY bar and a FINNIFTY bar are the same
+sixteen bytes.
+
+The check is at the CALL SITE rather than inside `read_contract`, because that is
+where the ask is known — `chain::month` holds it and the reader does not. A
+readable name for another series goes to `Chain::unreadable`, which is already
+the channel for a name this build will not file, so the month cannot then report
+itself whole. One comparison and not a normalisation: the ask is the operator's
+own symbol and the answer is the vendor's own token, so anything but equality is
+a disagreement this build must not resolve on the vendor's behalf.
+
+**2. A derivative row was graded against the spot calendar.**
+
+The ingest census computed `sessions * bars_per_session` for every row — the NSE
+calendar times what one session holds. That is the right number for ONE
+continuous series and the wrong one for a segment that is a **set of contracts**.
+A month of expired options is however many strikes traded across however many
+expiries; nothing on that page knows the number, and nothing can until the
+vendor's discovery call has run.
+
+Measured on the operator's own screen 2026-08-21: an `Expired futures · 1 day`
+row reading **`0 / 1,708`** — the spot session count of the window, presented as
+that row's denominator. A reader takes that as *"none of the 1,708 I should
+have"*, when the truthful statement is *"I do not know how many there are"*. §4:
+never invent a number that reads like a measurement.
+
+`null` is already the page's "no expectation" value — `r.per === null` produces
+it for a rung with no per-session count, and it renders as the unknown verdict
+rather than as a shortfall — so the derivative segments take the path that
+already exists instead of a new one. The BARS STORED half is untouched and stays
+exact: what is on disk is known, and it is the half worth reading there.
+
+**What refuses the first.**
+`pull::chain::a_contract_naming_another_underlying_is_refused_rather_than_filed`
+feeds the walk two names that BOTH parse — the point being that this is not a
+malformed name but a well-formed one for a series nobody asked for — and asserts
+that one lands, the other is carried with both series named, and the month cannot
+report itself whole.
+
+**Not closed.** The `EXPECTED` column now says *unknown* for a derivative row
+rather than saying something false, which is an improvement and not an answer.
+The answer needs a stored expired-contract catalog, which is the same thing
+`fnowork::gaps` waits on and is scoped as a decision rather than a patch.

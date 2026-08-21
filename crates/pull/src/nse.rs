@@ -794,6 +794,9 @@ fn split_row(line: &str) -> Vec<&str> {
 )]
 mod tests {
     use super::*;
+    // `write!` into a `String` rather than `push_str(&format!(..))`: one
+    // allocation fewer per row, and clippy denies the latter.
+    use core::fmt::Write as _;
 
     /// The first four rows of a real body, byte for byte.
     ///
@@ -1061,9 +1064,10 @@ mod tests {
                 // DISTINCT, so every one survives the dedup and the `seen` set
                 // grows to its full size — the worst case for a linear scan and
                 // the only case that separates the two shapes.
-                html.push_str(&format!(
+                let _cannot_fail = write!(
+                    html,
                     "<a href=\"/indices/equity/sectoral-indices/nifty-{i}\">x</a>"
-                ));
+                );
             }
             html
         }
@@ -1107,9 +1111,10 @@ mod tests {
     fn a_listing_past_the_link_bound_is_refused_rather_than_truncated() {
         let mut html = String::new();
         for i in 0..=MAX_INDEX_LINKS {
-            html.push_str(&format!(
+            let _cannot_fail = write!(
+                html,
                 "<a href=\"/indices/equity/sectoral-indices/nifty-{i}\">x</a>"
-            ));
+            );
         }
         let refused =
             index_links(&html, Category::Sectoral).expect_err("one past the cap is one too many");

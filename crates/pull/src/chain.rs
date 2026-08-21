@@ -298,6 +298,37 @@ pub async fn month<D: Discovery>(feed: Feed, ask: &Ask, from: &D) -> Result<Chai
         };
         for name in fno::names(&body, contracts_field).map_err(ChainError::Lookup)? {
             match fno::read_contract(&name, keyed_expiry) {
+                // THE ANSWER IS CHECKED AGAINST THE ASK, AND IT WAS NOT.
+                //
+                // `read_contract` binds the exchange token to `_` and reads the
+                // underlying out of the NAME. Neither was compared with what
+                // this walk asked for, so a vendor answering off-key — one
+                // contract of a neighbouring series in a page of the right one
+                // — was filed under the underlying IT named while the receipt
+                // reported the underlying the operator asked for.
+                //
+                // That is the worst shape a mapping fault can take here: the
+                // bars are real, the file is well-formed, the counts balance,
+                // and the series is somebody else's. §8's append-only rule
+                // means it cannot be corrected afterwards, and nothing
+                // downstream can detect it, because a NIFTY bar and a FINNIFTY
+                // bar are the same sixteen bytes.
+                //
+                // ONE COMPARISON, and it is not a normalisation: the ask is the
+                // operator's own symbol and the answer is the vendor's own
+                // token, so anything other than equality is a disagreement this
+                // build must not resolve on the vendor's behalf. `CLAUDE.md` §4
+                // — refuse, and name the reason.
+                Some(found) if found.underlying != ask.underlying => {
+                    chain.unreadable.push(format!(
+                        "{name}: this contract names {} and {} was asked for. \
+                         The name is readable and it is not this walk's series, \
+                         so it is refused rather than filed — a bar stored under \
+                         the wrong underlying is indistinguishable from a real \
+                         one and cannot be corrected under §8.",
+                        found.underlying, ask.underlying
+                    ));
+                }
                 Some(found) => chain.contracts.push(found),
                 // REPORTED, NEVER SKIPPED. See the module header.
                 None => chain.unreadable.push(name),
@@ -550,6 +581,67 @@ mod tests {
         assert!(
             !chain.whole(),
             "so the caller cannot report this month as complete"
+        );
+    }
+
+    /// **A CONTRACT OF ANOTHER SERIES IS REFUSED, NOT FILED.**
+    ///
+    /// `fno::read_contract` binds the exchange token to `_` and reads the
+    /// underlying out of the NAME, and neither was compared with what the walk
+    /// asked for. So a vendor answering off-key — one contract of a
+    /// neighbouring series inside a page of the right one — was filed under the
+    /// underlying IT named, while the receipt reported the underlying the
+    /// operator asked for.
+    ///
+    /// That is the worst shape a mapping fault takes here: the bars are real,
+    /// the file is well-formed, the counts balance, and the series is somebody
+    /// else's. §8's append-only rule means it cannot be corrected, and nothing
+    /// downstream can detect it — a NIFTY bar and a FINNIFTY bar are the same
+    /// sixteen bytes.
+    ///
+    /// The readable-but-wrong name goes to `unreadable`, which is already the
+    /// channel for a name this build will not file, so the month cannot then
+    /// report itself whole.
+    #[tokio::test]
+    async fn a_contract_naming_another_underlying_is_refused_rather_than_filed() {
+        let canned = Canned {
+            answers: std::cell::RefCell::new(vec![
+                r#"{"expiries":["2024-01-25"]}"#.to_owned(),
+                // BOTH NAMES PARSE. That is the point: this is not a malformed
+                // name, it is a well-formed name for a series nobody asked for.
+                r#"{"contracts":["NSE-NIFTY-25Jan24-21000-CE","NSE-FINNIFTY-25Jan24-21000-CE"]}"#
+                    .to_owned(),
+            ]),
+        };
+        let chain = month(Feed::Groww, &ask(), &canned)
+            .await
+            .expect("the call itself succeeded");
+
+        assert_eq!(
+            chain.contracts.len(),
+            1,
+            "only the asked-for series is filed: {:?}",
+            chain.contracts
+        );
+        assert_eq!(
+            chain.contracts[0].underlying, "NIFTY",
+            "and it is the one that was asked for"
+        );
+        assert_eq!(
+            chain.unreadable.len(),
+            1,
+            "the other is carried, not dropped"
+        );
+        assert!(
+            chain.unreadable[0].contains("FINNIFTY")
+                && chain.unreadable[0].contains("NIFTY was asked for"),
+            "the refusal names BOTH series, because an operator reading it needs \
+             to know which vendor answer produced it: {}",
+            chain.unreadable[0]
+        );
+        assert!(
+            !chain.whole(),
+            "and a month that refused a name cannot report itself complete"
         );
     }
 
