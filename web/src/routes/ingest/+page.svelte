@@ -4294,6 +4294,56 @@
   const VRANK = new Map(VORDER.map((k, i) => [k, i]));
 
   /**
+   * WHERE IN THE WINDOW THE GAPS ARE — four blocks, oldest on the left.
+   *
+   * `Months unproved` says 32/32 and `Verdict` says `never pulled`. Neither says
+   * WHERE: a series missing its first six months and a series missing its last
+   * six read identically in both columns, and they call for opposite actions —
+   * one is a floor you have to move, the other is a pull that has not caught up.
+   * This is the column that separates them, and it is the reference's own
+   * (`web/design/ingest.html` draws four blocks per row).
+   *
+   * FOUR BUCKETS OVER THE ROW'S OWN MONTHS, not over a fixed calendar: the
+   * window is whatever the two date fields hold, so quarters of THAT are what a
+   * reader can act on. Fewer than four months gives fewer than four blocks
+   * rather than padding with empties, because an empty block and an unsettled
+   * one look alike at 9px and only one of them is a fact.
+   *
+   * THE WORST VERDICT IN EACH BUCKET, never the best or the most common. A block
+   * showing the majority would hide the single missing month it exists to point
+   * at, and `VORDER` is already worst-first so the comparison is one Map lookup.
+   *
+   * Cost: O(months) per row, and it is computed once per view in `coverage`
+   * below rather than per render — the lookup at draw time is one `Map.get`.
+   *
+   * @param {CensusRow['months']} months
+   * @returns {{ tone: string, label: string, from: string, to: string, n: number }[]}
+   */
+  function coverageOf(months) {
+    if (months.length === 0) return [];
+    const buckets = Math.min(4, months.length);
+    const out = [];
+    for (let i = 0; i < buckets; i += 1) {
+      const slice = months.slice(
+        Math.floor((i * months.length) / buckets),
+        Math.floor(((i + 1) * months.length) / buckets)
+      );
+      let worst = slice[0].k;
+      for (const m of slice) {
+        if ((VRANK.get(m.k) ?? 99) < (VRANK.get(worst) ?? 99)) worst = m.k;
+      }
+      out.push({
+        tone: VERDICT[worst][0],
+        label: VERDICT[worst][1],
+        from: slice[0].month,
+        to: slice[slice.length - 1].month,
+        n: slice.length
+      });
+    }
+    return out;
+  }
+
+  /**
    * EVERY SERIES IN THE WINDOW, MEASURED. Ticked instruments × reached
    * segments × ticked rungs, each with its month files resolved against the
    * store, the calendar and the feed's floor.
@@ -4544,6 +4594,17 @@
 
   /** How many series the tally covers — the partition's own denominator. */
   const verdictTotal = $derived(censusRows.length);
+
+  /**
+   * THE DRAWN PAGE'S COVERAGE, COMPUTED ONCE PER VIEW.
+   *
+   * Keyed by `id` so the table's read is one `Map.get` per row rather than a
+   * walk of that row's months on every render — and it is built over
+   * `censusSlice`, the 25 rows actually on screen, never over all of them.
+   * Paging or sorting rebuilds it; a hover or an unrelated state change does
+   * not. Bound: 25 rows x the months in the window, once.
+   */
+  const coverage = $derived(new Map(censusSlice.map((r) => [r.id, coverageOf(r.months)])));
 
   /**
    * IS EVERY SERIES SETTLED? `ok` and `beyond` are the two verdicts that need
@@ -7795,6 +7856,18 @@
                       <span class="hsub">of {n(windowMonths.length)} in the window</span>
                     </button>
                   </th>
+                  <!-- NOT SORTABLE, AND THAT IS NOT AN OMISSION. Every other
+                       header here is a button because its column holds ONE
+                       value that a run can be ordered by. This column holds
+                       four, and any single key you sorted it on — worst block,
+                       first bad block, count of bad blocks — would be a
+                       different column from the one being drawn. `Months
+                       unproved` beside it already sorts on the number this
+                       summarises. -->
+                  <th>
+                    <span class="hrow">Coverage</span>
+                    <span class="hsub">oldest → newest</span>
+                  </th>
                   <th>
                     <button
                       class="sort"
@@ -7899,6 +7972,22 @@
                           : `All ${n(r.months.length)} month file(s) in the window are settled — matched the calendar, or out of this feed's reach.`}
                       >
                         {n(r.unproved)}/{n(r.months.length)}
+                      </td>
+                      <td>
+                        <!-- ONE `Map.get`, NOT A WALK. `coverage` was built for
+                             the drawn page; this cell only reads it. -->
+                        <span
+                          class="cov"
+                          role="img"
+                          aria-label={`Coverage, oldest to newest: ${(coverage.get(r.id) ?? []).map((q) => q.label).join(', ')}.`}
+                        >
+                          {#each coverage.get(r.id) ?? [] as q (q.from)}
+                            <i
+                              class="q {q.tone}"
+                              title={`${monthLabel(q.from)}${q.n > 1 ? ` – ${monthLabel(q.to)}` : ''} — ${q.n} month file(s), worst verdict ${q.label}.`}
+                            ></i>
+                          {/each}
+                        </span>
                       </td>
                       <td>
                         <span
@@ -10061,6 +10150,40 @@
     font-family: var(--num);
     font-variant-numeric: tabular-nums;
     color: var(--ink-2, var(--ink));
+  }
+
+  /* ---- the coverage blocks ----
+     FOUR SQUARES, READ LEFT TO RIGHT AS TIME. Squares and not a bar: a bar
+     would say "this much of the window", which `Months unproved` already says
+     better as a number. Discrete blocks say WHICH PART, and four is the count
+     the reference draws.
+     The same four semantic hues the partition and the verdict tag use, so one
+     verdict is one colour everywhere on this page. */
+  .cov {
+    display: inline-flex;
+    gap: 2px;
+    align-items: center;
+  }
+  /* THE WELL IS THE DEFAULT, so a tone that is somehow unset draws as an empty
+     slot rather than inheriting the row's text colour and reading as settled. */
+  .cov i {
+    width: 9px;
+    height: 9px;
+    border-radius: 2px;
+    background: var(--well);
+    flex: none;
+  }
+  .cov i.up {
+    background: var(--up);
+  }
+  .cov i.down {
+    background: var(--down);
+  }
+  .cov i.warn {
+    background: var(--warn);
+  }
+  .cov i.info {
+    background: var(--info);
   }
   /* `h2.sec`, its two children and `.cbar` all go with the markup they drew.
 
