@@ -39,9 +39,9 @@ arrives from outside.
 | 3 | Maps | Pre-sized with headroom | `HashMap::with_capacity(reservation_for(n))`, factor 2. **Lookup** is O(1) worst case. **Append** is O(1) worst case for the first `n_valid` calls after a load, and **amortised** O(1) after that — see below | ◐ |
 | 4 | Membership | No search of any kind | Open-addressed table built at compile time. **Never `binary_search`** | ✓ |
 | 5 | Address | Arithmetic, never lookup | `base + header + i·stride`. The path is the index | ✓ |
-| 6 | Hot data | 16 bytes per bar, not 56 | Bit plane separate from bar plane. 8 × `u128` per 128-byte cache line, zero straddle | ✓ |
-| 7 | Residency | Load once, never re-read | Pin the bit plane. 7.75 GB of 48 GB — it never exceeds RAM at this scale | ○ |
-| 8 | Evaluation | One instruction | `(bits & mask) == mask` on a `u128`, no branch | ✓ |
+| 6 | Hot data | 16 bytes per bar, not 56 | **48 bytes.** `ConditionMask` is `[u64; WORDS]` with `WORDS = 6`, pinned by a `const` assertion in `vocab::mask`. There is no bit plane — see below | ✗ |
+| 7 | Residency | Load once, never re-read | `indicators::Column` holds `Vec<ConditionMask>` plus a parallel index. Nothing pins anything, and the 7.75 GB figure was sized from the 16-byte row above | ○ |
+| 8 | Evaluation | One instruction | **Branchless, and not one instruction.** Six ANDs, six XORs, five ORs and one compare over `[u64; 6]` — no loop, no branch, constant | ◐ |
 | 9 | Allocation | **Zero in the hot loop** | Preallocated frontier. No `format!`, no `String`, no `push` | ○ |
 | 10 | Parallelism | Work-stealing, never static | 10 P-cores. A static split stalls waiting on the 4 efficiency cores | ○ |
 | 11 | Blocks | Whole records only | `BLOCK_LEN` is a whole multiple of the stride, so straddling is **unrepresentable** rather than handled | ✓ |
@@ -69,7 +69,7 @@ Measured on an Apple M4 Pro, 48 GB, macOS 26.5.2, rustc 1.97.1.
 
 | Operation | Measured | Note |
 |---|---|---|
-| One mask evaluation | **0.2007–0.2101 ns**, flat 1→74 bits (**1.047×**) | The hardware floor. Identical at 0%, 28% and 100% hit rate, so no data-dependent branch |
+| One mask evaluation | flat **1→234 bits** (`C-V-01…03`) | The hardware floor. Identical at 0%, 28% and 100% hit rate, so no data-dependent branch. **The span was written as `1→74 bits` and the vocabulary has 234 positions across six words** — 74 was the width when the row was first measured, and the ratios recorded against the current width live in `docs/04-invariants.md`: 0.998× hit→miss, 0.996× word 0 → word 5, 1.037× k=1 → k=234. A ratio quoted against a stale width is a measurement of a build nobody is running |
 | Universe membership | worst probe **6** (750 members) / **7** (213 members) | Replaced ~10 comparisons that grew with the list |
 | NSE series membership | worst probe **2** (6 members) / **1** (2) / **6** (120) | Layer 4's last holdout. `core::vendor::board_of` binary-searched these three until D-0065. The 120-code table measured **10** at 256 slots and was refused by its own test until it was 512 — the second time this section's own warning has caught a table that was accepted by `build` and too slow to ship |
 | Page render, 2,787 → 50,000 instruments | **0.974× – 1.084×**, every sort column × pill, plus the hatch and a clamped deep page | Layer 12. `cargo bench -p api`, exit 0, 2026-08-12 — re-measured for D-0130. Absolute ~157 µs at *both* sizes, release profile. Marginal cost of one more instrument: **0 – 280 ps** per request (C-15), against 85,400 ps before D-0042. **It regressed to 1,433 – 2,100 ps on all thirty C-15 lines and was caught by this bench**, not by the rows or the counts — the page drew its notes, and a note's length is the universe. D-0130 |

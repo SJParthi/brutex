@@ -170,14 +170,21 @@ Consequences:
   cannot support; the reader falls back to the previous generation rather than
   refusing the whole file.
 
-`Commit::durable_through` is the byte offset step 3 must cover. This repository
-performs no I/O yet, so it states the offset rather than issuing the barrier.
+`Commit::durable_through` is the byte offset step 3 must cover. **It states the
+offset; `crates/store/src/file.rs` issues the barrier** — `sync_all` on the
+records before any slot that names them, and a second one after. This paragraph
+read "this repository performs no I/O yet, so it states the offset rather than
+issuing the barrier", which was true of the format crate alone and stopped being
+true of the repository when `BarFile` learned to write.
 
 **Exactly one writer per file.** Two writers reading the same generation
-produce the same slot, the same offset and the same record range. Nothing in
-the store crate can enforce that — an exclusive lock is I/O — so the writer
-takes one on the `.lock` sibling (§8) before step 1. This is a stated
-precondition, not a guarantee the format provides.
+produce the same slot, the same offset and the same record range. **The writer
+takes an advisory `try_lock` on the `.lock` sibling (§8) before step 1** and
+refuses loudly when it is held. The clause "nothing in the store crate can
+enforce that — an exclusive lock is I/O" stood in front of that sentence and
+contradicted it; the lock is real, and what it does *not* provide is
+cross-machine exclusion on a network filesystem, which is the honest limit and
+the one worth stating.
 
 ---
 

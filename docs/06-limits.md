@@ -5233,3 +5233,44 @@ to do it. The asymmetry is the vendors', not this build's.
 **Not measured:** the wall-clock of the re-read against a cold page cache. The
 figures above are record counts and strides, which are exact; the I/O time they
 imply is not claimed.
+
+---
+
+## 89. The current month is never pulled for expired derivatives, and no document said so
+
+**A pull of a window ending today stores no expired future and no expired option
+for the month it ends in.** That is deliberate, it is the operator's own stated
+rule, and until this section existed it was recorded **only in a doc comment on
+`crates::api::ingest::last_settled_day`** — so a reader who checked the
+documents, saw August requested and August absent, and concluded the pull had
+failed was reading the best evidence available to them.
+
+The rule, operator-stated: *even on the 1st, still do not pull the current
+month.* The ceiling is the day before the 1st of the current month, computed by
+stepping back from the 1st so no month-length table is consulted and February
+needs no special case.
+
+**Why the month and not the day.** Expiry is a monthly structure. A contract's
+expiry falls somewhere inside its month, and "which day of this month is safe"
+has a different answer for every underlying and every cadence — it needs an
+expiry calendar this build does not have. "No day of this month" has one answer
+and cannot be wrong. A clamp to *yesterday* is the weaker rule that was there
+first: on 2026-08-19 it admitted 1–18 August, eighteen days inside a month whose
+every remaining weekly is a **live** contract, on the one route whose entire
+purpose is to store settled ones.
+
+**Spot is untouched by this**, and conflating the two is the mistake the split
+exists to prevent. Spot's rule is the session's, not the month's: today is
+storable once the session has closed. Two different questions, two different
+answers.
+
+**What this costs the reader.** Between one and thirty-one days of expired
+derivatives are absent from any window that reaches into the current month, and
+the absence is indistinguishable on the page from a vendor that returned
+nothing. The `/ingest` expectation column derives no count for a month it will
+not walk, so nothing renders as short — it renders as not-asked-for, which is
+accurate but silent.
+
+**Not measured:** how many contracts a typical month-end request loses to this.
+It is bounded by the month's own expiry count and is not a figure this build
+has taken.

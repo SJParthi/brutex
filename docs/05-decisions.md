@@ -19064,3 +19064,70 @@ and `set_exact` takes none, so a two-sided test against a level needs a new
 public function in `vocab::table`. A confirmed-and-verified ledger of the rest,
 including the 51-position touch-ordinal family and 13 unmirrored candlestick
 patterns, was produced by a 31-agent survey and is the input to the next decision.
+
+### D-0245 — four documents claimed properties the code does not have, and one silence was worse than all four
+
+**2026-08-21.** An audit of the documents against the code found five drifts.
+Four are corrections; the fifth is an addition, and it is the one that was
+actually costing the operator something.
+
+**`docs/07-o1-architecture.md` layers 6 and 8 were ticked `✓` for a bit plane
+that has never existed.** Layer 6 read *"16 bytes per bar, not 56 — bit plane
+separate from bar plane, 8 × `u128` per 128-byte cache line, zero straddle"*.
+The measured type is `vocab::mask::ConditionMask`, which is `[u64; WORDS]` with
+`WORDS = 6` — **48 bytes**, pinned by a `const` assertion in that module.
+`grep -rci 'bit.?plane' crates/` returns **zero**. And 128 is not a multiple of
+48, so "zero straddle" is not merely unbuilt but arithmetically impossible as
+stated. Layer 6 is now `✗`. Layer 8's *"one instruction, `(bits & mask) == mask`
+on a `u128`"* is now `◐`: the property that matters — branchless, no loop,
+constant — holds, over six ANDs, six XORs, five ORs and one compare. Layer 7's
+7.75 GB residency figure was sized from layer 6's 16-byte row and is withdrawn
+with it.
+
+**The same file quoted a mask-evaluation ratio against a vocabulary width that
+is two builds old** — *"flat 1→74 bits (1.047×)"* against 234 positions across
+six words. The ratios measured on the current width are in
+`docs/04-invariants.md`: 0.998× hit→miss, 0.996× word 0 → word 5, 1.037× k=1 →
+k=234. A ratio quoted against a stale width measures a build nobody is running.
+
+**`docs/02-store-format.md` said the repository performs no I/O**, which was
+true of the format crate alone and stopped being true when `BarFile` learned to
+write; `crates/store/src/file.rs` issues `sync_all` on the records before any
+slot that names them and again after. The same section then said *"nothing in
+the store crate can enforce [one writer] — an exclusive lock is I/O — so the
+writer takes one"*, which refutes itself in one sentence. The advisory
+`try_lock` is real. What it does not provide is cross-machine exclusion on a
+network filesystem, and that is the honest limit now stated in its place.
+
+**`docs/01-architecture.md` said `crates/web/Cargo.toml` lists one dependency
+and CI gate 7 fails on any other.** There is no `crates/web`; D-0052 moved the
+browser to `web/`. Gate 7 tests for that manifest, does not find it, and
+**exits 0 every run** — it has never failed and cannot. `CLAUDE.md` §5 already
+recorded the permanent skip; the architecture document still advertised the gate
+as load-bearing. The front end is governed by §2 instead.
+
+**The fifth is the one that matters, and it is an absence rather than an error.**
+A pull of a window ending today stores no expired future and no expired option
+for the month it ends in. That is correct, it is the operator's own stated rule
+— *even on the 1st, still do not pull the current month* — and it was recorded
+**only in a doc comment on `api::ingest::last_settled_day`**. No document said
+it. An operator who requested August, saw August absent and concluded the pull
+had failed was reading the best evidence the documents offered. It is now
+`docs/06-limits.md` §89, including the part a reader cannot infer: the absence
+is indistinguishable on the `/ingest` page from a vendor returning nothing,
+because a month that will not be walked derives no expectation and so renders as
+not-asked-for rather than as short.
+
+**One candidate was refuted rather than fixed.** `docs/00-charter.md`'s Dhan row
+— *"5/s, 100,000/day"* — reads like it took the Orders figure when Data APIs
+publish 7,000, and it is **correct**: operator-stated 2026-08-19, historical
+pulls carry the 100,000 lane. `crates/pull/src/rate.rs` documents the trap at
+length because someone has already "fixed" it once and cut the daily budget to a
+fourteenth. It is recorded here so the next audit does not make it a third time.
+
+**What this says about the method.** Four of the five were `✓` marks and
+confident prose, not `UNVERIFIED` notes — a document is most wrong where it is
+most certain, because nothing re-reads a settled claim. `CLAUDE.md` §10's
+caveat holds: where a document is gate-checked and this file is not, believe the
+gate. Layer 6 carried a tick for years and no gate ever measured
+`size_of::<ConditionMask>()` against it.

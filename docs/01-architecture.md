@@ -164,8 +164,14 @@ declare `store` as a dependency, someone would eventually call it, and the
 failure would surface as a runtime panic in a browser rather than as a
 compile error on a laptop.
 
-The constraint is not a convention. `crates/web/Cargo.toml` lists one
-dependency and CI gate 7 fails on any other.
+**The constraint is now a convention, and saying otherwise was the drift.** This
+read "`crates/web/Cargo.toml` lists one dependency and CI gate 7 fails on any
+other". There is no `crates/web` — D-0052 moved the browser to `web/` as an
+unrestricted directory — so gate 7 tests for that manifest, finds nothing and
+**exits 0 every run**. It has never failed and cannot. What governs the front end
+instead is `CLAUDE.md` §2: no crate may depend on its toolchain to build, test or
+run, which is the arrow that actually matters and is enforced by `cargo build`
+succeeding on a machine with no Node at all.
 
 The payoff: every display rule — how a price renders, how a percentage is
 computed, what counts as a valid mask — lives in `core` and is compiled twice,
