@@ -4954,6 +4954,112 @@ jobs:
             :
           }
 
+          # ---- rules 6 and 7. THE LINEAR MEMBERSHIP SCAN. ------------------
+          #
+          # WHY THESE EXIST, AND THE DEFECT THAT PROVES THEY DO.
+          #
+          # Rules 1-5 ban a binary search, a float, an unsized map, a sort and a
+          # panic. **None of them can see a linear scan**, and on 2026-08-21 an
+          # audit found one that had been shipping: `pull::nse::index_links`
+          # deduplicated with `seen.contains(&href)` -- a scan of everything kept
+          # so far -- INSIDE the loop that pushed to `seen`. O(n^2), with nothing
+          # bounding n, under a module header claiming "a constant that does not
+          # depend on how many matches there are".
+          #
+          # Gate 8 could not catch it: no bench named that path. Gate 11 could
+          # not catch it: `contains` was not a banned spelling. It was found by a
+          # human reading, which is exactly the coverage this gate exists to stop
+          # depending on. D-0224.
+          #
+          # THE SPELLING IS AMBIGUOUS, AND THAT IS WHY THERE IS AN ALLOWLIST
+          # RATHER THAN A BAN.
+          #
+          # `x.contains(&v)` is O(1) on a `Range` (two comparisons) and on a
+          # `HashSet` (one probe), and O(n) on a slice or a `Vec`. A text scan
+          # cannot tell them apart -- gate 11's own preamble says it refuses the
+          # spelling, not the behaviour -- so every occurrence is DECLARED with
+          # its bound, the same answer gate 1d gives for path-shaped literals and
+          # gate 20 for uncovered lines. A new one is red until somebody says
+          # which of the three it is.
+          #
+          # MEASURED, NOT GUESSED. Against the 56,494-line non-test corpus this
+          # gate builds: 17 occurrences of rule 6 in 9 files, 26 of rule 7 in 14.
+          # Every one was opened and classified before it was written down here.
+          #
+          # ---- rule 6: the explicit linear search --------------------------
+          # Unambiguous -- `.iter().find`/`.position` IS a scan. Every occurrence
+          # below is bounded by something fixed at COMPILE TIME, never by the
+          # number of bars, instruments, contracts, expiries or months:
+          #
+          #   api/{server,autopilot,audit_json}.rs -- 9 of these are
+          #     `censuses.iter().find(|c| c.vendor == feed)`, bounded by
+          #     FEED_COUNT (5 today, capped at 8 by `VendorSet(u8)`). One is
+          #     `self.unread`, the same per-vendor list.
+          #   pull/vendor.rs -- `rung_routes`, `layouts` and the granularity rows
+          #     are the descriptor's own `&'static` arrays, units long.
+          #   pull/fno.rs -- `MONTHS`, twelve.
+          #   pull/manifest.rs -- the NUL terminator inside a FIXED-WIDTH field;
+          #     the bound is the field, a compile-time constant.
+          #   pull/ssm.rs -- `AWS_FAULTS`, a `const` table.
+          #   pull/config.rs -- the credential file's own field list.
+          #   pull/resolve.rs -- a canned-answer fixture's list.
+          allow_scan='
+          crates/api/src/audit_json.rs 1
+          crates/api/src/autopilot.rs 1
+          crates/api/src/server.rs 7
+          crates/pull/src/config.rs 1
+          crates/pull/src/fno.rs 1
+          crates/pull/src/manifest.rs 1
+          crates/pull/src/resolve.rs 1
+          crates/pull/src/ssm.rs 1
+          crates/pull/src/vendor.rs 3
+          '
+
+          # ---- rule 7: the ambiguous membership test -----------------------
+          # Three shapes share one spelling. Each file below is one of:
+          #
+          #   RANGE, two comparisons -- `(500..=599)`, `(1..=3650)`,
+          #     `(FIRST_YEAR..=LAST_YEAR)`, `(MIN_VOLATILITY..=MAX_VOLATILITY)`,
+          #     the surrogate ranges in `telemetry/json.rs`, `pricing`'s rate
+          #     band, and `runner/split.rs` whose `Fold::train` is
+          #     `(Range<usize>, Range<usize>)`.
+          #   HASH PROBE, O(1) -- `asked.members` and `Vendor::MASTERED` in
+          #     `server.rs`, `frequent` in `engine`, `held` in `fnowork`,
+          #     `redundant` in `runner/closed.rs`, `kept` in `cli`,
+          #     `read_already` in `telemetry/tail.rs`, `asserted` in `merge.rs`,
+          #     `join.compared` in `constituents.rs`.
+          #   FIXED `const` ARRAY -- `core/vendor.rs`'s segment table is at most
+          #     FOUR `&str`, and `NSE_PLACEHOLDER_SCRIPS` is the exchange's own
+          #     short placeholder list.
+          #
+          # TWO ARE BOUNDED BY A CONSTANT RATHER THAN BY THEIR TYPE, and they are
+          # the two worth re-reading if either file changes:
+          #   pull/pricing.rs -- `!out.why.contains(&sentence)` IS a `Vec` scan,
+          #     and it is guarded by `out.why.len() < REASONS_KEPT` on the same
+          #     line, so the scan can never exceed five. Remove the guard and the
+          #     bound goes with it.
+          #   api/assets.rs -- `decoded.contains(&0)` scans one decoded asset for
+          #     a NUL. Bounded by the asset, which is bounded at the boundary,
+          #     and it runs once per asset rather than per request.
+          allow_member='
+          crates/api/src/assets.rs 1
+          crates/api/src/constituents.rs 2
+          crates/api/src/coverage.rs 1
+          crates/api/src/merge.rs 1
+          crates/api/src/server.rs 4
+          crates/cli/src/lib.rs 2
+          crates/core/src/vendor.rs 2
+          crates/costs/src/day.rs 2
+          crates/engine/src/lib.rs 1
+          crates/greeks/src/solver.rs 1
+          crates/pull/src/fnowork.rs 1
+          crates/pull/src/pricing.rs 2
+          crates/runner/src/closed.rs 1
+          crates/runner/src/split.rs 1
+          crates/telemetry/src/json.rs 3
+          crates/telemetry/src/tail.rs 1
+          '
+
           check 1 '\.(binary_search|partition_point)' \
                 "$allow_search" \
                 'docs/07 layer 4 — never binary_search'
@@ -4973,6 +5079,14 @@ jobs:
           check 5 '(^|[^A-Za-z0-9_])(panic!|todo!|unimplemented!|unreachable!)|\.unwrap\(\)|\.expect\(' \
                 "$allow_panic" \
                 'CLAUDE.md section 4 — degrade loudly or refuse, never die'
+
+          check 6 '\.iter\(\)\.(find|position|rposition)\(' \
+                "$allow_scan" \
+                'CLAUDE.md section 3 rule 4 — a search must be bounded by a compile-time table, never by the data'
+
+          check 7 '\.contains\(&' \
+                "$allow_member" \
+                'CLAUDE.md section 3 rule 4 — a membership test is a Range, a hash probe, or a declared bound'
 
           # Rule 5's construct is ALREADY denied by clippy at the workspace
           # root, and gate 6b runs clippy with -D warnings — so the grep above

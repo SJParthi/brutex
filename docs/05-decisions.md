@@ -17914,3 +17914,73 @@ rolling driver asks `ORDINALS_ASKED = 1` of three, which is the operator's own
 rule of 2026-08-20 and not a defect; and the rolling receipt's displayed `planned`
 figure omits the `.min(ORDINALS_ASKED)` that `planned_rolling_requests` applies,
 so it overstates by 3× and then reports every planned contract answered.
+
+### D-0228 — the O(1) sweep became a gate, because a sweep is a snapshot
+
+D-0224 recorded an O(n^2) that had been shipping in `pull::nse::index_links`: a
+`seen.contains(&href)` scan of everything kept so far, **inside the loop that
+pushed to `seen`**, with nothing bounding the input and a module header claiming
+a constant. What that entry did not say is the part that matters more.
+
+**No gate could see it.** Gate 8 measures a per-operation ratio at 1x/10x/100x
+and catches a bound that has already broken *on a path someone thought to write a
+bench for* — nobody had written one for the NSE crawl. Gate 11 refuses five
+spellings — `binary_search`, a float, an unsized map, a sort, a panic — and
+`contains` was not among them. Gate 12 requires every O(1) CLAIM to name a test,
+and this function claimed its bound in prose rather than in the invariants table.
+
+So it was found by a person reading source, and the next one would have to be
+too. **A finding that depends on somebody looking is not a guarantee, it is a
+coincidence**, and this repository's whole discipline is the difference between
+those two.
+
+**Rules 6 and 7, added to gate 11.**
+
+Rule 6 refuses `.iter().find`/`.position`/`.rposition` — unambiguously a scan.
+Rule 7 refuses `.contains(&`, which is **not** unambiguous and is the more
+valuable of the two: it is two comparisons on a `Range`, one probe on a
+`HashSet`, and a linear scan on a slice or a `Vec`. A text scan cannot tell them
+apart, and gate 11's own preamble already states that it refuses the spelling
+rather than the behaviour. So each occurrence is DECLARED with its bound — the
+answer gate 1d gives for path-shaped literals and gate 20 for uncovered lines. A
+new one is red until somebody says which of the three it is.
+
+**Measured against the corpus, never guessed.** The gate's own stripper was run
+locally over the 56,494-line non-test corpus it builds from 149 files: **17
+occurrences of rule 6 across 9 files, 26 of rule 7 across 14.** Every one was
+opened and classified before it was written into an allowlist. Nine of rule 6's
+seventeen are one shape — `censuses.iter().find(|c| c.vendor == feed)`, bounded
+by `FEED_COUNT`, five today and capped at eight by `VendorSet(u8)`. The rest are
+descriptor arrays, a twelve-month table, a NUL scan inside a fixed-width field,
+and `const` tables.
+
+**Two entries are bounded by a CONSTANT rather than by their type**, and the
+allowlist says so rather than letting them read as safe by association.
+`pricing.rs`'s `!out.why.contains(&sentence)` genuinely is a `Vec` scan, held to
+five by an `out.why.len() < REASONS_KEPT` guard **on the same line** — delete the
+guard and the bound goes with it. `assets.rs`'s `decoded.contains(&0)` is bounded
+by one asset and runs once per asset rather than per request.
+
+**It was proved in both directions, which is the only way a gate is worth
+anything.** Green on today's tree: zero refusals, zero stale entries, zero loose
+ones. Red on two injected lines — the exact `seen.contains(&href)` that shipped,
+on the file it shipped in, and a fresh `rows.iter().find(..)` in `vocab`, a crate
+with no allowlist entry at all. A gate that has only ever passed has demonstrated
+nothing; these two runs are what separate this from a comment.
+
+**What it still cannot see**, in the register gate 11's own preamble uses,
+because a gate that oversells itself is worse than none:
+
+* **Indirection.** A scan behind a trait method, a `HashSet` arrived at through
+  `.collect()`, a `contains` on a type alias — invisible. This is a text scan.
+* **The shape that actually made it O(n^2).** The defect was not the `contains`;
+  it was the `contains` *inside the loop that grew the collection*. The rule
+  catches the spelling and leaves the nesting to a human — which is enough,
+  because the spelling is what has to be declared, and declaring it is where
+  somebody has to think about the bound.
+* **Macro-generated code**, expanded after the gate runs.
+
+**The count is the guarantee, not the pattern.** An allowlist entry is an exact
+match and not a ceiling — a file that drops BELOW its declared count fails too,
+which is gate 1d's rule for a stale native-crate entry applied here: covering a
+line is a success the declaration has to record.
