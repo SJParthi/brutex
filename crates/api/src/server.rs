@@ -9627,7 +9627,38 @@ async fn roll_every(
     );
 
     for flag in &cadences {
-        for code in rolling.expiry_codes.iter().take(ORDINALS_ASKED) {
+        // EVERY ORDINAL THE VENDOR SERVES. THE NARROWING IS GONE.
+        //
+        // This read `.take(ORDINALS_ASKED)`, a `const usize = 1` carrying the
+        // operator's rule of 2026-08-20: "always we should always pull only
+        // current expiry which is 1". The reasoning was sound at the time. The
+        // walk is a cross product, so an ordinal is a whole multiple of it --
+        // 21 offsets x 2 sides x 2 cadences x ordinals x chunks -- and for the
+        // eight-month window measured that day it was 1,512 requests at three
+        // ordinals against 504 at one. Against an allowance the governor had
+        // backed off to one request a second: twenty-five minutes against eight.
+        //
+        // SUPERSEDED 2026-08-21. By then the operator had said seven times that
+        // a press of Pull must fetch the window ENTIRELY, and asked directly:
+        // "still why partial or issues". Near-only is one third of the chain by
+        // construction, so it is precisely the partial that question names.
+        //
+        // The earlier rule was written about a leg that LOOKED dead while it
+        // worked. The defects that made it look dead are fixed: no retry on any
+        // F&O transport, a journal recording `bars_stored: 0` by construction,
+        // and no seat -- so a collision surfaced only after the request was paid
+        // for (D-0224, D-0227). The reason to narrow went with them.
+        //
+        // AND THERE IS NO REPLACEMENT CONSTANT, which is the point. The old one
+        // lived on the argument that what the vendor SERVES and what this build
+        // ASKS are separate questions. That argument was right, and it is why
+        // the fix is not a `3`: the walk iterates the descriptor's own
+        // `expiry_codes` whole, so "how many ordinals" is a vendor fact read
+        // from the row rather than a number typed here. A vendor that serves
+        // four gets four the day its row says so, with no edit in this file --
+        // CLAUDE.md section 5's rule that adding a broker is a row, applied to
+        // a field of one. D-0231.
+        for code in rolling.expiry_codes {
             say_group_starting(asked, flag, code, stored, failed, declined);
             for strike in offsets {
                 for side in rolling.sides {
@@ -9752,32 +9783,6 @@ fn cadence_has_contracts_on(
     pull::rolling::expiry_of(asked.underlying.as_str(), flag, "1", on).is_ok()
 }
 
-/// HOW MANY EXPIRY ORDINALS THIS BUILD ASKS FOR: the NEAR one, and only it.
-///
-/// # Why this is here and not in the descriptor
-///
-/// `RollingSpec::expiry_codes` is `["1", "2", "3"]` because that is what Dhan
-/// SERVES — a recorded vendor fact, and `CLAUDE.md` §3 rule 1 keeps it that way.
-/// What this repository chooses to ASK for is a separate decision, and it
-/// belongs on the asking side. Narrowing the descriptor would delete the record
-/// of what the vendor offers.
-///
-/// # What it costs, and what it buys
-///
-/// The walk is a cross product, so an ordinal is a whole multiple of it:
-/// 21 offsets × 2 sides × 2 cadences × ordinals × window chunks. For the
-/// eight-month window measured on 2026-08-20 that is 1,512 requests at three
-/// ordinals and **504 at one**. Against a Dhan allowance the governor had
-/// backed off to one request per second, that is twenty-five minutes against
-/// eight — and the twenty-five is why the leg stored nothing for its first
-/// fifty minutes and looked, to every surface this build has, exactly like a
-/// leg that had died.
-///
-/// The far ordinals are NOT fetched, and that is the operator's rule of
-/// 2026-08-20: *"always we should always pull only current expiry which is 1"*.
-/// It is a narrowing of what is asked for, not of what is recorded.
-const ORDINALS_ASKED: usize = 1;
-
 /// How many vendor requests this walk will make, before it makes any of them.
 ///
 /// The cross product, spelled out: cadences × ordinals × offsets × sides ×
@@ -9795,7 +9800,7 @@ fn planned_rolling_requests(
     chunks: usize,
 ) -> usize {
     cadences
-        .saturating_mul(rolling.expiry_codes.len().min(ORDINALS_ASKED))
+        .saturating_mul(rolling.expiry_codes.len())
         .saturating_mul(offsets)
         .saturating_mul(rolling.sides.len())
         .saturating_mul(chunks)
@@ -16682,6 +16687,74 @@ mod tests {
         assert!(
             body.contains("await_budget(asked.feed, site)"),
             "the chunk loop still charges the permit for the first attempt"
+        );
+    }
+
+    /// **THE ROLLING WALK ASKS FOR EVERY ORDINAL THE VENDOR SERVES.**
+    ///
+    /// It took `.take(ORDINALS_ASKED)` — a `const usize = 1` — so two of the
+    /// three expiry ordinals Dhan serves were never requested. That is one third
+    /// of the chain missing by construction, on a route whose receipt then
+    /// reported *"every planned contract answered"*.
+    ///
+    /// # Asserted as a RELATIONSHIP, not as a number
+    ///
+    /// Checking `== 3` would pass the day the descriptor grows a fourth ordinal
+    /// and the walk quietly keeps asking for three. The property that has to
+    /// hold is that the walk asks for **what the row declares** — so the
+    /// assertion is that the planned count is the full cross product of the
+    /// descriptor's own lists, with no narrowing factor anywhere.
+    ///
+    /// This also pins the receipt bug that rode along with it: `fno_facts`
+    /// counted the full cross product for display while the walk applied a
+    /// `.min`, so the figure overstated by 3× and then declared it all answered.
+    /// One expression now, one number.
+    #[test]
+    fn the_rolling_walk_plans_every_ordinal_the_descriptor_declares() {
+        let pull::vendor::Transport::Http(dhan) = pull::vendor::Feed::Dhan.descriptor().transport
+        else {
+            panic!("Dhan is an HTTP feed");
+        };
+        let rolling = dhan
+            .fno
+            .by_offset()
+            .expect("Dhan addresses expired options by strike offset");
+
+        // The descriptor's own lists, whatever they are today.
+        let offsets = rolling.offsets_for(rolling.index_word).len();
+        let cadences = rolling.expiry_flags.len();
+        let planned = planned_rolling_requests(cadences, rolling, offsets, 1);
+
+        assert_eq!(
+            planned,
+            cadences * rolling.expiry_codes.len() * offsets * rolling.sides.len(),
+            "the plan must be the descriptor's full cross product. A narrowing \
+             factor here is expiry ordinals the vendor serves and this build \
+             never asks for — one third of the chain, missing by construction, \
+             on a route that then reports every planned contract answered"
+        );
+
+        // AND THE WALK ITSELF TAKES NO SLICE OF THE LIST. The plan being right
+        // is worth nothing if the loop still narrows.
+        let source = include_str!("server.rs");
+        let body = source
+            .split_once("async fn roll_every")
+            .expect("roll_every exists")
+            .1;
+        let body = &body[..body
+            .find("\n}\n")
+            .expect("roll_every's body ends at a column-0 brace")];
+        assert!(
+            body.contains("for code in rolling.expiry_codes {"),
+            "the walk must iterate the descriptor's ordinals whole"
+        );
+        // `.take(` on the ordinal list is the shape that was removed. Assembled
+        // at run time so this assertion does not match its own source — twice
+        // now a source-text test in this workspace has done exactly that.
+        let narrowed = format!("{}{}", "expiry_codes.iter().", "take(");
+        assert!(
+            !body.contains(narrowed.as_str()),
+            "a narrowing of the ordinal list is the defect this test exists for"
         );
     }
 

@@ -18134,3 +18134,75 @@ asked precisely.
 segments is two runs each re-paying the full month walk; and the whole current
 month is excluded from both derivative routes by the settled-day rule, which is
 correct and undocumented in `docs/06-limits.md`.
+
+### D-0231 — the near-only narrowing is withdrawn, and the descriptor decides instead
+
+D-0230 closed the calendar half of *"press Pull and the entire window is pulled"*.
+This closes the chain half, and it withdraws a rule rather than fixing a bug.
+
+**What stood here.** `const ORDINALS_ASKED: usize = 1`, and a walk that took
+`expiry_codes.iter().take(ORDINALS_ASKED)` — Dhan's NEAR expiry and nothing else.
+It carried the operator's rule of 2026-08-20: *"always we should always pull only
+current expiry which is 1"*, and the reasoning was sound in the conditions it was
+written in. The walk is a cross product, so an ordinal is a whole multiple of it —
+21 offsets × 2 sides × 2 cadences × ordinals × chunks — and for the eight-month
+window measured that day, **1,512 requests at three ordinals against 504 at one**.
+Against an allowance the governor had backed off to one request a second, that is
+twenty-five minutes against eight.
+
+**Why it is withdrawn.** By 2026-08-21 the operator had said seven times that a
+press of Pull must fetch the window *entirely*, and asked directly: *"still why
+partial or issues"*. Near-only is **one third of the chain by construction**, so
+it is precisely the partial that question names. The conflict was put to him
+explicitly one exchange earlier — *"say the word and I'll change it to 3, but I
+won't override your recorded instruction silently"* — and the reply reaffirmed the
+complete-pull requirement. This entry is the record that the earlier rule was
+superseded deliberately rather than forgotten.
+
+**The conditions that justified it are gone.** The 2026-08-20 rule was written
+about a leg that LOOKED dead while it was working: it stored nothing for its first
+fifty minutes and no surface in this build could distinguish that from a leg that
+had died. Every cause of that is now fixed — no retry on any F&O transport
+(D-0224), a journal recording `bars_stored: 0` by construction so a working walk
+and a broken one wrote identical numbers (D-0224), and no per-feed seat so a
+collision surfaced only after the request had been paid for (D-0227). A
+twenty-five-minute walk is now legible as a walk that is working, which is the
+condition the narrowing existed in the absence of.
+
+**There is no replacement constant, and that is the point.** The old one lived on
+the argument that what a vendor SERVES and what this build ASKS are separate
+questions, and that the second belongs on the asking side. That argument is right,
+and it is why the fix is not a `3`: the walk iterates `rolling.expiry_codes`
+whole, so *how many ordinals* is a vendor fact read from the descriptor row rather
+than a number somebody typed into a handler. A vendor whose row grows a fourth
+ordinal gets four the day it says so, with no edit in `crates/api` — §5's rule
+that adding a broker is a row and not an edit, applied to a field of one.
+
+**It fixes the receipt as a side effect.** `fno_facts` computed its displayed
+"Requests planned" as the full cross product — `offsets × sides × flags × codes` —
+while `planned_rolling_requests` applied a `.min(ORDINALS_ASKED)`. The figure
+therefore overstated by 3× and the run then reported *"every planned contract
+answered"*, which is a completeness claim §4 bans making falsely. Both expressions
+now count the same thing because there is only one thing left to count.
+
+**What refuses it.**
+`api::server::the_rolling_walk_plans_every_ordinal_the_descriptor_declares`
+asserts a RELATIONSHIP rather than a number: that the planned count equals the
+descriptor's own full cross product. Checking `== 3` would pass the day the row
+grows a fourth ordinal while the walk quietly keeps asking for three. It then
+checks the loop itself, because a correct plan is worth nothing if the walk still
+narrows — and it assembles that needle at run time, since twice already a
+source-text assertion in this workspace has matched its own source.
+
+**The cost, stated rather than discovered.** Three times the requests of the
+narrowed walk. That is the price of the coverage, and every mechanism that makes
+it survivable is now in place: the governor bounds the rate, the seat stops a
+second driver racing it, the ladder re-asks a blip, and the journal records what
+landed.
+
+**One overstatement is left on this route and is NOT closed here.** `fno_facts`
+counts `rolling.expiry_flags.len()` — every cadence the vendor serves — while the
+walk filters cadences through `cadence_has_contracts`. For a BANKNIFTY window
+after 2024-11-13, whose weekly was withdrawn by SEBI, the displayed figure is
+therefore double what the walk will issue. The two are computed in different
+scopes and joining them is a change to what `fno_facts` is given, not a `.min`.
