@@ -18708,3 +18708,37 @@ report itself whole.
 rather than saying something false, which is an improvement and not an answer.
 The answer needs a stored expired-contract catalog, which is the same thing
 `fnowork::gaps` waits on and is scoped as a decision rather than a patch.
+
+### D-0240 — the seat is per leg and the press is not, so the autopilot won the gap
+
+`autopilot::round` already stood off when a hand-made pull held a seat, and the
+standoff was correct. It was not sufficient.
+
+**A seat is per LEG.** `pull_spot` takes its feed's seat and drops it when the
+leg returns; `pullrun::conduct` runs a press of many legs across many passes. So
+between any two legs the seat mask reads **zero**, and `take_every_seat` is a
+`compare_exchange(0, ALL_SEATS)` — it wins that gap. The autopilot then holds
+every feed for a whole month's pass, the operator's next leg answers 409,
+`conduct` sleeps `RETRY_WAIT` and tries again, and **two drivers spend one shared
+token's quota against each other** for as long as both keep going.
+
+`site.run` is the press-shaped fact. `conduct` claims it before the first leg and
+releases it after the summary, so it covers exactly the gaps a per-leg seat
+cannot. The tick now reads it before claiming any seat — one uncontended lock
+take, against a tick that takes minutes and opens sockets.
+
+**Read THROUGH a poisoned lock rather than around it.** A panic while holding it
+means somebody's run ended abnormally; the flag is still readable, and refusing
+to look would stand the backfill off forever on the strength of one panicked
+request. Same position `pullrun::with_progress` already takes.
+
+**Both halves of the window matter, and the test drives both.** An unclaimed slot
+must NOT read as a press — otherwise the autopilot stands off against a run
+nobody started, which is `Progress::started`'s defect reached from the other
+side. And the summary must END it — otherwise one hand-made pull silences the
+backfill for the life of the process.
+
+`pullrun::a_press_reads_as_running_from_its_claim_until_its_summary` asserts the
+predicate at all three points: before the claim, after it, and after the summary.
+It drives the predicate rather than the standoff, because the standoff lives in a
+tick that takes minutes and opens sockets.

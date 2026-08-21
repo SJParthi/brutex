@@ -1552,6 +1552,53 @@ mod tests {
         );
     }
 
+    /// **A PRESS IN FLIGHT STANDS THE AUTOPILOT OFF, BETWEEN LEGS TOO.**
+    ///
+    /// The autopilot already stood off for a SEAT, and a seat is per LEG.
+    /// `pull_spot` takes its feed's seat and drops it when the leg returns,
+    /// while a press is many legs across many passes — so between any two legs
+    /// the mask reads zero, and `take_every_seat` is a
+    /// `compare_exchange(0, ALL)`. The autopilot won that gap and held every
+    /// feed for a whole month's pass; the operator's next leg 409'd, `conduct`
+    /// slept `RETRY_WAIT` and tried again, and two drivers spent one shared
+    /// token's quota against each other for as long as both kept going.
+    ///
+    /// `Progress::running` is the press-shaped fact — claimed before the first
+    /// leg, released after the summary — so it covers the gaps a seat cannot.
+    /// This drives the predicate the standoff reads, because the standoff itself
+    /// lives in a tick that takes minutes and opens sockets.
+    #[test]
+    fn a_press_reads_as_running_from_its_claim_until_its_summary() {
+        let site = site("pressflag");
+
+        // BEFORE THE CLAIM. An unclaimed slot must not read as a press, or the
+        // autopilot would stand off forever against a run nobody started —
+        // which is the defect `Progress::started` was added to fix, reached
+        // from the other side.
+        assert!(
+            !observed(&site).running(),
+            "a site with no run is not pressing"
+        );
+
+        claim(&site);
+        assert!(
+            observed(&site).running(),
+            "claimed and unfinished IS the window the autopilot must stand off \
+             for — it spans the gaps between legs, which is the whole point"
+        );
+
+        // AND THE SUMMARY ENDS IT. A press that finished must not keep the
+        // backfill standing off, or one hand-made pull would silence the
+        // autopilot for the life of the process.
+        with_progress(&site, |progress| {
+            progress.finished = Some("done".to_owned());
+        });
+        assert!(
+            !observed(&site).running(),
+            "the summary releases the standoff"
+        );
+    }
+
     /// **THE SKIP LIST IS READ FROM THE LIVE DOCUMENT, PER FEED.**
     ///
     /// [`halted_feeds`] is what the spawn loop consults, so this drives it

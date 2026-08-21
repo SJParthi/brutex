@@ -2732,6 +2732,48 @@ async fn round(
     // would spin that at the speed of the loop — which is the one way this task
     // could starve the requests it is supposed to stay out of the way of. So it
     // is checked before any work, and it waits rather than spinning.
+    // THE PRESS FIRST, AND THE SEAT SECOND — because a seat is per LEG and a
+    // press is not.
+    //
+    // The standoff below is correct and it was not sufficient. `pull_spot` takes
+    // its feed's seat and DROPS IT WHEN THE LEG RETURNS, while
+    // `pullrun::conduct` runs a press of many legs across many passes. Between
+    // any two legs the mask reads zero, and `take_every_seat` is a
+    // `compare_exchange(0, ALL)` — so the autopilot wins that gap and holds
+    // every feed for a whole month's pass. The operator's next leg then 409s,
+    // `conduct` sleeps `RETRY_WAIT` and tries again, and the two drivers spend
+    // one shared token's quota against each other for as long as both keep
+    // going.
+    //
+    // `site.run` is the press-shaped fact: `conduct` claims it before the first
+    // leg and releases it after the summary, so it covers the gaps the seats
+    // cannot. One uncontended lock take per tick, against a tick that takes
+    // minutes.
+    //
+    // READ THROUGH A POISONED LOCK rather than around it. A panic while holding
+    // it means somebody's run ended abnormally; the flag is still readable, and
+    // refusing to look would stand the backfill off forever on the strength of
+    // one panicked request. Same position `pullrun::with_progress` takes.
+    let pressing = site
+        .run
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .is_some_and(crate::pullrun::Progress::running);
+    if pressing {
+        site.autopilot.publish(|status| {
+            status.phase = Phase::Paused;
+            status.detail = String::from(
+                "a hand-made pull is running, so the backfill is standing off until \
+                 it finishes. Nothing is lost: the next unit is re-derived from \
+                 whatever the store holds by then.",
+            );
+            status.due_unix = ingest::epoch_secs(std::time::SystemTime::now())
+                .saturating_add(i64::try_from(SEAT_WAIT_SECS).unwrap_or(i64::MAX));
+        });
+        return SEAT_WAIT_SECS;
+    }
+
     let Some(_seats) = site.autopilot.take_every_seat() else {
         site.autopilot.publish(|status| {
             status.phase = Phase::Paused;
