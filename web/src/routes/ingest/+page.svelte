@@ -7207,7 +7207,22 @@
                        sends it one — and that gap is exactly where a silent
                        drop lives. -->
                   {#if fnoDeclined.length > 0 || fnoPartial.length > 0}
-                    <div class="note warn" style="display:flex;flex-direction:column;gap:4px">
+                    <!-- `.rows` RATHER THAN AN INLINE `display:flex`, AND THE
+                         MARKER IS WHY. `.note.warn` puts its `▲` on the
+                         container's `::before`; making that container a COLUMN
+                         flex box turns the pseudo-element into a flex item of
+                         its own, so the triangle was laid out on its own line
+                         with the sentence it belongs to 4px underneath it.
+                         Measured on the running page: one orphaned glyph above
+                         two lines of amber text.
+                         The class moves the marker onto each ROW instead, which
+                         is also the more truthful arrangement — every row here
+                         is a separate feed's separate refusal, so each one gets
+                         its own triangle rather than the group sharing one.
+                         Inline styles were the other half of the problem: this
+                         was the only `style=` in the block, so the rule could
+                         not be seen from the stylesheet that owns `.note`. -->
+                    <div class="note warn rows">
                       {#each fnoPartial as p (p.feed)}
                         <span><strong>{p.feed}</strong> {p.why}</span>
                       {/each}
@@ -8739,6 +8754,31 @@
     color: var(--warn);
   }
   .note.warn::before {
+    content: '▲ ';
+    font-size: 8px;
+    color: var(--warn);
+  }
+  /* A NOTE THAT IS SEVERAL REFUSALS, ONE PER ROW.
+     The container stops carrying the marker and each row carries its own, which
+     is both the fix and the more honest reading: every row here is a different
+     feed declining for a different reason, so a single shared triangle was
+     understating the count as well as sitting in the wrong place. Suppressing
+     `::before` on the container is REQUIRED, not tidiness — as a column flex box
+     the pseudo-element becomes a flex item and lands on its own line above the
+     text. `white-space: normal` because these are sentences, not the one-line
+     clipped captions the base `.note` is shaped for. */
+  .note.rows {
+    display: flex;
+    flex-direction: column;
+    gap: var(--s2);
+    white-space: normal;
+    overflow: visible;
+    line-height: var(--lh-base);
+  }
+  .note.rows::before {
+    content: none;
+  }
+  .note.warn.rows > span::before {
     content: '▲ ';
     font-size: 8px;
     color: var(--warn);

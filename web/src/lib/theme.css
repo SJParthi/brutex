@@ -686,6 +686,17 @@ body {
   background: var(--bg-2);
   min-height: 40px;
   flex: none;
+  /* THE BAND SETS A SIZE, BECAUSE ANYTHING PUT IN IT BARE TAKES THE BODY'S.
+     `.pane-title`, `.head-sub`, `.status` and `.btn` all carry their own scale,
+     so this changes nothing that was already styled — it catches what is not.
+     What was not: /ingest's link to the audit log, which is a `.link`, and
+     `.link` deliberately sets `font: inherit` because it is built to sit INSIDE
+     prose and take the sentence's size. Standing alone in this band there is no
+     sentence to inherit from, so it took `body`'s 16px and rendered as the
+     largest, brightest, only-underlined text on a page whose scale otherwise
+     stops at 13.5px — the least important element on the page drawn as the most
+     important. Measured: 16px, --acc, underlined, against a 12px strip. */
+  font-size: var(--fs-xs);
 }
 .pane-title {
   font-size: var(--fs-micro);
