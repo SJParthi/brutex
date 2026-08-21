@@ -4,6 +4,15 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="color-scheme" content="dark light" />
+    <!-- A MISSING FAVICON IS NOT A COSMETIC GAP, IT IS LOG NOISE.
+         With no icon declared the browser asks for `/favicon.ico` on every page
+         load, `assets.rs` has no such file, and the miss costs TWO warn-level
+         events — one `api.request` 404 and one `api.assets` "no such asset".
+         Measured against the running binary on 21 Aug 2026: 28 of the last 200
+         events, 17% of the log, all of it the console talking about itself. The
+         page that reads that log is one click away in the nav now, which is
+         exactly why the noise had to go with it. -->
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <title>brutex</title>
     %sveltekit.head%
   </head>

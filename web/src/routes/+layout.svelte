@@ -74,7 +74,33 @@
     { href: '/ingest', label: 'Ingest' },
     { href: '/autopilot', label: 'Autopilot' },
     { href: '/db', label: 'DB' },
-    { href: '/audit', label: 'Audit' }
+    { href: '/audit', label: 'Audit' },
+    // THE LOG, REACHABLE BY CLICKING RATHER THAN BY KNOWING THE URL.
+    //
+    // `crates/api/src/logs.rs` is a complete bounded reader -- 1,717 lines,
+    // with its own `/logs.json` beside it -- written because "the first
+    // question an operator asks after a failed pull (what did it say?) had no
+    // answer inside the application that wrote it". `render.rs`'s own nav
+    // gained a Logs entry for exactly that reason, in those words.
+    //
+    // THIS nav never did. Measured: `/logs` appeared in all of `web/src`
+    // exactly once, inside the <noscript> block of `app.html` -- so with script
+    // ON, which is every real session, the page was unreachable by clicking. A
+    // surface that exists and cannot be reached is the same as absent.
+    //
+    // `reload` IS LOAD-BEARING AND NOT A PREFERENCE. There is no
+    // `src/routes/logs/`, so the client router has nothing to resolve and the
+    // browser has to leave the app for axum to answer. Adding a Svelte route
+    // here instead would put a SECOND application on this path -- the defect
+    // `vite.config.js` records against `/audit`, where a click renders one page
+    // and a reload renders another with different nav, no feed picker and no
+    // theme. One `/logs`, and it is the server's.
+    {
+      href: '/logs',
+      label: 'Logs',
+      reload: true,
+      why: 'The rolling event log — every event a run wrote, newest first. This one leaves the console: it is rendered by the API itself, carries its own navigation, and the browser back button is the way back.'
+    }
   ];
 
   // `/db/anything` still lights DB. An exact match alone leaves the operator
@@ -615,7 +641,18 @@
 
     <nav aria-label="Primary">
       {#each NAV as t (t.href)}
-        <a class="tab" href={t.href} aria-current={current(t.href) ? 'page' : undefined}>{t.label}</a>
+        <!-- `data-sveltekit-reload` ONLY WHERE THE ENTRY ASKS FOR IT. An empty
+             string renders the attribute; `undefined` omits it entirely, so the
+             five in-app tabs keep client-side routing and only `/logs` leaves.
+             `title` carries the reason a tab behaves differently from its
+             neighbours, which is the one thing a label cannot say. -->
+        <a
+          class="tab"
+          href={t.href}
+          data-sveltekit-reload={t.reload ? '' : undefined}
+          title={t.why}
+          aria-current={current(t.href) ? 'page' : undefined}>{t.label}</a
+        >
       {/each}
     </nav>
 
