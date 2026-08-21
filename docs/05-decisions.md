@@ -17984,3 +17984,80 @@ because a gate that oversells itself is worse than none:
 match and not a ceiling — a file that drops BELOW its declared count fails too,
 which is gate 1d's rule for a stale native-crate entry applied here: covering a
 line is a success the declaration has to record.
+
+### D-0229 — real bars could be swept and never traded, and the audit could not say what it traded
+
+Seven locked choices from one change, recorded together because they are one
+change: `cli audit-stored`, and the corrections the review of it forced.
+
+**The gap.** Everything that turns a combination into money — trades, worst-case
+fills, the 125-cell exit grid, walk-forward, PBO, the bootstrap p-values — was
+reachable from exactly one command, `cli audit`, whose bars came from
+`runner::synthetic::sessions` **unconditionally**. There was no `audit-stored`,
+so **no entry point in this workspace had ever produced a P&L, a PBO figure or a
+p-value from real market data**. `sweep-stored` could read a real month and rank
+it; it stopped short of trading it.
+
+**One implementation, not two.** `audit_with` was generalised to `audit_bars`,
+which takes the bars and the provenance banner from its caller. A second
+implementation for real bars would be two backtests that can disagree, and the
+banner is a parameter for the same reason: `CLAUDE.md` §5 makes the two banners
+the only thing separating a sweep over invented data from one over real data, so
+the caller that chose the bars is the caller that names their provenance.
+
+**The audit traded an arbitrary combination, and this is the correction that
+matters.** It took `closed::closed(&sweep).kept.first()` — canonical mask order,
+which `crates/engine` states outright is **not a ranking**. So the traded
+combination was normally whichever k=1 bit happened to survive first, every
+figure below it described that singleton, and *the report never named it*. It now
+trades the strongest **closed** combination by |t| and prints it by name above
+its own P&L: ranked for evidence first, filtered for redundancy second, because
+neither ordering is right alone — a superset with the same support as its subset
+adds a condition that changed nothing, and trading it reports a k=3 result that
+is really a k=1 one.
+
+**The bootstrap family had the same defect.** White's Reality Check and Hansen's
+SPA are FAMILY-WISE tests: the family must be the set the search considered. It
+walked `closed.kept`'s first sixteen in mask order while the reported strategy
+came from a different rule entirely, so the p-value described a family the
+reported strategy need not have belonged to. Both now draw from one
+evidence-ordered list.
+
+**One fold, not two.** `audit_bars` built the `Column` from the caller's
+evaluator and then swept with a *private* one, so the `ev` parameter governed the
+column and nothing else — a caller supplying custom widths would have had masks
+discovered under one vocabulary indexing a column built under another, which is
+the mispairing `outcome::Edge::mismatched` exists to catch. `Sweeper::run_ranked`
+now returns the column it measured on, so the sweep, the ranking and the trade
+walk cannot disagree about what they saw.
+
+**The exit grid is charged for, as a CEILING and labelled one.**
+`significance::trials` counts condition combinations only. This command also
+searches 125 stop/target/trail settings and keeps the best, and none of that
+entered the bar. It is now printed beside the uncharged bar as an upper bound,
+with the statement that the truth is between them and is **not measured** — the
+125 cells share one trade walk, so they are correlated rather than independent,
+and the effective count is somewhere between 1 and 125. §3 rule 1 forbids
+inventing the discount that would collapse that range to a point; §3 rule 6 asks
+for the range instead. Two verifiers refuted a naive ×125 correction and were
+right to.
+
+**A thin sample says so.** One instrument-month is about twenty trading days. On
+it the audit still runs five walk-forward folds, a PBO over the placements and
+three bootstraps at block ten — so a draw is one or two blocks and a fold tests
+on a handful of days. None of those figures was wrong; what was wrong is that
+they rendered in **exactly the same format** as figures over 3,650 sessions with
+nothing to tell a reader which they held. Below `MIN_AUDIT_SESSIONS = 50` the
+report now names the resolution, and names which figures are unaffected — the
+trades, the grid and the excursions measure what happened and are fine.
+
+**The stated assumptions, each a number nobody derived.** `STORED_KEEP = 25`
+(rows a person reads), `AUDIT_KEEP = 250` (deep enough that the closed filter
+does not empty the list and report extinction on a sweep that found plenty),
+`BOOTSTRAP_ALPHA_PPM = 50_000` (5%, matching the `clears 5%` column the two rows
+beside it already render), `GRID_RUNGS = 4` and `GRID_VARIANTS = 125` (tied by a
+`const` assertion, so a rung change fails the build rather than leaving the
+printed exposure describing a grid that was not run), `MIN_AUDIT_SESSIONS = 50`
+(derived from the fold count and the block length above, not preferred).
+
+Invariants X-15 … X-17.

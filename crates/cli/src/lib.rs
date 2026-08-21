@@ -901,6 +901,70 @@ fn grid_exposure(sweep: &engine::Sweep) -> String {
     out
 }
 
+/// Sessions below which the institutional stack reports at a resolution it does
+/// not have.
+///
+/// # Where the number comes from
+///
+/// It is not invented, and it is not a preference. It is the arithmetic the
+/// three consumers of the series force:
+///
+/// * the walk-forward splits into [`WALK_FORWARD_SPLITS`] anchored folds, so a
+///   fold's TEST window is roughly `sessions / splits`;
+/// * the bootstrap resamples in stationary blocks of
+///   [`runner::bootstrap::DEFAULT_BLOCK`], so a draw is roughly
+///   `sessions / block` blocks;
+/// * a `t` is not judged at all below `MIN_OBSERVATIONS` in `runner::report`,
+///   for the same reason a normal quantile cannot rule on a small-sample
+///   Student-t.
+///
+/// At 50 sessions a fold tests on ~10 and a draw is ~5 blocks: thin, and
+/// arguably reportable. Below it, a draw is one or two blocks and a fold tests
+/// on a handful of days, at which point the resampling has almost no
+/// independent structure left to resample.
+///
+/// One stored instrument-month is **about 20 trading days**, so `audit-stored`
+/// on a single month is always below this. That is not a reason to hide the
+/// number — it is the reason to print the warning.
+const MIN_AUDIT_SESSIONS: usize = 50;
+
+/// What the sample is worth, said beside the figures rather than after them.
+///
+/// # Why this warns rather than refuses
+///
+/// `CLAUDE.md` §3 rule 6 requires an unmeetable bound to be said out loud, and
+/// §4 requires a degradation to name its reason. Neither asks for a refusal
+/// here: the trades, the exit grid and the excursions are all perfectly
+/// meaningful on twenty sessions — it is the *p-values and the PBO* that are
+/// not, and refusing the whole report would throw away the honest half to
+/// suppress the dishonest half.
+///
+/// What was actually wrong before this existed is narrower and worse: a p-value
+/// computed over ~20 sessions rendered in **exactly the same format** as one
+/// computed over 3,650, with nothing on the page to tell them apart. The number
+/// was not wrong; the impression it gave was.
+fn sample_warning(sessions: usize) -> String {
+    if sessions >= MIN_AUDIT_SESSIONS {
+        return String::new();
+    }
+    let block = runner::bootstrap::DEFAULT_BLOCK;
+    let mut out = String::with_capacity(512);
+    let _ = writeln!(
+        out,
+        "\nSAMPLE\n  sessions {sessions} · walk-forward folds {WALK_FORWARD_SPLITS} · \
+         bootstrap block {block}\n  \
+         THIN. Below {MIN_AUDIT_SESSIONS} sessions each fold tests on roughly \
+         {} day(s) and each bootstrap draw is roughly {} block(s), so the \
+         p-values and the PBO figure above are computed at a resolution this \
+         sample does not have. They render in the same format they would over \
+         ten years; they do not mean the same thing. The trades, the exit grid \
+         and the excursions are unaffected — those measure what happened.",
+        sessions / WALK_FORWARD_SPLITS.max(1),
+        sessions / block.max(1),
+    );
+    out
+}
+
 /// The combination the audit traded, in words, above its own P&L.
 ///
 /// `CLAUDE.md` §4: a number whose subject is unstated is a number that cannot be
@@ -1316,6 +1380,7 @@ fn audit_bars(
     };
     out.push_str(&traded_line(first));
     out.push_str(&grid_exposure(&outcome.sweep));
+    out.push_str(&sample_warning(session_index(&bars).len()));
 
     let taken = trade::walk(&bars, &column, &first.mask, horizon, Direction::Long);
     let exits = grid::evaluate(&bars, &column, &first.mask, horizon, Side::Long, GRID_RUNGS);
@@ -1477,9 +1542,10 @@ fn audit_bars(
 )]
 mod tests {
     use super::{
-        MISUSED, OK, PROVENANCE, STORED_PROVENANCE, USAGE, Vendor, audit_run, audit_stored, auto,
-        auto_with, evaluator_from, log_dir_from, parse_min_hits, parse_sessions, parse_vendor,
-        root_from, run, sweep, sweep_stored, sweep_with,
+        MIN_AUDIT_SESSIONS, MISUSED, OK, PROVENANCE, STORED_PROVENANCE, USAGE, Vendor, audit_run,
+        audit_stored, auto, auto_with, evaluator_from, log_dir_from, parse_min_hits,
+        parse_sessions, parse_vendor, root_from, run, sample_warning, sweep, sweep_stored,
+        sweep_with,
     };
 
     fn argv(words: &[&str]) -> Vec<String> {
@@ -1762,6 +1828,61 @@ mod tests {
             "a refusal must not render a census that would read as an empty \
              market: {text}"
         );
+    }
+
+    /// A THIN SAMPLE IS SAID SO, AND A SUFFICIENT ONE IS NOT NAGGED ABOUT.
+    ///
+    /// # The defect this closes, which is about an impression rather than a number
+    ///
+    /// `audit-stored` is scoped to one instrument-month — about twenty trading
+    /// days. On that series the audit still runs a five-fold walk-forward, a PBO
+    /// over the resulting placements, and three stationary-block bootstraps at a
+    /// block length of ten. A draw is then one or two blocks and a fold tests on
+    /// a handful of days.
+    ///
+    /// None of those figures was *wrong*. What was wrong is that they rendered
+    /// in **exactly the same format** as figures computed over 3,650 generated
+    /// sessions, with nothing on the page to tell a reader which they were
+    /// holding. `CLAUDE.md` §3 rule 6 asks for an unmeetable bound to be said out
+    /// loud; nothing said it.
+    ///
+    /// # Why the boundary is asserted from both sides
+    ///
+    /// A warning that always fires is noise a reader learns to skip, which makes
+    /// it worse than none. So the sufficient case must be silent, and the empty
+    /// string is asserted rather than assumed.
+    #[test]
+    fn a_thin_sample_is_named_and_a_sufficient_one_says_nothing() {
+        // SUFFICIENT: silent, exactly at the boundary and above it.
+        assert!(
+            sample_warning(MIN_AUDIT_SESSIONS).is_empty(),
+            "the boundary itself is sufficient; a warning here would fire on \
+             every adequate run and teach the reader to ignore it"
+        );
+        assert!(sample_warning(MIN_AUDIT_SESSIONS + 1_000).is_empty());
+
+        // THIN: named, with the two numbers that decide it.
+        let thin = sample_warning(20);
+        assert!(thin.contains("THIN"), "the verdict is stated: {thin}");
+        assert!(
+            thin.contains("sessions 20"),
+            "and the sample it is a verdict about: {thin}"
+        );
+        assert!(
+            thin.contains("p-values") && thin.contains("PBO"),
+            "naming WHICH figures are affected is the whole point — a blanket \
+             warning would also discredit the trades, which are fine: {thin}"
+        );
+        assert!(
+            thin.contains("unaffected"),
+            "and which figures are not affected, so the reader does not discard \
+             the honest half: {thin}"
+        );
+
+        // ZERO SESSIONS MUST NOT PANIC. The divisors are constants here, but a
+        // future change to either could make one zero, and this is the arm that
+        // would catch a division by it.
+        assert!(sample_warning(0).contains("THIN"));
     }
 
     /// THE LOG DIRECTORY IS DECIDED WITHOUT TOUCHING THE ENVIRONMENT.
