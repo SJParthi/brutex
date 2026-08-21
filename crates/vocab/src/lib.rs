@@ -88,15 +88,29 @@ mod tests {
 
     #[test]
     fn the_version_is_the_widened_table() {
-        // Still 3, and that is the rule rather than an oversight. 274 through 279 were
-        // APPENDED at NEXT_FREE, and this constant's own documentation says an append
-        // does not bump it: every mask recorded before today still means exactly what
-        // it meant, so two vocabularies differing only by an append are not
-        // "genuinely different" in the sense the version exists to separate.
-        // Retiring, renaming, renumbering or widening the mask would bump it.
+        // Still 3, and that is the rule rather than an oversight. 274 through 279
+        // and then 280 through 313 were APPENDED at NEXT_FREE, and this
+        // constant's own documentation says an append does not bump it: every
+        // mask recorded before today still means exactly what it meant, so two
+        // vocabularies differing only by an append are not "genuinely different"
+        // in the sense the version exists to separate. Retiring, renaming,
+        // renumbering or widening the mask would bump it.
+        //
+        // THE WIDTH IS THE ONE TO WATCH HERE. The crossing family took the
+        // table from 280 to 314 against a 384-bit mask, so it did not widen and
+        // the version holds. The next family that needs more than the remaining
+        // 70 positions cannot be an append: it widens `ConditionMask::WORDS`,
+        // which IS a bump, and re-keys every run ever recorded. That is why this
+        // assertion pins all three numbers together rather than only the version
+        // -- the version alone cannot tell you how close the next one is.
         assert_eq!(VOCAB_VERSION, 3);
-        assert_eq!(table::COUNT, 280);
+        assert_eq!(table::COUNT, 314);
         assert_eq!(ConditionMask::BITS, 384);
+        assert_eq!(
+            ConditionMask::BITS as usize - table::COUNT,
+            70,
+            "free positions before the next family forces a widen, and a bump"
+        );
     }
 
     #[test]

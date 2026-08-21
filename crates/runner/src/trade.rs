@@ -325,8 +325,29 @@ fn round_trip(
     forced: bool,
     direction: Direction,
 ) -> Option<Trade> {
+    // A BAR THIS RUN ALREADY REFUSED MAY NOT FILL A LEG.
+    //
+    // `bars.get(..)` alone was the whole guard, so a record
+    // `indicators::column::Column::build` had charged to
+    // `Census::price_outside_range` still supplied an open, a high and a low to
+    // `costs::fill`. `crate::outcome::priced` carries the measurement: one such
+    // record among 7,500 flipped the sign of `walk`'s best total, from
+    // **−14,700 to +79,930**, with `Trades::reconciles()` still true.
+    //
+    // `Candle::check` is the same predicate the column applies, so this refuses
+    // exactly what the census counted and never more. A refused leg returns
+    // `None`, which `walk` already accounts as a signal that took no trade
+    // rather than as a trade worth zero.
+    //
+    // `FillBar::new` below refuses an inverted or sub-tick bar and would have
+    // caught SOME of these -- but only some. The bar that produced the sign flip
+    // has `high >= low` and both legs above a tick; what makes it corrupt is
+    // that its close sits outside `[low, high]`, which is a question
+    // `costs::fill` never asks because a fill does not use the close.
     let e = bars.get(entry_bar)?;
     let x = bars.get(exit_bar)?;
+    e.check().ok()?;
+    x.check().ok()?;
 
     // BEST: both legs at the bar's open, through the same fill rule as the
     // worst case so the two differ only in the bar and never in the model.

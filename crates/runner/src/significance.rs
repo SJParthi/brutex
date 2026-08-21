@@ -90,10 +90,11 @@ pub fn trials(sweep: &Sweep) -> u64 {
 ///
 /// It is **not** the whole search for anything chosen through
 /// [`crate::grid`]. There, each surviving combination is evaluated at up to
-/// [`crate::grid::variants`] stop/target/trail settings and the best of them is
-/// kept — `Grid::sharpest` and `Grid::best` are argmaxes over as many as 125
-/// cells. Selecting a maximum over 125 variants is 125 more chances to look
-/// good by luck, per combination, and none of it entered the bar. An audit
+/// [`crate::grid::variants`] stop/target/trail/arm settings and the best of them
+/// is kept — `Grid::sharpest` and `Grid::best` are argmaxes over as many as 325
+/// cells at the shipped four rungs. Selecting a maximum over 325 variants is 325
+/// more chances to look good by luck, per combination, and none of it entered
+/// the bar. An audit
 /// measured the omission and named the consequence exactly: the reported
 /// Bonferroni and Bailey figures understate the true search size by roughly the
 /// grid size, **while the report prints them as the bar every row must clear**.
@@ -115,7 +116,7 @@ pub fn trials(sweep: &Sweep) -> u64 {
 /// # This is an UPPER bound, and saying which direction matters
 ///
 /// The product assumes the `variants` settings are independent trials. **They
-/// are not.** A grid's 125 cells share one trade walk — `crate::grid` caches the
+/// are not.** A grid's cells share one trade walk — `crate::grid` caches the
 /// path crossings once per candidate and each variant's exit is then three
 /// integer compares — so neighbouring cells differ by one rung and their
 /// outcomes are heavily correlated. The effective number of independent trials
@@ -482,7 +483,7 @@ mod tests {
     /// # Why each assertion is here
     ///
     /// The first pins the MULTIPLICATION, which is the whole point: a report
-    /// that ran a 125-way grid over every surviving combination searched 125
+    /// that ran a 325-way grid over every surviving combination searched 325
     /// times as much as `trials` alone reports, and a bar computed from the
     /// smaller number admits noise while looking like a family-wise correction.
     ///
@@ -502,12 +503,23 @@ mod tests {
         let s = sweep(vec![level(1, 4, 6), level(2, 2, 8)]);
         assert_eq!(trials(&s), 20, "the combination axis alone");
 
-        // `grid::variants(4, 4, 4)` is 125 -- the shipped DEFAULT_RUNGS grid.
+        // NOT A LITERAL: the shipped grid width, read from the one function
+        // that computes it. Written as `125` until the arming axis made it 325,
+        // at which point this assertion went on passing against a number the
+        // engine no longer runs -- which is the whole failure mode the constant
+        // in `crates/cli/src/lib.rs` is asserted against at compile time.
+        let shipped = crate::grid::variants(
+            super::super::validate::DEFAULT_RUNGS,
+            super::super::validate::DEFAULT_RUNGS,
+            super::super::validate::DEFAULT_RUNGS,
+        );
+        assert_eq!(shipped, 325, "the shipped DEFAULT_RUNGS grid");
+        let width = u64::try_from(shipped).expect("a grid width fits a u64");
         assert_eq!(
-            trials_with_grid(&s, 125),
-            2_500,
-            "twenty combinations examined at 125 exit settings each is a family \
-             of 2,500, not of 20"
+            trials_with_grid(&s, width),
+            20 * width,
+            "twenty combinations examined at every exit setting is a family of \
+             twenty times the grid, not of 20"
         );
 
         // NO GRID IS ONE GRID, NOT NO HYPOTHESES.
@@ -522,7 +534,7 @@ mod tests {
         // AND THE CHARGE ACTUALLY RAISES THE BAR. Every assertion above would
         // also pass on a function that ignored `variants` and returned `trials`.
         assert!(
-            bonferroni_t(trials_with_grid(&s, 125)) > bonferroni_t(trials(&s)),
+            bonferroni_t(trials_with_grid(&s, width)) > bonferroni_t(trials(&s)),
             "charging the grid must make the bar harder to clear, not merely \
              change the number"
         );

@@ -164,13 +164,17 @@ pub struct FoldResult {
     /// `1_000_000` halted at k=9 and kept **318,862**. A tighter budget produced
     /// 226x more work and a worse answer, and said nothing.
     pub halted: Option<engine::Halt>,
-    /// The exit variant chosen IN SAMPLE, as (stop, target, trail) rungs.
+    /// The exit variant chosen IN SAMPLE.
     ///
-    /// `None` on every element means the no-levels baseline won. Chosen on the
+    /// All four rungs `None` means the no-levels baseline won. Chosen on the
     /// training bars for the same reason the combination is: a stop fitted to
     /// the test window is look-ahead, and a stop fitted to the future looks
     /// spectacular and is trivially findable.
-    pub chosen_exit: Option<(Option<usize>, Option<usize>, Option<usize>)>,
+    ///
+    /// A named struct and not a tuple of four `Option<usize>`, for the reason
+    /// `crate::grid::Chosen` gives: this value crosses a window boundary, and a
+    /// permuted pair would score the right combination under the wrong exit.
+    pub chosen_exit: Option<crate::grid::Chosen>,
     /// What the CHOSEN exit variant scored in sample, pessimistically.
     ///
     /// This is the ranking key the combination was selected on, so it is the
@@ -279,10 +283,15 @@ impl Validated {
 
 /// How many rungs each exit ladder gets when a fold picks its exit.
 ///
-/// Four gives a 5x5x5 grid -- 125 variants including the no-stop no-target
-/// no-trail baseline -- per chosen combination. It is a stated assumption and
-/// not a derivation: more rungs resolve the ladder more finely and cost
-/// proportionally, and nothing in the data says where that trade sits.
+/// Four gives **325 variants** per chosen combination, including the no-stop
+/// no-target no-trail baseline -- `grid::variants(4, 4, 4)`, which is not a
+/// product of four factors because an arm with no trail is never emitted. It
+/// read `5x5x5 grid -- 125 variants` until the arming axis landed, and briefly
+/// read 525 before the unreachable arm settings were refused.
+///
+/// It is a stated assumption and not a derivation: more rungs resolve the
+/// ladder more finely and cost proportionally, and nothing in the data says
+/// where that trade sits.
 pub const DEFAULT_RUNGS: usize = 4;
 
 /// The excursion side matching a fill direction.
@@ -296,11 +305,11 @@ pub const DEFAULT_RUNGS: usize = 4;
 /// Carried through the ranking so the combination and its exit are decided in
 /// ONE evaluation. They used to be two: the combination was chosen on a
 /// level-less walk and a second grid pass then ran on the winner, which is how
-/// the search became `1 x 125` instead of `N x 125`.
+/// the search became `1 x G` instead of `N x G`, G being the grid width.
 #[derive(Clone, Debug)]
 struct ExitPick {
-    /// `(stop, target, trail)` rung indices. All `None` is the baseline row.
-    rungs: (Option<usize>, Option<usize>, Option<usize>),
+    /// The rung indices. All `None` is the baseline row.
+    rungs: crate::grid::Chosen,
     /// The cell's pessimistic total. This is the ranking key.
     pessimistic: i64,
     /// The TRAINING ladders this variant's rung indices point into.
@@ -444,8 +453,8 @@ pub fn walk_forward(
         // # What this replaces, and how large the defect was
         //
         // The combination was chosen first, on a level-less walk, and the
-        // 125-cell exit grid then ran on that single winner. So the search was
-        // 1 x 125 rather than N x 125, and a combination that is mediocre
+        // exit grid then ran on that single winner. So the search was
+        // one grid rather than N grids, and a combination that is mediocre
         // unstopped but excellent with a tight stop could not be found -- it
         // was eliminated in round one, before any stop existed to save it.
         //
@@ -465,9 +474,15 @@ pub fn walk_forward(
         // A grid costs 4.2x a bare walk, NOT 125x -- 77,815 ns against 18,389 ns
         // per candidate on `sessions(12)`. `crate::grid`'s header explains why:
         // the path crossings are cached once per candidate entry and each
-        // variant's exit is then three integer compares, so the 125 variants
-        // share one walk. A whole fold at 11,013 candidates goes from 0.20 s to
+        // variant's exit is then three integer compares, so every variant
+        // shares one walk. A whole fold at 11,013 candidates goes from 0.20 s to
         // 0.86 s.
+        //
+        // MEASURED AT 125 CELLS, BEFORE THE ARMING AXIS MADE IT 325. The 4.2x
+        // is therefore a figure for the grid as it then was, and this is the
+        // honest label rather than a re-run nobody has done: the cached half is
+        // unchanged, but `excursion::crossings` now advances one running maximum
+        // per arming rung, so the per-bar half grew. UNVERIFIED at 325.
         //
         // THE RANKING KEY IS NOT THE GRID'S MAXIMUM, AND THIS COMMENT SAID IT
         // WAS.
@@ -498,9 +513,9 @@ pub fn walk_forward(
         //
         // This was `Vec<(ConditionMask, i64)>` — mask and in-sample score, and
         // nothing about HOW that score was reached. The out-of-sample pass below
-        // therefore had no exit to apply, so it re-ran the whole 125-cell grid on
-        // the TEST window and took `sharpest().or_else(best)` of that: the best
-        // of a 125-way search chosen using the test bars themselves.
+        // therefore had no exit to apply, so it re-ran the whole grid on the TEST
+        // window and took `sharpest().or_else(best)` of that: the best of a
+        // full exit search chosen using the test bars themselves.
         //
         // That is precisely the look-ahead this module's own comment forty lines
         // down refuses in words — "a stop fitted to the test window is the same
@@ -549,7 +564,12 @@ pub fn walk_forward(
             // improves a handful of times per fold rather than once per
             // candidate — see the ordering note below.
             let pick = ExitPick {
-                rungs: (cell.stop, cell.target, cell.trail),
+                rungs: crate::grid::Chosen {
+                    stop: cell.stop,
+                    target: cell.target,
+                    trail: cell.trail,
+                    arm: cell.arm,
+                },
                 pessimistic: cell.pessimistic,
                 stops: g.stops.clone(),
                 targets: g.targets.clone(),
@@ -619,7 +639,7 @@ pub fn walk_forward(
                         // CHOSE IN TRAINING.
                         //
                         // `with_levels`, not `evaluate`. `evaluate` builds the
-                        // whole 125-cell grid FROM THE BARS IT IS GIVEN and
+                        // whole grid FROM THE BARS IT IS GIVEN and
                         // returns the best of it; called on the test window, as
                         // this did, it fits the exit to the data it is meant to
                         // be tested on. `with_levels` applies ONE named variant

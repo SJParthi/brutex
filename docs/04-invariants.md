@@ -2486,9 +2486,68 @@ than checked.
 | R-02 | **A fold's out-of-sample walk sees no training bar.** `restricted` blanks every row whose source is before the cut, and the check is against `ConditionMask::ZERO` rather than against a mask — an empty mask hits everything, `(bits & 0) == 0`, so asking whether a blanked row "hits" one is a question whose answer is always yes. Mutating `clear_before(from)` to `clear_before(0)` leaves 1,312 live rows before bar 3,188 | `runner::validate::the_out_of_sample_walk_cannot_see_a_single_training_bar` | ✓ |
 | R-03 | **The short direction is exercised, and differs from the long one.** No test ran `walk_forward` short before this, so a `panic!` planted in `side_of`'s `Short` arm survived the whole suite — half the execution model was never entered. The test also requires the two directions to disagree somewhere, so a direction accepted and then ignored fails it | `runner::validate::a_short_walk_forward_runs_and_is_not_the_long_one` | ✓ |
 | R-04 | **The stepdown threshold never rises as the surviving set shrinks.** Each Romano–Wolf round takes the bootstrap maximum over fewer strategies, so the bar must be non-increasing; that monotonicity is why a strategy masked by a stronger one can clear later. Drawing fresh indices per round broke it — measured 32.536 → 33.906 at seed 97, rising in 19 of 400 configurations, 0 of 400 with one resample matrix held across the stepdown | `runner::bootstrap::the_stepdown_threshold_never_rises_as_the_surviving_set_shrinks` | ✓ |
-| R-05 | **A grid holds exactly `(stops+1)(targets+1)(trails+1)` cells.** The count lived in four places and two were wrong: `evaluate`'s doc said `(rungs+1)^2`, the module header said `400 variants`, `validate::DEFAULT_RUNGS` said 125, and the reservation asked for 25 before pushing 125. One `grid::variants` function is now the only place it is computed | `runner::grid::the_cell_count_is_the_product_of_all_three_ladders_and_nothing_reserves_less` | ✓ |
+| R-05 | **A grid holds exactly `(stops+1)(targets+1)(1 + trails·(targets+1))` cells.** The count lived in four places and two were wrong: `evaluate`'s doc said `(rungs+1)^2`, the module header said `400 variants`, `validate::DEFAULT_RUNGS` said 125, and the reservation asked for 25 before pushing 125. One `grid::variants` function is now the only place it is computed. **The formula changed shape** when the arming axis landed — see R-06 for why it is not a fourth factor | `runner::grid::the_cell_count_is_the_product_of_all_three_ladders_and_nothing_reserves_less` and `runner::grid::arming_tests::the_grid_never_pairs_an_arm_with_no_trail` | ✓ |
+| R-06 | **No cell pairs an arm with no trail, so the grid is 525 wide and not 625.** `Cell::arm` indexes the target ladder, so a naive fourth factor reads `(S+1)(T+1)(R+1)(T+1)`. The 100 cells arming nothing cannot differ from the trail-less cell they duplicate, and a grid reporting one answer a hundred times has learned nothing a hundred times. The test also pins that no two cells carry the same setting, which is the defect class that let the trails factor go missing from the reservation before D-0208, and that `Grid::baseline` still matches exactly one row | `runner::grid::arming_tests::the_grid_never_pairs_an_arm_with_no_trail` and `..::exactly_one_cell_is_the_baseline` | ✓ |
+| R-07 | **A give-back made before arming cannot fire an armed trail.** `Crossings::trailing` is the largest retreat since ENTRY; an armed trail needs the largest retreat since ARMING, and one is not a filtered view of the other. Measured on the fixture path — up 300 ppm, back 200, up to 800, back 100 — the since-entry retreat is 200 and the since-arming retreat is 100, so a 150 ppm rung fires the un-armed trail and never fires the armed one. Conflating them would fire a trailing take profit for a give-back the position never made | `runner::excursion::armed_tests::a_give_back_before_arming_cannot_fire_the_armed_trail` | ✓ |
+| R-08 | **The arming bar never fires the trail it armed.** Arming is recorded after that bar's target cursor advances, so the first bar that can fire an armed trail is the next one. One minute both reaching the target and giving back the trail distance is the intra-bar ordering D-0212 refuses to assume for the plain trail, and assuming it here would be no better. Pinned with a bar that reaches the target AND falls five times the trail rung | `runner::excursion::armed_tests::the_arming_bar_itself_never_fires_the_trail_it_armed` | ✓ |
+| R-09 | **An armed rung pair that does not exist reads as NEVER, not as a neighbour's.** The armed tables are row-major and flat, so an out-of-range trailing rung would wrap into the next arming row and answer for a different cell — silently, and with a plausible number. Both bounds are guarded and both are tested | `runner::excursion::armed_tests::an_out_of_range_rung_pair_answers_never_and_not_a_neighbour` | ✓ |
 
-**What is NOT claimed here.** `FoldResult::out_of_sample` is a level-less walk:
-`trade::walk` takes no stop, target or trail, so the exit chosen in sample
-cannot be applied to the test window. Selection became joint under D-0157; the
-out-of-sample *validation* did not. That gap is recorded in `docs/06-limits.md`.
+**What is NOT claimed here — and one sentence that stopped being true.**
+
+This paragraph read: *"`FoldResult::out_of_sample` is a level-less walk … so the
+exit chosen in sample cannot be applied to the test window. Selection became
+joint under D-0157; the out-of-sample validation did not."* The first half still
+holds and the second no longer does. `FoldResult::out_of_sample_exit` exists and
+is populated by `grid::with_levels` using the **training** ladders, so the chosen
+variant IS scored on the test window with rung values that no test bar decided.
+`out_of_sample` beside it remains the level-less walk on purpose — the comparison
+"with these levels versus without them" is the whole question the grid answers,
+and losing the without-them number would lose it.
+
+What is still not claimed: the per-variant exit decision is constant, but
+`excursion::crossings` is not. It was `O(bars + rungs)` and the arming axis makes
+it `O(bars·arm_rungs + arm_rungs·trail_rungs)`, four times the per-bar trailing
+work at the shipped four rungs. That is **stated and not measured** — no bench
+row covers this crate's grid, which `docs/06-limits.md` already records.
+
+## A refused bar prices nothing — D-0243
+
+`Candle::check` is the only gate a price may come through in `crates/runner`.
+`outcome::priced` and the two calls in `trade::round_trip` apply the SAME
+predicate `indicators::column::Column::build` applies, so a record the column
+charged to `Census::price_outside_range` cannot supply a close, an open, a high
+or a low to anything downstream.
+
+**What it cost while it did not hold.** One mis-assembled record among 7,500
+synthetic bars: `forward(H=2).at(4688)` went `Some(-119)` → `Some(7_494_560)`,
+thirty-two live positions shifted, `close_above_ema20`'s mean went −15.17 → +2,120.07
+paisa and its `t` −10.464 → +0.993, and `trade::walk`'s best total went
+**−14,700 → +79,930 — a change of sign**.
+
+**Why nothing caught it.** `n` was unchanged, so `Edge::mismatched` stayed 0;
+`Census::reconciles()` and `Trades::reconciles()` both stayed true. The only trace
+was `refused: 1` against `swept: 5,623`. `map_or(0, ..)` was the defect and **zero
+is a price**: a missing index and a corrupt record both read as "the close was 0".
+
+**Proved by** `runner::outcome::refused_bar_tests::a_bar_the_run_refused_can_never_price_an_outcome`,
+whose second half kills the mutant that refuses everything, and
+`..::a_refused_bar_shrinks_the_sample_rather_than_moving_the_mean`, which holds
+the property that makes this a loud degradation: the refusal costs sample size
+rather than moving the mean.
+
+## The crossing family is derived and cannot outlive its bar — D-0244
+
+| Id | Invariant | Proven by | ✓ |
+|---|---|---|---|
+| V-01 | **A crossing is set only when the state was clear on the previous bar of the same session and is set on this one.** `Evaluator::crossings_of` reads `previous_mask` and `vocab::table::CROSSINGS` and nothing else — no level, no formula, no module | `indicators::evaluator` emit tests; `only_live_positions_are_ever_emitted` caught the family's absence from `positions()` on its first run | ✓ |
+| V-02 | **No crossing survives a session boundary.** `previous_mask` is cleared in the rollover beside `seeded`, so no crossing bit fires on a session's first bar. An overnight change of side is a GAP, which the 132–142 family already describes, and this engine is intraday-only by §1 | the rollover sets `previous_mask = None`; `suffix_independence` and `two_runs_of_one_slice_agree_exactly` hold across it | ✓ |
+| V-03 | **`previous_mask` is `None` and never `ZERO`.** An all-clear mask is indistinguishable from a bar on which every level happened to be un-crossed, and against that every `close_above_X` set on the first bar would read as a fresh crossing. `docs/03-vocabulary.md` §4: an unknowable condition is unset, not guessed | the field's type; the early return in `crossings_of` | ✓ |
+| V-04 | **`CROSSINGS` names only live, two-sided levels.** Sixteen `close_above_` names are `void` by D-0080 and two more are the VWAP pair, dead on every runnable path because the only production `Evaluator::new` passes `Availability::Absent`. Seventeen remain | `vocab::table::CROSSINGS` has 17 entries; every index in it is `BitStatus::Live` | ✓ |
+| V-05 | **The append did not widen the mask, so `VOCAB_VERSION` holds at 3.** 280 → 314 against 384 bits. The assertion pins version, count AND the 70 remaining positions together, because the version alone cannot tell a reader how close the next family is to forcing a widen — and a widen re-keys every run ever recorded | `vocab::tests::the_version_is_the_widened_table` | ✓ |
+
+**What is NOT claimed.** The relation space over the 88 levels the engine computes
+is twelve deep — open, high, low and close each above and below, plus near,
+touched, and crossed up and down: **1,056 positions**. With this family the engine
+covers **298**. `touched` is not merely absent but unrepresentable — `set_near`
+takes one scalar and `set_exact` takes none — so a two-sided test against a level
+needs a new public function in `vocab::table`, not a new row.

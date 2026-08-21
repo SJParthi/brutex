@@ -18742,3 +18742,325 @@ backfill for the life of the process.
 predicate at all three points: before the claim, after it, and after the summary.
 It drives the predicate rather than the standoff, because the standoff lives in a
 tick that takes minutes and opens sockets.
+
+### D-0241 — the trailing take profit was a comment claiming to be a feature
+
+`crates/runner/src/grid.rs`'s `Cell::trail` carried this sentence:
+
+> TRAILING TAKE PROFIT is this armed by a target: reach the target rung, then
+> trail — so it is a combination of two rungs rather than a third mechanism, and
+> it appears in this table as such.
+
+**No arming existed anywhere in the crate.** `one_variant` resolved the exit as
+`span.min(stop_at).min(target_at).min(trail_at)` — the three rungs COMPETED, and
+the target *closed the position* rather than arming anything. A grep for `arm`
+across `grid.rs` and `excursion.rs` returned exactly that one sentence and
+nothing else. The doc had already been corrected once to say so, and the
+correction ended by naming what would close it: *"Implementing the arming
+semantics would make those cells mean something distinct, and would CHANGE the
+result of every audit that has a target-and-trail winner. That is a decision for
+`docs/05-decisions.md`, not a comment."* This is that decision.
+
+#### TSL and TTP are opposite jobs, which is why both are kept
+
+The operator asked directly whether one of the two should be dropped. Neither
+should, because they are not two settings of one instrument:
+
+| | Trailing stop LOSS | Trailing take PROFIT |
+|---|---|---|
+| Live from | entry | a favourable move already made |
+| Job | cut a position that turns | let a winner keep running |
+| Effect on a wobble | exits | is not yet armed, so does not exist |
+| Effect on a run | rides it | rides it, having survived the wobble |
+
+`arm = None` is the first and `arm = Some(a)` the second, in one table, so
+"which of these helped here" is measured rather than argued.
+
+#### The new quantity, and why the old table could not be filtered into it
+
+`Crossings::trailing` holds the largest retreat since ENTRY. An armed trail needs
+the largest retreat since ARMING, and one is not a view of the other:
+
+> A path runs up 300 ppm, falls back 200, runs to 800, then retreats 100. The
+> since-entry retreat is 200. The since-arming retreat, arming at 500, is 100.
+
+Reading a 150 ppm rung off the since-entry table would fire the armed trail on
+the arming bar itself, for a give-back the position never made after arming.
+`excursion::armed_tests::a_give_back_before_arming_cannot_fire_the_armed_trail`
+is that path, and it fails if the two are ever conflated.
+
+So `Crossings` gains one running maximum per ARMING rung, each accumulating only
+from the bar after its rung was reached. Each has its own advance-only cursor,
+for the same reason the plain trail's does: a running maximum never decreases, so
+a crossed rung stays crossed and nothing rewinds.
+
+#### Arming is recorded at the END of its bar
+
+A single minute both reaching the target and giving back the trail distance is
+exactly the intra-bar ordering this crate refuses to assume for the plain trail —
+D-0212's reasoning, applied where it applies again. The arm is therefore set
+after that bar's target cursor advances, so the first bar that can fire an armed
+trail is the next one. `the_arming_bar_itself_never_fires_the_trail_it_armed`
+pins it with a bar that reaches the target AND falls five times the trail rung.
+
+#### 525 cells and not 625, because an arm with no trail is inert
+
+The arming rung indexes the TARGET ladder — "start protecting once it has run
+this far" is a favourable-excursion question, and that ladder is already scaled
+on that distribution, so no fourth ladder exists. A naive fourth factor would be
+`(S+1)(T+1)(R+1)(T+1)` = 625 at four rungs. The 100 cells pairing an arm with no
+trail cannot differ from the trail-less cell they duplicate, and a grid reporting
+one answer a hundred times has learned nothing a hundred times. They are never
+emitted:
+
+```text
+(S+1)(T+1) * (1 + R(T+1))   =   5*5 * (1 + 4*5)   =   525
+```
+
+`the_grid_never_pairs_an_arm_with_no_trail` asserts both halves — the arithmetic
+in `variants`, and that the loop in `evaluate` agrees with it — plus that no two
+cells carry the same setting, which is the defect that let the trails factor go
+missing from the reservation before D-0208.
+
+#### Nothing had to notice that 125 became 525
+
+`crates/cli/src/lib.rs` carries `const _: () = assert!(grid::variants(..) == 125)`
+beside `GRID_VARIANTS`. It **failed the build** the moment `variants` changed.
+That assertion exists because the workspace denies `as` casts and
+`u64::try_from` is not `const`, so a `u64` cannot be derived from that `usize`
+inside a `const` — a compile-time equality can, and a stale figure there would
+make the printed multiple-testing exposure charge for a grid that was never run.
+It did its whole job without being consulted.
+
+#### This is also the fix for the near-degenerate cells
+
+The corrected doc observed that the 25-of-125 cells carrying both a target and a
+trail measure approximately what the trail-only cells measure: a trail fires on a
+give-back, a target needs the full move, so the trail nearly always fires first.
+With arming, `target` and `arm` index the same ladder and mean different things —
+`arm = Some(1), target = Some(3)` is *start protecting at rung 1, hard exit at
+rung 3*, which no cell could express before.
+
+#### Honest cost
+
+The per-variant exit decision is unchanged: one lookup, then the same three
+integer compares. Which TABLE is read is the whole of the arming, and both are
+built in the same pass.
+
+The pass itself is not unchanged. `crossings` was `O(bars + rungs)`; it is now
+`O(bars x arm_rungs + arm_rungs x trail_rungs)`, because each arming row's
+running maximum must be advanced per bar. At the shipped four rungs that is four
+times the per-bar trailing work. **This is stated rather than measured** — no
+bench row covers this crate's grid, which `docs/06-limits.md` already records,
+and this entry does not claim a measurement it did not take.
+
+The grid is 4.2x wider, and the multiple-testing ceiling
+`significance::trials_with_grid` widens with it. That ceiling was already
+documented as an UPPER BOUND rather than a correction, because the cells share
+one trade walk and are correlated; widening it does not change that reasoning,
+and `cli`'s banner still prints the uncharged bar beside it with the sentence
+*the truth is between them and is NOT measured*.
+
+#### What changes for a reader
+
+Every audit that had a target-and-trail winner may now report a different one,
+which the superseded comment predicted. The `exit` column gains a fourth field:
+`stop/target/trail@arm`, with the `@` suffix present only when the trail is
+armed. The key is printed in the table's own header rather than documented
+elsewhere, because a reader who cannot tell a trailing stop loss from a trailing
+take profit cannot read the table at all.
+
+`grid::with_levels` and `validate::FoldResult::chosen_exit` take a named `Chosen`
+rather than a tuple. Four `Option<usize>` of one type in positional order is four
+values a caller can permute silently, and this one crosses a train/test window
+boundary — a swapped pair would score the right combination under the wrong exit
+and report it as a walk-forward result.
+
+### D-0242 — two silences: a log nobody could find, and a scan no gate could see
+
+Two unrelated defects, both found by an agent fleet reading the tree rather than
+the documents, and both of the same shape: a thing that was true and unsayable.
+
+#### The sweep writes events into a file the page does not open
+
+D-0226 gave `cli` its `telemetry` arrow so that a `sweep-stored` or
+`sweep-all` run would emit something — until then the `/logs` page covered the
+pull half of the data path and nothing of the read half. Three events were added,
+at the granularity gate 17's own comment prescribes.
+
+They land somewhere `/logs` does not read. Measured on the operator's machine:
+
+```text
+<workspace>/logs/events.ndjson       905,539 bytes    <- what /logs serves
+    grep -c 'cli.sweep'  ->  0
+~/.brutex/store/logs/events.ndjson         0 bytes    <- what cli writes
+```
+
+Neither default is wrong. `api::served_log_dir` falls back to `<cwd>/logs` when
+cwd is the workspace root, which is how `.claude/launch.json` starts it;
+`cli::log_dir_from` falls back to `<store>/logs`, because a sweep started from
+`/` or from a read-only checkout must still have somewhere writable. Both
+reasons are recorded at both sites. **What was missing is that neither end said
+which**, so an operator who ran a sweep, opened `/logs` and saw nothing had
+nothing to go on.
+
+`install_log` returned `Option<String>`: `Some` for a failure, `None` for
+success — and `None` printed nothing. So the success path was silent about the
+one fact needed to find the output. That is the quiet half of the same
+`CLAUDE.md` §4 failure the function's own doc already refuses in its `Some`
+half, and its doc already records the first version making the mirror-image
+mistake with a `?`.
+
+It now returns a `String` always, and `main` prints it always. Success reads
+`events -> <dir>` followed by the sentence that `/logs` reads a different one
+unless `BRUTEX_LOG_DIR` is set for both.
+
+**The narrow fix, deliberately.** Making the two defaults AGREE is an
+`crates/api` change, and `api` is not this change's to edit — a second session
+holds uncommitted work in it. Naming the directory is what this crate can do
+alone, and it is enough for an operator to act.
+
+#### Romano–Wolf's stepdown scanned its own rejection list
+
+`bootstrap::romano_wolf` ended each round with
+
+```rust
+alive.retain(|s| !rejected_now.contains(s));
+```
+
+which is a linear scan of the rejected set for every survivor — O(alive x
+rejected) per round. Nothing structural bounds either: `romano_wolf` is a
+`pub fn` over `&[Vec<i64>]` and the caller decides how many strategies it
+holds. A round rejecting half of 10,000 candidates is 25 million comparisons to
+recompute a partition the loop immediately above had already made.
+
+**Gate 11 rule 7 exists to refuse exactly this and could not see it.** Its
+pattern is `\.contains\(&` and this was `.contains(s)`, `s` already being a
+reference. The one genuine `Vec` scan of that shape in the crate was invisible
+to the gate written against it — which is a fact about the gate and is recorded
+here rather than fixed here, because widening a gate's pattern is its own change
+with its own allowlist consequences.
+
+Both halves now fall out of the single pass that decides them: O(alive) per
+round, and the two vectors cannot disagree about which strategy went where. The
+`stats.get(s)` `None` branch is spelled out as a SURVIVOR, which is what
+`retain` did by omission — it was never pushed to `rejected_now`, so the
+predicate kept it.
+
+Two tests pin what the rewrite had to preserve rather than the complexity, which
+is not testable from inside the crate: no strategy is rejected twice, and the
+round numbers never go backwards.
+
+### D-0243 — a bar the run had already refused was still pricing exits
+
+`indicators::column::Column::build` refuses a mis-assembled record and charges it
+to `Census::price_outside_range`. `runner::outcome::forward` and
+`runner::trade::round_trip` then indexed the **raw** slice with no reference to
+that verdict, so a record the same run had declared *not a bar* still supplied a
+close, an open, a high and a low.
+
+#### The measurement, which is what makes this a decision and not a tidy-up
+
+An adversarial audit built the input and ran it. `synthetic::sessions(20)` —
+7,500 bars — with exactly ONE record replaced by the shape
+`Corrupt::PriceOutsideRange` names, a close far outside `[low, high]`:
+
+| | clean | one refused bar |
+|---|---|---|
+| `forward(H=2).at(4688)` | `Some(-119)` | `Some(7_494_560)` |
+| bit 0 `close_above_ema20`, mean paisa | −15.17 | **+2,120.07** |
+| bit 0 `t` | −10.464 | **+0.993** |
+| bit 30 `bar_bullish`, mean paisa | −60.67 | **+3,270.30** |
+| `trade::walk` best total | −14,700 | **+79,930 — THE SIGN FLIPPED** |
+
+Thirty-two live positions moved.
+
+#### Nothing caught it, and every guard that should have was satisfied
+
+`n` was unchanged — 3,510 before and after — so `Edge::mismatched` stayed **0**.
+`Census::reconciles()` returned true. `Trades::reconciles()` returned true. The
+only trace anywhere was `refused: 1` against `swept: 5,623`: a 0.018% refusal
+rate, sitting beside a mean that had moved by 140x and a total P&L that had
+changed direction.
+
+That is `CLAUDE.md` §4's *fallback that hides a failure* in the most expensive
+form available — the failure it hid could reverse which way a strategy trades.
+
+#### The fix is the predicate the column already applies
+
+`outcome::priced` and the two `check()` calls in `round_trip` use
+`Candle::check`, which is the SAME predicate `Column::build` applies. So a record
+refused there is refused here by construction rather than by a second copy of the
+rule, and the two cannot drift apart. `map_or(0, ..)` is what stood in `forward`,
+and **zero is a price**: a missing index and a corrupt record both became "the
+close was 0 paisa".
+
+A refused bar now yields no outcome, which is a SMALLER `n` — visible in
+`Edge::mismatched`, which is exactly where this module already reasoned about
+refusals in the *index* dimension and never in the *price* dimension.
+
+`FillBar::new` would have caught SOME of these and only some. The record that
+produced the sign flip has `high >= low` and both legs above a tick; what makes
+it corrupt is a close outside the range, and a fill never reads the close.
+
+`a_bar_the_run_refused_can_never_price_an_outcome` is the four-bar reduction of
+the audit's input, and its second half kills the mutant that refuses everything.
+`a_refused_bar_shrinks_the_sample_rather_than_moving_the_mean` holds the property
+that makes this a loud degradation rather than a quiet one.
+
+### D-0244 — the moment a level was crossed had no bit, and the mask already knew it
+
+Every level relation in the vocabulary was a STATE. `close_above_ema20` is true on
+bar 500, on bar 501, and on every bar of a two-hour trend — so a sweep could ask
+where price IS and could not ask what it just DID. A grep for `cross` across the
+whole 280-row table returned **zero**, and the only `previous_close` in
+`crates/indicators` feeds SuperTrend's true range and no side test. Even the break
+family is a state: `bos_up` fires on every bar where the close is above the swing
+high, not only the first.
+
+#### Derived, not measured — which is why no module changed
+
+A crossing is two states one bar apart, and both states were already in the mask.
+`crossed_up_X` is `close_above_X` clear on the previous bar and set on this one.
+So the family needs no level, no formula and no indicator module:
+`Evaluator::crossings_of` reads `vocab::table::CROSSINGS` and the previous bar's
+mask, after the whole union and before the fold. Cost is `CROSSINGS.len()`
+iterations of six bit operations, a compile-time constant.
+
+#### Seventeen levels, and the two left out on purpose
+
+Thirty-five names carry `close_above_`. Sixteen are `void` — the
+`forming_pivot_*` family, algebraically constant by D-0080 — and a crossing of a
+level that never changes side can never fire.
+
+The other two are VWAP: 52/53 and 143/144. Those positions are LIVE and are
+nonetheless dead on every runnable path, because the only production
+`Evaluator::new` passes `vwap::Availability::Absent` and the whole twenty-position
+VWAP family is silenced. Adding a crossing that provably cannot fire today would
+be adding, permanently, exactly the defect that family is criticised for.
+Append-only cuts the other way here: they can be added the day VWAP is wired, and
+cannot be removed if they are added now.
+
+#### The version does NOT move, and the width is why
+
+`VOCAB_VERSION` stays 3. `vocab/src/lib.rs` says an append leaves every existing
+mask meaning exactly what it meant; retiring, renaming, renumbering or **widening
+the mask** bumps it. 280 → 314 against a 384-bit mask is an append and nothing
+more.
+
+`the_version_is_the_widened_table` now pins all three numbers together — version,
+count, and the **70** remaining free positions — because the version alone cannot
+tell a reader how close the next family is to forcing a widen. The next one that
+needs more than 70 is not an append: it widens `ConditionMask::WORDS`, which IS a
+bump, and re-keys every run ever recorded.
+
+#### What this does NOT close
+
+The relation space over the 88 levels the engine computes is twelve deep — open,
+high, low and close each above and below, plus near, touched, and crossed up and
+down. That is 1,056 positions. With this family the engine covers 298 of them.
+`touched` is not merely absent but unrepresentable: `set_near` takes ONE scalar
+and `set_exact` takes none, so a two-sided test against a level needs a new
+public function in `vocab::table`. A confirmed-and-verified ledger of the rest,
+including the 51-position touch-ordinal family and 13 unmirrored candlestick
+patterns, was produced by a 31-agent survey and is the input to the next decision.

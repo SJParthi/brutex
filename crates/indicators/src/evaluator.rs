@@ -252,6 +252,29 @@ pub struct Evaluator {
     seeded: bool,
     /// The timestamp of the last accepted bar, so a receding one can be refused.
     last_ts: Option<i64>,
+    /// The mask the PREVIOUS bar of this session emitted, or `None` on the first
+    /// bar of a session.
+    ///
+    /// # The whole of the crossing family, and nothing else reads it
+    ///
+    /// A crossing is two states one bar apart, and every state this crate can
+    /// express is already in the mask. So `crossed_up_X` needs no level, no
+    /// formula and no module — it is `close_above_X` clear here and set there.
+    /// See [`vocab::table::CROSSINGS`].
+    ///
+    /// **`None` at every session boundary, on purpose.** Reset in the rollover
+    /// beside `seeded`, so no crossing bit fires on a session's first bar. A
+    /// close that was below yesterday's pivot and is above today's open is a
+    /// GAP, which the 132–142 family already describes; calling it a cross would
+    /// report an intraday event for a move that happened while the market was
+    /// shut, and this engine is intraday-only by `CLAUDE.md` §1.
+    ///
+    /// **`None` and not `ZERO`.** An all-clear mask is indistinguishable from a
+    /// bar where every level happened to be un-crossed, and against that every
+    /// `close_above_X` set on the first bar would read as a fresh crossing —
+    /// `docs/03-vocabulary.md` §4's rule is that an unknowable condition is
+    /// unset, not guessed.
+    previous_mask: Option<ConditionMask>,
     /// The running session's extremes and last close — **including** every bar
     /// folded so far, which is why the fold happens after the emit.
     running_high: i64,
@@ -275,7 +298,14 @@ pub struct Evaluator {
 
 // Fixed size. If this assertion ever fails, something in a module started growing
 // with the number of bars and the constant-space claim is no longer true.
-const _: () = assert!(core::mem::size_of::<Evaluator>() <= 1792);
+//
+// RAISED FROM 1792 WHEN `previous_mask` LANDED, and the distinction matters:
+// this is a `ConditionMask` -- six `u64` and a discriminant, 56 bytes -- and not
+// a per-bar collection. The bound is still a CONSTANT and the assertion is still
+// what catches a module that starts accumulating; it moved because one more
+// fixed-size field was added, which is the only reason it is ever allowed to
+// move.
+const _: () = assert!(core::mem::size_of::<Evaluator>() <= 1856);
 
 impl Evaluator {
     /// A fresh evaluator.
@@ -311,6 +341,7 @@ impl Evaluator {
             day: i64::MIN,
             seeded: false,
             last_ts: None,
+            previous_mask: None,
             running_high: 0,
             running_low: 0,
             running_close: 0,
@@ -422,6 +453,10 @@ impl Evaluator {
             }
             self.day = today;
             self.seeded = false;
+            // NO CROSSING SURVIVES A SESSION BOUNDARY. See `previous_mask`: an
+            // overnight change of side is a gap, which the 132-142 family
+            // already describes, and this engine is intraday-only.
+            self.previous_mask = None;
         }
 
         // ── emit: every module, unioned ─────────────────────────────────────────
@@ -481,6 +516,25 @@ impl Evaluator {
             mask = vocab::table::set_exact(mask, index).unwrap_or(mask);
         }
 
+        // ── 280–313: the moment a side changed, from the mask and nothing else ──
+        //
+        // Every position above is a STATE. This is the only family that is an
+        // EDGE, and it is derived rather than measured: a crossing is two states
+        // one bar apart, and both states were just emitted. No level is
+        // recomputed, no module was changed, and no bar this function has not
+        // already read is consulted.
+        //
+        // Placed AFTER the whole union so it sees every state position, and
+        // BEFORE the fold for the reason every anchor here is read before the
+        // fold: `previous_mask` must be the previous BAR's, and the assignment
+        // below is what makes it so.
+        //
+        // Cost: `CROSSINGS.len()` iterations of six bit operations. The length
+        // is a compile-time constant, so this is O(1) per bar in the sense
+        // `CLAUDE.md` §3 rule 4 means — it does not grow with bars, with
+        // candidates, or with anything a caller supplies.
+        mask = self.crossings_of(mask);
+
         // ── fold last: the day's extremes are an anchor and must exclude the bar ─
         if self.seeded {
             if bar.high > self.running_high {
@@ -497,10 +551,63 @@ impl Evaluator {
         }
         self.running_close = bar.close;
         self.last_ts = Some(bar.ts_micros);
+        // THIS BAR'S MASK BECOMES THE NEXT BAR'S PREVIOUS. Stored with the
+        // crossing bits already in it, which costs nothing: `CROSSINGS` reads
+        // only the two STATE positions of each level, and no crossing position
+        // is the `above` or `below` of any tuple.
+        self.previous_mask = Some(mask);
 
         // Nothing outside the live vocabulary may reach a caller: a retired or void
         // position that escaped would be swept as a real condition.
         Ok((self, vocab::table::only_live(mask)))
+    }
+
+    /// Set every crossing position whose level changed side on this bar.
+    ///
+    /// # What a crossing is here, exactly
+    ///
+    /// `crossed_up_X` is set when `close_above_X` was CLEAR on the previous bar
+    /// of this session and is SET on this one. `crossed_down_X` is the same for
+    /// `close_below_X`. Nothing else qualifies: a level that was already above
+    /// and stays above is not a crossing, and neither is a level that has been
+    /// above since the open.
+    ///
+    /// # The three cases that set nothing, and each is right
+    ///
+    /// * **The first bar of a session** — `previous_mask` is `None`. There is no
+    ///   previous side, so there is no crossing to report. See that field.
+    /// * **A level with no state on either bar** — a pivot band on a day with no
+    ///   previous session sets neither `above` nor `below`, so nothing can
+    ///   change side and nothing does.
+    /// * **A close landing exactly ON the level** — D-0109's three-state rule
+    ///   clears both sides. That bar reports no crossing; the bar that leaves
+    ///   the level reports one, which is the honest reading of a touch-and-go.
+    ///
+    /// # Cost
+    ///
+    /// `CROSSINGS.len()` iterations, each two mask reads and at most one
+    /// `set_exact`. The length is a compile-time constant of this crate's own
+    /// vocabulary, so nothing a caller supplies can make it grow.
+    fn crossings_of(&self, mut mask: ConditionMask) -> ConditionMask {
+        let Some(before) = self.previous_mask.as_ref() else {
+            return mask;
+        };
+        for &(above, below, up, down) in &vocab::table::CROSSINGS {
+            for (state, edge) in [(above, up), (below, down)] {
+                let b = u32::from(state);
+                if mask.get(b) && !before.get(b) {
+                    // `unwrap_or(mask)` and not `if let Ok`, for the reason every
+                    // other module in this crate gives: `set_exact` refuses only
+                    // an absent, retired, void or `Near` position, and
+                    // `the_crossing_map_names_only_live_two_sided_levels` proves
+                    // no position in `CROSSINGS` is any of those. An `if let`
+                    // would write a branch no test can take, and a region that
+                    // cannot run is a region nobody can be held to.
+                    mask = vocab::table::set_exact(mask, edge).unwrap_or(mask);
+                }
+            }
+        }
+        mask
     }
 
     /// Hand the finished session to the families that need yesterday — **if it was a
@@ -769,6 +876,20 @@ impl Evaluator {
         // named here too — `only_live_positions_are_ever_emitted` compares what `step` emits
         // against this list, and it caught their absence the moment they started firing.
         all.extend([276, 277, 278, 279]);
+        // 280–313 likewise: no module owns them, because they are derived from
+        // the mask every module already produced. Taken from
+        // `vocab::table::CROSSINGS` rather than written out, so the list here
+        // and the derivation in `crossings_of` cannot name different positions.
+        //
+        // `only_live_positions_are_ever_emitted` caught their absence on the
+        // first run after they started firing — "bit 312 was set but no module
+        // claims it" — which is the whole reason this list is a list and not a
+        // comment.
+        all.extend(
+            vocab::table::CROSSINGS
+                .iter()
+                .flat_map(|&(_, _, up, down)| [up, down]),
+        );
         let last = crate::CURDAY_FIRST
             .saturating_add(u16::try_from(crate::CURDAY_RUNGS.len()).unwrap_or(0))
             .saturating_sub(1);
@@ -839,10 +960,16 @@ mod tests {
     #[test]
     fn the_position_set_is_the_union_of_the_modules() {
         let all = Evaluator::positions();
+        // 272 = 238 + the 34 crossing positions. NOT a literal beside a
+        // different literal: the sum is spelled from `CROSSINGS` so the two
+        // cannot drift, which is the same reason `positions()` reads that table
+        // rather than listing indices.
+        let crossings = vocab::table::CROSSINGS.len().saturating_mul(2);
         assert_eq!(
             all.len(),
-            238,
-            "238 positions are computable — every live one"
+            238_usize.saturating_add(crossings),
+            "every live position is computable: 238 measured by a module, plus \
+             {crossings} derived from the mask"
         );
         let mut sorted = all.clone();
         sorted.sort_unstable();

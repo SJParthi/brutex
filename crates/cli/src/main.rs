@@ -49,14 +49,16 @@ fn main() -> std::process::ExitCode {
     // sweep, and refusing to compute because a directory is unwritable trades a
     // whole answer for an audit trail. `CLAUDE.md` §4 bans a fallback that
     // HIDES a failure; this one names it, above the report, on the same screen.
-    let warning = cli::install_log();
+    let where_events_went = cli::install_log();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut out = String::new();
     let code = cli::run(&args, &mut out);
-    if let Some(why) = warning {
-        println!("{why}");
-    }
+    // PRINTED ON SUCCESS TOO, and that is the change. It used to print only on
+    // failure, so a run whose events landed somewhere `/logs` does not read
+    // looked exactly like a run that was fully observable. `install_log`'s doc
+    // carries the measurement.
+    println!("{where_events_went}");
     print!("{out}");
     std::process::ExitCode::from(code)
 }

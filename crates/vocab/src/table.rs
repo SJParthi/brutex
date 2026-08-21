@@ -236,7 +236,7 @@ const fn retired(index: u16, name: &'static str, band: Option<Base>, duplicate_o
 }
 
 /// The table. Row `i` is position `i`, for every `i`, forever.
-pub const TABLE: [BitDef; 280] = [
+pub const TABLE: [BitDef; 314] = [
     // ---- 0–5. Moving averages. Shipped. ---------------------------------
     plain(0, "close_above_ema20"),
     plain(1, "close_below_ema20"),
@@ -955,16 +955,143 @@ pub const TABLE: [BitDef; 280] = [
     // up" is not a value a bit may take.
     plain(278, "structure_up_in_force"),
     plain(279, "structure_down_in_force"),
+    // ---- 280–313. THE MOMENT OF A CROSS, WHICH THE TABLE COULD NOT EXPRESS. -
+    //
+    // Every level relation above this line is a STATE. `close_above_ema20` is
+    // true on bar 500, on bar 501, and on every bar of a two-hour trend — so a
+    // sweep could ask where price IS and could not ask what it just DID. There
+    // was no edge detector of any kind: measured before these rows existed, a
+    // grep for `cross` across this whole file returned ZERO, and the only
+    // `previous_close` in `crates/indicators` feeds SuperTrend's true range and
+    // no side test.
+    //
+    // Even the break family is a state rather than an edge: `bos_up` (56) fires
+    // on EVERY bar where the close is above the swing high, not only the first.
+    //
+    // # Derived from the mask, so no module computes anything new
+    //
+    // A crossing is two states one bar apart, and both states are already in
+    // this table. `crossed_up_X` is `close_above_X` false on the previous bar
+    // and true on this one; `crossed_down_X` is the same for `close_below_X`.
+    // `CROSSINGS` below names the four indices per level, and
+    // `indicators::evaluator` derives all 34 from the previous bar's mask in one
+    // pass whose length is a compile-time constant. No indicator module changed,
+    // no level is recomputed, and nothing reads a bar this crate has not
+    // already read.
+    //
+    // # A flat close crosses nothing, and that falls out of D-0109
+    //
+    // A close exactly ON a level sets NEITHER side. So a bar landing on the
+    // level clears `close_above_X` without setting `close_below_X`, and the next
+    // bar rising off it sets `crossed_up_X` — which is right, and is a property
+    // of the source rows rather than a rule restated here.
+    //
+    // # Seventeen levels, and the two that were deliberately left out
+    //
+    // Thirty-five names carry `close_above_`. Sixteen are `void` — the
+    // `forming_pivot_*` family, algebraically constant by D-0080 — and a
+    // crossing of a level that never changes side can never fire.
+    //
+    // The other two are VWAP: 52/53 `vwap` and 143/144 `vwap_session`. Those
+    // positions are LIVE and are nonetheless dead on every runnable path,
+    // because the only production `Evaluator::new` passes
+    // `vwap::Availability::Absent` and the whole twenty-position VWAP family is
+    // silenced. Adding a crossing that provably cannot fire today would be
+    // adding, permanently, exactly the defect that family is criticised for.
+    // Append-only cuts the other way here: they can be added the day VWAP is
+    // wired, and cannot be removed if they are added now.
+    plain(280, "crossed_up_ema20"),
+    plain(281, "crossed_down_ema20"),
+    plain(282, "crossed_up_ema200"),
+    plain(283, "crossed_down_ema200"),
+    plain(284, "crossed_up_pdh"),
+    plain(285, "crossed_down_pdh"),
+    plain(286, "crossed_up_pdl"),
+    plain(287, "crossed_down_pdl"),
+    plain(288, "crossed_up_supertrend"),
+    plain(289, "crossed_down_supertrend"),
+    plain(290, "crossed_up_gap_mid"),
+    plain(291, "crossed_down_gap_mid"),
+    plain(292, "crossed_up_pivot_r1_band"),
+    plain(293, "crossed_down_pivot_r1_band"),
+    plain(294, "crossed_up_pivot_r2_band"),
+    plain(295, "crossed_down_pivot_r2_band"),
+    plain(296, "crossed_up_pivot_r3_band"),
+    plain(297, "crossed_down_pivot_r3_band"),
+    plain(298, "crossed_up_pivot_s1_band"),
+    plain(299, "crossed_down_pivot_s1_band"),
+    plain(300, "crossed_up_pivot_s2_band"),
+    plain(301, "crossed_down_pivot_s2_band"),
+    plain(302, "crossed_up_pivot_s3_band"),
+    plain(303, "crossed_down_pivot_s3_band"),
+    plain(304, "crossed_up_pivot_r4_band"),
+    plain(305, "crossed_down_pivot_r4_band"),
+    plain(306, "crossed_up_pivot_s4_band"),
+    plain(307, "crossed_down_pivot_s4_band"),
+    plain(308, "crossed_up_pivot_r5_band"),
+    plain(309, "crossed_down_pivot_r5_band"),
+    plain(310, "crossed_up_pivot_s5_band"),
+    plain(311, "crossed_down_pivot_s5_band"),
+    plain(312, "crossed_up_day_open"),
+    plain(313, "crossed_down_day_open"),
+];
+
+/// Every level whose SIDE this table carries on both sides, and the two
+/// positions that name the moment it changes.
+///
+/// Each tuple is `(above, below, crossed_up, crossed_down)`. The first two are
+/// the shipped state positions; the last two are set by
+/// `indicators::Evaluator` when the corresponding state position was clear on
+/// the previous bar and is set on this one.
+///
+/// # Why this lives in `vocab` and not in `indicators`
+///
+/// It is a statement about which POSITIONS mean what, which is this crate's
+/// authority and no other's. `indicators` reads it; nothing else needs to know
+/// the shape. Putting it beside the rows also means a reviewer sees the four
+/// indices together, which is the only way to check them: an off-by-one here
+/// would set `crossed_up_pdh` from `close_above_pdl` and nothing about the
+/// resulting mask would look wrong.
+///
+/// # The order is the table's order and the length is asserted
+///
+/// `the_crossing_map_names_only_live_two_sided_levels` walks every tuple and
+/// checks all four positions are live, that the two state positions really are
+/// the `close_above_`/`close_below_` pair of one level, and that the two
+/// crossing positions carry that level's name — so the map cannot drift from
+/// the rows above it.
+pub const CROSSINGS: [(u16, u16, u16, u16); 17] = [
+    (0, 1, 280, 281),
+    (2, 3, 282, 283),
+    (13, 14, 284, 285),
+    (15, 16, 286, 287),
+    (64, 65, 288, 289),
+    (66, 67, 290, 291),
+    (74, 75, 292, 293),
+    (76, 77, 294, 295),
+    (78, 79, 296, 297),
+    (80, 81, 298, 299),
+    (82, 83, 300, 301),
+    (84, 85, 302, 303),
+    (180, 181, 304, 305),
+    (182, 183, 306, 307),
+    (184, 185, 308, 309),
+    (186, 187, 310, 311),
+    (276, 277, 312, 313),
 ];
 
 /// How many positions the table defines. Not how many bits the mask holds --
-/// [`ConditionMask::BITS`] is 384, and the 104 positions between are unallocated
-/// headroom, not free-for-all space.
+/// [`ConditionMask::BITS`] is 384, and the **70** positions between are
+/// unallocated headroom, not free-for-all space.
+///
+/// It read 104 until the crossing family took the table from 280 to 314. The
+/// number is pinned in `vocab::tests::the_version_is_the_widened_table` so this
+/// sentence cannot drift again without a red test.
 pub const COUNT: usize = TABLE.len();
 
 /// The highest position that will ever be a hole: none. The next condition
 /// appends here, whatever has been retired below it.
-pub const NEXT_FREE: u16 = 280;
+pub const NEXT_FREE: u16 = 314;
 
 // THE TABLE CANNOT OUTGROW THE MASK, enforced at COMPILE time.
 //
@@ -1006,7 +1133,46 @@ pub const LIVE: ConditionMask =
         .with_bit(276)
         .with_bit(277)
         .with_bit(278)
-        .with_bit(279);
+        .with_bit(279)
+        // 280-313: the crossing family. All 34 are live and all land in word 4,
+        // bits 24-57. Spelled one per line like their neighbours rather than
+        // folded into the word literal, because `the_live_mask_is_the_table`
+        // compares this against the rows and a hand-computed word is exactly
+        // the arithmetic that check exists to refuse.
+        .with_bit(280)
+        .with_bit(281)
+        .with_bit(282)
+        .with_bit(283)
+        .with_bit(284)
+        .with_bit(285)
+        .with_bit(286)
+        .with_bit(287)
+        .with_bit(288)
+        .with_bit(289)
+        .with_bit(290)
+        .with_bit(291)
+        .with_bit(292)
+        .with_bit(293)
+        .with_bit(294)
+        .with_bit(295)
+        .with_bit(296)
+        .with_bit(297)
+        .with_bit(298)
+        .with_bit(299)
+        .with_bit(300)
+        .with_bit(301)
+        .with_bit(302)
+        .with_bit(303)
+        .with_bit(304)
+        .with_bit(305)
+        .with_bit(306)
+        .with_bit(307)
+        .with_bit(308)
+        .with_bit(309)
+        .with_bit(310)
+        .with_bit(311)
+        .with_bit(312)
+        .with_bit(313);
 
 /// The row at `index`, or `None` when the index is past the table.
 #[must_use]
@@ -1197,8 +1363,9 @@ mod tests {
         assert_eq!(LIVE, folded, "the LIVE literal drifted from the table");
         assert_eq!(
             LIVE.popcount(),
-            238,
-            "280 positions, less three tombstones and less the 39 void forming-pivot rows"
+            272,
+            "314 positions, less three tombstones and less the 39 void \
+             forming-pivot rows"
         );
     }
 
@@ -1209,14 +1376,17 @@ mod tests {
             .with_bit(19)
             .with_bit(25)
             .with_bit(62)
-            // 300 is past NEXT_FREE and inside the mask, so it exercises the
+            // 350 is past NEXT_FREE and inside the mask, so it exercises the
             // "allocated in the mask but not in the table" case. It was 200,
-            // which stopped being unallocated the day the forming-pivot block landed.
-            .with_bit(300);
+            // which stopped being unallocated the day the forming-pivot block
+            // landed, and then 300, which stopped being unallocated the day the
+            // crossing block did. The moral each time: this bit must sit above
+            // NEXT_FREE, so it moves with NEXT_FREE.
+            .with_bit(350);
         let clean = only_live(dirty);
         assert!(!clean.get(6) && !clean.get(19) && !clean.get(25));
         assert!(clean.get(62), "a live bit beside a tombstone survives");
-        assert!(!clean.get(300), "unallocated positions are not live either");
+        assert!(!clean.get(350), "unallocated positions are not live either");
     }
 
     #[test]
@@ -1351,7 +1521,7 @@ mod tests {
 
     #[test]
     fn count_and_next_free_agree_with_the_table() {
-        assert_eq!(COUNT, 280);
+        assert_eq!(COUNT, 314);
         assert_eq!(usize::from(NEXT_FREE), COUNT);
     }
 

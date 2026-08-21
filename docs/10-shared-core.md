@@ -18,7 +18,7 @@ repository keeps finding in audits.
 |---|---|---|
 `core` | **nothing** | `Instrument`, `Isin`, `Symbol`, `Price`, `Vendor`, the universe. The nouns. |
 `vocab` | **nothing** | The bit table, `ConditionMask`, `Tolerance`. The alphabet. |
-`indicators` | **`vocab` only** | Candle in, condition bits out. Ten position sources, 238 positions. |
+`indicators` | **`vocab` only** | Candle in, condition bits out. Eleven position sources, 272 positions. |
 `engine` | **`vocab` only** | The Apriori ladder. Bit vectors in, frequent combinations out. |
 `greeks` | **nothing** | Black-Scholes, integer-safe. Already shared. |
 `costs` | **`core` only** | Brokerage, STT, stamp duty, GST, slippage. Paisa integers. |
@@ -109,8 +109,8 @@ is append-only rather than tidy.
 
 ### The width is checked by the compiler, not by review
 
-`ConditionMask` is `[u64; WORDS]`, currently 6 words = 384 bits, against 280
-allocated positions — 104 free. Adding conditions consumes headroom, and when it runs out:
+`ConditionMask` is `[u64; WORDS]`, currently 6 words = 384 bits, against 314
+allocated positions — 70 free. Adding conditions consumes headroom, and when it runs out:
 
 ```rust
 const _: () = assert!(COUNT <= ConditionMask::BITS as usize, ...);
@@ -127,9 +127,10 @@ because nothing compiles until `WORDS` is widened in the same change.
 
 ### The set of positions is derived, never listed
 
-`indicators::evaluator::Evaluator::positions()` is the union of the ten position sources'
-own `positions()` — eight modules, the current-day Fibonacci rung range, and the four the
-evaluator computes from its own session bookkeeping — 238 positions in total. Adding a position to a module adds it to the evaluator with no
+`indicators::evaluator::Evaluator::positions()` is the union of the ELEVEN position
+sources' own `positions()` — eight modules, the current-day Fibonacci rung range, the
+four the evaluator computes from its own session bookkeeping, and the crossing family it
+derives from `vocab::table::CROSSINGS` — **272 positions** in total. Adding a position to a module adds it to the evaluator with no
 second edit, so the two cannot drift. A hand-maintained list is exactly the kind of
 thing that goes stale silently.
 
@@ -173,17 +174,18 @@ Per candle, the shared core does a fixed amount of work with no allocation:
 
 | Operation | Cost | Bounded by |
 |---|---|---|
-Condition lookup | O(1) | direct index into a fixed array of 280 |
+Condition lookup | O(1) | direct index into a fixed array of 314 |
 Mask evaluation | O(1) | 6 ANDs, 6 XORs, 5 ORs, 1 compare — branchless, no early exit, identical for a true and a false answer |
 One candle through every module | O(1) | a fixed set of fixed-size states, no allocation; `size_of::<Evaluator>()` is asserted at compile time |
 Duplicate rejection | O(1) | one `HashSet` probe on a `Hash + Eq` mask |
 
 Nothing in the closure grows with the number of candles fed. That is the property a
 live consumer needs and it is asserted in the build rather than described here:
-`const _: () = assert!(size_of::<Evaluator>() <= 1792)` fails if any module starts
-accumulating. It measures 1744 bytes today, so the assertion has 48 bytes of slack and is
+`const _: () = assert!(size_of::<Evaluator>() <= 1856)` fails if any module starts
+accumulating. It measures 1808 bytes today, so the assertion has 48 bytes of slack and is
 a live guard rather than a rounded-up number that could never fire — it was 1664 until the
-non-regular-session `Calendar` was added and 1728 before the most recent growth, whose
+non-regular-session `Calendar` was added, 1728 before the growth after that, 1744 before
+the crossing family added one `Option<ConditionMask>`, whose
 cause is not recorded here because it was not measured here. The test that reads this
 number is what refused each stale figure rather than a reader noticing, and it has now
 done so twice; 48 bytes is two more `Calendar`-sized additions, not many.

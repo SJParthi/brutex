@@ -423,8 +423,42 @@ fn log_dir_from(
 /// line above the report, so an operator who expected events and got none is
 /// told why on the same screen rather than discovering an empty log later.
 ///
-/// `None` means a sink is installed and the run is being recorded. **Every other
-/// outcome returns `Some`,** including the one that has no directory to try.
+/// # SUCCESS IS ALSO A LINE NOW, AND THE MEASUREMENT IS WHY
+///
+/// This returned `None` on success and printed nothing. So an operator ran a
+/// sweep, opened `/logs`, saw no sweep events, and had nothing to go on —
+/// because `api` and this crate resolve DIFFERENT default directories and
+/// neither ever says which it chose:
+///
+/// | | default when `BRUTEX_LOG_DIR` is unset |
+/// |---|---|
+/// | `api::served_log_dir` | `<cwd>/logs` when cwd is the workspace root |
+/// | this function | `<store>/logs` |
+///
+/// Measured on the operator's machine, with `api` launched from the workspace
+/// root as `.claude/launch.json` runs it:
+///
+/// ```text
+/// <workspace>/logs/events.ndjson    905,539 bytes   <- what /logs serves
+///     grep -c 'cli.sweep'  ->  0
+/// ~/.brutex/store/logs/events.ndjson      0 bytes   <- what this writes
+/// ```
+///
+/// D-0226 added the three `cli.sweep` events precisely so `/logs` would cover
+/// the READ half of the data path, and they land in a file the page does not
+/// open. Nothing was wrong with either default; what was missing is that
+/// **neither end said where**, which is the silent half of the same
+/// `CLAUDE.md` §4 failure this function's `Err` half already refuses.
+///
+/// Naming the directory is the honest fix available from THIS crate. Making the
+/// two agree is an `api` change and `api` is not this crate's to edit.
+///
+/// # Errors
+///
+/// The refusal in `telemetry`'s own words — an unwritable directory, or a sink
+/// already installed, which `telemetry::install` refuses rather than ignores
+/// because two sinks on one path each roll the other's file away. Or, before
+/// either can be tried, that no directory could be resolved at all.
 ///
 /// # The `?` that was here was itself the silent failure this function warns about
 ///
@@ -438,26 +472,27 @@ fn log_dir_from(
 /// The two failures are now separate sentences because they need different
 /// actions: an unresolvable directory is fixed by setting a variable, an
 /// unwritable one by changing permissions.
-///
-/// # Errors
-///
-/// The refusal in `telemetry`'s own words — an unwritable directory, or a sink
-/// already installed, which `telemetry::install` refuses rather than ignores
-/// because two sinks on one path each roll the other's file away. Or, before
-/// either can be tried, that no directory could be resolved at all.
 #[must_use]
-pub fn install_log() -> Option<String> {
+pub fn install_log() -> String {
     let Some(dir) = log_dir_from(std::env::var_os("BRUTEX_LOG_DIR"), store_root().ok()) else {
-        return Some(
-            "events are NOT being recorded: neither BRUTEX_LOG_DIR nor a store root \
-             is set, so there is nowhere to write them. Set BRUTEX_LOG_DIR, or set \
-             BRUTEX_STORE or HOME so the log can sit beside the store."
-                .to_owned(),
-        );
+        return "events are NOT being recorded: neither BRUTEX_LOG_DIR nor a store root \
+                is set, so there is nowhere to write them. Set BRUTEX_LOG_DIR, or set \
+                BRUTEX_STORE or HOME so the log can sit beside the store."
+            .to_owned();
     };
-    telemetry::install(&telemetry::Config::new(dir))
-        .err()
-        .map(|why| format!("events are NOT being recorded: {why}"))
+    let shown = dir.display().to_string();
+    match telemetry::install(&telemetry::Config::new(dir)) {
+        Err(why) => format!("events are NOT being recorded: {why}"),
+        // THE DIRECTORY, NOT A TICK. "recorded successfully" would leave the
+        // operator exactly where the measurement above found them: told it
+        // worked, and unable to find the file.
+        Ok(_installed) => format!(
+            "events -> {shown}\n  \
+             The /logs page reads whatever directory `api` resolved, which is \
+             NOT this one unless BRUTEX_LOG_DIR is set for both. Set it for \
+             both, or read this file directly."
+        ),
+    }
 }
 
 /// One structural event about a run. **Never called per bar or per candidate.**
@@ -784,7 +819,7 @@ const STORED_KEEP: usize = 25;
 /// 20 KB and O(keep) regardless of how many combinations exist.
 const AUDIT_KEEP: usize = 250;
 
-/// How many rungs each of the exit grid's three axes carries.
+/// How many rungs each of the exit grid's ladders carries.
 ///
 /// Named rather than repeated as a bare `4` at the `grid::evaluate` call site,
 /// because [`GRID_VARIANTS`] is derived from it and the two drifting apart would
@@ -793,24 +828,34 @@ const GRID_RUNGS: usize = 4;
 
 /// How many exit settings the audit's grid actually evaluates.
 ///
-/// `grid::variants` is `(stops+1) · (targets+1) · (trails+1)` — the `+1` on each
-/// axis is the "no rung on this axis" row, which is why four rungs give
-/// **125 cells and not 64**. Derived from [`GRID_RUNGS`] through the same
-/// function the grid itself uses, so a change to the rung count moves this
-/// number rather than leaving it stale.
-/// The `+1` on each axis is the "no rung on this axis" row, which is why four
-/// rungs give **125 cells and not 64**.
+/// `grid::variants` is `(S+1)·[ (T+1) + R·(T+1)(T+2)/2 ]`, which at four rungs
+/// is **325 cells and not 256**.
 ///
-/// Written as a literal and then PROVED against `grid::variants` by the
-/// assertion below, rather than computed from it. The workspace denies `as`
-/// casts and `u64::try_from` is not `const`, so deriving a `u64` from that
-/// `usize` inside a `const` is not expressible — but a compile-time equality is,
-/// and it fails the BUILD if the rung count ever moves without this number
-/// following. A stale figure here would make the printed exposure describe a
-/// grid that was never run.
-const GRID_VARIANTS: u64 = 125;
+/// # This number moved TWICE, and the build caught it both times
+///
+/// D-0241 added the ARMING axis — a trailing take profit, being a trail that
+/// does not start until the move has already paid. The axis indexes the target
+/// ladder, so a naive fourth factor reads 625.
+///
+/// The first attempt refused one family and landed on 525: an arm with no trail
+/// to arm is inert, so those 100 cells duplicate the trail-less ones. **An
+/// adversarial read then found a second family**, and it was the dangerous one —
+/// an arm at or above the target rung can never fire, because the target closes
+/// the position first. Those 200 cells were duplicates too, and
+/// `Grid::best`'s `max_by_key` returns the LAST maximum, so a tie was won by the
+/// highest arm index: the audit would have printed a trailing take profit for a
+/// run in which nothing armed. Refusing both leaves 325.
+///
+/// Nothing here had to be noticed either time. The assertion below **failed the
+/// build** the moment `grid::variants` changed, which is the whole reason it is
+/// written as a literal proved against the function rather than computed from
+/// it: the workspace denies `as` casts and `u64::try_from` is not `const`, so
+/// deriving a `u64` from that `usize` inside a `const` is not expressible — but a
+/// compile-time equality is. A stale figure here would make the printed exposure
+/// charge for a grid that was never run.
+const GRID_VARIANTS: u64 = 325;
 const _: () = assert!(
-    grid::variants(GRID_RUNGS, GRID_RUNGS, GRID_RUNGS) == 125,
+    grid::variants(GRID_RUNGS, GRID_RUNGS, GRID_RUNGS) == 325,
     "GRID_VARIANTS must equal grid::variants(GRID_RUNGS, ..); the exit-grid \
      exposure would otherwise charge for a grid that was not evaluated"
 );

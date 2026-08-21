@@ -510,11 +510,39 @@ pub fn romano_wolf(
 
         // Every surviving strategy above the threshold is rejected together:
         // they all cleared the same bar in the same round.
+        //
+        // THE PARTITION IS BUILT ONCE, NOT DERIVED TWICE.
+        //
+        // This collected `rejected_now` and then ran
+        // `alive.retain(|s| !rejected_now.contains(s))`, which is a LINEAR SCAN
+        // of the rejected set for every survivor -- O(alive x rejected) per
+        // round, and nothing structural bounds either: `romano_wolf` is a
+        // `pub fn` over `&[Vec<i64>]` and the caller decides how many strategies
+        // it holds. A round that rejects half of 10,000 candidates is 25 million
+        // comparisons to compute a set the loop above already knew.
+        //
+        // Gate 11 rule 7 could not see it. Its pattern is `\.contains\(&` and
+        // this was `.contains(s)`, `s` already being a reference -- so the one
+        // genuine `Vec` scan of that shape in the crate was invisible to the
+        // gate written to refuse exactly it.
+        //
+        // Both halves fall out of the single pass that decides them, so the
+        // cost is O(alive) and the two vectors cannot disagree about which
+        // strategy went where.
         let mut rejected_now: Vec<usize> = Vec::new();
+        let mut survivors: Vec<usize> = Vec::with_capacity(alive.len());
         for &s in &alive {
-            let Some(own) = stats.get(s) else { continue };
+            // A strategy with no `stats` row SURVIVES, which is what `retain`
+            // did: it was never pushed to `rejected_now`, so the predicate kept
+            // it. Spelled out here because the old shape said it by omission.
+            let Some(own) = stats.get(s) else {
+                survivors.push(s);
+                continue;
+            };
             if studentized(root_n * own.mean, own.standard_error) > threshold {
                 rejected_now.push(s);
+            } else {
+                survivors.push(s);
             }
         }
         if rejected_now.is_empty() {
@@ -526,7 +554,7 @@ pub fn romano_wolf(
                 round,
             });
         }
-        alive.retain(|s| !rejected_now.contains(s));
+        alive = survivors;
         round = round.saturating_add(1);
     }
     out
@@ -1185,6 +1213,129 @@ mod tests {
         assert!(
             v.statistic.is_finite(),
             "a constant series produced a non-finite statistic"
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "the exception every test module in this workspace takes."
+)]
+mod stepdown_partition_tests {
+    use super::{DEFAULT_BLOCK, romano_wolf};
+
+    /// A LINEAR STEPDOWN, PROVED BY THE SHAPE OF WHAT IT RETURNS.
+    ///
+    /// # What this replaces, and why the old shape was invisible
+    ///
+    /// The round's survivors came from
+    /// `alive.retain(|s| !rejected_now.contains(s))` — a scan of the rejected
+    /// set per survivor, so O(alive × rejected) per round with nothing
+    /// structural bounding either. Gate 11 rule 7 exists to refuse exactly that
+    /// and could not see it: its pattern is a `.contains(&` and this was
+    /// `.contains(s)`, `s` already being a reference.
+    ///
+    /// # What is actually asserted
+    ///
+    /// A complexity claim is not testable from inside the crate, so this pins
+    /// the two OBSERVABLE properties the rewrite had to preserve, either of
+    /// which a careless partition would break:
+    ///
+    /// 1. **No strategy is rejected twice.** The old predicate removed every
+    ///    rejected index from `alive` in one go; a partition that pushed a
+    ///    rejected strategy to the survivors would re-reject it next round and
+    ///    emit a second row.
+    /// 2. **Survivors keep their original order**, which the stepdown depends
+    ///    on: `maxima` is taken over `alive` in order, and the resample matrix
+    ///    is held across rounds precisely so the threshold is comparable
+    ///    between them.
+    ///
+    /// Thirty-two strategies with clearly separated means, so several rounds
+    /// genuinely run rather than the whole set falling in one.
+    #[test]
+    fn the_stepdown_partition_rejects_each_strategy_at_most_once() {
+        let set: Vec<Vec<i64>> = (0..32)
+            .map(|s| {
+                let level = i64::from(s).saturating_mul(7);
+                (0..64)
+                    .map(|t| level.saturating_add(if t % 3 == 0 { 4 } else { -1 }))
+                    .collect()
+            })
+            .collect();
+        let rejected = romano_wolf(&set, 200, 9, DEFAULT_BLOCK, 50_000);
+
+        let mut seen: Vec<usize> = rejected.iter().map(|r| r.strategy).collect();
+        let before = seen.len();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(
+            before,
+            seen.len(),
+            "a strategy rejected twice means the partition returned it to the \
+             surviving set, which `retain` could not do"
+        );
+        assert!(
+            rejected.iter().all(|r| r.strategy < set.len()),
+            "every named strategy indexes the input"
+        );
+
+        // ROUNDS NEVER GO BACKWARDS. `out` is appended per round, so a
+        // partition that left `alive` unordered would produce a round number
+        // that dips -- which is also how a survivor set silently growing would
+        // announce itself.
+        let mut last = 0_usize;
+        for r in &rejected {
+            assert!(
+                r.round >= last,
+                "rounds are appended in order: {} after {last}",
+                r.round
+            );
+            last = r.round;
+        }
+
+        // AND IT IS STILL DETERMINISTIC. §3 rule 5 is the reason the resample
+        // matrix is drawn once; a rewrite of the survivor set must not disturb
+        // it.
+        let again = romano_wolf(&set, 200, 9, DEFAULT_BLOCK, 50_000);
+        assert_eq!(
+            rejected, again,
+            "same inputs, same rejections, byte for byte"
+        );
+    }
+
+    /// EVERY ROUND REMOVES AT LEAST ONE, OR THE LOOP STOPS.
+    ///
+    /// The `while !alive.is_empty()` bound rests on it. Under the old `retain`
+    /// this was guaranteed by the predicate; under a hand-written partition a
+    /// survivor pushed on both branches would loop forever, and a test that
+    /// merely finished would not say so. This one asserts the count.
+    #[test]
+    fn the_surviving_set_strictly_shrinks_every_round_that_rejects() {
+        let set: Vec<Vec<i64>> = (0..12)
+            .map(|s| {
+                let level = i64::from(s).saturating_mul(11);
+                (0..48)
+                    .map(|t| level + if t % 4 == 0 { 9 } else { -2 })
+                    .collect()
+            })
+            .collect();
+        let rejected = romano_wolf(&set, 150, 5, DEFAULT_BLOCK, 50_000);
+        if rejected.is_empty() {
+            return;
+        }
+        let rounds = rejected.last().map_or(0, |r| r.round);
+        for round in 0..=rounds {
+            let n = rejected.iter().filter(|r| r.round == round).count();
+            assert!(
+                n > 0,
+                "round {round} emitted nothing, so the loop ran a round without \
+                 shrinking the surviving set"
+            );
+        }
+        assert!(
+            rejected.len() <= set.len(),
+            "the total rejected can never exceed the input"
         );
     }
 }

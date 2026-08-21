@@ -797,9 +797,19 @@ mod tests {
     /// would still produce plausible output and would fail here.
     #[test]
     fn every_set_bit_is_named_and_an_unnameable_one_is_shown_rather_than_dropped() {
-        // Position 0 is the first row of the table; 300 is past its end but well
+        // Position 0 is the first row of the table; 350 is past its end but well
         // inside the mask, which `with_bit` accepts for anything below 384.
-        let both = ConditionMask::default().with_bit(0).with_bit(300);
+        //
+        // THIS BIT HAS TO MOVE EVERY TIME THE TABLE GROWS, and it has moved
+        // twice. It was 200 until the forming-pivot block reached it, then 300
+        // until the crossing family reached it — each time the test went red
+        // because the "unnameable" position had acquired a name, which is the
+        // gate working rather than failing. `vocab::table` carries the identical
+        // fixture and the identical note.
+        //
+        // 350 is above `NEXT_FREE` (314) and below `ConditionMask::BITS` (384).
+        // The next family that allocates past 350 moves it again.
+        let both = ConditionMask::default().with_bit(0).with_bit(350);
         let names = condition_names(&both);
 
         assert_eq!(
@@ -810,14 +820,14 @@ mod tests {
         );
         assert_eq!(
             names,
-            vec!["close_above_ema20".to_owned(), "?300".to_owned()],
+            vec!["close_above_ema20".to_owned(), "?350".to_owned()],
             "the named position renders its name and the unnameable one renders \
              its index rather than vanishing"
         );
 
         // AND THE JOINED FORM SEPARATES THEM WITH A CHARACTER THE VOCABULARY
         // NEVER USES, so a name is never mistaken for two.
-        assert_eq!(conditions_line(&both), "close_above_ema20 · ?300");
+        assert_eq!(conditions_line(&both), "close_above_ema20 · ?350");
 
         // THE EMPTY MASK IS NAMED, NOT BLANK. A blank where a combination should
         // be is indistinguishable from a rendering bug, and an empty mask is the

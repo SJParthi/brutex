@@ -197,6 +197,28 @@ pub fn trades(out: &mut String, t: &Trades) {
     let _ = writeln!(out);
 }
 
+/// One exit variant's four rungs, as the table's `exit` column shows it.
+///
+/// `NONE` is the baseline. Otherwise `stop/target/trail`, with `-` for an axis
+/// this variant does not use, and `@arm` appended when the trail is ARMED —
+/// which is the whole difference between a trailing stop loss and a trailing
+/// take profit and so is never left implicit.
+///
+/// The suffix is omitted rather than rendered `@-` when there is no arm: an
+/// un-armed trail is the common row, and a marker on the common row trains the
+/// eye to skip the one place the marker matters.
+fn exit_name(c: &Cell) -> String {
+    let rung = |r: Option<usize>| r.map_or_else(|| "-".to_owned(), |i| i.to_string());
+    if c.stop.is_none() && c.target.is_none() && c.trail.is_none() {
+        return "NONE".to_owned();
+    }
+    let levels = format!("{}/{}/{}", rung(c.stop), rung(c.target), rung(c.trail));
+    match c.arm {
+        Some(a) => format!("{levels}@{a}"),
+        None => levels,
+    }
+}
+
 /// The exit grid: with levels against without them.
 ///
 /// # The comparison, as a table rather than two runs
@@ -223,6 +245,20 @@ pub fn grid(out: &mut String, g: &Grid, keep: usize) {
         &format!("{} / {}", g.stops.len(), g.targets.len()),
         "derived from this combination's own excursions",
     );
+    // THE EXIT COLUMN IS FOUR FIELDS AND WOULD BE UNREADABLE UNNAMED.
+    //
+    // `2/3/1@0` is a stop, a target, a trail and the arming rung, and the last
+    // of those is the difference between a trailing stop LOSS and a trailing
+    // take PROFIT -- the opposite instrument on the same rung. A reader who
+    // cannot tell them apart cannot read the table at all, so the key is
+    // printed rather than documented.
+    row(
+        out,
+        "exit column",
+        "stop/target/trail@arm",
+        "`-` is no rung. `@n` arms the trail at target rung n: a trailing TAKE \
+         PROFIT. No `@` is a trailing STOP LOSS, live from entry.",
+    );
     let _ = writeln!(out);
     let _ = writeln!(
         out,
@@ -235,6 +271,9 @@ pub fn grid(out: &mut String, g: &Grid, keep: usize) {
     // row that is the comparison.
     let mut ordered: Vec<&Cell> = g.cells.iter().collect();
     ordered.sort_by_key(|c| {
+        // `arm` is not tested: it cannot be set without a trail, so a cell with
+        // no trail has none, and adding the clause would be a guard against a
+        // state `crate::grid::evaluate` does not emit.
         let base = c.stop.is_none() && c.target.is_none() && c.trail.is_none();
         // `Reverse`, NOT `-c.pessimistic`, AND THE DIFFERENCE IS AN ABORT.
         //
@@ -255,15 +294,7 @@ pub fn grid(out: &mut String, g: &Grid, keep: usize) {
 
     let shown = ordered.len().min(keep);
     for c in ordered.iter().take(keep) {
-        let name = match (c.stop, c.target, c.trail) {
-            (None, None, None) => "NONE".to_owned(),
-            (s, t, r) => format!(
-                "{}/{}/{}",
-                s.map_or_else(|| "-".to_owned(), |i| i.to_string()),
-                t.map_or_else(|| "-".to_owned(), |i| i.to_string()),
-                r.map_or_else(|| "-".to_owned(), |i| i.to_string())
-            ),
-        };
+        let name = exit_name(c);
         let _ = writeln!(
             out,
             "  {:<10}{:>8}{:>8}{:>8}{:>10}{:>10}{:>12}{:>10}",
@@ -936,7 +967,10 @@ mod tests {
                     considered: 207,
                     priced: 207,
                     halted: None,
-                    chosen_exit: Some((Some(0), None, None)),
+                    chosen_exit: Some(crate::grid::Chosen {
+                        stop: Some(0),
+                        ..crate::grid::Chosen::default()
+                    }),
                     chosen_exit_total: Some(1_000),
                     out_of_sample_exit: Some(500),
                     chosen: Some(vocab::ConditionMask::default()),
@@ -962,7 +996,11 @@ mod tests {
                     considered: 311,
                     priced: 311,
                     halted: None,
-                    chosen_exit: Some((Some(1), Some(2), None)),
+                    chosen_exit: Some(crate::grid::Chosen {
+                        stop: Some(1),
+                        target: Some(2),
+                        ..crate::grid::Chosen::default()
+                    }),
                     chosen_exit_total: Some(2_000),
                     out_of_sample_exit: Some(-500),
                     chosen: Some(vocab::ConditionMask::default()),

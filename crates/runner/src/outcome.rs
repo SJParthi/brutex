@@ -335,8 +335,41 @@ pub fn forward(bars: &[Candle], horizon: Horizon) -> Forward {
             ret.push(None);
             continue;
         }
-        let later = bars.get(exit).map_or(0, |b| b.close);
-        let now = bars.get(i).map_or(0, |b| b.close);
+        // A BAR THIS RUN ALREADY REFUSED MAY NOT PRICE AN EXIT.
+        //
+        // `indicators::column::Column::build` refuses a mis-assembled record and
+        // charges it to `Census::price_outside_range`. These two lines indexed
+        // the RAW slice with no reference to that verdict, so a record the same
+        // run declared "not a bar" was still read as a close.
+        //
+        // MEASURED, on `synthetic::sessions(20)` = 7,500 bars, with exactly ONE
+        // record replaced by the shape `Corrupt::PriceOutsideRange` names —
+        // `high` below `open`, and an absurd close:
+        //
+        // | | clean | with one refused bar |
+        // |---|---|---|
+        // | `forward(H=2).at(4688)` | `Some(-119)` | `Some(7_494_560)` |
+        // | bit 0 mean, paisa | −15.17 | **+2,120.07** |
+        // | bit 0 `t` | −10.464 | **+0.993** |
+        // | `trade::walk` best total | −14,700 | **+79,930 — SIGN FLIPPED** |
+        //
+        // Thirty-two of the live positions shifted. **Nothing caught it**: `n`
+        // was unchanged, so `Edge::mismatched` stayed 0; `Census::reconciles`
+        // and `Trades::reconciles` both stayed true; the only trace was
+        // `refused: 1` against `swept: 5,623`, a 0.018% rate sitting beside a
+        // mean that moved 140x. That is `CLAUDE.md` §4's fallback that hides a
+        // failure, and the failure it hid could change which way a strategy
+        // trades.
+        //
+        // `Candle::check` is the same predicate `Column::build` applies, so this
+        // agrees with the census by construction rather than by a second copy of
+        // the rule. A refused exit bar yields `None` — no outcome — which is a
+        // SMALLER `n` and therefore visible in `Edge::mismatched`, exactly where
+        // this module already reasons about refusals in the index dimension.
+        let (Some(later), Some(now)) = (priced(bars, exit), priced(bars, i)) else {
+            ret.push(None);
+            continue;
+        };
         ret.push(Some(later.saturating_sub(now)));
     }
 
@@ -370,6 +403,29 @@ pub fn forward(bars: &[Candle], horizon: Horizon) -> Forward {
 /// `j` ends the window when the bar after it belongs to another day, or is at or
 /// past the forced close. When there is no bar after it, the data ran out and
 /// the answer is no.
+/// The close at `index`, or `None` if that record is not a bar.
+///
+/// # The one place a price may come from
+///
+/// `Candle::check` is the SAME predicate `indicators::column::Column::build`
+/// applies before folding a record, so a record refused there is refused here
+/// and the two cannot disagree. That agreement is the point: the census and the
+/// pricing were reading the same slice under different rules, which let a record
+/// counted as `refused` still supply a close.
+///
+/// `map_or(0, ..)` is what stood here, and zero is a price. A missing index and
+/// a corrupt record both became "the close was 0 paisa", so an exit priced
+/// against either produced a move of the full entry price with nothing marking
+/// it. `None` propagates instead, and the caller drops the outcome.
+///
+/// Const-callable and index-only: one bounds check and one `check`, no
+/// allocation and no scan.
+fn priced(bars: &[Candle], index: usize) -> Option<i64> {
+    let bar = bars.get(index)?;
+    bar.check().ok()?;
+    Some(bar.close)
+}
+
 fn is_window_end(stamps: &[(i64, i64)], j: usize) -> bool {
     let Some(&(day, _)) = stamps.get(j) else {
         return false;
@@ -883,5 +939,168 @@ mod tests {
              inside it must not"
         );
         assert!(in_tail > 0, "the fixture must actually have a tail");
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "the exception every test module in this workspace takes."
+)]
+mod refused_bar_tests {
+    use super::{Horizon, forward};
+    use indicators::{Candle, OI_NULL};
+
+    /// ONE REFUSED BAR USED TO REWRITE EVERY STATISTIC IN THE RUN.
+    ///
+    /// # What was measured, and by whom
+    ///
+    /// An adversarial audit built this input and ran it. `Column::build` refuses
+    /// a mis-assembled record and charges it to `Census::price_outside_range`;
+    /// `forward` and `crate::trade::round_trip` then indexed the RAW slice with
+    /// no reference to that verdict, so a record the same run had declared "not
+    /// a bar" still supplied a close.
+    ///
+    /// On `synthetic::sessions(20)` — 7,500 bars — with exactly ONE record
+    /// replaced:
+    ///
+    /// | | clean | one refused bar |
+    /// |---|---|---|
+    /// | `forward(H=2).at(4688)` | `Some(-119)` | `Some(7_494_560)` |
+    /// | bit 0 mean, paisa | −15.17 | +2,120.07 |
+    /// | bit 0 `t` | −10.464 | +0.993 |
+    /// | `trade::walk` best total | −14,700 | **+79,930 — sign flipped** |
+    ///
+    /// Thirty-two live positions moved. Nothing caught it: `n` was unchanged so
+    /// `Edge::mismatched` stayed 0, and both `reconciles()` stayed true.
+    ///
+    /// # Why this fixture is four bars and not 7,500
+    ///
+    /// The defect is one index reading one record, so the smallest input that
+    /// exhibits it is the honest one. The 7,500-bar figures above say what it
+    /// COST; this says what it IS, and it fails the moment `priced` goes back to
+    /// `map_or(0, ..)`.
+    #[test]
+    fn a_bar_the_run_refused_can_never_price_an_outcome() {
+        let minute = |m: i64| (m + 555 - 330) * 60 * 1_000_000;
+        let ok = |m: i64, close: i64| {
+            Candle::new(
+                minute(m),
+                close,
+                close.saturating_add(50),
+                close.saturating_sub(50),
+                close,
+                100,
+                OI_NULL,
+            )
+        };
+        // THE SHAPE `Corrupt::PriceOutsideRange` NAMES: a close far outside
+        // `[low, high]`. `high >= low` holds and both legs clear a tick, so
+        // `costs::fill::Bar::new` would have accepted this bar — which is why
+        // the refusal has to be `Candle::check` and not a fill-side guard.
+        let poisoned = Candle::new(
+            minute(2),
+            2_600_000,
+            2_600_050,
+            2_599_950,
+            9_999_999,
+            100,
+            OI_NULL,
+        );
+        assert!(
+            poisoned.check().is_err(),
+            "the fixture must be a record the engine refuses, or this test \
+             asserts nothing"
+        );
+
+        let bars = vec![
+            ok(0, 2_600_000),
+            ok(1, 2_600_100),
+            poisoned,
+            ok(3, 2_600_200),
+        ];
+        let f = forward(&bars, Horizon::bars(2).expect("a non-zero horizon"));
+
+        assert_eq!(
+            f.at(0),
+            None,
+            "bar 0's outcome is priced against bar 2, which the engine refused. \
+             It used to read the refused close as 9,999,999 and report a move of \
+             7,399,999 paisa"
+        );
+        assert_eq!(
+            f.at(1),
+            Some(100),
+            "bar 1's outcome is priced against bar 3, which is sound, so the \
+             refusal must not spread further than the bar it names"
+        );
+
+        // AND THE SAME SLICE WITH A SOUND BAR IN THAT SLOT STILL ANSWERS. A fix
+        // that refused everything would satisfy the assertion above and be
+        // useless, which is the mutant this second half kills.
+        let mut healthy = bars.clone();
+        if let Some(slot) = healthy.get_mut(2) {
+            *slot = ok(2, 2_600_150);
+        }
+        let g = forward(&healthy, Horizon::bars(2).expect("a non-zero horizon"));
+        assert_eq!(
+            g.at(0),
+            Some(150),
+            "with a sound bar in the same slot the outcome is measured normally"
+        );
+    }
+
+    /// THE REFUSAL IS VISIBLE, WHICH IS THE HALF THAT MAKES IT NOT A FALLBACK.
+    ///
+    /// `CLAUDE.md` §4 bans a fallback that hides a failure. Dropping the outcome
+    /// would be one if the drop were silent — so the property that matters is
+    /// that a refused bar produces a SMALLER `n`, which `Edge::mismatched`
+    /// already reports and which the old zero-price path did not: it kept `n`
+    /// identical and moved the mean by 140x.
+    #[test]
+    fn a_refused_bar_shrinks_the_sample_rather_than_moving_the_mean() {
+        let minute = |m: i64| (m + 555 - 330) * 60 * 1_000_000;
+        let ok = |m: i64, close: i64| {
+            Candle::new(
+                minute(m),
+                close,
+                close.saturating_add(50),
+                close.saturating_sub(50),
+                close,
+                100,
+                OI_NULL,
+            )
+        };
+        let bad = |m: i64| {
+            Candle::new(
+                minute(m),
+                2_600_000,
+                2_600_050,
+                2_599_950,
+                9_999_999,
+                100,
+                OI_NULL,
+            )
+        };
+
+        let clean: Vec<Candle> = (0..6).map(|m| ok(m, 2_600_000 + m * 100)).collect();
+        let mut dirty = clean.clone();
+        if let Some(slot) = dirty.get_mut(3) {
+            *slot = bad(3);
+        }
+
+        let h = Horizon::bars(1).expect("a non-zero horizon");
+        let measured = |bs: &[Candle]| {
+            let f = forward(bs, h);
+            (0..bs.len()).filter(|&i| f.at(i).is_some()).count()
+        };
+        let before = measured(&clean);
+        let after = measured(&dirty);
+        assert!(
+            after < before,
+            "the refusal must cost sample size -- {after} outcomes against \
+             {before}. Equal counts is exactly what the zero-price path gave, \
+             and it is what made the contamination invisible"
+        );
     }
 }
