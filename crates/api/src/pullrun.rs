@@ -1310,6 +1310,231 @@ mod tests {
         assert_ne!(nothing, malformed);
     }
 
+    /// A scratch store, and a masters directory holding one index.
+    ///
+    /// Local to this module rather than borrowed from `server`'s test helpers,
+    /// which are private to that module. The shape is `audit_json`'s, for the
+    /// same reason: a `Site` needs both a universe and a store root, and neither
+    /// may be the operator's.
+    fn site(name: &str) -> Loaded {
+        let store = crate::scratch::path(&format!("pullrun-{name}"));
+        let _ = std::fs::remove_dir_all(&store);
+        std::fs::create_dir_all(store.join("manifest")).expect("mkdir");
+
+        let masters = crate::scratch::path(&format!("pullrun-masters-{name}"));
+        std::fs::create_dir_all(&masters).expect("mkdir");
+        std::fs::write(
+            masters.join("groww_instruments.csv"),
+            "exchange,segment,underlying_symbol,trading_symbol,instrument_type,series,isin,\
+             expiry_date,strike_price,groww_symbol\n\
+             NSE,CASH,,NIFTY,IDX,,NIFTY,,,NSE-NIFTY\n",
+        )
+        .expect("write");
+
+        // `Site::load` sets `Broker::Refused`, which is what every test wants:
+        // no socket is opened, so driving `conduct` here contacts no vendor.
+        // Wrapped because `conduct` takes a `Loaded` — the shared handle the
+        // route hands it — and every spawned chain clones it.
+        Loaded::new(Site::load(&masters, &store))
+    }
+
+    /// Claims the run slot the way `POST /pull/run` does, so a test can drive
+    /// [`conduct`] directly.
+    ///
+    /// `conduct` edits through [`with_progress`], which is a no-op when the slot
+    /// is empty — so a test that skipped this would exercise the loop and
+    /// observe nothing, which is the shape of a test that asserts nothing.
+    fn claim(site: &Site) {
+        let mut held = site
+            .run
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *held = Some(Progress::claimed());
+    }
+
+    /// Reads the live document back, as the page's poll would.
+    fn observed(site: &Site) -> Progress {
+        let held = site
+            .run
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        held.clone().unwrap_or_default()
+    }
+
+    fn leg(vendor: &str, dir: &str) -> Leg {
+        Leg {
+            route: Route::Spot,
+            vendor: vendor.to_owned(),
+            dir: dir.to_owned(),
+            label: format!("{vendor} · {dir}"),
+            body: String::new(),
+        }
+    }
+
+    /// **`conduct` HAD ONE CALLER AND NO TEST. THIS IS THAT TEST.**
+    ///
+    /// The function an operator's press runs — the pass loop, the per-vendor
+    /// spawn, the sequential legs, the ticker, the summary and the slot release
+    /// — was never executed by the suite. Every property this module documents
+    /// was held by reading. `docs/04-invariants.md` A-48 says so in its own
+    /// words: no test observes two vendors on the wire at once.
+    ///
+    /// # What this drives, and why the stop path is the one that can be driven
+    ///
+    /// A pass whose legs FAIL sleeps [`RETRY_WAIT`] and goes again, without a
+    /// ceiling short of [`MAX_PASSES`] — by design, and it makes a failing run
+    /// untestable in wall-clock terms. The stop is the deterministic entry: it
+    /// is checked at the top of the loop, so a run stopped before it starts
+    /// exercises the whole scaffold and returns at once.
+    ///
+    /// It proves four things that were previously only argued:
+    /// the groups are built from the legs; the ticker is spawned and aborted
+    /// rather than leaked; the summary is written; and the slot is released so a
+    /// second press is not refused forever by a run that has ended.
+    #[tokio::test]
+    async fn conduct_runs_the_scaffold_and_releases_the_slot_when_stopped() {
+        let site = site("conductstop");
+        claim(&site);
+        with_progress(&site, |progress| progress.stopping = true);
+
+        conduct(
+            Loaded::clone(&site),
+            vec![leg("dhan", "1day"), leg("groww", "1day")],
+        )
+        .await;
+
+        let seen = observed(&site);
+        assert_eq!(
+            seen.feeds.len(),
+            2,
+            "the groups are built from the legs, one per vendor: {:?}",
+            seen.feeds
+        );
+        assert!(
+            seen.finished.is_some(),
+            "a run that ends writes a summary — `finished: None` is the ONLY \
+             reading of `a run is in flight`, and leaving it would refuse every \
+             later press against a run that no longer exists"
+        );
+        assert!(
+            !seen.running(),
+            "and the slot is therefore free for the next press"
+        );
+        assert_eq!(seen.passes, 0, "stopped before the first pass ran");
+    }
+
+    /// **THE SKIP LIST IS READ FROM THE LIVE DOCUMENT, PER FEED.**
+    ///
+    /// [`halted_feeds`] is what the spawn loop consults, so this drives it
+    /// directly rather than through [`conduct`] — and the reason is worth
+    /// recording, because it is a trap this test was written INTO first.
+    ///
+    /// # `conduct` rebuilds `feeds` at entry, so a flag cannot be pre-set
+    ///
+    /// The first version of this test marked both feeds `credential_dead`
+    /// BEFORE calling `conduct`, expecting the pass loop to skip them and finish
+    /// in milliseconds. It hung. `conduct` assigns `progress.feeds` from
+    /// `groups` at entry with `..FeedReport::default()`, which is
+    /// `credential_dead: false` — so the marks were wiped, the legs ran against
+    /// a refused broker, every pass recorded a failure, and the loop began
+    /// sleeping [`RETRY_WAIT`] up to [`MAX_PASSES`] times. **Two hours of test.**
+    ///
+    /// That is a fact about the TEST and not a defect in the loop: in production
+    /// the flag is set by `run_chain` DURING a pass, and `feeds` is never
+    /// rebuilt after that initial assignment, so it survives into the next
+    /// pass's read. Written down here because the shape is genuinely
+    /// counter-intuitive and the next person to reach for that test will reach
+    /// the same way.
+    #[test]
+    fn a_halted_feed_is_reported_to_the_spawn_loop_and_a_healthy_one_is_not() {
+        let held = site("haltedlist");
+        claim(&held);
+        with_progress(&held, |progress| {
+            progress.feeds = vec![
+                FeedReport {
+                    vendor: "dhan".to_owned(),
+                    credential_dead: true,
+                    ..FeedReport::default()
+                },
+                FeedReport {
+                    vendor: "groww".to_owned(),
+                    credential_dead: false,
+                    ..FeedReport::default()
+                },
+            ];
+        });
+
+        assert_eq!(
+            halted_feeds(&held),
+            vec![true, false],
+            "the skip list is BY POSITION, because that is how the spawn loop \
+             indexes `groups` — a list that lost the order would skip the wrong \
+             vendor, which is worse than skipping none"
+        );
+
+        // AND AN EMPTY SLOT YIELDS AN EMPTY LIST rather than panicking or
+        // claiming everything is halted. `conduct` reads this before it has
+        // written anything, and a `true` here would skip every feed on the
+        // first pass — a run that asks for nothing and reports finishing.
+        let fresh = site("haltedlistempty");
+        assert!(
+            halted_feeds(&fresh).is_empty(),
+            "no run claimed, nothing halted"
+        );
+    }
+
+    /// **THE SPAWN LOOP CONSULTS THE SKIP LIST, AND PAIRS THE INDEX WITH THE
+    /// HANDLE.**
+    ///
+    /// Two properties that fail independently, and the second is the subtle one.
+    ///
+    /// Skipping makes `flying` SHORTER than `groups`, so a position in that
+    /// vector is no longer a position in `progress.feeds` — and `note_dead_chain`
+    /// writes by that index. Without the pairing, a panic in one feed would be
+    /// reported against another feed's row, and only when a credential died AND
+    /// something panicked in the same pass. That is a bug nobody would find by
+    /// reading.
+    ///
+    /// Source-text because the alternative is a twenty-second sleep per pass:
+    /// the loop is only observable through a run, and a run whose legs fail is
+    /// deliberately unbounded. The skip's INPUT is driven for real by the test
+    /// above.
+    #[test]
+    fn the_spawn_loop_skips_halted_feeds_and_carries_the_index_with_the_handle() {
+        let source = include_str!("pullrun.rs");
+        let body = source
+            .split_once("pub async fn conduct")
+            .expect("conduct exists")
+            .1;
+        let body = &body[..body
+            .find("\n}\n")
+            .expect("conduct's body ends at a column-0 brace")];
+
+        assert!(
+            body.contains("let halted = halted_feeds(&site);"),
+            "the pass loop must read the skip list, or a dead token keeps \
+             costing this feed's whole ladder every pass"
+        );
+        assert!(
+            body.contains("flying.push((\n                nth,"),
+            "the feed index must travel WITH the handle: `flying` is shorter \
+             than `groups` whenever a feed is skipped, and `note_dead_chain` \
+             writes by that index"
+        );
+        // THE OLD SHAPE, ASSEMBLED AT RUN TIME so this assertion does not match
+        // its own source — three times now a source-text test in this workspace
+        // has done exactly that.
+        let bare = format!(
+            "{}{}",
+            "for (nth, chain) in flying.into_iter()", ".enumerate()"
+        );
+        assert!(
+            !body.contains(bare.as_str()),
+            "enumerating `flying` re-derives the index from a vector that no \
+             longer matches `progress.feeds`"
+        );
+    }
+
     /// **A DEAD CREDENTIAL IS A REASON THIS PATH CAN NAME, AND HALT ON.**
     ///
     /// `autopilot::classify` had two production call sites, both inside

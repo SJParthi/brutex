@@ -18386,3 +18386,79 @@ test would have caught it: reproducing it needs a machine under memory pressure
 with several months in flight, and the suite runs one month at a time on an idle
 heap. **The defect was in the reasoning, not in a line** — the commit enumerated
 what a month owns and did not think to ask what a month *reads*.
+
+### D-0235 — the function an operator presses had one caller and no test
+
+The operator, 2026-08-21, after thirteen fixes: *"still I don't have confidence
+dude"*. He was right, and this entry is why.
+
+**`conduct` had ONE caller — the route — and ZERO tests.** So did `run_chain`.
+The pass loop, the per-vendor spawn, the sequential legs, the retry ladder, the
+ticker, the summary and the slot release had never been executed by the suite.
+Every property `pullrun`'s own header states was held **by reading**.
+`docs/04-invariants.md` A-48 already said as much in its own words: no test
+observes two vendors on the wire at once. The part an operator actually touches
+was the least verified part of the build, and no amount of describing it was
+going to change that.
+
+**What is drivable, and what is not.** A pass whose legs FAIL sleeps
+[`RETRY_WAIT`] and goes again without a ceiling short of `MAX_PASSES` — by
+design, and it makes a failing run untestable in wall-clock terms. The stop is
+the deterministic entry: checked at the top of the loop, so a run stopped before
+it starts exercises the whole scaffold and returns at once.
+`conduct_runs_the_scaffold_and_releases_the_slot_when_stopped` proves four things
+previously only argued — the groups are built from the legs, the summary is
+written, the slot is released so a later press is not refused forever by a run
+that has ended, and no pass ran.
+
+**The test that hung, and what it taught.** The first version of the halt test
+marked both feeds `credential_dead` BEFORE calling `conduct`, expecting the pass
+loop to skip them and finish in milliseconds. **It ran for over sixty seconds
+before it was killed.** `conduct` assigns `progress.feeds` from `groups` at entry
+with `..FeedReport::default()`, which is `credential_dead: false` — so the marks
+were wiped, the legs ran against a refused broker, every pass recorded a failure,
+and the loop began sleeping `RETRY_WAIT` up to `MAX_PASSES` times. **Two hours of
+test**, and it would have wedged CI rather than failed it.
+
+That is a fact about the TEST, not a defect in the loop: in production the flag is
+set by `run_chain` DURING a pass, and `feeds` is never rebuilt after that initial
+assignment, so it survives into the next pass's read. **The trap is written into
+the replacement test's own header**, because the shape is genuinely
+counter-intuitive and the next person will reach for it the same way.
+
+The replacement drives `halted_feeds` directly — the skip list is BY POSITION,
+because that is how the spawn loop indexes `groups`, and a list that lost the
+order would skip the wrong vendor, which is worse than skipping none. It also
+asserts an unclaimed slot yields an EMPTY list rather than `true`s: `conduct`
+reads it before it has written anything, and a `true` there would skip every feed
+on the first pass — a run that asks for nothing and reports finishing.
+
+**And a source-text test holds the pairing**, which is the subtle half. Skipping
+makes `flying` shorter than `groups`, so a position in that vector is no longer a
+position in `progress.feeds` — and `note_dead_chain` writes by that index.
+Without the pairing a panic in one feed would be reported against another feed's
+row, and **only when a credential died AND something panicked in the same pass**.
+That is a bug nobody finds by reading.
+
+**Also closed: `/audit.json` never emitted the record `kind`.** `audit::Record`
+has carried one since D-0073 split a failed member into its own fixed-stride
+record — a run, then one more record per member that did not land. The Rust page
+renders the distinction; the JSON emitted forty-four keys and not that one, so the
+SvelteKit `/audit` page — the only audit surface the nav links — could not tell
+them apart. A run refusing N members writes 1 + N records, and a reader treating
+all of them as runs counts the failures **twice** and then reports
+`reasonsLost = N - 1` when nothing was lost. `Kind::label` already existed for the
+Rust page and had no second caller; now it has one.
+
+**Measured while here, and it holds:** both dashboard readers are bounded by the
+PAGE and not by the history. `/audit.json` takes the record count from the file
+length divided by the stride, computes the page start by arithmetic, and issues
+one `seek` — at most `MAX_PAGE_RECORDS` × `RECORD_LEN` = 51,200 bytes per
+request, whatever the journal holds. `telemetry::tail` walks newest-first with one
+seek per block, capped three ways at once. A monitoring surface that slows as the
+store grows is one that stops being opened; neither of these does.
+
+**Still untested, and named rather than left:** the multi-pass path itself — two
+vendors on the wire at once, a leg failing and being re-asked, a pass gaining bars
+and going again. Each needs a vendor that answers, which means a stub server this
+crate does not yet have. A-48 stays open.

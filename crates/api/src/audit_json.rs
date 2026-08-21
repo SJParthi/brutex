@@ -350,8 +350,27 @@ fn run(entry: &audit::Entry, out: &mut String) {
         Ok(ref r) => {
             let _ = write!(
                 out,
-                r#"{{"ordinal":{},"fault":null,"at":{},"took_micros":{},"scope":{},"outcome":{},"loud":{},"members":{},"rows_read":{},"bars_stored":{},"rows_folded":{},"counted":{},"failures":{},"window":{},"source":{},"source_bytes":{},"note":{},"note_bytes":{},"drops":["#,
+                // `kind` IS FIRST AMONG THE RECORD'S OWN FIELDS, AND IT WAS
+                // ABSENT ENTIRELY.
+                //
+                // `audit::Record` has carried a `kind` since D-0073 split a
+                // failed member into its own fixed-stride record: a run, and
+                // then one more record per member that did not land. The Rust
+                // page renders that distinction; **this JSON never emitted it**,
+                // so the SvelteKit `/audit` page — the only audit surface the
+                // nav links to — could not tell the two apart.
+                //
+                // What that cost, arithmetically: a run that refused N members
+                // writes 1 + N records, and a reader treating all of them as
+                // runs counts the N failures twice — once on the run's own
+                // `failures` field and once per member record — then reports
+                // `reasonsLost = N - 1` when nothing was lost at all.
+                //
+                // `Kind::label` already existed for the Rust page and had no
+                // second caller. This is that caller.
+                r#"{{"ordinal":{},"fault":null,"kind":{},"at":{},"took_micros":{},"scope":{},"outcome":{},"loud":{},"members":{},"rows_read":{},"bars_stored":{},"rows_folded":{},"counted":{},"failures":{},"window":{},"source":{},"source_bytes":{},"note":{},"note_bytes":{},"drops":["#,
                 entry.ordinal,
+                render::json_string(r.kind.label()),
                 r.at_unix_secs,
                 r.elapsed_micros,
                 render::json_string(r.scope.label()),
