@@ -85,9 +85,32 @@ pub struct Cell {
     /// Index into the trailing ladder, or `None` for **no trailing stop**.
     ///
     /// A trailing stop follows the best price seen and fires on the give-back.
-    /// TRAILING TAKE PROFIT is this armed by a target: reach the target rung,
-    /// then trail -- so it is a combination of two rungs rather than a third
-    /// mechanism, and it appears in this table as such.
+    ///
+    /// # TRAILING TAKE PROFIT IS NOT IMPLEMENTED, AND THIS COMMENT USED TO SAY
+    /// IT WAS
+    ///
+    /// It read: *"TRAILING TAKE PROFIT is this armed by a target: reach the
+    /// target rung, then trail — so it is a combination of two rungs rather
+    /// than a third mechanism, and it appears in this table as such."*
+    ///
+    /// **No arming exists anywhere in this crate.** `one_variant` resolves the
+    /// exit as `span.min(stop_at).min(target_at).min(trail_at)` — the three
+    /// COMPETE, and the target *exits* the position rather than arming
+    /// anything. A grep for `arm` across this file and `crate::excursion`
+    /// returned exactly one hit: the sentence above.
+    ///
+    /// # And the cells it describes are close to degenerate
+    ///
+    /// Worth stating because it costs real grid width. A trail fires on a
+    /// give-back from the running peak; a target needs the full move. So in any
+    /// cell where both are set the trail almost always fires first and the
+    /// target is nearly inert — which means the 25 of 125 cells carrying both
+    /// are measuring approximately what the trail-only cells measure.
+    ///
+    /// Implementing the arming semantics would make those cells mean something
+    /// distinct, and would CHANGE the result of every audit that has a
+    /// target-and-trail winner. That is a decision for `docs/05-decisions.md`,
+    /// not a comment, so the honest statement stands here until one is written.
     pub trail: Option<usize>,
     /// Round trips taken under this variant.
     pub trades: u64,
