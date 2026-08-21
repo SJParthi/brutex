@@ -80,7 +80,7 @@ use vocab::ConditionMask;
 /// The last twenty bars of every session are the ones this changes: at 15:10 a
 /// position is closed, so 15:10 onward cannot be an ENTRY, and any entry between
 /// 14:55 and 15:10 exits early at 15:10 rather than running its full horizon.
-const AUTO_CLOSE_MINUTE: i64 = 15 * 60 + 10;
+pub const AUTO_CLOSE_MINUTE: i64 = 15 * 60 + 10;
 
 /// The last bar whose interval ENDS at or before the square-off: the one
 /// stamped 15:09.

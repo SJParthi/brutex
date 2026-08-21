@@ -495,10 +495,22 @@ fn is_window_end(stamps: &[(i64, i64)], j: usize) -> bool {
 ///
 /// A bar is stamped at its OPEN, so the bar stamped 15:09 covers 15:09–15:10 and
 /// its close IS the 15:10 price. The bar stamped 15:10 closes at 15:11, a minute
-/// after the position is already gone. The same constant, and the same reason,
-/// as [`crate::outcome`] — measured at a 36% error on fourteen observations per
-/// session when it was wrong.
-const LAST_FILL_MINUTE: i64 = 15 * 60 + 10 - 1;
+/// after the position is already gone — measured at a 36% error on fourteen
+/// observations per session when it was wrong.
+///
+/// # Derived, because "the same constant" was a copy
+///
+/// This read `15 * 60 + 10 - 1` and its own doc said *"the same constant, and
+/// the same reason, as `crate::outcome`"*. It was not the same constant. It was
+/// a second, independent spelling of it, and the sentence claiming otherwise is
+/// what would have made the divergence hard to see.
+///
+/// **This repository trades intraday only and squares off at 15:10.** That is
+/// one rule, so it gets one definition: change
+/// [`crate::outcome::AUTO_CLOSE_MINUTE`] and both the entry cut-off and the fill
+/// boundary move together. Two copies of a policy constant is how one of them
+/// gets updated.
+const LAST_FILL_MINUTE: i64 = crate::outcome::AUTO_CLOSE_MINUTE - 1;
 
 /// Minute of the IST day, `0..1440`.
 const fn minute_of_day(ts_micros: i64) -> i64 {
@@ -514,8 +526,51 @@ const fn minute_of_day(ts_micros: i64) -> i64 {
     reason = "the exception every test module in this workspace takes."
 )]
 mod tests {
-    use super::{Trades, walk};
-    use crate::outcome::Horizon;
+    use super::{LAST_FILL_MINUTE, Trades, walk};
+    use crate::outcome::{AUTO_CLOSE_MINUTE, Horizon};
+
+    /// THE SQUARE-OFF HAS ONE DEFINITION, AND THIS IS WHAT KEEPS IT THAT WAY.
+    ///
+    /// # The shape of the defect this replaces
+    ///
+    /// `trade` and `outcome` each held a `LAST_FILL_MINUTE`. `outcome` derived
+    /// its own from `AUTO_CLOSE_MINUTE`; `trade` re-spelled `15 * 60 + 10 - 1`
+    /// and carried a doc comment asserting *"the same constant … as
+    /// `crate::outcome`"*. They agreed, so nothing failed — and the sentence
+    /// claiming they were one constant is exactly what would have stopped anyone
+    /// noticing when they stopped agreeing.
+    ///
+    /// This repository trades **intraday only** and squares off at 15:10. That
+    /// is a policy, and a policy with two spellings is a policy that gets half
+    /// updated.
+    ///
+    /// # Why the assertion is a relation, not a value
+    ///
+    /// Asserting `LAST_FILL_MINUTE == 909` would pin today's number and pass
+    /// happily if someone moved the square-off and left the fill boundary
+    /// behind — the very drift this exists to catch. Asserting the RELATION
+    /// holds at any square-off time.
+    #[test]
+    fn the_fill_boundary_is_derived_from_the_square_off_and_not_re_spelled() {
+        assert_eq!(
+            LAST_FILL_MINUTE,
+            AUTO_CLOSE_MINUTE - 1,
+            "the last fillable bar is the one whose interval ENDS at the \
+             square-off. A bar is stamped at its open, so the bar stamped 15:09 \
+             covers 15:09-15:10 and its close IS the 15:10 price; the bar \
+             stamped 15:10 closes at 15:11, a minute after the position is gone."
+        );
+
+        // AND THE POLICY ITSELF, stated once so a reader of this test learns the
+        // rule rather than only the arithmetic. 15:10 IST = minute 910.
+        assert_eq!(
+            AUTO_CLOSE_MINUTE,
+            15 * 60 + 10,
+            "every position is force-closed at 15:10 IST — this engine is \
+             intraday only and holds nothing overnight"
+        );
+    }
+
     use costs::fill::Direction;
     use indicators::column::Column;
     use indicators::evaluator::{Evaluator, Widths};
