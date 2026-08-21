@@ -58,6 +58,63 @@ use crate::fno::{self, Ask, FnoError, Found};
 use crate::session::Window;
 use crate::vendor::{Feed, Granularity, HttpSpec, Listing, Transport};
 
+/// Why one discovery GET did not answer, with the vendor's status INTACT.
+///
+/// # Why this is a type and not the `String` it replaced
+///
+/// Because a caller has to be able to tell a 429 from a 401 without reading
+/// English. [`Discovery::get`] answered `Result<String, String>`, and the one
+/// production implementor rendered every refusal as `"the vendor answered
+/// {status}"` — so the number was on the wire, in the message, and unreachable
+/// to any policy that did not want to parse a sentence.
+///
+/// `crates/api`'s retry ladder already refuses to do that, in its own words:
+/// *"a formatter and a policy coupled through a string, with nothing testing
+/// them together"*. The bars path was given a structured status for exactly
+/// that reason — `FetchError::VendorRefused` carries `status: u16` — and the
+/// discovery path was left behind, which is why it had **no retry at all**
+/// while the identical event on a bars chunk was re-asked.
+///
+/// [`Self::status`] is `None` when nothing was answered — a dropped socket, a
+/// DNS failure, a timeout. That is a different fact from "answered 500", and
+/// collapsing them is what makes a blip look like a broken backend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refusal {
+    /// The HTTP status the vendor answered, or `None` if it answered nothing.
+    pub status: Option<u16>,
+    /// Why, in the host's own words, unparaphrased.
+    pub detail: String,
+}
+
+impl Refusal {
+    /// A refusal that never reached a status — a dropped socket, a timeout.
+    #[must_use]
+    pub const fn transport(detail: String) -> Self {
+        Self {
+            status: None,
+            detail,
+        }
+    }
+
+    /// A refusal the vendor answered, carrying the number it answered with.
+    #[must_use]
+    pub const fn answered(status: u16, detail: String) -> Self {
+        Self {
+            status: Some(status),
+            detail,
+        }
+    }
+}
+
+impl core::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // THE DETAIL ALONE, because it already contains the status where there
+        // is one — the implementor writes "the vendor answered 429 Too Many
+        // Requests". Printing the number twice would read as two events.
+        f.write_str(&self.detail)
+    }
+}
+
 /// Where a discovery answer comes from.
 ///
 /// One method, because a discovery request is one GET whose body is JSON. The
@@ -75,8 +132,11 @@ pub trait Discovery {
     ///
     /// # Errors
     ///
-    /// Whatever the transport refuses, in the host's own words.
-    fn get(&self, url: &str) -> impl core::future::Future<Output = Result<String, String>>;
+    /// [`Refusal`], carrying the vendor's status where there was one. It is a
+    /// type rather than a sentence so a retry policy can read the number
+    /// instead of searching prose for it — see [`Refusal`] for the defect that
+    /// shape was hiding.
+    fn get(&self, url: &str) -> impl core::future::Future<Output = Result<String, Refusal>>;
 }
 
 /// Why a chain could not be walked.
@@ -192,7 +252,7 @@ pub async fn month<D: Discovery>(feed: Feed, ask: &Ask, from: &D) -> Result<Chai
     let url = fno::expiries_url(&spec, ask).map_err(ChainError::Lookup)?;
     let body = from.get(&url).await.map_err(|why| ChainError::Transport {
         url: url.clone(),
-        why,
+        why: why.to_string(),
     })?;
     let expiries = fno::names(&body, field).map_err(ChainError::Lookup)?;
 
@@ -214,7 +274,7 @@ pub async fn month<D: Discovery>(feed: Feed, ask: &Ask, from: &D) -> Result<Chai
         let url = fno::contracts_url(&spec, &keyed).map_err(ChainError::Lookup)?;
         let body = from.get(&url).await.map_err(|why| ChainError::Transport {
             url: url.clone(),
-            why,
+            why: why.to_string(),
         })?;
         // THE DATE THIS BATCH IS KEYED ON, DECODED ONCE PER EXPIRY.
         //
@@ -306,10 +366,13 @@ mod tests {
     }
 
     impl Discovery for Canned {
-        async fn get(&self, _url: &str) -> Result<String, String> {
+        async fn get(&self, _url: &str) -> Result<String, Refusal> {
             let mut left = self.answers.borrow_mut();
             if left.is_empty() {
-                return Err("no answer left".to_owned());
+                // NO STATUS, because nothing answered — the double is standing
+                // in for a socket that gave nothing, not for a vendor that
+                // refused. `Refusal::transport` is the arm that says so.
+                return Err(Refusal::transport("no answer left".to_owned()));
             }
             Ok(left.remove(0))
         }
@@ -414,11 +477,11 @@ mod tests {
             answers: std::cell::RefCell<Vec<String>>,
         }
         impl Discovery for Recording {
-            async fn get(&self, url: &str) -> Result<String, String> {
+            async fn get(&self, url: &str) -> Result<String, Refusal> {
                 self.seen.borrow_mut().push(url.to_owned());
                 let mut left = self.answers.borrow_mut();
                 if left.is_empty() {
-                    return Err("no answer left".to_owned());
+                    return Err(Refusal::transport("no answer left".to_owned()));
                 }
                 Ok(left.remove(0))
             }

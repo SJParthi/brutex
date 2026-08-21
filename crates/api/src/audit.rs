@@ -608,6 +608,63 @@ impl Record {
         self
     }
 
+    /// What a run actually moved, for a path that has counts but no [`Ingested`].
+    ///
+    /// # The zeroes this exists to remove
+    ///
+    /// [`Record::refused`] hardcodes `members`, `rows_read`, `bars_stored`,
+    /// `rows_folded`, `counted` and `failures` to zero, which is right for the
+    /// thing it is named after — a run that never ran stored nothing. **The
+    /// expired-derivative route stamps every one of its outcomes through it,
+    /// including its successes**, because [`Record::of_run`] takes an
+    /// [`Ingested`] and that path does not build one: it lands contract by
+    /// contract and keeps its own tallies.
+    ///
+    /// The measured consequence, from the operator's own journal on 2026-08-20:
+    /// two records whose note reads *"every discovered contract fetched and
+    /// filed"* and whose `bars_stored` is `0` — not because nothing landed, but
+    /// because no code path could ever write anything else there. Every numeric
+    /// field of the F&O surface was structurally zero, so `/audit.json`, the
+    /// audit page and any ladder reading the journal could not distinguish a
+    /// working expired-derivative pull from a broken one.
+    ///
+    /// That is the shape `CLAUDE.md` §4 bans read backwards: not a failure
+    /// wearing a success's clothes, but a success with no clothes at all — and
+    /// it is worse, because the operator's only recourse was to count files on
+    /// disk by hand.
+    ///
+    /// # Why a builder and not a second constructor
+    ///
+    /// Because the outcome, the note and the window are decided identically on
+    /// every arm of that route and only the counts differ. A second constructor
+    /// would duplicate the five fields that do not vary, and the copy that
+    /// drifts is the one nobody remembers exists — the same argument
+    /// [`with_window`] settles one method up.
+    ///
+    /// `rows_folded` and `counted` stay zero deliberately: the F&O path folds
+    /// nothing into an open bar and does not re-count the census per contract,
+    /// so writing a number there would be an invention rather than a
+    /// measurement. `CLAUDE.md` §3 rule 6.
+    ///
+    /// # Cost
+    ///
+    /// Four field assignments. The record's stride is unchanged — these are
+    /// fields the format has always had and this path has never filled.
+    #[must_use]
+    pub const fn with_counts(
+        mut self,
+        members: u64,
+        rows_read: u64,
+        bars_stored: u64,
+        failures: u64,
+    ) -> Self {
+        self.members = members;
+        self.rows_read = rows_read;
+        self.bars_stored = bars_stored;
+        self.failures = failures;
+        self
+    }
+
     /// A record of a run that ran.
     ///
     /// Every figure comes off [`Ingested`] rather than being recomputed here: a

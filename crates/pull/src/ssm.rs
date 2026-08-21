@@ -131,6 +131,58 @@ pub const CREDENTIAL_TIMEOUT_SECS: u64 = 10;
 /// An edit that inverts the two fails the build.
 const _: () = assert!(CREDENTIAL_TIMEOUT_SECS < crate::http::REQUEST_TIMEOUT_SECS);
 
+/// ONE HTTPS CLIENT FOR EVERY PARAMETER READ THIS PROCESS EVER MAKES.
+///
+/// # The handshake storm this removes
+///
+/// [`get_parameter`] built a `reqwest::Client` of its own on **every call**, and
+/// the call is per instrument: `api::server::broker_run` loops its target list
+/// and each iteration reaches `read_credential`, which reads one parameter per
+/// secret the feed's scheme names. A 785-instrument leg therefore built 785
+/// clients — 1,570 for a two-secret vendor — and **a client owns its connection
+/// pool**, so not one of those TLS sessions could ever be reused by the next.
+/// Every credential read paid a full TCP and TLS handshake to `ap-south-1`.
+///
+/// A `reqwest::Client` is a handle around a shared inner state: cloning it is
+/// cheap and every clone shares one pool. So the fix is not to thread a client
+/// through six call sites — it is to stop making new ones.
+///
+/// # Why a `OnceLock` and not a field
+///
+/// Because the configuration has no inputs. Every one of those 785 clients was
+/// built from the same two constants — this module's timeout and the same
+/// redirect policy — so they were not 785 different clients, they were 785
+/// copies of one. A field would need an owner, and the owner would be `Site`,
+/// which would put an HTTP client in `crates/api`'s state for a call that
+/// belongs to this module.
+///
+/// The `Result` is stored rather than the `Client`, so a build failure is
+/// reported to the caller that provoked it instead of panicking a `Once`. It is
+/// a deployment fault — the TLS backend is unavailable — and it cannot become
+/// true later, so caching it costs nothing and re-attempting would only produce
+/// the same message once per instrument.
+///
+/// # Cost
+///
+/// One build per process; one `Arc` clone per call thereafter. O(1) either way,
+/// and the constant drops from a TLS handshake to a pointer copy.
+fn pooled_client() -> Result<reqwest::Client, String> {
+    static POOL: std::sync::OnceLock<Result<reqwest::Client, String>> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        crate::ensure_tls_provider();
+        reqwest::Client::builder()
+            .timeout(core::time::Duration::from_secs(CREDENTIAL_TIMEOUT_SECS))
+            // REDIRECTS ARE NOT FOLLOWED HERE EITHER, for the reason D-0050
+            // gives about the broker: a signature is scoped to a host, and a
+            // client that chases a `Location` would carry an `Authorization`
+            // header to a host the signature was never computed for.
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|why| format!("{why}"))
+    })
+    .clone()
+}
+
 /// The AWS identity a request is signed with.
 ///
 /// **Not the broker credential.** This is the operator's own AWS key, the thing
@@ -657,18 +709,9 @@ pub async fn get_parameter(
     };
     let authorization = signable.authorization(identity)?;
 
-    crate::ensure_tls_provider();
-    let client = reqwest::Client::builder()
-        .timeout(core::time::Duration::from_secs(CREDENTIAL_TIMEOUT_SECS))
-        // REDIRECTS ARE NOT FOLLOWED HERE EITHER, for the reason D-0050 gives
-        // about the broker: a signature is scoped to a host, and a client that
-        // chases a `Location` would carry an `Authorization` header to a host
-        // the signature was never computed for.
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|why| {
-            SsmError::unreachable(format!("the HTTPS client could not be built: {why}"))
-        })?;
+    let client = pooled_client().map_err(|why| {
+        SsmError::unreachable(format!("the HTTPS client could not be built: {why}"))
+    })?;
 
     let mut request = client
         .post(format!("https://{host}/"))

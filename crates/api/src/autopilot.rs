@@ -2947,10 +2947,58 @@ async fn tick(
         // target. It backfills a set rather than a selection, and an empty set
         // is that request rather than a narrowing of it.
         members: std::collections::HashSet::new(),
-        // SWEPT, AND IT MEANS ALL OF THEM. `broker_run` iterates
-        // `catalog::tracked`; `broker_window` refuses any other target
-        // outright. Anything else here fetches nothing at all.
-        target: ingest::SpotTarget::Swept,
+        // EVERYTHING, AND IT IS THE SAME PREDICATE THE COMPLETION PROBE USES.
+        //
+        // # The arithmetic that could never close
+        //
+        // This read `SpotTarget::Swept` under a comment saying *"SWEPT, AND IT
+        // MEANS ALL OF THEM"*. **That sentence was false.**
+        // `SpotTarget::names` resolves `Swept` to `InstrumentKey::is_sweepable`,
+        // which is a TWO-ROW table — `NSE-NIFTY` and `NSE-BANKNIFTY` — while
+        // [`tracked_series`] and the completion probe both walk
+        // `catalog::tracked`, the union of `INDEX` and `TOTAL_MARKET` at roughly
+        // 765 rows.
+        //
+        // So the tick fetched two series and was then graded against 765. Every
+        // month reported ~763 still short **forever**, `Settled::Complete` was
+        // arithmetically unreachable, and each month was retired not by being
+        // finished but by `DRY_ROUNDS` or by burning `MAX_MONTH_ATTEMPTS` into
+        // `Next::Stall`. The frontier then walked the calendar in stall mode.
+        // That is the whole of "the backfill runs and never finishes", and no
+        // amount of retrying could have closed it — the two numbers were
+        // measuring different sets.
+        //
+        // # Why THIS side moved, and not the other
+        //
+        // Narrowing `tracked_series` to the swept pair would also have made the
+        // two agree, and it would have made the autopilot permanently unable to
+        // satisfy `docs/07-plan.md` R-1: *"Spot, every instrument, bounded at
+        // ~800 — 750 NIFTY Total Market + ~35 NSE indices"*. The requirement is
+        // the wider set, so the ASK is what was wrong.
+        //
+        // `SpotTarget::Everything` is not a fourth spelling of the universe: its
+        // `names` arm is literally `catalog::tracked(universe)`, borrowed rather
+        // than copied for exactly this reason. `broker_run` filters on
+        // `tracked(..) && names(..)`, so for this target the second predicate is
+        // idempotent and the run list is provably the list the probe grades.
+        //
+        // # This does NOT widen the sweep, and cannot
+        //
+        // `CLAUDE.md` §1 fixes the swept surface at two instruments. This target
+        // decides what is **stored**, which §1 explicitly permits to be wider —
+        // it is the same distinction `SpotTarget::Indices` and `::Equities` have
+        // always had. `InstrumentKey::SWEPT` is untouched, so nothing here
+        // reaches the condition vocabulary, the ranking or a run identity.
+        //
+        // # What it costs, stated rather than discovered
+        //
+        // A tick now asks for ~765 instruments instead of 2. That is the
+        // backfill R-1 describes and the request count `docs/07-plan.md` §4
+        // already works out — it is not a surprise this line introduces, it is
+        // the work this line stops silently skipping. The governor bounds the
+        // rate, `Broker::Refused` bounds whether a socket opens at all, and the
+        // pause flag is checked per instrument rather than per month.
+        target: ingest::SpotTarget::Everything,
         window: unit.window,
         feed: state.feed,
         granularity,
@@ -3494,6 +3542,71 @@ mod tests {
     use brutex_core::instrument::{Exchange, Segment};
     use brutex_core::symbol::Symbol;
     use std::collections::HashMap;
+
+    /// **THE TICK ASKS FOR EXACTLY WHAT THE COMPLETION PROBE GRADES.**
+    ///
+    /// The blocker this pins, and it is arithmetic rather than a race: the tick
+    /// asked `SpotTarget::Swept`, which `names` resolves to
+    /// `InstrumentKey::is_sweepable` — a **two-row** table — while
+    /// [`tracked_series`] and the completion probe both walk `catalog::tracked`,
+    /// roughly **765** rows. Two series were fetched and 765 were graded, so
+    /// every month reported ~763 still short *forever*, `Settled::Complete` was
+    /// unreachable, and months retired by the dry-round counter or stalled out.
+    /// The frontier then walked the calendar in stall mode. That is the whole of
+    /// "the backfill runs and never finishes".
+    ///
+    /// # Why this asserts an EQUIVALENCE and not a variant name
+    ///
+    /// Asserting `target == SpotTarget::Everything` would pass the day somebody
+    /// changes what `Everything` means, which is the failure this test exists to
+    /// prevent. The property that has to hold is that the two predicates select
+    /// the same set — so it is checked as a predicate, over every universe bit
+    /// pattern that matters, including the empty one.
+    ///
+    /// `catalog::tracked` is the union `broker_run` filters by; `names` is what
+    /// narrows the run inside it. For this target the second must be idempotent
+    /// against the first, or the run list and the graded list come apart again.
+    #[test]
+    fn the_ask_and_the_completion_probe_select_the_same_set() {
+        use brutex_core::universe::Universe;
+
+        // The bit patterns a real merged master produces, plus the two edges:
+        // nothing set (a BSE listing or a derivative row), and both set.
+        for universe in [
+            Universe::NONE,
+            Universe::INDEX,
+            Universe::TOTAL_MARKET,
+            Universe::INDEX.union(Universe::TOTAL_MARKET),
+        ] {
+            // The key is irrelevant for this target — `Everything` reads the
+            // universe alone — but `names` takes one, so it gets a real one,
+            // built through the constructor rather than by hand so a new field
+            // on the type is a compile error here rather than a stale literal.
+            let key = brutex_core::instrument::InstrumentKey::index(Exchange::Nse, "NIFTY")
+                .expect("a spot index key");
+            assert_eq!(
+                ingest::SpotTarget::Everything.names(&key, universe),
+                crate::catalog::tracked(universe),
+                "the autopilot's target and the completion probe must select one \
+                 set. They came apart once — two instruments fetched, 765 graded \
+                 — and no month could ever read complete. universe: {universe:?}"
+            );
+        }
+
+        // AND THE TICK STILL USES IT. The equivalence above is worth nothing if
+        // the tick asks for something else, and the tick is async and takes a
+        // live `Site`, so the ask itself is checked where it is written.
+        let me = include_str!("autopilot.rs");
+        let tick = me.split_once("async fn tick(").expect("tick exists").1;
+        let tick = &tick[..tick
+            .find("\n}\n")
+            .expect("tick's body ends at a column-0 brace")];
+        assert!(
+            tick.contains("target: ingest::SpotTarget::Everything"),
+            "the tick must ask for the set the probe grades; `Swept` here is the \
+             two-row table that made every month unfinishable"
+        );
+    }
 
     fn day(y: u16, m: u8, d: u8) -> Day {
         Day::new(y, m, d).unwrap()

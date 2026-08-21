@@ -60,6 +60,78 @@ pub const MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 /// why, which is worse than a refusal: the operator has nothing to act on.
 pub const REQUEST_TIMEOUT_SECS: u64 = 30;
 
+/// ONE HTTPS CLIENT FOR EVERY VENDOR REQUEST THIS PROCESS EVER MAKES.
+///
+/// # The handshake storm this removes
+///
+/// [`HttpSource::new`] built a `reqwest::Client` of its own, and
+/// `api::server::broker_window` calls it **once per instrument**: a
+/// 785-instrument leg built 785 clients. **A client owns its connection pool**,
+/// so not one of those TLS sessions could be reused by the next instrument —
+/// every single one paid a full TCP and TLS handshake, and the whole point of
+/// HTTP keep-alive was unreachable from the shape of the code.
+///
+/// A `reqwest::Client` is a handle around shared inner state. Cloning it is
+/// cheap and every clone shares one pool, keyed by host — so one client serves
+/// every feed without mixing them: Groww's connections and Dhan's are different
+/// entries in the same pool, exactly as two requests to Groww are.
+///
+/// # What is per-source and what is not
+///
+/// Everything that varies by vendor stays on [`HttpSource`]: the descriptor, the
+/// assembled auth header, the governor. **Nothing about this client varies** —
+/// it was built from the same timeout and the same redirect policy every time,
+/// so those 785 clients were not 785 different clients but 785 copies of one.
+///
+/// It is deliberately NOT keyed by feed. A per-feed pool would be a second
+/// answer to "which connection serves this host", and `reqwest` already answers
+/// it correctly; keying it here would only shrink the reuse.
+///
+/// # Redirects are not followed, and the reason is the credential
+///
+/// `reqwest` follows up to ten redirects by default, and on a cross-origin hop
+/// it strips the headers it considers sensitive: `Authorization`, `Cookie`,
+/// `Proxy-Authorization`, `WWW-Authenticate`. **It has no way to know that this
+/// vendor's credential is not one of those.** Dhan's descriptor names its header
+/// `access-token` (`crate::vendor`, `AuthScheme::Raw`), a custom header like any
+/// other — so a 302 from the bars endpoint would put a live broker token on a
+/// socket to whatever host the `Location` named, and the strip list would not
+/// fire because the name is not on it. Groww's is `Authorization` and is
+/// stripped, but only cross-origin: a redirect to another path on a host that
+/// has been taken over still carries it.
+///
+/// Nothing legitimate is lost. `bars_path` is a fixed path on a fixed
+/// `base_url` in the descriptor; a broker's historical-bars endpoint answering
+/// 3xx is not a route change this build should silently chase. With
+/// `Policy::none` the 3xx comes back as a response, `is_success` is false, and
+/// `window_async` turns it into `VendorRefused` carrying the status — so the
+/// operator sees `302` and the `Location`, and decides. `CLAUDE.md` §4: degrade
+/// loudly and name the reason, never both silently.
+///
+/// # Why the `Result` is cached rather than the `Client`
+///
+/// A build failure here means the TLS backend is unavailable, which is a
+/// deployment fault and cannot become false later. Caching it reports the same
+/// honest message to every caller instead of poisoning a `Once` with a panic, and
+/// re-attempting would only rebuild the same failure once per instrument.
+///
+/// # Cost
+///
+/// One build per process; one `Arc` clone per call thereafter. O(1) either way,
+/// and the constant drops from a TLS handshake to a pointer copy.
+fn pooled_client() -> Result<reqwest::Client, String> {
+    static POOL: std::sync::OnceLock<Result<reqwest::Client, String>> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        crate::ensure_tls_provider();
+        reqwest::Client::builder()
+            .timeout(core::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|why| format!("{why}"))
+    })
+    .clone()
+}
+
 /// The secrets one feed's [`AuthScheme`] names, and nothing else.
 ///
 /// # Why a type and not two `String` arguments
@@ -332,37 +404,9 @@ impl HttpSource {
         // costs nothing to find; building a TLS client first would spend that
         // work to throw it away.
         let header_value = Self::header_value(spec.auth.scheme, credential)?;
-        crate::ensure_tls_provider();
-        let client = reqwest::Client::builder()
-            .timeout(core::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
-            // ── REDIRECTS ARE NOT FOLLOWED, AND THE REASON IS THE CREDENTIAL ──
-            //
-            // `reqwest` follows up to ten redirects by default, and on a
-            // cross-origin hop it strips the headers it considers sensitive:
-            // `Authorization`, `Cookie`, `Proxy-Authorization`,
-            // `WWW-Authenticate`. **It has no way to know that this vendor's
-            // credential is not in one of those.** Dhan's descriptor names its
-            // header `access-token` (`crate::vendor`, `AuthScheme::Raw`), which
-            // is a custom header like any other, so a 302 from the bars
-            // endpoint would put a live broker token on a socket to whatever
-            // host the `Location` named — and the strip list would not fire,
-            // because the name is not on it. Groww's is `Authorization` and is
-            // stripped, but only cross-origin: a redirect to another path on a
-            // host that has been taken over still carries it.
-            //
-            // Nothing legitimate is lost. `bars_path` is a fixed path on a
-            // fixed `base_url` in the descriptor; a broker's historical-bars
-            // endpoint answering 3xx is not a route change this build should
-            // silently chase. With `Policy::none` the 3xx comes back as a
-            // response, `is_success` is false, and `window_async` turns it into
-            // `VendorRefused` carrying the status — so the operator sees `302`
-            // and the `Location`, and decides. `CLAUDE.md` §4: degrade loudly
-            // and name the reason, never both silently.
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|why| FetchError::TransportFailed {
-                detail: format!("the HTTPS client could not be built: {why}"),
-            })?;
+        let client = pooled_client().map_err(|why| FetchError::TransportFailed {
+            detail: format!("the HTTPS client could not be built: {why}"),
+        })?;
         // THE GOVERNOR IS BUILT FROM THE DESCRIPTOR'S OWN BUDGET, so a feed
         // cannot be governed to a number nobody wrote down. A budget naming no
         // span at all yields `None` -- ungoverned by declaration rather than by
@@ -1419,27 +1463,45 @@ impl HttpSource {
     ///
     /// # Errors
     ///
-    /// The vendor's own status when it is not a success, or the transport's
-    /// message. Both as text, because the caller records them and does not
-    /// branch on them.
+    /// [`crate::chain::Refusal`], carrying the vendor's status where there was
+    /// one and `None` where nothing answered.
+    ///
+    /// **This used to say the caller "records them and does not branch on
+    /// them", and returned two `String`s.** That was true when it was written
+    /// and it is what left the rolling path with no retry: the status existed
+    /// only inside the sentence `"the vendor answered 429 Too Many Requests"`,
+    /// so a caller wanting to know whether the refusal was worth re-asking had
+    /// to search prose for a number. The bars path was given a structured status
+    /// for exactly that reason — `FetchError::VendorRefused` carries
+    /// `status: u16` — and this one was left behind.
     ///
     /// # Cost
     ///
-    /// One request, one permit. O(1).
-    pub async fn post_json(&self, url: &str, body: String) -> Result<String, String> {
+    /// One request, one permit. O(1). Unchanged — the type carries a number the
+    /// function had already computed.
+    pub async fn post_json(
+        &self,
+        url: &str,
+        body: String,
+    ) -> Result<String, crate::chain::Refusal> {
+        use crate::chain::Refusal;
+
         self.wait_for_permit().await;
         let (name, value) = self.header();
         let mut builder = self.client.post(url);
         for (header, word) in self.spec.extra_headers {
             builder = builder.header(*header, *word);
         }
+        // NOTHING ANSWERED, SO THERE IS NO STATUS TO CARRY — a dropped socket, a
+        // DNS failure or a timeout. The caller's ladder sizes a blip differently
+        // from a backend that answered 500, and only this arm can say which.
         let answer = builder
             .header(name, value)
             .header("content-type", "application/json")
             .body(body)
             .send()
             .await
-            .map_err(|why| format!("{why}"))?;
+            .map_err(|why| Refusal::transport(format!("{why}")))?;
 
         let status = answer.status();
         if let Some(lock) = self.governor.as_ref() {
@@ -1456,25 +1518,42 @@ impl HttpSource {
             // THE VENDOR'S OWN STATUS, for the reason `Discovery::get` gives
             // one line away: a 401 and a 429 mean different things to an
             // operator, and collapsing them reads a throttle as a dead token.
-            return Err(format!("the vendor answered {status}"));
+            //
+            // CARRIED AS A NUMBER BESIDE THE SENTENCE, which is what makes the
+            // rolling path's retry decidable at all.
+            return Err(Refusal::answered(
+                status.as_u16(),
+                format!("the vendor answered {status}"),
+            ));
         }
-        answer.text().await.map_err(|why| format!("{why}"))
+        // A FAILED BODY READ IS A TRANSPORT FAILURE, NOT A REFUSAL. The status
+        // was already a success; what failed is the socket delivering the rest.
+        answer
+            .text()
+            .await
+            .map_err(|why| Refusal::transport(format!("{why}")))
     }
 }
 
 impl crate::chain::Discovery for HttpSource {
-    async fn get(&self, url: &str) -> Result<String, String> {
+    async fn get(&self, url: &str) -> Result<String, crate::chain::Refusal> {
+        use crate::chain::Refusal;
+
         self.wait_for_permit().await;
         let (name, value) = self.header();
         let mut builder = self.client.get(url);
         for (header, word) in self.spec.extra_headers {
             builder = builder.header(*header, *word);
         }
+        // NOTHING ANSWERED, SO THERE IS NO STATUS TO CARRY. A refused `send` is
+        // a dropped socket, a DNS failure or a timeout, and `Refusal::transport`
+        // is the arm that says so — the caller's retry ladder sizes a blip
+        // differently from a backend that answered 500.
         let answer = builder
             .header(name, value)
             .send()
             .await
-            .map_err(|why| format!("{why}"))?;
+            .map_err(|why| Refusal::transport(format!("{why}")))?;
 
         let status = answer.status();
         if let Some(lock) = self.governor.as_ref() {
@@ -1492,9 +1571,24 @@ impl crate::chain::Discovery for HttpSource {
             // here mean different things to an operator -- one is a credential
             // and one is a pace -- and collapsing them is how a throttled sweep
             // gets read as an expired token.
-            return Err(format!("the vendor answered {status}"));
+            //
+            // AND IT IS NOW CARRIED AS A NUMBER BESIDE THE SENTENCE. The
+            // sentence was the only copy, so a caller wanting to know whether
+            // this was retryable had to search prose for `429` — which is the
+            // coupling `api::server::with_retry` refuses by name on the bars
+            // path, and the reason discovery had no retry ladder at all.
+            return Err(Refusal::answered(
+                status.as_u16(),
+                format!("the vendor answered {status}"),
+            ));
         }
-        answer.text().await.map_err(|why| format!("{why}"))
+        // THE BODY READ IS A TRANSPORT FAILURE, NOT A REFUSAL. The status was
+        // already a success; what failed is the socket delivering the rest of
+        // it, which is a blip and is ladder-eligible as one.
+        answer
+            .text()
+            .await
+            .map_err(|why| Refusal::transport(format!("{why}")))
     }
 }
 
@@ -2758,6 +2852,57 @@ mod tests {
 
     /// The descriptor's own bytes, against the vendor's published curl example.
     ///
+    /// **ZERODHA IS ASKED FOR OPEN INTEREST, AND IT HAS TO BE ASKED.**
+    ///
+    /// `Zerodha Docs/13-historical.md:65`: *"Accepts `0` or `1`. Pass `1` to get
+    /// OI (Open Interest) data."* Line 95: with `oi=1` *"each candle is a
+    /// 7-element positional array; the OI value is appended as the last
+    /// element."* Without the parameter the array is six cells and carries none.
+    ///
+    /// The request sent `from` and `to` and nothing else, so every Zerodha bar
+    /// this build could store held no open interest — the vendor was not
+    /// withholding it, nobody asked. The decoder was already ready: it reads
+    /// cell six unconditionally and falls back to `OI_NULL`.
+    ///
+    /// Asserted on the DESCRIPTOR rather than on a URL, because the query pairs
+    /// are resolved inside `window_async`, which needs a socket. The descriptor
+    /// is what decides, so the descriptor is what is pinned — and a mutation
+    /// that drops this row fails here rather than silently storing six-cell
+    /// candles for a feed that would have sent seven.
+    #[test]
+    fn zerodha_asks_for_open_interest_because_the_vendor_only_sends_it_on_request() {
+        let crate::vendor::Transport::Http(zerodha) =
+            crate::vendor::Feed::Zerodha.descriptor().transport
+        else {
+            panic!("Zerodha is an HTTP feed");
+        };
+        let oi =
+            zerodha.params.iter().find(|p| p.name == "oi").expect(
+                "the OI parameter is on the row, or every candle comes back six cells wide",
+            );
+        assert!(
+            matches!(oi.value, crate::vendor::ParamValue::Fixed("1")),
+            "the vendor accepts 0 or 1 and only 1 appends the column: {:?}",
+            oi.value
+        );
+
+        // AND THE FIELD NAME STAYS ABSENT, deliberately. `FieldNames` feeds the
+        // OBJECT-shaped decoder, which looks a column up by name; this vendor
+        // answers positional rows where the index is the whole contract, and a
+        // name here would claim a shape the payload does not have.
+        assert!(
+            zerodha.fields.open_interest.is_none(),
+            "a positional feed names no OI field — position is the contract"
+        );
+        assert!(
+            matches!(
+                zerodha.response,
+                crate::vendor::ResponseShape::PositionalRows { .. }
+            ),
+            "if this feed ever answers objects, the assertion above changes meaning"
+        );
+    }
+
     /// Nine single-field mutations to the Zerodha row left the suite green
     /// before this existed — the base URL, both path literals, the placeholder
     /// order, the two interval words, the prefix and the separator.

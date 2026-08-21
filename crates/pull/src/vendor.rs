@@ -5247,6 +5247,41 @@ const ZERODHA: Descriptor = Descriptor {
                 name: "to",
                 value: ParamValue::To,
             },
+            // OPEN INTEREST, ASKED FOR — BECAUSE IT IS FREE AND WAS BEING LEFT.
+            //
+            // `Zerodha Docs/13-historical.md` line 65: *"Accepts `0` or `1`.
+            // Pass `1` to get OI (Open Interest) data."* Line 95: with `oi=1`
+            // *"each candle is a 7-element positional array; the OI value is
+            // appended as the last element."* Without it the array is six cells
+            // and carries none.
+            //
+            // This request sent `from` and `to` and nothing else, so **every
+            // Zerodha bar this build could ever store held no open interest** —
+            // not because the vendor withholds it, but because nobody asked. The
+            // decoder was already ready: `RawWindow` reads cell six
+            // unconditionally and falls back to `OI_NULL` when it is absent, so
+            // this costs no decode change and no store change.
+            //
+            // It changes nothing for the two swept indices, which have no open
+            // interest to carry — Groww's own note says "only for FNO
+            // instruments, null for others". It matters the moment a derivative
+            // series is pulled on this feed, where open interest is one of the
+            // two columns that make the series worth holding at all.
+            //
+            // A `Fixed` word rather than a flag, for the reason the variant's
+            // own documentation gives: this build does not vary it, so it is
+            // reviewable beside the rest of the row instead of buried in a
+            // request builder.
+            //
+            // `FieldNames::open_interest` deliberately stays `None`. That field
+            // feeds the OBJECT-shaped decoder, which looks a column up by name;
+            // this vendor answers `PositionalRows`, where position is the whole
+            // contract and a name would be a claim about a shape that does not
+            // exist.
+            Param {
+                name: "oi",
+                value: ParamValue::Fixed("1"),
+            },
         ],
         // THE VERSION HEADER THE VENDOR REQUIRES ON EVERY CALL. Its own curl
         // examples carry it beside the credential, and a request without it is

@@ -17654,3 +17654,115 @@ identity so the term discriminates rather than adding noise.
 runs can share.
 
 Invariant X-14.
+
+### D-0224 — the expired-derivative path had no retry, no counts, and no way to finish
+
+Seven locked choices from one audit, recorded together because they were found
+together and four of them share a cause: **a rule this repository already had,
+applied to one path and never carried to the others.**
+
+**1. `pull::chain::Refusal` replaces `Result<String, String>`.** Both F&O
+transports answered a bare sentence, so the vendor's status existed only inside
+`"the vendor answered 429 Too Many Requests"`. Any policy wanting the number had
+to parse prose — the coupling `api::server::with_retry` refuses by name on the
+bars path, where `FetchError::VendorRefused` has carried `status: u16` all along.
+`status: None` now means *nothing answered*, which is a different fact from
+*answered 500* and is sized differently by the ladder.
+
+**2. The retry ladder reaches all three transports.** `with_retry` had **one**
+call site — `fetch_chunks`, spot bars. `Governed::get` (discovery) and
+`fetch_chain_chunks` and `fetch_rolling` reached the socket bare, so a dropped
+socket that was re-asked on a spot chunk **ended a month's walk, a contract, or a
+cross-product cell** on the derivative side. `chain::month` is a 1 + N walk run
+once per month, so an eight-year window is hundreds of single-refusal
+propositions. `laddered` is the shared loop; `step` is untouched and now has
+exactly two callers, pinned by a test — a third would be a second answer to *is
+this worth re-asking*.
+
+**3. `audit::Record::with_counts`.** Every expired-derivative outcome was
+stamped through `Record::refused`, which hardcodes `bars_stored`, `rows_read`,
+`members` and `failures` to zero. That is right for the thing it is named after
+and wrong for the two arms that succeeded. Measured in the operator's journal on
+2026-08-20: two records reading *"every discovered contract fetched and filed"*,
+both reporting **zero bars — by construction, not by measurement**, while spot
+records in the same file carried 3,242,671. One journal, one schema, one half
+filling it in. `rows_folded` and `counted` stay zero deliberately: this path
+measures neither, and a number there would be §3 rule 6's unmeasured claim.
+
+**4. One pooled HTTPS client per process, in `http` and in `ssm`.**
+`HttpSource::new` and `ssm::get_parameter` each built their own, and both are
+reached **per instrument** — a 785-instrument leg built ~1,570 clients. A client
+owns its connection pool, so not one TLS session could be reused and HTTP
+keep-alive was unreachable from the shape of the code. Nothing about either
+client varied: they were not 1,570 clients, they were 1,570 copies of one. The
+`Result` is cached rather than the `Client` because a build failure means the TLS
+backend is absent, which cannot become false later. CI gate 26 still passes —
+the change *reduces* construction sites.
+
+**5. `nse::MAX_INDEX_LINKS`, and a hash set for the dedup.** `index_links`
+deduplicated with `seen.contains(&href)` — a linear scan of everything kept so
+far — inside the loop that pushed to `seen`. **O(n²), with nothing bounding n**,
+under a module header claiming *"a constant that does not depend on how many
+matches there are"*. `MAX_DOCUMENT_BYTES` bounds the document and not the
+matches: the shortest legal anchor is tens of bytes, so an 8 MiB listing carries
+on the order of a hundred thousand. Past the cap the listing is **refused, never
+truncated** — a shortened list is a universe missing indices nobody can see are
+missing, which is §4's fallback that hides a failure.
+
+**6. The autopilot asks `SpotTarget::Everything`, not `Swept`.** It asked
+`Swept` under a comment reading *"SWEPT, AND IT MEANS ALL OF THEM"*. That
+sentence was **false**: `names` resolves `Swept` to `is_sweepable`, a two-row
+table, while `tracked_series` and the completion probe both walk
+`catalog::tracked` at roughly 765 rows. Two series were fetched and 765 were
+graded, so `Settled::Complete` was **arithmetically unreachable** — every month
+reported ~763 short forever and retired by `DRY_ROUNDS` or stalled, and the
+frontier walked the calendar in stall mode. That is the whole of *"the backfill
+runs and never finishes"*.
+
+The **ask** was the wrong half. Narrowing the probe would also have made the two
+agree and would have made `docs/07-plan.md` R-1 — *"Spot, every instrument,
+bounded at ~800"* — permanently unsatisfiable. `Everything`'s `names` arm is
+literally `catalog::tracked(universe)`, borrowed rather than copied, so
+`broker_run`'s `tracked(..) && names(..)` is idempotent for this target and the
+run list is provably the list the probe grades.
+
+**This does not widen the sweep and cannot.** §1 fixes the swept surface at two
+instruments; this decides what is **stored**, which §1 explicitly permits to be
+wider — the same distinction `Indices` and `Equities` have always had.
+`InstrumentKey::SWEPT` is untouched, so nothing here reaches the condition
+vocabulary, ranking, or a run identity.
+
+**7. Zerodha asks `oi=1`.** `Zerodha Docs/13-historical.md` line 65: *"Accepts
+`0` or `1`. Pass `1` to get OI (Open Interest) data."* Line 95: with it *"each
+candle is a 7-element positional array"*. The request sent `from` and `to` and
+nothing else, so **every Zerodha bar this build could store carried no open
+interest** — not the vendor withholding it, nobody asked. The decoder was
+already reading cell six and falling back to `OI_NULL`, so this cost no decode
+and no store change. `FieldNames::open_interest` deliberately stays `None`: that
+field feeds the object-shaped decoder, and this vendor answers positional rows
+where the index is the whole contract.
+
+**What refuses each of them.**
+`api::server::a_dropped_discovery_socket_is_re_asked_rather_than_ending_the_walk`,
+`an_answered_discovery_refusal_stops_at_once_instead_of_burning_the_ladder` and
+`a_dead_credential_on_the_discovery_path_is_not_retried` drive the ladder through
+doubles; `the_expired_derivative_chunk_loop_retries_the_way_the_spot_one_does`
+and `the_rolling_transport_goes_through_the_same_ladder` pin the two call sites;
+`the_retry_policy_has_exactly_two_call_sites_and_they_are_the_two_ladders`
+refuses a third copy — and assembles its own needles at run time, because
+`include_str!` reads the file the needle is written in and the first version
+counted itself. `pull::nse::deduplicating_index_links_costs_one_probe_each_rather_than_a_scan`
+asserts a **ratio** rather than a duration, because a wall clock proves nothing
+on a loaded machine and a quadratic quadruples where a linear doubles;
+`a_listing_past_the_link_bound_is_refused_rather_than_truncated` pins the
+refusal. `pull::http::zerodha_asks_for_open_interest_because_the_vendor_only_sends_it_on_request`
+pins the descriptor row. `api::autopilot::the_ask_and_the_completion_probe_select_the_same_set`
+asserts the **equivalence of the two predicates** rather than the variant name,
+which is the property that has to hold — asserting the name would pass the day
+somebody changes what `Everything` means.
+
+**What is NOT closed by this entry**, so the ledger does not read as a finish
+line: the F&O route still takes no per-feed seat; `fnowork::gaps` still has no
+production caller, so nothing says which expired contract-months are owed; the
+rolling driver still asks `ORDINALS_ASKED = 1` of three; and `/verify.json` still
+scrubs the manifest log rather than its index.

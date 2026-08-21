@@ -277,7 +277,20 @@ pub async fn crawl<S: DocumentSource>(
         // page stopped emitting them as markup or the body is not the page at
         // all. Reading it as "this family has no indices" is how a universe
         // silently loses 34 sets.
-        let links = nse::index_links(&listing, category);
+        // A LISTING PAST THE LINK BOUND IS A REFUSAL LIKE ANY OTHER TRANSPORT
+        // ONE, and it lands in the same `failures` list so the snapshot names
+        // the category it could not read. `nse::index_links` refuses rather
+        // than truncating — a shortened list is a universe missing indices
+        // nobody can see are missing — and this is the arm that carries the
+        // reason to the operator instead of dropping it.
+        let links = match nse::index_links(&listing, category) {
+            Ok(links) => links,
+            Err(why) => {
+                let refusal = note_refused(listing_url, why.to_string());
+                failures.push(refusal);
+                continue;
+            }
+        };
         if links.is_empty() {
             let refusal = note_refused(
                 listing_url,

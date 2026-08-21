@@ -4895,14 +4895,200 @@ struct Governed<'a, D> {
 }
 
 impl<D: pull::chain::Discovery> pull::chain::Discovery for Governed<'_, D> {
-    async fn get(&self, url: &str) -> Result<String, String> {
+    /// One discovery GET, re-asked while the reason to re-ask still stands.
+    ///
+    /// # The retry this path did not have, and what its absence cost
+    ///
+    /// [`with_retry`] had exactly **one** call site — `fetch_chunks`, the spot
+    /// bars path. Discovery reached the socket bare: `await_budget`, then
+    /// `self.inner.get(url).await`, and whatever came back was final. So a
+    /// dropped socket or a 502 on `…/expiries` ended the walk for that
+    /// (underlying, month) on the first refusal, while the identical event on a
+    /// spot chunk was re-asked up to [`THROTTLE_ATTEMPTS`] times.
+    ///
+    /// `pull::chain::month` is a **1 + N** walk and `walk_months` runs it once
+    /// per month, so an eight-year F&O window is hundreds of these calls. At any
+    /// non-zero transport failure rate, "one refusal ends the month" means whole
+    /// months arrive in `Chain::unreadable` for a reason that would have cleared
+    /// on the second ask.
+    ///
+    /// # It is the SAME policy, not a second one
+    ///
+    /// [`step`] is a pure `const fn` over `(status, invalid_auth, named,
+    /// attempt, server_errors)`. It is called here with the identical arguments
+    /// the bars path passes, so 401/403 stops at once (§8 forbids minting), 429
+    /// takes the exponential rate ladder, 5xx the shorter quadratic one, any
+    /// other status returns at once, and nothing-answered is a blip. A second
+    /// hand-written ladder here would be a second answer to "is this worth
+    /// re-asking", and the copy that drifts is the one nobody remembers exists.
+    ///
+    /// `named` is `None`: the discovery call's body is not read for a vendor
+    /// error name — [`pull::vendor::HttpSpec::error_names`] is consulted on the
+    /// bars path only — so this path cannot tell `PermissionException` from
+    /// `TokenException` under a shared 403. That is a gap in what has been READ
+    /// for discovery, stated rather than papered over, and it is the same gap
+    /// the bars path records for a feed with no declared contract.
+    ///
+    /// # The governor is charged per ATTEMPT and decreased by the TRANSPORT
+    ///
+    /// Every attempt takes its own permit, including the retries — the shape
+    /// [`with_retry`]'s own comment argues for, and the shape whose absence
+    /// earned the 429 of 2026-08-20 by a different road.
+    ///
+    /// The multiplicative decrease is deliberately NOT taken here.
+    /// `pull::http::HttpSource`'s `Discovery` implementation already calls
+    /// `record_throttled` on a 429 and `record_success` on a 2xx, which the bars
+    /// path's `window_async` does not — so [`with_retry`] takes the decrease
+    /// itself and this must not, or one 429 would be counted twice and halve the
+    /// ceiling on a single refusal.
+    ///
+    /// # Cost
+    ///
+    /// Unchanged on the clean path: one `admit` withdrawal and one request. A
+    /// refused call costs at most [`THROTTLE_ATTEMPTS`] of each, which is a
+    /// compile-time constant — not a property of the month, the window or the
+    /// number of expiries.
+    async fn get(&self, url: &str) -> Result<String, pull::chain::Refusal> {
+        laddered(self.feed, self.site, "discovery call", || {
+            self.inner.get(url)
+        })
+        .await
+    }
+}
+
+/// [`with_retry`]'s ladder, for the two F&O transports that answer a
+/// [`pull::chain::Refusal`] instead of a `FetchError`.
+///
+/// # Why a second function and not a second copy
+///
+/// Three transports need this policy and they answer three different error
+/// types: the bars path returns `pull::fetch::FetchError` (and keeps
+/// [`with_retry`], which also owns the `BodyNotUnderstood` arm and the governor's
+/// additive increase, neither of which applies here), while discovery and the
+/// rolling POST both return [`pull::chain::Refusal`]. Writing the ladder out
+/// twice more would be three answers to "is this worth re-asking", and the copy
+/// that drifts is the one nobody remembers exists.
+///
+/// [`step`] is the shared half: a pure `const fn` over `(status, invalid_auth,
+/// named, attempt, server_errors)` that both this and [`with_retry`] call with
+/// the same arguments, so the two ladders cannot disagree about a 429.
+///
+/// # `named` is `None`, and that is a stated gap
+///
+/// Neither of these two calls reads its body for a vendor error name —
+/// [`pull::vendor::HttpSpec::error_names`] is consulted on the bars path only —
+/// so neither can tell Kite's `PermissionException` from `TokenException` under
+/// a shared 403. That is a gap in what has been READ for these paths, not a
+/// decision, and it is the same gap the bars path records for any feed with no
+/// declared contract.
+///
+/// # The governor is charged per attempt and decreased by the TRANSPORT
+///
+/// Every attempt takes its own permit, retries included. The multiplicative
+/// decrease is deliberately NOT taken here: both `pull::http::HttpSource`
+/// entry points this wraps already call `record_throttled` on a 429 and
+/// `record_success` on a 2xx, which the bars path's `window_async` does not — so
+/// [`with_retry`] takes the decrease itself and this must not, or one 429 would
+/// be counted twice and halve the ceiling on a single refusal.
+///
+/// # Cost
+///
+/// Unchanged on the clean path: one `admit` withdrawal and one request. A
+/// refused call costs at most [`THROTTLE_ATTEMPTS`] of each — a compile-time
+/// constant, never a property of the window, the month or the cross product.
+async fn laddered<F, Fut>(
+    feed: pull::vendor::Feed,
+    site: &Site,
+    what: &str,
+    mut ask: F,
+) -> Result<String, pull::chain::Refusal>
+where
+    F: FnMut() -> Fut,
+    Fut: core::future::Future<Output = Result<String, pull::chain::Refusal>>,
+{
+    let mut last = pull::chain::Refusal::transport(String::new());
+    // Counted apart from `attempt`, so a 5xx budget is spent by 5xx answers —
+    // the split `step`'s own header argues for.
+    let mut server_errors = 0u32;
+    for attempt in 1..=THROTTLE_ATTEMPTS {
         // BEFORE THE REQUEST, NOT AFTER THE REFUSAL. A governor that learns its
         // ceiling from a 429 has already spent the run's goodwill: the vendor's
         // backoff applies to every later call, including the ones that would
         // have succeeded.
-        await_budget(self.feed, self.site).await?;
-        self.inner.get(url).await
+        //
+        // A HALTED BUDGET IS NOT A STATUS. Nothing was sent, so it carries no
+        // number and is not ladder-eligible: it is returned as it is.
+        await_budget(feed, site)
+            .await
+            .map_err(pull::chain::Refusal::transport)?;
+
+        let why = match ask().await {
+            Ok(body) => return Ok(body),
+            Err(why) => why,
+        };
+
+        if why.status.is_some_and(|code| (500..=599).contains(&code)) {
+            server_errors = server_errors.saturating_add(1);
+        }
+        // THE SAME MARKER THE BARS PATH READS. Dhan spells a dead session in the
+        // body rather than only in the status; the bars path looks for this word
+        // and so must this one, or the two paths disagree about one credential.
+        let invalid_auth = why.detail.contains("Invalid_Authentication");
+
+        match step(why.status, invalid_auth, None, attempt, server_errors) {
+            Step::NotEntitled => {
+                return Err(pull::chain::Refusal {
+                    status: why.status,
+                    detail: format!(
+                        "{why} — the credential is ALIVE and this API key is not \
+                         entitled to this call. Re-running later cannot fix it; \
+                         only a change to the key's subscription changes the \
+                         answer. Nothing was retried."
+                    ),
+                });
+            }
+            Step::CredentialDied => {
+                return Err(pull::chain::Refusal {
+                    status: why.status,
+                    detail: format!(
+                        "{why} — the access token is no longer valid mid-walk. \
+                         This repository never mints one (§8): the refreshed \
+                         value is read from Parameter Store on the next pull, and \
+                         the walk resumes from what the store already holds."
+                    ),
+                });
+            }
+            // It gave a reason about the request; the reason will not change
+            // because it was asked twice more.
+            Step::Answered => return Err(why),
+            Step::ServerDown { answered } => {
+                return Err(pull::chain::Refusal {
+                    status: why.status,
+                    detail: format!(
+                        "{why} — and its own side has now failed {answered} \
+                         time(s) on this {what}, out of {SERVER_ERROR_ATTEMPTS} \
+                         allowed. The vendor is reachable and failing, which is \
+                         not a blip this walk can wait out."
+                    ),
+                });
+            }
+            Step::Again { wait_ms, .. } => {
+                // `throttled` is deliberately ignored — see the header. The
+                // transport has already taken the decrease.
+                tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+            }
+            // The loop's own exit says it better than a branch here can.
+            Step::Exhausted => {}
+        }
+        last = why;
     }
+    Err(pull::chain::Refusal {
+        status: last.status,
+        detail: format!(
+            "{last} — and it failed {THROTTLE_ATTEMPTS} times, so the transport \
+             is not blipping, it is down"
+        ),
+    })
 }
 
 async fn await_budget(feed: pull::vendor::Feed, site: &Site) -> Result<(), String> {
@@ -6858,14 +7044,86 @@ struct FnoPage<'a> {
     broker: Broker,
 }
 
+/// What one expired-derivative run actually moved.
+///
+/// # Why this type exists
+///
+/// [`FnoPage::say`] is the one place this route stamps the journal, and it built
+/// its record with [`audit::Record::refused`] — which hardcodes every count to
+/// zero. That is correct for the arms it is named after and **wrong for the two
+/// arms that succeeded**, which were being recorded as having moved nothing.
+///
+/// Measured in the operator's journal on 2026-08-20: two records reading *"every
+/// discovered contract fetched and filed"*, both with `bars_stored: 0`. The spot
+/// path's records in the same file carry real numbers — 3,242,671 bars across
+/// 112 records — so the two halves of one journal were being read by one page
+/// under one schema while only one of them was filling it in.
+///
+/// Four fields rather than a whole [`audit::Ingested`], because that is what
+/// this route actually measures: it lands contract by contract and keeps its own
+/// tallies. Inventing the two it does not measure — `rows_folded` and `counted`
+/// — would be the §3 rule 6 failure of claiming a measurement never taken.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct FnoCounts {
+    /// Contracts this run asked the vendor about.
+    contracts: u64,
+    /// Rows the vendor answered with, across every contract.
+    rows_read: u64,
+    /// Bars written to the store.
+    bars_stored: u64,
+    /// Contracts that were asked for and did not land.
+    failures: u64,
+}
+
+impl FnoCounts {
+    /// The three numbers both walks measure, in the one shape the journal takes.
+    ///
+    /// A constructor rather than a literal at each call site because the two
+    /// walks — name and offset — must record the same fact the same way. One
+    /// operator reads both journal rows, and a difference in how they were
+    /// filled in would read as a difference in the DATA.
+    ///
+    /// `rows_read` is the bar count deliberately: this route counts what it
+    /// FILED, and claiming a separate rows-read figure it never measured would
+    /// be the §3 rule 6 failure of stating a measurement nobody took.
+    fn of(contracts: usize, stored: usize, failed: usize) -> Self {
+        Self {
+            contracts: contracts as u64,
+            rows_read: stored as u64,
+            bars_stored: stored as u64,
+            failures: failed as u64,
+        }
+    }
+}
+
 impl FnoPage<'_> {
-    /// One outcome, recorded and rendered.
+    /// One outcome, recorded and rendered — for an arm that moved nothing.
+    ///
+    /// Every refusal arm: a malformed request, an archive feed, a feed that
+    /// serves no expired history, a discovery that would not walk. Zero is the
+    /// truth on all of them, which is why they keep the plain form.
     fn say(
+        &self,
+        facts: Vec<(&'static str, String)>,
+        code: axum::http::StatusCode,
+        outcome: audit::Outcome,
+        why: &str,
+    ) -> (axum::http::StatusCode, String) {
+        self.say_counted(facts, code, outcome, why, FnoCounts::default())
+    }
+
+    /// One outcome, recorded and rendered, **carrying what the run moved**.
+    ///
+    /// Used by the two terminal arms that actually fetched — the name walk's and
+    /// the offset walk's — so the journal can tell a working expired-derivative
+    /// pull from a broken one. Before this, it could not: see [`FnoCounts`].
+    fn say_counted(
         &self,
         mut facts: Vec<(&'static str, String)>,
         code: axum::http::StatusCode,
         outcome: audit::Outcome,
         why: &str,
+        counts: FnoCounts,
     ) -> (axum::http::StatusCode, String) {
         let record = audit::Record::refused(
             audit::Scope::Fno,
@@ -6874,7 +7132,13 @@ impl FnoPage<'_> {
             self.asked.underlying.as_str(),
             why,
         )
-        .with_window(self.asked.window);
+        .with_window(self.asked.window)
+        .with_counts(
+            counts.contracts,
+            counts.rows_read,
+            counts.bars_stored,
+            counts.failures,
+        );
         facts.push(recorded_fact(self.journal, &record));
         (code, accepted_html("Expired F&O pull", facts, self.broker))
     }
@@ -7305,9 +7569,32 @@ enum Fetched {
 /// eight chunks is sixteen hundred requests, and a budget charged per contract
 /// would be a ceiling observed one time in eight.
 ///
+/// # A BLIP IS RETRIED HERE, EXACTLY AS IT IS ON THE SPOT PATH
+///
+/// This called [`pull::http::HttpSource::window_async`] directly, and it was the
+/// **only** bar fetch in the workspace that did. [`with_retry`] had one call
+/// site — `fetch_chunks`, the spot path — so a dropped socket, a 429 or a 502
+/// on an expired-derivative chunk ended the contract on the first refusal,
+/// while the identical event on a spot chunk was re-asked up to
+/// [`THROTTLE_ATTEMPTS`] times.
+///
+/// The asymmetry was not a decision; it was the ladder never being carried
+/// across. It costs more here than it does on spot, because of the sentence
+/// directly above: a refused chunk abandons the whole contract, so one blip in
+/// a 1,600-request walk discards every chunk that contract had already paid
+/// for. Measured shape of that, 2026-08-20: `some contracts did not land; the
+/// month is incomplete` recorded against runs whose only fault was transport.
+///
+/// The composition is the spot path's, unchanged: this function charges the
+/// permit for the FIRST attempt and [`with_retry`] charges every one after it,
+/// which is the arrangement its own comment describes.
+///
 /// # Cost
 ///
-/// One request per chunk, each rate-governed. Nothing here touches the store.
+/// One request per chunk on the clean path, each rate-governed — unchanged.
+/// A refused chunk costs at most [`THROTTLE_ATTEMPTS`] requests, which is a
+/// compile-time constant and not a property of the window, the contract or the
+/// store.
 async fn fetch_chain_chunks(
     found: &pull::fno::Found,
     chunks: &[pull::session::Window],
@@ -7321,7 +7608,7 @@ async fn fetch_chain_chunks(
             return Fetched::RunHalted(halt);
         }
         let request = pull::chain::request(found, *chunk, asked.granularity);
-        match wire.source.window_async(&request).await {
+        match with_retry(&wire.source, &request, asked.feed, site).await {
             // THE CHUNK'S OWN WINDOW TRAVELS WITH ITS ANSWER, exactly as the
             // spot path carries it — a body filed under the whole range would
             // claim months it does not hold.
@@ -7978,6 +8265,9 @@ async fn roll_one(
     // is the rule `FetchError::RungNotSpellable` already applies to bars.
     let rows = fetch_rolling(
         asked,
+        // THE BUDGETS, so the retry ladder inside can charge a permit for every
+        // attempt it makes. `roll_one` already held this.
+        site,
         wire,
         &rolling,
         security_id,
@@ -8919,6 +9209,8 @@ fn rolling_security_id(
 )]
 async fn fetch_rolling(
     asked: &ingest::FnoRequest,
+    // Where the rate budgets live, for the retry ladder below.
+    site: &Site,
     wire: &Wire,
     rolling: &pull::vendor::RollingSpec,
     security_id: &str,
@@ -8963,11 +9255,24 @@ async fn fetch_rolling(
     };
 
     let body = pull::rolling::body(rolling, &ask);
-    let answer = wire
-        .source
-        .post_json(endpoint, body)
-        .await
-        .map_err(|why| format!("{label}: {why}"))?;
+    // THROUGH THE LADDER, exactly as the chain path and the spot path are.
+    //
+    // This called `post_json` bare and was, with `fetch_chain_chunks`, one of the
+    // two F&O transports that did — so a dropped socket on one cell of the cross
+    // product ended that cell outright, while the identical event on a spot
+    // chunk was re-asked. The cross product is `offsets × sides × cadences ×
+    // ordinals`, hundreds of requests per underlying-month, and every one of
+    // them was a single-refusal proposition.
+    //
+    // THE BODY IS REBUILT PER ATTEMPT, not cloned once and moved: `post_json`
+    // takes it by value, and a retry that re-sends the same `String` would need
+    // it back. Rebuilding is a `format!` over a fixed descriptor — O(1), and
+    // paid only on the refusal path.
+    let answer = laddered(asked.feed, site, "rolling request", || {
+        wire.source.post_json(endpoint, body.clone())
+    })
+    .await
+    .map_err(|why| format!("{label}: {why}"))?;
     pull::rolling::read(&answer, option_type, wire.spec.prices)
         .map_err(|why| format!("{label}: {why}"))
 }
@@ -9196,15 +9501,49 @@ async fn roll_every(
     // answer was that nothing in this build could tell them. `CLAUDE.md` §4
     // bans a fallback that hides a failure; a path that hides its own progress
     // is the same rule pointing inward.
-    let planned = planned_rolling_requests(rolling, offsets.len(), chunks.len());
-    say_walk_starting(asked, &endpoint, chunks.len(), offsets.len(), planned);
+    // A CADENCE WITH NO CONTRACTS ON IT IS NOT ASKED FOR.
+    //
+    // `expiry_flags` is `["WEEK", "MONTH"]` because that is what Dhan serves.
+    // Whether the UNDERLYING had contracts on a cadence over this window is a
+    // different question, and `costs::expiry` already answers it from a cited
+    // table: BANKNIFTY weekly expiries were withdrawn after 2024-11-13, and
+    // `WeeklyRegime::Withdrawn` says so as a value rather than a gap.
+    //
+    // WHAT IT COST TO NOT ASK IT. `roll_one` fetches FIRST and names the
+    // contract second, so a WEEK request for a withdrawn weekly was issued,
+    // paid for out of the vendor's ceiling, answered, and only then declined
+    // with "this weekly was withdrawn for that slot, so no contract existed".
+    // For a BANKNIFTY window in 2026 that is HALF of every request this walk
+    // makes, spent to learn something the repository already knew.
+    let cadences: Vec<&'static str> = rolling
+        .expiry_flags
+        .iter()
+        .copied()
+        .filter(|flag| cadence_has_contracts(asked, flag))
+        .collect();
+    let planned = planned_rolling_requests(cadences.len(), rolling, offsets.len(), chunks.len());
+    say_walk_starting(
+        asked,
+        &endpoint,
+        chunks.len(),
+        offsets.len(),
+        cadences.len(),
+        planned,
+    );
 
-    for flag in rolling.expiry_flags {
-        for code in rolling.expiry_codes {
+    for flag in &cadences {
+        for code in rolling.expiry_codes.iter().take(ORDINALS_ASKED) {
             say_group_starting(asked, flag, code, stored, failed, declined);
             for strike in offsets {
                 for side in rolling.sides {
                     for chunk in &chunks {
+                        // THE BOUNDARY FALLS INSIDE A WINDOW, SO IT IS TESTED
+                        // PER CHUNK. Before the budget is charged and before a
+                        // socket is opened: a cadence with no contracts in this
+                        // slice is not a request worth a permit.
+                        if !cadence_has_contracts_on(asked, flag, chunk.from()) {
+                            continue;
+                        }
                         // THE GOVERNOR BEFORE EACH ONE. A month is 252 requests
                         // against a ceiling of five a second; a budget charged once
                         // for the batch is a ceiling observed once — and now it is
@@ -9269,6 +9608,81 @@ async fn roll_every(
     (stored, failed, declined, why, priced)
 }
 
+/// Whether this underlying had contracts on that cadence at all over the window.
+///
+/// # Why it is asked BEFORE the request and not after
+///
+/// `costs::expiry` holds the weekly and monthly regimes with their dates and
+/// their citations, and it records a withdrawal as a VALUE:
+/// `WeeklyRegime::Withdrawn` for BANKNIFTY weeklies after 2024-11-13. So the
+/// answer is already in this repository, and asking the vendor for a contract
+/// that did not exist buys nothing.
+///
+/// It is checked at the window's FIRST day because `next_weekly_expiry` answers
+/// "on or after" — no weekly on or after the window opens means none inside it.
+///
+/// The ordinal is `"1"` because the question is whether the cadence exists at
+/// all, and the near contract is the one that exists if any does.
+///
+/// # Cost
+///
+/// One table lookup per cadence per walk — twice, not twice per request.
+fn cadence_has_contracts(asked: &ingest::FnoRequest, flag: &str) -> bool {
+    cadence_has_contracts_on(asked, flag, asked.window.from())
+}
+
+/// The same question asked of ONE DAY, which is the granularity the rule needs.
+///
+/// # Why the window is not fine enough
+///
+/// A window that SPANS the withdrawal has weeklies at its first day and none at
+/// its last. Asked once at the window's start it answers "yes" and every chunk
+/// after the withdrawal is asked for anyway — the operator's rule is precisely
+/// *"until weekly expiry got fully removed, week; once removed, month"*, and
+/// that boundary falls inside a chunk, not between windows.
+///
+/// So the window-level filter is the cheap early-out for a window wholly after
+/// the withdrawal, and this is the exact test applied per chunk.
+///
+/// # Cost
+///
+/// One dated-table lookup. It runs once per chunk per cadence considered, not
+/// once per request, and it replaces an HTTP round trip — so it is strictly
+/// cheaper than the thing it prevents.
+fn cadence_has_contracts_on(
+    asked: &ingest::FnoRequest,
+    flag: &str,
+    on: pull::session::Day,
+) -> bool {
+    pull::rolling::expiry_of(asked.underlying.as_str(), flag, "1", on).is_ok()
+}
+
+/// HOW MANY EXPIRY ORDINALS THIS BUILD ASKS FOR: the NEAR one, and only it.
+///
+/// # Why this is here and not in the descriptor
+///
+/// `RollingSpec::expiry_codes` is `["1", "2", "3"]` because that is what Dhan
+/// SERVES — a recorded vendor fact, and `CLAUDE.md` §3 rule 1 keeps it that way.
+/// What this repository chooses to ASK for is a separate decision, and it
+/// belongs on the asking side. Narrowing the descriptor would delete the record
+/// of what the vendor offers.
+///
+/// # What it costs, and what it buys
+///
+/// The walk is a cross product, so an ordinal is a whole multiple of it:
+/// 21 offsets × 2 sides × 2 cadences × ordinals × window chunks. For the
+/// eight-month window measured on 2026-08-20 that is 1,512 requests at three
+/// ordinals and **504 at one**. Against a Dhan allowance the governor had
+/// backed off to one request per second, that is twenty-five minutes against
+/// eight — and the twenty-five is why the leg stored nothing for its first
+/// fifty minutes and looked, to every surface this build has, exactly like a
+/// leg that had died.
+///
+/// The far ordinals are NOT fetched, and that is the operator's rule of
+/// 2026-08-20: *"always we should always pull only current expiry which is 1"*.
+/// It is a narrowing of what is asked for, not of what is recorded.
+const ORDINALS_ASKED: usize = 1;
+
 /// How many vendor requests this walk will make, before it makes any of them.
 ///
 /// The cross product, spelled out: cadences × ordinals × offsets × sides ×
@@ -9280,14 +9694,13 @@ async fn roll_every(
 ///
 /// Four multiplications. O(1), and it allocates nothing.
 fn planned_rolling_requests(
+    cadences: usize,
     rolling: pull::vendor::RollingSpec,
     offsets: usize,
     chunks: usize,
 ) -> usize {
-    rolling
-        .expiry_flags
-        .len()
-        .saturating_mul(rolling.expiry_codes.len())
+    cadences
+        .saturating_mul(rolling.expiry_codes.len().min(ORDINALS_ASKED))
         .saturating_mul(offsets)
         .saturating_mul(rolling.sides.len())
         .saturating_mul(chunks)
@@ -9313,6 +9726,7 @@ fn say_walk_starting(
     endpoint: &str,
     chunks: usize,
     offsets: usize,
+    cadences: usize,
     planned: usize,
 ) {
     let _dropped_when_filtered = telemetry::emit(
@@ -9325,6 +9739,7 @@ fn say_walk_starting(
             .with("endpoint", telemetry::Value::Str(endpoint))
             .with("chunks", telemetry::Value::Uint(chunks as u64))
             .with("offsets", telemetry::Value::Uint(offsets as u64))
+            .with("cadences", telemetry::Value::Uint(cadences as u64))
             .with("planned_requests", telemetry::Value::Uint(planned as u64)),
     );
 }
@@ -9487,8 +9902,11 @@ async fn fno_roll(
         facts.push(("Contract runs declined", declined_note(declined)));
     }
 
+    // THE SAME NUMBERS THE NAME WALK RECORDS, through the same constructor.
+    let counted = FnoCounts::of(planned, stored, failed);
+
     if failed == 0 {
-        return page.say(
+        return page.say_counted(
             facts,
             axum::http::StatusCode::OK,
             if stored == 0 {
@@ -9498,6 +9916,7 @@ async fn fno_roll(
             },
             "every planned contract answered and was filed under its own \
              expiry and strike",
+            counted,
         );
     }
     facts.push((
@@ -9507,12 +9926,13 @@ async fn fno_roll(
     if !why.is_empty() {
         facts.push(("First reasons", why.join(" · ")));
     }
-    page.say(
+    page.say_counted(
         facts,
         axum::http::StatusCode::BAD_GATEWAY,
         audit::Outcome::Failed,
         "some contracts did not land; the month is incomplete and must not be \
          read as held",
+        counted,
     )
 }
 
@@ -9666,13 +10086,18 @@ async fn fno_report(
     // way, or the difference looks like a difference in the DATA.
     facts.extend(greek_facts(&priced, asked.rate.is_none()));
 
+    // WHAT THIS RUN MOVED, FOR THE JOURNAL. Built once and used by every
+    // terminal arm below, so a reader of `/audit.json` sees the same numbers the
+    // receipt shows rather than the structural zeroes this route used to write.
+    let counted = FnoCounts::of(wanted.len(), stored, failed);
+
     if failed == 0 {
         // A RUN THAT ASKED FOR NOTHING DID NOT FETCH ANYTHING, and saying it
         // did is the §4 fallback wearing a success's clothes. `Outcome::Empty`
         // rather than `Stored`, because a ladder reading this must not record a
         // fetch that no vendor was asked for.
         if stored == 0 && settled > 0 {
-            return page.say(
+            return page.say_counted(
                 facts,
                 axum::http::StatusCode::OK,
                 audit::Outcome::Empty,
@@ -9680,13 +10105,15 @@ async fn fno_report(
                  last owed day — its month end, this window's end, or the day \
                  the contract expired, whichever came first — so no vendor was \
                  asked and no bar was written",
+                counted,
             );
         }
-        return page.say(
+        return page.say_counted(
             facts,
             axum::http::StatusCode::OK,
             audit::Outcome::Stored,
             "every discovered contract fetched and filed",
+            counted,
         );
     }
 
@@ -9710,12 +10137,13 @@ async fn fno_report(
     if !why.is_empty() {
         facts.push(("First reasons", why.join(" · ")));
     }
-    page.say(
+    page.say_counted(
         facts,
         axum::http::StatusCode::BAD_GATEWAY,
         audit::Outcome::Failed,
         "some contracts did not land; the month is incomplete and must \
          not be read as held",
+        counted,
     )
 }
 
@@ -11745,6 +12173,56 @@ mod tests {
     /// read as "everything held", and a spurious refusal if it read as
     /// "nothing held". It refuses, and it quotes the census's own words.
     #[test]
+    /// A CADENCE WHOSE CONTRACTS WERE WITHDRAWN IS NEVER ASKED FOR — and one
+    /// that still trades still is.
+    ///
+    /// # The requests this saves, counted
+    ///
+    /// `roll_one` fetches FIRST and names the contract second, so a WEEK
+    /// request for a withdrawn weekly was issued, charged against the vendor's
+    /// ceiling, answered, and only then declined with "this weekly was
+    /// withdrawn for that slot, so no contract existed". For a BANKNIFTY window
+    /// in 2026 that is HALF of every request the walk makes, spent to learn
+    /// something `costs::expiry` already records.
+    ///
+    /// # Why both halves are asserted
+    ///
+    /// The first assertion alone would pass if `cadence_has_contracts_on`
+    /// answered `false` to everything — a walk that asked for nothing at all
+    /// would look identical. The second pins that monthlies ARE asked for, and
+    /// the third pins the BOUNDARY: the same underlying, the same cadence, a
+    /// day before the withdrawal, and the answer flips. That is what makes this
+    /// a test of the dated table rather than of a constant.
+    #[test]
+    fn a_cadence_whose_contracts_were_withdrawn_is_never_asked_for() {
+        let today = pull::session::Day::new(2026, 8, 20).expect("a real date");
+        let asked = ingest::parse_fno(
+            "underlying=BANKNIFTY&series=opt&vendor=dhan&from=2026-01-01&to=2026-08-19",
+            today,
+        )
+        .expect("a BANKNIFTY expired-option window is readable");
+
+        // WITHDRAWN AFTER 2024-11-13, a cited fact in `costs::expiry`.
+        assert!(
+            !cadence_has_contracts_on(&asked, "WEEK", asked.window.from()),
+            "BANKNIFTY had no weekly contracts in 2026, so none may be asked for"
+        );
+        assert!(
+            cadence_has_contracts_on(&asked, "MONTH", asked.window.from()),
+            "monthlies never stopped — without this the assertion above would \
+             pass for a walk that asked for nothing at all"
+        );
+
+        // THE BOUNDARY, WHICH IS THE WHOLE POINT. Same underlying, same
+        // cadence, a day on the other side of the withdrawal.
+        let before = pull::session::Day::new(2024, 6, 1).expect("a real date");
+        assert!(
+            cadence_has_contracts_on(&asked, "WEEK", before),
+            "weeklies existed before 2024-11-13, so this is a dated table and \
+             not a constant that always refuses WEEK"
+        );
+    }
+
     fn an_unreadable_census_refuses_and_names_what_would_not_load() {
         let censuses = vec![census::VendorCensus {
             vendor: Vendor::Dhan,
@@ -15792,7 +16270,7 @@ mod tests {
         /// A `Discovery` that answers instantly and counts what it was asked.
         struct Counting(std::sync::atomic::AtomicU32);
         impl pull::chain::Discovery for Counting {
-            async fn get(&self, _url: &str) -> Result<String, String> {
+            async fn get(&self, _url: &str) -> Result<String, pull::chain::Refusal> {
                 self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 Ok(String::new())
             }
@@ -15833,6 +16311,287 @@ mod tests {
             took >= std::time::Duration::from_secs(1),
             "twelve requests cleared in {took:?}, so the governed source is \
              not charging the budget — the 1 + N walk is ungoverned again"
+        );
+    }
+
+    /// **A DISCOVERY BLIP IS RE-ASKED, AND THE WALK SURVIVES IT.**
+    ///
+    /// The defect this pins: [`with_retry`] had exactly one call site — the spot
+    /// bars path — so `Governed::get` reached the socket bare and whatever came
+    /// back was final. One dropped socket on `…/expiries` ended that
+    /// (underlying, month) outright, while the identical event on a spot chunk
+    /// was re-asked. `walk_months` runs the 1 + N walk once per month, so an
+    /// eight-year window is hundreds of these calls and a non-zero failure rate
+    /// put whole months into `Chain::unreadable` for a reason that clears on the
+    /// second ask.
+    ///
+    /// A `None` status is the arm that matters, because it is what a dropped
+    /// socket produces — and it is the one the old code could not distinguish
+    /// from "the vendor answered and said no".
+    #[tokio::test]
+    async fn a_dropped_discovery_socket_is_re_asked_rather_than_ending_the_walk() {
+        /// Refuses with NO STATUS the first two times, then answers.
+        struct Blips {
+            seen: std::sync::atomic::AtomicU32,
+        }
+        impl pull::chain::Discovery for Blips {
+            async fn get(&self, _url: &str) -> Result<String, pull::chain::Refusal> {
+                let nth = self.seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if nth < 2 {
+                    return Err(pull::chain::Refusal::transport(
+                        "connection closed before message completed".to_owned(),
+                    ));
+                }
+                Ok("{\"expiry_dates\":[]}".to_owned())
+            }
+        }
+
+        let dir = agreeing("discoveryblip");
+        let site = site("discoveryblip", &dir);
+        let inner = Blips {
+            seen: std::sync::atomic::AtomicU32::new(0),
+        };
+        let governed = Governed {
+            inner: &inner,
+            feed: pull::vendor::Feed::Dhan,
+            site: &site,
+        };
+
+        let answered = pull::chain::Discovery::get(&governed, "https://example.invalid/expiries")
+            .await
+            .expect("a blip that clears must not end the walk");
+
+        assert_eq!(
+            answered, "{\"expiry_dates\":[]}",
+            "the body from the attempt that SUCCEEDED is the one returned"
+        );
+        // THREE, NOT ONE. Two refusals and the answer — which is the whole
+        // difference between this path and the one it replaced.
+        assert_eq!(
+            inner.seen.load(std::sync::atomic::Ordering::Relaxed),
+            3,
+            "a transport blip must be re-asked; one attempt means the ladder is \
+             not wired and a dropped socket still ends the month"
+        );
+    }
+
+    /// **A REASON ABOUT THE REQUEST IS NOT RE-ASKED, AND THE STATUS IS WHY.**
+    ///
+    /// The other half of the same change, and the half that keeps it cheap. A
+    /// 404 will not become a 200 because it was asked twice more, so [`step`]
+    /// returns [`Step::Answered`] and the walk stops at once.
+    ///
+    /// This is only decidable because [`pull::chain::Refusal`] carries the
+    /// status as a NUMBER. The shape it replaced was `Result<String, String>`,
+    /// where the status existed only inside the sentence `"the vendor answered
+    /// 404 Not Found"` — so any policy wanting it had to parse prose, which is
+    /// the coupling [`with_retry`]'s own comment refuses by name. Asserting the
+    /// attempt count is what proves the number was read rather than the words.
+    #[tokio::test]
+    async fn an_answered_discovery_refusal_stops_at_once_instead_of_burning_the_ladder() {
+        struct Answers {
+            seen: std::sync::atomic::AtomicU32,
+        }
+        impl pull::chain::Discovery for Answers {
+            async fn get(&self, _url: &str) -> Result<String, pull::chain::Refusal> {
+                self.seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Err(pull::chain::Refusal::answered(
+                    404,
+                    "the vendor answered 404 Not Found".to_owned(),
+                ))
+            }
+        }
+
+        let dir = agreeing("discovery404");
+        let site = site("discovery404", &dir);
+        let inner = Answers {
+            seen: std::sync::atomic::AtomicU32::new(0),
+        };
+        let governed = Governed {
+            inner: &inner,
+            feed: pull::vendor::Feed::Dhan,
+            site: &site,
+        };
+
+        let refusal = pull::chain::Discovery::get(&governed, "https://example.invalid/expiries")
+            .await
+            .expect_err("a 404 is a refusal");
+
+        assert_eq!(
+            refusal.status,
+            Some(404),
+            "the vendor's own number must survive to the caller"
+        );
+        assert_eq!(
+            inner.seen.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "an answered refusal must cost ONE request; retrying it spends the \
+             vendor's budget to be told the same thing"
+        );
+    }
+
+    /// **A DEAD CREDENTIAL STOPS THE WALK AT ONCE, AND §8 IS WHY.**
+    ///
+    /// 401 and 403 are the same fact spelled two ways, and this repository never
+    /// mints (`CLAUDE.md` §8) — so there is nothing a retry could do but spend
+    /// the ladder proving the token is still dead. The refreshed value is read
+    /// on the next pull.
+    ///
+    /// Asserted on the discovery path specifically because it is the path that
+    /// had no policy at all: before this, a mid-walk token death was rendered
+    /// identically to a dropped socket.
+    #[tokio::test]
+    async fn a_dead_credential_on_the_discovery_path_is_not_retried() {
+        struct Dead {
+            seen: std::sync::atomic::AtomicU32,
+        }
+        impl pull::chain::Discovery for Dead {
+            async fn get(&self, _url: &str) -> Result<String, pull::chain::Refusal> {
+                self.seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Err(pull::chain::Refusal::answered(
+                    403,
+                    "the vendor answered 403 Forbidden".to_owned(),
+                ))
+            }
+        }
+
+        let dir = agreeing("discoverydead");
+        let site = site("discoverydead", &dir);
+        let inner = Dead {
+            seen: std::sync::atomic::AtomicU32::new(0),
+        };
+        let governed = Governed {
+            inner: &inner,
+            feed: pull::vendor::Feed::Dhan,
+            site: &site,
+        };
+
+        let refusal = pull::chain::Discovery::get(&governed, "https://example.invalid/expiries")
+            .await
+            .expect_err("a 403 is a refusal");
+
+        assert_eq!(
+            inner.seen.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "§8 forbids minting, so a dead credential must cost exactly one request"
+        );
+        assert!(
+            refusal.detail.contains("never mints"),
+            "the operator is told WHY it stopped rather than that it stopped: {}",
+            refusal.detail
+        );
+    }
+
+    /// **THE EXPIRED-DERIVATIVE BARS FETCH GOES THROUGH THE SAME LADDER.**
+    ///
+    /// `fetch_chain_chunks` called [`pull::http::HttpSource::window_async`]
+    /// directly and was the only bar fetch in the workspace that did — so a 429
+    /// or a 502 on an F&O chunk ended the contract on the first refusal, and
+    /// because a refused chunk abandons the WHOLE contract, one blip discarded
+    /// every chunk that contract had already paid for.
+    ///
+    /// Asserted against the source text for the reason the `read_credential` and
+    /// `broker_run` assertions in this file already are: `with_retry` takes a
+    /// concrete `&HttpSource`, so there is no seam to drive a double through, and
+    /// the property that matters is *which function the chunk loop calls*. The
+    /// ladder's own behaviour is proved by `step`'s unit tests and by the three
+    /// above.
+    #[test]
+    fn the_expired_derivative_chunk_loop_retries_the_way_the_spot_one_does() {
+        let source = include_str!("server.rs");
+        let body = source
+            .split_once("async fn fetch_chain_chunks")
+            .expect("fetch_chain_chunks exists")
+            .1;
+        let body = &body[..body
+            .find("\n}\n")
+            .expect("fetch_chain_chunks' body ends at a column-0 brace")];
+
+        assert!(
+            body.contains("with_retry(&wire.source, &request, asked.feed, site)"),
+            "the F&O chunk loop must go through the retry ladder. A bare \
+             `window_async` here is the asymmetry this test exists to stop: the \
+             same dropped socket is re-asked on a spot chunk and ends a contract \
+             on an expired-derivative one"
+        );
+        assert!(
+            !body.contains("wire.source.window_async"),
+            "a second, un-laddered call would restore the defect beside the fix"
+        );
+        // AND THE PERMIT FOR THE FIRST ATTEMPT IS STILL THIS LOOP'S. `with_retry`
+        // charges every attempt after the first and relies on the caller having
+        // charged that one — drop this and the ladder under-charges by one
+        // request per chunk, which is the "N requests, one permit" shape that
+        // earned the 429 of 2026-08-20.
+        assert!(
+            body.contains("await_budget(asked.feed, site)"),
+            "the chunk loop still charges the permit for the first attempt"
+        );
+    }
+
+    /// **THE OFFSET PATH'S TRANSPORT GOES THROUGH THE LADDER TOO.**
+    ///
+    /// The second of the two F&O transports that reached the socket bare.
+    /// `fetch_rolling` called `post_json` directly, so one dropped socket ended
+    /// one cell of a cross product that is `offsets × sides × cadences ×
+    /// ordinals` — hundreds of requests per underlying-month, each a
+    /// single-refusal proposition.
+    ///
+    /// Source-text for the same reason as the chain assertion above: the call
+    /// takes a concrete `&HttpSource`, so what is checkable here is *which
+    /// function is called*. The ladder's own behaviour is proved against
+    /// [`laddered`] by the three `Governed` tests, which drive the identical
+    /// code path — that shared function is the whole point of the extraction.
+    #[test]
+    fn the_rolling_transport_goes_through_the_same_ladder() {
+        let source = include_str!("server.rs");
+        let body = source
+            .split_once("async fn fetch_rolling")
+            .expect("fetch_rolling exists")
+            .1;
+        let body = &body[..body
+            .find("\n}\n")
+            .expect("fetch_rolling's body ends at a column-0 brace")];
+
+        assert!(
+            body.contains("laddered(asked.feed, site, \"rolling request\""),
+            "the rolling transport must go through the retry ladder"
+        );
+        assert!(
+            !body.contains("wire.source.post_json(endpoint, body)\n"),
+            "a bare, un-laddered `post_json` would restore the defect beside the fix"
+        );
+    }
+
+    /// **ONE LADDER, NOT THREE.** The extraction is the property, not a detail.
+    ///
+    /// Three transports need this policy and answer two different error types.
+    /// If a later change writes the `step` loop out again beside one of them,
+    /// the copies drift and a 429 starts meaning two things — which is the exact
+    /// class of defect `docs/05-decisions.md` records for every other "second
+    /// answer to one question" in this workspace.
+    ///
+    /// [`step`] is what both ladders share, so it is `step`'s call sites that
+    /// are counted: one in [`with_retry`] (the `FetchError` path) and one in
+    /// [`laddered`] (the `Refusal` path). A third is a copy.
+    #[test]
+    fn the_retry_policy_has_exactly_two_call_sites_and_they_are_the_two_ladders() {
+        let source = include_str!("server.rs");
+        // THE NEEDLES ARE ASSEMBLED AT RUN TIME, AND THAT IS LOAD-BEARING.
+        //
+        // `include_str!` reads THIS file, so a needle written as one literal
+        // would match itself and the count would be off by exactly the number of
+        // needles. Measured: the first version of this test asserted 2, found 4,
+        // and the two extra hits were its own source lines. Splitting each
+        // needle in half means the contiguous text never appears in the file.
+        let bars = format!("{}{}", "step(", "status,");
+        let fno = format!("{}{}", "step(", "why.status,");
+        let calls = source.matches(bars.as_str()).count() + source.matches(fno.as_str()).count();
+        assert_eq!(
+            calls, 2,
+            "expected exactly two callers of the retry policy — `with_retry` for \
+             the bars path and `laddered` for the two F&O transports. A third is \
+             a hand-written copy of the ladder and will drift from these two."
         );
     }
 

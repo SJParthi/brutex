@@ -254,6 +254,15 @@ pub enum NseError {
         /// The bound.
         cap: usize,
     },
+    /// More distinct index links in one category listing than
+    /// [`MAX_INDEX_LINKS`].
+    ///
+    /// Refused rather than truncated: a silently shortened listing is a universe
+    /// missing indices nobody can see are missing.
+    TooManyIndexLinks {
+        /// How many had been collected when the bound was crossed.
+        links: usize,
+    },
     /// The file holds a header and nothing else.
     ///
     /// Distinct from [`Self::NotCsv`]: this IS the right document and it is
@@ -317,6 +326,14 @@ impl fmt::Display for NseError {
             Self::TooManyRows { rows, cap } => write!(
                 f,
                 "the file holds {rows} rows; this build accepts at most {cap}"
+            ),
+            Self::TooManyIndexLinks { links } => write!(
+                f,
+                "this category listing carries at least {links} distinct index \
+                 links; this build accepts at most {MAX_INDEX_LINKS}. A real \
+                 listing carries tens, so a page this size is not the listing \
+                 it claims to be. Refused rather than truncated — a shortened \
+                 list is a universe missing indices nobody can see are missing."
             ),
             Self::NoRows => write!(
                 f,
@@ -447,6 +464,28 @@ pub fn hrefs_with_prefix<'a>(html: &'a str, prefix: &str) -> Vec<&'a str> {
     out
 }
 
+/// The most index links one category listing may carry.
+///
+/// # Why a bound exists here at all
+///
+/// `docs/07-o1-architecture.md` law 5 — bound every input at the boundary, and
+/// unbounded input always arrives from outside. [`MAX_DOCUMENT_BYTES`] already
+/// bounds the document, but a bound on the BYTES is not a bound on the MATCHES:
+/// the shortest legal `<a href="…/x">` is on the order of tens of bytes, so an
+/// 8 MiB listing can carry on the order of a hundred thousand of them, and every
+/// per-link cost is multiplied by that number rather than by anything the
+/// exchange would ever publish.
+///
+/// [`MAX_CONSTITUENTS`] is the same idea one level down — the rows inside one
+/// index — and this is its sibling for the links between them. A real category
+/// listing carries tens; ten thousand is generous by three orders of magnitude
+/// and still finite, which is the only property that matters.
+///
+/// Past it the listing is REFUSED rather than truncated. A silently shortened
+/// list is a universe that is missing indices nobody can see are missing, which
+/// is the `CLAUDE.md` §4 fallback that hides a failure.
+pub const MAX_INDEX_LINKS: usize = 10_000;
+
 /// Every index page a category listing links to, deduplicated, in order.
 ///
 /// Deduplicated because a listing legitimately links the same index twice — a
@@ -455,8 +494,30 @@ pub fn hrefs_with_prefix<'a>(html: &'a str, prefix: &str) -> Vec<&'a str> {
 /// [`NseError::DuplicateSymbol`], which refuses: two links to one page are the
 /// same statement made twice, while one symbol twice in an index is a
 /// contradiction.
-#[must_use]
-pub fn index_links(html: &str, category: Category) -> Vec<IndexRef> {
+///
+/// # Errors
+///
+/// [`NseError::TooManyIndexLinks`] when the listing carries more than
+/// [`MAX_INDEX_LINKS`] distinct links.
+///
+/// # Cost, and the claim this function used to break
+///
+/// This module's header says every function is *"a single pass over its input …
+/// with a constant that does not depend on how many matches there are"*. This
+/// one was the exception: the dedup was `seen.contains(&href)` — a linear scan
+/// of everything kept so far — inside the loop that pushes to `seen`. That is
+/// **O(n²) in the number of links**, and nothing bounded n.
+///
+/// A `HashSet` makes the membership test one hash probe, so the pass is O(n)
+/// with an O(1) per-link cost, and [`MAX_INDEX_LINKS`] bounds n so the whole
+/// call is bounded by two compile-time constants. Both halves are needed: the
+/// set alone still lets an adversarial listing allocate without limit, and the
+/// bound alone still pays the quadratic up to it.
+///
+/// Order is preserved: the set decides membership, the `Vec` decides sequence.
+/// A set alone would lose the exchange's own ordering, which `resolve::crawl`
+/// relies on for a reproducible snapshot.
+pub fn index_links(html: &str, category: Category) -> Result<Vec<IndexRef>, NseError> {
     // The prefix is the category's own path plus a separator, so a listing that
     // links a SIBLING category is not collected into this one.
     let prefix = format!("{}/", category.path());
@@ -464,23 +525,30 @@ pub fn index_links(html: &str, category: Category) -> Vec<IndexRef> {
     // listing, and a byte scanner reads them where a browser does not — see
     // `without_comments`, which carries the measurement.
     let visible = without_comments(html);
-    let mut seen: Vec<&str> = Vec::new();
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let mut out = Vec::new();
     for href in hrefs_with_prefix(&visible, &prefix) {
         // A trailing slash and no slug is the category page linking itself.
         if href.len() <= prefix.len() {
             continue;
         }
-        if seen.contains(&href) {
+        // ONE HASH PROBE. `insert` answers whether the value was new, so the
+        // test and the record are one operation rather than two — which is also
+        // what stops them disagreeing.
+        if !seen.insert(href) {
             continue;
         }
-        seen.push(href);
+        if out.len() >= MAX_INDEX_LINKS {
+            return Err(NseError::TooManyIndexLinks {
+                links: out.len().saturating_add(1),
+            });
+        }
         out.push(IndexRef {
             category,
             path: href.to_owned(),
         });
     }
-    out
+    Ok(out)
 }
 
 /// The path segment every constituent link sits under.
@@ -911,7 +979,7 @@ mod tests {
             <a href="/indices/equity/sectoral-indices/">the category itself</a>
             <a href="/indices/equity/broad-based-indices/nifty--50">a SIBLING category</a>
         "#;
-        let found = index_links(html, Category::Sectoral);
+        let found = index_links(html, Category::Sectoral).expect("well under the link bound");
         assert_eq!(
             found.len(),
             2,
@@ -944,7 +1012,8 @@ mod tests {
 
     #[test]
     fn a_link_the_exchange_commented_out_is_not_an_index_this_build_crawls() {
-        let found = index_links(REAL_LISTING, Category::Thematic);
+        let found =
+            index_links(REAL_LISTING, Category::Thematic).expect("well under the link bound");
         assert_eq!(
             found.len(),
             2,
@@ -967,11 +1036,100 @@ mod tests {
         );
     }
 
+    /// **THE DEDUP IS ONE PROBE PER LINK, NOT A SCAN OF EVERY LINK BEFORE IT.**
+    ///
+    /// The shape this pins: the dedup was `seen.contains(&href)` — a linear scan
+    /// of everything kept so far — inside the loop that pushes to `seen`, which
+    /// is O(n²) in the number of links with nothing bounding n. This module's
+    /// own header claims *"a constant that does not depend on how many matches
+    /// there are"*, and this was the one function that broke it.
+    ///
+    /// Asserted as a RATIO rather than a duration, the way the workspace's
+    /// bench gate measures every other O(1) claim: a quadratic cost quadruples
+    /// when n doubles, a linear one doubles. Ten thousand distinct links against
+    /// five thousand must stay near 2× — a `contains` scan would put it near 4×
+    /// and, at these sizes, would take long enough to be unmistakable.
+    ///
+    /// The ceiling is deliberately loose. This is a correctness assertion about
+    /// the ALGORITHM, not a timing budget: a shared runner under load can stretch
+    /// any wall clock, and 3× still separates linear from quadratic decisively.
+    #[test]
+    fn deduplicating_index_links_costs_one_probe_each_rather_than_a_scan() {
+        fn listing(n: usize) -> String {
+            let mut html = String::with_capacity(n * 64);
+            for i in 0..n {
+                // DISTINCT, so every one survives the dedup and the `seen` set
+                // grows to its full size — the worst case for a linear scan and
+                // the only case that separates the two shapes.
+                html.push_str(&format!(
+                    "<a href=\"/indices/equity/sectoral-indices/nifty-{i}\">x</a>"
+                ));
+            }
+            html
+        }
+
+        let small = listing(5_000);
+        let large = listing(10_000);
+
+        let at = |html: &str, want: usize| -> core::time::Duration {
+            let started = std::time::Instant::now();
+            let found = index_links(html, Category::Sectoral).expect("under the bound");
+            let took = started.elapsed();
+            assert_eq!(found.len(), want, "every distinct link survives the dedup");
+            took
+        };
+
+        // WARM FIRST. The first call pays page faults for a freshly built
+        // `String`, which is not the cost under test.
+        let _warm = at(&small, 5_000);
+        let half = at(&small, 5_000);
+        let full = at(&large, 10_000);
+
+        let ratio = full.as_secs_f64() / half.as_secs_f64().max(f64::MIN_POSITIVE);
+        assert!(
+            ratio < 3.0,
+            "doubling the links multiplied the cost by {ratio:.2}×. Linear work \
+             doubles; a `contains` scan over everything kept so far quadruples. \
+             The dedup has stopped being one probe per link — {half:?} for 5,000 \
+             against {full:?} for 10,000"
+        );
+    }
+
+    /// **PAST THE BOUND THE LISTING IS REFUSED, NOT SHORTENED.**
+    ///
+    /// `MAX_DOCUMENT_BYTES` bounds the document and does not bound the matches:
+    /// the shortest legal anchor is tens of bytes, so an 8 MiB listing can carry
+    /// on the order of a hundred thousand links. Truncating at the cap would
+    /// hand back a universe missing indices nobody can see are missing, which is
+    /// the `CLAUDE.md` §4 fallback that hides a failure — so it refuses, and the
+    /// refusal names the count and the cap.
+    #[test]
+    fn a_listing_past_the_link_bound_is_refused_rather_than_truncated() {
+        let mut html = String::new();
+        for i in 0..=MAX_INDEX_LINKS {
+            html.push_str(&format!(
+                "<a href=\"/indices/equity/sectoral-indices/nifty-{i}\">x</a>"
+            ));
+        }
+        let refused =
+            index_links(&html, Category::Sectoral).expect_err("one past the cap is one too many");
+        assert!(
+            matches!(refused, NseError::TooManyIndexLinks { links } if links > MAX_INDEX_LINKS),
+            "the refusal names how many arrived: {refused:?}"
+        );
+        assert!(
+            refused
+                .to_string()
+                .contains("Refused rather than truncated"),
+            "the operator is told it was refused, not shortened: {refused}"
+        );
+    }
+
     #[test]
     fn an_unterminated_comment_consumes_the_rest_as_a_browser_would() {
         let page = "<a href=\"/indices/equity/sectoral-indices/before\">a</a>\
                     <!-- <a href=\"/indices/equity/sectoral-indices/after\">b</a>";
-        let found = index_links(page, Category::Sectoral);
+        let found = index_links(page, Category::Sectoral).expect("well under the link bound");
         assert_eq!(found.len(), 1);
         assert!(found[0].path.ends_with("before"));
     }
