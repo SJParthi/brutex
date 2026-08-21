@@ -495,6 +495,17 @@ fn note_landed(member: &Member, landed: &Landed) {
             .with(
                 "dropped",
                 telemetry::Value::Uint(u64::from(landed.census.total())),
+            )
+            // A SUBSET OF `dropped`, NOT AN ADDEND TO IT. `dropped` says how
+            // many rows were declined; this says how many of those the venue's
+            // published hours declined. A reader who sums them double-counts.
+            // It earns its slot because `dropped` alone cannot distinguish a
+            // vendor sending rows past the close from one sending rows outside
+            // the requested window, and a jump here means `crate::vendor`'s
+            // session table has gone stale.
+            .with(
+                "outside_session",
+                telemetry::Value::Uint(u64::from(landed.outside_session)),
             ),
     );
 }
@@ -1234,6 +1245,22 @@ struct Landed {
     /// the source rung are known here and are on neither `Member` nor `Plan`.
     /// See `derived_shortfall` for what the difference means.
     derived_expected: usize,
+    /// How many of `census`'s drops were for falling outside venue hours.
+    ///
+    /// **Computed since the session table existed and read by nobody.**
+    /// [`fetch::Landed::outside_session`] counts these on the way out, and a
+    /// jump in it after a session change is the signal that a row in
+    /// `crate::vendor`'s session table has gone stale. That signal reached this
+    /// function and stopped: `fetch::Landed` carried it, `ingest::Landed` had no
+    /// field for it, and so no receipt, no event and no page ever showed it.
+    ///
+    /// **A SUBSET of `census`, never an addend to it.** Since the operator's
+    /// rule of 2026-08-20 an out-of-session row is dropped, so it is counted
+    /// once in `census` and again here, on purpose — `census` answers how many
+    /// rows were declined, this answers how many of those the session table
+    /// declined. `Ingested::balances` reconciles against `census` alone and
+    /// must never learn about this field.
+    outside_session: u32,
 }
 
 /// The month's two closes, when the batch just appended **is** the whole file.
@@ -1340,6 +1367,27 @@ fn month_closes(file: &BarFile, header: &Header, batch: &[Bar]) -> Result<Closes
 
 /// One member: convert, fold, append, and describe the month file that
 /// resulted.
+/// A [`Landed`] that stored nothing, carrying only what is still true of it.
+///
+/// Both of [`one`]'s early returns built this literal field for field, and they
+/// differed in exactly one value — `folded`, which is zero before the fold runs
+/// and known after it. Eight duplicated lines twice over is where a field added
+/// to `Landed` gets carried on one path and forgotten on the other, which is
+/// how `outside_session` would have been lost on the empty-window path while
+/// looking correct on the one anybody tests.
+fn nothing_landed(census: DropCensus, folded: usize, outside_session: u32) -> Landed {
+    Landed {
+        committed: 0,
+        bars: 0,
+        folded,
+        census,
+        entries: Vec::new(),
+        derived: 0,
+        derived_expected: 0,
+        outside_session,
+    }
+}
+
 fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, String> {
     let Plan {
         request,
@@ -1356,16 +1404,10 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
         rows: member.rows.clone(),
     };
     let mut landed = fetch::land(&raw, request, encoding, scale).map_err(|why| why.to_string())?;
+    // Bound once so the three returns below cannot disagree. See the field.
+    let outside_session = landed.outside_session;
     if landed.bars.is_empty() {
-        return Ok(Landed {
-            committed: 0,
-            bars: 0,
-            folded: 0,
-            census: landed.census,
-            entries: Vec::new(),
-            derived: 0,
-            derived_expected: 0,
-        });
+        return Ok(nothing_landed(landed.census, 0, outside_session));
     }
 
     // THE FOLD. Without it a real run produced 354,675 rows and ZERO bars:
@@ -1394,15 +1436,7 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
     // and the arm that says "this cannot happen" is a `Landed` with nothing in
     // it rather than a panic.
     let (Some(first), Some(last)) = (landed.bars.first(), landed.bars.last()) else {
-        return Ok(Landed {
-            committed: 0,
-            bars: 0,
-            folded,
-            census: landed.census,
-            entries: Vec::new(),
-            derived: 0,
-            derived_expected: 0,
-        });
+        return Ok(nothing_landed(landed.census, folded, outside_session));
     };
     // THE MONTH, AND THE REFUSAL IF THE BARS CROSS ONE. See `month_of`.
     let ym = month_of(first, last)?;
@@ -1493,6 +1527,7 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
         entries,
         derived,
         derived_expected,
+        outside_session,
     })
 }
 

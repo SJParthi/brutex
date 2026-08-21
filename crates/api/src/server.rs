@@ -12351,12 +12351,6 @@ mod tests {
         );
     }
 
-    /// AN UNREADABLE CENSUS REFUSES RATHER THAN GUESSING EITHER WAY.
-    ///
-    /// This is the arm that would be a `CLAUDE.md` §4 silent fallback if it
-    /// read as "everything held", and a spurious refusal if it read as
-    /// "nothing held". It refuses, and it quotes the census's own words.
-    #[test]
     /// A CADENCE WHOSE CONTRACTS WERE WITHDRAWN IS NEVER ASKED FOR — and one
     /// that still trades still is.
     ///
@@ -12407,6 +12401,25 @@ mod tests {
         );
     }
 
+    /// AN UNREADABLE CENSUS REFUSES RATHER THAN GUESSING EITHER WAY.
+    ///
+    /// This is the arm that would be a `CLAUDE.md` §4 silent fallback if it
+    /// read as "everything held", and a spurious refusal if it read as
+    /// "nothing held". It refuses, and it quotes the census's own words.
+    ///
+    /// # This test did not run for five commits
+    ///
+    /// Its `#[test]` was left stranded above the NEXT test's doc comment by a
+    /// botched insertion in `cd2fb30`, where it bound to
+    /// `a_cadence_whose_contracts_were_withdrawn_is_never_asked_for` as a
+    /// SECOND `#[test]` and left this function with none. A function with no
+    /// attribute is not a failing test, it is not a test at all — `cargo test`
+    /// reported one fewer passing test than the file contains and said nothing,
+    /// which is precisely the §4 failure this test exists to catch, arriving in
+    /// the test itself. Only `-D warnings` found it, as a `dead_code` warning on
+    /// a name that reads like a test and a `duplicate_macro_attributes` on a
+    /// line twenty above.
+    #[test]
     fn an_unreadable_census_refuses_and_names_what_would_not_load() {
         let censuses = vec![census::VendorCensus {
             vendor: Vendor::Dhan,

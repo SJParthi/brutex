@@ -637,18 +637,29 @@ pub struct Landed {
     pub bars: Vec<Bar>,
     /// Every DISCARDED row, by reason. The total equals rows in minus bars out.
     ///
-    /// Only window reasons reach it now. A row outside the published session is
-    /// KEPT — see [`Self::outside_session`] — and counting it here as well
-    /// would break `Ingested::balances`, which reconciles rows read against
-    /// bars stored plus folded plus dropped. A row cannot be on both sides.
+    /// **Session reasons reach it too, and this said they did not.** The doc
+    /// here read "only window reasons reach it now. A row outside the published
+    /// session is KEPT … a row cannot be on both sides", which described the
+    /// operator's rule of 2026-08-19. The rule of 2026-08-20 reversed it: an
+    /// out-of-session row is now dropped, `census.count(reason)` runs for it,
+    /// and `Ingested::balances` reconciles correctly *because* it is a drop.
     pub census: DropCensus,
-    /// Bars kept although they fell outside the venue's published hours.
+    /// How many of the census's drops were for falling outside venue hours.
     ///
-    /// Not a drop and not silence: the operator's rule is that whatever the
-    /// vendor sends is stored, and this is the number that says how much of
-    /// what was stored the exchange's own timetable did not expect. A jump here
-    /// after a session change is the signal that a row in
-    /// `crate::vendor`'s session table has gone stale.
+    /// **A SUBSET OF [`Self::census`], not a disjoint counter**, and this said
+    /// the opposite: "bars kept although they fell outside the venue's
+    /// published hours … not a drop". That was the 2026-08-19 rule, under which
+    /// such a row was stored and this was the only number that mentioned it.
+    /// Since 2026-08-20 the row is dropped and counted in both places
+    /// deliberately — adding `dropped` and `outside_session` together
+    /// double-counts, which is the arithmetic error the old wording invited.
+    ///
+    /// What it is FOR is unchanged and is why it survives the reversal: the
+    /// census says how many rows were declined for session reasons, and a jump
+    /// in it after a session change is the signal that a row in
+    /// `crate::vendor`'s session table has gone stale. Measured on the run that
+    /// prompted the reversal: Dhan sends NSE index bars through 15:38 while
+    /// Groww and Zerodha stop at 15:29, against a published close of 15:30.
     pub outside_session: u32,
 }
 
@@ -790,9 +801,12 @@ pub fn land(
                 crate::session::DropReason::BeforeWindow | crate::session::DropReason::AfterWindow
             );
             if out_of_session {
-                // COUNTED SEPARATELY, because `outside_session` is what the
-                // receipt reports and `census` is what `balances()` reconciles.
-                // A row on both sides would be counted twice.
+                // COUNTED IN ADDITION TO THE CENSUS, not instead of it. This
+                // said "a row on both sides would be counted twice", which was
+                // true while the 2026-08-19 rule KEPT these rows. It is now
+                // deliberately on both sides: `census` answers "how many rows
+                // were declined", `outside_session` answers "how many of those
+                // were the session table's doing". Summing them is the error.
                 outside_session = outside_session.saturating_add(1);
             }
             // AND NOW DROPPED, WHICHEVER KIND IT IS. Operator's rule of

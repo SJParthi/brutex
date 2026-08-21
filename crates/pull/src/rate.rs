@@ -898,3 +898,51 @@ impl Pools {
         }
     }
 }
+
+/// Microseconds of vendor throttling this process has absorbed.
+///
+/// **The wait was always real; only the counting was missing.**
+/// [`crate::http::Fetcher`] consults a [`Governor`] before every request and
+/// sleeps exactly as long as a [`Verdict::Deny`] asks for. That sleep is the
+/// throttle being absorbed rather than surfacing as a vendor error, and it was
+/// invisible: `api`'s `Status::absorbed_ms` was declared, initialised to zero,
+/// serialised on `/autopilot.json` and **assigned nowhere**, so the page's
+/// "Throttle absorbed since start" line sits behind `{#if ap?.absorbed_ms}` and
+/// could never render. An operator asking "why is this slow" was shown nothing,
+/// and nothing is what a run with no throttling looks like too.
+///
+/// # Why a process-wide counter and not a field
+///
+/// `Status::absorbed_ms` says "this process", and one `Fetcher` is built per
+/// feed per chain — a per-`Fetcher` field would answer a narrower question than
+/// the one the page asks. A `static` also crosses the crate boundary without
+/// `pull` learning about `api`, which it must not.
+///
+/// # Cost
+///
+/// One `fetch_add` on the wait path and one `load` per status publish. Both are
+/// O(1) and neither allocates. `Relaxed` is correct because no other memory is
+/// ordered against this: it is a monotonic counter read for display, never a
+/// flag another thread branches on.
+static ABSORBED_MICROS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Add `micros` to what this process has absorbed.
+///
+/// Saturating rather than wrapping: a counter that rolls over to zero after
+/// 584,000 years of throttling would be a wrong number rather than a large one,
+/// and `CLAUDE.md` §3 rule 6 prefers the honest bound.
+pub fn note_absorbed(micros: u64) {
+    // `fetch_update` rather than `fetch_add` so the saturation is real. The
+    // closure returns `Some` unconditionally, so this never spins in practice.
+    let _ = ABSORBED_MICROS.fetch_update(
+        core::sync::atomic::Ordering::Relaxed,
+        core::sync::atomic::Ordering::Relaxed,
+        |held| Some(held.saturating_add(micros)),
+    );
+}
+
+/// Microseconds of throttling absorbed since this process started.
+#[must_use]
+pub fn absorbed_micros() -> u64 {
+    ABSORBED_MICROS.load(core::sync::atomic::Ordering::Relaxed)
+}

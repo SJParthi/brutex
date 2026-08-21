@@ -529,6 +529,11 @@ impl HttpSource {
             // emit one, and this floor means a future change to it cannot turn
             // this loop into a busy wait.
             let at_least = wait.max(1);
+            // COUNTED BEFORE THE SLEEP, NOT AFTER. A run cancelled mid-wait
+            // still absorbed the part it waited, and a counter that only
+            // credits completed sleeps under-reports exactly the runs an
+            // operator is most likely to be asking about.
+            crate::rate::note_absorbed(at_least);
             tokio::time::sleep(core::time::Duration::from_micros(at_least)).await;
         }
     }

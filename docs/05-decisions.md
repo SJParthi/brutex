@@ -19232,3 +19232,81 @@ subtracting one pinned constant from another — and **none reaches
 `min_hits = 600`**, which is why k=1 still returns 17. That is the family
 behaving as designed: a crossing fires on the one bar a level changes side, not
 on every bar the level is above.
+
+### D-0247 — three numbers the page shows were never computed, and one test was never a test
+
+**2026-08-21.** Four defects on the observability surface, found by running
+`cargo clippy --all-targets -- -D warnings` on crates whose *tests* were green.
+Each was invisible to `cargo test` by construction.
+
+**`waiting_ms` and `absorbed_ms` could only ever have been zero.** Both are
+declared on `api::autopilot::Status`, both are initialised to zero, both are
+serialised onto `/autopilot.json`, and **neither was assigned anywhere in the
+build**. The autopilot page guards its throttle line on `{#if ap?.absorbed_ms}`,
+so a permanently-falsy field meant "Throttle absorbed since start" could never
+render at all. An operator asking why a run was slow was shown nothing — and
+nothing is also what a run with no throttling looks like.
+
+The waits themselves were always real. `pull::http::Fetcher::wait_for_permit`
+consults a `Governor` before every request and sleeps exactly as long as a
+`Verdict::Deny` asks for; `autopilot::nap` sleeps between units a second at a
+time. Only the counting was missing. `pull::rate` now holds a process-wide
+`AtomicU64`, incremented **before** each sleep — a run cancelled mid-wait still
+absorbed the part it waited, and crediting only completed sleeps under-reports
+exactly the runs an operator is most likely to be asking about. `Relaxed` is
+correct: nothing branches on it, it is a monotonic counter read for display.
+One `fetch_add` on the wait path, one `load` per publish, both O(1).
+
+**A test in `api::server` had two `#[test]` attributes and its neighbour had
+none.** A botched insertion in `cd2fb30` — mine — left the attribute for
+`an_unreadable_census_refuses_and_names_what_would_not_load` stranded above the
+NEXT test's doc comment, where it bound to that test as a second `#[test]` and
+left its own function bare. **A function without `#[test]` is not a failing
+test; it is not a test at all.** `cargo test` reported one fewer pass and said
+nothing. That is precisely the `CLAUDE.md` §4 failure-that-hides-a-failure,
+arriving inside the test suite whose job is to catch it. Only `-D warnings`
+found it, and not as a test error: as `dead_code` on a test-shaped name, plus a
+`duplicate_macro_attributes` twenty lines away. api now runs 569, not 568.
+
+**`outside_session` was computed on every window and read by nobody.**
+`fetch::Landed` carries it, `ingest::Landed` had no field for it, and the value
+died at the bridge — no receipt, no event, no page. It is the store's own
+staleness alarm: a jump in it after a session change means a row in
+`crate::vendor`'s session table has gone stale, which is the difference between
+"the vendor sent less" and "this build stopped recognising what the vendor
+sent". It now rides the `pull.member landed` event beside `bars`, `folded`,
+`rows` and `dropped`. Six fields against `MAX_FIELDS = 12`, and overflow is
+counted rather than silent, so the surface has room.
+
+**Its own documentation had been wrong since the reversal.** Three separate
+comments said an out-of-session row is KEPT and must never reach the census,
+because "a row cannot be on both sides". That was the operator's rule of
+2026-08-19. The rule of **2026-08-20** dropped these rows instead — measured
+cause: Dhan sends NSE index bars through 15:38 while Groww and Zerodha stop at
+15:29, against a published close of 15:30, so one vendor's month held nine bars
+past the close and the same file before 2026-08-03 did not. Post-reversal the
+row is counted in `census` **and** in `outside_session`, deliberately: the first
+answers how many rows were declined, the second how many of those the session
+table declined. **They are subset and superset, so summing them double-counts** —
+the exact arithmetic error the old wording invited. `crates/pull/tests/census.rs`
+already encoded the correct relation (`OUTSIDE_SESSION = 2` inside
+`DROPPED = 4`); only the field docs had not caught up, which is the case
+`CLAUDE.md` §10 describes — believe the gate over the prose.
+
+**Two functions crossed the 100-line ceiling and both were duplication.**
+`autopilot::round` reached 116 because D-0240's press standoff duplicated the
+seat standoff verbatim but for one clause; it is now `stand_off(site, holder)`.
+`ingest::one` reached 101 because two early returns built the same eight-field
+`Landed` literal twice; it is now `nothing_landed(census, folded,
+outside_session)`. Both are worth recording rather than silently split: the
+lint's complaint WAS the duplication, and splitting a long function without
+removing the copy silences the symptom. The second one had already bitten in
+miniature — a field added to `Landed` has two places to be forgotten, which is
+how `outside_session` would have been carried on the tested path and lost on the
+empty-window one.
+
+**What this says about the gates.** Every one of these lived in a crate whose
+`cargo test` was green, and three of the four were invisible to any possible
+test: an unassigned field has no wrong value to assert against, an unregistered
+test does not run, and a computed-then-discarded number is not observable from
+outside. `-D warnings` on `--all-targets` found all three.

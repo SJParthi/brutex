@@ -7661,3 +7661,47 @@ fn the_newest_view_holds_one_row_per_month_where_the_log_holds_one_per_write() {
          disk actually has"
     );
 }
+
+/// **THE THROTTLE COUNTER COUNTS, AND IT SATURATES RATHER THAN WRAPPING.**
+///
+/// `absorbed_ms` on `/autopilot.json` was declared, initialised to zero,
+/// serialised, and assigned nowhere in the build — so the page's "Throttle
+/// absorbed since start" line, which renders behind `{#if ap?.absorbed_ms}`,
+/// could never appear. `waiting_ms` beside it had the same shape. Two numbers
+/// an operator would read as "nothing was throttled" when what they actually
+/// meant was "nobody was counting".
+///
+/// Asserted by DELTA, not by absolute value. The counter is process-wide by
+/// design — `Status::absorbed_ms` says "this process" and one `Fetcher` exists
+/// per feed per chain — so a test that demanded a specific total would be
+/// asserting that no other test in the binary ever throttled, which is a
+/// property of the schedule rather than of this code.
+/// # Why this does NOT assert the saturation
+///
+/// It could, and the first version did: `note_absorbed(u64::MAX)` twice, then
+/// assert the counter pinned at the ceiling instead of rolling over. Two things
+/// were wrong with that. The saturation is `u64::saturating_add`'s property, so
+/// asserting it here tests **std** rather than this crate. Worse, it left the
+/// process-wide counter pinned at `u64::MAX` for the rest of the binary — after
+/// which every delta this test measures is **zero**, and whether that breaks a
+/// future test depends on the order the harness happens to run them in. A test
+/// that poisons shared state for its successors is a flaky build waiting for a
+/// scheduling change.
+#[test]
+fn absorbed_throttle_is_counted_rather_than_discarded() {
+    let before = pull::rate::absorbed_micros();
+    pull::rate::note_absorbed(1_500);
+    assert_eq!(
+        pull::rate::absorbed_micros().saturating_sub(before),
+        1_500,
+        "the wait the governor asked for is the wait that is counted"
+    );
+
+    pull::rate::note_absorbed(500);
+    assert_eq!(
+        pull::rate::absorbed_micros().saturating_sub(before),
+        2_000,
+        "and it ACCUMULATES -- a counter that only held the last wait would \
+         report a run throttled a thousand times as one throttled once"
+    );
+}

@@ -2382,6 +2382,17 @@ async fn nap(site: &Loaded, secs: u64) {
         site.autopilot.publish(|status| {
             status.due_unix = ingest::epoch_secs(std::time::SystemTime::now())
                 .saturating_add(i64::try_from(left).unwrap_or(i64::MAX));
+            // THE SECOND ABOUT TO BE SLEPT, credited before it is slept so a
+            // pause partway through still counts the part that elapsed.
+            // `waiting_ms` was declared, serialised and assigned NOWHERE, so
+            // this and `absorbed_ms` both read zero for every run this build
+            // has ever done — two numbers on the page that could only ever
+            // have been zero.
+            status.waiting_ms = status.waiting_ms.saturating_add(1_000);
+            // ABSORBED THROTTLING IS THE GOVERNOR'S, not this loop's, so it is
+            // READ rather than accumulated: `pull::rate` counts the microseconds
+            // it actually slept and this is the only place that asks.
+            status.absorbed_ms = pull::rate::absorbed_micros() / 1_000;
         });
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
@@ -2718,6 +2729,40 @@ impl Settled {
 /// it, and record what happened.
 ///
 /// Returns how many seconds to wait before the next pass. Zero means carry on.
+/// Publish a standoff naming `holder`, and say how long to wait.
+///
+/// **The two standoffs said the same thing twice.** The press check (D-0240)
+/// and the seat check differ in one clause — *which* driver holds the tree —
+/// and everything after it was duplicated verbatim: the phase, the "nothing is
+/// lost" reassurance, the `due_unix` arithmetic and the return. Two copies of a
+/// message is two places for it to drift, and a page that explains the standoff
+/// one way in one arm and another way in the other is a worse diagnostic than
+/// one that says the same sentence both times.
+///
+/// It also took `round` to 116 lines against a 100-line ceiling, which is how
+/// this was found: the duplication was the lint's actual complaint, and
+/// splitting the function without removing the copy would have silenced the
+/// symptom.
+///
+/// `holder` completes the sentence and is the only part that varies. The
+/// substring `holds the pull seat` is asserted by
+/// `the_backfill_stands_off_while_a_hand_made_pull_holds_the_seat`, so the
+/// wording is load-bearing rather than decorative.
+fn stand_off(site: &Loaded, holder: &str) -> u64 {
+    let saying = format!(
+        "{holder}, so the backfill is standing off until it finishes. Nothing \
+         is lost: the next unit is re-derived from whatever the store holds by \
+         then."
+    );
+    site.autopilot.publish(move |status| {
+        status.phase = Phase::Paused;
+        status.detail = saying;
+        status.due_unix = ingest::epoch_secs(std::time::SystemTime::now())
+            .saturating_add(i64::try_from(SEAT_WAIT_SECS).unwrap_or(i64::MAX));
+    });
+    SEAT_WAIT_SECS
+}
+
 async fn round(
     site: &Loaded,
     feeds: &mut [FeedState],
@@ -2761,31 +2806,11 @@ async fn round(
         .as_ref()
         .is_some_and(crate::pullrun::Progress::running);
     if pressing {
-        site.autopilot.publish(|status| {
-            status.phase = Phase::Paused;
-            status.detail = String::from(
-                "a hand-made pull is running, so the backfill is standing off until \
-                 it finishes. Nothing is lost: the next unit is re-derived from \
-                 whatever the store holds by then.",
-            );
-            status.due_unix = ingest::epoch_secs(std::time::SystemTime::now())
-                .saturating_add(i64::try_from(SEAT_WAIT_SECS).unwrap_or(i64::MAX));
-        });
-        return SEAT_WAIT_SECS;
+        return stand_off(site, "a hand-made pull is running");
     }
 
     let Some(_seats) = site.autopilot.take_every_seat() else {
-        site.autopilot.publish(|status| {
-            status.phase = Phase::Paused;
-            status.detail = String::from(
-                "a hand-made pull holds the pull seat, so the backfill is standing off \
-                 until it finishes. Nothing is lost: the next unit is re-derived from \
-                 whatever the store holds by then.",
-            );
-            status.due_unix = ingest::epoch_secs(std::time::SystemTime::now())
-                .saturating_add(i64::try_from(SEAT_WAIT_SECS).unwrap_or(i64::MAX));
-        });
-        return SEAT_WAIT_SECS;
+        return stand_off(site, "a hand-made pull holds the pull seat");
     };
     let Some(yesterday) = yesterday_ist(std::time::SystemTime::now()) else {
         return IDLE_POLL_SECS;
