@@ -4583,6 +4583,31 @@ jobs:
           # those two sentences is now false. `crates/api` belongs to another line of
           # work; correcting it there is that owner's change, and this note is the
           # report.
+          # PROSE LIVES OUTSIDE THE QUOTES, AND THAT IS NOT A STYLE CHOICE.
+          #
+          # These seven lines sat INSIDE the single-quoted `allow_sort` string.
+          # The staleness audit at the end of `check()` reads column 1 of every
+          # non-blank line -- `awk 'NF{print $1}'` -- so it took the bare token
+          # `#` as a path and ran `git ls-files --error-unmatch '#'`, which
+          # fails. Gate 11 therefore printed "STALE ALLOWLIST ENTRY -- # is not a
+          # tracked file" seven times and exited 1 on EVERY run, for a reason
+          # with nothing to do with the tree. `allow_search`, `allow_float`,
+          # `allow_unsized`, `allow_panic` and `allow_assert` all keep their
+          # prose outside the quotes; this one list was the outlier.
+          #
+          # Gate 1e's own comment names why that matters more than the red
+          # itself: "red for the wrong reason trains a reader to ignore the
+          # gate."
+          #
+          # The entry the prose was about, kept here where the audit cannot read
+          # it as a path: `catalog::walk` returns a listing addressed by ORDINAL,
+          # built from a `read_dir` whose order the filesystem chooses. A page
+          # whose row 5 differs between two runs over identical bytes is not a
+          # listing, and every deterministic alternative costs the same or more
+          # -- a `BTreeSet` is O(n log n) on insert and a hash set returns
+          # nothing repeatable. CLI-only: `crates/cli/src/batch.rs` is the sole
+          # caller, so it is never on a request path. docs/06-limits.md
+          # section 86.
           allow_sort='
           crates/runner/src/audit.rs 1
           crates/runner/src/bootstrap.rs 1
@@ -4604,13 +4629,6 @@ jobs:
           crates/api/src/server.rs 2
           crates/pull/src/archive.rs 1
           crates/pull/src/manifest.rs 1
-          # `catalog::walk` returns a listing addressed by ORDINAL, built from a
-          # `read_dir` whose order the filesystem chooses. A page whose row 5
-          # differs between two runs over identical bytes is not a listing, and
-          # every deterministic alternative costs the same or more: a `BTreeSet`
-          # is O(n log n) on insert and a hash set returns nothing repeatable.
-          # CLI-only -- `crates/cli/src/batch.rs` is the sole caller -- so it is
-          # never on a request path. docs/06-limits.md section 86.
           crates/store/src/catalog.rs 1
           '
 
