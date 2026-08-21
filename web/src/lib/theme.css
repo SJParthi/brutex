@@ -80,7 +80,23 @@
      hues — teal, red, amber, violet — and the accent is a fifth, blue. */
   --up: #00875a;
   --down: #d3143f;
-  --warn: #a86a06;
+  /* AMBER IS MEASURED, NOT CHOSEN BY EYE — the same exercise `--n8` above
+     records, which `--warn` had never had. It was #a86a06, and that fails WCAG
+     AA as TEXT on every opaque surface this app paints: 3.78:1 on --well, the
+     worst of the three (--bg #f5f7fb, --panel-2 #eef1f7, --well #e9edf5).
+     It is a text colour far more often than it looks. /ingest alone renders 81
+     elements in it — every `.note.warn` sentence, the `<strong>` feed name
+     inside one, the stored-bar count, `61/140`, the `never pulled` chip and the
+     reach lane's from-date — at 12px and 15px, so no large-text exemption
+     applies to any of them.
+     #945d05 is the LIGHTEST value on this hue clearing 4.5:1 on --well
+     (4.68:1). #9c6205 was tried first and rejected at 4.30. Darker candidates
+     clear it with more room and were not taken: the floor is the target, and a
+     warning that has gone brown has stopped being a warning.
+     `--warn-soft` moves with it — the same hue at 13%, and two spellings of one
+     colour drift the day one of them is edited. Both light blocks carry the new
+     value; DARK IS UNTOUCHED, since #f0b429 there already clears the floor. */
+  --warn: #945d05;
   --info: #6d45d9;
   --acc: #0e7f96;
   --acc-hi: #1c58c8;
@@ -89,7 +105,7 @@
   --acc-soft: rgba(14, 127, 150, 0.10);
   --up-soft: rgba(0, 135, 90, 0.12);
   --down-soft: rgba(211, 20, 63, 0.11);
-  --warn-soft: rgba(168, 106, 6, 0.13);
+  --warn-soft: rgba(148, 93, 5, 0.13);
   --info-soft: rgba(109, 69, 217, 0.11);
 
   --focus: #0b6376;
@@ -214,7 +230,7 @@
 
   --up: #00875a;
   --down: #d3143f;
-  --warn: #a86a06;
+  --warn: #945d05;
   --info: #6d45d9;
   --acc: #0e7f96;
   --acc-hi: #1c58c8;
@@ -223,7 +239,7 @@
   --acc-soft: rgba(14, 127, 150, 0.10);
   --up-soft: rgba(0, 135, 90, 0.12);
   --down-soft: rgba(211, 20, 63, 0.11);
-  --warn-soft: rgba(168, 106, 6, 0.13);
+  --warn-soft: rgba(148, 93, 5, 0.13);
   --info-soft: rgba(109, 69, 217, 0.11);
 
   --focus: #0b6376;
