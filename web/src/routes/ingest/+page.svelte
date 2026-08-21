@@ -100,43 +100,36 @@
    * have two sources that disagree, which is why it is a field and not a
    * footnote. `pairFloor` below reads exactly these names.
    *
-   * @typedef {{
-   *   rung: string,
-   *   served: boolean,
-   *   kind: string,
-   *   unit: string | null,
-   *   n: number | null,
-   *   from: string | null,
-   *   oldest: string | null,
-   *   source: string,
-   *   standing: string,
-   *   binds_because: string,
-   *   contested: {
-   *     kind: string, unit: string | null, n: number | null,
-   *     from: string | null, oldest: string | null,
-   *     source: string, standing: string
-   *   } | null
-   * }} HistoryRow
+   * IMPORTED NOW, NOT RESTATED. This shape was spelled out here in full, which
+   * put a second copy of one server contract in the tree — the exact drift the
+   * note below already argued against for `Feed`'s own fields, and the argument
+   * holds identically for this one. It lives in `$lib/feeds.svelte.js` beside
+   * the `Feed` it hangs off, and moves when that moves.
+   *
+   * @typedef {import('$lib/feeds.svelte.js').HistoryRow} HistoryRow
    */
 
   /**
-   * A `/feeds.json` ROW AS THIS PAGE READS IT — `Feed`, plus the one field
-   * `$lib/feeds.svelte.js` does not spell.
+   * A `/feeds.json` ROW AS THIS PAGE READS IT — and it is now simply `Feed`.
    *
-   * `Feed` IS IMPORTED, NEVER RESTATED. Two definitions of one shape is the
-   * drift this repository is written against, so the eight fields that module
-   * already names stay its own and move when it moves. `history` is added by
-   * INTERSECTION rather than by copying them out: the same handler emits it on
-   * every row, and this page is its only reader — `pairFloor` and `rungServed`
-   * — so widening the shared typedef would edit a file three other routes
-   * import for a fact only this one asks about.
+   * This was `Feed & { history?: HistoryRow[] }`, an INTERSECTION adding the one
+   * field the shared typedef did not spell. The reasoning recorded here was that
+   * widening the shared shape "would edit a file three other routes import for a
+   * fact only this one asks about". That was true of the EDIT and false of the
+   * FIELD: `history` is on every row the server sends, so the shared typedef was
+   * not describing `/feeds.json` — it was describing the subset one page had
+   * happened to need first, and calling it the contract.
    *
-   * OPTIONAL, AND THAT IS THE HONEST ARITY. `rungServed` treats an absent array
-   * as "this server states nothing" rather than as "nothing is served", which
-   * is the running-binary-predates-the-field case its own comment names. A
-   * required field here would type away the very state it reports.
+   * `fno` was missing for the same reason and did not stay quiet about it: two
+   * `svelte-check` errors, both reported at this page rather than at the
+   * typedef, for a field every descriptor row carries.
    *
-   * @typedef {import('$lib/feeds.svelte.js').Feed & { history?: HistoryRow[] }} FeedRow
+   * OPTIONAL ARITY IS PRESERVED, and still matters for the reason given below:
+   * `rungServed` reads an absent array as "this server states nothing" rather
+   * than "nothing is served" — the running-binary-predates-the-field case. The
+   * shared typedef spells it `history?:` so that distinction survives the move.
+   *
+   * @typedef {import('$lib/feeds.svelte.js').Feed} FeedRow
    */
 
   /**
@@ -1592,9 +1585,31 @@
    */
   const archiveCensus = $derived.by(() => {
     if (!isFolderFeed || !active) return null;
-    if (folderReach.state === 'reading') return { state: 'reading' };
+    // THE TWO SHORT SHAPES ARE TYPED AS LITERALS, AND THAT IS WHAT MAKES THE
+    // MARKUP'S GUARD REAL RATHER THAN DECORATIVE.
+    //
+    // This derivation returns FOUR different things: `null`, a reading marker, a
+    // halt, and the full census. Only the last carries `instruments`,
+    // `collisions` and `rejected`. Without a literal on `state` the checker
+    // infers `string` here, the union stops being discriminated, and
+    // `{#if c.state === 'reading'}` narrows nothing — so a later read of
+    // `c.instruments` type-checks against a shape that does not have it.
+    //
+    // It did not merely type-check. Measured on the running binary: selecting an
+    // archive feed threw `TypeError: Cannot read properties of undefined
+    // (reading 'length')` from the instruments panel, because `c.instruments` is
+    // `undefined` in these two shapes, `undefined === null` is false, and the
+    // next branch reached straight for `.length`. Nine `svelte-check` errors
+    // were pointing at exactly that line and were read as noise.
+    if (folderReach.state === 'reading') {
+      return /** @type {{ state: 'reading' }} */ ({ state: 'reading' });
+    }
     if (folderReach.state === 'halted') {
-      return { state: 'halted', path: folderReach.body?.path ?? null, why: folderReach.why };
+      return /** @type {{ state: 'halted', path: string | null, why: string }} */ ({
+        state: 'halted',
+        path: folderReach.body?.path ?? null,
+        why: folderReach.why
+      });
     }
     const r = folderReach.body?.reach;
     if (!r || typeof r.state !== 'string') return null;
@@ -2839,6 +2854,40 @@
    * the order they are sent. `pull::fold`'s ladder is the server's to enforce and
    * `pullrun::by_feed` re-sorts each vendor's legs onto it.
    */
+  /**
+   * ONE LEG OF A RUN — the shape `runPull` takes and `chain` sends.
+   *
+   * WRITTEN DOWN BECAUSE THE INLINE VERSION WENT STALE. `runPull`'s `@param`
+   * spelled four keys — `dir`, `label`, `body`, `vendor?` — while the two
+   * builders emit six. The two it missed were `route`, which decides whether a
+   * leg goes to `/pull/spot` or `/pull/fno`, and `from`. Because `route` is
+   * read exactly once, behind a `?? '/pull/spot'` fallback, the gap surfaced as
+   * a type error at the READER and looked like an optional field with a
+   * sensible default rather than a required one the annotation had dropped.
+   *
+   * `vendor` AND `route` ARE OPTIONAL, AND THAT IS NOT A HEDGE. `pullRow` — the
+   * per-row button on the census — deliberately sends neither: `wireBodyFor`
+   * defaults the vendor to `feeds.active`, and a census row is a spot row, so
+   * the `?? '/pull/spot'` fallback is its answer rather than its accident. Both
+   * fallbacks are named at their own call sites. Typing these as required would
+   * have made this file describe two of its three callers.
+   *
+   * `route: string` and not a two-literal union: an object literal in a `.map`
+   * widens `'/pull/fno'` to `string` where it is built, so the union would
+   * reject the very values it describes. The two routes are pinned by
+   * `web/tests/proxy.test.js`, which diffs every URL this tree fetches against
+   * `vite.config.js`'s list — a real check where this would be a decorative one.
+   *
+   * @typedef {{
+   *   dir: string,
+   *   label: string,
+   *   body: string,
+   *   vendor?: string,
+   *   route?: string,
+   *   from?: string
+   * }} Leg
+   */
+
   const allBodies = $derived([...wireBodies, ...fnoBodies]);
 
   /**
@@ -5856,7 +5905,13 @@
            retried past a failure, so this is shown beside the summary rather
            than instead of it. */
         const hurt = feeds.find((f) => f.lastError);
-        if (hurt) netError = hurt.lastError;
+        // `?? null` AND NOT A BARE ASSIGNMENT. `lastError` is optional on the
+        // status document's feed row, so it reads `string | undefined`, while
+        // `netError` is `string | null` — and the two absences are not
+        // interchangeable here: every other writer of `netError` uses `null`,
+        // and `{#if netError}` would treat either as false while a later
+        // `netError === null` check would not. One spelling of "no error".
+        if (hurt) netError = hurt.lastError ?? null;
         phase = 'done';
         finishedAt = Date.now();
         try {
@@ -5871,7 +5926,22 @@
   }
 
   /**
-   * @param {{ dir: string, label: string, body: string, vendor?: string }[]} bodies
+   * THE PARAMETER TYPE WAS WRITTEN BY HAND AND THEN A FIELD WAS ADDED.
+   *
+   * This read `{ dir, label, body, vendor? }[]` — four keys, spelled out inline
+   * — while both builders emit six, and the two it missed are the two that
+   * decide where a leg goes and how far back it reaches: `route` and `from`.
+   * `route` is read once, at `request(b.route ?? '/pull/spot', …)`, so the
+   * checker reported the gap there rather than here, and the fallback made it
+   * look like an optional field with a sensible default instead of a required
+   * one the type had dropped. Annotating the call site, the map, and the
+   * derivation itself each moved the error to the next line that reads `route`;
+   * this is where it actually came from.
+   *
+   * `Leg` is the shape both builders now assert, so the four keys cannot go out
+   * of step with the six again.
+   *
+   * @param {Leg[]} bodies
    * @param {Set<string>} asked
    */
   async function runPull(bodies, asked) {
@@ -6580,8 +6650,23 @@
                          predates it, which names its own fix. `[]` is a folder
                          that names nothing, which is an ANSWER. A list is a
                          list. Collapsing the first two would print "0
-                         instruments" at a server that was never asked. -->
-                    {#if c.instruments === null}
+                         instruments" at a server that was never asked.
+
+                         FOUR STATES, THEN — AND THE FOURTH IS "THERE IS NO
+                         CENSUS YET". `reading` and `halted` are shapes that
+                         carry no `instruments` key at all, and this chain used
+                         to begin at `=== null`, so on those two it fell through
+                         to `.length` on `undefined` and THREW. Measured on the
+                         running binary: `TypeError: Cannot read properties of
+                         undefined (reading 'length')`, from this line, on any
+                         archive feed. Drawing nothing is right here rather than
+                         drawing a reason: the branch above has already printed
+                         "reading …" or named the halt, and a second sentence
+                         about the instrument list would be the same fact twice.
+                    -->
+                    {#if c.state === 'reading' || c.state === 'halted'}
+                      <!-- deliberately empty; the state chain above already spoke -->
+                    {:else if c.instruments === null}
                       <span
                         class="note wrap warn"
                         title="GET /folder.json emits `instruments` — every distinct name pull::archive::Member took off a file name in that folder, sorted. This server sent no such field, so this page cannot name what is in the folder and does not guess: the file names are the ONLY identity an archive has, and there is no ISIN, no security id and no master to fall back on. Restart the API on a build that emits it."
