@@ -8521,12 +8521,13 @@
   fieldset:disabled {
     opacity: 0.55;
   }
-  .field {
-    display: flex;
-    flex-direction: column;
-    gap: var(--s3);
-    min-width: 0;
-  }
+  /* THE FIRST OF THREE `.field` RULES IS GONE, AND IT NEVER RENDERED.
+     It set `gap: var(--s3)`; the rule in the control-strip section below sets
+     `gap: var(--s2)` at IDENTICAL specificity and later in source order, so
+     every `.field` on this page has always taken 4px and this 6px was
+     unreachable. Deleting it changes no pixel — verified by measurement, not by
+     reasoning — and leaves one definition of the box instead of a pair that
+     disagreed, where whichever you edited was a coin flip. */
   /* `.lbl` IS GONE FROM THIS FILE, RULE AND USE BOTH. It styled exactly one
      span — "What to do", in the archive blank state — while six other labels on
      the page used `.lab`, and it also re-sized `theme.css`'s `.lbl` from
@@ -9190,7 +9191,25 @@
      replaces it is the shape the design settled on: a monospace text field that
      reads and writes `Sep 2024`, a ▦ that opens the grid, and the grid itself —
      one year of months, the year a <select> in its header. */
-  .field {
+  /* THE CALENDAR'S ANCHOR, NAMED FOR THE CONTROL IT ANCHORS.
+     This was `.field { position: relative }` — a third rule on `.field`, at the
+     same specificity as the two above, written for the month fields and applied
+     to EVERY field on the page. That made a containing block out of the feed
+     cell, the universe cell, the instruments cell and the segments cell, none
+     of which asked for one, and it meant any absolutely-positioned descendant
+     added to the strip later would anchor to whichever cell it happened to land
+     in rather than to a box someone chose.
+     Measured before narrowing it, because this is the one rule here that is
+     load-bearing: `.cal` resolves its `offsetParent` to
+     `DIV.dcell.field.cal-open`, so the anchor is real and removing it outright
+     would drop the day grid to the page. `.ddm` does NOT depend on it — it
+     anchors to `.dd`, which sets its own `position: relative` — and Picker
+     positions `.pmenu` itself.
+     `.cal-open` rather than `.dcell` because that class already means "this
+     cell owns a calendar": `onMount`'s outside-press handler tests
+     `t.closest('.cal-open')` to decide whether a click is inside the control.
+     One name, two readers, and the anchor now says what it is for. */
+  .cal-open {
     position: relative;
   }
   .dwrap {
