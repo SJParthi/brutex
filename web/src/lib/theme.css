@@ -1062,6 +1062,18 @@ button.status.bad:hover {
 .dot.acc {
   background: var(--acc);
 }
+/* THE FIFTH TONE, AND ITS ABSENCE WAS A HOLE RATHER THAN A CHOICE. Section 1
+   defines five semantic hues — up, down, warn, info and the accent — and this
+   set carried four of them, so `.dot.info` fell through to `--faint` and drew
+   grey. That matters wherever a vocabulary uses `info` for a real state rather
+   than for chrome: /ingest's verdict table gives it to `retrying`, `no
+   yardstick` and `out of reach`, three of its seven, so three verdicts would
+   have shared one indistinguishable grey dot while the other four were
+   coloured. A legend that cannot tell three of its entries apart is not a
+   legend. */
+.dot.info {
+  background: var(--info);
+}
 
 /* The indeterminate bar, welded to the bottom edge of the top bar. It exists
    only while a request is genuinely in flight — it is driven by the fetch

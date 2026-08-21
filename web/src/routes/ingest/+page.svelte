@@ -4505,6 +4505,55 @@
   const censusPage = $derived(Math.min(Math.max(1, cPage), censusPages));
   const censusSlice = $derived(censusSorted.slice((censusPage - 1) * PAGE_SIZE, censusPage * PAGE_SIZE));
 
+  /**
+   * THE SEVEN COUNTS, WORST FIRST — the one thing the table cannot say.
+   *
+   * A table answers "what is this series" one row at a time. It cannot answer
+   * "how much of this window is settled", because that is a property of the
+   * whole set and the reader is looking at 25 of 50. The pager already states
+   * the arithmetic of the VIEW; this states the arithmetic of the ANSWER.
+   *
+   * COUNTED OVER `censusRows`, NOT OVER WHAT IS DRAWN, and that is the only
+   * honest denominator. `censusSorted` is what survived the search box, and the
+   * search box narrows what is DRAWN and deliberately not what was asked —
+   * `.cfind`'s own title says so at length. A summary that shrank when you typed
+   * would be answering a different question from the one above it, which is the
+   * `1 of 213 ticked` / `ASKED 1` / pulled-213 shape this page already carries a
+   * rule against.
+   *
+   * ONE PASS, AND THE ORDER IS `VORDER`'s. O(rows) to count and O(7) to render,
+   * with no sort: `VORDER` is already worst-first, so walking it is the display
+   * order. Nothing here re-derives a row — `state` was decided by `censusRows`.
+   *
+   * @type {{ k: Verdict, tone: string, label: string, why: string, n: number, pct: number }[]}
+   */
+  const verdictTally = $derived.by(() => {
+    /** @type {Map<Verdict, number>} */
+    const seen = new Map();
+    for (const row of censusRows) seen.set(row.state, (seen.get(row.state) ?? 0) + 1);
+    const total = censusRows.length;
+    return VORDER.map((k) => {
+      const [tone, label, why] = VERDICT[k];
+      const n = seen.get(k) ?? 0;
+      // A ZERO-WIDTH SEGMENT IS NOT DRAWN AT ALL rather than drawn at 0% — a
+      // 0%-wide flex child still takes its border and its gap, so seven of them
+      // would paint a row of hairlines for verdicts nothing is in.
+      return { k, tone, label, why, n, pct: total > 0 ? (n / total) * 100 : 0 };
+    }).filter((seg) => seg.n > 0);
+  });
+
+  /** How many series the tally covers — the partition's own denominator. */
+  const verdictTotal = $derived(censusRows.length);
+
+  /**
+   * IS EVERY SERIES SETTLED? `ok` and `beyond` are the two verdicts that need
+   * no action — one is proved, the other cannot be reached at this feed and
+   * timeframe and no attempt would help. Everything else is work.
+   */
+  const verdictSettled = $derived(
+    verdictTally.reduce((sum, seg) => (seg.k === 'ok' || seg.k === 'beyond' ? sum + seg.n : sum), 0)
+  );
+
   /** 1 … 7 pages in full; beyond that the ends, the middle and a gap. */
   /** @param {number} cur @param {number} total @returns {(number | string)[]} */
   function pageList(cur, total) {
@@ -7593,6 +7642,71 @@
              STEP button still pulls, and the form above still runs the whole
              window; the reading still refreshes when a run finishes. -->
 
+        <!-- ══ THE PARTITION. A READING, AND DELIBERATELY NOT A CONTROL ══
+
+             WHAT THE TABLE CANNOT SAY. A table answers "what is this series",
+             one row at a time, and the reader is looking at 25 of 50. It cannot
+             answer "how much of this window is settled" — that is a property of
+             the whole set. The pager states the arithmetic of the VIEW; this
+             states the arithmetic of the ANSWER.
+
+             NOTHING HERE IS CLICKABLE, AND THAT IS THE WHOLE BOUNDARY. The
+             verdict strip that stood here before carried FILTER PILLS and a
+             bulk-pull button, and both were removed at the operator's
+             instruction. They do not come back. This page already holds a
+             hard-won rule — one control chooses what is PULLED and it is the
+             tick list; the search box chooses what is DRAWN — written after the
+             button read `1 of 213 ticked`, the receipt read `ASKED 1`, and the
+             run pulled 213. A clickable chip would be a third control narrowing
+             one question, which is how those three answers came apart.
+
+             COUNTED OVER THE WHOLE WINDOW, NOT OVER WHAT IS DRAWN. See
+             `verdictTally`: a summary that shrank as you typed in the search box
+             would answer a different question from the table beneath it.
+
+             ONE `role="img"` WITH THE WHOLE SENTENCE ON IT. Seven coloured
+             segments are a picture; read one at a time by a screen reader they
+             are seven unlabelled boxes. The label carries the same reading the
+             chips carry, so nothing here is available only to a sighted reader.
+        -->
+        {#if verdictTotal > 0}
+          <div class="tally">
+            <div
+              class="tallybar"
+              role="img"
+              aria-label={`${n(verdictSettled)} of ${n(verdictTotal)} series need nothing. ` +
+                verdictTally.map((s) => `${n(s.n)} ${s.label}`).join(', ') + '.'}
+            >
+              {#each verdictTally as seg (seg.k)}
+                <span
+                  class="tseg {seg.tone}"
+                  style="width:{seg.pct}%"
+                  title={`${n(seg.n)} of ${n(verdictTotal)} series — ${seg.label}. ${seg.why}`}
+                ></span>
+              {/each}
+            </div>
+            <div class="tchips">
+              {#each verdictTally as seg (seg.k)}
+                <!-- THE COUNT AND THE WORD ARE ONE TEXT NODE, NOT TWO FLEX
+                     ITEMS. Separated by a `gap` they looked right and read
+                     wrong: the flex gap is layout, not content, so the chip's
+                     text was "50never pulled" — one token to anything reading
+                     the DOM rather than looking at it. The space is a real
+                     space now, and the gap only separates the dot from the
+                     words it belongs to. -->
+                <span class="tchip" title={`${seg.label} — ${seg.why}`}>
+                  <i class="dot {seg.tone}"></i>
+                  <span class="tword"><b>{n(seg.n)}</b> {seg.label}</span>
+                </span>
+              {/each}
+              <span class="spacer"></span>
+              <span class="tsum" title="Settled means verified or out of reach — the two verdicts no pull would change. Everything else is work this window still owes.">
+                <b>{n(verdictSettled)}</b> of {n(verdictTotal)} settled
+              </span>
+            </div>
+          </div>
+        {/if}
+
         <div class="cgrid">
           <!-- THE SEARCH. One control, no caption: the count it changes is
                already in the pager at the foot, and a line here restating it
@@ -9872,6 +9986,82 @@
     gap: var(--s4);
     min-width: 0;
   }
+
+  /* ---- the partition ----
+     A BAR AND A LEGEND, AND NEITHER IS A BUTTON. Every colour here comes from
+     the four semantic hues; nothing invents one, so a verdict's colour in the
+     bar, in its chip and on its row in the table is the same value from the
+     same token. */
+  .tally {
+    display: flex;
+    flex-direction: column;
+    gap: var(--s3);
+    min-width: 0;
+  }
+  /* THE WELL IS THE UNCOUNTED REMAINDER, and it should never show: the seven
+     segments sum to the whole set by construction. It is here so that a rounding
+     gap reads as a gap rather than as the page ending early. */
+  .tallybar {
+    display: flex;
+    height: 7px;
+    border-radius: var(--r-full);
+    background: var(--well);
+    overflow: hidden;
+    min-width: 0;
+  }
+  /* NO GAP AND NO BORDER BETWEEN SEGMENTS. A partition whose parts are separated
+     by a hairline reads as seven bars rather than as one quantity divided, and
+     at a 1% segment the hairline is wider than the fact. */
+  .tseg {
+    height: 100%;
+    min-width: 2px;
+  }
+  .tseg.up {
+    background: var(--up);
+  }
+  .tseg.down {
+    background: var(--down);
+  }
+  .tseg.warn {
+    background: var(--warn);
+  }
+  .tseg.info {
+    background: var(--info);
+  }
+  .tchips {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--s3) var(--s5);
+    min-width: 0;
+  }
+  /* THE COUNT IS TABULAR AND THE LABEL IS NOT. A row of chips is read down the
+     numbers, so the digits hold their column; the words beside them are prose
+     and take the sans face. */
+  .tchip {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s2);
+    font-size: var(--fs-micro);
+    color: var(--dim);
+    white-space: nowrap;
+  }
+  .tchip b {
+    font-family: var(--num);
+    font-variant-numeric: tabular-nums;
+    font-weight: var(--w-bold);
+    color: var(--ink);
+  }
+  .tsum {
+    font-size: var(--fs-micro);
+    color: var(--faint);
+    white-space: nowrap;
+  }
+  .tsum b {
+    font-family: var(--num);
+    font-variant-numeric: tabular-nums;
+    color: var(--ink-2, var(--ink));
+  }
   /* `h2.sec`, its two children and `.cbar` all go with the markup they drew.
 
      `.cbar` IS REMOVED EVEN THOUGH GATE W4 DID NOT ASK FOR IT. The compiler
@@ -10174,6 +10364,25 @@
      same rule $lib/theme.css holds itself to. A reduced-motion operator gets
      the whole console with nothing moving. */
   @media (prefers-reduced-motion: no-preference) {
+    /* THE PARTITION MOVES ONLY WHEN THE PARTITION CHANGED, which is the whole
+       test for whether motion belongs on this page.
+
+       A segment's width IS the count it stands for. When a pull settles a
+       month, `never pulled` shrinks and `verified` grows by exactly as much —
+       so animating the width is not decoration, it is the one moment the bar
+       has something to report, and a bar that jumps between two states makes
+       the reader diff two pictures from memory instead of watching the fact
+       move. Nothing else here animates: no hover flourish, no entrance on every
+       redraw, no pulse. A redraw that changes no count produces no motion at
+       all, because the width it transitions to is the width it already has.
+
+       `--d-enter` rather than a hover duration: this is a quantity travelling,
+       not a control acknowledging a press, and it has to outlast a saccade to
+       read as movement rather than as a flicker. It is the same 220ms the
+       panels enter on, which is deliberate — one page, one sense of pace. */
+    .tseg {
+      transition: width var(--d-enter) var(--ease-out);
+    }
     .din,
     .dbtn,
     .cday,
