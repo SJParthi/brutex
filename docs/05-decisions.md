@@ -19310,3 +19310,44 @@ empty-window one.
 test: an unassigned field has no wrong value to assert against, an unregistered
 test does not run, and a computed-then-discarded number is not observable from
 outside. `-D warnings` on `--all-targets` found all three.
+
+### D-0248 — an unread route and a refused one were spelled the same way, and one of them had been read
+
+**2026-08-22.** `crates/pull/src/vendor.rs` declared Zerodha's expired-contract
+access as `FnoAccess::None` under the comment *"no expired-contract route this
+build has read"*. That sentence stopped being true when the vendor's own page
+was read: `Zerodha Docs/13-historical.md` line 153 documents `continuous=1`.
+
+**What it serves, quoted rather than characterised:** `day` candles only, NFO
+and MCX **futures** only. It does not cover option contracts and gives no
+intraday history for an expired contract at all.
+
+**It is still `None`, and each reason is sufficient alone.** The operator's
+instruction of 2026-08-21 is that Zerodha carries no expired F&O, which
+`CLAUDE.md` §3 rule 2 makes a scope decision rather than a silent omission. The
+same vendor page states that expired `instrument_token`s are **flushed by the
+exchange** and are not obtainable from the instrument master, so intraday
+history is reachable only through a token cached before expiry — which this
+build has never held, making the route unusable for backfill even where it
+exists. And `day` candles cannot feed a one-minute store, while MCX is outside
+the engine surface §1 names, narrowed to NSE by D-0017.
+
+**Why the wording mattered enough to change.** D-0193 separated "this vendor
+serves nothing" from "this build has not looked", precisely so the second never
+hardens into the first by being spelled the same way. The comment was the second
+kind and the truth was now a third: **read, and refused.** A reader auditing
+coverage would have concluded Zerodha had nothing to offer, which its own
+documentation contradicts, and would then have had no way to tell whether the
+refusal was considered or accidental.
+
+**`docs/00-charter.md` line 210 already recorded the route correctly**, with the
+day-candle and futures-only qualifiers intact. So the document was right and the
+code comment beside the descriptor was stale — the second time this audit found
+that ordering, after D-0208. It is the case `CLAUDE.md` §10's caveat covers, and
+it argues the same way both times: where one side is checked and the other is
+prose, believe the checked side.
+
+**Nothing executable changed.** This is a comment and a ledger entry; the
+declared value is the same `FnoAccess::None` it was. Verified anyway rather than
+assumed: `cargo fmt --check` clean, `cargo clippy -p pull --all-targets -D
+warnings` clean, and `cargo test -p pull` 13 targets / 599 tests / 0 failures.

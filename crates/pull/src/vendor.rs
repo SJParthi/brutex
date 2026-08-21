@@ -5106,10 +5106,34 @@ const ZERODHA: Descriptor = Descriptor {
     record: RecordShape::Ohlcv,
     transport: Transport::Http(HttpSpec {
         base_url: "https://api.kite.trade",
-        // No contract lookup recorded for this vendor.
-        // No expired-contract route this build has read. `None` here is a
-        // recorded absence, not an unread vendor -- see D-0193 for why the two
-        // must never be spelled the same way.
+        // A ROUTE HAS NOW BEEN READ, AND IT IS STILL DECLINED. This said "no
+        // expired-contract route this build has read", which stopped being true
+        // on 2026-08-22: `Zerodha Docs/13-historical.md` line 153 documents
+        // `continuous=1`, and the reading changes what `None` means here, so it
+        // is written down rather than left as an absence anyone would re-read
+        // the same way twice.
+        //
+        // WHAT IT SERVES, from that page: `day` candles ONLY, NFO and MCX
+        // FUTURES only. It does not cover option contracts, and it does not
+        // give intraday history for an expired contract at all.
+        //
+        // WHY IT IS STILL `None`, and each reason is sufficient alone:
+        //
+        // 1. The operator's instruction of 2026-08-21 is that Zerodha carries
+        //    no expired F&O. `CLAUDE.md` §3 rule 2 makes that a scope decision,
+        //    and this comment is where it is visible from the code.
+        // 2. The same page says expired contracts' `instrument_token`s are
+        //    FLUSHED BY THE EXCHANGE and are not obtainable from the instrument
+        //    master. Intraday history is reachable only through a token cached
+        //    before expiry, which this build has never held -- so the route is
+        //    unusable for backfill even where it exists.
+        // 3. `day` candles cannot feed a one-minute store, and MCX is outside
+        //    the engine surface §1 names -- D-0017 narrowed it to NSE.
+        //
+        // `None` is therefore a recorded REFUSAL, not an unread vendor and not
+        // an unread route -- see D-0193 for why those must never be spelled the
+        // same way. Groww is the full expired chain (both classes, with OI,
+        // from 2020) and Dhan is options-only; neither gap is Zerodha-shaped.
         fno: FnoAccess::None,
         // NO OVERRIDE: this vendor puts the rung in `bars_path` itself as a
         // PathSegment — D-0133 — so the endpoint already varies with the rung
