@@ -326,6 +326,18 @@
   --lh-tight: 1.2;
   --lh-base: 1.5;
 
+  /* THE SCALE STARTED AT 500, AND TWO CALLERS HAD ALREADY ASSUMED IT DID NOT.
+     `--w-reg` was read in `$lib/DayField.svelte` and in `/ingest`'s census
+     sub-header and defined in neither this file nor any other — measured, zero
+     definitions against two uses. An undefined custom property makes the whole
+     declaration invalid, so `font-weight` silently fell back to whatever was
+     inherited: on `/ingest` that is a `<th>`, whose default is bold, so the
+     census sub-header rendered at 700 under a rule asking for regular and a
+     comment calling it "not decoration". Nothing looked broken; the quiet line
+     was simply as loud as the line above it.
+     Adding the base weight fixes both call sites at once and completes a scale
+     that ran 500-600-700-800 with no plain 400 in it. */
+  --w-reg: 400;
   --w-mid: 500;
   --w-semi: 600;
   --w-bold: 700;

@@ -6361,7 +6361,13 @@
       </p>
       <p class="warn mono">{active.why}</p>
       <p class="alt">
-        <span class="lbl">What to do</span>
+        <!-- `.lab`, NOT `.lbl`, AND THE PAGE NOW HAS ONE LABEL FACE INSTEAD OF
+             TWO. This was the only `.lbl` on the page against six `.lab`, and
+             the local rule that styled it also overrode `theme.css`'s own
+             `--fs-mini` down to `--fs-micro` — so the one odd label was odd in
+             two ways at once, in a different face and at a size neither `.lbl`
+             nor `.lab` actually specifies anywhere else. -->
+        <span class="lab">What to do</span>
         Buy the archive and give the feed a store prefix, or select a broker feed below. The folder
         form appears here the day this feed reports itself ready — nothing on this page names a
         vendor.
@@ -8370,13 +8376,14 @@
     gap: var(--s5);
     align-items: start;
   }
-  /* The run card is only drawn once there is a run, and a two-column track with
-     one card in it is the removed panel's hole still holding its width. */
-  @media (max-width: 1100px) {
-    .cols {
-      grid-template-columns: minmax(0, 1fr);
-    }
-  }
+  /* NO BREAKPOINT HERE, AND THE ABSENCE IS THE CORRECTION. A
+     `@media (max-width: 1100px)` block stood here restating
+     `grid-template-columns: minmax(0, 1fr)` — the value `.cols` already carries
+     four lines above, byte for byte. It was the leftover of the `5fr 4fr` split
+     that rule replaced, and it changed nothing at any viewport width.
+     A breakpoint that sets what is already set reads as a responsive decision
+     to the next person and is not one; the run card going under the form is
+     unconditional, so there is nothing here to make conditional. */
 
   /* NO `overflow: hidden` HERE. It squared off the header's top corners neatly
      and CLIPPED THE CALENDAR: the panel is taller than the space left under the
@@ -8420,13 +8427,13 @@
     gap: var(--s3);
     min-width: 0;
   }
-  .lbl {
-    font-size: var(--fs-micro);
-    font-weight: var(--w-bold);
-    letter-spacing: var(--track-caps);
-    text-transform: uppercase;
-    color: var(--faint);
-  }
+  /* `.lbl` IS GONE FROM THIS FILE, RULE AND USE BOTH. It styled exactly one
+     span — "What to do", in the archive blank state — while six other labels on
+     the page used `.lab`, and it also re-sized `theme.css`'s `.lbl` from
+     `--fs-mini` to `--fs-micro`, which is a change every OTHER `.lbl` in the
+     product would have inherited had one ever been added here. That span now
+     carries `.lab` like its six peers. `theme.css` keeps the global `.lbl` for
+     the feed strip that actually wants it. */
   .hint {
     font-size: var(--fs-xs);
     line-height: var(--lh-base);
@@ -8576,18 +8583,23 @@
      page that adopts the class name outright loses nothing.
 
      `line-height: var(--lab-h)` is what makes a label occupy the strip's label
-     ROW exactly, which is the height the grid reserves for it. */
+     ROW exactly, which is the height the grid reserves for it.
+
+     ONLY ONE DECLARATION IS LEFT, AND THE OTHER TEN ARE GONE BECAUSE THEY WERE
+     THE SAME TEN. The face, size, weight, tracking, case, colour, line-height
+     and the three ellipsis properties were a verbatim second copy of
+     `theme.css`'s `.lab` — the copy this comment's own first paragraph says the
+     page "loses nothing" by adopting outright. Two copies of one rule drift the
+     day one of them is edited, and the drift is invisible: both labels keep
+     rendering, just differently.
+
+     `min-width: 0` IS NOT PART OF THAT RULE AND MUST STAY. `theme.css` does not
+     set it. Without it a label that is a grid or flex item takes its content as
+     its floor and refuses to shrink, so `text-overflow: ellipsis` never fires —
+     the label pushes its own track wider instead of clipping, and the 248px
+     auto-fill floor that keeps the strip a row stops holding. It is the one
+     line here that is about this page's layout rather than about the label. */
   .lab {
-    font-family: var(--mono);
-    font-size: var(--fs-micro);
-    font-weight: var(--w-semi);
-    letter-spacing: var(--track-caps);
-    text-transform: uppercase;
-    color: var(--faint);
-    line-height: var(--lab-h);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
     min-width: 0;
   }
   /* THE FEED PICKER INSIDE A BLANK STATE. The three refusals above the strip
@@ -9800,12 +9812,10 @@
   .cscroll td {
     font-size: var(--fs-sm);
   }
-  /* `td.num` CARRIES THE DISPLAY SCALE ON ITSELF, so setting `td` is not enough
-     — `.num` is more specific than the element and wins at 17px. Named here
-     rather than reaching into the shared rule. */
-  .cscroll td.num {
-    font-size: var(--fs-sm);
-  }
+  /* `td.num`'s SCALE MOVED DOWN TO JOIN ITS ALIGNMENT — see the single
+     `.cscroll td.num` rule near the foot of this block. It was declared here
+     too, and the note down there had already worked out why that was a trap;
+     the two halves of one column's styling now live in one place. */
   /* THE CHIP AND THE BUTTON ARE NOT BODY TEXT and keep their own scales. A
      first pass set every descendant with `:global(*)` and blew the VERDICT chip
      up to 15px — the one thing on this row the operator had already called
@@ -9815,15 +9825,15 @@
   .cscroll td :global(.btn) {
     font-size: var(--fs-sm);
   }
-  /* The two-line header keeps its own smaller scale — a column's NAME and its
-     UNIT are labels, not data, and they are the one pair on this table that is
-     already consistent across all six columns. */
-  .cscroll .hrow {
-    font-size: var(--fs-mini);
-  }
-  .cscroll .hsub {
-    font-size: var(--fs-micro);
-  }
+  /* THE HEADER'S TWO SCALES ARE SET ONCE, ~90 LINES DOWN, AND NOT HERE.
+     `.cscroll .hrow` and `.cscroll .hsub` were each declared twice in this
+     block at identical specificity. The pair here carried nothing but the same
+     `font-size` the later pair restates before adding weight, tracking, case
+     and colour — so these two rules could never change a pixel, whichever way
+     either was edited. That is the exact hazard the note on `.cscroll td.num`
+     further down already names in its own words: "identical specificity, so the
+     later rule wins and the override silently did nothing. One rule per thing."
+     Applied here rather than only observed there. */
   .cscroll th {
     vertical-align: bottom;
   }
@@ -9918,11 +9928,14 @@
     text-transform: none;
     color: var(--ghost, var(--faint));
   }
-  /* LEFT — see the note on `.cscroll th.num .sort` for the measurement. Edited
-     HERE rather than overridden from above: a second `.cscroll td.num` earlier
-     in the file has identical specificity, so the later rule wins and the
-     override silently did nothing. One rule per thing. */
+  /* LEFT — see the note on `.cscroll th.num .sort` for the measurement. THIS IS
+     NOW THE ONLY `.cscroll td.num` IN THE BLOCK, which is what the earlier
+     version of this note was asking for: a second one used to sit ~120 lines
+     above carrying the `font-size` that has moved in beside the alignment. Two
+     rules of identical specificity meant the later silently won and any edit to
+     the earlier did nothing at all. One rule per thing. */
   .cscroll td.num {
+    font-size: var(--fs-sm);
     text-align: left;
   }
   .cscroll td.num.warn {
