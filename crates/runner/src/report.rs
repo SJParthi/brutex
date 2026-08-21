@@ -61,8 +61,8 @@ use core::fmt::Write as _;
 use crate::identity::RunId;
 use crate::rank::Ranked;
 use crate::{Auto, Outcome};
-use engine::Sweep;
 use engine::column::set_positions;
+use engine::{Sweep, Why};
 use indicators::column::Census;
 use vocab::ConditionMask;
 
@@ -105,6 +105,68 @@ pub fn condition_names(mask: &ConditionMask) -> Vec<String> {
                 .map_or_else(|| format!("?{position}"), ToOwned::to_owned)
         })
         .collect()
+}
+
+/// The positions that never entered the ladder, **by name and by reason**.
+///
+/// # D-0080 recorded these and nothing ever printed them
+///
+/// `engine::Sweep::excluded` has carried a `Vec<Excluded>` — position, measured
+/// support, and a `Why` — since D-0080, whose whole requirement is that a
+/// position excluded before k=1 be *"named in the run output rather than
+/// silently dropped, so that a reader of a result can tell 'this condition was
+/// never tried' apart from 'this condition was tried and lost'"*.
+///
+/// The report printed `excluded.len()` and nothing else. A count is exactly the
+/// thing D-0080 says is not enough.
+///
+/// # What this makes visible, and it is not a small thing
+///
+/// On every run this binary can perform, **twenty of the 238 live positions are
+/// the VWAP family and every one of them is permanently false** — `cli` and
+/// `runner` both pass `vwap::Availability::Absent`, because deriving
+/// availability reads the whole slice and that would be the look-ahead
+/// `CLAUDE.md` §3 rule 7 forbids. The ladder is handed them as live, measures
+/// support 0, and excludes them. Correct at every step, and until now the
+/// operator was told only that "20 positions were excluded" — not that a
+/// documented family of the vocabulary is switched off, nor why.
+///
+/// `CLAUDE.md` §4: degrade loudly and name the reason. This is the naming.
+///
+/// # Cost
+///
+/// One line per excluded position, at most `table::COUNT`. Off every path §3
+/// rule 4 bounds — it runs once, at the same structural boundary as the rest of
+/// the report.
+fn excluded_by_name(out: &mut String, sweep: &Sweep) {
+    if sweep.excluded.is_empty() {
+        return;
+    }
+    let _ = writeln!(out, "  EXCLUDED BEFORE k=1, by name");
+    for e in &sweep.excluded {
+        // `Why::NotLive` is the only variant with no measurement, and it says so
+        // rather than printing a zero — a support of 0 and a support that was
+        // never taken are different facts, and §3 rule 6 forbids naming a
+        // measurement that was not made.
+        let support = e
+            .support
+            .map_or_else(|| "not measured".to_owned(), |s| s.to_string());
+        let why = match e.reason {
+            Why::AlwaysFalse => "never true on any loaded bar",
+            Why::AlwaysTrue => "true on every loaded bar, so it partitions nothing",
+            Why::NotLive => "retired, void, or outside the table",
+        };
+        let name = u16::try_from(e.position)
+            .ok()
+            .and_then(vocab::table::name)
+            .unwrap_or("?");
+        let _ = writeln!(
+            out,
+            "    {:<3} {name:<34} support {support:>10}  {why}",
+            e.position
+        );
+    }
+    let _ = writeln!(out);
 }
 
 /// The condition names of `mask`, joined for one line of a report.
@@ -482,6 +544,7 @@ fn ladder(out: &mut String, sweep: &Sweep) {
         "always-true, always-false or not live",
     );
     let _ = writeln!(out);
+    excluded_by_name(out, sweep);
 
     // ── per level ───────────────────────────────────────────────────────────
     // Every column `Frontier::reconciles` sums, in the order it sums them, so a
@@ -640,6 +703,76 @@ mod tests {
             Availability::Absent,
             Thresholds::CLASSICAL,
         )
+    }
+
+    /// AN EXCLUDED POSITION IS NAMED IN THE REPORT, NOT MERELY COUNTED.
+    ///
+    /// # What D-0080 asked for, and what the report gave
+    ///
+    /// D-0080's requirement is that a position excluded before k=1 be *"named in
+    /// the run output rather than silently dropped, so that a reader of a result
+    /// can tell 'this condition was never tried' apart from 'this condition was
+    /// tried and lost'"*. `Sweep::excluded` carried the position, its measured
+    /// support and a `Why` for it — and the report printed `excluded.len()`.
+    ///
+    /// A count cannot make that distinction, which is the one D-0080 exists for.
+    ///
+    /// # Why this runs a real sweep instead of hand-building a `Sweep`
+    ///
+    /// A fixture with a hand-written `excluded` vector would prove the renderer
+    /// formats a struct. It would not prove that the ladder actually populates
+    /// that struct on a real column, which is the half that was silently
+    /// unexercised — and a test that passes on a fixture the production path
+    /// never produces is the shape this whole audit kept finding.
+    #[test]
+    fn an_excluded_position_reaches_the_report_by_name_and_by_reason() {
+        let bars = synthetic::sessions(8);
+        let out = Sweeper::new(bounded()).run(&bars, &mut evaluator());
+        let text = render(&out, None);
+
+        assert!(
+            !out.sweep.excluded.is_empty(),
+            "the fixture must exclude something or this test proves nothing; a \
+             generated column always has always-true and always-false positions"
+        );
+        assert!(
+            text.contains("EXCLUDED BEFORE k=1, by name"),
+            "the section exists: {text}"
+        );
+
+        // EVERY EXCLUDED POSITION APPEARS, not a sample and not a head.
+        for e in &out.sweep.excluded {
+            let name = u16::try_from(e.position)
+                .ok()
+                .and_then(vocab::table::name)
+                .unwrap_or("?");
+            assert!(
+                text.contains(name),
+                "position {} ({name}) was excluded and must be named: {text}",
+                e.position
+            );
+        }
+
+        // AND THE REASON IS WORDS, NOT A DISCRIMINANT. "excluded: 20" tells a
+        // reader nothing; "never true on any loaded bar" tells them the
+        // condition was measured and lost, which is the distinction D-0080 is
+        // about.
+        assert!(
+            text.contains("never true on any loaded bar")
+                || text.contains("partitions nothing")
+                || text.contains("retired, void, or outside the table"),
+            "the reason is stated in words: {text}"
+        );
+
+        // A SUPPORT THAT WAS NEVER TAKEN SAYS SO rather than printing 0. §3
+        // rule 6 forbids naming a measurement that was not made, and 0 is a
+        // real measurement.
+        if out.sweep.excluded.iter().any(|e| e.support.is_none()) {
+            assert!(
+                text.contains("not measured"),
+                "an unmeasured support must not render as a number: {text}"
+            );
+        }
     }
 
     /// A MASK RENDERS ONE NAME PER SET BIT, INCLUDING BITS THE TABLE CANNOT NAME.
