@@ -153,6 +153,36 @@ pub struct Cell {
     pub winner_mae: Ppm,
     /// Mean favourable excursion of the trades that ended profitable.
     pub winner_mfe: Ppm,
+    /// Mean adverse excursion of **every** round trip, winners and losers.
+    ///
+    /// # The number [`Cell::edge_ratio`] is divided by, and why it is not `winner_mae`
+    ///
+    /// `winner_mae` answers *"how far did a winner go against me before it
+    /// worked"* — the tightest stop that would not have killed it. It is the
+    /// right question and it has one fatal property as a **ranking** key: it is
+    /// computed only over trades that ended profitable, so it is structurally
+    /// blind to how large a loser gets.
+    ///
+    /// That blindness is not theoretical. A variant with **no stop** lets its
+    /// winners run further, which raises the numerator, while its losers — the
+    /// ones a stop would have cut — run to the horizon and never enter the
+    /// denominator at all. `crates/runner/src/validate.rs` records the
+    /// measurement: the old ratio **chose the no-stop variant 61–100% of the
+    /// time**, and `synthetic.rs` records two of three ranking keys doing the
+    /// same.
+    ///
+    /// So the metric asked for the tightest stop and selected for having none.
+    ///
+    /// Dividing by the adverse excursion of **everything the variant took**
+    /// closes it: a no-stop variant's deep losers now raise the denominator by
+    /// exactly the amount a stop would have removed, so the two halves an
+    /// operator actually wants — a small stop AND a large run — are both priced
+    /// in one number.
+    ///
+    /// `winner_mae` is kept and still rendered, because *"how much did a winner
+    /// make me sweat"* remains a real diagnostic. It is no longer the thing a
+    /// variant is chosen by.
+    pub all_mae: Ppm,
     /// The single worst round trip, in paisa, under pessimistic fills.
     ///
     /// **Zero when nothing lost.** The tightest stop that would have been
@@ -170,21 +200,39 @@ pub struct Cell {
 }
 
 impl Cell {
-    /// Favourable excursion over adverse, on the winners, in hundredths.
+    /// What a winner ran, over what **every** trade cost in adverse excursion.
     ///
-    /// The precision of the setup as a single number: how much a winner gave
-    /// you against how much it made you sweat first. Hundredths rather than a
-    /// float because `CLAUDE.md` §7 keeps this kind of arithmetic in integers,
-    /// and a ratio used for ranking is compared far more often than it is read.
+    /// The precision of the setup as a single number, in hundredths — integers
+    /// rather than a float because `CLAUDE.md` §7 keeps this arithmetic in
+    /// integers, and a ratio used for ranking is compared far more often than it
+    /// is read.
     ///
-    /// Zero when no winner ever went adverse — which is not an infinite ratio,
-    /// it is a sample too clean to rank, and saying so beats dividing by zero.
+    /// # The denominator changed, and that is the whole point
+    ///
+    /// This was `winner_mfe / winner_mae` — both terms over winners only. It
+    /// therefore rewarded a variant for **not having a stop**: no stop lets
+    /// winners run further, raising the numerator, while the losers a stop would
+    /// have cut run to the horizon and never enter a winners-only denominator.
+    /// `validate.rs` records the measurement — **the no-stop variant was chosen
+    /// 61–100% of the time** — so a key described as *"the tightest stop that
+    /// would not have killed them"* was in practice selecting for no stop at
+    /// all. That is the opposite of what it is used for.
+    ///
+    /// [`Cell::all_mae`] is the adverse excursion of everything the variant
+    /// took, so a deep loser now costs the variant exactly what a stop would
+    /// have saved. Both halves of *"minimal stop, massive target"* are priced in
+    /// one number, and neither can be gamed by omitting the other.
+    ///
+    /// # Zero is a refusal, not an infinity
+    ///
+    /// Zero when nothing ever went adverse — a sample too clean to rank rather
+    /// than an infinite ratio, and saying so beats dividing by zero.
     #[must_use]
     pub const fn edge_ratio(&self) -> i64 {
-        if self.winner_mae <= 0 {
+        if self.all_mae <= 0 {
             return 0;
         }
-        self.winner_mfe.saturating_mul(100) / self.winner_mae
+        self.winner_mfe.saturating_mul(100) / self.all_mae
     }
 
     /// Did the pessimistic reading make money?
@@ -663,6 +711,7 @@ fn one_variant(
     };
     let mut open_until: Option<usize> = None;
     let mut adverse_on_winners: i64 = 0;
+    let mut adverse_on_all: i64 = 0;
     let mut gain_on_winners: i64 = 0;
 
     for c in candidates {
@@ -762,19 +811,25 @@ fn one_variant(
             Ended::Target => cell.targeted = cell.targeted.saturating_add(1),
             Ended::Time => cell.timed_out = cell.timed_out.saturating_add(1),
         }
+        // EVERY TRADE'S ADVERSE EXCURSION, WINNER OR NOT.
+        //
+        // Outside the `pess > 0` gate on purpose. That gate is what made the old
+        // ranking key blind to losers, so a variant with no stop was rewarded
+        // for the very trades a stop exists to cut.
+        let exit = c.entry.saturating_add(pess_off);
+        let went_against = peak_adverse(bars, c.entry, exit, entry_price, side);
+        adverse_on_all = adverse_on_all.saturating_add(went_against);
+
         if pess > 0 {
             cell.wins = cell.wins.saturating_add(1);
-            adverse_on_winners = adverse_on_winners.saturating_add(peak_adverse(
-                bars,
-                c.entry,
-                c.entry.saturating_add(pess_off),
-                entry_price,
-                side,
-            ));
+            // The same excursion, kept separately: `winner_mae` remains the
+            // "how much did a WINNER make me sweat" diagnostic and is still
+            // rendered. It is simply no longer what a variant is chosen by.
+            adverse_on_winners = adverse_on_winners.saturating_add(went_against);
             gain_on_winners = gain_on_winners.saturating_add(peak_favourable(
                 bars,
                 c.entry,
-                c.entry.saturating_add(pess_off),
+                exit,
                 entry_price,
                 side,
             ));
@@ -782,12 +837,39 @@ fn one_variant(
         open_until = Some(c.entry.saturating_add(pess_off));
     }
 
+    mean_excursions(
+        &mut cell,
+        adverse_on_winners,
+        gain_on_winners,
+        adverse_on_all,
+    );
+    cell
+}
+
+/// Turns the three running excursion sums into the cell's three mean fields.
+///
+/// # Why the two denominators differ, and it is not an oversight
+///
+/// `winner_mae` and `winner_mfe` divide by `wins`, because they answer *"what
+/// did a WINNER do"*. [`Cell::all_mae`] divides by `trades`, because it answers
+/// *"what did everything I took cost me"* — and it is the one
+/// [`Cell::edge_ratio`] ranks on, precisely so a variant cannot improve its
+/// score by having losers a winners-only denominator never sees.
+///
+/// The `all_mae` guard is on `trades` rather than on `wins` deliberately: a
+/// variant whose every trade lost has a perfectly real adverse excursion and a
+/// zero numerator, and ranking it last is the honest answer rather than
+/// skipping it.
+fn mean_excursions(cell: &mut Cell, adverse_won: i64, gain_won: i64, adverse_all: i64) {
     if cell.wins > 0 {
         let n = i64::try_from(cell.wins).unwrap_or(1).max(1);
-        cell.winner_mae = adverse_on_winners / n;
-        cell.winner_mfe = gain_on_winners / n;
+        cell.winner_mae = adverse_won / n;
+        cell.winner_mfe = gain_won / n;
     }
-    cell
+    if cell.trades > 0 {
+        let m = i64::try_from(cell.trades).unwrap_or(1).max(1);
+        cell.all_mae = adverse_all / m;
+    }
 }
 
 /// Close-to-entry move at `entry + offset`, in paisa.
@@ -1029,6 +1111,93 @@ fn peak(bars: &[Candle], from: usize, to: usize, entry: i64, side: Side, adverse
 )]
 mod tests {
     use super::{Cell, Grid, evaluate};
+
+    /// A VARIANT CANNOT WIN BY HAVING NO STOP, WHICH IS WHAT IT USED TO DO.
+    ///
+    /// # The measurement this closes
+    ///
+    /// `edge_ratio` is the key `Grid::sharpest` ranks on, and it is described as
+    /// *"the tightest stop that would not have killed them"*. It divided
+    /// `winner_mfe` by `winner_mae` — **both over winners only** — so a variant
+    /// with no stop was rewarded twice: its winners ran further, raising the
+    /// numerator, and the losers a stop would have cut ran to the horizon and
+    /// never entered a winners-only denominator.
+    ///
+    /// `crates/runner/src/validate.rs` records what that cost: the old key
+    /// **chose the no-stop variant 61–100% of the time**, and
+    /// `crates/runner/src/synthetic.rs` records two of three ranking keys doing
+    /// the same. A metric asked for the tightest stop selected for having none.
+    ///
+    /// # Why this is a constructed pair and not a real grid
+    ///
+    /// The property is about the FORMULA, so the fixture is two cells that
+    /// differ only in the way the loophole exploited. Running a real grid and
+    /// asserting which variant won would test the market fixture as much as the
+    /// metric, and would pass or fail for reasons this test is not about.
+    #[test]
+    fn a_stopless_variant_cannot_outrank_a_stopped_one_by_hiding_its_losers() {
+        // THE STOPPED VARIANT. Winners ran 300 and sweated 100; losers were cut
+        // early, so across every trade the mean adverse excursion stays 120.
+        let stopped = Cell {
+            trades: 10,
+            wins: 5,
+            winner_mfe: 300,
+            winner_mae: 100,
+            all_mae: 120,
+            ..Cell::default()
+        };
+
+        // THE STOPLESS VARIANT. Its winners ran further because nothing cut them
+        // — 400 against the same 100 sweat — which is exactly the shape that
+        // used to win. But its losers ran to the horizon, so the adverse
+        // excursion over EVERYTHING it took is 600.
+        let stopless = Cell {
+            trades: 10,
+            wins: 5,
+            winner_mfe: 400,
+            winner_mae: 100,
+            all_mae: 600,
+            ..Cell::default()
+        };
+
+        // UNDER THE OLD KEY the stopless variant wins: 400/100 beats 300/100.
+        // That comparison is written out rather than described, because it is
+        // the defect and a reader should be able to see it.
+        assert!(
+            stopless.winner_mfe * 100 / stopless.winner_mae
+                > stopped.winner_mfe * 100 / stopped.winner_mae,
+            "the fixture must reproduce the OLD behaviour or this test proves \
+             nothing about the change"
+        );
+
+        // UNDER THE NEW KEY the stopped variant wins, because the losers the
+        // stop cut are now in the denominator: 300/120 = 250 against
+        // 400/600 = 66.
+        assert!(
+            stopped.edge_ratio() > stopless.edge_ratio(),
+            "a variant that lets its losers run must not outrank one that cuts \
+             them: stopped {} vs stopless {}",
+            stopped.edge_ratio(),
+            stopless.edge_ratio()
+        );
+
+        // AND THE ZERO CASE IS A REFUSAL, NOT AN INFINITY. Nothing ever went
+        // adverse, so there is no ratio to take — saying so beats dividing by
+        // zero and beats reporting an unbounded score.
+        let spotless = Cell {
+            trades: 3,
+            wins: 3,
+            winner_mfe: 500,
+            all_mae: 0,
+            ..Cell::default()
+        };
+        assert_eq!(
+            spotless.edge_ratio(),
+            0,
+            "a sample too clean to rank scores zero rather than infinity"
+        );
+    }
+
     use crate::excursion::Side;
     use crate::outcome::Horizon;
     use indicators::column::Column;
