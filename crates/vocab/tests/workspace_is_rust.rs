@@ -238,14 +238,40 @@ fn the_dependency_set_has_not_moved_without_review() {
     // scan over the resulting build graph found ZERO crates shipping .c, .h,
     // .S, .asm, .cc, .cpp or .js. graviola itself ships none of those and has
     // no build.rs -- its assembly is `core::arch::asm!`, ordinary stable Rust.
+    // 176 -> 182 BY `rayon`, AND THE SCAN THIS TEST DEMANDS WAS RUN.
+    //
+    // `c0bc3eb` gave `crates/cli` a `rayon` arrow so the whole-store sweep walks
+    // instrument-months in parallel. Six packages arrived and no others:
+    // `rayon`, `rayon-core`, `either`, `crossbeam-deque`, `crossbeam-epoch`,
+    // `crossbeam-utils`. The count moved by exactly six, which is itself the
+    // check that nothing else came with them.
+    //
+    // THE SCAN, because this test's own message says not to re-pin without it —
+    // *"any new crate may ship C, and DECLARED is the record"* — and because the
+    // sentence after it names what happens when somebody does: *"that is how
+    // `ring` got in."*
+    //
+    // Measured over the vendored sources of all six:
+    //   * **zero** files matching .c .h .S .asm .cc .cpp .js — so none is added
+    //     to DECLARED, because DECLARED records crates that ship non-Rust source
+    //     and none of these does;
+    //   * four carry a `build.rs` — crossbeam-deque, crossbeam-epoch,
+    //     crossbeam-utils and rayon-core — and `CLAUDE.md` §2 forbids not a
+    //     build script but *"any `build.rs` that invokes an external process"*.
+    //     Each was read: they are `env::var` reads and `println!("cargo:...")`
+    //     cfg emission, nothing else. Grepped for `Command`, `process::`,
+    //     `Stdio`, `spawn`, `.output()` and `.status()` across all four: zero
+    //     hits. `rayon` and `either` carry no build script at all.
+    //
+    // So §2 holds without an exception, and the pin moves. D-0232.
     assert_eq!(
         names.len(),
-        176,
+        182,
         "the dependency count changed. Run the registry scan for non-Rust source \
          before re-pinning: any new crate may ship C, and DECLARED is the record."
     );
     assert_eq!(
-        h, 0xDA2C_4162_D043_B7FE,
+        h, 0x1673_752A_DC06_321D,
         "the dependency SET changed — a package was added, removed or renamed. \
          Scan the new set for .c/.cc/.h/.S/.asm and build.rs, update DECLARED if \
          anything ships non-Rust source, then re-pin this fingerprint. Do not \
