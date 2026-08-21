@@ -50,10 +50,14 @@
 //! candidates via rayon" while **no crate in the workspace took that arrow** —
 //! the sweep was entirely single-threaded. This is the axis `cli` owns.
 //!
-//! §3 rule 5 survives by shape: `collect` on an indexed parallel iterator
-//! preserves order, and [`Tally`] is folded sequentially over the collected rows
-//! afterwards rather than mutated from the workers. No counter and no row
-//! depends on which thread finished first, so a rerun is byte-identical.
+//! §3 rule 5 survives by shape, and it takes THREE properties, not two. Indexed
+//! `collect` preserves order; [`Tally`] is folded sequentially over the collected
+//! rows rather than mutated from the workers; and each month is given an
+//! explicit [`BATCH_CEILING`] so its halt point is a stated constant rather than
+//! the machine free memory. The third was missing at first and it was the one
+//! that mattered: `engine::Ladder` halts on a real `try_reserve` probe, so N
+//! concurrent ladders would each halt at a point decided by what the others held
+//! — making depth, kept and completed scheduling-dependent. D-0234.
 
 use crate::stored;
 use core::fmt::Write as _;
@@ -61,6 +65,43 @@ use engine::Ladder;
 use rayon::prelude::*;
 use runner::Sweeper;
 use store::catalog::{self, Held};
+
+/// Candidates one instrument-month may hold before its ladder halts.
+///
+/// # Why the whole-store sweep needs its own ceiling
+///
+/// `engine::DEFAULT_CEILING` is `1 << 26` and its own doc prices that at
+/// **8 GiB** — more than an ordinary machine has. So on a single sweep the
+/// constant never binds and the real bound is `Ladder::cannot_grow`, a genuine
+/// `try_reserve` probe. `engine::Breach::Memory`'s doc states that as the
+/// design: the sweep *"uses what a 4 GB machine has and what a 48 GB machine
+/// has, discovers which at runtime, and asks nobody"*.
+///
+/// That is a good answer for **one** sweep and the wrong one for N at once.
+/// With [`sweep_under`] running months in parallel, an allocator-defined halt
+/// makes each month's `depth`, `kept` and `completed` depend on what the other
+/// workers held at that instant — and those three fields reach the report. Two
+/// runs over one store would print different bytes, which `CLAUDE.md` §3 rule 5
+/// forbids.
+///
+/// # 2^20, and it is a stated assumption
+///
+/// One million candidates. At the 128 bytes per retained candidate
+/// `engine::DEFAULT_CEILING`'s own arithmetic uses, that is **128 MiB per
+/// month** — so sixteen workers sit near 2 GiB, which an ordinary machine has
+/// with room to spare, and the number is the same on every machine.
+///
+/// It is smaller than a single-month sweep would be allowed, and that is the
+/// trade being made rather than hidden: a 54,000-month walk cannot give every
+/// month 8 GiB, so *some* per-month budget is required by the batch path
+/// whatever value it takes. Stating it beats discovering it. A month that
+/// reaches it halts **loudly** with `Breach::Ceiling` and prints
+/// `CEILING — depth not reached by extinction`, which is the §4 refusal shape;
+/// it is never silently truncated.
+///
+/// No document names a right value, so under §3 rule 1 this is the operator's
+/// choice with a default rather than a derivation. D-0234.
+const BATCH_CEILING: usize = 1 << 20;
 
 /// What one instrument-month produced, or why it produced nothing.
 #[derive(Debug, Clone)]
@@ -299,7 +340,31 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
             };
         }
     };
-    let ladder = Ladder::with_min_hits(min_hits);
+    // A STATED CEILING, BECAUSE THE DEFAULT ONE IS THE MACHINE'S FREE MEMORY.
+    //
+    // This was `Ladder::with_min_hits(min_hits)` alone, which leaves
+    // `engine::DEFAULT_CEILING` in force — and that constant is `1 << 26`,
+    // priced by its own doc at 8 GiB, more than an ordinary machine has. So the
+    // bound that actually binds is not the constant: it is `cannot_grow`, a real
+    // `try_reserve` probe. `Breach::Memory`'s doc says that is deliberate — the
+    // sweep "uses what a 4 GB machine has and what a 48 GB machine has,
+    // discovers which at runtime, and asks nobody".
+    //
+    // THAT IS SOUND FOR ONE SWEEP AND WRONG FOR N AT ONCE. Since the walk above
+    // became parallel, each month's halt point is a function of what the other
+    // N-1 threads happened to be holding at that instant — so `depth`, `kept`
+    // and `completed`, read off the sweep below and pushed into the `Row` and
+    // the `Tally`, become scheduling-dependent. Two runs over an identical store
+    // on an identical binary could print different bytes. `CLAUDE.md` §3 rule 5
+    // forbids exactly that, and D-0232 asserted the opposite.
+    //
+    // Giving each month an explicit ceiling makes the halt a STATED CONSTANT
+    // rather than an ambient discovery: identical on every thread, every machine
+    // and every run. The allocator probe stays as a backstop, but it now fires
+    // only in genuine exhaustion — a crash-level event, not a normal outcome.
+    // Capping the thread count would not have fixed this; it only changes N,
+    // and the halt would still be allocator-defined.
+    let ladder = Ladder::with_min_hits(min_hits).with_ceiling(BATCH_CEILING);
     let outcome = Sweeper::new(ladder).run(&loaded.bars, &mut ev);
 
     // THE IDENTITY THIS REPORT'S BANNER HAS ALWAYS PROMISED.

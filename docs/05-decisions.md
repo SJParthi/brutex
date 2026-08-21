@@ -18330,3 +18330,59 @@ expired-futures and expired-options rows, so a derivative row reads `0 / 1,708`
 against a denominator that describes a single continuous series rather than a set
 of contracts. The true expectation is not derivable before discovery runs, so the
 honest fix is to draw no denominator there rather than a wrong one.
+
+### D-0234 — the parallel sweep's halt point was the machine's free memory
+
+**D-0232 claimed byte-identical reruns and was wrong, and this entry is the
+correction.** That entry made `batch::sweep_under` parallel and argued §3 rule 5
+was held by two properties: indexed `collect` preserves order, and the `Tally` is
+folded sequentially over the collected rows. Both are true. **They are not
+sufficient**, and the enumeration beneath them — *"its own file, its own
+evaluator, its own ladder, its own run identity. Nothing is shared"* — was
+incomplete in exactly one place.
+
+**The process heap is a sweep input, deliberately.** `Ladder::exhausted` checks
+the constant ceiling and then `cannot_grow`, which is a real
+`seen.try_reserve(by).is_err()`. `engine::Breach::Memory`'s own doc states that
+as the design:
+
+> *"the sweep expands until the allocator genuinely refuses and then halts naming
+> that. It uses what a 4 GB machine has and what a 48 GB machine has, discovers
+> which at runtime, and asks nobody."*
+
+**And it is the bound that actually binds.** `DEFAULT_CEILING` is `1 << 26`,
+priced by its own arithmetic at **8 GiB** — more than an ordinary machine has —
+so the allocator refuses long before the constant does.
+
+**Which makes N concurrent ladders non-reproducible.** Each month's halt point
+becomes a function of what the other N−1 workers held at that instant.
+`depth`, `kept` and `completed` are read straight off the sweep and pushed into
+the `Row` and the `Tally`, so two invocations over an identical store on an
+identical binary can print different bytes: different per-row depths, different
+CEILING flags, different `tally.bars`, `kept` and `incomplete`. §3 rule 5 forbids
+precisely that, and D-0232 asserted the opposite in the same breath as the
+change that broke it.
+
+**The fix is a stated constant, not a smaller thread pool.** Capping the worker
+count only changes N; the halt would still be allocator-defined and still
+scheduling-dependent. `BATCH_CEILING = 1 << 20` gives every month the same
+explicit budget on every thread, every machine and every run, so the halt is
+decided by the DATA rather than by ambient memory. The `try_reserve` probe stays
+as a backstop and now fires only under genuine exhaustion — a crash-level event
+rather than a normal outcome.
+
+**The trade is stated rather than hidden.** One million candidates is 128 MiB per
+month at the 128 bytes `DEFAULT_CEILING`'s own arithmetic uses, so sixteen
+workers sit near 2 GiB. It is smaller than a single-month sweep is allowed, and
+that is unavoidable: a 54,000-month walk cannot give every month 8 GiB, so the
+batch path needs *some* per-month budget whatever value it takes. A month that
+reaches it halts loudly with `Breach::Ceiling` and prints `CEILING — depth not
+reached by extinction`; it is never silently truncated. No document names a right
+value, so under §3 rule 1 this is the operator's choice with a default.
+
+**How it was found, and the lesson worth keeping.** A 40-agent attack on the
+condition chain, told explicitly to treat the day-old parallelism as unproven. No
+test would have caught it: reproducing it needs a machine under memory pressure
+with several months in flight, and the suite runs one month at a time on an idle
+heap. **The defect was in the reasoning, not in a line** — the commit enumerated
+what a month owns and did not think to ask what a month *reads*.
