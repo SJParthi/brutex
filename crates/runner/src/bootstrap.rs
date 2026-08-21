@@ -291,10 +291,23 @@ pub fn reality_check(
         // The direction is the one `a_sample_too_short_for_hansens_gate_keeps_every_strategy`
         // already fixes for the recentring gate: where a statistic cannot be
         // computed, the answer falls to the CONSERVATIVE side.
+        // ADD ONE TO BOTH, WHICH IS NOT A FUDGE.
+        //
+        // This was `beaten / draws`, so a statistic no draw beat returned the
+        // EXACT double 0.0 -- `to_bits() == 0` -- and the audit printed
+        // `0.0000` beside `clears 5% = yes`. A 1,000-draw bootstrap cannot
+        // resolve a probability finer than 1/1000; reporting zero claims a
+        // certainty the estimator does not have, and it is the dangerous
+        // direction because zero passes every threshold.
+        //
+        // `(beaten + 1) / (draws + 1)` is the standard bootstrap p-value
+        // (Davison & Hinkley), and its floor is exactly the resolution the
+        // draws bought: 1/1001 at 1,000 draws. It is what a resampling test can
+        // honestly say, and it never returns zero.
         p_value: if draws == 0 || periods < 2 {
             1.0
         } else {
-            beaten as f64 / draws as f64
+            beaten.saturating_add(1) as f64 / draws.saturating_add(1) as f64
         },
         draws,
         strategies: returns.len(),
@@ -409,10 +422,23 @@ pub fn spa(returns: &[Vec<i64>], draws: usize, seed: u64, block: usize) -> Optio
         // The direction is the one `a_sample_too_short_for_hansens_gate_keeps_every_strategy`
         // already fixes for the recentring gate: where a statistic cannot be
         // computed, the answer falls to the CONSERVATIVE side.
+        // ADD ONE TO BOTH, WHICH IS NOT A FUDGE.
+        //
+        // This was `beaten / draws`, so a statistic no draw beat returned the
+        // EXACT double 0.0 -- `to_bits() == 0` -- and the audit printed
+        // `0.0000` beside `clears 5% = yes`. A 1,000-draw bootstrap cannot
+        // resolve a probability finer than 1/1000; reporting zero claims a
+        // certainty the estimator does not have, and it is the dangerous
+        // direction because zero passes every threshold.
+        //
+        // `(beaten + 1) / (draws + 1)` is the standard bootstrap p-value
+        // (Davison & Hinkley), and its floor is exactly the resolution the
+        // draws bought: 1/1001 at 1,000 draws. It is what a resampling test can
+        // honestly say, and it never returns zero.
         p_value: if draws == 0 || periods < 2 {
             1.0
         } else {
-            beaten as f64 / draws as f64
+            beaten.saturating_add(1) as f64 / draws.saturating_add(1) as f64
         },
         draws,
         strategies: returns.len(),

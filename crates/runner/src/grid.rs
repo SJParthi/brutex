@@ -79,59 +79,79 @@ use vocab::ConditionMask;
 use crate::excursion::{Crossings, Ladder, Ladders, NEVER, Ppm, Side, crossings};
 use crate::outcome::Horizon;
 
-/// One (stop, target) variant's result over the whole slice.
+/// A trailing take profit: the rung that arms it, and the rung it then trails
+/// by.
+///
+/// One type rather than two `Option<usize>` fields on [`Cell`], because the two
+/// are meaningless apart — an arm with no trail arms nothing, and an armed trail
+/// with no arm is a plain TSL. Bundling them makes the invalid pair unspellable
+/// instead of merely undocumented.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Ttp {
+    /// Rung on the TARGET ladder at which the trail wakes up.
+    ///
+    /// Indexes the target ladder because "start protecting once it has run this
+    /// far" is a favourable-excursion question, and that ladder is already
+    /// scaled on that distribution. No fourth ladder exists.
+    pub arm: usize,
+    /// Rung on the TRAILING ladder the armed order then follows the peak by.
+    ///
+    /// Strictly below [`Cell::tsl`] when a TSL is also set — see that field.
+    pub trail: usize,
+}
+
+/// One (stop, target, TSL, TTP) variant's result over the whole slice.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Cell {
     /// Index into the stop ladder, or `None` for **no stop**.
     pub stop: Option<usize>,
     /// Index into the target ladder, or **no target**.
     pub target: Option<usize>,
-    /// Index into the trailing ladder, or `None` for **no trailing stop**.
+    /// The TRAILING STOP LOSS: a trailing ladder rung, live from entry, or
+    /// `None`.
     ///
-    /// A trailing stop follows the best price seen and fires on the give-back.
-    /// Paired with [`Self::arm`] it is a trailing take profit instead; alone it
-    /// is a trailing stop loss, which is a different instrument and not a
-    /// setting of the same one. See [`Self::arm`].
-    pub trail: Option<usize>,
-    /// Index into the TARGET ladder at which [`Self::trail`] starts, or `None`
-    /// for a trail that is live from entry.
+    /// Follows the best price seen and fires on the give-back. It **protects a
+    /// gain**: live from the first bar, it cuts a position that turns.
     ///
-    /// # This is the trailing take profit, and it used to be a comment claiming
-    /// to be one
+    /// This field was `trail`, and it carried both instruments — `arm = None`
+    /// meant it was a stop loss and `arm = Some(a)` meant it was a take profit,
+    /// so a cell could be one or the other and never both. See [`Self::ttp`].
+    pub tsl: Option<usize>,
+    /// The TRAILING TAKE PROFIT: an arming rung and a trailing rung, or `None`.
     ///
-    /// The doc on [`Self::trail`] read: *"TRAILING TAKE PROFIT is this armed by
-    /// a target: reach the target rung, then trail."* No arming existed. The
-    /// exit was `span.min(stop_at).min(target_at).min(trail_at)` — three rungs
-    /// COMPETING, with the target *exiting* rather than arming anything, and a
-    /// grep for `arm` across this file and `crate::excursion` returned exactly
-    /// that one sentence. D-0241 is the decision that closed it.
+    /// # A separate field, because it is a separate order
     ///
-    /// # TSL and TTP are opposite jobs, which is why both are kept
+    /// A trailing take profit **extends a winner**: dormant until the move has
+    /// already paid, it then lets the position run instead of closing it at the
+    /// target. That is the opposite job from [`Self::tsl`], which is why both
+    /// exist — and until this field they shared one slot, so a cell could carry
+    /// one or the other and the 4 on/off patterns with both were unreachable.
     ///
-    /// A trailing stop loss protects a gain: live from entry, it cuts a
-    /// position that turns. A trailing take profit extends one: dormant until
-    /// the move has already paid, it then lets the winner run instead of
-    /// closing it at the target. `arm = None` is the first, `arm = Some(a)` the
-    /// second, and both sit in this one table so "which of these actually
-    /// helped here" is measured rather than argued.
+    /// The engine could express `SL·TP·TSL`, `SL·TP·TTP`, every "no X", and
+    /// every single instrument — 12 of the 16 on/off patterns. The 4 missing
+    /// ones were exactly *loose trail from entry, tighter trail once it pays*,
+    /// which is a strategy an operator asks for by name.
     ///
-    /// # It also fixes the near-degenerate cells the old comment named
+    /// # The armed trail must be strictly TIGHTER, and that is not a
+    /// simplification
     ///
-    /// That comment observed that the 25-of-125 cells carrying both a target
-    /// and a trail measure approximately what the trail-only cells measure — a
-    /// trail fires on a give-back, a target needs the full move, so the trail
-    /// nearly always fires first. With arming, `target` and `arm` index the
-    /// same ladder and mean different things: `arm = Some(1), target = Some(3)`
-    /// is *start protecting at rung 1, hard exit at rung 3*, which no cell
-    /// could express before.
+    /// Once armed, both trails hang from the same running peak, so only the
+    /// SMALLER distance can ever fire. A `ttp.trail` at or above `tsl` is
+    /// therefore inert — the live trail already fires first — and every such
+    /// cell would be byte-identical to the TSL-only cell beside it.
     ///
-    /// # Never set without a trail
+    /// That is the same degeneracy `variants` records refusing twice already,
+    /// and refusing it a third time is what keeps the grid at **625** instead of
+    /// the 1,125 an unconstrained pair would need. Ladder rungs ascend, so
+    /// "tighter" is `ttp.trail < tsl` on the index.
     ///
-    /// An arm with nothing to arm is inert, so [`evaluate`] does not emit those
-    /// cells at all, and neither is an arm the target pre-empts. That is why the
-    /// grid is 325 wide and not 625 — see
-    /// [`variants`].
-    pub arm: Option<usize>,
+    /// # This is the ONLY pair that composes
+    ///
+    /// A stop and a target are distances from ENTRY and can coexist trivially.
+    /// Two trails both hang from the PEAK, so they interact — and the
+    /// interaction is the whole point: before arming the position is protected
+    /// loosely, after arming tightly, and no single trail rung expresses that.
+    pub ttp: Option<Ttp>,
     /// Round trips taken under this variant.
     pub trades: u64,
     /// Trades that ended above water, resolving ambiguity against you.
@@ -361,6 +381,28 @@ pub struct Grid {
     /// `(rungs + 1)^2` for a three-deep loop. Scaled on the FAVOURABLE
     /// excursion, for the reason `evaluate` gives where it is built.
     pub trails: Ladder,
+    /// Candidate entries dropped because their path contained a bar the engine
+    /// refused.
+    ///
+    /// # Degraded LOUDLY, which is the whole difference
+    ///
+    /// `crate::outcome::priced` and `crate::trade::round_trip` refuse a
+    /// mis-assembled record at the entry and exit bars. Every bar STRICTLY
+    /// BETWEEN them still reached [`crate::excursion::crossings`] unchecked, and
+    /// those are the bars every level exit is decided on.
+    ///
+    /// Measured, one refused record among 2,250 bars: the chosen cell moved from
+    /// `target(0)` at 3,210 paisa to `trail(0) + arm(1)` at **499,089** — a
+    /// factor of 155, and **a different exit instrument recommended**.
+    ///
+    /// The whole path is dropped rather than the one bar, because a hole leaves
+    /// every running maximum after it computed on incomplete data. Dropping
+    /// costs sample size, which is visible; skipping would move the answer,
+    /// which is not. `CLAUDE.md` §4: degrade loudly and name the reason.
+    ///
+    /// **Zero on every sound slice**, so a non-zero here is the signal that the
+    /// store handed this run something it should not have.
+    pub refused_paths: u64,
 }
 
 impl Grid {
@@ -373,7 +415,7 @@ impl Grid {
     pub fn baseline(&self) -> Option<&Cell> {
         self.cells
             .iter()
-            .find(|c| c.stop.is_none() && c.target.is_none() && c.trail.is_none())
+            .find(|c| c.stop.is_none() && c.target.is_none() && c.tsl.is_none() && c.ttp.is_none())
     }
 
     /// The variant with the largest pessimistic total.
@@ -383,7 +425,7 @@ impl Grid {
     /// flattering assumption helped most.
     #[must_use]
     pub fn best(&self) -> Option<&Cell> {
-        self.cells.iter().max_by_key(|c| c.pessimistic)
+        self.cells.iter().max_by_key(|c| (c.pessimistic, merit(c)))
     }
 
     /// The variant with the sharpest winners, among those that survive.
@@ -396,8 +438,53 @@ impl Grid {
         self.cells
             .iter()
             .filter(|c| c.survives() && c.wins > 0)
-            .max_by_key(|c| c.edge_ratio())
+            .max_by_key(|c| (c.edge_ratio(), c.pessimistic, merit(c)))
     }
+}
+
+/// The tie-break, and it is not cosmetic.
+///
+/// # `max_by_key` returns the LAST maximum, so a tie was settled by position
+///
+/// Both selectors were a bare `max_by_key` on one key. Two consequences, both
+/// measured by an adversarial fleet on real grids:
+///
+/// 1. **A tie discarded money.** Two cells with the same `edge_ratio` and
+///    19,670 against 630 paisa: `sharpest` took the 630, because it happened to
+///    sit later in `cells`. `crate::validate` then ranks every candidate mask on
+///    exactly that cell's `pessimistic`, and `crate::pbo` consumes the result —
+///    so a vector-order accident propagated into the overfitting probability.
+///
+/// 2. **A tie named a mechanism that never fired.** A trail or an arm whose rung
+///    the path never reached leaves its cell byte-identical to the plain cell it
+///    decorates. They tie, the decorated one is emitted later, and it wins — so
+///    the audit printed a trailing take profit for a run in which nothing
+///    trailed. Measured: 64 of 240 grids on `sessions(12)`.
+///
+/// That second one is the same defect the arming axis was added to remove,
+/// recreated one level up, and it is why the tie-break runs toward FEWER claimed
+/// rungs. A cell that reaches the same number with less machinery reached it
+/// with less machinery, and saying otherwise is a claim the data does not carry.
+///
+/// # The order of the two terms
+///
+/// Money first. A cell that made more is better on the operator's own question,
+/// and simplicity only decides between cells that are otherwise identical —
+/// which is exactly the case both defects arose from.
+///
+/// Returns a key that SORTS ASCENDING with merit, so it composes with
+/// `max_by_key` directly: fewer rungs is a larger number.
+const fn merit(c: &Cell) -> i64 {
+    // A TTP counts as TWO claims -- an arming rung and a trailing rung -- because
+    // it is two decisions and a cell that reached the same number without making
+    // either of them made it more simply.
+    let claimed = c.stop.is_some() as i64
+        + c.target.is_some() as i64
+        + c.tsl.is_some() as i64
+        + if c.ttp.is_some() { 2 } else { 0 };
+    // Five minus the count, so the simplest cell scores highest and the fully
+    // decorated one scores zero.
+    5 - claimed
 }
 
 /// How a trade under a given variant ended.
@@ -405,9 +492,22 @@ impl Grid {
 enum Ended {
     Stop,
     Target,
-    /// A trailing stop, which fills at `peak - distance` rather than at a fixed
-    /// distance from entry -- so it carries the peak it was measured against.
-    Trail(i64),
+    /// A trailing exit, which fills at `peak - distance` rather than at a fixed
+    /// distance from entry.
+    ///
+    /// Carries BOTH the peak it hung from and the distance it trailed by, and
+    /// the second half is new. It used to carry only the anchor, and
+    /// `level_for` looked the distance up from a single `trail_ppm` — which was
+    /// unambiguous while a cell could hold one trailing order. With a TSL and a
+    /// TTP on the same cell there are two possible distances, and the one that
+    /// priced the fill is a property of WHICH order fired. Carrying it here
+    /// makes that unmistakable rather than a lookup that could pick the other.
+    Trail {
+        /// The peak the resting order hung from.
+        anchor: i64,
+        /// The give-back distance, in parts per million of the entry price.
+        ppm: Ppm,
+    },
     Time,
 }
 
@@ -451,23 +551,56 @@ enum Ended {
 /// recreated one level up. Measured at four rungs: **200 inert cells, 120 of
 /// them exact duplicates of each other.**
 ///
-/// So an arm is emitted only for a rung STRICTLY BELOW the target, plus the
-/// un-armed row. With no target every rung qualifies:
+/// So an arm is emitted only for a rung STRICTLY BELOW the target. With no
+/// target every rung qualifies:
 ///
 /// ```text
-/// arms(target = None)    = 1 + T          the un-armed row, plus every rung
-/// arms(target = Some(j)) = 1 + j          only rungs the target does not pre-empt
-/// sum over all targets   = (T+1)(T+2)/2   = 15 at four rungs
+/// arms(target = None)    = T     every rung can arm
+/// arms(target = Some(j)) = j     only rungs the target does not pre-empt
+/// sum over all targets   = T(T+1)/2  =  10 at four rungs
+/// ```
 ///
-/// (S+1) * [ (T+1) + R * (T+1)(T+2)/2 ]  =  5 * [ 5 + 4*15 ]  =  325
+/// # THE FIFTH AXIS, AND A THIRD REFUSAL
+///
+/// [`Cell::tsl`] and [`Cell::ttp`] were one field, so a cell held a trailing
+/// stop loss or a trailing take profit and never both — leaving 4 of the 16
+/// on/off patterns of `(SL, TP, TSL, TTP)` unreachable. They are the ones an
+/// operator asks for by name: *loose trail from entry, tighter trail once it
+/// pays.*
+///
+/// Splitting them naively would give `(S+1)(T+1)(R+1)(1 + T·R)` = **1,125**.
+/// The third refusal cuts it to 625: once armed, both trails hang from the same
+/// running peak, so **only the smaller distance can ever fire**. A TTP whose
+/// trailing rung is at or above the TSL's is inert, and its cell is
+/// byte-identical to the TSL-only cell beside it — the same degeneracy this
+/// block already records refusing twice.
+///
+/// Ladder rungs ascend, so the constraint is `ttp.trail < tsl` on the index:
+///
+/// ```text
+/// per (stop, target):
+///   armed rows available to a given TSL setting:
+///     tsl = None     ->  R    every trailing rung is available
+///     tsl = Some(i)  ->  i    only rungs strictly tighter than it
+///   summed over the R+1 TSL settings        =  R(R+1)/2  =  10 at four rungs
+///
+///   cells = (R+1)              the TTP-less rows, one per TSL setting
+///         + arms(t) * R(R+1)/2 the armed rows
+///
+/// (S+1) * [ (T+1)(R+1) + T(T+1)/2 * R(R+1)/2 ]
+///   =  5 * [ 25 + 10*10 ]  =  5 * 125  =  625
 /// ```
 #[must_use]
 pub const fn variants(stops: usize, targets: usize, trails: usize) -> usize {
     let target_settings = targets.saturating_add(1);
-    // The triangular sum above. Integer division is exact: one of `T+1` and
-    // `T+2` is always even.
-    let arms_over_all_targets = target_settings.saturating_mul(targets.saturating_add(2)) / 2;
-    let per_stop = target_settings.saturating_add(trails.saturating_mul(arms_over_all_targets));
+    let tsl_settings = trails.saturating_add(1);
+    // Both triangular sums. Integer division is exact: of `n` and `n+1` one is
+    // always even.
+    let arms_over_all_targets = targets.saturating_mul(target_settings) / 2;
+    let armed_rungs_over_all_tsl = trails.saturating_mul(tsl_settings) / 2;
+    let per_stop = target_settings
+        .saturating_mul(tsl_settings)
+        .saturating_add(arms_over_all_targets.saturating_mul(armed_rungs_over_all_tsl));
     stops.saturating_add(1).saturating_mul(per_stop)
 }
 
@@ -577,7 +710,11 @@ pub fn evaluate(
     let trails = Ladder::from_excursions(&mut favourable.clone(), rungs).unwrap_or_default();
 
     // PASS THREE: each candidate's path measured ONCE against both ladders.
-    let candidates: Vec<Candidate> = timed
+    //
+    // A PATH WITH A REFUSED BAR ANYWHERE IN IT IS DROPPED, NOT PRICED. See
+    // `Grid::refused_paths` for what one such bar did to a real audit. The drop
+    // is counted so a reader sees a smaller sample rather than a moved answer.
+    let all: Vec<Candidate> = timed
         .trades
         .iter()
         .map(|t| {
@@ -601,6 +738,9 @@ pub fn evaluate(
             }
         })
         .collect();
+    let refused_paths =
+        u64::try_from(all.iter().filter(|c| c.cross.refused() > 0).count()).unwrap_or(u64::MAX);
+    let candidates: Vec<Candidate> = all.into_iter().filter(|c| c.cross.refused() == 0).collect();
 
     // PASS FOUR: every variant, each a sequence walk with O(1) exits.
     // THE LOOP IS FOUR DEEP AND THE RESERVATION IS NOT ITS ARITHMETIC REPEATED.
@@ -615,49 +755,57 @@ pub fn evaluate(
         for t in 0..=targets.len() {
             let stop = (s < stops.len()).then_some(s);
             let target = (t < targets.len()).then_some(t);
-            // THE TRAIL-LESS ROW ONCE, NOT ONCE PER ARM SETTING. An arm with no
-            // trail to arm cannot move an exit, so the other `targets.len()`
-            // spellings of it would be byte-identical duplicates. See
-            // `variants`.
-            cells.push(one_variant(
-                bars,
-                &candidates,
-                rungs_of,
-                Variant {
-                    stop,
-                    target,
-                    trail: None,
-                    arm: None,
-                },
-                side,
-            ));
-            for r in 0..trails.len() {
-                // `0..=t` AND NOT `0..=targets.len()`, WHICH IS THE WHOLE OF
-                // THE SECOND REFUSAL.
+            // `i == trails.len()` is NO trailing stop loss. Every lower value is
+            // a TSL at that rung, live from entry.
+            for i in 0..=trails.len() {
+                let tsl = (i < trails.len()).then_some(i);
+                // THE THIRD REFUSAL, AND IT IS WHAT KEEPS THIS AT 625.
                 //
-                // `t` is `targets.len()` on the no-target row, so every rung is
-                // still offered there. On a row that HAS a target, `t` is that
-                // rung and only rungs strictly below it can arm before the
-                // target closes the position -- see `variants`, which counts
-                // the 200 cells this bound removes and what printing them cost.
+                // Once armed, a TTP and a TSL hang from the SAME running peak,
+                // so only the smaller distance can ever fire. `cap` is the
+                // exclusive bound on the armed trailing rung: strictly tighter
+                // than the live one, or unbounded when there is no live one.
+                // Rungs ascend, so a lower index is a tighter trail.
                 //
-                // The same expression serves both, because `a == t` is exactly
-                // the un-armed row in either case: a trailing STOP loss, live
-                // from entry. Every `a < t` is a trailing TAKE PROFIT armed at
-                // that target rung.
-                for a in 0..=t {
-                    cells.push(one_variant(
-                        bars,
-                        &candidates,
-                        rungs_of,
-                        Variant {
-                            stop,
-                            target,
-                            trail: Some(r),
-                            arm: (a < t).then_some(a),
-                        },
-                        side,
-                    ));
+                // Without it every `ttp.trail >= tsl` cell is byte-identical to
+                // the TSL-only cell beside it -- 500 inert cells at four rungs,
+                // and the same degeneracy `variants` records refusing twice
+                // already.
+                let cap = tsl.unwrap_or(trails.len());
+                // The TTP-LESS ROW: this TSL setting on its own, including the
+                // all-none baseline when `i` and `t` and `s` are all their
+                // no-level values.
+                cells.push(one_variant(
+                    bars,
+                    &candidates,
+                    rungs_of,
+                    Variant {
+                        stop,
+                        target,
+                        tsl,
+                        ttp: None,
+                    },
+                    side,
+                ));
+                // `0..t` AND NOT `0..targets.len()`, WHICH IS THE SECOND
+                // REFUSAL. `t` is `targets.len()` on the no-target row, so every
+                // rung can arm there. On a row that HAS a target, only rungs
+                // strictly below it arm before the target closes the position.
+                for arm in 0..t {
+                    for trail in 0..cap {
+                        cells.push(one_variant(
+                            bars,
+                            &candidates,
+                            rungs_of,
+                            Variant {
+                                stop,
+                                target,
+                                tsl,
+                                ttp: Some(Ttp { arm, trail }),
+                            },
+                            side,
+                        ));
+                    }
                 }
             }
         }
@@ -669,6 +817,7 @@ pub fn evaluate(
         stops,
         targets,
         trails,
+        refused_paths,
     }
 }
 
@@ -680,11 +829,11 @@ pub fn evaluate(
 struct Variant {
     stop: Option<usize>,
     target: Option<usize>,
-    trail: Option<usize>,
-    /// The target rung that arms `trail`, or `None` for a trail live from
-    /// entry. Meaningless without a trail, which is why [`evaluate`] never
-    /// pairs `Some` here with `None` there.
-    arm: Option<usize>,
+    /// The trailing STOP LOSS rung, live from entry.
+    tsl: Option<usize>,
+    /// The trailing TAKE PROFIT. When both are set, `ttp.trail < tsl` -- see
+    /// [`Cell::ttp`] for why an equal-or-looser armed trail is inert.
+    ttp: Option<Ttp>,
 }
 
 /// One already-chosen exit variant, applied to bars it was NOT chosen on.
@@ -748,8 +897,8 @@ pub fn with_levels(
     let Chosen {
         stop,
         target,
-        trail,
-        arm,
+        tsl,
+        ttp,
     } = variant;
     Some(one_variant(
         bars,
@@ -762,8 +911,8 @@ pub fn with_levels(
         Variant {
             stop,
             target,
-            trail,
-            arm,
+            tsl,
+            ttp,
         },
         side,
     ))
@@ -783,11 +932,11 @@ pub struct Chosen {
     pub stop: Option<usize>,
     /// Rung on the target ladder, or no target.
     pub target: Option<usize>,
-    /// Rung on the trailing ladder, or no trail.
-    pub trail: Option<usize>,
-    /// Target rung that arms `trail`, or a trail live from entry. See
-    /// [`Cell::arm`].
-    pub arm: Option<usize>,
+    /// Rung on the trailing ladder for the TRAILING STOP LOSS, live from entry.
+    pub tsl: Option<usize>,
+    /// The TRAILING TAKE PROFIT: the target rung that arms it and the trailing
+    /// rung it then follows the peak by. See [`Cell::ttp`].
+    pub ttp: Option<Ttp>,
 }
 
 /// The fill direction matching an excursion side.
@@ -820,14 +969,14 @@ fn one_variant(
     let Variant {
         stop,
         target,
-        trail,
-        arm,
+        tsl,
+        ttp,
     } = v;
     let mut cell = Cell {
         stop,
         target,
-        trail,
-        arm,
+        tsl,
+        ttp,
         ..Cell::default()
     };
     let mut open_until: Option<usize> = None;
@@ -842,20 +991,21 @@ fn one_variant(
         let span = c.time_exit.saturating_sub(c.entry);
         let stop_at = stop.map_or(NEVER, |r| c.cross.stop_at(r));
         let target_at = target.map_or(NEVER, |r| c.cross.target_at(r));
-        // The trailing exit competes with the other two: whichever fires first
-        // ends the position, and a trail that never fires is NEVER.
+        // TWO TRAILING ORDERS NOW, NOT ONE, AND EACH READS ITS OWN TABLE.
         //
-        // WHICH TABLE IS READ IS THE WHOLE OF THE ARMING. An un-armed trail
-        // reads the since-ENTRY give-back; an armed one reads the since-ARMING
-        // give-back, which `crate::excursion` accumulates as a separate running
-        // maximum because it is one. Everything downstream -- `ended_by`, the
-        // fill price, the exit attribution -- is identical, which is why a
-        // trailing take profit needed a table and not a mechanism.
-        let trail_at = trail_offset(&c.cross, trail, arm);
-        // BOTH anchors, because a trail crossed by the bar that raised the peak
-        // could have filled off either and the bar does not say which. Equal
-        // whenever the crossing bar left the peak alone.
-        let trail_peak = TrailPeaks::of(&c.cross, trail, arm);
+        // WHICH TABLE IS READ IS THE WHOLE OF THE ARMING. The TSL reads the
+        // since-ENTRY give-back; the TTP reads the since-ARMING give-back, which
+        // `crate::excursion` accumulates as a separate running maximum because
+        // it is one. Everything downstream is identical, which is why a trailing
+        // take profit needed a table and not a mechanism.
+        //
+        // Each carries its own anchor pair and its own distance, because the two
+        // fill at different prices: `peak - tsl_ppm` and `peak - ttp_ppm` off
+        // peaks recorded on different bars. Bundling them into one `Trailing`
+        // keeps the pairing unbreakable -- an anchor from one order and a
+        // distance from the other would price a fill nobody placed.
+        let live = Trailing::live(&c.cross, tsl, trails_rungs);
+        let armed = Trailing::armed(&c.cross, ttp, trails_rungs);
 
         // ONE EXIT BAR, TWO ATTRIBUTIONS.
         //
@@ -868,23 +1018,33 @@ fn one_variant(
         // was not optimism, it was a different trade -- one held past a stop
         // that had already fired. It produced a pessimistic total that BEAT the
         // optimistic one, which is how the error announced itself.
-        let pess_off = span.min(stop_at).min(target_at).min(trail_at);
+        //
+        // FOUR ORDERS COMPETE NOW. Whichever fires first ends the position, and
+        // an order that never fires is `NEVER`, so it drops out of the `min`
+        // without a branch.
+        let pess_off = span.min(stop_at).min(target_at).min(live.at).min(armed.at);
         let opt_off = pess_off;
         // PESSIMISTIC resolves an ambiguous bar as the STOP, so the stop is
         // tested first. OPTIMISTIC resolves it as the TARGET, so the target is.
         // That ordering is the entire difference between the two readings.
-        let pess_by = ended_by(stop_at, target_at, trail_at, trail_peak, pess_off, true);
-        let opt_by = ended_by(stop_at, target_at, trail_at, trail_peak, opt_off, false);
+        let firing = Firing {
+            stop_at,
+            target_at,
+            live,
+            armed,
+        };
+        let pess_by = ended_by(firing, pess_off, true);
+        let opt_by = ended_by(firing, opt_off, false);
         let ended = pess_by;
 
         let entry_price = bars.get(c.entry).map_or(0, |b| b.open);
-        // The three rung VALUES this variant fills at. An armed trail fills at
-        // the trailing rung exactly as an un-armed one does -- the arming
-        // decides WHEN, never how far.
-        let (stop_ppm, target_ppm, trail_ppm) = (
+        // The two FIXED rung values. The trailing distances are not here: each
+        // trailing order carries its own, in `Trailing::ppm`, because a cell can
+        // now hold two of them and looking one up by kind would be able to pick
+        // the other's.
+        let (stop_ppm, target_ppm) = (
             stop.and_then(|r| stops_rungs.get(r).copied()),
             target.and_then(|r| targets_rungs.get(r).copied()),
-            trail.and_then(|r| trails_rungs.get(r).copied()),
         );
         let pess = realised(
             bars,
@@ -893,7 +1053,7 @@ fn one_variant(
             entry_price,
             side,
             pess_by,
-            level_for(pess_by, stop_ppm, target_ppm, trail_ppm),
+            level_for(pess_by, stop_ppm, target_ppm),
         );
         let opt = realised(
             bars,
@@ -902,8 +1062,24 @@ fn one_variant(
             entry_price,
             side,
             opt_by,
-            level_for(opt_by, stop_ppm, target_ppm, trail_ppm),
+            level_for(opt_by, stop_ppm, target_ppm),
         );
+        // PESSIMISTIC IS THE SMALLER FIGURE, BY CONSTRUCTION AND NOT BY HABIT.
+        //
+        // `ended_by` chooses which exit each reading attributes the bar to, and
+        // in every ordinary case its pessimistic branch is the worse fill. There
+        // is one corner where it is not: a trail whose distance exceeds the
+        // stop's plus the whole favourable run fills BELOW the stop, so the
+        // branch labelled pessimistic would have produced the better number.
+        //
+        // Ordering them here settles it without teaching `ended_by` about
+        // prices, and it is a property worth holding outright rather than
+        // arguing for case by case: the two readings are the two ends of a
+        // measurement error, so the one called pessimistic must be the low end.
+        // `the_pessimistic_reading_never_beats_the_optimistic_one` asserts it;
+        // until now that assertion was satisfied by the two being EQUAL on the
+        // fixture, which is not the same as being ordered.
+        let (pess, opt) = (pess.min(opt), pess.max(opt));
 
         cell.trades = cell.trades.saturating_add(1);
         cell.pessimistic = cell.pessimistic.saturating_add(pess);
@@ -911,13 +1087,13 @@ fn one_variant(
         accrue_risk(&mut cell, pess, (&mut running, &mut peak_equity));
         cell.ambiguous_bars = cell
             .ambiguous_bars
-            .saturating_add(unorderable_bars(&c.cross, trail, arm));
+            .saturating_add(unorderable_bars(&c.cross, tsl, ttp));
         match ended {
             // A trailing exit IS a stop -- it gives back part of a gain to
             // protect the rest -- so it is counted as one. Reporting it as a
             // timeout would make a strategy that was stopped out look like one
             // that ran its course.
-            Ended::Stop | Ended::Trail(_) => cell.stopped = cell.stopped.saturating_add(1),
+            Ended::Stop | Ended::Trail { .. } => cell.stopped = cell.stopped.saturating_add(1),
             Ended::Target => cell.targeted = cell.targeted.saturating_add(1),
             Ended::Time => cell.timed_out = cell.timed_out.saturating_add(1),
         }
@@ -1051,11 +1227,15 @@ fn realised(
         // The distance is measured off the PEAK and not off entry, which is the
         // whole difference between a trailing stop and a fixed one: give back
         // `d` of what you made, rather than lose `d` of what you started with.
-        (Ended::Trail(peak), Some(ppm)) if peak > 0 => {
-            let give_back = paisa_of(ppm, peak);
+        // THE DISTANCE COMES FROM THE ORDER, NOT FROM A LOOKUP. `Ended::Trail`
+        // carries both halves, because a cell can hold a TSL and a TTP at once
+        // and they trail by different distances -- pairing one order's anchor
+        // with the other's rung would price a fill nobody placed.
+        (Ended::Trail { anchor, ppm }, _) if anchor > 0 => {
+            let give_back = paisa_of(ppm, anchor);
             let exit = match side {
-                Side::Long => peak.saturating_sub(give_back),
-                Side::Short => peak.saturating_add(give_back),
+                Side::Long => anchor.saturating_sub(give_back),
+                Side::Short => anchor.saturating_add(give_back),
             };
             match side {
                 Side::Long => exit.saturating_sub(entry_price),
@@ -1077,61 +1257,108 @@ fn realised(
     }
 }
 
-/// The two anchors a trailing exit could have hung from on its crossing bar.
+/// One trailing order, resolved against one candidate's path.
 ///
-/// One field per intra-bar ordering, straight out of
-/// [`crate::excursion::Crossings`]: `before` is the peak the bar opened with,
-/// `raised` the peak that bar's own favourable extreme left behind. They are
-/// equal on every crossing bar that did not raise the peak, which is most of
-/// them, and both are `None` for a rung the path never crossed.
+/// # Why the three fields travel together
+///
+/// A cell can now hold a TSL and a TTP at once, and they differ in all three:
+/// they cross on different bars, hang from peaks recorded on those different
+/// bars, and trail by different distances. Any mix — one order's anchor with the
+/// other's distance — prices a fill nobody placed, and it would look entirely
+/// plausible. Bundling makes the mix unspellable.
+///
+/// An order the variant does not carry, or one whose rung the path never
+/// reached, is [`Self::NEVER_FIRED`]: `at` is `NEVER`, so it drops out of the
+/// exit `min` without a branch, and both anchors are `None`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct TrailPeaks {
+struct Trailing {
+    /// The offset it fires on, or [`NEVER`].
+    at: usize,
     /// The peak as it stood BEFORE the crossing bar — the pessimistic anchor.
     before: Option<i64>,
     /// The peak including the crossing bar's own extreme — the optimistic one.
     raised: Option<i64>,
+    /// The give-back distance in parts per million of the entry price.
+    ppm: Ppm,
 }
 
-impl TrailPeaks {
-    /// The anchors for `trail`'s rung on this path, or none at all.
+impl Trailing {
+    /// An order this variant does not carry, or one the path never reached.
+    const NEVER_FIRED: Self = Self {
+        at: NEVER,
+        before: None,
+        raised: None,
+        ppm: 0,
+    };
+
+    /// The TRAILING STOP LOSS, reading the since-ENTRY give-back table.
+    fn live(cross: &Crossings, tsl: Option<usize>, trails_rungs: &[Ppm]) -> Self {
+        let Some(r) = tsl else {
+            return Self::NEVER_FIRED;
+        };
+        Self {
+            at: cross.trail_at(r),
+            before: cross.trail_peak_at(r),
+            raised: cross.trail_peak_raised_at(r),
+            ppm: trails_rungs.get(r).copied().unwrap_or(0),
+        }
+    }
+
+    /// The TRAILING TAKE PROFIT, reading the since-ARMING give-back table.
     ///
-    /// Both fields are `None` for a variant with no trailing rung, which is
-    /// what makes the trail inert in [`ended_by`] rather than needing a second
-    /// guard there: nothing anchors an exit that cannot fire.
-    ///
-    /// `arm` selects WHICH crossing is being priced, exactly as it does in
-    /// [`trail_offset`]: the armed crossing has its own anchors because it
-    /// happens on its own bar.
-    fn of(cross: &Crossings, trail: Option<usize>, arm: Option<usize>) -> Self {
-        match (trail, arm) {
-            (Some(r), Some(a)) => Self {
-                before: cross.armed_peak_at(a, r),
-                raised: cross.armed_peak_raised_at(a, r),
+    /// A different table and not a filtered view of the other one: the
+    /// since-arming retreat is its own running maximum, for the reason
+    /// `crate::excursion::Crossings::armed` gives at length.
+    fn armed(cross: &Crossings, ttp: Option<Ttp>, trails_rungs: &[Ppm]) -> Self {
+        let Some(t) = ttp else {
+            return Self::NEVER_FIRED;
+        };
+        Self {
+            at: cross.armed_at(t.arm, t.trail),
+            before: cross.armed_peak_at(t.arm, t.trail),
+            raised: cross.armed_peak_raised_at(t.arm, t.trail),
+            ppm: trails_rungs.get(t.trail).copied().unwrap_or(0),
+        }
+    }
+
+    /// Did this order fire at or before `chosen`?
+    const fn fired_by(&self, chosen: usize) -> bool {
+        self.at != NEVER && self.at <= chosen
+    }
+
+    /// The `Ended` this order produces, anchored for the given reading.
+    const fn ended(&self, pessimistic: bool) -> Ended {
+        let anchor = if pessimistic {
+            self.before
+        } else {
+            self.raised
+        };
+        Ended::Trail {
+            // A crossing with no recorded anchor cannot be priced off a peak, so
+            // zero falls through to `realised`'s close-priced arm rather than
+            // inventing a level.
+            anchor: match anchor {
+                Some(a) => a,
+                None => 0,
             },
-            (Some(r), None) => Self {
-                before: cross.trail_peak_at(r),
-                raised: cross.trail_peak_raised_at(r),
-            },
-            (None, _) => Self {
-                before: None,
-                raised: None,
-            },
+            ppm: self.ppm,
         }
     }
 }
 
-/// The offset a variant's trailing exit fires on, or [`NEVER`].
+/// Every order that could end one candidate's trade, resolved against its path.
 ///
-/// One `match` and no arithmetic: the two tables are built by
-/// [`crate::excursion::crossings`] in the same pass, so choosing between them
-/// is a lookup rather than a recomputation. That is what keeps the per-variant
-/// exit decision constant when the fourth axis quadruples the grid.
-fn trail_offset(cross: &Crossings, trail: Option<usize>, arm: Option<usize>) -> usize {
-    match (trail, arm) {
-        (Some(r), Some(a)) => cross.armed_at(a, r),
-        (Some(r), None) => cross.trail_at(r),
-        (None, _) => NEVER,
-    }
+/// Bundled because [`ended_by`] took six loose parameters and would have taken
+/// eight — and the four `usize` offsets among them are permutable without a
+/// compile error.
+#[derive(Clone, Copy, Debug)]
+struct Firing {
+    stop_at: usize,
+    target_at: usize,
+    /// The trailing STOP LOSS, live from entry.
+    live: Trailing,
+    /// The trailing TAKE PROFIT, armed at a target rung.
+    armed: Trailing,
 }
 
 /// Bars of one candidate's path whose intra-bar ordering the data cannot
@@ -1154,13 +1381,19 @@ fn trail_offset(cross: &Crossings, trail: Option<usize>, arm: Option<usize>) -> 
 /// reason the plain one is not charged to a trail-less variant: the two
 /// crossings happen on different bars, so a bar that made the since-entry trail
 /// unknowable need not have made the since-arming one unknowable at all.
-fn unorderable_bars(cross: &Crossings, trail: Option<usize>, arm: Option<usize>) -> u64 {
+fn unorderable_bars(cross: &Crossings, tsl: Option<usize>, ttp: Option<Ttp>) -> u64 {
     let stop_target = u64::try_from(cross.ambiguous().len()).unwrap_or(0);
-    let trailing = match (trail, arm) {
-        (Some(_), Some(_)) => cross.armed_ambiguous().len(),
-        (Some(_), None) => cross.trail_ambiguous().len(),
-        (None, _) => 0,
-    };
+    // EACH ORDER IS CHARGED ITS OWN SET, AND A CELL CARRYING BOTH IS CHARGED
+    // BOTH. The two crossings happen on different bars, so a bar that made the
+    // since-entry trail unknowable need not have made the since-arming one
+    // unknowable -- and a cell exposed to both is exposed to both.
+    let mut trailing = 0_usize;
+    if tsl.is_some() {
+        trailing = trailing.saturating_add(cross.trail_ambiguous().len());
+    }
+    if ttp.is_some() {
+        trailing = trailing.saturating_add(cross.armed_ambiguous().len());
+    }
     stop_target.saturating_add(u64::try_from(trailing).unwrap_or(0))
 }
 
@@ -1175,29 +1408,80 @@ fn unorderable_bars(cross: &Crossings, trail: Option<usize>, arm: Option<usize>)
 /// 2. When a trailing rung was crossed by the bar that raised the peak, minute
 ///    data cannot say whether the order was still hanging from the old peak or
 ///    already from the new one. The pessimistic reading anchors it at
-///    [`TrailPeaks::before`], the optimistic at [`TrailPeaks::raised`].
+///    [`Trailing::before`], the optimistic at [`Trailing::raised`].
 ///
 /// The parameter was called `stop_wins`, which named only the first job. The
 /// second was not being done at all: `crate::excursion` handed over one peak,
 /// the one the crossing bar itself had made, and both readings priced the trail
 /// off it — so a trailing exit's fill was settled by an ordering assumption
 /// neither reading ever tested. See that module's header.
-fn ended_by(
-    stop_at: usize,
-    target_at: usize,
-    trail_at: usize,
-    trail_peak: TrailPeaks,
-    chosen: usize,
-    pessimistic: bool,
-) -> Ended {
+fn ended_by(f: Firing, chosen: usize, pessimistic: bool) -> Ended {
+    let Firing {
+        stop_at,
+        target_at,
+        live,
+        armed,
+    } = f;
     let stop_fired = stop_at != NEVER && stop_at <= chosen;
     let target_fired = target_at != NEVER && target_at <= chosen;
-    let trail_fired = trail_at != NEVER && trail_at <= chosen;
+    // TWO TRAILING ORDERS, AND THE TIGHTER ONE WINS AN EXACT TIE.
+    //
+    // A cell can carry a TSL and a TTP at once, and `evaluate` only emits the
+    // pair when the armed trail is STRICTLY tighter. So on a bar both reach, the
+    // armed one is the nearer level and is what filled -- it is not an
+    // unknowable ordering but an arithmetic fact about which order sits closer
+    // to the peak. `at` is compared first because an order that fires EARLIER
+    // ended the position before the other was reachable at all.
+    let trail = match (live.fired_by(chosen), armed.fired_by(chosen)) {
+        (true, true) => {
+            match armed.at.cmp(&live.at) {
+                core::cmp::Ordering::Greater => live,
+                // The armed order fired FIRST, or on the same bar. On the same
+                // bar the tighter distance is the nearer level, and `evaluate`
+                // guarantees that is the armed one -- so both arms are `armed`
+                // for two different reasons, and merging them is clippy being
+                // right about the code rather than about the reasoning.
+                core::cmp::Ordering::Less | core::cmp::Ordering::Equal => armed,
+            }
+        }
+        (true, false) => live,
+        (false, true) => armed,
+        (false, false) => Trailing::NEVER_FIRED,
+    };
+    let trail_fired = trail.at != NEVER;
     if stop_fired && target_fired {
         return if pessimistic {
             Ended::Stop
         } else {
             Ended::Target
+        };
+    }
+    // A STOP AND A TRAIL ON ONE BAR IS ALSO UNORDERABLE, AND THIS BRANCH USED TO
+    // DENY IT.
+    //
+    // `if stop_fired { Ended::Stop }` came first and unconditionally, so a bar
+    // that reached both was priced as the stop in BOTH readings. They agreed by
+    // construction, `Cell::uncertainty` reported zero, and
+    // `depends_on_unknowable_ordering` answered false -- for a bar whose ordering
+    // is exactly as unknowable as the stop-versus-target case two lines above,
+    // which this module already resolves twice. Measured: 46 of 68 round trips
+    // on one cell, 80 of the 325 cells affected.
+    //
+    // The pessimistic reading takes the STOP and the optimistic the TRAIL,
+    // because a trail fires on a give-back FROM A PROFIT while a stop fires at a
+    // fixed loss from entry, so in the ordinary case the stop is the worse fill.
+    //
+    // THE CORNER WHERE THAT ORDERING IS WRONG IS HANDLED ELSEWHERE, on purpose.
+    // A trail whose distance exceeds the stop's plus the whole run so far fills
+    // BELOW the stop, and then "pessimistic" would have named the better one.
+    // Rather than reason about it here without the prices, `one_variant` orders
+    // the two realised figures after computing them, so `pessimistic` is the
+    // smaller by construction whichever branch produced it.
+    if stop_fired && trail_fired {
+        return if pessimistic {
+            Ended::Stop
+        } else {
+            trail.ended(false)
         };
     }
     if stop_fired {
@@ -1215,32 +1499,25 @@ fn ended_by(
         // not raise the peak carries the same value in both, so the choice is
         // inert there and the two readings agree — which is what keeps
         // `Cell::uncertainty` at zero unless something genuinely was unknowable.
-        let anchor = if pessimistic {
-            trail_peak.before
-        } else {
-            trail_peak.raised
-        };
-        Ended::Trail(anchor.unwrap_or(0))
+        trail.ended(pessimistic)
     } else {
         Ended::Time
     }
 }
 
 /// The level a given exit reason fills at, in parts per million from entry.
-const fn level_for(
-    by: Ended,
-    stop_ppm: Option<Ppm>,
-    target_ppm: Option<Ppm>,
-    trail_ppm: Option<Ppm>,
-) -> Option<Ppm> {
+const fn level_for(by: Ended, stop_ppm: Option<Ppm>, target_ppm: Option<Ppm>) -> Option<Ppm> {
     match by {
         Ended::Stop => stop_ppm,
         Ended::Target => target_ppm,
-        // A trailing exit DOES carry a level -- the trail rung -- and it is
-        // needed to price the give-back from the peak. Only a time exit has
-        // no level at all.
-        Ended::Trail(_) => trail_ppm,
-        Ended::Time => None,
+        // A TRAILING EXIT CARRIES ITS OWN DISTANCE AND IS NOT LOOKED UP HERE.
+        //
+        // It used to take a `trail_ppm` argument, which was unambiguous while a
+        // cell could hold ONE trailing order. With a TSL and a TTP on the same
+        // cell there are two distances, and a lookup by kind could return the
+        // one that did not fire -- pricing a fill nobody placed, plausibly.
+        // `Ended::Trail` now carries the anchor and the distance together.
+        Ended::Trail { .. } | Ended::Time => None,
     }
 }
 
@@ -1268,6 +1545,17 @@ fn peak(bars: &[Candle], from: usize, to: usize, entry: i64, side: Side, adverse
     let mut worst: i64 = 0;
     for i in from..=to {
         let Some(bar) = bars.get(i) else { break };
+        // THE SAME REFUSAL THE CROSSING WALK MAKES, AND FOR THE SAME REASON.
+        //
+        // This is a second walk over the same window, so a record that could not
+        // move a rung must not be allowed to set the reported MAE or MFE either.
+        // It is belt-and-braces rather than redundant: `evaluate` already drops
+        // any candidate whose path carries a refused bar, but `peak` is `pub(crate)`
+        // through two wrappers and a future caller could reach it with a path
+        // that was never filtered.
+        if bar.check().is_err() {
+            continue;
+        }
         let move_paisa = match (side, adverse) {
             (Side::Long, true) | (Side::Short, false) => entry.saturating_sub(bar.low),
             (Side::Long, false) | (Side::Short, true) => bar.high.saturating_sub(entry),
@@ -1603,7 +1891,7 @@ mod tests {
         );
         let base = g.baseline().expect("a baseline");
         for c in &g.cells {
-            if c.stop.is_none() && c.target.is_none() && c.trail.is_none() {
+            if c.stop.is_none() && c.target.is_none() && c.tsl.is_none() {
                 continue;
             }
             assert!(
@@ -1636,8 +1924,8 @@ mod tests {
         );
         assert!(g.cells.len() > 1, "the grid must hold several variants");
 
-        let before_best = g.best().map(|c| (c.stop, c.target, c.trail));
-        let before_sharp = g.sharpest().map(|c| (c.stop, c.target, c.trail));
+        let before_best = g.best().map(|c| (c.stop, c.target, c.tsl));
+        let before_sharp = g.sharpest().map(|c| (c.stop, c.target, c.tsl));
 
         let mutated = Grid {
             cells: g
@@ -1655,13 +1943,13 @@ mod tests {
         };
 
         assert_eq!(
-            mutated.best().map(|c| (c.stop, c.target, c.trail)),
+            mutated.best().map(|c| (c.stop, c.target, c.tsl)),
             before_best,
             "`best` moved when only the optimistic totals changed, so it reads \
              a figure it must not"
         );
         assert_eq!(
-            mutated.sharpest().map(|c| (c.stop, c.target, c.trail)),
+            mutated.sharpest().map(|c| (c.stop, c.target, c.tsl)),
             before_sharp,
             "`sharpest` moved when only the optimistic totals changed"
         );
@@ -1793,26 +2081,40 @@ mod tests {
         // left it at 107,000: 40,000 ppm of give-back off 105,000 is 4,200
         // paisa and off 107,000 is 4,280, so the two fills are 100,800 and
         // 102,720 against a 100,000 entry. Both are real prices inside that bar.
-        let peaks = super::TrailPeaks {
+        let live = super::Trailing {
+            at: 1,
             before: Some(105_000),
             raised: Some(107_000),
+            ppm: 40_000,
         };
-        let pess = super::ended_by(super::NEVER, super::NEVER, 1, peaks, 1, true);
-        let opt = super::ended_by(super::NEVER, super::NEVER, 1, peaks, 1, false);
+        let firing = super::Firing {
+            stop_at: super::NEVER,
+            target_at: super::NEVER,
+            live,
+            armed: super::Trailing::NEVER_FIRED,
+        };
+        let pess = super::ended_by(firing, 1, true);
+        let opt = super::ended_by(firing, 1, false);
         assert_eq!(
             pess,
-            super::Ended::Trail(105_000),
+            super::Ended::Trail {
+                anchor: 105_000,
+                ppm: 40_000
+            },
             "the pessimistic reading anchors the order where it hung when the \
              bar opened"
         );
         assert_eq!(
             opt,
-            super::Ended::Trail(107_000),
+            super::Ended::Trail {
+                anchor: 107_000,
+                ppm: 40_000
+            },
             "the optimistic reading anchors it at the peak the bar itself made"
         );
 
-        let priced_pess = super::realised(&[], 0, 1, 100_000, Side::Long, pess, Some(40_000));
-        let priced_opt = super::realised(&[], 0, 1, 100_000, Side::Long, opt, Some(40_000));
+        let priced_pess = super::realised(&[], 0, 1, 100_000, Side::Long, pess, None);
+        let priced_opt = super::realised(&[], 0, 1, 100_000, Side::Long, opt, None);
         assert_eq!(
             priced_pess, 800,
             "105,000 less 4,200, less the 100,000 entry"
@@ -1881,8 +2183,8 @@ mod tests {
             super::Variant {
                 stop: None,
                 target: None,
-                trail: Some(0),
-                arm: None,
+                tsl: Some(0),
+                ttp: None,
             },
             Side::Long,
         );
@@ -1918,8 +2220,8 @@ mod tests {
             super::Variant {
                 stop: None,
                 target: None,
-                trail: None,
-                arm: None,
+                tsl: None,
+                ttp: None,
             },
             Side::Long,
         );
@@ -1983,7 +2285,7 @@ mod tests {
         // arm with no trail to arm, and an arm the target pre-empts, are both
         // refused rather than counted. See `variants` for the arithmetic and
         // `arming_tests` for what printing them would have cost.
-        assert_eq!(super::variants(4, 4, 4), 325, "the shipped four rungs");
+        assert_eq!(super::variants(4, 4, 4), 625, "the shipped four rungs");
         assert_eq!(
             super::variants(4, 4, 0),
             25,
@@ -2028,7 +2330,12 @@ mod arming_tests {
     /// `Option<usize>` in a row is exactly the shape `clippy::type_complexity`
     /// exists to refuse, and `Chosen` is the production answer to the same
     /// objection.
-    type Setting = (Option<usize>, Option<usize>, Option<usize>, Option<usize>);
+    type Setting = (
+        Option<usize>,
+        Option<usize>,
+        Option<usize>,
+        Option<super::Ttp>,
+    );
 
     fn candle(minute: i64, open: i64, high: i64, low: i64, close: i64) -> Candle {
         Candle::new(
@@ -2141,8 +2448,8 @@ mod arming_tests {
             Variant {
                 stop: None,
                 target: None,
-                trail: Some(0),
-                arm: None,
+                tsl: Some(0),
+                ttp: None,
             },
             Side::Long,
         );
@@ -2153,8 +2460,8 @@ mod arming_tests {
             Variant {
                 stop: None,
                 target: None,
-                trail: Some(0),
-                arm: Some(0),
+                tsl: None,
+                ttp: Some(super::Ttp { arm: 0, trail: 0 }),
             },
             Side::Long,
         );
@@ -2176,26 +2483,35 @@ mod arming_tests {
         );
     }
 
-    /// TWO FAMILIES OF UNREACHABLE CELL ARE REFUSED, WHICH IS WHY 325 AND NOT
-    /// 625.
+    /// THREE FAMILIES OF UNREACHABLE CELL ARE REFUSED, WHICH IS WHY 625 AND NOT
+    /// 1,125.
     ///
-    /// The arming axis indexes the TARGET ladder, so a naive fourth factor is
-    /// `(S+1)(T+1)(R+1)(T+1)` = 625 at four rungs. The 100 cells pairing an arm
-    /// with no trail cannot differ from the trail-less cell they duplicate --
-    /// nothing is armed -- and a grid reporting one answer a hundred times has
-    /// learned nothing a hundred times.
+    /// The refusals, in the order they were found:
+    ///
+    /// 1. **An arm with no trail to arm** — nothing is armed, so the cell
+    ///    duplicates the trail-less one beside it.
+    /// 2. **An arm at or above the target** — the target closes the position
+    ///    before the arm can arm, so the trail can never fire. This one SHIPPED,
+    ///    200 cells wide, and made the audit print a trailing take profit for a
+    ///    run in which nothing armed.
+    /// 3. **An armed trail no tighter than the live one** — both hang from the
+    ///    same peak once armed, so only the smaller distance can ever fire.
+    ///
+    /// The third is what the fifth axis costs and what keeps it affordable:
+    /// splitting TSL from TTP naively gives 1,125 cells, and refusing the inert
+    /// pairs gives 625.
     ///
     /// Both halves are asserted: the arithmetic in `variants`, and the loop in
     /// `evaluate` that must agree with it.
     #[test]
-    fn the_grid_never_pairs_an_arm_with_no_trail() {
-        assert_eq!(variants(4, 4, 4), 325, "5 * [5 + 4*15]");
+    fn the_grid_refuses_every_cell_that_cannot_differ() {
+        assert_eq!(variants(4, 4, 4), 625, "5 * [25 + 10*10]");
         assert_eq!(variants(0, 0, 0), 1, "no ladders is still the baseline row");
         assert_eq!(
             variants(1, 1, 1),
-            10,
-            "one rung an axis: 2 stop settings x [2 target settings + 1 trail * 3 \
-             arm settings] = 10"
+            2 * (2 * 2 + 1),
+            "one rung an axis: 2 stops x [2 targets * 2 tsl settings + 1 arm * 1 \
+             armed rung] = 10"
         );
 
         let bars = crate::synthetic::sessions(8);
@@ -2215,9 +2531,28 @@ mod arming_tests {
             "the loop and the arithmetic must agree, or the reservation is a \
              guess"
         );
+        // THE THIRD REFUSAL, WHICH IS THE FIFTH AXIS'S WHOLE PRICE.
+        //
+        // A TTP alone is legitimate -- that is the arming axis as it shipped.
+        // What cannot exist is a TTP whose trailing rung is at or above a TSL on
+        // the same cell: once armed both hang from the same peak, the live one
+        // fires first, and the armed one is inert.
         assert!(
-            g.cells.iter().all(|c| c.trail.is_some() || c.arm.is_none()),
-            "an arm with nothing to arm is inert and must not be a row"
+            g.cells.iter().all(|c| match (c.tsl, c.ttp) {
+                (Some(live), Some(t)) => t.trail < live,
+                _ => true,
+            }),
+            "an armed trail no tighter than the live one can never fire, and \
+             every such cell duplicates the TSL-only cell beside it"
+        );
+        // AND THE SECOND REFUSAL STILL HOLDS: an arm at or above the target is
+        // pre-empted by it.
+        assert!(
+            g.cells.iter().all(|c| match (c.target, c.ttp) {
+                (Some(t), Some(ttp)) => ttp.arm < t,
+                _ => true,
+            }),
+            "an arm the target pre-empts can never fire"
         );
         // AND NO TWO CELLS CARRY THE SAME SETTING. A duplicate would mean the
         // loop emitted one variant twice, which is how the trail factor came to
@@ -2225,7 +2560,7 @@ mod arming_tests {
         let mut seen: Vec<Setting> = g
             .cells
             .iter()
-            .map(|c| (c.stop, c.target, c.trail, c.arm))
+            .map(|c| (c.stop, c.target, c.tsl, c.ttp))
             .collect();
         let before = seen.len();
         seen.sort_unstable();
@@ -2255,14 +2590,16 @@ mod arming_tests {
         let bases: Vec<&Cell> = g
             .cells
             .iter()
-            .filter(|c| c.stop.is_none() && c.target.is_none() && c.trail.is_none())
+            .filter(|c| {
+                c.stop.is_none() && c.target.is_none() && c.tsl.is_none() && c.ttp.is_none()
+            })
             .collect();
         assert_eq!(bases.len(), 1, "one baseline, not one per arm setting");
         assert_eq!(g.baseline(), bases.first().copied());
         assert_eq!(
-            g.baseline().and_then(|c| c.arm),
+            g.baseline().and_then(|c| c.ttp),
             None,
-            "and it carries no arm"
+            "and it carries no trailing take profit"
         );
     }
 }

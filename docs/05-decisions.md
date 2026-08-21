@@ -19351,3 +19351,157 @@ prose, believe the checked side.
 declared value is the same `FnoAccess::None` it was. Verified anyway rather than
 assumed: `cargo fmt --check` clean, `cargo clippy -p pull --all-targets -D
 warnings` clean, and `cargo test -p pull` 13 targets / 599 tests / 0 failures.
+
+### D-0249 — the ordinal family, the fifth exit axis, and seven defects the fleet proved
+
+Two vocabulary families, one grid axis, and the surviving half of a 34-agent work
+order. Every finding below survived an independent agent whose only instruction
+was to disprove it; eight others were disproved and are not here.
+
+#### The ordinal: which test of this level this is — 51 positions, 314–364
+
+D-0244 gave the vocabulary an EDGE, the bar a level changes side. It left a
+question a trader asks constantly unanswerable: **is this the first test of this
+level today, or the fourth?** `crossed_up_pdh` fires byte-identically on the
+clean first break and on the ninth probe of a level that has already absorbed
+eight attempts.
+
+**No AND of existing bits can express a count.** `ConditionMask::hits` is pure
+conjunction, so *not the first test* cannot be spelled by leaving a bit clear,
+and a tally cannot be assembled from level states however many are combined. A
+name sweep over all 314 positions for `count|times|twice|nth|repeat|again|
+retest|touch|tally|streak|consec|freq|revisit` returned two rows, both false
+positives on `pat_counterattack_*`.
+
+**Counting CROSSINGS and not touches is what made it fit.** No tracked document
+defines a touch — `near_X`, a close on the level, and a wick through it are
+three different predicates — so choosing one would be a stated assumption with
+its own entry, and choosing wrongly would make 51 positions mean something nobody
+asked for. A crossing is already defined, already derived and already tested, so
+the ordinal inherits its whole definition from 280–313 and introduces none.
+
+Three buckets: first, second, third-or-later. A bit per exact count would be
+unbounded; the third is open-ended because the distinction a trader draws is
+fresh / retest / being hammered, not fourth from fifth. They PARTITION the
+crossing bars — exactly one on a bar that crosses, none on a bar that does not —
+which is what makes them safe to combine with anything else.
+
+Cost: seventeen `u8` counters on `Evaluator`, cleared at the rollover beside
+`previous_mask`. Per bar the work is one increment on the rows that crossed.
+
+**`VOCAB_VERSION` holds at 3.** 280 → 314 → 365 against the same 384-bit mask.
+Nineteen positions remain, and the next family needing more cannot be an append:
+it widens `ConditionMask::WORDS`, which IS a bump and re-keys every run ever
+recorded.
+
+#### A false crossing on the second bar of every session — and the first fix for it was worse
+
+276/277 (`close_above_day_open`) are gated on `seeded`, which is false on a
+session's first bar: there is no session open yet to compare against. So bar 0
+set NEITHER side, bar 1 set one, and the naive edge test read *"was not above,
+now is"* and reported a crossing that did not happen. Once per session, on every
+session, for a level that never moved.
+
+**The first fix required the PREVIOUS BAR to have had a definite side, and that
+was a much larger defect than the one it closed.** A 46-agent re-audit of the
+whole pipeline found it twice, independently.
+
+`close_above_pivot_r1_band` is true above the band's TOP edge and
+`close_below_` below its BOTTOM edge, so the gap between them is not a paisa —
+it is **the whole band**, half the CPR width either way, a real price interval. A
+close walking through it spends bars with neither bit set, so the bar before the
+emergence had no side and the guard refused. **Fifty of the eighty-five new
+positions could fire only on a bar that jumped the entire band in one step.**
+
+The correct rule remembers the last DEFINITE side rather than the previous
+bar's, and an `Unknown` bar records nothing over it. One rule, three cases: the
+band walk reports its crossing when it emerges, a close landing exactly ON a
+level no longer loses the crossing that follows it, and a session's first bar
+still reports nothing because the rollover leaves the side `Unknown` — and an
+unknown side is not the other side, `docs/03-vocabulary.md` §4.
+
+`an_unknown_side_does_not_erase_the_side_before_it` asserts both halves: the new
+rule reports one crossing on that walk, and the previous-bar rule reports **zero**
+— so the test discriminates rather than merely passing.
+
+The evaluator SHRANK doing it. `Option<ConditionMask>` was 56 bytes and
+`[Side; 17]` is 17, so the size assertion went 1872 down to 1824 and the measured
+figure to 1,776. A fix that removes state is rarer than one that adds it and is
+worth recording as such.
+
+#### The fifth exit axis: TSL and TTP on one cell — 325 → 625
+
+`Cell::trail` and `Cell::arm` were one trailing order wearing two names, so a
+cell was a trailing stop loss OR a trailing take profit and never both. Of the 16
+on/off patterns of `(SL, TP, TSL, TTP)` the grid could express **12**. The four
+it could not are exactly *loose trail from entry, tighter trail once it pays* —
+which is a strategy an operator asks for by name.
+
+They are now separate fields, `tsl: Option<usize>` and `ttp: Option<Ttp>`, and
+`Ttp` bundles the arming rung with the trailing rung so the invalid pair is
+unspellable rather than merely undocumented.
+
+**Splitting them naively gives 1,125 cells. The third refusal gives 625.** Once
+armed, both trails hang from the same running peak, so **only the smaller
+distance can ever fire**: a TTP whose trailing rung is at or above the TSL's is
+inert, and its cell is byte-identical to the TSL-only cell beside it. That is the
+same degeneracy `variants` already records refusing twice, and refusing it a
+third time is what keeps the axis affordable — 1.9x on the multiple-testing
+ceiling instead of 3.5x.
+
+`Ended::Trail` now carries the anchor AND the distance. It carried only the
+anchor, and `level_for` looked the distance up by kind — unambiguous while a
+cell held one trailing order, and able to return the wrong one the moment a cell
+holds two.
+
+#### Seven defects, each demonstrated
+
+**A refused bar between entry and exit still priced level exits.** The entry and
+exit bars were guarded; every bar STRICTLY BETWEEN them reached the excursion
+walk unchecked, and those decide every level exit. Measured, one record among
+2,250: the chosen cell moved from `target(0)` at 3,210 paisa to
+`trail(0)+arm(1)` at **499,089** — a factor of 155, and **a different exit
+instrument recommended**. The whole path is now dropped, counted in
+`Grid::refused_paths`, and PRINTED.
+
+**Both selectors broke ties by position in the cell vector.** `max_by_key`
+returns the LAST maximum. Two cells tied on `edge_ratio` with 19,670 against 630
+paisa: `sharpest` took the 630 because it sat later. And a trail whose rung the
+path never reached leaves its cell identical to the plain one, ties, and wins —
+so the audit named a mechanism that never fired, on 64 of 240 grids. One merged
+key now: money, then FEWEST claimed rungs.
+
+**A stop and a trail on one bar were always priced as the stop.** Both readings
+agreed by construction, so `uncertainty()` reported ZERO for a bar whose
+ordering is exactly as unknowable as the stop-versus-target case the module
+already resolves twice. 46 of 68 round trips on one cell. Resolved twice now, and
+`one_variant` orders the two figures afterwards so `pessimistic` is the smaller
+by construction rather than by argument.
+
+**Bootstrap p-values returned the exact double 0.0.** A 1,000-draw bootstrap
+cannot resolve a probability finer than 1/1000, and the audit printed `0.0000`
+beside `clears 5% = yes`. `(beaten+1)/(draws+1)` is the standard estimator and
+its floor is the resolution the draws bought.
+
+**The exposure line compared a deflated count to a raw one.** `grid_exposure`
+printed `effective_trials` beside `trials_with_grid(sweep, ..)`, under a
+sentence claiming the only difference was the grid. Measured ratio **929,577x**
+where it promised 325x, and the upper Bonferroni bar overstated by 1.27 t-units.
+`trials_with_grid` now takes a COUNT, so the number printed on the left is the
+number multiplied on the right.
+
+**The refused-bar drop was invisible.** `edge`'s absent-outcome branch treats
+every `None` as the TAIL, under a comment saying so — and a corrupt bar can only
+ever be an EXIT bar, so it always landed there. `n` fell 234 → 230 with
+`mismatched == 0` in both runs. This crate's own doc had claimed the drop was
+"visible in `Edge::mismatched`"; it was not. `Forward::refused` and
+`Edge::refused` make the claim true, and `report` prints it.
+
+**Two engine constants were computed from a stale 238.** The `DEFAULT_CEILING`
+guard asserted `C(238,3) < ceiling < C(238,4)` as literals. At 323 live,
+`C(323,3)` is 5,559,461 — so a ceiling anywhere in `[2,218,637, 5,559,461]`
+would have passed both assertions while the real k=3 worst case overflowed it.
+And `the_allocation_is_bits_by_stride_and_not_the_live_count` compared a literal
+`238` against arithmetic on the same literal, staying GREEN through two
+vocabulary growths while certifying a stale figure. Both now read
+`vocab::table::LIVE`.

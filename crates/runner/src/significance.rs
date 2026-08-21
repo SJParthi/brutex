@@ -141,9 +141,27 @@ pub fn trials(sweep: &Sweep) -> u64 {
 /// Saturating rather than wrapping: a product past `u64::MAX` cannot arise from
 /// a walk the candidate ceiling bounds, and a wrapped trial count would print a
 /// small, plausible, catastrophically wrong bar.
+///
+/// # It takes a COUNT and not a `&Sweep`, and that signature is the fix
+///
+/// It was `trials_with_grid(sweep: &Sweep, variants: u64)` and computed
+/// `trials(sweep) * variants` internally. Its one caller,
+/// `cli::grid_exposure`, printed it beside `effective_trials(sweep)` — the
+/// DUPLICATE-DEFLATED count — under the sentence *"with N exit settings each, at
+/// most {ceiling}"*, which claims the only difference between the two numbers is
+/// the grid.
+///
+/// It was not. One is deflated and one is raw, so the ratio between the printed
+/// pair was **929,577x** on a measured fixture where the sentence promised 325x,
+/// and the upper Bonferroni bar was overstated by 1.27 t-units. Both figures
+/// were individually correct; the line comparing them was not.
+///
+/// Taking the count as an argument makes the caller choose which axis it is
+/// multiplying, and makes the mismatch unspellable: the number printed on the
+/// left is the number multiplied on the right, because it is the same binding.
 #[must_use]
-pub fn trials_with_grid(sweep: &Sweep, variants: u64) -> u64 {
-    trials(sweep).saturating_mul(variants.max(1))
+pub fn trials_with_grid(combinations: u64, variants: u64) -> u64 {
+    combinations.saturating_mul(variants.max(1))
 }
 
 /// The t-statistic the **best of `n` worthless strategies** is expected to show.
@@ -598,10 +616,10 @@ mod tests {
             super::super::validate::DEFAULT_RUNGS,
             super::super::validate::DEFAULT_RUNGS,
         );
-        assert_eq!(shipped, 325, "the shipped DEFAULT_RUNGS grid");
+        assert_eq!(shipped, 625, "the shipped DEFAULT_RUNGS grid");
         let width = u64::try_from(shipped).expect("a grid width fits a u64");
         assert_eq!(
-            trials_with_grid(&s, width),
+            trials_with_grid(trials(&s), width),
             20 * width,
             "twenty combinations examined at every exit setting is a family of \
              twenty times the grid, not of 20"
@@ -609,17 +627,21 @@ mod tests {
 
         // NO GRID IS ONE GRID, NOT NO HYPOTHESES.
         assert_eq!(
-            trials_with_grid(&s, 0),
+            trials_with_grid(trials(&s), 0),
             20,
             "a zero variant count means no grid ran; collapsing the family to \
              zero would return a bar of zero and pass every row"
         );
-        assert_eq!(trials_with_grid(&s, 1), 20, "one variant is the identity");
+        assert_eq!(
+            trials_with_grid(trials(&s), 1),
+            20,
+            "one variant is the identity"
+        );
 
         // AND THE CHARGE ACTUALLY RAISES THE BAR. Every assertion above would
         // also pass on a function that ignored `variants` and returned `trials`.
         assert!(
-            bonferroni_t(trials_with_grid(&s, width)) > bonferroni_t(trials(&s)),
+            bonferroni_t(trials_with_grid(trials(&s), width)) > bonferroni_t(trials(&s)),
             "charging the grid must make the bar harder to clear, not merely \
              change the number"
         );
@@ -628,7 +650,7 @@ mod tests {
         // plausible, catastrophically low bar.
         let huge = sweep(vec![level(1, 0, u64::MAX)]);
         assert_eq!(
-            trials_with_grid(&huge, u64::MAX),
+            trials_with_grid(trials(&huge), u64::MAX),
             u64::MAX,
             "the product saturates at the ceiling instead of wrapping to a \
              small number"

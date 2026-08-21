@@ -580,24 +580,161 @@ up".
 evaluating to "probably". Same source and same latch as 56–59, so no new formula and no
 threshold.
 
+
+### The moment a level changed side — bits 280–313, D-0244
+
+Every level relation above this point is a **state**: `close_above_ema20` is true on bar
+500, on bar 501, and on every bar of a two-hour trend. Nothing distinguished *just crossed*
+from *has been above since this morning*, and a grep for `cross` across the whole table
+returned zero. Even the break family is a state — `bos_up` fires on every bar above the
+swing high, not only the first.
+
+A crossing is two states one bar apart, and both states were already here, so these are
+**derived** rather than measured: `crossed_up_X` is `close_above_X` clear on the previous
+bar of this session and set on this one. No indicator module computes anything new.
+
+**Seventeen levels, not thirty-five.** Sixteen `close_above_` names are `void` by D-0080,
+| 280 | `crossed_up_ema20` | `close_above_ema20` was clear on the previous bar and is set now |
+| 281 | `crossed_down_ema20` | `close_below_ema20` was clear on the previous bar and is set now |
+| 282 | `crossed_up_ema200` | `close_above_ema200` was clear on the previous bar and is set now |
+| 283 | `crossed_down_ema200` | `close_below_ema200` was clear on the previous bar and is set now |
+| 284 | `crossed_up_pdh` | `close_above_pdh` was clear on the previous bar and is set now |
+| 285 | `crossed_down_pdh` | `close_below_pdh` was clear on the previous bar and is set now |
+| 286 | `crossed_up_pdl` | `close_above_pdl` was clear on the previous bar and is set now |
+| 287 | `crossed_down_pdl` | `close_below_pdl` was clear on the previous bar and is set now |
+| 288 | `crossed_up_supertrend` | `close_above_supertrend` was clear on the previous bar and is set now |
+| 289 | `crossed_down_supertrend` | `close_below_supertrend` was clear on the previous bar and is set now |
+| 290 | `crossed_up_gap_mid` | `close_above_gap_mid` was clear on the previous bar and is set now |
+| 291 | `crossed_down_gap_mid` | `close_below_gap_mid` was clear on the previous bar and is set now |
+| 292 | `crossed_up_pivot_r1_band` | `close_above_pivot_r1_band` was clear on the previous bar and is set now |
+| 293 | `crossed_down_pivot_r1_band` | `close_below_pivot_r1_band` was clear on the previous bar and is set now |
+| 294 | `crossed_up_pivot_r2_band` | `close_above_pivot_r2_band` was clear on the previous bar and is set now |
+| 295 | `crossed_down_pivot_r2_band` | `close_below_pivot_r2_band` was clear on the previous bar and is set now |
+| 296 | `crossed_up_pivot_r3_band` | `close_above_pivot_r3_band` was clear on the previous bar and is set now |
+| 297 | `crossed_down_pivot_r3_band` | `close_below_pivot_r3_band` was clear on the previous bar and is set now |
+| 298 | `crossed_up_pivot_s1_band` | `close_above_pivot_s1_band` was clear on the previous bar and is set now |
+| 299 | `crossed_down_pivot_s1_band` | `close_below_pivot_s1_band` was clear on the previous bar and is set now |
+| 300 | `crossed_up_pivot_s2_band` | `close_above_pivot_s2_band` was clear on the previous bar and is set now |
+| 301 | `crossed_down_pivot_s2_band` | `close_below_pivot_s2_band` was clear on the previous bar and is set now |
+| 302 | `crossed_up_pivot_s3_band` | `close_above_pivot_s3_band` was clear on the previous bar and is set now |
+| 303 | `crossed_down_pivot_s3_band` | `close_below_pivot_s3_band` was clear on the previous bar and is set now |
+| 304 | `crossed_up_pivot_r4_band` | `close_above_pivot_r4_band` was clear on the previous bar and is set now |
+| 305 | `crossed_down_pivot_r4_band` | `close_below_pivot_r4_band` was clear on the previous bar and is set now |
+| 306 | `crossed_up_pivot_s4_band` | `close_above_pivot_s4_band` was clear on the previous bar and is set now |
+| 307 | `crossed_down_pivot_s4_band` | `close_below_pivot_s4_band` was clear on the previous bar and is set now |
+| 308 | `crossed_up_pivot_r5_band` | `close_above_pivot_r5_band` was clear on the previous bar and is set now |
+| 309 | `crossed_down_pivot_r5_band` | `close_below_pivot_r5_band` was clear on the previous bar and is set now |
+| 310 | `crossed_up_pivot_s5_band` | `close_above_pivot_s5_band` was clear on the previous bar and is set now |
+| 311 | `crossed_down_pivot_s5_band` | `close_below_pivot_s5_band` was clear on the previous bar and is set now |
+| 312 | `crossed_up_day_open` | `close_above_day_open` was clear on the previous bar and is set now |
+| 313 | `crossed_down_day_open` | `close_below_day_open` was clear on the previous bar and is set now |
+
+### Which test of this level this is — bits 314–364, D-0246
+
+Bits 280–313 gave the vocabulary an edge; these give that edge an **ordinal**, and the
+difference is one a trader acts on. `crossed_up_pdh` fires byte-identically on the clean
+first break of the day and on the ninth probe of a level that has already absorbed eight
+attempts.
+
+**No combination of existing bits can express a count.** `ConditionMask::hits` is pure
+conjunction, so *not the first test* cannot be spelled by leaving a bit clear, and a tally
+cannot be assembled out of level states however many are ANDed. It has to be positions.
+
+**Counting crossings, not touches, and that choice is what made it fit.** No document
+defines a touch — `near_X`, a close on the level, and a wick through it are three different
+predicates — so picking one would be a stated assumption needing its own entry. A crossing
+is already defined, already derived and already tested, so the ordinal inherits its whole
+definition from 280–313 and introduces none.
+
+**Three buckets, exactly one of which fires.** First, second, third-or-later. A bit per
+exact count would be unbounded; the third is open-ended because the distinction a trader
+draws is fresh / retest / being hammered, not fourth from fifth. They partition the crossing
+bars — one on a bar that crosses, none on a bar that does not — which is what makes them
+safe to AND with anything else.
+
+**Per session.** The count is cleared in the rollover beside the crossing state: a level
+crossed twice yesterday and once today is on its first test today, not its third.
+
+| Bit | Name | Fires when |
+|---|---|---|
+| 314 | `first_cross_ema20` | this bar is the session's first crossing of `ema20`, in either direction |
+| 315 | `second_cross_ema20` | this bar is the session's second crossing of `ema20`, in either direction |
+| 316 | `third_plus_cross_ema20` | this bar is the session's third or any later crossing of `ema20`, in either direction |
+| 317 | `first_cross_ema200` | this bar is the session's first crossing of `ema200`, in either direction |
+| 318 | `second_cross_ema200` | this bar is the session's second crossing of `ema200`, in either direction |
+| 319 | `third_plus_cross_ema200` | this bar is the session's third or any later crossing of `ema200`, in either direction |
+| 320 | `first_cross_pdh` | this bar is the session's first crossing of `pdh`, in either direction |
+| 321 | `second_cross_pdh` | this bar is the session's second crossing of `pdh`, in either direction |
+| 322 | `third_plus_cross_pdh` | this bar is the session's third or any later crossing of `pdh`, in either direction |
+| 323 | `first_cross_pdl` | this bar is the session's first crossing of `pdl`, in either direction |
+| 324 | `second_cross_pdl` | this bar is the session's second crossing of `pdl`, in either direction |
+| 325 | `third_plus_cross_pdl` | this bar is the session's third or any later crossing of `pdl`, in either direction |
+| 326 | `first_cross_supertrend` | this bar is the session's first crossing of `supertrend`, in either direction |
+| 327 | `second_cross_supertrend` | this bar is the session's second crossing of `supertrend`, in either direction |
+| 328 | `third_plus_cross_supertrend` | this bar is the session's third or any later crossing of `supertrend`, in either direction |
+| 329 | `first_cross_gap_mid` | this bar is the session's first crossing of `gap_mid`, in either direction |
+| 330 | `second_cross_gap_mid` | this bar is the session's second crossing of `gap_mid`, in either direction |
+| 331 | `third_plus_cross_gap_mid` | this bar is the session's third or any later crossing of `gap_mid`, in either direction |
+| 332 | `first_cross_pivot_r1_band` | this bar is the session's first crossing of `pivot_r1_band`, in either direction |
+| 333 | `second_cross_pivot_r1_band` | this bar is the session's second crossing of `pivot_r1_band`, in either direction |
+| 334 | `third_plus_cross_pivot_r1_band` | this bar is the session's third or any later crossing of `pivot_r1_band`, in either direction |
+| 335 | `first_cross_pivot_r2_band` | this bar is the session's first crossing of `pivot_r2_band`, in either direction |
+| 336 | `second_cross_pivot_r2_band` | this bar is the session's second crossing of `pivot_r2_band`, in either direction |
+| 337 | `third_plus_cross_pivot_r2_band` | this bar is the session's third or any later crossing of `pivot_r2_band`, in either direction |
+| 338 | `first_cross_pivot_r3_band` | this bar is the session's first crossing of `pivot_r3_band`, in either direction |
+| 339 | `second_cross_pivot_r3_band` | this bar is the session's second crossing of `pivot_r3_band`, in either direction |
+| 340 | `third_plus_cross_pivot_r3_band` | this bar is the session's third or any later crossing of `pivot_r3_band`, in either direction |
+| 341 | `first_cross_pivot_s1_band` | this bar is the session's first crossing of `pivot_s1_band`, in either direction |
+| 342 | `second_cross_pivot_s1_band` | this bar is the session's second crossing of `pivot_s1_band`, in either direction |
+| 343 | `third_plus_cross_pivot_s1_band` | this bar is the session's third or any later crossing of `pivot_s1_band`, in either direction |
+| 344 | `first_cross_pivot_s2_band` | this bar is the session's first crossing of `pivot_s2_band`, in either direction |
+| 345 | `second_cross_pivot_s2_band` | this bar is the session's second crossing of `pivot_s2_band`, in either direction |
+| 346 | `third_plus_cross_pivot_s2_band` | this bar is the session's third or any later crossing of `pivot_s2_band`, in either direction |
+| 347 | `first_cross_pivot_s3_band` | this bar is the session's first crossing of `pivot_s3_band`, in either direction |
+| 348 | `second_cross_pivot_s3_band` | this bar is the session's second crossing of `pivot_s3_band`, in either direction |
+| 349 | `third_plus_cross_pivot_s3_band` | this bar is the session's third or any later crossing of `pivot_s3_band`, in either direction |
+| 350 | `first_cross_pivot_r4_band` | this bar is the session's first crossing of `pivot_r4_band`, in either direction |
+| 351 | `second_cross_pivot_r4_band` | this bar is the session's second crossing of `pivot_r4_band`, in either direction |
+| 352 | `third_plus_cross_pivot_r4_band` | this bar is the session's third or any later crossing of `pivot_r4_band`, in either direction |
+| 353 | `first_cross_pivot_s4_band` | this bar is the session's first crossing of `pivot_s4_band`, in either direction |
+| 354 | `second_cross_pivot_s4_band` | this bar is the session's second crossing of `pivot_s4_band`, in either direction |
+| 355 | `third_plus_cross_pivot_s4_band` | this bar is the session's third or any later crossing of `pivot_s4_band`, in either direction |
+| 356 | `first_cross_pivot_r5_band` | this bar is the session's first crossing of `pivot_r5_band`, in either direction |
+| 357 | `second_cross_pivot_r5_band` | this bar is the session's second crossing of `pivot_r5_band`, in either direction |
+| 358 | `third_plus_cross_pivot_r5_band` | this bar is the session's third or any later crossing of `pivot_r5_band`, in either direction |
+| 359 | `first_cross_pivot_s5_band` | this bar is the session's first crossing of `pivot_s5_band`, in either direction |
+| 360 | `second_cross_pivot_s5_band` | this bar is the session's second crossing of `pivot_s5_band`, in either direction |
+| 361 | `third_plus_cross_pivot_s5_band` | this bar is the session's third or any later crossing of `pivot_s5_band`, in either direction |
+| 362 | `first_cross_day_open` | this bar is the session's first crossing of `day_open`, in either direction |
+| 363 | `second_cross_day_open` | this bar is the session's second crossing of `day_open`, in either direction |
+| 364 | `third_plus_cross_day_open` | this bar is the session's third or any later crossing of `day_open`, in either direction |
+
 ---
 
 ## 8. Headroom, restated
 
 | | |
 |---|---|
-| positions allocated | 280 (0–279) |
-| live | 238 |
+| positions allocated | 365 (0–364) |
+| live | 323 |
 | retired (duplicated a live position) | 3 — bits 6, 19, 25 |
 | **void** (definitionally constant) | **39** — bits 235–273, D-0080 |
 | declaring `Kind::Near`, needing a tolerance | 81 live, of 97 allocated |
 | mask type | `ConditionMask`, `[u64; 6]` |
 | mask width | 384 bits |
-| free positions | 104 |
+| free positions | 19 |
 
 The first five rows account for every allocated position exactly once:
-238 + 3 + 39 = 280. If a future append breaks that sum, this table is the stale
+323 + 3 + 39 = 365. If a future append breaks that sum, this table is the stale
 copy and the table in `crates/vocab/src/table.rs` is the truth.
+
+**Nineteen free, and that number is now the constraint.** The crossing family
+(D-0244) took the table 280 to 314 and its ordinals (D-0246) took it to 365, both
+against the same 384-bit mask — so neither widened it and `VOCAB_VERSION` holds
+at 3. The next family needing more than nineteen positions cannot be an append.
+It widens `ConditionMask::WORDS`, which IS a version bump, and re-keys every run
+ever recorded: the same sweep over the same bars produces a different identity,
+and nothing stored can be found by the identity a rerun computes.
 
 **§6 above is superseded and kept for the record.** It said 74 live bits in a
 `u128` with 54 free, and that was true until this table widened. The `u128` claim

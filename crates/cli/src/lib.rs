@@ -853,9 +853,9 @@ const GRID_RUNGS: usize = 4;
 /// deriving a `u64` from that `usize` inside a `const` is not expressible — but a
 /// compile-time equality is. A stale figure here would make the printed exposure
 /// charge for a grid that was never run.
-const GRID_VARIANTS: u64 = 325;
+const GRID_VARIANTS: u64 = 625;
 const _: () = assert!(
-    grid::variants(GRID_RUNGS, GRID_RUNGS, GRID_RUNGS) == 325,
+    grid::variants(GRID_RUNGS, GRID_RUNGS, GRID_RUNGS) == 625,
     "GRID_VARIANTS must equal grid::variants(GRID_RUNGS, ..); the exit-grid \
      exposure would otherwise charge for a grid that was not evaluated"
 );
@@ -935,8 +935,9 @@ fn closed_by_evidence<'a>(
 /// # Why a second bar rather than a replacement
 ///
 /// Because the true correction is **unknown and this one is only a ceiling**.
-/// The 125 cells share a single trade walk, so they are heavily correlated and
-/// the effective trial count is somewhere between 1 and 125 — unmeasured.
+/// The cells share a single trade walk, so they are heavily correlated and the
+/// effective trial count is somewhere between 1 and [`GRID_VARIANTS`] —
+/// unmeasured.
 /// Replacing the printed bar with the ceiling would reject real findings;
 /// leaving it alone accepts noise. Printing both, and saying which is which,
 /// hands the reader the range that is actually known. `CLAUDE.md` §3 rule 6
@@ -944,7 +945,19 @@ fn closed_by_evidence<'a>(
 /// inventing the discount that would collapse the range to a point.
 fn grid_exposure(sweep: &engine::Sweep) -> String {
     let plain = runner::significance::effective_trials(sweep);
-    let ceiling = runner::significance::trials_with_grid(sweep, GRID_VARIANTS);
+    // THE SAME `plain` ON BOTH SIDES OF THE SENTENCE.
+    //
+    // This read `trials_with_grid(sweep, GRID_VARIANTS)`, which multiplied the
+    // RAW trial count while the line beside it printed the DUPLICATE-DEFLATED
+    // one -- so the sentence "with N exit settings each, at most {ceiling}"
+    // claimed the only difference was the grid, and the measured ratio was
+    // 929,577x where it promised 325x. The upper Bonferroni bar was overstated
+    // by 1.27 t-units as a result.
+    //
+    // Passing `plain` makes the claim true by construction rather than by two
+    // calls happening to agree, and `trials_with_grid` now takes a count for
+    // exactly that reason.
+    let ceiling = runner::significance::trials_with_grid(plain, GRID_VARIANTS);
     let mut out = String::with_capacity(512);
     let _ = writeln!(
         out,
@@ -2062,6 +2075,7 @@ mod tests {
                 n: 100,
                 mean_paisa: mean,
                 mismatched: 0,
+                refused: 0,
                 t: mean,
             },
         };

@@ -289,6 +289,32 @@ pub struct Crossings {
     armed_ambiguous: Vec<usize>,
     /// Row stride of `armed`, kept so a lookup does not have to be told it.
     trail_count: usize,
+    /// Bars in this path that `Candle::check` refused.
+    ///
+    /// # A path with one of these cannot be priced, and used to be anyway
+    ///
+    /// `crate::outcome::priced` and `crate::trade::round_trip` refuse a
+    /// mis-assembled record at the ENTRY bar and the EXIT bar. Every bar
+    /// STRICTLY BETWEEN them still reached the walk below with no check at all,
+    /// and those are the bars that decide every level exit: the MAE, the MFE and
+    /// every rung crossing are read off them.
+    ///
+    /// Measured by an adversarial fleet, one refused record among 2,250 bars:
+    ///
+    /// | | clean | one refused bar mid-hold |
+    /// |---|---|---|
+    /// | chosen cell | `target(0)` | `trail(0) + arm(1)` |
+    /// | its total | 3,210 paisa | **499,089 paisa** |
+    ///
+    /// A factor of 155, and a **different exit instrument recommended**. The
+    /// entry/exit guard could not see it, because the corrupt bar was neither.
+    ///
+    /// The bar is skipped in the walk and counted here. `crate::grid` then drops
+    /// the whole candidate rather than pricing a path with a hole in it — a
+    /// skipped bar does not merely lose one observation, it makes the running
+    /// maxima wrong for every bar after it, so the honest unit of refusal is the
+    /// PATH and not the bar.
+    refused: usize,
     /// The last offset walked, so a lookup can say "held to the end".
     last: usize,
 }
@@ -329,6 +355,7 @@ impl Crossings {
             armed_peak_raised: vec![0; armed_cells],
             armed_ambiguous: Vec::new(),
             trail_count: trails.len(),
+            refused: 0,
             last: 0,
         }
     }
@@ -488,6 +515,17 @@ impl Crossings {
     pub const fn last(&self) -> usize {
         self.last
     }
+
+    /// How many bars of this path the engine refused as not-a-bar.
+    ///
+    /// **Non-zero means the path is unpriceable, not merely shorter.** A skipped
+    /// bar leaves every running maximum after it computed on incomplete data, so
+    /// `crate::grid` drops the candidate rather than reporting a total. See the
+    /// `refused` field for the measurement that forced this.
+    #[must_use]
+    pub const fn refused(&self) -> usize {
+        self.refused
+    }
 }
 
 /// Which way the position is facing.
@@ -598,6 +636,18 @@ pub fn crossings(
         let Some(bar) = bars.get(from.saturating_add(offset)) else {
             break;
         };
+        // A BAR THE ENGINE REFUSED MAY NOT MOVE A RUNNING MAXIMUM.
+        //
+        // `Candle::check` is the same predicate `indicators::column::Column::build`
+        // applies, so a record refused there is refused here. Counted rather than
+        // silently skipped: `crate::grid` reads the count and drops the whole
+        // candidate, because a hole in the middle of a path leaves every maximum
+        // after it wrong. See the `refused` field for what one such bar did to a
+        // real audit -- 3,210 paisa to 499,089, and a different exit recommended.
+        if bar.check().is_err() {
+            out.refused = out.refused.saturating_add(1);
+            continue;
+        }
         out.last = offset;
 
         let m = BarMoves::of(bar, entry, peak, side);

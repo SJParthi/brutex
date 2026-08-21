@@ -236,7 +236,25 @@ const fn retired(index: u16, name: &'static str, band: Option<Base>, duplicate_o
 }
 
 /// The table. Row `i` is position `i`, for every `i`, forever.
-pub const TABLE: [BitDef; 314] = [
+/// The table must stay a `const`, and clippy is right that it is large.
+///
+/// `large_const_arrays` fires at 365 rows and suggests `static`. Taking that
+/// suggestion would silently delete the guard this file most depends on:
+/// `COUNT` is `TABLE.len()` **in a const context**, and
+/// `const _: () = assert!(COUNT <= ConditionMask::BITS as usize)` is what fails
+/// the BUILD on the day an append passes the mask width. A `static`'s `.len()`
+/// is not a const expression, so both would have to become runtime checks — and
+/// a runtime check for "the table outgrew the mask" fires after `with_bit` has
+/// already silently ignored the position.
+///
+/// The array is copied nowhere: every read is `TABLE.get(index)` behind
+/// [`definition`], which is one bounds check and one index.
+#[allow(
+    clippy::large_const_arrays,
+    reason = "COUNT is TABLE.len() in a const context, and the compile-time \
+              assertion that the table has not outgrown the mask depends on it."
+)]
+pub const TABLE: [BitDef; 365] = [
     // ---- 0–5. Moving averages. Shipped. ---------------------------------
     plain(0, "close_above_ema20"),
     plain(1, "close_below_ema20"),
@@ -1034,6 +1052,94 @@ pub const TABLE: [BitDef; 314] = [
     plain(311, "crossed_down_pivot_s5_band"),
     plain(312, "crossed_up_day_open"),
     plain(313, "crossed_down_day_open"),
+    // ---- 314–364. WHICH TEST OF THIS LEVEL THIS IS. -------------------------
+    //
+    // 280–313 gave the vocabulary an EDGE: the bar a level changes side. This
+    // gives that edge an ORDINAL, and the difference is one a trader acts on.
+    // `crossed_up_pdh` fires byte-identically on the clean first break of the
+    // day and on the ninth probe of a level that has already absorbed eight
+    // attempts. Those are not the same setup and the mask could not tell them
+    // apart.
+    //
+    // # No combination of existing bits can express a count
+    //
+    // `ConditionMask::hits` is pure conjunction, so "not the first test" cannot
+    // be spelled by leaving a bit clear, and a tally cannot be assembled out of
+    // level states however many are ANDed. It has to be positions. A survey of
+    // every one of the 314 names for `count|times|twice|nth|repeat|again|
+    // retest|touch|tally|streak|consec|freq|revisit` returned two rows, both
+    // false positives on `pat_counterattack_*`.
+    //
+    // # Counting CROSSINGS, not "touches", and that choice is what made it fit
+    //
+    // No tracked document defines a touch -- `near_X`, a close on the level, or
+    // a wick through it are three different predicates -- so picking one would
+    // be a stated assumption with its own decision entry, and picking wrongly
+    // would make 51 positions mean something nobody asked for. A crossing is
+    // already defined, already derived, and already tested, so the ordinal
+    // inherits its whole definition from 280–313 and introduces no new one.
+    //
+    // # Three buckets, and exactly one fires
+    //
+    // First, second, third-or-later. A bit per exact count would be unbounded;
+    // the third is open-ended because the distinction a trader draws is fresh /
+    // retest / being hammered, not fourth from fifth. They PARTITION the
+    // crossing bars: exactly one on a bar that crosses, none on a bar that does
+    // not, which is what makes them safe to AND with anything else.
+    //
+    // Per SESSION, reset in the rollover beside `previous_mask` -- an overnight
+    // change of side is a gap and not a test of the level.
+    plain(314, "first_cross_ema20"),
+    plain(315, "second_cross_ema20"),
+    plain(316, "third_plus_cross_ema20"),
+    plain(317, "first_cross_ema200"),
+    plain(318, "second_cross_ema200"),
+    plain(319, "third_plus_cross_ema200"),
+    plain(320, "first_cross_pdh"),
+    plain(321, "second_cross_pdh"),
+    plain(322, "third_plus_cross_pdh"),
+    plain(323, "first_cross_pdl"),
+    plain(324, "second_cross_pdl"),
+    plain(325, "third_plus_cross_pdl"),
+    plain(326, "first_cross_supertrend"),
+    plain(327, "second_cross_supertrend"),
+    plain(328, "third_plus_cross_supertrend"),
+    plain(329, "first_cross_gap_mid"),
+    plain(330, "second_cross_gap_mid"),
+    plain(331, "third_plus_cross_gap_mid"),
+    plain(332, "first_cross_pivot_r1_band"),
+    plain(333, "second_cross_pivot_r1_band"),
+    plain(334, "third_plus_cross_pivot_r1_band"),
+    plain(335, "first_cross_pivot_r2_band"),
+    plain(336, "second_cross_pivot_r2_band"),
+    plain(337, "third_plus_cross_pivot_r2_band"),
+    plain(338, "first_cross_pivot_r3_band"),
+    plain(339, "second_cross_pivot_r3_band"),
+    plain(340, "third_plus_cross_pivot_r3_band"),
+    plain(341, "first_cross_pivot_s1_band"),
+    plain(342, "second_cross_pivot_s1_band"),
+    plain(343, "third_plus_cross_pivot_s1_band"),
+    plain(344, "first_cross_pivot_s2_band"),
+    plain(345, "second_cross_pivot_s2_band"),
+    plain(346, "third_plus_cross_pivot_s2_band"),
+    plain(347, "first_cross_pivot_s3_band"),
+    plain(348, "second_cross_pivot_s3_band"),
+    plain(349, "third_plus_cross_pivot_s3_band"),
+    plain(350, "first_cross_pivot_r4_band"),
+    plain(351, "second_cross_pivot_r4_band"),
+    plain(352, "third_plus_cross_pivot_r4_band"),
+    plain(353, "first_cross_pivot_s4_band"),
+    plain(354, "second_cross_pivot_s4_band"),
+    plain(355, "third_plus_cross_pivot_s4_band"),
+    plain(356, "first_cross_pivot_r5_band"),
+    plain(357, "second_cross_pivot_r5_band"),
+    plain(358, "third_plus_cross_pivot_r5_band"),
+    plain(359, "first_cross_pivot_s5_band"),
+    plain(360, "second_cross_pivot_s5_band"),
+    plain(361, "third_plus_cross_pivot_s5_band"),
+    plain(362, "first_cross_day_open"),
+    plain(363, "second_cross_day_open"),
+    plain(364, "third_plus_cross_day_open"),
 ];
 
 /// Every level whose SIDE this table carries on both sides, and the two
@@ -1060,28 +1166,236 @@ pub const TABLE: [BitDef; 314] = [
 /// the `close_above_`/`close_below_` pair of one level, and that the two
 /// crossing positions carry that level's name — so the map cannot drift from
 /// the rows above it.
-pub const CROSSINGS: [(u16, u16, u16, u16); 17] = [
-    (0, 1, 280, 281),
-    (2, 3, 282, 283),
-    (13, 14, 284, 285),
-    (15, 16, 286, 287),
-    (64, 65, 288, 289),
-    (66, 67, 290, 291),
-    (74, 75, 292, 293),
-    (76, 77, 294, 295),
-    (78, 79, 296, 297),
-    (80, 81, 298, 299),
-    (82, 83, 300, 301),
-    (84, 85, 302, 303),
-    (180, 181, 304, 305),
-    (182, 183, 306, 307),
-    (184, 185, 308, 309),
-    (186, 187, 310, 311),
-    (276, 277, 312, 313),
+/// One level's seven positions: two states, two edges, three ordinals.
+///
+/// # A named struct and not a seven-tuple, and the reason is a real hazard
+///
+/// This was `(u16, u16, u16, u16)` and its own doc warned that *"an off-by-one
+/// here would set `crossed_up_pdh` from `close_above_pdl` and nothing about the
+/// resulting mask would look wrong"*. Seven positional `u16`s would make that
+/// warning three times as sharp. Named fields cannot be permuted silently.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LevelCrossing {
+    /// `close_above_X` — the state, true for as long as it holds.
+    pub above: u16,
+    /// `close_below_X` — the state on the other side.
+    pub below: u16,
+    /// `crossed_up_X` — the EDGE: `above` clear on the previous bar, set now.
+    pub up: u16,
+    /// `crossed_down_X` — the same for `below`.
+    pub down: u16,
+    /// `first_cross_X` — this bar is the session's FIRST crossing of the level,
+    /// in either direction.
+    pub first: u16,
+    /// `second_cross_X` — the second.
+    pub second: u16,
+    /// `third_plus_cross_X` — the third or any later one.
+    pub later: u16,
+}
+
+/// Every two-sided level, with its states, its edges and its ordinals.
+///
+/// # The ordinal family, and why the crossing is the countable event
+///
+/// D-0244 gave the vocabulary an EDGE — the bar a level changes side — and left
+/// a question a trader asks constantly unanswerable: *is this the first test of
+/// this level today, or the fourth?* A mask carrying `crossed_up_pdh` fires
+/// byte-identically on the clean first break and on the ninth probe of a level
+/// that has already absorbed eight attempts, and those are not the same setup.
+///
+/// **No AND of existing bits can express it.** `ConditionMask::hits` is pure
+/// conjunction — `(self & candidate) ^ candidate == 0` across six words — so
+/// "not the first test" cannot be spelled by leaving a bit clear, and a count
+/// cannot be assembled from level states at all. It has to be positions.
+///
+/// # Counting CROSSINGS and not "touches", which is the whole reason this fits
+///
+/// A survey of this vocabulary found no tracked document defines what a *touch*
+/// is — whether it is `near_X`, a close landing on the level, or a wick through
+/// it — so choosing one would be a stated assumption needing its own decision
+/// entry, and choosing wrongly would make 51 positions mean something nobody
+/// asked for.
+///
+/// A CROSSING needs no such choice. It is already defined, already derived from
+/// the mask, and already tested: `above` clear then set, or `below` clear then
+/// set. So "the third crossing of R1 today" inherits its whole definition from
+/// [`Self::up`] and [`Self::down`] and introduces no new one.
+///
+/// # Three buckets and not a counter
+///
+/// First, second, third-or-later. A bit per exact count would be unbounded; the
+/// third bucket is open-ended because a trader distinguishes *fresh*, *retest*
+/// and *being hammered*, and not fourth from fifth.
+///
+/// Exactly one of the three is set on any bar that crosses, and none is set on a
+/// bar that does not — so they partition the crossing bars rather than
+/// overlapping them, which is what makes them safe to combine with anything
+/// else.
+///
+/// # Reset at the session boundary, like the crossing itself
+///
+/// The count is per SESSION. `indicators::Evaluator` clears it in the rollover
+/// beside `previous_mask`, for the same reason: an overnight change of side is a
+/// gap, not a test of the level, and this engine is intraday-only by
+/// `CLAUDE.md` §1.
+pub const CROSSINGS: [LevelCrossing; 17] = [
+    LevelCrossing {
+        above: 0,
+        below: 1,
+        up: 280,
+        down: 281,
+        first: 314,
+        second: 315,
+        later: 316,
+    },
+    LevelCrossing {
+        above: 2,
+        below: 3,
+        up: 282,
+        down: 283,
+        first: 317,
+        second: 318,
+        later: 319,
+    },
+    LevelCrossing {
+        above: 13,
+        below: 14,
+        up: 284,
+        down: 285,
+        first: 320,
+        second: 321,
+        later: 322,
+    },
+    LevelCrossing {
+        above: 15,
+        below: 16,
+        up: 286,
+        down: 287,
+        first: 323,
+        second: 324,
+        later: 325,
+    },
+    LevelCrossing {
+        above: 64,
+        below: 65,
+        up: 288,
+        down: 289,
+        first: 326,
+        second: 327,
+        later: 328,
+    },
+    LevelCrossing {
+        above: 66,
+        below: 67,
+        up: 290,
+        down: 291,
+        first: 329,
+        second: 330,
+        later: 331,
+    },
+    LevelCrossing {
+        above: 74,
+        below: 75,
+        up: 292,
+        down: 293,
+        first: 332,
+        second: 333,
+        later: 334,
+    },
+    LevelCrossing {
+        above: 76,
+        below: 77,
+        up: 294,
+        down: 295,
+        first: 335,
+        second: 336,
+        later: 337,
+    },
+    LevelCrossing {
+        above: 78,
+        below: 79,
+        up: 296,
+        down: 297,
+        first: 338,
+        second: 339,
+        later: 340,
+    },
+    LevelCrossing {
+        above: 80,
+        below: 81,
+        up: 298,
+        down: 299,
+        first: 341,
+        second: 342,
+        later: 343,
+    },
+    LevelCrossing {
+        above: 82,
+        below: 83,
+        up: 300,
+        down: 301,
+        first: 344,
+        second: 345,
+        later: 346,
+    },
+    LevelCrossing {
+        above: 84,
+        below: 85,
+        up: 302,
+        down: 303,
+        first: 347,
+        second: 348,
+        later: 349,
+    },
+    LevelCrossing {
+        above: 180,
+        below: 181,
+        up: 304,
+        down: 305,
+        first: 350,
+        second: 351,
+        later: 352,
+    },
+    LevelCrossing {
+        above: 182,
+        below: 183,
+        up: 306,
+        down: 307,
+        first: 353,
+        second: 354,
+        later: 355,
+    },
+    LevelCrossing {
+        above: 184,
+        below: 185,
+        up: 308,
+        down: 309,
+        first: 356,
+        second: 357,
+        later: 358,
+    },
+    LevelCrossing {
+        above: 186,
+        below: 187,
+        up: 310,
+        down: 311,
+        first: 359,
+        second: 360,
+        later: 361,
+    },
+    LevelCrossing {
+        above: 276,
+        below: 277,
+        up: 312,
+        down: 313,
+        first: 362,
+        second: 363,
+        later: 364,
+    },
 ];
 
 /// How many positions the table defines. Not how many bits the mask holds --
-/// [`ConditionMask::BITS`] is 384, and the **70** positions between are
+/// [`ConditionMask::BITS`] is 384, and the **19** positions between are
 /// unallocated headroom, not free-for-all space.
 ///
 /// It read 104 until the crossing family took the table from 280 to 314. The
@@ -1091,7 +1405,7 @@ pub const COUNT: usize = TABLE.len();
 
 /// The highest position that will ever be a hole: none. The next condition
 /// appends here, whatever has been retired below it.
-pub const NEXT_FREE: u16 = 314;
+pub const NEXT_FREE: u16 = 365;
 
 // THE TABLE CANNOT OUTGROW THE MASK, enforced at COMPILE time.
 //
@@ -1172,7 +1486,59 @@ pub const LIVE: ConditionMask =
         .with_bit(310)
         .with_bit(311)
         .with_bit(312)
-        .with_bit(313);
+        .with_bit(313)
+        // 314-364: the crossing-ordinal family. All 51 live.
+        .with_bit(314)
+        .with_bit(315)
+        .with_bit(316)
+        .with_bit(317)
+        .with_bit(318)
+        .with_bit(319)
+        .with_bit(320)
+        .with_bit(321)
+        .with_bit(322)
+        .with_bit(323)
+        .with_bit(324)
+        .with_bit(325)
+        .with_bit(326)
+        .with_bit(327)
+        .with_bit(328)
+        .with_bit(329)
+        .with_bit(330)
+        .with_bit(331)
+        .with_bit(332)
+        .with_bit(333)
+        .with_bit(334)
+        .with_bit(335)
+        .with_bit(336)
+        .with_bit(337)
+        .with_bit(338)
+        .with_bit(339)
+        .with_bit(340)
+        .with_bit(341)
+        .with_bit(342)
+        .with_bit(343)
+        .with_bit(344)
+        .with_bit(345)
+        .with_bit(346)
+        .with_bit(347)
+        .with_bit(348)
+        .with_bit(349)
+        .with_bit(350)
+        .with_bit(351)
+        .with_bit(352)
+        .with_bit(353)
+        .with_bit(354)
+        .with_bit(355)
+        .with_bit(356)
+        .with_bit(357)
+        .with_bit(358)
+        .with_bit(359)
+        .with_bit(360)
+        .with_bit(361)
+        .with_bit(362)
+        .with_bit(363)
+        .with_bit(364);
 
 /// The row at `index`, or `None` when the index is past the table.
 #[must_use]
@@ -1363,8 +1729,8 @@ mod tests {
         assert_eq!(LIVE, folded, "the LIVE literal drifted from the table");
         assert_eq!(
             LIVE.popcount(),
-            272,
-            "314 positions, less three tombstones and less the 39 void \
+            323,
+            "365 positions, less three tombstones and less the 39 void \
              forming-pivot rows"
         );
     }
@@ -1376,17 +1742,17 @@ mod tests {
             .with_bit(19)
             .with_bit(25)
             .with_bit(62)
-            // 350 is past NEXT_FREE and inside the mask, so it exercises the
+            // 380 is past NEXT_FREE and inside the mask, so it exercises the
             // "allocated in the mask but not in the table" case. It was 200,
             // which stopped being unallocated the day the forming-pivot block
             // landed, and then 300, which stopped being unallocated the day the
             // crossing block did. The moral each time: this bit must sit above
             // NEXT_FREE, so it moves with NEXT_FREE.
-            .with_bit(350);
+            .with_bit(380);
         let clean = only_live(dirty);
         assert!(!clean.get(6) && !clean.get(19) && !clean.get(25));
         assert!(clean.get(62), "a live bit beside a tombstone survives");
-        assert!(!clean.get(350), "unallocated positions are not live either");
+        assert!(!clean.get(380), "unallocated positions are not live either");
     }
 
     #[test]
@@ -1521,7 +1887,7 @@ mod tests {
 
     #[test]
     fn count_and_next_free_agree_with_the_table() {
-        assert_eq!(COUNT, 314);
+        assert_eq!(COUNT, 365);
         assert_eq!(usize::from(NEXT_FREE), COUNT);
     }
 

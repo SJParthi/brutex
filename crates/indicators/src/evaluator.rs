@@ -252,29 +252,54 @@ pub struct Evaluator {
     seeded: bool,
     /// The timestamp of the last accepted bar, so a receding one can be refused.
     last_ts: Option<i64>,
-    /// The mask the PREVIOUS bar of this session emitted, or `None` on the first
-    /// bar of a session.
+    /// The last DEFINITE side seen for each level in
+    /// [`vocab::table::CROSSINGS`], indexed the same way.
     ///
-    /// # The whole of the crossing family, and nothing else reads it
+    /// # Not the previous bar's side — the last bar that HAD one
     ///
-    /// A crossing is two states one bar apart, and every state this crate can
-    /// express is already in the mask. So `crossed_up_X` needs no level, no
-    /// formula and no module — it is `close_above_X` clear here and set there.
-    /// See [`vocab::table::CROSSINGS`].
+    /// The distinction is the whole crossing family. `close_above_X` and
+    /// `close_below_X` leave a gap between them: a bare level's gap is a single
+    /// paisa, but a BANDED level's is the whole band — half the CPR width either
+    /// way for the ten pivot levels. A close walking through that band spends
+    /// bars with neither bit set.
     ///
-    /// **`None` at every session boundary, on purpose.** Reset in the rollover
-    /// beside `seeded`, so no crossing bit fires on a session's first bar. A
-    /// close that was below yesterday's pivot and is above today's open is a
-    /// GAP, which the 132–142 family already describes; calling it a cross would
-    /// report an intraday event for a move that happened while the market was
-    /// shut, and this engine is intraday-only by `CLAUDE.md` §1.
+    /// Comparing against the previous BAR therefore swallowed every crossing of
+    /// those ten levels: the bar before the emergence was inside the band, had
+    /// no side, and the guard refused. An adversarial fleet measured it twice
+    /// independently — 50 of the 85 new positions could fire only on a bar that
+    /// jumped the entire band in one step.
     ///
-    /// **`None` and not `ZERO`.** An all-clear mask is indistinguishable from a
-    /// bar where every level happened to be un-crossed, and against that every
-    /// `close_above_X` set on the first bar would read as a fresh crossing —
-    /// `docs/03-vocabulary.md` §4's rule is that an unknowable condition is
-    /// unset, not guessed.
-    previous_mask: Option<ConditionMask>,
+    /// Remembering the last definite side fixes three cases with one rule. The
+    /// band walk reports its crossing when it emerges. A close landing exactly
+    /// ON a level no longer loses the crossing that follows it. And a session's
+    /// first bar still reports nothing, because the rollover leaves this
+    /// [`Side::Unknown`] and an unknown side is not the other side —
+    /// `docs/03-vocabulary.md` §4.
+    ///
+    /// Seventeen bytes, cleared at the rollover: the side is per SESSION,
+    /// because an overnight change is a gap and not a crossing.
+    last_side: [Side; vocab::table::CROSSINGS.len()],
+    /// How many times each level in [`vocab::table::CROSSINGS`] has been crossed
+    /// this session, indexed the same way.
+    ///
+    /// # Seventeen bytes, and that is the entire cost of the ordinal family
+    ///
+    /// A count cannot be assembled from level states by `AND`-ing them —
+    /// `ConditionMask::hits` is pure conjunction — so "the third test of this
+    /// level" needs real state. This is it: one saturating `u8` per level,
+    /// incremented on the bar a crossing fires and read once to pick which of
+    /// the three ordinal positions to set.
+    ///
+    /// **`u8` and saturating.** Past 255 crossings of one level in one session
+    /// every further bar is `third_plus` anyway, which is exactly what a
+    /// saturated counter reports — so the saturation cannot produce a wrong
+    /// answer, only an unreachable one. 375 bars cannot cross a level 255 times
+    /// and alternate, but the type does not need that argument to be safe.
+    ///
+    /// Cleared in the rollover beside [`Self::last_side`]: the count is per
+    /// SESSION, because an overnight change of side is a gap rather than a test
+    /// of the level.
+    crossings_seen: [u8; vocab::table::CROSSINGS.len()],
     /// The running session's extremes and last close — **including** every bar
     /// folded so far, which is why the fold happens after the emit.
     running_high: i64,
@@ -296,16 +321,42 @@ pub struct Evaluator {
     vwap: Vwap,
 }
 
+/// Which side of one level a bar closed on, or that it had none.
+///
+/// # Three states, and the third is not "neither of the other two"
+///
+/// `close_above_X` and `close_below_X` leave a gap between them. For a bare
+/// level that gap is one paisa -- D-0109's rule that a close exactly ON a level
+/// sets neither side. For a BANDED level it is the whole band, half the CPR
+/// width either way, and a close can sit inside it for many bars.
+///
+/// `Unknown` is that gap, and it means the side is NOT KNOWN rather than that it
+/// changed. `Evaluator::last_side` therefore remembers the last DEFINITE side
+/// and an `Unknown` bar records nothing over it -- which is what lets a close
+/// that walks through a pivot band report its crossing when it emerges.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Side {
+    /// The close was strictly above the level, or above the band's top edge.
+    Above,
+    /// Strictly below the level, or below the band's bottom edge.
+    Below,
+    /// Neither bit set: on the level, inside the band, or the level does not
+    /// exist yet.
+    Unknown,
+}
+
 // Fixed size. If this assertion ever fails, something in a module started growing
 // with the number of bars and the constant-space claim is no longer true.
 //
-// RAISED FROM 1792 WHEN `previous_mask` LANDED, and the distinction matters:
+// IT WENT UP AND THEN BACK DOWN, which is worth recording. It rose from 1792
+// for the crossing family's `Option<ConditionMask>` and again for the 17-byte
+// ordinal counter, and the distinction matters:
 // this is a `ConditionMask` -- six `u64` and a discriminant, 56 bytes -- and not
 // a per-bar collection. The bound is still a CONSTANT and the assertion is still
 // what catches a module that starts accumulating; it moved because one more
 // fixed-size field was added, which is the only reason it is ever allowed to
 // move.
-const _: () = assert!(core::mem::size_of::<Evaluator>() <= 1856);
+const _: () = assert!(core::mem::size_of::<Evaluator>() <= 1824);
 
 impl Evaluator {
     /// A fresh evaluator.
@@ -341,7 +392,8 @@ impl Evaluator {
             day: i64::MIN,
             seeded: false,
             last_ts: None,
-            previous_mask: None,
+            last_side: [Side::Unknown; vocab::table::CROSSINGS.len()],
+            crossings_seen: [0; vocab::table::CROSSINGS.len()],
             running_high: 0,
             running_low: 0,
             running_close: 0,
@@ -453,10 +505,13 @@ impl Evaluator {
             }
             self.day = today;
             self.seeded = false;
-            // NO CROSSING SURVIVES A SESSION BOUNDARY. See `previous_mask`: an
+            // NO CROSSING SURVIVES A SESSION BOUNDARY. See `last_side`: an
             // overnight change of side is a gap, which the 132-142 family
             // already describes, and this engine is intraday-only.
-            self.previous_mask = None;
+            self.last_side = [Side::Unknown; vocab::table::CROSSINGS.len()];
+            // AND NEITHER DOES THE COUNT. A level crossed twice yesterday and
+            // once today is on its FIRST test today, not its third.
+            self.crossings_seen = [0; vocab::table::CROSSINGS.len()];
         }
 
         // ── emit: every module, unioned ─────────────────────────────────────────
@@ -526,8 +581,8 @@ impl Evaluator {
         //
         // Placed AFTER the whole union so it sees every state position, and
         // BEFORE the fold for the reason every anchor here is read before the
-        // fold: `previous_mask` must be the previous BAR's, and the assignment
-        // below is what makes it so.
+        // fold: the side it records is this bar's, and every anchor here is read
+        // before the fold for the same reason.
         //
         // Cost: `CROSSINGS.len()` iterations of six bit operations. The length
         // is a compile-time constant, so this is O(1) per bar in the sense
@@ -551,11 +606,6 @@ impl Evaluator {
         }
         self.running_close = bar.close;
         self.last_ts = Some(bar.ts_micros);
-        // THIS BAR'S MASK BECOMES THE NEXT BAR'S PREVIOUS. Stored with the
-        // crossing bits already in it, which costs nothing: `CROSSINGS` reads
-        // only the two STATE positions of each level, and no crossing position
-        // is the `above` or `below` of any tuple.
-        self.previous_mask = Some(mask);
 
         // Nothing outside the live vocabulary may reach a caller: a retired or void
         // position that escaped would be swept as a real condition.
@@ -574,8 +624,8 @@ impl Evaluator {
     ///
     /// # The three cases that set nothing, and each is right
     ///
-    /// * **The first bar of a session** — `previous_mask` is `None`. There is no
-    ///   previous side, so there is no crossing to report. See that field.
+    /// * **The first bar of a session** — `last_side` is `Unknown`. There is no
+    ///   remembered side, so there is no crossing to report. See that field.
     /// * **A level with no state on either bar** — a pivot band on a day with no
     ///   previous session sets neither `above` nor `below`, so nothing can
     ///   change side and nothing does.
@@ -588,24 +638,84 @@ impl Evaluator {
     /// `CROSSINGS.len()` iterations, each two mask reads and at most one
     /// `set_exact`. The length is a compile-time constant of this crate's own
     /// vocabulary, so nothing a caller supplies can make it grow.
-    fn crossings_of(&self, mut mask: ConditionMask) -> ConditionMask {
-        let Some(before) = self.previous_mask.as_ref() else {
-            return mask;
-        };
-        for &(above, below, up, down) in &vocab::table::CROSSINGS {
-            for (state, edge) in [(above, up), (below, down)] {
-                let b = u32::from(state);
-                if mask.get(b) && !before.get(b) {
-                    // `unwrap_or(mask)` and not `if let Ok`, for the reason every
-                    // other module in this crate gives: `set_exact` refuses only
-                    // an absent, retired, void or `Near` position, and
-                    // `the_crossing_map_names_only_live_two_sided_levels` proves
-                    // no position in `CROSSINGS` is any of those. An `if let`
-                    // would write a branch no test can take, and a region that
-                    // cannot run is a region nobody can be held to.
-                    mask = vocab::table::set_exact(mask, edge).unwrap_or(mask);
-                }
+    fn crossings_of(&mut self, mut mask: ConditionMask) -> ConditionMask {
+        for (slot, level) in vocab::table::CROSSINGS.iter().enumerate() {
+            // WHICH SIDE THIS BAR IS ON, OR THAT IT HAS NONE.
+            let now = if mask.get(u32::from(level.above)) {
+                Side::Above
+            } else if mask.get(u32::from(level.below)) {
+                Side::Below
+            } else {
+                Side::Unknown
+            };
+            // A BAR WITH NO SIDE RECORDS NOTHING AND REPORTS NOTHING.
+            //
+            // It does NOT clear the remembered side, and that is the whole
+            // correction. The first version compared against the PREVIOUS BAR
+            // and required it to have had a definite side, which is right for
+            // the day-open pair -- 276/277 are gated on `seeded`, so a session's
+            // first bar has no side and the naive test reported a crossing on
+            // bar 1 of every session -- and catastrophically wrong for a BANDED
+            // level.
+            //
+            // `close_above_pivot_r1_band` is true above the band's TOP edge and
+            // `close_below_` below its BOTTOM edge, so the "no side" zone is the
+            // whole band -- half the CPR width either way, a real price
+            // interval, not a paisa. A close walking through it spends bars with
+            // neither bit set, and the previous-bar guard therefore swallowed
+            // EVERY crossing of all ten banded pivot levels. An adversarial
+            // fleet measured it twice independently: 50 of the 85 new positions
+            // could fire only on a bar that jumped the entire band in one step.
+            //
+            // Remembering the last DEFINITE side fixes all three cases at once:
+            // the band walk reports its crossing when it emerges, a close
+            // landing exactly ON a level no longer loses the crossing that
+            // follows it, and a session's first bar still reports nothing
+            // because `Unknown` is where the rollover leaves it.
+            if matches!(now, Side::Unknown) {
+                continue;
             }
+            let Some(last) = self.last_side.get_mut(slot) else {
+                continue;
+            };
+            let was = *last;
+            *last = now;
+            if matches!(was, Side::Unknown) || was == now {
+                continue;
+            }
+            // `unwrap_or(mask)` and not `if let Ok`, for the reason every other
+            // module in this crate gives: `set_exact` refuses only an absent,
+            // retired, void or `Near` position, and
+            // `the_crossing_map_names_only_live_two_sided_levels` proves no
+            // position in `CROSSINGS` is any of those. An `if let` would write a
+            // branch no test can take, and a region that cannot run is a region
+            // nobody can be held to.
+            let edge = match now {
+                Side::Above => level.up,
+                Side::Below => level.down,
+                Side::Unknown => continue,
+            };
+            mask = vocab::table::set_exact(mask, edge).unwrap_or(mask);
+            // ONE ORDINAL PER CROSSING, WHICH THE SHAPE NOW GUARANTEES.
+            //
+            // `now` is a single side, so at most one edge fires per level per
+            // bar and the count advances by exactly one. The first version
+            // looped over both directions and needed a bar-level flag to avoid
+            // double-counting; reading the side once removes the possibility
+            // rather than guarding against it.
+            let Some(count) = self.crossings_seen.get_mut(slot) else {
+                continue;
+            };
+            *count = count.saturating_add(1);
+            let index = match *count {
+                1 => level.first,
+                2 => level.second,
+                // Three or more. Saturating at 255 is harmless: past that every
+                // further crossing is `third_plus` anyway, which is exactly what
+                // a saturated counter reports.
+                _ => level.later,
+            };
+            mask = vocab::table::set_exact(mask, index).unwrap_or(mask);
         }
         mask
     }
@@ -888,7 +998,7 @@ impl Evaluator {
         all.extend(
             vocab::table::CROSSINGS
                 .iter()
-                .flat_map(|&(_, _, up, down)| [up, down]),
+                .flat_map(|c| [c.up, c.down, c.first, c.second, c.later]),
         );
         let last = crate::CURDAY_FIRST
             .saturating_add(u16::try_from(crate::CURDAY_RUNGS.len()).unwrap_or(0))
@@ -960,16 +1070,23 @@ mod tests {
     #[test]
     fn the_position_set_is_the_union_of_the_modules() {
         let all = Evaluator::positions();
-        // 272 = 238 + the 34 crossing positions. NOT a literal beside a
-        // different literal: the sum is spelled from `CROSSINGS` so the two
-        // cannot drift, which is the same reason `positions()` reads that table
-        // rather than listing indices.
-        let crossings = vocab::table::CROSSINGS.len().saturating_mul(2);
+        // 323 = 238 measured by a module + 85 derived from the mask. NOT a
+        // literal beside a different literal: the derived half is spelled from
+        // `CROSSINGS` so the two cannot drift, which is the same reason
+        // `positions()` reads that table rather than listing indices.
+        //
+        // FIVE PER LEVEL, NOT TWO. Each `LevelCrossing` carries `up` and `down`
+        // — the edge — and `first`, `second` and `later` — the ordinal. This
+        // read `* 2` and went red the moment the ordinal family landed, which is
+        // the arithmetic being checked rather than restated.
+        // FIVE per level: `up` and `down` are the edge, `first`, `second` and
+        // `later` the ordinal.
+        let derived = vocab::table::CROSSINGS.len().saturating_mul(5);
         assert_eq!(
             all.len(),
-            238_usize.saturating_add(crossings),
+            238_usize.saturating_add(derived),
             "every live position is computable: 238 measured by a module, plus \
-             {crossings} derived from the mask"
+             {derived} derived from the mask"
         );
         let mut sorted = all.clone();
         sorted.sort_unstable();
@@ -2692,6 +2809,124 @@ mod tests {
             d.is_non_regular(20_382),
             "the default calendar does not recognise 2025-10-21, the one Muhurat session whose \
              bars reach disk"
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "the exception every test module in this workspace takes."
+)]
+mod band_crossing_tests {
+    use super::Side;
+
+    /// A CLOSE THAT WALKS THROUGH A BAND STILL CROSSED IT.
+    ///
+    /// # The defect this pins, which shipped in the first version
+    ///
+    /// The crossing family compared against the PREVIOUS BAR and required it to
+    /// have had a definite side. That is right for the day-open pair — 276/277
+    /// are gated on `seeded`, so a session's first bar has no side and the naive
+    /// test reported a crossing on bar 1 of every session — and wrong for every
+    /// BANDED level.
+    ///
+    /// `close_above_pivot_r1_band` is true above the band's TOP edge and
+    /// `close_below_` below its BOTTOM edge, so the gap between them is the
+    /// whole band: half the CPR width either way, a real price interval. A close
+    /// walking through it spends bars with neither bit set, so the bar before
+    /// the emergence had no side and the guard refused.
+    ///
+    /// **Fifty of the eighty-five new positions could fire only on a bar that
+    /// jumped the entire band in one step.** An adversarial fleet measured it
+    /// twice, independently.
+    ///
+    /// # Why this is a state-machine test and not a bar fixture
+    ///
+    /// The band's width is a function of the previous session's CPR, so driving
+    /// a real close through a real `pivot_r1_band` needs a two-session fixture
+    /// whose CPR is wide enough to hold a bar — which makes the test about the
+    /// fixture rather than about the rule. The rule is: an `Unknown` bar records
+    /// nothing over the remembered side. That is exactly what this asserts, and
+    /// it fails the moment the code goes back to reading the previous bar.
+    #[test]
+    fn an_unknown_side_does_not_erase_the_side_before_it() {
+        // The sequence a close makes walking down through a band: definitely
+        // above, then inside for three bars, then definitely below.
+        let walk = [
+            Side::Above,
+            Side::Unknown,
+            Side::Unknown,
+            Side::Unknown,
+            Side::Below,
+        ];
+
+        // The rule, applied exactly as `crossings_of` applies it.
+        let mut last = Side::Unknown;
+        let mut crossings = 0_u32;
+        for now in walk {
+            if matches!(now, Side::Unknown) {
+                continue;
+            }
+            let was = last;
+            last = now;
+            if matches!(was, Side::Unknown) || was == now {
+                continue;
+            }
+            crossings = crossings.saturating_add(1);
+        }
+        assert_eq!(
+            crossings, 1,
+            "a close that was above, spent three bars inside the band, and came \
+             out below has crossed the level once. Comparing against the \
+             PREVIOUS bar sees `Unknown -> Below` and reports nothing"
+        );
+
+        // AND THE PREVIOUS-BAR RULE REALLY DOES MISS IT, so the assertion above
+        // is discriminating rather than merely true.
+        let mut previous = Side::Unknown;
+        let mut naive = 0_u32;
+        for now in walk {
+            let was = previous;
+            previous = now;
+            if matches!(was, Side::Unknown) || matches!(now, Side::Unknown) || was == now {
+                continue;
+            }
+            naive = naive.saturating_add(1);
+        }
+        assert_eq!(
+            naive, 0,
+            "the previous-bar rule reports NO crossing on this walk, which is \
+             the defect: 50 of the 85 new positions could fire only on a bar \
+             that jumped the whole band in one step"
+        );
+    }
+
+    /// A SESSION'S FIRST BAR STILL REPORTS NOTHING.
+    ///
+    /// The fix must not reintroduce the defect it replaced. `last_side` starts
+    /// and is cleared to `Unknown`, so the first bar that HAS a side records it
+    /// and reports no crossing — which is what kept `crossed_up_day_open` from
+    /// firing on the second bar of every session.
+    #[test]
+    fn the_first_definite_side_of_a_session_is_recorded_and_not_reported() {
+        let mut last = Side::Unknown;
+        let mut crossings = 0_u32;
+        for now in [Side::Unknown, Side::Above, Side::Above, Side::Below] {
+            if matches!(now, Side::Unknown) {
+                continue;
+            }
+            let was = last;
+            last = now;
+            if matches!(was, Side::Unknown) || was == now {
+                continue;
+            }
+            crossings = crossings.saturating_add(1);
+        }
+        assert_eq!(
+            crossings, 1,
+            "the first Above is recorded and reports nothing; only the later \
+             Below is a crossing"
         );
     }
 }

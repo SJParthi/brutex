@@ -469,6 +469,31 @@ pub fn render_findings(ranked: &Ranked, sweep: &Sweep) -> String {
             ranked.top.len()
         );
     }
+    // AND THE OTHER REASON A SAMPLE IS SMALLER, WHICH HAD NO LINE AT ALL.
+    //
+    // `Edge::refused` counts hits whose outcome was dropped because the exit bar
+    // failed the engine's own bar check. Until it existed, those were swallowed
+    // into the same branch as the TAIL — a documented, expected absence — so a
+    // run over corrupt data reported a slightly smaller `n` and looked exactly
+    // like a run over clean data with a slightly longer horizon.
+    //
+    // Reported per RUN and not per row, like the mispairing above: it is a fault
+    // in the DATA, and every row measured on that data carries it.
+    let dropped: u64 = ranked
+        .top
+        .iter()
+        .fold(0_u64, |a, s| a.saturating_add(s.edge.refused));
+    if dropped > 0 {
+        let _ = writeln!(out);
+        let _ = writeln!(
+            out,
+            "  REFUSED EXITS: {dropped} outcome(s) across the rows above were \
+             DROPPED because the exit bar failed the engine's own bar check. \
+             Every `n` here is over a smaller sample, not a corrected one -- the \
+             store handed this run records it does not consider bars, and the \
+             BARS section's refusal count is where they were first seen."
+        );
+    }
     let _ = writeln!(out);
     out
 }
@@ -797,19 +822,23 @@ mod tests {
     /// would still produce plausible output and would fail here.
     #[test]
     fn every_set_bit_is_named_and_an_unnameable_one_is_shown_rather_than_dropped() {
-        // Position 0 is the first row of the table; 350 is past its end but well
-        // inside the mask, which `with_bit` accepts for anything below 384.
+        // Position 0 is the first row of the table; `NEXT_FREE` is the first
+        // position past its end, and `with_bit` accepts anything below 384.
         //
-        // THIS BIT HAS TO MOVE EVERY TIME THE TABLE GROWS, and it has moved
-        // twice. It was 200 until the forming-pivot block reached it, then 300
-        // until the crossing family reached it — each time the test went red
-        // because the "unnameable" position had acquired a name, which is the
-        // gate working rather than failing. `vocab::table` carries the identical
-        // fixture and the identical note.
+        // DERIVED, BECAUSE IT MOVED THREE TIMES. It was 200 until the
+        // forming-pivot block reached it, 300 until the crossing family did, and
+        // 350 until the ordinal family did -- each time the test went red
+        // because the "unnameable" position had acquired a name. That is the
+        // gate working, but it is also a literal that has to be re-typed on
+        // every append, and a fixture that needs maintenance is a fixture that
+        // will eventually be maintained wrongly.
         //
-        // 350 is above `NEXT_FREE` (314) and below `ConditionMask::BITS` (384).
-        // The next family that allocates past 350 moves it again.
-        let both = ConditionMask::default().with_bit(0).with_bit(350);
+        // `NEXT_FREE` IS the first unallocated position, by definition, so it
+        // can never acquire a name without this line moving with it. The day the
+        // table fills the mask entirely there is no unnameable position left and
+        // this test fails loudly, which is the correct answer at that point.
+        let unallocated = u32::from(vocab::table::NEXT_FREE);
+        let both = ConditionMask::default().with_bit(0).with_bit(unallocated);
         let names = condition_names(&both);
 
         assert_eq!(
@@ -820,14 +849,17 @@ mod tests {
         );
         assert_eq!(
             names,
-            vec!["close_above_ema20".to_owned(), "?350".to_owned()],
+            vec!["close_above_ema20".to_owned(), format!("?{unallocated}")],
             "the named position renders its name and the unnameable one renders \
              its index rather than vanishing"
         );
 
         // AND THE JOINED FORM SEPARATES THEM WITH A CHARACTER THE VOCABULARY
         // NEVER USES, so a name is never mistaken for two.
-        assert_eq!(conditions_line(&both), "close_above_ema20 · ?350");
+        assert_eq!(
+            conditions_line(&both),
+            format!("close_above_ema20 · ?{unallocated}")
+        );
 
         // THE EMPTY MASK IS NAMED, NOT BLANK. A blank where a combination should
         // be is indistinguishable from a rendering bug, and an empty mask is the
@@ -1233,6 +1265,7 @@ mod tests {
             edge: crate::outcome::Edge {
                 n: 500,
                 mismatched: 0,
+                refused: 0,
                 mean_paisa: 1.0,
                 t: 0.4,
             },
@@ -1297,6 +1330,7 @@ mod tests {
             edge: crate::outcome::Edge {
                 n: 13,
                 mismatched: 0,
+                refused: 0,
                 mean_paisa: 50.0,
                 // Enormous, and it must STILL not be called a finding.
                 t: 40.0,

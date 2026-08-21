@@ -195,6 +195,7 @@ mod tests {
             edge: Edge {
                 n: 2,
                 mismatched: 0,
+                refused: 0,
                 mean_paisa: t,
                 t,
             },

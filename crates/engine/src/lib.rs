@@ -1126,6 +1126,27 @@ fn len_u64(n: usize) -> u64 {
     u64::try_from(n).unwrap_or(u64::MAX)
 }
 
+/// Live positions in the shipped vocabulary, read from the table.
+///
+/// At module scope so the two `const` blocks in the ceiling test can use it
+/// without tripping `items_after_statements`, and so a reader sees the three
+/// derived numbers together rather than buried in a test body.
+#[cfg(test)]
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "a popcount of a 384-bit mask cannot exceed 384."
+)]
+const LIVE_POSITIONS: usize = vocab::table::LIVE.popcount() as usize;
+
+/// `C(live, 3)` -- the widest a k=3 level can be if every live position is
+/// frequent. The ceiling must sit above this or a healthy sweep halts.
+#[cfg(test)]
+const WORST_K3: usize = LIVE_POSITIONS * (LIVE_POSITIONS - 1) * (LIVE_POSITIONS - 2) / 6;
+
+/// `C(live, 4)`. The ceiling must sit BELOW this, or it is bounding nothing.
+#[cfg(test)]
+const WORST_K4: usize = WORST_K3 * (LIVE_POSITIONS - 3) / 4;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2324,16 +2345,33 @@ mod tests {
         // knew; a `const` block fails the BUILD if the ceiling is ever moved to a
         // value that puts C(238,3) outside it or C(238,4) inside it, which is the
         // arithmetic the doc block on `DEFAULT_CEILING` argues from.
+        // DERIVED FROM THE LIVE COUNT, NOT FROM A LITERAL, AND THAT MATTERS NOW.
+        //
+        // These read `2_218_636` and `130_344_865` -- C(238,3) and C(238,4) at a
+        // vocabulary of 238 live positions. The vocabulary has grown twice since
+        // (D-0244, D-0246) and is 323 live, where C(323,3) is 5,559,461: a
+        // ceiling lowered anywhere into [2,218,637, 5,559,461] would have passed
+        // both literal assertions while the real k=3 worst case overflowed it.
+        //
+        // The guard is only as good as the number it is computed from, so it is
+        // computed from the table -- the same shape `WIDTH_IS_SUFFICIENT` uses
+        // at the top of this file, and for the same reason.
         const {
             assert!(
-                2_218_636 < DEFAULT_CEILING,
-                "C(238,3) must fit. 238*237*236/6 = 2,218,636 -- the pin read \
-                 2,215,180 for months, which is 3,456 short and therefore a \
-                 guard that admitted values it advertised as rejected. Found by \
-                 an adversarial audit, not by this assertion."
+                WORST_K3 < DEFAULT_CEILING,
+                "C(live,3) must fit. The pin read 2,215,180 for months against a \
+                 true 2,218,636 -- 3,456 short, and therefore a guard that \
+                 admitted values it advertised as rejecting. Found by an \
+                 adversarial audit and not by this assertion, which is why it is \
+                 now derived."
             );
         };
-        const { assert!(130_344_865 > DEFAULT_CEILING, "C(238,4) must not") };
+        const {
+            assert!(
+                WORST_K4 > DEFAULT_CEILING,
+                "C(live,4) must NOT fit, or the ceiling is not bounding anything"
+            );
+        };
     }
 
     #[test]

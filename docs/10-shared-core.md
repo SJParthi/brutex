@@ -18,7 +18,7 @@ repository keeps finding in audits.
 |---|---|---|
 `core` | **nothing** | `Instrument`, `Isin`, `Symbol`, `Price`, `Vendor`, the universe. The nouns. |
 `vocab` | **nothing** | The bit table, `ConditionMask`, `Tolerance`. The alphabet. |
-`indicators` | **`vocab` only** | Candle in, condition bits out. Eleven position sources, 272 positions. |
+`indicators` | **`vocab` only** | Candle in, condition bits out. Eleven position sources, 323 positions. |
 `engine` | **`vocab` only** | The Apriori ladder. Bit vectors in, frequent combinations out. |
 `greeks` | **nothing** | Black-Scholes, integer-safe. Already shared. |
 `costs` | **`core` only** | Brokerage, STT, stamp duty, GST, slippage. Paisa integers. |
@@ -109,8 +109,8 @@ is append-only rather than tidy.
 
 ### The width is checked by the compiler, not by review
 
-`ConditionMask` is `[u64; WORDS]`, currently 6 words = 384 bits, against 314
-allocated positions — 70 free. Adding conditions consumes headroom, and when it runs out:
+`ConditionMask` is `[u64; WORDS]`, currently 6 words = 384 bits, against 365
+allocated positions — 19 free. Adding conditions consumes headroom, and when it runs out:
 
 ```rust
 const _: () = assert!(COUNT <= ConditionMask::BITS as usize, ...);
@@ -174,15 +174,15 @@ Per candle, the shared core does a fixed amount of work with no allocation:
 
 | Operation | Cost | Bounded by |
 |---|---|---|
-Condition lookup | O(1) | direct index into a fixed array of 314 |
+Condition lookup | O(1) | direct index into a fixed array of 365 |
 Mask evaluation | O(1) | 6 ANDs, 6 XORs, 5 ORs, 1 compare — branchless, no early exit, identical for a true and a false answer |
 One candle through every module | O(1) | a fixed set of fixed-size states, no allocation; `size_of::<Evaluator>()` is asserted at compile time |
 Duplicate rejection | O(1) | one `HashSet` probe on a `Hash + Eq` mask |
 
 Nothing in the closure grows with the number of candles fed. That is the property a
 live consumer needs and it is asserted in the build rather than described here:
-`const _: () = assert!(size_of::<Evaluator>() <= 1856)` fails if any module starts
-accumulating. It measures 1808 bytes today, so the assertion has 48 bytes of slack and is
+`const _: () = assert!(size_of::<Evaluator>() <= 1824)` fails if any module starts
+accumulating. It measures 1776 bytes today, so the assertion has 48 bytes of slack and is
 a live guard rather than a rounded-up number that could never fire — it was 1664 until the
 non-regular-session `Calendar` was added, 1728 before the growth after that, 1744 before
 the crossing family added one `Option<ConditionMask>`, whose

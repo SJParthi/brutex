@@ -43,38 +43,38 @@ const TOTAL_SURVIVORS: usize = 3_689;
 
 /// Positions excluded before k=1, on this fixture.
 ///
-/// # This number moved and the join's answer did not, which is the whole point
+/// # This number has moved twice and the join's answer has moved neither time
 ///
-/// It was **161** when the vocabulary held 238 live positions. The crossing
-/// family (D-0244) added 34, and this figure went to **182**. Every other
-/// assertion in this file was untouched: [`FREQUENT`] matched level for level and
-/// [`TOTAL_SURVIVORS`] matched at 3,689.
+/// That is the whole point of the file. Every other assertion here — [`FREQUENT`]
+/// level for level, [`TOTAL_SURVIVORS`] at 3,689 — was untouched by both
+/// vocabulary growths.
 ///
-/// So the arithmetic is forced, and [`NEW_POSITIONS_THAT_FIRE`] below states it
-/// as a claim rather than leaving 21 to be inferred from two constants:
+/// | vocabulary | live | excluded | firing |
+/// |---|---:|---:|---:|
+/// | before D-0244 | 238 | 161 | 77 |
+/// | + 34 crossings (D-0244) | 272 | 182 | 90 |
+/// | + 51 ordinals (D-0249) | **323** | **219** | **104** |
 ///
-/// ```text
-/// 34 added  −  21 that never fire on this fixture  =  13 that fire at least once
-/// ```
+/// So **27 of the 85 new positions fire at least once** and 58 never do, which
+/// [`NEW_POSITIONS_THAT_FIRE`] states directly rather than leaving a reader to
+/// subtract one pinned constant from another.
 ///
-/// **None of the 13 reached `min_hits = 600`**, which is why [`FREQUENT`]'s k=1
-/// entry is still 17. That is the family behaving as designed rather than a
-/// coincidence: a crossing fires on the one bar a level changes side, not on
-/// every bar the level is above — so its support is a small multiple of the
-/// number of trend changes in eight sessions, nowhere near 600 of 1,124 bars.
+/// **None of the 27 reaches `min_hits = 600`**, which is why [`FREQUENT`]'s k=1
+/// entry is still 17. That is both families behaving as designed rather than a
+/// coincidence: a crossing fires on the one bar a level changes side, and an
+/// ordinal on a subset of those — so their support is a small multiple of the
+/// number of side changes in eight sessions, nowhere near 600 of 1,124 bars.
 ///
-/// A pinned figure that moves for a reason you can state is a gate working. This
-/// one told us the vocabulary grew, told us by how much, and told us the join
-/// was not disturbed — which is exactly what this file exists to establish.
-const EXCLUDED_AT_K1: usize = 182;
+/// A pinned figure that moves for a reason you can state is a gate working.
+const EXCLUDED_AT_K1: usize = 219;
 
-/// How many of the 34 crossing positions have non-zero support on this fixture.
+/// How many of the 85 new positions have non-zero support on this fixture.
 ///
 /// Asserted rather than left implicit. If a future change makes MORE of them
 /// fire, `EXCLUDED_AT_K1` falls and this rises, and a reader diffing one constant
 /// would have to derive the other; pinning both means the test says which of the
 /// two things happened.
-const NEW_POSITIONS_THAT_FIRE: usize = 13;
+const NEW_POSITIONS_THAT_FIRE: usize = 27;
 
 fn evaluator() -> Evaluator {
     Evaluator::new(
@@ -128,19 +128,23 @@ fn every_level_returns_the_survivors_the_pairwise_join_returned() {
          crossing family moved, and the constant's own doc carries the arithmetic"
     );
 
-    // THE CROSSING FAMILY'S SUPPORT, STATED RATHER THAN INFERRED FROM TWO
+    // BOTH NEW FAMILIES' SUPPORT, STATED RATHER THAN INFERRED FROM TWO
     // CONSTANTS.
     //
-    // `EXCLUDED_AT_K1` went 161 -> 182 when 34 positions were appended, which
-    // forces 13 of them to have non-zero support. Deriving that by subtracting
-    // one pinned number from another is exactly the kind of reasoning a reader
-    // should not have to redo, so it is measured here directly: a future change
-    // that makes a different number of them fire fails on THIS line and names
-    // the family, rather than failing on the excluded count and leaving the
-    // reader to work out which vocabulary moved.
+    // `EXCLUDED_AT_K1` went 161 -> 182 -> 219 across two appends totalling 85
+    // positions, which forces 27 of them to have non-zero support. Deriving
+    // that by subtracting one pinned number from another is exactly the kind of
+    // reasoning a reader should not have to redo, so it is measured here
+    // directly: a future change that makes a different number fire fails on
+    // THIS line and names the family, rather than failing on the excluded count
+    // and leaving the reader to work out which vocabulary moved.
+    //
+    // All FIVE positions per level -- the two edges and the three ordinals --
+    // because they are one family in everything but numbering, and counting
+    // only the edges is what this line did before the ordinals landed.
     let firing = vocab::table::CROSSINGS
         .iter()
-        .flat_map(|&(_, _, up, down)| [up, down])
+        .flat_map(|c| [c.up, c.down, c.first, c.second, c.later])
         .filter(|&index| {
             out.sweep
                 .excluded
@@ -150,10 +154,10 @@ fn every_level_returns_the_survivors_the_pairwise_join_returned() {
         .count();
     assert_eq!(
         firing, NEW_POSITIONS_THAT_FIRE,
-        "of the 34 crossing positions, {firing} have non-zero support on this \
+        "of the 85 new positions, {firing} have non-zero support on this \
          fixture. None reaches min_hits = 600, which is why k=1 still returns \
-         17: a crossing fires on the one bar a level changes side, not on every \
-         bar it is above"
+         17: a crossing fires on the one bar a level changes side, and an \
+         ordinal on a subset of those"
     );
 }
 

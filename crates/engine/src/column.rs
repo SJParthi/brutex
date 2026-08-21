@@ -93,13 +93,21 @@ impl Column {
     /// `engine::column::the_allocation_is_bits_by_stride_and_not_the_live_count`.
     ///
     /// THE FIRST FACTOR IS `BITS` AND NOT THE LIVE POSITION COUNT, deliberately. Only
-    /// 238 of the 384 are live, and sizing to those would be 36.4 MB -- 22.3 MB less.
+    /// **323** of the 384 are live, and sizing to those would be 49.4 MB -- 9.3 MB less.
     /// It is not done, because [`Self::bitmap`] addresses a bitmap as
     /// `position * stride`, and that multiply is the whole reason a lookup is O(1). To
     /// pack out the dead positions the type would have to carry a live-position map and
     /// pay an indirection per access, trading a constant-time address for a smaller
-    /// allocation on the hottest path in the sweep. The 22.3 MB is the price of the
+    /// allocation on the hottest path in the sweep. The 9.3 MB is the price of the
     /// multiply, and it is a price and not an oversight.
+    ///
+    /// **The price SHRINKS as the vocabulary fills, and these numbers moved.** They read
+    /// 238 live / 36.4 MB / 22.3 MB, correct when the table held 280 positions and 104
+    /// were free. D-0244 and D-0246 took it to 365 with 19 free, so what the multiply
+    /// buys is now paid for with 19 empty positions instead of 104. The test beside this
+    /// derives the live count from `vocab::table::LIVE` rather than repeating it, because
+    /// it previously compared a literal `238` against arithmetic on the same literal and
+    /// stayed green through both growths.
     ///
     /// Pre-sized rather than grown, which is what gate 11 rule 3 asks of every
     /// collection on an O(1) path.
@@ -417,7 +425,16 @@ mod tests {
             "58.7 MB, which is the figure `transpose`'s doc block states"
         );
         // AND THE LIVE COUNT WOULD BE SMALLER, which is the trade being refused.
-        let live = 238_usize;
+        //
+        // DERIVED FROM THE TABLE, NOT WRITTEN DOWN. This read `let live =
+        // 238_usize;` and the assertion below was computed from it. The
+        // vocabulary has grown twice since — D-0244 and D-0246 took it to 323
+        // live — and the test stayed GREEN the whole time, because it was
+        // comparing a literal against arithmetic on the same literal. A test
+        // that certifies its own stale constant is worse than no test: it makes
+        // the figure look checked.
+        let live = usize::try_from(vocab::table::LIVE.popcount()).unwrap_or(0);
+        assert_eq!(live, 323, "the live count, read from the table");
         assert!(
             live * stride * 8 < words * 8,
             "sizing to the live positions would be smaller -- that is why the doc \
@@ -425,8 +442,11 @@ mod tests {
         );
         assert_eq!(
             words * 8 - live * stride * 8,
-            22_316_976,
-            "22.3 MB is the price of addressing a bitmap as position * stride"
+            9_324_216,
+            "the price of addressing a bitmap as position * stride. It was 22.3 MB \
+             at 238 live and is 9.3 MB at 323: the waste SHRINKS as the vocabulary \
+             fills, because what is being paid for is the UNALLOCATED headroom, \
+             and there are now 19 free positions instead of 104"
         );
     }
 

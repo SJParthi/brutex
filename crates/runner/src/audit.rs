@@ -209,24 +209,81 @@ pub fn trades(out: &mut String, t: &Trades) {
 /// eye to skip the one place the marker matters.
 fn exit_name(c: &Cell) -> String {
     let rung = |r: Option<usize>| r.map_or_else(|| "-".to_owned(), |i| i.to_string());
-    if c.stop.is_none() && c.target.is_none() && c.trail.is_none() {
+    if c.stop.is_none() && c.target.is_none() && c.tsl.is_none() && c.ttp.is_none() {
         return "NONE".to_owned();
     }
-    let levels = format!("{}/{}/{}", rung(c.stop), rung(c.target), rung(c.trail));
-    match c.arm {
-        Some(a) => format!("{levels}@{a}"),
+    // stop / target / TSL, then the TTP as `+arm@trail` when one is set.
+    //
+    // The `+` is what says a cell carries TWO trailing orders. A TSL of 3 with a
+    // TTP armed at target rung 1 trailing by rung 0 reads `-/-/3+1@0`: loose
+    // trail from entry, tighter trail once it pays. That pair was unreachable
+    // until the fifth axis, and it is the thing an operator asks for by name --
+    // so the column has to be able to say it.
+    let levels = format!("{}/{}/{}", rung(c.stop), rung(c.target), rung(c.tsl));
+    match c.ttp {
+        Some(t) => format!("{levels}+{}@{}", t.arm, t.trail),
         None => levels,
     }
+}
+
+/// The rows above the exit table: what was evaluated, what was dropped, and how
+/// to read the `exit` column.
+///
+/// Split out so [`grid`] stays under `clippy::too_many_lines`. Nothing is hidden
+/// by the split — these three rows are the table's preamble and the table's
+/// preamble is one idea.
+fn grid_header(out: &mut String, g: &Grid) {
+    row(out, "variants evaluated", &g.cells.len().to_string(), "");
+    row(
+        out,
+        "stop rungs / target rungs",
+        &format!("{} / {}", g.stops.len(), g.targets.len()),
+        "derived from this combination's own excursions",
+    );
+    // A DROPPED PATH IS PRINTED, NEVER ONLY COUNTED INTERNALLY.
+    //
+    // `Grid::refused_paths` is zero on every sound slice, so a non-zero here
+    // means the store handed this run a record the engine refused -- and the
+    // whole point of dropping rather than skipping is that the operator sees a
+    // smaller sample instead of a moved answer. A count kept and not rendered
+    // would put it back to being invisible.
+    if g.refused_paths > 0 {
+        row(
+            out,
+            "PATHS DROPPED, refused bar",
+            &g.refused_paths.to_string(),
+            "a bar between entry and exit failed the engine's own bar check, so \
+             the whole round trip was dropped rather than priced. Every figure \
+             below is over a SMALLER sample, not a corrected one.",
+        );
+    }
+    // THE EXIT COLUMN IS FIVE FIELDS AND WOULD BE UNREADABLE UNNAMED.
+    //
+    // `2/3/1+0@0` is a stop, a target, a trailing STOP LOSS, and then a trailing
+    // TAKE PROFIT with its own arming and trailing rungs. A TSL and a TTP are
+    // opposite instruments -- one cuts a position that turns, the other lets a
+    // winner run -- and a cell can now carry both. A reader who cannot tell them
+    // apart cannot read the table at all, so the key is printed rather than
+    // documented somewhere else.
+    row(
+        out,
+        "exit column",
+        "stop/target/tsl+arm@ttp",
+        "`-` is no rung. The third slot is a trailing STOP LOSS, live from \
+         entry. `+a@t` appends a trailing TAKE PROFIT armed at target rung a \
+         and trailing by rung t -- and a cell can carry BOTH, which is the \
+         loose-then-tight pair.",
+    );
 }
 
 /// The exit grid: with levels against without them.
 ///
 /// # The comparison, as a table rather than two runs
 ///
-/// The first row is the baseline — no stop, no target, no trail — and every
-/// other row is a level variant. They were computed in one pass over the same
-/// trades, so the comparison is exact rather than two runs a reader lines up by
-/// hand.
+/// The first row is the baseline — no stop, no target, no TSL and no TTP — and
+/// every other row is a level variant. They were computed in one pass over the
+/// same trades, so the comparison is exact rather than two runs a reader lines
+/// up by hand.
 ///
 /// `keep` bounds the rows printed. Whatever it drops is stated, because a table
 /// that quietly showed the best twelve of a hundred would read as the whole
@@ -238,27 +295,7 @@ pub fn grid(out: &mut String, g: &Grid, keep: usize) {
         let _ = writeln!(out);
         return;
     }
-    row(out, "variants evaluated", &g.cells.len().to_string(), "");
-    row(
-        out,
-        "stop rungs / target rungs",
-        &format!("{} / {}", g.stops.len(), g.targets.len()),
-        "derived from this combination's own excursions",
-    );
-    // THE EXIT COLUMN IS FOUR FIELDS AND WOULD BE UNREADABLE UNNAMED.
-    //
-    // `2/3/1@0` is a stop, a target, a trail and the arming rung, and the last
-    // of those is the difference between a trailing stop LOSS and a trailing
-    // take PROFIT -- the opposite instrument on the same rung. A reader who
-    // cannot tell them apart cannot read the table at all, so the key is
-    // printed rather than documented.
-    row(
-        out,
-        "exit column",
-        "stop/target/trail@arm",
-        "`-` is no rung. `@n` arms the trail at target rung n: a trailing TAKE \
-         PROFIT. No `@` is a trailing STOP LOSS, live from entry.",
-    );
+    grid_header(out, g);
     let _ = writeln!(out);
     let _ = writeln!(
         out,
@@ -274,7 +311,7 @@ pub fn grid(out: &mut String, g: &Grid, keep: usize) {
         // `arm` is not tested: it cannot be set without a trail, so a cell with
         // no trail has none, and adding the clause would be a guard against a
         // state `crate::grid::evaluate` does not emit.
-        let base = c.stop.is_none() && c.target.is_none() && c.trail.is_none();
+        let base = c.stop.is_none() && c.target.is_none() && c.tsl.is_none() && c.ttp.is_none();
         // `Reverse`, NOT `-c.pessimistic`, AND THE DIFFERENCE IS AN ABORT.
         //
         // `crate::grid` accumulates this field with `saturating_add`, whose floor
@@ -869,7 +906,7 @@ mod tests {
                 // renderings are exercised too.
                 crate::grid::Cell {
                     target: Some(0),
-                    trail: Some(1),
+                    tsl: Some(1),
                     trades: 44,
                     wins: 20,
                     pessimistic: 300,

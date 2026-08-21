@@ -567,8 +567,8 @@ pub fn walk_forward(
                 rungs: crate::grid::Chosen {
                     stop: cell.stop,
                     target: cell.target,
-                    trail: cell.trail,
-                    arm: cell.arm,
+                    tsl: cell.tsl,
+                    ttp: cell.ttp,
                 },
                 pessimistic: cell.pessimistic,
                 stops: g.stops.clone(),

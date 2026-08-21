@@ -10,7 +10,7 @@
 //! | Module | Owns |
 //! |---|---|
 //! | [`mask`] | [`ConditionMask`], the six-word condition mask and the hit test |
-//! | [`table`] | the 280 positions, their names, and the three tombstones |
+//! | [`table`] | the 365 positions, their names, and the three tombstones |
 //! | [`tolerance`] | the `near_*` band half-width, which is UNPINNED |
 //! | [`error`] | every refusal the two above can produce |
 //!
@@ -67,7 +67,7 @@ pub use tolerance::Tolerance;
 /// | Version | Table |
 /// |---:|---|
 /// | 1 | the shipped 74 conditions in a `u128`, `docs/03-vocabulary.md` |
-/// | 3 | 280 positions in a [`ConditionMask`], six words wide, three of them tombstones |
+/// | 3 | 365 positions in a [`ConditionMask`], six words wide, three of them tombstones |
 ///
 /// Appending a condition at the next free position does **not** bump it: an
 /// append leaves every existing mask meaning exactly what it meant, which is
@@ -97,18 +97,21 @@ mod tests {
         // renumbering or widening the mask would bump it.
         //
         // THE WIDTH IS THE ONE TO WATCH HERE. The crossing family took the
-        // table from 280 to 314 against a 384-bit mask, so it did not widen and
-        // the version holds. The next family that needs more than the remaining
-        // 70 positions cannot be an append: it widens `ConditionMask::WORDS`,
-        // which IS a bump, and re-keys every run ever recorded. That is why this
-        // assertion pins all three numbers together rather than only the version
-        // -- the version alone cannot tell you how close the next one is.
+        // table 280 -> 314 and its ordinals took it 314 -> 365, both against a
+        // 384-bit mask, so neither widened and the version holds.
+        //
+        // NINETEEN LEFT. The next family that needs more than that cannot be an
+        // append: it widens `ConditionMask::WORDS`, which IS a bump, and re-keys
+        // every run ever recorded. That is why this assertion pins all three
+        // numbers together rather than only the version -- the version alone
+        // cannot tell you how close the next one is, and the answer is now
+        // "very".
         assert_eq!(VOCAB_VERSION, 3);
-        assert_eq!(table::COUNT, 314);
+        assert_eq!(table::COUNT, 365);
         assert_eq!(ConditionMask::BITS, 384);
         assert_eq!(
             ConditionMask::BITS as usize - table::COUNT,
-            70,
+            19,
             "free positions before the next family forces a widen, and a bump"
         );
     }

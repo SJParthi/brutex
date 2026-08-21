@@ -162,9 +162,42 @@ pub struct Forward {
     /// `bars.len() − H`, so the tail is absent by construction rather than by a
     /// sentinel a caller could mistake for a measurement.
     ret: Vec<Option<i64>>,
+    /// `true` at `i` when the outcome is absent because a BAR WAS REFUSED,
+    /// rather than because `i` is in the tail.
+    ///
+    /// # Both are `None`, and they mean opposite things
+    ///
+    /// The tail is a documented, expected absence: the last `H` bars have no
+    /// future in the data, so a run over 1,124 bars at H=15 measures 1,109 of
+    /// them and that shortfall is the design. A refused bar is the opposite —
+    /// the store handed this run a record the engine does not consider a bar,
+    /// and the outcome is missing because the data is wrong.
+    ///
+    /// Without this, [`edge`]'s `let Some(r) = ... else { continue }` swallowed
+    /// both into the same silent path under a comment reading *"in the tail: no
+    /// future exists"*. A corrupt bar can only ever be an EXIT bar, so it always
+    /// landed there: `n` fell from 234 to 230 with `mismatched == 0` in both
+    /// runs, and nothing anywhere said why.
+    ///
+    /// One `bool` per bar. At the store's largest instrument-month that is under
+    /// 1.3 MB, once per `Forward` and never per candidate.
+    refused: Vec<bool>,
 }
 
 impl Forward {
+    /// Was the outcome at `i` dropped because a bar was REFUSED?
+    ///
+    /// `false` for the tail, for an out-of-range index, and for a bar that has a
+    /// real outcome. Only a record `Candle::check` rejected answers `true`.
+    ///
+    /// Exists because [`Self::at`] returns `None` for two facts that mean
+    /// opposite things — see the `refused` field — and every caller that treats
+    /// them alike reports a smaller sample with no reason attached.
+    #[must_use]
+    pub fn was_refused(&self, i: usize) -> bool {
+        self.refused.get(i).copied().unwrap_or(false)
+    }
+
     /// The forward move at caller-slice index `i`, or `None` for the tail.
     #[must_use]
     pub fn at(&self, i: usize) -> Option<i64> {
@@ -296,19 +329,26 @@ pub fn forward(bars: &[Candle], horizon: Horizon) -> Forward {
     // PASS THREE: the return, from entry to the earlier of the horizon and the
     // forced close.
     let mut ret: Vec<Option<i64>> = Vec::with_capacity(bars.len());
+    // Parallel to `ret`, marking WHY an outcome is absent. Pre-sized for the same
+    // reason `ret` is: gate 11 rule 3 asks every collection on this path to be
+    // sized once rather than grown.
+    let mut refused: Vec<bool> = Vec::with_capacity(bars.len());
     for i in 0..bars.len() {
         let Some(&(_, minute)) = stamps.get(i) else {
             ret.push(None);
+            refused.push(false);
             continue;
         };
         // NO ENTRY AT OR AFTER THE FORCED CLOSE. At 15:10 the position is being
         // closed, so it cannot also be opened; `<` and not `<=`.
         if minute > LAST_FILL_MINUTE {
             ret.push(None);
+            refused.push(false);
             continue;
         }
         let Some(forced) = close_at.get(i).copied().flatten() else {
             ret.push(None);
+            refused.push(false);
             continue;
         };
         let want = i.saturating_add(h);
@@ -329,10 +369,12 @@ pub fn forward(bars: &[Candle], horizon: Horizon) -> Forward {
             forced
         } else {
             ret.push(None);
+            refused.push(false);
             continue;
         };
         if exit <= i {
             ret.push(None);
+            refused.push(false);
             continue;
         }
         // A BAR THIS RUN ALREADY REFUSED MAY NOT PRICE AN EXIT.
@@ -363,20 +405,30 @@ pub fn forward(bars: &[Candle], horizon: Horizon) -> Forward {
         //
         // `Candle::check` is the same predicate `Column::build` applies, so this
         // agrees with the census by construction rather than by a second copy of
-        // the rule. A refused exit bar yields `None` — no outcome — which is a
-        // SMALLER `n` and therefore visible in `Edge::mismatched`, exactly where
-        // this module already reasons about refusals in the index dimension.
+        // the rule.
+        //
+        // MARKED, NOT MERELY ABSENT. The first version of this fix pushed a bare
+        // `None` and its own comment claimed the drop was "visible in
+        // `Edge::mismatched`". It was not: `edge`'s `let Some(r) = ... else {
+        // continue }` treats every `None` as the TAIL, under a comment saying so,
+        // and a corrupt bar can only ever be an exit bar — so it always landed
+        // there. Measured: `n` fell 234 to 230 with `mismatched == 0` in both
+        // runs and nothing said why. A silent smaller sample is a quieter version
+        // of the same §4 failure.
         let (Some(later), Some(now)) = (priced(bars, exit), priced(bars, i)) else {
             ret.push(None);
+            refused.push(true);
             continue;
         };
         ret.push(Some(later.saturating_sub(now)));
+        refused.push(false);
     }
 
     Forward {
         horizon,
         bars_len: bars.len(),
         ret,
+        refused,
     }
 }
 
@@ -468,6 +520,27 @@ pub struct Edge {
     /// about one mask and has nowhere to put an error; `CLAUDE.md` §4 asks for
     /// the reason to be named beside the answer, and this names it.
     pub mismatched: u64,
+    /// Bars where the mask fired and the outcome was dropped because a BAR WAS
+    /// REFUSED.
+    ///
+    /// # Not the tail, and it used to be indistinguishable from it
+    ///
+    /// `edge`'s absent-outcome branch carried the comment *"in the tail: no
+    /// future exists, so nothing is counted"* and treated every `None` that way.
+    /// A corrupt bar can only ever be an EXIT bar, so a refusal always landed
+    /// there. Measured on a fixture with one refused record: `n` fell from 234
+    /// to 230 and `mismatched` was **0** in both runs. The sample shrank and
+    /// nothing anywhere said why.
+    ///
+    /// The doc on `crate::outcome::priced` claimed the drop was *"visible in
+    /// `Edge::mismatched`"*. It was not, and this field is what makes the claim
+    /// true.
+    ///
+    /// **Zero on every sound slice.** Non-zero means the store handed this run a
+    /// record the engine refuses, and every figure beside it is over a smaller
+    /// sample rather than a corrected one — `CLAUDE.md` §4, degrade loudly and
+    /// name the reason.
+    pub refused: u64,
     /// The t-statistic of that mean against zero.
     ///
     /// `mean / (sd / √n)`. Zero when fewer than two observations exist, where a
@@ -492,6 +565,9 @@ pub struct Edge {
 pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
     let mut n: u64 = 0;
     let mut mismatched: u64 = 0;
+    // Outcomes dropped because a bar was REFUSED, kept apart from the tail. See
+    // `Forward::refused`: both are absent, and they mean opposite things.
+    let mut refused: u64 = 0;
     let mut mean = 0.0_f64;
     let mut m2 = 0.0_f64;
 
@@ -522,7 +598,17 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
             continue;
         }
         let Some(r) = forward.at(source) else {
-            continue; // in the tail: no future exists, so nothing is counted
+            // TWO REASONS AN OUTCOME IS ABSENT, AND THEY ARE NOT THE SAME FACT.
+            //
+            // The tail is the design: the last `H` bars have no future in the
+            // data. A REFUSED bar is the store handing this run a record the
+            // engine does not consider a bar. This branch swallowed both under
+            // a comment reading "in the tail: no future exists", and since a
+            // corrupt bar can only ever be an exit bar it always landed here.
+            if forward.was_refused(source) {
+                refused = refused.saturating_add(1);
+            }
+            continue;
         };
         n = n.saturating_add(1);
         // A paisa return above 2^52 is 45 trillion rupees on one bar, and a
@@ -551,6 +637,7 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
         return Edge {
             n,
             mismatched,
+            refused,
             mean_paisa: mean,
             t: 0.0,
         };
@@ -573,6 +660,7 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
     Edge {
         n,
         mismatched,
+        refused,
         mean_paisa: mean,
         t,
     }
