@@ -2778,6 +2778,27 @@
     )
   );
 
+  /**
+   * EVERY LEG ONE PRESS SENDS — spot and expired-derivative together.
+   *
+   * # The disagreement this removes
+   *
+   * `runPull` built `[...wireBodies, ...fnoBodies]` inline while the feed
+   * picker counted `wireBodies` ALONE. Measured on the running page with three
+   * segments ticked: the strip read **`3 feeds · 6 request(s)`** and the press
+   * submitted **nine**. The label, the counter and the run were three answers to
+   * one question — the shape this product removes everywhere else, and the §4
+   * failure of a surface that reports something other than what happened.
+   *
+   * Declared once here so there is nothing left to keep in step: the counter and
+   * the submission read the same expression, and a segment added later joins
+   * both or neither.
+   *
+   * Spot first, then derivatives — `pull::fold`'s ladder is the server's to
+   * enforce and it re-sorts each vendor's legs itself, so this order is what is
+   * OFFERED, never what is sent.
+   */
+
   const wireBodies = $derived(
     feedsChosen.flatMap((v) =>
       rungsChosen.map((r) => ({
@@ -2797,6 +2818,28 @@
       }))
     )
   );
+
+  /**
+   * EVERY LEG ONE PRESS SENDS — spot and expired-derivative together.
+   *
+   * # The disagreement this removes
+   *
+   * `runPull` built `[...wireBodies, ...fnoBodies]` inline while the feed picker
+   * counted `wireBodies` ALONE. Measured on the running page with three segments
+   * ticked: the strip read **`3 feeds · 6 request(s)`** and the press submitted
+   * **nine**. The label, the counter and the run were three answers to one
+   * question — the shape this product removes everywhere else, and the §4
+   * failure of a surface reporting something other than what happens.
+   *
+   * Declared once so there is nothing left to keep in step: the counter and the
+   * submission read the same expression, and a segment added later joins both or
+   * neither.
+   *
+   * Spot first, then derivatives — but that is the order they are OFFERED, never
+   * the order they are sent. `pull::fold`'s ladder is the server's to enforce and
+   * `pullrun::by_feed` re-sorts each vendor's legs onto it.
+   */
+  const allBodies = $derived([...wireBodies, ...fnoBodies]);
 
   /**
    * EVERY FEED WHOSE ASK WAS MOVED, AND THE DAY IT MOVED TO.
@@ -5657,11 +5700,21 @@
     showProblems = true;
     if (problems.length > 0 || phase === 'running') return;
 
-    /* SPOT FIRST, THEN THE DERIVATIVES. The server sorts each vendor's legs
-       onto `pull::fold`'s ladder itself, so this only decides what is IN the
-       run; the order below is the order they are offered, not the order they
-       are sent. */
-    const bodies = [...wireBodies, ...fnoBodies];
+    /* THE SAME LIST THE PAGE COUNTS, AND THAT IS THE WHOLE POINT.
+     *
+     * This built `[...wireBodies, ...fnoBodies]` inline while the feed picker's
+     * summary counted `wireBodies` ALONE — so a run with three segments ticked
+     * announced `3 feeds · 6 request(s)` and submitted NINE. The label, the
+     * counter and the run were three answers to one question, which is the
+     * shape `SpotTarget::names` was added to remove one layer down and the
+     * §4 failure this page is otherwise careful about.
+     *
+     * `allBodies` is now the only expression that joins them, so a counter and
+     * a submission cannot drift apart again — there is nothing left to keep in
+     * step. Spot first, then derivatives: the server sorts each vendor's legs
+     * onto `pull::fold`'s ladder itself, so this decides what is IN the run,
+     * never the order they are sent. */
+    const bodies = allBodies;
     if (bodies.length === 0) return;
 
     const form = bodies
@@ -7935,8 +7988,8 @@
         ? 'No feeds'
         : feedsChosen.length === 1
           ? feedName(feedsChosen[0])
-          : `${n(feedsChosen.length)} feeds · ${n(wireBodies.length)} request(s)`}
-      title={`Everything below is this feed's answer — ${scopeNote}. Which vendors this run asks: ${n(feedsChosen.length)} feed(s) x ${n(rungsChosen.length)} timeframe(s) = ${n(wireBodies.length)} request(s), each with its own receipt. The page's COUNTS stay scoped to ${feedName(feeds.active)} — a count is measured against one master and one store, and no page in this product puts two feeds' numbers side by side.`}
+          : `${n(feedsChosen.length)} feeds · ${n(allBodies.length)} request(s)`}
+      title={`Everything below is this feed's answer — ${scopeNote}. Which vendors this run asks: ${n(wireBodies.length)} spot request(s) — ${n(feedsChosen.length)} feed(s) x ${n(rungsChosen.length)} timeframe(s) — plus ${n(fnoBodies.length)} expired-derivative request(s), ${n(allBodies.length)} in all, each with its own receipt. The page's COUNTS stay scoped to ${feedName(feeds.active)} — a count is measured against one master and one store, and no page in this product puts two feeds' numbers side by side.`}
       rows={feeds.all.map((f) => ({
         key: f.wire,
         name: f.display,

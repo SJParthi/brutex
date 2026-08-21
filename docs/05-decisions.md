@@ -18256,3 +18256,77 @@ no `benches/ratio.rs`, which is a separate red gate recorded elsewhere.
 `docs/01-architecture.md`'s row is struck through rather than deleted, with the
 reason and the gate that forbids it, and a new row records where the parallelism
 actually is. A stale claim quietly removed teaches nobody why it was wrong.
+
+### D-0233 — the manual run could not name a dead token, and the page under-counted its own request
+
+Two defects from one screenshot session, both of the same family: **a surface
+reporting something other than what happens.**
+
+**1. The feed picker counted `wireBodies` alone.** `runPull` submits
+`[...wireBodies, ...fnoBodies]` and the picker's summary read
+`${feedsChosen.length} feeds · ${wireBodies.length} request(s)`, which is SPOT
+ONLY. Measured on the running page with three feeds and three segments ticked:
+the strip read **`3 feeds · 6 request(s)`** and the press submitted **nine**. The
+label, the counter and the run were three answers to one question — the same
+shape `SpotTarget::names` was added to remove one layer down.
+
+`allBodies` is declared once and both the counter and the submission read it, so
+there is nothing left to keep in step. A segment added later joins both or
+neither. The title now spells the arithmetic out — *N spot requests plus M
+expired-derivative requests, N+M in all* — rather than stating one number that
+was never the total.
+
+**2. `autopilot::classify` had two call sites and both were in `autopilot.rs`.**
+The manual run — the one an operator presses — had **no credential handling of
+any kind**. A dead token produced `retries` climbing and a `lastError` reading
+*"answered HTTP 401 … the leg is owed and will be asked for again"*, for up to
+`MAX_PASSES` × `RETRY_WAIT`: **two hours of 401s against a token another system
+shares**, with the word *credential* appearing nowhere on any surface.
+
+§8 forbids minting one here, so there is nothing to retry INTO. The refreshed
+value is read on the next pull, and every request spent before then buys the same
+refusal. `CLAUDE.md` §4 — degrade loudly and name the reason, or refuse.
+
+**Per FEED, never the whole run**, and that is the load-bearing half. A
+credential is per vendor, exactly as the seats and the governors are, so a dead
+Dhan token must not stop Groww. `run_chain` marks the feed and stops attempting
+its remaining legs — they would each earn the same 401 — and `conduct` skips
+spawning that chain on every later pass while its siblings keep going.
+
+**Three details that would each have been a defect on their own.**
+
+*The first reason is kept, except this one.* `last_error` deliberately holds the
+FIRST failure so a later one cannot paint over the cause. A credential death is
+the exception, and it has to be: it arrives on whichever leg happens to run after
+the token expires, so an earlier transport blip would otherwise hide the only
+reason that cannot be waited out.
+
+*A halted feed keeps `finished: true`.* The pass loop clears `finished` on every
+feed at the top of each pass; a halted one is skipped, so without the exception
+the page would draw it as pending forever while nothing was ever spawned for it.
+
+*The feed index travels with the handle.* `flying` is now SHORTER than `groups`
+whenever a feed is halted, so its position is no longer the position in
+`progress.feeds` — and `note_dead_chain` writes by that index. Pairing them is
+what stops a panic being reported against somebody else's feed. This is the class
+of bug that would have appeared only when a credential died AND another feed
+panicked in the same pass.
+
+**`credentialDead` is on the wire** because without it a halted feed and a
+finished one are the same two booleans, and the operator is left inferring a
+credential death from a retry counter that has stopped moving.
+
+**What refuses them.**
+`pullrun::a_dead_token_is_classified_as_a_credential_and_not_as_a_blip` pins the
+three vendor spellings this path will actually meet — and asserts a 5xx is STILL
+`Transport`, because a classifier answering `Credential` to everything would halt
+a run on a blip, which is the opposite defect and just as expensive.
+`pullrun::a_halted_feed_is_named_on_the_status_document_while_its_siblings_run`
+asserts both booleans appear in one document and that `running` stays true — a
+document where every feed reads the same distinguishes nothing.
+
+**Not closed:** the census's EXPECTED column applies the spot session count to
+expired-futures and expired-options rows, so a derivative row reads `0 / 1,708`
+against a denominator that describes a single continuous series rather than a set
+of contracts. The true expectation is not derivable before discovery runs, so the
+honest fix is to draw no denominator there rather than a wrong one.

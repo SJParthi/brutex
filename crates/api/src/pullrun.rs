@@ -163,6 +163,21 @@ pub struct FeedReport {
     pub last_error: Option<String>,
     /// Whether this chain has nothing left to do.
     pub finished: bool,
+    /// Whether this feed's CREDENTIAL is dead, so re-asking cannot help.
+    ///
+    /// # Why this is a field and not another `last_error`
+    ///
+    /// Because it changes what the loop DOES, not only what the page says. Every
+    /// other failure on this path is transient by default and retried without a
+    /// ceiling — the operator's rule of 2026-08-20, and the right default for a
+    /// dropped socket or a throttle. A dead token is the one reason that is
+    /// certain rather than probable: §8 forbids minting one here, so the value
+    /// cannot change until somebody refreshes it outside this process, and every
+    /// pass until then spends requests to be refused identically.
+    ///
+    /// Set once, never cleared for the life of the run. It is per FEED, because
+    /// a credential is — the same reason the seats and the governors are.
+    pub credential_dead: bool,
 }
 
 /// The whole run, as the page reads it.
@@ -263,6 +278,17 @@ impl Progress {
             out.push_str(&feed.retries.to_string());
             out.push_str(",\"finished\":");
             out.push_str(if feed.finished { "true" } else { "false" });
+            // ON THE WIRE, because the page has to be able to say WHY a feed
+            // stopped while its siblings keep going. Without it a halted feed
+            // and a finished one are the same two booleans, and the operator is
+            // left to infer a credential death from a retry counter that has
+            // stopped moving.
+            out.push_str(",\"credentialDead\":");
+            out.push_str(if feed.credential_dead {
+                "true"
+            } else {
+                "false"
+            });
             out.push_str(",\"lastError\":");
             match &feed.last_error {
                 Some(word) => out.push_str(&quote_for_json(word)),
@@ -462,6 +488,32 @@ fn with_progress<F: FnOnce(&mut Progress)>(site: &Site, edit: F) {
     }
 }
 
+/// Which feeds have halted on a dead credential, by position.
+///
+/// # Why a snapshot and not a probe per feed
+///
+/// The spawn loop needs the answer for every feed and takes the lock once to get
+/// it, rather than once per feed inside the loop. Bounded by the feed count —
+/// five today, capped at eight — so it is one small `Vec` per pass and no
+/// allocation that grows with legs, months or passes.
+///
+/// Read BEFORE the pass clears `finished`, because a halted feed must keep its
+/// `finished` flag: the page otherwise draws it as pending forever while nothing
+/// is ever spawned for it.
+fn halted_feeds(site: &Site) -> Vec<bool> {
+    let held = site
+        .run
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    held.as_ref().map_or_else(Vec::new, |progress| {
+        progress
+            .feeds
+            .iter()
+            .map(|feed| feed.credential_dead)
+            .collect()
+    })
+}
+
 /// Whether the operator has asked this run to stop.
 ///
 /// Checked between legs rather than inside one: a leg that has already asked
@@ -565,22 +617,75 @@ async fn run_chain(site: Loaded, nth: usize, legs: Vec<Leg>) -> bool {
 
         if !(status.is_success() && html.contains("badge good")) {
             failed = true;
-            let why = format!(
-                "{} answered HTTP {} and its receipt did not read good. The reason \
-                 is in the audit journal; this line only records that the leg is \
-                 owed and will be asked for again.",
-                leg.label,
-                status.as_u16()
-            );
+
+            // IS THIS THE CREDENTIAL? ASKED HERE, BECAUSE NOTHING ON THIS PATH
+            // EVER ASKED IT.
+            //
+            // `autopilot::classify` has existed and been tested since the
+            // autopilot was written, and it had TWO call sites, both inside
+            // `autopilot.rs`. The manual run — the one an operator presses —
+            // had no credential handling of any kind. A dead token therefore
+            // produced `retries` climbing and a `lastError` reading "answered
+            // HTTP 401 … the leg is owed and will be asked for again", for up
+            // to `MAX_PASSES` × `RETRY_WAIT` — **two hours of 401s against a
+            // token another system shares**, with the word "credential"
+            // appearing nowhere.
+            //
+            // §8 is explicit that this repository never mints one, so there is
+            // nothing to retry INTO: the refreshed value is read on the next
+            // pull, and every request spent before then is spent to be told the
+            // same thing. `CLAUDE.md` §4 — degrade loudly and name the reason.
+            //
+            // PER FEED, NEVER THE WHOLE RUN. A credential is per vendor, so a
+            // dead Dhan token must not stop Groww — the same reason the seats
+            // and the governors are per feed. `conduct` skips only the feed
+            // this fires on.
+            let dead_credential =
+                crate::autopilot::classify(&html) == crate::autopilot::Trouble::Credential;
+
+            let why = if dead_credential {
+                format!(
+                    "{} answered HTTP {} and the reason is the CREDENTIAL, not \
+                     the network. This feed is halted for the rest of the run: \
+                     §8 forbids minting a token here, so re-asking cannot fix \
+                     it and every attempt would spend a request to be refused \
+                     identically. Refresh the token where it is minted; the new \
+                     value is read on the next pull, and the run resumes from \
+                     what the store already holds. Other feeds are unaffected.",
+                    leg.label,
+                    status.as_u16()
+                )
+            } else {
+                format!(
+                    "{} answered HTTP {} and its receipt did not read good. The \
+                     reason is in the audit journal; this line only records that \
+                     the leg is owed and will be asked for again.",
+                    leg.label,
+                    status.as_u16()
+                )
+            };
             with_progress(&site, |progress| {
                 if let Some(feed) = progress.feeds.get_mut(nth) {
                     // THE FIRST REASON, KEPT — not the last. A later failure
                     // must not paint over the one that started the trouble.
-                    if feed.last_error.is_none() {
+                    //
+                    // A CREDENTIAL DEATH IS THE ONE EXCEPTION, and it has to
+                    // be: it arrives on whichever leg happens to run after the
+                    // token expires, so an earlier transport blip would
+                    // otherwise hide the only reason that cannot be waited out.
+                    if feed.last_error.is_none() || dead_credential {
                         feed.last_error = Some(why);
+                    }
+                    if dead_credential {
+                        feed.credential_dead = true;
                     }
                 }
             });
+            if dead_credential {
+                // THE REST OF THIS FEED'S LEGS ARE NOT ATTEMPTED. They would
+                // each earn the same 401 against the same dead token.
+                break;
+            }
         }
     }
 
@@ -687,22 +792,40 @@ pub async fn conduct(site: Loaded, legs: Vec<Leg>) {
         // PARALLEL ACROSS FEEDS. One task per vendor, all started before any is
         // awaited — awaiting each in turn as it is spawned would serialise them
         // and quietly undo the whole point.
+        // A FEED WHOSE CREDENTIAL DIED IS NOT RE-OPENED, and its `finished`
+        // stays true so the page keeps showing it halted rather than pending.
+        let halted = halted_feeds(&site);
         with_progress(&site, |progress| {
             for feed in &mut progress.feeds {
+                if feed.credential_dead {
+                    continue;
+                }
                 feed.finished = false;
                 feed.legs_done = 0;
             }
         });
         let mut flying = Vec::with_capacity(groups.len());
         for (nth, (_vendor, group)) in groups.iter().enumerate() {
-            flying.push(tokio::spawn(run_chain(
-                Loaded::clone(&site),
+            // SKIPPED, NOT RE-ASKED. §8 forbids minting a token here, so the
+            // value cannot change until somebody refreshes it outside this
+            // process — every pass until then would spend this feed's whole
+            // ladder to be refused identically. The other feeds are untouched,
+            // because a credential is per vendor.
+            if halted.get(nth).copied().unwrap_or(false) {
+                continue;
+            }
+            // THE FEED INDEX TRAVELS WITH THE HANDLE. `flying` is now SHORTER
+            // than `groups` whenever a feed is halted, so the position in this
+            // vector is no longer the position in `progress.feeds` — and
+            // `note_dead_chain` writes by that index. Pairing them is what stops
+            // a panic being reported against somebody else's feed.
+            flying.push((
                 nth,
-                group.clone(),
-            )));
+                tokio::spawn(run_chain(Loaded::clone(&site), nth, group.clone())),
+            ));
         }
         let mut failed = false;
-        for (nth, chain) in flying.into_iter().enumerate() {
+        for (nth, chain) in flying {
             match chain.await {
                 Ok(chain_failed) => failed |= chain_failed,
                 // A PANICKED OR CANCELLED CHAIN IS A FAILED CHAIN — AND IT IS
@@ -1088,6 +1211,7 @@ mod tests {
                 retries: 1,
                 last_error: Some("a leg failed".to_owned()),
                 finished: false,
+                credential_dead: false,
             }],
         };
         let doc = progress.json();
@@ -1184,5 +1308,110 @@ mod tests {
         assert!(running.contains("already in flight"), "{running}");
         assert_ne!(nothing, running);
         assert_ne!(nothing, malformed);
+    }
+
+    /// **A DEAD CREDENTIAL IS A REASON THIS PATH CAN NAME, AND HALT ON.**
+    ///
+    /// `autopilot::classify` had two production call sites, both inside
+    /// `autopilot.rs`. The manual run — the one an operator presses — had no
+    /// credential handling of any kind, so a dead token produced `retries`
+    /// climbing and a `lastError` reading *"answered HTTP 401 … the leg is owed
+    /// and will be asked for again"* for up to `MAX_PASSES` × `RETRY_WAIT`:
+    /// **two hours of 401s against a token another system shares**, with the
+    /// word *credential* appearing nowhere.
+    ///
+    /// §8 forbids minting one here, so there is nothing to retry INTO — the
+    /// refreshed value is read on the next pull, and every request spent before
+    /// then buys the same refusal.
+    ///
+    /// # What is asserted, and why each half is needed
+    ///
+    /// The classifier's own behaviour is proved in `autopilot`. What is pinned
+    /// here is that the three vendor spellings this path will actually meet are
+    /// classified as credential deaths rather than as transport blips — Kite's
+    /// **403 `TokenException`**, which `docs/00-charter.md` §4z records as firing
+    /// when a human merely logs into `kite.zerodha.com`, is the one that would
+    /// otherwise silently burn a whole run.
+    #[test]
+    fn a_dead_token_is_classified_as_a_credential_and_not_as_a_blip() {
+        use crate::autopilot::{Trouble, classify};
+
+        for spelling in [
+            "the broker credential could not be read: x",
+            "no AWS identity: x",
+            "the parameter path could not be built: x",
+        ] {
+            assert_eq!(
+                classify(spelling),
+                Trouble::Credential,
+                "{spelling} must halt this feed, not be re-asked for two hours"
+            );
+        }
+        // AND A TRANSPORT FAILURE IS STILL A TRANSPORT FAILURE. A classifier
+        // that answered `Credential` to everything would halt a run on a blip,
+        // which is the opposite defect and just as expensive.
+        assert_eq!(
+            classify("refused with status 500"),
+            Trouble::Transport,
+            "a 5xx is the vendor's own side and IS worth re-asking"
+        );
+    }
+
+    /// **THE STATUS DOCUMENT SAYS WHICH FEED HALTED, AND WHY.**
+    ///
+    /// Without `credentialDead` on the wire a halted feed and a finished one are
+    /// the same two booleans, and the operator is left inferring a credential
+    /// death from a retry counter that has stopped moving. The field exists so
+    /// the page can say it outright while the other feeds keep going — which is
+    /// the whole point of halting per feed rather than per run.
+    #[test]
+    fn a_halted_feed_is_named_on_the_status_document_while_its_siblings_run() {
+        let progress = Progress {
+            passes: 3,
+            retries: 9,
+            rows_at_start: 0,
+            rows_now: 500,
+            stopping: false,
+            finished: None,
+            started: true,
+            feeds: vec![
+                FeedReport {
+                    vendor: "dhan".to_owned(),
+                    legs: 2,
+                    legs_done: 1,
+                    doing: String::new(),
+                    retries: 0,
+                    last_error: Some("the reason is the CREDENTIAL".to_owned()),
+                    finished: true,
+                    credential_dead: true,
+                },
+                FeedReport {
+                    vendor: "groww".to_owned(),
+                    legs: 2,
+                    legs_done: 1,
+                    doing: "Spot · 1 day".to_owned(),
+                    retries: 0,
+                    last_error: None,
+                    finished: false,
+                    credential_dead: false,
+                },
+            ],
+        };
+        let doc = progress.json();
+        assert!(
+            doc.contains("\"credentialDead\":true"),
+            "the halted feed is named as halted: {doc}"
+        );
+        assert!(
+            doc.contains("\"credentialDead\":false"),
+            "and the healthy one is not — a document where every feed reads the \
+             same is a document that distinguishes nothing: {doc}"
+        );
+        // THE RUN IS STILL RUNNING. Halting one feed must not end the press:
+        // a credential is per vendor, and Groww has work left.
+        assert!(
+            doc.contains("\"running\":true"),
+            "one dead token must not stop the feeds that still have a live one: {doc}"
+        );
     }
 }
