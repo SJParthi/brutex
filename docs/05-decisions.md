@@ -18061,3 +18061,76 @@ printed exposure describing a grid that was not run), `MIN_AUDIT_SESSIONS = 50`
 (derived from the fold count and the block length above, not preferred).
 
 Invariants X-15 … X-17.
+
+### D-0230 — the walk asked about the window's months and a contract outlives the month it trades in
+
+The operator's requirement, in his own words on 2026-08-21: *"if i click pull with
+the needed selections from the webpage the entire window and sections data should
+be fully pulled"*. This is the defect that broke it, and it is the hardest shape
+in this file to see — **not an error, a smaller question answered perfectly.**
+
+**Discovery is keyed by the month a contract EXPIRED in. Bars are keyed by the
+month they TRADED in.** `pull::fnowork`'s header has stated the consequence since
+it was written: *"a monthly that expired 2026-01-29 was listed for roughly three
+months and has bars in 2025-11 and 2025-12 as well."* That header then says the
+choice of bar months is deliberately the CALLER's, so a driver "is honest about
+covering only" what it passes.
+
+`months_to_walk` was that caller, and it passed `ladder::months_of(window)` —
+the window's own months and nothing else. Read the fnowork sentence the other way
+round, which is the way that bites: **a contract trading on the last day of the
+window may not expire until roughly three months after it.** It is never
+discovered, so its in-window bars are never fetched, and the receipt still reads
+*"every discovered contract fetched and filed"* — because every contract that WAS
+discovered was. No error exists anywhere. D-0219 fixed the sibling defect (one
+month walked of an eight-month window) and left this one, because both were the
+same mistake pointing in opposite directions along the calendar.
+
+**`EXPIRY_LOOKAHEAD_MONTHS = 3`, and it is a SEARCH decision, not a vendor fact.**
+§3 rule 1 forbids inventing an exchange claim, and no claim is made here about how
+long NSE lists a contract. This is how far this build chooses to LOOK. Three,
+because `fnowork`'s recorded reading says "roughly three months" — hedged with
+*roughly*, and the constant inherits the hedge rather than hiding it.
+
+The cost of being wrong is asymmetric, which is what decides the number. **Too
+small:** a contract that traded in the window and expired past the lookahead is
+never discovered, its bars are absent, the month reads complete, and nothing can
+say otherwise — unrecoverable under §8 once filed. **Too large:** three extra
+discovery calls per underlying, bounded and visible and paid once per run, each
+answering with contracts that either land or are refused as unsettled. Only one
+direction is recoverable, so the walk errs toward asking — the rule `owed_chunks`
+already states for its own two fallbacks.
+
+**Clamped to `last_settled_day`'s month, which is cheaper AND more correct.** A
+contract expiring after it has not settled and `ingest::matching` drops it by
+name, so walking those months could only spend requests to discover contracts
+that are then correctly refused. The clamp is not a narrowing of the ask; it is
+the live-contract rule the route already applies, moved one step earlier where it
+costs nothing. A clock this build cannot read yields NO lookahead rather than an
+unbounded one — the conservative direction, and exactly what the code did before
+this existed.
+
+**Weeklies need none of it.** A weekly expires inside the month it trades in, so
+the window's own months already hold it. This constant exists for the monthly and
+quarterly series alone, and saying so is what stops it being read as a general
+fudge factor.
+
+**What refuses it.** Three tests, one per arm, because the arms fail
+independently:
+`the_expiry_walk_reaches_past_the_window_so_a_contract_that_outlives_it_is_found`
+drives a January window against a December clock — so the clamp is not what is
+under test — and asserts February, March and April are walked and May is not, so
+the lookahead is proved bounded as well as present.
+`the_lookahead_stops_at_the_last_settled_month_rather_than_asking_about_live_ones`
+drives a June window against an August clock and asserts July is walked and
+August is not; this is the arm that fires in real use, because an operator's
+window usually runs up to recent history.
+`naming_an_expiry_still_walks_exactly_its_own_month` holds the other half: a named
+expiry is one month, and the lookahead must not widen a question the operator
+asked precisely.
+
+**Still open on this route**, so the entry does not read as a finish line: one
+`/pull/fno` request enumerates futures XOR options, never both, so ticking both
+segments is two runs each re-paying the full month walk; and the whole current
+month is excluded from both derivative routes by the settled-day rule, which is
+correct and undocumented in `docs/06-limits.md`.

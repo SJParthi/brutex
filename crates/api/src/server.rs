@@ -8049,7 +8049,7 @@ async fn fno_walk(
     // eight-month window. Measured on disk after such a run: 18 contracts, all
     // of them expiry 2026-07-28, with January through June never asked about.
     // `months_to_walk` carries the rule and the evidence.
-    let months = months_to_walk(asked);
+    let months = months_to_walk(asked, today);
     facts.push(("Months walked", months.len().to_string()));
     match walk_months(asked.feed, asked.underlying.as_str(), &months, &governed).await {
         Err(why) => {
@@ -8112,17 +8112,112 @@ async fn fno_walk(
 /// the only one that can hold it. Widening that would fetch months they did not
 /// ask for.
 ///
+/// # AND PAST ITS END, BECAUSE A CONTRACT OUTLIVES THE MONTH IT TRADES IN
+///
+/// Discovery is keyed by the month a contract **expired** in; bars are keyed by
+/// the month they **traded** in. Those are not the same month, and walking only
+/// the window's own months silently loses the difference.
+///
+/// `pull::fnowork`'s header states the fact this rests on: *"a monthly that
+/// expired 2026-01-29 was listed for roughly three months and has bars in
+/// 2025-11 and 2025-12 as well."* Read the other way round — which is the way
+/// that bites — **a contract trading on the last day of the window may not
+/// expire until roughly three months after it.** Asking only for the window's
+/// months never discovers that contract, so its in-window bars are never
+/// fetched, and the receipt still reads *"every discovered contract fetched and
+/// filed"* because every contract that WAS discovered was.
+///
+/// That is the failure this file is most careful about, in the shape hardest to
+/// see: not an error, a smaller question answered perfectly.
+///
+/// # Why the lookahead errs toward asking
+///
+/// Over-walking costs [`EXPIRY_LOOKAHEAD_MONTHS`] extra discovery calls per
+/// underlying — units, and `walk_months` already reports a month that refuses
+/// without abandoning the others. Under-walking leaves a hole that nothing comes
+/// back for and no counter can show. Only one of those is recoverable, and
+/// `CLAUDE.md` §4 names the other. `owed_chunks` states the same rule for its own
+/// two fallbacks.
+///
+/// # Clamped to the last settled month, which makes it cheaper AND correct
+///
+/// A contract expiring after `last_settled_day` has not settled, and
+/// `ingest::matching` drops it by name — so walking those months could only
+/// spend requests to discover contracts that are then correctly refused. The
+/// clamp is not a narrowing of what is asked for; it is the same live-contract
+/// rule the rest of this route already applies, moved one step earlier so it
+/// costs nothing.
+///
+/// # When it is still ONE month
+///
+/// An operator who names an expiry is asking about that expiry, and its month is
+/// the only one that can hold it. Widening that would fetch months they did not
+/// ask for.
+///
 /// # Cost
 ///
-/// O(months in the window), and each month's walk is `1 + N` governed requests.
-/// `ladder::months_of` is the same list the spot ladder walks, so the two cannot
-/// disagree about which months a window covers.
-fn months_to_walk(asked: &ingest::FnoRequest) -> Vec<store::path::YearMonth> {
-    asked.expiry.map_or_else(
-        || crate::ladder::months_of(asked.window),
-        |named| named.year_month().into_iter().collect(),
-    )
+/// O(months in the window + [`EXPIRY_LOOKAHEAD_MONTHS`]), each month's walk
+/// `1 + N` governed requests. `ladder::months_of` is still the same list the spot
+/// ladder walks, so the two cannot disagree about which months a WINDOW covers —
+/// the lookahead is appended to it rather than replacing it.
+fn months_to_walk(asked: &ingest::FnoRequest, today: Day) -> Vec<store::path::YearMonth> {
+    let Some(named) = asked.expiry else {
+        let mut months = crate::ladder::months_of(asked.window);
+        let Some(&last) = months.last() else {
+            return months;
+        };
+        // THE CEILING: the last month that can hold a SETTLED contract. A clock
+        // this build cannot read is not a reason to walk further — it is a
+        // reason to walk no further than the window, which is what this build
+        // did before the lookahead existed and is the conservative direction.
+        let ceiling = ingest::last_settled_day(today)
+            .ok()
+            .and_then(|day| day.year_month().ok());
+        let mut at = last;
+        for _ in 0..EXPIRY_LOOKAHEAD_MONTHS {
+            let Some(next) = crate::autopilot::month_after(at) else {
+                break;
+            };
+            if ceiling.is_some_and(|top| next > top) {
+                break;
+            }
+            months.push(next);
+            at = next;
+        }
+        return months;
+    };
+    named.year_month().into_iter().collect()
 }
+
+/// How many months PAST a window's end the expiry walk reaches.
+///
+/// # It is a SEARCH decision, not a vendor fact, and the distinction matters
+///
+/// `CLAUDE.md` §3 rule 1 forbids inventing a claim about an exchange. This is not
+/// one: no assertion is made here about how long NSE lists a contract for. It is
+/// how far this build chooses to LOOK, and the cost of being wrong is asymmetric
+/// in a way that decides the number.
+///
+/// Three, because `pull::fnowork`'s header records that a monthly contract "was
+/// listed for roughly three months" and has bars in the two months before its
+/// expiry. That is the repository's own recorded reading, hedged with *roughly*,
+/// and this constant inherits the hedge rather than hiding it.
+///
+/// # What being wrong costs, in each direction
+///
+/// **Too small** — a contract that traded in the window and expired past the
+/// lookahead is never discovered. Its bars are absent, the month reads complete,
+/// and nothing anywhere can say otherwise. Unrecoverable under §8's append-only
+/// rule once the month is filed.
+///
+/// **Too large** — three extra discovery calls per underlying, each answering
+/// with contracts that either land legitimately or are refused as unsettled.
+/// Bounded, visible, and paid once per run.
+///
+/// A weekly needs none of this: it expires inside the month it trades in, so the
+/// window's own months already hold it. This constant exists for the monthly and
+/// quarterly series alone.
+const EXPIRY_LOOKAHEAD_MONTHS: u32 = 3;
 
 /// Walks every month in `months`, merging what each names into one chain.
 ///
@@ -16587,6 +16682,134 @@ mod tests {
         assert!(
             body.contains("await_budget(asked.feed, site)"),
             "the chunk loop still charges the permit for the first attempt"
+        );
+    }
+
+    /// **THE WALK REACHES PAST THE WINDOW, BECAUSE A CONTRACT OUTLIVES IT.**
+    ///
+    /// Discovery is keyed by the month a contract EXPIRED in; bars are keyed by
+    /// the month they TRADED in. A monthly listed roughly three months before
+    /// expiry therefore trades inside a window it does not expire in — and
+    /// walking only the window's own months never discovers it, so its in-window
+    /// bars are never fetched while the receipt still reads *"every discovered
+    /// contract fetched and filed"*, because every contract that WAS discovered
+    /// was.
+    ///
+    /// This is the operator's requirement stated plainly — *press Pull and the
+    /// entire window is pulled* — and the shape that broke it is the hardest
+    /// kind to see: not an error, a smaller question answered perfectly.
+    #[test]
+    fn the_expiry_walk_reaches_past_the_window_so_a_contract_that_outlives_it_is_found() {
+        let day = |y, m, d| Day::new(y, m, d).expect("a real day");
+        let ym = |y, m| store::path::YearMonth::new(y, m).expect("a real month");
+
+        // A ONE-MONTH WINDOW, and a clock far enough ahead that every month it
+        // could reach has settled — so the clamp is not what is under test here.
+        let asked = ingest::FnoRequest {
+            underlying: brutex_core::symbol::Symbol::new("NIFTY").expect("a symbol"),
+            series: ingest::Series::Options,
+            expiry: None,
+            window: pull::session::Window::new(day(2026, 1, 1), day(2026, 1, 31))
+                .expect("a window"),
+            feed: pull::vendor::Feed::Groww,
+            granularity: pull::vendor::Granularity::Minute1,
+            rate: None,
+            clamped_from: None,
+        };
+        let walked = months_to_walk(&asked, day(2026, 12, 15));
+
+        assert!(
+            walked.contains(&ym(2026, 1)),
+            "the window's own month is still walked: {walked:?}"
+        );
+        // THE THREE THAT MATTER. A monthly trading in January can expire in
+        // February, March or April; none of those months is in the window, and
+        // before the lookahead none of them was ever asked about.
+        for m in 2..=4 {
+            assert!(
+                walked.contains(&ym(2026, m)),
+                "a contract trading in January can expire in month {m}; without \
+                 walking it, its January bars are lost in silence: {walked:?}"
+            );
+        }
+        assert!(
+            !walked.contains(&ym(2026, 5)),
+            "and it stops — the lookahead is bounded, not open-ended: {walked:?}"
+        );
+    }
+
+    /// **AND THE LOOKAHEAD NEVER REACHES AN UNSETTLED MONTH.**
+    ///
+    /// A contract expiring after `last_settled_day` has not settled, and
+    /// `ingest::matching` drops it by name. Walking those months could only
+    /// spend discovery requests to find contracts that are then correctly
+    /// refused — so the clamp is the same live-contract rule the rest of the
+    /// route applies, moved one step earlier where it costs nothing.
+    ///
+    /// This is the arm that fires in real use: an operator's window usually runs
+    /// up to recent history, so the lookahead is nearly always clamped.
+    #[test]
+    fn the_lookahead_stops_at_the_last_settled_month_rather_than_asking_about_live_ones() {
+        let day = |y, m, d| Day::new(y, m, d).expect("a real day");
+        let ym = |y, m| store::path::YearMonth::new(y, m).expect("a real month");
+
+        let asked = ingest::FnoRequest {
+            underlying: brutex_core::symbol::Symbol::new("NIFTY").expect("a symbol"),
+            series: ingest::Series::Options,
+            expiry: None,
+            window: pull::session::Window::new(day(2026, 6, 1), day(2026, 6, 30))
+                .expect("a window"),
+            feed: pull::vendor::Feed::Groww,
+            granularity: pull::vendor::Granularity::Minute1,
+            rate: None,
+            clamped_from: None,
+        };
+        // TODAY IS IN AUGUST, so July is the last settled month.
+        let walked = months_to_walk(&asked, day(2026, 8, 21));
+
+        assert!(
+            walked.contains(&ym(2026, 6)),
+            "the window's month: {walked:?}"
+        );
+        assert!(
+            walked.contains(&ym(2026, 7)),
+            "July has settled and can hold a contract that traded in June: {walked:?}"
+        );
+        assert!(
+            !walked.contains(&ym(2026, 8)),
+            "August has NOT settled; asking about it spends a request to discover \
+             contracts `matching` refuses by name: {walked:?}"
+        );
+        assert!(
+            !walked.contains(&ym(2026, 9)),
+            "and nothing beyond it either: {walked:?}"
+        );
+    }
+
+    /// **A NAMED EXPIRY IS STILL EXACTLY ONE MONTH.**
+    ///
+    /// An operator who names an expiry is asking about that expiry, and its
+    /// month is the only one that can hold it. The lookahead must not widen
+    /// that — it would fetch months they did not ask for, on a route whose whole
+    /// discipline is that the ask and the run are the same question.
+    #[test]
+    fn naming_an_expiry_still_walks_exactly_its_own_month() {
+        let day = |y, m, d| Day::new(y, m, d).expect("a real day");
+        let asked = ingest::FnoRequest {
+            underlying: brutex_core::symbol::Symbol::new("NIFTY").expect("a symbol"),
+            series: ingest::Series::Options,
+            expiry: Some(day(2026, 1, 29)),
+            window: pull::session::Window::new(day(2026, 1, 1), day(2026, 1, 31))
+                .expect("a window"),
+            feed: pull::vendor::Feed::Groww,
+            granularity: pull::vendor::Granularity::Minute1,
+            rate: None,
+            clamped_from: None,
+        };
+        assert_eq!(
+            months_to_walk(&asked, day(2026, 12, 15)).len(),
+            1,
+            "a named expiry lives in one month and the walk asks about one month"
         );
     }
 
