@@ -1423,6 +1423,135 @@ mod tests {
         assert_eq!(seen.passes, 0, "stopped before the first pass ran");
     }
 
+    /// **ONE PRESS, AND BARS ARE ON DISK — THE WHOLE PATH, NO VENDOR.**
+    ///
+    /// The proof that was missing, and the reason it was missing: every other
+    /// route through [`conduct`] ends at a broker, and this repository's
+    /// standing rule is that no live vendor request originates from a test.
+    ///
+    /// **An archive feed needs none.** `Transport::LocalArchive` is CSV files on
+    /// disk — no socket, no token, no governor — so a leg naming one drives the
+    /// identical path a broker leg takes: `conduct` → per-vendor spawn →
+    /// sequential legs → `pull_spot` → `run_local` → `pull::ingest::from_dir` →
+    /// the census, the store and the counter file.
+    ///
+    /// So this is the end-to-end assertion the suite never had: **press, and
+    /// bars exist that did not exist before.** Not a receipt, not a status
+    /// document, not a count the run reported about itself — a file on disk,
+    /// read back through the store's own reader.
+    ///
+    /// # What it would catch
+    ///
+    /// Every wiring defect between the press and the disk, which is where this
+    /// session's findings lived: a leg that never reaches its route, a route
+    /// that reaches no ingest, an ingest that files under the wrong prefix, a
+    /// pass loop that ends before the work is done, a summary written over a
+    /// run still in flight.
+    #[tokio::test]
+    async fn one_press_over_an_archive_feed_puts_bars_on_disk() {
+        use std::io::Write as _;
+
+        // THE FIXTURE IS THE VENDOR'S OWN SHAPE, verbatim from
+        // `GFDLNFO_TICK_01072025/Futures/-III/FINNIFTY-III.NFO.csv` — ten
+        // fields, a header row, `DD/MM/YYYY`, and a stamp inside the session.
+        let folder = crate::scratch::path("pullrun-archive-folder");
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).expect("mkdir");
+        let mut f = std::fs::File::create(folder.join("NIFTY.NFO.csv")).expect("create");
+        f.write_all(
+            b"Ticker,Date,Time,LTP,BuyPrice,BuyQty,SellPrice,SellQty,LTQ,OpenInterest\n\
+              NIFTY.NFO,01/07/2025,09:16:16,27674,0,0,0,0,65,65\n\
+              NIFTY.NFO,01/07/2025,09:17:04,27680,0,0,0,0,40,70\n",
+        )
+        .expect("write");
+
+        let site = site("archivepress");
+        let store = site.store_root.clone();
+
+        // NOTHING IS HELD YET. Asserted rather than assumed: a test that finds
+        // bars it did not put there proves nothing at all.
+        let before = crate::census::read_all(&store)
+            .iter()
+            .filter_map(census::VendorCensus::counters)
+            .map(|(_months, rows, _entries)| rows)
+            .sum::<u64>();
+        assert_eq!(before, 0, "the scratch store starts empty");
+
+        claim(&site);
+        // BOUNDED, AND THE BOUND IS NOT DECORATION.
+        //
+        // `conduct`'s pass loop is deliberately unbounded on failure: a pass
+        // whose legs failed sleeps `RETRY_WAIT` and goes again, up to
+        // `MAX_PASSES`. That is right for an operator waiting out a vendor and
+        // catastrophic for a test — MEASURED, by breaking this test's own
+        // fixture: with no data rows the leg fails, the loop retries, and the
+        // test ran past sixty seconds instead of failing. Unbounded it would
+        // have taken `MAX_PASSES` x `RETRY_WAIT` ~= two hours and WEDGED CI
+        // rather than reddening it.
+        //
+        // The clean path takes a fraction of a second — no socket, no governor,
+        // one folder — so anything approaching this bound is already the
+        // failure. A test that hangs reports nothing; this one reports what it
+        // was waiting for.
+        let bound = core::time::Duration::from_secs(30);
+        let ran = tokio::time::timeout(
+            bound,
+            conduct(
+                Loaded::clone(&site),
+                vec![Leg {
+                    route: Route::Spot,
+                    vendor: pull::vendor::Feed::TrueData.wire().to_owned(),
+                    dir: "1min".to_owned(),
+                    label: "archive · 1 minute".to_owned(),
+                    body: format!(
+                        "target=swept&vendor={}&from=2025-07-01&to=2025-07-01&folder={}",
+                        pull::vendor::Feed::TrueData.wire(),
+                        folder.display()
+                    ),
+                }],
+            ),
+        )
+        .await;
+        assert!(
+            ran.is_ok(),
+            "the press did not finish inside {bound:?}. On this path that means \
+             the leg FAILED and the pass loop is retrying it — the loop is \
+             unbounded on failure by design, so the run would continue for \
+             MAX_PASSES x RETRY_WAIT. Read the feed's `lastError`: {:?}",
+            observed(&site).feeds
+        );
+
+        // THE STORE ITSELF, not the run's opinion of the store. `rows_now`
+        // re-reads the manifests, which is the only reading of progress that
+        // cannot be fooled by a receipt.
+        let after = crate::census::read_all(&store)
+            .iter()
+            .filter_map(census::VendorCensus::counters)
+            .map(|(_months, rows, _entries)| rows)
+            .sum::<u64>();
+
+        let seen = observed(&site);
+        assert!(
+            after > before,
+            "one press stored nothing. The whole path from the leg to the disk \
+             is what this asserts, and every wiring defect between them lands \
+             here: {after} row(s) after, {before} before. Run summary: {:?}, \
+             feeds: {:?}",
+            seen.finished,
+            seen.feeds
+        );
+        assert!(
+            seen.finished.is_some(),
+            "and the run ended rather than being left in flight forever"
+        );
+        assert_eq!(
+            seen.feeds.len(),
+            1,
+            "one vendor was asked, so one chain was built: {:?}",
+            seen.feeds
+        );
+    }
+
     /// **THE SKIP LIST IS READ FROM THE LIVE DOCUMENT, PER FEED.**
     ///
     /// [`halted_feeds`] is what the spawn loop consults, so this drives it

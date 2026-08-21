@@ -18462,3 +18462,54 @@ store grows is one that stops being opened; neither of these does.
 vendors on the wire at once, a leg failing and being re-asked, a pass gaining bars
 and going again. Each needs a vendor that answers, which means a stub server this
 crate does not yet have. A-48 stays open.
+
+### D-0236 — one press, and bars are on disk: the assertion the suite never had
+
+D-0235 gave `conduct` its first tests and named what they could not reach: the
+path from the press to the disk, which every other route ends at a broker — and
+this repository's standing rule is that no live vendor request originates from a
+test. A-48 was left open on that basis.
+
+**An archive feed needs no vendor.** `Transport::LocalArchive` is CSV files on
+disk: no socket, no token, no governor. A leg naming one drives the **identical**
+path a broker leg takes — `conduct` → per-vendor spawn → sequential legs →
+`pull_spot` → `run_local` → `pull::ingest::from_dir` → the census, the store and
+the counter file. The only difference is where the bytes come from, and that is
+the one part already covered elsewhere.
+
+So `one_press_over_an_archive_feed_puts_bars_on_disk` asserts the thing the suite
+had never asserted: **press, and bars exist that did not exist before.** Not a
+receipt, not a status document, not a count the run reported about itself — rows
+read back through `census::read_all`, which re-reads the manifests and is the only
+reading of progress that cannot be fooled by a run's own opinion. The store is
+asserted EMPTY first, because a test that finds bars it did not put there proves
+nothing.
+
+**It was broken on purpose to check it asserts something.** With the fixture's
+data rows removed the leg fails, and the test **ran past sixty seconds instead of
+failing** — the pass loop retried it. That is not vacuity, it is a worse failure
+mode: unbounded, the run would continue for `MAX_PASSES` × `RETRY_WAIT`, roughly
+two hours, and **wedge CI rather than redden it**.
+
+**So the press is bounded, and the bound is not decoration.** Thirty seconds
+against a clean path that takes a fraction of one — no socket, no governor, one
+folder — so anything approaching it is already the failure. The assertion names
+what it was waiting for and prints the feed's own `lastError`, because a test that
+hangs reports nothing.
+
+**The general rule this produces, and it is the one to carry:** *any test driving
+`conduct` must be timeout-bounded.* The loop is deliberately unbounded on failure
+— that is the operator's rule of 2026-08-20 and it is right for an operator
+waiting out a vendor — which makes it categorically hostile to a test harness.
+Both properties are correct; they simply cannot share a wall clock.
+
+**What this closes, and what it does not.** It closes the wiring: a leg that never
+reaches its route, a route that reaches no ingest, an ingest that files under the
+wrong prefix, a pass loop that ends before the work is done, a summary written
+over a run still in flight — every one of those now reddens this test.
+
+It does **not** close A-48. Two vendors on the wire at once, a leg failing and
+being re-asked, a pass gaining bars and going again — each needs a vendor that
+ANSWERS, and answers differently on successive calls. That is a stub HTTP server
+this crate does not have. The archive path proves the pipeline; it cannot prove
+the retry.
