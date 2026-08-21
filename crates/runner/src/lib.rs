@@ -157,9 +157,42 @@ impl Sweeper {
     /// table, so the ladder is never handed a position that would measure as
     /// permanently false because nothing computes it.
     pub fn run(&self, bars: &[Candle], evaluator: &mut Evaluator) -> Outcome {
+        let (column, sweep) = self.fold_and_walk(bars, evaluator);
+        Self::outcome_of(&column, sweep)
+    }
+
+    /// One fold over the bars, then one walk of the ladder over the result.
+    ///
+    /// # Why this is extracted rather than written twice
+    ///
+    /// [`Self::run`] and [`Self::run_ranked`] both need exactly this, and for a
+    /// while they both *contained* it — four identical lines in two places, of
+    /// which only one had a test. Nothing bound the copies together, so a change
+    /// to one could not be caught diverging from the other by anything.
+    ///
+    /// That is not hypothetical here: [`Outcome::is_complete`]'s own doc reasons
+    /// about its invariant in terms of `Sweeper::run` alone — *"because it hands
+    /// `Ladder::walk` the very column it took the census from"* — and that
+    /// sentence was not updated when a second method acquired the same
+    /// obligation. One body means one place to change and one sentence to keep
+    /// true.
+    fn fold_and_walk(&self, bars: &[Candle], evaluator: &mut Evaluator) -> (Column, Sweep) {
         let column = Column::build(bars, evaluator);
+        // The live position list is `Evaluator::positions` — every bit this
+        // vocabulary can actually compute — rather than every live bit in the
+        // table, so the ladder is never handed a position that would measure as
+        // permanently false because nothing computes it.
         let live = live_positions();
         let sweep = self.ladder.walk(column.bits(), &live);
+        (column, sweep)
+    }
+
+    /// The census and the sweep, taken from the very column that was walked.
+    ///
+    /// Split out beside [`Self::fold_and_walk`] so the pairing
+    /// [`Outcome::is_complete`] depends on cannot be got wrong by a caller: the
+    /// census and the sweep always come from one fold.
+    fn outcome_of(column: &Column, sweep: Sweep) -> Outcome {
         Outcome {
             census: column.census(),
             first_swept: column.first_swept(),
@@ -201,23 +234,44 @@ impl Sweeper {
         evaluator: &mut Evaluator,
         horizon: crate::outcome::Horizon,
         keep: usize,
-    ) -> (Outcome, crate::rank::Ranked) {
-        let column = Column::build(bars, evaluator);
-        let live = live_positions();
-        let sweep = self.ladder.walk(column.bits(), &live);
+    ) -> RankedRun {
+        let (column, sweep) = self.fold_and_walk(bars, evaluator);
         // THE SAME SLICE THE COLUMN WAS BUILT FROM, and that is the whole point
         // of computing it here rather than leaving it to the caller.
         let forward = crate::outcome::forward(bars, horizon);
         let ranked = crate::rank::rank(&sweep, &column, &forward, keep);
-        (
-            Outcome {
-                census: column.census(),
-                first_swept: column.first_swept(),
-                sweep,
-            },
+        RankedRun {
+            outcome: Self::outcome_of(&column, sweep),
             ranked,
-        )
+            column,
+        }
     }
+}
+
+/// Everything one ranked sweep produced, including the column it was measured on.
+///
+/// # Why the column is returned rather than dropped
+///
+/// [`Sweeper::run`] builds a [`Column`] and throws it away, so a caller that
+/// then wants to TRADE what the sweep found has to build a second one — a second
+/// fold over every bar with a second freshly-warmed evaluator. `crates/cli`'s
+/// audit did exactly that, and the two folds were not merely wasteful: the
+/// column came from the caller's evaluator while the sweep came from a private
+/// one, so a caller supplying custom widths would have had masks discovered
+/// under one vocabulary indexing a column built under another. That is the
+/// mispairing [`crate::outcome::Edge::mismatched`] exists to catch, reachable by
+/// construction rather than by accident.
+///
+/// Returning the column makes one fold serve the sweep, the ranking and the
+/// trade walk, so the three cannot disagree about what they measured.
+#[derive(Debug)]
+pub struct RankedRun {
+    /// The census, the warm-up boundary and the ladder's result.
+    pub outcome: Outcome,
+    /// The strongest combinations by |t|, best first, bounded by `keep`.
+    pub ranked: crate::rank::Ranked,
+    /// The bar-bit column every figure above was measured on.
+    pub column: Column,
 }
 
 /// Pairs one probe may walk while the search is looking for a threshold.
@@ -551,6 +605,90 @@ mod tests {
     /// happened when neither was there.
     fn bounded() -> Ladder {
         Ladder::with_min_hits(600).with_ceiling(50_000)
+    }
+
+    /// `run_ranked` AGREES WITH `run`, AND PAIRS ITS FORWARD WITH ITS OWN COLUMN.
+    ///
+    /// # Why this test had to be written before anything else here was trusted
+    ///
+    /// `run_ranked` shipped with **zero** coverage: its one production call site
+    /// is inside `cli::sweep_stored_inner`, which refuses at the commit gate on
+    /// any build without `BRUTEX_COMMIT` — and `cargo test` is such a build. So
+    /// the whole body, `Column::build` through `rank::rank`, never executed in
+    /// the suite. `CLAUDE.md` §9 asks for 100% on a touched crate and this was a
+    /// hole straight through the middle of the change.
+    ///
+    /// # The two properties, and why the second is the one that matters
+    ///
+    /// The first is agreement: the sweep half of `run_ranked` must produce
+    /// exactly what `run` produces, or the two entry points answer differently
+    /// about the same bars. Both now share `fold_and_walk`, and this is what
+    /// stops that sharing being undone silently.
+    ///
+    /// The second is the claim the method's own doc makes and nothing proved:
+    /// that building the column and the `Forward` from **one** slice makes
+    /// `Edge::mismatched` unreachable *by construction* rather than merely
+    /// detected afterwards. A non-zero count means the mean and the `t` of that
+    /// row were computed from returns belonging to other bars — the row would
+    /// render as `MISPAIRED`, and a report that can print that is a report whose
+    /// numbers cannot be believed.
+    #[test]
+    fn a_ranked_run_agrees_with_a_plain_one_and_never_mispairs() {
+        let bars = synthetic::sessions(8);
+
+        let plain = Sweeper::new(bounded()).run(&bars, &mut evaluator());
+        let run = Sweeper::new(bounded()).run_ranked(
+            &bars,
+            &mut evaluator(),
+            crate::outcome::Horizon::DEFAULT,
+            10,
+        );
+
+        assert_eq!(
+            run.outcome.census, plain.census,
+            "the same bars folded the same way must yield the same census"
+        );
+        assert_eq!(
+            run.outcome.first_swept, plain.first_swept,
+            "and the same warm-up boundary"
+        );
+        assert_eq!(
+            run.outcome.sweep.depth(),
+            plain.sweep.depth(),
+            "and the same ladder depth — a ranked run is a plain run that also scores"
+        );
+
+        // THE FIXTURE HAS TO PRODUCE SOMETHING, or every assertion below is
+        // vacuous and this test would pass on a `rank` that returned nothing.
+        assert!(
+            !run.ranked.top.is_empty(),
+            "the fixture must produce ranked rows, or the mispairing assertion \
+             below proves nothing"
+        );
+        assert!(
+            run.ranked.top.len() <= 10,
+            "the heap is bounded by `keep`, which is the whole reason it is a \
+             heap and not a sort"
+        );
+
+        // THE PROPERTY THE DOC CLAIMS. One slice in, so no row can be scored
+        // against returns belonging to other bars.
+        for scored in &run.ranked.top {
+            assert_eq!(
+                scored.edge.mismatched, 0,
+                "the column and the forward came from one slice, so no row may \
+                 be mispaired; a non-zero count makes that row's mean and t \
+                 meaningless"
+            );
+        }
+
+        // AND THE COLUMN COMES BACK, which is what lets a caller trade what was
+        // found without folding the bars a second time under a second evaluator.
+        assert_eq!(
+            run.column.bits().len(),
+            usize::try_from(run.outcome.census.swept).unwrap_or(usize::MAX),
+            "the returned column is the one the census counted, not another"
+        );
     }
 
     fn evaluator() -> Evaluator {

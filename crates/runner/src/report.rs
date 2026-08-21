@@ -623,7 +623,7 @@ pub fn render_auto(auto: &Auto, id: Option<&RunId>) -> String {
               instrumented, so it leaves no uncoverable region behind."
 )]
 mod tests {
-    use super::{Outcome, permille, render, render_auto};
+    use super::{Outcome, condition_names, conditions_line, permille, render, render_auto};
     use crate::identity::{Direction, Params, Run, data_digest, identity};
     use crate::{Sweeper, synthetic};
     use brutex_core::instrument::{Exchange, InstrumentKey};
@@ -640,6 +640,60 @@ mod tests {
             Availability::Absent,
             Thresholds::CLASSICAL,
         )
+    }
+
+    /// A MASK RENDERS ONE NAME PER SET BIT, INCLUDING BITS THE TABLE CANNOT NAME.
+    ///
+    /// # Why the unnameable case is tested rather than argued away
+    ///
+    /// `ConditionMask` is 384 wide and the table defines 280 rows, so a mask can
+    /// carry a bit no name exists for. On today's production path it cannot —
+    /// every mask reaching a report is built from `Evaluator::positions`, all of
+    /// which are in the table — so the `?N` arm is unreachable *from production*
+    /// and would be an uncovered region under `CLAUDE.md` §9's 100% floor. That
+    /// makes it exactly the kind of line the operator's standing rule says
+    /// blocks the coverage floor, and the answer is a direct test rather than a
+    /// deletion: the arm is what keeps the printed arity equal to `popcount`, so
+    /// a reader counting names against the `k` the ladder reports cannot be
+    /// misled by a silent omission.
+    ///
+    /// # The property, not the strings
+    ///
+    /// The assertion that matters is the COUNT: one rendered name per set bit,
+    /// whatever the table says. A version that skipped unnameable positions
+    /// would still produce plausible output and would fail here.
+    #[test]
+    fn every_set_bit_is_named_and_an_unnameable_one_is_shown_rather_than_dropped() {
+        // Position 0 is the first row of the table; 300 is past its end but well
+        // inside the mask, which `with_bit` accepts for anything below 384.
+        let both = ConditionMask::default().with_bit(0).with_bit(300);
+        let names = condition_names(&both);
+
+        assert_eq!(
+            names.len(),
+            usize::try_from(both.popcount()).unwrap_or(usize::MAX),
+            "one name per set bit, or a reader counting names against k is \
+             silently misled: {names:?}"
+        );
+        assert_eq!(
+            names,
+            vec!["close_above_ema20".to_owned(), "?300".to_owned()],
+            "the named position renders its name and the unnameable one renders \
+             its index rather than vanishing"
+        );
+
+        // AND THE JOINED FORM SEPARATES THEM WITH A CHARACTER THE VOCABULARY
+        // NEVER USES, so a name is never mistaken for two.
+        assert_eq!(conditions_line(&both), "close_above_ema20 · ?300");
+
+        // THE EMPTY MASK IS NAMED, NOT BLANK. A blank where a combination should
+        // be is indistinguishable from a rendering bug, and an empty mask is the
+        // one that matches every bar — the most dangerous thing to render silently.
+        assert!(condition_names(&ConditionMask::ZERO).is_empty());
+        assert!(
+            conditions_line(&ConditionMask::ZERO).contains("matches every bar"),
+            "the empty set says what it means"
+        );
     }
 
     fn bounded() -> Ladder {

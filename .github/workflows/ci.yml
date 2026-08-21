@@ -2563,13 +2563,37 @@ jobs:
           # already enforces -- probe counts and bounds -- so the number is on
           # the terminal for a human reading a failure and in the assertion for
           # the build. Neither ships.
+          #
+          # THE TWO `cli` DIAGNOSTICS, AND WHY NEITHER CAN EMIT AN EVENT
+          # INSTEAD. Both are the case telemetry/src/sink.rs already argues for
+          # its own last-resort `eprintln!`: the thing you would emit through is
+          # the thing that is unavailable.
+          #
+          # `cli/src/main.rs:println!` reports that the event sink FAILED TO
+          # INSTALL. Emitting that through the sink is the one message it cannot
+          # carry. It prints before the report so a long report cannot scroll it
+          # away, and it names which variable to set -- `CLAUDE.md` section 4
+          # asks a degradation to name its reason, and a silent absence of
+          # events would be the fallback that hides a failure. D-0226.
+          #
+          # `cli/src/lib.rs:eprintln!` reports bars whose timestamps go
+          # BACKWARDS, which the store's monotonic invariant forbids. It is
+          # reached while BUILDING the session index every later stage reads, so
+          # there is no report yet to write it into, and `session_index` returns
+          # a plain `Vec` with nowhere to carry a refusal. Sorting around it
+          # would paper over a broken invariant one layer down and hand the
+          # caller a plausible index, which is what section 4 refuses. This line
+          # predates the telemetry arrow and was undeclared; it is declared here
+          # rather than left to be found again.
           declared='api/src/constituents.rs:println!:2
           api/src/server.rs:println!:22
           api/src/server.rs:eprintln!:7
           api/src/server.rs:print!:1
           core/src/universe.rs:println!:2
           core/src/vendor.rs:println!:1
+          cli/src/lib.rs:eprintln!:1
           cli/src/main.rs:print!:1
+          cli/src/main.rs:println!:1
           greeks/src/bsm.rs:println!:4
           greeks/src/normal.rs:println!:3
           greeks/src/solver.rs:println!:5

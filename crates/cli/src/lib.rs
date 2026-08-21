@@ -50,7 +50,6 @@ pub mod stored;
 use brutex_core::vendor::Vendor;
 use costs::fill::Direction;
 use engine::Ladder;
-use indicators::column::Column;
 use indicators::evaluator::{Evaluator, Widths};
 use indicators::pattern::Thresholds;
 use indicators::vwap::Availability;
@@ -424,16 +423,38 @@ fn log_dir_from(
 /// line above the report, so an operator who expected events and got none is
 /// told why on the same screen rather than discovering an empty log later.
 ///
-/// `None` means a sink is installed and the run is being recorded.
+/// `None` means a sink is installed and the run is being recorded. **Every other
+/// outcome returns `Some`,** including the one that has no directory to try.
+///
+/// # The `?` that was here was itself the silent failure this function warns about
+///
+/// The first version read `let dir = log_dir_from(..)?;` — so when neither
+/// `BRUTEX_LOG_DIR` nor a store root resolved, it returned `None` early. `None`
+/// is the value that means *installed successfully*, so a run with nowhere to
+/// write reported itself as fully recorded, and the operator got no events and
+/// no reason. That is exactly the `CLAUDE.md` §4 fallback-that-hides-a-failure
+/// this function exists to avoid, introduced by the function avoiding it.
+///
+/// The two failures are now separate sentences because they need different
+/// actions: an unresolvable directory is fixed by setting a variable, an
+/// unwritable one by changing permissions.
 ///
 /// # Errors
 ///
-/// Returns the refusal in `telemetry`'s own words — an unwritable directory, or
-/// a sink already installed, which `telemetry::install` refuses rather than
-/// ignores because two sinks on one path each roll the other's file away.
+/// The refusal in `telemetry`'s own words — an unwritable directory, or a sink
+/// already installed, which `telemetry::install` refuses rather than ignores
+/// because two sinks on one path each roll the other's file away. Or, before
+/// either can be tried, that no directory could be resolved at all.
 #[must_use]
 pub fn install_log() -> Option<String> {
-    let dir = log_dir_from(std::env::var_os("BRUTEX_LOG_DIR"), store_root().ok())?;
+    let Some(dir) = log_dir_from(std::env::var_os("BRUTEX_LOG_DIR"), store_root().ok()) else {
+        return Some(
+            "events are NOT being recorded: neither BRUTEX_LOG_DIR nor a store root \
+             is set, so there is nowhere to write them. Set BRUTEX_LOG_DIR, or set \
+             BRUTEX_STORE or HOME so the log can sit beside the store."
+                .to_owned(),
+        );
+    };
     telemetry::install(&telemetry::Config::new(dir))
         .err()
         .map(|why| format!("events are NOT being recorded: {why}"))
@@ -548,8 +569,8 @@ fn sweep_stored_inner(
     // 3,689 are. `run_ranked` builds the forward from the same slice the column
     // was built from, so the mispairing `Edge::mismatched` guards against cannot
     // arise, and `report::render_findings` below names every kept combination.
-    let (outcome, ranked) =
-        Sweeper::new(ladder).run_ranked(&loaded.bars, &mut ev, Horizon::DEFAULT, STORED_KEEP);
+    let run = Sweeper::new(ladder).run_ranked(&loaded.bars, &mut ev, Horizon::DEFAULT, STORED_KEEP);
+    let (outcome, ranked) = (run.outcome, run.ranked);
 
     // The identity, over the bars actually swept and the ladder actually
     // applied. `Params::of` reads the ladder rather than the argument, so a
@@ -746,6 +767,158 @@ const BOOTSTRAP_ALPHA_PPM: u64 = 50_000;
 /// **not** the twenty-five that are true. The bar printed above them is what
 /// decides that, and on a sweep of sixty-one million hypotheses it sits above 6.
 const STORED_KEEP: usize = 25;
+
+/// How many ranked combinations the audit weighs before choosing one to trade.
+///
+/// # Why larger than [`STORED_KEEP`], which only has to be readable
+///
+/// `STORED_KEEP` bounds a table a person reads. This bounds a SEARCH: the audit
+/// takes the strongest candidate that is also closed, so the heap has to be deep
+/// enough that a closed combination is still in it after the redundant supersets
+/// are filtered out. Too small and the filter empties the list, and the audit
+/// reports extinction on a sweep that found plenty — a refusal that would be a
+/// lie about the market rather than a fact about it.
+///
+/// Two hundred and fifty is a stated assumption, not a derivation, and it is
+/// cheap: `crate::rank` is a bounded heap at 80 bytes per entry, so this is
+/// 20 KB and O(keep) regardless of how many combinations exist.
+const AUDIT_KEEP: usize = 250;
+
+/// How many rungs each of the exit grid's three axes carries.
+///
+/// Named rather than repeated as a bare `4` at the `grid::evaluate` call site,
+/// because [`GRID_VARIANTS`] is derived from it and the two drifting apart would
+/// make the printed exposure describe a grid that was not run.
+const GRID_RUNGS: usize = 4;
+
+/// How many exit settings the audit's grid actually evaluates.
+///
+/// `grid::variants` is `(stops+1) · (targets+1) · (trails+1)` — the `+1` on each
+/// axis is the "no rung on this axis" row, which is why four rungs give
+/// **125 cells and not 64**. Derived from [`GRID_RUNGS`] through the same
+/// function the grid itself uses, so a change to the rung count moves this
+/// number rather than leaving it stale.
+/// The `+1` on each axis is the "no rung on this axis" row, which is why four
+/// rungs give **125 cells and not 64**.
+///
+/// Written as a literal and then PROVED against `grid::variants` by the
+/// assertion below, rather than computed from it. The workspace denies `as`
+/// casts and `u64::try_from` is not `const`, so deriving a `u64` from that
+/// `usize` inside a `const` is not expressible — but a compile-time equality is,
+/// and it fails the BUILD if the rung count ever moves without this number
+/// following. A stale figure here would make the printed exposure describe a
+/// grid that was never run.
+const GRID_VARIANTS: u64 = 125;
+const _: () = assert!(
+    grid::variants(GRID_RUNGS, GRID_RUNGS, GRID_RUNGS) == 125,
+    "GRID_VARIANTS must equal grid::variants(GRID_RUNGS, ..); the exit-grid \
+     exposure would otherwise charge for a grid that was not evaluated"
+);
+
+/// The strongest combination by evidence that is also **closed**.
+///
+/// # Why not simply the first one, which is what this replaced
+///
+/// The audit used to trade `closed::closed(&sweep).kept.first()`. `closed`
+/// builds `kept` from `Sweep::all_frequent`, which is level-ascending and then
+/// discovery order within a level — an ordering `crates/engine` states outright
+/// is **not a ranking**. So `first()` was normally whichever k=1 bit happened to
+/// survive first, and every figure downstream of it — the trades, the 125-cell
+/// exit grid, the walk-forward, the PBO, the bootstrap — described that
+/// arbitrary singleton.
+///
+/// # Why the closed set is still applied, as a filter
+///
+/// Evidence order alone is not enough. A superset with the same support as its
+/// subset adds a condition that changed nothing, so trading it would report a
+/// k=3 result that is really a k=1 one wearing two extra names. `closed` removes
+/// exactly those. Ranking first and filtering second gives the strongest
+/// candidate that is also irredundant — which neither ordering gives alone.
+///
+/// # Cost
+///
+/// One `HashSet` build over the closed set, then one pass over `ranked.top`
+/// with an O(1) probe each. Both are bounded by `keep`, not by how many
+/// combinations the sweep produced.
+fn closed_by_evidence<'a>(
+    ranked: &'a runner::rank::Ranked,
+    sweep: &engine::Sweep,
+) -> Vec<&'a runner::rank::Scored> {
+    let kept: std::collections::HashSet<_> = closed::closed(sweep)
+        .kept
+        .iter()
+        .map(|item| item.mask)
+        .collect();
+    ranked
+        .top
+        .iter()
+        .filter(|scored| kept.contains(&scored.mask))
+        .collect()
+}
+
+/// How many exit settings the audit also searched, and what that costs the bar.
+///
+/// # The axis the significance section does not charge for
+///
+/// `report::render`'s SIGNIFICANCE block computes its Bonferroni bar from
+/// `significance::trials`, which counts one thing: how many condition
+/// COMBINATIONS had their support measured. That is the whole search for
+/// `sweep-stored`, which ranks on forward returns and builds no grid.
+///
+/// It is not the whole search here. This command evaluates the chosen
+/// combination at [`GRID_VARIANTS`] stop/target/trail settings and keeps the
+/// best of them, and selecting a maximum over 125 cells is 125 more chances to
+/// look good by luck. None of it entered the bar printed above.
+///
+/// # Why a second bar rather than a replacement
+///
+/// Because the true correction is **unknown and this one is only a ceiling**.
+/// The 125 cells share a single trade walk, so they are heavily correlated and
+/// the effective trial count is somewhere between 1 and 125 — unmeasured.
+/// Replacing the printed bar with the ceiling would reject real findings;
+/// leaving it alone accepts noise. Printing both, and saying which is which,
+/// hands the reader the range that is actually known. `CLAUDE.md` §3 rule 6
+/// asks for exactly that when a bound cannot be met, and §3 rule 1 forbids
+/// inventing the discount that would collapse the range to a point.
+fn grid_exposure(sweep: &engine::Sweep) -> String {
+    let plain = runner::significance::effective_trials(sweep);
+    let ceiling = runner::significance::trials_with_grid(sweep, GRID_VARIANTS);
+    let mut out = String::with_capacity(512);
+    let _ = writeln!(
+        out,
+        "\nEXIT-GRID EXPOSURE\n  \
+         combinations weighed {plain}\n  \
+         with {GRID_VARIANTS} exit settings each, at most {ceiling}\n  \
+         t must clear {:.2} on the combination axis alone\n  \
+         t must clear {:.2} if every exit setting were an independent trial\n\
+         \n  \
+         The truth is between them and is NOT measured: the {GRID_VARIANTS} cells \
+         share one trade walk, so they are correlated rather than independent. \
+         The upper figure cannot be cleared by luck; the lower one can.",
+        runner::significance::bonferroni_t(plain),
+        runner::significance::bonferroni_t(ceiling),
+    );
+    out
+}
+
+/// The combination the audit traded, in words, above its own P&L.
+///
+/// `CLAUDE.md` §4: a number whose subject is unstated is a number that cannot be
+/// checked. Every figure in the sections below belongs to this one combination,
+/// and until it was printed the report gave the reader no way to learn which.
+fn traded_line(scored: &runner::rank::Scored) -> String {
+    let mut out = String::with_capacity(256);
+    let _ = writeln!(
+        out,
+        "\nTRADED COMBINATION\n  {}\n  hits {} · n {} · mean {} paisa · t {:.2}",
+        runner::report::condition_names(&scored.mask).join(" · "),
+        scored.hits,
+        scored.edge.n,
+        scored.edge.mean_paisa,
+        scored.edge.t,
+    );
+    out
+}
 
 /// The seed the resampler is started from.
 ///
@@ -1105,30 +1278,47 @@ fn audit_bars(
         Ok(e) => e,
         Err(why) => return format!("refused: {why}\n"),
     };
-    let column = Column::build(&bars, &mut ev);
-    let mut ev2 = match evaluator() {
-        Ok(e) => e,
-        Err(why) => return format!("refused: {why}\n"),
-    };
-    let outcome = Sweeper::new(Ladder::with_min_hits(min_hits)).run(&bars, &mut ev2);
+    let horizon = Horizon::DEFAULT;
+    // ONE FOLD, NOT TWO, AND ONE EVALUATOR RATHER THAN A CALLER'S PLUS A
+    // PRIVATE ONE. This was `Column::build(&bars, &mut ev)` followed by a second
+    // `evaluator()` that the sweep used instead — so the `ev` parameter governed
+    // the column and nothing else, and a caller passing custom widths would have
+    // had masks discovered under one vocabulary indexing a column built under
+    // another. `run_ranked` returns the column it measured on, so the sweep, the
+    // ranking and the trade walk below cannot disagree about what they saw.
+    let run = Sweeper::new(Ladder::with_min_hits(min_hits))
+        .run_ranked(&bars, &mut ev, horizon, AUDIT_KEEP);
+    let (outcome, ranked, column) = (run.outcome, run.ranked, run.column);
 
     let mut out = String::from(banner);
     out.push('\n');
     out.push_str(&runner::report::render(&outcome, id));
+    // WHICH COMBINATIONS SURVIVED, BY NAME, before anything is traded. The
+    // stored SWEEP has printed this since the ranker was wired; the audit did
+    // not, so the one command that produces a P&L was the one that could not say
+    // what the P&L was of.
+    out.push_str(&runner::report::render_findings(&ranked, &outcome.sweep));
 
-    // The first CLOSED combination, or nothing to trade.
-    let distinct = closed::closed(&outcome.sweep);
-    let Some(first) = distinct.kept.first() else {
+    // RANKED BY EVIDENCE, THEN FILTERED FOR REDUNDANCY. Computed once and used
+    // twice: the head is the combination this audit trades, and the first
+    // `BOOTSTRAP_CANDIDATES` of it are the family the bootstrap compares. Those
+    // used to be two different sets — the trade took `closed.kept.first()` and
+    // the bootstrap took `closed.kept`'s first sixteen, both in canonical mask
+    // order — so the report's chosen strategy was not even a member of the
+    // family whose p-value the report printed beside it.
+    let by_evidence = closed_by_evidence(&ranked, &outcome.sweep);
+    let Some(first) = by_evidence.first().copied() else {
         out.push_str(
             "\nAUDIT\n  no closed combination survived, so there is nothing to \
              trade. This is extinction, not a failure.\n",
         );
         return out;
     };
+    out.push_str(&traded_line(first));
+    out.push_str(&grid_exposure(&outcome.sweep));
 
-    let horizon = Horizon::DEFAULT;
     let taken = trade::walk(&bars, &column, &first.mask, horizon, Direction::Long);
-    let exits = grid::evaluate(&bars, &column, &first.mask, horizon, Side::Long, 4);
+    let exits = grid::evaluate(&bars, &column, &first.mask, horizon, Side::Long, GRID_RUNGS);
     out.push('\n');
     // THE WALK-FORWARD, WHICH USED TO BE A `None`.
     //
@@ -1201,12 +1391,24 @@ fn audit_bars(
         .enumerate()
         .map(|(slot, day)| (*day, slot))
         .collect();
-    let family: Vec<Vec<i64>> = distinct
-        .kept
+    // THE FAMILY THE REPORT ACTUALLY SELECTS FROM, and it did not used to be.
+    //
+    // White's Reality Check and Hansen's SPA are FAMILY-WISE tests: they ask
+    // whether the best of a set beats what the same search finds on resampled
+    // data, so the set has to be the set the search considered. This walked
+    // `closed.kept` truncated to the first sixteen in canonical mask order —
+    // which `crates/engine` states outright is not a ranking — while the
+    // combination the report chose to trade came from a different rule entirely.
+    // The p-value therefore described a family the reported strategy need not
+    // even have belonged to.
+    //
+    // `by_evidence` is the same list the traded combination is drawn from, so
+    // the head of the family and the strategy under test are now one thing.
+    let family: Vec<Vec<i64>> = by_evidence
         .iter()
         .take(BOOTSTRAP_CANDIDATES)
-        .map(|item| {
-            let walked = trade::walk(&bars, &column, &item.mask, horizon, Direction::Long);
+        .map(|scored| {
+            let walked = trade::walk(&bars, &column, &scored.mask, horizon, Direction::Long);
             session_returns(&index, days.len(), &bars, &walked)
         })
         .collect();

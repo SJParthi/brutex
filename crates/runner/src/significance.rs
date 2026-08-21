@@ -112,10 +112,28 @@ pub fn trials(sweep: &Sweep) -> u64 {
 /// module does not, and guessing would make one of the two reports wrong no
 /// matter which default it picked.
 ///
+/// # This is an UPPER bound, and saying which direction matters
+///
+/// The product assumes the `variants` settings are independent trials. **They
+/// are not.** A grid's 125 cells share one trade walk — `crate::grid` caches the
+/// path crossings once per candidate and each variant's exit is then three
+/// integer compares — so neighbouring cells differ by one rung and their
+/// outcomes are heavily correlated. The effective number of independent trials
+/// is somewhere between 1 and `variants`, and **nobody has measured where**.
+///
+/// So this returns the ceiling: a bar computed from it is harder to clear than
+/// the true one. A finding that clears it is safe; a finding that does not is
+/// not thereby worthless. That is the same direction, and the same disclaimer,
+/// [`expected_max_t`] already carries for its own independence assumption.
+///
+/// The alternative was to invent a correlation discount, which `CLAUDE.md` §3
+/// rule 1 forbids, or to keep charging nothing at all — which was the defect.
+/// An upper bound stated as one is the honest third option, per §3 rule 6.
+///
 /// # Multiplicative, and the saturation is deliberate
 ///
 /// The two selections compose: each of `trials` combinations was examined at
-/// `variants` settings, so the family is the product. `variants == 0` is
+/// `variants` settings, so the family is at most the product. `variants == 0` is
 /// treated as 1 — "no grid was run" — rather than collapsing the whole family
 /// to zero, which would return a bar of zero and pass everything.
 ///
