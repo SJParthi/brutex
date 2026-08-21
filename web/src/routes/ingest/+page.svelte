@@ -45,7 +45,23 @@
   // to nothing else — see the rung-drop effect for why an effect that reacts to
   // its own write is a hazard rather than a nicety.
   import { onMount, untrack } from 'svelte';
-  import { store, syncStore, refreshStore, watchStore, foldMonths } from '$lib/store.svelte.js';
+  // `survey` IS ALREADY IN MEMORY AND COSTS NOTHING TO READ.
+  //
+  // `$lib/feeds.svelte.js` awaits `surveyStores(feeds.all)` while loading the
+  // feed list, because picking a sensible default feed means knowing which
+  // stores hold anything. So every page — this one included — boots with one
+  // `FeedHolding` per feed already folded and stamped with the feed list it
+  // answered for. Importing it here adds a READER, not a fetch, and the call
+  // below is a no-op whenever that answer is already held.
+  import {
+    store,
+    survey,
+    surveyStores,
+    syncStore,
+    refreshStore,
+    watchStore,
+    foldMonths
+  } from '$lib/store.svelte.js';
   import { notAReceipt, RECEIPT_HEADER } from '$lib/receipt.js';
   // IMPORTED AS `request`, AND THE ALIAS IS THE WHOLE POINT.
   //
@@ -2913,6 +2929,18 @@
       }))
   );
 
+  /* THE HOLDINGS ARE RE-ASKED WHEN THE FEED LIST CHANGES, AND NEVER OTHERWISE.
+     `$lib/feeds.svelte.js` already folded this at boot to pick a default feed,
+     and `surveyStores` is a no-op whenever the answer for that list and
+     generation is already held — so the common case costs nothing and this
+     exists for the uncommon one: a feed appearing in `/feeds.json` after the
+     page loaded, which would otherwise leave its lane reading "nothing held"
+     against a store nobody had looked at. The same shape and the same reasoning
+     as `/db`'s own call. */
+  $effect(() => {
+    if (feeds.all.length > 0) surveyStores(feeds.all);
+  });
+
   /**
    * THE WINDOW YOU ASKED FOR, AND WHAT EACH LEG CAN ACTUALLY ANSWER OF IT.
    *
@@ -2949,14 +2977,25 @@
     return wireBodies.map((leg) => {
       const lost = Math.max(0, Math.min(span, Date.parse(leg.from) - opens));
       const deadPct = (lost / span) * 100;
+      // WHAT THIS FEED'S STORE ACTUALLY HOLDS, beside what it can answer for.
+      // Reach is a CLAIM the descriptor makes; holding is a MEASUREMENT off
+      // disk, and the two failure modes look nothing alike: a feed that reaches
+      // the whole window and holds nothing has never been asked, while one that
+      // cannot be read at all is broken and no pull will fix it. `survey` is
+      // already folded per feed — see the import — so this is a Map lookup.
+      const hold = survey.byFeed.get(leg.vendor) ?? null;
       return {
         key: `${leg.vendor}·${leg.dir}`,
+        wire: leg.vendor,
         feed: feedName(leg.vendor),
         rung: RUNGS.find((r) => r.dir === leg.dir)?.label ?? leg.dir,
         at: leg.from,
         deadPct,
         livePct: 100 - deadPct,
-        whole: lost === 0
+        whole: lost === 0,
+        bars: hold?.bars ?? 0,
+        broken: hold?.error ?? null,
+        held: hold !== null
       };
     });
   });
@@ -7440,6 +7479,29 @@
                           <span class="lat" class:dim={lane.whole}>
                             {lane.whole ? 'whole window' : dayLabel(lane.at)}
                           </span>
+                          <!-- WHAT IS ON DISK FOR THIS FEED, AND THE THREE
+                               STATES ARE NOT TWO. A store that cannot be READ
+                               is broken and no pull will fix it; a store that
+                               reads and holds nothing has simply never been
+                               asked; a store with bars in it has been. Those
+                               call for three different actions, so they get
+                               three different words. -->
+                          <span
+                            class="lhold"
+                            class:down={lane.broken !== null}
+                            class:up={lane.broken === null && lane.bars > 0}
+                            title={lane.broken !== null
+                              ? `${lane.feed}'s store could not be read: ${lane.broken}. That is a broken store rather than an empty one, and a pull will not settle it.`
+                              : lane.bars > 0
+                                ? `${lane.feed}'s store holds ${n(lane.bars)} bar(s) across every instrument, timeframe and month it has — NOT only this window. What this window holds is the census below, and that is scoped to the feed the counts are stamped with.`
+                                : `${lane.feed}'s store reads cleanly and holds nothing at all. Nothing has been asked of this vendor yet.`}
+                          >
+                            {lane.broken !== null
+                              ? 'store unreadable'
+                              : lane.bars > 0
+                                ? `${n(lane.bars)} held`
+                                : 'nothing held'}
+                          </span>
                         </div>
                       {/each}
                     </div>
@@ -10266,7 +10328,7 @@
   }
   .lane {
     display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
     align-items: center;
     gap: var(--s3);
     min-width: 0;
@@ -10312,6 +10374,24 @@
      the amber that means a date was moved. */
   .lat.dim {
     color: var(--faint);
+  }
+  /* THE HOLDING, AND ITS DEFAULT TONE IS THE QUIET ONE. Neutral means "reads
+     cleanly, holds nothing" — the ordinary state before a first pull, and not
+     something to colour as a problem. Only the two ends take a hue: red for a
+     store that cannot be read, green for one with bars in it. */
+  .lhold {
+    font-family: var(--num);
+    font-variant-numeric: tabular-nums;
+    font-size: var(--fs-micro);
+    color: var(--faint);
+    white-space: nowrap;
+  }
+  .lhold.up {
+    color: var(--up);
+  }
+  .lhold.down {
+    color: var(--down);
+    font-family: var(--sans);
   }
 
   /* ---- the completeness fill ----
