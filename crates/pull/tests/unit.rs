@@ -7588,3 +7588,76 @@ fn only_derivatives_moved_on_2026_08_03_and_the_index_kept_its_close() {
         None,
     );
 }
+
+/// **THE INDEX HOLDS ONE ROW PER MONTH; THE LOG HOLDS ONE PER WRITE.**
+///
+/// The manifest is append-only — *"an update to a key that already exists is a
+/// new entry, and the newest wins"* — so a month backfilled day by day is
+/// appended once per day. `Manifest::all` walks the LOG and yields every one of
+/// those writes; `Manifest::newest` walks the INDEX and yields the month once.
+///
+/// # The false verdict this pins
+///
+/// `api::verify` scrubbed `all()`, checking each row against the bytes on disk.
+/// For a resumed month that is twenty-one rows of which **twenty describe a file
+/// that has since grown**, so a perfectly sound month reported twenty genuine
+/// disagreements and one agreement — `verified: false` for every store that had
+/// ever been resumed, which is every real store. The noise then consumed the
+/// report's name cap, pushing the real `Missing` months out of sight: the one
+/// class of finding the surface exists to show was the class it hid.
+///
+/// Both accessors are kept because both answer real questions. This asserts they
+/// answer DIFFERENT ones, which is the property a caller has to choose between.
+#[test]
+fn the_newest_view_holds_one_row_per_month_where_the_log_holds_one_per_write() {
+    let mut census = fresh(Vendor::Groww);
+
+    // ONE MONTH, GROWING — the shape a day-by-day backfill writes. Row counts
+    // ascend because `record_held` refuses a count that goes backwards, which is
+    // itself the append-only rule showing through.
+    for day in 1..=5u64 {
+        let growing = entry(
+            "NIFTY",
+            2026,
+            3,
+            day * 375,
+            1,
+            i64::from(day as i32) * 1_000,
+        );
+        census
+            .record_held(Held::new(growing, Closes::UNKNOWN))
+            .expect("a growing month is a legal append");
+    }
+    // AND A SECOND, DISTINCT MONTH, so the index is not trivially of size one.
+    let other = entry("BANKNIFTY", 2026, 4, 375, 1, 2);
+    census
+        .record_held(Held::new(other, Closes::UNKNOWN))
+        .expect("a second key");
+
+    assert_eq!(
+        census.all().len(),
+        6,
+        "the LOG keeps every write: five generations of one month plus one other"
+    );
+    assert_eq!(
+        census.newest().len(),
+        2,
+        "the INDEX keeps one row per key — this is the number a scrub must walk, \
+         and reading the log instead is what made a healthy store report \
+         `seen: 6, agreed: 1`"
+    );
+
+    // AND IT IS THE NEWEST, not merely one of them. A view that answered the
+    // FIRST write would be just as wrong and just as small.
+    let nifty = census
+        .newest()
+        .into_iter()
+        .find(|e| e.key.symbol.as_str() == "NIFTY")
+        .expect("the month is held");
+    assert_eq!(
+        nifty.rows,
+        5 * 375,
+        "the row count is the last one written, which is the one the file on \
+         disk actually has"
+    );
+}

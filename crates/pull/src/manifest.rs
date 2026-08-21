@@ -148,7 +148,7 @@
 //! census is. **A writer must produce bytes this module's own reader accepts**,
 //! and the round trip that proves it goes through [`Manifest::load`] unchanged.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -2645,6 +2645,78 @@ impl Manifest {
     #[must_use]
     pub fn all(&self) -> impl ExactSizeIterator<Item = Entry> + '_ {
         self.log.iter().map(|held| held.entry)
+    }
+
+    /// The NEWEST entry per key — one row per instrument-month, never a history.
+    ///
+    /// # The difference from [`Self::all`], and why it is not cosmetic
+    ///
+    /// The manifest is append-only: *"an update to a key that already exists is
+    /// a **new entry**, and the newest wins"* — [`Self::record_held`] says so.
+    /// So [`Self::all`] walks the LOG and yields one row per *write*, while the
+    /// index holds one row per *key*.
+    ///
+    /// For a store built the way this one is built, those two numbers are very
+    /// far apart. A month backfilled day by day is appended once per day, so it
+    /// appears in the log twenty-one times and in the index once — and **twenty
+    /// of those twenty-one rows describe a file that has since grown**. Anything
+    /// that checks a row against the bytes on disk therefore finds twenty
+    /// genuine disagreements and one agreement, for a month that is perfectly
+    /// healthy.
+    ///
+    /// That is exactly what `api::verify` was doing: it scrubbed
+    /// [`Self::all`] and reported `seen: 21, agreed: 1` on a sound store, which
+    /// makes `verified: false` the answer for every store that was ever resumed.
+    /// Worse, the real `Missing` months were pushed past the report's name cap
+    /// by the noise, so the one class of finding the surface exists to show was
+    /// the class it hid.
+    ///
+    /// **Neither accessor is wrong; they answer different questions.**
+    /// [`Self::all`] is *what was written* — the right shape for auditing the
+    /// counter's own history. This is *what is held* — the right shape for
+    /// checking the counter against the files it describes.
+    ///
+    /// # The order is the LOG's, and that is deliberate
+    ///
+    /// Reading `self.index.values()` would be the obvious implementation and it
+    /// hands back a `HashMap`'s order, which is not stable between runs. A
+    /// caller that truncates — and `api::verify` truncates at `MAX_NAMED` —
+    /// would then name a different subset on every reload, which is not a
+    /// measurement. [`Self::held_keys`] states the same hazard and leaves it to
+    /// the caller; here the caller would have to sort, and a sort is
+    /// **O(keys log keys)** — a log factor per element on a path whose whole
+    /// discipline is that each step is constant.
+    ///
+    /// So the log is walked BACKWARD instead, keeping an entry the first time
+    /// its key is seen. Backward, because the manifest is append-only and the
+    /// newest write is the last one, so the first sighting walking back IS the
+    /// newest. The result is newest-per-key in reverse-append order — as
+    /// deterministic as the file itself, with no comparison sort anywhere.
+    ///
+    /// # Cost
+    ///
+    /// **One hash probe and one push per entry — O(1) per operation**, which is
+    /// the bound `CLAUDE.md` §3 rule 4 actually names. O(entries) steps in
+    /// total, which is inherent: you cannot report what is held without looking
+    /// at what was written. That is more STEPS than reading the index directly
+    /// (entries ≥ keys) and each one is cheaper than the `log keys` a sort would
+    /// add, and the result is ordered where the index's is not.
+    ///
+    /// Allocates two collections bounded by the key count, both reserved up
+    /// front, and nothing per step beyond that.
+    #[must_use]
+    pub fn newest(&self) -> Vec<Entry> {
+        let mut seen: HashSet<EntryKey> = HashSet::with_capacity(self.index.len());
+        let mut out: Vec<Entry> = Vec::with_capacity(self.index.len());
+        for held in self.log.iter().rev() {
+            // ONE PROBE, AND IT BOTH TESTS AND RECORDS. `insert` answers whether
+            // the key was new, so the two cannot come apart the way a
+            // `contains` followed by an `insert` can.
+            if seen.insert(held.entry.key) {
+                out.push(held.entry);
+            }
+        }
+        out
     }
 
     /// The newest row for one key — the entry and its closes. One hash probe.

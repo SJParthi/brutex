@@ -17824,3 +17824,93 @@ decision directly — the environment reading stays in `install_log` for the sam
 reason `root_from` is split from `store_root`: a test that installed a
 process-wide sink would poison every later test in the same binary, and which one
 won would depend on thread scheduling.
+
+### D-0227 — the F&O route paid for a collision it could have refused, and the verifier cried wolf on every resumed store
+
+Three choices, closing two of the four items D-0224 recorded as still open.
+
+**1. `pull_fno` takes its feed's seat, and holds it across the walk.**
+`Control::take_seat` had exactly ONE production call site in `crates/api`, in
+`pull_spot`. The expired-derivative route took none, so for the length of a walk
+— a month of discovery plus the cross product of bar requests, which can run for
+half an hour — the seat mask read **zero** and `autopilot::round`'s
+`take_every_seat` was free to win the gap and hold every feed for a whole month's
+pass.
+
+It cost more here than it would have on the spot route, because the collision was
+discovered LATER. `pull::ingest` takes the census lock per contract-month, so
+without a seat the refusal — *"another ingest holds the census lock … refused
+rather than queued"* — arrived **after** the vendor request had been built,
+issued, answered and charged against the day's allowance. A seat turns a run that
+spends quota to be refused into one honest refusal naming the control that
+resolves it. §4: degrade loudly and name the reason.
+
+The feed is parsed BEFORE the seat is taken, as it is on the spot route: a seat
+cannot be per-feed if it is claimed before anyone knows which feed. The guard is
+bound as `_seat` rather than `_`, so it lives to the end of the handler; a
+wildcard drops it immediately and reopens the window it exists to close, while
+still containing the call any naive assertion would look for.
+
+**2. `Manifest::newest`, and `api::verify` walks it instead of `all`.**
+The manifest is append-only — *"an update to a key that already exists is a new
+entry, and the newest wins"*. `Manifest::all` walks the LOG and yields one row
+per **write**; the index holds one per **key**. For a month backfilled day by day
+those are twenty-one rows and one, and **twenty of the twenty-one describe a file
+that has since grown**.
+
+`api::verify` scrubbed `all()` against the bytes on disk, so a perfectly sound
+month reported twenty genuine disagreements and one agreement — measured
+`seen: 21, agreed: 1, rows: 20`. `verified: false` was therefore the answer for
+**every store that had ever been resumed**, which is every real store. Worse, the
+noise consumed the report's `MAX_NAMED` budget and pushed the real `Missing`
+months into `undrawn`: the one class of finding the surface exists to show was
+the class it hid. A verifier that cries wolf on a healthy store is worse than no
+verifier, because it teaches the reader to ignore it.
+
+Both accessors are kept. `all` is *what was written* and is the right shape for
+auditing the counter's own history; `newest` is *what is held* and is the right
+shape for checking the counter against the files it describes.
+
+**3. `newest` walks the log BACKWARD rather than reading the index — and that is
+an O(1) decision, not a style one.**
+`self.index.values()` is the obvious implementation and hands back a `HashMap`'s
+order, which is not stable between runs. A caller that truncates — and `verify`
+truncates at `MAX_NAMED` — would then name a different subset on every reload,
+which is not a measurement. The obvious repair is for the caller to sort, and a
+sort is **O(keys log keys)**: a log factor per element, on a path whose whole
+discipline is that every step is constant.
+
+Walking the log backward and keeping the first sighting of each key gives the
+newest write — because append-only means the last write is the newest — in
+reverse-append order, which is as deterministic as the file itself. **One hash
+probe and one push per entry: O(1) per operation**, §3 rule 4's actual bound,
+with no comparison sort anywhere. It costs more STEPS than reading the index
+(entries ≥ keys) and each is cheaper than the `log keys` a sort would add, and
+the result is ordered where the index's is not. `insert` both tests and records,
+so the two cannot come apart the way a `contains` followed by an `insert` can.
+
+**What refuses them.**
+`api::server::both_pull_routes_claim_a_seat_before_they_reach_a_vendor` asserts
+each route claims the seat, BINDS it, and resolves the feed first — three
+properties, because the call alone is satisfied by a version that drops the guard
+on the spot. `pull::unit::the_newest_view_holds_one_row_per_month_where_the_log_holds_one_per_write`
+records one month five times plus a second month and asserts the log holds six
+and the index two, then that the surviving row carries the LAST row count — a
+view answering the FIRST write would be just as small and just as wrong.
+`api::server::the_verifier_walks_the_index_and_not_the_append_log` pins the call
+site and refuses a sort.
+
+That last test matched a bare `manifest.all()` in its first version and failed on
+`verify.rs`'s own comment, which quotes the old call while explaining the defect.
+It matches the loop header now. This is the second time a source-text assertion
+in this workspace has matched the prose written to explain it — the first was
+`the_retry_policy_has_exactly_two_call_sites_and_they_are_the_two_ladders`, which
+counted its own needles. **A source-text test must be written against a form
+that only the code can take.**
+
+**Still open**, so this entry does not read as a finish line: `fnowork::gaps` has
+no production caller, so nothing says which expired contract-months are owed; the
+rolling driver asks `ORDINALS_ASKED = 1` of three, which is the operator's own
+rule of 2026-08-20 and not a defect; and the rolling receipt's displayed `planned`
+figure omits the `.min(ORDINALS_ASKED)` that `planned_rolling_requests` applies,
+so it overstates by 3× and then reports every planned contract answered.

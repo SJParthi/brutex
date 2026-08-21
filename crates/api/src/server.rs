@@ -10154,6 +10154,67 @@ pub(crate) async fn pull_fno(
 ) -> (axum::http::StatusCode, axum::response::Html<String>) {
     let now = std::time::SystemTime::now();
     let journal = site.journal();
+
+    // THE SEAT, TAKEN HERE TOO — AND HELD ACROSS THE WHOLE WALK.
+    //
+    // # The asymmetry this removes
+    //
+    // `take_seat` had exactly ONE production call site in this file, in
+    // `pull_spot`. This route took none at all, so for the length of an F&O
+    // walk — which is a month of discovery plus a cross product of bar
+    // requests, and can run for half an hour — the seat mask read ZERO and the
+    // autopilot's `take_every_seat` was free to win it and hold every feed for
+    // a whole month's pass.
+    //
+    // # Why it costs more here than on the spot route
+    //
+    // Because the collision is discovered LATER. `pull::ingest` takes the
+    // census lock per contract-month, so without a seat the refusal —
+    // *"another ingest holds the census lock … refused rather than queued"* —
+    // arrives **after** the vendor request was built, issued, answered and
+    // charged against the day's allowance. The seat turns a run that spends
+    // quota to be refused into a single honest refusal that names the control
+    // which resolves it. `CLAUDE.md` §4: degrade loudly and name the reason.
+    //
+    // # Parsed before it is taken, exactly as the spot route does it
+    //
+    // A seat cannot be per-feed if it is claimed before anyone knows which feed.
+    // This is the same O(1) form lookup `parse_fno` does later, and an
+    // unreadable vendor word falls to the descriptor's default there too, so the
+    // seat and the walk can never disagree about which feed this is.
+    //
+    // # Held to the end of the function, deliberately
+    //
+    // `_seat` is bound rather than dropped, so it lives until this function
+    // returns — the whole walk, not one leg of it. Binding it to `_` would drop
+    // it immediately and reintroduce the gap this exists to close, which is why
+    // the name has an underscore prefix rather than being the bare wildcard.
+    let wants = ingest::parse_feed(&param(&body, "vendor")).unwrap_or(pull::vendor::Feed::Dhan);
+    let Some(_seat) = site.autopilot.take_seat(wants) else {
+        return (
+            axum::http::StatusCode::CONFLICT,
+            axum::response::Html(accepted_html(
+                "Expired F&O pull",
+                vec![(
+                    "Refused because",
+                    format!(
+                        "another pull already holds {}'s seat, so this walk was \
+                         refused BEFORE it asked the vendor for anything — rather \
+                         than spending a month of discovery and a cross product of \
+                         bar requests to be refused by the census lock at the end. \
+                         Other feeds are unaffected: the seats are per feed, \
+                         because the census they stand for is. If it is the \
+                         autopilot, pause it at /autopilot and try again; it \
+                         resumes from wherever the store reaches, so nothing is \
+                         lost by pausing.",
+                        wants.display()
+                    ),
+                )],
+                site.broker,
+            )),
+        );
+    };
+
     // THE SAME SHAPE `pull_spot` USES, and for the same reason its comment
     // gives: `dated` takes a SYNCHRONOUS closure and this answer is now async,
     // because discovery awaits a credential. Making `dated` generic over
@@ -16526,6 +16587,113 @@ mod tests {
         assert!(
             body.contains("await_budget(asked.feed, site)"),
             "the chunk loop still charges the permit for the first attempt"
+        );
+    }
+
+    /// **BOTH PULL ROUTES TAKE A PER-FEED SEAT, AND HOLD IT.**
+    ///
+    /// `take_seat` had exactly one production call site in this file — inside
+    /// `pull_spot`. The F&O route took none, so for the length of a walk (a
+    /// month of discovery plus a cross product of bar requests, which can run
+    /// for half an hour) the seat mask read zero and `autopilot::round`'s
+    /// all-or-nothing claim was free to win it and hold every feed for a whole
+    /// month's pass.
+    ///
+    /// It cost more on this route than on the spot one because the collision was
+    /// discovered LATER: `pull::ingest` takes the census lock per contract-month,
+    /// so the refusal arrived **after** the vendor request had been built,
+    /// issued, answered and charged against the day's allowance.
+    ///
+    /// Source-text because both routes are async axum handlers taking a live
+    /// `Site` and a real store root, and what is checkable is *that the seat is
+    /// claimed at the door*. The seat mechanism's own behaviour is proved by
+    /// `autopilot`'s tests, which drive `take_seat` and `take_every_seat`
+    /// against each other directly.
+    #[test]
+    fn both_pull_routes_claim_a_seat_before_they_reach_a_vendor() {
+        let source = include_str!("server.rs");
+        let body_of = |after: &str| -> String {
+            let tail = source
+                .split_once(after)
+                .unwrap_or_else(|| panic!("{after} exists"))
+                .1;
+            tail[..tail
+                .find("\n}\n")
+                .unwrap_or_else(|| panic!("{after}'s body ends at a column-0 brace"))]
+                .to_owned()
+        };
+
+        for route in [
+            "pub(crate) async fn pull_spot",
+            "pub(crate) async fn pull_fno",
+        ] {
+            let body = body_of(route);
+            assert!(
+                body.contains("site.autopilot.take_seat(wants)"),
+                "{route} must claim its feed's seat at the door. Without it the \
+                 autopilot wins the gap and this route discovers the collision \
+                 only after it has already spent the vendor's allowance"
+            );
+            // BOUND, NOT DISCARDED. `let Some(_) = ..` would drop the guard on
+            // the spot, reopening the window the seat exists to close — and it
+            // would still contain the call the assertion above looks for.
+            assert!(
+                body.contains("let Some(_seat) ="),
+                "{route} must BIND the seat so it lives to the end of the \
+                 handler; a wildcard drops it immediately"
+            );
+            // AND THE FEED IS KNOWN FIRST. A seat cannot be per-feed if it is
+            // claimed before anyone knows which feed.
+            let took = body
+                .find("take_seat(wants)")
+                .expect("the seat is taken in this route");
+            let parsed = body
+                .find("ingest::parse_feed(")
+                .expect("the feed is parsed in this route");
+            assert!(
+                parsed < took,
+                "{route} must resolve the feed before claiming its seat, or the \
+                 seat and the run disagree about which vendor this is"
+            );
+        }
+    }
+
+    /// **THE VERIFIER SCRUBS WHAT IS HELD, NOT WHAT WAS WRITTEN.**
+    ///
+    /// `api::verify` walked `Manifest::all()` — the append LOG, one row per
+    /// write. A month backfilled day by day is twenty-one rows of which twenty
+    /// describe a file that has since grown, so a sound month reported twenty
+    /// disagreements and one agreement and `verified: false` was the answer for
+    /// every store that had ever been resumed.
+    ///
+    /// The behaviour of the two views is proved in
+    /// `pull::unit::the_newest_view_holds_one_row_per_month_where_the_log_holds_one_per_write`.
+    /// What is pinned here is that the route reads the right one.
+    #[test]
+    fn the_verifier_walks_the_index_and_not_the_append_log() {
+        let source = include_str!("verify.rs");
+        // THE LOOP HEADER, NOT THE WORD. The file's own comment explains the
+        // defect and therefore QUOTES the old call — a bare `manifest.all()`
+        // needle matches that prose and the test fails on its own explanation.
+        // Measured: this test's first version did exactly that. The call site is
+        // what decides, so the call site is what is matched.
+        assert!(
+            source.contains("for entry in manifest.newest()"),
+            "the scrub must walk one row per instrument-month"
+        );
+        assert!(
+            !source.contains("for entry in manifest.all()"),
+            "walking the log re-scrubs every superseded generation and reports \
+             each as a disagreement"
+        );
+        // AND NOTHING IS SORTED HERE. `Manifest::newest` walks the append log
+        // backward and keeps the first sighting of each key, so the order is the
+        // file's own and already deterministic. A sort would be a `log keys`
+        // factor on a path whose discipline is that every step is constant.
+        assert!(
+            !source.contains("sort_unstable_by_key") && !source.contains(".sort("),
+            "the order arrives deterministic from `newest`; sorting here would \
+             add a log factor to buy something already held"
         );
     }
 

@@ -151,7 +151,37 @@ pub fn vendor(root: &Path, census: &VendorCensus) -> Report {
     // rides along rather than stopping the walk.
     let degraded = manifest.degraded_reason().map(|why| why.to_string());
 
-    for entry in manifest.all() {
+    // THE INDEX, NOT THE LOG — one row per instrument-month, never a history.
+    //
+    // # The false disagreement this removes
+    //
+    // This read `manifest.all()`, which walks the append LOG and yields one row
+    // per WRITE. The manifest is append-only, so a month backfilled day by day
+    // is appended once per day: twenty-one rows for one file, of which twenty
+    // describe a file that has since grown. Scrubbing those against the bytes on
+    // disk found twenty genuine disagreements and one agreement — measured
+    // `seen: 21, agreed: 1, rows: 20` — for a month that was perfectly sound.
+    //
+    // So `verified: false` was the answer for **every store that had ever been
+    // resumed**, which is every real store. And because the noise consumed the
+    // report's `MAX_NAMED` budget, the genuine `Missing` months were pushed into
+    // `undrawn` — the one class of finding this surface exists to show was the
+    // class it hid. A verifier that cries wolf on a healthy store is worse than
+    // no verifier, because it trains the reader to ignore it.
+    //
+    // `Manifest::newest` answers *what is held*; `all` answers *what was
+    // written*. Both are real questions and this one is the first.
+    //
+    // # AND IT IS ALREADY DETERMINISTIC, so nothing is sorted here
+    //
+    // A report truncated at `MAX_NAMED` that named a different subset on every
+    // reload would not be a measurement, and reading a `HashMap`'s values would
+    // do exactly that. `Manifest::newest` walks the append log backward instead,
+    // keeping the first sighting of each key — the newest write, because the log
+    // is append-only — so the order is the file's own and no comparison sort is
+    // needed. One hash probe per entry: O(1) per operation, no `log keys`
+    // factor. See its header.
+    for entry in manifest.newest() {
         // THE SAME DERIVATION THE WRITER USED, so a mismatch is a real
         // disagreement rather than an artefact of asking wrongly.
         // `crates/pull/src/ingest.rs` computes it exactly this way.
