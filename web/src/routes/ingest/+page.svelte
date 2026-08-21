@@ -7491,57 +7491,39 @@
              is narrative about the run; the outcome per instrument is a COLUMN
              in the results table below, which is where it belongs. -->
 
-        <!-- ══════════════════ BELOW THE PANEL, NOT INSIDE IT ══════════════════
-             THE CONTROL PANEL CARRIES CONTROLS. A caution box, a fold of wire
-             bodies and a paragraph of grey prose are all TRUE and all belong to
-             this form, and every one of them was standing between the operator
-             and the five dropdowns he came here to set. The panel above is the
-             mockup's panel now — a row of controls, a day window, two quiet
-             buttons — and everything that was crowding it is here, one row
-             below, at full width where a sentence can be a sentence.
+        <!-- ══ THE BAND UNDER THE PANEL IS GONE, AND WHAT IT HELD IS RECORDED ══
 
-             NOTHING IS DELETED. The three cautions are the same `cautions`
-             array rendered by the same loop; `askGap` is the same derived
-             sentence; the wire fold is byte for byte the fold that was inside
-             the form, still closed by default, still one `<p>` per ticked rung.
-             What changed is which side of the panel edge they sit on.
+             `.belowsel` was a full-width row beneath the form, and by the time
+             it was measured it contained no elements at all — only the notes
+             below. Rendered: zero children, zero pixels tall, with a class, a
+             grid span and a flex column still describing it in the stylesheet.
+             An empty box that is styled and documented reads to the next person
+             as a slot waiting to be filled rather than as a thing that ended.
 
-             STILL INSIDE `.cols`, spanning both tracks, so it sits under the
-             form and the run card rather than becoming a third column beside
-             them. -->
-        <div class="belowsel">
-          <!-- THE FOUR FACTORS ARE FOUR CONTROLS AND THE PRODUCT IS THEIRS.
-               Where the ticked count and the reachable count differ, the
-               difference is stated in words: the request cannot be narrowed and
-               this is the only line that can say so. It sat in a 248px grid
-               track and wrapped into a ribbon; at full width it is a sentence. -->
-          <!-- THIS BANNER IS GONE FROM THE SURFACE AND JOINED THE FOLD.
-               `askGap` says the request cannot be narrowed to the ticked
-               instruments — true, and a property of api::ingest::SpotRequest
-               that never changes while this route exists. A permanent fact
-               about an API, drawn as a yellow alert above the button on every
-               load where a tick count differs, is not a warning: it is
-               furniture. It is in `cautions` below with the rest, where its
-               count is visible and its sentence is one click away. -->
+             WHAT LEFT, IN THE ORDER IT LEFT, because each was a decision:
 
-          <!-- ══ FOLDED, NOT DELETED, AND THE COUNT IS THE HEADLINE ══
+               * The four-factor sentence — where the ticked count and the
+                 reachable count differ, the difference stated in words. It sat
+                 in a 248px track and wrapped into a ribbon.
 
-               Every one of these is a real caution — a rung this build does not
-               fetch, a store with no directory for it, a window outside the
-               folder's span — and §4 requires each to be named. What it does
-               not require is all of them open, all at once, above the button,
-               as full paragraphs. Five stacked yellow blocks is how a page
-               teaches an operator to scroll past yellow blocks, and then the
-               sixth one is the one that mattered.
+               * `askGap`'s banner, saying the request cannot be narrowed to the
+                 ticked instruments. True, and a permanent property of
+                 `api::ingest::SpotRequest` for as long as this route exists — a
+                 fact about an API drawn as a yellow alert on every load is not a
+                 warning, it is furniture. It moved into `cautions`, where its
+                 count is visible and its sentence is one click away.
 
-               So the COUNT is always visible and the sentences are one click
-               away. Nothing is lost, nothing is summarised, and the disclosure
-               opens itself when there is exactly one — a single caution has
-               nothing to fold and hiding it would only add a click. -->
-          <!-- REMOVED: the caution disclosure. Not a control and not a column. -->
+               * The caution disclosure. Every one of those is a real caution and
+                 §4 requires each to be named — what §4 does not require is all
+                 of them open at once above the button. Five stacked yellow
+                 blocks is how a page teaches an operator to scroll past yellow
+                 blocks, and then the sixth is the one that mattered. The COUNT
+                 stays visible; the sentences are one click away.
 
-      <!-- REMOVED: "What goes on the wire" — the request body, collapsed. Not a control and not a column. -->
-        </div>
+               * "What goes on the wire" — the request body, collapsed.
+
+             Nothing above is lost and nothing was summarised; all of it lives in
+             `cautions` and the wire fold. Only the emptied container is gone. -->
       </div>
 
       <!-- ============================================== THE OUTCOMES ====== -->
@@ -8711,15 +8693,12 @@
     max-width: 320px;
     margin-top: var(--s5);
   }
-  /* EVERYTHING THAT WAS CROWDING THE PANEL, ONE ROW UNDER IT. Both tracks, so
-     it is a band beneath the form and the run card and never a third column. */
-  .belowsel {
-    grid-column: 1 / -1;
-    display: flex;
-    flex-direction: column;
-    gap: var(--s4);
-    min-width: 0;
-  }
+  /* `.belowsel` IS GONE — see the markup, where the band's whole history is
+     kept. It described a full-width row under the form holding everything that
+     had been crowding the panel; measured, it held nothing at all, and a styled
+     grid span with a flex column and a gap is an expensive way to describe zero
+     pixels. The rule outlived its contents by several commits, which is exactly
+     what a dead rule does: it goes on reading like a layout. */
   /* ONE LINE, AND IT CLIPS RATHER THAN WRAPS. This is where a fact that used
      to be a paragraph now lives, and a clause that can grow to three lines
      would reflow the whole strip the moment a feed answered slowly. The full
