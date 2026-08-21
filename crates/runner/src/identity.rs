@@ -3,37 +3,36 @@
 //! # The rule this exists to satisfy
 //!
 //! `CLAUDE.md` §3 rule 3: *"Every run is identified by `blake3(mask ‖ direction ‖
-//! instrument ‖ timeframe ‖ params ‖ data_digest ‖ vocab_version ‖ commit)`. No
-//! computation without that identity recorded."*
+//! instrument ‖ timeframe ‖ params ‖ data_digest ‖ vocab_version ‖ commit ‖
+//! feed)`. No computation without that identity recorded."*
 //!
 //! Until now nothing implemented it. `blake3 = "1"` sat unused in the workspace
 //! manifest with no lockfile entry at all, and the formula existed only as a doc
 //! comment in `crates/vocab`.
 //!
-//! # Nine terms: §3 rule 3's eight, plus the feed
+//! # Nine terms, and the ninth is not `mode`
 //!
-//! `docs/00-charter.md` §5 writes nine, adding a `mode` between `timeframe` and
-//! the parameters. `CLAUDE.md` §3 rule 3 writes eight and does not mention it,
-//! and `CLAUDE.md` §10 settles that disagreement in one line: *"If this file and
-//! a document disagree, this file wins and the document is the stale copy to
-//! fix."* So `mode` is not a term, the charter is the stale copy on that point,
-//! and no decision was invented.
+//! `docs/00-charter.md` §5 also writes nine — but its ninth is a `mode` between
+//! `timeframe` and the parameters, which §3 rule 3 has never mentioned.
+//! `CLAUDE.md` §10 settles that in one line: *"If this file and a document
+//! disagree, this file wins and the document is the stale copy to fix."* So
+//! `mode` is not a term, the charter is the stale copy on that point, and no
+//! decision was invented.
 //!
-//! **The ninth term here is not `mode`.** It is [`Run::feed`] — which feed wrote
-//! the bars — and it is an addition to §3 rule 3's list rather than a reading of
-//! it, so it carries its reason on the field itself. In short: the eight terms
-//! identify *what was computed* and none of them identifies *whose data it was
-//! computed on*. Two vendors redistributing one exchange feed can deliver
-//! byte-identical bars for a month, at which point every one of the eight is
-//! equal and two runs over two different feeds collide on one `RunId` — while
-//! `cli`'s own banner tells the reader the identity "names the exact column they
-//! came from". A term that is only incidentally distinguishing is not an
-//! identity term.
+//! The ninth term rule 3 does carry is [`Run::feed`], added by **D-0220**. The
+//! other eight identify *what was computed* and none of them identifies *whose
+//! data it was computed on*. The store is keyed by vendor, so one
+//! instrument-month exists once per feed and sweeping two of them is two runs;
+//! and two vendors redistributing one exchange feed deliver byte-identical bars
+//! for a clean month, at which point every one of the eight is equal and the two
+//! runs collide on one `RunId` — while `cli`'s own banner tells the reader the
+//! identity "names the exact column they came from". A term that is only
+//! incidentally distinguishing is not an identity term.
 //!
 //! Adding it re-keys every run that can be computed. That is affordable exactly
 //! now and will not stay affordable: **nothing persists a `RunId` yet** — it is
 //! formatted into a report string and never written to the store — so there is
-//! no recorded corpus to migrate.
+//! no recorded corpus to migrate. Invariant X-14.
 //!
 //! # Why every field is length-prefixed
 //!

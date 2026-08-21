@@ -17590,3 +17590,67 @@ renders for a site that has never run — answered `"running":true`. Every fresh
 tab would have believed a backfill was in flight. Recorded as invariant A-45.
 
 Invariants A-45 … A-48.
+
+### D-0220 — the run identity named what was computed and not whose data it was
+
+**`CLAUDE.md` §3 rule 3 lists eight terms. The identity now hashes nine.** The
+ninth is `feed`, and this entry is why the law's list grew rather than the code
+being wrong.
+
+**What the eight could not separate.** `blake3(mask ‖ direction ‖ instrument ‖
+timeframe ‖ params ‖ data_digest ‖ vocab_version ‖ commit)` identifies *what was
+computed*. Not one of the eight identifies *whose data it was computed on*. The
+store is keyed by feed — `bars/<vendor>/NSE/INDEX/NIFTY/1min/2026-08.bin` — so
+one instrument-month exists once per vendor, and sweeping two of them is two
+runs.
+
+**Why this looked safe and was not.** Two feeds' bytes for one month almost
+always differ, so `data_digest` separated them **incidentally**. Incidentally is
+not a guarantee. Two vendors redistributing one NSE feed publish the same OHLCV
+at the same timestamps for a clean month; then the digest is equal, and so is
+every other term — same instrument, same rung, same ladder, same commit — and
+the two runs collide on one `RunId`.
+
+**Measured on the operator's own disk**, `store.bak-20260819-092235`:
+
+| file | bytes |
+|---|---|
+| `bars/dhan/NSE/INDEX/NIFTY/1min/2026-08.bin` | 284,768 |
+| `bars/groww/NSE/INDEX/NIFTY/1min/2026-08.bin` | 284,768 |
+
+Same instrument, same rung, same month, two feeds, **identical length** — the
+same record count. The file digests differ, but a file digest covers the header,
+so that is not evidence the *bar payloads* differ. The collision case is the
+ordinary one, not a contrived one.
+
+**And the report already claimed otherwise.** `cli::STORED_PROVENANCE` tells the
+reader that *"the run identity beneath names the exact column they came from"*.
+It did not. A banner asserting a property the code does not hold is the
+failure-wearing-a-success's-clothes shape §4 bans, in the one place §5 says the
+two provenance banners exist to keep straight.
+
+**The value was present and unread the whole time.** `cli::stored::Loaded`
+carries `vendor`, documented as *"the first path segment, never inferred"*, and
+an audit found it had no production reader. The term is taken from the load
+rather than from the operator's argument word, so it names the column on disk.
+
+**Tag 9, appended.** The eight keep their tag numbers. A tag is the only thing
+separating one term's bytes from another's inside the hash, so renumbering would
+silently re-key every run ever computed — §3.8's append-only discipline applied
+to tags rather than to condition bits.
+
+**Adding a term re-keys every run, and that is affordable exactly now.**
+Nothing persists a `RunId`: it is formatted into a report string and never
+written to the store, so there is no recorded corpus to migrate. The same change
+made after run results are stored is a migration, and this entry is the record
+that the window was used deliberately.
+
+**What refuses it.** `runner::identity::two_feeds_with_byte_identical_bars_do_not_collide`
+holds `data_digest` **equal on purpose**, so it fails on any implementation that
+leans on the bytes differing, and asserts the same feed still reproduces its own
+identity so the term discriminates rather than adding noise.
+`every_term_changes_the_identity` gains a ninth arm for the same reason
+`pair_budget` needed one: a term that is written and never read is a term two
+runs can share.
+
+Invariant X-14.

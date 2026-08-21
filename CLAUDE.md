@@ -92,7 +92,19 @@ CI gate 1 enforces this by walking every tracked file. It is not advisory.
    narrow without a new entry in `docs/05-decisions.md`.
 3. **Reproducibility.** Every run is identified by
    `blake3(mask ‖ direction ‖ instrument ‖ timeframe ‖ params ‖ data_digest ‖
-   vocab_version ‖ commit)`. No computation without that identity recorded.
+   vocab_version ‖ commit ‖ feed)`. No computation without that identity
+   recorded.
+
+   **`feed` is the ninth, and it was added because the eight identify what was
+   computed and none of them identifies whose data it was computed on.** The
+   store is keyed by vendor, so one instrument-month exists once per feed and
+   sweeping two of them is two runs. Two feeds were separated only
+   *incidentally* — by their bytes happening to differ — and two vendors
+   redistributing one NSE feed publish the same OHLCV at the same timestamps for
+   a clean month, at which point `data_digest` is equal and so is every other
+   term. Meanwhile `cli`'s own banner told the reader the identity *"names the
+   exact column they came from"*. D-0220 is that entry, and this sentence is
+   that edit.
 4. **Constant per-operation cost.** Bar lookup, condition lookup, mask
    evaluation, duplicate rejection and result append are each O(1). A change
    that makes one of them scan fails the bench gate.
