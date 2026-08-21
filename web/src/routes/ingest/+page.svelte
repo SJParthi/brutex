@@ -2913,6 +2913,54 @@
       }))
   );
 
+  /**
+   * THE WINDOW YOU ASKED FOR, AND WHAT EACH LEG CAN ACTUALLY ANSWER OF IT.
+   *
+   * `narrowings` above states this in prose and only when it is bad news. The
+   * sentence is accurate and it is also the hardest kind of fact to act on: it
+   * names a date, and what the reader needs is a PROPORTION. "Dhan · 1 minute
+   * from 21 Aug 2021" against a window opening 01 Jan 2015 is six and a half
+   * years of nothing, and the sentence gives no sense of that at all.
+   *
+   * The coverage column on the census proves the same thing after the fact —
+   * measured on the running page, the first two of four blocks read `out of
+   * reach`. This draws it BEFORE the press, next to the two date fields that
+   * decide it, which is where the decision is actually made.
+   *
+   * A LANE PER LEG, because that is the unit that goes on the wire. `wireBodies`
+   * is feed x rung and each entry already carries the `from` the server will be
+   * sent — `floorFor` decided it — so this reads the request rather than
+   * recomputing it. Two views of one number cannot disagree if only one of them
+   * does arithmetic.
+   *
+   * GOOD NEWS DRAWS TOO. A feed reaching the whole window gets a full lane and
+   * says so, where `narrowings` stays silent. Silence reads as "not checked"
+   * just as easily as "nothing wrong", and one of those is false.
+   *
+   * `Date.parse` on three ISO days: all three are UTC midnight, so the ratio is
+   * exact and no zone enters it. The window is the denominator, never the
+   * calendar.
+   */
+  const reachLanes = $derived.by(() => {
+    if (!windowOk || !from || !to) return [];
+    const opens = Date.parse(from);
+    const span = Date.parse(to) - opens;
+    if (!(span > 0)) return [];
+    return wireBodies.map((leg) => {
+      const lost = Math.max(0, Math.min(span, Date.parse(leg.from) - opens));
+      const deadPct = (lost / span) * 100;
+      return {
+        key: `${leg.vendor}·${leg.dir}`,
+        feed: feedName(leg.vendor),
+        rung: RUNGS.find((r) => r.dir === leg.dir)?.label ?? leg.dir,
+        at: leg.from,
+        deadPct,
+        livePct: 100 - deadPct,
+        whole: lost === 0
+      };
+    });
+  });
+
   // -------------------------------------------------------------- validation
   //
   // EACH ONE NAMES THE FIELD, THE VALUE AND THE RULE. "Invalid date" is a
@@ -7362,6 +7410,40 @@
                       {narrowings.map((w) => `${w.feed} · ${w.rung} from ${dayLabel(w.at)}`).join(', ')}
                     </span>
                   {/if}
+
+                  <!-- ══ THE WINDOW, DRAWN ══
+                       The sentence above names a date; this names a PROPORTION,
+                       which is the thing a reader can act on. Six and a half
+                       years of dead track under a window opening 01 Jan 2015 is
+                       a picture the prose cannot make.
+                       Not a control: there is nothing to click, and the two date
+                       fields directly above are what change it. -->
+                  {#if reachLanes.length > 0}
+                    <div class="reach">
+                      {#each reachLanes as lane (lane.key)}
+                        <div class="lane">
+                          <span class="lname" title={`${lane.feed} · ${lane.rung}`}
+                            >{lane.feed} · {lane.rung}</span
+                          >
+                          <span
+                            class="ltrack"
+                            role="img"
+                            aria-label={lane.whole
+                              ? `${lane.feed} at ${lane.rung} answers for the whole window.`
+                              : `${lane.feed} at ${lane.rung} answers for ${Math.round(lane.livePct)}% of the window, from ${dayLabel(lane.at)}. The earlier ${Math.round(lane.deadPct)}% returns nothing.`}
+                          >
+                            {#if lane.deadPct > 0}
+                              <i class="ldead" style="width:{lane.deadPct}%"></i>
+                            {/if}
+                            <i class="llive" style="width:{lane.livePct}%"></i>
+                          </span>
+                          <span class="lat" class:dim={lane.whole}>
+                            {lane.whole ? 'whole window' : dayLabel(lane.at)}
+                          </span>
+                        </div>
+                      {/each}
+                    </div>
+                  {/if}
                 </div>
 
                 {#if isFolderFeed}
@@ -7962,6 +8044,24 @@
                           >{n(r.got)}</span
                         >
                         / {r.per === null ? '—' : n(r.exp)}
+                        <!-- THE RATIO THE TWO NUMBERS ALREADY STATE, AS A
+                             LENGTH. `0 / 11,29,875` and `11,04,320 / 11,29,875`
+                             are both two long tabular numbers, and telling them
+                             apart means reading eight digits and dividing. The
+                             fill is that division, done once, at the width the
+                             eye reads without counting.
+                             DRAWN ONLY WHEN THERE IS A DENOMINATOR: `r.per` is
+                             null for a rung with no bars-per-session this page
+                             can state, and a bar against an unknown total would
+                             be inventing the very yardstick the `no yardstick`
+                             verdict exists to refuse. -->
+                        {#if r.per !== null && r.exp > 0}
+                          <i
+                            class="fill"
+                            class:up={r.got >= r.exp}
+                            style="width:{Math.min(100, (r.got / r.exp) * 100)}%"
+                          ></i>
+                        {/if}
                       </td>
                       <td
                         class="num mono"
@@ -10152,6 +10252,96 @@
     color: var(--ink-2, var(--ink));
   }
 
+  /* ---- the reach lanes ----
+     THREE COLUMNS, AND THE TRACK IS THE ONLY ONE THAT STRETCHES. Name and date
+     size to their content so every lane's track starts and ends at the same x —
+     without that the bars are different lengths for a reason that has nothing
+     to do with reach, and comparing two feeds becomes impossible. */
+  .reach {
+    display: flex;
+    flex-direction: column;
+    gap: var(--s2);
+    max-width: 560px;
+    min-width: 0;
+  }
+  .lane {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: var(--s3);
+    min-width: 0;
+  }
+  .lname {
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    color: var(--dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .ltrack {
+    display: flex;
+    height: 7px;
+    border-radius: var(--r-full);
+    background: var(--well);
+    overflow: hidden;
+    min-width: 0;
+  }
+  /* DEAD TRACK IS DRAWN, NOT LEFT EMPTY. An empty gutter reads as "the bar has
+     not loaded"; a filled-but-muted span reads as "this part returns nothing",
+     which is the fact. The `--down` tint rather than plain grey because it is a
+     refusal — days asked for that no request will answer. */
+  .ldead {
+    height: 100%;
+    background: var(--down-soft);
+    border-right: 1px solid var(--down);
+  }
+  .llive {
+    height: 100%;
+    background: var(--up);
+  }
+  .lat {
+    font-family: var(--num);
+    font-variant-numeric: tabular-nums;
+    font-size: var(--fs-micro);
+    color: var(--warn);
+    white-space: nowrap;
+  }
+  /* A LANE THAT LOSES NOTHING SAYS SO QUIETLY. It is still drawn — silence
+     reads as "not checked" as easily as "nothing wrong" — but it does not take
+     the amber that means a date was moved. */
+  .lat.dim {
+    color: var(--faint);
+  }
+
+  /* ---- the completeness fill ----
+     A RULE UNDER THE NUMBER, NOT A BAR BESIDE IT. The cell is already two
+     tabular numbers and a slash; a second object competing for width would push
+     the column wider for a fact the number states exactly. Two pixels welded to
+     the bottom edge of the cell cost no width at all, and the row height is
+     unchanged because it is positioned out of flow.
+     `--well` is NOT painted behind it. An empty track on a row that has stored
+     nothing draws a line the width of the column and reads as a full bar at a
+     glance — the exact opposite of the truth. Zero stored means zero drawn. */
+  .cscroll td .fill {
+    position: absolute;
+    left: 0;
+    bottom: 0;
+    height: 2px;
+    background: var(--warn);
+    border-radius: var(--r-full);
+    pointer-events: none;
+  }
+  .cscroll td .fill.up {
+    background: var(--up);
+  }
+  /* The cell that holds a fill is its own containing block — see the single
+     `.cscroll td.num` rule further down, which now carries `position: relative`
+     alongside the scale and the alignment. It is declared THERE and not here:
+     writing a second `.cscroll td.num` at this point would have recreated, in
+     the same file and within the same hour, the identical-specificity duplicate
+     removed from this block earlier today. */
+
   /* ---- the coverage blocks ----
      FOUR SQUARES, READ LEFT TO RIGHT AS TIME. Squares and not a bar: a bar
      would say "this much of the window", which `Months unproved` already says
@@ -10373,6 +10563,13 @@
   .cscroll td.num {
     font-size: var(--fs-sm);
     text-align: left;
+    /* THE CONTAINING BLOCK FOR `.fill`, which is welded to the cell's bottom
+       edge and must measure against this cell rather than against whatever
+       ancestor happens to be positioned. Scoped to `td.num` and not to every
+       `td` — the `.field { position: relative }` rule removed from this file
+       earlier was exactly that mistake, written for one box and applied to
+       every box that looked like it. */
+    position: relative;
   }
   .cscroll td.num.warn {
     color: var(--warn);
@@ -10503,7 +10700,9 @@
        not a control acknowledging a press, and it has to outlast a saccade to
        read as movement rather than as a flicker. It is the same 220ms the
        panels enter on, which is deliberate — one page, one sense of pace. */
-    .tseg {
+    .tseg,
+    .ldead,
+    .llive {
       transition: width var(--d-enter) var(--ease-out);
     }
     .din,
