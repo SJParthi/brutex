@@ -4155,7 +4155,7 @@ pub(crate) struct Blocked {
 ///
 /// The result is discarded for the reason `pull::ingest`'s `note_*` helpers
 /// give — a level-filtered event legitimately reaches no file.
-fn note_run_started(asked: &ingest::SpotRequest, instruments: usize) {
+fn note_run_started(asked: &ingest::SpotRequest, instruments: usize) -> Option<u64> {
     // STAMP EVERY LATER EVENT WITH THIS RUN, before the first of them.
     //
     // A log file spanning three backfills is three interleaved stories, and an
@@ -4168,9 +4168,24 @@ fn note_run_started(asked: &ingest::SpotRequest, instruments: usize) {
     // reason `emit` reads a global at all: a parameter on every function
     // between here and a leaf is one somebody forgets, and the site they forget
     // is the one being diagnosed. Cleared by `note_run_finished`.
-    if let Some(sink) = telemetry::global() {
-        sink.set_run(telemetry::now_millis().unsigned_abs());
-    }
+    // CLAIMED, NOT STORED — because this function runs once per LEG and the
+    // legs of one press run CONCURRENTLY.
+    //
+    // `conduct` spawns one chain per vendor. Each reaches here, and a bare
+    // `set_run` meant the second feed overwrote the first feed's key, so every
+    // event after that carried the wrong id — including the first feed's — and
+    // whichever finished first cleared the key to zero, after which the
+    // survivor's remaining events carried no run at all. `/logs?run=` then
+    // showed one story assembled from two feeds and a second that stopped
+    // mid-sentence.
+    //
+    // A claim gives the key to the FIRST leg of a press and lets every
+    // concurrent sibling inherit it, which is correct: they are one press. The
+    // losers do not take it and, in `note_run_finished`, do not release it.
+    let claimed = telemetry::global().and_then(|sink| {
+        let id = telemetry::now_millis().unsigned_abs();
+        sink.claim_run(id).then_some(id)
+    });
     let _dropped_when_filtered = telemetry::emit(
         &telemetry::Event::info("pull.run", "started")
             .with("feed", telemetry::Value::Str(asked.feed.wire()))
@@ -4183,6 +4198,7 @@ fn note_run_started(asked: &ingest::SpotRequest, instruments: usize) {
             .with("to", telemetry::Value::Str(&asked.window.to().to_string()))
             .with("instruments", telemetry::Value::Uint(instruments as u64)),
     );
+    claimed
 }
 
 /// The run's own verdict, on the one surface that survives a restart.
@@ -4190,7 +4206,7 @@ fn note_run_started(asked: &ingest::SpotRequest, instruments: usize) {
 /// `Warn` when the books do not balance, because that is the sentence the
 /// receipt puts in red and the log had no equivalent of. Every figure is the
 /// one the receipt renders, so the two can be compared rather than reconciled.
-fn note_run_finished(out: &BrokerRun, balanced: bool) {
+fn note_run_finished(out: &BrokerRun, balanced: bool, claimed: Option<u64>) {
     let _dropped_when_filtered = telemetry::emit(
         &telemetry::Event::new(
             if balanced && out.total.failures.is_empty() {
@@ -4225,8 +4241,15 @@ fn note_run_finished(out: &BrokerRun, balanced: bool) {
     // CLEARED AFTER THE LAST EVENT OF THE RUN, so a served request that arrives
     // between backfills is not filed under the one that just ended. An event
     // outside a run carries no run, and says so by omitting the key.
-    if let Some(sink) = telemetry::global() {
-        sink.set_run(0);
+    //
+    // ONLY BY THE LEG THAT TOOK IT. `claimed` is `Some` for the first leg of a
+    // press and `None` for every concurrent sibling, so a leg that finished
+    // early can no longer clear the key out from under the ones still running --
+    // which is what left the survivors emitting events with no run at all.
+    // `release_run` compares before it clears, so even the winner cannot clear
+    // a key a LATER press has since taken.
+    if let (Some(sink), Some(run)) = (telemetry::global(), claimed) {
+        sink.release_run(run);
     }
 }
 
@@ -4521,7 +4544,7 @@ pub(crate) async fn broker_run(
         return BrokerRun::out_of_order(why);
     }
 
-    note_run_started(asked, targets.len());
+    let claimed_run = note_run_started(asked, targets.len());
     let mut out = BrokerRun {
         attempted: targets.len(),
         ..BrokerRun::default()
@@ -4633,7 +4656,7 @@ pub(crate) async fn broker_run(
     site.autopilot.publish(|status| status.now = None);
     out.took = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
     let balanced = out.total.balances();
-    note_run_finished(&out, balanced);
+    note_run_finished(&out, balanced, claimed_run);
     out
 }
 

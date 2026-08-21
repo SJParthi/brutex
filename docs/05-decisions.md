@@ -18594,3 +18594,57 @@ it justified `always()` by the step above being unable to pass, which is now
 false. `always()` still earns its place, for a better reason — the step can now
 go red for a regression, and that is exactly when the declared uncovered lines
 are most worth re-checking.
+
+### D-0238 — the log's run key was a bare store, and the legs of one press overwrote it
+
+`crates/telemetry`'s `record.rs` calls the run field *"the key a reader groups
+by"*. It was the one field that could not be trusted for exactly the runs worth
+reading.
+
+**The mechanism.** `api::server::broker_run` stamped it with `Sink::set_run` — a
+bare `store` on a process-global atomic — once per LEG. `api::pullrun::conduct`
+spawns one chain per vendor and every one of them reaches that line. So in a
+two-feed press:
+
+* feed A stores its id; feed B stores its own over the top;
+* every event after that carries B's id, **including A's events**;
+* whichever finishes first calls `set_run(0)` unconditionally, and
+* the survivor's remaining events carry **no run at all**.
+
+`/logs?run=` therefore showed one story assembled from two feeds, and a second
+that stopped mid-sentence. Neither is a story that happened.
+
+**`claim_run` / `release_run`, one `compare_exchange` each.** The outermost leg
+of a press takes the key; every concurrent sibling finds it held, does not take
+it, and **inherits it** — which is correct, because they are one press, not two.
+A leg that lost the claim also does not release, so an early finisher can no
+longer clear the key out from under the legs still running. `release_run`
+compares before it clears, so even the winner cannot clear a key a LATER press
+has since taken.
+
+Claiming zero is refused. Zero is the ABSENCE of a run, so a caller asking for it
+is asking to hold nothing while being told it succeeded — after which its
+`release_run(0)` would clear whatever a later press held.
+
+**Why not a task-local, which is the obvious repair.** `CLAUDE.md` §5 puts
+`telemetry` among the crates that depend on **nothing**, and a task-local means a
+runtime dependency. Threading the id through every `emit` is the other repair and
+is the one this sink exists to avoid — its own comment says a parameter on every
+function between the caller and a leaf is one somebody forgets, and the site they
+forget is the one being diagnosed. A claim needs neither.
+
+**`set_run` is kept, not replaced.** A single-run process is the ordinary case
+and a store is the honest primitive for it; the autopilot's tick is exactly that
+shape. What changed is that the path where runs can overlap now uses the
+primitive that survives overlap, and `set_run`'s own documentation names the
+distinction so the next caller chooses deliberately.
+
+**Cost.** One `compare_exchange` per claim and per release — O(1), lock-free, and
+exact: two threads racing to claim cannot both win, which a `load`-then-`store`
+cannot promise.
+
+**What refuses it.**
+`telemetry::sink::a_second_claim_does_not_steal_the_run_key_and_a_loser_cannot_clear_it`
+holds four properties that fail independently — the first leg takes it, the
+second does not and the key does not move, a loser cannot clear it, and only the
+holder can — plus the zero refusal.

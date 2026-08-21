@@ -888,8 +888,79 @@ impl Sink {
     /// Set when a run begins and cleared when it ends, so events outside a run
     /// — a served request, a startup line — carry no run and say so by
     /// omission rather than by a zero a reader has to interpret.
+    ///
+    /// # This is a STORE, and a store is wrong when two runs overlap
+    ///
+    /// It is kept because a single-run process is the ordinary case and this is
+    /// the honest primitive for it. When runs can overlap — `api::pullrun`
+    /// spawns one chain per vendor and every one of them reaches a pull — the
+    /// last writer wins and the first finisher clears the key for everybody, so
+    /// `/logs?run=` groups events into stories that never happened. Use
+    /// [`Self::claim_run`] there.
     pub fn set_run(&self, run: u64) {
         self.run.store(run, Ordering::Relaxed);
+    }
+
+    /// Takes the run key **only if nothing holds it**, answering whether it did.
+    ///
+    /// # The stories that never happened
+    ///
+    /// `set_run` is a bare store, and `api::server::broker_run` called it once
+    /// per LEG while `api::pullrun::conduct` runs one chain per vendor
+    /// concurrently. So two feeds in one press overwrote each other's key, every
+    /// event after the second write carried the second feed's id — including the
+    /// first feed's — and whichever finished first cleared the key to zero,
+    /// after which the survivor's remaining events carried no run at all.
+    ///
+    /// A reader grouping by `run` therefore saw one story assembled from two
+    /// feeds and a second story that stopped mid-sentence. `record.rs` calls
+    /// this field *"the key a reader groups by"*, and it was the one field that
+    /// could not be trusted for exactly the runs worth reading.
+    ///
+    /// # Why a claim rather than a task-local
+    ///
+    /// The obvious repair is per-task storage, and this crate cannot have it:
+    /// `CLAUDE.md` §5 puts `telemetry` among the crates that **depend on
+    /// nothing**, and a task-local means a runtime dependency. Threading the id
+    /// through every `emit` is the other repair and is the one this sink exists
+    /// to avoid — its own comment says a parameter on every function between
+    /// the caller and a leaf is one somebody forgets, and the site they forget
+    /// is the one being diagnosed.
+    ///
+    /// A claim needs neither. The OUTERMOST scope that knows a run has begun
+    /// takes the key, every concurrent leg beneath it inherits that one id —
+    /// which is correct, because they are one press — and a leg that finds the
+    /// key already held does not take it and does not release it.
+    ///
+    /// # Cost
+    ///
+    /// One `compare_exchange`. O(1), lock-free, and exact: two threads racing
+    /// to claim cannot both win, which a `load`-then-`store` cannot promise.
+    ///
+    /// Claiming zero is refused — zero is the absence of a run, so a caller
+    /// asking for it is asking to hold nothing.
+    pub fn claim_run(&self, run: u64) -> bool {
+        run != 0
+            && self
+                .run
+                .compare_exchange(0, run, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+    }
+
+    /// Releases the run key, **only if this caller still holds it**.
+    ///
+    /// The other half of [`Self::claim_run`], and the half that stops a leg
+    /// clearing a key it never took. A caller that lost the claim passes the id
+    /// it wanted and nothing happens, which is the outcome it wants: somebody
+    /// else's run is still in flight and its events must keep their key.
+    ///
+    /// # Cost
+    ///
+    /// One `compare_exchange`. O(1).
+    pub fn release_run(&self, run: u64) {
+        let _lost_the_claim =
+            self.run
+                .compare_exchange(run, 0, Ordering::AcqRel, Ordering::Acquire);
     }
 
     /// The run every event is currently stamped with, or zero for none.
@@ -3059,6 +3130,63 @@ mod tests {
     /// and the read-back accessor an operator surface would call was never
     /// exercised. Small, but it is the shape this crate has recorded three
     /// times now — a thing built and reachable from nothing.
+    /// **THE SECOND LEG OF A PRESS INHERITS THE KEY; IT DOES NOT TAKE IT.**
+    ///
+    /// The defect: `api::server::broker_run` stamped the run key with a bare
+    /// `set_run`, once per LEG, while `api::pullrun::conduct` runs one chain per
+    /// vendor CONCURRENTLY. Two feeds in one press overwrote each other, every
+    /// event after the second write carried the second feed's id — including the
+    /// first feed's — and whichever finished first cleared the key to zero,
+    /// after which the survivor's remaining events carried no run at all.
+    ///
+    /// `record.rs` calls this field *"the key a reader groups by"*, and it was
+    /// the one field that could not be trusted for exactly the runs worth
+    /// reading: `/logs?run=` showed one story assembled from two feeds and a
+    /// second that stopped mid-sentence.
+    ///
+    /// Four properties, and each fails independently.
+    #[test]
+    fn a_second_claim_does_not_steal_the_run_key_and_a_loser_cannot_clear_it() {
+        let dir = scratch("run-claim");
+        let sink = Sink::open(&Config::new(&dir)).expect("opens");
+        assert_eq!(sink.run(), 0, "a fresh sink belongs to no run");
+
+        // 1. THE FIRST LEG TAKES IT.
+        assert!(sink.claim_run(11), "an unheld key is takeable");
+        assert_eq!(sink.run(), 11);
+
+        // 2. THE SECOND DOES NOT — and the key does not move. This is the whole
+        //    defect: `set_run` would have made this 22.
+        assert!(!sink.claim_run(22), "a held key is not takeable");
+        assert_eq!(
+            sink.run(),
+            11,
+            "the concurrent sibling INHERITS the press's id rather than \
+             overwriting it — they are one press"
+        );
+
+        // 3. A LOSER CANNOT CLEAR IT. This is the half that left the survivor's
+        //    events with no run at all: whichever leg finished first called
+        //    `set_run(0)` unconditionally.
+        sink.release_run(22);
+        assert_eq!(
+            sink.run(),
+            11,
+            "a leg that never took the key must not clear it out from under the \
+             legs still running"
+        );
+
+        // 4. THE HOLDER CAN, and only the holder.
+        sink.release_run(11);
+        assert_eq!(sink.run(), 0, "the press ended, so the key is free again");
+
+        // AND ZERO IS NOT CLAIMABLE. Zero is the ABSENCE of a run, so claiming
+        // it would be taking nothing while reporting success — after which the
+        // caller would `release_run(0)` and clear whatever a later press held.
+        assert!(!sink.claim_run(0), "zero is no run, not a run named zero");
+        assert_eq!(sink.run(), 0);
+    }
+
     #[test]
     fn the_run_getter_answers_what_was_stamped_and_what_was_cleared() {
         let dir = scratch("run-getter");
