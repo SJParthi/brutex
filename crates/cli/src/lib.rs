@@ -982,6 +982,94 @@ fn sample_warning(sessions: usize) -> String {
     out
 }
 
+/// Why the audit has nothing to trade — and the two reasons are not the same.
+///
+/// # The sentence that covered both
+///
+/// The audit printed *"no closed combination survived, so there is nothing to
+/// trade. This is extinction, not a failure."* unconditionally. Its input is
+/// `closed_by_evidence`, the strongest [`AUDIT_KEEP`] by |t| intersected with
+/// the closed set, so it can be empty two ways:
+///
+/// * the sweep genuinely found nothing — that **is** extinction, and §6 says so:
+///   depth is decided by extinction and an empty answer is the answer;
+/// * the sweep found plenty and none of the strongest 250 happened to be closed.
+///
+/// The second is not extinction and saying so is a claim about the market that
+/// the code cannot support. [`AUDIT_KEEP`]'s own doc block predicts this exact
+/// failure — *"the audit reports extinction on a sweep that found plenty, a
+/// refusal that would be a lie about the market rather than a fact about it"* —
+/// and the constant was raised to make it unlikely while the message was left
+/// covering both. Guarding the cause and not the claim is how a report ends up
+/// asserting something it does not know.
+///
+/// The second arm also tells the operator what to change, which `CLAUDE.md` §4
+/// asks of a refusal: it must name what was wrong, not merely decline.
+fn nothing_to_trade(frequent: usize) -> String {
+    if frequent == 0 {
+        return "\nAUDIT\n  no combination met the threshold, so there is nothing \
+                to trade. This is extinction, not a failure.\n"
+            .to_owned();
+    }
+    let mut out = String::with_capacity(384);
+    let _ = writeln!(
+        out,
+        "\nAUDIT\n  REFUSED. The sweep kept {frequent} combination(s), and none \
+         of the strongest {AUDIT_KEEP} by |t| is closed — each is a superset of \
+         a subset with the same support, so trading one would report a result of \
+         one arity that is really another.\n  This is NOT extinction. Raise \
+         AUDIT_KEEP, or raise min_hits and run again."
+    );
+    out
+}
+
+/// Which side the evidence points, for a combination the ranker chose.
+///
+/// # Why this has to be derived rather than assumed
+///
+/// `crate::rank` orders by **|t|**, and says why in its own header: a
+/// combination that reliably precedes a fall is as tradeable as one that
+/// precedes a rise, so ranking on a signed `t` would discard every short setup.
+/// The sign is not lost — it is carried in `Edge::mean_paisa` *"for a reader to
+/// see"*. The audit was not a reader: it traded `Direction::Long`
+/// unconditionally, so a strong downward signal was bought.
+///
+/// # The sign is taken from `mean_paisa`, not from `t`
+///
+/// They agree in sign by construction — `t` is the mean over its standard
+/// error, and a standard error is non-negative. `mean_paisa` is used because it
+/// is the quantity with units: the mean forward move in paisa, which is what a
+/// side actually means. Reading `t` would work and would say less.
+///
+/// # Exactly zero is Long, and that is a stated convention
+///
+/// A mean of exactly 0.0 has no side. It cannot survive the significance bar —
+/// a zero mean gives `t = 0` — so which way it is taken changes no verdict, and
+/// picking one keeps the function total rather than adding a third arm no
+/// report can reach. `f64` is used because `Edge` keeps statistical values at
+/// full precision, which `CLAUDE.md` §7 permits and requires for exactly this.
+fn side_of_evidence(scored: &runner::rank::Scored) -> Side {
+    if scored.edge.mean_paisa < 0.0 {
+        Side::Short
+    } else {
+        Side::Long
+    }
+}
+
+/// The trade direction matching a side.
+///
+/// Two enums for one concept — `costs::fill::Direction` decides which way a
+/// fill is adverse, `runner::excursion::Side` decides which way an excursion is
+/// favourable — and every call site that takes both must map them consistently
+/// or a long is priced as a short. `runner::validate` carries its own copy of
+/// this mapping for the same reason.
+const fn direction_of(side: Side) -> Direction {
+    match side {
+        Side::Long => Direction::Long,
+        Side::Short => Direction::Short,
+    }
+}
+
 /// The combination the audit traded, in words, above its own P&L.
 ///
 /// `CLAUDE.md` §4: a number whose subject is unstated is a number that cannot be
@@ -1389,18 +1477,49 @@ fn audit_bars(
     // family whose p-value the report printed beside it.
     let by_evidence = closed_by_evidence(&ranked, &outcome.sweep);
     let Some(first) = by_evidence.first().copied() else {
-        out.push_str(
-            "\nAUDIT\n  no closed combination survived, so there is nothing to \
-             trade. This is extinction, not a failure.\n",
-        );
+        // TWO DIFFERENT FACTS WORE ONE SENTENCE, AND ONLY ONE OF THEM IS
+        // EXTINCTION.
+        //
+        // This printed "This is extinction, not a failure" unconditionally.
+        // `by_evidence` is the best AUDIT_KEEP by |t| intersected with the
+        // closed set — so it can be empty either because the sweep genuinely
+        // found nothing, or because none of the top 250 by evidence happened to
+        // be closed on a sweep that found millions.
+        //
+        // `AUDIT_KEEP`'s own doc block predicts this failure in words — "the
+        // audit reports extinction on a sweep that found plenty, a refusal that
+        // would be a lie about the market rather than a fact about it" — and
+        // the constant was raised to make it unlikely while the MESSAGE was
+        // left unconditional. Guarding the cause and not the claim is how a
+        // report ends up asserting something it cannot know.
+        out.push_str(&nothing_to_trade(outcome.sweep.all_frequent().count()));
         return out;
     };
     out.push_str(&traded_line(first));
     out.push_str(&grid_exposure(&outcome.sweep));
     out.push_str(&sample_warning(session_index(&bars).len()));
 
-    let taken = trade::walk(&bars, &column, &first.mask, horizon, Direction::Long);
-    let exits = grid::evaluate(&bars, &column, &first.mask, horizon, Side::Long, GRID_RUNGS);
+    // THE SIDE IS READ OFF THE EVIDENCE, NOT ASSUMED.
+    //
+    // `rank` orders candidates by |t| — the ABSOLUTE value, deliberately, because
+    // a combination that reliably precedes a FALL is as tradeable as one that
+    // precedes a rise; only the side differs. `rank`'s own header says so, and
+    // carries the sign in `Edge::mean_paisa` "for a reader to see".
+    //
+    // Nothing read it. This walked `Direction::Long` unconditionally, so the
+    // combination with the strongest evidence of a DOWNWARD move was traded
+    // long — and every figure below it, the P&L, the 125-cell grid, the
+    // walk-forward, the PBO and all three bootstrap p-values, described the
+    // wrong side of it.
+    //
+    // Worse, 6d849ee made it more likely to bite rather than less. Before that
+    // commit the audit traded `closed.kept.first()`, an arbitrary combination in
+    // canonical mask order, so its sign was incidental. Selecting for the
+    // largest |t| selects precisely the strongest signals of EITHER sign — so
+    // the better the ranker got, the more often the side was wrong.
+    let side = side_of_evidence(first);
+    let taken = trade::walk(&bars, &column, &first.mask, horizon, direction_of(side));
+    let exits = grid::evaluate(&bars, &column, &first.mask, horizon, side, GRID_RUNGS);
     out.push('\n');
     // THE WALK-FORWARD, WHICH USED TO BE A `None`.
     //
@@ -1490,7 +1609,19 @@ fn audit_bars(
         .iter()
         .take(BOOTSTRAP_CANDIDATES)
         .map(|scored| {
-            let walked = trade::walk(&bars, &column, &scored.mask, horizon, Direction::Long);
+            // EACH CANDIDATE ON ITS OWN SIDE, for the reason the traded
+            // combination above is. Walking the whole family long would give a
+            // short setup a return series that is the negative of what it would
+            // have earned, so the bootstrap's null would be built from returns
+            // no strategy in the family would ever have taken — and the p-value
+            // beside it would describe that fiction rather than the family.
+            let walked = trade::walk(
+                &bars,
+                &column,
+                &scored.mask,
+                horizon,
+                direction_of(side_of_evidence(scored)),
+            );
             session_returns(&index, days.len(), &bars, &walked)
         })
         .collect();
@@ -1558,11 +1689,12 @@ fn audit_bars(
               test that cannot panic cannot fail."
 )]
 mod tests {
+    use super::{Direction, Side};
     use super::{
         MIN_AUDIT_SESSIONS, MISUSED, OK, PROVENANCE, STORED_PROVENANCE, USAGE, Vendor, audit_run,
-        audit_stored, auto, auto_with, evaluator_from, log_dir_from, parse_min_hits,
-        parse_sessions, parse_vendor, root_from, run, sample_warning, sweep, sweep_stored,
-        sweep_with,
+        audit_stored, auto, auto_with, direction_of, evaluator_from, log_dir_from,
+        nothing_to_trade, parse_min_hits, parse_sessions, parse_vendor, root_from, run,
+        sample_warning, side_of_evidence, sweep, sweep_stored, sweep_with,
     };
 
     fn argv(words: &[&str]) -> Vec<String> {
@@ -1844,6 +1976,117 @@ mod tests {
             !text.contains("BARS"),
             "a refusal must not render a census that would read as an empty \
              market: {text}"
+        );
+    }
+
+    /// THE SIDE FOLLOWS THE EVIDENCE, AND A FALL IS SOLD RATHER THAN BOUGHT.
+    ///
+    /// # The defect, and why the better ranker made it worse
+    ///
+    /// `crate::rank` orders by |t| on purpose — a combination that reliably
+    /// precedes a FALL is as tradeable as one that precedes a rise, and ranking
+    /// on a signed `t` would discard every short setup. The sign lives in
+    /// `Edge::mean_paisa`, which `rank`'s header says is carried *"for a reader
+    /// to see"*.
+    ///
+    /// Nothing read it. The audit walked `Direction::Long` unconditionally, so
+    /// the strongest DOWNWARD signal was bought, and the P&L, the 125-cell grid,
+    /// the walk-forward, the PBO and all three bootstrap p-values described the
+    /// wrong side of it.
+    ///
+    /// And selecting for the largest |t| — which `6d849ee` introduced as an
+    /// improvement over an arbitrary pick — selects precisely the strongest
+    /// signals of EITHER sign. The better the ranker got, the more often the
+    /// side was wrong.
+    #[test]
+    fn the_traded_side_follows_the_sign_of_the_evidence() {
+        use runner::outcome::Edge;
+        use runner::rank::Scored;
+
+        let scored = |mean: f64| Scored {
+            // `Default::default()` and not the named path, for the reason every
+            // other mask literal in this crate gives: spelling `ConditionMask`
+            // needs a `vocab` arrow §5 does not draw for `cli`.
+            #[expect(
+                clippy::default_trait_access,
+                reason = "the named path would add a dependency arrow §5 does not draw"
+            )]
+            mask: Default::default(),
+            hits: 100,
+            edge: Edge {
+                n: 100,
+                mean_paisa: mean,
+                mismatched: 0,
+                t: mean,
+            },
+        };
+
+        assert_eq!(
+            side_of_evidence(&scored(250.0)),
+            Side::Long,
+            "a combination that precedes a RISE is bought"
+        );
+        assert_eq!(
+            side_of_evidence(&scored(-250.0)),
+            Side::Short,
+            "a combination that precedes a FALL is SOLD — buying it is the \
+             defect this test exists for, and it is the case a Long-only audit \
+             got wrong on exactly half its strongest candidates"
+        );
+
+        // EXACTLY ZERO IS LONG, and it is a stated convention rather than an
+        // accident: a zero mean gives t = 0, which cannot clear any bar, so
+        // which way it is taken changes no verdict.
+        assert_eq!(side_of_evidence(&scored(0.0)), Side::Long);
+
+        // AND THE TWO ENUMS MAP CONSISTENTLY. Two types name one concept —
+        // `Side` for excursions, `Direction` for fills — and a call site that
+        // mapped them the wrong way round would price a long as a short with
+        // nothing else in the report disagreeing.
+        assert!(matches!(direction_of(Side::Long), Direction::Long));
+        assert!(matches!(direction_of(Side::Short), Direction::Short));
+    }
+
+    /// "EXTINCTION" IS CLAIMED ONLY WHEN THE SWEEP ACTUALLY FOUND NOTHING.
+    ///
+    /// # Two facts wore one sentence
+    ///
+    /// The audit's no-trade branch printed *"This is extinction, not a
+    /// failure"* unconditionally. Its input is the strongest [`AUDIT_KEEP`] by
+    /// |t| intersected with the closed set, which is empty either because the
+    /// sweep found nothing — genuine extinction, and §6's expected answer — or
+    /// because none of the top 250 happened to be closed on a sweep that found
+    /// millions.
+    ///
+    /// The second is not extinction, and claiming it is a statement about the
+    /// market the code cannot support. [`AUDIT_KEEP`]'s own doc predicted this
+    /// and the constant was raised to make it unlikely while the message was
+    /// left covering both cases.
+    #[test]
+    fn extinction_is_claimed_only_when_nothing_was_found() {
+        let extinct = nothing_to_trade(0);
+        assert!(
+            extinct.contains("extinction, not a failure"),
+            "a genuinely empty sweep IS extinction and must say so: {extinct}"
+        );
+
+        let plenty = nothing_to_trade(3_689);
+        assert!(
+            plenty.contains("NOT extinction"),
+            "a sweep that kept 3,689 combinations did not go extinct: {plenty}"
+        );
+        assert!(
+            plenty.contains("3689") || plenty.contains("3,689"),
+            "and the refusal names how many it did keep: {plenty}"
+        );
+        assert!(
+            plenty.contains("Raise"),
+            "§4 asks a refusal to say what to change, not merely to decline: \
+             {plenty}"
+        );
+        assert!(
+            !plenty.contains("extinction, not a failure"),
+            "the two messages must not both fire — that is the defect: {plenty}"
         );
     }
 
