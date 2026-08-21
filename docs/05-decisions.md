@@ -19131,3 +19131,104 @@ most certain, because nothing re-reads a settled claim. `CLAUDE.md` §10's
 caveat holds: where a document is gate-checked and this file is not, believe the
 gate. Layer 6 carried a tick for years and no gate ever measured
 `size_of::<ConditionMask>()` against it.
+
+### D-0246 — three ways a test can be green and mean nothing
+
+Three defects of one shape, all found by an adversarial fleet reading the tree
+rather than the documents, and all of them cases where the suite was green and
+the property was not held.
+
+#### The significance bar returned exactly zero, and everything passed
+
+`bonferroni_t` read `inverse_normal_cdf(1.0 - FWER / (2n))`. Once the tail
+falls below half an ulp of 1.0 — `2^-53`, about `1.11e-16` — `1.0 - alpha`
+rounds to exactly `1.0`, and `inverse_normal_cdf` returns `0.0` for
+`p >= 1.0`. Bisected, the cliff is one integer wide:
+
+```text
+bonferroni_t(450_359_962_737_049) = 8.209536
+bonferroni_t(450_359_962_737_050) = 0.000000
+```
+
+`expected_max_bailey` carried the same defect through `1.0 - 1.0/n`, dropping
+4.739 across one integer near `n = 6.6e15` **while `sqrt(2 ln n)`, the
+approximation it sits beside, was still rising through 8.54.** Two estimates of
+one quantity moving in opposite directions is the shape it took.
+
+A bar of zero passes every finding while being printed as a family-wise
+correction. That is worse than printing no bar at all, and it is the §4 fallback
+that hides a failure.
+
+**Not reachable at shipped defaults, and that is not the reason to fix it.**
+`engine::DEFAULT_PAIR_BUDGET` is `1 << 34`, so `trials` is bounded near
+`1.72e10`; times the 325-cell grid that is `5.58e12`, about **80x below the
+cliff**. But `Ladder::with_pair_budget` is `pub` and takes any `u64`, and
+`trials_with_grid` is `pub` and takes a caller-supplied `u64`. Both returned a
+wrong answer in the dangerous direction for inputs inside their declared domain,
+with no refusal.
+
+**The fix is to never form `1 - alpha`.** The tail branch of
+`inverse_normal_cdf` computes `sqrt(-2 ln(1 - p))`, so a caller holding
+`alpha` was passing `1 - alpha` in for that branch to subtract back out. The
+rational form is now reachable from the tail probability itself through
+`upper_tail_quantile`. The smallest alpha a `u64` trial count can produce is
+`0.05 / (2 * u64::MAX)`, about `1.4e-21`, which `ln` handles with room to
+spare: **there is no longer a cliff at any `u64`.** Above `P_LOW` it delegates
+to the central form, where `1 - alpha` loses nothing — so the published 3.78
+figure at 316 factors is unmoved.
+
+The test is a PROPERTY and not those two integers. Pinning them would fix the old
+cliff's location and say nothing about a new one; *the bar never falls as the
+search grows and is never zero for a real search* fails at any cliff, anywhere.
+
+#### Five tests passed on an empty mask
+
+`nothing_outside_the_N_positions_is_set` in `daily`, `orb`, `pattern`,
+`session` and `vwap` each build a union starting at `ConditionMask::ZERO` and
+then check, for every set bit, that this module owns it. **An empty union
+satisfies that vacuously** — the guard never fires and the assertion never runs.
+Stub the module's emit to `ConditionMask::ZERO` and all five pass.
+
+`crates/indicators/src/lib.rs` had already diagnosed this exact defect in
+writing — *"an empty mask satisfies both of them … it is what let `bits` be
+replaced wholesale by `Default::default()` with the suite green"* — and added a
+positive companion for two modules. Five others were left with the vacuous form.
+All five now assert the union is non-empty.
+
+#### Two module headers had drifted, and one contradicted its own table
+
+`daily.rs` claimed 41 vocabulary positions against a `positions()` returning
+**44**; it had conflated two real numbers, since `plan()` does have 41 entries
+and `positions()` returns those plus three CPR-width states. `fib.rs` claimed
+26 against **27** — and its own table, two lines below the claim, listed
+9 + 7 + 11.
+
+**Correcting the numbers fixes today; the gate fixes the class.**
+`crates/indicators/tests/module_doc_counts.rs` reads each of the six module
+headers off disk and compares the quoted count against the width of the array
+`positions()` returns, which the compiler already enforces against the ladders
+that build it. A module that grows a position and does not say so now fails the
+build.
+
+`pattern.rs` stated its count as *"The candlestick patterns — all 62"*, the same
+fact in a phrasing no gate could parse, and an unparseable claim is an unchecked
+one. It now uses the form the other five use.
+
+The pattern this extends already existed twelve lines from the code that drifted:
+`tests/shared_core_doc.rs` is a working doc-count gate covering exactly one
+document. What was missing was not the mechanism but its reach.
+
+#### One pinned figure moved, and the thing it guards did not
+
+`join_answer_is_unchanged.rs` compares the prefix-grouped join against numbers
+recorded before that join existed. `EXCLUDED_AT_K1` went **161 → 182** when
+D-0244 appended 34 crossing positions. Every other assertion in the file was
+untouched: the per-level survivor counts matched, and `TOTAL_SURVIVORS` matched
+at 3,689.
+
+So the join's answer is unchanged and 21 of the 34 never fire on this fixture.
+The remaining 13 are now asserted directly rather than left to be derived by
+subtracting one pinned constant from another — and **none reaches
+`min_hits = 600`**, which is why k=1 still returns 17. That is the family
+behaving as designed: a crossing fires on the one bar a level changes side, not
+on every bar the level is above.

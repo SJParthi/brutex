@@ -1,6 +1,6 @@
 //! The pivot ladder, the central pivot range, and yesterday's high and low.
 //!
-//! **41 vocabulary positions from one input**: the previous completed session's
+//! **44 vocabulary positions from one input**: the previous completed session's
 //! high, low and close. Every level here is frozen before today's first bar
 //! prints, so the per-bar cost is a comparison against a number already computed
 //! — the cheapest family in the vocabulary and the one with no repaint risk at
@@ -927,13 +927,29 @@ mod tests {
 
     /// Only the 41 positions this module owns are ever set.
     #[test]
-    fn nothing_outside_the_forty_one_positions_is_set() {
+    fn nothing_outside_the_forty_four_positions_is_set() {
         let owned = positions();
         let x = levels(2_510_000, 2_490_000, 2_508_000);
         let mut union = ConditionMask::ZERO;
         for step in -400..400 {
             union = union.union(&bits(&x, x.pivot() + step * 37, tol()));
         }
+        // THE UNION MUST NOT BE EMPTY, AND THIS LINE IS THE WHOLE TEST.
+        //
+        // Everything below is a SUBSET check: for each set bit, is it ours.
+        // `union` starts at `ConditionMask::ZERO`, so an empty union satisfies
+        // it vacuously -- the guard never fires and the assertion never runs.
+        // Stub this module's emit to `ConditionMask::ZERO` and the test passes,
+        // which `CLAUDE.md` §4 bans outright: a test that asserts nothing.
+        //
+        // `crates/indicators/src/lib.rs` diagnosed exactly this defect and
+        // added a positive companion for two modules. Five others, this one
+        // among them, were left with the vacuous form.
+        assert!(
+            union.popcount() > 0,
+            "the fixture set NO position, so the subset check below is vacuous \
+             and a stub returning ConditionMask::ZERO would pass this test"
+        );
         for index in 0..ConditionMask::BITS {
             if union.get(index) {
                 let as_u16 = u16::try_from(index).unwrap_or(u16::MAX);

@@ -1,7 +1,13 @@
-//! The candlestick patterns — all 62.
+//! The candlestick patterns.
 //!
-//! Vocabulary positions 153–177 and 198–234. Every one is `Kind::Plain`: a
-//! pattern is true or false on the bars themselves and needs no band.
+//! **62 vocabulary positions**: 153–177 and 198–234. Every one is `Kind::Plain`:
+//! a pattern is true or false on the bars themselves and needs no band.
+//!
+//! The count is stated in the same form every other module in this crate uses,
+//! because `tests/module_doc_counts.rs` reads it from this line and compares it
+//! against the width of the array `positions()` returns. It read
+//! *"The candlestick patterns — all 62"*, which is the same fact in a phrasing
+//! no gate could parse — and an unparseable claim is an unchecked one.
 //!
 //! # The thresholds are conventions, and that is stated rather than hidden
 //!
@@ -1485,6 +1491,22 @@ mod tests {
             px = close;
             union = union.union(&ok(&mut p, &at(m, open, high, low, close)));
         }
+        // THE UNION MUST NOT BE EMPTY, AND THIS LINE IS THE WHOLE TEST.
+        //
+        // Everything below is a SUBSET check: for each set bit, is it ours.
+        // `union` starts at `ConditionMask::ZERO`, so an empty union satisfies
+        // it vacuously -- the guard never fires and the assertion never runs.
+        // Stub this module's emit to `ConditionMask::ZERO` and the test passes,
+        // which `CLAUDE.md` §4 bans outright: a test that asserts nothing.
+        //
+        // `crates/indicators/src/lib.rs` diagnosed exactly this defect and
+        // added a positive companion for two modules. Five others, this one
+        // among them, were left with the vacuous form.
+        assert!(
+            union.popcount() > 0,
+            "the fixture set NO position, so the subset check below is vacuous \
+             and a stub returning ConditionMask::ZERO would pass this test"
+        );
         for index in 0..ConditionMask::BITS {
             if union.get(index) {
                 let as_u16 = u16::try_from(index).unwrap_or(u16::MAX);

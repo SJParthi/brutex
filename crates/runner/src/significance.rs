@@ -248,8 +248,12 @@ pub fn expected_max_bailey(n: u64) -> f64 {
         reason = "see expected_max_t: the walk cannot reach 2^53 candidates."
     )]
     let n_f = n as f64;
-    let a = inverse_normal_cdf(1.0 - 1.0 / n_f);
-    let b = inverse_normal_cdf(1.0 - 1.0 / (n_f * core::f64::consts::E));
+    // Both quantiles taken from their TAIL probabilities, for the reason
+    // `upper_tail_quantile` records: `1.0 - 1.0/n` rounds to 1.0 near
+    // n = 6.6e15, and this function dropped 4.739 across one integer there
+    // while `sqrt(2 ln n)` was still rising.
+    let a = upper_tail_quantile(1.0 / n_f);
+    let b = upper_tail_quantile(1.0 / (n_f * core::f64::consts::E));
     (1.0 - EULER_MASCHERONI) * a + EULER_MASCHERONI * b
 }
 
@@ -276,7 +280,12 @@ pub fn bonferroni_t(n: u64) -> f64 {
         reason = "see expected_max_t: the walk cannot reach 2^53 candidates."
     )]
     let n_f = n as f64;
-    inverse_normal_cdf(1.0 - FWER / (2.0 * n_f))
+    // THE TAIL PROBABILITY, HANDED OVER DIRECTLY. This read
+    // `inverse_normal_cdf(1.0 - FWER / (2.0 * n_f))`, which rounds to
+    // `inverse_normal_cdf(1.0)` -- and therefore to 0.0 -- once the tail falls
+    // below half an ulp of 1.0. See `upper_tail_quantile` for the bisected
+    // cliff and for why a bar of zero is the dangerous direction.
+    upper_tail_quantile(FWER / (2.0 * n_f))
 }
 
 /// Two-sided p-value for a t-statistic, under the normal approximation.
@@ -411,11 +420,29 @@ fn inverse_normal_cdf(p: f64) -> f64 {
     }
     // The tails. `bonferroni_t` always lands in the upper one.
     let upper = p > 1.0 - P_LOW;
-    let q = if upper {
-        (-2.0 * (1.0 - p).ln()).sqrt()
+    let tail = if upper { 1.0 - p } else { p };
+    // The rational form is written for the LOWER tail and returns a negative
+    // value there; the upper tail is its mirror. Getting this backwards made
+    // `bonferroni_t(316)` return -3.78, which the published-figure test caught
+    // on the first run -- the reason that test asserts the sign and not just the
+    // magnitude.
+    if upper {
+        -tail_rational(tail)
     } else {
-        (-2.0 * p.ln()).sqrt()
-    };
+        tail_rational(tail)
+    }
+}
+
+/// The shared tail rational form, in the tail probability itself.
+///
+/// Extracted from [`inverse_normal_cdf`] so that a caller holding a TAIL
+/// probability can reach it without first forming `1 - alpha` and then having
+/// this function undo that subtraction. See [`upper_tail_quantile`] for why
+/// that round trip is not merely wasteful.
+///
+/// Returns the LOWER-tail quantile, which is negative. Mirror it for the upper.
+fn tail_rational(tail: f64) -> f64 {
+    let q = (-2.0 * tail.ln()).sqrt();
     let num = ((((-0.007_784_894_002_430_293 * q - 0.322_396_458_041_136_5) * q
         - 2.400_758_277_161_838)
         * q
@@ -430,12 +457,70 @@ fn inverse_normal_cdf(p: f64) -> f64 {
         + 3.754_408_661_907_416)
         * q
         + 1.0;
-    // The rational form is written for the LOWER tail and returns a negative
-    // value there; the upper tail is its mirror. Getting this backwards made
-    // `bonferroni_t(316)` return -3.78, which the published-figure test caught
-    // on the first run -- the reason that test asserts the sign and not just the
-    // magnitude.
-    if upper { -(num / den) } else { num / den }
+    num / den
+}
+
+/// The standard normal quantile at upper-tail probability `alpha`.
+///
+/// # THE BAR EVERY FINDING MUST CLEAR USED TO COLLAPSE TO EXACTLY ZERO
+///
+/// [`bonferroni_t`] read `inverse_normal_cdf(1.0 - FWER / (2n))`, and
+/// [`expected_max_bailey`] read `inverse_normal_cdf(1.0 - 1.0 / n)`. Both form
+/// `1 - alpha` in `f64`. Once `alpha` falls below half an ulp of 1.0 —
+/// `2^-53`, about `1.11e-16` — **`1.0 - alpha` rounds to exactly `1.0`**, and
+/// `inverse_normal_cdf` returns `0.0` for `p >= 1.0`.
+///
+/// So the threshold every finding is judged against became **zero**, and
+/// everything passed. Bisected, the cliff is one integer wide:
+///
+/// ```text
+/// bonferroni_t(450_359_962_737_049) = 8.209536
+/// bonferroni_t(450_359_962_737_050) = 0.000000
+/// ```
+///
+/// A bar that is too LOW is the dangerous direction — it admits noise while
+/// carrying the authority of a family-wise correction, which is worse than
+/// printing no bar at all. There was also a quantization plateau before the
+/// cliff: the bar froze at 8.209536 across a doubling of the search size.
+///
+/// # Not reachable at shipped defaults, and that is not the reason to fix it
+///
+/// `engine::DEFAULT_PAIR_BUDGET` is `1 << 34`, so `trials` is bounded near
+/// `1.72e10`; times the 325-cell grid that is `5.58e12`, about **80x below the
+/// cliff**. But `Ladder::with_pair_budget` is `pub` and takes any `u64`, and
+/// [`trials_with_grid`] is `pub` and takes a caller-supplied `u64`. Both return
+/// a wrong answer in the dangerous direction for inputs inside their declared
+/// domain, with no refusal — which is the `CLAUDE.md` §4 fallback that hides a
+/// failure, not a theoretical concern about an unreachable input.
+///
+/// # The fix is to never form `1 - alpha`
+///
+/// `inverse_normal_cdf`'s own tail branch computes `sqrt(-2 * ln(1 - p))`, so a
+/// caller holding `alpha` was passing `1 - alpha` in for that branch to
+/// subtract back out. Taking `alpha` directly removes both the cancellation and
+/// the round trip: the smallest `alpha` a `u64` trial count can produce is
+/// `0.05 / (2 * u64::MAX)`, about `1.4e-21`, which `ln` handles with room to
+/// spare. **There is no longer a cliff at any `u64`.**
+///
+/// Above `P_LOW` this delegates rather than duplicating: in that region `1 -
+/// alpha` loses nothing and the central rational form is the accurate one.
+///
+/// Returns 0.0 for a non-positive or non-finite `alpha`, and for `alpha >= 1`,
+/// where an upper-tail quantile is not a quantity.
+fn upper_tail_quantile(alpha: f64) -> f64 {
+    /// The same boundary [`inverse_normal_cdf`] uses between its central
+    /// rational form and its tail form.
+    const P_LOW: f64 = 0.02425;
+    if !alpha.is_finite() || alpha <= 0.0 || alpha >= 1.0 {
+        return 0.0;
+    }
+    if alpha >= P_LOW {
+        // No cancellation is possible here -- `1 - alpha` is exact to within an
+        // ulp for an alpha this large -- and the central form is the accurate
+        // one in that region.
+        return inverse_normal_cdf(1.0 - alpha);
+    }
+    -tail_rational(alpha)
 }
 
 #[cfg(test)]
@@ -790,5 +875,155 @@ mod tests {
                 "there is no quantile at p = {p}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "the exception every test module in this workspace takes."
+)]
+mod tail_tests {
+    use super::{bonferroni_t, expected_max_bailey, expected_max_t};
+
+    /// THE BAR COLLAPSED TO EXACTLY ZERO, AND NO TEST ASKED WHETHER IT COULD.
+    ///
+    /// # The defect, bisected
+    ///
+    /// `bonferroni_t` read `inverse_normal_cdf(1.0 - FWER / (2n))`. Once the
+    /// tail falls below half an ulp of 1.0 — `2^-53` — `1.0 - alpha` rounds to
+    /// exactly `1.0`, and `inverse_normal_cdf` returns `0.0` for `p >= 1.0`. One
+    /// integer wide:
+    ///
+    /// ```text
+    /// bonferroni_t(450_359_962_737_049) = 8.209536
+    /// bonferroni_t(450_359_962_737_050) = 0.000000
+    /// ```
+    ///
+    /// A bar of zero passes every finding, while still being printed as a
+    /// family-wise correction. That is worse than printing no bar at all.
+    ///
+    /// # Why this test is a property and not the two integers
+    ///
+    /// Asserting those two values would pin the old cliff's location and say
+    /// nothing about a new one. The PROPERTY is that the bar never falls as the
+    /// search grows and is never zero for a real search — which fails at any
+    /// cliff, anywhere, including one introduced later by a different
+    /// approximation.
+    #[test]
+    fn the_significance_bar_never_falls_as_the_search_grows() {
+        // Across the whole u64 range by powers of two, plus the exact integers
+        // either side of the old cliff and the largest count that exists.
+        let mut probes: Vec<u64> = (0..64).map(|k| 1_u64 << k).collect();
+        probes.extend([
+            450_359_962_737_049,
+            450_359_962_737_050,
+            450_359_962_737_051,
+            6_627_126_856_707_895,
+            6_627_126_856_707_896,
+            u64::MAX,
+        ]);
+        probes.sort_unstable();
+        probes.dedup();
+
+        let mut previous = 0.0_f64;
+        for n in probes {
+            let bar = bonferroni_t(n);
+            assert!(
+                bar.is_finite(),
+                "the bar must be a number at n = {n}, and it was {bar}"
+            );
+            assert!(
+                bar > 0.0,
+                "a bar of zero passes every finding while claiming to be a \
+                 family-wise correction. At n = {n} it was {bar}"
+            );
+            assert!(
+                bar >= previous,
+                "the bar must never FALL as the search grows: n = {n} gives \
+                 {bar}, below the {previous} a smaller search demanded"
+            );
+            previous = bar;
+        }
+    }
+
+    /// THE SAME CLIFF, IN BAILEY'S EXPECTED MAXIMUM.
+    ///
+    /// It formed `1.0 - 1.0 / n` and `1.0 - 1.0 / (n * e)`, so it dropped 4.739
+    /// across one integer near `n = 6.6e15` — while `sqrt(2 ln n)`, the
+    /// approximation it sits beside, was still rising through 8.54. Two
+    /// estimates of the same quantity moving in opposite directions is the
+    /// shape the defect took.
+    #[test]
+    fn the_expected_maximum_never_falls_and_tracks_its_own_approximation() {
+        let mut previous = 0.0_f64;
+        for k in 1..64_u32 {
+            let n = 1_u64 << k;
+            let exact = expected_max_bailey(n);
+            assert!(exact.is_finite() && exact > 0.0, "n = {n} gave {exact}");
+            assert!(
+                exact >= previous,
+                "the expected maximum of noise must rise with the number of \
+                 draws: n = {n} gives {exact}, below {previous}"
+            );
+            previous = exact;
+
+            // AND THE TWO ESTIMATES MUST NOT DIVERGE. `expected_max_t` is the
+            // `sqrt(2 ln n)` approximation of the same quantity; the published
+            // expression is the more accurate one and sits BELOW it. A gap
+            // wider than one whole t-unit means one of them has broken, which
+            // is exactly what the cliff did.
+            let approx = expected_max_t(n);
+            assert!(
+                (approx - exact).abs() < 1.0,
+                "the two estimates of the expected maximum disagree by {} at \
+                 n = {n}: closed form {exact}, approximation {approx}",
+                (approx - exact).abs()
+            );
+        }
+    }
+
+    /// THE SMALL END STILL ANSWERS, AND THE PUBLISHED FIGURE IS UNMOVED.
+    ///
+    /// The fix routes `alpha >= P_LOW` back through the central rational form,
+    /// so nothing about the reachable range may shift. Harvey, Liu & Zhu's 316
+    /// factors give 3.78, and that is the check that the arithmetic is still
+    /// theirs.
+    #[test]
+    fn the_reachable_range_is_unchanged_by_the_tail_fix() {
+        assert!(
+            (bonferroni_t(316) - 3.78).abs() < 0.01,
+            "the published Bonferroni figure moved: {}",
+            bonferroni_t(316)
+        );
+        // EXACT COMPARISONS, AND DELIBERATELY SO. These three are the sentinel
+        // returns the functions promise for a degenerate count -- a literal
+        // `return 0.0` taken before any arithmetic -- not a computed value that
+        // happens to land near zero. `clippy::float_cmp` is right about computed
+        // floats and wrong about a documented sentinel, which is why the
+        // exception is taken here and named rather than blanket-allowed.
+        #[allow(
+            clippy::float_cmp,
+            reason = "these are documented sentinel returns taken before any \
+                      arithmetic, not computed values."
+        )]
+        {
+            assert_eq!(bonferroni_t(0), 0.0, "no trials is not a search");
+            assert_eq!(expected_max_bailey(1), 0.0, "one draw has no maximum");
+            assert_eq!(expected_max_bailey(0), 0.0);
+        }
+
+        // THE SHIPPED CEILING, WHICH IS WHERE THIS ACTUALLY RUNS.
+        // `engine::DEFAULT_PAIR_BUDGET` is `1 << 34`, and the exit grid is 325
+        // cells, so the largest family a default run can present is about
+        // 5.6e12 -- roughly 80x below where the old cliff sat. The fix is not
+        // needed for the default path and is needed because both entry points
+        // are `pub` and take any `u64`.
+        let shipped = (1_u64 << 34).saturating_mul(325);
+        let bar = bonferroni_t(shipped);
+        assert!(
+            bar > 7.0 && bar < 9.0,
+            "the bar at the shipped ceiling should sit near 8, and it is {bar}"
+        );
     }
 }

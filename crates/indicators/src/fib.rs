@@ -1,6 +1,6 @@
 //! The Fibonacci ladders anchored on completed sessions.
 //!
-//! **26 vocabulary positions.** Three ladders, all frozen before today's first
+//! **27 vocabulary positions.** Three ladders, all frozen before today's first
 //! bar prints, so none can repaint and none can look ahead:
 //!
 //! | Ladder | Anchor | Positions | Live |
@@ -496,9 +496,9 @@ mod tests {
         assert!(m.is_empty(), "a flat session produced a rung");
     }
 
-    /// Only the 26 positions this module owns are ever set.
+    /// Only the 27 positions this module owns are ever set.
     #[test]
-    fn nothing_outside_the_twenty_six_positions_is_set() {
+    fn nothing_outside_the_twenty_seven_positions_is_set() {
         let owned = positions();
         let x = levels(2_510_000, 2_490_000, 2_500_000);
         let mut p5 = Prev5::new();
@@ -827,7 +827,7 @@ mod tests {
     /// go wrong are both silent. A zip that ran short would leave a slot at its `0`
     /// initialiser — and 0 is not one of the 27, so the mask would claim a position this
     /// module never computes. A chain in the wrong order would still hold 27 correct
-    /// numbers, and `nothing_outside_the_twenty_six_positions_is_set` would still pass,
+    /// numbers, and `nothing_outside_the_twenty_seven_positions_is_set` would still pass,
     /// while the documented "down ladder, then up, then the five-session ladder" became
     /// false.
     #[test]
