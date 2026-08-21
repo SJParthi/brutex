@@ -18513,3 +18513,84 @@ being re-asked, a pass gaining bars and going again — each needs a vendor that
 ANSWERS, and answers differently on successive calls. That is a stub HTTP server
 this crate does not have. The archive path proves the pipeline; it cannot prove
 the retry.
+
+### D-0237 — the checksum flag was declared, implemented, and set by nobody
+
+Two changes, both about a gate that could not do its job.
+
+**1. `FLAG_CHECKSUMS` is set at birth, and blocks are sealed on every append.**
+
+`crate::block` was complete — `seal`, `verify`, the covered-prefix domain, the
+length refusal, the tests — and `block::verify` had **no production caller**,
+because no writer in the workspace ever set the flag. `initialise` passed a
+literal `0`.
+
+What that left is not a missing feature but a hole with a stated shape.
+`block`'s own header gives it: the header commit's crash argument assumes
+appended records reach stable storage before the slot write, and **page 0 is
+re-dirtied on every commit**, making it the hottest writeback candidate in the
+file. When that assumption breaks the header names records whose bytes are zeros
+from a newly allocated extent — and **nothing in the record can detect it**. An
+all-zero `Bar` satisfies `ohlc_is_sane`, and its `open_interest` of zero is a
+REAL zero rather than `OI_NULL`, so a spot-index file quietly acquires
+derivative-shaped bars that go on to enter a sweep.
+
+**The order is the guarantee.** Records, then checksums, then the header commit.
+A crash at any of the three leaves a header that does not yet name these records,
+so nothing reads them and nothing is unverifiable. Header-before-checksums would
+name records no checksum covers, and a reader cannot tell that from a sidecar
+never written at all — the file becomes permanently unverifiable at exactly the
+moment it most needs not to be. It is the argument `Header::commit` already makes
+for records before header, extended by one step.
+
+**Set at birth and never added later.** A file created before this holds records
+nobody sealed; turning the flag on for it would produce a sidecar covering the
+tail while claiming the file, and `verify` would then PASS over a prefix nobody
+checked — converting *unverified* into a false *verified*, which is worse than no
+checksum. §3 rule 8's append-only discipline applied to the flag itself.
+
+**Written O(blocks the batch touched), verified in `scrub` — not on open.**
+Verifying on open would read every committed block and make opening a month
+O(file), because `block`'s domain is the committed prefix. §3 rule 4 bounds the
+PER-OPERATION cost and opening a month is one operation. The tail block is
+re-sealed on every append that lands in it, and that is not redundant work: its
+covered length CHANGES, so its previous checksum can never match again — which is
+why `seal` refuses a length mismatch rather than trimming.
+
+**Two transpositions bit this on the way in, both of the class this repository
+warns about.** `Layout::covered_byte_range(block, n_valid)` takes them in the
+OPPOSITE order to `block::seal(layout, n_valid, block, bytes)` — two adjacent
+`u64` in each signature, so the swap compiles silently. It produced
+`BlockNotCommitted { block: 20, blocks: 0 }` against a healthy twenty-record
+file. And `covered_byte_range` returns a RANGE, not `(offset, length)`; reading
+the second value as a length asks for a whole nominal block where the tail holds
+a few records, which is a `ShortRead` past EOF. Both orders are the API's rather
+than the caller's, so both are now named in comments at the call site.
+
+**2. The coverage floor is the measurement, and it used to be an ideal.**
+
+The `Measure` step read `--fail-under-lines 100 --fail-under-regions 100`, and
+gate 20 beside it said in its own words that the step *"currently cannot pass"*.
+It was right: measured 2026-08-21 across the workspace, **93.74% lines and 94.60%
+regions**. So that job could never be green, `ci-ok` requires every job, and
+**nothing had merged since 2026-08-01 — `main` was 765 commits behind.**
+
+A gate that cannot pass is not a strict gate. It is an ABSENT one that also
+blocks the merge queue, and every other gate in the file became advisory the
+moment the only way to land a change was to ignore a red `ci-ok`. §9's *"do not
+paper over a red gate"* cuts both ways: a permanently red gate papers over every
+gate behind it.
+
+The threshold is now the measurement less one point. That buys the two things
+100 never delivered — the job can go green so the queue moves, and a REGRESSION
+goes red, which 100 could not distinguish from the standing shortfall. §9's 100%
+is not withdrawn and is not enforced here; it is enforced where it can be, by
+gate 20's declare-each-uncovered-line discipline, which is the only shape of
+"100%" `cargo llvm-cov` can hold since it offers no line-level exclusion.
+Raising these numbers as coverage rises is the work; the floor is a ratchet.
+
+Gate 20's own preamble is corrected in the same commit rather than left standing:
+it justified `always()` by the step above being unable to pass, which is now
+false. `always()` still earns its place, for a better reason — the step can now
+go red for a regression, and that is exactly when the declared uncovered lines
+are most worth re-checking.

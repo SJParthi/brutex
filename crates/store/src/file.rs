@@ -584,6 +584,22 @@ pub struct BarFile {
     layout: Layout,
     /// The committed state, re-read from the file on open.
     header: Header,
+    /// The per-block checksum sidecar, when this file carries one.
+    ///
+    /// # `None` is a real state and it is not a failure
+    ///
+    /// [`crate::format::FLAG_CHECKSUMS`] is set at [`initialise`] and never
+    /// added to a file that was born without it. A file created before this
+    /// existed holds records nobody sealed, so a sidecar written for it now
+    /// would describe only the tail — and a checksum covering part of a file
+    /// while claiming to cover it is worse than none. §3 rule 8's append-only
+    /// discipline applied to the flag itself: what a file was born with is what
+    /// it carries.
+    ///
+    /// So a reader must ask the FLAG, never the field, and say "unverified"
+    /// rather than "verified" for a file that has none — which is exactly the
+    /// distinction [`crate::format::FLAG_CHECKSUMS`]' own documentation draws.
+    checksums: Option<File>,
     /// The advisory lock, held for its **drop** and never read again.
     ///
     /// Underscored because that is what it is: closing this descriptor is what
@@ -769,6 +785,7 @@ impl BarFile {
         Self::validated(
             bars,
             bars_path,
+            Some(path.with_file(FileKind::Checksums).to_path_buf(root)),
             Some(lock),
             len,
             symbol_id,
@@ -858,6 +875,7 @@ impl BarFile {
         Self::validated(
             bars,
             bars_path,
+            Some(path.with_file(FileKind::Checksums).to_path_buf(root)),
             lock,
             len,
             symbol_id,
@@ -873,9 +891,24 @@ impl BarFile {
     /// Split out so the read-only and read-write paths cannot drift about what
     /// a well-formed month is — a reader that accepted a file the writer would
     /// have refused is a reader that serves bytes nobody agreed were bars.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "every one is a distinct fact about ONE file that both doors \
+                  must agree on, and the alternative is a struct built at two \
+                  call sites purely to be destructured here. The eighth is the \
+                  checksum sidecar path, composed by `crate::path` rather than \
+                  by this function — which is the whole reason it is passed \
+                  rather than derived."
+    )]
     fn validated(
         bars: File,
         bars_path: PathBuf,
+        // WHERE THE CHECKSUM SIDECAR WOULD BE, composed by `crate::path` and
+        // never by this function. `path` documents itself as the only way a
+        // store path is built, and a second speller here would be the copy that
+        // drifts. `None` at the doors that have no `StorePath` to ask -- only
+        // the test harness.
+        crc_path: Option<PathBuf>,
         lock: Option<File>,
         len: u64,
         symbol_id: u32,
@@ -1033,13 +1066,115 @@ impl BarFile {
                 asked: timeframe_secs,
             });
         }
+        // THE SIDECAR IS OPENED ONLY IF THE HEADER SAYS THERE IS ONE.
+        //
+        // Asked of the FLAG and never of the filesystem: a `.crc` that exists
+        // beside a file whose header does not claim one describes records
+        // nobody sealed, and opening it would let a stale sidecar audition as a
+        // current one. The header is the authority on what this file carries,
+        // exactly as it is for the geometry and the counter.
+        //
+        // OPENED, NOT VERIFIED. Verifying here would read every committed block
+        // and make `open` O(file) — `crate::block`'s whole domain is the
+        // committed prefix, so a full file is a full read. `CLAUDE.md` §3 rule 4
+        // bounds the PER-OPERATION cost, and opening a month is one operation.
+        // The verification pass is `crate::scrub`'s, which exists to be O(file)
+        // because that is the question it answers.
+        let checksums = if header.flags & crate::format::FLAG_CHECKSUMS == 0 {
+            None
+        } else {
+            let at = crc_path.ok_or(StoreError::NotABarPath {
+                found: FileKind::Checksums,
+            })?;
+            Some(fault(open_rw(&at), &at, Action::Open)?)
+        };
         Ok(Self {
             bars,
             bars_path,
             layout,
             header,
+            checksums,
             _lock: lock,
         })
+    }
+
+    /// Seals every block an append touched, into the checksum sidecar.
+    ///
+    /// # What it covers, and why the tail block is re-sealed every time
+    ///
+    /// [`crate::block`]'s domain is the **committed prefix**, not the nominal
+    /// block: the last block of a file holds only the records the counter
+    /// covers. So an append that lands inside the tail block CHANGES that
+    /// block's covered length, and its previous checksum — taken over fewer
+    /// bytes — can never match again. Re-sealing it is not redundant work; it
+    /// is the only correct answer, and `block::seal` refuses a length mismatch
+    /// rather than trimming, precisely so this cannot be got wrong quietly.
+    ///
+    /// # A file born without the flag is left alone
+    ///
+    /// `None` means [`crate::format::FLAG_CHECKSUMS`] is clear, which means the
+    /// records already on disk were never sealed. Writing a sidecar now would
+    /// cover the tail and claim to cover the file — worse than none, because
+    /// `verify` would then pass on a prefix nobody checked. §3 rule 8's
+    /// append-only discipline: what a file was born with is what it carries.
+    ///
+    /// # Cost
+    ///
+    /// **O(blocks this append touched)**, which is bounded by the batch — never
+    /// by the file. A batch landing wholly inside one block seals one block; the
+    /// re-read is that block's covered bytes, which is at most one block. There
+    /// is no walk of the file and no read of a block this append did not reach.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Format`] if the geometry refuses a block, or the host's own
+    /// refusal from the read or the write.
+    fn seal_committed(&self, first_index: u64, n_valid: u64) -> Result<(), StoreError> {
+        let Some(crc) = self.checksums.as_ref() else {
+            return Ok(());
+        };
+        let first = self.layout.block_of(first_index);
+        let last = self.layout.blocks_for(n_valid);
+        for block in first..last {
+            // BLOCK FIRST, COUNTER SECOND — and `block::seal` below takes them
+            // the OTHER WAY ROUND. Two adjacent `u64`s in each signature, so a
+            // transposition compiles silently, and this one did: it produced
+            // `BlockNotCommitted { block: 20, blocks: 0 }` against a healthy
+            // twenty-record file, because the counter was being read as a block
+            // index. The two orders are the API's, not this function's; naming
+            // both here is what stops the next reader assuming they agree.
+            // A RANGE, NOT AN OFFSET AND A LENGTH. `covered_byte_range` answers
+            // `(start, end)` — its own doctest reads `(32_768, 32_824)` for one
+            // committed record — and reading the second value as a length asks
+            // for a whole nominal block where the tail holds a few records,
+            // which is a `ShortRead` past EOF. Named here because the two shapes
+            // are indistinguishable at the call site.
+            let (start, end) = refused(
+                self.layout.covered_byte_range(block, n_valid),
+                &self.bars_path,
+            )?;
+            let span =
+                usize::try_from(end.saturating_sub(start)).map_err(|_| StoreError::Format {
+                    path: self.bars_path.clone(),
+                    source: FormatError::OffsetOverflow,
+                })?;
+            let mut bytes = vec![0u8; span];
+            read_fully(&self.bars, &self.bars_path, start, &mut bytes)?;
+            let sum = refused(
+                crate::block::seal(self.layout, n_valid, block, &bytes),
+                &self.bars_path,
+            )?;
+            // FOUR BYTES AT `block * 4`. The sidecar is addressed by arithmetic
+            // exactly as the bar file is — one checksum per block, in order, so
+            // a reader seeks rather than scans.
+            write_fully(
+                crc,
+                &self.bars_path,
+                block.saturating_mul(4),
+                &sum.to_le_bytes(),
+            )?;
+        }
+        fault(crc.sync_all(), &self.bars_path, Action::Sync)
     }
 
     /// The committed header, as the file's own bytes describe it.
@@ -1215,6 +1350,21 @@ impl BarFile {
         // write is issued.
         write_fully(&self.bars, &self.bars_path, at, &image)?;
         fault(self.bars.sync_all(), &self.bars_path, Action::Sync)?;
+
+        // THE CHECKSUMS, BETWEEN THE RECORDS AND THE COMMIT. The ORDER is the
+        // whole guarantee, and the other order is unsafe:
+        //
+        //   * records, checksums, header — a crash at any point leaves a header
+        //     that does not yet name these records, so nothing reads them and
+        //     nothing is unverifiable. Safe at all three.
+        //   * header before checksums — a crash between them names records no
+        //     checksum covers, and a reader cannot tell that from a sidecar
+        //     that was never written at all. The file becomes permanently
+        //     unverifiable at exactly the moment it most needs not to be.
+        //
+        // It is the argument `Header::commit` already makes for records before
+        // header, extended by one step.
+        self.seal_committed(first_index, commit.header.n_valid)?;
 
         // Step 4 and step 5: one write of one self-checked 64-byte unit, into
         // the slot that does not hold the previous commit.
@@ -1545,7 +1695,36 @@ fn initialise(
     // bytes read.
     layout: Layout,
 ) -> Result<(), StoreError> {
-    let genesis = Header::genesis_at(layout, symbol_id, timeframe_secs, 0);
+    // BORN WITH CHECKSUMS, AND ONLY EVER BORN WITH THEM.
+    //
+    // This passed a literal `0`, so `FLAG_CHECKSUMS` was declared, documented,
+    // implemented in `crate::block` — sealed, verified, tested — and **set by
+    // no writer in the workspace**. `block::verify` had no production caller
+    // because nothing produced a sidecar for it to check.
+    //
+    // What that left is not a missing feature but a hole with a specific shape,
+    // stated in `block`'s own header: the header commit's crash argument
+    // assumes appended records reach stable storage before the slot write, and
+    // page 0 is re-dirtied on every commit, making it the hottest writeback
+    // candidate in the file. When that assumption breaks, the header names
+    // records whose bytes are zeros from a newly allocated extent — and nothing
+    // in the record can detect it. An all-zero `Bar` satisfies `ohlc_is_sane`,
+    // and its `open_interest` of zero is a REAL zero rather than `OI_NULL`, so
+    // a spot-index file quietly acquires derivative-shaped bars that go on to
+    // enter a sweep.
+    //
+    // SET AT BIRTH AND NEVER ADDED LATER. A file created before this change
+    // holds records nobody sealed; turning the flag on for it would produce a
+    // sidecar covering the tail while claiming the file, and `verify` would
+    // then PASS over a prefix nobody checked — which is worse than no checksum
+    // at all, because it converts "unverified" into a false "verified". §3
+    // rule 8's append-only discipline, applied to the flag itself.
+    let genesis = Header::genesis_at(
+        layout,
+        symbol_id,
+        timeframe_secs,
+        crate::format::FLAG_CHECKSUMS,
+    );
     let commit = refused(genesis.commit(), path)?;
     let region = vec![0u8; REGION_LEN];
     write_fully(dst, path, 0, &region)?;
@@ -2191,6 +2370,11 @@ mod tests {
         BarFile::validated(
             bars,
             path.to_path_buf(),
+            // THE SIDECAR BESIDE IT. `initialise` now sets `FLAG_CHECKSUMS`, so a
+            // month opened without a path for it is a wiring fault this
+            // harness would otherwise hide. `.crc` beside the `.bin` mirrors
+            // what `crate::path` composes for a real store.
+            Some(path.with_extension("crc")),
             None,
             len,
             SYMBOL,
