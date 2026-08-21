@@ -1,4 +1,4 @@
-//! Run identity: the eight terms, hashed once, before anything is computed.
+//! Run identity: the nine terms, hashed once, before anything is computed.
 //!
 //! # The rule this exists to satisfy
 //!
@@ -10,14 +10,30 @@
 //! manifest with no lockfile entry at all, and the formula existed only as a doc
 //! comment in `crates/vocab`.
 //!
-//! # Eight terms, not nine
+//! # Nine terms: §3 rule 3's eight, plus the feed
 //!
-//! `docs/00-charter.md` §5 writes NINE, adding a `mode` between `timeframe` and
+//! `docs/00-charter.md` §5 writes nine, adding a `mode` between `timeframe` and
 //! the parameters. `CLAUDE.md` §3 rule 3 writes eight and does not mention it,
-//! and `CLAUDE.md` §10 settles the disagreement in one line: *"If this file and a
-//! document disagree, this file wins and the document is the stale copy to fix."*
-//! So the identity is eight terms and the charter is the stale copy. No decision
-//! was needed and none was invented.
+//! and `CLAUDE.md` §10 settles that disagreement in one line: *"If this file and
+//! a document disagree, this file wins and the document is the stale copy to
+//! fix."* So `mode` is not a term, the charter is the stale copy on that point,
+//! and no decision was invented.
+//!
+//! **The ninth term here is not `mode`.** It is [`Run::feed`] — which feed wrote
+//! the bars — and it is an addition to §3 rule 3's list rather than a reading of
+//! it, so it carries its reason on the field itself. In short: the eight terms
+//! identify *what was computed* and none of them identifies *whose data it was
+//! computed on*. Two vendors redistributing one exchange feed can deliver
+//! byte-identical bars for a month, at which point every one of the eight is
+//! equal and two runs over two different feeds collide on one `RunId` — while
+//! `cli`'s own banner tells the reader the identity "names the exact column they
+//! came from". A term that is only incidentally distinguishing is not an
+//! identity term.
+//!
+//! Adding it re-keys every run that can be computed. That is affordable exactly
+//! now and will not stay affordable: **nothing persists a `RunId` yet** — it is
+//! formatted into a report string and never written to the store — so there is
+//! no recorded corpus to migrate.
 //!
 //! # Why every field is length-prefixed
 //!
@@ -65,6 +81,14 @@ mod tag {
     pub(super) const DATA_DIGEST: u8 = 6;
     pub(super) const VOCAB_VERSION: u8 = 7;
     pub(super) const COMMIT: u8 = 8;
+    /// The feed the bars were written by.
+    ///
+    /// **Nine, appended, and the eight below keep their numbers.** A tag is the
+    /// only thing separating one term's bytes from another's inside the hash, so
+    /// renumbering an existing tag would silently re-key every run that had ever
+    /// been computed — the same append-only discipline `CLAUDE.md` §3.8 applies
+    /// to condition bits, applied here for the same reason.
+    pub(super) const FEED: u8 = 9;
 }
 
 /// Which way a strategy is taken.
@@ -198,6 +222,39 @@ pub struct Run<'a> {
     pub data_digest: [u8; OUT_LEN],
     /// The commit this ran at.
     pub commit: &'a str,
+    /// **Which feed wrote the bars** — `groww`, `dhan`, `zerodha`, and so on.
+    ///
+    /// # Why this is a term, and why `data_digest` was not enough
+    ///
+    /// `CLAUDE.md` §3 rule 3 lists eight terms and this is a ninth, so it needs
+    /// its reason stated. The eight identify *what was computed*; none of them
+    /// identifies *whose data it was computed on*.
+    ///
+    /// That looked harmless because two feeds' bytes for one instrument-month
+    /// almost always differ, so `data_digest` separated them **incidentally**.
+    /// Incidentally is not a guarantee. Two vendors redistributing the same
+    /// exchange feed can deliver byte-identical OHLCV at identical timestamps
+    /// for a month — that is the normal case for a clean month, not a
+    /// pathological one — and then every other term is equal too, so the two
+    /// runs collide on one `RunId` while their reports print different feeds.
+    ///
+    /// That is the §3 rule 3 guarantee inverted, and the report says so out
+    /// loud: `cli`'s `STORED_PROVENANCE` banner tells the reader that *"the run
+    /// identity beneath names the exact column they came from"*. Without this
+    /// term it did not.
+    ///
+    /// The value was available and unused the whole time — `cli::stored::Loaded`
+    /// carries `vendor`, documented as "the first path segment, never inferred",
+    /// and no production path read it.
+    ///
+    /// # Adding a term re-keys every run, and that is affordable exactly now
+    ///
+    /// Any new term changes every `RunId` this workspace can compute. That is
+    /// normally expensive; here it costs nothing, because **nothing persists a
+    /// `RunId`**. It is formatted into a report string and never written to the
+    /// store, so there is no recorded corpus to invalidate. The same change made
+    /// after run results are stored would be a migration.
+    pub feed: &'a str,
 }
 
 /// A streamed digest over every field of every bar.
@@ -351,6 +408,12 @@ pub fn identity(run: &Run<'_>) -> RunId {
     // 8. commit
     term(&mut hasher, tag::COMMIT, run.commit.as_bytes());
 
+    // 9. feed — length-prefixed by `term`, like every other variable-width
+    //    value here, so `("groww", "1min")` and `("groww1", "min")` cannot
+    //    produce the same byte stream. See `Run::feed` for why this term exists
+    //    at all and why `data_digest` did not already cover it.
+    term(&mut hasher, tag::FEED, run.feed.as_bytes());
+
     RunId(hasher.finalize())
 }
 
@@ -397,7 +460,57 @@ mod tests {
             params: Params::of(Ladder::with_min_hits(600)),
             data_digest: digest,
             commit: "0123456789abcdef",
+            feed: "groww",
         }
+    }
+
+    /// TWO FEEDS DELIVERING THE SAME BYTES MUST NOT SHARE A `RunId`.
+    ///
+    /// # The case this is about, which is the ordinary one
+    ///
+    /// This is not a pathological fixture. Two vendors redistributing one NSE
+    /// feed publish the same OHLCV at the same timestamps for a clean month, so
+    /// `data_digest` — a hash of the bar bytes — is **equal**, and so is every
+    /// other term: same instrument, same rung, same ladder, same commit. Before
+    /// `feed` was a term, those two runs hashed identically while their reports
+    /// printed different feeds, and `cli`'s `STORED_PROVENANCE` banner told the
+    /// reader that the identity "names the exact column they came from".
+    ///
+    /// The digest separating them was **incidental**, not guaranteed, and this
+    /// test is what turns the guarantee on: it holds `data_digest` fixed on
+    /// purpose, so it fails on any implementation that leans on the bytes
+    /// differing.
+    #[test]
+    fn two_feeds_with_byte_identical_bars_do_not_collide() {
+        let key = key();
+        let digest = [7_u8; 32];
+        let mask = ConditionMask::default().with_bit(3);
+
+        let groww = run_over(&key, digest, mask);
+        let mut zerodha = run_over(&key, digest, mask);
+        zerodha.feed = "zerodha";
+
+        assert_eq!(
+            groww.data_digest, zerodha.data_digest,
+            "the fixture's whole point is that the BARS are identical; if this \
+             fails the test is no longer testing what it claims"
+        );
+        assert_ne!(
+            identity(&groww),
+            identity(&zerodha),
+            "two feeds delivering identical bytes for one instrument-month are \
+             two runs, and §3 rule 3 requires two identities"
+        );
+
+        // AND THE SAME FEED STILL AGREES WITH ITSELF, so the term is a
+        // discriminator and not a source of noise -- without this, a `feed`
+        // hashed from something incidental would pass the assertion above.
+        assert_eq!(
+            identity(&groww),
+            identity(&run_over(&key, digest, mask)),
+            "one feed, one instrument-month, one ladder: rerunning must be safe \
+             and must reproduce the identity byte for byte"
+        );
     }
 
     /// TWO CONTRACTS THAT DIFFER ONLY IN `kind` MUST NOT SHARE A `RunId`.
@@ -512,7 +625,7 @@ mod tests {
 
     #[test]
     fn every_term_changes_the_identity() {
-        // Eight terms, eight assertions. A term that is written but never read
+        // Nine terms, nine assertions. A term that is written but never read
         // would let two different runs share an identity, which is the one thing
         // an identity may not do.
         let k = key();
@@ -563,6 +676,14 @@ mod tests {
         let mut r = run_over(&k, d, m);
         r.commit = "fedcba9876543210";
         assert_ne!(base, identity(&r), "commit");
+
+        // 9. feed — the term that is NOT one of §3 rule 3's eight. Varied here
+        //    beside the others so the roll-call stays a roll-call: a term this
+        //    loop does not exercise is a term that can be written and never
+        //    read, which is the exact defect `pair_budget` was.
+        let mut r = run_over(&k, d, m);
+        r.feed = "dhan";
+        assert_ne!(base, identity(&r), "feed");
     }
 
     #[test]

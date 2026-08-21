@@ -57,6 +57,27 @@ struct Row {
     kept: usize,
     /// `false` when a level breached the candidate ceiling.
     completed: bool,
+    /// This month's run identity, as hex.
+    ///
+    /// # Why a per-ROW identity and not one for the batch
+    ///
+    /// `CLAUDE.md` §3 rule 3 identifies a run by a hash whose terms include the
+    /// instrument and the `data_digest` of the bars swept. A whole-store sweep
+    /// touches many instruments and many months, so there is no single value
+    /// those terms can take — one identity for the batch would have to invent
+    /// an instrument, which is the fabrication §3 rule 1 forbids. Each
+    /// instrument-month IS a run, and each carries its own.
+    ///
+    /// This field did not exist, and its absence was the report's own banner
+    /// telling a lie: `crate::STORED_PROVENANCE` states that "the run identity
+    /// beneath names the exact column they came from", and beneath it were
+    /// counts and no identity at all. The single-month path has always printed
+    /// one, so a reader who had seen that report reasonably assumed this one
+    /// carried it too.
+    ///
+    /// `None` only for a refused month, which performed no computation and so
+    /// has nothing to identify.
+    identity: Option<String>,
     /// Present when the month could not be swept at all.
     refused: Option<String>,
 }
@@ -146,7 +167,7 @@ fn sweep_under(
     let mut rows: Vec<Row> = Vec::with_capacity(wanted.len());
 
     for held in wanted {
-        rows.push(one(root, held, min_hits, &mut tally));
+        rows.push(one(root, held, min_hits, commit, &mut tally));
     }
 
     Ok(render(
@@ -161,7 +182,7 @@ fn sweep_under(
 }
 
 /// Sweeps one instrument-month, folding the outcome into `tally`.
-fn one(root: &std::path::Path, held: &Held, min_hits: u64, tally: &mut Tally) -> Row {
+fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str, tally: &mut Tally) -> Row {
     let label = format!(
         "{} {} {} {}",
         held.vendor.as_str(),
@@ -186,6 +207,7 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, tally: &mut Tally) ->
                 depth: 0,
                 kept: 0,
                 completed: false,
+                identity: None,
                 refused: Some(why),
             };
         }
@@ -200,11 +222,43 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, tally: &mut Tally) ->
                 depth: 0,
                 kept: 0,
                 completed: false,
+                identity: None,
                 refused: Some(why.to_owned()),
             };
         }
     };
-    let outcome = Sweeper::new(Ladder::with_min_hits(min_hits)).run(&loaded.bars, &mut ev);
+    let ladder = Ladder::with_min_hits(min_hits);
+    let outcome = Sweeper::new(ladder).run(&loaded.bars, &mut ev);
+
+    // THE IDENTITY THIS REPORT'S BANNER HAS ALWAYS PROMISED.
+    //
+    // Built from the ladder that ACTUALLY RAN rather than from `min_hits` as
+    // typed — `Params::of` reads the ladder, so a zero the ladder raised to one
+    // is recorded as the one that ran. Same construction as `sweep_stored`, so
+    // sweeping a month here and sweeping it alone produce the same 64 hex
+    // characters, which is the only thing that makes the two reports comparable.
+    let id = runner::identity::identity(&runner::identity::Run {
+        // `Default::default()` and not the named path, for the reason
+        // `crate::sweep_stored` gives at its own call site: spelling
+        // `ConditionMask` needs a `vocab` arrow that `CLAUDE.md` §5 does not
+        // draw for `cli`, and adding one to satisfy a lint would be the silent
+        // scope change §3 rule 2 forbids.
+        #[expect(
+            clippy::default_trait_access,
+            reason = "the named path would add a dependency arrow §5 does not draw"
+        )]
+        mask: Default::default(),
+        direction: runner::identity::Direction::Undirected,
+        instrument: &loaded.key,
+        timeframe: loaded.timeframe,
+        params: runner::identity::Params::of(ladder),
+        data_digest: runner::identity::data_digest(&loaded.bars),
+        commit,
+        // The feed this month's file was actually read from. A whole-store
+        // sweep walks several vendors in one run, so this is the term that keeps
+        // two feeds' rows for one instrument-month from carrying one identity.
+        feed: loaded.vendor.as_str(),
+    });
 
     let kept = outcome.sweep.all_frequent().count();
     let depth = outcome.sweep.depth();
@@ -225,6 +279,7 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, tally: &mut Tally) ->
         depth,
         kept,
         completed,
+        identity: Some(runner::identity::RunId::hex(&id)),
         refused: None,
     }
 }
@@ -268,6 +323,16 @@ fn render(
                     "  CEILING — depth not reached by extinction"
                 }
             );
+            // THE IDENTITY, ON ITS OWN LINE UNDER THE MONTH IT IDENTIFIES.
+            //
+            // Indented past the label so a reader scanning months is not made to
+            // read 64 hex characters per line, and printed rather than omitted
+            // because `STORED_PROVENANCE` two screens above tells them it is
+            // here. A run whose identity is not recorded is a run `CLAUDE.md` §3
+            // rule 3 does not permit.
+            if let Some(ref hex) = row.identity {
+                let _ = writeln!(out, "      identity {hex}");
+            }
         }
     }
 

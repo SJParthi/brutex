@@ -336,6 +336,11 @@ fn the_identity_does_not_depend_on_how_many_bars_the_digest_covered() -> bool {
         params: Params::of(ladder(1)),
         data_digest: digest,
         commit: "0123456789abcdef",
+        // A fixed word, like `commit` and `timeframe` above: this row measures
+        // that `identity` is O(1) in the BAR COUNT, and every term but
+        // `data_digest` is held constant so the digest is the only thing varying
+        // across the two magnitudes.
+        feed: "groww",
     };
     // The digests are computed OUTSIDE the timed region. `data_digest` is
     // O(bars) and honestly so -- it must read every bar. What this row claims is

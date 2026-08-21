@@ -166,6 +166,58 @@ impl Sweeper {
             sweep,
         }
     }
+
+    /// [`Self::run`], and then scores what it found.
+    ///
+    /// # Why this exists beside `run` rather than replacing it
+    ///
+    /// `run` builds a [`Column`], walks the ladder, and **drops the column**. A
+    /// caller that then wants to know which combinations were strongest has no
+    /// choice but to rebuild it — a second fold over every bar with a second
+    /// freshly-warmed evaluator, which is both the largest cost in the run and
+    /// an invitation to the one error [`crate::outcome::Edge::mismatched`]
+    /// exists to catch: a column and a [`Forward`] built from different slices
+    /// produce a mean and a `t` belonging to other bars.
+    ///
+    /// This method builds both from `bars`, once, so the mispairing is
+    /// unreachable by construction rather than merely detected after the fact.
+    ///
+    /// `run` stays because three of the five commands genuinely do not rank —
+    /// the threshold search calls it per probe, and paying for a `Forward` and
+    /// a heap on a probe that exists only to discover `min_hits` would be work
+    /// nobody reads.
+    ///
+    /// # Cost
+    ///
+    /// One `Column::build` (O(bars), unchanged from `run`), one
+    /// [`crate::outcome::forward`] pass (O(bars)), then [`crate::rank::rank`],
+    /// which is one edge pass per surviving combination and O(log keep) to
+    /// admit. Memory is O(keep) and independent of how many combinations the
+    /// sweep produced — the whole reason `rank` is a bounded heap and not a
+    /// sort.
+    pub fn run_ranked(
+        &self,
+        bars: &[Candle],
+        evaluator: &mut Evaluator,
+        horizon: crate::outcome::Horizon,
+        keep: usize,
+    ) -> (Outcome, crate::rank::Ranked) {
+        let column = Column::build(bars, evaluator);
+        let live = live_positions();
+        let sweep = self.ladder.walk(column.bits(), &live);
+        // THE SAME SLICE THE COLUMN WAS BUILT FROM, and that is the whole point
+        // of computing it here rather than leaving it to the caller.
+        let forward = crate::outcome::forward(bars, horizon);
+        let ranked = crate::rank::rank(&sweep, &column, &forward, keep);
+        (
+            Outcome {
+                census: column.census(),
+                first_swept: column.first_swept(),
+                sweep,
+            },
+            ranked,
+        )
+    }
 }
 
 /// Pairs one probe may walk while the search is looking for a threshold.

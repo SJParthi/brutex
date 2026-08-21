@@ -494,7 +494,31 @@ pub fn walk_forward(
         // KEPT, NOT DISCARDED. The loop below already scores every candidate;
         // until now only the maximum survived it. `crate::pbo` needs the whole
         // ranking, so the mask and its score are collected as they are computed.
-        let mut scored: Vec<(ConditionMask, i64)> = Vec::with_capacity(closed.kept.len());
+        // THE EXIT TRAVELS WITH THE MASK, and that is the whole correction.
+        //
+        // This was `Vec<(ConditionMask, i64)>` — mask and in-sample score, and
+        // nothing about HOW that score was reached. The out-of-sample pass below
+        // therefore had no exit to apply, so it re-ran the whole 125-cell grid on
+        // the TEST window and took `sharpest().or_else(best)` of that: the best
+        // of a 125-way search chosen using the test bars themselves.
+        //
+        // That is precisely the look-ahead this module's own comment forty lines
+        // down refuses in words — "a stop fitted to the test window is the same
+        // look-ahead as a combination fitted to it, and worse, because a stop
+        // fitted to the future looks spectacular and is trivially findable" —
+        // and it was doing it for EVERY candidate, on the vector `crate::pbo`
+        // consumes.
+        //
+        // Why that direction of error is the dangerous one: PBO asks how often
+        // the in-sample winner lands below median out-of-sample. Giving every
+        // candidate its best-case OOS score inflates the whole distribution and
+        // compresses the ranks, so the winner looks less anomalous than it is
+        // and the PROBABILITY OF OVERFITTING IS REPORTED TOO LOW. A safety
+        // metric that fails optimistic is worse than none.
+        //
+        // Carrying the `ExitPick` costs three small ladders per candidate — the
+        // type already existed and already held them for exactly this reason.
+        let mut scored: Vec<(ConditionMask, i64, ExitPick)> = Vec::with_capacity(closed.kept.len());
         let mut priced: u64 = 0;
         for item in &closed.kept {
             priced = priced.saturating_add(1);
@@ -513,22 +537,28 @@ pub fn walk_forward(
                 continue;
             }
             let s = Summary::of(&walk(train, &train_column, &item.mask, horizon, direction));
-            scored.push((item.mask, cell.pessimistic));
-            if best
+            // The pick is built once and used twice: here, so the out-of-sample
+            // pass can apply this candidate's TRAINING exit to the test bars,
+            // and below for the fold's own winner. Built before the `best`
+            // comparison so both see the same value.
+            let pick = ExitPick {
+                rungs: (cell.stop, cell.target, cell.trail),
+                pessimistic: cell.pessimistic,
+                stops: g.stops.clone(),
+                targets: g.targets.clone(),
+                trails: g.trails.clone(),
+            };
+            let improves = best
                 .as_ref()
-                .is_none_or(|(_, _, pick)| cell.pessimistic > pick.pessimistic)
-            {
-                best = Some((
-                    item.mask,
-                    s,
-                    ExitPick {
-                        rungs: (cell.stop, cell.target, cell.trail),
-                        pessimistic: cell.pessimistic,
-                        stops: g.stops.clone(),
-                        targets: g.targets.clone(),
-                        trails: g.trails.clone(),
-                    },
-                ));
+                .is_none_or(|(_, _, held)| cell.pessimistic > held.pessimistic);
+            scored.push((item.mask, cell.pessimistic, pick.clone()));
+            if improves {
+                // The SAME `pick` the vector holds, not a second one built from
+                // the same cell. Two constructions of one value are two things
+                // that can drift apart, and the fold's winner and its row in
+                // `scored` disagreeing about the chosen rungs is exactly the
+                // defect this whole block exists to remove.
+                best = Some((item.mask, s, pick));
             }
         }
 
@@ -566,21 +596,39 @@ pub fn walk_forward(
                 // computing it at all.
                 oos_all = scored
                     .iter()
-                    .map(|(mask, _)| {
-                        let g = crate::grid::evaluate(
+                    .map(|(mask, _, pick)| {
+                        // EVERY CANDIDATE ON THE TEST BARS, WEARING THE EXIT IT
+                        // CHOSE IN TRAINING.
+                        //
+                        // `with_levels`, not `evaluate`. `evaluate` builds the
+                        // whole 125-cell grid FROM THE BARS IT IS GIVEN and
+                        // returns the best of it; called on the test window, as
+                        // this did, it fits the exit to the data it is meant to
+                        // be tested on. `with_levels` applies ONE named variant
+                        // whose rung values came from `train`, so nothing about
+                        // the test bars decides a level — the same discipline
+                        // the fold's own winner has followed since
+                        // `docs/06-limits.md` §70, now applied to the vector
+                        // `crate::pbo` actually ranks.
+                        //
+                        // A candidate whose signals produce no trade in the test
+                        // window scores 0, exactly as before: `with_levels`
+                        // returns `None` on an empty trade set, and 0 is the
+                        // level-less total of no trades rather than a sentinel.
+                        crate::grid::with_levels(
                             upto,
                             &confined,
                             mask,
                             horizon,
                             side_of(direction),
-                            DEFAULT_RUNGS,
-                        );
-                        // `sharpest` then `best`, the SAME fallback the in-sample loop
-                        // uses. A different tie-break on the two sides would rank the
-                        // same candidate by two rules and make the placement meaningless.
-                        g.sharpest()
-                            .or_else(|| g.best())
-                            .map_or(0, |c| c.pessimistic)
+                            crate::excursion::Ladders {
+                                stops: &pick.stops,
+                                targets: &pick.targets,
+                                trails: &pick.trails,
+                            },
+                            pick.rungs,
+                        )
+                        .map_or(0, |c| c.pessimistic)
                     })
                     .collect();
                 let plain = Summary::of(&walk(upto, &confined, &mask, horizon, direction));
@@ -628,7 +676,7 @@ pub fn walk_forward(
             in_sample,
             out_of_sample,
             out_of_sample_exit,
-            in_sample_all: scored.iter().map(|(_, v)| *v).collect(),
+            in_sample_all: scored.iter().map(|(_, v, _)| *v).collect(),
             out_of_sample_all: oos_all,
         });
     }

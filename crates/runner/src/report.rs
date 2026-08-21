@@ -62,7 +62,65 @@ use crate::identity::RunId;
 use crate::rank::Ranked;
 use crate::{Auto, Outcome};
 use engine::Sweep;
+use engine::column::set_positions;
 use indicators::column::Census;
+use vocab::ConditionMask;
+
+/// The condition names a mask requires, in ascending position order.
+///
+/// # Why this function is the point of the whole product
+///
+/// Until it existed, `vocab::table::name` had **zero production call sites**
+/// workspace-wide: the 280-row name table shipped in the binary and never
+/// reached an operator. A sweep would report `combinations found 3,689` and
+/// there was no surface anywhere -- not in the CLI, not over HTTP -- that could
+/// turn one of those 3,689 masks back into the conditions it is made of. The
+/// mask reached the report as a sort key, a dedup key and a hash input, and in
+/// none of those roles is it readable. An audit named this the headline hole and
+/// it was right: a brute-force search whose answer cannot be read is a counter,
+/// not a research tool.
+///
+/// # A position with no name is printed, not skipped
+///
+/// `table::name` returns `None` above the table, and a mask CAN carry such a bit
+/// -- `ConditionMask` is 384 wide against a 280-row table, and `with_bit`
+/// silently ignores nothing below 384. Rendering that as `?<position>` rather
+/// than dropping it keeps the printed arity equal to `popcount`, so a reader
+/// counting names against the `k` the ladder reports cannot be misled by a
+/// silent omission. `CLAUDE.md` §4: degrade loudly and name the reason.
+///
+/// # Cost
+///
+/// O(popcount) lookups, each a direct index into a fixed array -- `set_positions`
+/// walks set bits by `trailing_zeros`, never by scanning 384 positions. The
+/// allocation is per RENDERED ROW, not per bar or per candidate, so it is off
+/// every path `CLAUDE.md` §3 rule 4 bounds.
+#[must_use]
+pub fn condition_names(mask: &ConditionMask) -> Vec<String> {
+    set_positions(mask)
+        .map(|position| {
+            u16::try_from(position)
+                .ok()
+                .and_then(vocab::table::name)
+                .map_or_else(|| format!("?{position}"), ToOwned::to_owned)
+        })
+        .collect()
+}
+
+/// The condition names of `mask`, joined for one line of a report.
+///
+/// `·` rather than `,` because several condition names contain no punctuation
+/// and a comma reads as part of the name at a glance; the separator has to be a
+/// character the vocabulary never uses. An empty mask renders as a named empty
+/// set rather than as an empty string, because a blank where a combination
+/// should be is indistinguishable from a rendering bug.
+fn conditions_line(mask: &ConditionMask) -> String {
+    let names = condition_names(mask);
+    if names.is_empty() {
+        return "(no conditions — an empty mask matches every bar)".to_owned();
+    }
+    names.join(" · ")
+}
 
 /// Observations below which a normal-quantile bar cannot rule on a t-statistic.
 ///
@@ -322,6 +380,17 @@ pub fn render_findings(ranked: &Ranked, sweep: &Sweep) -> String {
                 "BELOW THE BAR — indistinguishable from luck"
             }
         );
+        // THE COMBINATION, IN WORDS, ON ITS OWN LINE UNDER THE NUMBERS.
+        //
+        // Indented past the rank column so the table's own columns stay
+        // scannable and the names read as a continuation of the row above
+        // rather than as a sixth column that would wrap unpredictably -- a
+        // combination at k=8 is longer than any terminal is wide, and a name
+        // broken across a column boundary is worse than no name.
+        //
+        // Under the numbers and not above them, because a reader scanning for
+        // `clears` reads the verdict first and only then asks what the row was.
+        let _ = writeln!(out, "        {}", conditions_line(&s.mask));
     }
     // AND SAID ONCE MORE, IN A LINE OF ITS OWN. A per-row tag is easy to miss
     // in a table an operator scans for `clears`; a mispairing is a fault in the
@@ -1117,6 +1186,7 @@ mod tests {
             params: Params::of(bounded()),
             data_digest: data_digest(&bars),
             commit: "0123456789abcdef",
+            feed: "groww",
         });
         let text = render(&out, Some(&id));
 

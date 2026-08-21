@@ -94,15 +94,22 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
        cli audit    SESSIONS MIN_HITS   sweep, then trade the best combination
        cli sweep-stored VENDOR UNDERLYING RUNG YEAR MONTH MIN_HITS
                                    sweep REAL bars read from the store
+       cli audit-stored VENDOR UNDERLYING RUNG YEAR MONTH MIN_HITS
+                                   sweep REAL bars, then trade them: exit grid,
+                                   walk-forward, PBO and bootstrap p-values
        cli sweep-all    VENDOR RUNG MIN_HITS
                                    sweep EVERY stored instrument-month at that
                                    feed and rung, one report for all of them
 
 SESSIONS  how many generated trading days to sweep, 1..=3650
 MIN_HITS  bars a combination must fire on to be kept, 1 or more
-VENDOR    the feed that wrote them -- groww, dhan, truedata, gdfl
+VENDOR    the feed that wrote them -- groww, dhan, truedata, gdfl, zerodha
 UNDERLYING  the index, e.g. NIFTY or BANKNIFTY
 RUNG      the bar length as its directory word -- 1min, 1day
+
+The two stored commands read a run identity off the build, so they refuse
+unless it was stamped:
+    BRUTEX_COMMIT=$(git rev-parse HEAD) cargo build --release -p cli
 ";
 
 /// Parses one command and runs it, returning the code the shell reads.
@@ -149,6 +156,34 @@ pub fn run(args: &[String], out: &mut String) -> u8 {
             ) {
                 (Ok(y), Ok(m), Ok(h)) => {
                     let text = sweep_stored(vendor, underlying, rung, y, m, h);
+                    let refused = text.starts_with("refused: ");
+                    out.push_str(&text);
+                    if refused { MISUSED } else { OK }
+                }
+                (Err(_), _, _) => refuse(out, "YEAR must be a number like 2026"),
+                (_, Err(_), _) => refuse(out, "MONTH must be 1..=12"),
+                (_, _, Err(why)) => refuse(out, why),
+            }
+        }
+        [
+            "audit-stored",
+            vendor,
+            underlying,
+            rung,
+            year,
+            month,
+            min_hits,
+        ] => {
+            // The same parse, the same order and the same three refusals as
+            // `sweep-stored` above. Two commands taking one shape of argument
+            // must reject a bad one identically, or an operator learns two rules.
+            match (
+                year.parse::<u16>(),
+                month.parse::<u8>(),
+                parse_min_hits(min_hits),
+            ) {
+                (Ok(y), Ok(m), Ok(h)) => {
+                    let text = audit_stored(vendor, underlying, rung, y, m, h);
                     let refused = text.starts_with("refused: ");
                     out.push_str(&text);
                     if refused { MISUSED } else { OK }
@@ -437,7 +472,13 @@ fn sweep_stored_inner(
 
     let mut ev = evaluator().map_err(str::to_owned)?;
     let ladder = Ladder::with_min_hits(min_hits);
-    let outcome = Sweeper::new(ladder).run(&loaded.bars, &mut ev);
+    // RANKED, NOT MERELY COUNTED. This was `Sweeper::run`, whose report ends at
+    // "combinations found 3,689" -- a count with no way to learn what any of the
+    // 3,689 are. `run_ranked` builds the forward from the same slice the column
+    // was built from, so the mispairing `Edge::mismatched` guards against cannot
+    // arise, and `report::render_findings` below names every kept combination.
+    let (outcome, ranked) =
+        Sweeper::new(ladder).run_ranked(&loaded.bars, &mut ev, Horizon::DEFAULT, STORED_KEEP);
 
     // The identity, over the bars actually swept and the ladder actually
     // applied. `Params::of` reads the ladder rather than the argument, so a
@@ -459,6 +500,15 @@ fn sweep_stored_inner(
         params: Params::of(ladder),
         data_digest: data_digest(&loaded.bars),
         commit,
+        // THE FEED, READ OFF THE LOAD RATHER THAN OFF THE ARGUMENT.
+        //
+        // `loaded.vendor` is the first path segment of the file that was
+        // actually opened — "never inferred", as its own doc says — so an
+        // identity built from it names the column on disk rather than the word
+        // the operator typed. Those agree today because `stored::load` resolves
+        // one from the other, and reading the load keeps them agreeing if that
+        // ever stops being true.
+        feed: loaded.vendor.as_str(),
     });
 
     let mut out = String::from(STORED_PROVENANCE);
@@ -472,6 +522,11 @@ fn sweep_stored_inner(
     );
     out.push('\n');
     out.push_str(&runner::report::render(&outcome, Some(&id)));
+    // THE ANSWER, NOT JUST THE SEARCH. `render` reports how MANY combinations
+    // survived at each level; this reports WHICH, by condition name, with the
+    // evidence for each and the bar that evidence must clear. Without it the
+    // whole ladder is a counter.
+    out.push_str(&runner::report::render_findings(&ranked, &outcome.sweep));
     Ok(out)
 }
 
@@ -565,6 +620,39 @@ fn auto_with(ev: Result<Evaluator, &'static str>, sessions: i64) -> String {
 /// Monte Carlo error and cost linearly; nothing in the data says where that
 /// trade sits, so this is the assumption and the report prints it.
 const BOOTSTRAP_DRAWS: usize = 1_000;
+
+/// The family-wise error rate the stepdown is judged at, in parts per million.
+///
+/// Fifty thousand ppm is 5%, and it is 5% because the two rows printed beside it
+/// — White's Reality Check and Hansen's SPA — already render a `clears 5%`
+/// column. One report carrying two different alphas would let a reader compare
+/// three numbers that are not comparable, which is the kind of quiet mismatch
+/// `crate::report`'s own Bonferroni figure was corrected for.
+///
+/// Parts per million rather than a float because `CLAUDE.md` §7 keeps this
+/// workspace's arithmetic in integers wherever a decision depends on it, and a
+/// rejection threshold is such a decision.
+const BOOTSTRAP_ALPHA_PPM: u64 = 50_000;
+
+/// How many ranked combinations a stored sweep prints.
+///
+/// # Why a bound at all, and why this number
+///
+/// A sweep retains every survivor and there can be tens of millions of them —
+/// `crate::rank` exists precisely so that memory is a function of how many
+/// results you look at rather than how many exist. That makes this constant the
+/// only thing standing between an operator and a report longer than any
+/// terminal scrollback, so it is a bound rather than "all of them".
+///
+/// **Twenty-five is a stated assumption, not a derivation.** No document names a
+/// number and nothing in the data implies one, so under `CLAUDE.md` §3 rule 1
+/// this is the operator's choice with a default: enough rows that a reader can
+/// see where the evidence falls off, few enough that the whole section fits on
+/// one screen beside the bar it must clear. `crate::rank::rank` orders by |t|,
+/// so these are the twenty-five with the strongest evidence — which is emphatically
+/// **not** the twenty-five that are true. The bar printed above them is what
+/// decides that, and on a sweep of sixty-one million hypotheses it sits above 6.
+const STORED_KEEP: usize = 25;
 
 /// The seed the resampler is started from.
 ///
@@ -755,6 +843,107 @@ pub fn audit_run(sessions: i64, min_hits: u64) -> String {
     audit_with(evaluator(), sessions, min_hits)
 }
 
+/// The full audit stack over **one real instrument-month read from the store**.
+///
+/// # The gap this closes
+///
+/// `sweep-stored` reads real bars and ranks the combinations it finds. It stops
+/// there. Everything that turns a combination into money — trades, worst-case
+/// fills, the 125-cell exit grid, walk-forward folds, PBO and the bootstrap
+/// p-values — lived behind `cli audit`, whose bars were **hardcoded** to
+/// `synthetic::sessions`. So real bars could be swept and could never be traded,
+/// and every P&L, PBO figure and p-value the workspace could print described a
+/// generated series with a deterministic upward drift.
+///
+/// # Errors
+///
+/// The same refusals `sweep_stored` returns, in the same order and for the same
+/// reasons: an unstamped build first (§3 rule 3 — no computation without a
+/// recordable identity), then an unknown feed, then a store root that is not
+/// configured, then a month that is not held.
+fn audit_stored_inner(
+    vendor_word: &str,
+    underlying: &str,
+    rung: &str,
+    year: u16,
+    month: u8,
+    min_hits: u64,
+) -> Result<String, stored::Refusal> {
+    // COMMIT FIRST, BEFORE A BAR IS READ — the order `sweep_stored` uses and for
+    // the identical reason: a build that cannot be identified must refuse BEFORE
+    // it computes, not compute and then apologise.
+    let commit = commit_stamp().ok_or_else(|| {
+        "this build carries no commit stamp, so §3 rule 3's run identity cannot be \
+         recorded and the audit will not run. Rebuild with \
+         `BRUTEX_COMMIT=$(git rev-parse HEAD) cargo build --release -p cli`"
+            .to_owned()
+    })?;
+
+    let vendor = parse_vendor(vendor_word)?;
+    let root = store_root()?;
+    let loaded = stored::load(&root, vendor, underlying, rung, year, month)?;
+
+    let ladder = Ladder::with_min_hits(min_hits);
+    let id = identity(&Run {
+        #[expect(
+            clippy::default_trait_access,
+            reason = "the named path would add a dependency arrow §5 does not draw"
+        )]
+        mask: Default::default(),
+        // UNDIRECTED, and deliberately so even though this command DOES trade.
+        // The identity names the SWEEP that produced the candidates; the
+        // direction a trade is taken in is chosen per combination further down,
+        // and stamping one of them here would name a decision the sweep did not
+        // make. `Direction::Long`/`Short` re-key the identity for the day a
+        // directional sweep exists, which is what that field is reserved for.
+        direction: RunDirection::Undirected,
+        instrument: &loaded.key,
+        timeframe: loaded.timeframe,
+        params: Params::of(ladder),
+        data_digest: data_digest(&loaded.bars),
+        commit,
+        feed: loaded.vendor.as_str(),
+    });
+
+    // THE BANNER LEADS, and the feed line rides inside it rather than above the
+    // report. `audit_bars` writes its banner first and the report second, so a
+    // feed line written here would land BETWEEN them — pushing the provenance
+    // claim away from the numbers it qualifies. `sweep_stored` puts the two
+    // together for the same reason.
+    let mut header = String::from(STORED_PROVENANCE);
+    let _ = writeln!(
+        header,
+        "feed {} · {} · {} · {year}-{month:02} · {} bars · built at {commit}",
+        vendor.as_str(),
+        underlying,
+        loaded.timeframe,
+        loaded.bars.len(),
+    );
+    Ok(audit_bars(
+        evaluator(),
+        loaded.bars,
+        &header,
+        min_hits,
+        Some(&id),
+    ))
+}
+
+/// [`audit_stored_inner`], with every refusal rendered the way the CLI prints one.
+#[must_use]
+pub fn audit_stored(
+    vendor_word: &str,
+    underlying: &str,
+    rung: &str,
+    year: u16,
+    month: u8,
+    min_hits: u64,
+) -> String {
+    match audit_stored_inner(vendor_word, underlying, rung, year, month, min_hits) {
+        Ok(text) => text,
+        Err(why) => format!("refused: {why}\n"),
+    }
+}
+
 /// The audit, from an evaluator the caller supplies. Split for the same reason
 /// [`sweep_with`] is.
 #[allow(
@@ -765,11 +954,64 @@ pub fn audit_run(sessions: i64, min_hits: u64) -> String {
               per CLI invocation, in a function called once per process."
 )]
 fn audit_with(ev: Result<Evaluator, &'static str>, sessions: i64, min_hits: u64) -> String {
+    audit_bars(
+        ev,
+        synthetic::sessions(sessions),
+        PROVENANCE,
+        min_hits,
+        None,
+    )
+}
+
+/// The whole audit stack over bars the caller supplies, under a banner it names.
+///
+/// # Why this exists: the audit could only ever see invented data
+///
+/// Everything below — trades, worst-case fills, the exit grid, walk-forward,
+/// PBO and the bootstrap — was reachable from exactly one command, `cli audit`,
+/// whose bars came from `synthetic::sessions` **unconditionally**. There was no
+/// `audit-stored`, so no entry point in this workspace had ever produced a
+/// trade, a P&L, an exit grid, a walk-forward verdict, a PBO figure or a
+/// bootstrap p-value **from real market data**. Every such number this system
+/// could print described the generator.
+///
+/// `sweep-stored` could read a real month and rank it; it stopped short of
+/// trading it. This is the join, and it is the same code on both sides — a
+/// second implementation for real bars would be two backtests that could
+/// disagree.
+///
+/// # The banner is a parameter, and that is load-bearing
+///
+/// A sweep over invented data is byte-identical in SHAPE to one over real data,
+/// so the banner is the only thing separating them — which is why
+/// `the_generated_and_stored_banners_make_opposite_claims` fails the build if
+/// the two ever converge. Passing it in rather than deciding it here means the
+/// caller that chose the bars is the caller that names their provenance, and the
+/// two cannot drift apart.
+///
+/// # The identity is `Option`, for the reason `report::render` takes one
+///
+/// A synthetic run has no instrument to name, and naming one would be the
+/// invention `CLAUDE.md` §3 rule 1 forbids — so it passes `None` and the report
+/// says NOT RECORDED in place of a digest. A stored run has one and passes it.
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::large_types_passed_by_value,
+    reason = "the same ownership requirement `audit_with` documents: \
+              `Column::build` and `Sweeper::run` both take `&mut`, and the \
+              evaluator must outlive them."
+)]
+fn audit_bars(
+    ev: Result<Evaluator, &'static str>,
+    bars: Vec<indicators::Candle>,
+    banner: &str,
+    min_hits: u64,
+    id: Option<&runner::identity::RunId>,
+) -> String {
     let mut ev = match ev {
         Ok(e) => e,
         Err(why) => return format!("refused: {why}\n"),
     };
-    let bars = synthetic::sessions(sessions);
     let column = Column::build(&bars, &mut ev);
     let mut ev2 = match evaluator() {
         Ok(e) => e,
@@ -777,9 +1019,9 @@ fn audit_with(ev: Result<Evaluator, &'static str>, sessions: i64, min_hits: u64)
     };
     let outcome = Sweeper::new(Ladder::with_min_hits(min_hits)).run(&bars, &mut ev2);
 
-    let mut out = String::from(PROVENANCE);
+    let mut out = String::from(banner);
     out.push('\n');
-    out.push_str(&runner::report::render(&outcome, None));
+    out.push_str(&runner::report::render(&outcome, id));
 
     // The first CLOSED combination, or nothing to trade.
     let distinct = closed::closed(&outcome.sweep);
@@ -875,11 +1117,26 @@ fn audit_with(ev: Result<Evaluator, &'static str>, sessions: i64, min_hits: u64)
             session_returns(&index, days.len(), &bars, &walked)
         })
         .collect();
-    // Two of the three tests, and they answer different questions: Reality Check
-    // says "something in this family is real", SPA says the same with poor
-    // strategies no longer diluting the null. Romano-Wolf is the per-strategy
-    // stepdown and needs a decision about which strategies to report, which this
-    // caller does not have — so it is not run rather than run and discarded.
+    // ALL THREE TESTS, AND THE THIRD ONE NOW ACTUALLY RUNS.
+    //
+    // They answer different questions: Reality Check says "something in this
+    // family is real", SPA says the same with poor strategies no longer diluting
+    // the null, and Romano-Wolf is the per-strategy stepdown that says WHICH.
+    //
+    // This comment used to read "…so it is not run rather than run and
+    // discarded", and that was true of the computation and false of the REPORT:
+    // `audit::bootstrap` was handed `family.len()` for its `named` column and
+    // printed, in words, "Only Romano-Wolf says WHICH, and it names 16" — the
+    // size of the family offered, not the count of anything rejected. A reader
+    // was told a stepdown had named sixteen strategies when no stepdown had been
+    // computed at all. That is the failure-wearing-a-success's-clothes shape
+    // `CLAUDE.md` §4 bans, in the one section of the report whose whole job is
+    // to say how much of this is luck.
+    //
+    // The stated reason for not running it — "needs a decision about which
+    // strategies to report" — is answered by the same alpha the two rows beside
+    // it are already judged at, so the decision was available; it just had not
+    // been made.
     let rc = runner::bootstrap::reality_check(
         &family,
         BOOTSTRAP_DRAWS,
@@ -892,7 +1149,17 @@ fn audit_with(ev: Result<Evaluator, &'static str>, sessions: i64, min_hits: u64)
         BOOTSTRAP_SEED,
         runner::bootstrap::DEFAULT_BLOCK,
     );
-    let boot = (!family.is_empty()).then_some((rc.as_ref(), spa.as_ref(), family.len()));
+    // THE STEPDOWN, at the same 5% the two rows above are judged at, so one
+    // report carries one alpha rather than two.
+    let named = runner::bootstrap::romano_wolf(
+        &family,
+        BOOTSTRAP_DRAWS,
+        BOOTSTRAP_SEED,
+        runner::bootstrap::DEFAULT_BLOCK,
+        BOOTSTRAP_ALPHA_PPM,
+    )
+    .len();
+    let boot = (!family.is_empty()).then_some((rc.as_ref(), spa.as_ref(), named));
 
     out.push_str(&audit::render(
         Some(&taken),
@@ -915,9 +1182,9 @@ fn audit_with(ev: Result<Evaluator, &'static str>, sessions: i64, min_hits: u64)
 )]
 mod tests {
     use super::{
-        MISUSED, OK, PROVENANCE, STORED_PROVENANCE, USAGE, Vendor, audit_run, auto, auto_with,
-        evaluator_from, parse_min_hits, parse_sessions, parse_vendor, root_from, run, sweep,
-        sweep_stored, sweep_with,
+        MISUSED, OK, PROVENANCE, STORED_PROVENANCE, USAGE, Vendor, audit_run, audit_stored, auto,
+        auto_with, evaluator_from, parse_min_hits, parse_sessions, parse_vendor, root_from, run,
+        sweep, sweep_stored, sweep_with,
     };
 
     fn argv(words: &[&str]) -> Vec<String> {
@@ -1199,6 +1466,117 @@ mod tests {
             !text.contains("BARS"),
             "a refusal must not render a census that would read as an empty \
              market: {text}"
+        );
+    }
+
+    /// THE REAL-DATA AUDIT REFUSES FOR THE SAME CAUSE AS THE SWEEP, AND NAMES ITSELF.
+    ///
+    /// # What this can reach, stated because it decides every assertion below
+    ///
+    /// `cargo test` builds without `BRUTEX_COMMIT`, so `commit_stamp()` is `None`
+    /// and **both commands refuse at the commit gate before the store is touched
+    /// at all**. That is correct — §3 rule 3 forbids a computation whose identity
+    /// cannot be recorded, so the gate must come first — but it means the
+    /// fixtures below do NOT exercise the vendor parse, the store root or the
+    /// month lookup.
+    ///
+    /// Saying so matters. The audit that prompted `audit-stored` found exactly
+    /// this illusion in `sweep-stored`'s own test: it "passes because the commit
+    /// gate short-circuits before any of the code under test runs". A test that
+    /// looks like it covers the store path and does not is worse than an absent
+    /// one, so this asserts only what an unstamped build genuinely reaches.
+    ///
+    /// # Why identical wording is the WRONG property to assert
+    ///
+    /// The two refusals differ by one word — "the sweep will not run" against
+    /// "the audit will not run" — and that difference is deliberate. §4 requires
+    /// a refusal to say what was refused, and an operator who ran `audit-stored`
+    /// should not be told about a sweep. An earlier version of this test asserted
+    /// string equality and failed on precisely that improvement, which is a test
+    /// pinning a defect. So the assertions are on the CAUSE and on the
+    /// self-naming, both of which stay true as the wording changes.
+    #[test]
+    fn the_stored_audit_refuses_for_the_same_cause_and_names_itself() {
+        for (vendor, underlying, rung, year, month) in [
+            // A month no store holds.
+            ("groww", "NIFTY", "1min", 1970_u16, 1_u8),
+            // A feed word no build knows.
+            ("nosuchfeed", "NIFTY", "1min", 2026, 8),
+        ] {
+            let swept = sweep_stored(vendor, underlying, rung, year, month, 500);
+            let audited = audit_stored(vendor, underlying, rung, year, month, 500);
+
+            for (label, text) in [("sweep-stored", &swept), ("audit-stored", &audited)] {
+                assert!(
+                    text.starts_with("refused: "),
+                    "{label} must refuse ({vendor}, {underlying}, {rung}, \
+                     {year}-{month}), or this test proves nothing: {text}"
+                );
+                assert!(
+                    !text.contains("BARS"),
+                    "{label}: a refusal must not render a census that would read \
+                     as an empty market: {text}"
+                );
+            }
+
+            // THE SAME CAUSE. On this unstamped build that cause is the commit
+            // gate, and both must cite it — an `audit-stored` that reached the
+            // store first would compute before it could record an identity.
+            assert!(
+                swept.contains("BRUTEX_COMMIT") && audited.contains("BRUTEX_COMMIT"),
+                "both stored commands must refuse at the commit gate before \
+                 reading a bar:\n  sweep: {swept}\n  audit: {audited}"
+            );
+
+            // AND EACH NAMES ITSELF. This is the half that would silently rot if
+            // the two messages were ever merged into one shared constant, and it
+            // is why this test does NOT assert the two strings are equal.
+            assert!(
+                swept.contains("the sweep will not run"),
+                "the sweep's refusal must name the sweep: {swept}"
+            );
+            assert!(
+                audited.contains("the audit will not run"),
+                "the audit's refusal must name the audit, not the sweep: {audited}"
+            );
+        }
+    }
+
+    /// AND IT IS REACHABLE FROM THE COMMAND LINE, not merely defined.
+    ///
+    /// `cli` dispatches on a hand-written slice match rather than a derive, so a
+    /// function can exist, compile, be tested directly, and still be
+    /// unreachable because no arm names it — which is the shape of the
+    /// unreachability D-0169 was written to close. This drives `run` by its
+    /// argv, so the arm itself is what is under test.
+    #[test]
+    fn the_stored_audit_is_reachable_from_argv_and_is_in_the_usage() {
+        let mut out = String::new();
+        let code = run(
+            &argv(&["audit-stored", "groww", "NIFTY", "1min", "1970", "1", "500"]),
+            &mut out,
+        );
+        assert_eq!(
+            code, MISUSED,
+            "a month the store does not hold is a misuse, not a success: {out}"
+        );
+        assert!(
+            out.starts_with("refused: "),
+            "the arm reached the command rather than falling through to \
+             `not a command this build knows`: {out}"
+        );
+        assert!(
+            USAGE.contains("audit-stored"),
+            "a command an operator cannot discover is a command that does not \
+             exist for them"
+        );
+        // THE FEED THE PARSER ACCEPTS AND THE USAGE OMITTED. `parse_vendor`
+        // takes `zerodha`; the usage listed four feeds and not that one, so an
+        // operator with zerodha bars on disk would read it and conclude the
+        // store could not be swept for them.
+        assert!(
+            USAGE.contains("zerodha"),
+            "every feed the parser accepts must appear in the usage"
         );
     }
 

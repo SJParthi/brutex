@@ -80,6 +80,53 @@ pub fn trials(sweep: &Sweep) -> u64 {
     })
 }
 
+/// [`trials`], charged for the exit grid a finding was also selected through.
+///
+/// # The axis the bar was not charging for
+///
+/// [`trials`] counts one thing: how many condition COMBINATIONS had their
+/// support measured. That is the whole search only for a report that ranks a
+/// combination on its own forward return, which is what [`crate::rank`] does.
+///
+/// It is **not** the whole search for anything chosen through
+/// [`crate::grid`]. There, each surviving combination is evaluated at up to
+/// [`crate::grid::variants`] stop/target/trail settings and the best of them is
+/// kept — `Grid::sharpest` and `Grid::best` are argmaxes over as many as 125
+/// cells. Selecting a maximum over 125 variants is 125 more chances to look
+/// good by luck, per combination, and none of it entered the bar. An audit
+/// measured the omission and named the consequence exactly: the reported
+/// Bonferroni and Bailey figures understate the true search size by roughly the
+/// grid size, **while the report prints them as the bar every row must clear**.
+///
+/// A bar that is too low is the dangerous direction. It admits noise while
+/// carrying the authority of a family-wise correction, which is worse than
+/// printing no bar at all — a reader who sees no bar knows to be careful.
+///
+/// # Why a separate function rather than folding it into `trials`
+///
+/// Because the two searches are genuinely different, and charging a report for
+/// a grid it never ran would be its own error in the opposite direction.
+/// `cli sweep-stored` ranks on forward returns and never builds a grid: for it,
+/// `trials` is exact and this function would inflate the bar and reject real
+/// findings. `cli audit` does build one. The caller knows which it did; this
+/// module does not, and guessing would make one of the two reports wrong no
+/// matter which default it picked.
+///
+/// # Multiplicative, and the saturation is deliberate
+///
+/// The two selections compose: each of `trials` combinations was examined at
+/// `variants` settings, so the family is the product. `variants == 0` is
+/// treated as 1 — "no grid was run" — rather than collapsing the whole family
+/// to zero, which would return a bar of zero and pass everything.
+///
+/// Saturating rather than wrapping: a product past `u64::MAX` cannot arise from
+/// a walk the candidate ceiling bounds, and a wrapped trial count would print a
+/// small, plausible, catastrophically wrong bar.
+#[must_use]
+pub fn trials_with_grid(sweep: &Sweep, variants: u64) -> u64 {
+    trials(sweep).saturating_mul(variants.max(1))
+}
+
 /// The t-statistic the **best of `n` worthless strategies** is expected to show.
 ///
 /// `√(2·ln n)` — the standard extreme-value result for the maximum of `n`
@@ -380,7 +427,7 @@ fn inverse_normal_cdf(p: f64) -> f64 {
 mod tests {
     use super::{
         benjamini_hochberg, bonferroni_t, effective_trials, expected_max_bailey, expected_max_t,
-        inverse_normal_cdf, normal_cdf, p_value, trials,
+        inverse_normal_cdf, normal_cdf, p_value, trials, trials_with_grid,
     };
     use engine::{Frontier, Itemset, Sweep};
     use vocab::ConditionMask;
@@ -410,6 +457,67 @@ mod tests {
             min_hits: 1,
             halted: None,
         }
+    }
+
+    /// The exit grid is a second search axis, and the bar has to be charged for it.
+    ///
+    /// # Why each assertion is here
+    ///
+    /// The first pins the MULTIPLICATION, which is the whole point: a report
+    /// that ran a 125-way grid over every surviving combination searched 125
+    /// times as much as `trials` alone reports, and a bar computed from the
+    /// smaller number admits noise while looking like a family-wise correction.
+    ///
+    /// The second and third pin the two arguments that could collapse the
+    /// family to nothing. `variants == 0` means "no grid ran", not "no
+    /// hypotheses were tested" — collapsing to zero would return a bar of zero
+    /// from `bonferroni_t` and pass every row, which is the exact failure the
+    /// function exists to prevent, arrived at from the other side. `variants ==
+    /// 1` is the same statement said the other way and is the identity.
+    ///
+    /// The fourth pins that the charged bar is genuinely HIGHER. Without it every
+    /// assertion above would pass on a function that returned `trials` unchanged.
+    #[test]
+    fn the_bar_is_charged_for_the_exit_grid_it_was_selected_through() {
+        // 4 kept + 6 infrequent at k=1, 2 kept + 8 infrequent at k=2: 20 support
+        // counts, which is what `trials` means.
+        let s = sweep(vec![level(1, 4, 6), level(2, 2, 8)]);
+        assert_eq!(trials(&s), 20, "the combination axis alone");
+
+        // `grid::variants(4, 4, 4)` is 125 -- the shipped DEFAULT_RUNGS grid.
+        assert_eq!(
+            trials_with_grid(&s, 125),
+            2_500,
+            "twenty combinations examined at 125 exit settings each is a family \
+             of 2,500, not of 20"
+        );
+
+        // NO GRID IS ONE GRID, NOT NO HYPOTHESES.
+        assert_eq!(
+            trials_with_grid(&s, 0),
+            20,
+            "a zero variant count means no grid ran; collapsing the family to \
+             zero would return a bar of zero and pass every row"
+        );
+        assert_eq!(trials_with_grid(&s, 1), 20, "one variant is the identity");
+
+        // AND THE CHARGE ACTUALLY RAISES THE BAR. Every assertion above would
+        // also pass on a function that ignored `variants` and returned `trials`.
+        assert!(
+            bonferroni_t(trials_with_grid(&s, 125)) > bonferroni_t(trials(&s)),
+            "charging the grid must make the bar harder to clear, not merely \
+             change the number"
+        );
+
+        // SATURATES RATHER THAN WRAPS. A wrapped product would print a small,
+        // plausible, catastrophically low bar.
+        let huge = sweep(vec![level(1, 0, u64::MAX)]);
+        assert_eq!(
+            trials_with_grid(&huge, u64::MAX),
+            u64::MAX,
+            "the product saturates at the ceiling instead of wrapping to a \
+             small number"
+        );
     }
 
     /// The check that this implements Harvey, Liu & Zhu's arithmetic.
