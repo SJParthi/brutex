@@ -584,7 +584,10 @@
     }
     const rung = chartRung || run.timeframe;
     void catalogue.ready; // re-resolve once the master lands
-    untrack(() => loadSeries(run, rung));
+    untrack(() => {
+      loadSeries(run, rung);
+      loadBenchmark(run, rung);
+    });
   });
 
   /* ====================================================================
@@ -650,6 +653,138 @@
       storeRungs = [];
     }
   }
+
+  /* ====================================================================
+     BUY & HOLD — TradingView's headline comparison, and ours was missing
+     --------------------------------------------------------------------
+     Every strategy report worth reading answers "did this beat simply
+     holding the thing", and until this the page could not. It is the one
+     TradingView metric this ledger does NOT carry that is nevertheless
+     computable here, because the bars are on disk: close of the span's
+     first bar against close of its last is buy-and-hold, exactly as
+     TradingView defines it.
+
+     IT NEEDS ITS OWN REQUEST, and the reason is the 1,000-bar ceiling.
+     `series` holds the NEWEST 1,000 bars of the span, so its first bar is
+     three weeks old, not seven years. Buy-and-hold over the visible window
+     is a different and much smaller number than buy-and-hold over the run,
+     and quietly using the first would understate the benchmark the run is
+     measured against — flattering the strategy, which is the direction
+     this page must never err in.
+
+     ONE UNIT, AND IT IS STATED. The ledger records totals in paisa of
+     index points with no position size and no capital, so the comparison
+     is one unit of the index against one unit held. A percentage return
+     would need initial capital, which nothing on disk carries.
+     ==================================================================== */
+
+  /** @type {{ phase: 'idle'|'loading'|'ready'|'failed', open: number, close: number, why: string }} */
+  let bench = $state({ phase: 'idle', open: 0, close: 0, why: '' });
+
+  /**
+   * The close of the span's FIRST bar, fetched from its first month alone.
+   *
+   * @param {any} run
+   * @param {string} rung
+   */
+  async function loadBenchmark(run, rung) {
+    const at = place(run.underlying);
+    if (!at) {
+      bench = { phase: 'idle', open: 0, close: 0, why: '' };
+      return;
+    }
+    bench = { phase: 'loading', open: 0, close: 0, why: '' };
+    const first = `${run.from_year}-${String(run.from_month).padStart(2, '0')}`;
+    try {
+      const response = await ask(
+        `/bars/window.json?feed=${encodeURIComponent(run.feed)}` +
+          `&exchange=${encodeURIComponent(at.exchange)}&segment=${encodeURIComponent(at.segment)}` +
+          `&symbol=${encodeURIComponent(run.underlying)}` +
+          `&timeframe=${encodeURIComponent(rung)}&from=${first}&to=${first}` +
+          `&limit=${MAX_WINDOW_LIMIT}`,
+        { cache: 'no-store', ms: 30_000 }
+      );
+      if (!response.ok) {
+        bench = {
+          phase: 'failed',
+          open: 0,
+          close: 0,
+          why: `The span's first month answered ${response.status}, so buy-and-hold has no starting price.`
+        };
+        return;
+      }
+      const body = await response.json();
+      const bars = [...(body.bars ?? [])].sort((a, b) => a.t - b.t);
+      if (bars.length === 0) {
+        bench = {
+          phase: 'failed',
+          open: 0,
+          close: 0,
+          why: `The store holds no ${rung} bars for ${first}, the span's first month, so there is no price to start the comparison from.`
+        };
+        return;
+      }
+      bench = { phase: 'ready', open: bars[0].c, close: 0, why: '' };
+    } catch (error) {
+      bench = {
+        phase: 'failed',
+        open: 0,
+        close: 0,
+        why: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+
+  /**
+   * Buy-and-hold over the run's whole span, in paisa of index points.
+   *
+   * The start comes from [`loadBenchmark`]'s own request; the end is the
+   * newest bar already on screen, which IS the span's last bar because
+   * `/bars/window.json` answers newest first.
+   */
+  const buyHold = $derived.by(() => {
+    if (bench.phase !== 'ready' || series.bars.length === 0) return null;
+    const last = series.bars[series.bars.length - 1];
+    if (!last || bench.open <= 0) return null;
+    const gain = last.c - bench.open;
+    return {
+      from: bench.open,
+      to: last.c,
+      gain,
+      bps: Math.round((gain / bench.open) * 10_000)
+    };
+  });
+
+  /**
+   * The strategy against buy-and-hold, on the figure selection ranks on.
+   *
+   * Compared on `pessimistic` and not on `optimistic`, for the same reason
+   * everything else here is: the flattering number would flatter this
+   * comparison most of all.
+   */
+  const outperformance = $derived.by(() => {
+    if (!buyHold || !openRun) return null;
+    return {
+      strategy: openRun.pessimistic,
+      hold: buyHold.gain,
+      edge: openRun.pessimistic - buyHold.gain,
+      beat: openRun.pessimistic > buyHold.gain
+    };
+  });
+
+  /**
+   * Expected payoff per trade — TradingView's own name for it.
+   *
+   * Integer division of paisa by trades, so it stays in paisa. `null` at
+   * zero trades rather than a division by zero rendered as `Infinity`.
+   */
+  const perTrade = $derived.by(() => {
+    if (!openRun || openRun.trades === 0) return null;
+    return {
+      worst: Math.round(openRun.pessimistic / openRun.trades),
+      best: Math.round(openRun.optimistic / openRun.trades)
+    };
+  });
 
   /** Rungs that carry a recorded run, so the switcher can mark them. */
   const sweptRungs = $derived(
@@ -1580,6 +1715,152 @@
               </p>
             {/if}
           </div>
+
+          <!-- ==========================================================
+               THE STRATEGY REPORT — TradingView's Strategy Tester shape
+               Key stats, then the benchmark, then an explicit account of
+               every metric TradingView reports that this ledger cannot.
+               ========================================================== -->
+          <section class="report">
+            <div class="rep-head">
+              <h3>Strategy report</h3>
+              <span class="rep-sub">
+                the shape TradingView's Strategy Tester uses, over what this ledger records
+              </span>
+            </div>
+
+            <!-- KEY STATS -->
+            <div class="keystats">
+              <div class="ks">
+                <span class="ks-k">Net profit</span>
+                <span class="ks-v" class:up={openRun.pessimistic >= 0} class:down={openRun.pessimistic < 0}>
+                  {money(openRun.pessimistic)}
+                </span>
+                <span class="ks-n">worst-case fills · {money(openRun.optimistic)} at best</span>
+              </div>
+              <div class="ks">
+                <span class="ks-k">Max drawdown</span>
+                <span class="ks-v down">{money(openRun.max_drawdown)}</span>
+                <span class="ks-n">worst peak-to-trough</span>
+              </div>
+              <div class="ks">
+                <span class="ks-k">Closed trades</span>
+                <span class="ks-v">{exact(openRun.trades)}</span>
+                <span class="ks-n">over {exact(openRun.bars)} bars</span>
+              </div>
+              <div class="ks">
+                <span class="ks-k">Expected payoff</span>
+                <span class="ks-v">{perTrade ? money(perTrade.worst) : '—'}</span>
+                <span class="ks-n">
+                  {perTrade ? `per trade, worst-case` : 'no trades to average over'}
+                </span>
+              </div>
+              <div class="ks">
+                <span class="ks-k">Largest losing trade</span>
+                <span class="ks-v down">{money(openRun.worst_trade)}</span>
+                <span class="ks-n">single worst round trip</span>
+              </div>
+            </div>
+
+            <!-- BENCHMARK -->
+            <div class="bench">
+              <h4>Strategy vs buy &amp; hold</h4>
+              {#if bench.phase === 'loading'}
+                <p class="cnote"><span class="spin sm" aria-hidden="true"></span> Reading the span's first bar for a starting price…</p>
+              {:else if bench.phase === 'failed'}
+                <p class="cnote warn-t">{bench.why}</p>
+              {:else if buyHold && outperformance}
+                {@const scale = Math.max(1, Math.abs(outperformance.strategy), Math.abs(outperformance.hold))}
+                <div class="bcmp">
+                  <div class="brow">
+                    <span class="blab">strategy</span>
+                    <span class="bbar">
+                      <span
+                        class="bfill"
+                        class:down={outperformance.strategy < 0}
+                        style="width:{(Math.abs(outperformance.strategy) / scale) * 100}%"
+                      ></span>
+                    </span>
+                    <span class="bval strong">{money(outperformance.strategy)}</span>
+                  </div>
+                  <div class="brow">
+                    <span class="blab">buy &amp; hold</span>
+                    <span class="bbar">
+                      <span
+                        class="bfill hold"
+                        class:down={outperformance.hold < 0}
+                        style="width:{(Math.abs(outperformance.hold) / scale) * 100}%"
+                      ></span>
+                    </span>
+                    <span class="bval">{money(outperformance.hold)}</span>
+                  </div>
+                </div>
+                <p class="cnote">
+                  Holding one unit from {money(buyHold.from)} to {money(buyHold.to)} over the same
+                  span returns <b>{money(buyHold.gain)}</b> ({buyHold.bps >= 0 ? '+' : ''}{(
+                    buyHold.bps / 100
+                  ).toFixed(2)}%). The sweep
+                  {#if outperformance.beat}
+                    <b class="up">beats it by {money(outperformance.edge)}</b>
+                  {:else}
+                    <b class="down">falls short of it by {money(-outperformance.edge)}</b>
+                  {/if}
+                  under worst-case fills.
+                </p>
+                <p class="cnote faint">
+                  One unit against one unit. The ledger records totals in paisa of index points
+                  with no position size and no capital, so a percentage return on equity is not
+                  computable from it — and inventing an initial capital to divide by would make
+                  every ratio on this page a number of my choosing.
+                </p>
+              {:else}
+                <p class="cnote faint">Waiting for the price series.</p>
+              {/if}
+            </div>
+
+            <!-- WHAT TRADINGVIEW REPORTS AND THIS DOES NOT -->
+            <details class="cover">
+              <summary>
+                Every metric TradingView's Strategy Tester reports, and whether this ledger can
+                answer it
+              </summary>
+              <div class="covtbl-wrap">
+                <table class="covtbl">
+                  <thead>
+                    <tr><th>TradingView metric</th><th>Here</th><th>Why</th></tr>
+                  </thead>
+                  <tbody>
+                    <tr><td>Net profit</td><td><span class="pill good">yes</span></td><td>Recorded twice — under worst-case AND best-case fills. TradingView reports one fill model; this reports both and ranks on the worse.</td></tr>
+                    <tr><td>Max drawdown</td><td><span class="pill good">yes</span></td><td><code>max_drawdown</code></td></tr>
+                    <tr><td>Total closed trades</td><td><span class="pill good">yes</span></td><td><code>trades</code></td></tr>
+                    <tr><td>Expected payoff / avg trade</td><td><span class="pill good">derived</span></td><td>Net profit ÷ trades, both recorded</td></tr>
+                    <tr><td>Largest losing trade</td><td><span class="pill good">yes</span></td><td><code>worst_trade</code></td></tr>
+                    <tr><td>Buy &amp; hold return</td><td><span class="pill good">derived</span></td><td>Computed from the bars on disk, above. Not in the ledger — read from the store at page time.</td></tr>
+                    <tr><td>Outperformance vs buy &amp; hold</td><td><span class="pill good">derived</span></td><td>The two figures above, subtracted</td></tr>
+                    <tr><td>Max adverse / favourable excursion</td><td><span class="pill warn">aggregate</span></td><td>Three ppm folds — winners' adverse, winners' favourable, all trades' adverse. TradingView plots one column per trade; the ledger stores the fold, not the trades.</td></tr>
+                    <tr><td>Percent profitable</td><td><span class="pill bad">no</span></td><td>No win count is recorded. It cannot be inferred from a net total.</td></tr>
+                    <tr><td>Profit factor</td><td><span class="pill bad">no</span></td><td>Needs gross profit and gross loss separately; only the net is stored.</td></tr>
+                    <tr><td>Gross profit / gross loss</td><td><span class="pill bad">no</span></td><td>Same field is absent</td></tr>
+                    <tr><td>Largest winning trade</td><td><span class="pill bad">no</span></td><td>Only the worst single trade is kept</td></tr>
+                    <tr><td>Cumulative PnL curve</td><td><span class="pill bad">no</span></td><td>No equity series of any kind — four scalars cannot make a curve</td></tr>
+                    <tr><td>Run-ups and drawdowns over time</td><td><span class="pill bad">no</span></td><td>One drawdown figure, no series</td></tr>
+                    <tr><td>Sharpe / Sortino ratio</td><td><span class="pill bad">no</span></td><td><code>crates/runner</code> computes significance, but no ratio reaches the record</td></tr>
+                    <tr><td>List of trades</td><td><span class="pill bad">no</span></td><td>No trade list, so no entry/exit price, time, or per-trade PnL — and no markers on the chart above</td></tr>
+                    <tr><td>Avg # bars in trades</td><td><span class="pill bad">no</span></td><td>Bars ÷ trades would be the average gap BETWEEN trades, which is a different quantity. Not shown rather than shown wrong.</td></tr>
+                    <tr><td>Long / short split</td><td><span class="pill bad">no</span></td><td>Direction is one of the nine terms inside the run's identity hash, not a field beside it</td></tr>
+                    <tr><td>Capital, margin, margin calls</td><td><span class="pill bad">no</span></td><td>The engine models no account. Totals are index points, not an equity curve on capital.</td></tr>
+                    <tr><td>Commission paid</td><td><span class="pill bad">no</span></td><td><code>crates/costs</code> applies costs inside the sweep; the record keeps the net, not the fee line</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <p class="cnote faint">
+                Six of these are one change away: a second append-only file beside
+                <code>runs.bin</code>, written by the same sweep at a fixed stride, would carry the
+                win count, gross profit and loss, the per-level survivor counts and the winning
+                mask. That is <code>cli</code>'s file to write.
+              </p>
+            </details>
+          </section>
 
           <div class="drill-grid">
             <!-- LEVEL 3 — EXECUTION RISK -->
@@ -2601,6 +2882,205 @@
     border-style: solid;
     border-color: var(--down);
     background: var(--down-soft);
+  }
+
+  /* ================= THE STRATEGY REPORT ================= */
+  .report {
+    display: flex;
+    flex-direction: column;
+    gap: 0.9rem;
+    background: var(--n3);
+    border: 1px solid var(--n6);
+    border-radius: 10px;
+    padding: 1rem 1.1rem 1.1rem;
+    animation: arrive 0.35s cubic-bezier(0.22, 0.7, 0.3, 1) both;
+  }
+  .report > * {
+    flex: 0 0 auto;
+  }
+  .rep-head {
+    display: flex;
+    align-items: baseline;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+  }
+  .rep-head h3 {
+    margin: 0;
+    font-size: 0.95rem;
+    color: var(--n12);
+  }
+  .rep-sub {
+    font-size: 0.74rem;
+    color: var(--n8);
+  }
+
+  /* ---- key stats ---- */
+  .keystats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 1px;
+    background: var(--n6);
+    border: 1px solid var(--n6);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .ks {
+    background: var(--n2);
+    padding: 0.7rem 0.8rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+  }
+  .ks-k {
+    font-size: 0.63rem;
+    text-transform: uppercase;
+    letter-spacing: 0.09em;
+    color: var(--n8);
+  }
+  .ks-v {
+    font-size: 1.15rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--n12);
+    line-height: 1.15;
+  }
+  .ks-v.up {
+    color: var(--up);
+  }
+  .ks-v.down {
+    color: var(--down);
+  }
+  .ks-n {
+    font-size: 0.7rem;
+    color: var(--n9);
+  }
+
+  /* ---- benchmark ---- */
+  .bench h4 {
+    margin: 0 0 0.5rem;
+    font-size: 0.82rem;
+    color: var(--n11);
+  }
+  .bcmp {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    margin-bottom: 0.6rem;
+  }
+  .brow {
+    display: grid;
+    grid-template-columns: 9ch 1fr auto;
+    gap: 0.6rem;
+    align-items: center;
+  }
+  .blab {
+    font-size: 0.68rem;
+    color: var(--n8);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .bbar {
+    height: 12px;
+    background: var(--n0);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .bfill {
+    display: block;
+    height: 100%;
+    background: var(--up);
+    animation: grow 0.5s cubic-bezier(0.22, 0.7, 0.3, 1) both;
+    transform-origin: left;
+  }
+  .bfill.hold {
+    background: var(--n7);
+  }
+  .bfill.down {
+    background: var(--down);
+  }
+  .bval {
+    font-size: 0.82rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--n10);
+  }
+  .bval.strong {
+    color: var(--n12);
+    font-weight: 600;
+  }
+  .cnote .up {
+    color: var(--up);
+  }
+  .cnote .down {
+    color: var(--down);
+  }
+  .spin.sm {
+    width: 10px;
+    height: 10px;
+    display: inline-block;
+    vertical-align: -1px;
+    margin-right: 0.35rem;
+  }
+
+  /* ---- the coverage table ----
+     A `<details>` because it is long and it is REFERENCE: an operator reads
+     it once to learn what this surface can and cannot answer, then never
+     again. Collapsed by default, and never removed -- the whole point is
+     that the gaps are documented rather than merely absent. */
+  .cover {
+    border-top: 1px solid var(--n5);
+    padding-top: 0.75rem;
+  }
+  .cover summary {
+    cursor: pointer;
+    font-size: 0.8rem;
+    color: var(--n10);
+    padding: 0.2rem 0;
+  }
+  .cover summary:hover {
+    color: var(--acc);
+  }
+  .cover summary:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+  }
+  .covtbl-wrap {
+    overflow-x: auto;
+    margin: 0.7rem 0;
+    border: 1px solid var(--n6);
+    border-radius: 8px;
+  }
+  .covtbl {
+    width: 100%;
+    min-width: 560px;
+    border-collapse: collapse;
+    font-size: 0.78rem;
+  }
+  .covtbl th {
+    text-align: left;
+    background: var(--n2);
+    color: var(--n8);
+    font-size: 0.64rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 600;
+    padding: 0.5rem 0.7rem;
+    border-bottom: 1px solid var(--n6);
+  }
+  .covtbl td {
+    padding: 0.45rem 0.7rem;
+    border-bottom: 1px solid var(--n5);
+    color: var(--n9);
+    vertical-align: top;
+  }
+  .covtbl tr:last-child td {
+    border-bottom: 0;
+  }
+  .covtbl td:first-child {
+    color: var(--n11);
+    white-space: nowrap;
+  }
+  .covtbl .pill.bad {
+    background: var(--down-soft);
+    color: var(--down);
   }
 
   /* ================= THE PRICE TERMINAL =================
