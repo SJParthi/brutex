@@ -4421,6 +4421,41 @@
   const VRANK = new Map(VORDER.map((k, i) => [k, i]));
 
   /**
+   * THE ACTIONABLE CLAUSE OF A VENDOR'S REFUSAL, for a one-line cell.
+   *
+   * `lastError` is a full sentence and often two: `crates/api` wraps the
+   * vendor's words in its own — "the vendor refused with status 403 and named
+   * it: the session is dead — nothing further this run; the next pull reads a
+   * refresh". The wrapper is the same on every refusal and the vendor's half is
+   * the half that differs, so the wrapper is what a four-column strip should
+   * drop.
+   *
+   * SPLIT ON `named it:` BECAUSE THE SERVER PUTS IT THERE. This is not a guess
+   * at prose shape: `crates/api`'s refusal builder uses that exact marker to
+   * separate its framing from what the vendor said. When it is absent — a
+   * failure that never reached a vendor — the whole sentence is already the
+   * vendor-free one and is used as it stands.
+   *
+   * THE WHOLE SENTENCE IS NEVER LOST. It goes on the cell's `title`; this only
+   * decides what is DRAWN. Truncating a reason with no way back to it would be
+   * the §4 half-naming this function exists to end.
+   *
+   * @param {string} said
+   * @returns {string}
+   */
+  function firstClause(said) {
+    const text = String(said ?? '').trim();
+    if (!text) return '';
+    const marked = text.split('named it:');
+    const body = (marked.length > 1 ? marked[marked.length - 1] : text).trim();
+    // The three the server actually uses to end a clause. `\. ` and not `\.`
+    // so a decimal or an abbreviation does not cut the sentence in half.
+    const stop = body.search(/[—;]|\.\s/u);
+    const clause = (stop > 0 ? body.slice(0, stop) : body).trim();
+    return clause || text;
+  }
+
+  /**
    * WHERE IN THE WINDOW THE GAPS ARE — four blocks, oldest on the left.
    *
    * `Months unproved` says 32/32 and `Verdict` says `never pulled`. Neither says
@@ -7908,7 +7943,29 @@
                         <td class="rf-v">{feedName(f.vendor)}</td>
                         <td class="rf-n">{n(f.legsDone)}/{n(f.legs)}</td>
                         <td class="rf-d">{f.finished ? '—' : (f.doing || 'waiting for its turn')}</td>
-                        <td class="rf-e">{f.lastError ? 'retrying after a failure' : ''}</td>
+                        <!-- ══ THE VENDOR'S OWN WORDS, NOT A GUESS ABOUT THEM ══
+                             This read `retrying after a failure` for EVERY
+                             `lastError`, and threw the error itself away.
+                             Measured on a live run: Zerodha's leg failed with
+                             `403 — the session is dead; nothing further this
+                             run; the next pull reads a refresh`, a TERMINAL
+                             condition, and the card said it was retrying. The
+                             operator waited twenty-two minutes on a feed that
+                             was never going to recover, because the page had
+                             the sentence and printed a different one.
+                             "Retrying" and "the session is dead" are opposite
+                             instructions: one says wait, the other says go and
+                             refresh a token no code here may mint (§8). That is
+                             a failure named halfway, which §4 bans outright.
+                             The full sentence goes in `title` because these
+                             cells are one line in a four-column strip; what is
+                             DRAWN is the vendor's own first clause, which is
+                             where the actionable half lives. -->
+                        <td class="rf-e" title={f.lastError ?? ''}>
+                          {#if f.lastError}
+                            <span class="rf-said">{firstClause(f.lastError)}</span>
+                          {/if}
+                        </td>
                       </tr>
                     {/each}
                   </tbody>
@@ -11166,6 +11223,20 @@
   td.rf-v { font-weight: 600; white-space: nowrap; }
   td.rf-n { white-space: nowrap; font-variant-numeric: tabular-nums; opacity: .8; }
   td.rf-d { width: 99%; opacity: .8; }
-  td.rf-e { white-space: nowrap; opacity: .8; }
+  /* A REFUSAL IS NOT DECORATION AND STOPS BEING DIMMED. This carried
+     `opacity: .8` while it printed the same generic sentence on every failure;
+     now it prints the vendor's own words, which is the most actionable text in
+     the card, and it takes the down tone rather than being faded out.
+     It CLIPS rather than wraps — the card is a four-column strip and a
+     two-line cell would push every row below it — and the whole sentence is on
+     the cell's `title`, so nothing is lost by the clip. */
+  td.rf-e {
+    max-width: 26rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--down);
+  }
+  .rf-said { font-family: var(--mono); font-size: var(--fs-micro); }
 </style>
 
