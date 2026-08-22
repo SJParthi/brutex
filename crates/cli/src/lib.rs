@@ -2938,6 +2938,49 @@ fn audit_bars(
             Err(why) => return format!("refused: {why}\n"),
         };
 
+    // THE RANKING IS RE-TAKEN ON THE EXECUTION SERIES, AND IT HAS TO BE.
+    //
+    // # MEASURED: every one of the top 250 on a daily run scored n=0, t=0.00
+    //
+    // `run_ranked` above computes `outcome::forward` on the SIGNAL bars, which
+    // was right when the signal series was also the series positions were taken
+    // on. It is not right now, and on the coarsest rung it is catastrophic.
+    //
+    // Trace a 1day bar through `outcome::forward`. Each daily bar is its own IST
+    // session, so `close_at[i]` is `i` itself -- the forced close of that
+    // session is that bar. `want = i + horizon` is past it, `is_window_end`
+    // holds, so `exit = forced = i`, and `exit <= i` refuses the outcome. EVERY
+    // forward return on a daily series is `None`, correctly: this engine is
+    // intraday-only and squares off at 15:10, so there is no intraday movement
+    // inside one daily bar to measure.
+    //
+    // `rank` then orders by |t| over a set where every t is 0.00, which is an
+    // ordering by nothing. The audit printed 250 rows all reading "TOO FEW
+    // OBSERVATIONS to judge" and the combination it traded was whichever of them
+    // the heap happened to surface.
+    //
+    // Meanwhile `trade::walk` and `grid::evaluate` DO run on the execution
+    // series and found 342 real round trips. So the run traded on one series and
+    // ranked on another where trading is impossible.
+    //
+    // # Why frequency stays on the signal series and outcomes do not
+    //
+    // "This fired on 20% of 15-minute bars" is a property of the rung the
+    // condition was found on, and re-counting it per minute answers a different
+    // question -- which is why the sweep is left alone above. A forward RETURN
+    // is not frequency: it is what happened after the signal, and what happened
+    // is what the execution series records. The two halves belong on different
+    // series and the split was half-made.
+    let ranked = match execution {
+        None => ranked,
+        Some(_) => runner::rank::rank(
+            &outcome.sweep,
+            &trade_column,
+            &runner::outcome::forward(&trade_bars, horizon),
+            AUDIT_KEEP,
+        ),
+    };
+
     let mut out = String::from(banner);
     out.push('\n');
     out.push_str(&execution_note);
