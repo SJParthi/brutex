@@ -2376,6 +2376,35 @@ pub fn range_all(
         .par_iter()
         .map(|&rung| one_rung(vendor_word, underlying, rung, from, to, support_ppm))
         .collect();
+    // EVERY RUNG REFUSED IS A REFUSAL, NOT A REPORT.
+    //
+    // MEASURED, by attacking this command: `range-all nosuchfeed NIFTY ...`,
+    // a backwards range, month 0, month 13, an empty symbol, a unicode symbol
+    // and `../../etc` ALL printed the STORED_PROVENANCE banner -- "THESE BARS
+    // ARE REAL MARKET DATA, READ FROM THE STORE" -- and exited ZERO. Nine rows
+    // each said REFUSED underneath, which is honest, but the banner above them
+    // claimed real bars had been read and the exit code told a script the run
+    // succeeded.
+    //
+    // That is precisely the failure wearing a success's clothes `CLAUDE.md` §4
+    // bans, and the provenance banner is the one line in this workspace that
+    // must never be printed over nothing -- `cli`'s own header says the two
+    // banners are "the only thing separating" a real sweep from a generated one.
+    //
+    // So: if no rung produced a row, the whole command refuses, with the first
+    // rung's reason. They are all the same reason when the argument is what is
+    // wrong, and when they differ the table below still prints every one.
+    if rows.iter().all(|r| r.outcome.is_err()) {
+        let why = rows
+            .first()
+            .and_then(|r| r.outcome.as_ref().err())
+            .map_or_else(|| "no rung produced a row".to_owned(), Clone::clone);
+        return format!(
+            "refused: every one of the {} rungs refused. Nothing was read and no \
+             row was recorded.\n  first reason: {why}\n",
+            rows.len()
+        );
+    }
 
     let _ = writeln!(
         out,
@@ -4357,5 +4386,103 @@ mod tests {
             MISUSED,
             "a half-given filter must refuse rather than ignore itself: {out}"
         );
+    }
+
+    /// A request no rung can serve is a REFUSAL, never a report.
+    ///
+    /// # Found by attacking the command, not by reading it
+    ///
+    /// `range-all nosuchfeed NIFTY ...`, a backwards range, month 0, month 13,
+    /// an empty symbol, a unicode symbol and `../../etc` ALL printed the
+    /// `STORED_PROVENANCE` banner -- *"THESE BARS ARE REAL MARKET DATA, READ
+    /// FROM THE STORE"* -- and exited ZERO. Nine rows said REFUSED underneath,
+    /// which is honest; the banner above them claimed real bars had been read
+    /// and the exit code told a script the run succeeded.
+    ///
+    /// The provenance banner is the one line in this workspace that must never
+    /// print over nothing: `cli`'s own header calls the two banners *"the only
+    /// thing separating"* a real sweep from a generated one.
+    #[test]
+    fn a_request_no_rung_can_serve_refuses_and_prints_no_provenance() {
+        for args in [
+            [
+                "range-all",
+                "nosuchfeed",
+                "NIFTY",
+                "2019",
+                "12",
+                "2026",
+                "8",
+                "200000",
+            ],
+            [
+                "range-all",
+                "zerodha",
+                "NIFTY",
+                "2026",
+                "8",
+                "2019",
+                "12",
+                "200000",
+            ],
+            [
+                "range-all",
+                "zerodha",
+                "NIFTY",
+                "2019",
+                "0",
+                "2026",
+                "8",
+                "200000",
+            ],
+            [
+                "range-all",
+                "zerodha",
+                "NIFTY",
+                "2019",
+                "13",
+                "2026",
+                "8",
+                "200000",
+            ],
+            [
+                "range-all",
+                "zerodha",
+                "../../etc",
+                "2019",
+                "12",
+                "2026",
+                "8",
+                "200000",
+            ],
+            [
+                "range-all",
+                "zerodha",
+                "",
+                "2019",
+                "12",
+                "2026",
+                "8",
+                "200000",
+            ],
+        ] {
+            let mut out = String::new();
+            let code = run(&argv(&args), &mut out);
+            assert_eq!(code, MISUSED, "`{args:?}` must exit MISUSED:\n{out}");
+            assert!(
+                out.starts_with("refused: "),
+                "and lead with the refusal:\n{out}"
+            );
+            assert!(
+                !out.contains("REAL MARKET DATA"),
+                "the provenance banner must NEVER print over a run that read \
+                 nothing -- it is the only line separating a real sweep from a \
+                 generated one:\n{out}"
+            );
+            assert!(
+                out.contains("first reason:"),
+                "and it must name WHY, not merely that it refused:\n{out}"
+            );
+        }
     }
 }
