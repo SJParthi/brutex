@@ -3603,8 +3603,34 @@
   });
 
   /** A PRIMITIVE, so the fetch effect re-runs when the SET changes and not
-      on every keystroke that leaves the same set standing. */
-  const barPlanKeys = $derived(pagePlan.files.map((/** @type {any} */ r) => r.key).join('\n'));
+      on every keystroke that leaves the same set standing.
+   *
+   * THE PAGE IS PART OF THE KEY ON THE WINDOW ROUTE, AND LEAVING IT OUT SHOWED
+   * THE WRONG ROWS UNDER THE RIGHT PAGER.
+   *
+   * On the seek route the file set IS the page — turn to page 6,000 and a
+   * different month is wanted, so this string changes and the effect re-runs.
+   * On the window route it is not: every matched month is named whatever page
+   * you are on, because the server does the slicing. So the key held still, the
+   * effect never re-ran, and the request that had already been made — `offset=0`
+   * — remained the only one.
+   *
+   * MEASURED: page 6,000 of a CLOSE-sorted grid drew `2,99,951-3,00,000 of
+   * 6,23,498` over the fifty rows of page ONE, having sent exactly one request
+   * for offset 0. The pager was right, the rows were wrong, and nothing said so
+   * — which is worse than an empty grid, because an empty grid cannot be
+   * misread.
+   *
+   * `page` AND NOT `pageNow`. `pageNow` is clamped through `pageCount` from
+   * `pageTotal`, which on this route reads `windowSaid`, which reads the files
+   * this effect WRITES. Keying on it would close a loop through the effect:
+   * fetch, new total, new clamp, new key, fetch again. `page` is raw `$state`
+   * and depends on nothing downstream, so it triggers without feeding back. */
+  const barPlanKeys = $derived(
+    `${pagePlan.files.map((/** @type {any} */ r) => r.key).join('\n')} ${
+      pageExact ? '' : `${page}|${pageSize}|${barSortKey}|${barDesc}`
+    }`
+  );
 
   /* ---------------------------------------------------------------------
      THE READ. One request per instrument-month, cached for as long as the
