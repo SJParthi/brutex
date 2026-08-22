@@ -4368,6 +4368,197 @@
     opacity: 0.85;
   }
 
+  /* ==================================================================
+     MOTION IN THIS PANEL
+     ------------------------------------------------------------------
+     Every animation here is an ARRIVAL: the thing was not on screen and
+     now it is, and the motion carries it in from where its value comes
+     from. Nothing loops, nothing pulses, nothing moves once it has
+     landed. A figure that keeps moving reads as a figure still changing,
+     and on a page about money that is a lie told with easing curves.
+
+     So: the curve DRAWS itself left to right, the way it was
+     accumulated. Bars GROW from the zero line, which is the axis they
+     are measured against. Rows and sections rise a few pixels into
+     place. Switching a tab re-runs the arrival, because the numbers
+     genuinely changed. And every one of them stops.
+     ================================================================== */
+
+  /* THE CURVE DRAWS ITSELF. `stroke-dasharray` at the path's own length
+     with the offset animated to zero is the only way to do this without
+     measuring in JavaScript; 2400 is comfortably longer than any path
+     this 1000-unit viewBox produces, and an over-long dash simply starts
+     fully hidden, which is what is wanted. */
+  .tester .cf-svg path[stroke] {
+    stroke-dasharray: 2400;
+    stroke-dashoffset: 2400;
+    animation: draw 1.1s cubic-bezier(0.33, 0.8, 0.35, 1) forwards;
+  }
+  @keyframes draw {
+    to {
+      stroke-dashoffset: 0;
+    }
+  }
+  /* The area under it fades in behind the line rather than with it, so
+     the line reads as leading and the fill as following. */
+  .tester .cf-svg path[fill]:not([stroke]) {
+    opacity: 0;
+    animation: wash 0.9s ease-out 0.35s forwards;
+  }
+  @keyframes wash {
+    to {
+      opacity: 1;
+    }
+  }
+
+  /* BARS GROW FROM THE ZERO LINE. `transform-box: fill-box` makes the
+     origin the rect's own box rather than the SVG root, which is what
+     lets a bar below the axis grow downward and one above grow up. */
+  .tester .cf-svg rect {
+    transform-box: fill-box;
+    transform-origin: center bottom;
+    animation: sprout 0.55s cubic-bezier(0.22, 0.7, 0.3, 1) both;
+  }
+  @keyframes sprout {
+    from {
+      transform: scaleY(0);
+      opacity: 0.4;
+    }
+    to {
+      transform: none;
+      opacity: 1;
+    }
+  }
+  /* Left to right, capped: past a dozen the last bar waits longer than
+     a reader will, and these charts can hold sixty. */
+  .tester .cf-svg rect:nth-of-type(1) { animation-delay: 0.02s; }
+  .tester .cf-svg rect:nth-of-type(2) { animation-delay: 0.05s; }
+  .tester .cf-svg rect:nth-of-type(3) { animation-delay: 0.08s; }
+  .tester .cf-svg rect:nth-of-type(4) { animation-delay: 0.11s; }
+  .tester .cf-svg rect:nth-of-type(5) { animation-delay: 0.14s; }
+  .tester .cf-svg rect:nth-of-type(6) { animation-delay: 0.17s; }
+  .tester .cf-svg rect:nth-of-type(7) { animation-delay: 0.2s; }
+  .tester .cf-svg rect:nth-of-type(8) { animation-delay: 0.23s; }
+  .tester .cf-svg rect:nth-of-type(9) { animation-delay: 0.26s; }
+  .tester .cf-svg rect:nth-of-type(10) { animation-delay: 0.29s; }
+  .tester .cf-svg rect:nth-of-type(n + 11) { animation-delay: 0.32s; }
+
+  /* SECTIONS RISE INTO PLACE, in the order they are read. */
+  .tester .tt-sec {
+    animation: liftin 0.42s cubic-bezier(0.22, 0.7, 0.3, 1) both;
+  }
+  .tester .tt-sec:nth-of-type(1) { animation-delay: 0.02s; }
+  .tester .tt-sec:nth-of-type(2) { animation-delay: 0.08s; }
+  .tester .tt-sec:nth-of-type(3) { animation-delay: 0.14s; }
+  .tester .tt-sec:nth-of-type(4) { animation-delay: 0.2s; }
+  @keyframes liftin {
+    from {
+      opacity: 0;
+      transform: translateY(8px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
+  /* A STAT ARRIVES WITH ITS LABEL, staggered across the row so the eye
+     is carried left to right rather than hit with four at once. */
+  .tester .tt-quad > .tt-q,
+  .tester .tt-stats > .tt-q {
+    animation: liftin 0.4s cubic-bezier(0.22, 0.7, 0.3, 1) both;
+  }
+  .tester .tt-quad > .tt-q:nth-child(1) { animation-delay: 0.04s; }
+  .tester .tt-quad > .tt-q:nth-child(2) { animation-delay: 0.1s; }
+  .tester .tt-quad > .tt-q:nth-child(3) { animation-delay: 0.16s; }
+  .tester .tt-quad > .tt-q:nth-child(4) { animation-delay: 0.22s; }
+
+  /* TABLE ROWS COME IN DOWN THE COLUMN. Capped at ten steps: the details
+     table is twenty-four rows and the last must not wait a second. */
+  .tester .tt-tbl tbody tr {
+    animation: liftin 0.34s cubic-bezier(0.22, 0.7, 0.3, 1) both;
+  }
+  .tester .tt-tbl tbody tr:nth-child(1) { animation-delay: 0.02s; }
+  .tester .tt-tbl tbody tr:nth-child(2) { animation-delay: 0.045s; }
+  .tester .tt-tbl tbody tr:nth-child(3) { animation-delay: 0.07s; }
+  .tester .tt-tbl tbody tr:nth-child(4) { animation-delay: 0.095s; }
+  .tester .tt-tbl tbody tr:nth-child(5) { animation-delay: 0.12s; }
+  .tester .tt-tbl tbody tr:nth-child(6) { animation-delay: 0.145s; }
+  .tester .tt-tbl tbody tr:nth-child(7) { animation-delay: 0.17s; }
+  .tester .tt-tbl tbody tr:nth-child(8) { animation-delay: 0.195s; }
+  .tester .tt-tbl tbody tr:nth-child(9) { animation-delay: 0.22s; }
+  .tester .tt-tbl tbody tr:nth-child(n + 10) { animation-delay: 0.245s; }
+
+  /* The horizontal bar rows sweep out from their own left edge, which is
+     the axis they are measured from. */
+  .tester .tt-brow,
+  .tester .tt-plrow,
+  .tester .tt-cmprow {
+    animation: liftin 0.38s cubic-bezier(0.22, 0.7, 0.3, 1) both;
+  }
+  .tester .tt-pl .tt-plrow:nth-child(2) { animation-delay: 0.06s; }
+  .tester .tt-pl .tt-plrow:nth-child(3) { animation-delay: 0.12s; }
+
+  /* The donut ring sweeps round once, from the top, then holds. */
+  .tester .tt-donut circle {
+    transform-origin: 50% 50%;
+    animation: sweep 0.9s cubic-bezier(0.33, 0.8, 0.35, 1) both;
+  }
+  @keyframes sweep {
+    from {
+      stroke-dasharray: 0 400;
+      transform: rotate(-90deg);
+    }
+    to {
+      stroke-dasharray: 276 400;
+      transform: rotate(-90deg);
+    }
+  }
+
+  /* Controls respond, but only while the pointer is on them. */
+  .tester .tt-pill,
+  .tester .tt-segbtn,
+  .tester .tt-view,
+  .tester .tt-ctl {
+    transition:
+      background 0.16s ease,
+      color 0.16s ease,
+      border-color 0.16s ease;
+  }
+  .tester .tt-iconbtn {
+    transition:
+      background 0.16s ease,
+      color 0.16s ease,
+      transform 0.16s ease;
+  }
+  .tester .tt-iconbtn:hover {
+    transform: translateY(-1px);
+  }
+
+  /* NOTHING MOVES FOR A READER WHO ASKED FOR STILLNESS, and a bar that
+     would have grown from zero must end at its full height rather than
+     at its starting one — `animation: none` on a `both`-filled keyframe
+     leaves the element at its natural state, which is what is wanted. */
+  @media (prefers-reduced-motion: reduce) {
+    .tester .cf-svg path[stroke],
+    .tester .cf-svg path[fill],
+    .tester .cf-svg rect,
+    .tester .tt-sec,
+    .tester .tt-quad > .tt-q,
+    .tester .tt-stats > .tt-q,
+    .tester .tt-tbl tbody tr,
+    .tester .tt-brow,
+    .tester .tt-plrow,
+    .tester .tt-cmprow,
+    .tester .tt-donut circle {
+      animation: none !important;
+      opacity: 1 !important;
+      transform: none !important;
+      stroke-dasharray: none !important;
+      stroke-dashoffset: 0 !important;
+    }
+  }
+
   /* ---- drawn charts ---- */
   .cf-plot.tall {
     height: 250px;
@@ -4759,6 +4950,338 @@
   }
   .lot-num {
     color: var(--n11);
+  }
+
+  /* ==================================================================
+     TRADINGVIEW'S OWN MEASUREMENTS, SCOPED TO THIS PANEL ONLY
+     ------------------------------------------------------------------
+     Read off the operator's screenshots rather than approximated. They
+     are declared as LOCAL custom properties on `.tester`, so everything
+     inside inherits them and NOTHING outside changes: `/db`, `/ingest`,
+     `/audit` and the price terminal above keep the console's own
+     palette. One panel imitates another product; the console does not.
+
+     Why the console's tokens are not simply reused: they are close but
+     not the same, and the two differences are the ones the eye catches
+     first. The console's green is #00e19b, a neon that TradingView never
+     uses; its red is #ff4d6a, which is pink beside TradingView's #F23645.
+     Everything else here is within a few points and is matched anyway,
+     because a panel that is 90% right reads as wrong rather than as
+     nearly right.
+     ================================================================== */
+  .tester {
+    --tv-bg: #131722;
+    --tv-panel: #1e222d;
+    --tv-line: #2a2e39;
+    --tv-line-soft: #22262f;
+    --tv-text: #d1d4dc;
+    --tv-label: #b2b5be;
+    --tv-muted: #787b86;
+    --tv-green: #089981;
+    --tv-red: #f23645;
+    --tv-blue: #2962ff;
+    --tv-teal: #26a69a;
+
+    /* TradingView's own stack. `Trebuchet MS` is the one that gives their
+       numerals their particular width; without it the tables read wider. */
+    font-family: -apple-system, BlinkMacSystemFont, 'Trebuchet MS', Roboto, Ubuntu, sans-serif;
+    background: var(--tv-bg);
+    border-color: var(--tv-line);
+    color: var(--tv-text);
+  }
+  /* A LIGHT-THEME READER GETS THE CONSOLE'S PALETTE, not a dark panel
+     dropped into a light page. TradingView's tester is dark because
+     TradingView is; ours has to survive both. */
+  :root[data-theme='light'] .tester,
+  :root:not([data-theme='dark']) .tester {
+    --tv-bg: var(--n3);
+    --tv-panel: var(--n2);
+    --tv-line: var(--n6);
+    --tv-line-soft: var(--n5);
+    --tv-text: var(--n11);
+    --tv-label: var(--n9);
+    --tv-muted: var(--n8);
+    --tv-green: #089981;
+    --tv-red: #d1263a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme='light']) .tester {
+      --tv-bg: #131722;
+      --tv-panel: #1e222d;
+      --tv-line: #2a2e39;
+      --tv-line-soft: #22262f;
+      --tv-text: #d1d4dc;
+      --tv-label: #b2b5be;
+      --tv-muted: #787b86;
+      --tv-green: #089981;
+      --tv-red: #f23645;
+    }
+  }
+
+  .tester .tt-bar {
+    background: var(--tv-bg);
+    border-bottom-color: var(--tv-line);
+    padding: 0.7rem 1rem;
+  }
+  .tester .tt-sec {
+    padding: 1.35rem 1rem 1.5rem;
+    border-bottom-color: var(--tv-line);
+  }
+  /* 15px, semibold — measured off "Key stats" and "Performance analysis". */
+  .tester .tt-h {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--tv-text);
+    margin-bottom: 1.05rem;
+  }
+  .tester .tt-h5 {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--tv-text);
+    margin: 1.5rem 0 0.65rem;
+  }
+  /* THE QUAD IS FOUR EVEN COLUMNS ACROSS THE FULL WIDTH, not auto-fit
+     boxes. TradingView spreads them regardless of content length, which
+     is what makes the row scan as one line rather than four cards. */
+  .tester .tt-quad,
+  .tester .tt-stats {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 1.1rem 1.5rem;
+  }
+  @media (max-width: 860px) {
+    .tester .tt-quad,
+    .tester .tt-stats {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+  .tester .tt-k {
+    font-size: 13px;
+    color: var(--tv-label);
+    font-weight: 400;
+    letter-spacing: 0;
+    text-transform: none;
+  }
+  /* 20px and NOT BOLD. The weight is the detail most imitations get
+     wrong; TradingView sets these at normal weight and lets size carry
+     the hierarchy. */
+  .tester .tt-qv.big {
+    font-size: 20px;
+    font-weight: 400;
+    color: var(--tv-text);
+    line-height: 1.35;
+    gap: 0.4rem;
+  }
+  .tester .tt-qv {
+    font-size: 14px;
+    color: var(--tv-text);
+  }
+  .tester .tt-qv.up,
+  .tester .tt-v.up {
+    color: var(--tv-green);
+  }
+  .tester .tt-qv.down,
+  .tester .tt-v.down {
+    color: var(--tv-red);
+  }
+  /* The unit suffix: ~10px, uppercase, muted, tight against the number. */
+  .tester .tt-unit {
+    font-size: 10px;
+    color: var(--tv-muted);
+    letter-spacing: 0.02em;
+    margin-left: 0.1rem;
+  }
+  .tester .tt-pc {
+    font-size: 14px;
+    color: inherit;
+    opacity: 1;
+  }
+  .tester .tt-note {
+    font-size: 12px;
+    color: var(--tv-muted);
+  }
+  .tester .tt-note2 {
+    font-size: 12px;
+    color: var(--tv-muted);
+    line-height: 1.55;
+  }
+  .tester .tt-note2 b {
+    color: var(--tv-label);
+  }
+
+  /* ---- pills: TradingView's are 30px tall with a 15px radius ---- */
+  .tester .tt-pills {
+    gap: 0.5rem;
+    margin-bottom: 1.15rem;
+  }
+  .tester .tt-pill {
+    background: var(--tv-panel);
+    border: 1px solid transparent;
+    border-radius: 15px;
+    padding: 0.4rem 0.85rem;
+    font-size: 13px;
+    color: var(--tv-label);
+    height: 30px;
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+  }
+  .tester .tt-pill:hover {
+    color: var(--tv-text);
+  }
+  .tester .tt-pill.on {
+    background: transparent;
+    border-color: var(--tv-blue);
+    color: var(--tv-text);
+  }
+  .tester .tt-seg {
+    background: var(--tv-panel);
+    border-radius: 7px;
+  }
+  .tester .tt-segbtn {
+    font-size: 13px;
+    color: var(--tv-label);
+    padding: 0.32rem 0.85rem;
+  }
+  .tester .tt-segbtn.on {
+    background: #2f3241;
+    color: var(--tv-text);
+    box-shadow: none;
+  }
+
+  /* ---- tables: 13px, and rows with room to breathe ---- */
+  .tester .tt-tblwrap {
+    border: 0;
+    border-radius: 0;
+    margin-top: 0;
+  }
+  .tester .tt-tbl {
+    font-size: 13px;
+  }
+  .tester .tt-tbl th {
+    background: transparent;
+    color: var(--tv-muted);
+    font-size: 13px;
+    font-weight: 400;
+    text-transform: none;
+    letter-spacing: 0;
+    padding: 0.85rem 1rem;
+    border-bottom: 1px solid var(--tv-line);
+  }
+  /* ~48px single-line, ~62px when a cell carries its percentage under
+     the value. Measured off the details table in the screenshots. */
+  .tester .tt-tbl td {
+    padding: 0.95rem 1rem;
+    border-bottom: 1px solid var(--tv-line-soft);
+    color: var(--tv-text);
+  }
+  .tester .tt-tbl td:first-child {
+    color: var(--tv-text);
+  }
+  .tester .tt-tbl tbody tr:hover {
+    background: #1c2030;
+  }
+  .tester .tt-tbl td .tp {
+    font-size: 12px;
+    color: var(--tv-muted);
+    margin-top: 0.1rem;
+  }
+  .tester .tt-tbl td.down {
+    color: var(--tv-red);
+  }
+
+  /* Every digit in this panel is tabular, so columns of numbers line up
+     down the page the way they do in the screenshots. */
+  .tester {
+    font-variant-numeric: tabular-nums;
+  }
+
+  .tester .tt-chip {
+    font-size: 12px;
+    background: var(--tv-panel);
+    color: var(--tv-label);
+  }
+  .tester .tt-chip.good {
+    color: var(--tv-green);
+  }
+  .tester .tt-chip.warn {
+    color: #f0b429;
+  }
+  .tester .tt-ctl,
+  .tester .tt-view {
+    font-size: 13px;
+    color: var(--tv-label);
+  }
+  .tester .tt-view.on {
+    background: var(--tv-blue);
+    color: #fff;
+  }
+  .tester .tt-name b {
+    font-size: 14px;
+    color: var(--tv-text);
+  }
+  .tester .tt-plotrow {
+    font-size: 13px;
+    color: var(--tv-text);
+  }
+  .tester .tt-plotrow.off {
+    color: var(--tv-muted);
+  }
+  .tester .cf-plot {
+    border-color: var(--tv-line);
+    background: transparent;
+  }
+  .tester .cf-axis,
+  .tester .cf-x,
+  .tester .cf-legend {
+    font-size: 12px;
+    color: var(--tv-muted);
+  }
+  .tester .cf-note {
+    font-size: 12px;
+    color: var(--tv-muted);
+  }
+  .tester .tt-blab,
+  .tester .tt-pllab,
+  .tester .tt-cmplab {
+    font-size: 13px;
+    color: var(--tv-label);
+    text-transform: none;
+    letter-spacing: 0;
+  }
+  .tester .tt-bval,
+  .tester .tt-plval,
+  .tester .tt-cmpval {
+    font-size: 13px;
+    color: var(--tv-text);
+  }
+  .tester .tt-bfill,
+  .tester .tt-plfill,
+  .tester .tt-cmpfill {
+    background: var(--tv-green);
+  }
+  .tester .tt-bfill.down,
+  .tester .tt-plfill.downbar,
+  .tester .tt-cmpfill.down {
+    background: var(--tv-red);
+  }
+  .tester .tt-plfill.ghost,
+  .tester .tt-bfill.hold {
+    background: #434651;
+  }
+  .tester .tt-donutmid b {
+    font-size: 22px;
+    color: var(--tv-text);
+    font-weight: 400;
+  }
+  .tester .tt-donutmid span {
+    font-size: 12px;
+    color: var(--tv-muted);
+  }
+  .tester .tt-donutleg {
+    font-size: 13px;
+    color: var(--tv-text);
+    gap: 0.7rem;
   }
 
   /* ---- sections ---- */
