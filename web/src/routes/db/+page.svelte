@@ -4449,6 +4449,74 @@
     return `${neg ? '−' : ''}${fmt(whole)}.${String(frac).padStart(2, '0')}`;
   }
 
+  /* ======================================================================
+     THE DIGITS THAT REPEAT DOWN EVERY ROW EARN NONE OF THEIR WEIGHT
+     ======================================================================
+     This is the `dayrep` rule applied to prices, and prices need it more. A
+     page of BANKNIFTY minute bars reads `57,647.65` / `57,647.65` /
+     `57,761.95`: eight characters, of which the first four are the same on
+     every row and in all four price columns. The eye has to walk past the part
+     that never changes to reach the part that does, on every cell, forty times
+     a page — and the part that changes is the entire reason the column exists.
+
+     So the shared opening is dimmed. DIMMED, NOT REMOVED, for exactly the
+     reasons the day column already states: the text stays in the cell, so a
+     copy, an export and a screen reader all still get the whole number, and
+     only its weight in the eye changes. Nothing is hidden and no figure is
+     rounded — `CLAUDE.md` §7 keeps the value, this changes how it is drawn.
+
+     ONE PREFIX ACROSS ALL FOUR PRICE COLUMNS, not one per column. They are the
+     same instrument at the same magnitude, so a shared prefix makes the dimmed
+     run line up across the row and the bright tails sit in a column of their
+     own — which is what turns four numbers into a shape a reader can scan
+     DOWN. Per-column prefixes would each be a different length and the effect
+     would be noise.
+
+     IT IS COMPUTED FROM THE PAGE, NOT THE STORE, and that is the honest scope:
+     it says "these rows open alike", which is a fact about what is on screen.
+     Cost is the page's own row count times a short string — the same order as
+     drawing them. */
+  const pricePfx = $derived.by(() => {
+    if (barPage.length === 0) return '';
+    /** @type {string | null} */
+    let pfx = null;
+    let shortest = Infinity;
+    for (const b of barPage) {
+      for (const v of [b.o, b.h, b.l, b.c]) {
+        const s = paisaText(v);
+        if (s.length < shortest) shortest = s.length;
+        if (pfx === null) {
+          pfx = s;
+          continue;
+        }
+        let i = 0;
+        while (i < pfx.length && i < s.length && pfx[i] === s[i]) i += 1;
+        if (i === 0) return '';
+        pfx = pfx.slice(0, i);
+      }
+    }
+    /* FOUR CHARACTERS ARE NEVER DIMMED, whatever the data says. On a run of
+       genuinely identical bars — which this store has, at the flat tail of a
+       session — the common prefix IS the whole number, and dimming all of it
+       would draw a grid of ghosts. The cap keeps a bright tail on every cell,
+       so "nothing changed here" reads as a quiet column rather than a broken
+       one. */
+    const cap = Math.max(0, shortest - 4);
+    const out = (pfx ?? '').slice(0, cap);
+    /* A ONE-CHARACTER DIM IS NOT WORTH THE TWO-TONE CELL IT COSTS. */
+    return out.length >= 2 ? out : '';
+  });
+
+  /** One price, split into the run every row shares and the part that is this
+      row's own. Returns `['', whole]` when there is nothing worth dimming.
+      @param {number | null | undefined} v */
+  function priceSplit(v) {
+    const s = paisaText(v);
+    return pricePfx && s.startsWith(pricePfx)
+      ? [pricePfx, s.slice(pricePfx.length)]
+      : ['', s];
+  }
+
   /** Why one bar's percentage is not a number. One code, one sentence. */
   const BAR_WHY = {
     first_bar_in_file:
@@ -8407,9 +8475,19 @@
                         >{timeLabel(b.ts)}</td
                       >
                       <td class="bt">{b.tf}</td>
-                      <td class="bn" title="{fmt(b.o)} paisa, as stored">{paisaText(b.o)}</td>
-                      <td class="bn" title="{fmt(b.h)} paisa, as stored">{paisaText(b.h)}</td>
-                      <td class="bn" title="{fmt(b.l)} paisa, as stored">{paisaText(b.l)}</td>
+                      <!-- THE SHARED OPENING IS DIMMED IN PLACE. `.pfx` is a
+                           span inside the cell, so the cell's own text is
+                           unchanged for a copy, an export, `textContent` and a
+                           screen reader — see `pricePfx`. -->
+                      <td class="bn" title="{fmt(b.o)} paisa, as stored"
+                        ><span class="pfx">{priceSplit(b.o)[0]}</span>{priceSplit(b.o)[1]}</td
+                      >
+                      <td class="bn" title="{fmt(b.h)} paisa, as stored"
+                        ><span class="pfx">{priceSplit(b.h)[0]}</span>{priceSplit(b.h)[1]}</td
+                      >
+                      <td class="bn" title="{fmt(b.l)} paisa, as stored"
+                        ><span class="pfx">{priceSplit(b.l)[0]}</span>{priceSplit(b.l)[1]}</td
+                      >
                       <!-- THE CLOSE IS THE FIGURE THE TABLE IS READ FOR, and it
                            was the same weight and colour as the other three.
                            `bclose` lets the row's own `data-dir` reach it — the
@@ -8417,7 +8495,9 @@
                            server-side price table, where `td.close` is bold and
                            tinted by `close >= open`. The two surfaces show the
                            same store and disagreed about that. -->
-                      <td class="bn bclose" title="{fmt(b.c)} paisa, as stored">{paisaText(b.c)}</td>
+                      <td class="bn bclose" title="{fmt(b.c)} paisa, as stored"
+                        ><span class="pfx">{priceSplit(b.c)[0]}</span>{priceSplit(b.c)[1]}</td
+                      >
                       <td class="bn bvol" style="--vmag:{volMag(b.vol, b.tf)}%;--vmagpx:{Math.round((volMag(b.vol, b.tf) / 100) * 56)}px">{fmt(b.vol)}</td>
 
                       <!-- PRE-MARKET %: no source on this wire. -->
@@ -9076,7 +9156,21 @@
      the column now marks — which is the only thing it was ever telling you
      across a page of one-minute bars. */
   .bt.dayrep {
-    opacity: 0.42;
+    /* A COLOUR, NOT AN OPACITY, AND THE RULE ABOVE EXPLAINS WHY IT MATTERS.
+       `opacity: 0.42` stood here. It multiplied with the 0.45 alpha the
+       `data-dir` rule was putting on this cell's `color`, and the repeated date
+       composited to 1.33 against a 4.5 floor — the comment above this block
+       promises "DIMMED, NOT BLANKED ... only its weight in the eye changes",
+       and at 1.33 it was blanked in everything but the DOM.
+
+       `--faint` is a token that was chosen to be legible on these panels:
+       measured 5.47 on the plain row and 4.87 on the striped one, against
+       9.65 for a date at full strength. So it still reads as clearly quieter —
+       which is the whole design — and it is still readable, which the opacity
+       version was not. Dimming with a colour also cannot multiply with another
+       alpha further up, which is the failure mode that produced 1.33 out of two
+       individually reasonable numbers. */
+    color: var(--faint);
     font-weight: var(--w-reg);
   }
   /* AND THE BOUNDARY GETS A LINE ACROSS THE WHOLE ROW. A day change is the one
@@ -9827,6 +9921,24 @@
     letter-spacing: var(--track-caps);
     text-transform: uppercase;
     color: var(--faint);
+    /* A SECTION LABEL THAT LOOKS LIKE ONE. Ten-pixel grey caps on a dark panel
+       read as a note about the panel rather than as the name of it, so a reader
+       scanning for structure finds no structure. The mark gives the label a
+       left edge to start from and a colour that says "this is a heading"
+       without adding a rule across the panel — which would be a second horizontal
+       line under a panel that already has a border. It is the accent because
+       the accent means "the console is speaking" everywhere else on this page. */
+    display: flex;
+    align-items: center;
+    gap: var(--s3);
+  }
+  .lead::before {
+    content: '';
+    flex: none;
+    width: 3px;
+    height: 0.85em;
+    border-radius: 2px;
+    background: var(--acc);
   }
 
   /* ---- A RUNG ---------------------------------------------------------
@@ -10061,6 +10173,30 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  /* THE INSTRUMENT IS THE PAGE'S SUBJECT AND NOW LOOKS LIKE IT. A gradient
+     across the word rather than a flat colour — it is the largest type on the
+     page and the only place a graphic treatment costs nothing, because no
+     figure is being compared to it.
+
+     `@supports` AND `color` DECLARED BEFORE IT, deliberately. `color:
+     transparent` with `background-clip: text` is the whole trick and it is also
+     the whole risk: where the clip is unsupported, `transparent` text on a
+     transparent background is an INVISIBLE HEADING — the page would lose the
+     name of what it is showing and nothing would report it. The flat
+     `--ink-hi` above stands on its own, and only a browser that has already
+     proven it can clip to the text ever sets `transparent`. */
+  @supports (background-clip: text) or (-webkit-background-clip: text) {
+    .sym {
+      background: linear-gradient(
+        96deg,
+        var(--ink-hi) 34%,
+        color-mix(in srgb, var(--acc) 82%, var(--ink-hi))
+      );
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
   }
   .px {
     margin-left: auto;
@@ -11304,7 +11440,13 @@
     padding: 0 var(--s4);
     text-align: left;
     background: linear-gradient(180deg, var(--panel-2), var(--bg-2));
-    border-bottom: 1px solid var(--line);
+    /* THE ACCENT IN THE HAIRLINE, because this line separates the two halves of
+       the grid — the names above it and the measurements below — and drawing it
+       in `--line` made it the same weight as every other border on the page.
+       Mixed rather than pure: at full strength it becomes a rule the eye lands
+       on first, and a column header's job is to be found when looked for, not
+       to compete with the figures under it. */
+    border-bottom: 1px solid color-mix(in srgb, var(--acc) 34%, var(--line));
     /* THE ONE MEASURED GAP IN THIS GRID, and it is depth rather than type. The
        header is already opaque and already sticky -- measured `rgb(26,32,48)`
        -- so a row scrolling under it is correctly clipped and nothing bleeds
@@ -11691,16 +11833,73 @@
      was only ever scaffolding for the scale. */
   .brow > td:first-child::before {
     content: '';
-    background: currentColor;
+    /* `var(--dirc)` — set by the three `data-dir` rules below, which no longer
+       write `color` for exactly this purpose. `--dim` is the fallback for a row
+       with no direction at all rather than a colour anything normally uses. */
+    background: var(--dirc, var(--dim));
   }
+  /* THE SHARED OPENING OF EVERY PRICE ON THE PAGE. Weight and colour only —
+     the same size, the same family and the same tabular figures as the rest of
+     the cell, so the digits stay on their grid and the number keeps its shape.
+     A smaller prefix would break the column alignment that makes the bright
+     tails scannable, which is the entire point. `--faint` rather than a lower
+     opacity so it composites the same on the striped rows as on the plain
+     ones. */
+  .pfx {
+    color: var(--faint);
+    font-weight: var(--w-reg);
+  }
+  /* THE CLOSE'S PREFIX IS NOT DIMMED HARDER, AND IT WAS, AND IT FAILED AA.
+     `opacity: 0.75` stood here to widen the gap between the run that repeats
+     and the digits that moved. Measured after compositing: 3.62 against the
+     plain row and 3.35 against the striped one, where the floor is 4.5.
+
+     IT PASSED THE FIRST CHECK, which is the part worth recording. A contrast
+     reader that takes `color` and the background and ignores `opacity` reports
+     5.47 for text that renders at 3.62 — and `opacity` is the most common way
+     to dim anything in CSS. Effective alpha is the PRODUCT of every ancestor's
+     opacity down to the first opaque background and has to be composited before
+     luminance, or the instrument passes exactly the cases it exists to catch.
+
+     The close is already the figure: the `nth-child` rule above lowers O/H/L to
+     `--ink-2` and leaves the close at full weight, so the emphasis is there
+     without spending it out of the one budget on this page that is not a matter
+     of taste. */
+
+  /* A DIRECTION YOU CAN SEE WITHOUT READING. The spine states the RANGE and the
+     percentage states the MOVE; neither says at a glance which way the bar
+     went, and colour on a 3px mark is the least visible channel available. This
+     is a wash across the first third of the row, mixed out of the same `--up` /
+     `--down` tokens, at a strength that reads as a tint rather than a
+     highlight — a full-row fill would fight the alternating stripe and the
+     cursor row, both of which mean something else here. */
+  .brow[data-dir='up'] > td:first-child,
+  .brow[data-dir='down'] > td:first-child {
+    background-image: linear-gradient(90deg, var(--dirc), transparent 82%);
+  }
+  /* ---------------------------------------------------------------------
+     `--dirc` AND NOT `color`, AND THE DIFFERENCE WAS AN ACCESSIBILITY BUG.
+
+     These three rules exist so the range mark can say `background:
+     var(--dirc)` and pick up its row's direction. They used to say `color`,
+     which works for the mark — and the CELL'S TEXT INHERITS IT. The date in
+     that cell was therefore drawn in a 58%-transparent green.
+
+     MEASURED, compositing the alpha: 4.27 against a floor of 4.5, and on the
+     rows where `.dayrep` dims a repeated day as well the two alphas multiply —
+     0.45 x 0.42 — and the date rendered at 1.33. Not marginal: barely there.
+
+     A custom property carries the direction to the one element that wants it
+     and stops at every element that does not. The text goes back to inheriting
+     the row's own colour, which measures 9.65. */
   .brow[data-dir='up'] > td:first-child {
-    color: color-mix(in srgb, var(--up) 58%, transparent);
+    --dirc: color-mix(in srgb, var(--up) 58%, transparent);
   }
   .brow[data-dir='down'] > td:first-child {
-    color: color-mix(in srgb, var(--down) 58%, transparent);
+    --dirc: color-mix(in srgb, var(--down) 58%, transparent);
   }
   .brow[data-dir='flat'] > td:first-child {
-    color: color-mix(in srgb, var(--dim) 45%, transparent);
+    --dirc: color-mix(in srgb, var(--dim) 45%, transparent);
   }
 
   /* O / H / L ARE CONTEXT; CLOSE IS THE FIGURE. Four prices at one weight makes
