@@ -20082,3 +20082,75 @@ written are both zero and a hardcoded zero would pass it. The distinction is
 made and proved one layer down, in `pull/tests/census.rs`, where a first run
 commits three and its re-run commits none while every other counter agrees.
 `CLAUDE.md` §3 rule 6.
+
+### D-0260
+
+**The month was a STORAGE unit and had become the analysis unit, so the largest
+question the engine could be asked was "what worked in March".**
+
+`crates/cli/src/stored.rs`, `crates/cli/src/lib.rs`.
+
+`crates/store` keeps one file per `(vendor, instrument, timeframe, month)`.
+Seven years of one-minute bars is **eighty-four files**, and `stored::load` could
+open exactly one. `sweep-all` walked every stored month but swept each
+SEPARATELY -- `wanted.par_iter().map(one)` -- producing N answers about N months.
+
+That is not a smaller version of the seven-year question, it is a different one.
+A combination that fires on two percent of bars in every month is not one that
+fires on two percent of seven years; a trade cannot open in one month and close
+in the next; and a walk-forward split inside one month tests against days rather
+than regimes.
+
+`stored::load_span` joins a contiguous range into ONE series and `cli
+audit-range` sweeps it. Run identity needed no new field: `Run` carries no year
+or month, so a span and any month inside it hash differently purely because
+`data_digest` is taken over different bars.
+
+**The join is CHECKED, not assumed.** Two files opened in order are two files.
+`Column::build` folds bar by bar and §3 rule 7's no-look-ahead property is held
+by that shape, so a series that stepped backwards at a boundary would fold a
+later bar into an earlier state and nothing downstream would catch it. A
+non-increasing step refuses.
+
+**A missing month is NAMED, never skipped.** `Span::missing` lists them and the
+banner prints them with "every figure below is over a SHORTER sample, not a
+corrected one". A seven-year request with one month un-pulled returns six years
+and eleven months and says which one is absent -- refusing everything would be
+worse, and skipping quietly is the §4 fallback.
+
+**Two defects in this work were found by its own tests, not by review.**
+
+`MONTH` parses as `u8`, so 13 through 255 arrive intact, build no path, and
+would have landed in `Span::missing` -- the operator reading "2019-13 is missing
+from the store" and going to pull a month that cannot exist. The endpoints are
+now checked against 1..=12 and refused by name and by end.
+
+`YEAR` parses as `u16`, so `audit-range ... 1970 1 65535 1` asks for **763,000
+months**, every one a failed file open. The walk would grind for minutes and then
+report that nothing was found: a hang wearing a result's clothes.
+`MAX_SPAN_MONTHS` is 1,200 and the count is taken before the first month is
+pushed.
+
+**A third was found by a self-check inside a fixture.** The multi-month seeder
+computes a real timestamp per month, because the store refuses a bar stamped
+outside the month its path names. Its first draft computed 09:15 IST and
+disagreed with the single-month fixture's hard-coded constant by exactly
+1,200,000,000 micros: that constant is 03:25 UTC, which is 08:55 IST, while its
+comment calls it 09:15 IST. The helper matches the CONSTANT, deliberately -- both
+fixtures must stamp bars the same way -- and the discrepancy is recorded rather
+than silently resolved, because it predates this module.
+
+**Cost.** One `open_existing` per month and one `read_record` per bar, each
+O(1), with the destination reserved once from the sum of the headers' own record
+counts. Total work is O(total bars), which is the size of the answer. §3 rule 4
+governs bar lookup, condition lookup, mask evaluation, duplicate rejection and
+result append; this is none of them, and nothing here scans, sorts or searches.
+
+**MEASURED on the store as it then stood** -- `zerodha BANKNIFTY 1day
+2019-12..2026-08`, 81 of 81 months, no holes: 1,671 bars joined, 1,471 swept, 200
+warming, 54,895,691 combinations at depth 11, `outcome REFUSED` at the
+candidate budget, 515 s. The refusal is the sweep's own and is disclosed; the
+join itself held.
+
+`cli`: 55 lib, 4 binary, 0 failures. `fmt` and `clippy --all-targets -D warnings`
+clean.

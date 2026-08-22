@@ -96,6 +96,11 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
        cli audit-stored VENDOR UNDERLYING RUNG YEAR MONTH MIN_HITS
                                    sweep REAL bars, then trade them: exit grid,
                                    walk-forward, PBO and bootstrap p-values
+       cli audit-range  VENDOR UNDERLYING RUNG FROM_Y FROM_M TO_Y TO_M MIN_HITS
+                                   sweep a CONTIGUOUS SPAN of months as ONE
+                                   series -- the seven-year question, not twelve
+                                   monthly ones. Missing months are named, never
+                                   skipped quietly.
        cli sweep-all    VENDOR RUNG MIN_HITS
                                    sweep EVERY stored instrument-month at that
                                    feed and rung, one report for all of them
@@ -110,6 +115,48 @@ The two stored commands read a run identity off the build, so they refuse
 unless it was stamped:
     BRUTEX_COMMIT=$(git rev-parse HEAD) cargo build --release -p cli
 ";
+
+/// The `audit-range` arm, lifted out of [`run`].
+///
+/// # Why it is a function and not five more lines in the match
+///
+/// `run` is a dispatch table and `clippy::too_many_lines` caps it at a hundred.
+/// The cap is doing real work here: an arm that parses FOUR numbers plus a
+/// threshold is the largest in the table, and inlining it pushed the whole
+/// dispatch past the point where a reader can see the command list at all.
+///
+/// The refusals are the same four `audit-stored` gives and in the same order,
+/// because two commands taking one shape of argument must reject a bad one
+/// identically or an operator learns two rules.
+fn audit_range_arm(
+    out: &mut String,
+    vendor: &str,
+    underlying: &str,
+    rung: &str,
+    from: (&str, &str),
+    to: (&str, &str),
+    min_hits: &str,
+) -> u8 {
+    match (
+        from.0.parse::<u16>(),
+        from.1.parse::<u8>(),
+        to.0.parse::<u16>(),
+        to.1.parse::<u8>(),
+        parse_min_hits(min_hits),
+    ) {
+        (Ok(fy), Ok(fm), Ok(ty), Ok(tm), Ok(h)) => {
+            let text = audit_range(vendor, underlying, rung, (fy, fm), (ty, tm), h);
+            let refused = text.starts_with("refused: ");
+            out.push_str(&text);
+            if refused { MISUSED } else { OK }
+        }
+        (Err(_), _, _, _, _) | (_, _, Err(_), _, _) => {
+            refuse(out, "YEAR must be a number like 2026")
+        }
+        (_, Err(_), _, _, _) | (_, _, _, Err(_), _) => refuse(out, "MONTH must be 1..=12"),
+        (_, _, _, _, Err(why)) => refuse(out, why),
+    }
+}
 
 /// Parses one command and runs it, returning the code the shell reads.
 ///
@@ -191,6 +238,9 @@ pub fn run(args: &[String], out: &mut String) -> u8 {
                 (_, Err(_), _) => refuse(out, "MONTH must be 1..=12"),
                 (_, _, Err(why)) => refuse(out, why),
             }
+        }
+        ["audit-range", v, u, r, fy, fm, ty, tm, mh] => {
+            audit_range_arm(out, v, u, r, (fy, fm), (ty, tm), mh)
         }
         ["sweep-all", vendor, rung, min_hits] => match parse_min_hits(min_hits) {
             Ok(h) => {
@@ -1480,6 +1530,144 @@ fn audit_stored_inner(
     Ok(report)
 }
 
+/// The full audit over a CONTIGUOUS SPAN of months, as one series.
+///
+/// # Why this is not `audit_stored` in a loop
+///
+/// Looping the single-month audit produces N answers about N months. This
+/// produces ONE answer about the whole span, and the difference is the question
+/// itself: a combination frequent in every month separately is not a combination
+/// frequent over seven years, a trade may open in one month and close in the
+/// next, and a walk-forward split across a span tests against REGIMES rather
+/// than against days inside one month.
+///
+/// The month is a STORAGE unit — `crates/store` keeps one file per
+/// instrument-month — and it was never meant to be the analysis unit. It became
+/// one only because the loader could open a single file.
+///
+/// # Errors
+///
+/// Every arm of [`stored::load_span`], plus the commit-stamp refusal §3 rule 3
+/// requires before any bar is read.
+fn audit_range_inner(
+    vendor_word: &str,
+    underlying: &str,
+    rung: &str,
+    from: (u16, u8),
+    to: (u16, u8),
+    min_hits: u64,
+) -> Result<String, stored::Refusal> {
+    // COMMIT FIRST, BEFORE A BAR IS READ, for the reason `audit_stored_inner`
+    // gives: a build that cannot be identified must refuse BEFORE it computes.
+    let commit = commit_stamp().ok_or_else(|| {
+        "this build carries no commit stamp, so §3 rule 3's run identity cannot be \
+         recorded and the audit will not run. Rebuild with \
+         `BRUTEX_COMMIT=$(git rev-parse HEAD) cargo build --release -p cli`"
+            .to_owned()
+    })?;
+
+    let vendor = parse_vendor(vendor_word)?;
+    let root = store_root()?;
+    let span = stored::load_span(&root, vendor, underlying, rung, from, to)?;
+
+    note(
+        &telemetry::Event::info("cli.audit", "stored span loaded")
+            .with("feed", span.vendor.as_str())
+            .with("underlying", underlying)
+            .with("rung", span.timeframe)
+            .with("from", format!("{}-{:02}", from.0, from.1).as_str())
+            .with("to", format!("{}-{:02}", to.0, to.1).as_str())
+            .with("months_asked", u64::from(span.asked))
+            .with("months_found", u64::from(span.found))
+            .with(
+                "months_missing",
+                u64::try_from(span.missing.len()).unwrap_or(u64::MAX),
+            )
+            .with("bars", u64::try_from(span.bars.len()).unwrap_or(u64::MAX))
+            .with("min_hits", min_hits),
+    );
+
+    let ladder = Ladder::with_min_hits(min_hits);
+    let id = identity(&Run {
+        #[expect(
+            clippy::default_trait_access,
+            reason = "the named path would add a dependency arrow §5 does not draw"
+        )]
+        mask: Default::default(),
+        // Undirected for the reason `audit_stored_inner` states: the identity
+        // names the SWEEP, and direction is chosen per combination below.
+        direction: RunDirection::Undirected,
+        instrument: &span.key,
+        timeframe: span.timeframe,
+        params: Params::of(ladder),
+        // THE DIGEST IS OVER THE WHOLE SPAN, which is what makes this identity
+        // correct without a new field. `Run` carries no year or month, so a
+        // span and any single month inside it hash differently purely because
+        // their bars differ — and two runs over the same span agree, which is
+        // §3 rule 5.
+        data_digest: data_digest(&span.bars),
+        commit,
+        feed: span.vendor.as_str(),
+    });
+
+    let mut header = String::from(STORED_PROVENANCE);
+    let _ = writeln!(
+        header,
+        "feed {} · {} · {} · {}-{:02}..{}-{:02} · {} of {} months · {} bars · built at {commit}",
+        vendor.as_str(),
+        underlying,
+        span.timeframe,
+        from.0,
+        from.1,
+        to.0,
+        to.1,
+        span.found,
+        span.asked,
+        span.bars.len(),
+    );
+    // A HOLE IS NAMED, NEVER SKIPPED. A span missing three months is a shorter
+    // sample and not a corrected one, and every figure below is computed over
+    // what was actually there. `CLAUDE.md` §4 bans the fallback that would let
+    // it read like a whole span.
+    if !span.complete() {
+        let names: Vec<String> = span
+            .missing
+            .iter()
+            .map(|&(y, m)| format!("{y}-{m:02}"))
+            .collect();
+        let _ = writeln!(
+            header,
+            "MONTHS MISSING FROM THIS SPAN ({}): {}\n\
+             Every figure below is over a SHORTER sample, not a corrected one. \
+             Pull those months and rerun to close the gap.",
+            span.missing.len(),
+            names.join(" ")
+        );
+    }
+    Ok(audit_bars(
+        evaluator(),
+        span.bars,
+        &header,
+        min_hits,
+        Some(&id),
+    ))
+}
+
+/// [`audit_range_inner`], with every refusal rendered the way the CLI prints one.
+#[must_use]
+pub fn audit_range(
+    vendor_word: &str,
+    underlying: &str,
+    rung: &str,
+    from: (u16, u8),
+    to: (u16, u8),
+    min_hits: u64,
+) -> String {
+    match audit_range_inner(vendor_word, underlying, rung, from, to, min_hits) {
+        Ok(text) => text,
+        Err(why) => format!("refused: {why}\n"),
+    }
+}
 /// [`audit_stored_inner`], with every refusal rendered the way the CLI prints one.
 #[must_use]
 pub fn audit_stored(
@@ -2524,6 +2712,154 @@ mod tests {
         assert!(
             text.contains("complete"),
             "a search that settles on a rung it cannot walk has not searched: {text}"
+        );
+    }
+
+    /// THE RANGE COMMAND REFUSES A BAD ARGUMENT BEFORE IT REACHES THE STORE.
+    ///
+    /// # What an unstamped build can reach here, and what it cannot
+    ///
+    /// The four number parses in `audit_range_arm` run BEFORE `audit_range` is
+    /// called, so they are reachable under `cargo test` even though the commit
+    /// gate inside refuses immediately after — the same split
+    /// `the_stored_audit_refuses_for_the_same_cause_and_names_itself` documents
+    /// for `audit-stored`. These assertions therefore cover the parse arms and
+    /// claim nothing about the store walk.
+    #[test]
+    fn the_range_command_names_which_argument_it_refused() {
+        // 300 AND NOT 13, AND THE DIFFERENCE IS THE POINT. `MONTH` parses as
+        // `u8`, so 13 succeeds here and the call reaches `audit_range`, which
+        // refuses at the COMMIT GATE first -- the documented limit an unstamped
+        // `cargo test` build always hits. Only a value that cannot be a `u8` at
+        // all exercises the parse arm from this side. The 1..=12 guard itself is
+        // covered directly by
+        // `stored::a_month_outside_one_to_twelve_is_refused_and_never_reported_as_missing`.
+        for (args, want) in [
+            (
+                [
+                    "audit-range",
+                    "zerodha",
+                    "NIFTY",
+                    "1min",
+                    "x",
+                    "1",
+                    "2026",
+                    "8",
+                    "500",
+                ],
+                "YEAR must be a number",
+            ),
+            (
+                [
+                    "audit-range",
+                    "zerodha",
+                    "NIFTY",
+                    "1min",
+                    "2019",
+                    "12",
+                    "y",
+                    "8",
+                    "500",
+                ],
+                "YEAR must be a number",
+            ),
+            (
+                [
+                    "audit-range",
+                    "zerodha",
+                    "NIFTY",
+                    "1min",
+                    "2019",
+                    "300",
+                    "2026",
+                    "8",
+                    "500",
+                ],
+                "MONTH must be 1..=12",
+            ),
+            (
+                [
+                    "audit-range",
+                    "zerodha",
+                    "NIFTY",
+                    "1min",
+                    "2019",
+                    "12",
+                    "2026",
+                    "300",
+                    "500",
+                ],
+                "MONTH must be 1..=12",
+            ),
+            (
+                [
+                    "audit-range",
+                    "zerodha",
+                    "NIFTY",
+                    "1min",
+                    "2019",
+                    "12",
+                    "2026",
+                    "8",
+                    "0",
+                ],
+                "MIN_HITS must be 1 or more",
+            ),
+        ] {
+            let mut out = String::new();
+            let code = run(&argv(&args), &mut out);
+            assert_eq!(code, MISUSED, "a bad argument exits MISUSED: {out}");
+            assert!(
+                out.contains(want),
+                "the refusal must name the argument it rejected.\nwanted: \
+                 {want}\ngot: {out}"
+            );
+        }
+    }
+
+    /// A well-formed range still refuses, and for the identity reason.
+    ///
+    /// This is the pair to the test above: the arguments are all valid, so the
+    /// parse arms pass and the call reaches `audit_range`, which refuses at the
+    /// commit gate before touching the store. That gate is §3 rule 3 and it must
+    /// come FIRST — a computation whose identity cannot be recorded may not run,
+    /// so the refusal here is the correct behaviour and not a gap.
+    #[test]
+    fn a_well_formed_range_refuses_at_the_identity_gate_and_says_so() {
+        let mut out = String::new();
+        let code = run(
+            &argv(&[
+                "audit-range",
+                "zerodha",
+                "NIFTY",
+                "1min",
+                "2019",
+                "12",
+                "2026",
+                "8",
+                "500",
+            ]),
+            &mut out,
+        );
+        assert_eq!(code, MISUSED);
+        assert!(
+            out.contains("commit stamp"),
+            "an unstamped build must refuse by naming the stamp, not by \
+             failing to find a file: {out}"
+        );
+        assert!(
+            out.contains("the audit will not run"),
+            "and it must say which command it refused: {out}"
+        );
+    }
+
+    /// The usage text lists the range command, so an operator can find it.
+    #[test]
+    fn the_range_command_is_listed_in_usage() {
+        assert!(USAGE.contains("audit-range"), "the command is listed");
+        assert!(
+            USAGE.contains("CONTIGUOUS SPAN"),
+            "and usage says what makes it different from `audit-stored`"
         );
     }
 }
