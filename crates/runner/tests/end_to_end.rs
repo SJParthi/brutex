@@ -115,10 +115,13 @@ fn the_whole_pipeline_runs_and_every_stage_feeds_the_next() {
         );
         assert_eq!(
             cell.stopped
+                .saturating_add(cell.trailed_stop)
+                .saturating_add(cell.trailed_profit)
                 .saturating_add(cell.targeted)
                 .saturating_add(cell.timed_out),
             cell.trades,
-            "every trade ends by exactly one of stop, target or time"
+            "every trade ends by exactly one of fixed stop, trailing stop loss, \
+             trailing take profit, target or time"
         );
     }
 

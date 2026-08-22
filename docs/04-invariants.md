@@ -2551,3 +2551,23 @@ touched, and crossed up and down: **1,056 positions**. With this family the engi
 covers **298**. `touched` is not merely absent but unrepresentable — `set_near`
 takes one scalar and `set_exact` takes none — so a two-sided test against a level
 needs a new public function in `vocab::table`, not a new row.
+
+## The exit report names what it counted, and names the row it chose — D-0253
+
+| Id | Invariant | Proven by | ✓ |
+|---|---|---|---|
+| W-01 | **Every round trip is charged to exactly one of five counters, and the counter is the order that closed it.** `stopped` is a fixed stop, `trailed_stop` a trailing STOP LOSS, `trailed_profit` a trailing TAKE PROFIT, plus `targeted` and `timed_out`. They sum to `trades` | `grid::every_trade_ends_by_exactly_one_of_the_five_exits`; `runner/tests/end_to_end.rs`'s five-way sum | ✓ |
+| W-02 | **A counter can only be moved by the order that owns it.** No fixed stop ⟹ `stopped == 0`; no TSL ⟹ `trailed_stop == 0`; no TTP ⟹ `trailed_profit == 0`; no target ⟹ `targeted == 0` — each with a witness cell that DID fire it, so no implication is vacuous | `grid::each_exit_counter_can_only_be_moved_by_the_order_that_owns_it`; mutant `Armed → trailed_stop` killed | ✓ |
+| W-03 | **A truncated walk-forward is countable.** `halted_folds()` is a filter over `FoldResult::halted`, and the audit prints the row whether it is zero or not — a run that degraded names the reason | `validate::a_truncated_walk_is_countable_and_a_complete_one_counts_zero`, which asserts BOTH a non-zero and a zero | ✓ |
+| W-04 | **The table's top variant row IS `Grid::best()`.** The sort key is `Reverse((pessimistic, merit(c), index))`, and descending on the index reproduces `max_by_key`'s last-maximum rule exactly | `audit::the_top_variant_row_is_the_cell_best_actually_returns` (ties on money and merit); `audit::the_top_row_prefers_the_simpler_of_two_variants_tied_on_money` (ties on money alone) | ✓ |
+| W-05 | **A selector's own row is never dropped by the display cut.** `keep` bounds the table; `best()` and `sharpest()` rank the whole grid, so their rows are printed below the cut when they fall past it | `audit::a_chosen_row_below_the_cut_is_printed_anyway`, at `keep = 1` | ✓ |
+| W-06 | **Every rung index in the `exit` column resolves to a ppm distance on the same page.** Three `ladder, … (ppm)` rows print `index=ppm`, and their labels do not share the count row's prefix | `audit::the_rung_ladders_are_printed_as_index_equals_ppm` | ✓ |
+| W-07 | **Every column heading ends flush at its field, and every value on every row has a space before it.** The widest value a column can hold still leaves a separator, so two numbers can never weld into one | `audit::every_exit_column_heading_ends_where_its_number_ends` — the assertion that caught `unknown` at ten digits in ten columns, and `ret/DD` at `i64::MAX` | ✓ |
+
+**What is NOT claimed.** `return_over_drawdown` is measured and rendered and
+**nothing ranks on it** — whether it or `edge_ratio` should decide the selection
+is still the open question in `docs/06-limits.md`, and answering it by quietly
+switching the key would be the defect this entry exists to remove, recreated one
+layer down. The seventeen-field width spec lives in three places because
+`writeln!` requires a literal format string; W-07 is what makes the third copy a
+specification rather than a duplicate.

@@ -279,6 +279,29 @@ impl Validated {
     pub fn decided(&self) -> usize {
         self.folds.iter().filter(|f| f.chosen.is_some()).count()
     }
+
+    /// Folds that HALTED rather than going extinct on their own.
+    ///
+    /// `FoldResult::halted` is `Some` when a level breached a budget, so the
+    /// deepest level that fold reached is PARTIAL: candidates were dropped
+    /// unexamined and the fold's chosen combination is the best of a truncated
+    /// set, not the best of the set.
+    ///
+    /// The field has been recorded per fold since it was added and NOTHING
+    /// SUMMED IT. A walk-forward in which every fold truncated read exactly
+    /// like one in which none did, because the only figures the caller had
+    /// were `decided()` and `folds.len()` and a halted fold still decides.
+    /// That is the fallback that hides a failure `CLAUDE.md` section 4 bans:
+    /// the run degraded, and nothing named the reason.
+    ///
+    /// O(folds), and `folds` is the walk-forward window count -- a handful,
+    /// fixed before the sweep starts and independent of bars, candidates and
+    /// vocabulary size. It is not on the per-bar or per-candidate path that
+    /// golden rule 4 governs.
+    #[must_use]
+    pub fn halted_folds(&self) -> usize {
+        self.folds.iter().filter(|f| f.halted.is_some()).count()
+    }
 }
 
 /// How many rungs each exit ladder gets when a fold picks its exit.
@@ -1224,5 +1247,56 @@ mod tests {
         assert_eq!(v, Validated::default());
         assert_eq!(v.decided(), 0);
         assert_eq!(v.held_up(), 0);
+    }
+
+    #[test]
+    fn a_truncated_walk_is_countable_and_a_complete_one_counts_zero() {
+        // WHY THIS TEST EXISTS. `FoldResult::halted` was recorded per fold and
+        // summed nowhere, so a walk-forward in which every fold truncated
+        // presented the same two numbers as one in which none did --
+        // `decided()` and `folds.len()` -- because a halted fold still decides.
+        //
+        // Both halves are asserted deliberately. A counter that is never zero
+        // is not a counter, and a counter that is never non-zero is a constant;
+        // asserting only one half leaves the other free to be wrong.
+        let bars = crate::synthetic::sessions(12);
+
+        // A ceiling of four cannot hold even the k=1 frontier of this
+        // vocabulary, so every fold breaches it and stops with a PARTIAL
+        // deepest level.
+        let starved = Sweeper::new(Ladder::with_min_hits(120).with_ceiling(4));
+        let truncated = walk_forward(&bars, h(15), 3, Direction::Long, &starved, evaluator);
+        // MEASURED: two of the three folds breach it and one does not -- the
+        // first fold trains on the fewest bars, so its k=1 frontier fits. That
+        // split is what makes this fixture worth keeping. A `halted_folds` that
+        // ignored the filter and returned `folds.len()` would pass an
+        // all-folds-halted assertion; it cannot pass this one.
+        assert!(
+            truncated.halted_folds() > 0,
+            "a starved ceiling must truncate at least one fold"
+        );
+        assert!(
+            truncated.halted_folds() < truncated.folds.len(),
+            "the count must be a filter over folds, not the fold count itself"
+        );
+
+        // The control must go EXTINCT on its own, and reaching that took a
+        // measurement worth recording: the shipped test `sweeper()` --
+        // `min_hits(120).with_ceiling(20_000)` -- HALTS TWO OF THESE THREE
+        // FOLDS. Every walk-forward test in this module runs on it, so they
+        // have all been ranking truncated candidate sets and none of them could
+        // say so, which is the exact blindness this counter exists to end.
+        //
+        // MEASURED across `min_hits` at that ceiling on `sessions(12)`:
+        // 120 -> 2 folds halted, 600 -> 0, 1200 -> 0, 2400 -> 0, 4800 -> 0.
+        // 600 is the first support that clears it, so it is the control.
+        let roomy = Sweeper::new(Ladder::with_min_hits(600).with_ceiling(20_000));
+        let complete = walk_forward(&bars, h(15), 3, Direction::Long, &roomy, evaluator);
+        assert_eq!(
+            complete.halted_folds(),
+            0,
+            "a walk that went extinct on its own must not report a halt"
+        );
+        assert_eq!(complete.folds.len(), 3, "the control walk must have folds");
     }
 }

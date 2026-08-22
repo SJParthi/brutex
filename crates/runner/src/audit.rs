@@ -226,12 +226,46 @@ fn exit_name(c: &Cell) -> String {
     }
 }
 
-/// The rows above the exit table: what was evaluated, what was dropped, and how
-/// to read the `exit` column.
+/// One ladder as `index=ppm`, the way the `exit` column indexes it.
+///
+/// # A RUNG INDEX IS NOT A LEVEL
+///
+/// The `exit` column reads `2/3/1+1@0`, and every one of those digits is a
+/// SUBSCRIPT INTO A LADDER the reader could not see. The ladder is derived from
+/// this combination's own excursion distribution — `Ladder::from_excursions`
+/// places each rung at a quantile of what the instrument actually did — so rung
+/// 2 is a different distance on BANKNIFTY than on NIFTY, a different distance in
+/// a quiet month than a loud one, and a different distance for two combinations
+/// on the same bars.
+///
+/// `stop rungs / target rungs: 4 / 4` said how MANY there were and nothing about
+/// what they WERE, so "the best variant stops at rung 2" was unactionable: an
+/// operator cannot place that stop on a broker screen. Printing `index=ppm`
+/// makes every digit in the table resolvable without a second run.
+///
+/// `O(rungs)`, and `rungs` is fixed by the grid's own construction — four or
+/// five, chosen before any bar is read. It is not on the per-bar or
+/// per-candidate path golden rule 4 governs.
+fn ladder(l: &crate::excursion::Ladder) -> String {
+    if l.rungs().is_empty() {
+        return "-".to_owned();
+    }
+    let mut s = String::new();
+    for (i, r) in l.rungs().iter().enumerate() {
+        if i > 0 {
+            s.push(' ');
+        }
+        let _ = write!(s, "{i}={r}");
+    }
+    s
+}
+
+/// The rows above the exit table: what was evaluated, what was dropped, what the
+/// rung indices mean, and how to read the `exit` column.
 ///
 /// Split out so [`grid`] stays under `clippy::too_many_lines`. Nothing is hidden
-/// by the split — these three rows are the table's preamble and the table's
-/// preamble is one idea.
+/// by the split — these rows are the table's preamble and the table's preamble
+/// is one idea.
 fn grid_header(out: &mut String, g: &Grid) {
     row(out, "variants evaluated", &g.cells.len().to_string(), "");
     row(
@@ -239,6 +273,30 @@ fn grid_header(out: &mut String, g: &Grid) {
         "stop rungs / target rungs",
         &format!("{} / {}", g.stops.len(), g.targets.len()),
         "derived from this combination's own excursions",
+    );
+    // THE LADDERS THEMSELVES, NOT JUST THEIR LENGTHS.
+    //
+    // These three labels deliberately do NOT begin "stop rungs": the row above
+    // starts with exactly that string, and a reader -- or a test -- matching on
+    // a line prefix would bind to whichever came first. Distinct prefixes make
+    // each row addressable.
+    row(
+        out,
+        "ladder, stops (ppm)",
+        &ladder(&g.stops),
+        "rung index = ppm from entry",
+    );
+    row(
+        out,
+        "ladder, targets (ppm)",
+        &ladder(&g.targets),
+        "rung index = ppm from entry",
+    );
+    row(
+        out,
+        "ladder, trails (ppm)",
+        &ladder(&g.trails),
+        "give-back from the running peak, for BOTH trailing orders",
     );
     // A DROPPED PATH IS PRINTED, NEVER ONLY COUNTED INTERNALLY.
     //
@@ -276,6 +334,93 @@ fn grid_header(out: &mut String, g: &Grid) {
     );
 }
 
+/// The exit table's column headings.
+///
+/// Seventeen columns, and every one of them was already computed. `all_mae`,
+/// `winner_mfe`, `worst_trade`, `max_drawdown` and `return_over_drawdown` were
+/// accumulated per cell and rendered NOWHERE, and the three exit counters split
+/// by `crate::grid::count_exit` would have gone the same way. A figure computed
+/// and not shown is a figure the operator cannot act on, which is the same
+/// outcome as not computing it and costs more.
+fn grid_columns(out: &mut String) {
+    let _ = writeln!(
+        out,
+        "  {:<15}{:>7}{:>6}{:>6}{:>6}{:>6}{:>7}{:>6}{:>14}{:>12}{:>12}{:>9}{:>13}{:>11}{:>11}{:>9}{:>11}",
+        "exit",
+        "trades",
+        "won",
+        "stop",
+        "tsl",
+        "ttp",
+        "target",
+        "time",
+        "total",
+        "worst trip",
+        "drawdown",
+        "ret/DD",
+        "unknown",
+        "winner MAE",
+        "winner MFE",
+        "all MAE",
+        "mfe/allMAE",
+    );
+    let _ = writeln!(
+        out,
+        "  stop+tsl+ttp+target+time = trades. total/worst trip/drawdown are \
+         paisa; the MAE/MFE columns and ret/DD are ppm."
+    );
+}
+
+/// The `ret/DD` cell, with the zero-drawdown sentinel rendered as words.
+///
+/// # A SENTINEL IS NOT A MEASUREMENT
+///
+/// `Cell::return_over_drawdown` returns [`i64::MAX`] when a variant never gave
+/// anything back, because that is the best possible reading and there is nothing
+/// to divide by. Printed raw it is `9223372036854775807` — nineteen digits in a
+/// nine-wide column, so it overruns into `drawdown` and welds two numbers into
+/// one unreadable one. Worse than unreadable, it reads as a MEASURED RATIO of
+/// nine quintillion, which is not a thing that happened.
+///
+/// `no DD` is four characters, fits, and says what the sentinel means.
+fn ret_dd(c: &Cell) -> String {
+    let v = c.return_over_drawdown();
+    if v == i64::MAX {
+        return "no DD".to_owned();
+    }
+    v.to_string()
+}
+
+/// One cell as one row, `mark` naming the selector that chose it.
+///
+/// `mark` is empty for an ordinary row. It is how `best()` and `sharpest()` stop
+/// being two sentences under a table the reader has to search: the row that IS
+/// the answer says so on the row.
+fn grid_row(out: &mut String, c: &Cell, mark: &str) {
+    let _ = writeln!(
+        out,
+        "  {:<15}{:>7}{:>6}{:>6}{:>6}{:>6}{:>7}{:>6}{:>14}{:>12}{:>12}{:>9}{:>13}{:>11}{:>11}{:>9}{:>11}{}",
+        exit_name(c),
+        c.trades,
+        c.wins,
+        c.stopped,
+        c.trailed_stop,
+        c.trailed_profit,
+        c.targeted,
+        c.timed_out,
+        c.pessimistic,
+        c.worst_trade,
+        c.max_drawdown,
+        ret_dd(c),
+        c.uncertainty(),
+        c.winner_mae,
+        c.winner_mfe,
+        c.all_mae,
+        c.edge_ratio(),
+        mark,
+    );
+}
+
 /// The exit grid: with levels against without them.
 ///
 /// # The comparison, as a table rather than two runs
@@ -287,7 +432,9 @@ fn grid_header(out: &mut String, g: &Grid) {
 ///
 /// `keep` bounds the rows printed. Whatever it drops is stated, because a table
 /// that quietly showed the best twelve of a hundred would read as the whole
-/// grid.
+/// grid — and the two rows the selectors chose are printed BELOW the cut when
+/// they fall past it, because a table that hides its own answer is worse than a
+/// table that is merely short.
 pub fn grid(out: &mut String, g: &Grid, keep: usize) {
     let _ = writeln!(out, "EXIT GRID");
     if g.cells.is_empty() {
@@ -297,17 +444,13 @@ pub fn grid(out: &mut String, g: &Grid, keep: usize) {
     }
     grid_header(out, g);
     let _ = writeln!(out);
-    let _ = writeln!(
-        out,
-        "  {:<10}{:>8}{:>8}{:>8}{:>10}{:>10}{:>12}{:>10}",
-        "exit", "trades", "won", "stopped", "worst", "unknown", "winner MAE", "ratio"
-    );
+    grid_columns(out);
 
     // The baseline first, always, then the rest by pessimistic total. A reader
     // comparing "with levels" against "without" must not have to hunt for the
     // row that is the comparison.
-    let mut ordered: Vec<&Cell> = g.cells.iter().collect();
-    ordered.sort_by_key(|c| {
+    let mut ordered: Vec<(usize, &Cell)> = g.cells.iter().enumerate().collect();
+    ordered.sort_by_key(|&(i, c)| {
         // `arm` is not tested: it cannot be set without a trail, so a cell with
         // no trail has none, and adding the clause would be a guard against a
         // state `crate::grid::evaluate` does not emit.
@@ -326,24 +469,41 @@ pub fn grid(out: &mut String, g: &Grid, keep: usize) {
         // nothing left to overflow. `costs::moneyness` reaches for `checked_neg`
         // at the same hazard; here the negation can be deleted outright rather
         // than guarded, which is the better of the two.
-        (!base, core::cmp::Reverse(c.pessimistic))
+        //
+        // THE KEY IS `Grid::best`'s KEY, PLUS THE INDEX, AND THAT IS THE POINT.
+        //
+        // It used to be `Reverse(c.pessimistic)` alone while `best()` ranked on
+        // `(pessimistic, merit)` and settled full ties by `max_by_key`'s
+        // last-maximum rule. So the top row of this table and the cell the rest
+        // of the report calls the best answer were chosen by DIFFERENT
+        // comparators, and on any tie they disagreed -- the table naming one
+        // variant while `validate` and `pbo` consumed another. Descending on the
+        // index reproduces last-maximum exactly, so row one IS `best()`.
+        (
+            !base,
+            core::cmp::Reverse((c.pessimistic, crate::grid::merit(c), i)),
+        )
     });
 
+    // Marks are resolved by IDENTITY, not by re-running the comparator: the
+    // selectors return a `&Cell` into `g.cells`, so pointer equality answers
+    // "is this row the one it chose" without a second ranking that could differ
+    // from the first.
+    let best = g.best().map(core::ptr::from_ref);
+    let sharp = g.sharpest().map(core::ptr::from_ref);
+    let mark_for = |c: &Cell| -> &'static str {
+        let p = core::ptr::from_ref(c);
+        match (best == Some(p), sharp == Some(p)) {
+            (true, true) => "  <- best() AND SHARPEST",
+            (true, false) => "  <- best()",
+            (false, true) => "  <- SHARPEST",
+            (false, false) => "",
+        }
+    };
+
     let shown = ordered.len().min(keep);
-    for c in ordered.iter().take(keep) {
-        let name = exit_name(c);
-        let _ = writeln!(
-            out,
-            "  {:<10}{:>8}{:>8}{:>8}{:>10}{:>10}{:>12}{:>10}",
-            name,
-            c.trades,
-            c.wins,
-            c.stopped,
-            c.pessimistic,
-            c.uncertainty(),
-            c.winner_mae,
-            c.edge_ratio()
-        );
+    for &(_, c) in ordered.iter().take(keep) {
+        grid_row(out, c, mark_for(c));
     }
     if ordered.len() > shown {
         let _ = writeln!(
@@ -352,6 +512,20 @@ pub fn grid(out: &mut String, g: &Grid, keep: usize) {
              table is not.",
             ordered.len().saturating_sub(shown)
         );
+        // A SELECTOR'S OWN ROW IS NEVER DROPPED BY THE CUT.
+        //
+        // `keep` is a display bound, and `best()`/`sharpest()` rank the WHOLE
+        // grid -- so the row the report names as the answer could sit at
+        // position 400 of 625 and be truncated away, leaving a sentence naming a
+        // variant no row described. Printing it below the cut costs two lines
+        // and removes the one way this table could contradict the report around
+        // it.
+        for &(_, c) in ordered.iter().skip(shown) {
+            let mark = mark_for(c);
+            if !mark.is_empty() {
+                grid_row(out, c, mark);
+            }
+        }
     }
     let _ = writeln!(out);
 
@@ -382,12 +556,19 @@ pub fn grid(out: &mut String, g: &Grid, keep: usize) {
 
     // THE SNIPER LINE. Of the variants that survived pessimistic fills AND
     // pessimistic ambiguity, the one whose winners went least against you.
+    //
+    // NAMED THROUGH `exit_name`. It reported three numbers and never said WHICH
+    // VARIANT produced them, so the one row an operator would actually place on
+    // a broker screen was described and not identified -- and with `keep`
+    // truncating the table there was no way to find it by matching the figures
+    // either.
     if let Some(sharp) = g.sharpest() {
         let _ = writeln!(
             out,
-            "  SHARPEST: winners went {} ppm against before working, and {} ppm \
-             for. Ratio {}. That adverse figure is the tightest stop that would \
-             not have killed a winner.",
+            "  SHARPEST: variant {}. Winners went {} ppm against before working, \
+             and {} ppm for. Ratio {}. That adverse figure is the tightest stop \
+             that would not have killed a winner.",
+            exit_name(sharp),
             sharp.winner_mae,
             sharp.winner_mfe,
             sharp.edge_ratio()
@@ -421,6 +602,21 @@ pub fn walk_forward(out: &mut String, v: &Validated) {
         "  that chose a combination",
         &v.decided().to_string(),
         "",
+    );
+    // PRINTED, NOT MERELY COUNTED. `halted_folds` exists because the field was
+    // recorded per fold and summed nowhere; a sum that is computed and never
+    // rendered repeats the same defect one level up. The note is conditional
+    // and the row is not: a zero must be visible, or the reader cannot tell a
+    // walk that truncated nothing from a build that never checked.
+    row(
+        out,
+        "  that HALTED on a budget",
+        &v.halted_folds().to_string(),
+        if v.halted_folds() == 0 {
+            "every fold went extinct on its own"
+        } else {
+            "PARTIAL -- these folds ranked a truncated candidate set"
+        },
     );
     row(
         out,
@@ -1228,5 +1424,393 @@ mod tests {
             "a truncated table must name what it dropped"
         );
         assert!(out.contains("25 further"));
+    }
+
+    /// The exit table's heading line and its data rows must line up.
+    ///
+    /// # Why a test and not a shared constant
+    ///
+    /// `grid_columns` and `grid_row` carry two copies of one seventeen-field
+    /// width spec, and they CANNOT share a constant: `writeln!` requires a
+    /// literal format string, so a `const GRID_FMT` is not expressible in Rust.
+    /// The duplication is unavoidable, and an unavoidable duplication with
+    /// nothing checking it is a table whose headings sit over the wrong numbers
+    /// — a defect that renders perfectly and reads as data.
+    ///
+    /// `COLUMNS` below is a third copy and the only one that is CHECKED, which
+    /// is what makes it a specification rather than another duplicate. Two
+    /// properties are measured, and the second is the one that already bit:
+    ///
+    /// 1. every heading ends flush at its field's last column, so a width
+    ///    edited in one renderer and not the other fails here;
+    /// 2. every field has a space before its value, so the widest number a
+    ///    column can hold still leaves a separator. `unknown` was ten wide and
+    ///    `uncertainty()` returned `1111111110` — ten digits, no space, welded
+    ///    to `ret/DD`. Two numbers with nothing between them are one unreadable
+    ///    number, and the report would have shipped that way.
+    #[test]
+    fn every_exit_column_heading_ends_where_its_number_ends() {
+        // The spec, first thing in the function: `clippy::items_after_statements`
+        // and, more usefully, a reader who wants to know what the table claims
+        // to be does not have to scroll past a fixture to find out.
+        const COLUMNS: [(&str, usize); 17] = [
+            ("exit", 15),
+            ("trades", 7),
+            ("won", 6),
+            ("stop", 6),
+            ("tsl", 6),
+            ("ttp", 6),
+            ("target", 7),
+            ("time", 6),
+            ("total", 14),
+            ("worst trip", 12),
+            ("drawdown", 12),
+            ("ret/DD", 9),
+            ("unknown", 13),
+            ("winner MAE", 11),
+            ("winner MFE", 11),
+            ("all MAE", 9),
+            ("mfe/allMAE", 11),
+        ];
+        // Values wide enough to force the separator check to mean something. A
+        // default cell prints zeros, which fit any width and prove nothing.
+        let loud = crate::grid::Cell {
+            trades: 123_456,
+            wins: 65_432,
+            stopped: 12_345,
+            trailed_stop: 9_876,
+            trailed_profit: 5_432,
+            targeted: 21_098,
+            timed_out: 74_705,
+            pessimistic: -987_654_321,
+            optimistic: 123_456_789,
+            worst_trade: -87_654_321,
+            max_drawdown: -76_543_210,
+            winner_mae: 65_432,
+            winner_mfe: 543_210,
+            all_mae: 98_765,
+            ..crate::grid::Cell::default()
+        };
+        // A SECOND ROW THAT EXERCISES THE SENTINEL. `return_over_drawdown`
+        // returns `i64::MAX` when a variant never gave anything back, and
+        // printed raw that is nineteen digits in a nine-wide column. A fixture
+        // with a non-zero drawdown never reaches it, which is exactly how the
+        // defect survived the first version of this test.
+        let smooth = crate::grid::Cell {
+            stop: Some(1),
+            trades: 40,
+            wins: 40,
+            pessimistic: 4_242,
+            optimistic: 4_242,
+            max_drawdown: 0,
+            ..crate::grid::Cell::default()
+        };
+        let g = crate::grid::Grid {
+            cells: vec![loud, smooth],
+            ..crate::grid::Grid::default()
+        };
+        let mut out = String::new();
+        grid(&mut out, &g, 64);
+
+        let lines: Vec<&str> = out.lines().collect();
+        let head = lines
+            .iter()
+            .position(|l| l.contains("mfe/allMAE"))
+            .expect("the exit table must print its headings");
+        let heading = *lines.get(head).expect("heading line");
+        // The line after the headings is the units note; rows follow it, and
+        // EVERY one of them is checked -- a column only overflows on the value
+        // that is widest, and that value is rarely on row one.
+        let rows: Vec<&str> = lines
+            .iter()
+            .skip(head.saturating_add(2))
+            .take_while(|l| l.starts_with("  ") && !l.trim_start().starts_with("..."))
+            .copied()
+            .collect();
+        assert_eq!(rows.len(), 2, "both fixture cells must render:\n{out}");
+
+        let h: Vec<char> = heading.chars().collect();
+        let mut start = 2_usize; // the two-space indent both lines carry
+        for (name, width) in COLUMNS {
+            let end = start.saturating_add(width);
+            if start > 2 {
+                let cut: String = h
+                    .get(end.saturating_sub(name.len())..end)
+                    .expect("the heading line is shorter than the spec says")
+                    .iter()
+                    .collect();
+                assert_eq!(
+                    cut, name,
+                    "heading `{name}` does not end at column {end}\n{heading}"
+                );
+                for data in &rows {
+                    let d: Vec<char> = data.chars().collect();
+                    assert_eq!(
+                        d.get(start),
+                        Some(&' '),
+                        "column `{name}` has no space before its value -- it \
+                         ran into the column on its left\n{heading}\n{data}"
+                    );
+                }
+                assert_eq!(
+                    h.get(start),
+                    Some(&' '),
+                    "heading `{name}` fills its field and touches the one \
+                     before it\n{heading}"
+                );
+            }
+            start = end;
+        }
+    }
+
+    /// A cell that carries a stop, is profitable, and survives — so both
+    /// selectors have something to point at.
+    fn winner(
+        stop: Option<usize>,
+        pessimistic: i64,
+        mfe: crate::excursion::Ppm,
+    ) -> crate::grid::Cell {
+        crate::grid::Cell {
+            stop,
+            trades: 10,
+            wins: 7,
+            pessimistic,
+            optimistic: pessimistic,
+            winner_mae: 100,
+            winner_mfe: mfe,
+            all_mae: 100,
+            ..crate::grid::Cell::default()
+        }
+    }
+
+    /// The rung ladders are printed, not just their lengths.
+    ///
+    /// # The digit was a subscript into a table nobody could see
+    ///
+    /// `exit` reads `2/3/-`, and 2 is an index into a ladder derived from this
+    /// combination's own excursions — so it is a different distance on every
+    /// instrument, every month and every combination. "Stop at rung 2" is not
+    /// something an operator can place on a broker screen.
+    #[test]
+    fn the_rung_ladders_are_printed_as_index_equals_ppm() {
+        let g = crate::grid::Grid {
+            cells: vec![crate::grid::Cell::default()],
+            stops: crate::excursion::Ladder::new(vec![300, 700]).expect("ascending"),
+            targets: crate::excursion::Ladder::new(vec![900]).expect("ascending"),
+            ..crate::grid::Grid::default()
+        };
+        let mut out = String::new();
+        grid(&mut out, &g, 8);
+        assert!(
+            out.contains("0=300 1=700"),
+            "the stop ladder must resolve:\n{out}"
+        );
+        assert!(
+            out.contains("0=900"),
+            "the target ladder must resolve:\n{out}"
+        );
+        // An empty ladder renders as `-` rather than as a blank that reads like
+        // a missing row. `trails` is unset on this fixture.
+        assert!(
+            out.contains("ladder, trails (ppm)"),
+            "an unset ladder still gets its row:\n{out}"
+        );
+        // The three labels must not collide with the count row's prefix, or a
+        // reader matching on a line prefix binds to whichever came first.
+        assert!(out.contains("stop rungs / target rungs"));
+        for label in ["ladder, stops", "ladder, targets", "ladder, trails"] {
+            assert!(
+                !label.starts_with("stop rungs"),
+                "{label} shadows the count row's prefix"
+            );
+        }
+    }
+
+    /// The row the rest of the report calls the answer says so on the row.
+    #[test]
+    fn the_rows_the_selectors_chose_are_marked_in_the_table() {
+        let g = crate::grid::Grid {
+            cells: vec![
+                crate::grid::Cell::default(),
+                winner(Some(0), 500, 900),
+                winner(Some(1), 900, 400),
+            ],
+            ..crate::grid::Grid::default()
+        };
+        let mut out = String::new();
+        grid(&mut out, &g, 8);
+        assert!(out.contains("<- best()"), "best() must be marked:\n{out}");
+        assert!(
+            out.contains("<- SHARPEST"),
+            "sharpest must be marked:\n{out}"
+        );
+        // The two selectors rank on different keys, so on this fixture they
+        // choose DIFFERENT cells -- 900 total against 900 mfe. A mark that
+        // named one row twice would prove nothing about either.
+        assert!(
+            !out.contains("best() AND SHARPEST"),
+            "this fixture is built so the two disagree:\n{out}"
+        );
+    }
+
+    /// Both selectors on one cell get one combined mark, not two rows.
+    #[test]
+    fn one_cell_chosen_by_both_selectors_is_marked_once() {
+        let g = crate::grid::Grid {
+            cells: vec![crate::grid::Cell::default(), winner(Some(0), 900, 900)],
+            ..crate::grid::Grid::default()
+        };
+        let mut out = String::new();
+        grid(&mut out, &g, 8);
+        assert_eq!(
+            out.matches("best() AND SHARPEST").count(),
+            1,
+            "one cell, one combined mark:\n{out}"
+        );
+    }
+
+    /// `keep` is a display bound and must never hide the report's own answer.
+    #[test]
+    fn a_chosen_row_below_the_cut_is_printed_anyway() {
+        // The baseline sorts first unconditionally, and `keep` is 1 -- so the
+        // only row the cut admits is the baseline, and both selectors chose
+        // something else. Without the rescue the report names a variant that no
+        // row in the table describes.
+        let g = crate::grid::Grid {
+            cells: vec![crate::grid::Cell::default(), winner(Some(2), 900, 900)],
+            ..crate::grid::Grid::default()
+        };
+        let mut out = String::new();
+        grid(&mut out, &g, 1);
+        assert!(
+            out.contains("NOT SHOWN"),
+            "the cut must be disclosed:\n{out}"
+        );
+        assert!(
+            out.contains("best() AND SHARPEST"),
+            "a truncated table must still print the row it calls the answer:\n{out}"
+        );
+        // And it must be that cell's own row, identified by its exit name.
+        assert!(
+            out.contains("2/-/-"),
+            "the rescued row must carry the variant's exit name:\n{out}"
+        );
+    }
+
+    /// The sniper line identifies the variant it describes.
+    #[test]
+    fn the_sharpest_line_names_the_variant_and_not_only_its_numbers() {
+        let g = crate::grid::Grid {
+            cells: vec![crate::grid::Cell::default(), winner(Some(3), 900, 900)],
+            ..crate::grid::Grid::default()
+        };
+        let mut out = String::new();
+        grid(&mut out, &g, 8);
+        assert!(
+            out.contains("SHARPEST: variant 3/-/-"),
+            "three numbers with no variant name are unactionable:\n{out}"
+        );
+    }
+
+    /// The table's top variant row IS `Grid::best()`, ties included.
+    ///
+    /// # A surviving mutant is what put this here
+    ///
+    /// The sort key was `Reverse(c.pessimistic)` while `best()` ranked on
+    /// `(pessimistic, merit)` and settled full ties by `max_by_key`'s
+    /// LAST-maximum rule. Two different comparators over one grid: on any tie
+    /// the table's top row and the cell `validate` and `pbo` actually consume
+    /// were different cells, and the report named one while the pipeline used
+    /// the other.
+    ///
+    /// Adding `merit` was not enough — dropping the trailing index from the key
+    /// left every audit test green, because `sort_by_key` is STABLE and keeps
+    /// the FIRST of a tie while `max_by_key` returns the LAST. This fixture is
+    /// two cells tied on both terms so only the index can separate them.
+    #[test]
+    fn the_top_variant_row_is_the_cell_best_actually_returns() {
+        // Same total, same claimed-rung count, so `(pessimistic, merit)` ties
+        // and `best()` takes the later of the two.
+        let g = crate::grid::Grid {
+            cells: vec![
+                crate::grid::Cell::default(),
+                winner(Some(4), 900, 900),
+                winner(Some(7), 900, 900),
+            ],
+            ..crate::grid::Grid::default()
+        };
+        let chosen = super::exit_name(g.best().expect("a non-empty grid has a best"));
+        assert_eq!(chosen, "7/-/-", "the fixture must tie so the index decides");
+
+        let mut out = String::new();
+        grid(&mut out, &g, 8);
+        let lines: Vec<&str> = out.lines().collect();
+        let head = lines
+            .iter()
+            .position(|l| l.contains("mfe/allMAE"))
+            .expect("headings");
+        // head+0 headings, head+1 units note, head+2 the baseline row (which
+        // sorts first unconditionally), head+3 the top VARIANT row.
+        let top = lines.get(head.saturating_add(3)).expect("a variant row");
+        assert!(
+            top.trim_start().starts_with(&chosen),
+            "the top variant row must be the cell `best()` returns, not the \
+             other side of the tie\nbest(): {chosen}\nrow:    {top}\n{out}"
+        );
+        assert!(
+            top.contains("<- best()"),
+            "and it must be the row carrying the mark\n{top}"
+        );
+    }
+
+    /// Two variants tied on money: the table leads with the SIMPLER one.
+    ///
+    /// # The second surviving mutant this table produced
+    ///
+    /// Deleting `merit` from the sort key left every other audit test green,
+    /// because the tie fixture beside this one ties on merit as well and only
+    /// the index separates its cells. So the table was free to lead with the
+    /// more decorated of two identical results while `Grid::best` — which does
+    /// carry `merit` — returned the other.
+    ///
+    /// That is not cosmetic. `crate::grid::merit`'s own doc records the measured
+    /// case: a trail whose rung the path never reached leaves its cell
+    /// byte-identical to the plain cell it decorates, they tie, and naming the
+    /// decorated one advertises a mechanism that never fired. 64 of 240 grids on
+    /// `sessions(12)`. The table has to break that tie the same way, or it
+    /// re-creates the defect one layer up in the only place the operator looks.
+    #[test]
+    fn the_top_row_prefers_the_simpler_of_two_variants_tied_on_money() {
+        let plain = winner(Some(4), 900, 900);
+        let decorated = crate::grid::Cell {
+            target: Some(2),
+            tsl: Some(1),
+            ..winner(Some(4), 900, 900)
+        };
+        // The decorated cell sits LATER, so an index-only tie-break would put it
+        // first and a merit-carrying one would not.
+        let g = crate::grid::Grid {
+            cells: vec![crate::grid::Cell::default(), plain, decorated],
+            ..crate::grid::Grid::default()
+        };
+        let chosen = super::exit_name(g.best().expect("a non-empty grid has a best"));
+        assert_eq!(
+            chosen, "4/-/-",
+            "the fixture must tie on money so merit decides"
+        );
+
+        let mut out = String::new();
+        grid(&mut out, &g, 8);
+        let lines: Vec<&str> = out.lines().collect();
+        let head = lines
+            .iter()
+            .position(|l| l.contains("mfe/allMAE"))
+            .expect("headings");
+        let top = lines.get(head.saturating_add(3)).expect("a variant row");
+        assert!(
+            top.trim_start().starts_with(&chosen),
+            "the table must lead with the variant that reached the same total \
+             with less machinery\nbest(): {chosen}\nrow:    {top}\n{out}"
+        );
     }
 }

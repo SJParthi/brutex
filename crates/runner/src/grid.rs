@@ -160,8 +160,26 @@ pub struct Cell {
     pub pessimistic: i64,
     /// Total paisa per unit, ambiguity resolved as the TARGET first.
     pub optimistic: i64,
-    /// Trades whose exit came from the stop.
+    /// Trades whose exit came from the FIXED stop.
+    ///
+    /// # Three exits used to share this counter, and a reader could not separate
+    /// them
+    ///
+    /// It read *"a trailing exit IS a stop -- it gives back part of a gain to
+    /// protect the rest -- so it is counted as one"*, which was defensible while
+    /// a cell held one trailing order. It is not defensible now: a cell can
+    /// carry a fixed stop, a trailing STOP LOSS and a trailing TAKE PROFIT, and
+    /// those are three different things happening to a position.
+    ///
+    /// A fixed stop is a loss taken at a distance from entry. A trailing stop
+    /// loss is a gain protected. A trailing take profit is a winner let run and
+    /// then closed. Merging them told the operator only "it did not time out",
+    /// which is the one thing they could already see.
     pub stopped: u64,
+    /// Trades closed by the trailing STOP LOSS, live from entry.
+    pub trailed_stop: u64,
+    /// Trades closed by the trailing TAKE PROFIT, armed at a target rung.
+    pub trailed_profit: u64,
     /// Trades whose exit came from the target.
     pub targeted: u64,
     /// Trades that ran to the horizon or the 15:10 square-off.
@@ -474,7 +492,7 @@ impl Grid {
 ///
 /// Returns a key that SORTS ASCENDING with merit, so it composes with
 /// `max_by_key` directly: fewer rungs is a larger number.
-const fn merit(c: &Cell) -> i64 {
+pub(crate) const fn merit(c: &Cell) -> i64 {
     // A TTP counts as TWO claims -- an arming rung and a trailing rung -- because
     // it is two decisions and a cell that reached the same number without making
     // either of them made it more simply.
@@ -485,6 +503,20 @@ const fn merit(c: &Cell) -> i64 {
     // Five minus the count, so the simplest cell scores highest and the fully
     // decorated one scores zero.
     5 - claimed
+}
+
+/// Which of the two trailing orders closed a position.
+///
+/// They hang from the same peak and fill by the same arithmetic, so nothing
+/// about the PRICE distinguishes them. What distinguishes them is what they are
+/// for: one cuts a position that turns, the other lets a winner run and then
+/// closes it. An operator reading "stopped: 40" needs to know which.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TrailKind {
+    /// The trailing STOP LOSS, live from entry.
+    Live,
+    /// The trailing TAKE PROFIT, armed at a target rung.
+    Armed,
 }
 
 /// How a trade under a given variant ended.
@@ -507,6 +539,13 @@ enum Ended {
         anchor: i64,
         /// The give-back distance, in parts per million of the entry price.
         ppm: Ppm,
+        /// WHICH trailing order it was.
+        ///
+        /// A cell can carry a trailing stop loss and a trailing take profit at
+        /// once, and they are different instruments doing opposite jobs. Without
+        /// this the exit counter could only say "not a timeout", merging a
+        /// protected gain with a run let out -- see [`Cell::stopped`].
+        kind: TrailKind,
     },
     Time,
 }
@@ -1104,15 +1143,7 @@ fn one_variant(
         cell.ambiguous_bars = cell
             .ambiguous_bars
             .saturating_add(unorderable_bars(&c.cross, tsl, ttp));
-        match ended {
-            // A trailing exit IS a stop -- it gives back part of a gain to
-            // protect the rest -- so it is counted as one. Reporting it as a
-            // timeout would make a strategy that was stopped out look like one
-            // that ran its course.
-            Ended::Stop | Ended::Trail { .. } => cell.stopped = cell.stopped.saturating_add(1),
-            Ended::Target => cell.targeted = cell.targeted.saturating_add(1),
-            Ended::Time => cell.timed_out = cell.timed_out.saturating_add(1),
-        }
+        count_exit(&mut cell, ended);
         // EVERY TRADE'S ADVERSE EXCURSION, WINNER OR NOT.
         //
         // Outside the `pess > 0` gate on purpose. That gate is what made the old
@@ -1146,6 +1177,41 @@ fn one_variant(
         adverse_on_all,
     );
     cell
+}
+
+/// Charge one round trip to the counter for the exit that closed it.
+///
+/// # FIVE COUNTERS, NOT THREE
+///
+/// This was a `match` inside `one_variant` with the arm
+/// `Ended::Stop | Ended::Trail { .. } => cell.stopped`, justified as *"a
+/// trailing exit IS a stop"*. That was defensible while a cell held ONE trailing
+/// order. A cell can now carry a fixed stop, a trailing STOP LOSS and a trailing
+/// TAKE PROFIT, and merging all three told the operator only "it did not time
+/// out" -- the one thing the table already showed.
+///
+/// A fixed stop is a loss taken at a distance from entry. A trailing stop loss
+/// is a gain protected. A trailing take profit is a winner let run and then
+/// closed. Three different things happening to a position, and an operator
+/// choosing between exits needs to know which one happened.
+///
+/// A free function rather than an inline `match` so the five arms are in one
+/// place and `every_trade_ends_by_exactly_one_of_the_five_exits` has something
+/// to point at.
+const fn count_exit(cell: &mut Cell, ended: Ended) {
+    match ended {
+        Ended::Stop => cell.stopped = cell.stopped.saturating_add(1),
+        Ended::Trail {
+            kind: TrailKind::Live,
+            ..
+        } => cell.trailed_stop = cell.trailed_stop.saturating_add(1),
+        Ended::Trail {
+            kind: TrailKind::Armed,
+            ..
+        } => cell.trailed_profit = cell.trailed_profit.saturating_add(1),
+        Ended::Target => cell.targeted = cell.targeted.saturating_add(1),
+        Ended::Time => cell.timed_out = cell.timed_out.saturating_add(1),
+    }
 }
 
 /// Fold one round trip's result into the cell's two risk figures.
@@ -1247,7 +1313,7 @@ fn realised(
         // carries both halves, because a cell can hold a TSL and a TTP at once
         // and they trail by different distances -- pairing one order's anchor
         // with the other's rung would price a fill nobody placed.
-        (Ended::Trail { anchor, ppm }, _) if anchor > 0 => {
+        (Ended::Trail { anchor, ppm, .. }, _) if anchor > 0 => {
             let give_back = paisa_of(ppm, anchor);
             let exit = match side {
                 Side::Long => anchor.saturating_sub(give_back),
@@ -1288,6 +1354,9 @@ fn realised(
 /// exit `min` without a branch, and both anchors are `None`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Trailing {
+    /// Which order this is. Carried so the exit counter can separate a
+    /// protected gain from a run let out -- see [`Cell::stopped`].
+    kind: TrailKind,
     /// The offset it fires on, or [`NEVER`].
     at: usize,
     /// The peak as it stood BEFORE the crossing bar — the pessimistic anchor.
@@ -1300,19 +1369,26 @@ struct Trailing {
 
 impl Trailing {
     /// An order this variant does not carry, or one the path never reached.
-    const NEVER_FIRED: Self = Self {
-        at: NEVER,
-        before: None,
-        raised: None,
-        ppm: 0,
-    };
+    ///
+    /// Takes the kind so a never-fired order still knows which slot it is, which
+    /// keeps `ended_by` able to hand one back without inventing a kind.
+    const fn never_fired(kind: TrailKind) -> Self {
+        Self {
+            kind,
+            at: NEVER,
+            before: None,
+            raised: None,
+            ppm: 0,
+        }
+    }
 
     /// The TRAILING STOP LOSS, reading the since-ENTRY give-back table.
     fn live(cross: &Crossings, tsl: Option<usize>, trails_rungs: &[Ppm]) -> Self {
         let Some(r) = tsl else {
-            return Self::NEVER_FIRED;
+            return Self::never_fired(TrailKind::Live);
         };
         Self {
+            kind: TrailKind::Live,
             at: cross.trail_at(r),
             before: cross.trail_peak_at(r),
             raised: cross.trail_peak_raised_at(r),
@@ -1327,9 +1403,10 @@ impl Trailing {
     /// `crate::excursion::Crossings::armed` gives at length.
     fn armed(cross: &Crossings, ttp: Option<Ttp>, trails_rungs: &[Ppm]) -> Self {
         let Some(t) = ttp else {
-            return Self::NEVER_FIRED;
+            return Self::never_fired(TrailKind::Armed);
         };
         Self {
+            kind: TrailKind::Armed,
             at: cross.armed_at(t.arm, t.trail),
             before: cross.armed_peak_at(t.arm, t.trail),
             raised: cross.armed_peak_raised_at(t.arm, t.trail),
@@ -1358,6 +1435,7 @@ impl Trailing {
                 None => 0,
             },
             ppm: self.ppm,
+            kind: self.kind,
         }
     }
 }
@@ -1462,7 +1540,7 @@ fn ended_by(f: Firing, chosen: usize, pessimistic: bool) -> Ended {
         }
         (true, false) => live,
         (false, true) => armed,
-        (false, false) => Trailing::NEVER_FIRED,
+        (false, false) => Trailing::never_fired(TrailKind::Live),
     };
     let trail_fired = trail.at != NEVER;
     if stop_fired && target_fired {
@@ -2057,6 +2135,8 @@ mod tests {
         for c in &g.cells {
             assert_eq!(
                 c.stopped
+                    .saturating_add(c.trailed_stop)
+                    .saturating_add(c.trailed_profit)
                     .saturating_add(c.targeted)
                     .saturating_add(c.timed_out),
                 c.trades,
@@ -2102,12 +2182,13 @@ mod tests {
             before: Some(105_000),
             raised: Some(107_000),
             ppm: 40_000,
+            kind: super::TrailKind::Live,
         };
         let firing = super::Firing {
             stop_at: super::NEVER,
             target_at: super::NEVER,
             live,
-            armed: super::Trailing::NEVER_FIRED,
+            armed: super::Trailing::never_fired(super::TrailKind::Armed),
         };
         let pess = super::ended_by(firing, 1, true);
         let opt = super::ended_by(firing, 1, false);
@@ -2115,7 +2196,8 @@ mod tests {
             pess,
             super::Ended::Trail {
                 anchor: 105_000,
-                ppm: 40_000
+                ppm: 40_000,
+                kind: super::TrailKind::Live,
             },
             "the pessimistic reading anchors the order where it hung when the \
              bar opened"
@@ -2124,7 +2206,8 @@ mod tests {
             opt,
             super::Ended::Trail {
                 anchor: 107_000,
-                ppm: 40_000
+                ppm: 40_000,
+                kind: super::TrailKind::Live,
             },
             "the optimistic reading anchors it at the peak the bar itself made"
         );
@@ -2326,6 +2409,67 @@ mod tests {
                 "the grid built a different number of cells than `variants` says it holds"
             );
         }
+    }
+
+    #[test]
+    fn each_exit_counter_can_only_be_moved_by_the_order_that_owns_it() {
+        // WHAT THIS REPLACES. `Ended::Stop | Ended::Trail { .. } => cell.stopped`
+        // folded three different things into one number, defended as "a trailing
+        // exit IS a stop". That held while a cell carried ONE trailing order. A
+        // cell now carries a fixed stop, a trailing stop loss and a trailing
+        // take profit, and the merged counter told the operator only "it did not
+        // time out" -- which the timeout column already said.
+        //
+        // The test is stated as four implications plus four witnesses, and the
+        // witnesses are the half that bites. Without them every implication is
+        // vacuously true on a grid whose counters are all zero, which is exactly
+        // what a broken `count_exit` would produce.
+        let (bars, column) = swept_with_wide_bars();
+        let g = evaluate(
+            &bars,
+            &column,
+            &ConditionMask::default(),
+            h(15),
+            Side::Long,
+            4,
+        );
+
+        let (mut saw_stop, mut saw_tsl, mut saw_ttp, mut saw_target) = (false, false, false, false);
+        for c in &g.cells {
+            if c.stop.is_none() {
+                assert_eq!(
+                    c.stopped, 0,
+                    "a variant with no fixed stop cannot report a stop-out"
+                );
+            }
+            if c.tsl.is_none() {
+                assert_eq!(
+                    c.trailed_stop, 0,
+                    "a variant with no trailing stop loss cannot report one firing"
+                );
+            }
+            if c.ttp.is_none() {
+                assert_eq!(
+                    c.trailed_profit, 0,
+                    "a variant with no trailing take profit cannot report one firing"
+                );
+            }
+            if c.target.is_none() {
+                assert_eq!(c.targeted, 0, "a variant with no target cannot hit one");
+            }
+            saw_stop |= c.stopped > 0;
+            saw_tsl |= c.trailed_stop > 0;
+            saw_ttp |= c.trailed_profit > 0;
+            saw_target |= c.targeted > 0;
+        }
+
+        assert!(
+            saw_stop,
+            "no cell fired a fixed stop -- the grid proves nothing"
+        );
+        assert!(saw_tsl, "no cell fired a trailing stop loss");
+        assert!(saw_ttp, "no cell fired a trailing take profit");
+        assert!(saw_target, "no cell hit a target");
     }
 }
 
