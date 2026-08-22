@@ -7344,7 +7344,51 @@
          adding a second that narrows it from here would be two answers to one
          question — the same rule `/ingest` keeps about its verdict strip.
          ================================================================== -->
+    <!-- ==================================================================
+         THE FOUR FACTS, BEFORE ANY DIGIT.
+
+         WHAT THIS FIXES. The page went straight from a form to five hundred
+         numbers. Nothing above the grid said what you were looking at, so the
+         first thing a reader did on every visit was reconstruct it from the
+         controls: which instrument, how deep the history goes, how much of it
+         there is, where it ends. Four questions, answered by reading a form.
+
+         They are answered here instead, at a size that is read rather than
+         scanned. Every one is already in memory — `coverBand` folds the census
+         the page has loaded, and the last bar is the first row of the grid when
+         it is in the store's own order. No request is added.
+
+         THE NUMBERS ARE THE DESIGN. There is no ornament here: each figure is
+         the largest thing in its own cell because it is the thing worth
+         reading, and the label under it is small because you only need it once.
+         ================================================================== -->
     {#if view === 'bars' && coverBand.cells.length > 0}
+      <div class="facts">
+        <div class="fact">
+          <span class="fv">{fmt(coverBand.bars)}</span>
+          <span class="fl">bars held</span>
+        </div>
+        <div class="fact">
+          <span class="fv">{coverBand.months}</span>
+          <span class="fl">month{coverBand.months === 1 ? '' : 's'} covered</span>
+        </div>
+        <div class="fact wide">
+          <span class="fv sm"
+            >{coverBand.cells[0].month} <span class="arw">→</span>
+            {coverBand.cells[coverBand.cells.length - 1].month}</span
+          >
+          <span class="fl">range on disk</span>
+        </div>
+        {#if barPage.length > 0 && barSortKey === 'ts'}
+          <div class="fact">
+            <span class="fv num" data-dir={barPage[0].c > barPage[0].o ? 'up' : barPage[0].c < barPage[0].o ? 'down' : 'flat'}
+              >{paisaText(barPage[0].c)}</span
+            >
+            <span class="fl">{barDesc ? 'newest close' : 'oldest close'} on this page</span>
+          </div>
+        {/if}
+      </div>
+
       <div class="cband" role="img"
            aria-label="{coverBand.months} months in this selection, {fmt(coverBand.bars)} bars.">
         <div class="cband-head">
@@ -8218,6 +8262,103 @@
   .strip.bare .note {
     margin: 0;
     flex: 1 1 30ch;
+  }
+
+  /* ---------------------------------------------------------------------
+     THE FOUR FACTS. A row of cells, each one number over one label.
+
+     THE SIZE IS THE HIERARCHY AND IT IS THE WHOLE POINT. Every figure on this
+     page was 14px — the close, the open, the volume, the counts — so a reader's
+     eye had nowhere to land and the page read as one undifferentiated block.
+     These are clamp()ed up to 30px, which is not decoration: it is the
+     difference between a page you scan and a page you read.
+
+     `tabular-nums` on the values so the four cells stay aligned as the numbers
+     change under a poll, and `text-wrap: balance` nowhere — these are numbers,
+     not prose, and a balanced number is a wrapped number.
+     --------------------------------------------------------------------- */
+  .facts {
+    /* `flex: none`, AND THE FILE ALREADY WARNED ABOUT THIS ONE.
+       `.board` is a flex COLUMN and this is one of its children, so the default
+       `flex-shrink: 1` lets it be compressed below its content the moment the
+       column overflows — which a table of fifty rows guarantees. Measured
+       without it: the row rendered, all four cells present with a 26px figure
+       in each, at a container height of 2px. Invisible, and not because
+       anything failed.
+       `.strip` carries the identical line under the identical reason. This is
+       the second time that trap has been hit in this file; it is written here
+       as well so the next block added to this column inherits the answer. */
+    flex: none;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    gap: 1px;
+    margin: var(--s3) 0 var(--s2);
+    border: 1px solid var(--line);
+    border-radius: var(--r2);
+    background: var(--line);
+    overflow: hidden;
+  }
+  /* THE 1px GAP IS THE RULE BETWEEN CELLS. The container's background shows
+     through it, so four cells share three hairlines and none of them needs a
+     border of its own — which is what stops the ends doubling up. */
+  .fact {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: var(--s3) var(--s4);
+    background: var(--bg-2);
+    min-width: 0;
+  }
+  .fv {
+    font-family: var(--mono);
+    font-size: clamp(20px, 3.4vw, 30px);
+    font-weight: var(--w-semi);
+    line-height: 1.05;
+    letter-spacing: -0.02em;
+    color: var(--ink-hi);
+    font-variant-numeric: tabular-nums;
+    overflow-wrap: anywhere;
+  }
+  /* THE RANGE IS TWO DATES AND A GLYPH, so it takes a smaller step — at 30px it
+     would wrap on a narrow column and a wrapped range reads as two ranges.
+
+     AND IT MUST NOT WRAP AT ALL. Measured at the smaller step it still broke as
+     `2019-12 → 2026-` / `08`, which reads as three dates rather than two: the
+     hyphen inside an ISO month is a legal break point and the browser took it.
+     `nowrap` refuses that, and the cell is given room to ask for instead. */
+  .fv.sm {
+    font-size: clamp(15px, 2.1vw, 19px);
+    letter-spacing: 0;
+    white-space: nowrap;
+    overflow-wrap: normal;
+  }
+  /* THE RANGE CELL IS NOT SPANNED, AND THE FIRST ATTEMPT THAT SPANNED IT WAS
+     WORSE THAN THE WRAP IT FIXED.
+     `grid-column: span 2` did stop the break, and took two of the four tracks
+     with it — so the fourth fact fell to a second row with an empty half beside
+     it. A row of four facts that draws as three-plus-one with a hole is a
+     worse answer than a wrapped date.
+     The track minimum carries it instead: at 170px the widest cell (two ISO
+     months, a glyph, at the 19px step) fits on one line, and four of them fit
+     the 776px board in a single row. `1fr` still shares the slack equally, so
+     the cells stay the same width as each other. */
+  .fv .arw {
+    color: var(--dim);
+    padding: 0 0.15em;
+  }
+  /* THE CLOSE CARRIES ITS DIRECTION HERE TOO, from the same tokens the grid's
+     own close uses. One encoding, two places, no second vocabulary. */
+  .fv.num[data-dir='up'] {
+    color: var(--up);
+  }
+  .fv.num[data-dir='down'] {
+    color: var(--down);
+  }
+  .fl {
+    font-size: var(--fs-micro);
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--dim);
   }
 
   .cband {
