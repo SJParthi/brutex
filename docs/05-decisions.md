@@ -20398,3 +20398,37 @@ one Muhurat that was measured.
 
 `pull`: 324 lib tests, 27 doctests, 0 failures. `fmt` and
 `clippy --all-targets -D warnings` clean.
+
+### D-0262 — the change column is folded where the time order still exists
+
+D-0261 gave `/bars/window.json` a page and a sort. It could not be wired to the
+grid as written, and the reason is worth recording because it is not obvious.
+
+The grid's CHANGE % is against the PREVIOUS BAR IN TIME, and the browser
+computes it per file: the first row of a month has no predecessor there and says
+`first_bar_in_file`. That works only because the browser holds WHOLE MONTHS.
+
+**A price-ordered page holds no time neighbours at all.** Fifty rows sorted by
+close are fifty rows from fifty different minutes, so a page fetched
+already-sorted cannot compute the column on arrival — and folding it after the
+sort would compute each row against whichever row happened to land above it. A
+column of real-looking numbers, every one of them meaningless, is worse than an
+empty one.
+
+So the fold moved to `bars::with_change`, which runs over each file's records in
+the order they were WRITTEN, before anything is sorted. `crate::server::basis_points`
+is called rather than re-implemented — it rounds half away from zero and returns
+a named refusal, and a second spelling of that arithmetic would drift the first
+time either was touched. `Unknown` and `basis_points` became `pub(crate)` for it.
+
+**ONE RECORD IS READ BEHIND THE PAGE AND NEVER RETURNED.** A page starting
+mid-file needs the row before it or its first change cell is blank. Reading one
+back costs a single seek and fills it — strictly better than the browser managed
+while holding whole months, where the first row of EVERY month had nothing
+behind it. The only row that still has none is the first record of the first
+file, where none exists.
+
+The wire carries `chg`/`chg_why` and `oichg`/`oichg_why`, exactly one of each
+pair non-null on every row, which is the contract `/store.json` already keeps for
+`chg_bps`. An unknown change is never `0` — zero is a real bar that closed where
+the last one did.

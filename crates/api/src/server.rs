@@ -2222,15 +2222,27 @@ async fn bars_window_json(
 /// `months_missing` is on it for the same reason: a sparse store is legal, and
 /// a reader must be able to tell a gap from a refusal — `CLAUDE.md` §4.
 fn render_window(window: &bars::Window, scanned: bool) -> String {
-    let mut rows = String::with_capacity(window.bars.len() * 96 + 32);
+    let mut rows = String::with_capacity(window.bars.len() * 128 + 32);
     rows.push('[');
-    for (n, bar) in window.bars.iter().enumerate() {
+    for (n, row) in window.bars.iter().enumerate() {
         if n > 0 {
             rows.push(',');
         }
+        let bar = &row.bar;
+        // EXACTLY ONE OF EACH PAIR IS NON-NULL, on every row, the same contract
+        // `/store.json`'s `chg_bps`/`chg_why` already keeps. An unknown change
+        // is never `0` — zero is a real bar that closed where the last one did.
+        let value = |bps: Option<i64>| bps.map_or_else(|| "null".to_owned(), |n| n.to_string());
+        let why = |bps: Option<i64>, reason: &str| {
+            if bps.is_some() {
+                "null".to_owned()
+            } else {
+                render::json_string(reason)
+            }
+        };
         let _ = write!(
             rows,
-            r#"{{"t":{},"o":{},"h":{},"l":{},"c":{},"v":{},"oi":{}}}"#,
+            r#"{{"t":{},"o":{},"h":{},"l":{},"c":{},"v":{},"oi":{},"chg":{},"chg_why":{},"oichg":{},"oichg_why":{}}}"#,
             bar.ts_micros / 1_000_000,
             bar.open,
             bar.high,
@@ -2241,7 +2253,11 @@ fn render_window(window: &bars::Window, scanned: bool) -> String {
                 "null".to_owned()
             } else {
                 bar.open_interest.to_string()
-            }
+            },
+            value(row.chg),
+            why(row.chg, row.chg_why),
+            value(row.oichg),
+            why(row.oichg, row.oichg_why)
         );
     }
     rows.push(']');
@@ -2303,7 +2319,7 @@ pub(crate) fn census_now(
 /// and what the page keys its prose off; the page never invents a sentence for
 /// a code it does not know.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Unknown {
+pub(crate) enum Unknown {
     /// The instrument can be split, bonused or otherwise re-based, and no
     /// threshold that would detect it is sourced anywhere in this repository.
     ///
@@ -2392,7 +2408,7 @@ const fn can_be_rebased(segment: brutex_core::instrument::Segment) -> bool {
 ///
 /// [`Unknown::BaseNotPositive`] when the base is zero, [`Unknown::Overflow`]
 /// when the scaled move leaves `i64`.
-fn basis_points(first_paisa: i64, last_paisa: i64) -> Result<i64, Unknown> {
+pub(crate) fn basis_points(first_paisa: i64, last_paisa: i64) -> Result<i64, Unknown> {
     // A RATIO NEEDS A BASE, AND ZERO IS NOT ONE. Not rendered as 0.00%, not as
     // infinity, not as an empty cell that means five other things.
     if first_paisa <= 0 {

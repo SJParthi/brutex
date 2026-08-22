@@ -554,6 +554,84 @@ pub struct Extremes {
     pub volume: i64,
 }
 
+/// A bar, with the change the grid draws beside it.
+///
+/// # Why the change travels with the bar instead of being derived on arrival
+///
+/// The grid's CHANGE % is against the PREVIOUS BAR IN TIME, and it is computed
+/// per file: the first row of a month has no predecessor in that file and says
+/// so. That works in the browser only because the browser holds whole months.
+///
+/// A price-ordered page does not: fifty rows sorted by close have no time
+/// neighbours at all, so a page fetched already-sorted cannot compute the column
+/// on arrival. The number is therefore folded HERE, over the records in the
+/// order they were written, BEFORE anything is sorted — which is exactly what
+/// the browser does today, moved to where the time order still exists.
+///
+/// `why` carries the grid's own vocabulary rather than a new one, so a cell that
+/// cannot be computed says the same thing it said before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowBar {
+    /// The record as stored.
+    pub bar: Bar,
+    /// Basis points against the previous bar in the same month, when there is
+    /// one and the arithmetic holds.
+    pub chg: Option<i64>,
+    /// Empty when `chg` is `Some`; otherwise the reason, in the grid's words.
+    pub chg_why: &'static str,
+    /// The same, for open interest.
+    pub oichg: Option<i64>,
+    /// Empty when `oichg` is `Some`; otherwise the reason.
+    pub oichg_why: &'static str,
+}
+
+/// Folds the change columns over one file's records, IN THE ORDER WRITTEN.
+///
+/// `crate::server::basis_points` is called rather than re-implemented: it rounds
+/// half away from zero and returns a named refusal, and a second spelling of
+/// that arithmetic would drift the first time either was touched.
+fn with_change(rows: Vec<Bar>) -> Vec<WindowBar> {
+    let mut out = Vec::with_capacity(rows.len());
+    let mut previous: Option<Bar> = None;
+    for bar in rows {
+        let (chg, chg_why) = match previous {
+            None => (None, "first_bar_in_file"),
+            Some(before) => match crate::server::basis_points(before.close, bar.close) {
+                Ok(bps) => (Some(bps), ""),
+                Err(crate::server::Unknown::Overflow) => (None, "overflow"),
+                Err(_) => (None, "previous_close_zero"),
+            },
+        };
+        // OPEN INTEREST HAS A NULL AND A REAL ZERO, and they are not the same
+        // cell. `OI_NULL` is the sentinel `CLAUDE.md` §7 names; a stored zero is
+        // a stored zero and must not be erased into "unknown".
+        let oi_null = bar.open_interest == OI_NULL;
+        let prev_oi = previous.map(|b| b.open_interest);
+        let (oichg, oichg_why) = if oi_null {
+            (None, "oi_null")
+        } else {
+            match prev_oi {
+                None => (None, "first_bar_in_file"),
+                Some(before) if before == OI_NULL => (None, "oi_null_before"),
+                Some(before) => match crate::server::basis_points(before, bar.open_interest) {
+                    Ok(bps) => (Some(bps), ""),
+                    Err(crate::server::Unknown::Overflow) => (None, "overflow"),
+                    Err(_) => (None, "previous_oi_zero"),
+                },
+            }
+        };
+        previous = Some(bar);
+        out.push(WindowBar {
+            bar,
+            chg,
+            chg_why,
+            oichg,
+            oichg_why,
+        });
+    }
+    out
+}
+
 /// One page of bars drawn from a RANGE of months.
 #[derive(Debug, Clone)]
 pub struct Window {
@@ -565,8 +643,8 @@ pub struct Window {
     /// allowed to be sparse, and saying so is how a reader tells a gap from a
     /// refusal.
     pub months_missing: usize,
-    /// The rows asked for.
-    pub bars: Vec<Bar>,
+    /// The rows asked for, each with the change folded in time order.
+    pub bars: Vec<WindowBar>,
     /// Records that would not read, named. Never silently dropped.
     pub faults: Vec<String>,
     /// Present only when asked for, because it costs a scan.
@@ -611,8 +689,9 @@ pub fn months_of(from: YearMonth, to: YearMonth) -> Option<Vec<YearMonth>> {
 /// One pass, no allocation. Separate from [`window`] because it is the whole of
 /// what `extremes=1` buys and reads as one sentence on its own.
 #[must_use]
-fn extremes_of(bars: &[Bar]) -> Extremes {
-    bars.iter().fold(Extremes::default(), |mut top, bar| {
+fn extremes_of(bars: &[WindowBar]) -> Extremes {
+    bars.iter().fold(Extremes::default(), |mut top, row| {
+        let bar = &row.bar;
         let range = bar.high.saturating_sub(bar.low);
         if range > top.range {
             top.range = range;
@@ -637,13 +716,23 @@ fn extremes_of(bars: &[Bar]) -> Extremes {
 /// over a whole window is each file reversed **as well as** the files reversed.
 /// Reading a file forwards and reversing afterwards is right for one file and
 /// wrong the moment a page straddles two.
+/// ONE RECORD IS READ BEHIND THE PAGE, and it is never returned.
+///
+/// The change column is against the previous bar IN TIME, so the first row of a
+/// page needs the record before it or the cell is blank. Reading one back costs
+/// a single extra seek and fills it — which is strictly better than the browser
+/// managed while holding whole months, because there the first row of EVERY
+/// month had nothing behind it. The only row that still has none is the first
+/// record of the first file, where none exists.
+const LOOKBACK: usize = 1;
+
 fn seek_page(
     files: &[BarFile],
     desc: bool,
     offset: usize,
     limit: usize,
-) -> (Vec<Bar>, Vec<String>) {
-    let mut bars = Vec::with_capacity(limit.min(PAGE_BARS));
+) -> (Vec<WindowBar>, Vec<String>) {
+    let mut bars: Vec<WindowBar> = Vec::with_capacity(limit.min(PAGE_BARS));
     let mut faults = Vec::new();
     let mut seen = 0usize;
     for file in files {
@@ -658,18 +747,31 @@ fn seek_page(
         }
         let skip_in_file = offset.saturating_sub(lo);
         let take = limit.saturating_sub(bars.len());
-        let (mut got, mut bad) = if desc {
+        /* THE BLOCK IN FILE ORDER, WHICHEVER DIRECTION THE PAGE RUNS.
+        `start..end` is always ascending because the change fold needs the
+        order the records were WRITTEN; the reversal for a descending page
+        happens after, on the folded rows. */
+        let (start, end) = if desc {
             let end = held.saturating_sub(skip_in_file);
-            let start = end.saturating_sub(take);
-            let (mut rows, bad) = page(file, start, end.saturating_sub(start));
-            rows.reverse();
-            (rows, bad)
+            (end.saturating_sub(take), end)
         } else {
-            page(file, skip_in_file, take)
+            (skip_in_file, skip_in_file.saturating_add(take).min(held))
         };
-        bars.append(&mut got);
+        let back = start.min(LOOKBACK);
+        let (block, mut bad) = page(file, start - back, end.saturating_sub(start - back));
+        let mut folded = with_change(block);
+        /* THE LOOKBACK ROW IS DROPPED AFTER IT HAS DONE ITS WORK. It exists to
+        give the row behind it a predecessor and is not part of the page. */
+        if back > 0 && !folded.is_empty() {
+            folded.drain(..back);
+        }
+        if desc {
+            folded.reverse();
+        }
+        bars.append(&mut folded);
         faults.append(&mut bad);
     }
+    bars.truncate(limit);
     (bars, faults)
 }
 
@@ -779,13 +881,17 @@ pub fn window(
         });
     }
 
-    /* ---- THE READING PATH. One pass, then order, then slice. ---- */
-    let mut all = Vec::with_capacity(usize::try_from(total).unwrap_or(0));
+    /* ---- THE READING PATH. One pass, then order, then slice. ----
+    THE CHANGE IS FOLDED PER FILE, BEFORE ANYTHING IS SORTED, because it is
+    against the previous bar in TIME and a sorted page has no time
+    neighbours. Folding after the sort would compute each row against
+    whichever row happened to land above it. */
+    let mut all: Vec<WindowBar> = Vec::with_capacity(usize::try_from(total).unwrap_or(0));
     let mut faults = Vec::new();
     for file in &files {
         let held = usize::try_from(file.header().n_valid).unwrap_or(usize::MAX);
-        let (mut rows, mut bad) = page(file, 0, held);
-        all.append(&mut rows);
+        let (rows, mut bad) = page(file, 0, held);
+        all.append(&mut with_change(rows));
         faults.append(&mut bad);
     }
 
@@ -797,16 +903,16 @@ pub fn window(
     unique within a series, so it is the tie-break and it is NOT inverted
     with the direction. */
     all.sort_by(|a, b| {
-        let (x, y) = (sort.of(a), sort.of(b));
+        let (x, y) = (sort.of(&a.bar), sort.of(&b.bar));
         let primary = if desc { y.cmp(&x) } else { x.cmp(&y) };
-        primary.then_with(|| a.ts_micros.cmp(&b.ts_micros))
+        primary.then_with(|| a.bar.ts_micros.cmp(&b.bar.ts_micros))
     });
 
     let bars = all
         .into_iter()
         .skip(offset)
         .take(limit)
-        .collect::<Vec<Bar>>();
+        .collect::<Vec<WindowBar>>();
 
     Ok(Window {
         total,
@@ -1255,7 +1361,7 @@ mod window_tests {
         assert_eq!(got.months_missing, 0);
         assert_eq!(got.bars.len(), 10, "the page is the size asked for");
         assert!(got.extremes.is_none(), "not asked for, so not paid for");
-        let closes: Vec<i64> = got.bars.iter().map(|b| b.close).collect();
+        let closes: Vec<i64> = got.bars.iter().map(|r| r.bar.close).collect();
         assert_eq!(
             closes,
             [
@@ -1295,7 +1401,7 @@ mod window_tests {
         )
         .expect("a legal window");
 
-        let closes: Vec<i64> = got.bars.iter().map(|b| b.close).collect();
+        let closes: Vec<i64> = got.bars.iter().map(|r| r.bar.close).collect();
         assert_eq!(
             closes,
             [
@@ -1435,7 +1541,7 @@ mod window_tests {
             false,
         )
         .expect("a legal window");
-        let closes: Vec<i64> = got.bars.iter().map(|b| b.close).collect();
+        let closes: Vec<i64> = got.bars.iter().map(|r| r.bar.close).collect();
         assert_eq!(
             closes,
             [5_099, 5_098, 5_097, 5_096, 5_095],
@@ -1479,6 +1585,125 @@ mod window_tests {
             "the heaviest volume is the 40th bar of the SECOND month — 39*2 — \
              so this is folded over the whole window and not over the page, \
              which is only five rows long"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **THE CHANGE IS AGAINST THE PREVIOUS BAR IN TIME, EVEN WHEN THE PAGE IS
+    /// SORTED BY PRICE.**
+    ///
+    /// This is the whole reason the fold happens here. Fifty rows sorted by
+    /// close have no time neighbours, so a page folded after the sort would
+    /// compute each row against whichever row happened to land above it — a
+    /// column of real-looking numbers, every one of them meaningless.
+    #[test]
+    fn the_change_is_folded_in_time_order_and_survives_a_price_sort() {
+        let root = scratch("chg");
+        // Closes run 1_000, 1_001, … so each bar is +1 paisa on the one before.
+        write_month(&root, YearMonth::new(2026, 1).expect("m"), 20, 1_000);
+
+        let sorted = window(
+            &root,
+            Vendor::Dhan,
+            "NSE",
+            "INDEX",
+            SYMBOL,
+            Timeframe::MINUTE_1,
+            None,
+            YearMonth::new(2026, 1).expect("m"),
+            YearMonth::new(2026, 1).expect("m"),
+            SortKey::Close,
+            true,
+            0,
+            3,
+            false,
+        )
+        .expect("a legal window");
+
+        let closes: Vec<i64> = sorted.bars.iter().map(|r| r.bar.close).collect();
+        assert_eq!(closes, [1_019, 1_018, 1_017], "the three largest closes");
+        for row in &sorted.bars {
+            let before = row.bar.close - 1;
+            let want = crate::server::basis_points(before, row.bar.close).expect("a real ratio");
+            assert_eq!(
+                row.chg,
+                Some(want),
+                "every row's change is against the bar one minute BEFORE it, \
+                 not against the row above it in the sorted page"
+            );
+            assert_eq!(row.chg_why, "");
+        }
+
+        // The very first record of the file has nothing behind it, and says so
+        // rather than reporting a change of zero.
+        let first = window(
+            &root,
+            Vendor::Dhan,
+            "NSE",
+            "INDEX",
+            SYMBOL,
+            Timeframe::MINUTE_1,
+            None,
+            YearMonth::new(2026, 1).expect("m"),
+            YearMonth::new(2026, 1).expect("m"),
+            SortKey::Ts,
+            false,
+            0,
+            1,
+            false,
+        )
+        .expect("a legal window");
+        assert_eq!(first.bars[0].chg, None);
+        assert_eq!(
+            first.bars[0].chg_why, "first_bar_in_file",
+            "never 0 — zero is a real bar that closed where the last one did"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **THE ROW BEFORE THE PAGE IS READ AND NOT RETURNED.**
+    ///
+    /// A page starting mid-file must still fill its first change cell, which
+    /// needs the record behind it. Reading one back costs a seek and is what
+    /// makes a deep page's first row indistinguishable from any other.
+    #[test]
+    fn a_page_starting_mid_file_still_fills_its_first_change_cell() {
+        let root = scratch("lookback");
+        write_month(&root, YearMonth::new(2026, 1).expect("m"), 50, 1_000);
+
+        let got = window(
+            &root,
+            Vendor::Dhan,
+            "NSE",
+            "INDEX",
+            SYMBOL,
+            Timeframe::MINUTE_1,
+            None,
+            YearMonth::new(2026, 1).expect("m"),
+            YearMonth::new(2026, 1).expect("m"),
+            SortKey::Ts,
+            false,
+            10,
+            5,
+            false,
+        )
+        .expect("a legal window");
+
+        assert_eq!(
+            got.bars.len(),
+            5,
+            "the lookback row is NOT part of the page"
+        );
+        assert_eq!(
+            got.bars[0].bar.close, 1_010,
+            "the page still starts where it was asked to"
+        );
+        assert!(
+            got.bars[0].chg.is_some(),
+            "and its change is filled, because the row behind it was read: {:?}",
+            got.bars[0].chg_why
         );
 
         let _ = std::fs::remove_dir_all(&root);
