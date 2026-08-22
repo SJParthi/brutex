@@ -20835,3 +20835,55 @@ that is NOT constant is `cli`'s duplicate-identity set, O(runs) once at process
 open, and it is stated rather than hidden — it is not on a request path.
 
 Invariants BT-01 … BT-12 in `docs/04-invariants.md`.
+
+### D-0273 — a successful pull wrote no log line at all, and the header had promised one
+
+**2026-08-22.** The operator asked for auditing and observability in almost every
+message of the session. A pull of **1,871,491 rows into 1,870,591 bars** across
+three instruments and nine rungs left `~/.brutex/store/logs/events.ndjson` at
+**0 bytes**. The audit journal recorded 502 records; telemetry recorded nothing,
+so `/logs` covered a completed backfill with a blank page and every question
+about it was answered by decoding fixed-stride records by hand.
+
+**The cause was not a broken sink.** `server::run_in` installs one on the serve
+path and it works. Every emit on the ingest path is `debug`, `warn` or `error`:
+
+| Site | Level |
+|---|---|
+| `pull.fold` folded | debug |
+| `pull.member` landed | debug |
+| `pull.member` did not land | error |
+| `pull.derive` rung not derived | warn |
+| `pull.run` refused | error |
+
+**There is no `Info` for a run that SUCCEEDED**, and the default floor is
+`Level::Info`. So a clean pull emits nothing above it, and the log is empty
+exactly when everything worked.
+
+**The module header had already promised the missing half**: *"`Info` carries
+the run; `Debug` carries the members, for the one run an operator is actually
+diagnosing."* The `Debug` half was built. The `Info` half never existed. That is
+the same defect class as `FLAG_CHECKSUMS`, `absorbed_ms`, `outside_session` and
+the unwired ladder — a documented behaviour with no implementation — and it is
+the fifth today.
+
+**A silence that only breaks on failure is the worst possible contract**: it is
+indistinguishable from a run that never happened. §4 asks for the opposite.
+
+`note_run` emits one `Info` record per completed run carrying members, rows,
+bars, committed, folded, **dropped** and failures. Dropped is computed on the
+line rather than left as a subtraction, because an operator reading a log should
+not have to reconcile the books to learn a run discarded something.
+
+**One event per run, and it is emitted from `from_members`** — the single public
+entry every run passes through, so no caller can take a path that skips it. The
+members stay at `Debug` where they belong: 800 instruments × 80 windows is
+64,000 lines nobody wants by default and everybody wants when diagnosing one run.
+That is the granularity §5 calls affordable.
+
+**The test drives a CLEAN ingest**, which is the case that was silent, and
+asserts the sink's `written` count rises and `dropped` stays zero. A test over a
+failing run would have passed before this change.
+
+`pull`: 13 targets, 622 tests, 0 failures. `fmt` and
+`clippy --all-targets -D warnings` clean.

@@ -255,3 +255,50 @@ fn the_internal_rungs_are_derived_for_spot_and_futures_but_never_for_options() {
     assert!(fut.is_future() && !fut.is_option());
     assert!(ce.is_option() && pe.is_option());
 }
+
+/// **A RUN THAT SUCCEEDS WRITES A LINE, AND UNTIL TODAY IT DID NOT.**
+///
+/// `ingest`'s header says *"`Info` carries the run; `Debug` carries the
+/// members"*. The `Debug` half was built and the `Info` half never existed:
+/// every emit on this path was `debug`, `warn` or `error`, so a run that went
+/// perfectly emitted nothing above the default floor of `Level::Info`.
+///
+/// Measured on the operator's store, 2026-08-22: a pull of **1,871,491 rows
+/// into 1,870,591 bars** left `logs/events.ndjson` at **0 bytes**. The audit
+/// journal held 502 records and `/logs` showed a blank page for a completed
+/// backfill.
+///
+/// A silence that only breaks on failure is indistinguishable from a run that
+/// never happened. This test drives a CLEAN ingest — the case that was silent —
+/// and asserts the record lands at `Info` with the books on it.
+#[test]
+fn a_clean_run_writes_one_info_record_naming_what_it_did() {
+    let dir = std::env::temp_dir().join(format!("brutex-derive-log-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    // Install-or-adopt: `telemetry::install` is a process singleton, so a
+    // sibling test in this binary may already own it. Either way the sink
+    // returned is the one `emit` reaches, which is the only one an assertion
+    // about a production emit can be written against.
+    let config = telemetry::Config::new(&dir).with_min_level(telemetry::Level::Trace);
+    let sink = match telemetry::install(&config) {
+        Ok(installed) => installed,
+        Err(_already) => telemetry::global().expect("install named the sink that exists"),
+    };
+    let before = sink.health().written;
+
+    let scratch = Scratch::new("runlog");
+    let req = request();
+    let done = pull::ingest::from_members(&[session_member()], &scratch.0, plan(&req));
+    assert!(done.failures.is_empty(), "the premise: a CLEAN run");
+
+    assert!(
+        sink.health().written > before,
+        "a clean run wrote no telemetry at all — which is the state that left a \
+         1.87-million-bar backfill with a 0-byte log"
+    );
+    assert_eq!(
+        sink.health().dropped,
+        0,
+        "and nothing was dropped, so a missing record would be a missing emit"
+    );
+}

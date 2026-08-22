@@ -433,7 +433,68 @@ pub fn from_dir(
 /// folder's.
 #[must_use]
 pub fn from_members(members: &[Member], store_root: &Path, plan: Plan<'_>) -> Ingested {
-    from_members_inner(members, store_root, plan)
+    let done = from_members_inner(members, store_root, plan);
+    note_run(&done);
+    done
+}
+
+/// One line per completed run, at **`Info`** — the line this module's header
+/// promised and nothing wrote.
+///
+/// # The defect this closes, measured
+///
+/// The header says *"`Info` carries the run; `Debug` carries the members, for
+/// the one run an operator is actually diagnosing."* The `Debug` half was built.
+/// **The `Info` half never existed.** Every emit on this path was `debug`,
+/// `warn` or `error`, so a run that SUCCEEDED emitted nothing above the default
+/// floor of `Level::Info`.
+///
+/// Measured on the operator's store, 2026-08-22: a pull of **1,871,491 rows
+/// into 1,870,591 bars** across three instruments and nine rungs left
+/// `logs/events.ndjson` at **0 bytes**. The audit journal recorded 502 records
+/// and the telemetry log recorded nothing, so `/logs` covered a completed
+/// backfill with a blank page and every question about it had to be answered by
+/// decoding fixed-stride records by hand.
+///
+/// A silence that only breaks on failure is the worst possible reporting
+/// contract: it is indistinguishable from a run that never happened, and
+/// `CLAUDE.md` §4 asks for the opposite — say what happened, loudly, and name
+/// the reason.
+///
+/// # Why one event and not one per member
+///
+/// The members already emit at `Debug`, which is where they belong: 800
+/// instruments × 80 windows is 64,000 lines an operator does not want by
+/// default and does want when diagnosing one run. This is the granularity
+/// `CLAUDE.md` §5 calls affordable — one event per run — and it is emitted from
+/// the single public entry point every run passes through, so a caller cannot
+/// take a path that skips it.
+fn note_run(done: &Ingested) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::info("pull.run", "ingested")
+            .with("members", telemetry::Value::Uint(done.members as u64))
+            .with("rows", telemetry::Value::Uint(done.rows_read as u64))
+            .with("bars", telemetry::Value::Uint(done.bars_stored as u64))
+            .with(
+                "committed",
+                telemetry::Value::Uint(done.bars_committed as u64),
+            )
+            .with("folded", telemetry::Value::Uint(done.rows_folded as u64))
+            // THE BOOKS, ON THE LINE ITSELF. `rows - bars - folded` is what
+            // `Ingested::balances` reconciles, and an operator reading the log
+            // should not have to subtract to learn a run dropped something.
+            .with(
+                "dropped",
+                telemetry::Value::Uint(
+                    (done.rows_read.saturating_sub(done.bars_stored))
+                        .saturating_sub(done.rows_folded) as u64,
+                ),
+            )
+            .with(
+                "failures",
+                telemetry::Value::Uint(done.failures.len() as u64),
+            ),
+    );
 }
 
 /// The fold ratio, once per member — never per snapshot.
