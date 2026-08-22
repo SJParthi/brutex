@@ -11423,6 +11423,24 @@ pub fn router_serving(site: Loaded, assets: std::sync::Arc<assets::Assets>) -> a
         // See `crate::logs`.
         .route("/logs", axum::routing::get(crate::logs::logs_page))
         .route("/logs.json", axum::routing::get(crate::logs::logs_json))
+        // THE SWEEP'S OUTPUT, READABLE FROM THE APPLICATION THAT RANKS IT.
+        //
+        // `/audit` above is the INGEST console -- what a PULL did. Until this
+        // line nothing served here said anything about what the ENGINE found:
+        // `cli::results` recorded every completed sweep into an append-only
+        // file and the only reader was a terminal command.
+        //
+        // ONE ROUTE, NOT TWO, AND THE MISSING ONE IS DELIBERATE. There is no
+        // `.route("/backtest", ...)`: the front end owns that path through the
+        // fallback below, exactly as it owns `/db` and `/ingest`. A registered
+        // route beats `Router::fallback` unconditionally, so a page here would
+        // make a CLICK render Svelte and a RELOAD render Rust -- the two
+        // applications on one URL that `web/vite.config.js` documents against
+        // `/audit`. See `crate::backtest`.
+        .route(
+            "/backtest.json",
+            axum::routing::get(crate::backtest::backtest_json),
+        )
         .route("/health", axum::routing::get(health))
         // THE FRONT END, LAST. A fallback rather than a `/*path` route, so
         // every line above keeps winning and nothing on disk can shadow one.
