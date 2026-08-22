@@ -133,6 +133,33 @@ Two writers to one format is how the format diverges.
 
 ---
 
+## 4b. The log directory is now SPLIT, and `/logs` must read both
+
+`telemetry::sink::BASENAME` is a constant, so every writer pointed at one
+directory appends to one `events.ndjson`. `api` and `cli` were both resolving
+`<store>/logs`, which meant a long `range-all` and a live server appending to the
+same file.
+
+`cli` now writes to **`<store>/logs/cli/`** and `api` keeps whatever it resolved.
+A directory each removes the race with no lock and no coordination.
+
+**Consequence for you:** `/logs` shows only the server's half until it walks both
+`logs/` and `logs/cli/`. The CLI events are the richer ones for a backtest -- each
+carries feed, symbol, rung, span, months asked/found/**missing**, bar count and
+the derived `min_hits`:
+
+```
+"stored span loaded"  feed=zerodha underlying=NIFTY rung=10min
+                      from=2019-12 to=2026-08
+                      months_asked=81 months_found=81 months_missing=0
+                      bars=63192 min_hits=12638
+```
+
+Merge them newest-first by the `ts` field; both files are NDJSON with the same
+shape, and both rotate independently.
+
+---
+
 ## 5. Routes to add
 
 Follow the shape of `/logs` + `/logs.json` in `crates/api/src/server.rs:11424`:

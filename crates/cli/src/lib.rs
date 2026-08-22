@@ -542,20 +542,43 @@ fn root_from(
     )
 }
 
-/// Where the sweep writes its events: `$BRUTEX_LOG_DIR`, else `<store>/logs`.
+/// Where the sweep writes its events: `$BRUTEX_LOG_DIR`, else `<store>/logs/cli`.
 ///
-/// The same two-step every other root here uses, so an operator who has moved
-/// one has moved them all. Beneath the STORE rather than the working directory
-/// because a sweep started from `/` or from a read-only checkout must still log
-/// somewhere it can write, and the store root is already required to be writable
-/// — the same reasoning `api::served_log_dir` gives for its own fallback.
+/// # `cli`, NOT `logs`, and the subdirectory is a correctness fix
+///
+/// This resolved `<store>/logs` — the same directory `api` appends to. Both
+/// write `events.ndjson` because `telemetry::sink::BASENAME` is a constant, so
+/// **two live processes were appending to one file.** A long `range-all` and a
+/// running server interleaving lines is a corrupted record of the one thing that
+/// exists to say what happened.
+///
+/// The measured consequence was worse than a race. To avoid it, a whole
+/// nine-rung run over 81 months was pointed at a scratch directory instead —
+/// forty events describing every span load, every derived threshold and every
+/// month found or missing, written somewhere `/logs` does not read and the
+/// operator would never see. `<store>/logs/events.ndjson` stayed **zero bytes**
+/// while the run produced its entire history elsewhere.
+///
+/// A subdirectory removes the race without a `telemetry` change: `Config` takes
+/// a DIRECTORY, so each writer owning one means each owns its own
+/// `events.ndjson`, its own rotation and its own byte budget. No lock, no
+/// coordination, nothing to get wrong under concurrency — which is the only
+/// design that is `O(1)` per event with two writers as with one.
+///
+/// **`/logs` must read both.** `api` serves whatever directory it resolved, so
+/// until it walks `logs/` and `logs/cli/` the page shows the server's half. That
+/// is recorded in `HANDOVER-web-backtest.md` rather than left for the next
+/// operator to find by seeing an empty page.
+///
+/// `BRUTEX_LOG_DIR` still wins outright and is used exactly as given, because an
+/// operator who names a directory means that directory and not a child of it.
 fn log_dir_from(
     explicit: Option<std::ffi::OsString>,
     store: Option<std::path::PathBuf>,
 ) -> Option<std::path::PathBuf> {
     explicit
         .map(std::path::PathBuf::from)
-        .or_else(|| store.map(|s| s.join("logs")))
+        .or_else(|| store.map(|s| s.join("logs").join("cli")))
 }
 
 /// Installs the process-wide event sink, or says why it could not.
@@ -3388,13 +3411,24 @@ mod tests {
             Some(PathBuf::from("/tmp/brutex-events")),
         );
 
-        // WITH NO VARIABLE, THE LOG SITS UNDER THE STORE. Beneath the store and
-        // not the working directory, because a sweep started from `/` or from a
-        // read-only checkout must still write somewhere, and the store root is
-        // already required to be writable.
+        // WITH NO VARIABLE, THE LOG SITS UNDER THE STORE, IN ITS OWN
+        // SUBDIRECTORY. Beneath the store and not the working directory,
+        // because a sweep started from `/` or from a read-only checkout must
+        // still write somewhere and the store root is already required to be
+        // writable.
+        //
+        // `logs/cli` and not `logs`, and the child is the whole point:
+        // `telemetry::sink::BASENAME` is a constant, so every writer pointed at
+        // one directory appends to one `events.ndjson`. `api` resolves
+        // `<store>/logs` when it is configured that way, and a long `range-all`
+        // running beside a live server was two processes appending to one file.
+        // A directory each removes the race with no lock and no coordination,
+        // which is the only shape that stays O(1) per event with two writers.
         assert_eq!(
             log_dir_from(None, Some(PathBuf::from("/srv/store"))),
-            Some(PathBuf::from("/srv/store/logs")),
+            Some(PathBuf::from("/srv/store/logs/cli")),
+            "the CLI owns a child directory so it cannot interleave with the \
+             server's file"
         );
 
         // WITH NEITHER, THERE IS NOWHERE TO WRITE AND THAT IS `None`, not a
