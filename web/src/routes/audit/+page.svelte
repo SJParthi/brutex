@@ -1411,7 +1411,16 @@
           <span>Window</span>
           <span class="r">Members</span>
           <span class="r">Rows read</span>
-          <span class="r">Bars stored</span>
+          <!-- SAME CORRECTION AS THE DETAIL PANEL BELOW, and it has to be made
+               in both or the column and the cell it expands into disagree about
+               what one number means. `bars_stored` is what the rung OFFERED;
+               the written figure is `bars_committed` and this journal has no
+               such field. -->
+          <span
+            class="r"
+            title="What the rung that was pulled OFFERED. A re-pull offers every bar and writes none, because the file already holds them — measured here as bars_stored 16,43,341 against bars_committed 0. The written count is on the pull.run finished line in /logs."
+            >Bars offered</span
+          >
           <span class="r">Failed</span>
           <span class="r">Took</span>
         </div>
@@ -1502,7 +1511,38 @@
             <div class="stat"><span class="k">Took</span><span class="v">{micros(picked.took_micros)}</span><span class="n">so it ended near {istTime(picked.at + picked.took_micros / 1_000_000)}</span></div>
             <div class="stat"><span class="k">Members</span><span class="v">{n0(picked.members)}</span><span class="n">{n0(picked.failures)} failed</span></div>
             <div class="stat"><span class="k">Rows read</span><span class="v">{n0(picked.rows_read)}</span><span class="n">{n0(picked.rows_folded)} folded into an open bar</span></div>
-            <div class="stat"><span class="k">Bars stored</span><span class="v">{n0(picked.bars_stored)}</span><span class="n">{n0(picked.counted)} slices counted after</span></div>
+            <!-- "OFFERED", NOT "STORED", AND THE DIFFERENCE IS A RUN THAT WROTE
+                 NOTHING READING AS A RUN THAT WROTE EVERYTHING.
+
+                 `bars_stored` counts what the pulled rung OFFERED. What reached
+                 the file is `bars_committed`, and they diverge on every re-pull:
+                 a second run over a window offers every bar and writes none,
+                 because the file already holds them byte for byte — which §3
+                 rule 5 requires of it.
+
+                 MEASURED on this store, from the telemetry line D-0259 added:
+                 `bars_stored: 1643341, bars_committed: 0`. Sixteen lakh bars
+                 offered, ZERO written — and this cell called it "Bars stored"
+                 and printed 16,43,341. A large success figure over an empty
+                 write is the failure wearing a success's clothes that §4 bans.
+
+                 THE FIGURE CANNOT BE CORRECTED HERE, ONLY THE CLAIM. The number
+                 this row has is the offered one: `/audit.json` sends no
+                 `bars_committed`, and it cannot without `audit::Record` growing
+                 a field — which §4 makes a new file version at its own stride,
+                 not an addition. So the label stops overstating and the caption
+                 says where the written figure does live. -->
+            <div class="stat"
+              ><span class="k" title="What the rung that was pulled OFFERED. Not what reached the file — a re-pull offers every bar and writes none, because the file already holds them. The written figure is bars_committed, on the pull.run finished line in /logs; the journal this page reads carries no such field."
+                >Bars offered</span
+              ><span class="v">{n0(picked.bars_stored)}</span><span class="n"
+                >{n0(picked.counted)} slices counted after · written count is in <a
+                  class="link"
+                  href="/logs?target=pull.run"
+                  data-sveltekit-reload>the log</a
+                ></span
+              ></div
+            >
           </div>
           <h3>What it says</h3>
           <p class="note">{picked.note || '(no note)'}</p>

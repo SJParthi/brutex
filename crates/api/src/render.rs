@@ -1879,10 +1879,28 @@ fn capture_meters(capture: Option<Capture<'_>>) -> String {
             count_cell(capture.map(|c| c.fetched)),
             "as the source sent them",
         ),
+        // "OFFERED", AND THE CAPTION WAS THE PLAINEST VERSION OF THE LIE.
+        //
+        // It read "written to the bar file" under a figure that counts what the
+        // pulled rung OFFERED. What reached the file is `bars_committed`, and
+        // the two diverge on every re-pull: a second run over a window offers
+        // every bar and writes none, because the file already holds them byte
+        // for byte, which `CLAUDE.md` §3 rule 5 requires of it.
+        //
+        // MEASURED on a real store, from the line D-0259 added:
+        // `bars_stored: 1643341, bars_committed: 0`. Sixteen lakh bars offered,
+        // ZERO written — under a caption promising they were written. A large
+        // success figure over an empty write is the failure wearing a success's
+        // clothes that §4 bans, and this said so in words.
+        //
+        // THE FIGURE CANNOT BE CORRECTED HERE, ONLY THE CLAIM: `audit::Record`
+        // carries no committed count, and adding one is a new file version at
+        // its own stride under §4, not a field. So the label stops overstating
+        // and the caption says where the written figure does live.
         (
-            "Bars stored",
+            "Bars offered",
             count_cell(capture.map(|c| c.stored)),
-            "written to the bar file",
+            "offered by the rung pulled — the written count is on pull.run finished, in /logs",
         ),
         (
             "Rows folded",
@@ -2887,7 +2905,10 @@ pub fn audit_page(view: &AuditView<'_>) -> String {
             "Took",
             "Members",
             "Rows read",
-            "Bars stored",
+            // THE SAME CORRECTION AS THE DETAIL TABLE ABOVE. Both name one
+            // number, and a column that disagrees with the panel it expands
+            // into is worse than either being wrong alone.
+            "Bars offered",
             "Rows folded",
             "Counted",
         ] {

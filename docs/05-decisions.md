@@ -20663,3 +20663,42 @@ lesson is the same: a module list is not a place for a line-based edit.
 
 `pull` 329 lib + 27 doctests, `api` 620 lib, 0 failures. `fmt` and
 `clippy --all-targets -D warnings` clean.
+
+### D-0270 — "written to the bar file", under a number that was not
+
+D-0259 put `bars_committed` on the `pull.run finished` line because
+`bars_stored` counts what the pulled rung OFFERED and nothing said what reached
+the file. It fixed one surface. Three others were still making the claim, and
+one of them was making it in words.
+
+`crates/api/src/render.rs` drew the audit detail table with the label **"Bars
+stored"** and the caption **"written to the bar file"** — under
+`capture.stored`, which is the offered figure. Not an ambiguous label: a
+sentence promising the bars were written, over a count of bars that were only
+offered.
+
+**MEASURED on a real store**, from the line D-0259 added:
+`"bars_stored":1643341,"bars_committed":0`. **Sixteen lakh bars offered, zero
+written**, on a re-pull over months the store already held — which is the
+correct behaviour §3 rule 5 demands, reported as sixteen lakh bars written.
+
+The label is now **"Bars offered"** in both places `render.rs` says it — the
+detail table and the run-list header — and the caption names where the written
+figure does live. The same correction is made on `web/src/routes/audit/+page.svelte`,
+which draws the client-side copy of the same two surfaces, because a column that
+disagrees with the panel it expands into is worse than either being wrong alone.
+
+**THE FIGURE CANNOT BE CORRECTED, ONLY THE CLAIM.** `audit::Record` carries no
+committed count and `/audit.json` therefore cannot send one. Adding it is a new
+file version at its own stride under §4, not a field — the same refusal D-0259
+recorded. So every surface that has only the offered number now says "offered",
+and points at `/logs` for the other.
+
+**THREE RECEIPT LABELS REMAIN, AND THEY ARE BLOCKED RATHER THAN OVERLOOKED.**
+`crates/api/src/server.rs` pushes `("Bars stored", …)` at three call sites and
+pins the string in a test. That file is held by a concurrent session in this
+shared tree, and editing a file another session is actively changing is how a
+write is lost. They are named here so the next hand finds them: `server.rs`
+lines near 6783, 10369 and 10544, and the assertion near 18967.
+
+api: 626 tests green, clippy silent, fmt clean.
