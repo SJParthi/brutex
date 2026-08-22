@@ -2703,7 +2703,9 @@
                   {/each}
                 </div>
 
-                {#if paTab === 'breakdown'}
+              {#key paTab}
+                <div class="pane">
+                  {#if paTab === 'breakdown'}
                   <div class="tt-quad">
                     <div class="tt-q"><span class="tt-k">Gross profit</span><span class="tt-qv"><Lock why="Only the net total is recorded." /></span></div>
                     <div class="tt-q"><span class="tt-k">Gross loss</span><span class="tt-qv"><Lock why="Only the net total is recorded." /></span></div>
@@ -2915,7 +2917,9 @@
                       </div>
                     {/each}
                   </div>
-                {/if}
+                  {/if}
+                </div>
+              {/key}
               </div>
 
               <!-- ================= TRADES ANALYSIS ================= -->
@@ -2927,7 +2931,14 @@
                   {/each}
                 </div>
 
-                {#if taTab === 'distribution'}
+              <!-- KEYED, SO SWITCHING A TAB IS A MOVE RATHER THAN A SWAP.
+                   Without the key the block re-renders in place and the
+                   content simply becomes different content, which reads as
+                   a glitch. Keyed, the old pane leaves and the new one
+                   arrives, and the eye follows it. -->
+              {#key taTab}
+                <div class="pane">
+                  {#if taTab === 'distribution'}
                   <div class="tt-quad">
                     <div class="tt-q"><span class="tt-k">Expected payoff</span><span class="tt-qv">{perTrade ? money(perTrade.worst) : '—'}</span></div>
                     <div class="tt-q"><span class="tt-k">Outliers PnL</span><span class="tt-qv"><Lock why="Needs a per-trade list to find outliers in." /></span></div>
@@ -3036,7 +3047,9 @@
                       </tbody>
                     </table>
                   </div>
-                {/if}
+                  {/if}
+                </div>
+              {/key}
               </div>
             {:else if testerView === 'trades'}
               <!-- ================= LIST OF TRADES ================= -->
@@ -5136,6 +5149,92 @@
       transform: none !important;
       stroke-dasharray: none !important;
       stroke-dashoffset: 0 !important;
+    }
+  }
+
+  /* ---- a tab pane arrives, it does not appear ----------------------
+     `{#key}` remounts the pane on every switch, so this runs each time.
+     It comes in from the LEFT because the pills it belongs to sit above
+     and to the left, and a pane that slid the other way would read as
+     going back. 18ms of stagger on the quad inside it carries the eye
+     across the row after the pane itself has landed. */
+  .pane {
+    animation: panein 0.34s cubic-bezier(0.22, 0.75, 0.3, 1) both;
+  }
+  @keyframes panein {
+    from {
+      opacity: 0;
+      transform: translateX(-10px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  /* The pane's own stats re-stagger, because they are new numbers and
+     not the same numbers moved. */
+  .pane .tt-quad > .tt-q {
+    animation: liftin 0.36s cubic-bezier(0.22, 0.7, 0.3, 1) both;
+  }
+  .pane .tt-quad > .tt-q:nth-child(1) { animation-delay: 0.08s; }
+  .pane .tt-quad > .tt-q:nth-child(2) { animation-delay: 0.12s; }
+  .pane .tt-quad > .tt-q:nth-child(3) { animation-delay: 0.16s; }
+  .pane .tt-quad > .tt-q:nth-child(4) { animation-delay: 0.2s; }
+
+  /* ---- the drill-down opens rather than appearing ------------------
+     It is the largest thing on the page and it arrives under a row the
+     operator just clicked, so it grows from that direction: down, and
+     from slightly behind. */
+  .drill {
+    animation: drillopen 0.42s cubic-bezier(0.22, 0.75, 0.3, 1) both;
+    transform-origin: top center;
+  }
+  @keyframes drillopen {
+    from {
+      opacity: 0;
+      transform: translateY(-8px) scale(0.994);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
+  /* ---- below the fold, a block waits until it is looked at ---------
+     Everything above the fold animates on load, which is right; a block
+     three screens down that has already finished animating by the time
+     it is reached might as well not have. `animation-timeline: view()`
+     is the declarative form of an IntersectionObserver and costs no
+     JavaScript. Browsers without it simply show the block, which is the
+     correct fallback: visible beats animated. */
+  @supports (animation-timeline: view()) {
+    @media (prefers-reduced-motion: no-preference) {
+      .rgroup,
+      .drill-grid > .card {
+        animation: reveal 1ms linear both;
+        animation-timeline: view();
+        animation-range: entry 0% entry 40%;
+      }
+      @keyframes reveal {
+        from {
+          opacity: 0;
+          transform: translateY(14px);
+        }
+        to {
+          opacity: 1;
+          transform: none;
+        }
+      }
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .pane,
+    .pane .tt-quad > .tt-q,
+    .drill {
+      animation: none !important;
+      opacity: 1 !important;
+      transform: none !important;
     }
   }
 
