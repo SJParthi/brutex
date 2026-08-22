@@ -5303,3 +5303,49 @@ bars — `groww BANKNIFTY 15min 2026-03`, 475 bars, `min_hits` 100:
 printed, so a kill during printing keeps it and a kill during the sweep does
 not — which is the intended span semantics, but the kill itself has not been
 performed.
+
+## The sweep's cost curve, MEASURED on one real instrument-month — D-0258
+
+Release build, stamped, `groww BANKNIFTY 1min 2026-03`, **5,249 swept bars**,
+Apple M4 Pro. One instrument, one timeframe, one direction. Wall clock from
+process start to process exit, so it includes the file read and the render.
+
+| `min_hits` | support | seconds | combinations | depth | verdict |
+|---|---|---|---|---|---|
+| 6000 | 114.3% | 0.01 | 0 | 0 | complete |
+| 5000 | 95.2% | 0.01 | 1 | 1 | complete |
+| 4000 | 76.2% | 0.01 | 5 | 2 | complete |
+| 3000 | 57.1% | 0.01 | 52 | 5 | complete |
+| 2000 | 38.1% | 0.03 | 2,456 | 10 | complete |
+| 1500 | 28.5% | 0.48 | 49,424 | 14 | complete |
+| 1000 | 19.0% | 4.26 | 512,264 | 17 | complete |
+| 700 | 13.3% | 18.33 | 2,334,353 | 19 | complete |
+| 500 | 9.5% | 54.03 | 7,011,584 | 20 | complete |
+| 350 | 6.6% | 160.56 | 20,353,771 | 21 | complete |
+| 250 | 4.7% | 390.23 | 48,481,981 | 22 | complete |
+| 175 | 3.3% | 406.57 | 55,358,927 | **11** | **REFUSED** |
+| 120 | 2.2% | 349.14 | 51,718,847 | **9** | **REFUSED** |
+
+**Three things this measures that no comment previously stated.**
+
+**The threshold is the only lever that matters.** From 19.0% support to 4.7%,
+runtime rises 92x and the combination count rises 95x. Nothing else in the run
+changed. A reader looking for speed should look here before looking at cores.
+
+**4.7% support is the deepest threshold that FINISHES on this month.** At 3.3%
+and below the sweep breaches the 67,108,864-candidate budget and stops:
+`outcome REFUSED`, `trustworthy as a whole answer NO`. Note the depth column —
+it FALLS from 22 to 11 to 9. A halted run is not a slower complete run; it is a
+shallower one, and its combination count is larger while covering less of the
+ladder. Reading the count alone would suggest the opposite.
+
+**A run below the budget cannot be made to finish by waiting.** 175 and 120 took
+LESS wall clock than 250 and returned a worse answer. Time is not the binding
+constraint at that end; the candidate ceiling is.
+
+**Not measured, and labelled as an extrapolation under golden rule 6:** what
+seven years costs. Multiplying the 84 months of a seven-year window by the
+figures above assumes the combination count at constant SUPPORT is
+scale-invariant, and that has NOT been tested — only one month has been swept.
+The arithmetic is recorded so a later measurement can be compared against it,
+not so it can be quoted as a result.

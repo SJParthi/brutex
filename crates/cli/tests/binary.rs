@@ -22,10 +22,53 @@ fn bin() -> std::path::PathBuf {
     p
 }
 
+/// The number a report renders on a labelled row, as an integer.
+///
+/// The rows are `  <label><value right-aligned>  <note>`, so the value is the
+/// FIRST whitespace-separated token AFTER the label. Not the last token on the
+/// line: `swept` carries a percentage note, so a last-token parser reads
+/// `0.0%` and fails to parse -- which is exactly what the first draft of this
+/// helper did.
+///
+/// Returns `None` when the row is absent, which the caller asserts on rather
+/// than defaulting past: a missing row means the report changed shape, and
+/// silently treating that as zero would put this test back to passing on a
+/// report it no longer understands.
+fn row_number(text: &str, label: &str) -> Option<u64> {
+    text.lines()
+        .find(|l| l.trim_start().starts_with(label))?
+        .trim_start()
+        .strip_prefix(label)?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
 #[test]
 fn a_sweep_runs_end_to_end_and_says_its_bars_were_generated() {
+    // THE FIXTURE IS SIX SESSIONS, NOT TWO, AND THAT IS THE FIX.
+    //
+    // This test ran `sweep 2 50` and asserted `text.contains("bars")`. The
+    // string "bars" is in the `BARS` section heading, which prints
+    // unconditionally — so the assertion was satisfied by the report's own
+    // furniture and could not fail.
+    //
+    // MEASURED, which is how this was found: the indicator warm-up is 1,876
+    // bars, and a generated session is 375. So `sweep 2` offers 750 bars and
+    // sweeps ZERO of them. The run this test called "end to end" produced
+    // `swept 0`, `combinations found 0`, and a VERDICT of `NOTHING MEASURED`
+    // with `trustworthy as a whole answer: NO`. The binary was telling the
+    // truth; the test was not listening. `CLAUDE.md` section 4 bans a test that
+    // asserts nothing, and one that passes on a run the binary itself declares
+    // untrustworthy is that ban's exact case.
+    //
+    // Six sessions is the first count that clears the warm-up: 2,250 offered,
+    // 374 swept. `min_hits` 200 keeps it at 8 ms and, importantly, leaves the
+    // verdict `complete` rather than `REFUSED` — a budget breach would make the
+    // "trustworthy" assertion below pin the wrong thing.
     let out = Command::new(bin())
-        .args(["sweep", "2", "50"])
+        .args(["sweep", "6", "200"])
         .output()
         .expect("the binary runs");
     assert!(out.status.success(), "a valid sweep exits zero");
@@ -35,9 +78,35 @@ fn a_sweep_runs_end_to_end_and_says_its_bars_were_generated() {
         "a report that does not declare its provenance is the one thing this \
          binary must never print:\n{text}"
     );
+
+    // WORK HAPPENED. Each of these three is separately capable of failing on a
+    // run that renders a complete-looking report having done nothing.
+    let swept = row_number(&text, "swept").expect("the BARS block must report a swept count");
     assert!(
-        text.contains("bars"),
-        "the report body rendered, not just the banner:\n{text}"
+        swept > 0,
+        "the sweep read no bars at all, so nothing below it means anything:\n{text}"
+    );
+    let combinations =
+        row_number(&text, "combinations found").expect("the LADDER block must report a count");
+    assert!(
+        combinations > 0,
+        "the ladder produced no combinations, so the report describes an empty \
+         search:\n{text}"
+    );
+
+    // AND THE BINARY'S OWN VERDICT AGREES. This is the assertion the old test
+    // most needed: the report already knew it had measured nothing and said so
+    // in plain words, and nothing was reading them.
+    assert!(
+        text.contains("the frontier went extinct, which is the answer"),
+        "the sweep must reach extinction on its own -- `NOTHING MEASURED` or \
+         `REFUSED` here means this fixture stopped proving what it claims \
+         to:\n{text}"
+    );
+    assert!(
+        !text.contains("NOTHING MEASURED"),
+        "the binary declared it measured nothing, which no end-to-end test may \
+         pass on:\n{text}"
     );
 }
 
