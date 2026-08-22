@@ -3190,6 +3190,14 @@
      measurements in the other language; none of the four moves alone. */
   const ROW = 40;
   const HEAD = 30; /* the sticky header covers the top of the scroll box */
+  /* THE FIT'S TOLERANCE, HOISTED HERE FOR THE SAME REASON THE TWO ABOVE WERE.
+     Two deriveds divide by it — `rowsThatFit` for the grid and `settledRows`
+     for the fold — and the second is written above the first. It ran, because a
+     `$derived` is lazy, and only `svelte-check` saw the temporal dead zone;
+     that is the third time in this file, so the rule is now simply that a
+     constant shared by two deriveds lives above both. Its reasoning stays with
+     `rowsThatFit`, which is where the 24 was measured. */
+  const FIT_SLACK = 24;
 
   /* ======================================================================
      COMPACT — THE ONE HONEST WAY TO BUY ROWS, AND IT IS A TRADE NOT A FIX
@@ -3334,9 +3342,47 @@
        while the panels EXIST — folded, they measure zero, and a label reading
        "+0 rows" on the control that would give them back is worse than stale. */
     void compact;
+    /* AND RE-MEASURE ON EVERY NEW READ, because the chrome changes without a
+       resize and the fit was going stale in ordinary use.
+       ---------------------------------------------------------------------
+       MEASURED: sorting by Close raised a notes line under the grid, the box
+       shrank from 465 to 444 and the fit dropped to nine rows — correct. Then
+       sorting BACK to Date removed the line, the box returned to 465, and the
+       grid stayed at NINE, because nothing re-measured. A row lost to a sort
+       and not recovered by undoing it, until the window was resized.
+
+       WHY THIS IS SAFE NOW AND WOULD NOT HAVE BEEN BEFORE. This is the feedback
+       edge the `ResizeObserver` was removed for: if the chrome's height depends
+       on the row count, measuring after every read makes the measurement its
+       own cause. The notes line WAS such a dependency — the false manifest
+       warning above fired because the page size differed from a month's row
+       count, so the chrome literally grew with the page size. Guarding that
+       warning to full reads is what cut the edge; with it gone, the notes line
+       reflects the STORE and not the paging, and nothing above the grid counts
+       rows any more. The two fixes are one fix, and this one must not be kept
+       if the other is ever reverted. */
+    void barPlanKeys;
+    /* `settled` — WHETHER THIS READ IS ENTITLED TO AN OPINION ON OVERFLOW.
+       ---------------------------------------------------------------------
+       The box's height can be read at any moment: it comes from `flex` against
+       a column whose size is set by the viewport, so it is right even mid-update.
+       The page's OVERFLOW cannot. It is content against container, and during a
+       read the content is briefly whatever the previous rows plus the new state
+       happen to make — a transient that is not what the reader will see.
+
+       That distinction became load-bearing the moment this effect started
+       re-measuring on every fetch. MEASURED: sorting by Close and back at a
+       1,200px window — which fits the readouts comfortably — sampled a
+       mid-update overflow, and the auto-fold, which is deliberately monotonic
+       and fires once, folded the readouts away and left them folded. A
+       transient became permanent, on a window with room to spare.
+
+       So only a read that is genuinely after the fact writes `pageOver`: the
+       250ms one, and the resize handler, whose event fires after layout. The
+       immediate and next-tick reads keep the box honest and stay out of a
+       decision they cannot see clearly. */
     const measure = () => {
       barBoxH = el.clientHeight;
-      pageOver = boardEl ? boardEl.scrollHeight - boardEl.clientHeight : 0;
       const f = factsEl?.getBoundingClientRect().height ?? 0;
       const c = cbandEl?.getBoundingClientRect().height ?? 0;
       /* THE TWO PANELS ARE PRICED DIFFERENTLY BECAUSE THEY FOLD DIFFERENTLY.
@@ -3391,6 +3437,60 @@
   const CBAND_SLIM_H = 36;
   /** What the fold is worth right now, in rows. */
   const foldRows = $derived(Math.max(0, Math.floor(foldPx / ROW)));
+
+  /* ======================================================================
+     THE OVERFLOW IS MEASURED ON ITS OWN CLOCK, AND DELIBERATELY NOT ON THE
+     DATA'S
+     ======================================================================
+     Two different questions were being answered by one measurement, and only
+     one of them survives a mid-fetch reading.
+
+     The BOX'S HEIGHT is safe to read at any moment: it comes from `flex`
+     against a column the viewport sizes, so it does not depend on what is in
+     it. That read belongs with every layout change, including every new fetch,
+     which is why the effect above takes `barPlanKeys` as a dependency.
+
+     The PAGE'S OVERFLOW is content against container. During a read the content
+     is briefly whatever the old rows and the new state make between them, and
+     that transient is not what the reader will see. Wiring it to the same clock
+     was measured doing real damage TWICE: sorting by Close and back at a
+     1,200px window — which fits the readouts with room to spare — sampled a
+     mid-update overflow and the auto-fold, which is monotonic and fires once by
+     design, folded the readouts away permanently. Deferring the sample by 250ms
+     did not fix it; the fetch simply outlasts 250ms.
+
+     A monotonic rule cannot afford a false positive, because it has no way back.
+     So this effect depends on `boardEl` ALONE: it runs on mount and on the
+     window's own resize, both of which are settled moments the reader caused,
+     and it never re-runs because data arrived. The fold now answers "is this
+     window too small", which is the question it was written for, rather than
+     "was the page mid-update when someone looked". */
+  let settledBoxH = $state(0);
+  $effect(() => {
+    const el = boardEl;
+    if (!el) return;
+    const read = () => {
+      pageOver = el.scrollHeight - el.clientHeight;
+      /* THE BOX'S HEIGHT IS TAKEN HERE TOO, AND NOT REUSED FROM `barBoxH`.
+         `barBoxH` is deliberately re-read on every fetch so the grid's own fit
+         tracks the layout closely — which means it also holds the transients.
+         The fold must not see those: it is monotonic, so one bad reading is
+         permanent. Same instant, same element, different clock. */
+      settledBoxH = barBox ? barBox.clientHeight : 0;
+    };
+    /* Not immediate: on mount the grid has not had its first rows yet, so the
+       board is short and reports no overflow whatever the window's size. */
+    const t = setTimeout(read, 250);
+    window.addEventListener('resize', read);
+    return () => {
+      window.removeEventListener('resize', read);
+      clearTimeout(t);
+    };
+  });
+  /** The row count the FOLD reasons about — from the settled height only. */
+  const settledRows = $derived(
+    settledBoxH > 0 ? Math.max(1, Math.floor((settledBoxH - HEAD - FIT_SLACK) / ROW)) : 0
+  );
 
   /* ======================================================================
      THE FOLD HAPPENS BY ITSELF WHEN THE WINDOW CANNOT HOLD THE PAGE
@@ -3452,7 +3552,16 @@
   const MIN_USEFUL_ROWS = 10;
   $effect(() => {
     if (readerChose || compact) return;
-    if (pageOver <= 1 && rowsThatFit >= MIN_USEFUL_ROWS) return;
+    /* NOTHING IS DECIDED BEFORE THE SETTLED READ HAS HAPPENED. `settledRows` is
+       0 until then, and 0 is not "no rows fit" — it is "nobody has looked". */
+    if (settledRows === 0) return;
+    /* `settledRows`, NOT `rowsThatFit`. The grid's own fit is re-read on every
+       fetch so it tracks the layout closely; this rule is monotonic and one
+       transient reading is permanent. MEASURED with `rowsThatFit` here: sorting
+       by Close and back at a 1,200px window folded the readouts away and left
+       them folded, because the row count dipped for one update in the middle of
+       the switch back. */
+    if (pageOver <= 1 && settledRows >= MIN_USEFUL_ROWS) return;
     /* Nothing to gain by folding what is not there: on a window so short that
        the grid is small even WITHOUT the readouts, hiding them buys nothing and
        the reader loses them for no rows. */
@@ -3494,8 +3603,10 @@
      size, so watching that strip re-enters the loop this whole block exists to
      cut. 24px is 0.6 of a row — it costs a row only when the box was within a
      hair of holding one, and it guarantees the table never carries a five-pixel
-     scrollbar, which is the thing the reader actually notices. */
-  const FIT_SLACK = 24;
+     scrollbar, which is the thing the reader actually notices.
+     THE DECLARATION ITSELF IS UP BESIDE `ROW` AND `HEAD`, because the fold's
+     `settledRows` divides by it too and is written above this point. The
+     reasoning stays here, where the 24 was measured. */
   const rowsThatFit = $derived(
     Math.max(1, Math.floor((barBoxH - HEAD - FIT_SLACK) / ROW))
   );
@@ -4452,11 +4563,9 @@
   /** Files that answered 206 - read in part, with the part that failed named. */
   const barFaults = $derived(barState.files.filter((/** @type {any} */ f) => f.faults));
   /** Files whose bar count disagrees with the census row that named them. */
-  const barDisagree = $derived(
-    barState.files.filter(
-      (/** @type {any} */ f) => f.error === null && f.bars.length !== f.row.rows
-    )
-  );
+  /* `barDisagree` HAS MOVED, to sit below `windowSaid` — it now has to ask
+     whether the rows came from the window endpoint, and `windowSaid` is
+     declared further down. Order is not decoration here; see its new home. */
 
   /* ---------------------------------------------------------------------
      THE BAR ROWS. Built once per read - never per paint and never per
@@ -4898,6 +5007,38 @@
      into it. Subtracting the base is what turns a global ordinal into an
      offset within the two files actually in memory; without it every page past
      the first slices past the end and the grid draws nothing. */
+  /* ======================================================================
+     THE MANIFEST DISAGREEMENT — AND IT MUST NOT BE ASKED ON THE WINDOW ROUTE
+     ======================================================================
+     A file whose bars do not number what the census manifest claims is a fact
+     about the STORE and one of the few things this page can notice on the
+     operator's behalf, so it is drawn as a warning under the grid.
+
+     THE TEST IS ONLY MEANINGFUL WHEN THE WHOLE MONTH WAS READ. `f.bars.length`
+     against `f.row.rows` compares what came back to what the month should
+     hold — true for a full read, and nonsense on the window route, where the
+     ENDPOINT slices and deliberately returns one page. Measured after sorting
+     by Close: "the file returned 9 bar(s) and the census manifest claims
+     5,625" — nine being the page size. A false alarm about store integrity,
+     raised by the page's own paging.
+
+     It also cost a row. The warning is 38px where the empty notes strip is 17,
+     so it pushed `.bnotes` up by 21 and the fit came back with nine rows
+     instead of ten — a false warning charging the reader real space.
+
+     `windowSaid !== null` is the same condition `barPage` below uses to decide
+     the server already sliced, and for the same reason: it is the one signal
+     that says the rows in hand are a page rather than a file. That is why this
+     block had to move down here — it now depends on a value declared above
+     `barPage` and below where it used to sit. */
+  const barDisagree = $derived(
+    windowSaid !== null
+      ? []
+      : barState.files.filter(
+          (/** @type {any} */ f) => f.error === null && f.bars.length !== f.row.rows
+        )
+  );
+
   const barPage = $derived.by(() => {
     /* THE SERVER ALREADY SLICED, SO THE CLIENT MUST NOT SLICE AGAIN — BUT ONLY
        WHERE THE SERVER ACTUALLY ANSWERED.
