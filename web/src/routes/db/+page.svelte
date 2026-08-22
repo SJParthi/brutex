@@ -7441,7 +7441,9 @@
                       class:odd={i % 2 === 1}
                       class:row-in={entering}
                       data-dir={b.c > b.o ? 'up' : b.c < b.o ? 'down' : 'flat'}
-                      style="--rng:{rngMag(b.h - b.l, b.tf)}"
+                      style="--rng:{rngMag(b.h - b.l, b.tf)};--spine:{Math.round(
+                        rngMag(b.h - b.l, b.tf) * 24
+                      )}px"
                     >
                       <!-- DATE / TIME. The stamp is IST and says so; the rung
                            and the instrument that produced the bar are on the
@@ -7464,7 +7466,14 @@
                       <td class="bn" title="{fmt(b.o)} paisa, as stored">{paisaText(b.o)}</td>
                       <td class="bn" title="{fmt(b.h)} paisa, as stored">{paisaText(b.h)}</td>
                       <td class="bn" title="{fmt(b.l)} paisa, as stored">{paisaText(b.l)}</td>
-                      <td class="bn" title="{fmt(b.c)} paisa, as stored">{paisaText(b.c)}</td>
+                      <!-- THE CLOSE IS THE FIGURE THE TABLE IS READ FOR, and it
+                           was the same weight and colour as the other three.
+                           `bclose` lets the row's own `data-dir` reach it — the
+                           convention `bars.rs` already renders on the
+                           server-side price table, where `td.close` is bold and
+                           tinted by `close >= open`. The two surfaces show the
+                           same store and disagreed about that. -->
+                      <td class="bn bclose" title="{fmt(b.c)} paisa, as stored">{paisaText(b.c)}</td>
                       <td class="bn bvol" style="--vmag:{volMag(b.vol, b.tf)}%">{fmt(b.vol)}</td>
 
                       <!-- PRE-MARKET %: no source on this wire. -->
@@ -7989,6 +7998,85 @@
      that is held, `--warn` for one that is short, `--line-hard` for one holding
      nothing — the same three readings `/ingest` gives a coverage cell.
      --------------------------------------------------------------------- */
+  /* ---------------------------------------------------------------------
+     TWO THINGS THIS GRID ALREADY MEASURED AND NEVER DREW.
+
+     `data-dir` has been on every row since the grid was written — `up`, `down`
+     or `flat`, from `close` against `open` — and no rule read it. `--rng` is
+     set from `rngMag()` on every row, which folds the widest high-low at that
+     rung, and no rule read that either. Both were computed per row, per paint,
+     and thrown away.
+
+     So the close — the one figure a price table is read FOR — rendered at the
+     same weight and the same colour as the other three, while `bars.rs` was
+     rendering the SAME STORE server-side with `td.close` bold and tinted by
+     direction. Two surfaces over one file, disagreeing about which number
+     matters.
+     --------------------------------------------------------------------- */
+  .bclose {
+    font-weight: var(--w-semi);
+    color: var(--ink-hi);
+  }
+  .brow[data-dir='up'] .bclose {
+    color: var(--up);
+  }
+  .brow[data-dir='down'] .bclose {
+    color: var(--down);
+  }
+  /* FLAT KEEPS THE NEUTRAL INK AND THAT IS THE POINT. A bar that closed where
+     it opened is not a small rise; tinting it either way would invent a
+     direction the data does not have. */
+
+  /* THE RANGE SPINE. A left-edge tick whose height is this bar's high-low
+     against the widest at the same rung, so a doji reads short and a wide bar
+     reads tall and "where did anything actually happen" is answerable before a
+     single figure is read.
+     ON THE ROW, NOT IN A COLUMN, because it describes the whole row and a
+     column of its own would cost horizontal space in a grid that already has
+     twenty-five.
+
+     `--rng` IS A FRACTION IN 0..1, NOT A PERCENTAGE. `rngMag` returns
+     `max(MIN_SPINE, sqrt(range / widest))` — a square root because the eye
+     compares lengths by area and a linear scale put every row on the floor, and
+     a floor of 0.08 because a flat minute is a real state and a row with no
+     mark at all reads as a rendering fault. Multiplying by `1%` drew every
+     spine at half a pixel; the unit is `100%`. */
+  /* ON THE FIRST CELL, AND IN PIXELS, AND BOTH ARE FORCED.
+     A `<tr>` is not a containing block an absolutely-positioned child can
+     resolve a PERCENTAGE height against — its own height is content-driven, so
+     `height: calc(var(--rng) * 100%)` computed to 0px on every row and the
+     spine was invisible twice over. The first `<td>` takes `position: relative`
+     cleanly, and `--rng` inherits down to it from the row.
+     THE PIXELS ARE MULTIPLIED IN THE MARKUP, NOT IN `calc()`. `--rng` is a
+     unitless fraction and `calc(var(--rng) * 24px)` measured 0px on every row
+     even though the same rule's COLOURS applied — so the pseudo-element existed
+     and only its height did not resolve. `--spine` carries the finished pixel
+     value instead, computed beside the fraction that produces it, which removes
+     the question rather than answering it. 24px against a 40px row leaves the
+     tallest spine clear of the cell's own padding. */
+  .brow > td:first-child {
+    position: relative;
+  }
+  .brow > td:first-child::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 50%;
+    width: 2px;
+    height: var(--spine, 0px);
+    transform: translateY(-50%);
+    background: var(--dim);
+    opacity: 0.55;
+    border-radius: 1px;
+    pointer-events: none;
+  }
+  .brow[data-dir='up'] > td:first-child::before {
+    background: var(--up);
+  }
+  .brow[data-dir='down'] > td:first-child::before {
+    background: var(--down);
+  }
+
   /* A STRIP WITH NO RUNGS IS A SENTENCE, NOT A PANEL.
      `.strip` is a grid with a label row and a control row, which is right when
      it holds controls and pure cost when it holds none. `display: flex`
