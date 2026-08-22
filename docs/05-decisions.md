@@ -20036,3 +20036,49 @@ data silently, and §4 prefers the loud failure.
 failures, all `E0460: found possibly newer version of crate store` — a build
 artifact race with the other session rebuilding `store`, not a defect; they pass
 on re-run.)*
+
+### D-0259 — the log reported bars OFFERED and called it bars stored
+
+`pull::ingest::Ingested` carries two counters and they answer different
+questions. `bars_stored` counts what the rung that was pulled OFFERED.
+`bars_committed` counts what reached the file. They are equal on a first fill
+and they diverge on every re-pull, because a second run over a window offers
+every bar and writes none — the file already holds them byte for byte, which
+`CLAUDE.md` §3 rule 5 requires of it.
+
+Only the first number was ever emitted. Measured on the running log: the
+`pull.run finished` line carries `attempted, reached, members, rows_read,
+bars_stored, failed, took_micros` and **no `bars_committed`**, so a run that
+wrote nothing at all reported `bars_stored: 59250`. `pull/tests/census.rs`
+had already recorded the same defect on the other surface, in its own words:
+*"the receipt said 'Bars stored 375' over a run that wrote nothing at all"*.
+
+A large success figure standing over an empty write is the failure wearing a
+success's clothes that §4 bans, so the figure that separates them is now on
+the line.
+
+**BOTH, NOT ONE REPLACING THE OTHER, and that is the decision.** The obvious
+fix is to swap the counter under `audit::Outcome` — `audit.rs` chooses
+`Outcome::Empty` on `done.bars_stored == 0` under a comment claiming the arm
+*"stops a window that landed nothing from reporting success"*, and it reads the
+counter that cannot tell. **That swap is refused.** A re-run that commits zero
+is CORRECT and its window is complete; `Outcome::Stored` is the honest end
+state, and testing `bars_committed` there would report a finished window as
+empty — trading a figure that overstates for a verdict that lies. The end state
+and the work done are two facts and the line now carries both.
+
+**Not the journal, and not for want of wanting it.** `audit::Record` is
+append-only and §4 bans a dynamic schema — *a new field is a new file version at
+its own stride* — so putting `bars_committed` into the journal is a format
+version, not a field add. The telemetry line is schemaless per record and is
+already what `/logs` reads, so it takes the figure today at no format cost.
+
+**What is still missing, stated rather than implied.** The receipt does not
+render `bars_committed` and neither does `/audit.json`; the asymmetry between
+the log and the receipt is now real, and it resolves by the receipt GAINING the
+figure, never by the line losing it. The api-layer test proves the key is on the
+line and deliberately claims no more: its universe is empty, so offered and
+written are both zero and a hardcoded zero would pass it. The distinction is
+made and proved one layer down, in `pull/tests/census.rs`, where a first run
+commits three and its re-run commits none while every other counter agrees.
+`CLAUDE.md` §3 rule 6.

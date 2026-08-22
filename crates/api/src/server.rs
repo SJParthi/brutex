@@ -4280,8 +4280,16 @@ fn note_run_started(asked: &ingest::SpotRequest, instruments: usize) -> Option<u
 /// The run's own verdict, on the one surface that survives a restart.
 ///
 /// `Warn` when the books do not balance, because that is the sentence the
-/// receipt puts in red and the log had no equivalent of. Every figure is the
-/// one the receipt renders, so the two can be compared rather than reconciled.
+/// receipt puts in red and the log had no equivalent of.
+///
+/// Every figure here was once *"the one the receipt renders, so the two can be
+/// compared rather than reconciled"*, and `bars_committed` is deliberately one
+/// the receipt does NOT render. It is emitted anyway because the reconciliation
+/// that sentence wanted is impossible without it: `bars_stored` alone cannot
+/// separate a first fill from a re-run that wrote nothing, and the log is the
+/// surface that survives the restart the receipt does not. The asymmetry is the
+/// point, and it resolves the other way — the receipt is what should gain the
+/// figure next, not the line that should lose it.
 fn note_run_finished(out: &BrokerRun, balanced: bool, claimed: Option<u64>) {
     let _dropped_when_filtered = telemetry::emit(
         &telemetry::Event::new(
@@ -4307,6 +4315,31 @@ fn note_run_finished(out: &BrokerRun, balanced: bool, claimed: Option<u64>) {
         .with(
             "bars_stored",
             telemetry::Value::Uint(out.total.bars_stored as u64),
+        )
+        // OFFERED AND WRITTEN ARE TWO NUMBERS, AND ONLY ONE OF THEM WAS HERE.
+        //
+        // `bars_stored` counts what the rung that was pulled OFFERED;
+        // `bars_committed` counts what reached the file. They differ whenever a
+        // window is re-pulled — the second run offers every bar and writes none,
+        // because the file already holds them byte for byte, which `CLAUDE.md`
+        // §3 rule 5 requires of it.
+        //
+        // With only the first number on the line, that run reported
+        // `bars_stored: 59250` over a write of nothing, and `pull/tests/census.rs`
+        // says the receipt did the same in these words: *"the receipt said 'Bars
+        // stored 375' over a run that wrote nothing at all"*. A large success
+        // figure standing over an empty write is the failure wearing a success's
+        // clothes that §4 bans.
+        //
+        // Both are emitted rather than one replacing the other, because neither
+        // is the lie. A re-run that writes nothing is CORRECT and its window is
+        // complete — `Outcome::Stored` is the honest end state, and swapping the
+        // counter under `audit::Outcome` would call a finished window empty. What
+        // was missing is the work figure beside the state, so the reader can tell
+        // an idempotent no-op from a first fill without inferring it.
+        .with(
+            "bars_committed",
+            telemetry::Value::Uint(out.total.bars_committed as u64),
         )
         .with(
             "failed",
@@ -19930,6 +19963,25 @@ mod tests {
             crate::emitted::counts(mine, "failed", 0)
                 && crate::emitted::counts(mine, "bars_stored", 0),
             "{mine:?}"
+        );
+        // BOTH COUNTERS REACH THE LINE, AND THIS RUN CANNOT TELL THEM APART.
+        //
+        // `counts` is false for a key that is absent, so this proves
+        // `bars_committed` is ON the line — which is the whole of what was
+        // missing, and the reason a re-run could report `bars_stored: 59250`
+        // over a write of nothing.
+        //
+        // It does NOT prove the two are wired to different counters: this run
+        // has an empty universe, so offered and written are both zero and a
+        // hardcoded zero would pass here just as well. What separates them is
+        // `pull/tests/census.rs`, where a first run commits three and its re-run
+        // commits none while every other counter agrees. That is the layer the
+        // distinction is MADE at; this one only has to forward it, and the
+        // honest claim for this assertion is presence rather than provenance.
+        assert!(
+            crate::emitted::counts(mine, "bars_committed", 0),
+            "the figure that separates a first fill from an idempotent re-run \
+             must be on the line even when it is zero: {mine:?}"
         );
 
         // A MEMBER THAT REACHED THE VENDOR AND DIED AT THE STORE. Driven
