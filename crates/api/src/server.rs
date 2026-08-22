@@ -22171,19 +22171,61 @@ async fn calendar_json(
             no_such_feed_json(&asked),
         );
     };
-    // THE SYMBOL DECIDES THE CALENDAR, and it must be asked for rather than
-    // assumed: a derived calendar is one instrument's reading of the exchange,
-    // and answering NIFTY's for a caller asking about BANKNIFTY would be the
-    // wrong-number-with-confidence shape this route exists to end.
+    // NO SYMBOL MEANS THE EXCHANGE'S OWN CALENDAR, AGREED RATHER THAN BORROWED.
+    //
+    // This used to answer 400, on the reasoning that a derived calendar is one
+    // instrument's reading and there is no default that is not a guess. The
+    // reasoning was right and the conclusion was wrong: the caller that needs
+    // this — `/ingest`, computing how many bars a month owed — is asking an
+    // EXCHANGE question, and refusing it left the browser holding four
+    // hardcoded tables of the same facts, which is the duplication D-0274
+    // recorded and P-03 is still open on.
+    //
+    // The honest answer is not to pick an instrument. It is to derive every
+    // instrument this feed holds and agree them, and to ship the agreement's
+    // own evidence beside it — who it was derived from, and every day they read
+    // differently. See `calendar_of::agree` for why that is a union.
     let symbol = param(query, "symbol");
     if symbol.is_empty() {
+        let mut names: Vec<String> = site
+            .entries
+            .iter()
+            .map(|(series, _)| series.symbol.as_str().to_owned())
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        let mut readings: Vec<(String, pull::calendar::Calendar)> = Vec::new();
+        for name in names {
+            let months: Vec<store::path::YearMonth> = site
+                .entries
+                .iter()
+                .filter(|(series, _)| series.symbol.as_str() == name)
+                .map(|(_, month)| *month)
+                .collect();
+            let calendar = crate::calendar_of::cached(
+                &site.calendars,
+                &site.store_root,
+                feed,
+                "NSE",
+                "INDEX",
+                &name,
+                &months,
+            );
+            // A SYMBOL THIS FEED HOLDS NOTHING FOR IS NOT A VOTE FOR ANYTHING.
+            // `entries` spans every vendor, so asking Zerodha's store for an
+            // instrument only Dhan carries reads no files and returns an empty
+            // calendar; counting that as agreement would let a feed's absence
+            // close the exchange.
+            if calendar.sessions() > 0 {
+                readings.push((name, calendar));
+            }
+        }
+        let (exchange, clashes) = crate::calendar_of::agree(&readings);
+        let from: Vec<String> = readings.into_iter().map(|(name, _)| name).collect();
         return (
-            axum::http::StatusCode::BAD_REQUEST,
+            axum::http::StatusCode::OK,
             [(axum::http::header::CONTENT_TYPE, json)],
-            "{\"error\":\"name the instrument: /calendar.json?feed=zerodha&symbol=NIFTY. \
-             A calendar is one instrument's reading of the exchange, so there is no \
-             default that is not a guess.\"}"
-                .to_owned(),
+            crate::calendar_of::exchange_json(&exchange, &from, &clashes),
         );
     }
 

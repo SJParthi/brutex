@@ -21118,3 +21118,70 @@ change without a rebuild ships a page nobody can reach.
 `(feed, symbol)` and `/ingest` needs expected-bar counts for many instruments at
 once, so P-03 is not a table deletion but a route shape question, and this entry
 does not pretend otherwise.
+
+### D-0278 — the exchange calendar is agreed, not borrowed, and P-03 is closed
+
+**2026-08-22.** `/calendar.json` refused to answer without a symbol, on the
+reasoning that *a derived calendar is one instrument's reading of the exchange,
+and there is no default that is not a guess.* The reasoning was right and the
+conclusion was wrong. The caller that needed it — `/ingest`, computing how many
+bars a month owed — is asking an EXCHANGE question, and refusing it left four
+hardcoded tables in the browser beside four more in `crates/pull/src/calendar.rs`,
+derived from the same bars on the same afternoon and checked against each other
+by nothing. That is the duplication D-0274 recorded and P-03 stayed open on.
+
+**The answer is not to pick an instrument. It is to agree all of them.**
+`calendar_of::agree` derives every instrument the feed holds and unions their
+readings, and ships the agreement's own evidence beside it: `derivedFrom` names
+who was consulted, and `disagreements` names every day they read differently.
+
+**A bar is proof that the exchange traded; silence is not proof that it did
+not.** So a day is a session if ANY instrument observed one, and the session
+taken is the LONGEST any instrument measured. A shorter reading is that store's
+hole, not a shorter exchange day — the opposite rule would let one vendor's
+missing morning shorten the calendar for everything else, and an expected-bar
+count that is quietly too small is a real loss that stops being reported.
+
+**A day outside a reading's own span is not a vote.** An instrument whose
+history begins in 2019 has no opinion about 2015, and counting its absence as a
+closure would manufacture four years of holidays. Only readings whose span
+contains the day are consulted, which is also why a feed that holds nothing for
+an instrument is excluded rather than counted as closed — `site.entries` spans
+every vendor, so asking Zerodha's store for a Dhan-only instrument reads no
+files and would otherwise vote the exchange shut on every day there is.
+
+**`OpenLengthUnmeasured` survives only while nothing measured a length.** One
+instrument that saw the Muhurat session's 60 minutes settles it for all of them.
+Withholding a number somebody measured is refusing evidence, which is a
+different act from declining to invent one.
+
+**The browser's four tables are deleted.** 95 holidays, 8 weekend sessions, 4
+short sessions and 5 days with no minute series, gone. The comment that stood in
+their place had already said what to do — *it MUST MOVE SERVER-SIDE, because the
+store knows which days it holds bars for and the browser is guessing beside it*
+— and this is that. `isSession`, `noSessionWhy` and `holidaysKnownFor` keep
+their names and signatures so the sixteen call sites did not move; only what
+they read changed.
+
+**Days beat rules, and the weekend exception is the proof.** The old
+`isSession` checked `WEEKEND_SESSIONS` first because eight Saturdays traded and
+the day-of-week rule had to be overridden. The new one has no exception at all:
+those Saturdays are simply in the list and the holidays are simply not.
+`minuteBarsByMonth` collapses the same way — a short session is a smaller
+`owed`, and a day nobody sized arrives as `null` and contributes nothing, which
+is what the two tables it replaces were for.
+
+**Three states became two, and the one that went was "forecast".** The old
+table was measured to 2026-08-21 and hand-carried to 2026-12-31; a forecast that
+reads like a measurement is what put five wrong dates in the table before it. A
+calendar derived from bars has no such region — it ends where the bars end, and
+past that the page says so rather than projecting. Before the fetch lands, and
+outside the span, a weekday is still ASSUMED to be a session and every sentence
+built from it still says so. §4: degrade loudly and name the reason.
+
+**What is NOT claimed.** `agree` walks the union span once per reading and is
+not O(1); it is behind the same mtime-keyed cache `calendar_of::cached` already
+uses, and it is not on a bar path. And the agreement is only as wide as the
+store: three instruments hold bars today, so `derivedFrom` names three, and a
+day all three miss is indistinguishable from a closure. That is the honest limit
+of deriving a calendar from bars, and it is why the provenance is on the wire.

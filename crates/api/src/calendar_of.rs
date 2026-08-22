@@ -658,3 +658,327 @@ mod wire {
         assert!(wire.contains("\"sessions\":0"), "{wire}");
     }
 }
+
+/// One day the instruments did not read the same way.
+///
+/// **This is a finding, not an error.** Two instruments on one exchange trade
+/// the same days; where their stores disagree, one of them has a hole. Naming
+/// the day and who was silent is what turns "the calendar is fuzzy here" into
+/// "this instrument is missing this day".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Disagreement {
+    /// The day, as an epoch day.
+    pub day: i64,
+    /// Instruments whose store proves a session — sorted.
+    pub seen_by: Vec<String>,
+    /// Instruments in range for that day whose store holds nothing — sorted.
+    pub silent: Vec<String>,
+    /// Every distinct session length measured, ascending. One entry means the
+    /// instruments agreed on the length and disagreed only about existence.
+    pub owed: Vec<u16>,
+}
+
+/// Agree several instruments' readings into one exchange calendar.
+///
+/// # The rule, and why it is a union rather than an intersection
+///
+/// **A bar is proof that the exchange traded; silence is not proof that it did
+/// not.** So a day is a session if ANY instrument observed one, and the session
+/// taken is the LONGEST any instrument measured. A shorter reading is that
+/// instrument's hole, not a shorter exchange day — the opposite rule would let
+/// one vendor's missing morning shorten the calendar for everything else, which
+/// is how an expected-bar count becomes quietly too small and a real loss stops
+/// being reported.
+///
+/// **A day outside a reading's own span is not a vote.** An instrument whose
+/// history begins in 2019 has no opinion about 2015, and counting its absence
+/// as a closure would manufacture four years of holidays. Only readings whose
+/// `first_day..=last_day` contains the day are consulted.
+///
+/// `OpenLengthUnmeasured` survives agreement only when nothing measured a
+/// length — one instrument that saw the Muhurat session's 60 minutes settles it
+/// for all of them, and that is the same "a bar is proof" rule.
+///
+/// # Cost
+///
+/// One pass over the union span, and for each day one lookup per reading —
+/// bounded by the instrument count, which is the two the engine sweeps plus
+/// whatever else the store holds. Not O(1) and not on a bar path.
+#[must_use]
+pub fn agree(readings: &[(String, Calendar)]) -> (Calendar, Vec<Disagreement>) {
+    use pull::calendar::DayKind;
+
+    let live: Vec<&(String, Calendar)> = readings
+        .iter()
+        .filter(|(_, calendar)| calendar.sessions() > 0)
+        .collect();
+    let (Some(first), Some(last)) = (
+        live.iter().map(|(_, c)| c.first_day()).min(),
+        live.iter().map(|(_, c)| c.last_day()).max(),
+    ) else {
+        return (Calendar::from_observed(&[]), Vec::new());
+    };
+
+    let mut observed: Vec<Observed> = Vec::new();
+    let mut clashes: Vec<Disagreement> = Vec::new();
+    for day in first..=last {
+        let mut longest: Option<pull::calendar::Session> = None;
+        let mut seen_by: Vec<String> = Vec::new();
+        let mut silent: Vec<String> = Vec::new();
+        let mut owed: Vec<u16> = Vec::new();
+        for (name, calendar) in &live {
+            if day < calendar.first_day() || day > calendar.last_day() {
+                continue;
+            }
+            match calendar.kind_of(day) {
+                DayKind::Open(session) => {
+                    seen_by.push(name.clone());
+                    let bars = session.bars();
+                    if !owed.contains(&bars) {
+                        owed.push(bars);
+                    }
+                    if longest.is_none_or(|held| held.bars() < bars) {
+                        longest = Some(session);
+                    }
+                }
+                // SEEN, BUT NOT SIZED. It votes for the day existing and not for its
+                // length, which is what leaving `longest` alone means.
+                DayKind::OpenLengthUnmeasured => seen_by.push(name.clone()),
+                DayKind::Closed | DayKind::Unmeasured => silent.push(name.clone()),
+            }
+        }
+        if seen_by.is_empty() {
+            continue;
+        }
+        observed.push(Observed {
+            day,
+            // `from_observed` reads `None` as "traded, length unknown", which is
+            // exactly the Muhurat case and exactly what is meant when every
+            // instrument that saw the day saw it without a minute series.
+            session: longest,
+        });
+        if !silent.is_empty() || owed.len() > 1 {
+            owed.sort_unstable();
+            seen_by.sort();
+            silent.sort();
+            clashes.push(Disagreement {
+                day,
+                seen_by,
+                silent,
+                owed,
+            });
+        }
+    }
+    (Calendar::from_observed(&observed), clashes)
+}
+
+/// The exchange calendar on the wire, with the evidence behind it.
+///
+/// A superset of [`json`]: the same `days` array, plus who it was derived from
+/// and every day they disagreed about. **The provenance is not decoration** —
+/// a calendar agreed from one instrument and a calendar agreed from six are
+/// different claims, and a caller that cannot tell them apart will trust the
+/// first as much as the second.
+#[must_use]
+pub fn exchange_json(
+    calendar: &Calendar,
+    derived_from: &[String],
+    clashes: &[Disagreement],
+) -> String {
+    use std::fmt::Write as _;
+    let inner = json(calendar);
+    // `json` closes with `]}`; the extra members are spliced before that brace
+    // rather than the whole payload rebuilt, so the two can never describe the
+    // same days differently.
+    let body = inner.strip_suffix('}').unwrap_or(&inner);
+    let mut out = String::with_capacity(body.len() + 1024);
+    out.push_str(body);
+    out.push_str(",\"derivedFrom\":[");
+    for (position, name) in derived_from.iter().enumerate() {
+        if position > 0 {
+            out.push(',');
+        }
+        out.push_str(&crate::pullrun::quote_for_json(name));
+    }
+    out.push_str("],\"disagreements\":[");
+    for (position, clash) in clashes.iter().enumerate() {
+        if position > 0 {
+            out.push(',');
+        }
+        let _ = write!(out, "{{\"day\":{},\"seenBy\":[", clash.day);
+        for (n, name) in clash.seen_by.iter().enumerate() {
+            if n > 0 {
+                out.push(',');
+            }
+            out.push_str(&crate::pullrun::quote_for_json(name));
+        }
+        out.push_str("],\"silent\":[");
+        for (n, name) in clash.silent.iter().enumerate() {
+            if n > 0 {
+                out.push(',');
+            }
+            out.push_str(&crate::pullrun::quote_for_json(name));
+        }
+        out.push_str("],\"owed\":[");
+        for (n, bars) in clash.owed.iter().enumerate() {
+            if n > 0 {
+                out.push(',');
+            }
+            let _ = write!(out, "{bars}");
+        }
+        out.push_str("]}");
+    }
+    out.push_str("]}");
+    out
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic, reason = "test-only assertions")]
+mod agreement {
+    use super::*;
+
+    /// 09:15–15:29 inclusive — the 375-minute session.
+    const FULL_RUN: [(u16, u16); 1] = [(555, 929)];
+    /// A 60-minute Muhurat session.
+    const SHORT_RUN: [(u16, u16); 1] = [(555, 614)];
+
+    /// **A BAR IS PROOF; SILENCE IS NOT.**
+    ///
+    /// Two halves in one test because they are one rule. A day only one
+    /// instrument saw is still a session — the other has a hole, and the hole is
+    /// reported rather than allowed to close the exchange. A day that falls
+    /// outside an instrument's own history is not that instrument voting
+    /// "closed": it has no opinion, and counting its absence would manufacture
+    /// holidays for every year before it started.
+    #[test]
+    fn a_day_one_instrument_missed_is_a_session_and_a_day_it_predates_is_not_its_vote() {
+        let nifty = Calendar::from_observed(&[
+            Observed::from_runs(100, &FULL_RUN),
+            Observed::from_runs(101, &FULL_RUN),
+        ]);
+        let banknifty = Calendar::from_observed(&[
+            Observed::from_runs(100, &FULL_RUN),
+            Observed::from_runs(102, &FULL_RUN),
+        ]);
+        let (exchange, clashes) = agree(&[
+            ("NIFTY".to_owned(), nifty),
+            ("BANKNIFTY".to_owned(), banknifty),
+        ]);
+
+        assert_eq!(exchange.sessions(), 3, "the union, not the intersection");
+        assert_eq!(exchange.expected_bars(101), Some(375));
+        assert_eq!(exchange.expected_bars(102), Some(375));
+
+        // Day 101 is in BANKNIFTY's span and missing from its store: a hole,
+        // and named. Day 102 is past NIFTY's last day, so NIFTY is not silent
+        // about it -- it was never asked.
+        assert_eq!(clashes.len(), 1, "{clashes:?}");
+        let only = clashes.first().expect("one clash");
+        assert_eq!(only.day, 101);
+        assert_eq!(only.seen_by, ["NIFTY"]);
+        assert_eq!(only.silent, ["BANKNIFTY"]);
+    }
+
+    /// **THE LONGEST READING WINS, because a short one is that store's hole.**
+    ///
+    /// The opposite rule is the dangerous one: letting a vendor's missing
+    /// morning shorten the exchange day makes every expected-bar count for that
+    /// day too small, so a real loss stops being reported as a loss.
+    #[test]
+    fn the_longest_session_measured_is_the_one_the_exchange_gets() {
+        let whole = Calendar::from_observed(&[Observed::from_runs(200, &FULL_RUN)]);
+        let holed = Calendar::from_observed(&[Observed::from_runs(200, &SHORT_RUN)]);
+        let (exchange, clashes) =
+            agree(&[("HOLED".to_owned(), holed), ("WHOLE".to_owned(), whole)]);
+
+        assert_eq!(exchange.expected_bars(200), Some(375));
+        let only = clashes.first().expect("a length disagreement is a clash");
+        assert_eq!(only.owed, [60, 375], "ascending, and both are reported");
+        assert!(only.silent.is_empty(), "neither was silent: {only:?}");
+        assert_eq!(only.seen_by, ["HOLED", "WHOLE"]);
+    }
+
+    /// **ONE MEASUREMENT SETTLES A MUHURAT FOR ALL OF THEM.**
+    ///
+    /// `OpenLengthUnmeasured` means "a daily bar proves it traded and no minute
+    /// bar sizes it". That is a property of a STORE, not of the exchange, so it
+    /// survives agreement only while nothing measured a length — and the moment
+    /// one instrument did, withholding the number would be refusing evidence
+    /// rather than declining to invent it.
+    #[test]
+    fn an_unsized_day_stays_unsized_only_until_something_sizes_it() {
+        let blind = Calendar::from_observed(&[Observed::from_runs(300, &[])]);
+        let alsoblind = Calendar::from_observed(&[Observed::from_runs(300, &[])]);
+        let (dark, _) = agree(&[("A".to_owned(), blind.clone()), ("B".to_owned(), alsoblind)]);
+        assert_eq!(dark.expected_bars(300), None, "nothing measured it");
+
+        let sighted = Calendar::from_observed(&[Observed::from_runs(300, &SHORT_RUN)]);
+        let (lit, _) = agree(&[("A".to_owned(), blind), ("B".to_owned(), sighted)]);
+        assert_eq!(
+            lit.expected_bars(300),
+            Some(60),
+            "one measurement is enough"
+        );
+    }
+
+    /// **A FEED THAT HOLDS NOTHING CANNOT CLOSE THE EXCHANGE.**
+    ///
+    /// `site.entries` spans every vendor, so asking one feed's store for an
+    /// instrument only another carries reads no files and yields an empty
+    /// calendar. Counted as agreement it would vote "closed" on every day there
+    /// is, which is the confident wrong answer this module exists to remove.
+    #[test]
+    fn an_empty_reading_is_excluded_rather_than_counted_as_closed() {
+        let real = Calendar::from_observed(&[Observed::from_runs(400, &FULL_RUN)]);
+        let (exchange, clashes) = agree(&[
+            ("ABSENT".to_owned(), Calendar::from_observed(&[])),
+            ("REAL".to_owned(), real),
+        ]);
+        assert_eq!(exchange.sessions(), 1);
+        assert!(clashes.is_empty(), "{clashes:?}");
+
+        let (nothing, none) = agree(&[]);
+        assert_eq!(nothing.sessions(), 0);
+        assert!(none.is_empty());
+    }
+
+    /// **THE PROVENANCE TRAVELS WITH THE ANSWER.**
+    ///
+    /// A calendar agreed from one instrument and one agreed from six are
+    /// different claims. A caller that cannot tell them apart trusts the first
+    /// as much as the second, so `derivedFrom` is on the wire beside the days
+    /// rather than left for a reader to assume.
+    #[test]
+    fn the_exchange_wire_carries_who_it_was_derived_from_and_where_they_differed() {
+        let nifty = Calendar::from_observed(&[
+            Observed::from_runs(500, &FULL_RUN),
+            Observed::from_runs(501, &FULL_RUN),
+        ]);
+        let vix = Calendar::from_observed(&[
+            Observed::from_runs(500, &FULL_RUN),
+            Observed::from_runs(501, &SHORT_RUN),
+        ]);
+        let readings = [("NIFTY".to_owned(), nifty), ("INDIAVIX".to_owned(), vix)];
+        let (exchange, clashes) = agree(&readings);
+        let from: Vec<String> = readings.iter().map(|(name, _)| name.clone()).collect();
+        let wire = exchange_json(&exchange, &from, &clashes);
+
+        assert!(wire.starts_with('{') && wire.ends_with('}'), "{wire}");
+        assert!(wire.contains("\"days\":["), "{wire}");
+        assert!(wire.contains("{\"day\":500,\"owed\":375}"), "{wire}");
+        assert!(
+            wire.contains("\"derivedFrom\":[\"NIFTY\",\"INDIAVIX\"]"),
+            "{wire}"
+        );
+        assert!(
+            wire.contains(
+                "{\"day\":501,\"seenBy\":[\"INDIAVIX\",\"NIFTY\"],\"silent\":[],\"owed\":[60,375]}"
+            ),
+            "{wire}"
+        );
+
+        // The per-symbol payload is untouched: no caller of `json` gains fields
+        // it did not ask for.
+        assert!(!json(&exchange).contains("derivedFrom"));
+    }
+}

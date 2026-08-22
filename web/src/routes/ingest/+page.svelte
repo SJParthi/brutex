@@ -961,152 +961,100 @@
   // block below: the only bound that may take a day away from the operator is
   // the FEED's, because that is the one his own choice can move.
   //
-  // THE HOLIDAY TABLE IS THE ONE THING HERE THAT CANNOT BE COMPUTED, and no
-  // route on this server states it: `crates/api/src/server.rs`'s router carries
-  // no calendar endpoint, and `crates/api/src/calendar.rs` renders a day picker
-  // that knows about years and month lengths, not about trading days. So the
-  // table is checked in HERE, dated, and it MUST MOVE SERVER-SIDE — the store
-  // knows which days it holds bars for and the browser is guessing beside it.
+  // THE TRADING CALENDAR IS THE SERVER'S NOW, AND THIS PAGE STOPPED GUESSING.
   //
-  // WHAT HAPPENS WHEN IT RUNS OUT is stated rather than hidden. Past
-  // `HOL_THRU` a weekday is treated as a session, which will call a holiday a
-  // session — and every sentence built from it says so. The alternative was
-  // freezing the ceiling on the table's last day, which is a page whose "newest
-  // day" stops moving and never explains why. `CLAUDE.md` §4: degrade loudly
-  // and name the reason.
+  // Four tables used to sit here — 95 holidays, 8 weekend sessions, 4 short
+  // sessions and 5 days with no minute series — typed into the browser beside
+  // `crates/pull/src/calendar.rs`'s four, derived from the same bars on the same
+  // afternoon and checked against each other by nothing. The comment that stood
+  // here said it plainly, and this is it being done: *it MUST MOVE SERVER-SIDE
+  // — the store knows which days it holds bars for and the browser is guessing
+  // beside it.*
+  //
+  // D-0274 built `/calendar.json`, D-0278 taught it to answer for the EXCHANGE
+  // rather than for one instrument, and this deletion is what P-03 was open on.
+  //
+  // WHAT ARRIVES IS DAYS, NOT RULES. The payload lists every day the exchange
+  // traded and how many minute bars each owed, so a Muhurat that ran 60 minutes
+  // is 60 here rather than a special case, and a day whose length was never
+  // measured is `null` rather than a confident 375. Nothing on this page
+  // reconstructs a holiday rule from that, because it does not need one: a day
+  // absent from the list inside the span is a day the exchange did not trade.
+  //
+  // WHAT HAPPENS BEFORE IT ARRIVES, AND OUTSIDE ITS SPAN, is unchanged and still
+  // stated rather than hidden — a weekday is ASSUMED to be a session and every
+  // sentence built from it says so. `holidaysKnownFor` is the flag that decides,
+  // and it is false until the fetch lands. `CLAUDE.md` §4: degrade loudly and
+  // name the reason.
 
   /**
-   * The first day the table below is complete for.
+   * The exchange calendar, as the store knows it.
    *
-   * WAS `2024-09-01`, which is why this page reported six complete series as
-   * SHORT: a window opening 2019-12-02 had almost five years in which every
-   * weekday was assumed to be a session. The table is now derived from bars and
-   * starts where the bars do.
+   * @type {{
+   *   first: string, last: string,
+   *   owed: Map<string, number|null>,
+   *   from: string[], clashes: number, why: string
+   * }}
    */
-  const HOL_FROM = '2019-12-02';
-  /**
-   * The last day the table is MEASURED for — the newest bar the derivation saw.
-   *
-   * Distinct from `HOL_THRU` on purpose: between these two the table is a
-   * forecast carried over from the old hand-typed list, and a forecast that
-   * calls itself a measurement is the kind of claim `CLAUDE.md` §3 rule 1
-   * exists to stop. The old table was wrong on five of its own dates.
-   */
-  const HOL_MEASURED_THRU = '2026-08-21';
-  /** The last day it covers at all. After this, weekday-only — and every reader is told. */
-  const HOL_THRU = '2026-12-31';
-  // MEASURED FROM THE EXCHANGE'S OWN RECORD, NOT TYPED FROM A PAGE.
-  //
-  // Every date to 2026-08-21 is a weekday on which NIFTY, BANKNIFTY and
-  // INDIAVIX all produced no `1day` bar in the operator's store — three
-  // instruments agreeing, over 1,671 trading days. `crates/pull/src/calendar.rs`
-  // holds the same list on the Rust side and reconciles it:
-  //
-  //     1,755 weekdays - 92 holidays + 8 weekend sessions = 1,671 on disk
-  //
-  // WHAT THIS REPLACED, AND WHAT IT COST. The old table had 28 dates and began
-  // at 2024-09-01, so every weekday before that was assumed to be a session.
-  // Against a window opening 2019-12-02 it knew 24 non-trading days where there
-  // are 92, and all six stored series therefore reported SHORT while every one
-  // of them was complete. An alarm that fires on complete data hides the real
-  // gap among the false ones.
-  //
-  // It was also WRONG on five dates it did name. 2024-11-01 and 2025-10-21 were
-  // called holidays and are Muhurat sessions the exchange traded; 2026-03-04,
-  // 2026-03-19 and 2026-04-01 were called holidays and hold 375 bars each. The
-  // measured list puts the 2026 holidays on 03-03, 03-26, 03-31 and 04-03.
-  const HOLIDAYS = new Set([
-    '2019-12-25', '2020-02-21', '2020-03-10', '2020-04-02', '2020-04-06', '2020-04-10',
-    '2020-04-14', '2020-05-01', '2020-05-25', '2020-10-02', '2020-11-16', '2020-11-30',
-    '2020-12-25', '2021-01-26', '2021-03-11', '2021-03-29', '2021-04-02', '2021-04-14',
-    '2021-04-21', '2021-05-13', '2021-07-21', '2021-08-19', '2021-09-10', '2021-10-15',
-    '2021-11-05', '2021-11-19', '2022-01-26', '2022-03-01', '2022-03-18', '2022-04-14',
-    '2022-04-15', '2022-05-03', '2022-08-09', '2022-08-15', '2022-08-31', '2022-10-05',
-    '2022-10-26', '2022-11-08', '2023-01-26', '2023-03-07', '2023-03-30', '2023-04-04',
-    '2023-04-07', '2023-04-14', '2023-05-01', '2023-06-29', '2023-08-15', '2023-09-19',
-    '2023-10-02', '2023-10-24', '2023-11-14', '2023-11-27', '2023-12-25', '2024-01-22',
-    '2024-01-26', '2024-03-08', '2024-03-25', '2024-03-29', '2024-04-11', '2024-04-17',
-    '2024-05-01', '2024-05-20', '2024-06-17', '2024-07-17', '2024-08-15', '2024-10-02',
-    '2024-11-15', '2024-11-20', '2024-12-25', '2025-02-26', '2025-03-14', '2025-03-31',
-    '2025-04-10', '2025-04-14', '2025-04-18', '2025-05-01', '2025-08-15', '2025-08-27',
-    '2025-10-02', '2025-10-22', '2025-11-05', '2025-12-25', '2026-01-15', '2026-01-26',
-    '2026-03-03', '2026-03-26', '2026-03-31', '2026-04-03', '2026-04-14', '2026-05-01',
-    '2026-05-28', '2026-06-26',
-    // BEYOND THE MEASURED WINDOW these three are a FORECAST, carried over from
-    // the old table and unverifiable here — no bar past 2026-08-21 exists to
-    // check them against. See `HOL_MEASURED_THRU`.
-    '2026-10-02', '2026-11-09', '2026-12-25'
-  ]);
+  let calendar = $state({ first: '', last: '', owed: new Map(), from: [], clashes: 0, why: '' });
 
-  // WEEKDAYS ARE NOT THE RULE, AND THESE EIGHT DAYS ARE WHY.
-  //
-  // `isSession` returned false for every Saturday and Sunday, which silently
-  // excluded three Budget days, two Muhurat sessions and three
-  // disaster-recovery live tests — all of which traded and all of which have
-  // bars on disk. `docs/06-limits.md` P-03 named one of them years before this
-  // list existed: "it records 2025-02-01, a Saturday, as a full 375-bar
-  // session".
-  // NOT EVERY SESSION IS 375 MINUTES, AND MULTIPLYING SAYS IT IS.
-  //
-  // Measured off the stored bars on 2026-08-22, the same way the holiday list
-  // was. Four days in the window traded a session that was never 09:15–15:29,
-  // and `sessions × 375` claims 1,176 bars that the exchange never offered:
-  //
-  //   2021-02-24   54 bars  09:15–10:08  — the exchange halted, an outage shape
-  //   2024-03-02  105 bars  two windows  — disaster-recovery live test
-  //   2024-05-18  105 bars  two windows  — disaster-recovery live test
-  //   2025-10-21   60 bars  13:45–14:44  — Muhurat
-  //
-  // Without this a Muhurat hour reads as 315 missing bars, which is the false
-  // alarm the holiday table was fixed to stop, arriving one rung down.
-  const SHORT_SESSIONS = new Map([
-    ['2021-02-24', 54],
-    ['2024-03-02', 105],
-    ['2024-05-18', 105],
-    ['2025-10-21', 60]
-  ]);
+  /** An epoch day as `YYYY-MM-DD`. UTC midnight, like every other date here. */
+  /** @param {number} day */
+  function isoOfEpochDay(day) {
+    return new Date(day * 86_400_000).toISOString().slice(0, 10);
+  }
 
-  /**
-   * Minute bars a full NSE equity session holds: 09:15 to 15:29 inclusive.
-   *
-   * 375 and not 376, because the close is EXCLUSIVE — 15:30 is
-   * `AtOrAfterSessionClose` in `crates/pull/src/session.rs`. Expecting a 15:30
-   * bar would report one phantom hole on every one of the 1,671 days.
-   */
-  const FULL_SESSION_BARS = 375;
+  /** @param {string|null} feed */
+  async function loadCalendar(feed) {
+    if (!feed) return;
+    try {
+      const response = await request(`/calendar.json?feed=${encodeURIComponent(feed)}`, {
+        cache: 'no-store'
+      });
+      if (!response.ok) {
+        calendar = {
+          first: '',
+          last: '',
+          owed: new Map(),
+          from: [],
+          clashes: 0,
+          why: `/calendar.json answered ${response.status}, so no measured calendar is available and every weekday below is ASSUMED to be a session`
+        };
+        return;
+      }
+      const body = await response.json();
+      /** @type {Map<string, number|null>} */
+      const owed = new Map();
+      for (const entry of body?.days ?? []) {
+        owed.set(isoOfEpochDay(entry.day), entry.owed ?? null);
+      }
+      calendar = {
+        first: owed.size ? isoOfEpochDay(body.firstDay) : '',
+        last: owed.size ? isoOfEpochDay(body.lastDay) : '',
+        owed,
+        from: body?.derivedFrom ?? [],
+        clashes: (body?.disagreements ?? []).length,
+        why: owed.size ? '' : 'the store holds no bars for this feed, so there is no calendar to derive'
+      };
+    } catch (error) {
+      calendar = {
+        first: '',
+        last: '',
+        owed: new Map(),
+        from: [],
+        clashes: 0,
+        why:
+          error instanceof Error
+            ? `the calendar request failed (${error.message}), so every weekday below is ASSUMED to be a session`
+            : 'the calendar request failed, so every weekday below is ASSUMED to be a session'
+      };
+    }
+  }
 
-  // TRADED, AND THE MINUTE SERIES DOES NOT REACH THEM.
-  //
-  // Every Diwali Muhurat before 2025. Each has a `1day` bar — the exchange
-  // traded — and not one minute bar anywhere in the store: 1,671 days of daily
-  // bars against 1,666 of minute bars, and this is the difference.
-  //
-  // They are excluded from the MINUTE expectation rather than counted at 375 or
-  // at 0. Counting 375 claims 1,875 bars Zerodha does not hold and can never
-  // return; counting 0 would say the exchange was shut when a daily bar proves
-  // otherwise. The honest number is unknown, so the minute rung does not claim
-  // one — `crates/pull/src/calendar.rs` calls this `OpenLengthUnmeasured`.
-  const NO_MINUTE_SERIES = new Set([
-    '2020-11-14',
-    '2021-11-04',
-    '2022-10-24',
-    '2023-11-12',
-    '2024-11-01'
-  ]);
-
-  const WEEKEND_SESSIONS = new Set([
-    '2020-02-01', // Budget, Saturday
-    '2020-11-14', // Muhurat
-    '2023-11-12', // Muhurat, a Sunday
-    '2024-01-20', // disaster-recovery live test
-    '2024-03-02', // disaster-recovery live test
-    '2024-05-18', // disaster-recovery live test
-    '2025-02-01', // Budget
-    '2026-02-01'  // Budget, a Sunday
-  ]);
-
-  /** How many holidays that table names. Counted from it, never written twice. */
-  const HOLIDAY_COUNT = HOLIDAYS.size;
+  $effect(() => {
+    const feed = feeds.active;
+    untrack(() => loadCalendar(feed));
+  });
 
   const DAYNAME = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
   /** 0 = Sunday. Built at UTC midnight like every other date here, so no zone moves it. */
@@ -1118,27 +1066,36 @@
   /** Whether the NSE traded that day, as far as this page can honestly say. */
   /** @param {string} isoDay */
   function isSession(isoDay) {
-    // THE WEEKEND EXCEPTION IS CHECKED FIRST, because it OVERRIDES the day of
-    // the week rather than qualifying it: eight of these traded.
-    if (WEEKEND_SESSIONS.has(isoDay)) return true;
+    // INSIDE THE MEASURED SPAN THE LIST IS THE ANSWER, and it needs no weekend
+    // exception: the eight Saturdays that traded are simply in it, and the
+    // holidays are simply not. That is the whole reason days beat rules.
+    if (holidaysKnownFor(isoDay)) return calendar.owed.has(isoDay);
     const w = weekdayOf(isoDay);
-    if (w === 0 || w === 6) return false;
-    return !HOLIDAYS.has(isoDay);
+    return w !== 0 && w !== 6;
   }
   /** Why a day holds no bars, or `null` when it is a session. */
   /** @param {string} isoDay */
   function noSessionWhy(isoDay) {
-    if (WEEKEND_SESSIONS.has(isoDay)) return null;
+    if (isSession(isoDay)) return null;
     const w = weekdayOf(isoDay);
     if (w === 0 || w === 6) return `${DAYNAME[w]}, no session`;
-    if (HOLIDAYS.has(isoDay)) return 'NSE holiday, no session';
-    return null;
+    // A WEEKDAY THE STORE HOLDS NO SESSION FOR. The calendar is days and not
+    // rules, so it cannot say *which* holiday — only that the exchange was shut,
+    // which is the fact that matters here.
+    return 'NSE holiday, no session';
   }
-  /** Whether the holiday table actually covers a day, or is only guessing weekends. */
+  /** Whether the derived calendar actually covers a day, or the page is guessing weekends. */
   /** @param {string} isoDay */
   function holidaysKnownFor(isoDay) {
-    return isoDay >= HOL_FROM && isoDay <= HOL_THRU;
+    return calendar.owed.size > 0 && isoDay >= calendar.first && isoDay <= calendar.last;
   }
+
+  /** The measured span in words, for the two sentences that must name it. */
+  const calendarSpan = $derived(
+    calendar.owed.size
+      ? `${dayLabel(calendar.first)} – ${dayLabel(calendar.last)}`
+      : calendar.why || `no measured span yet`
+  );
 
   /** NSE equity close, 15:30 IST. The minute a session stops being partial. */
   const CLOSE_MIN = 15 * 60 + 30;
@@ -2481,7 +2438,7 @@
   const ceilReason = $derived.by(() => {
     const today = istToday;
     const guessing = !holidaysKnownFor(today)
-      ? ` This page's NSE holiday table covers ${dayLabel(HOL_FROM)} – ${dayLabel(HOL_THRU)} and today is outside it, so a weekday here is ASSUMED to be a session — an NSE holiday would be offered and would come back empty.`
+      ? ` The exchange calendar the store derives from this feed's own bars covers ${calendarSpan} and today is outside it, so a weekday here is ASSUMED to be a session — an NSE holiday would be offered and would come back empty.`
       : '';
     if (isSession(today) && istMin < CLOSE_MIN) {
       return `Today, ${dayLabel(today)}, is a trading session and it has not closed yet — NSE closes 15:30 IST and it is ${pad(Math.floor(istMin / 60))}:${pad(istMin % 60)} — so no feed has a final bar for it. The newest day that can be asked for is ${dayLabel(maxDay)}, the last session that closed.${guessing}`;
@@ -4537,7 +4494,6 @@
     }
     return m;
   });
-
   /**
    * Minute bars each month's sessions actually owe — **summed, never multiplied**.
    *
@@ -4548,23 +4504,30 @@
    * every one of them was complete but for 28 minutes.
    *
    * The 3,051 difference is not mysterious and is not one bug:
-   *   1,176 — four sessions that were never 375 minutes ([`SHORT_SESSIONS`])
-   *   1,875 — five Muhurat days the minute series does not reach
-   *           ([`NO_MINUTE_SERIES`]), 375 apiece
+   *   1,176 — four sessions that were never 375 minutes
+   *   1,875 — five Muhurat days the minute series does not reach, 375 apiece
    *
-   * A day in `NO_MINUTE_SERIES` contributes **nothing**, which is deliberate and
-   * is not the same as contributing zero bars: the daily rung still counts it as
-   * a session, because a `1day` bar for it exists. Only the minute expectation
-   * declines to name a number nobody has measured.
+   * **THE NUMBERS ARE NO LONGER THIS PAGE'S TO KNOW.** They used to come from
+   * two tables typed in above; they now come from `owed` on `/calendar.json`,
+   * which the store derived from the bars themselves. A short session is simply
+   * a smaller `owed`, and a day whose length was never measured arrives as
+   * `null` — which contributes **nothing**, deliberately, and is not the same as
+   * contributing zero. The daily rung still counts such a day as a session,
+   * because a `1day` bar for it exists; only the minute expectation declines to
+   * name a number nobody has measured.
+   *
+   * Outside the calendar's span there is no `owed` to read, so nothing is added
+   * and nothing is invented — the same silence `holidaysKnownFor` reports.
    */
   const minuteBarsByMonth = $derived.by(() => {
     const m = new Map();
     if (!windowOk) return m;
     let d = from;
     while (d <= to) {
-      if (isSession(d) && !NO_MINUTE_SERIES.has(d)) {
+      const owed = calendar.owed.get(d);
+      if (typeof owed === 'number') {
         const ym = d.slice(0, 7);
-        m.set(ym, (m.get(ym) ?? 0) + (SHORT_SESSIONS.get(d) ?? FULL_SESSION_BARS));
+        m.set(ym, (m.get(ym) ?? 0) + owed);
       }
       d = addDays(d, 1);
     }
@@ -6074,14 +6037,14 @@
   /** @param {string} isoDay */
   function dayNote(isoDay) {
     const ns = noSessionWhy(isoDay);
-    // THREE STATES, NOT TWO. Measured from bars, forecast beyond them, or
-    // outside the table entirely — and a forecast that reads like a
-    // measurement is what put five wrong dates in the table this replaced.
-    const approx = !holidaysKnownFor(isoDay)
-      ? ` · this page's NSE holiday table covers ${dayLabel(HOL_FROM)} – ${dayLabel(HOL_THRU)} only, so outside it a weekday is assumed to be a session`
-      : isoDay > HOL_MEASURED_THRU
-        ? ` · past ${dayLabel(HOL_MEASURED_THRU)} this page's holiday table is a FORECAST, not measured from bars — a holiday it misses would be offered and would come back empty`
-        : '';
+    // TWO STATES NOW, NOT THREE. The third was "forecast": the table this
+    // replaced was measured to 2026-08-21 and hand-carried to 2026-12-31, and a
+    // forecast that reads like a measurement is what put five wrong dates in it.
+    // A calendar derived from bars has no such region — it ends where the bars
+    // end, and past that the page says so rather than projecting.
+    const approx = holidaysKnownFor(isoDay)
+      ? ''
+      : ` · outside ${calendarSpan}, the span this feed's own bars measure, so a weekday here is assumed to be a session and an NSE holiday would be offered and come back empty`;
     const ceiling = isoDay === maxDay ? ` · the newest day that can be asked for. ${ceilReason}` : '';
     return `${dayLabel(isoDay)} · ${ns ?? 'trading session'}${approx}${ceiling}`;
   }
