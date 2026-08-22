@@ -3031,8 +3031,7 @@
     align-items: center;
     gap: 0.8rem;
   }
-  .path code,
-  .ident code {
+  .path code {
     font-size: 0.78rem;
     color: var(--n10);
     word-break: break-all;
@@ -3565,15 +3564,6 @@
   .card.gap {
     border-style: dashed;
   }
-  .card h3 {
-    margin: 0;
-    font-size: 0.88rem;
-    color: var(--n12);
-    display: flex;
-    gap: 0.5rem;
-    align-items: center;
-    flex-wrap: wrap;
-  }
   .cnote {
     margin: 0;
     font-size: 0.76rem;
@@ -3634,18 +3624,6 @@
     gap: 0.15rem 0.6rem;
     margin: 0;
     font-size: 0.76rem;
-  }
-  .kv dt {
-    color: var(--n8);
-  }
-  .kv dd {
-    margin: 0;
-    text-align: right;
-    color: var(--n11);
-    font-variant-numeric: tabular-nums;
-  }
-  .kv dd.neg {
-    color: var(--down);
   }
 
   .exc {
@@ -3719,9 +3697,6 @@
     color: var(--n11);
     font-variant-numeric: tabular-nums;
   }
-  .axis.unused .axis-v {
-    color: var(--n8);
-  }
 
   /* ---------------- buttons ---------------- */
   .btn {
@@ -3782,9 +3757,6 @@
     color: var(--n8);
     font-variant-numeric: tabular-nums;
   }
-  .chart-facts .warnt {
-    color: var(--warn);
-  }
   /* A HEIGHT IN PIXELS AND A REFUSAL TO SHRINK, and both halves are a fix for
      a measured bug. `autoSize` measures its host, so a host with no height
      measures zero; and `.card` is a column flex container, where a child
@@ -3836,19 +3808,11 @@
     padding: 1rem 1.1rem 1.1rem;
     animation: arrive 0.35s cubic-bezier(0.22, 0.7, 0.3, 1) both;
   }
-  .report > * {
-    flex: 0 0 auto;
-  }
   .rep-head {
     display: flex;
     align-items: baseline;
     gap: 0.6rem;
     flex-wrap: wrap;
-  }
-  .rep-head h3 {
-    margin: 0;
-    font-size: 0.95rem;
-    color: var(--n12);
   }
   .rep-sub {
     font-size: 0.74rem;
@@ -3896,11 +3860,6 @@
   }
 
   /* ---- benchmark ---- */
-  .bench h4 {
-    margin: 0 0 0.5rem;
-    font-size: 0.82rem;
-    color: var(--n11);
-  }
   .bcmp {
     display: flex;
     flex-direction: column;
@@ -3947,12 +3906,6 @@
     color: var(--n12);
     font-weight: 600;
   }
-  .cnote .up {
-    color: var(--up);
-  }
-  .cnote .down {
-    color: var(--down);
-  }
   .spin.sm {
     width: 10px;
     height: 10px;
@@ -3961,27 +3914,20 @@
     margin-right: 0.35rem;
   }
 
-  /* ---- the coverage table ----
-     A `<details>` because it is long and it is REFERENCE: an operator reads
-     it once to learn what this surface can and cannot answer, then never
-     again. Collapsed by default, and never removed -- the whole point is
-     that the gaps are documented rather than merely absent. */
+  /* ---- the coverage bar ----
+     `.cover` now styles a `<span>` progress bar in the run table — "N of M
+     months on disk". It used to head a `<details>` reference table, and the
+     comment here said that table was "never removed -- the whole point is
+     that the gaps are documented rather than merely absent". IT IS REMOVED.
+     The markup went, these two properties stayed, and the four `summary`
+     rules under them styled nothing until Gate W4 refused the build. The
+     claim went with them, because a comment that keeps asserting a guarantee
+     the page no longer delivers is the exact failure that gate is for. If the
+     documented gaps are wanted back they are a surface to rebuild, not a
+     sentence to restore. */
   .cover {
     border-top: 1px solid var(--n5);
     padding-top: 0.75rem;
-  }
-  .cover summary {
-    cursor: pointer;
-    font-size: 0.8rem;
-    color: var(--n10);
-    padding: 0.2rem 0;
-  }
-  .cover summary:hover {
-    color: var(--acc);
-  }
-  .cover summary:focus-visible {
-    outline: 2px solid var(--focus);
-    outline-offset: 2px;
   }
   .covtbl-wrap {
     overflow-x: auto;
@@ -3994,34 +3940,6 @@
     min-width: 560px;
     border-collapse: collapse;
     font-size: 0.78rem;
-  }
-  .covtbl th {
-    text-align: left;
-    background: var(--n2);
-    color: var(--n8);
-    font-size: 0.64rem;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    font-weight: 600;
-    padding: 0.5rem 0.7rem;
-    border-bottom: 1px solid var(--n6);
-  }
-  .covtbl td {
-    padding: 0.45rem 0.7rem;
-    border-bottom: 1px solid var(--n5);
-    color: var(--n9);
-    vertical-align: top;
-  }
-  .covtbl tr:last-child td {
-    border-bottom: 0;
-  }
-  .covtbl td:first-child {
-    color: var(--n11);
-    white-space: nowrap;
-  }
-  .covtbl .pill.bad {
-    background: var(--down-soft);
-    color: var(--down);
   }
 
   /* ================= THE STRATEGY TESTER =================
@@ -4464,8 +4382,7 @@
 
   /* A STAT ARRIVES WITH ITS LABEL, staggered across the row so the eye
      is carried left to right rather than hit with four at once. */
-  .tester .tt-quad > .tt-q,
-  .tester .tt-stats > .tt-q {
+  .tester .tt-quad > .tt-q {
     animation: liftin 0.4s cubic-bezier(0.22, 0.7, 0.3, 1) both;
   }
   .tester .tt-quad > .tt-q:nth-child(1) { animation-delay: 0.04s; }
@@ -4545,7 +4462,6 @@
     .tester .cf-svg rect,
     .tester .tt-sec,
     .tester .tt-quad > .tt-q,
-    .tester .tt-stats > .tt-q,
     .tester .tt-tbl tbody tr,
     .tester .tt-brow,
     .tester .tt-plrow,
@@ -4575,9 +4491,6 @@
     font-size: 0.73rem;
     color: var(--n8);
     max-width: 96ch;
-  }
-  .cf-note b {
-    color: var(--n10);
   }
 
   /* ---- the chart frame ---- */
@@ -4719,9 +4632,6 @@
     display: flex;
     align-items: center;
     gap: 0.5rem;
-  }
-  .tt-donutleg .v {
-    margin-left: auto;
   }
   .tt-donutleg .sw {
     width: 9px;
@@ -5408,20 +5318,6 @@
     display: flex;
     flex-direction: column;
     gap: 0.3rem;
-  }
-  .tt-plots li {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.5rem;
-    font-size: 0.76rem;
-    color: var(--n11);
-    padding: 0.22rem 0.45rem;
-    border-radius: 5px;
-    background: var(--n2);
-  }
-  .tt-plots li.off {
-    color: var(--n8);
   }
   .tt-dot {
     width: 8px;
