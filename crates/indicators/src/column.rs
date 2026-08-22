@@ -376,7 +376,7 @@ impl Column {
     /// per candidate — `CLAUDE.md` §3 rule 4 governs the sweep's inner
     /// operations and this is not one of them.
     #[must_use]
-    pub fn reproject(&self, onto: &[Option<usize>]) -> Option<(Self, u64)> {
+    pub fn reproject(&self, onto: &[Option<usize>], onto_len: usize) -> Option<(Self, u64)> {
         if onto.len() != self.bits.len() {
             return None;
         }
@@ -404,11 +404,13 @@ impl Column {
         // Carrying the signal series' value would name a bar in the wrong
         // series, and it is the field `sources` exists to keep honest.
         let first_swept = source.first().copied();
+        let mut census = self.census;
+        census.offered = onto_len as u64;
         Some((
             Self {
                 bits,
                 source,
-                census: self.census,
+                census,
                 first_swept,
             },
             dropped,
@@ -457,7 +459,7 @@ impl Column {
               instrumented, so it leaves no uncoverable region behind the way an \
               `unreachable!` expanding in this crate would."
 )]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::OI_NULL;
     use crate::evaluator::Widths;
@@ -481,7 +483,7 @@ mod tests {
         Widths::pinned().expect("both pinned widths are valid")
     }
 
-    fn evaluator(availability: Availability) -> Evaluator {
+    pub(super) fn evaluator(availability: Availability) -> Evaluator {
         Evaluator::new(widths(), availability, Thresholds::CLASSICAL)
     }
 
@@ -512,7 +514,7 @@ mod tests {
     }
 
     /// `sessions` consecutive trading days of `BARS_PER_SESSION` bars each.
-    fn run(sessions: i64) -> Vec<Candle> {
+    pub(super) fn run(sessions: i64) -> Vec<Candle> {
         let mut out = Vec::with_capacity(usize::try_from(sessions).unwrap_or(0) * BARS_PER_SESSION);
         for day in 0..sessions {
             for minute in 0..BARS_PER_SESSION {
@@ -1085,5 +1087,94 @@ mod tests {
         assert_eq!(column.census().warming, first as u64);
         assert_eq!(column.census().refused(), 0);
         assert!(first > 0, "a run cannot be warm on its first bar");
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "the exception every test module in this workspace takes"
+)]
+mod reproject_tests {
+    use super::Column;
+    use super::tests::{evaluator as build_evaluator, run};
+    use crate::vwap::Availability;
+
+    /// A reprojected column must PAIR with a `Forward` from the series it now
+    /// indexes.
+    ///
+    /// `outcome::edge` computes
+    /// `forward.built_from_same_slice_as(column.census().offered)`, so `offered`
+    /// is not only a description of what was handed in — it is the slice
+    /// IDENTITY the pairing check reads.
+    ///
+    /// MEASURED before this was fixed, on `zerodha NIFTY 60min`: a column
+    /// reprojected onto 623,546 one-minute bars still claimed 10,400 offered, so
+    /// every hit landed in `Edge::mismatched` and every row of the report read
+    /// "MISPAIRED — the forward outcomes belong to other bars".
+    #[test]
+    fn a_reprojected_column_claims_the_slice_it_now_indexes() {
+        let bars = run(6);
+        let mut ev = build_evaluator(Availability::Absent);
+        let column = Column::build(&bars, &mut ev);
+        assert!(!column.is_empty(), "the fixture must produce rows");
+
+        // Every row maps onto a much larger series, as a 1-minute execution
+        // series is larger than any signal rung.
+        let onto: Vec<Option<usize>> = (0..column.len()).map(Some).collect();
+        let (projected, dropped) = column
+            .reproject(&onto, 9_999)
+            .expect("the map is parallel to the column");
+
+        assert_eq!(dropped, 0);
+        assert_eq!(
+            projected.census().offered,
+            9_999,
+            "the census must name the slice this column now indexes, not the \
+             one it came from -- `outcome::edge` reads it as the pairing key"
+        );
+        // AND THE REST OF THE CENSUS IS THE SIGNAL SERIES', unchanged. Those
+        // bars really were swept; reducing the count here would make `swept` a
+        // lie about work that happened.
+        assert_eq!(
+            projected.census().swept,
+            column.census().swept,
+            "swept describes the signal bars and does not move"
+        );
+        assert_eq!(projected.census().warming, column.census().warming);
+    }
+
+    /// Dropped rows are counted and removed, and nothing else shifts.
+    #[test]
+    fn a_row_with_no_execution_bar_is_dropped_and_counted() {
+        let bars = run(6);
+        let mut ev = build_evaluator(Availability::Absent);
+        let column = Column::build(&bars, &mut ev);
+        let keep = column.len().saturating_sub(3);
+
+        let onto: Vec<Option<usize>> = (0..column.len())
+            .map(|i| if i < keep { Some(i) } else { None })
+            .collect();
+        let (projected, dropped) = column.reproject(&onto, 1_000).expect("parallel");
+
+        assert_eq!(dropped, 3, "the three unreachable rows are counted");
+        assert_eq!(projected.len(), keep, "and removed");
+        assert_eq!(
+            projected.first_swept(),
+            Some(0),
+            "first_swept names the new series, not the old one"
+        );
+    }
+
+    /// A map that is not parallel to its column refuses.
+    #[test]
+    fn a_map_of_the_wrong_length_refuses_rather_than_truncating() {
+        let bars = run(6);
+        let mut ev = build_evaluator(Availability::Absent);
+        let column = Column::build(&bars, &mut ev);
+        assert!(
+            column.reproject(&[Some(0)], 10).is_none(),
+            "a caller bug refuses rather than silently taking the shorter of two"
+        );
     }
 }

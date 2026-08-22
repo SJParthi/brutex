@@ -2584,7 +2584,7 @@ fn project_onto_execution(
                     series. Nothing was traded."
             .to_owned());
     };
-    let Some((projected, dropped)) = column.reproject(&alignment.onto) else {
+    let Some((projected, dropped)) = column.reproject(&alignment.onto, execution.bars.len()) else {
         return Err("the alignment is not parallel to the column it was built \
                     from. Nothing was traded."
             .to_owned());
