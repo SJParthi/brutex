@@ -47,7 +47,7 @@
 //! for: the per-operation cost on the hot path is constant, and the
 //! non-constant part happens once and is stated.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 /// The evidence behind a resolution. Never discarded — a caller that treats
 /// an inference as proof is the invention §3 rule 1 forbids.
@@ -141,7 +141,7 @@ fn accepts(symbol: &str, published: &str) -> bool {
 /// The indices NSE publishes, collapsed and deduplicated.
 #[derive(Clone, Debug, Default)]
 pub struct Catalogue {
-    names: HashSet<String>,
+    names: HashMap<String, String>,
 }
 
 impl Catalogue {
@@ -156,8 +156,8 @@ impl Catalogue {
         Self {
             names: names
                 .into_iter()
-                .map(|name| collapse(name.as_ref()))
-                .filter(|name| !name.is_empty())
+                .map(|name| (collapse(name.as_ref()), name.as_ref().to_owned()))
+                .filter(|(collapsed, _)| !collapsed.is_empty())
                 .collect(),
         }
     }
@@ -185,12 +185,15 @@ impl Catalogue {
         if key.is_empty() {
             return Err(Unresolved::Absent);
         }
-        if let Some(name) = self.names.get(&key) {
-            return Ok((name.as_str(), Basis::Published));
+        if let Some(written) = self.names.get(&key) {
+            return Ok((written.as_str(), Basis::Published));
         }
-        let mut accepted = self.names.iter().filter(|name| accepts(&key, name));
+        let mut accepted = self
+            .names
+            .iter()
+            .filter(|(collapsed, _)| accepts(&key, collapsed));
         match (accepted.next(), accepted.next()) {
-            (Some(only), None) => Ok((only.as_str(), Basis::Abbreviation)),
+            (Some((_, only)), None) => Ok((only.as_str(), Basis::Abbreviation)),
             (None, _) => Err(Unresolved::Absent),
             (Some(_), Some(_)) => Err(Unresolved::Ambiguous(2 + accepted.count())),
         }
@@ -349,7 +352,7 @@ mod tests {
     fn a_symbol_published_verbatim_resolves_as_proof() {
         assert_eq!(
             gsec_family().resolve("Nifty Private Bank"),
-            Ok(("NIFTYPRIVATEBANK", Basis::Published))
+            Ok(("Nifty Private Bank", Basis::Published))
         );
     }
 
@@ -357,7 +360,7 @@ mod tests {
     fn an_abbreviation_accepted_by_one_name_resolves_as_inference() {
         assert_eq!(
             gsec_family().resolve("NIFTY PVT BANK"),
-            Ok(("NIFTYPRIVATEBANK", Basis::Abbreviation))
+            Ok(("Nifty Private Bank", Basis::Abbreviation))
         );
     }
 
@@ -402,7 +405,7 @@ mod tests {
         assert_eq!(mapping.resolved_by(Basis::Abbreviation), 1);
         assert_eq!(
             mapping.get("nifty pvt bank"),
-            Some(("NIFTYPRIVATEBANK", Basis::Abbreviation))
+            Some(("Nifty Private Bank", Basis::Abbreviation))
         );
         assert_eq!(mapping.get("NOT A SYMBOL"), None);
         assert_eq!(

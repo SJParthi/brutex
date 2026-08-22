@@ -21007,3 +21007,56 @@ yet, which is exactly the compiled-and-unreachable shape §5 records against
 Wiring it — `Feed::index_alias` reading the mapping instead of its two literals,
 and the refusals reaching a page — is the next unit and is not claimed by this
 entry. `docs/04-invariants.md` P-52 is the invariant.
+
+### D-0276 — `/indexmap.json`, so the join has a caller and the refusals have a reader
+
+**2026-08-22.** D-0275 built the join and said, in its own last paragraph, that
+the module had no caller and that wiring it was not claimed by that entry. This
+is the wiring, and `crates/api/src/indexmap.rs` plus one route is all of it.
+
+**The refusals are the payload.** A symbol that resolves confirms what an
+operator already assumed. A symbol the exchange does not confirm is one whose
+bars are being filed under a name no authority backs, and there was nowhere to
+see those at all — not a page, not a log line, not a count. The route reports
+every symbol either way and **filters none out for being unanswerable**, which
+is the opposite of the shape that made the drop census invisible for so long.
+
+**Readable, not collapsed — and the catalogue carries it.** `Catalogue`
+collapses every name so a match can ignore the separators vendors disagree
+about, which is right for matching and useless on a screen. The first draft kept
+a second map beside the matcher, collapsed to as-written, and looked the answer
+up after resolving. That lookup could not fail — both maps were built from one
+pass over the same names — so it was written as an `expect`, on the reasoning
+that a fallback branch which cannot run is a region no test can cover and this
+repository's floor is 100%. **Clippy refused it, and clippy was right:** the
+workspace denies `expect_used` in library code because a panic there is a real
+defect, and the same allow in `indicators::fib` and `indicators::pattern` sits on
+test modules only. The fix was not an allow, it was the design the constraint
+pointed at — `Catalogue` now stores each collapsed key beside the name as NSE
+wrote it and `resolve` hands the readable one back directly. There is no second
+lookup, so there is nothing to miss and nothing to panic about.
+
+**A missing catalogue halts loudly.** An empty list would resolve nothing and
+report all 136 symbols as disowned by the exchange — a finding, apparently,
+rather than an absent file. `Published::read` refuses an empty parse by name and
+the route answers 500 with the path in it. §4 bans the other behaviour.
+
+**Cost, and what is NOT claimed.** The catalogue is re-read from disk on every
+request. It is a few kilobytes and this is an operator route rather than a bar
+path, so **§3 rule 4's per-operation bound is not claimed for it** — saying
+otherwise would be inventing a measurement §3 rule 6 forbids. The join walks the
+index symbols the selected feed lists, not the master's several hundred thousand
+rows. If this ever moves onto a hot path it needs the mtime-keyed cache
+`calendar_of::cached` already demonstrates, and it does not have one today.
+
+**The operator's catalogue file grew to match.** `nse_indices.csv` held the 152
+equity indices only, so the `BHARATBOND` and G-Sec families had nothing to match
+against and were counted as absent for the wrong reason. It now holds 260 names
+read from `niftyindices.com` — the 152 with their categories unchanged, plus 108
+fixed-income, hybrid and money-market indices. The file is operator data and is
+not tracked; §8's rule about untracked local configuration is why.
+
+**What this still does NOT do.** There is no page. `/indexmap.json` answers and
+nothing in `web/` fetches it, exactly as `/calendar.json` stood after D-0274.
+Two routes now wait on a reader, and that is the next unit rather than a thing
+this entry claims.

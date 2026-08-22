@@ -11358,6 +11358,7 @@ pub fn router_serving(site: Loaded, assets: std::sync::Arc<assets::Assets>) -> a
         // one thing no route said. D-0120.
         .route("/universes.json", axum::routing::get(universe_reach_json))
         .route("/calendar.json", axum::routing::get(calendar_json))
+        .route("/indexmap.json", axum::routing::get(indexmap_json))
         // HOW FAR A FOLDER FEED REACHES — the files present, and nothing else.
         // Its own route rather than a field on `/feeds.json` because answering
         // it means WALKING the folder, and `/feeds.json` renders on every page
@@ -22059,6 +22060,82 @@ fn hex32(bytes: [u8; 32]) -> String {
         let _ = write!(acc, "{b:02x}");
         acc
     })
+}
+
+/// `GET /indexmap.json` — a feed's index symbols, joined to what NSE publishes.
+///
+/// # Why this route exists
+///
+/// `pull::nseindex` decides how a vendor's symbol meets an exchange name, and
+/// it had no caller: the join compiled, was tested, and answered nobody. That
+/// is the same compiled-and-unreachable shape `CLAUDE.md` §5 records against
+/// `cli` before D-0169, and D-0275 named it rather than implying the mapping
+/// was live. This is the caller.
+///
+/// **The refusals are the point.** A symbol that resolves tells an operator
+/// nothing they did not assume; a symbol the exchange does not confirm is one
+/// whose bars are filed under a name no authority backs. Both travel, and no
+/// row is filtered out for being unanswerable.
+///
+/// # Cost
+///
+/// The catalogue is re-read from disk on every request. It is a few kilobytes
+/// and this is an operator route rather than a bar path, so **the per-operation
+/// bound of §3 rule 4 is not claimed for it** — saying otherwise would be the
+/// measurement §3 rule 6 forbids inventing. The join walks the index symbols
+/// the feed lists, not the master's several hundred thousand rows.
+async fn indexmap_json(
+    axum::extract::State(site): axum::extract::State<Loaded>,
+    uri: axum::http::Uri,
+) -> (
+    axum::http::StatusCode,
+    [(axum::http::HeaderName, &'static str); 1],
+    String,
+) {
+    let json = "application/json; charset=utf-8";
+    let query = uri.query().unwrap_or("");
+    let asked = param(query, "feed");
+    let Some(feed) = ingest::parse_vendor(&asked) else {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            [(axum::http::header::CONTENT_TYPE, json)],
+            no_such_feed_json(&asked),
+        );
+    };
+    let read = masters_dir()
+        .map(|dir| dir.join("nse_indices.csv"))
+        .and_then(|path| crate::indexmap::Published::read(&path));
+    let nse = match read {
+        Ok(nse) => nse,
+        Err(why) => {
+            // LOUD, AND NAMING THE FILE. An empty catalogue would report every
+            // symbol as disowned by the exchange, which reads as a finding
+            // rather than a missing file -- the fallback that hides a failure
+            // §4 bans.
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                [(axum::http::header::CONTENT_TYPE, json)],
+                format!("{{\"error\":{}}}", crate::pullrun::quote_for_json(&why)),
+            );
+        }
+    };
+    let symbols: Vec<&str> = site
+        .read
+        .merged
+        .by_key
+        .iter()
+        .filter(|(key, entry)| {
+            matches!(key.kind, brutex_core::instrument::Kind::Index)
+                && entry.ids.get(feed as usize).copied().flatten().is_some()
+        })
+        .map(|(key, _)| key.underlying.as_str())
+        .collect();
+    let rows = crate::indexmap::join(&nse, symbols);
+    (
+        axum::http::StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, json)],
+        crate::indexmap::json(&nse, &rows),
+    )
 }
 
 /// `GET /calendar.json` — which days the exchange traded, and what each owes.

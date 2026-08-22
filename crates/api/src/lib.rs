@@ -51,6 +51,7 @@ pub mod census;
 pub mod constituents;
 pub mod coverage;
 pub mod folder;
+pub mod indexmap;
 pub mod ingest;
 pub mod ladder;
 pub mod logs;
