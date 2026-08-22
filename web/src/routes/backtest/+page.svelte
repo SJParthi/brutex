@@ -492,7 +492,7 @@
   }
 
   /** @param {any} run */
-  async function loadSeries(run) {
+  async function loadSeries(run, rung) {
     const at = place(run.underlying);
     if (!at) {
       series = {
@@ -517,7 +517,7 @@
       `/bars/window.json?feed=${encodeURIComponent(run.feed)}` +
       `&exchange=${encodeURIComponent(at.exchange)}&segment=${encodeURIComponent(at.segment)}` +
       `&symbol=${encodeURIComponent(run.underlying)}` +
-      `&timeframe=${encodeURIComponent(run.timeframe)}&from=${from}&to=${to}` +
+      `&timeframe=${encodeURIComponent(rung)}&from=${from}&to=${to}` +
       `&limit=${MAX_WINDOW_LIMIT}`;
     try {
       // 30 s rather than the default 15: 81 months of 30-minute bars is 21,620
@@ -528,6 +528,7 @@
         series = {
           phase: 'failed',
           bars: [],
+          total: 0,
           months_read: 0,
           months_missing: 0,
           why: `The bar window answered ${response.status}. The run's own figures above are unaffected — they were computed when the sweep ran, not now.`
@@ -560,22 +561,100 @@
     }
   }
 
-  // The series follows whichever run is open, and is dropped when none is.
+  // OPENING A RUN RESETS THE CHART TO THAT RUN'S OWN RUNG. Leaving the
+  // previous run's rung selected would draw one run's figures beside another
+  // run's price, which is the stale-value shape §4 bans.
+  $effect(() => {
+    const run = openRun;
+    if (!run) return;
+    untrack(() => {
+      chartRung = run.timeframe;
+      storeRungs = [];
+      loadRungs(run);
+    });
+  });
+
+  // The series follows the open run AND the selected rung, and is dropped when
+  // no run is open.
   $effect(() => {
     const run = openRun;
     if (!run) {
       series = { phase: 'idle', bars: [], total: 0, months_read: 0, months_missing: 0, why: '' };
       return;
     }
+    const rung = chartRung || run.timeframe;
     void catalogue.ready; // re-resolve once the master lands
-    untrack(() => loadSeries(run));
+    untrack(() => loadSeries(run, rung));
   });
 
-  /* ---- the chart itself ---------------------------------------------- */
+  /* ====================================================================
+     THE CHART — a terminal panel, not a thumbnail
+     --------------------------------------------------------------------
+     Everything below is chrome a trading terminal has and a small
+     embedded chart does not: a live OHLC legend bound to the crosshair, a
+     rung switcher over the rungs the STORE actually holds, range presets,
+     and a stats strip folded from the bars on screen.
+
+     Every number in it comes from the bars. There is no indicator, no
+     overlay and no marker that is not a value in the file — an indicator
+     computed here would be a second implementation of something
+     `crates/indicators` already owns, and a marker would be the invented
+     figure §3 rule 1 bans.
+     ==================================================================== */
 
   /** @type {HTMLElement | null} */
   let chartHost = $state(null);
   let chartError = $state('');
+  /** The bar under the crosshair, for the legend. Null when the pointer is off. */
+  let ohlc = $state(null);
+  /** Which rung the CHART shows. Starts at the run's own and is switchable. */
+  let chartRung = $state('');
+  /** Every rung the store holds for this instrument, newest census first. */
+  let storeRungs = $state([]);
+
+  /**
+   * The rungs the store actually holds for one instrument.
+   *
+   * **Discovered, never declared.** `store::path::Timeframe::KNOWN` can gain a
+   * rung tomorrow; a list written here would be a list the store contradicts.
+   * `/store.json` is the census `/db` already reads — one row per
+   * (instrument, month, rung) — so the rung set is a fold over it.
+   *
+   * @param {any} run
+   * @param {string} rung the timeframe to draw, which is not always the run’s own
+   */
+  async function loadRungs(run) {
+    try {
+      const response = await ask(`/store.json?feed=${encodeURIComponent(run.feed)}`, {
+        cache: 'no-store',
+        ms: 30_000
+      });
+      if (!response.ok) return;
+      const rows = await response.json();
+      /** @type {Map<string, number>} */
+      const months = new Map();
+      for (const row of rows ?? []) {
+        // The census names an instrument `NSE-INDEX-NIFTY`; the ledger names
+        // it `NIFTY`. Matching on the LAST segment is what joins them without
+        // this page holding an exchange or a segment literal.
+        const leaf = String(row.instrument ?? '').split('-').pop();
+        if (leaf !== run.underlying) continue;
+        months.set(row.timeframe, (months.get(row.timeframe) ?? 0) + 1);
+      }
+      storeRungs = [...months.entries()]
+        .map(([name, count]) => ({ name, months: count }))
+        .sort((a, b) => byRung(a.name, b.name));
+    } catch {
+      // A census that will not load costs the SWITCHER and nothing else: the
+      // chart still draws the run's own rung, which is the one that matters.
+      storeRungs = [];
+    }
+  }
+
+  /** Rungs that carry a recorded run, so the switcher can mark them. */
+  const sweptRungs = $derived(
+    new Set(runs.filter((r) => r.underlying === openRun?.underlying).map((r) => r.timeframe))
+  );
 
   /** The console's own palette, read off the document so both themes follow. */
   function chartTokens() {
@@ -592,6 +671,68 @@
     };
   }
 
+  /** The chart handle, kept so the range presets can drive the time scale. */
+  let chartApi = null;
+
+  /**
+   * Show the last `n` bars, or everything.
+   *
+   * Sets the VISIBLE RANGE rather than refetching: the window is already in
+   * memory, so a preset is a pan and not a request. `null` fits everything.
+   *
+   * @param {number | null} n
+   */
+  function showLast(n) {
+    if (!chartApi) return;
+    const total = series.bars.length;
+    if (n === null || n >= total) {
+      chartApi.timeScale().fitContent();
+      return;
+    }
+    chartApi.timeScale().setVisibleLogicalRange({ from: total - n, to: total });
+  }
+
+  /**
+   * The presets, in bars, derived from the rung's own length.
+   *
+   * A month is a different number of bars at every rung — roughly 1,375 at
+   * 30-minute and 21 at daily — so a preset list in BARS would mean a
+   * different span at each rung. These are computed from the rung's seconds
+   * against a 6.25-hour session, so "3M" is three months whatever the rung.
+   */
+  const presets = $derived.by(() => {
+    const secs = rungSeconds(chartRung || openRun?.timeframe || '');
+    if (!secs) return [];
+    // 555 minutes of session, 21 sessions a month — the same 555 the store's
+    // own alignment notes use.
+    const perMonth = secs >= 86_400 ? 21 : Math.max(1, Math.round((555 * 60) / secs) * 21);
+    return [
+      { label: '1M', bars: perMonth },
+      { label: '3M', bars: perMonth * 3 },
+      { label: '6M', bars: perMonth * 6 },
+      { label: '1Y', bars: perMonth * 12 },
+      { label: 'All', bars: null }
+    ].filter((p) => p.bars === null || p.bars < series.bars.length);
+  });
+
+  /** What the bars on screen fold to — high, low, range, net change. */
+  const windowStats = $derived.by(() => {
+    const bars = series.bars;
+    if (bars.length === 0) return null;
+    let hi = -Infinity;
+    let lo = Infinity;
+    for (const b of bars) {
+      if (b.h > hi) hi = b.h;
+      if (b.l < lo) lo = b.l;
+    }
+    const first = bars[0];
+    const last = bars[bars.length - 1];
+    // BASIS POINTS, INTEGER. `CLAUDE.md` §7 keeps prices in paisa and this
+    // crate's own rule is that a ratio is not a float until it is displayed.
+    const netBps = first.c > 0 ? Math.round(((last.c - first.c) / first.c) * 10_000) : null;
+    return { hi, lo, range: hi - lo, first, last, netBps };
+  });
+
   $effect(() => {
     const host = chartHost;
     const bars = series.bars;
@@ -601,8 +742,7 @@
     (async () => {
       try {
         // TRADINGVIEW'S OWN LIBRARY, MIT, BUNDLED — no CDN and nothing fetched
-        // at runtime, exactly as the Markets page takes it. Imported
-        // dynamically so this card never delays the figures above it.
+        // at runtime, exactly as the Markets page takes it.
         const mod = await import('lightweight-charts');
         if (dead) return;
         const c = chartTokens();
@@ -614,22 +754,33 @@
             attributionLogo: false
           },
           grid: { vertLines: { color: c.grid }, horzLines: { color: c.grid } },
-          rightPriceScale: { borderColor: c.border, scaleMargins: { top: 0.1, bottom: 0.1 } },
+          rightPriceScale: { borderColor: c.border, scaleMargins: { top: 0.08, bottom: 0.08 } },
           timeScale: {
             borderColor: c.border,
             timeVisible: true,
             secondsVisible: false,
+            rightOffset: 2,
             // MAX HAS TO MEAN MAX — the Markets page's own note. The default
             // half-pixel floor on bar spacing makes `fitContent` silently draw
-            // only the last few hundred of 21,620 bars while the axis claims
-            // the whole span.
-            minBarSpacing: 0.02
+            // only the last few hundred bars while the axis claims the span.
+            minBarSpacing: 0.02,
+            // 0 Year, 1 Month, 2 DayOfMonth, 3 Time, 4 TimeWithSeconds. Without
+            // this the axis labels in UTC while the legend beside it reads IST,
+            // and the two name different times for the bar they both point at.
+            tickMarkFormatter: (time, type) => istLabel(Number(time), type <= 2)
+          },
+          // The crosshair's own time label, same clock.
+          localization: {
+            locale: 'en-IN',
+            timeFormatter: (time) => `${istLabel(Number(time), false)} IST`
           },
           crosshair: {
-            mode: 1,
-            vertLine: { color: c.faint, labelBackgroundColor: c.acc },
-            horzLine: { color: c.faint, labelBackgroundColor: c.acc }
-          }
+            mode: 1, // magnet: snaps to OHLC, which is what the price under the pointer means
+            vertLine: { color: c.faint, labelBackgroundColor: c.acc, width: 1 },
+            horzLine: { color: c.faint, labelBackgroundColor: c.acc, width: 1 }
+          },
+          handleScroll: { mouseWheel: true, pressedMouseMove: true },
+          handleScale: { mouseWheel: true, pinch: true }
         });
         const cs = made.addSeries(mod.CandlestickSeries, {
           upColor: c.up,
@@ -641,8 +792,8 @@
         });
         // PAISA DIVIDE ONCE, AT THE DISPLAY BOUNDARY. `CLAUDE.md` §7 keeps
         // prices as `i64` paisa everywhere; this is the only place a
-        // fractional rupee may exist, and it exists because a chart library
-        // takes floats.
+        // fractional rupee may exist, and it exists because the library takes
+        // floats.
         cs.setData(
           bars.map((b) => ({
             time: b.t,
@@ -652,16 +803,31 @@
             close: b.c / 100
           }))
         );
+
+        // THE LEGEND READS THE PAISA, NOT THE CHART. Only the TIME comes back
+        // off the crosshair; the bar itself is looked up in a Map of the
+        // integers, so no number the legend prints has been through the
+        // library's floats. The Markets page takes the same care in the same
+        // words.
+        const byTime = new Map(bars.map((b) => [b.t, b]));
+        made.subscribeCrosshairMove((param) => {
+          const at = param?.time == null ? null : byTime.get(Number(param.time));
+          ohlc = at ?? null;
+        });
+
         made.timeScale().fitContent();
+        chartApi = made;
         chartError = '';
       } catch (why) {
         // A chart library that will not load is a NAMED failure, not a blank
-        // rectangle. Every figure above this card still stands.
+        // rectangle. Every figure above this panel still stands.
         if (!dead) chartError = String(why?.message ?? why);
       }
     })();
     return () => {
       dead = true;
+      chartApi = null;
+      ohlc = null;
       try {
         made?.remove();
       } catch {
@@ -669,6 +835,7 @@
       }
     };
   });
+
 
   /* ====================================================================
      FORMATTING
@@ -708,15 +875,47 @@
     Number.isFinite(r?.pessimistic) &&
     r.optimistic < r.pessimistic;
 
+  /**
+   * The exchange's own clock, pinned.
+   *
+   * **NSE bars are IST and the browser's zone is not a fact about them.**
+   * Without `timeZone` this used whatever zone the reader's machine is in, so
+   * the same bar read 10:45 in Mumbai and 05:15 in London — and the chart's own
+   * axis, which labels in UTC unless told otherwise, disagreed with the legend
+   * beside it on a bar they were both pointing at. One clock, and it is the
+   * exchange's.
+   */
+  const IST = 'Asia/Kolkata';
+
   /** @param {number} micros */
   function when(micros) {
     if (!Number.isFinite(micros) || micros <= 0) return 'not stamped';
     return new Date(micros / 1000).toLocaleString('en-IN', {
+      timeZone: IST,
       year: 'numeric',
       month: 'short',
       day: '2-digit',
       hour: '2-digit',
       minute: '2-digit'
+    });
+  }
+
+  /**
+   * A unix second as the chart's own axis label, in IST.
+   *
+   * `lightweight-charts` labels its time axis in UTC unless a formatter says
+   * otherwise, so this is what stops the axis and the legend naming two
+   * different times for one bar.
+   *
+   * @param {number} seconds
+   * @param {boolean} dateOnly a tick mark coarser than a day needs no clock
+   */
+  function istLabel(seconds, dateOnly) {
+    return new Date(seconds * 1000).toLocaleString('en-IN', {
+      timeZone: IST,
+      month: 'short',
+      day: '2-digit',
+      ...(dateOnly ? {} : { hour: '2-digit', minute: '2-digit' })
     });
   }
 
@@ -1221,31 +1420,84 @@
           {/if}
 
           <!-- ==========================================================
-               THE PRICE SERIES THIS RUN WAS SWEPT OVER
+          <!-- ==========================================================
+               THE PRICE TERMINAL
+               A panel, not a thumbnail: a live OHLC legend bound to the
+               crosshair, a rung switcher over the rungs the STORE holds,
+               range presets, and a stats strip folded from the bars on
+               screen. Every number in it is a value in the file.
                ========================================================== -->
-          <div class="card chartcard">
-            <div class="chart-head">
-              <h3>
-                The bars this run swept
-                <span class="pill">{openRun.underlying} · {openRun.timeframe}</span>
-              </h3>
-              {#if series.phase === 'ready'}
-                <span class="chart-facts">
-                  {#if series.total > series.bars.length}
-                    <!-- A WINDOW IS NEVER PASSED OFF AS THE WHOLE. Same
-                         contract the ledger's own `hit_scan_cap` keeps. -->
-                    <b class="warnt">newest {exact(series.bars.length)}</b> of
-                    {exact(series.total)} bars
-                  {:else}
-                    all {exact(series.total)} bars
-                  {/if}
-                  · {exact(series.months_read)} months read
-                  {#if series.months_missing > 0}
-                    · <b class="warnt">{exact(series.months_missing)} months missing</b>
-                  {:else}
-                    · no month missing
-                  {/if}
+          <div class="term">
+            <div class="term-bar">
+              <div class="term-id">
+                <b>{openRun.underlying}</b>
+                <span class="term-feed">{openRun.feed}</span>
+                {#if chartRung !== openRun.timeframe}
+                  <span class="pill warn" title="The run was swept at {openRun.timeframe}">
+                    viewing {chartRung} · run is {openRun.timeframe}
+                  </span>
+                {/if}
+              </div>
+              <!-- THE RUNG SWITCHER, over what the store HOLDS rather than
+                   over a list written here. A ✓ marks a rung that carries a
+                   recorded run, so "I can look at 5-minute price but nothing
+                   has been swept there" is readable at a glance. -->
+              {#if storeRungs.length > 0}
+                <div class="rungs" role="group" aria-label="Timeframe">
+                  {#each storeRungs as r (r.name)}
+                    <button
+                      class="rungbtn"
+                      class:on={chartRung === r.name}
+                      class:swept={sweptRungs.has(r.name)}
+                      onclick={() => (chartRung = r.name)}
+                      title="{r.months} months on disk{sweptRungs.has(r.name)
+                        ? ' · a run is recorded at this rung'
+                        : ' · no run recorded at this rung'}"
+                    >
+                      {r.name}{#if sweptRungs.has(r.name)}<span class="tick" aria-hidden="true">✓</span>{/if}
+                    </button>
+                  {/each}
+                </div>
+              {/if}
+            </div>
+
+            <!-- THE LEGEND. Reads the paisa integers, never the chart's
+                 floats: only the TIME comes back off the crosshair. -->
+            <div class="legend" aria-live="off">
+              {#if ohlc}
+                {@const up = ohlc.c >= ohlc.o}
+                {@const bps = ohlc.o > 0 ? Math.round(((ohlc.c - ohlc.o) / ohlc.o) * 10_000) : null}
+                <span class="lg-t">{when(ohlc.t * 1_000_000)}</span>
+                <span class="lg"><i>O</i>{money(ohlc.o)}</span>
+                <span class="lg"><i>H</i>{money(ohlc.h)}</span>
+                <span class="lg"><i>L</i>{money(ohlc.l)}</span>
+                <span class="lg"><i>C</i>{money(ohlc.c)}</span>
+                <!-- ONE SIGN, NOT TWO. This carried a `+` from the up/down
+                     test AND another from the sign of the ratio, so every
+                     rising bar read `++0.14%`. The sign now comes from the
+                     number alone. Basis points as an integer, divided once
+                     for display — the ratio is not a float until it is
+                     printed. -->
+                <span class="lg-chg" class:up class:down={!up}>
+                  {#if bps === null}—{:else}{bps >= 0 ? '+' : ''}{(bps / 100).toFixed(2)}%{/if}
                 </span>
+              {:else if windowStats}
+                <span class="lg-t">hover the chart for a bar</span>
+                <span class="lg"><i>HIGH</i>{money(windowStats.hi)}</span>
+                <span class="lg"><i>LOW</i>{money(windowStats.lo)}</span>
+                <span class="lg"><i>RANGE</i>{money(windowStats.range)}</span>
+                {#if windowStats.netBps !== null}
+                  <span
+                    class="lg-chg"
+                    class:up={windowStats.netBps >= 0}
+                    class:down={windowStats.netBps < 0}
+                  >
+                    {windowStats.netBps >= 0 ? '+' : ''}{(windowStats.netBps / 100).toFixed(2)}%
+                    over the window
+                  </span>
+                {/if}
+              {:else}
+                <span class="lg-t">no bars on screen</span>
               {/if}
             </div>
 
@@ -1253,8 +1505,8 @@
               <div class="chart-state">
                 <span class="spin" aria-hidden="true"></span>
                 <p>
-                  Reading {span(openRun)} at {openRun.timeframe} off the store. This is the same
-                  file set the sweep read.
+                  Reading {span(openRun)} at {chartRung} off the store — the same files the sweep
+                  read.
                 </p>
               </div>
             {:else if series.phase === 'failed'}
@@ -1264,41 +1516,67 @@
             {:else if series.phase === 'ready' && series.bars.length === 0}
               <div class="chart-state">
                 <p>
-                  <b>The store returned no bars for this span.</b> The run's figures above were
-                  computed when the sweep ran and are unaffected — but the bars it read are not
-                  here now, which means the store changed after the run or the span was filed
-                  under a different rung.
+                  <b>The store returned no bars at {chartRung} for this span.</b> The run's figures
+                  above were computed when the sweep ran and are unaffected.
                 </p>
               </div>
             {:else if chartError}
               <div class="chart-state bad">
                 <p>
                   <b>The chart library did not load</b>, so the price cannot be drawn:
-                  {chartError}. Every figure above this card is unaffected — none of them comes
-                  from the chart.
+                  {chartError}. Every figure above is unaffected — none of them comes from the
+                  chart.
                 </p>
               </div>
             {:else if series.phase === 'ready'}
-              <!-- A CANVAS IS NOTHING TO A SCREEN READER. The chart is drawn
-                   onto canvases by the library, so without this it announces
-                   as an empty box. The label carries what the picture carries:
-                   which instrument, which rung, how many bars, over what. -->
               <div
                 class="chart"
                 bind:this={chartHost}
                 role="img"
-                aria-label="Candlestick chart of {openRun.underlying} at the {openRun.timeframe} rung, {exact(
+                aria-label="Candlestick chart of {openRun.underlying} at the {chartRung} rung, {exact(
                   series.bars.length
                 )} bars ending {span(openRun)}. Prices in rupees. No entries or exits are marked because the ledger records no trade list."
               ></div>
             {/if}
 
+            <div class="term-foot">
+              <div class="term-facts">
+                {#if series.phase === 'ready' && series.bars.length > 0}
+                  {#if series.total > series.bars.length}
+                    <span class="pill warn">newest {exact(series.bars.length)} of {exact(series.total)}</span>
+                  {:else}
+                    <span class="pill good">all {exact(series.total)} bars</span>
+                  {/if}
+                  <span class="fnote">{exact(series.months_read)} months read</span>
+                  {#if series.months_missing > 0}
+                    <span class="pill warn">{exact(series.months_missing)} months missing</span>
+                  {:else}
+                    <span class="fnote">no month missing</span>
+                  {/if}
+                  <!-- VOLUME IS NOT DRAWN BECAUSE THERE IS NONE. Every bar in
+                       this index series carries v=0: NSE publishes no volume
+                       on a spot index. An empty histogram pane would read as
+                       "no trading happened", which is a different claim. -->
+                  <span class="fnote">no volume pane — a spot index publishes none</span>
+                {/if}
+              </div>
+              {#if presets.length > 1 && series.phase === 'ready'}
+                <div class="ranges" role="group" aria-label="Visible range">
+                  {#each presets as p (p.label)}
+                    <button class="rangebtn" onclick={() => showLast(p.bars)}>{p.label}</button>
+                  {/each}
+                </div>
+              {/if}
+            </div>
+
             {#if series.phase === 'ready' && series.bars.length > 0}
-              <p class="cnote faint">
+              <p class="cnote faint term-note">
                 <b>No entries or exits are marked, and that is deliberate.</b> The ledger records
                 {exact(openRun.trades)} trades as a COUNT and keeps no trade list, so there is no
                 timestamp to put a marker at. A chart with plausible markers would look like the
-                answer to "when did it trade", which nothing on disk can answer.
+                answer to "when did it trade", which nothing on disk can answer. No indicator is
+                overlaid either — one computed here would be a second implementation of something
+                <code>crates/indicators</code> already owns.
               </p>
             {/if}
           </div>
@@ -2323,6 +2601,206 @@
     border-style: solid;
     border-color: var(--down);
     background: var(--down-soft);
+  }
+
+  /* ================= THE PRICE TERMINAL =================
+     Full-bleed within the drill-down and taller than everything around it,
+     because it is the only element here that rewards being looked AT rather
+     than read. Everything else on this page is a number with a label. */
+  .term {
+    display: flex;
+    flex-direction: column;
+    background: var(--n3);
+    border: 1px solid var(--n6);
+    border-radius: 10px;
+    overflow: hidden;
+    box-shadow: var(--e2);
+    animation: arrive 0.35s cubic-bezier(0.22, 0.7, 0.3, 1) both;
+  }
+  .term > * {
+    flex: 0 0 auto;
+  }
+
+  .term-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    padding: 0.6rem 0.85rem;
+    background: var(--n2);
+    border-bottom: 1px solid var(--n6);
+  }
+  .term-id {
+    display: flex;
+    align-items: baseline;
+    gap: 0.55rem;
+    flex-wrap: wrap;
+  }
+  .term-id b {
+    font-size: 1.05rem;
+    color: var(--n12);
+    letter-spacing: -0.01em;
+  }
+  .term-feed {
+    font-size: 0.72rem;
+    color: var(--n8);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+
+  /* ---- the rung switcher ---- */
+  .rungs {
+    display: flex;
+    gap: 2px;
+    background: var(--n0);
+    padding: 2px;
+    border-radius: 7px;
+    overflow-x: auto;
+  }
+  .rungbtn {
+    background: transparent;
+    border: 0;
+    border-radius: 5px;
+    padding: 0.26rem 0.5rem;
+    font: inherit;
+    font-size: 0.73rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--n9);
+    cursor: pointer;
+    white-space: nowrap;
+    transition:
+      background 0.14s ease,
+      color 0.14s ease;
+  }
+  .rungbtn:hover {
+    color: var(--n11);
+    background: var(--n4);
+  }
+  .rungbtn.on {
+    background: var(--acc);
+    color: var(--on-acc);
+  }
+  .rungbtn:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 1px;
+  }
+  /* A rung that carries a recorded run wears its tick. A rung that does not
+     is still selectable -- looking at price the sweep never ran on is a
+     legitimate thing to want, and hiding it would answer a question nobody
+     asked. */
+  .tick {
+    margin-left: 0.22rem;
+    font-size: 0.72em;
+    opacity: 0.75;
+  }
+  .rungbtn.on .tick {
+    opacity: 1;
+  }
+
+  /* ---- the OHLC legend ---- */
+  .legend {
+    display: flex;
+    align-items: baseline;
+    gap: 0.85rem;
+    flex-wrap: wrap;
+    padding: 0.5rem 0.85rem;
+    border-bottom: 1px solid var(--n5);
+    font-variant-numeric: tabular-nums;
+    min-height: 2.1rem;
+  }
+  .lg-t {
+    font-size: 0.72rem;
+    color: var(--n8);
+  }
+  .lg {
+    font-size: 0.79rem;
+    color: var(--n11);
+  }
+  .lg i {
+    font-style: normal;
+    font-size: 0.66rem;
+    letter-spacing: 0.09em;
+    color: var(--n8);
+    margin-right: 0.28rem;
+  }
+  .lg-chg {
+    font-size: 0.79rem;
+    font-weight: 600;
+  }
+  .lg-chg.up {
+    color: var(--up);
+  }
+  .lg-chg.down {
+    color: var(--down);
+  }
+
+  .term .chart {
+    height: 520px;
+    flex: 0 0 520px;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+  }
+  .term .chart-state {
+    border: 0;
+    border-radius: 0;
+    min-height: 200px;
+    background: transparent;
+  }
+
+  .term-foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    padding: 0.55rem 0.85rem;
+    background: var(--n2);
+    border-top: 1px solid var(--n6);
+  }
+  .term-facts {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+  .fnote {
+    font-size: 0.72rem;
+    color: var(--n8);
+  }
+  .ranges {
+    display: flex;
+    gap: 2px;
+    background: var(--n0);
+    padding: 2px;
+    border-radius: 7px;
+  }
+  .rangebtn {
+    background: transparent;
+    border: 0;
+    border-radius: 5px;
+    padding: 0.24rem 0.52rem;
+    font: inherit;
+    font-size: 0.72rem;
+    color: var(--n9);
+    cursor: pointer;
+    transition:
+      background 0.14s ease,
+      color 0.14s ease;
+  }
+  .rangebtn:hover {
+    background: var(--n4);
+    color: var(--n11);
+  }
+  .rangebtn:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 1px;
+  }
+  .term-note {
+    padding: 0.6rem 0.85rem 0.75rem;
+    margin: 0;
+    border-top: 1px solid var(--n5);
   }
 
   /* ---------------- the sort indicator ---------------- */
