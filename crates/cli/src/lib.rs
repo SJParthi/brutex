@@ -45,6 +45,7 @@
 /// `runner` and no `store`, so nothing in the workspace connected a pulled bar
 /// to a ranked result.
 pub mod batch;
+pub mod results;
 pub mod stored;
 
 use brutex_core::vendor::Vendor;
