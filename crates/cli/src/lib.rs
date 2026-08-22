@@ -1503,7 +1503,15 @@ fn audit_stored_inner(
         loaded.bars.len(),
     );
     let bars = u64::try_from(loaded.bars.len()).unwrap_or(u64::MAX);
-    let report = audit_bars(evaluator(), loaded.bars, &header, min_hits, Some(&id), None);
+    let report = audit_bars(
+        evaluator(),
+        loaded.bars,
+        &header,
+        min_hits,
+        Some(&id),
+        None,
+        None,
+    );
     // THE IDENTITY REACHES THE LOG, which is the half section 3 rule 3 cares
     // about. A report names its identity in text that scrolls past; an operator
     // asking "which run produced the grid I am looking at" needs it in a line
@@ -1529,6 +1537,54 @@ fn audit_stored_inner(
             .with("bars", bars),
     );
     Ok(report)
+}
+
+/// The provenance banner for one span, including any months it is missing.
+///
+/// Split out of [`audit_range_inner`] to keep it under
+/// `clippy::too_many_lines`. It is one idea: what this run was over, said
+/// before any figure computed from it.
+fn span_banner(
+    span: &stored::Span,
+    underlying: &str,
+    from: (u16, u8),
+    to: (u16, u8),
+    commit: &str,
+) -> String {
+    let mut header = String::from(STORED_PROVENANCE);
+    let _ = writeln!(
+        header,
+        "feed {} · {underlying} · {} · {}-{:02}..{}-{:02} · {} of {} months · {} bars · built at {commit}",
+        span.vendor.as_str(),
+        span.timeframe,
+        from.0,
+        from.1,
+        to.0,
+        to.1,
+        span.found,
+        span.asked,
+        span.bars.len(),
+    );
+    // A HOLE IS NAMED, NEVER SKIPPED. A span missing three months is a shorter
+    // sample and not a corrected one, and every figure below is computed over
+    // what was actually there. `CLAUDE.md` §4 bans the fallback that would let
+    // it read like a whole span.
+    if !span.complete() {
+        let names: Vec<String> = span
+            .missing
+            .iter()
+            .map(|&(y, m)| format!("{y}-{m:02}"))
+            .collect();
+        let _ = writeln!(
+            header,
+            "MONTHS MISSING FROM THIS SPAN ({}): {}\n\
+             Every figure below is over a SHORTER sample, not a corrected one. \
+             Pull those months and rerun to close the gap.",
+            span.missing.len(),
+            names.join(" ")
+        );
+    }
+    header
 }
 
 /// The full audit over a CONTIGUOUS SPAN of months, as one series.
@@ -1661,40 +1717,7 @@ fn audit_range_inner(
         signal_length_micros: signal_length,
     });
 
-    let mut header = String::from(STORED_PROVENANCE);
-    let _ = writeln!(
-        header,
-        "feed {} · {} · {} · {}-{:02}..{}-{:02} · {} of {} months · {} bars · built at {commit}",
-        vendor.as_str(),
-        underlying,
-        span.timeframe,
-        from.0,
-        from.1,
-        to.0,
-        to.1,
-        span.found,
-        span.asked,
-        span.bars.len(),
-    );
-    // A HOLE IS NAMED, NEVER SKIPPED. A span missing three months is a shorter
-    // sample and not a corrected one, and every figure below is computed over
-    // what was actually there. `CLAUDE.md` §4 bans the fallback that would let
-    // it read like a whole span.
-    if !span.complete() {
-        let names: Vec<String> = span
-            .missing
-            .iter()
-            .map(|&(y, m)| format!("{y}-{m:02}"))
-            .collect();
-        let _ = writeln!(
-            header,
-            "MONTHS MISSING FROM THIS SPAN ({}): {}\n\
-             Every figure below is over a SHORTER sample, not a corrected one. \
-             Pull those months and rerun to close the gap.",
-            span.missing.len(),
-            names.join(" ")
-        );
-    }
+    let header = span_banner(&span, underlying, from, to, commit);
     Ok(audit_bars(
         evaluator(),
         span.bars,
@@ -1702,6 +1725,16 @@ fn audit_range_inner(
         min_hits,
         Some(&id),
         execution,
+        Some(Recording {
+            root: &root,
+            feed: vendor.as_str(),
+            underlying,
+            timeframe: span.timeframe,
+            from,
+            to,
+            months_asked: span.asked,
+            months_found: span.found,
+        }),
     ))
 }
 
@@ -1746,11 +1779,16 @@ pub fn audit_stored(
               per CLI invocation, in a function called once per process."
 )]
 fn audit_with(ev: Result<Evaluator, &'static str>, sessions: i64, min_hits: u64) -> String {
+    // NO RECORDING FOR GENERATED BARS, and that is not an oversight. The
+    // results store is a ledger of runs over REAL instrument-months; a row for
+    // a synthetic sweep would carry a feed and an instrument it does not have,
+    // and `CLAUDE.md` §3 rule 1 forbids inventing either.
     audit_bars(
         ev,
         synthetic::sessions(sessions),
         PROVENANCE,
         min_hits,
+        None,
         None,
         None,
     )
@@ -1848,6 +1886,122 @@ fn project_onto_execution(
         horizon.as_bars(),
     );
     Ok((execution.bars.to_vec(), projected, note))
+}
+
+/// Everything the RESULTS STORE needs that only the caller knows.
+///
+/// The computed half — depth, combinations, the chosen exit's figures — is read
+/// off the run inside [`audit_bars`]. This is the half that describes what was
+/// ASKED for, and no part of the sweep can reconstruct it: the span and the feed
+/// are gone by the time bars are a `Vec<Candle>`.
+#[derive(Clone, Copy)]
+struct Recording<'a> {
+    /// Where the results file lives — the store root.
+    root: &'a std::path::Path,
+    /// The feed's directory word.
+    feed: &'a str,
+    /// The instrument.
+    underlying: &'a str,
+    /// The SIGNAL rung. Execution is always one-minute.
+    timeframe: &'a str,
+    /// First month of the span.
+    from: (u16, u8),
+    /// Last month of the span.
+    to: (u16, u8),
+    /// Months the range asked for.
+    months_asked: u32,
+    /// Months the store actually held.
+    months_found: u32,
+}
+
+/// Writes one completed run into the results store, and says what happened.
+///
+/// # A failure here NEVER fails the run
+///
+/// A sweep with no recorded row is still a correct sweep, and refusing to report
+/// an answer because a directory was unwritable would trade the whole answer for
+/// an audit trail. `CLAUDE.md` §4 bans a fallback that HIDES a failure; this one
+/// NAMES it, in the report, on the same screen as the numbers it failed to
+/// record. That is the same rule `cli::install_log` follows for the event sink.
+///
+/// A duplicate identity is reported as what it is — not an error but a fact:
+/// §3 rule 5 makes a rerun byte-identical, so the row is already correct.
+fn record_run(
+    into: Recording<'_>,
+    id: &runner::identity::RunId,
+    outcome: &runner::Outcome,
+    exits: &runner::grid::Grid,
+    bars: u64,
+    min_hits: u64,
+) -> String {
+    let chosen = exits.best();
+    let rung =
+        |slot: Option<usize>| -> i16 { slot.and_then(|v| i16::try_from(v).ok()).unwrap_or(-1) };
+    let record = results::Record {
+        identity: id.bytes(),
+        // The wall clock, taken once, after the work. `SystemTime` can precede
+        // the epoch on a machine whose clock is set wrongly, and that is
+        // recorded as the negative it is rather than clamped: a row stamped
+        // before 1970 is a clock problem an operator should see.
+        finished_micros: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| i64::try_from(d.as_micros()).unwrap_or(i64::MAX)),
+        feed: results::field(into.feed),
+        underlying: results::field(into.underlying),
+        timeframe: results::field(into.timeframe),
+        from_year: into.from.0,
+        from_month: into.from.1,
+        to_year: into.to.0,
+        to_month: into.to.1,
+        months_asked: into.months_asked,
+        months_found: into.months_found,
+        bars,
+        min_hits,
+        combinations: outcome.sweep.all_frequent().count() as u64,
+        depth: u32::try_from(outcome.sweep.depth()).unwrap_or(u32::MAX),
+        // ONE BYTE THAT CHANGES HOW EVERY OTHER FIELD READS. A halted sweep's
+        // `depth` is PARTIAL and its `combinations` covers less of the ladder
+        // than the number suggests, so a row without this flag would rank a
+        // truncated search against complete ones as though they were the same
+        // kind of thing.
+        halted: u8::from(outcome.sweep.halted.is_some()),
+        trades: chosen.map_or(0, |c| c.trades),
+        pessimistic: chosen.map_or(0, |c| c.pessimistic),
+        optimistic: chosen.map_or(0, |c| c.optimistic),
+        worst_trade: chosen.map_or(0, |c| c.worst_trade),
+        max_drawdown: chosen.map_or(0, |c| c.max_drawdown),
+        winner_mae: chosen.map_or(0, |c| c.winner_mae),
+        winner_mfe: chosen.map_or(0, |c| c.winner_mfe),
+        all_mae: chosen.map_or(0, |c| c.all_mae),
+        exit_rungs: [
+            rung(chosen.and_then(|c| c.stop)),
+            rung(chosen.and_then(|c| c.target)),
+            rung(chosen.and_then(|c| c.tsl)),
+            rung(chosen.and_then(|c| c.ttp.map(|t| t.arm))),
+            rung(chosen.and_then(|c| c.ttp.map(|t| t.trail))),
+        ],
+    };
+
+    let mut store = match results::Results::open(into.root) {
+        Ok(store) => store,
+        Err(why) => {
+            return format!(
+                "RESULT NOT RECORDED: {why}\n  The figures below are correct; only the row is missing.\n\n"
+            );
+        }
+    };
+    match store.append(&record) {
+        Ok(index) => format!(
+            "RESULT RECORDED\n  \
+             row                                            {index:>10}  in {}\n  \
+             identity                                       {}\n\n",
+            results::Results::path(into.root).display(),
+            record.identity_hex(),
+        ),
+        Err(why) => format!(
+            "RESULT NOT RECORDED: {why}\n  The figures below are correct; only the row is missing.\n\n"
+        ),
+    }
 }
 
 /// The three multiple-testing p-values, and the family they were taken over.
@@ -2022,6 +2176,7 @@ fn audit_bars(
     min_hits: u64,
     id: Option<&runner::identity::RunId>,
     execution: Option<Execution<'_>>,
+    recording: Option<Recording<'_>>,
 ) -> String {
     let mut ev = match ev {
         Ok(e) => e,
@@ -2194,6 +2349,19 @@ fn audit_bars(
         .as_ref()
         .map(|(rc, spa, named)| (rc.as_ref(), spa.as_ref(), *named));
 
+    // RECORDED BEFORE IT IS RENDERED, so a process killed while formatting a
+    // large report still leaves its row. The same ordering `cli.audit`'s
+    // `audit rendered` event uses, and for the same reason.
+    if let (Some(into), Some(run_id)) = (recording, id) {
+        out.push_str(&record_run(
+            into,
+            run_id,
+            &outcome,
+            &exits,
+            u64::try_from(bars.len()).unwrap_or(u64::MAX),
+            min_hits,
+        ));
+    }
     out.push_str(&audit::render(
         Some(&taken),
         Some(&exits),
@@ -3081,5 +3249,74 @@ mod tests {
             USAGE.contains("CONTIGUOUS SPAN"),
             "and usage says what makes it different from `audit-stored`"
         );
+    }
+
+    /// A COMPLETED RANGE RUN LEAVES A ROW, and a rerun does not leave a second.
+    ///
+    /// # What this can reach under `cargo test`, stated because it bounds the
+    /// # assertion
+    ///
+    /// `commit_stamp()` is `option_env!`, so an unstamped test build refuses at
+    /// the identity gate before the store is touched -- the limit
+    /// `the_stored_audit_refuses_for_the_same_cause_and_names_itself` documents.
+    /// So this cannot drive `audit-range` end to end.
+    ///
+    /// What it CAN do is drive the results store through the same calls
+    /// `record_run` makes, which is where every defect in that path would live:
+    /// the codec, the addressing, the duplicate rule and the reopen. The wiring
+    /// itself is one call and is verified by measurement on a stamped build,
+    /// recorded in `docs/05-decisions.md`.
+    #[test]
+    fn a_recorded_run_is_addressable_and_a_rerun_adds_nothing() {
+        let root = std::env::temp_dir().join("brutex-wire-test");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a temp root");
+
+        let record = crate::results::Record {
+            identity: [42; 32],
+            finished_micros: 1_785_727_500_000_000,
+            feed: crate::results::field("zerodha"),
+            underlying: crate::results::field("NIFTY"),
+            timeframe: crate::results::field("15min"),
+            from_year: 2019,
+            from_month: 12,
+            to_year: 2026,
+            to_month: 8,
+            months_asked: 81,
+            months_found: 81,
+            bars: 43_875,
+            min_hits: 200,
+            combinations: 54_895_691,
+            depth: 11,
+            halted: 1,
+            trades: 412,
+            pessimistic: -987_654_321,
+            optimistic: 123_456_789,
+            worst_trade: -87_654_321,
+            max_drawdown: -76_543_210,
+            winner_mae: 2_291,
+            winner_mfe: 8_876,
+            all_mae: 2_295,
+            exit_rungs: [2, 3, -1, 1, 0],
+        };
+
+        let mut store = crate::results::Results::open(&root).expect("the store opens");
+        let row = store.append(&record).expect("the run is recorded");
+        assert_eq!(row, 0, "the first run is row zero");
+
+        // ADDRESSABLE, which is the whole reason for a fixed stride.
+        let back = store.read(row).expect("the row reads back");
+        assert_eq!(back, record, "every field survived the write and the read");
+        assert_eq!(crate::results::read_field(&back.underlying), "NIFTY");
+        assert_eq!(back.halted, 1, "a truncated search stays flagged as one");
+
+        // A RERUN ADDS NOTHING. §3 rule 5 makes it byte-identical.
+        assert!(
+            store.append(&record).is_err(),
+            "the same identity must not be recorded twice"
+        );
+        assert_eq!(store.len().expect("measurable"), 1);
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
