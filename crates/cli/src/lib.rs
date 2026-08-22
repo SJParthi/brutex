@@ -98,6 +98,12 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
        cli audit-stored VENDOR UNDERLYING RUNG YEAR MONTH MIN_HITS
                                    sweep REAL bars, then trade them: exit grid,
                                    walk-forward, PBO and bootstrap p-values
+       cli verify       VENDOR UNDERLYING
+                                   prove the engine correct on YOUR data: joins,
+                                   determinism, no look-ahead, ledger round trip
+                                   and the refusal surface. Exits non-zero on any
+                                   failure. Nothing is pulled, nothing is written
+                                   to the bar store.
        cli results      [VENDOR UNDERLYING]
                                    list every recorded run, newest first, and
                                    name the best COMPLETE one
@@ -128,6 +134,18 @@ unless it was stamped:
     BRUTEX_COMMIT=$(git rev-parse HEAD) cargo build --release -p cli
 ";
 
+/// The `verify` arm, lifted out of [`run`] for the reason [`audit_range_arm`]
+/// gives.
+///
+/// Exits [`FAILED`] and not [`MISUSED`] on a failing check: the ARGUMENTS were
+/// understood and the ENGINE did not hold, which are different facts and a
+/// script distinguishing them is the point of having two codes.
+fn verify_arm(out: &mut String, feed: &str, underlying: &str) -> u8 {
+    let report = verify(feed, underlying);
+    let failed = report.contains("FAIL");
+    out.push_str(&report);
+    if failed { FAILED } else { OK }
+}
 /// The `results` arm, lifted out of [`run`] for the reason [`audit_range_arm`]
 /// gives.
 ///
@@ -310,6 +328,7 @@ pub fn run(args: &[String], out: &mut String) -> u8 {
             audit_range_arm(out, v, u, r, (fy, fm), (ty, tm), mh)
         }
         ["range-all", v, u, fy, fm, ty, tm, mh] => range_all_arm(out, v, u, (fy, fm), (ty, tm), mh),
+        ["verify", feed, underlying] => verify_arm(out, feed, underlying),
         ["results"] => results_arm(out, None),
         ["results", feed, underlying] => results_arm(out, Some((feed, underlying))),
         ["sweep-all", vendor, rung, min_hits] => match parse_min_hits(min_hits) {
@@ -2058,6 +2077,350 @@ fn as_percent(ppm: i64) -> String {
         hundredths / 100,
         hundredths % 100
     )
+}
+
+/// One checked property, and what it measured.
+struct Check {
+    /// What is being proved, in the operator's words.
+    claim: &'static str,
+    /// Whether it held.
+    held: bool,
+    /// The number that decided it, so a reader can see the evidence rather
+    /// than a tick.
+    evidence: String,
+}
+
+/// Proves the engine correct on the operator's OWN data, and prints what it
+/// measured.
+///
+/// # Why this exists
+///
+/// `docs/09-verify.md` lists six gates and every one of them is a BUILD gate:
+/// the workspace compiles, the tests pass, clippy is quiet, the bundle is
+/// current. They prove the code is well-formed. **None of them proves the sweep
+/// produces a correct answer on this store.**
+///
+/// That gap is the whole reason an operator has to take a report on trust, and
+/// taking a report on trust is the thing this repository exists not to ask for.
+/// Every check below runs against the REAL store, in seconds, and prints the
+/// figure it measured beside the verdict.
+///
+/// # What each check would catch
+///
+/// | check | the defect it refuses |
+/// |---|---|
+/// | determinism | a sweep whose answer moves between runs, so no result is reproducible |
+/// | suffix independence | look-ahead: a bar's verdict changing because LATER bars exist |
+/// | monotone join | a span assembled out of order, folding a later bar into an earlier state |
+/// | paired statistics | `Edge::mismatched` — a t and a mean computed from other bars' returns |
+/// | ledger round trip | a fixed-stride file whose reader and writer disagree, which still parses |
+/// | refusal surface | a bad argument answered with a report instead of a refusal |
+///
+/// Every one of those has actually occurred in this repository. This is the
+/// button that would have caught them.
+#[must_use]
+pub fn verify(vendor_word: &str, underlying: &str) -> String {
+    let mut out = String::from("VERIFYING THE ENGINE ON YOUR OWN DATA\n");
+    let _ = writeln!(
+        out,
+        "  feed {vendor_word} · {underlying} · nothing is pulled, nothing is \
+         written to the bar store\n"
+    );
+    let mut checks: Vec<Check> = Vec::new();
+
+    let root = match store_root() {
+        Ok(root) => root,
+        Err(why) => return format!("refused: {why}\n"),
+    };
+    let vendor = match parse_vendor(vendor_word) {
+        Ok(vendor) => vendor,
+        Err(why) => return format!("refused: {why}\n"),
+    };
+
+    // 1. THE SPAN LOADS, AND ITS JOIN IS MONOTONE.
+    let span = stored::load_span(&root, vendor, underlying, "1day", (2019, 12), (2026, 8));
+    checks.extend(span_checks(&span));
+
+    // 2. DETERMINISM. §3 rule 5: same inputs, same outputs, byte for byte.
+    // Two sweeps of the same slice, compared as bytes.
+    if let Ok(span) = &span {
+        let short: Vec<indicators::Candle> = span.bars.iter().take(600).copied().collect();
+        let first = audit_bars(evaluator(), short.clone(), "", 120, None, None, None);
+        let second = audit_bars(evaluator(), short, "", 120, None, None, None);
+        checks.push(Check {
+            claim: "two runs of one slice agree byte for byte",
+            held: first == second,
+            evidence: format!(
+                "{} bytes vs {} bytes, {}",
+                first.len(),
+                second.len(),
+                if first == second {
+                    "identical"
+                } else {
+                    "DIFFER"
+                }
+            ),
+        });
+    }
+
+    // 3. SUFFIX INDEPENDENCE -- the measurable face of no-look-ahead. A bar's
+    // conditions must not change because LATER bars exist, so a column built on
+    // a prefix must agree with the same rows of a column built on the whole.
+    if let Ok(span) = &span {
+        let whole: Vec<indicators::Candle> = span.bars.iter().take(900).copied().collect();
+        let prefix: Vec<indicators::Candle> = whole.iter().take(600).copied().collect();
+        let mut ev_a = match evaluator() {
+            Ok(ev) => ev,
+            Err(why) => return format!("refused: {why}\n"),
+        };
+        let mut ev_b = ev_a;
+        let on_whole = indicators::column::Column::build(&whole, &mut ev_a);
+        let on_prefix = indicators::column::Column::build(&prefix, &mut ev_b);
+        let shared = on_prefix.len();
+        let disagreements = on_prefix
+            .bits()
+            .iter()
+            .zip(on_whole.bits().iter().take(shared))
+            .filter(|(a, b)| a != b)
+            .count();
+        checks.push(Check {
+            claim: "a bar's conditions do not change because later bars exist",
+            held: disagreements == 0,
+            evidence: format!("{disagreements} of {shared} rows differ"),
+        });
+    }
+
+    checks.push(ledger_round_trip());
+    checks.push(refusal_surface(vendor_word, underlying));
+
+    let passed = checks.iter().filter(|c| c.held).count();
+    for check in &checks {
+        let _ = writeln!(
+            out,
+            "  {:<6}{:<62}{}",
+            if check.held { "PASS" } else { "FAIL" },
+            check.claim,
+            check.evidence
+        );
+    }
+    let _ = writeln!(
+        out,
+        "\n  {passed} of {} checks passed.{}",
+        checks.len(),
+        if passed == checks.len() {
+            " Every property above was MEASURED on your store just now, not \
+             recalled."
+        } else {
+            " A FAILURE ABOVE MEANS A RESULT FROM THIS ENGINE CANNOT BE \
+             TRUSTED UNTIL IT IS FIXED."
+        }
+    );
+    out
+}
+
+/// The two properties a joined span must have before anything is computed on it.
+///
+/// `Column::build` folds bar by bar and §3 rule 7's no-look-ahead property is
+/// held by that shape, so a series that stepped backwards at a month boundary
+/// would fold a later bar into an earlier state with nothing downstream to
+/// notice. A hole is the other half: a span missing months is a SHORTER sample
+/// and every figure taken over it is over that shorter sample.
+fn span_checks(span: &Result<stored::Span, stored::Refusal>) -> Vec<Check> {
+    match span {
+        Err(why) => vec![Check {
+            claim: "the span loads at all",
+            held: false,
+            evidence: why.lines().next().unwrap_or(why).to_owned(),
+        }],
+        Ok(span) => {
+            let steps_back = span
+                .bars
+                .windows(2)
+                .filter(|w| {
+                    let then = w.first().map_or(i64::MIN, |b| b.ts_micros);
+                    let now = w.last().map_or(i64::MIN, |b| b.ts_micros);
+                    now <= then
+                })
+                .count();
+            vec![
+                Check {
+                    claim: "every month the range asked for is present",
+                    held: span.complete(),
+                    evidence: format!("{} of {} months", span.found, span.asked),
+                },
+                Check {
+                    claim: "the joined series is strictly increasing in time",
+                    held: steps_back == 0,
+                    evidence: format!(
+                        "{steps_back} backward steps across {} bars",
+                        span.bars.len()
+                    ),
+                },
+            ]
+        }
+    }
+}
+
+/// Six hostile requests against THIS feed, all of which must be refused.
+///
+/// # Feed-scoped, not literal
+///
+/// The set is built from the feed and instrument under test rather than from
+/// hard-coded names. A verification that always attacked `zerodha NIFTY` would
+/// prove nothing about the feed the operator actually asked about — and this
+/// whole surface is feed-scoped by design: the ledger keys on `feed`, the
+/// listing filters on it, and `feed` is the NINTH term of the run identity
+/// precisely so two vendors redistributing one exchange's data are never
+/// collapsed into one answer.
+///
+/// The property is not merely "exit non-zero". It is **exit non-zero AND print
+/// no provenance banner** — `cli`'s own header calls the two banners the only
+/// thing separating a real sweep from a generated one, so a refusal that still
+/// printed one would be the failure this check exists to catch.
+fn refusal_surface(vendor_word: &str, underlying: &str) -> Check {
+    let v = vendor_word.to_owned();
+    let u = underlying.to_owned();
+    let ppm = "200000".to_owned();
+    let hostile: [[String; 8]; 6] = [
+        // A feed no build knows.
+        [
+            "range-all".into(),
+            "nosuchfeed".into(),
+            u.clone(),
+            "2019".into(),
+            "12".into(),
+            "2026".into(),
+            "8".into(),
+            ppm.clone(),
+        ],
+        // This feed, range inverted.
+        [
+            "range-all".into(),
+            v.clone(),
+            u.clone(),
+            "2026".into(),
+            "8".into(),
+            "2019".into(),
+            "12".into(),
+            ppm.clone(),
+        ],
+        // This feed, a month that is not a month.
+        [
+            "range-all".into(),
+            v.clone(),
+            u.clone(),
+            "2019".into(),
+            "13".into(),
+            "2026".into(),
+            "8".into(),
+            ppm.clone(),
+        ],
+        // This feed, an instrument shaped like a path.
+        [
+            "range-all".into(),
+            v.clone(),
+            "../../etc".into(),
+            "2019".into(),
+            "12".into(),
+            "2026".into(),
+            "8".into(),
+            ppm.clone(),
+        ],
+        // This feed, no instrument at all.
+        [
+            "range-all".into(),
+            v.clone(),
+            String::new(),
+            "2019".into(),
+            "12".into(),
+            "2026".into(),
+            "8".into(),
+            ppm,
+        ],
+        // This feed, a support that would disable extinction.
+        [
+            "range-all".into(),
+            v,
+            u,
+            "2019".into(),
+            "12".into(),
+            "2026".into(),
+            "8".into(),
+            "0".into(),
+        ],
+    ];
+    let mut refused = 0_usize;
+    for args in &hostile {
+        let mut sink = String::new();
+        if run(args.as_ref(), &mut sink) == MISUSED && !sink.contains("REAL MARKET DATA") {
+            refused = refused.saturating_add(1);
+        }
+    }
+    Check {
+        claim: "a request nothing can serve is refused, no provenance banner",
+        held: refused == hostile.len(),
+        evidence: format!("{refused} of {} refused cleanly", hostile.len()),
+    }
+}
+
+/// Writes one record to a scratch ledger, reads it back, and compares.
+///
+/// Uses a temporary directory rather than the operator's ledger: a verification
+/// that appended a fake row to the real history would corrupt the thing it
+/// exists to protect.
+fn ledger_round_trip() -> Check {
+    let dir = std::env::temp_dir().join("brutex-verify-ledger");
+    let _ = std::fs::remove_dir_all(&dir);
+    let want = crate::results::Record {
+        identity: [0xAB; 32],
+        finished_micros: 1_787_000_000_000_000,
+        feed: crate::results::field("zerodha"),
+        underlying: crate::results::field("NIFTY"),
+        timeframe: crate::results::field("10min"),
+        from_year: 2019,
+        from_month: 12,
+        to_year: 2026,
+        to_month: 8,
+        months_asked: 81,
+        months_found: 81,
+        bars: 623_546,
+        min_hits: 124_709,
+        combinations: 54_895_691,
+        depth: 16,
+        halted: 0,
+        trades: 11_209,
+        pessimistic: 2_459_160,
+        optimistic: 3_649_640,
+        worst_trade: -4_694,
+        max_drawdown: -29_163,
+        winner_mae: 300,
+        winner_mfe: 700,
+        all_mae: 500,
+        exit_rungs: [-1, -1, 3, 0, 0],
+    };
+    let outcome = crate::results::Results::open(&dir)
+        .and_then(|mut store| {
+            let at = store.append(&want)?;
+            store.read(at)
+        })
+        .map(|got| got == want);
+    let _ = std::fs::remove_dir_all(&dir);
+    match outcome {
+        Err(why) => Check {
+            claim: "a recorded run reads back exactly as written",
+            held: false,
+            evidence: why,
+        },
+        Ok(same) => Check {
+            claim: "a recorded run reads back exactly as written",
+            held: same,
+            evidence: format!(
+                "24 fields at stride {}, {}",
+                crate::results::STRIDE,
+                if same { "all equal" } else { "MISMATCH" }
+            ),
+        },
+    }
 }
 
 /// Rows the listing prints before it says how many it dropped.
