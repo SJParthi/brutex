@@ -94,13 +94,34 @@
         // A NON-503 FAILURE IS THE SERVER, NOT THE CONFIGURATION. 503 still
         // carries a parseable body with the refusal in it, so it is read
         // rather than thrown away.
+        // A 404 HERE HAS EXACTLY ONE CAUSE AND THE PAGE MUST NAME IT.
+        //
+        // The route is registered unconditionally in `server::router_serving`,
+        // so a running binary either has it or predates it. There is no
+        // configuration that removes it and no state that hides it. A 404
+        // therefore means the process was started before the route existed —
+        // and the page it serves comes off DISK, so the front end updates
+        // while the binary does not, which is precisely the trap: the page
+        // looks new and the API behind it is old.
+        //
+        // This cost a long session once: the operator's server had been up 36
+        // hours, every rebuild of this page reached them instantly, and none
+        // of the route did. The message said "the API refused the request",
+        // which is true and useless. It now names the cause and the fix.
         load = {
           phase: 'failed',
           body: null,
           why:
-            `/backtest.json answered ${response.status}. That is the API refusing the ` +
-            `request itself, not the ledger being empty — the two are different facts ` +
-            `and only one of them is fixable by sweeping something.`
+            response.status === 404
+              ? `/backtest.json is not a route on the running server, which means the API ` +
+                `process was started before this route existed. RESTART THE API — the ` +
+                `binary on disk already has it. Nothing is wrong with the store, the ` +
+                `ledger or this page: the front end is served off disk and updates on ` +
+                `every build, while the binary only changes when it is restarted, so this ` +
+                `page can be hours newer than the server answering it.`
+              : `/backtest.json answered ${response.status}. That is the API refusing the ` +
+                `request itself, not the ledger being empty — the two are different facts ` +
+                `and only one of them is fixable by sweeping something.`
         };
         return;
       }
