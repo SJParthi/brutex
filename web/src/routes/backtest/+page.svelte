@@ -1802,9 +1802,12 @@
   <header class="head">
     <div>
       <h1>Backtest</h1>
-      <p class="sub">
-        Every sweep this store has recorded, newest first. Ranked on <b>worst-case fills</b>,
-        which is what selection ranks on everywhere in this workspace.
+      <!-- THE STANDFIRST BECOMES A TOOLTIP. It said something true and said
+           it in three lines above the data; TradingView's tester carries no
+           page copy at all. The fact survives where a reader who wants it
+           will look for it, and the space goes back to the numbers. -->
+      <p class="sub" title="Ranked on worst-case fills — adverse-extreme execution — because that is what selection ranks on everywhere in this workspace. The best-case column is open fills and is never the figure a winner is chosen by.">
+        ranked on <b>worst-case fills</b>
       </p>
     </div>
     <button class="btn ghost" onclick={fetchLedger} disabled={load.phase === 'loading'}>
@@ -1821,6 +1824,11 @@
        identity, so guessing either would name a run after something
        nobody asked for.
        ================================================================ -->
+  <!-- ONE PANEL FROM HERE DOWN. Every section below owns only a bottom
+       hairline; the shell owns the border, the radius and the shadow. A
+       gap between two boxes says they are separate things, and every
+       section here is a different view of ONE run. -->
+  <div class="bt-shell">
   <section class="runbar">
     <span class="runbar-k">New sweep</span>
     <label class="runf">
@@ -2086,12 +2094,12 @@
            LEVEL 2 — NINE RUNGS SIDE BY SIDE
            ============================================================ -->
       <section class="block">
-        <h2 class="bh">Which rung carries the edge</h2>
-        <p class="bsub">
-          One row per comparable span — same feed, same instrument, same window, same support
-          threshold. Bars share one scale within a row, so height is comparable across rungs. A
-          rung that was never swept for a span is <b>absent, and said to be</b>: it is not a zero.
-        </p>
+        <h2
+          class="bh"
+          title="One row per comparable span — same feed, instrument, window and support ratio. Bars share one scale within a row, so height is comparable across rungs. A rung never swept for a span is absent rather than zero."
+        >
+          Which rung carries the edge
+        </h2>
 
         {#each rungGroups as g (g.key)}
           <div class="rgroup">
@@ -2238,7 +2246,7 @@
                 </tr>
               </thead>
             </table>
-            <div class="spacer" style="height:{spacerH}px">
+            <div class="bt-spacer" style="height:{spacerH}px">
               {#each windowed as r, i (r.index)}
                 <div
                   class="row"
@@ -2704,7 +2712,7 @@
                 </div>
 
               {#key paTab}
-                <div class="pane">
+                <div class="bt-pane">
                   {#if paTab === 'breakdown'}
                   <div class="tt-quad">
                     <div class="tt-q"><span class="tt-k">Gross profit</span><span class="tt-qv"><Lock why="Only the net total is recorded." /></span></div>
@@ -2937,7 +2945,7 @@
                    a glitch. Keyed, the old pane leaves and the new one
                    arrives, and the eye follows it. -->
               {#key taTab}
-                <div class="pane">
+                <div class="bt-pane">
                   {#if taTab === 'distribution'}
                   <div class="tt-quad">
                     <div class="tt-q"><span class="tt-k">Expected payoff</span><span class="tt-qv">{perTrade ? money(perTrade.worst) : '—'}</span></div>
@@ -3184,6 +3192,7 @@
       {/if}
     {/if}
   {/if}
+  </div>
 </div>
 
 <style>
@@ -3229,6 +3238,113 @@
   }
   .sub b {
     color: var(--n11);
+  }
+
+  /* ==================================================================
+     ONE PANEL, NOT A STACK OF CARDS
+     ------------------------------------------------------------------
+     This page was a column of rounded cards with 1.5rem between them,
+     and it read as a DASHBOARD OF WIDGETS. TradingView's tester is one
+     continuous instrument: sections separated by a hairline, nothing
+     floating, no gap for the page's ground to show through. The
+     difference is not decoration — a gap says "these are separate
+     things", and every section here is a different view of ONE run.
+
+     So the outer container owns the border, the radius and the shadow,
+     and every section inside owns only a bottom hairline. Density comes
+     from the same change: the space the gaps were using goes back to
+     the content.
+     ================================================================== */
+  .page {
+    display: block;
+    gap: 0;
+    padding-bottom: 3rem;
+  }
+  .bt-shell {
+    border: 1px solid var(--n6);
+    border-radius: 10px;
+    overflow: hidden;
+    background: var(--n3);
+    box-shadow: var(--e1);
+  }
+  /* Every direct section of the shell: a hairline below, no border of
+     its own, no radius, no shadow, no gap. */
+  .bt-shell > * {
+    border: 0;
+    border-bottom: 1px solid var(--n6);
+    border-radius: 0;
+    box-shadow: none;
+    margin: 0;
+  }
+  .bt-shell > *:last-child {
+    border-bottom: 0;
+  }
+
+  /* ---- density: the sections themselves ---------------------------- */
+  .runbar {
+    padding: 0.6rem 0.9rem;
+    border-left: 0;
+    background: linear-gradient(120deg, var(--acc-soft) 0%, var(--n3) 34%);
+  }
+  .bt-strip {
+    border-radius: 0;
+    gap: 1px;
+  }
+  .fact {
+    padding: 0.7rem 0.9rem;
+  }
+  .fact .v {
+    font-size: 1.3rem;
+  }
+  .block {
+    padding: 0.9rem 0.9rem 1rem;
+    gap: 0.55rem;
+  }
+  .bh {
+    font-size: 0.9rem;
+  }
+  .crown {
+    padding: 0.8rem 0.95rem;
+    gap: 0.85rem;
+  }
+  .rgroup {
+    padding: 0.75rem 0.85rem;
+    gap: 0.5rem;
+  }
+  .tbl-scroll {
+    border: 1px solid var(--n6);
+    border-radius: 8px;
+    max-height: 420px;
+  }
+  .drill {
+    padding: 0.9rem;
+  }
+  .drill-grid {
+    gap: 0.7rem;
+  }
+  .card {
+    padding: 0.75rem 0.85rem;
+    gap: 0.45rem;
+  }
+  .term,
+  .tester {
+    border: 1px solid var(--n6);
+    border-radius: 8px;
+  }
+  .term .bt-chart {
+    height: 400px;
+    flex: 0 0 400px;
+  }
+
+  /* The page's own heading loses its standfirst paragraph and shrinks:
+     TradingView's tester has no page header at all, and every line of
+     chrome above the data is a line of data that did not fit. */
+  .head {
+    padding-bottom: 0.15rem;
+    margin-bottom: 0.7rem;
+  }
+  h1 {
+    font-size: 1.15rem;
   }
 
   /* ---------------- panels ---------------- */
@@ -3732,7 +3848,7 @@
     outline-offset: 1px;
   }
 
-  .spacer {
+  .bt-spacer {
     position: relative;
   }
   .row {
@@ -5158,7 +5274,7 @@
      and to the left, and a pane that slid the other way would read as
      going back. 18ms of stagger on the quad inside it carries the eye
      across the row after the pane itself has landed. */
-  .pane {
+  .bt-pane {
     animation: panein 0.34s cubic-bezier(0.22, 0.75, 0.3, 1) both;
   }
   @keyframes panein {
@@ -5173,13 +5289,13 @@
   }
   /* The pane's own stats re-stagger, because they are new numbers and
      not the same numbers moved. */
-  .pane .tt-quad > .tt-q {
+  .bt-pane .tt-quad > .tt-q {
     animation: liftin 0.36s cubic-bezier(0.22, 0.7, 0.3, 1) both;
   }
-  .pane .tt-quad > .tt-q:nth-child(1) { animation-delay: 0.08s; }
-  .pane .tt-quad > .tt-q:nth-child(2) { animation-delay: 0.12s; }
-  .pane .tt-quad > .tt-q:nth-child(3) { animation-delay: 0.16s; }
-  .pane .tt-quad > .tt-q:nth-child(4) { animation-delay: 0.2s; }
+  .bt-pane .tt-quad > .tt-q:nth-child(1) { animation-delay: 0.08s; }
+  .bt-pane .tt-quad > .tt-q:nth-child(2) { animation-delay: 0.12s; }
+  .bt-pane .tt-quad > .tt-q:nth-child(3) { animation-delay: 0.16s; }
+  .bt-pane .tt-quad > .tt-q:nth-child(4) { animation-delay: 0.2s; }
 
   /* ---- the drill-down opens rather than appearing ------------------
      It is the largest thing on the page and it arrives under a row the
@@ -5229,8 +5345,8 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .pane,
-    .pane .tt-quad > .tt-q,
+    .bt-pane,
+    .bt-pane .tt-quad > .tt-q,
     .drill {
       animation: none !important;
       opacity: 1 !important;
