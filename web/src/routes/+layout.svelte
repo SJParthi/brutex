@@ -75,6 +75,25 @@
     { href: '/autopilot', label: 'Autopilot' },
     { href: '/db', label: 'DB' },
     { href: '/audit', label: 'Audit' },
+    // THE ENGINE'S OUTPUT, one click from the ingest console that feeds it.
+    //
+    // Every entry above this line is about DATA -- what was pulled, what is
+    // stored, what a pull did. None of them said anything about what the SWEEP
+    // found, because until `crates/api/src/backtest.rs` nothing served the
+    // results ledger at all: `cli::results` recorded every completed run into
+    // an append-only file and the only reader was a terminal command.
+    //
+    // A surface that exists and cannot be reached is the same as absent. That
+    // is the sentence the Logs entry below was written under, after `/logs`
+    // shipped reachable only by typing its URL; this entry exists so it does
+    // not have to be written a third time.
+    //
+    // NO `reload`, unlike Logs, and the difference is load-bearing.
+    // `src/routes/backtest/` IS a Svelte route, and
+    // `crates/api/src/server.rs` deliberately registers only `/backtest.json`
+    // beside it and NO page -- so nothing on the server can shadow this path
+    // and a click, a reload and a bookmark all render the same application.
+    { href: '/backtest', label: 'Backtest' },
     // THE LOG, REACHABLE BY CLICKING RATHER THAN BY KNOWING THE URL.
     //
     // `crates/api/src/logs.rs` is a complete bounded reader -- 1,717 lines,

@@ -31,6 +31,13 @@ const ROUTES = [
 	'/bars.json',
 	'/store.json',
 	'/audit.json',
+	// THE RESULTS LEDGER. Its page at `/backtest` is a SvelteKit route and is
+	// deliberately NOT listed here, for the reason the `/audit` note below
+	// gives at length: a path that appears in this list is answered by Rust in
+	// development and by the client router on a click, which is one URL serving
+	// two applications. `crates/api/src/server.rs` registers no `/backtest`
+	// page at all, so here there is only the JSON.
+	'/backtest.json',
 	// `/audit` IS NOT HERE, AND ITS ABSENCE IS THE POINT.
 	//
 	// It used to be, and it made one URL serve two different applications:
