@@ -21060,3 +21060,61 @@ not tracked; §8's rule about untracked local configuration is why.
 nothing in `web/` fetches it, exactly as `/calendar.json` stood after D-0274.
 Two routes now wait on a reader, and that is the next unit rather than a thing
 this entry claims.
+
+### D-0277 — `/mapping`, so the join has a reader and the nav does not need this sentence a third time
+
+**2026-08-22.** D-0275 built the vendor-to-exchange join and recorded that it
+had no caller. D-0276 gave it `/indexmap.json` and recorded that nothing in
+`web/` fetched it. `web/src/routes/mapping/+page.svelte` is the reader, and it
+is in the nav, because *a surface that exists and cannot be reached is the same
+as absent* — the sentence `+layout.svelte` already carries twice, once for
+`/logs` and once for `/backtest`.
+
+**The refusals open the table.** A symbol that resolves confirms what an
+operator already assumed. A symbol the exchange does not confirm is one whose
+bars are filed under a name no authority backs, and until this page there was no
+list of those anywhere. So refused rows are not filtered out, not collapsed
+behind a toggle and not sorted to the bottom, and the census counts them beside
+the resolutions rather than under a heading that reads like an error.
+
+**The two bases stay two colours.** `published` is proof and `abbreviation` is
+inference, and the server sends them apart for the reason §3 rule 1 exists. A
+page painting both the same would undo that on the last hop, so they carry
+different hues from the console's own semantic ramp — `--up` and `--info`,
+against `--warn` for ambiguity and `--down` for absence. **No colour is declared
+in this file**: every one is the ramp `theme.css` already defines, which is why
+both themes were correct on the first build rather than after a dark-mode fix.
+
+**An ambiguous row shows what collided.** "Ambiguous" alone is a dead end an
+operator cannot act on. `NIFTY EV` matches nine published indices, and the
+difference between a refusal and a decision waiting to be made is seeing the
+nine.
+
+**No suggested name for a refused symbol, deliberately.** Fifteen of the
+seventeen absences have a published name that is obvious to a reader and not to
+the rule. Printing a guess in the column that elsewhere holds a resolution would
+make inference and proof indistinguishable at a glance, which is the one thing
+this surface exists to keep apart. The *reason* is printed instead: a reason is
+checkable, a guess is not.
+
+**`reload` is absent and that is load-bearing.** `src/routes/mapping/` is a
+Svelte route and `server.rs` registers only `/indexmap.json` beside it and no
+page, so a click, a reload and a bookmark all render one application. That is
+the `/backtest` arrangement and deliberately not the `/audit` one, where two
+applications answer on one path.
+
+**Verified against the running console, not asserted.** `/mapping` resolves,
+the nav lights `Mapping`, and the refusal panel renders — the operator's own
+binary predates the route, so `/indexmap.json` answers 404 and the page says so
+in those words instead of drawing an empty table. Dark and light both resolve
+every token. `npm run check` reports zero problems in the two touched files; the
+118 errors it reports elsewhere are pre-existing and untouched.
+
+**`web/build` is rebuilt and committed with the source**, per D-0068 — the
+binary serves the directory from disk and never compiles the bundle, so a source
+change without a rebuild ships a page nobody can reach.
+
+**What this still does NOT do.** `/calendar.json` remains unread. It answers per
+`(feed, symbol)` and `/ingest` needs expected-bar counts for many instruments at
+once, so P-03 is not a table deletion but a route shape question, and this entry
+does not pretend otherwise.

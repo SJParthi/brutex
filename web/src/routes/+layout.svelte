@@ -75,6 +75,24 @@
     { href: '/autopilot', label: 'Autopilot' },
     { href: '/db', label: 'DB' },
     { href: '/audit', label: 'Audit' },
+    // WHAT THE EXCHANGE SAYS ABOUT THE FEED'S OWN SYMBOLS.
+    //
+    // Every tab above is about BARS -- what was pulled, what is stored, what a
+    // run did, what the sweep found. None of them said anything about whether
+    // the NAME those bars are filed under is one NSE actually publishes, and
+    // until `/indexmap.json` nothing served that at all: the join in
+    // `pull::nseindex` compiled, was tested and answered nobody.
+    //
+    // NO `reload`. `src/routes/mapping/` IS a Svelte route and
+    // `crates/api/src/server.rs` registers only `/indexmap.json` beside it and
+    // no page, so a click, a reload and a bookmark all render this application
+    // -- the same arrangement `/backtest` documents, and deliberately not the
+    // one `/audit` is a warning about.
+    {
+      href: '/mapping',
+      label: 'Mapping',
+      why: 'Each index symbol this feed lists, joined to the name NSE publishes for it — and the reason for every symbol the exchange does not confirm.'
+    },
     // THE ENGINE'S OUTPUT, one click from the ingest console that feeds it.
     //
     // Every entry above this line is about DATA -- what was pulled, what is
