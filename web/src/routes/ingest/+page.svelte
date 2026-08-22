@@ -8677,9 +8677,20 @@
          The multi-feed branch is NOT narration and stays: with two feeds ticked
          the counts below belong to ONE of them, and nothing else on this page
          says which. It appears only when it is true. -->
+    <!-- `allBodies` AND NOT `wireBodies`, BECAUSE THE BUTTON ABOVE COUNTS
+         `allBodies` AND BOTH SAID "request(s)".
+         Measured with five feeds, three segments and two timeframes ticked: the
+         control face read `5 feeds · 16 request(s)` and this line read
+         `5 feed(s) · 10 request(s)`, on the same screen, under the same word.
+         Neither number was wrong — the face counts spot AND expired derivatives,
+         this counted spot alone — and that is exactly what makes it the defect
+         this page already carries a rule against: the shape where the button
+         said `1 of 213 ticked`, the receipt said `ASKED 1`, and the run pulled
+         213. Three answers to one question, each defensible on its own.
+         One expression, so they cannot disagree again. -->
     {#if feedsChosen.length > 1}
       <span class="note quiet">
-        {n(feedsChosen.length)} feed(s) · {n(wireBodies.length)} request(s) · counts below are {feedName(
+        {n(feedsChosen.length)} feed(s) · {n(allBodies.length)} request(s) · counts below are {feedName(
           feeds.active
         )}'s
       </span>
