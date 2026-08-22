@@ -20399,7 +20399,7 @@ one Muhurat that was measured.
 `pull`: 324 lib tests, 27 doctests, 0 failures. `fmt` and
 `clippy --all-targets -D warnings` clean.
 
-### D-0262 — the change column is folded where the time order still exists
+### D-0265 — the change column is folded where the time order still exists
 
 D-0261 gave `/bars/window.json` a page and a sort. It could not be wired to the
 grid as written, and the reason is worth recording because it is not obvious.
