@@ -2984,15 +2984,35 @@
       // cannot be read at all is broken and no pull will fix it. `survey` is
       // already folded per feed — see the import — so this is a Map lookup.
       const hold = survey.byFeed.get(leg.vendor) ?? null;
+      // A CLAIM NOT MADE IS NOT A CLAIM OF "NO LIMIT", AND THIS LANE COLLAPSED
+      // THE TWO.
+      //
+      // `pairFloor` answers `{ at: null, known: false }` for a rung the feed
+      // states nothing about, and the two archive feeds state nothing about any
+      // of theirs — `TRUEDATA`'s and GDFL's descriptors carry `history: &[]`,
+      // whose own comment says an archive's reach "is whatever the operator
+      // bought and put in the folder" and that `/feeds.json` renders it "as a
+      // claim NOT MADE rather than as 'no limit'".
+      //
+      // `floorFor` then leaves `from` untouched, `lost` is zero, and this lane
+      // drew a full green track reading "whole window" — the page asserting, on
+      // a vendor's behalf, a reach that vendor never claimed. That is the
+      // §3-rule-1 invention this repository exists to refuse, arriving as
+      // reassurance rather than as a number.
+      //
+      // `known` is carried so the lane can draw the third state instead of
+      // rounding it to the friendlier of the other two.
+      const known = pairFloor(leg.vendor, leg.dir).known;
       return {
         key: `${leg.vendor}·${leg.dir}`,
         wire: leg.vendor,
         feed: feedName(leg.vendor),
         rung: RUNGS.find((r) => r.dir === leg.dir)?.label ?? leg.dir,
         at: leg.from,
+        known,
         deadPct,
         livePct: 100 - deadPct,
-        whole: lost === 0,
+        whole: known && lost === 0,
         bars: hold?.bars ?? 0,
         broken: hold?.error ?? null,
         held: hold !== null
@@ -7604,17 +7624,32 @@
                           <span
                             class="ltrack"
                             role="img"
-                            aria-label={lane.whole
-                              ? `${lane.feed} at ${lane.rung} answers for the whole window.`
-                              : `${lane.feed} at ${lane.rung} answers for ${Math.round(lane.livePct)}% of the window, from ${dayLabel(lane.at)}. The earlier ${Math.round(lane.deadPct)}% returns nothing.`}
+                            aria-label={!lane.known
+                              ? `${lane.feed} states no reach at ${lane.rung}. This is a folder of bought files, so what it covers is whatever is in it — not a claim this page can make for it.`
+                              : lane.whole
+                                ? `${lane.feed} at ${lane.rung} answers for the whole window.`
+                                : `${lane.feed} at ${lane.rung} answers for ${Math.round(lane.livePct)}% of the window, from ${dayLabel(lane.at)}. The earlier ${Math.round(lane.deadPct)}% returns nothing.`}
                           >
-                            {#if lane.deadPct > 0}
-                              <i class="ldead" style="width:{lane.deadPct}%"></i>
+                            {#if !lane.known}
+                              <!-- NEITHER GREEN NOR RED. A green track would
+                                   assert a reach the vendor never claimed; a red
+                                   one would assert a refusal nobody made. The
+                                   track stays the empty well, which is the only
+                                   honest picture of "not stated". -->
+                              <i class="lnone"></i>
+                            {:else}
+                              {#if lane.deadPct > 0}
+                                <i class="ldead" style="width:{lane.deadPct}%"></i>
+                              {/if}
+                              <i class="llive" style="width:{lane.livePct}%"></i>
                             {/if}
-                            <i class="llive" style="width:{lane.livePct}%"></i>
                           </span>
-                          <span class="lat" class:dim={lane.whole}>
-                            {lane.whole ? 'whole window' : dayLabel(lane.at)}
+                          <span class="lat" class:dim={lane.whole || !lane.known}>
+                            {!lane.known
+                              ? 'reach not stated'
+                              : lane.whole
+                                ? 'whole window'
+                                : dayLabel(lane.at)}
                           </span>
                           <!-- WHAT IS ON DISK FOR THIS FEED, AND THE THREE
                                STATES ARE NOT TWO. A store that cannot be READ
@@ -10608,6 +10643,15 @@
   .llive {
     height: 100%;
     background: var(--up);
+  }
+  /* THE THIRD STATE: A REACH NOBODY STATED. Full width so the track is not
+     mistaken for a bar that failed to load, and the well's own colour so it
+     asserts nothing — an archive covers whatever the operator put in the folder,
+     and that is not a span this page may draw on the vendor's behalf. */
+  .lnone {
+    height: 100%;
+    width: 100%;
+    background: var(--well);
   }
   .lat {
     font-family: var(--num);
