@@ -218,7 +218,16 @@ pub fn classify(stored: &[i64], first: i64, last: i64) -> Ledger {
         }
 
         match kind {
-            DayKind::Unmeasured => {
+            // BOTH REPORT `Unmeasured`, AND NEITHER ADDS TO `expected`.
+            //
+            // `Unmeasured` is a day outside the calendar's range.
+            // `OpenLengthUnmeasured` is a Muhurat the exchange traded and the
+            // minute series does not reach — five days, every Diwali before
+            // 2025. Calling those a `VendorHole` would claim a loss whose SIZE
+            // this build cannot state, and calling them `Closed` would deny a
+            // session the daily bar proves happened. They are flagged, and the
+            // caller decides.
+            DayKind::Unmeasured | DayKind::OpenLengthUnmeasured => {
                 push(&mut ledger, &mut run, day, 0, 1_439, Reason::Unmeasured);
             }
             DayKind::Closed => {

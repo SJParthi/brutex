@@ -55,13 +55,33 @@
 //! **Extending it is a measurement, never a typed date.** Pull the earlier
 //! years, re-derive from the store, widen the range.
 //!
+//! # Five days traded and have no minute series at all
+//!
+//! The store holds **1,671** days of daily bars and **1,666** of minute bars.
+//! The difference is every Diwali **Muhurat** session before 2025 —
+//! 2020-11-14, 2021-11-04, 2022-10-24, 2023-11-12, 2024-11-01 — each with a
+//! daily bar and not one minute bar. Zerodha's minute history does not reach
+//! them.
+//!
+//! They get their own answer, [`DayKind::OpenLengthUnmeasured`], because both
+//! neighbours are wrong: a full session would claim 375 owed bars each and
+//! report 1,875 losses that were never offered, and a closed day would deny a
+//! session the daily bar proves happened.
+//!
+//! **This was found only after an audit had already reported the store
+//! complete.** That audit grouped absences by days that HAD minute bars, so a
+//! day with none was invisible to it, and "28 minutes missing" was an
+//! undercount by an order of magnitude. The test
+//! `a_muhurat_with_no_minute_series_owes_an_unknown_number_and_not_375` exists
+//! so the same blind spot cannot return.
+//!
 //! # Cost
 //!
 //! One subtraction, one array index and one bit test — O(1), no hash, no search,
 //! no allocation. The bitset is 307 bytes for 2,455 days and lives in
-//! `.rodata`. The four non-standard sessions are a fixed four-element table
-//! whose length is a compile-time constant, so the walk over it is a bounded
-//! constant and not a scan that grows.
+//! `.rodata`. The four irregular sessions and the five length-unmeasured days
+//! are fixed tables whose lengths are compile-time constants, so the walks over
+//! them are bounded and not scans that grow.
 
 /// First day this calendar knows: **2019-12-02**, as days since the epoch.
 pub const FIRST_DAY: i64 = 18_232;
@@ -189,6 +209,25 @@ impl Session {
 pub enum DayKind {
     /// The exchange traded, and this is what it held.
     Open(Session),
+    /// The exchange traded — a `1day` bar proves it — but **no minute bar
+    /// exists for that day anywhere in the store**, so the session's length was
+    /// never measured and this build will not guess it.
+    ///
+    /// # The five days this is, and why they are not a bug in the calendar
+    ///
+    /// Every Diwali **Muhurat** session before 2025: 2020-11-14, 2021-11-04,
+    /// 2022-10-24, 2023-11-12 and 2024-11-01. Each has a daily bar and zero
+    /// minute bars, which is Zerodha's minute history not reaching them rather
+    /// than a hole in a day it served.
+    ///
+    /// **It is a third answer on purpose.** Calling them [`Self::Open`] with a
+    /// full session would claim 375 owed bars and report 1,875 losses that were
+    /// never offered; calling them [`Self::Closed`] would deny a session the
+    /// daily bar proves happened. The 2025 Muhurat measured **60** minutes and
+    /// these were probably the same, but "probably" is the invention
+    /// `CLAUDE.md` §3 rule 1 bans — so the length is withheld and the day is
+    /// flagged for a caller to decide about.
+    OpenLengthUnmeasured,
     /// The exchange did not trade. A weekend or a holiday — this calendar does
     /// not distinguish them, because the store cannot: both are simply days on
     /// which no instrument produced a bar, and naming one a "holiday" would be
@@ -240,6 +279,23 @@ const IRREGULAR: [(i64, Session); 4] = [
             count: 1,
         },
     ),
+];
+
+/// Days with a `1day` bar and **no minute bar anywhere in the store**.
+///
+/// Measured, not chosen: the store holds 1,671 days of daily bars and 1,666
+/// days of minute bars, and this is the difference. Every one is a Diwali
+/// Muhurat session, and the only Muhurat that IS in the minute series is
+/// 2025-10-21 — which is in [`IRREGULAR`] with its measured hour instead.
+///
+/// See [`DayKind::OpenLengthUnmeasured`] for why these are a third answer
+/// rather than folded into either neighbour.
+const LENGTH_UNMEASURED: [i64; 5] = [
+    18_580, // 2020-11-14 Sat
+    18_935, // 2021-11-04 Thu
+    19_289, // 2022-10-24 Mon
+    19_673, // 2023-11-12 Sun
+    20_028, // 2024-11-01 Fri
 ];
 
 /// Whether each day in the window traded. One bit per day, LSB first.
@@ -294,6 +350,16 @@ pub fn kind_of(epoch_day: i64) -> DayKind {
     if byte & (1_u8 << (offset % 8)) == 0 {
         return DayKind::Closed;
     }
+    // THE MUHURAT DAYS WITH NO MINUTE SERIES, CHECKED BEFORE THE IRREGULAR
+    // TABLE. Five entries, a compile-time constant, so this is a bounded walk
+    // and not a scan that grows.
+    let mut m = 0_usize;
+    while m < LENGTH_UNMEASURED.len() {
+        match LENGTH_UNMEASURED.get(m) {
+            Some(&day) if day == epoch_day => return DayKind::OpenLengthUnmeasured,
+            _ => m += 1,
+        }
+    }
     let mut i = 0_usize;
     while i < IRREGULAR.len() {
         match IRREGULAR.get(i) {
@@ -313,7 +379,11 @@ pub fn expected_bars(epoch_day: i64) -> Option<u16> {
     match kind_of(epoch_day) {
         DayKind::Open(session) => Some(session.bars()),
         DayKind::Closed => Some(0),
-        DayKind::Unmeasured => None,
+        // BOTH `None`, AND FOR THE SAME REASON. One is a day outside the range
+        // and the other a Muhurat whose length was never measured; in both the
+        // honest answer to "how many bars are owed" is that nobody knows, and
+        // `Some(0)` would say the exchange owed nothing.
+        DayKind::OpenLengthUnmeasured | DayKind::Unmeasured => None,
     }
 }
 
@@ -366,7 +436,12 @@ mod tests {
                 weekday_total += 1;
             }
             match kind_of(day) {
-                DayKind::Open(_) => {
+                // BOTH ARE DAYS THE EXCHANGE TRADED, which is what the
+                // reconciliation counts. One has a measured session, the other
+                // is a pre-2025 Muhurat whose minute series is absent — but a
+                // `1day` bar exists for it either way, and this arithmetic is
+                // against the daily bars.
+                DayKind::Open(_) | DayKind::OpenLengthUnmeasured => {
                     open += 1;
                     if weekend {
                         weekend_sessions += 1;
@@ -479,5 +554,46 @@ mod tests {
              every one of the 1,671 days"
         );
         assert!(!full.expects(OPEN_MINUTE - 1), "09:14 is pre-open");
+    }
+
+    /// **THE FIVE MUHURAT SESSIONS WITH A DAILY BAR AND NO MINUTE SERIES.**
+    ///
+    /// Found by an audit that had already reported "28 minutes missing" and was
+    /// wrong: the scan grouped by days that HAD minute bars, so a day with none
+    /// at all was invisible to it. The store holds 1,671 days of daily bars and
+    /// **1,666** of minute bars, and this is the difference — every Diwali
+    /// Muhurat before 2025.
+    ///
+    /// Getting this wrong in either direction is expensive. As [`DayKind::Open`]
+    /// with a full session they would claim 375 owed bars each and report 1,875
+    /// losses that were never offered. As [`DayKind::Closed`] they would deny a
+    /// session the daily bar proves happened. The length is withheld because the
+    /// 2025 Muhurat measured 60 minutes and "probably the same" is the invention
+    /// §3 rule 1 bans.
+    #[test]
+    fn a_muhurat_with_no_minute_series_owes_an_unknown_number_and_not_375() {
+        for (day, label) in [
+            (18_580_i64, "2020-11-14"),
+            (18_935, "2021-11-04"),
+            (19_289, "2022-10-24"),
+            (19_673, "2023-11-12"),
+            (20_028, "2024-11-01"),
+        ] {
+            assert_eq!(
+                kind_of(day),
+                DayKind::OpenLengthUnmeasured,
+                "{label} has a 1day bar and no minute bar"
+            );
+            assert_eq!(
+                expected_bars(day),
+                None,
+                "{label} owes an UNKNOWN number of bars — not 375, and not 0"
+            );
+        }
+
+        // AND THE ONE MUHURAT THAT IS IN THE MINUTE SERIES IS NOT ONE OF THEM.
+        // 2025-10-21 was measured at sixty bars, so it is an ordinary irregular
+        // session and this list must not swallow it.
+        assert_eq!(expected_bars(20_382), Some(60), "2025-10-21 IS measured");
     }
 }

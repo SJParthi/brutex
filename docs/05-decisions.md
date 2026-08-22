@@ -20345,3 +20345,56 @@ persists a ledger. That wiring is next, and until it lands the page still report
 
 `pull`: 323 lib tests, 27 doctests, 0 failures. `fmt` and
 `clippy --all-targets -D warnings` clean.
+
+### D-0264 — five Muhurat sessions have a daily bar and no minute series, and the audit that said otherwise could not see them
+
+**2026-08-22.** D-0262's calendar and D-0263's classifier were built on an audit
+that reported the operator's store essentially complete: **28 minutes** absent
+from a 623,546-bar series, 0.0045%. **That number was an undercount by roughly an
+order of magnitude, and the reason is a blind spot worth recording.**
+
+The scan grouped absent minutes by day and looked for holes *within* each day —
+so it could only see days that had at least one minute bar. **A day with none at
+all was invisible to it.** Comparing the two series directly is what found them:
+the store holds **1,671** days of daily bars and **1,666** of minute bars.
+
+The five are every Diwali **Muhurat** session before 2025 — 2020-11-14,
+2021-11-04, 2022-10-24, 2023-11-12, 2024-11-01. Each has a daily bar proving the
+exchange traded and not one minute bar. The 2025 Muhurat, 2025-10-21, **is** in
+the minute series at sixty bars, so this is Zerodha's minute history not
+reaching the older ones rather than a rule about Muhurat.
+
+Corrected total: 28 minutes of interior holes, plus roughly 300 minutes of
+absent Muhurat sessions, is about **328 minutes — 0.053%**, and systematic
+rather than random.
+
+**Both obvious encodings are wrong, which is why there is a third.**
+`DayKind::Open` with a full session would claim 375 owed bars on each of the
+five and report **1,875 losses that were never offered** — the same false alarm
+the calendar exists to stop, inverted. `DayKind::Closed` would deny a session
+the daily bar proves happened. `DayKind::OpenLengthUnmeasured` says the exchange
+traded and this build does not know for how long. The 2025 session measured 60
+minutes and these were probably the same; "probably" is the invention §3 rule 1
+bans, so the length is withheld.
+
+`expected_bars` therefore answers `None` for them, alongside a day outside the
+range, and `gaps::classify` reports them as `Reason::Unmeasured` while adding
+nothing to `expected` — a flag for a caller to decide about, not a loss whose
+size cannot be stated.
+
+**The compiler found every site.** Adding the variant broke `expected_bars`,
+`gaps::classify` and the reconciliation test with `E0004: non-exhaustive
+patterns`, which is precisely the property D-0263 claimed for the taxonomy —
+that a new case cannot be added without the compiler naming every place that
+must handle it. The claim was tested by making it happen.
+
+**The reconciliation still holds at 1,671**, because both open kinds are days
+the exchange traded and the arithmetic is against daily bars. Two of the eight
+weekend sessions — 2020-11-14 and 2023-11-12 — are among the five.
+
+`a_muhurat_with_no_minute_series_owes_an_unknown_number_and_not_375` pins all
+five, and pins that 2025-10-21 is NOT among them, so the list cannot swallow the
+one Muhurat that was measured.
+
+`pull`: 324 lib tests, 27 doctests, 0 failures. `fmt` and
+`clippy --all-targets -D warnings` clean.
