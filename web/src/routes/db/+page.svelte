@@ -3374,9 +3374,133 @@
     const take = readBudget === 0 ? all.length : Math.min(readBudget, all.length);
     return { all, read: all.slice(0, take), held: all.length - take };
   });
+  /* ---------------------------------------------------------------------
+     WHICH OF THOSE FILES THE PAGE ON SCREEN ACTUALLY NEEDS.
+
+     `barPlan.read` is every matched instrument-month, and reading all of them
+     to draw fifty rows is the waste this exists to remove: one month file at
+     one minute holds about 7,875 bars, so a fifty-row page is served by ONE
+     file and the other 2,186 are fetched, parsed, and then sliced away.
+
+     THE CENSUS ALREADY KNOWS HOW MANY ROWS EACH FILE HOLDS - `r.rows`, in the
+     single `/store.json` response the page has loaded before any of this runs.
+     So the file that holds row N is found by running the counts, not by
+     opening anything: a prefix sum over integers already in memory.
+
+     WHEN THIS IS EXACT, AND IT IS NOT ALWAYS. A file's position in the plan
+     predicts its rows' positions in the table only when the table is in the
+     store's own order and nothing removes rows after they are fetched. Two
+     things break that and both fall back to reading everything:
+
+       · a sort on any column but `ts` - the store is indexed by TIME, and
+         `CLAUDE.md` §4 bans a query planner, so there is no index that could
+         answer "the fifty largest closes" without reading the closes. A scan
+         is the honest cost of that question and the fallback pays it.
+       · a day window - `barWindowed` filters AFTER the fetch, so the census
+         count for a month stops predicting how many of its rows survive.
+
+     WHAT IS AND IS NOT O(1) HERE, stated rather than implied. The REQUESTS
+     and the SOCKETS are constant: one page needs one file, two when a page
+     straddles a boundary, whatever the store holds. The prefix sum itself is
+     O(files) integer arithmetic - about 2,187 additions on this store, tens of
+     microseconds - which is not constant and does not need to be, because it
+     is in memory and the thing it replaces was 2,187 HTTP round trips.
+     --------------------------------------------------------------------- */
+  /* WHETHER THE PREFIX SUM CAN BE TRUSTED - read by both derivations below,
+     so the two can never disagree about which mode the grid is in.
+
+     A WINDOW BEING SET IS NOT A WINDOW NARROWING ANYTHING, and treating the
+     two as one is what made this fall back on every load: the date controls
+     open populated - 01 Jan 2015 to today on this build - so `fromDay ||
+     toDay` is true before the operator has touched either, and the exact path
+     would never once have run.
+
+     What matters is whether the window EXCLUDES a row, and the census answers
+     that without opening a file: every entry carries the span it actually
+     covers, so a month lying wholly inside the window loses nothing and its
+     census count still predicts its rows. A month that straddles either edge,
+     or falls outside entirely, does not - and that is the fallback's case,
+     because no count in the census says how many of a month's rows sit on one
+     side of a day. */
+  const pageExact = $derived.by(() => {
+    if (barSortKey !== 'ts') return false;
+    if (!dayWindowApplies || (!fromDay && !toDay)) return true;
+    for (const r of barPlan.read) {
+      /* THE WIRE'S OWN SPELLING, AND ONLY IT. `store.rows` is the array as
+         `/store.json` sent it, so the span is `first_ts`/`last_ts`. A first
+         attempt read `first`/`last` - the names `$lib/store.svelte.js` gives
+         its NORMALISED cells, which are a different array - found `undefined`
+         on every row and fell back on every load, which is the silent
+         fallback this branch exists to avoid. `svelte-check` names the type's
+         real field as `firstAt`, so neither alternative spelling belongs
+         here and both are gone rather than left as a dead `??`. */
+      const lo = r.first_ts;
+      const hi = r.last_ts;
+      /* AN ENTRY WITH NO SPAN CANNOT BE PROVED TO SURVIVE, so it is not
+         assumed to. Older census images predate the two timestamps. */
+      if (!Number.isFinite(lo) || !Number.isFinite(hi)) return false;
+      /* MICROSECONDS IN, MILLISECONDS OUT, AND THE DIVISION IS NOT OPTIONAL.
+         The census writes microseconds - `crates/api`'s unit, which
+         `$lib/store.svelte.js` documents and `$lib/dates.js` refuses to sniff -
+         and `istDayKey` hands its argument straight to `new Date`, which reads
+         milliseconds. Passing the census figure raw dated every month to the
+         year 58555, so `istDayKey(hi) > toDay` was true on every row and the
+         exact path never once ran. A thousand-fold unit error does not throw;
+         it just quietly answers the wrong question. */
+      if (fromDay && istDayKey(lo / 1000) < fromDay) return false;
+      if (toDay && istDayKey(hi / 1000) > toDay) return false;
+    }
+    return true;
+  });
+
+  /* THE ROW COUNT THE PAGER COUNTS IN, AND IT MUST NOT DEPEND ON THE PAGE.
+     `pageTotal` feeds `pageCount` feeds `pageNow`, and `pagePlan` reads
+     `pageNow` - so computing the total inside `pagePlan` closes a cycle that
+     Svelte resolves by throwing. Summed here, from the census alone, the total
+     is a property of the QUERY and the cycle does not exist. */
+  const barTotalRows = $derived.by(() => {
+    if (!pageExact) return null;
+    let t = 0;
+    for (const r of barPlan.read) t += Number(r.rows) || 0;
+    return t;
+  });
+
+  const pagePlan = $derived.by(() => {
+    const all = barPlan.read;
+    if (!pageExact) {
+      return { files: all, base: 0, exact: false };
+    }
+    /* NEWEST FIRST IS THE PLAN'S ORDER, which is `ts` DESCENDING. Ascending
+       asks for the same files from the other end, so the list is walked
+       reversed rather than re-sorted. */
+    const order = barDesc ? all : [...all].reverse();
+    const first = (pageNow - 1) * pageSize;
+    const last = first + pageSize - 1;
+    /** @type {any[]} */
+    const need = [];
+    let seen = 0;
+    let base = 0;
+    for (const r of order) {
+      const n = Number(r.rows) || 0;
+      if (n === 0) continue;
+      const lo = seen;
+      const hi = seen + n - 1;
+      seen += n;
+      if (hi < first) continue;
+      /* PAST THE PAGE, SO NOTHING FURTHER CAN OVERLAP IT. The list is walked
+         in row order, so once a file starts after the last row wanted, every
+         file behind it does too. `barTotalRows` already has the count, so
+         there is nothing left for this loop to learn. */
+      if (lo > last) break;
+      if (need.length === 0) base = lo;
+      need.push(r);
+    }
+    return { files: need, base, exact: true };
+  });
+
   /** A PRIMITIVE, so the fetch effect re-runs when the SET changes and not
       on every keystroke that leaves the same set standing. */
-  const barPlanKeys = $derived(barPlan.read.map((/** @type {any} */ r) => r.key).join('\n'));
+  const barPlanKeys = $derived(pagePlan.files.map((/** @type {any} */ r) => r.key).join('\n'));
 
   /* ---------------------------------------------------------------------
      THE READ. One request per instrument-month, cached for as long as the
@@ -3586,7 +3710,7 @@
       barState = { loading: false, error: null, files: [] };
       return;
     }
-    const want = untrack(() => barPlan.read);
+    const want = untrack(() => pagePlan.files);
     const mine = ++barToken;
     let dead = false;
     barState = { loading: true, error: null, files: untrack(() => barState.files) };
@@ -3913,13 +4037,30 @@
      PAGING - the same arithmetic for both grids, so the readout under one
      cannot mean something different under the other.
      --------------------------------------------------------------------- */
-  const pageTotal = $derived(view === 'bars' ? barSorted.length : sorted.length);
+  /* THE CENSUS COUNT WHEN THE GRID READS ONE PAGE AT A TIME, because
+     `barSorted` then holds only the page's own rows and paging by it would
+     report "1-50 of 50" over a store of four million bars. When the prefix sum
+     does not apply every matched row is in memory and `barSorted` IS the
+     count. */
+  const pageTotal = $derived(
+    view === 'bars' ? (barTotalRows ?? barSorted.length) : sorted.length
+  );
   const pageCount = $derived(Math.max(1, Math.ceil(pageTotal / pageSize)));
   const pageNow = $derived(Math.min(Math.max(1, page), pageCount));
   const pageFrom = $derived(pageTotal === 0 ? 0 : (pageNow - 1) * pageSize + 1);
   const pageTo = $derived(Math.min(pageNow * pageSize, pageTotal));
   const censusPage = $derived(sorted.slice((pageNow - 1) * pageSize, pageNow * pageSize));
-  const barPage = $derived(barSorted.slice((pageNow - 1) * pageSize, pageNow * pageSize));
+  /* THE SLICE IS RELATIVE TO WHAT WAS FETCHED, NOT TO THE WHOLE QUERY.
+     `pagePlan.base` is the global row index the first fetched file opens on,
+     so page 900's rows sit at the FRONT of `barSorted` and not 44,950 rows
+     into it. Subtracting the base is what turns a global ordinal into an
+     offset within the two files actually in memory; without it every page past
+     the first slices past the end and the grid draws nothing. */
+  const barPage = $derived.by(() => {
+    const first = (pageNow - 1) * pageSize;
+    const start = Math.max(0, pagePlan.exact ? first - pagePlan.base : first);
+    return barSorted.slice(start, start + pageSize);
+  });
 
   /** @param {number} n */
   function goPage(n) {
@@ -4572,9 +4713,26 @@
    * 8, and the largest on the page is 8. Every bar drew at 5-8% of the cell and
    * the column was blank. A scale nothing reaches is not a scale.
    *
-   * Taken from `barRows` -- every row the query matched, not `barPage` -- so
-   * turning to page 2 cannot silently change what a full bar means. That
-   * stability is the whole reason this is not computed per page.
+   * Taken from `barRows` and not `barPage`, so it is every row IN MEMORY
+   * rather than only the fifty drawn.
+   *
+   * THAT USED TO MEAN EVERY ROW THE QUERY MATCHED, AND SINCE `pagePlan` IT
+   * DOES NOT. This comment read "every row the query matched ... so turning to
+   * page 2 cannot silently change what a full bar means", and that was true
+   * only because the grid read every matched instrument-month before drawing
+   * anything - the 2,187-request storm. Now the exact path reads the file the
+   * page sits in, so `barRows` holds that month and the scale is the widest
+   * move IN THE LOADED WINDOW.
+   *
+   * So paging CAN change what a full bar means, and the honest description of
+   * this scale is "widest move among the bars loaded", not "in the query". It
+   * is stated here rather than quietly left as the old sentence because a
+   * scale whose basis moved without saying so is the same defect as a receipt
+   * that overstates: nothing on screen is wrong, and it is not the answer the
+   * reader thinks they are getting.
+   *
+   * The fallback path is unchanged - a non-time sort still loads every matched
+   * row, and there the old sentence still holds exactly.
    *
    * The floor stops a dead-flat selection from magnifying rounding into a
    * full-width bar: with every row at 0 or 1 bps there is nothing to compare
@@ -4597,7 +4755,10 @@
   /* VOLUME AND RANGE GET THEIR OWN PER-RUNG SCALES, for the reason the change
    * scale has one: a minute's volume and a day's are not two sizes of the same
    * thing, so they do not share a ruler. Folded over `barRows` and never
-   * `barPage`, so turning the page cannot change what a full bar means. */
+   * `barPage`, so the scale is every row LOADED and not only the fifty drawn -
+   * which since `pagePlan` is the page's own month rather than the whole
+   * query. See the change-scale block above for why that trade was taken and
+   * what it costs. */
   const volFullByTf = $derived.by(() => {
     /** @type {Map<string, number>} */
     const top = new Map();
