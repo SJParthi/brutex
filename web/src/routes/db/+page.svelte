@@ -3305,9 +3305,14 @@
       pageOver = boardEl ? boardEl.scrollHeight - boardEl.clientHeight : 0;
       const f = factsEl?.getBoundingClientRect().height ?? 0;
       const c = cbandEl?.getBoundingClientRect().height ?? 0;
-      /* `+ BOARD_GAP` per panel: the column's own row gap goes with the panel
-         that leaves, so a fold recovers the panel AND the space under it. */
-      if (f || c) foldPx = (f ? f + BOARD_GAP : 0) + (c ? c + BOARD_GAP : 0);
+      /* THE TWO PANELS ARE PRICED DIFFERENTLY BECAUSE THEY FOLD DIFFERENTLY.
+         The counted line LEAVES, so it is worth its whole height plus the
+         column gap that goes with it. The band STAYS and only loses its heading
+         and its legend, so it is worth the difference between what it measures
+         now and what it measures slim — never the whole thing, which is what
+         the label claimed while the band was being deleted outright. */
+      if (f || c)
+        foldPx = (f ? f + BOARD_GAP : 0) + (c ? Math.max(0, c - CBAND_SLIM_H) : 0);
     };
     measure();
     const settle = setTimeout(measure, 0);
@@ -3324,6 +3329,13 @@
      accuracy and nothing else, which is why it is worth an approximation
      rather than a `getComputedStyle` call on every resize. */
   const BOARD_GAP = 8;
+  /* THE SLIM BAND'S HEIGHT: the 26px rail, `--s2` of padding each side and its
+     1px border. Written rather than measured because the slim band does not
+     EXIST while the full one is on screen, and the value is only ever used to
+     price the button's label — being a few pixels out costs that label a little
+     accuracy and costs the layout nothing, since the fit itself is measured
+     after the fold rather than predicted from this. */
+  const CBAND_SLIM_H = 36;
   /** What the fold is worth right now, in rows. */
   const foldRows = $derived(Math.max(0, Math.floor(foldPx / ROW)));
 
@@ -8079,10 +8091,25 @@
          the largest thing in its own cell because it is the thing worth
          reading, and the label under it is small because you only need it once.
          ================================================================== -->
-    <!-- `&& !compact` FOLDS BOTH PANELS AT ONCE, and they share one condition
-         because they are one decision: the counted line and the window band
-         both ANSWER questions about the selection rather than change it, which
-         is what makes them the part a reader may put away in exchange for rows.
+    <!-- COMPACT FOLDS THE COUNTED LINE AND SLIMS THE BAND. IT DOES NOT DELETE
+         THE BAND, AND THE FIRST VERSION DID.
+         ------------------------------------------------------------------
+         Both panels answer questions about the selection rather than change
+         it, which is what makes them the part a reader may spend for rows —
+         but they are not the same KIND of thing, and treating them as one
+         decision threw away the wrong one. The counted line is four figures
+         and its labels: text, and text a reader has already read. The window
+         band is the only PICTURE on this page — eighty-one months of coverage
+         in one glance, the thing that answers "where are the holes" without
+         reading a single number.
+
+         Folding both bought rows and removed the visualisation, on exactly the
+         windows too small to show much else. So the band stays and loses its
+         heading and its legend instead: 103px becomes ~40, the rail itself is
+         untouched, and what goes is the chrome around it rather than the data
+         in it. The legend's key is recoverable — the band keeps its `aria-label`
+         and the rail its per-cell titles.
+
          Nothing that narrows the query is inside this block. -->
     {#if view === 'bars' && coverBand.cells.length > 0 && !compact}
       <div class="facts" bind:this={factsEl}>
@@ -8118,18 +8145,27 @@
           </div>
         {/if}
       </div>
+    {/if}
 
+    <!-- THE BAND IS OUTSIDE THE FOLD, and `class:slim` is what it does instead
+         of leaving. See the note above the counted line: this rail is the only
+         picture on the page, so `compact` takes its heading and its legend and
+         leaves the data. -->
+    {#if view === 'bars' && coverBand.cells.length > 0}
       <div class="cband" role="img"
+           class:slim={compact}
            bind:this={cbandEl}
            aria-label="{coverBand.months} months in this selection, {fmt(coverBand.bars)} bars.">
-        <div class="cband-head">
-          <span class="cb-title">WINDOW</span>
-          <span class="cb-facts">
-            <b>{coverBand.months}</b> month{coverBand.months === 1 ? '' : 's'}
-            · <b>{fmt(coverBand.bars)}</b> bars
-            · <span class="cb-span">{coverBand.cells[0].month} → {coverBand.cells[coverBand.cells.length - 1].month}</span>
-          </span>
-        </div>
+        {#if !compact}
+          <div class="cband-head">
+            <span class="cb-title">WINDOW</span>
+            <span class="cb-facts">
+              <b>{coverBand.months}</b> month{coverBand.months === 1 ? '' : 's'}
+              · <b>{fmt(coverBand.bars)}</b> bars
+              · <span class="cb-span">{coverBand.cells[0].month} → {coverBand.cells[coverBand.cells.length - 1].month}</span>
+            </span>
+          </div>
+        {/if}
         <div class="cband-rail">
           {#each coverBand.cells as c, i (c.month)}
             <span
@@ -8139,12 +8175,14 @@
             ></span>
           {/each}
         </div>
-        <div class="cband-legend">
-          <span class="cb-key held"></span> held
-          <span class="cb-key short"></span> short of the fullest month here
-          <span class="cb-key absent"></span> nothing stored
-          <span class="cb-note">height is each month against the fullest in this selection — not against a session calendar, which this page does not read</span>
-        </div>
+        {#if !compact}
+          <div class="cband-legend">
+            <span class="cb-key held"></span> held
+            <span class="cb-key short"></span> short of the fullest month here
+            <span class="cb-key absent"></span> nothing stored
+            <span class="cb-note">height is each month against the fullest in this selection — not against a session calendar, which this page does not read</span>
+          </div>
+        {/if}
       </div>
     {/if}
 
@@ -9074,12 +9112,25 @@
     position: absolute;
     left: 0;
     top: 50%;
-    width: 2px;
+    /* 3px AND 0.9, UP FROM 2px AND 0.55. This mark is the bar's own HIGH-LOW
+       RANGE — the one thing in the row that is a picture rather than a number —
+       and at two pixels of `--dim` at just over half opacity it was present in
+       the DOM and absent to the eye. Measured on the running page: an 11px
+       spine on a moving bar and a 2px one on a flat bar, both correct, neither
+       legible against the row's own background at that weight.
+       A quantity drawn too faintly to compare is not a visualisation, it is a
+       decoration of one, and this column's whole job is to let a reader see
+       which minutes had range without reading two price columns and
+       subtracting. */
+    width: 3px;
     height: var(--spine, 0px);
     transform: translateY(-50%);
-    background: var(--dim);
-    opacity: 0.55;
-    border-radius: 1px;
+    /* NO `background` HERE. The second declaration of this pseudo-element sets
+       `currentColor`, and the `data-dir` rules colour the cell — so writing
+       `var(--dim)` here was a flat grey that the later rule overrode on every
+       row anyway. Removing it means one place decides the colour. */
+    opacity: 0.9;
+    border-radius: 2px;
     pointer-events: none;
   }
   .brow[data-dir='up'] > td:first-child::before {
@@ -9212,6 +9263,15 @@
     color: var(--dim);
   }
 
+  /* SLIM IS THE BAND WITHOUT ITS FURNITURE, NOT A SMALLER BAND. The rail keeps
+     its own height, its cells keep their proportions and their titles, and the
+     `aria-label` on the container still carries the months and the bar count
+     that the folded heading was stating in words. What leaves is a caption and
+     a key — 103px becomes about 40 — so the one picture on this page survives
+     the windows that need the rows most. */
+  .cband.slim {
+    padding: var(--s2) var(--s4);
+  }
   .cband {
     margin: var(--s3) 0 var(--s2);
     padding: var(--s3) var(--s4);
@@ -11545,12 +11605,20 @@
   .bpc::after {
     content: '';
     position: absolute;
-    bottom: 3px;
-    height: 3px;
+    bottom: 2px;
+    /* 5px AT 0.5, UP FROM 3px AT 0.28. Same finding as the spine above: the bar
+       behind the percentage is how a reader compares this move to the largest
+       move in the selection WITHOUT reading every figure, and at three pixels
+       of `currentColor` at twenty-eight percent it did not survive the row
+       stripe behind it. `currentColor` already carries the direction, so
+       raising the weight strengthens the comparison and adds no new hue —
+       which is what keeps this readable in greyscale and to a dichromat, the
+       property the note above this rule exists to protect. */
+    height: 5px;
     width: var(--magpx, 0px);
-    border-radius: 1px;
+    border-radius: 2px;
     background: currentColor;
-    opacity: 0.28;
+    opacity: 0.5;
     pointer-events: none;
   }
   /* THE AXIS IS THE CELL'S CENTRE. `left: 50%` grows right; `right: 50%` grows
@@ -11601,14 +11669,29 @@
   .brow > td:first-child {
     position: relative;
   }
+  /* THIS IS THE SECOND DECLARATION OF THIS PSEUDO-ELEMENT AND IT USED TO
+     APPLY THE RANGE A SECOND TIME.
+     ---------------------------------------------------------------------
+     Two rules for one selector do not simply shadow each other — they MERGE,
+     property by property, and only the properties they share resolve by order.
+     So the earlier rule's `height: var(--spine)` survived here, and this rule
+     then added `transform: scaleY(var(--rng))` on top of it. `--spine` is
+     already `--rng * 24px`, computed in the markup: the range was applied
+     TWICE. Measured on a bar with `--rng: 0.45` — 24 x 0.45 x 0.45 = 4.9px
+     where the encoding says 10.8. Every bar was squashed toward zero, worst
+     for the small ones, which is exactly backwards for a mark whose job is
+     making small differences visible. Neither rule is wrong read alone.
+
+     The height carries the range and the transform is gone. What stays is
+     `background: currentColor`, which is this rule's real contribution: the
+     `data-dir` rules below colour the CELL, and the mark inherits it, so
+     direction and range are encoded by two different channels rather than one
+     doing both badly. `inset` goes with the transform — the earlier rule
+     centres a bar of an explicit height, and stretching it edge to edge here
+     was only ever scaffolding for the scale. */
   .brow > td:first-child::before {
     content: '';
-    position: absolute;
-    inset: 0 auto 0 0;
-    width: 3px;
     background: currentColor;
-    transform: scaleY(var(--rng, 0.18));
-    transform-origin: center;
   }
   .brow[data-dir='up'] > td:first-child {
     color: color-mix(in srgb, var(--up) 58%, transparent);
