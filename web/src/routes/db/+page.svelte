@@ -3191,6 +3191,36 @@
   const ROW = 40;
   const HEAD = 30; /* the sticky header covers the top of the scroll box */
 
+  /* ======================================================================
+     COMPACT — THE ONE HONEST WAY TO BUY ROWS, AND IT IS A TRADE NOT A FIX
+     ======================================================================
+     `Fit` above makes the grid hold exactly what the screen can show. It
+     cannot make the screen bigger, and on a 1,200px window the chrome above
+     the grid is about 600px — the query strip 223, the coverage band 103, the
+     counted line 62, plus the contract line, the anchor and the gaps. That
+     leaves ten rows.
+
+     EVERY EXTRA ROW COSTS FORTY PIXELS OF CHROME. There is no arrangement, no
+     tightening and no cleverness that avoids that; three passes over this page
+     tried and the arithmetic won each time. What CAN be done is to let the
+     reader spend it: the coverage band and the counted line are DISPLAY, they
+     answer questions about the selection rather than change it, and a reader
+     who has read them once and now wants rows should be able to put them away.
+
+     Measured at 1,200px: ten rows becomes fourteen.
+
+     IT DEFAULTS TO OFF, deliberately. The band and the counted line were asked
+     for and built; a page that hides them until asked has decided on the
+     reader's behalf which half of the trade they want. The control names the
+     gain — the button says how many rows it is worth right now — so the choice
+     is made with the number in hand rather than by experiment. */
+  let compact = $state(false);
+  /* WHAT THE FOLD IS WORTH, IN THE UNIT THE READER IS SPENDING. Measured live
+     rather than stated: the two panels' heights come from the elements, so a
+     band that grew a legend line or a counted line that wrapped reports its own
+     new price and the label cannot go stale. Zero until measured. */
+  let foldPx = $state(0);
+
   let sizeMode = $state(/** @type {'fit' | 'fixed'} */ ('fit'));
   /** The bar box's measured inner height. Layout is the only honest source for
       it: `.board`'s height less whatever the chrome above happens to occupy,
@@ -3199,6 +3229,10 @@
   let barBoxH = $state(0);
   /** @type {HTMLElement | null} */
   let barBox = $state(null);
+  /** @type {HTMLElement | null} */
+  let factsEl = $state(null);
+  /** @type {HTMLElement | null} */
+  let cbandEl = $state(null);
   /* ---------------------------------------------------------------------
      WHAT TRIGGERS THE MEASUREMENT IS THE WHOLE PROBLEM, AND TWO OBVIOUS
      ANSWERS WERE BUILT AND MEASURED FAILING BEFORE THIS ONE.
@@ -3254,7 +3288,22 @@
   $effect(() => {
     const el = barBox;
     if (!el) return;
-    const measure = () => (barBoxH = el.clientHeight);
+    /* `compact` IS READ SO THE FOLD RE-MEASURES, and it is loop-safe for the
+       same reason the window's resize is: it changes only when the reader
+       presses the button. The two panels' heights come out of the layout in the
+       same pass, so the button's label is priced from what was on screen a
+       moment ago rather than from a number typed here. `foldPx` is only written
+       while the panels EXIST — folded, they measure zero, and a label reading
+       "+0 rows" on the control that would give them back is worse than stale. */
+    void compact;
+    const measure = () => {
+      barBoxH = el.clientHeight;
+      const f = factsEl?.getBoundingClientRect().height ?? 0;
+      const c = cbandEl?.getBoundingClientRect().height ?? 0;
+      /* `+ BOARD_GAP` per panel: the column's own row gap goes with the panel
+         that leaves, so a fold recovers the panel AND the space under it. */
+      if (f || c) foldPx = (f ? f + BOARD_GAP : 0) + (c ? c + BOARD_GAP : 0);
+    };
     measure();
     const settle = setTimeout(measure, 0);
     window.addEventListener('resize', measure);
@@ -3263,6 +3312,15 @@
       clearTimeout(settle);
     };
   });
+  /* `--s4`, WHICH IS `.board`'s `gap`. Written here because this file cannot
+     read a stylesheet token, and named rather than inlined so the next reader
+     knows which declaration it is shadowing. If `.board`'s gap changes, this
+     changes with it; being wrong costs the fold's LABEL a few pixels of
+     accuracy and nothing else, which is why it is worth an approximation
+     rather than a `getComputedStyle` call on every resize. */
+  const BOARD_GAP = 8;
+  /** What the fold is worth right now, in rows. */
+  const foldRows = $derived(Math.max(0, Math.floor(foldPx / ROW)));
   /* EIGHT PIXELS OF SLACK, AND IT IS A DAMPER RATHER THAN A FUDGE.
      ---------------------------------------------------------------------
      MEASURED without it: a 1,400px window computed sixteen rows from a 670px
@@ -7386,6 +7444,27 @@
               : `Write the ${fmt(csvRows.length)} matched instrument-month(s) as CSV, named ${csvName}. Built in the browser from rows already in memory: no request is made, and nothing is written into this repository — the bytes go to your downloads. Every cell is the store's own wire form — raw YYYY-MM months, raw ISO expiries, strikes in paisa, percentages as the integer basis points they arrived as — so the file joins against the store. Only the header row is words.`}
           onclick={exportCsv}>Export CSV</button
         >
+        <!-- THE FOLD, AND THE BUTTON CARRIES ITS OWN PRICE. `Fit` gives the
+             grid exactly the rows the window can show and cannot give it more;
+             past that, a row costs forty pixels of chrome and the only chrome
+             a reader can spend is the part that DISPLAYS rather than asks. So
+             the label says what it is worth — "+4 rows" — measured from the two
+             panels as they stand, not written here. A toggle whose effect you
+             have to try in order to learn is a toggle nobody presses twice. -->
+        {#if view === 'bars'}
+          <button
+            class="btn ghost sm"
+            type="button"
+            aria-pressed={compact}
+            title={compact
+              ? `Bring back the counted line and the window band. Costs ${fmt(foldRows)} row(s) of grid at this window size.`
+              : `Fold the counted line and the window band away and give the grid the space — worth ${fmt(foldRows)} more row(s) at this window size. Both are readouts; nothing that narrows the selection is hidden.`}
+            onclick={() => (compact = !compact)}
+            >{compact ? 'Show readouts' : 'Compact'}{#if foldRows > 0}<span class="c"
+                >{compact ? '−' : '+'}{fmt(foldRows)}</span
+              >{/if}</button
+          >
+        {/if}
       </span>
 
       <!-- ==============================================================
@@ -7914,8 +7993,13 @@
          the largest thing in its own cell because it is the thing worth
          reading, and the label under it is small because you only need it once.
          ================================================================== -->
-    {#if view === 'bars' && coverBand.cells.length > 0}
-      <div class="facts">
+    <!-- `&& !compact` FOLDS BOTH PANELS AT ONCE, and they share one condition
+         because they are one decision: the counted line and the window band
+         both ANSWER questions about the selection rather than change it, which
+         is what makes them the part a reader may put away in exchange for rows.
+         Nothing that narrows the query is inside this block. -->
+    {#if view === 'bars' && coverBand.cells.length > 0 && !compact}
+      <div class="facts" bind:this={factsEl}>
         <div class="fact">
           <span
             class="fv"
@@ -7950,6 +8034,7 @@
       </div>
 
       <div class="cband" role="img"
+           bind:this={cbandEl}
            aria-label="{coverBand.months} months in this selection, {fmt(coverBand.bars)} bars.">
         <div class="cband-head">
           <span class="cb-title">WINDOW</span>
@@ -11550,38 +11635,34 @@
     border-radius: var(--r4);
     background: var(--panel-2);
     /* ---------------------------------------------------------------------
-       PINNED TO THE BOTTOM, AND IT IS WHAT RESOLVES A CONTRADICTION RATHER
-       THAN A PREFERENCE.
+       NOT STICKY, AND THE STICKY VERSION IS WHY THE PAGE SHOOK.
 
-       The two things asked of this page pull against each other on any ordinary
-       screen: twenty-five rows costs 1,030px, the chrome above costs ~465, and
-       a 1,200px window cannot hold 1,672px. MEASURED before this rule: 25 rows
-       rendered correctly and the pager sat at 1,753px against a 1,200px fold —
-       553px below it. Every earlier attempt at this fought the arithmetic by
-       shaving panels, and the arithmetic won each time, because 505px is not
-       hiding in a coverage band.
+       It was pinned here — `position: sticky; bottom: calc(-1 * var(--s5))` —
+       to answer a real complaint: 25 rows in a fixed box put this bar 553px
+       below the fold, and pinning it meant the reader never had to travel to
+       reach the next page. It worked, and it was the wrong layer to fix it at.
 
-       So the layout stops trying to fit the pager on the screen and PINS it to
-       the screen instead. `bottom: 0` inside `.board` — the page's scroller —
-       holds it at the fold wherever the reader has scrolled to, and the answer
-       to "how do I reach the next page" becomes "you never have to". The rows
-       above it scroll; the control that leaves them does not.
+       A STICKY ELEMENT INSIDE A PADDED SCROLLER ALWAYS SNAPS BY THE PADDING.
+       `.board` carries 12px of it. Stuck, this bar held at the scrollport's
+       edge; released at the end of the scroll, it settled 12px higher.
+       MEASURED on a 980px window with a 56px scroll range: the bar sat still
+       through 55 pixels of scrolling and then JUMPED TWELVE at the last one.
+       Cross that threshold with the wheel and the whole bottom of the page
+       shakes, which is exactly what the operator reported and exactly what a
+       control the eye uses as a fixed landmark must never do.
 
-       WHY IT WORKS HERE AND NOT ON THE TABLE: sticky resolves against the
-       nearest ancestor with a non-visible overflow, and this is a DIRECT child
-       of `.board`, so nothing clips in between. The sticky `<th>` learned that
-       rule the expensive way when `.bscroll`'s leftover `overflow: auto` pinned
-       it to a box that scrolled away.
+       AND IT WAS ALREADY REDUNDANT. `Fit` sizes the grid to what the window can
+       show, so the page fits and this bar is on screen without help — the
+       problem the pin was hired for no longer exists. What remained was its
+       side effect. A workaround kept after its cause is fixed is strictly worse
+       than no workaround, because it now only does the harm.
 
-       `z-index` above the rows because they pass UNDER it, and the negative
-       bottom margin swallows `.board`'s own 12px padding so no strip of table
-       shows below the bar. The background is already opaque — a translucent one
-       would let the rows read through the page numbers. */
-    position: sticky;
-    bottom: calc(-1 * var(--s5));
-    z-index: 3;
-    margin-bottom: 0;
-    box-shadow: var(--e2), 0 -8px 20px -12px rgb(0 0 0 / 45%);
+       WHAT HAPPENS ON A WINDOW TOO SHORT FOR `Fit`, said plainly: the table
+       reaches its 320px floor, the page overflows by a few dozen pixels, and
+       this bar scrolls with everything else. That is a short, honest scroll to
+       a bar that does not move relative to the thing above it, and it is the
+       better of the two failures. `Compact` recovers ~180px and removes even
+       that. */
   }
   .pgof,
   .pgof2 {
