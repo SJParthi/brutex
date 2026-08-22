@@ -19621,3 +19621,67 @@ as before: this redirects the question, it does not invent an answer. It is an
 equality test on a single segment, so `/_app/favicon.ico` and
 `not-a-favicon.ico` are untouched — pinned by
 `the_icon_a_browser_asks_for_is_answered_by_the_one_that_exists`.
+
+### D-0252 — every fixture on the expired-derivative path was written from a document, and none from a vendor
+
+**2026-08-22.** 129 tests cover the expired futures and expired options path —
+19 in `fno`, 7 in `chain`, 23 in `fnowork`, 13 in `rolling`, 17 in `pricing`, 8
+in `tenor` and 42 in `api::ingest`. Every one of them is built on a
+**hand-written** fixture encoding what the vendor's *documentation* says a
+response looks like.
+
+Searched on 2026-08-22: the only fixture in this repository marked as a real
+capture is `TrueData`'s index layout, *"verbatim from the operator's 2022
+archive"* — and that is a CSV on disk, not an API answer. **No Dhan or Groww
+response has ever been observed by this build.**
+
+**So the suite proves the code is self-consistent with the documents, and
+nothing has ever proved it consistent with the vendor.** Those are two different
+claims and only one was ever tested. This entry exists because the difference
+had never been written down, and a reader counting 129 green tests would
+reasonably conclude the opposite.
+
+**Why the gap could not be closed the way the spot gap was.** `pullrun::conduct`
+over `Transport::LocalArchive` drives the spot path end to end with no socket,
+and on 2026-08-22 it was run: two CSV rows produced eight rung files, a manifest
+and a journal recording `rows_read 2`, `bars_stored 2`, `folded 0`. The
+expired-derivative route has no equivalent. `FnoRequest` carries `underlying`,
+`series`, `expiry`, `window`, `rate`, `feed` and `granularity` and **no folder**,
+because discovery is a vendor call by construction: the two brokers publish
+different endpoints and different JSON field names, which is why
+`pull::vendor::DESCRIPTORS` holds the difference at all. The first real answer
+can therefore only arrive during a real pull.
+
+**`crates/pull/src/capture.rs` records it before anything parses it**, so a
+request the operator spends once becomes a fixture for ever. Written verbatim,
+byte for byte, ahead of the parse — a body this build reshaped before recording
+would prove only that the reshaping is self-consistent, which is the exact
+circularity the module exists to break.
+
+**What it never records: any header.** §8 puts the credential in one —
+`HttpSource::header_value` builds `Raw`, `Bearer` or `PrefixedPair` — and no
+descriptor carries a secret-valued query parameter, so the URL is safe and the
+request is never handed to this module at all. A test asserts the word
+`authorization` appears in no capture.
+
+**Bounded by construction, because a capture that grew with the pull would be
+the disk-filling fallback §4 bans.** The slot is
+`feed as usize * 2 + method as usize` — an array index into a table whose width
+is pinned by two `const` assertions, so a sixth feed or a third method stops the
+build rather than indexing past the end. Four answers per slot: Groww's F&O path
+alone issues three distinct GETs, so a budget of one would capture the expiry
+list and never the shape that carries prices. The ceiling is
+`FEED_COUNT * 2 * PER_SLOT` files for the life of the process; past it, `record`
+is one `fetch_update` that fails and returns, touching no filesystem and
+allocating nothing. `fetch_update` rather than a load and a store, because two
+threads can pass the same load and that is how a bounded thing becomes
+unbounded.
+
+**A failed capture never fails a pull, and is never silent either.** Refusing a
+vendor answer that arrived intact because a debugging aid could not be written
+would be §4 pointing the wrong way. The failure is counted in `REFUSED` and
+readable through `capture::refused()`, because an unrecorded failure leaves an
+operator believing a fixture exists when none does.
+
+`pull`: 13 targets, 602 tests, 0 failures. `fmt` and
+`clippy --all-targets -D warnings` clean.

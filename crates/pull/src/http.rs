@@ -182,6 +182,19 @@ impl Credential {
 /// A vendor reached over HTTPS, driven entirely by its descriptor.
 pub struct HttpSource {
     spec: HttpSpec,
+    /// Which feed this source speaks to, resolved ONCE in [`HttpSource::new`].
+    ///
+    /// Only [`crate::capture`] needs it, and only to index its slot array. It
+    /// is resolved here rather than per answer because the resolution walks
+    /// [`crate::vendor::Feed::ALL`] — five entries, a fixed table — and doing
+    /// that per request would be five comparisons on a path that already knows
+    /// the answer and cannot change it.
+    ///
+    /// `None` for a spec whose `base_url` matches no descriptor, which is a
+    /// test's made-up endpoint rather than a vendor. Capture is skipped there:
+    /// a fixture recorded from a fixture is the circularity the module exists
+    /// to break.
+    feed: Option<crate::vendor::Feed>,
     /// The auth header's VALUE, assembled once in [`HttpSource::new`].
     ///
     /// # Assembled at construction, not per request
@@ -430,8 +443,19 @@ impl HttpSource {
                 });
             }
         };
+        // THE FEED, ONCE. Five comparisons against a table whose length is
+        // pinned to `FEED_COUNT`, done at construction so no answer pays for
+        // it. See the `feed` field for why `None` is a real answer and not a
+        // failure.
+        let feed = crate::vendor::Feed::ALL.into_iter().find(|candidate| {
+            matches!(
+                &candidate.descriptor().transport,
+                crate::vendor::Transport::Http(other) if other.base_url == spec.base_url
+            )
+        });
         Ok(Self {
             spec,
+            feed,
             header_value,
             client,
             governor,
@@ -1533,10 +1557,37 @@ impl HttpSource {
         }
         // A FAILED BODY READ IS A TRANSPORT FAILURE, NOT A REFUSAL. The status
         // was already a success; what failed is the socket delivering the rest.
-        answer
+        let body = answer
             .text()
             .await
-            .map_err(|why| Refusal::transport(format!("{why}")))
+            .map_err(|why| Refusal::transport(format!("{why}")))?;
+        self.keep_first(crate::capture::Method::Post, url, &body);
+        Ok(body)
+    }
+
+    /// Record this answer if the capture budget has room.
+    ///
+    /// **Between the read and the parse, deliberately.** Everything downstream
+    /// of here interprets the body; a capture taken after that would record
+    /// this build's reading of the vendor rather than the vendor, which is the
+    /// circularity `crate::capture` exists to break.
+    ///
+    /// It cannot fail the request: [`crate::capture::record`] counts a failed
+    /// write and returns `None`. The root is resolved per capture rather than
+    /// held, because the budget makes that at most
+    /// `FEED_COUNT * 2 * PER_SLOT` resolutions for the life of the process and
+    /// a field would have to be threaded through every constructor for nothing.
+    fn keep_first(&self, method: crate::capture::Method, url: &str, body: &str) {
+        let Some(feed) = self.feed else {
+            return;
+        };
+        if crate::capture::kept(feed, method) >= crate::capture::PER_SLOT {
+            return;
+        }
+        let Ok(root) = crate::folder::root() else {
+            return;
+        };
+        drop(crate::capture::record(&root, feed, method, url, body));
     }
 }
 
@@ -1590,10 +1641,15 @@ impl crate::chain::Discovery for HttpSource {
         // THE BODY READ IS A TRANSPORT FAILURE, NOT A REFUSAL. The status was
         // already a success; what failed is the socket delivering the rest of
         // it, which is a blip and is ladder-eligible as one.
-        answer
+        let body = answer
             .text()
             .await
-            .map_err(|why| Refusal::transport(format!("{why}")))
+            .map_err(|why| Refusal::transport(format!("{why}")))?;
+        // THE DISCOVERY CALLS ARE THE ONES WITH NO FIXTURE AT ALL. Groww's
+        // expiries and contracts answers are parsed by field names taken from
+        // its documentation and never from an observed response.
+        self.keep_first(crate::capture::Method::Get, url, &body);
+        Ok(body)
     }
 }
 
