@@ -4326,6 +4326,53 @@
    * census exists to prevent.
    */
   const storeMine = $derived(store.feed !== null && store.feed === (feeds.active ?? ''));
+
+  /* ---------------------------------------------------------------------
+     THE FEED HOLDS BARS, JUST NOT THE ONES THIS UNIVERSE NAMES.
+
+     THE CONFUSION THIS EXISTS TO END, measured on a real store: with Zerodha
+     selected, this page reported "50 never pulled · 0 of 50 settled" while
+     `/db` on the SAME feed showed 4,225,185 bars across 2,187
+     instrument-months. Both were telling the truth about different questions,
+     and nothing on either page said so.
+
+     The cause is a DEFAULT, not a fault. This page opens on `n50` because it is
+     a PULL page and the universe is what you are about to ask a vendor for —
+     defaulting it to "everything" would arrive with thousands of instruments
+     ticked. `/db` opens on Everything because it is a READ page and the honest
+     opening question there is "what do I have". Each default is right for its
+     own page, so neither is what should change.
+
+     What was missing is the SENTENCE. A page that says "never pulled" fifty
+     times over a store holding four million bars is not wrong, it is
+     unanswerable — and an operator reasonably reads it as the pull having
+     failed. `CLAUDE.md` §4: name the reason.
+
+     COUNTED FROM THE CENSUS ALREADY IN MEMORY. `store.rows` is the whole feed;
+     `heldHere` is what the chosen universe accounts for. No request is added.
+     --------------------------------------------------------------------- */
+  const feedHoldsElsewhere = $derived.by(() => {
+    if (!storeMine || store.state !== 'ready') return null;
+    const all = store.rows ?? [];
+    if (all.length === 0) return null;
+    /* THE NAMES THIS UNIVERSE PUTS ON THE WIRE, as symbols the census keys on.
+       `members` is the same list the tick control draws from, so the two can
+       never disagree about who is in. */
+    const mine = new Set(members.map((m) => String(m.symbol ?? m).toUpperCase()));
+    let barsHere = 0;
+    let barsTotal = 0;
+    for (const r of all) {
+      const n = Number(r.rows) || 0;
+      barsTotal += n;
+      /* `NSE-INDEX-BANKNIFTY` -> `BANKNIFTY`: the census spells the series
+         Exchange-Segment-Symbol and the universe lists bare symbols. */
+      const parts = String(r.instrument ?? '').split('-');
+      const sym = parts.length > 2 ? parts.slice(2).join('-') : String(r.instrument ?? '');
+      if (mine.has(sym.toUpperCase())) barsHere += n;
+    }
+    if (barsHere > 0 || barsTotal === 0) return null;
+    return { barsTotal, cells: all.length };
+  });
   const storeRead = $derived({
     at: storeMine && store.state === 'ready' ? (store.at ?? 0) : 0,
     feed: store.feed ?? '',
@@ -4665,8 +4712,23 @@
           if (seen.beyond === months.length) state = 'beyond';
           else if (named) state = 'retry';
           else if (feedHalt && missing > 0) state = 'fail';
-          else if (seen.never > 0) state = 'never';
-          else if (seen.short > 0) state = 'short';
+          /* `never` MEANS NOTHING LANDED, NOT "A MONTH IS MISSING".
+             This read `seen.never > 0`, so ONE empty month labelled the whole
+             series NEVER PULLED. Measured on a real store: BANKNIFTY drew
+             `6,23,498 / 11,07,375 — 78/140 — NEVER PULLED`, a series holding
+             six hundred thousand bars reported as never pulled, on the same
+             row that printed the count.
+             It is not an edge case. The window opens at 2015-01 and Zerodha's
+             minute history starts 2019-12, so fifty-nine months are legitimately
+             empty on the very first honest pull — the verdict was wrong for the
+             NORMAL case, and an operator reading it would re-run a pull that had
+             already worked.
+             `got` is the bars this series actually holds. Zero of them is
+             `never`; any of them with months still missing is `short`, which is
+             what `short` already means everywhere else on this page — has bars,
+             not all of them. */
+          else if (seen.never > 0 && got === 0) state = 'never';
+          else if (seen.never > 0 || seen.short > 0) state = 'short';
           else if (seen.unknown > 0) state = 'unknown';
           else state = 'ok';
           out.push({
@@ -8285,6 +8347,34 @@
           </div>
         {/if}
 
+        <!-- ==================================================================
+             "NEVER PULLED" OVER A STORE THAT IS FULL, EXPLAINED.
+
+             Measured: with Zerodha chosen, this page read "50 never pulled ·
+             0 of 50 settled" while /db on the SAME feed showed 4,225,185 bars.
+             Both true, of different questions, and nothing said so — so the
+             honest reading from here was that the pull had failed.
+
+             The cause is a default and not a fault: this is a PULL page, so it
+             opens on a universe you are about to ASK for, and /db is a READ
+             page, so it opens on everything you HAVE. Neither default should
+             move. What was missing is this sentence.
+             ================================================================== -->
+        {#if feedHoldsElsewhere}
+          <p class="elsewhere" role="status">
+            <i class="dot info"></i>
+            <span>
+              Every row below reads <b>never pulled</b>, and this feed is not empty:
+              it holds <b>{n(feedHoldsElsewhere.barsTotal)}</b> bar(s) across
+              <b>{n(feedHoldsElsewhere.cells)}</b> instrument-month(s) — none of them
+              in <b>{universeSpec.label}</b>. Switch the universe above to see them,
+              or open
+              <a class="link" href="/db" data-sveltekit-reload>the store</a>, which opens
+              on everything held rather than on one membership.
+            </span>
+          </p>
+        {/if}
+
         <div class="cgrid">
           <!-- THE SEARCH. One control, no caption: the count it changes is
                already in the pager at the foot, and a line here restating it
@@ -9214,6 +9304,35 @@
   /* Everything below is built from the tokens in $lib/theme.css. No colour,
      radius, duration or step is spelled twice — a hex code here would be a
      second theme that the toggle does not reach. */
+
+  /* THE "IT IS NOT EMPTY, IT IS ELSEWHERE" LINE.
+     Sits directly under the verdict tally it explains, because the tally is the
+     thing that reads wrong on its own. Accent rather than warn: nothing has
+     failed here — a universe with no coverage is an ordinary state and the line
+     is a direction, not an alarm. Warn tone would say the pull broke, which is
+     the misreading this exists to remove. */
+  .elsewhere {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--s2);
+    margin: var(--s2) 0 0;
+    padding: var(--s2) var(--s3);
+    border: 1px solid var(--acc);
+    border-radius: var(--r2);
+    background: var(--acc-soft);
+    font-size: var(--fs-mini);
+    color: var(--ink-2);
+    line-height: 1.5;
+  }
+  .elsewhere b {
+    color: var(--ink);
+    font-weight: var(--w-semi);
+    font-variant-numeric: tabular-nums;
+  }
+  .elsewhere .dot {
+    margin-top: 0.42em;
+    flex: none;
+  }
 
   /* ---- density ----
      DENSE ROWS, GENEROUS SPACING BETWEEN GROUPS. The page is read at a glance
