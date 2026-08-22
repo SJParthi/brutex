@@ -3230,6 +3230,10 @@
   /** @type {HTMLElement | null} */
   let barBox = $state(null);
   /** @type {HTMLElement | null} */
+  let boardEl = $state(null);
+  /** How much the page overflows its own scroller. Zero is the target state. */
+  let pageOver = $state(0);
+  /** @type {HTMLElement | null} */
   let factsEl = $state(null);
   /** @type {HTMLElement | null} */
   let cbandEl = $state(null);
@@ -3298,6 +3302,7 @@
     void compact;
     const measure = () => {
       barBoxH = el.clientHeight;
+      pageOver = boardEl ? boardEl.scrollHeight - boardEl.clientHeight : 0;
       const f = factsEl?.getBoundingClientRect().height ?? 0;
       const c = cbandEl?.getBoundingClientRect().height ?? 0;
       /* `+ BOARD_GAP` per panel: the column's own row gap goes with the panel
@@ -3321,6 +3326,77 @@
   const BOARD_GAP = 8;
   /** What the fold is worth right now, in rows. */
   const foldRows = $derived(Math.max(0, Math.floor(foldPx / ROW)));
+
+  /* ======================================================================
+     THE FOLD HAPPENS BY ITSELF WHEN THE WINDOW CANNOT HOLD THE PAGE
+     ======================================================================
+     `Fit` sizes the grid to the space it is given and the table has a floor —
+     it may not shrink to nothing. On a short window those two meet: at 900px
+     the box sits ON its floor and the page still overflows by 136px.
+
+     A 136-PIXEL SCROLL RANGE IS THE WORST LENGTH THERE IS. Every visible
+     element moves exactly 1:1 with it — verified across 330 elements, one
+     offender and it is the invisible `.sr-only` — so nothing is JUMPING. It
+     still reads as shaking, because a wheel gesture is longer than the range:
+     the page lurches a fraction of a screen, hits the end and rebounds. The
+     defect is not the motion of any element, it is that the range exists at
+     all when the page was supposed to fit.
+
+     So when the page overflows, the readouts fold themselves and the space
+     goes to the grid. At 900px that turns a 136px scroll range into none, and
+     six rows into eight.
+
+     IT ONLY EVER FOLDS — NEVER UNFOLDS — AND THAT IS WHAT MAKES IT TERMINATE.
+     Folding changes the layout, which changes the overflow, which is the input
+     to this decision: a rule that could also unfold would sit on the boundary
+     and alternate forever, which is the same trap the `ResizeObserver` above
+     fell into. Monotonic, it runs at most once. Unfolding is the reader's, on
+     the button, and it stays unfolded — `autoFolded` exists so the control can
+     say the page did this rather than let it look like a setting that changed
+     on its own.
+
+     `pageOver > 1` RATHER THAN `> 0` because sub-pixel layout leaves a stray
+     pixel of "overflow" on a page that visually fits, and folding two panels
+     over one pixel would be absurd. */
+  let autoFolded = $state(false);
+  /* ONCE THE READER HAS PRESSED THE BUTTON, THE PAGE STOPS DECIDING. Without
+     this the automatic rule is not merely persistent, it is UNDOABLE-PROOF:
+     unfolding restores the panels, the page overflows again, and the rule
+     folds them back inside the same frame — a button that visibly refuses the
+     press. Monotonic-until-overridden is the shape that has both properties,
+     the page helping by default and never overruling a choice. */
+  let readerChose = $state(false);
+  /* TEN ROWS, AND THE SECOND CONDITION EXISTS BECAUSE "DOES IT FIT" ALONE
+     PRODUCED A BIGGER WINDOW WITH FEWER ROWS.
+     ---------------------------------------------------------------------
+     MEASURED with only the overflow test: a 900px window did not fit, folded,
+     and gave EIGHT rows; a 1,000px window fitted — barely, with the table
+     sitting on its floor — so it did not fold, and gave FIVE. A hundred pixels
+     more screen, three rows fewer, because "fits" was satisfied by a table too
+     small to read. Fitting is the constraint; a usable grid is the point.
+
+     So the readouts also fold when the grid is under ten rows and they are
+     what is standing in its way. Ten is the count this page's own arithmetic
+     keeps arriving at as the plain-view figure on an ordinary window, so it
+     reads as "the grid is worse than ordinary here" rather than as a threshold
+     picked to make a case pass.
+
+     STILL MONOTONIC. This only ever folds, the guard above returns as soon as
+     `compact` is true, and a reader's press stops it for good — so adding a
+     second trigger adds no way for it to run twice. */
+  const MIN_USEFUL_ROWS = 10;
+  $effect(() => {
+    if (readerChose || compact) return;
+    if (pageOver <= 1 && rowsThatFit >= MIN_USEFUL_ROWS) return;
+    /* Nothing to gain by folding what is not there: on a window so short that
+       the grid is small even WITHOUT the readouts, hiding them buys nothing and
+       the reader loses them for no rows. */
+    if (foldPx <= 0) return;
+    untrack(() => {
+      compact = true;
+      autoFolded = true;
+    });
+  });
   /* EIGHT PIXELS OF SLACK, AND IT IS A DAMPER RATHER THAN A FUDGE.
      ---------------------------------------------------------------------
      MEASURED without it: a 1,400px window computed sixteen rows from a 670px
@@ -6557,7 +6633,7 @@
          height it is given, and a column that will not shrink hands it the
          whole document instead.
          ================================================================== -->
-    <div class="board">
+    <div class="board" bind:this={boardEl}>
 
     <!-- ==================================================================
          THE QUERY STRIP.
@@ -7457,9 +7533,19 @@
             type="button"
             aria-pressed={compact}
             title={compact
-              ? `Bring back the counted line and the window band. Costs ${fmt(foldRows)} row(s) of grid at this window size.`
+              ? autoFolded
+                ? `Folded by the page, not by you: this window could not hold the readouts AND the grid, so it was overflowing by a screen-fraction — long enough to scroll, too short to be worth scrolling, which reads as shaking. Press to bring them back and accept that scroll. Costs ${fmt(foldRows)} row(s) of grid here.`
+                : `Bring back the counted line and the window band. Costs ${fmt(foldRows)} row(s) of grid at this window size.`
               : `Fold the counted line and the window band away and give the grid the space — worth ${fmt(foldRows)} more row(s) at this window size. Both are readouts; nothing that narrows the selection is hidden.`}
-            onclick={() => (compact = !compact)}
+            onclick={() => {
+              compact = !compact;
+              /* THE PRESS ENDS THE AUTOMATIC BEHAVIOUR FOR GOOD — see
+                 `readerChose`. Without it, unfolding on a short window restores
+                 the panels, the page overflows, and the rule folds them back in
+                 the same frame: a button that visibly refuses the press. */
+              readerChose = true;
+              autoFolded = false;
+            }}
             >{compact ? 'Show readouts' : 'Compact'}{#if foldRows > 0}<span class="c"
                 >{compact ? '−' : '+'}{fmt(foldRows)}</span
               >{/if}</button
@@ -10368,13 +10454,22 @@
        and the page size is set from it, so the grid holds exactly the rows that
        fit and the box never scrolls at all. See `rowsThatFit`.
 
-       320px IS A SURVIVAL FLOOR AND NOT A PROMISE. It is about eight rows, and
-       it exists only so a very short window degrades to a small table rather
-       than to the nineteen-pixel one this file recorded earlier. Past it the
-       page scrolls, which is the honest outcome; above it nothing does.
+       220px IS A SURVIVAL FLOOR AND NOT A PROMISE. It exists only so a very
+       short window degrades to a small table rather than to the nineteen-pixel
+       one this file recorded earlier. It is about five rows.
+
+       IT WAS 320 AND THAT TURNED OUT TO BE THE LAST THING HOLDING THE SCROLL
+       OPEN. Measured at an 800px window with the readouts already folded away:
+       the box sat ON the 320 floor and the page still overflowed by 35px — a
+       range far too short to be worth scrolling and long enough to lurch, which
+       is the whole complaint. The floor was not protecting a readable table at
+       that point, it was buying three rows at the price of the page not
+       fitting, which is the wrong side of the trade this page has now made
+       three times. Below 220 the page scrolls, which is the honest outcome and
+       needs a window shorter than any this was tested on.
        --------------------------------------------------------------------- */
     flex: 1;
-    min-height: 320px;
+    min-height: 220px;
     display: flex;
     flex-direction: column;
     position: relative; /* the drawer's containing block */
