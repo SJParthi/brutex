@@ -1,5 +1,42 @@
 # Handover: wire the backtest into `api` and `web`
 
+## READ THIS FIRST — what you are being asked to do
+
+Build the backtest page. The engine, the sweep, the 1-minute execution layer,
+both fill models and the results ledger are **already built, tested and on
+`feat/pull`**. You are wiring them to a route and a page. You are not writing an
+engine, and you should not need to touch `crates/runner`, `crates/cli`,
+`crates/indicators`, `crates/costs`, `crates/vocab` or `crates/engine` at all —
+another session owns those and is actively editing them.
+
+**Your files:** `crates/api/**`, `crates/store/**`, `crates/pull/**`, `web/**`.
+
+Commit with **explicit pathspecs** — the git index is shared between two live
+sessions. Never `git add -A`.
+
+---
+
+## The standing requirements this repository is held to
+
+These are the operator's, and they apply to everything below:
+
+- **Rust only** outside `web/`. Inside `web/`, unrestricted.
+- **O(1) always** — uniqueness, deduplication, mapping, latency, time and space.
+  Frontend, backend, database, anything. Every read of the ledger below is
+  `O(1)` at a computed offset; keep it that way. A scan added to a request path
+  is a regression.
+- **Everything auditable**: saved, logged, tracked, captured, searchable,
+  monitorable, visualised, and reachable from the nav. A page that ships
+  unreachable has not shipped — `/logs` did exactly that once.
+- **Cover every worst case**: errors, exceptions, empty states, partial data,
+  concurrent writes, malformed input. Each is a FACT that gets a sentence, never
+  a blank and never a silent default.
+- **Common, runtime-dynamic, incremental, scalable.** No hardcoded instrument,
+  no hardcoded span, no hardcoded rung list that the store contradicts.
+
+---
+
+
 **For the session that owns `crates/api`, `crates/pull`, `crates/store` and `web/`.**
 Written by the session that owns `crates/cli`, `crates/runner`, `crates/indicators`,
 `crates/costs`, `crates/vocab`, `crates/engine`. Nothing in this document has been
