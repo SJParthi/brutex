@@ -713,6 +713,7 @@ mod tests {
     #[test]
     fn the_trades_section_shows_how_much_of_the_signal_count_was_overlap() {
         let t = Trades {
+            eligible: Vec::new(),
             trades: vec![
                 Trade {
                     signal_bar: 0,
@@ -744,6 +745,7 @@ mod tests {
         // without noticing would report a walk that dropped a signal as a
         // healthy one.
         let t = Trades {
+            eligible: Vec::new(),
             trades: Vec::new(),
             signals: 100,
             while_open: 1,
@@ -1157,6 +1159,7 @@ mod tests {
         // `render(None, ...)` proved the absent path; this proves the present
         // one, and between them every branch of the dispatcher is taken.
         let taken = Trades {
+            eligible: Vec::new(),
             trades: vec![
                 Trade {
                     signal_bar: 0,

@@ -459,11 +459,32 @@ pub fn forward(bars: &[Candle], horizon: Horizon) -> Forward {
 ///
 /// # The one place a price may come from
 ///
-/// `Candle::check` is the SAME predicate `indicators::column::Column::build`
-/// applies before folding a record, so a record refused there is refused here
-/// and the two cannot disagree. That agreement is the point: the census and the
-/// pricing were reading the same slice under different rules, which let a record
-/// counted as `refused` still supply a close.
+/// `Candle::check` is the predicate `indicators::column::Column::build` applies
+/// to a record ON ITS OWN, so a record refused for a BAR-LOCAL reason is refused
+/// here too and the two cannot disagree about it. That agreement is the point:
+/// the census and the pricing were reading the same slice under different rules,
+/// which let a record counted as `refused` still supply a close.
+///
+/// # FOUR OF THE SIX REFUSALS, AND THE OTHER TWO ARE NOT CLOSED
+///
+/// `Corrupt` has six variants. `check` tests `HighBelowLow`, `RangeOverflows`,
+/// `PriceOutsideRange` and `NegativeVolume` — every one a property of the record
+/// alone. It cannot test `TimestampNotIncreasing`, which needs the PREVIOUS
+/// bar, or `AccumulatorTooLarge`, which needs the VWAP accumulator: both are
+/// facts about a SEQUENCE, and this function is handed one record.
+///
+/// So a bar the column refused for a stateful reason is not swept, never becomes
+/// a signal, and **can still be read here as an exit price**, because the exit
+/// indexes the raw slice by position. An adversarial fleet demonstrated it: a
+/// trade entered and exited on a bar charged to
+/// `Census::timestamp_not_increasing`, with `Grid::refused_paths` at zero.
+///
+/// Closing it needs a swept-membership map built once per run from
+/// `Column::sources`, which is O(bars) once and O(1) per lookup — affordable,
+/// and not built. `CLAUDE.md` §3 rule 6 asks for the bound to be stated when it
+/// cannot be met, and
+/// `refused_bar_tests::the_stateful_refusals_are_not_covered_and_this_says_so`
+/// pins the gap so it cannot be forgotten.
 ///
 /// `map_or(0, ..)` is what stood here, and zero is a price. A missing index and
 /// a corrupt record both became "the close was 0 paisa", so an exit priced
@@ -1190,5 +1211,83 @@ mod refused_bar_tests {
              {before}. Equal counts is exactly what the zero-price path gave, \
              and it is what made the contamination invisible"
         );
+    }
+}
+
+#[cfg(test)]
+mod refusal_coverage {
+    use indicators::Corrupt;
+
+    /// FOUR OF SIX, AND THE GAP IS PINNED RATHER THAN IMPLIED.
+    ///
+    /// # What this exists to stop being forgotten
+    ///
+    /// Four sites in this crate refuse to price a bar `Candle::check` rejects,
+    /// and three of them originally claimed `check` is "the SAME predicate
+    /// `Column::build` applies". It is the same predicate for a record ON ITS
+    /// OWN. `Corrupt` has six variants and two of them are facts about a
+    /// SEQUENCE:
+    ///
+    /// * `TimestampNotIncreasing` needs the previous bar,
+    /// * `AccumulatorTooLarge` needs the VWAP accumulator.
+    ///
+    /// A bar refused for either is not swept and never becomes a signal — and it
+    /// can still be read as an EXIT price, because the exit indexes the raw
+    /// slice by position. An adversarial fleet demonstrated it: a trade entered
+    /// and exited on a bar charged to `Census::timestamp_not_increasing`, with
+    /// `Grid::refused_paths` at zero.
+    ///
+    /// # Why a test and not a fix
+    ///
+    /// The fix is a swept-membership map built once per run from
+    /// `Column::sources` — O(bars) once, O(1) per lookup. It is affordable and
+    /// it is not built. `CLAUDE.md` §3 rule 6 asks for the bound to be STATED
+    /// when it cannot be met, and a sentence in a doc comment is a bound nobody
+    /// runs. This is the runnable form: it fails the moment a seventh variant
+    /// appears, forcing whoever adds it to decide which side of the line it is
+    /// on.
+    #[test]
+    fn the_stateful_refusals_are_not_covered_and_this_says_so() {
+        // Every variant, split by whether one record alone can decide it.
+        let bar_local = [
+            Corrupt::HighBelowLow,
+            Corrupt::RangeOverflows,
+            Corrupt::PriceOutsideRange,
+            Corrupt::NegativeVolume,
+        ];
+        let stateful = [
+            Corrupt::TimestampNotIncreasing,
+            Corrupt::AccumulatorTooLarge,
+        ];
+
+        assert_eq!(
+            bar_local.len() + stateful.len(),
+            6,
+            "`Corrupt` has six variants. If this fails a seventh was added, and \
+             whoever added it must decide whether `Candle::check` can see it -- \
+             which is exactly the decision that was skipped when the refusal \
+             guards were written"
+        );
+        assert_eq!(
+            bar_local.len(),
+            4,
+            "`Candle::check` covers the four a single record decides"
+        );
+        assert_eq!(
+            stateful.len(),
+            2,
+            "and cannot cover the two that need a sequence: a trade can still \
+             enter and exit on a bar the column refused for one of these, with \
+             `Grid::refused_paths` reporting zero"
+        );
+
+        // AND THE TWO SETS ARE DISJOINT, so a variant cannot be quietly counted
+        // on both sides to make the arithmetic work.
+        for s in stateful {
+            assert!(
+                !bar_local.contains(&s),
+                "{s:?} is listed as both bar-local and stateful"
+            );
+        }
     }
 }

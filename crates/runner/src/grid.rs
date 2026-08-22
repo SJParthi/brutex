@@ -714,8 +714,21 @@ pub fn evaluate(
     // A PATH WITH A REFUSED BAR ANYWHERE IN IT IS DROPPED, NOT PRICED. See
     // `Grid::refused_paths` for what one such bar did to a real audit. The drop
     // is counted so a reader sees a smaller sample rather than a moved answer.
+    // FROM `eligible`, NOT `trades`, AND THAT IS THE WHOLE OF THE RE-WALK.
+    //
+    // `trades` is `crate::trade::walk`'s answer under rule 4 with LEVEL-LESS
+    // exits -- the longest holds, so the most exclusion. Building candidates
+    // from it left `one_variant`'s own exclusivity nothing to do: a tighter stop
+    // frees the next signal only if that signal is in the list, and rule 4 had
+    // already removed it. Measured by an adversarial fleet: the guard fired ZERO
+    // times across 168,892 cells, while this module's header claims the sequence
+    // differs per variant.
+    //
+    // `eligible` is every signal that could open a position, exclusivity NOT
+    // applied. `one_variant` is now the only place it is applied, which is what
+    // the header always said.
     let all: Vec<Candidate> = timed
-        .trades
+        .eligible
         .iter()
         .map(|t| {
             let entry_price = bars.get(t.entry_bar).map_or(0, |b| b.open);
@@ -877,11 +890,14 @@ pub fn with_levels(
     variant: Chosen,
 ) -> Option<Cell> {
     let timed = crate::trade::walk(bars, column, mask, horizon, direction_of(side));
-    if timed.trades.is_empty() {
+    if timed.eligible.is_empty() {
         return None;
     }
+    // `eligible` and not `trades`, for the reason `evaluate` gives: exclusivity
+    // belongs to the variant being scored, not to the level-less walk that found
+    // the signals.
     let candidates: Vec<Candidate> = timed
-        .trades
+        .eligible
         .iter()
         .map(|t| {
             let entry_price = bars.get(t.entry_bar).map_or(0, |b| b.open);
@@ -2600,6 +2616,145 @@ mod arming_tests {
             g.baseline().and_then(|c| c.ttp),
             None,
             "and it carries no trailing take profit"
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "the exception every test module in this workspace takes."
+)]
+mod rewalk_tests {
+    use super::evaluate;
+    use crate::excursion::Side;
+    use crate::outcome::Horizon;
+    use indicators::column::Column;
+    use vocab::ConditionMask;
+
+    fn evaluator() -> indicators::evaluator::Evaluator {
+        indicators::evaluator::Evaluator::new(
+            indicators::evaluator::Widths::pinned().expect("pinned widths are valid"),
+            indicators::vwap::Availability::Absent,
+            indicators::pattern::Thresholds::CLASSICAL,
+        )
+    }
+
+    /// A TIGHTER EXIT TAKES MORE TRADES, AND FOR MONTHS IT COULD NOT.
+    ///
+    /// # The defect, measured
+    ///
+    /// This module's header says the sequence is re-walked per variant because
+    /// *"a stop that fires early ends the position early, and under
+    /// `crate::trade`'s one-position-at-a-time rule that frees the NEXT signal
+    /// to be taken sooner"*.
+    ///
+    /// It could not. `evaluate` built its candidates from `Trades::trades`,
+    /// which is the level-less walk's answer with rule 4 already applied — the
+    /// longest possible holds, so the most exclusion. A tighter stop frees the
+    /// next signal only if that signal is in the candidate list, and rule 4 had
+    /// removed it. An adversarial fleet measured `one_variant`'s `open_until`
+    /// guard firing **zero times across 168,892 cells**: every one of the 625
+    /// exit variants measured the time-exit baseline's trade set.
+    ///
+    /// So the whole exit grid compared 625 ways of pricing ONE sequence of
+    /// trades, while claiming to compare 625 sequences.
+    ///
+    /// # The property, not a number
+    ///
+    /// A tightest-stop cell must take **at least as many** round trips as the
+    /// baseline, and on any fixture where a stop ever fires early, strictly
+    /// more. Asserting a specific count would pin this fixture; asserting the
+    /// ordering fails the moment the candidate list goes back to being
+    /// pre-excluded, whatever the fixture.
+    #[test]
+    fn a_tighter_exit_can_take_a_trade_the_baseline_had_no_room_for() {
+        let bars = crate::synthetic::sessions(8);
+        let column = Column::build(&bars, &mut evaluator());
+        let g = evaluate(
+            &bars,
+            &column,
+            &ConditionMask::default(),
+            Horizon::bars(15).expect("a non-zero horizon"),
+            Side::Long,
+            4,
+        );
+        let base = g.baseline().copied().expect("the baseline row exists");
+        assert!(base.trades > 0, "the fixture must trade at all");
+
+        // The most-constrained cell: tightest stop, tightest target, tightest
+        // TSL. Every one of its exits fires at or before the baseline's, so it
+        // can only free signals, never consume more.
+        let tightest = g
+            .cells
+            .iter()
+            .filter(|c| c.stop == Some(0) && c.target == Some(0) && c.tsl == Some(0))
+            .max_by_key(|c| c.trades)
+            .copied()
+            .expect("a cell with every tightest rung exists");
+
+        assert!(
+            tightest.trades >= base.trades,
+            "an exit that never fires LATER than the baseline cannot take fewer \
+             round trips: {} against the baseline's {}",
+            tightest.trades,
+            base.trades
+        );
+        assert!(
+            tightest.trades > base.trades,
+            "the tightest exit must take STRICTLY more round trips than the \
+             time-exit baseline on this fixture -- it exits sooner, so it frees \
+             signals rule 4 blocked. Equal counts is exactly what the grid \
+             produced when its candidates came from the already-excluded list, \
+             and it is what made all 625 cells measure one trade set. Got {} \
+             against {}",
+            tightest.trades,
+            base.trades
+        );
+    }
+
+    /// THE ELIGIBLE UNIVERSE CONTAINS THE TAKEN TRADES, ALWAYS.
+    ///
+    /// `eligible` is every signal that cleared rules 1, 1b, 1c and 2; `trades`
+    /// is the subset rule 4 admitted. A `trades` entry absent from `eligible`
+    /// would mean the two lists were built by different rules, which is the way
+    /// this refactor could have gone wrong without any count looking odd.
+    #[test]
+    fn every_taken_trade_was_eligible_and_the_counters_still_reconcile() {
+        let bars = crate::synthetic::sessions(8);
+        let column = Column::build(&bars, &mut evaluator());
+        let t = crate::trade::walk(
+            &bars,
+            &column,
+            &ConditionMask::default(),
+            Horizon::bars(15).expect("a non-zero horizon"),
+            costs::fill::Direction::Long,
+        );
+        assert!(
+            t.eligible.len() >= t.trades.len(),
+            "the universe cannot be smaller than the selection: {} against {}",
+            t.eligible.len(),
+            t.trades.len()
+        );
+        assert!(
+            t.trades.iter().all(|x| t.eligible.contains(x)),
+            "every taken trade must appear in the eligible universe, or the two \
+             lists were built by different rules"
+        );
+        assert!(
+            t.eligible.len() > t.trades.len(),
+            "on this fixture the empty mask fires on every swept bar, so rule 4 \
+             MUST block some of them -- an equal pair means `eligible` is being \
+             filtered by exclusivity too, which is the defect this exists to \
+             prevent"
+        );
+        // AND THE THREE-WAY RECONCILIATION IS UNMOVED. Routing the early
+        // refusals through `blocked` changed which counter a blocked-and-late
+        // signal lands in; it must not change that every signal lands in
+        // exactly one.
+        assert!(
+            t.reconciles(),
+            "trades + blocked + too-late must still equal signals"
         );
     }
 }

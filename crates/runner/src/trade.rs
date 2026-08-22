@@ -122,6 +122,33 @@ pub struct Trade {
 pub struct Trades {
     /// The round trips, in bar order and never overlapping.
     pub trades: Vec<Trade>,
+    /// Every signal that COULD have opened a position, exclusivity not applied.
+    ///
+    /// # Why a second list, and what its absence cost
+    ///
+    /// [`Self::trades`] is the answer under rule 4 with LEVEL-LESS exits — the
+    /// longest possible holds, so the most exclusion. `crate::grid::evaluate`
+    /// built its candidates from it, and its own per-variant exclusivity then
+    /// had nothing to do: a tighter stop frees the next signal only if that
+    /// signal is in the list, and rule 4 had already removed it.
+    ///
+    /// So **all 625 exit cells measured one trade set** — the time-exit
+    /// baseline's — while `crate::grid`'s module header claims in writing that
+    /// the sequence is re-walked per variant because "a stop that fires early
+    /// ends the position early, and that frees the NEXT signal to be taken
+    /// sooner". An adversarial fleet measured the guard firing **zero times
+    /// across 168,892 cells**.
+    ///
+    /// This is that universe: every signal that passed rules 1, 1b, 1c and 2,
+    /// whether or not a position happened to be open at the time. Exclusivity is
+    /// then whoever applies it — rule 4 here for [`Self::trades`], and
+    /// `one_variant`'s own `open_until` for each grid cell, which is now the
+    /// only place it can differ.
+    ///
+    /// **A superset of `trades`, always**, and equal to it exactly when no
+    /// signal was ever blocked. `an_eligible_signal_blocked_here_can_open_a_cell`
+    /// holds the containment.
+    pub eligible: Vec<Trade>,
     /// Bars the mask fired on, whether or not they became a trade.
     ///
     /// The number [`crate::outcome::edge`] would have used as its `n`. Reported
@@ -203,17 +230,42 @@ pub fn walk(
         }
         out.signals = out.signals.saturating_add(1);
 
-        // RULE 4. A position is open, so this signal buys nothing. Not a long,
-        // not a short, not a scale-in.
-        if open_until.is_some_and(|until| signal < until) {
-            out.while_open = out.while_open.saturating_add(1);
-            continue;
-        }
+        // RULE 4, DECIDED HERE AND APPLIED BELOW.
+        //
+        // A position is open, so this signal buys nothing. Not a long, not a
+        // short, not a scale-in.
+        //
+        // IT USED TO `continue` HERE, AND THAT MADE THE EXIT GRID MEASURE ONE
+        // TRADE SET FOR ALL 625 CELLS.
+        //
+        // `crate::grid::evaluate` builds its candidates from `out.trades`, which
+        // is this walk's answer with LEVEL-LESS exits -- the longest possible
+        // holds, so the most exclusion. Its own per-variant exclusivity then had
+        // nothing left to do: a tighter stop frees the next signal only if that
+        // signal is in the list, and a `continue` here is exactly what kept it
+        // out. An adversarial fleet measured the guard firing **zero times
+        // across 168,892 cells**, and the module header of `crate::grid` claims
+        // in writing that the sequence differs per variant.
+        //
+        // So eligibility is now decided for EVERY signal and recorded in
+        // [`Trades::eligible`], and rule 4 selects `trades` out of it. The
+        // counters are unmoved: `blocked` is still tested before lateness, so a
+        // signal that is both still counts as `while_open` exactly as before.
+        let blocked = open_until.is_some_and(|until| signal < until);
 
         // RULE 2. The fill is on the NEXT bar; the signal bar's close has
         // already printed and cannot be traded at.
+        // Every refusal below is a LATENESS, and a blocked signal is charged to
+        // `while_open` rather than to it -- so each branch asks `blocked` first.
+        // The macro-free way of writing that is one `late` closure, but the
+        // counter is on `out` and a closure would borrow it, so it is spelled
+        // out at each site.
         let Some(entry) = signal.checked_add(1) else {
-            out.too_late = out.too_late.saturating_add(1);
+            if blocked {
+                out.while_open = out.while_open.saturating_add(1);
+            } else {
+                out.too_late = out.too_late.saturating_add(1);
+            }
             continue;
         };
         // RULE 1. The entry bar must itself be inside the tradeable window of
@@ -222,7 +274,11 @@ pub fn walk(
         // or the slice merely stopped there, is RULE 1c's question and not this
         // one's.
         let Some(forced) = exits.get(entry).copied().flatten() else {
-            out.too_late = out.too_late.saturating_add(1);
+            if blocked {
+                out.while_open = out.while_open.saturating_add(1);
+            } else {
+                out.too_late = out.too_late.saturating_add(1);
+            }
             continue;
         };
 
@@ -249,7 +305,11 @@ pub fn walk(
             indicators::ist_day(s.ts_micros) == indicators::ist_day(e.ts_micros)
         });
         if !same_session {
-            out.too_late = out.too_late.saturating_add(1);
+            if blocked {
+                out.while_open = out.while_open.saturating_add(1);
+            } else {
+                out.too_late = out.too_late.saturating_add(1);
+            }
             continue;
         }
         let wanted = entry.saturating_add(h);
@@ -299,13 +359,32 @@ pub fn walk(
             continue;
         };
         if exit <= entry {
-            out.too_late = out.too_late.saturating_add(1);
+            if blocked {
+                out.while_open = out.while_open.saturating_add(1);
+            } else {
+                out.too_late = out.too_late.saturating_add(1);
+            }
             continue;
         }
         let Some(trade) = round_trip(bars, signal, entry, exit, exit < wanted, direction) else {
-            out.too_late = out.too_late.saturating_add(1);
+            if blocked {
+                out.while_open = out.while_open.saturating_add(1);
+            } else {
+                out.too_late = out.too_late.saturating_add(1);
+            }
             continue;
         };
+        // THE UNIVERSE FIRST, THE SELECTION SECOND.
+        //
+        // This signal is tradeable: it cleared every rule except rule 4. It goes
+        // into `eligible` whether or not a position is open, because the exit
+        // grid needs the signals a DIFFERENT exit would have freed -- see that
+        // field for what its absence cost.
+        out.eligible.push(trade);
+        if blocked {
+            out.while_open = out.while_open.saturating_add(1);
+            continue;
+        }
         open_until = Some(exit);
         out.trades.push(trade);
     }

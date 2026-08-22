@@ -19505,3 +19505,72 @@ And `the_allocation_is_bits_by_stride_and_not_the_live_count` compared a literal
 `238` against arithmetic on the same literal, staying GREEN through two
 vocabulary growths while certifying a stale figure. Both now read
 `vocab::table::LIVE`.
+
+### D-0250 — the exit grid measured one trade set and called it six hundred
+
+Two defects from a 46-agent re-audit of the whole pipeline. The first changes
+every exit-grid figure the engine has ever produced; the second is a claim this
+crate made about itself that was not true.
+
+#### All 625 cells were pricing the SAME trades
+
+`crate::grid`'s module header says, in writing:
+
+> A stop that fires early ends the position early, and under `crate::trade`'s
+> one-position-at-a-time rule that frees the NEXT signal to be taken sooner. So
+> the trade sequence is not the same across variants and reusing one list would
+> quietly measure the wrong trades.
+
+It reused one list. `evaluate` built its candidates from `Trades::trades`, which
+is `trade::walk`'s answer **with rule 4 already applied at LEVEL-LESS exits** —
+the longest possible holds, therefore the most exclusion. `one_variant`'s own
+`open_until` guard then had nothing to do: a tighter stop frees the next signal
+only if that signal is in the candidate list, and rule 4 had removed it.
+
+**Measured: the guard fired zero times across 168,892 cells.** Every one of the
+625 exit variants measured the time-exit baseline's trade set. The grid was
+comparing 625 ways of PRICING one sequence while claiming to compare 625
+sequences.
+
+`Trades::eligible` is the fix: every signal that cleared rules 1, 1b, 1c and 2,
+exclusivity NOT applied. The grid feeds from it, so `one_variant` is now the only
+place exclusivity happens — which is what the header always said.
+
+**The counters are unmoved.** Rule 4 used to `continue` before the lateness
+checks, so a blocked signal was never tested for lateness. It is now decided
+first and applied last, and every refusal below asks `blocked` before charging
+`too_late` — so a signal that is both still counts as `while_open`, exactly as
+before, and `reconciles()` still holds.
+
+`a_tighter_exit_can_take_a_trade_the_baseline_had_no_room_for` asserts a STRICT
+inequality: the tightest stop, target and TSL together must take more round trips
+than the baseline. Equal counts is precisely what the defect produced, so a
+`>=` would have passed on the broken code.
+
+#### `Candle::check` covers four of six refusals, and three sites claimed it covered all
+
+D-0243 and D-0249 added four guards refusing to price a bar the engine had
+refused, each saying `Candle::check` is *"the SAME predicate `Column::build`
+applies"*. It is the same predicate **for a record on its own**.
+
+`Corrupt` has six variants. `check` tests `HighBelowLow`, `RangeOverflows`,
+`PriceOutsideRange` and `NegativeVolume` — every one a property of the record
+alone. It cannot test `TimestampNotIncreasing`, which needs the PREVIOUS bar, or
+`AccumulatorTooLarge`, which needs the VWAP accumulator. Both are facts about a
+SEQUENCE and the function is handed one record.
+
+So a bar refused for a stateful reason is not swept and never becomes a signal —
+and can still be read as an EXIT price, because the exit indexes the raw slice by
+position. The fleet demonstrated it: a trade entered and exited on a bar charged
+to `Census::timestamp_not_increasing`, with `Grid::refused_paths` at zero.
+
+**This is stated rather than fixed, deliberately.** The fix is a swept-membership
+map built once per run from `Column::sources` — O(bars) once, O(1) per lookup,
+affordable, and not built. §3 rule 6 asks for the bound to be stated when it
+cannot be met, and a sentence in a doc comment is a bound nobody runs.
+`the_stateful_refusals_are_not_covered_and_this_says_so` is the runnable form: it
+fails the moment a seventh variant appears, forcing whoever adds it to decide
+which side of the line it is on.
+
+The three claims are corrected to say what is true: four of six, and which two
+are not closed.
