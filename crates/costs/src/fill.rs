@@ -104,15 +104,23 @@ impl core::fmt::Display for Direction {
     }
 }
 
-/// One minute bar's two adverse anchors.
+/// One minute bar's three fill anchors.
 ///
-/// Only the high and the low are carried, because only they are read. The
-/// predecessor's input type also carries the open, and uses it **solely** to
-/// validate that the extremes bracket it; that validation is expressed here as
-/// `low <= high`, which is what it implies and all that the arithmetic needs. A
-/// field that never enters a computation is a field that can drift.
+/// # The open is carried again, and the reason it was dropped is the reason it
+/// # is back
+///
+/// This doc read *"only the high and the low are carried, because only they are
+/// read"*, and ended *"a field that never enters a computation is a field that
+/// can drift"*. That was correct while one fill model existed. It no longer is:
+/// [`Anchor::Open`] reads the open, so the field enters a computation and the
+/// argument for removing it has expired.
+///
+/// The bracket check the predecessor used the open for is still made --
+/// `low <= open <= high` -- and is now a real invariant rather than a
+/// restatement of `low <= high`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Bar {
+    open: Paisa,
     high: Paisa,
     low: Paisa,
 }
@@ -140,12 +148,17 @@ impl Bar {
     /// use brutex_core::price::Paisa;
     /// use costs::fill::Bar;
     ///
-    /// let bar = Bar::new(Paisa::from_raw(120_50), Paisa::from_raw(119_00))?;
+    /// let bar = Bar::new(
+    ///     Paisa::from_raw(120_00),
+    ///     Paisa::from_raw(120_50),
+    ///     Paisa::from_raw(119_00),
+    /// )?;
+    /// assert_eq!(bar.open().raw(), 120_00);
     /// assert_eq!(bar.high().raw(), 120_50);
     /// assert_eq!(bar.low().raw(), 119_00);
     /// # Ok::<(), costs::error::CostError>(())
     /// ```
-    pub fn new(high: Paisa, low: Paisa) -> Result<Self, CostError> {
+    pub fn new(open: Paisa, high: Paisa, low: Paisa) -> Result<Self, CostError> {
         if high.raw() < TICK.raw() {
             return Err(CostError::BelowTick {
                 quantity: "bar high",
@@ -158,7 +171,17 @@ impl Bar {
                 low: low.raw(),
             });
         }
-        Ok(Self { high, low })
+        // THE BRACKET CHECK, WHICH IS NOW A REAL ONE. The predecessor validated
+        // `low <= open <= high` and this module expressed it as `low <= high`,
+        // on the grounds that the open never entered a computation. It does
+        // now, so an open outside its own bar is refused rather than filled at.
+        if open.raw() < low.raw() || open.raw() > high.raw() {
+            return Err(CostError::InvertedBar {
+                high: high.raw(),
+                low: open.raw(),
+            });
+        }
+        Ok(Self { open, high, low })
     }
 
     /// A bar that did not move: high, low and open all the same price.
@@ -187,7 +210,13 @@ impl Bar {
     /// # Ok::<(), costs::error::CostError>(())
     /// ```
     pub fn flat(price: Paisa) -> Result<Self, CostError> {
-        Self::new(price, price)
+        Self::new(price, price, price)
+    }
+
+    /// The bar's opening print — the anchor for [`Anchor::Open`].
+    #[must_use]
+    pub const fn open(self) -> Paisa {
+        self.open
     }
 
     /// The bar's highest print — the adverse anchor for a buy.
@@ -212,6 +241,20 @@ pub struct Fills {
 }
 
 impl Fills {
+    /// Fills anchored on two opens, with no slippage.
+    ///
+    /// Private to this module: the only caller is [`fills_at`], which has
+    /// already refused a sub-tick open. A public constructor would let a caller
+    /// assert any pair of prices carried no slippage, which is the one claim
+    /// this type exists to make honestly.
+    const fn at_open(buy: Paisa, sell: Paisa) -> Self {
+        Self {
+            buy,
+            sell,
+            realized_slip_per_unit: Paisa::from_raw(0),
+        }
+    }
+
     /// The price the buy leg filled at.
     #[must_use]
     pub const fn buy(self) -> Paisa {
@@ -238,6 +281,139 @@ impl Fills {
     }
 }
 
+/// Which price inside a bar a leg is assumed to fill at.
+///
+/// # Two readings, and why BOTH are needed rather than one
+///
+/// This module shipped with one model and its header said so: *"there is one
+/// fill model and it is the worst case"*, the open-anchored alternative having
+/// been deleted with its flag by the predecessor's
+/// `DEC-FILL-WORST-CASE-ONLY-001`. That decision is sound for SELECTION — a
+/// search ranked on flattering fills picks whatever the flattering assumption
+/// helped most, which is the argument `crate::validate`'s sibling makes for
+/// choosing on the pessimistic total.
+///
+/// It is not sound for REPORTING, and the two are different jobs. A worst-case
+/// figure alone cannot answer *"how much of this edge is the fill assumption?"*
+/// A strategy whose best and worst readings are 3,000 and 2,900 paisa is a
+/// different proposition from one reading 3,000 and −200, and the worst case
+/// prints the same number for both.
+///
+/// So both are computed and both are shown. **Selection still uses the worst
+/// case, unchanged** — nothing ranks on [`Anchor::Open`], and the day something
+/// does is a decision that gets its own entry.
+///
+/// | | buy leg | sell leg | slippage baked in |
+/// |---|---|---|---|
+/// | [`Anchor::Open`] | the bar OPEN | the bar OPEN | none |
+/// | [`Anchor::AdverseExtreme`] | high + one [`TICK`] | low − one [`TICK`] | one tick per leg |
+///
+/// On a flat bar the two coincide exactly, which restates the module header's
+/// "can never flatter the retired one" as an equality.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Anchor {
+    /// The bar's open, with no adverse tick — the BEST case.
+    ///
+    /// An order resting at the open and filled there. It is a price that
+    /// PRINTED, which the adverse-extreme buy deliberately is not. It is
+    /// optimistic because it assumes no queue, no spread crossed, and no
+    /// movement between the decision and the fill.
+    Open,
+    /// The adverse extreme plus one tick — the WORST case.
+    ///
+    /// The model this module has always used, unchanged: a buy at the bar high
+    /// plus a tick and a sell at the bar low minus a tick, both legs adverse on
+    /// both directions.
+    AdverseExtreme,
+}
+
+impl Anchor {
+    /// The word an audit prints for this reading.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "best",
+            Self::AdverseExtreme => "worst",
+        }
+    }
+}
+
+/// Both legs of a round trip, filled at the chosen anchor.
+///
+/// [`worst_case_fills`] is exactly this with [`Anchor::AdverseExtreme`]. It is
+/// not deprecated and its behaviour has not moved by one paisa.
+///
+/// # Errors
+///
+/// Every error [`worst_case_fills`] returns, plus one of its own:
+/// [`CostError::BelowTick`] when an open is under one [`TICK`].
+///
+/// **That refusal is deliberate and is the alternative to a silent floor.** The
+/// worst-case sell has a floor because its anchor is a bar LOW, which may
+/// legitimately sit below a tick on a malformed bar, and absorbing that is
+/// conservative. An OPEN below a tick is different: flooring it would move the
+/// fill UP, making the best case better than the price it claims to be anchored
+/// on — a flattering adjustment inside the reading that already flatters. There
+/// is no conservative direction to fail in, so it refuses.
+///
+/// # Examples
+///
+/// ```
+/// use brutex_core::price::Paisa;
+/// use costs::fill::{Anchor, Bar, Direction, fills_at};
+///
+/// let entry = Bar::new(
+///     Paisa::from_raw(100_00),
+///     Paisa::from_raw(101_00),
+///     Paisa::from_raw(99_00),
+/// )?;
+/// let exit = Bar::new(
+///     Paisa::from_raw(120_00),
+///     Paisa::from_raw(121_00),
+///     Paisa::from_raw(119_00),
+/// )?;
+///
+/// let best = fills_at(entry, exit, Direction::Long, Anchor::Open)?;
+/// assert_eq!(best.buy().raw(), 100_00);
+/// assert_eq!(best.sell().raw(), 120_00);
+/// assert_eq!(best.realized_slip_per_unit().raw(), 0);
+///
+/// let worst = fills_at(entry, exit, Direction::Long, Anchor::AdverseExtreme)?;
+/// assert_eq!(worst.buy().raw(), 101_05);
+/// assert_eq!(worst.sell().raw(), 118_95);
+/// # Ok::<(), costs::error::CostError>(())
+/// ```
+pub fn fills_at(
+    entry: Bar,
+    exit: Bar,
+    direction: Direction,
+    anchor: Anchor,
+) -> Result<Fills, CostError> {
+    match anchor {
+        Anchor::AdverseExtreme => worst_case_fills(entry, exit, direction),
+        Anchor::Open => {
+            // Direction selects which BAR each leg is on, and nothing else:
+            // there is no adverse extreme to choose between.
+            let (buy, sell) = match direction {
+                Direction::Long => (entry.open(), exit.open()),
+                Direction::Short => (exit.open(), entry.open()),
+            };
+            for (which, price) in [("buy open fill", buy), ("sell open fill", sell)] {
+                if price.raw() < TICK.raw() {
+                    return Err(CostError::BelowTick {
+                        quantity: which,
+                        value: price.raw(),
+                    });
+                }
+            }
+            // Zero slippage, and it is a FACT here rather than an assumption:
+            // both fills are the printed open, so nothing was given up between
+            // the decision and the fill. The worst case's tick is what this
+            // reading exists to be compared against.
+            Ok(Fills::at_open(buy, sell))
+        }
+    }
+}
 /// The worst-case fills for one round trip.
 ///
 /// "Worst case" is the name of the model this module's header states, not a
@@ -314,11 +490,30 @@ pub fn worst_case_fills(entry: Bar, exit: Bar, direction: Direction) -> Result<F
     clippy::unwrap_used,
     clippy::panic
 )]
+// `100_00` IS THE MONEY, and grouping it as `10_000` would hide that. Every
+// price in this module is paisa, so `120_50` reads as one-twenty-fifty at a
+// glance while `12_050` reads as twelve thousand. The doctests above already
+// write prices this way; this makes the unit tests match them rather than the
+// lint.
+#[allow(
+    clippy::inconsistent_digit_grouping,
+    reason = "rupees_paise is the readable grouping for a paisa integer"
+)]
 mod tests {
+    /// A price in paisa, so the fixtures below read as rupees-and-paise.
+    fn p(raw: i64) -> Paisa {
+        Paisa::from_raw(raw)
+    }
+
     use super::*;
 
     fn bar(high: i64, low: i64) -> Bar {
-        Bar::new(Paisa::from_raw(high), Paisa::from_raw(low)).expect("a legal bar")
+        Bar::new(
+            Paisa::from_raw(low),
+            Paisa::from_raw(high),
+            Paisa::from_raw(low),
+        )
+        .expect("a legal bar")
     }
 
     fn flat(price: i64) -> Bar {
@@ -460,7 +655,7 @@ mod tests {
     #[test]
     fn a_bar_whose_high_is_below_one_tick_is_refused_by_name() {
         assert_eq!(
-            Bar::new(Paisa::from_raw(4), Paisa::from_raw(1)),
+            Bar::new(Paisa::from_raw(1), Paisa::from_raw(4), Paisa::from_raw(1)),
             Err(CostError::BelowTick {
                 quantity: "bar high",
                 value: 4
@@ -474,7 +669,11 @@ mod tests {
             })
         );
         assert_eq!(
-            Bar::new(Paisa::from_raw(i64::MIN), Paisa::from_raw(i64::MIN)),
+            Bar::new(
+                Paisa::from_raw(i64::MIN),
+                Paisa::from_raw(i64::MIN),
+                Paisa::from_raw(i64::MIN)
+            ),
             Err(CostError::BelowTick {
                 quantity: "bar high",
                 value: i64::MIN
@@ -487,17 +686,31 @@ mod tests {
     #[test]
     fn a_bar_whose_low_is_above_its_high_is_refused_rather_than_swapped() {
         assert_eq!(
-            Bar::new(Paisa::from_raw(100), Paisa::from_raw(101)),
+            Bar::new(
+                Paisa::from_raw(101),
+                Paisa::from_raw(100),
+                Paisa::from_raw(101)
+            ),
             Err(CostError::InvertedBar {
                 high: 100,
                 low: 101
             })
         );
         // Equal is not inverted.
-        let touching = Bar::new(Paisa::from_raw(100), Paisa::from_raw(100)).expect("legal");
+        let touching = Bar::new(
+            Paisa::from_raw(100),
+            Paisa::from_raw(100),
+            Paisa::from_raw(100),
+        )
+        .expect("legal");
         assert_eq!(touching.high(), touching.low());
         // A low below zero is NOT refused: the sell floor absorbs it.
-        let degenerate = Bar::new(Paisa::from_raw(100), Paisa::from_raw(-5_000)).expect("legal");
+        let degenerate = Bar::new(
+            Paisa::from_raw(-5_000),
+            Paisa::from_raw(100),
+            Paisa::from_raw(-5_000),
+        )
+        .expect("legal");
         assert_eq!(degenerate.low().raw(), -5_000);
     }
 
@@ -592,7 +805,7 @@ mod tests {
         assert!(bar(100, 89) < bar(100, 90));
         assert_eq!(
             format!("{:?}", flat(5)),
-            "Bar { high: Paisa(5), low: Paisa(5) }"
+            "Bar { open: Paisa(5), high: Paisa(5), low: Paisa(5) }"
         );
 
         let fills = worst_case_fills(one, flat(200), Direction::Long).expect("in range");
@@ -605,5 +818,133 @@ mod tests {
         assert!(!set.insert(fills));
         assert_eq!(set.len(), 1);
         assert!(format!("{fills:?}").starts_with("Fills {"));
+    }
+
+    #[test]
+    fn the_best_case_fills_on_the_open_and_gives_up_nothing() {
+        let entry = Bar::new(p(100_00), p(101_00), p(99_00)).expect("legal");
+        let exit = Bar::new(p(120_00), p(121_00), p(119_00)).expect("legal");
+        let best = fills_at(entry, exit, Direction::Long, Anchor::Open).expect("fills");
+        assert_eq!(best.buy().raw(), 100_00, "the buy is the entry bar's open");
+        assert_eq!(best.sell().raw(), 120_00, "the sell is the exit bar's open");
+        assert_eq!(
+            best.realized_slip_per_unit().raw(),
+            0,
+            "nothing was given up between the decision and the fill"
+        );
+    }
+
+    #[test]
+    fn the_best_case_is_never_worse_than_the_worst_case_on_any_bar() {
+        // THE PROPERTY THAT MAKES THE PAIR MEAN ANYTHING. If the "best" reading
+        // could come out below the worst on some bar, the two would not bracket
+        // the truth and printing both would mislead rather than inform.
+        for open in [99_00_i64, 99_50, 100_00, 100_50, 101_00] {
+            for exit_open in [119_00_i64, 120_00, 121_00] {
+                let entry = Bar::new(p(open), p(101_00), p(99_00)).expect("legal");
+                let exit = Bar::new(p(exit_open), p(121_00), p(119_00)).expect("legal");
+                for direction in [Direction::Long, Direction::Short] {
+                    let best = fills_at(entry, exit, direction, Anchor::Open).expect("fills");
+                    let worst =
+                        fills_at(entry, exit, direction, Anchor::AdverseExtreme).expect("fills");
+                    assert!(
+                        best.buy().raw() <= worst.buy().raw(),
+                        "the best-case buy must never pay more than the worst: \
+                         {} vs {}",
+                        best.buy().raw(),
+                        worst.buy().raw()
+                    );
+                    assert!(
+                        best.sell().raw() >= worst.sell().raw(),
+                        "the best-case sell must never receive less than the \
+                         worst: {} vs {}",
+                        best.sell().raw(),
+                        worst.sell().raw()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn on_a_flat_bar_the_two_readings_coincide_exactly() {
+        // The module header's "can never flatter the retired one", stated as the
+        // equality it actually is: on a bar that did not move, the open IS the
+        // adverse extreme, and the worst case's tick is the whole difference.
+        let flat_in = Bar::flat(p(100_00)).expect("legal");
+        let flat_out = Bar::flat(p(120_00)).expect("legal");
+        let best = fills_at(flat_in, flat_out, Direction::Long, Anchor::Open).expect("fills");
+        let worst =
+            fills_at(flat_in, flat_out, Direction::Long, Anchor::AdverseExtreme).expect("fills");
+        assert_eq!(best.buy().raw(), 100_00);
+        assert_eq!(worst.buy().raw(), 100_05, "exactly one tick worse");
+        assert_eq!(best.sell().raw(), 120_00);
+        assert_eq!(worst.sell().raw(), 119_95, "exactly one tick worse");
+    }
+
+    #[test]
+    fn fills_at_the_adverse_extreme_is_the_worst_case_function_unchanged() {
+        // The old entry point must not have moved by one paisa. If these ever
+        // disagreed, every figure this workspace has ever produced would have
+        // shifted silently.
+        let entry = Bar::new(p(100_00), p(101_00), p(99_00)).expect("legal");
+        let exit = Bar::new(p(120_00), p(121_00), p(119_00)).expect("legal");
+        for direction in [Direction::Long, Direction::Short] {
+            assert_eq!(
+                fills_at(entry, exit, direction, Anchor::AdverseExtreme).expect("fills"),
+                worst_case_fills(entry, exit, direction).expect("fills"),
+                "the anchored entry point and the original must agree exactly"
+            );
+        }
+    }
+
+    #[test]
+    fn an_open_below_one_tick_refuses_rather_than_being_floored_upward() {
+        // The worst-case sell is FLOORED because its anchor is a bar low, which
+        // may legitimately sit below a tick, and absorbing that is conservative.
+        // An open below a tick has no conservative direction to fail in:
+        // flooring it moves the fill UP, making the best case better than the
+        // price it claims to be anchored on.
+        let low_open = Bar::new(p(1), p(100_00), p(0)).expect("a legal, if odd, bar");
+        let normal = Bar::flat(p(100_00)).expect("legal");
+        assert!(
+            fills_at(low_open, normal, Direction::Long, Anchor::Open).is_err(),
+            "a sub-tick buy open refuses"
+        );
+        assert!(
+            fills_at(normal, low_open, Direction::Long, Anchor::Open).is_err(),
+            "a sub-tick sell open refuses too"
+        );
+        // And the worst case still ABSORBS it, unchanged.
+        assert!(
+            fills_at(low_open, normal, Direction::Long, Anchor::AdverseExtreme).is_ok(),
+            "the worst case's floor still does its job"
+        );
+    }
+
+    #[test]
+    fn an_open_outside_its_own_bar_is_not_a_bar() {
+        // The bracket check the predecessor used the open for, restored as a
+        // real invariant. `low <= open <= high` was expressed as `low <= high`
+        // while the open was absent, which is strictly weaker.
+        assert!(
+            Bar::new(p(102_00), p(101_00), p(99_00)).is_err(),
+            "an open above the high is refused"
+        );
+        assert!(
+            Bar::new(p(98_00), p(101_00), p(99_00)).is_err(),
+            "an open below the low is refused"
+        );
+        assert!(
+            Bar::new(p(99_00), p(101_00), p(99_00)).is_ok(),
+            "and both bracket ends are legal"
+        );
+        assert!(Bar::new(p(101_00), p(101_00), p(99_00)).is_ok());
+    }
+
+    #[test]
+    fn each_anchor_names_itself_for_the_audit() {
+        assert_eq!(Anchor::Open.as_str(), "best");
+        assert_eq!(Anchor::AdverseExtreme.as_str(), "worst");
     }
 }

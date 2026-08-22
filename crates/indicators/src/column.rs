@@ -321,6 +321,99 @@ impl Column {
             }
         }
     }
+
+    /// The same conditions, re-indexed onto a DIFFERENT bar series.
+    ///
+    /// # Why a column has to be able to move series at all
+    ///
+    /// A condition is decided on one timeframe and a position is taken on
+    /// another. A fifteen-minute bar stamped 09:15 covers `[09:15, 09:30)` and
+    /// its mask is not knowable until 09:30, so the earliest bar that mask can
+    /// be acted on is the one-minute bar stamped 09:30. That is not a smaller
+    /// version of entering on the next fifteen-minute bar — it is the same
+    /// instant, reached with **fifteen times the resolution** for everything
+    /// that happens afterwards.
+    ///
+    /// The resolution is what matters. A stop and a target inside one bar's
+    /// range have no order the data can settle, so a fifteen-minute bar hides
+    /// fifteen minutes of path; a trailing order tracks a running peak that
+    /// updates twenty-five times a session on fifteen-minute bars and three
+    /// hundred and seventy-five times on one-minute bars. The trail is the
+    /// figure that moves most, and it moves because the coarse series never saw
+    /// the peak.
+    ///
+    /// # The projection carries the BITS unchanged, and that is the point
+    ///
+    /// Nothing here recomputes a condition. The mask a bar produced is the mask
+    /// it produced; only the index it is filed under changes. So no indicator is
+    /// evaluated on a series it was not built for, and `CLAUDE.md` §3 rule 7
+    /// holds exactly as before: the mask was computed from bars `0..=s` of the
+    /// signal series, and the index it now carries points at a bar that opens at
+    /// or after that signal bar CLOSED.
+    ///
+    /// # What `onto` is, and what `None` means
+    ///
+    /// `onto[j]` is the execution-series index for column position `j`, or
+    /// `None` when there is no bar to act on — a signal on the session's last
+    /// bar, or one whose close falls past the end of the execution series. Those
+    /// rows are DROPPED rather than mapped to a neighbour, because mapping a
+    /// signal to a bar that opened before the signal was knowable is look-ahead,
+    /// and mapping it to a much later one is a trade nobody could have taken.
+    ///
+    /// The count of dropped rows is returned so the caller can report it. A
+    /// projection that quietly shortened the column would make a smaller sample
+    /// read like a whole one, which is the `CLAUDE.md` §4 fallback.
+    ///
+    /// # Errors
+    ///
+    /// `None` when `onto` is not parallel to this column. That is a caller bug
+    /// and not a data condition, so it refuses rather than truncating to the
+    /// shorter of the two.
+    ///
+    /// # Cost
+    ///
+    /// One pass, one copy per kept row. `O(len)`, called once per run and never
+    /// per candidate — `CLAUDE.md` §3 rule 4 governs the sweep's inner
+    /// operations and this is not one of them.
+    #[must_use]
+    pub fn reproject(&self, onto: &[Option<usize>]) -> Option<(Self, u64)> {
+        if onto.len() != self.bits.len() {
+            return None;
+        }
+        let mut bits = Vec::with_capacity(self.bits.len());
+        let mut source = Vec::with_capacity(self.source.len());
+        let mut dropped: u64 = 0;
+        for (&mask, &target) in self.bits.iter().zip(onto.iter()) {
+            match target {
+                None => dropped = dropped.saturating_add(1),
+                Some(index) => {
+                    bits.push(mask);
+                    source.push(index);
+                }
+            }
+        }
+        // THE CENSUS IS THE SIGNAL SERIES', AND IS LEFT ALONE. It answers "where
+        // did every offered bar go", and the offered bars were the signal
+        // series' — reprojection neither offers nor refuses one. `swept` would
+        // become a lie if it were reduced here, because those bars WERE swept;
+        // what changed is how many of them can be acted on, which is `dropped`
+        // and is returned separately rather than folded into a count that means
+        // something else.
+        // `first_swept` is the first index of the series this column now indexes,
+        // so it is taken from the projected sources rather than carried over.
+        // Carrying the signal series' value would name a bar in the wrong
+        // series, and it is the field `sources` exists to keep honest.
+        let first_swept = source.first().copied();
+        Some((
+            Self {
+                bits,
+                source,
+                census: self.census,
+                first_swept,
+            },
+            dropped,
+        ))
+    }
     /// The column, as `engine::Ladder::walk` wants it.
     #[must_use]
     pub fn bits(&self) -> &[ConditionMask] {

@@ -1257,7 +1257,12 @@ mod tests {
     fn ranged_leg(on: TradeDay, high: i64, low: i64) -> Leg {
         Leg::new(
             on,
-            Bar::new(Paisa::from_raw(high), Paisa::from_raw(low)).expect("a legal bar"),
+            Bar::new(
+                Paisa::from_raw(low),
+                Paisa::from_raw(high),
+                Paisa::from_raw(low),
+            )
+            .expect("a legal bar"),
         )
     }
 
@@ -2195,7 +2200,12 @@ mod tests {
             Outcome::NormalClose,
             Leg::new(
                 example_day(),
-                Bar::new(Paisa::from_raw(i64::MAX), Paisa::from_raw(10)).expect("legal"),
+                Bar::new(
+                    Paisa::from_raw(10),
+                    Paisa::from_raw(i64::MAX),
+                    Paisa::from_raw(10),
+                )
+                .expect("legal"),
             ),
             leg(example_day(), 120_00),
             65,
@@ -2263,6 +2273,7 @@ mod tests {
         let slippery = worst_case_fills(
             Bar::flat(TICK_HELPER).expect("legal"),
             Bar::new(
+                Paisa::from_raw(-900_000_000_000_000_000),
                 Paisa::from_raw(10),
                 Paisa::from_raw(-900_000_000_000_000_000),
             )
@@ -2280,7 +2291,12 @@ mod tests {
         // (10) The net: a gross at the bottom of i64 and any charge at all.
         let ruinous = worst_case_fills(
             Bar::flat(Paisa::from_raw(i64::MAX - 5)).expect("legal"),
-            Bar::new(Paisa::from_raw(10), Paisa::from_raw(10)).expect("legal"),
+            Bar::new(
+                Paisa::from_raw(10),
+                Paisa::from_raw(10),
+                Paisa::from_raw(10),
+            )
+            .expect("legal"),
             Direction::Long,
         )
         .expect("in range");
@@ -2544,7 +2560,12 @@ mod tests {
         // rupee of the ceiling. Recorded in docs/06-limits.md section 27.
         let fills = worst_case_fills(
             Bar::flat(Paisa::from_raw(10)).expect("legal"),
-            Bar::new(Paisa::from_raw(i64::MAX), Paisa::from_raw(i64::MAX)).expect("legal"),
+            Bar::new(
+                Paisa::from_raw(i64::MAX),
+                Paisa::from_raw(i64::MAX),
+                Paisa::from_raw(i64::MAX),
+            )
+            .expect("legal"),
             Direction::Long,
         )
         .expect("in range");

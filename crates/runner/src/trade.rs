@@ -85,7 +85,7 @@
 //! market. They are here because they size the DEFECT, and that is a fact about
 //! this code rather than about NIFTY.
 
-use costs::fill::{Bar as FillBar, Direction, worst_case_fills};
+use costs::fill::{Anchor, Bar as FillBar, Direction, fills_at, worst_case_fills};
 use indicators::Candle;
 use indicators::column::Column;
 use vocab::ConditionMask;
@@ -102,12 +102,26 @@ pub struct Trade {
     /// The bar the exit filled in: the horizon, or the 15:10 square-off,
     /// whichever came first.
     pub exit_bar: usize,
-    /// Paisa per unit if both legs filled at the bar's open, one tick adverse.
+    /// Paisa per unit if both legs filled at the bar's OPEN, with no slippage.
+    ///
+    /// The most favourable fill that could have happened: the open is a price
+    /// that PRINTED, so this is reachable rather than hypothetical. It assumes
+    /// no queue, no spread crossed and no movement between the decision and the
+    /// fill, which is why it is a bound and not an expectation.
+    ///
+    /// **This used to carry one adverse tick** and its doc said so. That was a
+    /// consequence of `costs::fill::Bar` not carrying an open: the only way to
+    /// anchor there was a flat bar run through the adverse rule, which still
+    /// charged the tick. `costs::fill::Anchor::Open` reads the open directly, so
+    /// the best case is now the best case.
     pub best: i64,
-    /// Paisa per unit if both legs filled at the bar's adverse extreme.
+    /// Paisa per unit if both legs filled at the bar's adverse extreme, plus
+    /// one tick on each leg.
     ///
     /// Never better than [`Self::best`], and the gap between them is the whole
-    /// range of outcomes a real fill can land in.
+    /// range of outcomes a real fill can land in. **Selection ranks on THIS
+    /// one**, unchanged: a search ranked on the flattering reading picks
+    /// whatever the flattering assumption helped most.
     pub worst: i64,
     /// True when the exit was the 15:10 square-off rather than the horizon.
     ///
@@ -428,24 +442,38 @@ fn round_trip(
     e.check().ok()?;
     x.check().ok()?;
 
-    // BEST: both legs at the bar's open, through the same fill rule as the
-    // worst case so the two differ only in the bar and never in the model.
-    let best_fills = worst_case_fills(
-        FillBar::flat(paisa(e.open)).ok()?,
-        FillBar::flat(paisa(x.open)).ok()?,
-        direction,
-    )
-    .ok()?;
+    // BEST: both legs at the bar's open, through `Anchor::Open`.
+    //
+    // # This was `worst_case_fills` on a FLAT bar, and the tick is the change
+    //
+    // `costs::fill::Bar` carried only the extremes, so the only way to anchor on
+    // an open was to build a bar where the open WAS both extremes and run the
+    // adverse rule over it. That works -- on a flat bar the adverse anchor is
+    // the open -- but the adverse TICK still applied, so the "best" case bought
+    // one tick above the open and sold one tick below it. It was the open plus a
+    // penalty, which is not the best case; it is a slightly-worse-than-best one
+    // wearing that name.
+    //
+    // `Bar` carries the open again and `Anchor::Open` reads it, so this is now
+    // the open exactly, with zero slippage and none of the flat-bar staging.
+    // The two readings therefore bracket a real fill properly: the best is the
+    // most favourable price that PRINTED, the worst is the adverse extreme plus
+    // a tick, and every achievable fill lies between them.
 
-    // WORST: the adverse extreme of each bar. `Bar::new` takes (high, low) and
-    // refuses an inverted or sub-tick bar, which is a corrupt candle rather than
-    // a tradeable one.
-    let worst_fills = worst_case_fills(
-        FillBar::new(paisa(e.high), paisa(e.low)).ok()?,
-        FillBar::new(paisa(x.high), paisa(x.low)).ok()?,
-        direction,
-    )
-    .ok()?;
+    // WORST: the adverse extreme of each bar. `Bar::new` takes (open, high, low)
+    // and refuses an inverted bar, a sub-tick high, or an open its own extremes
+    // do not bracket -- each a corrupt candle rather than a tradeable one.
+    //
+    // THE OPEN IS PASSED NOW AND IT WAS NOT BEFORE. `costs::fill::Bar` carried
+    // only the extremes while one fill model existed; it carries the open again
+    // because `Anchor::Open` reads it. Passing the candle's real open rather
+    // than a stand-in matters: the bracket check is now a genuine invariant, so
+    // a candle whose open sits outside its own high-low is refused HERE, at the
+    // fill, instead of silently pricing off extremes that never contained it.
+    let entry_fill_bar = FillBar::new(paisa(e.open), paisa(e.high), paisa(e.low)).ok()?;
+    let exit_fill_bar = FillBar::new(paisa(x.open), paisa(x.high), paisa(x.low)).ok()?;
+    let best_fills = fills_at(entry_fill_bar, exit_fill_bar, direction, Anchor::Open).ok()?;
+    let worst_fills = worst_case_fills(entry_fill_bar, exit_fill_bar, direction).ok()?;
 
     Some(Trade {
         signal_bar,
@@ -761,6 +789,65 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_best_case_is_the_open_exactly_and_the_worst_carries_two_ticks() {
+        // Five paisa, the tick grid `CLAUDE.md` section 7 fixes. Declared at the
+        // top of the function so `clippy::items_after_statements` is satisfied.
+        const TICK: i64 = 5;
+
+        // WHY THIS EXISTS. `Trade::best` was pinned by ONE assertion --
+        // `worst <= best` -- and by nothing else in the workspace. So when the
+        // best case changed from "the open, one tick adverse on each leg" to
+        // "the open exactly", every test still passed: an ordering check cannot
+        // see a two-tick shift that moves both readings the same way.
+        //
+        // A value that only an inequality constrains is a value any arithmetic
+        // can produce. This pins BOTH readings against the bars they came from,
+        // recomputed here from the raw candles rather than from the fill module,
+        // so a change in either place has to be deliberate.
+        let (bars, column) = swept();
+        let t = walk(
+            &bars,
+            &column,
+            &ConditionMask::default(),
+            h(15),
+            Direction::Long,
+        );
+        assert!(t.count() > 0, "the fixture must produce trades");
+
+        for trade in &t.trades {
+            let e = bars.get(trade.entry_bar).expect("the entry bar exists");
+            let x = bars.get(trade.exit_bar).expect("the exit bar exists");
+
+            // BEST, long: buy the entry open, sell the exit open. No tick.
+            assert_eq!(
+                trade.best,
+                x.open.saturating_sub(e.open),
+                "the best case must be the two opens and nothing else -- trade \
+                 at {}",
+                trade.entry_bar
+            );
+
+            // WORST, long: buy the entry HIGH plus a tick, sell the exit LOW
+            // minus a tick. TICK is five paisa, so the round trip gives up ten.
+            assert_eq!(
+                trade.worst,
+                x.low
+                    .saturating_sub(TICK)
+                    .saturating_sub(e.high.saturating_add(TICK)),
+                "the worst case must be the adverse extremes plus a tick each \
+                 way -- trade at {}",
+                trade.entry_bar
+            );
+
+            // AND THE GAP IS THE FILL ASSUMPTION, priced. It is what an operator
+            // is really asking when they ask how much of an edge is real.
+            assert!(
+                trade.best.saturating_sub(trade.worst) > 0,
+                "on a bar with any range at all the two readings must differ"
+            );
+        }
+    }
     #[test]
     fn the_worst_case_is_never_better_than_the_best_case() {
         // The two scenarios bracket every real fill. A worst case that came out

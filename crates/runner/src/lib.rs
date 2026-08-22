@@ -49,6 +49,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod align;
 pub mod audit;
 pub mod bootstrap;
 pub mod closed;
