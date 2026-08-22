@@ -57,6 +57,16 @@ pub enum Basis {
     Published,
     /// The symbol abbreviates exactly one published name.
     Abbreviation,
+    /// The symbol is not the vendor's — it is a name THIS repository renamed
+    /// it to — and the vendor's own name is published verbatim.
+    ///
+    /// Proof, like [`Self::Published`], but proof of a different sentence.
+    /// `BANKNIFTY` is not an NSE index; `NIFTY BANK` is, and the store keys on
+    /// the first because `core::vendor::index_alias` renamed it. Reporting that
+    /// as `Published` would claim the exchange prints `BANKNIFTY`, and reporting
+    /// it as a refusal would deny a join that is exactly known. It is its own
+    /// answer because it is its own claim.
+    Aliased,
 }
 
 /// Why a symbol did not resolve. Both variants are reportable; neither is a

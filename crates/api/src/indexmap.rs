@@ -11,7 +11,8 @@
 //! not over the ~800k rows of its master. The masters are parsed once at
 //! startup; this walks what that parse already produced.
 
-use pull::nseindex::{Basis, Catalogue, Unresolved};
+use brutex_core::vendor::Vendor;
+use pull::nseindex::{Basis, Catalogue, Unresolved, collapse};
 use std::fmt::Write as _;
 use std::path::Path;
 
@@ -91,8 +92,15 @@ pub struct Row {
 }
 
 /// Join a feed's index symbols to the exchange, sorted by symbol.
+///
+/// `feed` is here for the rename. The store keys on names this repository
+/// chose — `NIFTY` for `NIFTY 50`, `BANKNIFTY` for `NIFTY BANK` — and those are
+/// what the census hands over, so a join that only sees them cannot find the
+/// exchange's own listing. Measured before this: `NIFTY` matched 80 published
+/// names and `BANKNIFTY` matched none, which made **the two instruments the
+/// engine sweeps the two it could not resolve.**
 #[must_use]
-pub fn join<I, S>(nse: &Published, symbols: I) -> Vec<Row>
+pub fn join<I, S>(nse: &Published, feed: Vendor, symbols: I) -> Vec<Row>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
@@ -101,6 +109,30 @@ where
         .into_iter()
         .map(|symbol| {
             let symbol = symbol.as_ref().to_owned();
+            // THE RENAME IS TRIED FIRST, and the order is the whole point.
+            //
+            // It was a fallback for one commit, reached only when the direct
+            // resolve refused, and a test caught what that costs: `NIFTY`
+            // abbreviates `NIFTY BANK` — it is an ordered subsequence with no
+            // digits on either side — so a catalogue where that is the only
+            // candidate hands back the wrong index and the rename is never
+            // consulted. A stated fact must beat a guess, not queue behind one.
+            //
+            // Only a VERBATIM match is accepted through here. Following the
+            // rename costs nothing because the rename is known; letting the
+            // renamed-from name then resolve by abbreviation would stack
+            // inference on inference and file it beside the proofs.
+            if let Some(Ok((name, Basis::Published))) = feed
+                .index_alias_source(&collapse(&symbol))
+                .map(|vendors_own| nse.matcher.resolve(vendors_own))
+            {
+                return Row {
+                    symbol,
+                    nse: Some(name.to_owned()),
+                    basis: Some(Basis::Aliased),
+                    why: None,
+                };
+            }
             match nse.matcher.resolve(&symbol) {
                 Ok((name, basis)) => Row {
                     symbol,
@@ -127,6 +159,7 @@ fn basis_word(basis: Basis) -> &'static str {
     match basis {
         Basis::Published => "published",
         Basis::Abbreviation => "abbreviation",
+        Basis::Aliased => "aliased",
     }
 }
 
@@ -149,17 +182,19 @@ fn refusal_word(why: Unresolved) -> &'static str {
 pub fn json(nse: &Published, rows: &[Row]) -> String {
     let resolved = rows.iter().filter(|row| row.nse.is_some()).count();
     let by = |want: Basis| rows.iter().filter(|row| row.basis == Some(want)).count();
+    let aliased = by(Basis::Aliased);
     let mut out = String::new();
     let _ = write!(
         out,
         concat!(
             "{{\"published\":{},\"listed\":{},\"resolved\":{},",
-            "\"verbatim\":{},\"abbreviated\":{},\"refused\":{},\"rows\":["
+            "\"verbatim\":{},\"aliased\":{},\"abbreviated\":{},\"refused\":{},\"rows\":["
         ),
         nse.len(),
         rows.len(),
         resolved,
         by(Basis::Published),
+        aliased,
         by(Basis::Abbreviation),
         rows.len() - resolved,
     );
@@ -196,6 +231,7 @@ pub fn json(nse: &Published, rows: &[Row]) -> String {
 #[allow(clippy::expect_used, clippy::panic, reason = "test-only assertions")]
 mod tests {
     use super::{Published, Row, join, json};
+    use brutex_core::vendor::Vendor;
     use pull::nseindex::{Basis, Unresolved};
 
     /// Four published names, written the way NSE writes them.
@@ -223,7 +259,7 @@ mod tests {
         let held = Published::from_text("NIFTY AUTO, TRUCKS,sectoral-indices\nNIFTY IT\n");
         assert_eq!(held.len(), 2);
         assert_eq!(
-            join(&held, ["NIFTYAUTOTRUCKS"])
+            join(&held, Vendor::Zerodha, ["NIFTYAUTOTRUCKS"])
                 .first()
                 .and_then(|row| row.nse.clone()),
             Some("NIFTY AUTO, TRUCKS".to_owned())
@@ -232,7 +268,7 @@ mod tests {
 
     #[test]
     fn a_resolution_reports_the_name_as_nse_writes_it_not_collapsed() {
-        let rows = join(&nse(), ["NIFTY PVT BANK"]);
+        let rows = join(&nse(), Vendor::Zerodha, ["NIFTY PVT BANK"]);
         assert_eq!(
             rows,
             [Row {
@@ -246,7 +282,11 @@ mod tests {
 
     #[test]
     fn rows_are_sorted_and_a_symbol_listed_twice_appears_once() {
-        let rows = join(&nse(), ["NIFTY PVT BANK", "INDIA VIX", "NIFTY PVT BANK"]);
+        let rows = join(
+            &nse(),
+            Vendor::Zerodha,
+            ["NIFTY PVT BANK", "INDIA VIX", "NIFTY PVT BANK"],
+        );
         assert_eq!(rows.len(), 2);
         assert_eq!(
             rows.first().map(|row| row.symbol.as_str()),
@@ -259,6 +299,7 @@ mod tests {
         let nse = nse();
         let rows = join(
             &nse,
+            Vendor::Zerodha,
             [
                 "NIFTY PRIVATE BANK",
                 "NIFTY PVT BANK",
@@ -269,7 +310,7 @@ mod tests {
         let wire = json(&nse, &rows);
         assert!(wire.starts_with(
             "{\"published\":4,\"listed\":4,\"resolved\":2,\
-             \"verbatim\":1,\"abbreviated\":1,\"refused\":2,\"rows\":["
+             \"verbatim\":1,\"aliased\":0,\"abbreviated\":1,\"refused\":2,\"rows\":["
         ));
         // Proof, inference, ambiguity with its count, and absence.
         assert!(wire.contains("{\"symbol\":\"NIFTY PRIVATE BANK\",\"nse\":\"NIFTY PRIVATE BANK\",\"basis\":\"published\"}"));
@@ -287,7 +328,7 @@ mod tests {
         assert_eq!(
             json(&nse, &[]),
             "{\"published\":4,\"listed\":0,\"resolved\":0,\
-             \"verbatim\":0,\"abbreviated\":0,\"refused\":0,\"rows\":[]}"
+             \"verbatim\":0,\"aliased\":0,\"abbreviated\":0,\"refused\":0,\"rows\":[]}"
         );
     }
 
@@ -320,7 +361,7 @@ mod tests {
         assert_eq!(held.len(), 1);
         assert!(!held.is_empty());
         assert_eq!(
-            join(&held, ["NIFTY PVT BANK"])
+            join(&held, Vendor::Zerodha, ["NIFTY PVT BANK"])
                 .first()
                 .and_then(|row| row.basis),
             Some(Basis::Abbreviation)
@@ -329,10 +370,90 @@ mod tests {
 
     #[test]
     fn a_refusal_carries_its_own_variant_and_not_the_others() {
-        let rows = join(&nse(), ["INDIA VIX", "NIFTY100QLTY30"]);
+        let rows = join(&nse(), Vendor::Zerodha, ["INDIA VIX", "NIFTY100QLTY30"]);
         assert_eq!(
             rows.iter().map(|row| row.why).collect::<Vec<_>>(),
             [Some(Unresolved::Absent), Some(Unresolved::Ambiguous(2))]
+        );
+    }
+
+    /// **THE TWO INSTRUMENTS THE ENGINE SWEEPS WERE THE TWO IT COULD NOT
+    /// RESOLVE, and this is the test that says so out loud.**
+    ///
+    /// The census hands over the STORE's key, and this repository renamed both
+    /// of them: `NIFTY 50` became `NIFTY` and `NIFTY BANK` became `BANKNIFTY`.
+    /// Measured against NSE's published list before the inverse existed, the
+    /// first matched 80 names and the second matched none — so `/indexmap.json`
+    /// refused the entire engine surface `CLAUDE.md` §1 defines.
+    #[test]
+    fn the_stores_own_rename_is_undone_before_the_exchange_is_asked() {
+        let nse =
+            Published::from_text("index_name,category\nNIFTY 50,broad\nNIFTY BANK,sectoral\n");
+
+        // A VENDOR THAT RENAMES NOTHING HAS NOTHING TO UNDO. `BANKNIFTY`
+        // reverses the exchange's word order, and no ordered match can see
+        // through a reorder, so Dhan is left with the refusal Zerodha escapes.
+        assert_eq!(
+            join(&nse, Vendor::Dhan, ["BANKNIFTY"])
+                .first()
+                .and_then(|row| row.why),
+            Some(Unresolved::Absent)
+        );
+
+        assert_eq!(
+            join(&nse, Vendor::Zerodha, ["NIFTY", "BANKNIFTY"]),
+            [
+                Row {
+                    symbol: "BANKNIFTY".to_owned(),
+                    nse: Some("NIFTY BANK".to_owned()),
+                    basis: Some(Basis::Aliased),
+                    why: None,
+                },
+                Row {
+                    symbol: "NIFTY".to_owned(),
+                    nse: Some("NIFTY 50".to_owned()),
+                    basis: Some(Basis::Aliased),
+                    why: None,
+                },
+            ]
+        );
+    }
+
+    /// **AN ALIAS MAY NOT LAUNDER AN ABBREVIATION INTO PROOF.**
+    ///
+    /// Following a rename costs nothing, because the rename is a stated fact.
+    /// Letting the renamed-from name then resolve by ABBREVIATION would stack
+    /// inference on inference and report the result beside the verbatim
+    /// matches, so that path keeps the original refusal instead.
+    #[test]
+    fn the_alias_path_accepts_only_a_verbatim_match() {
+        // `NIFTY 50 Arbitrage` is not `NIFTY 50`; `NIFTY50` merely abbreviates
+        // it. The alias leads there, and the answer is still no.
+        let nse = Published::from_text("index_name,category\nNIFTY 50 Arbitrage,strategy\n");
+        let rows = join(&nse, Vendor::Zerodha, ["NIFTY"]);
+        assert_eq!(rows.first().and_then(|row| row.nse.clone()), None);
+        assert_eq!(
+            rows.first().and_then(|row| row.why),
+            Some(Unresolved::Absent)
+        );
+    }
+
+    /// The wire word for the third basis, and its count beside the other two.
+    #[test]
+    fn an_aliased_row_is_counted_and_named_apart_from_the_verbatim_ones() {
+        let nse =
+            Published::from_text("index_name,category\nNIFTY 50,broad\nNIFTY BANK,sectoral\n");
+        let wire = json(&nse, &join(&nse, Vendor::Zerodha, ["NIFTY", "NIFTY 50"]));
+        assert!(
+            wire.starts_with(
+                "{\"published\":2,\"listed\":2,\"resolved\":2,\
+                 \"verbatim\":1,\"aliased\":1,\"abbreviated\":0,\"refused\":0,\"rows\":["
+            ),
+            "{wire}"
+        );
+        assert!(
+            wire.contains("{\"symbol\":\"NIFTY\",\"nse\":\"NIFTY 50\",\"basis\":\"aliased\"}"),
+            "{wire}"
         );
     }
 }

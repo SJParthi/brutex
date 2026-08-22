@@ -120,6 +120,7 @@
   const listed = $derived(join?.listed ?? 0);
   const resolved = $derived(join?.resolved ?? 0);
   const verbatim = $derived(join?.verbatim ?? 0);
+  const aliased = $derived(join?.aliased ?? 0);
   const abbreviated = $derived(join?.abbreviated ?? 0);
   const refused = $derived(join?.refused ?? 0);
 
@@ -128,10 +129,11 @@
    * tint all read the same field rather than re-deriving it three ways.
    *
    * @param {any} row
-   * @returns {'published'|'abbreviation'|'ambiguous'|'absent'}
+   * @returns {'published'|'aliased'|'abbreviation'|'ambiguous'|'absent'}
    */
   function outcome(row) {
     if (row.basis === 'published') return 'published';
+    if (row.basis === 'aliased') return 'aliased';
     if (row.basis === 'abbreviation') return 'abbreviation';
     return row.why === 'ambiguous' ? 'ambiguous' : 'absent';
   }
@@ -145,6 +147,7 @@
   const CHIPS = /** @type {const} */ ([
     { key: 'all', label: 'All', tone: '' },
     { key: 'published', label: 'Confirmed', tone: 'p' },
+    { key: 'aliased', label: 'Renamed', tone: 'r' },
     { key: 'abbreviation', label: 'Abbreviated', tone: 'i' },
     { key: 'ambiguous', label: 'Ambiguous', tone: 'a' },
     { key: 'absent', label: 'Absent', tone: 'x' }
@@ -162,7 +165,14 @@
   /** How many rows each chip would show, so a zero is visible before it is clicked. */
   const tally = $derived.by(() => {
     /** @type {Record<string, number>} */
-    const n = { all: searched.length, published: 0, abbreviation: 0, ambiguous: 0, absent: 0 };
+    const n = {
+      all: searched.length,
+      published: 0,
+      aliased: 0,
+      abbreviation: 0,
+      ambiguous: 0,
+      absent: 0
+    };
     for (const r of searched) n[r.kind] += 1;
     return n;
   });
@@ -176,6 +186,9 @@
       return 'No published name accepts it. Either the vendor reordered the words, dropped a number the name carries, or this is not an NSE index at all.';
     }
     if (row.kind === 'abbreviation') return 'Shortens exactly one published name.';
+    if (row.kind === 'aliased') {
+      return `This engine renamed it. The exchange publishes the vendor's own name for it, and the store keys on ${row.symbol} instead.`;
+    }
     return 'The symbol is the published name.';
   }
 </script>
@@ -219,6 +232,10 @@
       <div class="cell p">
         <span class="n">{verbatim}</span><span class="k">Confirmed</span>
         <span class="s">The symbol is the published name. Proof.</span>
+      </div>
+      <div class="cell r">
+        <span class="n">{aliased}</span><span class="k">Renamed</span>
+        <span class="s">This engine renamed it; the vendor's name is published.</span>
       </div>
       <div class="cell i">
         <span class="n">{abbreviated}</span><span class="k">Abbreviated</span>
@@ -274,11 +291,13 @@
                   <span
                     class="pill {row.kind === 'published'
                       ? 'p'
-                      : row.kind === 'abbreviation'
-                        ? 'i'
-                        : row.kind === 'ambiguous'
-                          ? 'a'
-                          : 'x'}">
+                      : row.kind === 'aliased'
+                        ? 'r'
+                        : row.kind === 'abbreviation'
+                          ? 'i'
+                          : row.kind === 'ambiguous'
+                            ? 'a'
+                            : 'x'}">
                     {row.kind === 'abbreviation' ? 'abbreviated' : row.kind}
                   </span>
                 </td>
@@ -387,6 +406,9 @@
   .cell.p .n {
     color: var(--up);
   }
+  .cell.r .n {
+    color: var(--acc);
+  }
   .cell.i .n {
     color: var(--info);
   }
@@ -438,6 +460,10 @@
   .chip.p.on {
     border-color: var(--up);
     color: var(--up);
+  }
+  .chip.r.on {
+    border-color: var(--acc);
+    color: var(--acc);
   }
   .chip.i.on {
     border-color: var(--info);
@@ -527,6 +553,10 @@
   .pill.p {
     background: var(--up-soft);
     color: var(--up);
+  }
+  .pill.r {
+    background: var(--acc-soft);
+    color: var(--acc);
   }
   .pill.i {
     background: var(--info-soft);

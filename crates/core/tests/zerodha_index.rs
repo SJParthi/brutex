@@ -140,3 +140,53 @@ fn no_other_vendor_is_reclassified_by_a_segment_word() {
     assert_eq!(Vendor::Zerodha.index_alias("NIFTY"), None);
     assert_eq!(Vendor::Zerodha.index_alias("nifty50"), None);
 }
+
+/// **THE ALIAS AND ITS INVERSE MUST NOT DRIFT, so one is walked through the other.**
+///
+/// `index_alias` renames the exchange's name to the store's key and
+/// `index_alias_source` undoes it. They are two `match` arms in two functions,
+/// which is two places to edit and one place to forget — and forgetting is not
+/// a compile error, it is `/indexmap.json` quietly refusing an instrument.
+///
+/// Measured before the inverse existed: the join saw only the store's key, so
+/// `NIFTY` matched 80 published NSE names and `BANKNIFTY` matched none. **The
+/// two instruments `CLAUDE.md` §1 names as the entire engine surface were the
+/// two its own exchange join could not resolve.**
+#[test]
+fn every_alias_round_trips_through_its_inverse() {
+    for vendor in Vendor::ALL {
+        for source in ["NIFTY50", "NIFTYBANK", "INDIAVIX", "NIFTY", "BANKNIFTY", ""] {
+            if let Some(renamed) = vendor.index_alias(source) {
+                assert_eq!(
+                    vendor.index_alias_source(renamed),
+                    Some(source),
+                    "{vendor:?}: {source} -> {renamed} does not come back"
+                );
+            }
+            if let Some(original) = vendor.index_alias_source(source) {
+                assert_eq!(
+                    vendor.index_alias(original),
+                    Some(source),
+                    "{vendor:?}: {source} <- {original} does not go forward"
+                );
+            }
+        }
+    }
+}
+
+/// The two the engine sweeps, named explicitly, because a loop that happens to
+/// cover nothing still passes.
+#[test]
+fn the_swept_instruments_carry_the_exchange_name_they_were_renamed_from() {
+    assert_eq!(Vendor::Zerodha.index_alias_source("NIFTY"), Some("NIFTY50"));
+    assert_eq!(
+        Vendor::Zerodha.index_alias_source("BANKNIFTY"),
+        Some("NIFTYBANK")
+    );
+    // Not renamed, so nothing to undo -- `INDIAVIX` is what Zerodha lists.
+    assert_eq!(Vendor::Zerodha.index_alias_source("INDIAVIX"), None);
+    assert_eq!(Vendor::Zerodha.index_alias_source(""), None);
+    for vendor in [Vendor::Groww, Vendor::Dhan, Vendor::TrueData, Vendor::Gdfl] {
+        assert_eq!(vendor.index_alias_source("NIFTY"), None, "{vendor:?}");
+    }
+}

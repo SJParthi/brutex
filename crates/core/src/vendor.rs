@@ -1325,6 +1325,32 @@ impl Vendor {
             Self::Groww | Self::Dhan | Self::TrueData | Self::Gdfl => None,
         }
     }
+
+    /// The vendor's own collapsed name for a symbol this engine renamed.
+    ///
+    /// The inverse of [`Self::index_alias`], and it exists because the rename
+    /// **loses the exchange's name**. `NIFTY 50` is what NSE publishes and what
+    /// Zerodha lists; `NIFTY` is what this repository decided to key the store
+    /// on. Anything joining the store back to the exchange sees only the second
+    /// and cannot find it — measured: `NIFTY` matched 80 published names and
+    /// `BANKNIFTY` matched none, so the two instruments the engine actually
+    /// sweeps were the two its own exchange join refused.
+    ///
+    /// **Kept beside `index_alias` so the pair cannot drift**, and pinned by a
+    /// test that walks every arm of one through the other.
+    ///
+    /// **Constant time**, for the reason above: a `match` over string literals.
+    #[must_use]
+    pub fn index_alias_source(self, collapsed: &str) -> Option<&'static str> {
+        match self {
+            Self::Zerodha => match collapsed {
+                "NIFTY" => Some("NIFTY50"),
+                "BANKNIFTY" => Some("NIFTYBANK"),
+                _ => None,
+            },
+            Self::Groww | Self::Dhan | Self::TrueData | Self::Gdfl => None,
+        }
+    }
 }
 
 /// Reads one master row into a canonical key.

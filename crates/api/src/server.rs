@@ -22130,7 +22130,7 @@ async fn indexmap_json(
         })
         .map(|(key, _)| key.underlying.as_str())
         .collect();
-    let rows = crate::indexmap::join(&nse, symbols);
+    let rows = crate::indexmap::join(&nse, feed, symbols);
     (
         axum::http::StatusCode::OK,
         [(axum::http::header::CONTENT_TYPE, json)],

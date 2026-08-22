@@ -21185,3 +21185,57 @@ uses, and it is not on a bar path. And the agreement is only as wide as the
 store: three instruments hold bars today, so `derivedFrom` names three, and a
 day all three miss is indistinguishable from a closure. That is the honest limit
 of deriving a calendar from bars, and it is why the provenance is on the wire.
+
+### D-0279 — the two instruments the engine sweeps were the two its own exchange join refused
+
+**2026-08-22.** D-0276 shipped `/indexmap.json` and D-0277 shipped the page that
+reads it. Against the operator's restarted server, with real masters, the first
+answer was **105 of 136 resolved** — and the two refusals at the top of the list
+were `NIFTY` (ambiguous, 80 candidates) and `BANKNIFTY` (absent).
+
+Those are the entire engine surface `CLAUDE.md` §1 defines. **The join resolved
+every index in the master except the only two that are swept.**
+
+**The cause is a rename this repository made on purpose.**
+`core::vendor::index_alias` maps Zerodha's `NIFTY 50` to `NIFTY` and its
+`NIFTY BANK` to `BANKNIFTY`, so the store keys on short names. The census hands
+those keys to the route, and by then the exchange's own name is gone. Bare
+`NIFTY` is an ordered subsequence of 80 published names; `BANKNIFTY` is a
+subsequence of none, because NSE writes the words the other way round. Both
+refusals were correct about the string they were given and useless about the
+instrument.
+
+**`index_alias_source` is the inverse, and it lives beside `index_alias` so the
+pair cannot drift.** A test walks every arm of one through the other, because
+two `match` blocks in two functions are two places to edit and one place to
+forget — and forgetting is not a compile error, it is a route quietly refusing
+an instrument.
+
+**`Basis::Aliased` is a third answer because it is a third claim.** Reporting
+`BANKNIFTY → NIFTY BANK` as `Published` would assert the exchange prints
+`BANKNIFTY`, which it does not. Reporting it as a refusal would deny a join that
+is exactly known. It is proof — of a different sentence: *the vendor's own name
+for this is published verbatim, and the store renamed it.*
+
+**The alias may not launder an abbreviation into proof.** Following the rename
+costs nothing, because the rename is a stated fact. Letting the renamed-from
+name then resolve by *abbreviation* would stack inference on inference and file
+the result beside the verbatim matches, so that path keeps the original
+refusal. `NIFTY` against a catalogue holding only `NIFTY 50 Arbitrage` still
+answers `Absent`.
+
+**THE RENAME IS TRIED FIRST, and a test is why.** It was written as a fallback —
+consulted only when the direct resolve refused — which is wrong in a way that
+only shows on the right catalogue. `NIFTY` is an ordered subsequence of
+`NIFTY BANK` with no digits on either side, so against a list where that is the
+only candidate the join hands back the wrong index, calls it an abbreviation,
+and never consults the rename at all. It happened to be safe against the real
+260 names because there `NIFTY` is ambiguous 80 ways and ambiguity refuses. **A
+stated fact must beat a guess rather than queue behind one**, so the alias is
+now the first thing tried and the abbreviation rule only sees what it leaves.
+
+**What this does not fix.** The other 29 refusals stand and their reasons are
+unchanged — 7 G-Sec indices whose words the vendor reorders, 8 that drop a
+number the published name carries, 12 ambiguous, and 2 that are correctly
+refused because NSE does not publish them as indices at all. This entry moves
+two rows, and they are the two that mattered most.
