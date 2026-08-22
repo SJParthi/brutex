@@ -2931,14 +2931,34 @@
 
   /* THE HOLDINGS ARE RE-ASKED WHEN THE FEED LIST CHANGES, AND NEVER OTHERWISE.
      `$lib/feeds.svelte.js` already folded this at boot to pick a default feed,
-     and `surveyStores` is a no-op whenever the answer for that list and
-     generation is already held — so the common case costs nothing and this
-     exists for the uncommon one: a feed appearing in `/feeds.json` after the
-     page loaded, which would otherwise leave its lane reading "nothing held"
-     against a store nobody had looked at. The same shape and the same reasoning
-     as `/db`'s own call. */
+     so the common case costs nothing; this exists for the uncommon one — a feed
+     appearing in `/feeds.json` after the page loaded, which would otherwise
+     leave its lane reading "nothing held" against a store nobody looked at.
+
+     `untrack` IS LOAD-BEARING AND ITS ABSENCE WAS A FETCH STORM. `surveyStores`
+     builds its dedup key as `${wires}#${store.generation}` — it READS
+     `store.generation`, and a read inside an effect is a dependency. Meanwhile
+     `watchStore(5000)` calls `refreshStore()` every five seconds while a run is
+     in flight, and `refreshStore` does `store.generation += 1`.
+
+     So without this the chain ran: poll → generation bumps → this effect
+     re-runs → the key is new → EVERY FEED'S STORE IS RE-FETCHED. Measured on
+     the running binary: `/store.json?feed=dhan` is 329 KB and 268 ms, five
+     feeds, every five seconds — roughly 1.6 MB and five JSON parses per tick,
+     none of which any reader asked for. It is also why changing a selection
+     felt slow: the main thread was parsing a megabyte and a half on a timer.
+
+     `untrack` scopes the generation read out of this effect's dependencies, so
+     it fires on a change of FEED LIST and on nothing else.
+
+     THE TRADE, STATED: the holding figure is now a snapshot taken when the feed
+     list last changed rather than a live counter. That is the right arity for
+     what it says — "this feed's store holds N bars across everything it has",
+     a coarse has-anything-landed signal — and the live numbers a run produces
+     are the run card's job and the census's, both of which already poll. */
   $effect(() => {
-    if (feeds.all.length > 0) surveyStores(feeds.all);
+    const list = feeds.all;
+    if (list.length > 0) untrack(() => surveyStores(list));
   });
 
   /**
