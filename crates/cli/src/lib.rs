@@ -2727,6 +2727,39 @@ fn record_run(
     }
 }
 
+/// The sentence a walk-forward that could not measure anything needs.
+///
+/// # A true zero that reads as the wrong fact
+///
+/// `validate::walk_forward` runs on the SIGNAL series while a run with an
+/// execution series trades on the one-minute one. It cannot be moved the way the
+/// ranking and the bootstrap family were: it builds its own `Column` per fold
+/// and calls `grid::evaluate` on slices of whatever it is handed, so an
+/// execution series must be threaded through it along with a per-fold alignment.
+/// That is a change to a function with its own test suite and it is not made
+/// here.
+///
+/// The consequence, on any rung whose bars are a whole session each: every
+/// fold's forward return is refused — `outcome::forward` sets `close_at[i] = i`,
+/// `exit <= i`, outcome `None` — so the walk decides nothing.
+/// `Validated::decided()` prints 0, which is TRUE and reads as *"no combination
+/// held up out of sample"* when the real reason is that nothing could be
+/// measured. `CLAUDE.md` §4 bans a fallback that hides a failure; naming it is
+/// what is left until the fix lands.
+fn walk_forward_caveat(has_execution: bool, decided: usize) -> &'static str {
+    if has_execution && decided == 0 {
+        "  WALK-FORWARD MEASURED NOTHING, AND THAT IS NOT THE SAME AS FAILING.\n  \
+         It runs on the SIGNAL series while this run trades on the 1-minute one. \
+         On a rung whose bars are a whole session each, every forward return is \
+         refused because a position cannot open and close inside one bar -- so \
+         `that chose a combination` above is 0 for a reason about the SERIES and \
+         not about the strategy. Read the EXIT GRID and the bootstrap instead; \
+         both run on the execution series.\n\n"
+    } else {
+        ""
+    }
+}
+
 /// The three multiple-testing p-values, and the family they were taken over.
 ///
 /// Split out of [`audit_bars`] to keep it under `clippy::too_many_lines`. It is
@@ -2736,11 +2769,14 @@ fn record_run(
 /// Returns `None` when the family is empty, which is the one state the callers
 /// below must not read as "the tests passed".
 ///
-/// **Runs on the SIGNAL series**, deliberately and unlike the trade and the exit
-/// grid above. These are statements about how often a CONDITION precedes a move,
-/// which is a property of the rung it was found on; re-taking them at one-minute
-/// resolution would answer a question nobody asked and would not be comparable
-/// with the sweep's own support figures.
+/// **Runs on the EXECUTION series**, with the trade and the exit grid.
+///
+/// This doc argued the opposite -- that these belong on the signal rung because
+/// they are statements about how often a CONDITION precedes a move. That is true
+/// of FREQUENCY and false of what this function actually builds, which is one
+/// RETURN SERIES per candidate from `trade::walk`. A trade walk on a series whose
+/// bars are a whole session each produces no trades at all, so the family came
+/// back empty and all three tests reported on nothing.
 fn bootstrap_family(
     bars: &[indicators::Candle],
     column: &indicators::column::Column,
@@ -3110,7 +3146,17 @@ fn audit_bars(
 
     // The three multiple-testing p-values, over one family. See the helper: it
     // runs on the SIGNAL series on purpose, unlike the trade and the grid above.
-    let boot_owned = bootstrap_family(&bars, &column, &by_evidence, horizon);
+    // THE SAME DEFECT AS THE RANKING, IN THE SAME SHAPE. `bootstrap_family`
+    // builds one return series per candidate by calling `trade::walk`, and a
+    // trade walk on the SIGNAL series produces nothing on any rung whose bars
+    // are a whole session each -- so the family is empty, and White's Reality
+    // Check, Hansen's SPA and Romano-Wolf all report on nothing.
+    //
+    // Its own doc argued the opposite: that these are statements about how often
+    // a CONDITION precedes a move and so belong on the rung it was found on.
+    // That is true of FREQUENCY and false of a RETURN SERIES, which is what this
+    // builds. The argument was right about the sweep and wrong about this.
+    let boot_owned = bootstrap_family(&trade_bars, &trade_column, &by_evidence, horizon);
     let boot = boot_owned
         .as_ref()
         .map(|(rc, spa, named)| (rc.as_ref(), spa.as_ref(), *named));
@@ -3128,6 +3174,7 @@ fn audit_bars(
             min_hits,
         ));
     }
+    out.push_str(walk_forward_caveat(execution.is_some(), folds.decided()));
     out.push_str(&audit::render(
         Some(&taken),
         Some(&exits),
