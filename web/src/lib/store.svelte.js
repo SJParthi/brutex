@@ -568,6 +568,7 @@ let ticking = false;
 export function watchStore(everyMs) {
   const holder = { everyMs: Math.max(1000, Math.trunc(everyMs) || 1000), live: true };
   holders.push(holder);
+  armWake();
   if (!ticking) {
     ticking = true;
     tick();
@@ -579,11 +580,47 @@ export function watchStore(everyMs) {
   };
 }
 
+/* A HIDDEN TAB IS NOBODY READING, AND THIS POLL IS NOT CHEAP.
+   ----------------------------------------------------------------------
+   `/store.json` is the whole census and it grows with the store: measured on
+   the running binary mid-pull, 377,735 bytes in 375 ms for one feed, up from
+   329 KB minutes earlier. At a five-second period that is ~75 KB/s of transfer
+   plus a JSON parse of the same size on the main thread — sustained, for as
+   long as a run lasts, whether or not the tab is in front of anyone.
+
+   `/audit` already reached this conclusion and wrote it down: "stopped while
+   the tab is hidden — a monitoring page that keeps a" clock running in the
+   background is spending someone's battery to answer a question nobody asked.
+   That page carries its own visibility check; this poll is the one every OTHER
+   page shares, and it had none.
+
+   SKIPPED, NOT STOPPED. The loop keeps its cadence so a holder is still held
+   and the release contract is unchanged; only the READ is skipped. And
+   `wake()` fires one immediately on becoming visible, because the first thing
+   a returning reader deserves is a current number rather than one up to a
+   period old. */
+function visible() {
+  return typeof document === 'undefined' || !document.hidden;
+}
+
+/* REGISTERED ONCE FOR THE MODULE, not once per holder: several pages can hold
+   the clock at the same time and N listeners would fire N reads for one
+   return-to-tab, which is the stampede this whole module exists to prevent. */
+let woken = false;
+function armWake() {
+  if (woken || typeof document === 'undefined') return;
+  woken = true;
+  document.addEventListener('visibilitychange', () => {
+    if (holders.length > 0 && visible()) void refreshStore();
+  });
+}
+
 async function tick() {
   while (holders.length > 0) {
     const period = Math.min(...holders.map((h) => h.everyMs));
     await new Promise((done) => setTimeout(done, period));
     if (holders.length === 0) break;
+    if (!visible()) continue;
     // AWAITED, SO A SLOW ANSWER CANNOT STACK REQUESTS ON TOP OF ITSELF. The
     // period is the gap BETWEEN reads, never the rate they are fired at.
     await refreshStore();
