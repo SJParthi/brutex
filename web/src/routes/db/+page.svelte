@@ -3488,6 +3488,28 @@
     return { cells, fullest, months: months.length, bars };
   });
 
+  /* ---------------------------------------------------------------------
+     WHICH COLUMNS `/bars/window.json` CAN ORDER BY, AND IT IS NOT ALL OF THEM.
+
+     `bars::SortKey::parse` accepts exactly these seven — they are the fields a
+     stored `Bar` HAS. This grid draws twenty-five columns, and the other
+     eighteen are derived here: the change columns, the expiry arithmetic, the
+     moneyness, every greek. The endpoint has no way to order by a number the
+     store never held.
+
+     WHAT HAPPENED WITHOUT THIS GUARD, measured by clicking the column: sorting
+     on OI CHG % sent `sort=oichg`, the server answered **400 — "oichg" is not a
+     column this grid sorts on** — and the grid emptied. Fifty rows became none,
+     on a store holding 623,498 bars, because a control the page offers asked a
+     question the route it now uses cannot take.
+
+     A COLUMN THE GRID OFFERS MUST NOT EMPTY THE GRID. The window route is for
+     the seven the store can order; everything else keeps the read-and-sort-here
+     path it always had, which is slower and correct. `CLAUDE.md` §4: degrade
+     loudly and name the reason, or refuse — never a control that silently
+     returns nothing. */
+  const WINDOW_SORTS = new Set(['ts', 'o', 'h', 'l', 'c', 'v', 'oi']);
+
   /* WHETHER THE PREFIX SUM CAN BE TRUSTED - read by both derivations below,
      so the two can never disagree about which mode the grid is in.
 
@@ -3935,9 +3957,15 @@
        filters after the fetch, which is when one file answers one page. False
        is the sort no index covers, and that is what the window endpoint is for
        — one request per series rather than one per instrument-month. */
-    (exact
-      ? pooled(want, IN_FLIGHT, (/** @type {any} */ r) => readBarFile(feed, r))
-      : readWindow(feed, want, first, take)
+    /* THE WINDOW ROUTE ONLY FOR AN ORDER IT CAN TAKE. A derived column — the
+       change columns, the expiry arithmetic, the greeks — is not a field the
+       store holds, so the endpoint cannot order by it and answers 400. Falling
+       back to the full read is slower and returns the right rows; sending the
+       key anyway returned none. */
+    const canWindow = !exact && WINDOW_SORTS.has(barSortKey);
+    (canWindow
+      ? readWindow(feed, want, first, take)
+      : pooled(want, IN_FLIGHT, (/** @type {any} */ r) => readBarFile(feed, r))
     )
       .then((files) => {
         if (dead || mine !== barToken) return;
@@ -4340,11 +4368,17 @@
      offset within the two files actually in memory; without it every page past
      the first slices past the end and the grid draws nothing. */
   const barPage = $derived.by(() => {
-    /* THE SERVER ALREADY SLICED, SO THE CLIENT MUST NOT SLICE AGAIN.
+    /* THE SERVER ALREADY SLICED, SO THE CLIENT MUST NOT SLICE AGAIN — BUT ONLY
+       WHERE THE SERVER ACTUALLY ANSWERED.
        On the window route `barSorted` holds the fifty rows that were asked for
        and nothing else, so an offset of 2,99,950 into fifty rows is the empty
-       set — the grid would draw nothing on every page but the first. */
-    if (!pagePlan.exact) return barSorted.slice(0, pageSize);
+       set and the grid would draw nothing on every page but the first.
+       `windowSaid` AND NOT `!pagePlan.exact`, because those are no longer the
+       same condition: a sort on a derived column is not exact AND does not use
+       the window route, so it comes back as a full read that still needs
+       slicing. Keying on `!exact` there would pin the grid to page one for
+       every column the endpoint cannot order by. */
+    if (windowSaid !== null) return barSorted.slice(0, pageSize);
     const first = (pageNow - 1) * pageSize;
     const start = Math.max(0, first - pagePlan.base);
     return barSorted.slice(start, start + pageSize);
