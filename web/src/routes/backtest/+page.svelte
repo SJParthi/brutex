@@ -886,6 +886,55 @@
     )
   );
 
+  /* ---- AXIS TICKS ------------------------------------------------------
+     A plot's SCALE is a true statement about it even when the series is
+     missing: these are the gridlines the data would be read against, and
+     drawing them is what makes an empty frame read as a chart rather than
+     as a broken one. TradingView puts the value axis on the right, top
+     value first, so these are ordered top-down. -------------------------- */
+
+  /** Money axis, symmetric about zero — the periodic and benchmark plots. */
+  const PNL_TICKS = ['+2K', '+1K', '0', '−1K', '−2K'];
+  /** Percentage axis — margin utilisation and the growth/decline plot. */
+  const PCT_TICKS = ['100%', '75%', '50%', '25%', '0%'];
+  /** Streak counts run outward in BOTH directions from zero, as TradingView
+      draws them: wins above the line, losses below, both counted positive. */
+  const STREAK_TICKS = ['8', '4', '0', '4', '8'];
+  /** A histogram counts trades, so its axis starts at zero and only rises. */
+  const COUNT_TICKS = ['20', '15', '10', '5', '0'];
+  /** The returns histogram's own x-axis, in percent, as TradingView labels it. */
+  const RETURN_TICKS = ['−0.8%', '−0.4%', '0%', '0.4%', '0.8%', '1.2%'];
+  /** The histogram legend carries two DASHED entries for the two averages. */
+  const HIST_LEGEND = [
+    { label: 'Losers' },
+    { label: 'Winners' },
+    { label: 'Average loss', dash: true },
+    { label: 'Average profit', dash: true }
+  ];
+
+  /**
+   * The x-axis labels for a periodic chart, spread across the run's own span.
+   *
+   * Derived from the span rather than written down: a run over four months and
+   * a run over seven years must not share an axis, and a hardcoded date row
+   * would be a claim about a window this page does not choose.
+   */
+  const periodTicks = $derived.by(() => {
+    if (!openRun) return [];
+    const from = openRun.from_year * 12 + (openRun.from_month - 1);
+    const to = openRun.to_year * 12 + (openRun.to_month - 1);
+    const span = Math.max(1, to - from);
+    const steps = 6;
+    const out = [];
+    for (let i = 0; i <= steps; i += 1) {
+      const m = from + Math.round((span * i) / steps);
+      const y = Math.floor(m / 12);
+      const mo = (m % 12) + 1;
+      out.push(`${String(mo).padStart(2, '0')}/${String(y).slice(2)}`);
+    }
+    return out;
+  });
+
   /** The heading TradingView puts above each periodic chart. */
   const PERIOD_LABEL = {
     daily: 'Daily',
@@ -1228,24 +1277,41 @@
      the padlock makes one level down: the thing keeps its place, and the
      absence is legible instead of invisible.
      ============================================================ -->
-{#snippet chartFrame(why, legend)}
+{#snippet chartFrame(why, legend, ticks, xLabels, pager)}
   <div class="cf">
     <div class="cf-plot">
+      {#if pager}
+        <!-- TradingView pages a dense periodic chart rather than squeezing it.
+             The arrows sit inside the plot, vertically centred, on both edges. -->
+        <button class="cf-page l" aria-label="Earlier periods" disabled>‹</button>
+        <button class="cf-page r" aria-label="Later periods" disabled>›</button>
+      {/if}
       <svg class="cf-grid" viewBox="0 0 100 60" preserveAspectRatio="none" aria-hidden="true">
         {#each [0, 15, 30, 45, 60] as y (y)}
           <line x1="0" y1={y} x2="100" y2={y} stroke="var(--n5)" stroke-width="0.3" />
         {/each}
         <line x1="0" y1="30" x2="100" y2="30" stroke="var(--n7)" stroke-width="0.5" />
       </svg>
+      <!-- THE VALUE AXIS IS ON THE RIGHT, as it is on every TradingView plot,
+           and it carries real tick labels rather than a plus and a minus. The
+           SCALE is a true statement about the plot even when the series is
+           not there: these are the gridlines the data would be read against. -->
       <div class="cf-axis">
-        <span>+</span><span>0</span><span>−</span>
+        {#each ticks as t (t)}<span>{t}</span>{/each}
       </div>
       <div class="cf-msg"><Lock /> <span>{why}</span></div>
     </div>
+    {#if xLabels.length > 0}
+      <div class="cf-x">
+        {#each xLabels as x (x)}<span>{x}</span>{/each}
+      </div>
+    {/if}
     {#if legend.length > 0}
       <ul class="cf-legend">
-        {#each legend as l, i (l)}
-          <li><span class="cf-sw s{i}"></span>{l}</li>
+        {#each legend as l, i (l.label ?? l)}
+          <li class:dash={l.dash}>
+            <span class="cf-sw s{i}" class:dashed={l.dash}></span>{l.label ?? l}{#if l.value}<b>{l.value}</b>{/if}
+          </li>
         {/each}
       </ul>
     {/if}
@@ -1928,6 +1994,16 @@
                         {#if p !== 'Available chart range'}<Lock small why="The run's span is fixed at the moment the sweep ran and recorded. Re-testing a different window means running the sweep again, not re-reading this record." />{/if}
                       </button>
                     {/each}
+                    <!-- TradingView's last item sits under a divider and
+                         carries a calendar. -->
+                    <div class="tt-menudiv"></div>
+                    <button class="tt-menuitem">
+                      <span class="tt-menuic">
+                        <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3" width="12" height="11" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.3" /><path d="M2 6.5h12M5.5 2v2.5M10.5 2v2.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" /></svg>
+                        Custom date range
+                      </span>
+                      <Lock small why="A different window is a different sweep, not a different reading of this record. The span is one of the nine terms in the run's identity." />
+                    </button>
                   </div>
                 {/if}
               </div>
@@ -1972,9 +2048,16 @@
                     </span>
                     <span class="tt-note">worst peak-to-trough</span>
                   </div>
+                  <!-- TWO VALUES SIDE BY SIDE, as TradingView sets this one:
+                       the percentage and the fraction it came from. The
+                       denominator is recorded and the numerator is not, so the
+                       fraction is drawn with the half that exists. -->
                   <div class="tt-q">
                     <span class="tt-k">Profitable trades</span>
-                    <span class="tt-qv big"><Lock why="No win count is recorded. A net total cannot be split into winners and losers after the fact." /></span>
+                    <span class="tt-qv big">
+                      <Lock why="No win count is recorded. A net total cannot be split into winners and losers after the fact." />
+                      <em class="tt-frac"><Lock small why="The numerator — how many of these trades won — is not recorded." />/{exact(openRun.trades)}</em>
+                    </span>
                     <span class="tt-note">of {exact(openRun.trades)} closed</span>
                   </div>
                   <div class="tt-q">
@@ -1988,7 +2071,7 @@
               <!-- ================= PERFORMANCE ================= -->
               <div class="tt-sec">
                 <div class="tt-hrow">
-                  <h4 class="tt-h">Performance</h4>
+                  <h4 class="tt-h">Performance <button class="tt-info" title="What these four plots are" aria-label="About the performance plots"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M8 7.2v4M8 4.9v.1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button></h4>
                   <div class="tt-icons">
                     <button class="tt-iconbtn" title="Chart settings" aria-label="Chart settings"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.2" fill="none" stroke="currentColor" stroke-width="1.3" /><path d="M8 1.6v2M8 12.4v2M1.6 8h2M12.4 8h2M3.5 3.5l1.4 1.4M11.1 11.1l1.4 1.4M12.5 3.5l-1.4 1.4M4.9 11.1l-1.4 1.4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" /></svg></button>
                     <button class="tt-iconbtn" title="Snapshot" aria-label="Snapshot"><svg viewBox="0 0 16 16"><rect x="1.8" y="4.5" width="12.4" height="8.5" rx="1.4" fill="none" stroke="currentColor" stroke-width="1.3" /><circle cx="8" cy="8.7" r="2.4" fill="none" stroke="currentColor" stroke-width="1.3" /><path d="M5.6 4.5l1-1.5h2.8l1 1.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" /></svg></button>
@@ -1996,12 +2079,32 @@
                   </div>
                 </div>
                 <div class="tt-perf">
-                  <ul class="tt-plots">
-                    <li class="off">Cumulative PnL <Lock small why="No equity series is recorded — four scalars cannot make a curve." /></li>
-                    <li>Buy and hold <span class="tt-dot on" aria-hidden="true"></span></li>
-                    <li class="off">Trades excursions <Lock small why="Three aggregates are recorded, not one column per trade." /></li>
-                    <li class="off">Run-ups and drawdowns <Lock small why="One drawdown figure is recorded, not a series over time." /></li>
-                  </ul>
+                  <!-- TradingView lists the plots as PLAIN TEXT down the left
+                       of the chart, each with an eye that toggles it, and a
+                       collapse chevron underneath. No boxes, no bullets. -->
+                  <div class="tt-plots">
+                    <div class="tt-plotrow off">
+                      <span>Cumulative PnL</span>
+                      <Lock small why="No equity series is recorded — four scalars cannot make a curve." />
+                    </div>
+                    <div class="tt-plotrow">
+                      <span>Buy and hold</span>
+                      <button class="tt-eye" title="Shown" aria-label="Buy and hold is shown">
+                        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 8s2.4-4 6.5-4 6.5 4 6.5 4-2.4 4-6.5 4S1.5 8 1.5 8z" fill="none" stroke="currentColor" stroke-width="1.3" /><circle cx="8" cy="8" r="1.9" fill="currentColor" /></svg>
+                      </button>
+                    </div>
+                    <div class="tt-plotrow off">
+                      <span>Trades excursions</span>
+                      <Lock small why="Three aggregates are recorded, not one column per trade." />
+                    </div>
+                    <div class="tt-plotrow off">
+                      <span>Run-ups and drawdowns</span>
+                      <Lock small why="One drawdown figure is recorded, not a series over time." />
+                    </div>
+                    <button class="tt-collapse" aria-label="Collapse plot list">
+                      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 10l4-4 4 4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                    </button>
+                  </div>
                   <div class="tt-plot">
                     {#if bench.phase === 'loading'}
                       <div class="tt-empty"><span class="spin sm" aria-hidden="true"></span> Reading the span's opening price…</div>
@@ -2106,7 +2209,10 @@
                   </div>
                   {@render chartFrame(
                     'Per-period totals need the sweep to record when each trade resolved. It records one total for the whole span, so there is no series to bucket by ' + periodScale.replace('ly', '') + '.',
-                    ['Realized profit', 'Realized loss', 'Favorable excursion', 'Adverse excursion']
+                    ['Realized profit', 'Realized loss', 'Favorable excursion', 'Adverse excursion'],
+                    PNL_TICKS,
+                    periodTicks,
+                    periodScale === 'daily'
                   )}
                   <p class="tt-note2">
                     Return is on <b>one unit of the index</b>, against the price at the span's start ({money(bench.open)}).
@@ -2145,7 +2251,10 @@
                   </div>
                   {@render chartFrame(
                     'The per-period comparison needs a strategy PnL series. Only the two whole-span totals are recorded, and those are the bars drawn under Performance above.',
-                    ['Strategy PnL', 'Buy and hold PnL']
+                    ['Strategy PnL', 'Buy and hold PnL'],
+                    PNL_TICKS,
+                    periodTicks,
+                    periodScale === 'daily'
                   )}
                 {:else if paTab === 'margin'}
                   <div class="tt-quad">
@@ -2157,7 +2266,10 @@
                   <h5 class="tt-h5">Margin utilization</h5>
                   {@render chartFrame(
                     'Every row on this tab is locked, and that is a DESIGN FACT rather than a gap to fill. The engine computes totals in index points with no capital, no position size and no broker. There is no margin to use, so there is nothing here to record.',
-                    []
+                    [],
+                    PCT_TICKS,
+                    periodTicks,
+                    false
                   )}
                 {:else}
                   <div class="tt-quad">
@@ -2169,8 +2281,38 @@
                   <h5 class="tt-h5">Alternating growth and decline</h5>
                   {@render chartFrame(
                     'Alternating run-up and drawdown periods need an equity series to segment. One drawdown figure is recorded, and it is the number in the quad above.',
-                    ['Run-up', 'Drawdown', 'Current run-up']
+                    ['Run-up', 'Drawdown', 'Current run-up'],
+                    PCT_TICKS,
+                    periodTicks,
+                    false
                   )}
+                  <!-- TradingView's second block on this tab: run-up and
+                       drawdown, each as maximum / average / current, on one
+                       shared scale. The maximum drawdown is the one figure
+                       recorded, so it is the one bar drawn. -->
+                  <h5 class="tt-h5">Comparison of growth and decline periods</h5>
+                  <div class="tt-cmp">
+                    <span class="tt-cmpgrp">Run-up</span>
+                    {#each ['Maximum', 'Average', 'Current'] as k (k)}
+                      <div class="tt-cmprow">
+                        <span class="tt-cmplab">{k}</span>
+                        <span class="tt-cmpbar"></span>
+                        <span class="tt-cmpval"><Lock small why="Run-up needs an equity series to measure a rise across." /></span>
+                      </div>
+                    {/each}
+                    <span class="tt-cmpgrp">Drawdown</span>
+                    <div class="tt-cmprow">
+                      <span class="tt-cmplab">Maximum</span>
+                      <span class="tt-cmpbar"><span class="tt-cmpfill down" style="width:100%"></span></span>
+                      <span class="tt-cmpval down">{drawdownBps === null ? money(Math.abs(openRun.max_drawdown)) : `${(drawdownBps / 100).toFixed(2)}%`}</span>
+                    </div>
+                    <div class="tt-cmprow">
+                      <span class="tt-cmplab">Average</span>
+                      <span class="tt-cmpbar"></span>
+                      <span class="tt-cmpval"><Lock small why="Only the single worst drawdown is recorded, not every one to average." /></span>
+                    </div>
+                  </div>
+
                   <h5 class="tt-h5">Excursion <span class="tt-own">brutex</span></h5>
                   <p class="tt-note2">
                     How far trades went against the position before resolving, in parts per million. The winners' adverse
@@ -2208,7 +2350,7 @@
                   <div class="tt-two">
                     <div>
                       <h5 class="tt-h5">Returns distribution</h5>
-                      {@render chartFrame('A histogram of per-trade returns needs the return of every trade. The sweep records ' + exact(openRun.trades) + ' as a count and keeps no list.', ['Losers', 'Winners'])}
+                      {@render chartFrame('A histogram of per-trade returns needs the return of every trade. The sweep records ' + exact(openRun.trades) + ' as a count and keeps no list.', HIST_LEGEND, COUNT_TICKS, RETURN_TICKS, false)}
                     </div>
                     <div>
                       <h5 class="tt-h5">Trades distribution</h5>
@@ -2226,10 +2368,24 @@
                           <b>{exact(openRun.trades)}</b>
                           <span>Total trades</span>
                         </div>
+                        <!-- THREE COLUMNS, as TradingView sets it: name,
+                             trade count, share of the total. -->
                         <ul class="tt-donutleg">
-                          <li><span class="sw up"></span>Winners<span class="v"><Lock small why="No win count is recorded." /></span></li>
-                          <li><span class="sw down"></span>Losers<span class="v"><Lock small why="No loss count is recorded." /></span></li>
-                          <li><span class="sw flat"></span>Breakevens<span class="v"><Lock small why="No breakeven count is recorded." /></span></li>
+                          <li>
+                            <span class="sw up"></span><span class="nm">Winners</span>
+                            <span class="ct"><Lock small why="No win count is recorded." /></span>
+                            <span class="pc"><Lock small why="Needs the win count above." /></span>
+                          </li>
+                          <li>
+                            <span class="sw down"></span><span class="nm">Losers</span>
+                            <span class="ct"><Lock small why="No loss count is recorded." /></span>
+                            <span class="pc"><Lock small why="Needs the loss count above." /></span>
+                          </li>
+                          <li>
+                            <span class="sw flat"></span><span class="nm">Breakevens</span>
+                            <span class="ct"><Lock small why="No breakeven count is recorded." /></span>
+                            <span class="pc"><Lock small why="Needs the breakeven count above." /></span>
+                          </li>
                         </ul>
                       </div>
                       <p class="tt-note2">
@@ -2254,7 +2410,10 @@
                   </div>
                   {@render chartFrame(
                     'Every figure on this tab is a property of the ORDER trades resolved in. The ledger keeps a count and a net, both order-independent, so nothing here is recoverable from it.',
-                    []
+                    [],
+                    STREAK_TICKS,
+                    [],
+                    false
                   )}
                 {:else}
                   <div class="tt-tblwrap">
@@ -2268,14 +2427,14 @@
                         <tr><td>Total winners</td><td class="n"><Lock small why="No win count is recorded." /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         <tr><td>Total losers</td><td class="n"><Lock small why="No loss count is recorded." /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         <tr><td>Percent profitable</td><td class="n"><Lock small why="Cannot be inferred from a net total." /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
-                        <tr><td>Average PnL</td><td class="n">{perTrade ? money(perTrade.worst) : '—'}</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
+                        <tr><td>Average PnL</td><td class="n"><span class="tv">{perTrade ? money(perTrade.worst) : "—"}</span><span class="tp">{perTrade && bench.open > 0 ? `${((perTrade.worst / bench.open) * 100).toFixed(2)}%` : ""}</span></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         <tr><td>Average profit</td><td class="n"><Lock small why="Needs gross profit and a winner count." /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         <tr><td>Average loss</td><td class="n"><Lock small why="Needs gross loss and a loser count." /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         <tr><td>Average profit / average loss</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         <tr><td>Largest profit</td><td class="n"><Lock small why="Only the worst single trade is kept." /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         <tr><td>Largest profit %</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         <tr><td>Largest profit as % of gross profit</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
-                        <tr><td>Largest loss</td><td class="n down">{money(openRun.worst_trade)}</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
+                        <tr><td>Largest loss</td><td class="n down"><span class="tv">{money(openRun.worst_trade)}</span><span class="tp">{bench.open > 0 ? `${((openRun.worst_trade / bench.open) * 100).toFixed(2)}%` : ""}</span></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         <tr><td>Largest loss %</td><td class="n"><Lock small why="Needs the entry price of that trade." /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         <tr><td>Largest loss as % of gross loss</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         <tr><td>Outliers</td><td class="n"><Lock small why="Needs a per-trade list." /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
@@ -2313,6 +2472,33 @@
                       </tr>
                     </thead>
                     <tbody>
+                      <!-- ONE TRADE IS TWO ROWS: exit above, entry below, in a
+                           bordered block, with the per-TRADE columns spanning
+                           both and the per-LEG columns differing. That shape is
+                           the whole reason this table reads as trades rather
+                           than as a log, so it is drawn even though every leg
+                           is a padlock. The columns to the right of Price
+                           belong to the trade and are set with rowspan. -->
+                      <tr class="lot-a">
+                        <td rowspan="2" class="lot-num"><Lock small why="No trade number — no trade list is recorded." /></td>
+                        <td>Exit</td>
+                        <td><Lock small why="No exit timestamp is recorded." /></td>
+                        <td><Lock small why="No exit signal is recorded." /></td>
+                        <td class="n"><Lock small why="No exit price is recorded." /></td>
+                        <td rowspan="2" class="n"><Lock small why="Position size is not modelled — the engine computes index points, not contracts." /></td>
+                        <td rowspan="2" class="n"><Lock small why="Per-trade PnL is not recorded, only the run's net." /></td>
+                        <td rowspan="2" class="n"><Lock small why="Needs per-trade PnL and its entry price." /></td>
+                        <td rowspan="2" class="n"><Lock small why="Favourable excursion is recorded as a fold over winners, not per trade." /></td>
+                        <td rowspan="2" class="n"><Lock small why="Adverse excursion is recorded as a fold, not per trade." /></td>
+                        <td rowspan="2" class="n"><Lock small why="A cumulative series needs every trade in order." /></td>
+                        <td rowspan="2" class="n"><Lock small why="Needs the entry and exit bar of each trade." /></td>
+                      </tr>
+                      <tr class="lot-b">
+                        <td>Entry</td>
+                        <td><Lock small why="No entry timestamp is recorded." /></td>
+                        <td><Lock small why="No entry signal is recorded." /></td>
+                        <td class="n"><Lock small why="No entry price is recorded." /></td>
+                      </tr>
                       <tr class="lockrow">
                         <td colspan="12">
                           <div class="tt-lockbig">
@@ -3678,6 +3864,39 @@
     color: var(--n8);
   }
 
+  .tt-info {
+    background: none;
+    border: 0;
+    padding: 0;
+    margin-left: 0.3rem;
+    line-height: 0;
+    color: var(--n8);
+    cursor: help;
+    vertical-align: -2px;
+  }
+  .tt-info svg {
+    width: 13px;
+    height: 13px;
+  }
+  .tt-info:hover {
+    color: var(--n10);
+  }
+  .tt-menudiv {
+    height: 1px;
+    background: var(--n5);
+    margin: 0.3rem 0;
+  }
+  .tt-menuic {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+  }
+  .tt-menuic svg {
+    width: 13px;
+    height: 13px;
+    color: var(--n8);
+  }
+
   /* ---- icon buttons on a panel header ---- */
   .tt-hrow {
     display: flex;
@@ -3940,6 +4159,219 @@
   }
   .tt-donutleg .sw.flat {
     background: var(--warn);
+  }
+
+  /* ---- the plot list: plain text, an eye, a collapse chevron ---- */
+  .tt-plots {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+  }
+  .tt-plotrow {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+    font-size: 0.77rem;
+    color: var(--n11);
+    padding: 0.2rem 0.1rem;
+  }
+  .tt-plotrow.off {
+    color: var(--n8);
+  }
+  .tt-eye {
+    background: none;
+    border: 0;
+    padding: 0;
+    line-height: 0;
+    color: var(--acc);
+    cursor: pointer;
+  }
+  .tt-eye svg {
+    width: 14px;
+    height: 14px;
+  }
+  .tt-collapse {
+    align-self: flex-start;
+    margin-top: 0.3rem;
+    background: var(--n4);
+    border: 0;
+    border-radius: 5px;
+    padding: 0.18rem 0.4rem;
+    color: var(--n9);
+    cursor: pointer;
+    line-height: 0;
+  }
+  .tt-collapse svg {
+    width: 13px;
+    height: 13px;
+  }
+  .tt-collapse:hover {
+    color: var(--n11);
+  }
+
+  /* ---- the two-value key stat ---- */
+  .tt-frac {
+    font-size: 0.82rem;
+    font-style: normal;
+    color: var(--n9);
+    display: inline-flex;
+    align-items: center;
+    gap: 0.1rem;
+  }
+
+  /* ---- two-line table cells ---- */
+  .tt-tbl td .tv {
+    display: block;
+    line-height: 1.25;
+  }
+  .tt-tbl td .tp {
+    display: block;
+    font-size: 0.7rem;
+    color: var(--n8);
+    line-height: 1.2;
+  }
+
+  /* ---- growth / decline comparison ---- */
+  .tt-cmp {
+    display: flex;
+    flex-direction: column;
+    gap: 0.32rem;
+    margin-top: 0.5rem;
+  }
+  .tt-cmpgrp {
+    font-size: 0.73rem;
+    color: var(--n11);
+    margin-top: 0.35rem;
+  }
+  .tt-cmpgrp:first-child {
+    margin-top: 0;
+  }
+  .tt-cmprow {
+    display: grid;
+    grid-template-columns: 8ch 1fr auto;
+    gap: 0.7rem;
+    align-items: center;
+  }
+  .tt-cmplab {
+    font-size: 0.72rem;
+    color: var(--n8);
+  }
+  .tt-cmpbar {
+    height: 11px;
+    background: var(--n0);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .tt-cmpfill {
+    display: block;
+    height: 100%;
+    background: var(--up);
+    animation: grow 0.5s cubic-bezier(0.22, 0.7, 0.3, 1) both;
+    transform-origin: left;
+  }
+  .tt-cmpfill.down {
+    background: var(--down);
+  }
+  .tt-cmpval {
+    font-size: 0.76rem;
+    color: var(--n10);
+    font-variant-numeric: tabular-nums;
+    min-width: 6ch;
+    text-align: right;
+  }
+  .tt-cmpval.down {
+    color: var(--down);
+  }
+
+  /* ---- chart frame: x axis and the pager ---- */
+  .cf-x {
+    display: flex;
+    justify-content: space-between;
+    padding: 0.32rem 0.6rem 0;
+    font-size: 0.65rem;
+    color: var(--n8);
+    font-variant-numeric: tabular-nums;
+  }
+  .cf-page {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    z-index: 2;
+    width: 20px;
+    height: 26px;
+    border: 1px solid var(--n6);
+    border-radius: 5px;
+    background: var(--n3);
+    color: var(--n9);
+    font-size: 0.8rem;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .cf-page.l {
+    left: 6px;
+  }
+  .cf-page.r {
+    right: 6px;
+  }
+  .cf-page:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+  .cf-sw.dashed {
+    border-radius: 0;
+    height: 0;
+    width: 12px;
+    border-top: 2px dashed currentColor;
+    background: none;
+  }
+  .cf-legend li.dash {
+    color: var(--n8);
+  }
+  .cf-legend li b {
+    color: var(--n11);
+    font-weight: 600;
+    margin-left: 0.2rem;
+  }
+
+  /* ---- donut legend, three columns ---- */
+  .tt-donutleg li {
+    display: grid;
+    grid-template-columns: 10px 1fr auto auto;
+    gap: 0.5rem;
+    align-items: center;
+  }
+  .tt-donutleg .nm {
+    color: var(--n10);
+  }
+  .tt-donutleg .ct,
+  .tt-donutleg .pc {
+    min-width: 4.5ch;
+    text-align: right;
+    color: var(--n9);
+  }
+
+  /* ---- list of trades: the two-row block ---- */
+  .tt-tbl tr.lot-a td {
+    border-bottom: 0;
+    padding-bottom: 0.2rem;
+  }
+  .tt-tbl tr.lot-b td {
+    padding-top: 0.2rem;
+    border-bottom: 1px solid var(--n6);
+  }
+  /* The per-trade columns span both legs, so their divider is the block's. */
+  .tt-tbl tr.lot-a td[rowspan] {
+    border-bottom: 1px solid var(--n6);
+    vertical-align: middle;
+    padding-bottom: 0.46rem;
+  }
+  .tt-tbl tr.lot-a:hover,
+  .tt-tbl tr.lot-b:hover {
+    background: var(--n4);
+  }
+  .lot-num {
+    color: var(--n11);
   }
 
   /* ---- sections ---- */
