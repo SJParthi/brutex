@@ -2121,15 +2121,25 @@
                     ? 'Halted — not comparable with the complete rungs beside it'
                     : `Worst-case ${money(r.pessimistic)} over ${exact(r.trades)} trades`}
                 >
+                  <!-- A FLOOR OF 4%, SO NOTHING VANISHES. On this store's own
+                       ledger 15min returns twenty times what 1day does, which
+                       put the daily bar at three pixels and the eye read it as
+                       an empty slot rather than a small number. A floor is not
+                       a distortion as long as the FIGURE is printed beneath it,
+                       which it is — the bar ranks, the number states.
+
+                       The best-case fill is an OUTLINE rather than a filled
+                       block: it is always the taller of the two, so as a solid
+                       it covered the number that actually ranks. -->
                   <span class="mult-bars">
                     <span
                       class="mult-ghost"
-                      style="height:{Math.min(100, (Math.abs(r.optimistic) / g.scale) * 100)}%"
+                      style="height:{Math.max(4, Math.min(100, (Math.abs(r.optimistic) / g.scale) * 100))}%"
                     ></span>
                     <span
                       class="mult-bar"
                       class:neg={r.pessimistic < 0}
-                      style="height:{Math.min(100, (Math.abs(r.pessimistic) / g.scale) * 100)}%"
+                      style="height:{Math.max(4, Math.min(100, (Math.abs(r.pessimistic) / g.scale) * 100))}%"
                     ></span>
                   </span>
                   <span class="mult-rung">{r.timeframe}</span>
@@ -3838,6 +3848,362 @@
   .pill.flat {
     background: var(--n4);
     color: var(--n8);
+  }
+
+  /* ==================================================================
+     THE VISUAL PASS
+     ------------------------------------------------------------------
+     Everything below is surface: depth, gradient, glow and entrance.
+     None of it moves a number or hides one. The rule the rest of this
+     file keeps — a fact gets a sentence, an absence gets a padlock —
+     is untouched; this only decides how the facts LOOK while they say
+     what they already said.
+
+     Where a colour carries meaning it is the same colour it was: green
+     is still worst-case-positive, amber is still halted, the accent is
+     still "this is the answer". Gradients run between a token and a
+     transparent version of the SAME token, never between two hues, so
+     nothing here invents a third state the reader has to learn.
+     ================================================================== */
+
+  /* ---- section headings get a rule that starts at the accent -------- */
+  .bh {
+    position: relative;
+    padding-left: 0.75rem;
+  }
+  .bh::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0.15em;
+    bottom: 0.15em;
+    width: 3px;
+    border-radius: 2px;
+    background: linear-gradient(to bottom, var(--acc), transparent);
+  }
+
+  /* ---- the summary strip: depth, and a hover that lifts ------------- */
+  .bt-strip {
+    box-shadow: var(--e1);
+  }
+  .fact {
+    position: relative;
+    transition:
+      background 0.2s ease,
+      transform 0.2s cubic-bezier(0.22, 0.7, 0.3, 1);
+  }
+  .fact::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 2px;
+    background: linear-gradient(to right, var(--acc), transparent);
+    opacity: 0;
+    transition: opacity 0.2s ease;
+  }
+  .fact:hover {
+    background: var(--n4);
+  }
+  .fact:hover::after {
+    opacity: 0.7;
+  }
+  .fact.good::after {
+    background: linear-gradient(to right, var(--up), transparent);
+  }
+  .fact.warn::after {
+    background: linear-gradient(to right, var(--warn), transparent);
+  }
+
+  /* ---- THE ANSWER. The one card on the page that is a verdict, so it
+     is the one that gets a glow. A gradient ground away from the accent
+     edge, and a soft outer light that says "start here" without moving. */
+  .crown {
+    position: relative;
+    background:
+      linear-gradient(135deg, var(--acc-soft) 0%, transparent 42%),
+      var(--n3);
+    box-shadow:
+      var(--e2),
+      0 0 0 1px var(--acc),
+      0 8px 32px -18px var(--acc);
+    overflow: hidden;
+  }
+  /* A single sweep of light across the card as it arrives, then gone.
+     It runs ONCE — a card that keeps shimmering is a card still loading,
+     and this one has finished. */
+  .crown::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(105deg, transparent 35%, rgba(255, 255, 255, 0.06) 50%, transparent 65%);
+    transform: translateX(-100%);
+    animation: sheen 1.1s cubic-bezier(0.3, 0.7, 0.4, 1) 0.25s 1 forwards;
+    pointer-events: none;
+  }
+  @keyframes sheen {
+    to {
+      transform: translateX(100%);
+    }
+  }
+  .crown-mark {
+    position: relative;
+    padding: 0.2rem 0.5rem;
+    border-radius: 4px;
+    background: var(--acc-soft);
+    border: 1px solid var(--acc);
+  }
+  .fig.lead .v {
+    text-shadow: 0 0 24px var(--up-soft);
+  }
+
+  /* ---- the rung multiples, as a chart rather than four boxes -------- */
+  .rgroup {
+    background: linear-gradient(180deg, var(--n3) 0%, var(--n2) 100%);
+    box-shadow: var(--e1);
+  }
+  .multiples {
+    padding: 0.4rem 0.1rem 0.5rem;
+  }
+  .mult {
+    flex: 0 0 92px;
+    background: linear-gradient(180deg, var(--n2) 0%, var(--n0) 100%);
+    transition:
+      border-color 0.18s ease,
+      transform 0.18s cubic-bezier(0.22, 0.7, 0.3, 1),
+      box-shadow 0.18s ease;
+  }
+  .mult:hover {
+    transform: translateY(-3px);
+    box-shadow: var(--e2);
+  }
+  /* THE LEADER GLOWS. It is the rung that carries the edge for this span,
+     and on a row of four bars the eye should land on it first. */
+  .mult.leader {
+    border-color: var(--acc);
+    box-shadow: 0 0 0 1px var(--acc), 0 6px 22px -14px var(--acc);
+  }
+  .mult-bars {
+    width: 40px;
+    height: 92px;
+    background: linear-gradient(180deg, var(--n0) 0%, rgba(0, 0, 0, 0.25) 100%);
+    box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.4);
+  }
+  /* The best-case fill is an OUTLINE. As a solid it always covered the
+     figure that actually ranks, because it is always the taller of the
+     two. */
+  .mult-ghost {
+    background: transparent;
+    border: 1px dashed var(--n7);
+    border-bottom: 0;
+    border-radius: 3px 3px 0 0;
+  }
+  .mult-bar {
+    background: linear-gradient(180deg, var(--up) 0%, var(--up-soft) 140%);
+    box-shadow: 0 -2px 12px -4px var(--up);
+  }
+  .mult-bar.neg {
+    background: linear-gradient(180deg, var(--down) 0%, var(--down-soft) 140%);
+    box-shadow: 0 -2px 12px -4px var(--down);
+  }
+  .mult.leader .mult-bar {
+    box-shadow: 0 -3px 18px -3px var(--up);
+  }
+  .mult-fig {
+    font-weight: 600;
+    color: var(--n11);
+  }
+  .mult.leader .mult-rung {
+    color: var(--acc);
+    font-weight: 600;
+  }
+
+  /* ---- the coverage bar reads as a gauge --------------------------- */
+  .cover {
+    height: 6px;
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.35);
+  }
+  .cover-fill {
+    background: linear-gradient(to right, var(--up), var(--acc));
+  }
+  .cover-fill.short {
+    background: linear-gradient(to right, var(--warn), var(--down));
+  }
+
+  /* ---- the ledger table ------------------------------------------- */
+  .tbl-scroll {
+    box-shadow: var(--e1);
+  }
+  .row {
+    transition:
+      background 0.16s ease,
+      border-left-color 0.16s ease,
+      box-shadow 0.16s ease;
+  }
+  .row:hover {
+    background: var(--n4);
+    box-shadow: inset 3px 0 0 var(--acc);
+  }
+  .row.crowned {
+    background: linear-gradient(to right, var(--acc-soft), transparent 45%);
+    border-left-color: var(--acc);
+  }
+  .row.halted {
+    background: linear-gradient(to right, var(--warn-soft), transparent 30%);
+  }
+
+  /* ---- the Run bar: the one control that causes work --------------- */
+  .runbar {
+    background: linear-gradient(120deg, var(--acc-soft) 0%, var(--n3) 38%);
+    box-shadow: var(--e1);
+  }
+  .btn.run {
+    box-shadow: 0 4px 18px -8px var(--acc);
+    transition:
+      filter 0.16s ease,
+      transform 0.16s cubic-bezier(0.22, 0.7, 0.3, 1),
+      box-shadow 0.16s ease;
+  }
+  .btn.run:hover:not(:disabled) {
+    transform: translateY(-1px);
+    box-shadow: 0 7px 24px -8px var(--acc);
+  }
+  .btn.run:active:not(:disabled) {
+    transform: translateY(0);
+  }
+
+  /* ---- SELECTS: the native arrow is replaced, and it turns --------- */
+  select.find {
+    appearance: none;
+    -webkit-appearance: none;
+    padding-right: 1.9rem;
+    background-image: linear-gradient(45deg, transparent 50%, var(--n9) 50%),
+      linear-gradient(135deg, var(--n9) 50%, transparent 50%);
+    background-position:
+      calc(100% - 1.05rem) 55%,
+      calc(100% - 0.72rem) 55%;
+    background-size:
+      5px 5px,
+      5px 5px;
+    background-repeat: no-repeat;
+    cursor: pointer;
+    transition:
+      border-color 0.16s ease,
+      background-position 0.18s cubic-bezier(0.22, 0.7, 0.3, 1);
+  }
+  select.find:hover {
+    border-color: var(--acc);
+  }
+  select.find:focus {
+    border-color: var(--acc);
+    background-position:
+      calc(100% - 0.72rem) 55%,
+      calc(100% - 1.05rem) 55%;
+  }
+
+  /* Text inputs get the same focus treatment, so the strip reads as one
+     set of controls rather than as two kinds. */
+  .find {
+    transition:
+      border-color 0.16s ease,
+      box-shadow 0.16s ease;
+  }
+  .find:hover {
+    border-color: var(--n7);
+  }
+  .find:focus,
+  .find:focus-visible {
+    border-color: var(--acc);
+    box-shadow: 0 0 0 3px var(--acc-soft);
+    outline: none;
+  }
+
+  /* ---- the drill-down cards ---------------------------------------- */
+  .card {
+    background: linear-gradient(180deg, var(--n3) 0%, var(--n2) 100%);
+    transition:
+      border-color 0.18s ease,
+      transform 0.18s cubic-bezier(0.22, 0.7, 0.3, 1),
+      box-shadow 0.18s ease;
+  }
+  .card:hover {
+    border-color: var(--n7);
+    transform: translateY(-2px);
+    box-shadow: var(--e2);
+  }
+  /* A card that is a stated GAP does not lift: there is nothing in it to
+     inspect, and inviting a hover would promise otherwise. */
+  .card.gap:hover {
+    transform: none;
+    box-shadow: none;
+    border-color: var(--n6);
+  }
+
+  /* ---- the price terminal ------------------------------------------ */
+  .term {
+    box-shadow: var(--e2);
+  }
+  .term-bar {
+    background: linear-gradient(180deg, var(--n2) 0%, var(--n3) 100%);
+  }
+  .rungbtn.on {
+    box-shadow: 0 2px 10px -4px var(--acc);
+  }
+
+  /* ---- the page arrives in reading order --------------------------- */
+  .runbar,
+  .bt-strip,
+  .block {
+    animation: pagein 0.45s cubic-bezier(0.22, 0.7, 0.3, 1) both;
+  }
+  .runbar {
+    animation-delay: 0.02s;
+  }
+  .bt-strip {
+    animation-delay: 0.08s;
+  }
+  .block:nth-of-type(1) {
+    animation-delay: 0.14s;
+  }
+  .block:nth-of-type(2) {
+    animation-delay: 0.2s;
+  }
+  .block:nth-of-type(3) {
+    animation-delay: 0.26s;
+  }
+  @keyframes pagein {
+    from {
+      opacity: 0;
+      transform: translateY(10px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
+  /* Nothing above moves for a reader who asked for stillness, and the
+     sheen in particular must not leave the card mid-sweep. */
+  @media (prefers-reduced-motion: reduce) {
+    .crown::before {
+      animation: none;
+      opacity: 0;
+    }
+    .runbar,
+    .bt-strip,
+    .block,
+    .mult,
+    .card,
+    .fact,
+    .row,
+    .btn.run,
+    .find,
+    select.find {
+      animation: none !important;
+      transition: none !important;
+      transform: none !important;
+    }
   }
 
   /* ---------------- the drill-down ---------------- */
