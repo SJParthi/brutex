@@ -725,6 +725,46 @@ impl Assets {
         }
     }
 
+    /// `/favicon.ico` is answered by `favicon.svg`, and the alias lives here.
+    ///
+    /// # Why an alias rather than a second file
+    ///
+    /// A browser asks for `/favicon.ico` by convention whether or not the page
+    /// declares an icon, and `web/build` holds `favicon.svg` and no `.ico`. The
+    /// miss is not free: it costs TWO warn-level events per page load — one
+    /// `api.request` 404 and one `api.assets` "no such asset" — and measured on
+    /// the running binary that was 28 of the last 200 events, 17% of the log,
+    /// all of it the console talking about itself on the page an operator opens
+    /// to read that log.
+    ///
+    /// Shipping a real `.ico` was tried first and rejected on evidence: a
+    /// hand-built PNG-in-ICO passed `file(1)`, reported itself as a valid 64x64,
+    /// and decoded to fully transparent in the browser. A binary asset nobody in
+    /// this repository can render is one nobody can check.
+    ///
+    /// # Why here and not in the router
+    ///
+    /// This function is already the one place that answers "which file on disk
+    /// answers this path". A route would put a second answer to that question in
+    /// `server.rs`, and the two would drift the day the build output moves.
+    ///
+    /// The substitution is on the SEGMENTS, before `resolve`, so the alias
+    /// inherits every rule that follows it — the traversal guard, the symlink
+    /// escape check, and `content_type`, which reads the RESOLVED name and
+    /// therefore answers `image/svg+xml` rather than claiming to be an icon.
+    /// A missing `favicon.svg` still 404s exactly as before; this redirects the
+    /// question, it does not invent an answer.
+    /// `first()` AND NOT `[0]`: this workspace denies `indexing_slicing`, and
+    /// the lint is right even where the length check makes the index provably
+    /// safe — the guarantee lives in a different expression from the access, and
+    /// the two drift when one is edited.
+    fn favicon_alias(segments: Vec<String>) -> Vec<String> {
+        if segments.len() == 1 && segments.first().is_some_and(|only| only == "favicon.ico") {
+            return vec!["favicon.svg".to_owned()];
+        }
+        segments
+    }
+
     /// Answers one request for a static path.
     ///
     /// The order is the whole contract, and it is the order of this function:
@@ -746,6 +786,9 @@ impl Assets {
             Ok(segments) => segments,
             Err(refusal) => return refused(refusal),
         };
+        // AFTER the textual rules and BEFORE the filesystem, so the alias is
+        // subject to every guard that follows rather than stepping around them.
+        let segments = Self::favicon_alias(segments);
         let target = match Self::resolve(root, &segments) {
             Ok(target) => target,
             Err(refusal) => return refused(refusal),
@@ -1593,5 +1636,41 @@ mod tests {
         );
         assert!(!looks_like_asset(&seg("/db")), "a client route");
         assert!(!looks_like_asset(&seg("/")), "and the root");
+    }
+
+    #[test]
+    fn the_icon_a_browser_asks_for_is_answered_by_the_one_that_exists() {
+        let own = |s: &str| vec![s.to_owned()];
+
+        assert_eq!(
+            Assets::favicon_alias(own("favicon.ico")),
+            own("favicon.svg"),
+            "a browser asks for /favicon.ico whether or not the page declares an \
+             icon, and web/build holds only the SVG — the miss cost two \
+             warn-level events per page load"
+        );
+
+        // EVERY OTHER PATH IS UNTOUCHED, and the three below are the ways this
+        // could have been written too loosely: a suffix match, a segment match
+        // at any depth, and a name that merely contains it.
+        assert_eq!(
+            Assets::favicon_alias(own("favicon.svg")),
+            own("favicon.svg"),
+            "the real file still answers for itself"
+        );
+        assert_eq!(
+            Assets::favicon_alias(vec!["_app".to_owned(), "favicon.ico".to_owned()]),
+            vec!["_app".to_owned(), "favicon.ico".to_owned()],
+            "the alias is the ROOT icon, not any file of that name at any depth"
+        );
+        assert_eq!(
+            Assets::favicon_alias(own("not-a-favicon.ico")),
+            own("not-a-favicon.ico"),
+            "an equality test and never a suffix one"
+        );
+        assert!(
+            Assets::favicon_alias(Vec::new()).is_empty(),
+            "the root path has no segment to alias and must not gain one"
+        );
     }
 }

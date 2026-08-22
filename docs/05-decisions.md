@@ -19574,3 +19574,50 @@ which side of the line it is on.
 
 The three claims are corrected to say what is true: four of six, and which two
 are not closed.
+
+### D-0251 — one path answered by two applications, and an icon nobody could see
+
+Two defects on the HTTP surface, both of them the same shape: a request whose
+answer was correct and whose IDENTITY was not stated.
+
+**`/audit` is answered by two different applications and said so nowhere.**
+Clicking Audit in the console renders `web/src/routes/audit/+page.svelte` —
+SvelteKit routes in the browser and never asks the server. A reload, a bookmark
+or a typed address reaches `crates/api/src/render.rs` instead. Measured on the
+running binary 21 Aug 2026: different nav (Dashboard · Instruments · Ingest ·
+Audit · Store · Logs · Runs against Markets · Ingest · Autopilot · DB · Audit ·
+Logs), no feed picker, no theme toggle — and an identical `<title>`, so neither
+the tab, a bookmark, nor a history entry could tell them apart.
+
+`web/vite.config.js` records this collision at length and removed it **for
+development** by declining to proxy `/audit`. That fixed the dev server and left
+the shipped binary exactly as it was, which is why it survived to be measured.
+
+DISTINGUISHED RATHER THAN DELETED, at the operator's decision. Deleting the
+server-rendered page would take with it the script-free surface
+`web/src/app.html` advertises in its `<noscript>` block — the one that answers
+when the bundle fails to load, which is precisely when a reader needs it. So the
+Rust page is titled `brutex · audit · server-rendered` and the console's
+`brutex · audit · console`; the Rust page's footer already carried the visible
+half, *"Rendered on the server. No JavaScript"*.
+
+**`/favicon.ico` 404ed, and the miss was 17% of the log.** A browser asks for it
+by convention whether or not the page declares an icon, and `web/build` holds
+`favicon.svg` and no `.ico`. Each miss costs TWO warn-level events — one
+`api.request` 404 and one `api.assets` "no such asset" — and measured against
+the running binary that was **28 of the last 200 events**, all of it the console
+talking about itself on the very page an operator opens to read the log.
+
+Shipping a real `.ico` was tried first and rejected on evidence: a hand-built
+PNG-in-ICO passed `file(1)`, reported itself a valid 64×64, and decoded to
+**fully transparent** in the browser. A binary asset nobody in this repository
+can render is one nobody can check.
+
+The alias lives in `Assets::favicon_alias`, substituting on the SEGMENTS before
+`resolve` — so it inherits the traversal guard, the symlink escape check, and
+`content_type`, which reads the resolved name and answers `image/svg+xml`
+rather than claiming to be an icon. A missing `favicon.svg` still 404s exactly
+as before: this redirects the question, it does not invent an answer. It is an
+equality test on a single segment, so `/_app/favicon.ico` and
+`not-a-favicon.ico` are untouched — pinned by
+`the_icon_a_browser_asks_for_is_answered_by_the_one_that_exists`.

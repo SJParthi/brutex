@@ -893,7 +893,17 @@
   const stale = $derived(load.state === 'error' && payload !== null);
 </script>
 
-<svelte:head><title>brutex · audit</title></svelte:head>
+<!-- THE OTHER HALF OF THE `/audit` COLLISION — see `crates/api/src/render.rs`,
+     which now titles its own page "server-rendered". Two applications answer
+     this one path: a CLICK renders this file, because SvelteKit routes in the
+     browser and never asks the server, while a reload, a bookmark or a typed
+     address reaches the Rust page instead. They have different nav, and this one
+     alone has the feed picker and the theme toggle.
+     Both titles were "brutex · audit", so a tab, a bookmark and a history entry
+     could not tell them apart — and neither could the reader. Naming each is the
+     operator's decision of 21 Aug 2026: distinguish them rather than delete one,
+     so the script-free surface `app.html` advertises stays reachable. -->
+<svelte:head><title>brutex · audit · console</title></svelte:head>
 
 <div class="pane">
   <div class="pane-head">

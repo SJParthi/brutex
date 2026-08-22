@@ -2828,7 +2828,26 @@ fn audit_row(row: &AuditRow) -> String {
 pub fn audit_page(view: &AuditView<'_>) -> String {
     let loud =
         view.journal.trouble.is_some() || view.rows.iter().any(|r| r.loud || r.fault.is_some());
-    let mut body = open("brutex · audit", "/audit");
+    // ══ THE TITLE NAMES WHICH APPLICATION THIS IS, AND THAT IS NOT COSMETIC ══
+    //
+    // `/audit` is the one path TWO applications answer. Clicking Audit in the
+    // console renders `web/src/routes/audit/+page.svelte` — SvelteKit routes in
+    // the browser and never asks the server — while a reload, a bookmark or a
+    // typed address reaches this function instead. Measured on the running
+    // binary: different nav, no feed picker, no theme toggle, and until now the
+    // SAME `<title>`, so nothing on screen or in the tab said which one you had.
+    //
+    // `web/vite.config.js` records this collision at length and removed it for
+    // development by declining to proxy `/audit`. That fixed the dev server and
+    // left the shipped binary exactly as it was.
+    //
+    // Distinguishing the two is the operator's own decision, taken 21 Aug 2026:
+    // each page says which it is rather than one of them being deleted, so the
+    // script-free surface `web/src/app.html` advertises in its <noscript> block
+    // stays reachable. The footer already carries the visible half — "Rendered
+    // on the server. No JavaScript" — and this is the half a tab, a bookmark and
+    // a history entry can show.
+    let mut body = open("brutex · audit · server-rendered", "/audit");
     body.push_str(&hero(
         "EVERY PULL · ON DISK · SURVIVES A RESTART",
         "What was asked,<br>and what it did.",
