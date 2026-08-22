@@ -3510,6 +3510,39 @@
      returns nothing. */
   const WINDOW_SORTS = new Set(['ts', 'o', 'h', 'l', 'c', 'v', 'oi']);
 
+  /* ---------------------------------------------------------------------
+     WHETHER THE DAY WINDOW EXCLUDES ANYTHING, WHICH IS NOT THE SAME QUESTION
+     `pageExact` ANSWERS.
+
+     `pageExact` is false for either of two unrelated reasons — a sort no index
+     covers, or a day window that narrows — and the window route can serve the
+     first but NOT the second. `/bars/window.json` takes a MONTH range; it has
+     no day filter and cannot have one without the store gaining a day index.
+
+     WHAT THAT COST, measured by typing a window into the date fields: with the
+     grid sorted by CLOSE and the range set to 2016 — entirely before this
+     store's first bar in 2019-12 — the route returned its fifty rows for the
+     month range, `barWindowed` filtered every one of them out on the day, and
+     the grid drew NOTHING under a pager still reading `4,49,751-4,50,000 of
+     6,23,498`. The empty-state then blamed "a disagreement between" the file
+     and the census, which is not what happened at all: the filter did it.
+
+     So the day window sends the read back to the full path, where the client
+     holds every row and can filter them itself. Slower, and it answers. */
+  const dayNarrows = $derived.by(() => {
+    if (!dayWindowApplies || (!fromDay && !toDay)) return false;
+    for (const r of barPlan.read) {
+      const lo = r.first_ts;
+      const hi = r.last_ts;
+      /* NO SPAN MEANS IT CANNOT BE PROVED HARMLESS, so it is treated as
+         narrowing — the same conservative reading `pageExact` takes. */
+      if (!Number.isFinite(lo) || !Number.isFinite(hi)) return true;
+      if (fromDay && istDayKey(lo / 1000) < fromDay) return true;
+      if (toDay && istDayKey(hi / 1000) > toDay) return true;
+    }
+    return false;
+  });
+
   /* WHETHER THE PREFIX SUM CAN BE TRUSTED - read by both derivations below,
      so the two can never disagree about which mode the grid is in.
 
@@ -3996,7 +4029,11 @@
        store holds, so the endpoint cannot order by it and answers 400. Falling
        back to the full read is slower and returns the right rows; sending the
        key anyway returned none. */
-    const canWindow = !exact && WINDOW_SORTS.has(barSortKey);
+    /* AND NOT WHEN THE DAY WINDOW NARROWS. The route has a month range and no
+       day filter, so it would answer the wider question and let the client
+       throw the difference away — which drew an empty grid under a full
+       pager. */
+    const canWindow = !exact && !untrack(() => dayNarrows) && WINDOW_SORTS.has(barSortKey);
     (canWindow
       ? readWindow(feed, want, first, take)
       : pooled(want, IN_FLIGHT, (/** @type {any} */ r) => readBarFile(feed, r))
@@ -7818,13 +7855,45 @@
                 <tr class="bstate">
                   <td colspan={BAR_COLS.length}>
                     <div class="bnone">
-                      <h3>No bar came back</h3>
+                      <!-- THE DAY WINDOW GETS ITS OWN BRANCH, ABOVE THE ONE
+                           THAT ACCUSES THE STORE.
+
+                           MEASURED by typing a 2016 range into the date fields
+                           over a store whose first bar is 2019-12: the read
+                           worked, 81 files opened, 6,23,498 bars arrived, and
+                           `barWindowed` then filtered every one of them out on
+                           the day. The message drawn was:
+
+                             "6,23,498 bar(s) arrived. The file(s) opened and
+                              held no record. The census says they hold
+                              6,23,498, so this is a disagreement between the
+                              manifest and the file, not an empty query."
+
+                           Self-contradictory in its first two sentences — bars
+                           arrived AND no record was held — and then it accuses
+                           the store of CORRUPTION for what a filter did. An
+                           operator reading that would go looking for a damaged
+                           file that is perfectly intact.
+
+                           The bars-arrived count is what separates the two: if
+                           rows came back and none survived, the window is the
+                           answer, and the store is not in question at all. -->
+                      <h3>
+                        {barsRead > 0 && dayNarrows
+                          ? 'No bar in this date window'
+                          : 'No bar came back'}
+                      </h3>
                       <p>
                         {fmt(barPlan.read.length)} instrument-month(s) were read and
                         <b>{fmt(barsRead)}</b> bar(s) arrived.
                         {#if barFails.length}
                           {fmt(barFails.length)} of those file(s) refused — each refusal is named
                           under the grid.
+                        {:else if barsRead > 0 && dayNarrows}
+                          Every one of them falls outside <b>{fromDay || 'the start'}</b> to
+                          <b>{toDay || 'the end'}</b>, so the grid has nothing to draw. The files
+                          and the census agree — it is the date window above that is empty, and
+                          widening it brings these {fmt(barsRead)} bar(s) back.
                         {:else}
                           The file(s) opened and held no record. The census says they hold {fmt(
                             barsClaimed
