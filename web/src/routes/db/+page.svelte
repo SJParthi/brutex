@@ -3163,6 +3163,144 @@
   let pageSize = $state(50);
   let page = $state(1);
 
+  /* ======================================================================
+     FIT — THE GRID HOLDS THE ROWS THE SCREEN CAN SHOW, AND NOT ONE MORE
+     ======================================================================
+     Every fixed page size is a guess about a viewport the script cannot see,
+     and when the guess is high the surplus does not vanish — it becomes a
+     second scrollbar inside the table. That is what this page was carrying:
+     fifty rows fetched into a box with room for the first thirteen, so the
+     wheel moved the rows under the pointer and the page under it everywhere
+     else, and neither felt like the one in charge.
+
+     There is no arrangement of two scrollers that reads well. The fix is to
+     stop producing the surplus: measure the box, divide by the row height, and
+     fetch exactly that. The inner scroll range then goes to ZERO — not hidden,
+     not chained, not styled away, simply absent, because every row that was
+     asked for is on screen.
+
+     `fit` IS THE DEFAULT AND THE FIXED SIZES REMAIN. A reader who wants 250
+     rows in one document to search or export still picks one and gets a
+     scrolling box, deliberately. What changes is that they must ask.  */
+  /* THE TWO WINDOWING CONSTANTS, HOISTED TO THEIR FIRST USE. They belong to
+     the virtual-scroll section far below — `ROW` places row N at `N * ROW` and
+     `HEAD` is the sticky header the cursor arithmetic clears — and they are
+     declared HERE because `rowsThatFit` divides by both and is written above
+     that section. `--dbrow` and `--dbhead` in the stylesheet are the same two
+     measurements in the other language; none of the four moves alone. */
+  const ROW = 40;
+  const HEAD = 30; /* the sticky header covers the top of the scroll box */
+
+  let sizeMode = $state(/** @type {'fit' | 'fixed'} */ ('fit'));
+  /** The bar box's measured inner height. Layout is the only honest source for
+      it: `.board`'s height less whatever the chrome above happens to occupy,
+      which depends on the reader's window, their font size and how many rungs
+      the strip wrapped onto a second line. */
+  let barBoxH = $state(0);
+  /** @type {HTMLElement | null} */
+  let barBox = $state(null);
+  /* ---------------------------------------------------------------------
+     WHAT TRIGGERS THE MEASUREMENT IS THE WHOLE PROBLEM, AND TWO OBVIOUS
+     ANSWERS WERE BUILT AND MEASURED FAILING BEFORE THIS ONE.
+
+     1. `bind:clientHeight={barBoxH}` — WRONG IN THE WORST AVAILABLE WAY: it
+        reports on mount and never again. Measured — first paint at a 1,100px
+        window bound 382 and fitted 8 rows, correctly; the window was taken to
+        1,400, the box grew to 665, the bound value stayed 382 and the grid
+        stayed at 8. No error, no warning, and a first paint that passes the
+        only check anyone thinks to run.
+
+     2. A `ResizeObserver` ON THE BOX — ran away. Instrumented with a counter:
+        ONE THOUSAND firings on a single page load. The reason is structural and
+        it is worth stating exactly, because the same trap is available to
+        anything else on this page that measures itself:
+
+          the page size decides the ROW COUNT,
+          the row count changes the PAGER'S TEXT — "of 38,969" against
+            "of 12,470" — and the facts row's "newest close on this page",
+          both of those are CHROME, and the chrome sits ABOVE the box,
+          so the chrome's height decides the BOX'S height,
+          and the box's height decides the PAGE SIZE.
+
+        The sensor was wired to its own output. A tolerance damps JITTER; it
+        cannot fix a loop whose gain is structural, which is why the eight
+        pixels of slack below did not stop it and should not be expected to.
+
+     SO THE TRIGGER IS THE WINDOW, WHICH THE LOOP CANNOT CAUSE. A resize is the
+     reader's act. Nothing this component writes can produce one, so the cycle
+     is cut at the only place it can be cut — the measurement is no longer
+     downstream of the thing it decides.
+
+     THE COST IS NAMED RATHER THAN HIDDEN: a chrome height that changes without
+     a resize — the strip wrapping to a second line because a longer instrument
+     was chosen — is not picked up until the next resize. The slack below
+     absorbs a few pixels of that and the rest is one row, which is why this is
+     the right trade and not merely the safe one.
+
+     AND NOT `requestAnimationFrame`, WHICH WAS THE THIRD FAILURE AND THE ONLY
+     ONE THAT BREAKS WHEN NOBODY IS LOOKING. A double-rAF was written here to
+     let the panel settle before reading. rAF DOES NOT RUN IN A BACKGROUND TAB:
+     measured with the pane hidden, the callback never fired, `barBoxH` stayed
+     at its initial 0, and `rowsThatFit`'s `max(1, …)` floor turned that into a
+     grid holding ONE ROW under a pager reporting six hundred thousand. A reader
+     who opens `/db` in a second tab and switches to it later gets that. A timer
+     is throttled in a background tab; it is not cancelled.
+
+     SO: READ NOW, AND READ AGAIN ON THE NEXT TURN OF THE LOOP. The immediate
+     read is correct in the ordinary case — a Svelte effect runs after the DOM
+     is updated — and the deferred one catches what settles late: web fonts, the
+     panel animations, the notes line under the table.
+     --------------------------------------------------------------------- */
+  $effect(() => {
+    const el = barBox;
+    if (!el) return;
+    const measure = () => (barBoxH = el.clientHeight);
+    measure();
+    const settle = setTimeout(measure, 0);
+    window.addEventListener('resize', measure);
+    return () => {
+      window.removeEventListener('resize', measure);
+      clearTimeout(settle);
+    };
+  });
+  /* EIGHT PIXELS OF SLACK, AND IT IS A DAMPER RATHER THAN A FUDGE.
+     ---------------------------------------------------------------------
+     MEASURED without it: a 1,400px window computed sixteen rows from a 670px
+     box, rendered them, and the box then settled at 665 — five pixels short,
+     so the table carried a five-pixel scrollbar. Late settling is normal here:
+     web fonts land, the panel animations finish, a scrollbar comes or goes.
+
+     THE REASON IT IS NOT SIMPLY RE-MEASURED is that re-measuring can spin. The
+     pager's own text carries the page COUNT, which changes when the page SIZE
+     changes — "of 38,969" against "of 12,470" — so a narrow window can wrap it
+     to a second line and change the chrome's height. Then: sixteen rows makes
+     the box short, fifteen makes it tall enough for sixteen, and the fit
+     alternates for as long as the tab is open. A tolerance is what stops a
+     control loop hunting across a boundary, and eight pixels is a fifth of a
+     row: it absorbs the jitter that was measured and it can only ever cost a
+     row when the box is within eight pixels of holding one anyway.
+
+     `- HEAD` because the sticky header sits INSIDE the scroll box and covers
+     the first rows; a fit computed without it is one row too many, which is
+     precisely one row of hidden scrolling. `max(1, …)` because a window short
+     enough to fit no rows must still ask for a row, or the pager reports zero
+     of zero on a store holding four million bars. */
+  /* 24, AND IT IS SIZED TO A NAMED THING RATHER THAN ROUNDED UP UNTIL THE BUG
+     STOPPED. `.bnotes` — the warnings strip under the grid — is 17px when it
+     carries a line and renders AFTER the bars load, so a box measured at 682
+     is 665 by the time the rows are in it. That is the seventeen; the rest is
+     the few pixels of font-and-animation settle measured earlier. It cannot be
+     observed away: the notes list one entry per file whose manifest disagrees
+     with what the file returned, and which files are read depends on the page
+     size, so watching that strip re-enters the loop this whole block exists to
+     cut. 24px is 0.6 of a row — it costs a row only when the box was within a
+     hair of holding one, and it guarantees the table never carries a five-pixel
+     scrollbar, which is the thing the reader actually notices. */
+  const FIT_SLACK = 24;
+  const rowsThatFit = $derived(
+    Math.max(1, Math.floor((barBoxH - HEAD - FIT_SLACK) / ROW))
+  );
+
   /* ---------------------------------------------------------------------
      WHAT HAS NO SOURCE, SAID ONCE EACH.
 
@@ -4514,6 +4652,38 @@
     page = Math.floor(firstRow / pageSize) + 1;
   }
 
+  /* THE FIT, APPLIED. Tracks exactly two things — the mode and the measured
+     row count — and does everything else inside `untrack`, because
+     `setPageSize` READS `pageNow` and `pageSize` and WRITES both. Tracked,
+     those reads would make this effect its own trigger and the page would
+     re-enter until the stack gave out; this file has closed that ring three
+     times already in one session and each time the symptom was a blank page
+     rather than a warning.
+
+     THE FEEDBACK PATH THAT WOULD ACTUALLY BITE IS THE OTHER ONE, and it is
+     worth naming because it is not obvious: if the box's height depended on how
+     many rows were in it, then setting the page size would resize the box,
+     which would recompute the fit, which would set the page size. It does not.
+     `.tbl` takes its height from `flex` against `.board` — the viewport less
+     the chrome — and the chrome does not count rows. The measurement is
+     independent of the thing it decides, which is what makes one pass enough. */
+  $effect(() => {
+    if (sizeMode !== 'fit') return;
+    /* NOTHING IS APPLIED BEFORE THE BOX HAS BEEN MEASURED. `barBoxH` starts at
+       0 and an unmeasured box is not a box that fits nothing — it is a box
+       nobody has looked at yet. Without this line the arithmetic reads
+       `(0 - 30 - 8) / 40`, the `max(1, …)` floor rounds that up to one, and the
+       grid renders a SINGLE row under a pager reporting six hundred thousand.
+       Measured, with the tab in the background so the measurement was late.
+       Until the first read lands the page keeps its declared default, which is
+       a sane grid rather than a broken one. */
+    if (barBoxH <= 0) return;
+    const want = rowsThatFit;
+    untrack(() => {
+      if (want > 0 && want !== pageSize) setPageSize(want);
+    });
+  });
+
   /**
    * Which page buttons to draw. Always first, last, current and its
    * neighbours; the rest elided - a 1,840-page run must not render 1,840
@@ -5443,8 +5613,14 @@
     return Math.round((Math.min(Math.abs(bps), full) / full) * 100);
   }
 
-  const ROW = 40;
-  const HEAD = 30; /* the sticky header covers the top of the scroll box */
+  /* `ROW` AND `HEAD` HAVE MOVED UP, to the `Fit` block beside `pageSize`, and
+     the move was forced rather than tidy: `rowsThatFit` is declared two
+     thousand lines above this point and divides by both. It RAN — a `$derived`
+     is evaluated lazily, long after the whole script has been through — so the
+     only thing that reported it was `svelte-check`, four times, on a temporal
+     dead zone that a browser never reaches. Working by luck is not the same as
+     working, and the next reader of this file would have had to establish that
+     for themselves. They are still the same two constants this section uses. */
   const OVER = 6;
   /** @type {HTMLElement | null} */
   let scroller = $state(null);
@@ -7802,9 +7978,22 @@
     {/if}
 
     <div class="tbl">
+        <!-- THE FIT IS PUBLISHED ON THE ELEMENT, AND IT IS KEPT RATHER THAN
+             SWEPT UP AFTERWARDS. `data-boxh` and `data-fit` went in as debug
+             scaffolding and earned their place: every failure in this one
+             measurement — a binding that reported only on mount, an observer
+             that fired a thousand times in a loop, a background tab that left
+             the height at zero — presented as a PLAUSIBLE row count with
+             nothing to check it against. Each was pinned only once the measured
+             height and the derived fit could be read from outside. Two
+             attributes, and they are the difference between "the grid looks
+             short" and "it read 682 and fitted 15 rows into 665". -->
         <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
         <div
           class="tbl-scroll bscroll"
+          bind:this={barBox}
+          data-fit={rowsThatFit}
+          data-boxh={barBoxH}
           tabindex="0"
           role="region"
           aria-label="Stored bars, {fmt(barPage.length)} on this page of {fmt(
@@ -8266,21 +8455,41 @@
         <Picker
           single
           label="page sizes"
-          summary={fmt(pageSize)}
+          summary={sizeMode === 'fit' ? `Fit · ${fmt(pageSize)}` : fmt(pageSize)}
           title="How many rows this page holds. The reader's place is kept across a change: the row you were standing on stays on screen."
-          rows={PAGE_SIZES.map((n) => ({
-            key: String(n),
-            name: fmt(n),
-            detail: n >= 1000 ? `${fmt(n * BAR_COLS.length)} cells` : undefined,
-            why:
-              n >= 1000
-                ? `${fmt(n)} rows in one document. On the bar grid that is ${fmt(n * BAR_COLS.length)} cells — legible, and slow to lay out.`
-                : undefined
-          }))}
-          selected={new Set([String(pageSize)])}
+          rows={[
+            {
+              key: 'fit',
+              name: 'Fit',
+              detail: `${fmt(rowsThatFit)} row(s)`,
+              why: `As many rows as this window can SHOW — measured now at ${fmt(rowsThatFit)}. The grid then holds nothing the screen cannot, so the table does not scroll and the page is one surface rather than two. Re-measured when the window changes.`
+            },
+            ...PAGE_SIZES.map((n) => ({
+              key: String(n),
+              name: fmt(n),
+              detail: n >= 1000 ? `${fmt(n * BAR_COLS.length)} cells` : undefined,
+              why:
+                n >= 1000
+                  ? `${fmt(n)} rows in one document. On the bar grid that is ${fmt(n * BAR_COLS.length)} cells — legible, and slow to lay out.`
+                  : n > rowsThatFit
+                    ? `${fmt(n)} rows into a box that can show ${fmt(rowsThatFit)}. The remainder scrolls INSIDE the table, which is a second scrollbar — deliberate here, and the reason Fit exists.`
+                    : undefined
+            }))
+          ]}
+          selected={new Set([sizeMode === 'fit' ? 'fit' : String(pageSize)])}
           onchange={(/** @type {Set<string>} */ sel) => {
-            const n = Number([...sel][0]);
-            if (Number.isFinite(n) && n > 0) setPageSize(n);
+            const key = [...sel][0];
+            if (key === 'fit') {
+              /* No `setPageSize` here: the effect owns the value in this mode,
+                 and setting it twice would move the reader's place twice. */
+              sizeMode = 'fit';
+              return;
+            }
+            const n = Number(key);
+            if (Number.isFinite(n) && n > 0) {
+              sizeMode = 'fixed';
+              setPageSize(n);
+            }
           }}
         />
       </div>
@@ -10056,7 +10265,31 @@
        it belongs on the scroller; this box is then whatever that needs plus its
        own furniture, and a note added under the table later cannot silently
        eat a row. */
-    flex: none;
+    /* ---------------------------------------------------------------------
+       AND THE HEIGHT IS THE SCREEN'S TO GIVE, NOT THIS BOX'S TO DEMAND.
+
+       A 25-row box is 1,030px. On a 1,200px window the chrome above leaves
+       about 500. Asking for 1,030 of a 500px hole does not fail loudly — it
+       hangs 461px of table BELOW THE FOLD and starts a second scrollbar to
+       reach it, which is the exact arrangement this page was told twice to
+       stop having. MEASURED in that state: two scrollers, and THIRTEEN rows on
+       screen under a box whose CSS said twenty-five. The number was true of the
+       box and false of the screen, and only the screen counts.
+
+       So the box takes what is left and no more. `flex: 1` against `.board`'s
+       remaining height, `min-height` only as a floor against vanishing —
+       not as a row count, because a row count is a promise about a viewport
+       this rule cannot see. How many rows that comes to is MEASURED at runtime
+       and the page size is set from it, so the grid holds exactly the rows that
+       fit and the box never scrolls at all. See `rowsThatFit`.
+
+       320px IS A SURVIVAL FLOOR AND NOT A PROMISE. It is about eight rows, and
+       it exists only so a very short window degrades to a small table rather
+       than to the nineteen-pixel one this file recorded earlier. Past it the
+       page scrolls, which is the honest outcome; above it nothing does.
+       --------------------------------------------------------------------- */
+    flex: 1;
+    min-height: 320px;
     display: flex;
     flex-direction: column;
     position: relative; /* the drawer's containing block */
@@ -10088,11 +10321,23 @@
        ceiling, nothing capped the box, and it stood at 2,030px with all fifty
        rows and an inner scroll range of ZERO. Measured both.
 
-       A STATIC BOX HAS ONE HEIGHT, so it is stated once as a height and neither
-       failure is reachable. `flex: none` beside it stops `.tbl`'s column from
-       stretching it back out. */
-    flex: none;
-    height: calc(25 * var(--dbrow) + var(--dbhead));
+       AND THE THIRD ANSWER IS NEITHER: THE BOX FILLS `.tbl` AND `.tbl` FILLS
+       WHAT THE SCREEN LEFT. A fixed `height: calc(25 * var(--dbrow) + ...)`
+       stood here and was measured hanging 461px below the fold with a second
+       scrollbar to reach it. Any height stated HERE is a guess about a viewport
+       this rule cannot see; the only honest source for it is the viewport
+       itself, so `.tbl` reads it via `flex` and this box takes all of `.tbl`.
+
+       `min-height: 0` IS BACK AND IS NOW LOAD-BEARING IN THE OTHER DIRECTION:
+       a flex child will not shrink under its own content without it, and this
+       box's content is fifty rows. It must shrink; the rows are what scrolls —
+       except that `rowsThatFit` sets the page size from this box's measured
+       height, so in practice there is nothing to scroll and the range is zero.
+       The overflow stays `auto` rather than `hidden` so the rare case that
+       overruns it — a short window under the 320px floor — degrades to a
+       scrollbar instead of to hidden rows. */
+    flex: 1;
+    min-height: 0;
     /* ---------------------------------------------------------------------
        THIS SCROLLS AGAIN, AND THE ROUND TRIP IS WORTH STATING PLAINLY BECAUSE
        BOTH ARRANGEMENTS ARE DEFENSIBLE AND ONLY ONE ANSWERS THIS PAGE.
