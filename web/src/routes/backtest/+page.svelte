@@ -745,6 +745,154 @@
    * newest bar already on screen, which IS the span's last bar because
    * `/bars/window.json` answers newest first.
    */
+  /* ====================================================================
+     THE SERIES THE CHARTS ACTUALLY DRAW
+     --------------------------------------------------------------------
+     WHAT THESE ARE, SAID ONCE AND SAID PLAINLY: every curve, bar and
+     column below is the BENCHMARK's — one unit of the index, held. Not the
+     strategy's. The strategy has no series on disk and cannot be given
+     one, so drawing its equity curve is off the table permanently.
+
+     But the benchmark's series IS on disk: it is the closes of the bars
+     already loaded for the price chart. Cumulative P&L of holding, P&L per
+     week, the distribution of per-bar returns, the run-up and drawdown
+     segments — all of it folds out of `series.bars` and all of it is true.
+
+     That is the difference between an empty frame and a full one, and it
+     costs nothing in honesty as long as every plot says whose line it is.
+     Each chart carries that label; none of them claims to be the strategy.
+     ==================================================================== */
+
+  /** Cumulative P&L of holding one unit, in paisa, bar by bar. */
+  const holdCurve = $derived.by(() => {
+    const bars = series.bars;
+    if (bars.length < 2) return [];
+    const base = bars[0].c;
+    return bars.map((b) => ({ t: b.t, v: b.c - base }));
+  });
+
+  /**
+   * The bars bucketed by the selected period, each bucket's close-to-close
+   * change in paisa.
+   *
+   * Buckets are keyed by a STRING derived from the bar's IST date, so a
+   * week that straddles a month or a year stays one bucket. Ordered by first
+   * appearance, which is chronological because the bars are.
+   */
+  const holdPeriods = $derived.by(() => {
+    const bars = series.bars;
+    if (bars.length < 2) return [];
+    /** @param {number} t */
+    const key = (t) => {
+      const d = new Date(t * 1000);
+      const y = d.getUTCFullYear();
+      if (periodScale === 'yearly') return `${y}`;
+      if (periodScale === 'quarterly') return `Q${Math.floor(d.getUTCMonth() / 3) + 1} '${String(y).slice(2)}`;
+      if (periodScale === 'daily') return `${d.getUTCDate()}/${d.getUTCMonth() + 1}`;
+      // Weekly: the Monday that starts the bar's week.
+      const monday = new Date(d);
+      monday.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7));
+      return `${monday.getUTCDate()}/${monday.getUTCMonth() + 1}`;
+    };
+    /** @type {Map<string, {label: string, first: number, last: number}>} */
+    const buckets = new Map();
+    for (const b of bars) {
+      const k = key(b.t);
+      const at = buckets.get(k);
+      if (at) at.last = b.c;
+      else buckets.set(k, { label: k, first: b.c, last: b.c });
+    }
+    return [...buckets.values()].map((x) => ({ label: x.label, v: x.last - x.first }));
+  });
+
+  /**
+   * The distribution of per-bar returns, in basis points, bucketed.
+   *
+   * Per BAR, not per trade — the ledger has no trades to distribute. Said on
+   * the chart, because a histogram labelled "returns" that is silently a
+   * different population is exactly the quiet substitution this page refuses.
+   */
+  const returnHistogram = $derived.by(() => {
+    const bars = series.bars;
+    if (bars.length < 2) return { bins: [], max: 0, avgLoss: null, avgGain: null };
+    const rets = [];
+    for (const b of bars) {
+      if (b.o > 0) rets.push(Math.round(((b.c - b.o) / b.o) * 10_000));
+    }
+    if (rets.length === 0) return { bins: [], max: 0, avgLoss: null, avgGain: null };
+    const lo = Math.min(...rets);
+    const hi = Math.max(...rets);
+    const width = Math.max(1, Math.ceil((hi - lo) / 18));
+    /** @type {Map<number, number>} */
+    const counts = new Map();
+    for (const r of rets) {
+      const slot = Math.floor((r - lo) / width);
+      counts.set(slot, (counts.get(slot) ?? 0) + 1);
+    }
+    const bins = [];
+    for (let i = 0; i <= Math.floor((hi - lo) / width); i += 1) {
+      const from = lo + i * width;
+      bins.push({ from, mid: from + width / 2, n: counts.get(i) ?? 0 });
+    }
+    const losses = rets.filter((r) => r < 0);
+    const gains = rets.filter((r) => r > 0);
+    const mean = (xs) => (xs.length === 0 ? null : Math.round(xs.reduce((a, b) => a + b, 0) / xs.length));
+    return {
+      bins,
+      max: Math.max(1, ...bins.map((b) => b.n)),
+      lo,
+      hi,
+      avgLoss: mean(losses),
+      avgGain: mean(gains),
+      losers: losses.length,
+      winners: gains.length,
+      flat: rets.length - losses.length - gains.length,
+      total: rets.length
+    };
+  });
+
+  /**
+   * Alternating run-up and drawdown segments of the hold curve.
+   *
+   * A segment runs from one running extreme to the next reversal. Real, and
+   * a property of the PRICE — which is what makes it the benchmark's growth
+   * and decline rather than the strategy's.
+   */
+  const holdSwings = $derived.by(() => {
+    const curve = holdCurve;
+    if (curve.length < 3) return { segs: [], max: 1 };
+    const segs = [];
+    let anchor = curve[0].v;
+    let extreme = curve[0].v;
+    let dir = 0;
+    for (const p of curve) {
+      const rising = p.v > extreme;
+      const falling = p.v < extreme;
+      if (dir === 0) {
+        if (rising) dir = 1;
+        else if (falling) dir = -1;
+        if (rising || falling) extreme = p.v;
+        continue;
+      }
+      if ((dir === 1 && rising) || (dir === -1 && falling)) {
+        extreme = p.v;
+        continue;
+      }
+      // A move of at least 1% of the whole range counts as a reversal, so the
+      // chart shows swings rather than every tick of noise.
+      const span = Math.abs(p.v - extreme);
+      if (span > Math.abs(extreme - anchor) * 0.35 && span > 0) {
+        segs.push({ up: dir === 1, size: Math.abs(extreme - anchor) });
+        anchor = extreme;
+        extreme = p.v;
+        dir = -dir;
+      }
+    }
+    segs.push({ up: dir === 1, size: Math.abs(extreme - anchor) });
+    const kept = segs.filter((s) => s.size > 0).slice(-16);
+    return { segs: kept, max: Math.max(1, ...kept.map((s) => s.size)) };
+  });
+
   const buyHold = $derived.by(() => {
     if (bench.phase !== 'ready' || series.bars.length === 0) return null;
     const last = series.bars[series.bars.length - 1];
@@ -947,6 +1095,55 @@
   const benchScale = $derived(
     Math.max(1, Math.abs(outperformance?.strategy ?? 0), Math.abs(outperformance?.hold ?? 0))
   );
+
+  /* ---- chart geometry -------------------------------------------------
+     Plain arithmetic over a 1000×260 viewBox, so the SVG scales with its
+     container and no measurement is needed. Every one takes the series it
+     draws as an argument rather than reading state, so a chart cannot
+     silently render one panel's data under another panel's heading. ---- */
+
+  /** The vertical extent a curve needs, symmetric so zero stays on a line. */
+  function curveScale(points) {
+    return Math.max(1, ...points.map((p) => Math.abs(p.v)));
+  }
+
+  /** The polyline through a cumulative series. */
+  function linePath(points) {
+    const scale = curveScale(points);
+    const step = 1000 / Math.max(1, points.length - 1);
+    return points
+      .map((p, i) => `${i === 0 ? 'M' : 'L'}${(i * step).toFixed(1)} ${(130 - (p.v / scale) * 120).toFixed(1)}`)
+      .join(' ');
+  }
+
+  /** The same polyline, closed to the zero line, for the area fill. */
+  function areaPath(points) {
+    const step = 1000 / Math.max(1, points.length - 1);
+    return `${linePath(points)} L${((points.length - 1) * step).toFixed(1)} 130 L0 130 Z`;
+  }
+
+  /** The tallest bar in a set, so a column chart shares one scale. */
+  function barScale(bars) {
+    return Math.max(1, ...bars.map((b) => Math.abs(b.v)));
+  }
+
+  /** At most seven x labels, evenly spaced, so the axis never crowds. */
+  function barLabels(bars) {
+    if (bars.length === 0) return [];
+    if (bars.length <= 7) return bars.map((b) => b.label);
+    const out = [];
+    for (let i = 0; i < 7; i += 1) out.push(bars[Math.round((i * (bars.length - 1)) / 6)].label);
+    return out;
+  }
+
+  /** Where a basis-point value falls across the histogram's own range. */
+  function histX(h, bps) {
+    const span = Math.max(1, h.hi - h.lo);
+    return (((bps - h.lo) / span) * 1000).toFixed(1);
+  }
+
+  /** Basis points as a signed percent, for the histogram's axis and legend. */
+  const pctOf = (bps) => `${bps >= 0 ? '+' : ''}${(bps / 100).toFixed(2)}%`;
 
   /** A basis-point integer as a percent string, or the em dash. */
   const pct = (bps) => (bps === null || bps === undefined ? '—' : `${bps >= 0 ? '+' : ''}${(bps / 100).toFixed(2)}%`);
@@ -1277,6 +1474,129 @@
      the padlock makes one level down: the thing keeps its place, and the
      absence is legible instead of invisible.
      ============================================================ -->
+
+<!-- ============================================================
+     THE DRAWN CHARTS.
+     Each takes a real series folded out of the bars on disk and each
+     carries a label saying whose series it is. They are the BENCHMARK's --
+     one unit of the index, held -- because the strategy has none on disk
+     and never will until the sweep writes one.
+     ============================================================ -->
+
+{#snippet areaChart(points, ticks, xLabels, note)}
+  <div class="cf">
+    <div class="cf-plot tall">
+      <svg class="cf-svg" viewBox="0 0 1000 260" preserveAspectRatio="none" aria-hidden="true">
+        {#each [0, 65, 130, 195, 260] as y (y)}
+          <line x1="0" y1={y} x2="1000" y2={y} stroke="var(--n5)" stroke-width="1" vector-effect="non-scaling-stroke" />
+        {/each}
+        {#if points.length > 1}
+          <path d={areaPath(points)} fill="var(--acc-soft)" />
+          <path d={linePath(points)} fill="none" stroke="var(--acc)" stroke-width="2" vector-effect="non-scaling-stroke" stroke-linejoin="round" />
+        {/if}
+      </svg>
+      <div class="cf-axis">{#each ticks as t (t)}<span>{t}</span>{/each}</div>
+    </div>
+    <div class="cf-x">{#each xLabels as x (x)}<span>{x}</span>{/each}</div>
+    <p class="cf-note">{note}</p>
+  </div>
+{/snippet}
+
+{#snippet barChart(bars, ticks, note, legend)}
+  <div class="cf">
+    <div class="cf-plot tall">
+      <svg class="cf-svg" viewBox="0 0 1000 260" preserveAspectRatio="none" aria-hidden="true">
+        {#each [0, 65, 130, 195, 260] as y (y)}
+          <line x1="0" y1={y} x2="1000" y2={y} stroke="var(--n5)" stroke-width="1" vector-effect="non-scaling-stroke" />
+        {/each}
+        <line x1="0" y1="130" x2="1000" y2="130" stroke="var(--n7)" stroke-width="1" vector-effect="non-scaling-stroke" />
+        {#each bars as b, i (i)}
+          {@const w = 1000 / Math.max(1, bars.length)}
+          {@const h = (Math.abs(b.v) / barScale(bars)) * 120}
+          <rect
+            x={i * w + w * 0.18}
+            y={b.v >= 0 ? 130 - h : 130}
+            width={w * 0.64}
+            height={Math.max(1, h)}
+            fill={b.v >= 0 ? 'var(--up)' : 'var(--down)'}
+            rx="1"
+          />
+        {/each}
+      </svg>
+      <div class="cf-axis">{#each ticks as t (t)}<span>{t}</span>{/each}</div>
+    </div>
+    <div class="cf-x">
+      {#each barLabels(bars) as x (x)}<span>{x}</span>{/each}
+    </div>
+    {#if legend}
+      <ul class="cf-legend">
+        {#each legend as l, i (l)}<li><span class="cf-sw s{i}"></span>{l}</li>{/each}
+      </ul>
+    {/if}
+    <p class="cf-note">{note}</p>
+  </div>
+{/snippet}
+
+{#snippet histogram(h, note)}
+  <div class="cf">
+    <div class="cf-plot">
+      <svg class="cf-svg" viewBox="0 0 1000 200" preserveAspectRatio="none" aria-hidden="true">
+        {#each [0, 50, 100, 150, 200] as y (y)}
+          <line x1="0" y1={y} x2="1000" y2={y} stroke="var(--n5)" stroke-width="1" vector-effect="non-scaling-stroke" />
+        {/each}
+        {#each h.bins as b, i (i)}
+          {@const w = 1000 / Math.max(1, h.bins.length)}
+          {@const bh = (b.n / h.max) * 190}
+          <rect x={i * w + w * 0.12} y={200 - bh} width={w * 0.76} height={Math.max(1, bh)} fill={b.mid < 0 ? 'var(--down)' : 'var(--up)'} rx="1" />
+        {/each}
+        {#if h.avgLoss !== null}
+          <line x1={histX(h, h.avgLoss)} y1="0" x2={histX(h, h.avgLoss)} y2="200" stroke="var(--down)" stroke-width="1.5" stroke-dasharray="4 3" vector-effect="non-scaling-stroke" />
+        {/if}
+        {#if h.avgGain !== null}
+          <line x1={histX(h, h.avgGain)} y1="0" x2={histX(h, h.avgGain)} y2="200" stroke="var(--up)" stroke-width="1.5" stroke-dasharray="4 3" vector-effect="non-scaling-stroke" />
+        {/if}
+      </svg>
+      <div class="cf-axis">
+        <span>{h.max}</span><span>{Math.round(h.max / 2)}</span><span>0</span>
+      </div>
+    </div>
+    <div class="cf-x">
+      <span>{pctOf(h.lo)}</span><span>{pctOf(Math.round((h.lo + h.hi) / 2))}</span><span>{pctOf(h.hi)}</span>
+    </div>
+    <ul class="cf-legend">
+      <li><span class="cf-sw s1"></span>Losers<b>{exact(h.losers)}</b></li>
+      <li><span class="cf-sw s0"></span>Winners<b>{exact(h.winners)}</b></li>
+      <li class="dash"><span class="cf-sw dashed"></span>Average loss<b>{h.avgLoss === null ? '—' : pctOf(h.avgLoss)}</b></li>
+      <li class="dash"><span class="cf-sw dashed"></span>Average profit<b>{h.avgGain === null ? '—' : pctOf(h.avgGain)}</b></li>
+    </ul>
+    <p class="cf-note">{note}</p>
+  </div>
+{/snippet}
+
+{#snippet swingChart(sw, note)}
+  <div class="cf">
+    <div class="cf-plot">
+      <svg class="cf-svg" viewBox="0 0 1000 200" preserveAspectRatio="none" aria-hidden="true">
+        {#each [0, 50, 100, 150, 200] as y (y)}
+          <line x1="0" y1={y} x2="1000" y2={y} stroke="var(--n5)" stroke-width="1" vector-effect="non-scaling-stroke" />
+        {/each}
+        {#each sw.segs as s, i (i)}
+          {@const w = 1000 / Math.max(1, sw.segs.length)}
+          {@const h = (s.size / sw.max) * 190}
+          <rect x={i * w + w * 0.16} y={200 - h} width={w * 0.68} height={Math.max(1, h)} fill={s.up ? 'var(--up)' : 'var(--down)'} rx="1" />
+        {/each}
+      </svg>
+      <div class="cf-axis">
+        <span>{money(sw.max)}</span><span>{money(Math.round(sw.max / 2))}</span><span>0</span>
+      </div>
+    </div>
+    <ul class="cf-legend">
+      <li><span class="cf-sw s0"></span>Run-up</li>
+      <li><span class="cf-sw s1"></span>Drawdown</li>
+    </ul>
+    <p class="cf-note">{note}</p>
+  </div>
+{/snippet}
 {#snippet chartFrame(why, legend, ticks, xLabels, pager)}
   <div class="cf">
     <div class="cf-plot">
@@ -2207,13 +2527,22 @@
                       {/each}
                     </div>
                   </div>
-                  {@render chartFrame(
-                    'Per-period totals need the sweep to record when each trade resolved. It records one total for the whole span, so there is no series to bucket by ' + periodScale.replace('ly', '') + '.',
-                    ['Realized profit', 'Realized loss', 'Favorable excursion', 'Adverse excursion'],
-                    PNL_TICKS,
-                    periodTicks,
-                    periodScale === 'daily'
-                  )}
+                  {#if holdPeriods.length > 1}
+                    {@render barChart(
+                      holdPeriods,
+                      [money(barScale(holdPeriods)), money(Math.round(barScale(holdPeriods) / 2)), "0", money(-Math.round(barScale(holdPeriods) / 2)), money(-barScale(holdPeriods))],
+                      "Per-period P&L of HOLDING one unit, from the bars on disk. The strategy has no per-period series — it records one total for the whole span — so this is the benchmark, and it is the only one of the two that can be bucketed.",
+                      ["Benchmark gain", "Benchmark loss"]
+                    )}
+                  {:else}
+                    {@render chartFrame(
+                      'No bars are loaded, so there is nothing to bucket by ' + periodScale.replace('ly', '') + '.',
+                      ['Realized profit', 'Realized loss', 'Favorable excursion', 'Adverse excursion'],
+                      PNL_TICKS,
+                      periodTicks,
+                      periodScale === 'daily'
+                    )}
+                  {/if}
                   <p class="tt-note2">
                     Return is on <b>one unit of the index</b>, against the price at the span's start ({money(bench.open)}).
                     The ledger records no capital, so a return on equity has no denominator on disk. Annualised over the
@@ -2249,13 +2578,22 @@
                       {/each}
                     </div>
                   </div>
-                  {@render chartFrame(
-                    'The per-period comparison needs a strategy PnL series. Only the two whole-span totals are recorded, and those are the bars drawn under Performance above.',
-                    ['Strategy PnL', 'Buy and hold PnL'],
-                    PNL_TICKS,
-                    periodTicks,
-                    periodScale === 'daily'
-                  )}
+                  {#if holdCurve.length > 1}
+                    {@render areaChart(
+                      holdCurve,
+                      [money(curveScale(holdCurve)), money(Math.round(curveScale(holdCurve) / 2)), "0", money(-Math.round(curveScale(holdCurve) / 2)), money(-curveScale(holdCurve))],
+                      periodTicks,
+                      "Cumulative P&L of HOLDING one unit across the window on screen, bar by bar. The strategy line TradingView draws beside this one needs an equity series the sweep never wrote — its whole-span total is the bar under Performance above."
+                    )}
+                  {:else}
+                    {@render chartFrame(
+                      'No bars are loaded, so the benchmark curve has nothing to draw.',
+                      ['Strategy PnL', 'Buy and hold PnL'],
+                      PNL_TICKS,
+                      periodTicks,
+                      false
+                    )}
+                  {/if}
                 {:else if paTab === 'margin'}
                   <div class="tt-quad">
                     <div class="tt-q"><span class="tt-k">Margin efficiency</span><span class="tt-qv"><Lock why="The engine models no account." /></span></div>
@@ -2279,13 +2617,20 @@
                     <div class="tt-q"><span class="tt-k">Max drawdown as % of opening price</span><span class="tt-qv">{drawdownBps === null ? '—' : `${(drawdownBps / 100).toFixed(2)}%`}</span></div>
                   </div>
                   <h5 class="tt-h5">Alternating growth and decline</h5>
-                  {@render chartFrame(
-                    'Alternating run-up and drawdown periods need an equity series to segment. One drawdown figure is recorded, and it is the number in the quad above.',
-                    ['Run-up', 'Drawdown', 'Current run-up'],
-                    PCT_TICKS,
-                    periodTicks,
-                    false
-                  )}
+                  {#if holdSwings.segs.length > 0}
+                    {@render swingChart(
+                      holdSwings,
+                      "Alternating run-up and drawdown of the BENCHMARK — one unit held — segmented from the cumulative curve on disk. The strategy has no equity series to segment, so its single recorded drawdown is the figure in the quad above."
+                    )}
+                  {:else}
+                    {@render chartFrame(
+                      'No bars are loaded, so there is no curve to segment into run-ups and drawdowns.',
+                      ['Run-up', 'Drawdown', 'Current run-up'],
+                      PCT_TICKS,
+                      periodTicks,
+                      false
+                    )}
+                  {/if}
                   <!-- TradingView's second block on this tab: run-up and
                        drawdown, each as maximum / average / current, on one
                        shared scale. The maximum drawdown is the one figure
@@ -2350,7 +2695,7 @@
                   <div class="tt-two">
                     <div>
                       <h5 class="tt-h5">Returns distribution</h5>
-                      {@render chartFrame('A histogram of per-trade returns needs the return of every trade. The sweep records ' + exact(openRun.trades) + ' as a count and keeps no list.', HIST_LEGEND, COUNT_TICKS, RETURN_TICKS, false)}
+                      {#if returnHistogram.bins.length > 0}{@render histogram(returnHistogram, 'The distribution of per-BAR returns over the window on screen, from the bars on disk. NOT per trade — the sweep records ' + exact(openRun.trades) + ' as a count and keeps no list, so a per-trade histogram has no population to draw.')}{:else}{@render chartFrame('No bars are loaded, so there is nothing to distribute.', HIST_LEGEND, COUNT_TICKS, RETURN_TICKS, false)}{/if}
                     </div>
                     <div>
                       <h5 class="tt-h5">Trades distribution</h5>
@@ -4000,6 +4345,27 @@
     font-style: normal;
     color: inherit;
     opacity: 0.85;
+  }
+
+  /* ---- drawn charts ---- */
+  .cf-plot.tall {
+    height: 250px;
+  }
+  .cf-svg {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+  .cf-note {
+    margin: 0.5rem 0 0;
+    font-size: 0.73rem;
+    color: var(--n8);
+    max-width: 96ch;
+  }
+  .cf-note b {
+    color: var(--n10);
   }
 
   /* ---- the chart frame ---- */
