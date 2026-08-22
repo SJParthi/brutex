@@ -9967,20 +9967,54 @@
        on a 1300px one it is 1040px: about twenty-six rows, which is what a
        reader of a price table is actually looking for.
        --------------------------------------------------------------------- */
-    min-height: min(80vh, 1100px);
+    /* AND NOW THERE IS NO FLOOR AT ALL, BECAUSE THERE IS NOTHING TO SHRINK.
+       Every number above is the history of a box that had to survive inside a
+       fixed-height column — 220px to stop it vanishing, then 680, then
+       min(80vh, 1100px) to stop it being a letterbox. With the inner scroller
+       gone this box simply IS its rows: fifty of them at 40px is 2,030px, and
+       the page scrolls to them. A floor would now be a CEILING on nothing, and
+       `flex: 1` would stretch an already-correct height. */
+    flex: none;
     display: flex;
     flex-direction: column;
     position: relative; /* the drawer's containing block */
     border: 1px solid var(--line);
     border-radius: var(--r4);
-    overflow: hidden;
+    /* `visible`, SO THE STICKY HEADER CAN SEE THE PAGE. See `.tbl-scroll`:
+       a non-visible overflow anywhere between the `<th>` and `.board` makes
+       THAT box the sticky scroller, and the header would then scroll away with
+       the table instead of holding at the top of the page. The rounded corners
+       lose their clip, which is what the border is drawn for anyway. */
+    overflow: visible;
     background: var(--panel);
     box-shadow: var(--e2);
   }
   .tbl-scroll {
     flex: 1;
     min-height: 0;
-    overflow: auto;
+    /* ---------------------------------------------------------------------
+       THIS NO LONGER SCROLLS, AND THAT IS THE POINT.
+
+       TWO SCROLLERS IS THE BUG, NOT THE HANDOFF. d34bd03 fixed the handoff —
+       reaching the last row now chains into the page instead of stopping dead —
+       and the operator's answer to that was the right one: with a scroller
+       inside a scroller, the pointer's position decides which one moves, so you
+       never know which you are driving and either can feel stuck. Chaining made
+       it recoverable. It did not make it legible.
+
+       ONE SCROLLBAR NOW. `.board` scrolls the page; this box grows to its
+       content and the rows go with it. The `<th>`s are already
+       `position: sticky; top: 0` — they were sticking to the top of THIS box,
+       and with no scroll container here they stick to the page instead, so the
+       column heads stay put as the whole page moves. That is the arrangement
+       that needed no explaining in the first place.
+
+       `overflow: visible` RATHER THAN REMOVING THE LINE, and on `.tbl` too:
+       any ancestor with a non-visible overflow becomes the sticky element's
+       containing scroller, so a leftover `hidden` between the `<th>` and
+       `.board` would pin the header to a box that scrolls away with the page.
+       --------------------------------------------------------------------- */
+    overflow: visible;
     /* SCROLL CHAINS OUT OF THE ROWS AND ON INTO THE PAGE.
        `overscroll-behavior: contain` is right for a popover — the instrument
        menu keeps it, because scrolling a dropdown must not move the page behind
@@ -10655,8 +10689,15 @@
 
   /* ---- THE BAR GRID. A real table: paged, not windowed, so the browser's
      own column algorithm can do the work. */
+  /* `.bscroll` NO LONGER SCROLLS EITHER, AND IT IS WHY THE FIRST ATTEMPT FAILED.
+     The scroll region carries BOTH classes — `class="tbl-scroll bscroll"` — so
+     setting `overflow: visible` on `.tbl-scroll` alone left this rule standing
+     and the box went on scrolling. Measured: the `<th>` still reported its
+     nearest scroller as `.tbl-scroll`, so it stuck to a box 2,049px tall and
+     scrolled off the screen with it — the header vanished at -857px.
+     Two class names for one box is how a change lands on half of it. */
   .bscroll {
-    overflow: auto;
+    overflow: visible;
   }
   .bgrid {
     border-collapse: separate;
