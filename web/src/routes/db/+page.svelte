@@ -3639,19 +3639,53 @@
   }
 
   /**
-   * One month file, for one series.
+   * One month file, for one series — CACHED ON THE PROMISE, NOT ON THE ANSWER.
+   *
+   * THE DUPLICATE THIS REMOVES. `barCache` held finished reads, so two askers
+   * for the same file deduplicated only if the first had already COME BACK.
+   * The fetch effect re-runs as the query settles, and those runs overlap:
+   * measured on a fresh pull, page 1 fired seven requests where the settled
+   * plan needs three — BANKNIFTY's 2026-08 and 2026-07 were each fetched twice,
+   * because the second ask was made while the first was still in flight and the
+   * cache was therefore still empty.
+   *
+   * Caching the PROMISE closes that: the second asker joins the first request
+   * instead of starting a second one. Deduplication becomes a property of
+   * asking rather than of timing.
+   *
+   * ONLY SUCCESSES SURVIVE, which is the rule the old cache kept and this one
+   * must not lose. A refusal is a VALUE here, not a rejection — one unreadable
+   * file must not blank the twelve that read — so the entry is dropped once a
+   * failed read resolves, and the next ask is a real retry rather than the same
+   * failure served from memory for ever.
+   *
+   * @param {string} feed
+   * @param {any} r
+   * @returns {Promise<any>}
+   */
+  function readBarFile(feed, r) {
+    const hit = barCache.get(r.key);
+    if (hit) return Promise.resolve(hit);
+    const inflight = fetchBarFile(feed, r).then((out) => {
+      if (out && out.error === null) barCache.set(r.key, out);
+      else barCache.delete(r.key);
+      return out;
+    });
+    barCache.set(r.key, inflight);
+    return inflight;
+  }
+
+  /**
+   * The read itself. Called only by [`readBarFile`], which owns the cache.
    *
    * A FAILURE IS A VALUE HERE, NOT A REJECTION: one unreadable file must not
    * blank the twelve that read, so the grid lists each refusal under its own
-   * instrument-month. Only successes are cached - a retry has to be able to
-   * succeed.
+   * instrument-month.
    *
    * @param {string} feed
    * @param {any} r
    */
-  async function readBarFile(feed, r) {
-    const hit = barCache.get(r.key);
-    if (hit) return hit;
+  async function fetchBarFile(feed, r) {
     /* EXCHANGE-SEGMENT-SYMBOL, AND THE SYMBOL KEEPS ITS OWN HYPHENS. The
        store's series name is `Exchange-Segment-Symbol`, and a symbol is
        legally `ABB-III` or `NIFTY-2026-08-27-2500000-CE`. Only the FIRST
@@ -3731,7 +3765,8 @@
         faults: Array.isArray(body) ? null : (body?.faults ?? null),
         error: null
       };
-      barCache.set(r.key, out);
+      /* NOT CACHED HERE ANY MORE — `readBarFile` owns the cache, and writing it
+         from both places is how the two spellings drift. */
       return out;
     } catch (why) {
       const w = /** @type {any} */ (why);
