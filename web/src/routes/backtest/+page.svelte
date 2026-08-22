@@ -63,7 +63,10 @@
    */
   import { untrack } from 'svelte';
   import { feeds } from '$lib/feeds.svelte.js';
-  import { ask } from '$lib/ask.js';
+  /* RENAMED ON IMPORT. This page's Run control owns a state object called
+     `ask` — what the operator is asking the sweep for — and the fetch helper
+     is a different thing entirely. One name for one value. */
+  import { ask as ask_ } from '$lib/ask.js';
   import { rupee, group, exact } from '$lib/money.js';
   import * as prefix from '$lib/prefix.js';
   /* THE FEED'S OWN MASTER, ALREADY ON HAND. `+layout.svelte` calls
@@ -89,7 +92,7 @@
   async function fetchLedger() {
     load.phase = 'loading';
     try {
-      const response = await ask(`/backtest.json?limit=${LIMIT}`, { cache: 'no-store' });
+      const response = await ask_(`/backtest.json?limit=${LIMIT}`, { cache: 'no-store' });
       if (!response.ok && response.status !== 503) {
         // A NON-503 FAILURE IS THE SERVER, NOT THE CONFIGURATION. 503 still
         // carries a parseable body with the refusal in it, so it is read
@@ -140,6 +143,118 @@
 
   $effect(() => {
     untrack(() => fetchLedger());
+  });
+
+  /* ====================================================================
+     STARTING A SWEEP FROM HERE
+     --------------------------------------------------------------------
+     Until `POST /backtest/run` existed this page reported on work it
+     could not cause: the operator read it, decided to try another rung,
+     left for a terminal, and came back to refresh. Half a console.
+
+     THE POLL IS THE SHAPE `/pull/run.json` ALREADY USES, and it is one
+     lock take on the server — never a store read — so refreshing it
+     every two seconds through an hour-long sweep costs the disk nothing.
+     It stops the moment the run is no longer in flight, because a poll
+     that outlives its subject is a request nobody is waiting for.
+     ==================================================================== */
+
+  /** The span and threshold the Run control will send. */
+  let ask = $state({ from: '2019-12', to: '2026-08', supportPpm: 200_000 });
+  /** @type {{ phase: 'idle'|'starting'|'running'|'done'|'failed', run: any, why: string }} */
+  let sweep = $state({ phase: 'idle', run: null, why: '' });
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  let pollAt = null;
+
+  /** `YYYY-MM` as the two numbers the route wants, or null. */
+  function months(text) {
+    const m = /^(\d{4})-(\d{2})$/.exec(text ?? '');
+    if (!m) return null;
+    const year = Number(m[1]);
+    const month = Number(m[2]);
+    return month >= 1 && month <= 12 ? { year, month } : null;
+  }
+
+  async function pollSweep() {
+    try {
+      const response = await ask_(`/backtest/run.json`, { cache: 'no-store' });
+      if (!response.ok) return;
+      const body = await response.json();
+      const run = body.running;
+      if (!run) {
+        sweep = { phase: 'idle', run: null, why: '' };
+        return;
+      }
+      if (run.in_flight) {
+        sweep = { phase: 'running', run, why: '' };
+        pollAt = setTimeout(pollSweep, 2000);
+        return;
+      }
+      // FINISHED: the ledger now has one more record, so the table is stale.
+      sweep = { phase: 'done', run, why: '' };
+      fetchLedger();
+    } catch (error) {
+      sweep = {
+        phase: 'failed',
+        run: null,
+        why: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+
+  async function startSweep() {
+    const from = months(ask.from);
+    const to = months(ask.to);
+    if (!from || !to) {
+      sweep = {
+        phase: 'failed',
+        run: null,
+        why: 'Both months must be written as YYYY-MM, and the month must be 01 to 12.'
+      };
+      return;
+    }
+    sweep = { phase: 'starting', run: null, why: '' };
+    try {
+      const response = await ask_('/backtest/run', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          feed: activeFeed,
+          underlying: sweepSymbol,
+          from_year: from.year,
+          from_month: from.month,
+          to_year: to.year,
+          to_month: to.month,
+          support_ppm: ask.supportPpm
+        })
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok || body.accepted !== true) {
+        sweep = {
+          phase: 'failed',
+          run: null,
+          why: body.refusal ?? `The server answered ${response.status} and gave no reason.`
+        };
+        return;
+      }
+      sweep = { phase: 'running', run: null, why: '' };
+      pollAt = setTimeout(pollSweep, 1200);
+    } catch (error) {
+      sweep = {
+        phase: 'failed',
+        run: null,
+        why: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+
+  /** Which instrument a new sweep runs over. Defaults to the newest run's. */
+  let sweepSymbol = $state('NIFTY');
+
+  // A POLL MUST NOT OUTLIVE THE PAGE. Without this a navigation away leaves a
+  // timer firing against a component that is gone.
+  $effect(() => () => {
+    if (pollAt !== null) clearTimeout(pollAt);
   });
 
   /* ====================================================================
@@ -547,7 +662,7 @@
       // 30 s rather than the default 15: 81 months of 30-minute bars is 21,620
       // records off a cold page cache, and giving up on a read that is working
       // would report a wedged server that is not one.
-      const response = await ask(url, { cache: 'no-store', ms: 30_000 });
+      const response = await ask_(url, { cache: 'no-store', ms: 30_000 });
       if (!response.ok) {
         series = {
           phase: 'failed',
@@ -652,7 +767,7 @@
    */
   async function loadRungs(run) {
     try {
-      const response = await ask(`/store.json?feed=${encodeURIComponent(run.feed)}`, {
+      const response = await ask_(`/store.json?feed=${encodeURIComponent(run.feed)}`, {
         cache: 'no-store',
         ms: 30_000
       });
@@ -720,7 +835,7 @@
     bench = { phase: 'loading', open: 0, close: 0, why: '' };
     const first = `${run.from_year}-${String(run.from_month).padStart(2, '0')}`;
     try {
-      const response = await ask(
+      const response = await ask_(
         `/bars/window.json?feed=${encodeURIComponent(run.feed)}` +
           `&exchange=${encodeURIComponent(at.exchange)}&segment=${encodeURIComponent(at.segment)}` +
           `&symbol=${encodeURIComponent(run.underlying)}` +
@@ -1696,6 +1811,77 @@
       {load.phase === 'loading' ? 'Reading…' : 'Re-read ledger'}
     </button>
   </header>
+
+  <!-- ================================================================
+       RUN ONE FROM HERE.
+       The console reported on work it could not cause until this; the
+       operator read the page, decided to try another rung, and left for
+       a terminal. Every field is required and none is defaulted on the
+       server: the span and the feed are two of the nine terms in a run's
+       identity, so guessing either would name a run after something
+       nobody asked for.
+       ================================================================ -->
+  <section class="runbar">
+    <span class="runbar-k">New sweep</span>
+    <label class="runf">
+      <span>instrument</span>
+      <input class="find sm" bind:value={sweepSymbol} aria-label="Instrument" />
+    </label>
+    <label class="runf">
+      <span>from</span>
+      <input class="find sm" bind:value={ask.from} placeholder="YYYY-MM" aria-label="First month" />
+    </label>
+    <label class="runf">
+      <span>to</span>
+      <input class="find sm" bind:value={ask.to} placeholder="YYYY-MM" aria-label="Last month" />
+    </label>
+    <label class="runf">
+      <span>support</span>
+      <select class="find sm" bind:value={ask.supportPpm} aria-label="Support threshold">
+        <option value={50_000}>5% of bars</option>
+        <option value={100_000}>10% of bars</option>
+        <option value={200_000}>20% of bars</option>
+        <option value={300_000}>30% of bars</option>
+      </select>
+    </label>
+    <button
+      class="btn run"
+      onclick={startSweep}
+      disabled={sweep.phase === 'starting' || sweep.phase === 'running' || !activeFeed}
+    >
+      {#if sweep.phase === 'starting'}Starting…{:else if sweep.phase === 'running'}Sweeping…{:else}Run all nine rungs{/if}
+    </button>
+    <span class="runbar-n">
+      {#if !activeFeed}
+        choose a feed first — a run is stamped with the feed its bars came from
+      {:else}
+        on <b>{activeFeed}</b> · every rung the store holds
+      {/if}
+    </span>
+  </section>
+
+  {#if sweep.phase === 'running'}
+    <!-- INDETERMINATE, AND SAYING SO. A sweep is 43 ms to hours depending on
+         the rung; a percentage bar would be a guess and a spinner alone says
+         nothing. The elapsed clock is the one honest progress signal. -->
+    <p class="inline-note runstate">
+      <span class="spin sm" aria-hidden="true"></span>
+      <b>Sweeping.</b> The ladder walks upward until the frequent frontier empties, so how long
+      it takes is decided by the data rather than by a setting — a one-day span finishes in
+      milliseconds and a fine rung over seven years takes minutes per month. This page is
+      polling and will refresh itself the moment a record lands.
+      {#if sweep.run}
+        <span class="dim">· started {when(sweep.run.started_micros)}</span>
+      {/if}
+    </p>
+  {:else if sweep.phase === 'done' && sweep.run}
+    <p class="inline-note runstate good">
+      <b>Sweep finished</b> — {sweep.run.underlying} on {sweep.run.feed}, and the ledger below has
+      been re-read.
+    </p>
+  {:else if sweep.phase === 'failed'}
+    <p class="inline-note bad runstate"><b>The sweep was refused.</b> {sweep.why}</p>
+  {/if}
 
   {#if load.phase === 'loading'}
     <!-- ==============================================================
@@ -3162,6 +3348,79 @@
     text-decoration: underline;
     cursor: pointer;
     font: inherit;
+  }
+
+  /* ---- the Run control ---- */
+  .runbar {
+    display: flex;
+    align-items: flex-end;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    padding: 0.85rem 1rem;
+    background: var(--n3);
+    border: 1px solid var(--n6);
+    border-left: 3px solid var(--acc);
+    border-radius: 10px;
+  }
+  .runbar-k {
+    font-size: 0.66rem;
+    text-transform: uppercase;
+    letter-spacing: 0.09em;
+    color: var(--n8);
+    padding-bottom: 0.45rem;
+  }
+  .runbar-n {
+    font-size: 0.75rem;
+    color: var(--n9);
+    padding-bottom: 0.45rem;
+  }
+  .runbar-n b {
+    color: var(--n11);
+  }
+  .runf {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+  }
+  .runf > span {
+    font-size: 0.64rem;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--n8);
+  }
+  .find.sm {
+    flex: 0 0 auto;
+    max-width: 11rem;
+    padding: 0.34rem 0.5rem;
+    font-size: 0.78rem;
+  }
+  /* THE ONE BUTTON THAT CAUSES WORK wears the accent. Everything else on
+     this page reads; this one writes to an append-only ledger. */
+  .btn.run {
+    background: var(--acc);
+    border-color: var(--acc);
+    color: var(--on-acc);
+    font-weight: 600;
+  }
+  .btn.run:hover:not(:disabled) {
+    filter: brightness(1.08);
+  }
+  .btn.run:disabled {
+    opacity: 0.5;
+  }
+  .runstate {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+  .runstate.good {
+    border-left-color: var(--up);
+    background: var(--up-soft);
+  }
+  .inline-note.bad {
+    border-left-color: var(--down);
+    background: var(--down-soft);
   }
 
   /* ---------------- blocks ---------------- */

@@ -61,6 +61,35 @@ store = { path = "../store", version = "0.1.0" }
 # does not draw this arrow and must be amended.
 telemetry = { path = "../telemetry", version = "0.1.0" }
 
+# THE SWEEP ITSELF, so the console can START one rather than only display what
+# a terminal already produced. Until this arrow the operator ran `cli` by hand
+# and the page reported the result — half a console, and the half that requires
+# a second application to be useful.
+#
+# WHY THIS ARROW AND NOT `runner`. `docs/HANDOVER` proposed `runner`, on the
+# reasoning that the sweep lives there. It does not: `runner` exposes
+# `Sweeper::run` over a `&[Candle]` the caller already holds, while the
+# functions that LOAD a stored span and sweep it — `stored::load_span`,
+# `range_all`, `audit_range` — are all in `cli`. A `runner` arrow buys nothing
+# that can actually be run, so this is the honest one.
+#
+# WHY NOT RE-IMPLEMENT IT HERE. Loading a span and walking the ladder would be a
+# SECOND definition of the sweep, and the first thing to diverge would be the
+# run identity — the nine terms `CLAUDE.md` §3 rule 3 makes the name of a run.
+# Two implementations of that is two answers to "is this the same run", which is
+# the exact failure the identity exists to prevent.
+#
+# WHAT IT COSTS, STATED RATHER THAN DISCOVERED. `cli` pulls `runner`, `engine`,
+# `indicators`, `vocab` and `costs` behind it, so this crate now compiles the
+# whole engine, and a `cli` that does not build is a server that does not build.
+# That is the price of the console being able to run the thing it reports on,
+# and it is paid deliberately.
+#
+# GATE 22 IS UNAFFECTED: its PINNED list is `vocab indicators engine` and `api`
+# is not on it. The MEASURED graph in `CLAUDE.md` §5 does change, and is amended
+# in the same commit as this line. D-ENTRY-PENDING.
+cli = { path = "../cli", version = "0.1.0" }
+
 axum   = { workspace = true }
 tokio  = { workspace = true }
 

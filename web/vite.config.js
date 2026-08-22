@@ -57,6 +57,13 @@ const ROUTES = [
 	// two applications. `crates/api/src/server.rs` registers no `/backtest`
 	// page at all, so here there is only the JSON.
 	'/backtest.json',
+	// THE RUN CONTROL'S TWO. `/backtest/run` starts a sweep and
+	// `/backtest/run.json` is what the page polls while it goes. Listed with
+	// the slash, so neither covers `/backtest` itself — that path is the
+	// SvelteKit page and proxying it would hand it to Rust and 404 the route
+	// in development only, which is the trap the `/audit` note above records.
+	'/backtest/run',
+	'/backtest/run.json',
 	// `/audit` IS NOT HERE, AND ITS ABSENCE IS THE POINT.
 	//
 	// It used to be, and it made one URL serve two different applications:

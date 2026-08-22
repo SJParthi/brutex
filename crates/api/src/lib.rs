@@ -60,6 +60,10 @@ pub mod merge;
 pub mod pullrun;
 pub mod render;
 pub mod server;
+/// A SWEEP STARTED FROM THE BROWSER -- the half of the console that was
+/// missing, because a page that reports on work it cannot start needs a
+/// terminal beside it to be useful.
+pub mod sweeprun;
 /// THE SCRUB, over a whole vendor -- the only thing entitled to say a store
 /// is verified rather than merely counted.
 pub mod verify;

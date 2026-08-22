@@ -3342,6 +3342,17 @@ pub struct Site {
     /// here rather than taken out: the page reads its summary after it ends,
     /// and a slot emptied on completion would answer that read with nothing.
     pub run: std::sync::Mutex<Option<crate::pullrun::Progress>>,
+    /// The browser-started SWEEP, in the same shape as [`Self::run`] and for
+    /// the same reasons: one slot per `Site` so concurrent tests do not refuse
+    /// each other, `Some` with no `finished_micros` as the one reading of "in
+    /// flight", and a finished run LEFT in the slot so the page can read its
+    /// report after it ends.
+    ///
+    /// Separate from [`Self::run`] rather than sharing it, because a pull and
+    /// a sweep are independent work: a sweep reads bars off disk and a pull
+    /// writes them, and refusing one because the other is running would be a
+    /// constraint neither of them has.
+    pub sweep: std::sync::Mutex<Option<crate::sweeprun::Progress>>,
     /// The instrument universe, merged from both masters.
     pub read: Read,
     /// One manifest census per vendor, in [`Vendor::ALL`] order.
@@ -3482,6 +3493,8 @@ impl Site {
             // for, which is the shape `CLAUDE.md` §4 bans in the other
             // direction: a report with nothing behind it.
             run: std::sync::Mutex::new(None),
+            // NO SWEEP UNTIL SOMEBODY PRESSES RUN, for the reason above it.
+            sweep: std::sync::Mutex::new(None),
             read,
             censuses,
             series,
@@ -11462,6 +11475,18 @@ pub fn router_serving(site: Loaded, assets: std::sync::Arc<assets::Assets>) -> a
         .route(
             "/backtest.json",
             axum::routing::get(crate::backtest::backtest_json),
+        )
+        // THE CONSOLE CAN NOW CAUSE A RUN, not only report one.
+        //
+        // POST, and there is no GET, for the same reason `/universe/resolve`
+        // is POST-only: this starts work that appends to an append-only
+        // ledger, and a GET would be fetched by a link preview or a health
+        // check — neither of which is a person deciding to sweep seven years
+        // of bars. See `crate::sweeprun`.
+        .route("/backtest/run", axum::routing::post(crate::sweeprun::run))
+        .route(
+            "/backtest/run.json",
+            axum::routing::get(crate::sweeprun::run_json),
         )
         .route("/health", axum::routing::get(health))
         // THE FRONT END, LAST. A fallback rather than a `/*path` route, so
