@@ -3780,6 +3780,102 @@
     }
   }
 
+  /**
+     ONE REQUEST FOR A PAGE NO INDEX CAN ANSWER.
+
+     Sorting by a price column is the one question the prefix sum cannot serve:
+     the store is indexed by TIME — the path IS the index, and `CLAUDE.md` §4
+     bans a query planner because there is no second path to choose — so "the
+     fifty largest closes" cannot be known without reading the closes.
+
+     The browser used to read them ALL. MEASURED: 76 requests and 9.4 seconds
+     for one sorted page, and the network was never the cost — parsing 623,498
+     rows into objects to keep fifty was. `/bars/window.json` answers the same
+     question against files already on local disk: MEASURED at 1.23s for the
+     identical sort, moving 4 KB instead of ~50 MB, and returning the same top
+     rows the browser found.
+
+     ONE INSTRUMENT PER CALL, because the endpoint is keyed on one series. A
+     query matching three instruments is three calls, not 2,187 — still a
+     constant per instrument rather than a file per month.
+
+     THE CHANGE COLUMN COMES BACK WITH THE ROWS. It is folded server-side in
+     time order before the sort (D-0265), which is the only place it can be
+     computed for a sorted page. `barRows` prefers the wire's value wherever the
+     wire sent one.
+     ------------------------------------------------------------------------
+     @param {string} feed
+     @param {any[]} plan every matched instrument-month, for the series it names
+     @param {number} offset @param {number} limit
+     @returns {Promise<any[]>} one synthetic file, in `barState.files` shape */
+  async function readWindow(feed, plan, offset, limit) {
+    if (plan.length === 0) return [];
+    /* THE SERIES IS ONE PER CALL AND THE PLAN MAY NAME SEVERAL. Grouped by the
+       instrument key the census carries, so each series asks once for its own
+       slice and the page stitches them. */
+    /** @type {Map<string, any[]>} */
+    const bySeries = new Map();
+    for (const r of plan) {
+      const k = `${r.instrument}|${r.timeframe}`;
+      if (!bySeries.has(k)) bySeries.set(k, []);
+      (bySeries.get(k) ?? []).push(r);
+    }
+    const series = [...bySeries.values()];
+    const out = await pooled(series, IN_FLIGHT, async (group) => {
+      const first = group[0];
+      const months = group.map((g) => String(g.month)).sort();
+      const parts = String(first.instrument).split('-');
+      const two = (/** @type {string} */ s) => /^\d{2}$/.test(s);
+      let at = -1;
+      for (let i = 2; i + 2 < parts.length; i += 1) {
+        if (/^\d{4}$/.test(parts[i] ?? '') && two(parts[i + 1] ?? '') && two(parts[i + 2] ?? '')) {
+          at = i;
+          break;
+        }
+      }
+      const q = new URLSearchParams({
+        feed,
+        exchange: parts[0] ?? '',
+        segment: parts[1] ?? '',
+        symbol: at === -1 ? parts.slice(2).join('-') : parts.slice(2, at).join('-'),
+        contract: at === -1 ? '' : parts.slice(at).join('-'),
+        timeframe: first.timeframe,
+        from: months[0],
+        to: months[months.length - 1],
+        sort: barSortKey === 'ts' ? 'ts' : barSortKey,
+        dir: barDesc ? 'desc' : 'asc',
+        offset: String(offset),
+        limit: String(limit),
+        extremes: '1'
+      });
+      try {
+        const res = await ask(`/bars/window.json?${q}`);
+        const body = await res.json();
+        if (!res.ok && !body?.bars) {
+          return { key: `${first.key}|window`, row: first, bars: [], faults: null,
+                   error: body?.error ?? `HTTP ${res.status}` };
+        }
+        return {
+          key: `${first.key}|window`,
+          row: first,
+          bars: body.bars ?? [],
+          faults: body.faults ?? null,
+          error: null,
+          /* CARRIED SO THE PAGER AND THE SCALE CAN READ THEM WITHOUT A SECOND
+             CALL. `total` is every row the window holds, not the page. */
+          total: body.total ?? 0,
+          extremes: body.extremes ?? null,
+          scanned: body.scanned === true
+        };
+      } catch (why) {
+        const w = /** @type {any} */ (why);
+        return { key: `${first.key}|window`, row: first, bars: [], faults: null,
+                 error: String(w && w.message ? w.message : w) };
+      }
+    });
+    return out.filter(Boolean);
+  }
+
   $effect(() => {
     const active = view === 'bars';
     const feed = feeds.active;
@@ -3798,10 +3894,21 @@
       return;
     }
     const want = untrack(() => pagePlan.files);
+    const exact = untrack(() => pagePlan.exact);
+    const first = untrack(() => (pageNow - 1) * pageSize);
+    const take = untrack(() => pageSize);
     const mine = ++barToken;
     let dead = false;
     barState = { loading: true, error: null, files: untrack(() => barState.files) };
-    pooled(want, IN_FLIGHT, (/** @type {any} */ r) => readBarFile(feed, r))
+    /* TWO ROUTES, AND THE PLAN ALREADY KNOWS WHICH. `exact` is the prefix sum's
+       own verdict: true when the grid is in the store's order and nothing
+       filters after the fetch, which is when one file answers one page. False
+       is the sort no index covers, and that is what the window endpoint is for
+       — one request per series rather than one per instrument-month. */
+    (exact
+      ? pooled(want, IN_FLIGHT, (/** @type {any} */ r) => readBarFile(feed, r))
+      : readWindow(feed, want, first, take)
+    )
       .then((files) => {
         if (dead || mine !== barToken) return;
         barState = { loading: false, error: null, files };
@@ -3918,10 +4025,28 @@
         const prevOi = before && typeof before.oi === 'number' ? before.oi : null;
         const ts = b.t * 1000;
         const day = istDayKey(ts);
-        const chgWhy =
-          before === null ? 'first_bar_in_file' : before.c === 0 ? 'previous_close_zero' : null;
-        const oiWhy =
-          oi === null
+        /* THE WIRE'S OWN CHANGE WINS WHERE THE WIRE SENT ONE.
+           `/bars/window.json` folds the change against the previous bar IN TIME,
+           per file, before it sorts — which is the only place that number can be
+           computed for a PRICE-ORDERED page, because fifty rows sorted by close
+           are fifty rows from fifty different minutes and none of them is the
+           neighbour of the one above it.
+           `/bars.json` sends no such field, so the local fold below still runs
+           for every read on that route. `undefined` is the test and not `null`:
+           null is a real answer from the server — "no change, and here is why" —
+           and treating it as absent would recompute a value the server has
+           already refused. */
+        const wireChg = b.chg !== undefined || b.chg_why !== undefined;
+        const chgWhy = wireChg
+          ? (b.chg_why ?? null)
+          : before === null
+            ? 'first_bar_in_file'
+            : before.c === 0
+              ? 'previous_close_zero'
+              : null;
+        const oiWhy = wireChg
+          ? (b.oichg_why ?? null)
+          : oi === null
             ? 'oi_null'
             : before === null
               ? 'first_bar_in_file'
@@ -3938,8 +4063,16 @@
            the engine returns `Unknown::Overflow`, and that null has to become
            a REASON rather than a bare dash: `WHY.overflow` already holds the
            sentence, and a cell nobody can compute must say why. */
-        const chgBps = chgWhy === null ? basisPoints(before.c, b.c) : null;
-        const oichgBps = oiWhy === null ? basisPoints(prevOi, oi) : null;
+        const chgBps = wireChg
+          ? (b.chg ?? null)
+          : chgWhy === null
+            ? basisPoints(before.c, b.c)
+            : null;
+        const oichgBps = wireChg
+          ? (b.oichg ?? null)
+          : oiWhy === null
+            ? basisPoints(prevOi, oi)
+            : null;
         out.push({
           /* THE KEY IS THE SERIES, THE MONTH, THE RUNG AND THE BAR'S OWN
              SECOND. An `{#each}` key: unique across every file on screen and
@@ -4129,8 +4262,41 @@
      report "1-50 of 50" over a store of four million bars. When the prefix sum
      does not apply every matched row is in memory and `barSorted` IS the
      count. */
+  /* WHAT THE WINDOW ROUTE ALREADY DECIDED, read back off the files it returned.
+     `total` is every row the window holds and `extremes` is the widest move in
+     it — both folded server-side, so the pager and the magnitude scale get them
+     without a second request. Null when the seek route ran.
+
+     DECLARED ABOVE `pageTotal`, WHICH READS IT. `const` is hoisted but not
+     initialised, so a derivation evaluated before this line hits the temporal
+     dead zone — svelte-check named it exactly: "Block-scoped variable
+     'windowSaid' used before its declaration". Order is not decoration where
+     one derivation feeds another.
+
+     `pageExact` AND NOT `pagePlan.exact`, AND THE DIFFERENCE IS A CRASH.
+     `pagePlan` reads `pageNow`, `pageNow` comes from `pageCount` which comes
+     from `pageTotal` — and `pageTotal` reads THIS. Reading `pagePlan` here
+     closes that ring, and Svelte resolves it by recursing until `RangeError:
+     Maximum call stack size exceeded` and a blank page. It was hit, and the
+     page went white. `pageExact` is the same verdict computed one step earlier,
+     from the sort key and the day window alone, and depends on no paging state
+     — it exists because this cycle was already hit once, on `barTotalRows`. */
+  const windowSaid = $derived.by(() => {
+    if (pageExact) return null;
+    const f = barState.files.find((/** @type {any} */ x) => x && x.total !== undefined);
+    return f
+      ? { total: Number(f.total) || 0, extremes: f.extremes ?? null, scanned: f.scanned === true }
+      : null;
+  });
+
   const pageTotal = $derived(
-    view === 'bars' ? (barTotalRows ?? barSorted.length) : sorted.length
+    view === 'bars'
+      ? /* THE WINDOW'S OWN TOTAL WHERE IT RAN. Without it the pager counts the
+           fifty rows in memory and reports "1-50 of 50" over a store of four
+           million — the same defect `barTotalRows` fixes on the seek route,
+           arriving by the other road. */
+        (windowSaid?.total ?? barTotalRows ?? barSorted.length)
+      : sorted.length
   );
   const pageCount = $derived(Math.max(1, Math.ceil(pageTotal / pageSize)));
   const pageNow = $derived(Math.min(Math.max(1, page), pageCount));
@@ -4144,8 +4310,13 @@
      offset within the two files actually in memory; without it every page past
      the first slices past the end and the grid draws nothing. */
   const barPage = $derived.by(() => {
+    /* THE SERVER ALREADY SLICED, SO THE CLIENT MUST NOT SLICE AGAIN.
+       On the window route `barSorted` holds the fifty rows that were asked for
+       and nothing else, so an offset of 2,99,950 into fifty rows is the empty
+       set — the grid would draw nothing on every page but the first. */
+    if (!pagePlan.exact) return barSorted.slice(0, pageSize);
     const first = (pageNow - 1) * pageSize;
-    const start = Math.max(0, pagePlan.exact ? first - pagePlan.base : first);
+    const start = Math.max(0, first - pagePlan.base);
     return barSorted.slice(start, start + pageSize);
   });
 
@@ -4872,6 +5043,24 @@
     for (const b of barRows) {
       const r = b.h - b.l;
       if (r > (top.get(b.tf) ?? 0)) top.set(b.tf, r);
+    }
+    /* THE WINDOW'S OWN WIDEST RANGE, WHERE THE WINDOW ANSWERED.
+       D-0260 traded this away: the seek route reads one month, so the scale
+       became "widest move among the bars LOADED" rather than "in the query",
+       and both comment blocks here say so. `extremes=1` buys it back — the
+       server folds the widest high-low over every month in the window while it
+       is already reading them for the sort, and sends one number.
+       MEASURED on the running store: 1,50,700 paisa — Rs 1,507.00 — against
+       623,498 bars, for no request of its own.
+       IT ONLY RAISES. The loaded rows are a SUBSET of the window, so their own
+       maximum can never legitimately exceed it; taking the larger of the two
+       means a scale that is correct when the server answered and unchanged when
+       it did not, rather than a second source of truth. */
+    const wide = windowSaid?.extremes?.range;
+    if (typeof wide === 'number' && wide > 0) {
+      for (const tf of top.keys()) {
+        if (wide > (top.get(tf) ?? 0)) top.set(tf, wide);
+      }
     }
     return top;
   });
