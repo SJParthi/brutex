@@ -19926,3 +19926,47 @@ Both are pinned by
 Cost: O(body) on the server, which builds the body either way — this hashes what
 it is already holding. The reader is spared the transfer and the parse entirely,
 which is the half an operator feels.
+
+### D-0257 — the log cut off the one field it exists to carry
+
+An operator asked why Groww's F&O never landed. The log that recorded the
+refusal could not answer, because it had truncated the answer at write time.
+
+Measured on the running `logs/events.ndjson` — 996,087 bytes, 4,071 records:
+**535 of them, 13%, carry `"cut":true`**, and on the F&O path the cut lands on
+`why`, which is the only field those records exist for.
+
+The arithmetic is exact and that is what makes it a defect rather than bad luck.
+`MAX_STR_VALUE_BYTES` was 128. A `why` is built as context THEN reason —
+`format!("{url} was not reached: {why}")`, `crates/pull/src/resolve.rs` — and the
+context is a URL:
+
+```text
+https://api.groww.in/v1/historical/expiries?exchange=NSE&underlying_symbol=BANKNIFTY&year=2026&month=7
+```
+
+That is **102 bytes**. The separator ` was not reached: ` is **18**. So **120 of
+the 128 were spent before the vendor's reason began**, and the 8 that remained
+are exactly the 8 bytes of `"Groww's "` that **all 64** of those records end on.
+The field was long enough for the question and never for the answer.
+
+**Raised to 512, not removed.** The real ceiling is the LINE — `tail::MAX_LINE_BYTES`
+is 64 KB and a reader refuses anything longer. With `MAX_FIELDS` of 12 the worst
+line is about `12 × (32 + 512)` ≈ 6.5 KB, an order of magnitude inside the bound
+it must respect, where 128 sat two orders inside it and paid for the margin in
+lost reasons. A value with no ceiling is a line with no ceiling, and `tail` walks
+these files under a scan budget, so the cap stays and `cut` is still reported —
+`CLAUDE.md` §4 is why a silent trim was never the alternative.
+
+**What this does NOT do is recover the 64 records already written.** They are on
+disk with the reason gone and §3 rule 8 keeps them there. The reason was instead
+recovered from the source: `f74edd3` had already diagnosed it — `pull::chain::month`
+is a **1 + N** walk, one call for the month's expiries then one per expiry, and
+`fno_walk` charged `await_budget` ONCE for the whole thing, so a month with five
+weeklies fired six requests against a ceiling of four a second and earned a 429.
+`Governed` moved the charge into the transport, where every request pays.
+
+**That fix is in the tree and remains unexercised.** All 64 Groww F&O records are
+dated 2026-08-20; the log runs to 2026-08-22 and holds no F&O attempt after the
+fix. Nothing here claims Groww's F&O now works — only that the next attempt will
+be able to say why if it does not. `CLAUDE.md` §3 rule 6.

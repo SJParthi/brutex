@@ -48,7 +48,39 @@ pub const MAX_KEY_BYTES: usize = 32;
 ///
 /// Numbers have no ceiling because they have no room to need one: the widest
 /// `u64` is twenty digits.
-pub const MAX_STR_VALUE_BYTES: usize = 128;
+///
+/// # Why 512 and not 128
+///
+/// It was 128, and at 128 this log truncated the one field it exists to carry.
+/// Measured on a real `logs/events.ndjson`: **535 of 4,071 records — 13% — were
+/// written with `cut: true`**, and the cut landed on `why`.
+///
+/// The shape of the loss matters more than the count. A `why` is written as
+/// context THEN reason, and the context is a URL:
+///
+/// ```text
+/// https://api.groww.in/v1/historical/expiries?exchange=NSE&underlying_symbol=BANKNIFTY&year=2026&month=7
+/// ```
+///
+/// is 102 bytes on its own. With the 18 of ` was not reached: ` after it, 120
+/// of the 128 were spent before the reason began. The remaining 8 are exactly
+/// the 8 bytes of `"Groww's "` that every one of those 64 records ends on —
+/// the vendor's actual reason cut off mid-word. An operator asking "why did
+/// Groww's F&O never land" could not be answered from the log that recorded it.
+///
+/// # Why raising it is safe rather than a loosened bound
+///
+/// The real ceiling is the LINE, not the value: `tail::MAX_LINE_BYTES` is 64 KB
+/// and a reader refuses anything longer. With [`MAX_FIELDS`] of 12, the worst
+/// line is roughly `12 × (32 key + 512 value)` ≈ 6.5 KB — an order of magnitude
+/// inside the bound it has to respect, where 128 was two orders inside it and
+/// paying for the margin in lost reasons.
+///
+/// The cap is not removed and must not be: a value with no ceiling is a line
+/// with no ceiling, and `tail` walks these files under a scan budget. Truncation
+/// still happens and is still reported — `cut` is set, and `CLAUDE.md` §4 is why
+/// a silent trim was never an option.
+pub const MAX_STR_VALUE_BYTES: usize = 512;
 
 /// One thing that happened.
 ///

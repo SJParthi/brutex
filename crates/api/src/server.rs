@@ -5543,13 +5543,13 @@ async fn fetch_chunks(
                     // THE VENDOR'S OWN WORDS, IN THEIR OWN FIELD.
                     //
                     // Logging the wrapped string below loses them: telemetry
-                    // bounds a string value at MAX_STR_VALUE_BYTES (128) to keep
+                    // bounds a string value at MAX_STR_VALUE_BYTES to keep
                     // an event O(1) in space, and the prose is longer than that
                     // before `{why}` is even reached — so the operator got a
                     // sentence about chunk counts and nothing about the failure.
                     //
                     // Emitted here, unwrapped, the reason is the whole field and
-                    // fits. The bound stays where it is; what changes is that
+                    // fits. The bound rose to 512 later; what still holds is that
                     // the field carries the answer rather than the preamble.
                     let noted = telemetry::emit(
                         &telemetry::Event::error("pull.http", "vendor refused a window")
