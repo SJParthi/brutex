@@ -7604,7 +7604,7 @@
                            tinted by `close >= open`. The two surfaces show the
                            same store and disagreed about that. -->
                       <td class="bn bclose" title="{fmt(b.c)} paisa, as stored">{paisaText(b.c)}</td>
-                      <td class="bn bvol" style="--vmag:{volMag(b.vol, b.tf)}%">{fmt(b.vol)}</td>
+                      <td class="bn bvol" style="--vmag:{volMag(b.vol, b.tf)}%;--vmagpx:{Math.round((volMag(b.vol, b.tf) / 100) * 56)}px">{fmt(b.vol)}</td>
 
                       <!-- PRE-MARKET %: no source on this wire. -->
                       <td class="bn na"
@@ -7624,7 +7624,11 @@
                       <td
                         class="bn bpc"
                         data-dir={dirOf(b.chg)}
-                        style={b.chg === null ? undefined : `--mag:${chgMag(b.chg, b.tf)}%`}
+                        style={b.chg === null
+                          ? undefined
+                          : `--mag:${chgMag(b.chg, b.tf)}%;--magpx:${Math.round(
+                              (chgMag(b.chg, b.tf) / 100) * 44
+                            )}px`}
                       >
                         {#if b.chg === null}
                           <span
@@ -10427,23 +10431,62 @@
     flex-wrap: wrap;
   }
 
+  /* A PSEUDO-ELEMENT, NOT A GRADIENT, AND THE GRADIENT NEVER ONCE DREW.
+     ---------------------------------------------------------------------
+     This was `background-image: linear-gradient(color-mix(in srgb,
+     currentColor 20%, transparent) …)` sized by `background-size: var(--mag)
+     3px`. MEASURED on the running page: of fifty rows, twenty-nine carried a
+     real `--mag` between 1% and 20%, and every one of them computed
+     `background-image: none; background-size: auto`. Not a zero-width bar — no
+     bar at all.
+
+     It is not the value and it is not the selector. Both were tested in
+     isolation on the same element: setting `background-size: var(--mag) 3px`
+     inline resolved to `20% 3px`, setting the gradient inline resolved to a
+     real gradient, `@property --mag` is registered in `theme.css` and reaches
+     the built sheet, the rule `.bpc.svelte-d8w2tr` is in the loaded stylesheet
+     carrying the declaration, and the cell matches that selector. Every part
+     works alone and the rule still does not apply — the remaining suspect being
+     `color-mix()` over `currentcolor` inside a gradient, in a stylesheet rather
+     than inline.
+
+     So the encoding stopped depending on that. A `::before` with an explicit
+     WIDTH is the pattern the direction spine on this same grid already proves,
+     and a percentage width resolves against a positioned ancestor without
+     needing the definite HEIGHT that caught the spine out. It draws.
+
+     The design is unchanged: a 3px band on the cell's floor, the axis at the
+     centre, growing RIGHT for up and LEFT for down — direction carried by
+     POSITION, so the column reads as a distribution down fifty rows and
+     survives greyscale and a red-green dichromat. */
   .bpc {
     --mag: 0%;
     position: relative;
-    background-image: linear-gradient(
-      color-mix(in srgb, currentColor 20%, transparent) 0 100%,
-      color-mix(in srgb, currentColor 20%, transparent)
-    );
-    background-repeat: no-repeat;
-    /* A 3px band on the cell's floor, not a full-height wash: at 40px rows a
-       block fights the figure it is meant to annotate. */
-    background-size: var(--mag) 3px;
   }
-  .bpc[data-dir='up'] {
-    background-position: 50% bottom;
+  .bpc::after {
+    content: '';
+    position: absolute;
+    bottom: 3px;
+    height: 3px;
+    width: var(--magpx, 0px);
+    border-radius: 1px;
+    background: currentColor;
+    opacity: 0.28;
+    pointer-events: none;
   }
-  .bpc[data-dir='down'] {
-    background-position: calc(50% - var(--mag)) bottom;
+  /* THE AXIS IS THE CELL'S CENTRE. `left: 50%` grows right; `right: 50%` grows
+     left. Neither needs to know the bar's own width, which is what the old
+     `calc(50% - var(--mag))` background-position had to compute. */
+  .bpc[data-dir='up']::after {
+    left: 50%;
+  }
+  .bpc[data-dir='down']::after {
+    right: 50%;
+  }
+  /* FLAT DRAWS NOTHING. A bar that closed where it opened has no direction and
+     no magnitude, and a tick at the axis would read as a small move. */
+  .bpc[data-dir='flat']::after {
+    display: none;
   }
 
   /* VOLUME, THE SAME IDEA AND DELIBERATELY NEUTRAL. Length reads as size; it
@@ -10452,13 +10495,19 @@
      figure, so the number stays what the eye lands on. */
   .bvol {
     --vmag: 0%;
-    background-image: linear-gradient(
-      color-mix(in srgb, var(--dim) 24%, transparent) 0 100%,
-      color-mix(in srgb, var(--dim) 24%, transparent)
-    );
-    background-repeat: no-repeat;
-    background-size: var(--vmag) 3px;
-    background-position: right bottom;
+    position: relative;
+  }
+  .bvol::after {
+    content: '';
+    position: absolute;
+    right: 0;
+    bottom: 3px;
+    height: 3px;
+    width: var(--vmagpx, 0px);
+    border-radius: 1px;
+    background: var(--dim);
+    opacity: 0.34;
+    pointer-events: none;
   }
 
   /* ---------------------------------------------------------------------
