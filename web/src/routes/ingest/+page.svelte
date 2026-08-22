@@ -9414,7 +9414,15 @@
     padding: var(--s2) var(--s3);
     border: 1px solid var(--acc);
     border-radius: var(--r2);
-    background: var(--acc-soft);
+    /* NO TINT BEHIND THE TEXT, AND THE REASON IS MEASURED.
+       This was `var(--acc-soft)`. In the light theme that composites to
+       rgb(231,242,245), and the `--acc` link sitting on it measured 4.36:1 —
+       under the 4.5 AA floor for 12.5px text. The same link on the plain panel
+       measures 4.67:1 and passes, so the tint was costing the one thing in this
+       line a reader is meant to click.
+       The accent border already marks the line as accented; the fill was doing
+       nothing the border was not, and was doing it at the cost of legibility. */
+    background: var(--bg-2);
     font-size: var(--fs-mini);
     color: var(--ink-2);
     line-height: 1.5;
