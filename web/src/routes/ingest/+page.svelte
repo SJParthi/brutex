@@ -4728,6 +4728,51 @@
     verdictTally.reduce((sum, seg) => (seg.k === 'ok' || seg.k === 'beyond' ? sum + seg.n : sum), 0)
   );
 
+  /**
+   * WHERE EVERY NUMBER BELOW CAME FROM — the answer to "how would I know if
+   * this were faked".
+   *
+   * THE PROBLEM THIS SOLVES IS NOT HYPOTHETICAL. A table of numbers looks
+   * identical whether the store was read a second ago, read for a DIFFERENT
+   * feed, read and failed, or never read at all. Four states, one appearance —
+   * and the most dangerous of them is the third, because a failed read leaves
+   * the last good numbers on screen and they keep looking current.
+   *
+   * `$lib/store.svelte.js` already carries the whole record and this page never
+   * showed it: `state` (none/reading/ready/error), `feed` — the feed the value
+   * ANSWERED FOR, `at` — when this browser observed it, `error` in the words it
+   * failed with, and `reads`, the count that has actually succeeded. That
+   * module's own header says a page "compares `store.feed` against the feed it
+   * is asking about before it believes a single number". This is that
+   * comparison, made visible instead of assumed.
+   *
+   * THE STALE CASE IS THE ONE WORTH DRAWING. `store.feed !== feeds.active` means
+   * the numbers on screen are real measurements OF ANOTHER FEED. Nothing about
+   * them looks wrong; they are simply answers to a different question.
+   *
+   * @type {{ tone: string, word: string, detail: string, live: boolean }}
+   */
+  const provenance = $derived.by(() => {
+    if (store.state === 'reading') {
+      return { tone: 'acc', word: 'reading', live: true,
+               detail: 'asking /store.json for what is on disk right now' };
+    }
+    if (store.state === 'error') {
+      return { tone: 'down', word: 'unreadable', live: false,
+               detail: store.error ?? 'the read failed and gave no reason' };
+    }
+    if (store.state !== 'ready' || store.at === null) {
+      return { tone: '', word: 'not read', live: false,
+               detail: 'nothing has been counted yet — these are not numbers, they are placeholders' };
+    }
+    if (store.feed !== null && feeds.active !== null && store.feed !== feeds.active) {
+      return { tone: 'warn', word: 'stale', live: false,
+               detail: `these numbers were measured for ${feedName(store.feed)}, and you are asking about ${feedName(feeds.active)}` };
+    }
+    return { tone: 'up', word: 'measured', live: false,
+             detail: `${feedName(store.feed)} · ${stampLabel(store.at)} · read ${n(store.reads)}` };
+  });
+
   /** 1 … 7 pages in full; beyond that the ends, the middle and a gap. */
   /** @param {number} cur @param {number} total @returns {(number | string)[]} */
   function pageList(cur, total) {
@@ -7900,6 +7945,28 @@
              are seven unlabelled boxes. The label carries the same reading the
              chips carry, so nothing here is available only to a sighted reader.
         -->
+        <!-- ══ WHERE THESE NUMBERS CAME FROM ══
+             A table looks identical whether the store was read a second ago,
+             read for a DIFFERENT feed, read and failed, or never read at all.
+             Four states, one appearance — and the dangerous one is the failure,
+             because it leaves the last good numbers on screen still looking
+             current. `$lib/store.svelte.js` has carried the whole record all
+             along and this page never showed it.
+             `aria-live="polite"` because this line changing IS the news: a read
+             going stale or failing is exactly the thing a reader must not have
+             to notice for themselves. -->
+        <div class="prov" aria-live="polite">
+          <i class="dot {provenance.tone}" class:live={provenance.live}></i>
+          <b class="pword">{provenance.word}</b>
+          <span class="pdetail">{provenance.detail}</span>
+          <span class="spacer"></span>
+          <span
+            class="pnote"
+            title="BARS STORED is measured — it is counted out of /store.json, which the server rebuilds per request. BARS EXPECTED is arithmetic: NSE sessions inside the window times the bars one session holds. The first is a fact about disk; the second is a claim about the calendar, and this page never lets one wear the other's clothes. CLAUDE.md section 3 rule 6."
+            >stored is measured · expected is arithmetic</span
+          >
+        </div>
+
         {#if verdictTotal > 0}
           <div class="tally">
             <div
@@ -10263,6 +10330,44 @@
     gap: var(--s4);
     min-width: 0;
   }
+
+  /* ---- where the numbers came from ----
+     A LINE, NOT A BANNER. This is true on every load and most of the time it
+     says "measured" — a bordered box saying "everything is fine" on every
+     render is the furniture this page has spent its life removing. It earns
+     colour only when it has something to report: amber for stale, red for a
+     failed read, the accent while a read is in flight. The resting state is a
+     grey dot and a quiet sentence. */
+  .prov {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--s2) var(--s4);
+    font-size: var(--fs-micro);
+    color: var(--faint);
+    min-width: 0;
+  }
+  .pword {
+    font-family: var(--mono);
+    font-weight: var(--w-bold);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    color: var(--ink-2);
+  }
+  .pdetail {
+    font-family: var(--mono);
+    font-variant-numeric: tabular-nums;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  /* THE TONE IS ON THE DOT AND THE WORD, NEVER ON THE WHOLE LINE. Colouring the
+     detail text too would make a stale reading shout at the same volume as a
+     failed one, and they are not the same news. */
+  .prov:has(.dot.warn) .pword { color: var(--warn); }
+  .prov:has(.dot.down) .pword { color: var(--down); }
+  .prov:has(.dot.up) .pword { color: var(--up); }
+  .pnote { font-family: var(--mono); white-space: nowrap; }
 
   /* ---- the partition ----
      A BAR AND A LEGEND, AND NEITHER IS A BUTTON. Every colour here comes from
