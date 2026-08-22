@@ -3215,6 +3215,40 @@
      gain — the button says how many rows it is worth right now — so the choice
      is made with the number in hand rather than by experiment. */
   let compact = $state(false);
+
+  /* THE FOLD IS INSTANT, AND AN ANIMATED ONE WAS BUILT, MEASURED BREAKING THE
+     FOLD ENTIRELY, AND REVERTED.
+     ---------------------------------------------------------------------
+     `{#if}` removes the panel the instant `compact` flips, so a CSS keyframe
+     can only ever animate it BACK — a control whose effect is a smooth arrival
+     and an abrupt disappearance reads as two different controls. The framework's
+     own answer is `transition:slide`, and it was the first use of
+     `svelte/transition` in this app.
+
+     IT DID NOT MERELY FAIL TO ANIMATE, IT STOPPED THE FOLD FROM HAPPENING. A
+     Svelte transition holds the element in the document until its OUT
+     transition completes, and that completion is driven by the framework's own
+     animation loop. Measured with the render surface backgrounded: 113
+     animations all sitting at `currentTime: 0`, the out transition never
+     starting, and `.facts` still 62px tall at full opacity after the press —
+     the fold, which had been verified taking the grid from ten rows to
+     fifteen, became a no-op. Forcing every animation to `finish()` did not
+     release it either, so the element's removal was gated on something this
+     environment cannot advance.
+
+     A backgrounded tab is not exotic — it is where a page sits while its
+     operator is doing something else — and an animation that can withhold a
+     LAYOUT change is a different class of thing from one that merely does not
+     play. The instant fold is verified and correct in every state; a
+     transition that is only correct while someone is watching is not an
+     improvement on it.
+
+     WHAT WOULD MAKE IT SAFE, for whoever picks this up: collapse a wrapper
+     from `grid-template-rows: 1fr` to `0fr` and keep the panel mounted. That
+     animates in both directions in pure CSS, sits inside the same
+     `prefers-reduced-motion` guard as every other animation here, and — the
+     point — its end state is a static rule, so the layout is correct whether or
+     not a single frame ever renders. */
   /* WHAT THE FOLD IS WORTH, IN THE UNIT THE READER IS SPENDING. Measured live
      rather than stated: the two panels' heights come from the elements, so a
      band that grew a legend line or a counted line that wrapped reports its own
@@ -3316,10 +3350,29 @@
     };
     measure();
     const settle = setTimeout(measure, 0);
+    /* A THIRD READ, LATER, AND IT IS KEPT THOUGH THE THING IT WAS WRITTEN FOR
+       IS GONE.
+       ---------------------------------------------------------------------
+       It was added because an animated fold moved the panel's height over
+       190ms, so both reads above landed mid-slide and whatever they caught was
+       LATCHED until the next resize. Measured then: a fold-then-unfold cycle
+       left the box at 444px where it had been 465, and the grid came back with
+       nine rows where it had had ten — a row lost to an animation frame,
+       permanently.
+
+       That transition was reverted (see `compact`), so the fold is instant and
+       the two reads above are enough for it. This stays because the defect it
+       caught is not specific to a transition: `compact` changes the layout, and
+       ANY late reflow — a web font landing, a scrollbar arriving, a strip
+       rewrapping — latches the same way. It costs one timer per mount and it is
+       the difference between a fit that is right and a fit that was right at
+       the moment it was taken. */
+    const afterFold = setTimeout(measure, 250);
     window.addEventListener('resize', measure);
     return () => {
       window.removeEventListener('resize', measure);
       clearTimeout(settle);
+      clearTimeout(afterFold);
     };
   });
   /* `--s4`, WHICH IS `.board`'s `gap`. Written here because this file cannot
@@ -4001,6 +4054,16 @@
     if (pageExact) return files;
     return `${files} ${page}|${pageSize}|${barSortKey}|${barDesc}`;
   });
+
+  /* A `barSetKey` OF THE FILES ALONE WAS WRITTEN HERE AND REMOVED, and the
+     reasoning is kept because it is convincing and wrong. It was meant to
+     answer "are these different rows" for the entrance direction — the files
+     look like the set, and a re-sort of one instrument-month is the same bars
+     in a new order. But sorting by Close cannot be answered from the census
+     prefix sums, so the grid opens a DIFFERENT set of files in order to sort
+     globally: the files change because of the sort, which is the single case
+     the test existed to distinguish. Measured — the sort reported `set`.
+     `pageTotal` is what carries that fact; see `barMove`. */
 
   /* ---------------------------------------------------------------------
      THE READ. One request per instrument-month, cached for as long as the
@@ -6456,11 +6519,133 @@
      which is the same question `CLAUDE.md` §4 asks about silent failure.
      --------------------------------------------------------------------- */
   let barEntering = $state(false);
+  /* ---------------------------------------------------------------------
+     AND THE ENTRANCE SAYS WHICH WAY, BECAUSE THE FOUR CAUSES ARE NOT ONE.
+
+     `barEntering` fires for four different reasons and drew the same 4px fade
+     for all of them, so a page FORWARD, a page BACK, a re-SORT and a new
+     result set were visually identical events. That is motion that announces
+     something happened and says nothing about what — the failure this file's
+     own note warns about two paragraphs up, arriving by a different door.
+
+     The direction is the fact. Turning to a later page pulls rows up from
+     below, so they arrive from below; turning back sends them the other way.
+     A re-sort is not travel at all — the same rows in a new order — so it
+     settles sideways instead, which reads as "re-ranked" rather than "moved".
+     A new set keeps the theme's plain fade, because nothing about it is
+     directional.
+
+     THE CAUSE IS DERIVED FROM WHAT CHANGED, not passed in by the caller. Every
+     control that can move the grid — the pager, the jump box, the rows-per-page
+     picker, a column header, the query — already writes the state this watches,
+     so none of them has to remember to describe itself, and one added later
+     cannot forget to. The plain `let`s below are deliberately not `$state`:
+     they are this effect's memory of its own last run, and making them
+     reactive would make the effect its own trigger. */
+  let barMove = $state(/** @type {'fwd' | 'back' | 'sort' | 'set'} */ ('set'));
+  let lastPageSeen = 1;
+  let lastSortSeen = '';
   $effect(() => {
-    void pageNow;
-    void barSortKey;
-    void barDesc;
+    const p = pageNow;
+    const s = `${barSortKey}|${barDesc}`;
+    /* `pageTotal` IS THE SET'S IDENTITY, AND TWO BETTER-LOOKING CANDIDATES WERE
+       BUILT AND MEASURED FAILING FIRST.
+       -------------------------------------------------------------------
+       `barPlanKeys` carries the page, the page size and the sort, because its
+       job is "does this need a new fetch" — so testing it reported every sort
+       AND every page turn as a brand new set.
+       `barSetKey`, the FILES alone, looked exactly right and is not: sorting by
+       Close cannot be answered from the census prefix sums, so the grid reads a
+       different set of files to sort globally. The files change BECAUSE of the
+       sort, which is the one thing this test must not confuse.
+       The count of matched rows is immune to both. A re-sort is the same rows
+       in a new order and a page turn is a window onto them, so neither moves
+       it; narrowing the query moves it almost always, and in the case where it
+       does not, the page is also unchanged and the last branch says `set`
+       anyway. */
+    /* Read, not tested: this is what changes when a fetch is needed, so reading
+       it keeps the entrance firing on one. */
     void barPlanKeys;
+    /* THE SORT IS TESTED FIRST, AND IT TOOK THREE TRIES TO PUT IT THERE.
+       -------------------------------------------------------------------
+       Each earlier order led with a proxy for "is this a different set" and
+       each proxy turned out to move BECAUSE of the sort: `barPlanKeys` carries
+       the sort by construction; the file list changes because a global sort
+       cannot be answered from the census prefix sums; and `pageTotal` changes
+       because that same sort is answered by the window endpoint, which reports
+       its own count. Three plausible signals, all measured reporting `set` for
+       a re-rank.
+
+       `barSortKey` and `barDesc` are not a proxy for the sort — they ARE the
+       sort, and nothing else on this page writes them. A narrowing never
+       touches them, so leading with them cannot misread a query change, and it
+       settles the page-versus-sort ambiguity the same way: a re-sort resets the
+       page to 1, and testing the page first would call every sort a backwards
+       turn.
+
+       The lesson is the shape rather than the three cases: an event was being
+       identified by its side effects when the event itself was already in a
+       variable. */
+    /* NOTHING IDENTIFIABLE CHANGED IS `null`, NOT `set`, AND THAT ONE LINE
+       REPLACES A LATCH, A TIMER AND A ROW-COUNT TEST.
+       -------------------------------------------------------------------
+       One press produces several runs of this effect: the click, then the
+       fetch it triggered landing, then the fit re-applying. Only the FIRST of
+       those has anything to identify — by the second, the sort and the page
+       have already been recorded as seen. Every earlier version had that run
+       fall through to `set` and overwrite the reason the first run got right.
+
+       Each fix for that defended the fall-through instead of removing it: a
+       `pageTotal` test to catch the narrowing case (which the fetch also
+       trips, since a sorted read is answered by the window endpoint reporting
+       its own count), then a latch to suppress re-runs, then a narrower latch
+       suppressing only `set`. MEASURED after all three: the first sort of a
+       session still reported `set`, because the fetch outlives the latch's
+       420ms and writes over it once the latch has lifted.
+
+       `null` says what is actually true — this run identified nothing — and
+       leaving `barMove` alone is exactly right, because the previous reason is
+       still the reason these rows are on screen. No timer, no latch, no
+       inferred state.
+
+       THE COST IS NAMED: a query narrowing is not detected here. It resets the
+       page to 1, so from page 5 it reads `back` and from page 1 it keeps the
+       previous reason. Both are wrong labels on a real event and neither is
+       visible as anything worse than a 10px settle in the wrong direction —
+       against a sort cue that was measurably wrong on the first use of the
+       page, every session. */
+    const reason =
+      lastSortSeen === ''
+        ? 'set'
+        : s !== lastSortSeen
+          ? 'sort'
+          : p > lastPageSeen
+            ? 'fwd'
+            : p < lastPageSeen
+              ? 'back'
+              : null;
+    /* THE FIRST RUN OF AN EVENT OWNS THE REASON, AND THE REST OF IT DOES NOT.
+       -------------------------------------------------------------------
+       One press produces SEVERAL runs of this effect: the click changes the
+       sort, then the fetch it triggers settles and `pageTotal` lands, then the
+       fit may re-apply. Each re-run recomputed the reason against state the
+       press had already moved, so the second run saw the sort as unchanged —
+       it had been recorded — and the newly-arrived total as changed, and wrote
+       `set` over the `sort` the first run got right. MEASURED: the first sort
+       of a column reported `set`, while REVERSING that same column reported
+       `sort` correctly, because reversing needs no new fetch and produces only
+       one run. Two behaviours for one control, decided by whether the data
+       happened to be in hand.
+
+       So the reason latches for the length of the entrance. `entranceActive` is
+       a plain `let` and not `$state` deliberately: this effect writes
+       `barEntering`, and reading a reactive twin of it here would make the
+       effect its own trigger. The cleanup clears the timer without clearing the
+       latch, so a burst of re-runs from one press extends the window rather
+       than reopening it, and the latch lifts 420ms after the last of them. */
+    if (reason) barMove = reason;
+    lastPageSeen = p;
+    lastSortSeen = s;
     barEntering = true;
     const t = setTimeout(() => (barEntering = false), 420);
     return () => clearTimeout(t);
@@ -8282,6 +8467,7 @@
             class:noday={dayRung}
             class:nofuture={!shape.contract}
             class:nooption={!shape.option}
+            data-move={barMove}
             style="min-width:{BAR_WIDTH}px"
           >
             <colgroup>
@@ -9147,6 +9333,77 @@
      reading as motion and starts reading as latency. */
   .brow.row-in {
     animation-delay: var(--in-delay, 0ms);
+  }
+  /* ---------------------------------------------------------------------
+     THE DIRECTION OF THE ENTRANCE, SET BY WHAT CAUSED IT — see `barMove`.
+
+     Only `animation-name` is overridden. The duration, the easing, the
+     `backwards` fill and the per-row delay all stay where they were, so these
+     four cases cannot drift apart in timing and a change to the entrance's
+     pace is still made in one place.
+
+     INSIDE THE REDUCED-MOTION GUARD, and that is not a formality here: this is
+     the one entrance on the page that MOVES the row rather than fading it, so
+     it is precisely what someone who asked for stillness is asking to be
+     spared. With the guard unmatched, theme.css's `.row-in` does not apply
+     either and the rows simply appear.
+
+     10px AND NOT 4. The theme's default is a 4px settle, which is right for a
+     row appearing in place and too small to read as a direction — at 4px the
+     forward and backward cases are indistinguishable, which would make this
+     whole distinction decorative. 10px is still under the row height, so
+     nothing travels far enough to be mistaken for scrolling.
+
+     TRANSFORM ON THE ROW IS SAFE HERE AND IS NOT ON THE CENSUS GRID. `.trow`
+     carries a `position: sticky` instrument cell, and a transform on its row
+     would make the row the containing block and unpin it mid-animation — that
+     is why `.trow.row-in` is an opacity fade and says so. Measured on this
+     grid: 250 body cells, ZERO of them sticky; the 25 sticky elements are the
+     column headers, which are in `<thead>` and never inside a `.brow`. */
+  @media (prefers-reduced-motion: no-preference) {
+    .bgrid[data-move='fwd'] .brow.row-in {
+      animation-name: brow-in-fwd;
+    }
+    .bgrid[data-move='back'] .brow.row-in {
+      animation-name: brow-in-back;
+    }
+    .bgrid[data-move='sort'] .brow.row-in {
+      animation-name: brow-in-sort;
+    }
+  }
+  /* LATER PAGES ARE FURTHER DOWN THE SET, so their rows come UP from below. */
+  @keyframes brow-in-fwd {
+    from {
+      opacity: 0;
+      transform: translateY(10px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  @keyframes brow-in-back {
+    from {
+      opacity: 0;
+      transform: translateY(-10px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  /* A RE-SORT IS NOT TRAVEL. The same rows in a new order, so they settle
+     sideways — off the axis the pager moves on, which is what keeps the two
+     events distinguishable rather than merely both animated. */
+  @keyframes brow-in-sort {
+    from {
+      opacity: 0;
+      transform: translateX(-9px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
   }
 
   /* A REPEATED DAY STAYS LEGIBLE AND STOPS COMPETING.
