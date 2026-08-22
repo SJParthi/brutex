@@ -20432,3 +20432,60 @@ The wire carries `chg`/`chg_why` and `oichg`/`oichg_why`, exactly one of each
 pair non-null on every row, which is the contract `/store.json` already keeps for
 `chg_bps`. An unknown change is never `0` — zero is a real bar that closed where
 the last one did.
+
+### D-0266 — the page's holiday table is measured now, and it was wrong on five of its own dates
+
+**2026-08-22.** D-0262 built a measured trading calendar in `crates/pull` and
+D-0263 a classifier over it, and neither was wired to anything. This is the
+wiring, and it is the change an operator actually sees: `/ingest` stops
+reporting complete series as `SHORT`.
+
+**What the old table was.** 28 dates, beginning at `HOL_FROM = '2024-09-01'`. A
+window opening 2019-12-02 therefore had almost five years in which **every
+weekday was assumed to be a session**. Across that window it knew 24
+non-trading days where there are 92, so its expected count was 1,731 against a
+true 1,671 — and all six stored series read `SHORT` while every one of them was
+complete. An alarm that fires on complete data is worse than no alarm: the true
+gap hides among the false ones.
+
+**And it was wrong on five dates it did name.** 2024-11-01 and 2025-10-21 were
+listed as holidays and are **Muhurat sessions the exchange traded**; 2026-03-04,
+2026-03-19 and 2026-04-01 were listed as holidays and hold **375 bars each**.
+The measured list puts the 2026 holidays on 03-03, 03-26, 03-31 and 04-03
+instead. Those five were found by diffing the typed table against the bars —
+which is the only way a typed table is ever found to be wrong.
+
+**Weekends were the second half of the error.** `isSession` returned false for
+every Saturday and Sunday unconditionally, silently excluding three Budget days,
+two Muhurat sessions and three disaster-recovery live tests — eight days that
+traded and have bars on disk. `WEEKEND_SESSIONS` is now checked **first**,
+because it overrides the day of the week rather than qualifying it.
+`docs/06-limits.md` P-03 named one of these years ago: *"it records 2025-02-01,
+a Saturday, as a full 375-bar session"*.
+
+**Verified by simulation against the store rather than by reading the diff.**
+Walking 2019-12-02 … 2026-08-21 through the page's own `isSession` with the new
+tables counts **1,671** sessions, which is exactly the number of `1day` bars on
+disk. The first attempt reported 1,670 and the off-by-one was **the
+measurement's fault, not the page's**: the extraction picked a date out of a
+comment inside the `Set`. Recorded because it is the same class of error as
+everything else here — a list that looks right and was never checked against
+the thing it describes.
+
+**Three states, not two.** `HOL_MEASURED_THRU` is new and distinct from
+`HOL_THRU`: to 2026-08-21 the table is derived from bars, between there and
+2026-12-31 it is a forecast carried over from the old hand-typed list, and past
+that a weekday is assumed to be a session. The day note says which, because a
+forecast that reads like a measurement is exactly what put five wrong dates in
+the table this replaces.
+
+`P-03` is closer but still not closed: the browser's table and
+`crates/pull/src/calendar.rs` now agree and are derived from the same bars, but
+they are **two copies**, and nothing checks them against each other. The table
+belongs server-side — the store knows which days it holds bars for and the
+browser is guessing beside it — which the page's own comment has said since
+before either list existed.
+
+Gate W3: 47 svelte-check errors against a ceiling of 61, and **none in the file
+changed**. `npm run build` exit 0; `web/build` committed with the source, as
+gate W1 requires.

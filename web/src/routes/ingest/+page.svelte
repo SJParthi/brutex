@@ -975,17 +975,86 @@
   // day" stops moving and never explains why. `CLAUDE.md` §4: degrade loudly
   // and name the reason.
 
-  /** The first day the table below is complete for. Sep 2024 carried no NSE trading holiday. */
-  const HOL_FROM = '2024-09-01';
-  /** The last day it covers. After this, weekday-only — and every reader is told. */
+  /**
+   * The first day the table below is complete for.
+   *
+   * WAS `2024-09-01`, which is why this page reported six complete series as
+   * SHORT: a window opening 2019-12-02 had almost five years in which every
+   * weekday was assumed to be a session. The table is now derived from bars and
+   * starts where the bars do.
+   */
+  const HOL_FROM = '2019-12-02';
+  /**
+   * The last day the table is MEASURED for — the newest bar the derivation saw.
+   *
+   * Distinct from `HOL_THRU` on purpose: between these two the table is a
+   * forecast carried over from the old hand-typed list, and a forecast that
+   * calls itself a measurement is the kind of claim `CLAUDE.md` §3 rule 1
+   * exists to stop. The old table was wrong on five of its own dates.
+   */
+  const HOL_MEASURED_THRU = '2026-08-21';
+  /** The last day it covers at all. After this, weekday-only — and every reader is told. */
   const HOL_THRU = '2026-12-31';
+  // MEASURED FROM THE EXCHANGE'S OWN RECORD, NOT TYPED FROM A PAGE.
+  //
+  // Every date to 2026-08-21 is a weekday on which NIFTY, BANKNIFTY and
+  // INDIAVIX all produced no `1day` bar in the operator's store — three
+  // instruments agreeing, over 1,671 trading days. `crates/pull/src/calendar.rs`
+  // holds the same list on the Rust side and reconciles it:
+  //
+  //     1,755 weekdays - 92 holidays + 8 weekend sessions = 1,671 on disk
+  //
+  // WHAT THIS REPLACED, AND WHAT IT COST. The old table had 28 dates and began
+  // at 2024-09-01, so every weekday before that was assumed to be a session.
+  // Against a window opening 2019-12-02 it knew 24 non-trading days where there
+  // are 92, and all six stored series therefore reported SHORT while every one
+  // of them was complete. An alarm that fires on complete data hides the real
+  // gap among the false ones.
+  //
+  // It was also WRONG on five dates it did name. 2024-11-01 and 2025-10-21 were
+  // called holidays and are Muhurat sessions the exchange traded; 2026-03-04,
+  // 2026-03-19 and 2026-04-01 were called holidays and hold 375 bars each. The
+  // measured list puts the 2026 holidays on 03-03, 03-26, 03-31 and 04-03.
   const HOLIDAYS = new Set([
-    '2024-10-02', '2024-11-01', '2024-11-15', '2024-12-25',
-    '2025-02-26', '2025-03-14', '2025-03-31', '2025-04-10', '2025-04-14', '2025-04-18',
-    '2025-05-01', '2025-08-15', '2025-08-27', '2025-10-02', '2025-10-21', '2025-10-22',
-    '2025-11-05', '2025-12-25',
-    '2026-01-26', '2026-03-04', '2026-03-19', '2026-04-01', '2026-04-03', '2026-05-01',
-    '2026-08-15', '2026-10-02', '2026-11-09', '2026-12-25'
+    '2019-12-25', '2020-02-21', '2020-03-10', '2020-04-02', '2020-04-06', '2020-04-10',
+    '2020-04-14', '2020-05-01', '2020-05-25', '2020-10-02', '2020-11-16', '2020-11-30',
+    '2020-12-25', '2021-01-26', '2021-03-11', '2021-03-29', '2021-04-02', '2021-04-14',
+    '2021-04-21', '2021-05-13', '2021-07-21', '2021-08-19', '2021-09-10', '2021-10-15',
+    '2021-11-05', '2021-11-19', '2022-01-26', '2022-03-01', '2022-03-18', '2022-04-14',
+    '2022-04-15', '2022-05-03', '2022-08-09', '2022-08-15', '2022-08-31', '2022-10-05',
+    '2022-10-26', '2022-11-08', '2023-01-26', '2023-03-07', '2023-03-30', '2023-04-04',
+    '2023-04-07', '2023-04-14', '2023-05-01', '2023-06-29', '2023-08-15', '2023-09-19',
+    '2023-10-02', '2023-10-24', '2023-11-14', '2023-11-27', '2023-12-25', '2024-01-22',
+    '2024-01-26', '2024-03-08', '2024-03-25', '2024-03-29', '2024-04-11', '2024-04-17',
+    '2024-05-01', '2024-05-20', '2024-06-17', '2024-07-17', '2024-08-15', '2024-10-02',
+    '2024-11-15', '2024-11-20', '2024-12-25', '2025-02-26', '2025-03-14', '2025-03-31',
+    '2025-04-10', '2025-04-14', '2025-04-18', '2025-05-01', '2025-08-15', '2025-08-27',
+    '2025-10-02', '2025-10-22', '2025-11-05', '2025-12-25', '2026-01-15', '2026-01-26',
+    '2026-03-03', '2026-03-26', '2026-03-31', '2026-04-03', '2026-04-14', '2026-05-01',
+    '2026-05-28', '2026-06-26',
+    // BEYOND THE MEASURED WINDOW these three are a FORECAST, carried over from
+    // the old table and unverifiable here — no bar past 2026-08-21 exists to
+    // check them against. See `HOL_MEASURED_THRU`.
+    '2026-10-02', '2026-11-09', '2026-12-25'
+  ]);
+
+  // WEEKDAYS ARE NOT THE RULE, AND THESE EIGHT DAYS ARE WHY.
+  //
+  // `isSession` returned false for every Saturday and Sunday, which silently
+  // excluded three Budget days, two Muhurat sessions and three
+  // disaster-recovery live tests — all of which traded and all of which have
+  // bars on disk. `docs/06-limits.md` P-03 named one of them years before this
+  // list existed: "it records 2025-02-01, a Saturday, as a full 375-bar
+  // session".
+  const WEEKEND_SESSIONS = new Set([
+    '2020-02-01', // Budget, Saturday
+    '2020-11-14', // Muhurat
+    '2023-11-12', // Muhurat, a Sunday
+    '2024-01-20', // disaster-recovery live test
+    '2024-03-02', // disaster-recovery live test
+    '2024-05-18', // disaster-recovery live test
+    '2025-02-01', // Budget
+    '2026-02-01'  // Budget, a Sunday
   ]);
 
   /** How many holidays that table names. Counted from it, never written twice. */
@@ -1001,6 +1070,9 @@
   /** Whether the NSE traded that day, as far as this page can honestly say. */
   /** @param {string} isoDay */
   function isSession(isoDay) {
+    // THE WEEKEND EXCEPTION IS CHECKED FIRST, because it OVERRIDES the day of
+    // the week rather than qualifying it: eight of these traded.
+    if (WEEKEND_SESSIONS.has(isoDay)) return true;
     const w = weekdayOf(isoDay);
     if (w === 0 || w === 6) return false;
     return !HOLIDAYS.has(isoDay);
@@ -1008,6 +1080,7 @@
   /** Why a day holds no bars, or `null` when it is a session. */
   /** @param {string} isoDay */
   function noSessionWhy(isoDay) {
+    if (WEEKEND_SESSIONS.has(isoDay)) return null;
     const w = weekdayOf(isoDay);
     if (w === 0 || w === 6) return `${DAYNAME[w]}, no session`;
     if (HOLIDAYS.has(isoDay)) return 'NSE holiday, no session';
@@ -5844,9 +5917,14 @@
   /** @param {string} isoDay */
   function dayNote(isoDay) {
     const ns = noSessionWhy(isoDay);
-    const approx = holidaysKnownFor(isoDay)
-      ? ''
-      : ` · this page's NSE holiday table covers ${dayLabel(HOL_FROM)} – ${dayLabel(HOL_THRU)} only, so outside it a weekday is assumed to be a session`;
+    // THREE STATES, NOT TWO. Measured from bars, forecast beyond them, or
+    // outside the table entirely — and a forecast that reads like a
+    // measurement is what put five wrong dates in the table this replaced.
+    const approx = !holidaysKnownFor(isoDay)
+      ? ` · this page's NSE holiday table covers ${dayLabel(HOL_FROM)} – ${dayLabel(HOL_THRU)} only, so outside it a weekday is assumed to be a session`
+      : isoDay > HOL_MEASURED_THRU
+        ? ` · past ${dayLabel(HOL_MEASURED_THRU)} this page's holiday table is a FORECAST, not measured from bars — a holiday it misses would be offered and would come back empty`
+        : '';
     const ceiling = isoDay === maxDay ? ` · the newest day that can be asked for. ${ceilReason}` : '';
     return `${dayLabel(isoDay)} · ${ns ?? 'trading session'}${approx}${ceiling}`;
   }
