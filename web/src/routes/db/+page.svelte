@@ -3626,11 +3626,19 @@
    * this effect WRITES. Keying on it would close a loop through the effect:
    * fetch, new total, new clamp, new key, fetch again. `page` is raw `$state`
    * and depends on nothing downstream, so it triggers without feeding back. */
-  const barPlanKeys = $derived(
-    `${pagePlan.files.map((/** @type {any} */ r) => r.key).join('\n')} ${
-      pageExact ? '' : `${page}|${pageSize}|${barSortKey}|${barDesc}`
-    }`
-  );
+  /* `$derived.by` AND NOT `$derived`, for a reason about the CHECKER rather
+     than the runtime. `barSortKey` and `barDesc` are declared further down this
+     file, and both forms read them lazily, so both work. But svelte-check reads
+     `$derived(expr)` as an expression evaluated HERE and reports "Block-scoped
+     variable 'barSortKey' used before its declaration", while it reads
+     `$derived.by(() => …)` as the deferred body it is — which is why
+     `pageExact`, a hundred lines above and reading the same variable, was never
+     flagged. Same semantics; one of them provable. */
+  const barPlanKeys = $derived.by(() => {
+    const files = pagePlan.files.map((/** @type {any} */ r) => r.key).join('\n');
+    if (pageExact) return files;
+    return `${files} ${page}|${pageSize}|${barSortKey}|${barDesc}`;
+  });
 
   /* ---------------------------------------------------------------------
      THE READ. One request per instrument-month, cached for as long as the
