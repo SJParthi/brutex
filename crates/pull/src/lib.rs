@@ -137,6 +137,9 @@ pub mod fno;
 pub mod fnowork;
 pub mod fold;
 pub mod folder;
+/// WHY EVERY ABSENT BAR IS ABSENT -- classified into four states, of which only
+/// one is a loss. The store always knew; nothing asked it.
+pub mod gaps;
 /// Groww's `GA00x` error vocabulary -- one vendor's row in `refusal`.
 ///
 /// The code is NESTED under `error`, which is why `ErrorNames` carries an

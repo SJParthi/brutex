@@ -20282,3 +20282,66 @@ Wiring it into the expected-count and into a gap classifier is the next step.
 
 `pull`: 12 targets, 579 tests, plus 27 doctests, 0 failures. `fmt` and
 `clippy --all-targets -D warnings` clean.
+
+### D-0263 — the store always knew why a bar was absent, and nothing asked it
+
+**2026-08-22.** An operator asked why bars were missing from a completed pull.
+Answering took an afternoon of decoding fixed-stride records by hand, and the
+answer was that **almost nothing was missing**: of 1,204 absent minutes in a
+623,546-bar NIFTY series, 1,176 belonged to sessions that were never 375 minutes
+long, and **28** were minutes the vendor did not send.
+
+Every one of those figures was recoverable from the store on disk. None of them
+was **reported** by it. `crates/pull/src/gaps.rs` is that question asked in code
+rather than by forensics.
+
+**The taxonomy is exhaustive by construction, which is the property that
+matters.** An absent minute is in exactly one of four states — the exchange did
+not trade that day, the day traded but this minute was outside its windows, it
+was inside a window and is not there, or the calendar has never measured that
+day. `Reason` has four variants because there is no fifth, so `match` is total
+and a new case cannot be added without the compiler naming every site.
+
+**Only `VendorHole` is a loss.** Conflating it with the other three is precisely
+what made six complete series report `SHORT`. `Reason::is_loss` is the one
+predicate a report should filter on, and `Ledger::lost_minutes` is separate from
+`absent_minutes` for that reason.
+
+**`Closed` and `Unmeasured` are deliberately not merged**, and the test
+`a_holiday_and_an_unmeasured_day_do_not_share_a_reason` pins it. "The exchange
+was shut" and "nobody has looked" are different facts; reporting the second as
+the first is the invention §3 rule 1 bans, and it is exactly what an operator
+backfilling 2015 would be told by a classifier that guessed.
+
+**Cost: a two-cursor merge, O(1) per minute and per bar, with no lookup
+structure at all.** Stored bars arrive in timestamp order — the store's append
+rule guarantees it — so expected minutes and stored bars are walked together and
+each side advances at most once per step. A `HashSet` of stored minutes was the
+obvious shape and is strictly worse: a hash per bar to answer what the ordering
+answers for free. There is no per-minute allocation.
+
+**Gaps are runs, not minutes.** 1,176 of the 1,204 absences measured were four
+contiguous events; a per-minute list of the same facts is 43× longer and says
+less. A run never spans two days, because 15:29 Friday and 09:15 Monday are not
+contiguous in any sense an operator cares about.
+
+**Truncation is announced.** `MAX_GAPS` is 4,096, because a store that lost a
+year would otherwise build a ~94,000-entry `Vec` on a polled path, and a report
+that cannot be rendered is not a report. `Ledger::truncated` says so — a silent
+`take(N)` would tell an operator their store is healthier than it is, which is
+the §4 failure on the very report built to prevent it.
+
+**Three tests reproduce days from the operator's own store rather than invented
+ones**: the seven-minute hole at 2023-06-14 12:41 must be ONE run of
+`VendorHole` and not seven rows; the Muhurat hour of 2025-10-21 must owe sixty
+bars and lose none, where an arithmetic count reports 315 losses; and the
+two-window Saturday of 2024-03-02 must call its midday break `OutsideWindow`
+while still calling a hole inside either window a loss.
+
+`P-03` is still not closed. The calendar exists (D-0262) and now a classifier
+consumes it, but nothing yet feeds either into the `/ingest` expected-count or
+persists a ledger. That wiring is next, and until it lands the page still reports
+`SHORT` on complete data.
+
+`pull`: 323 lib tests, 27 doctests, 0 failures. `fmt` and
+`clippy --all-targets -D warnings` clean.
