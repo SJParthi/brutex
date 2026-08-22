@@ -10974,9 +10974,18 @@
     opacity: 0.45;
     cursor: not-allowed;
   }
+  /* THE CURRENT PAGE IS MARKED THREE TIMES AND ONLY NEEDED TWO. It carried the
+     accent on its border, its background AND its text, and the third was the
+     one that failed: `--acc` on `--acc-soft` measures 4.10:1 at 13.5px, under
+     the 4.5 floor, and this is a page NUMBER — the one glyph in the pager a
+     reader has to actually read.
+     Darkening `--acc` would have fixed it and repainted the brand everywhere to
+     do so, which is a large change to make on behalf of one chip. The border and
+     the tinted ground already say "this is the page you are on"; the number
+     itself is better as ink, and reads at 12.6:1. */
   .pg.on {
     border-color: var(--acc);
-    color: var(--acc);
+    color: var(--ink);
     background: var(--acc-soft);
     font-weight: var(--w-bold);
   }

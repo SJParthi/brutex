@@ -78,7 +78,22 @@
      accent change: if the accent were also the "info" colour then re-hueing
      the brand would silently re-hue a meaning. They are four independent
      hues — teal, red, amber, violet — and the accent is a fifth, blue. */
-  --up: #00875a;
+  /* GREEN IS MEASURED TOO, AND FOR THE SAME REASON AMBER WAS. It was #00875a,
+     which measures 3.78–3.88 as TEXT on the three opaque light surfaces —
+     under the 4.5 floor on all of them, worst on --well. #00764e is the
+     lightest value on this hue that clears it (4.84); #007e54 was tried and
+     rejected at 4.35.
+     FOUND BY A CLEAN-LOAD MEASUREMENT, AND THAT MATTERS. An earlier sweep of
+     this same page reported three elements rendering DARK-ramp colours on a
+     light ground and could not explain them. They were an artefact of measuring
+     while the theme transition was still running: toggling and reading in the
+     same breath catches `color` mid-interpolation. Loading the page already in
+     light removed all three and left exactly two real failures — this one and
+     `.pg.on`. The lesson is in `theme.css` rather than in a commit message
+     because the next person to audit contrast here will reach for the toggle.
+     `--up-soft` moves with it, being the same hue at 12%. DARK IS UNTOUCHED:
+     #00e19b there clears the floor comfortably. */
+  --up: #00764e;
   --down: #d3143f;
   /* AMBER IS MEASURED, NOT CHOSEN BY EYE — the same exercise `--n8` above
      records, which `--warn` had never had. It was #a86a06, and that fails WCAG
@@ -103,7 +118,7 @@
   --on-acc: #ffffff;
 
   --acc-soft: rgba(14, 127, 150, 0.10);
-  --up-soft: rgba(0, 135, 90, 0.12);
+  --up-soft: rgba(0, 118, 78, 0.12);
   --down-soft: rgba(211, 20, 63, 0.11);
   --warn-soft: rgba(148, 93, 5, 0.13);
   --info-soft: rgba(109, 69, 217, 0.11);
@@ -228,7 +243,7 @@
   --n11: #0d1220;
   --n12: #000814;
 
-  --up: #00875a;
+  --up: #00764e;
   --down: #d3143f;
   --warn: #945d05;
   --info: #6d45d9;
@@ -237,7 +252,7 @@
   --on-acc: #ffffff;
 
   --acc-soft: rgba(14, 127, 150, 0.10);
-  --up-soft: rgba(0, 135, 90, 0.12);
+  --up-soft: rgba(0, 118, 78, 0.12);
   --down-soft: rgba(211, 20, 63, 0.11);
   --warn-soft: rgba(148, 93, 5, 0.13);
   --info-soft: rgba(109, 69, 217, 0.11);
