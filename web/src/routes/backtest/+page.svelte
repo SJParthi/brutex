@@ -1721,7 +1721,7 @@
     <div
       class="panel"
       class:err={!refusal.includes('not an error')}
-      class:note={refusal.includes('not an error')}
+      class:bt-note={refusal.includes('not an error')}
     >
       <h2>
         {refusal.includes('not an error')
@@ -1730,14 +1730,14 @@
       </h2>
       <p>{refusal}</p>
       {#if ledger?.path}
-        <p class="path"><span class="lab">file</span> <code>{ledger.path}</code></p>
+        <p class="path"><span class="bt-lab">file</span> <code>{ledger.path}</code></p>
       {/if}
     </div>
   {:else}
     <!-- ==============================================================
          SUMMARY — the four facts before any detail
          ============================================================== -->
-    <section class="strip">
+    <section class="bt-strip">
       <div class="fact">
         <span class="k">Runs recorded</span>
         <span class="v">{exact(ledger.total)}</span>
@@ -1797,18 +1797,43 @@
       <!-- ============================================================
            THE FEED FILTER EMPTIED THE TABLE — a fact, with the way out
            ============================================================ -->
-      <div class="panel note">
-        <h2>No runs under {activeFeed || 'this feed'}</h2>
-        <p>
-          The ledger holds {exact(allRuns.length)}
-          {allRuns.length === 1 ? 'run' : 'runs'}, none of them recorded against
-          <b>{activeFeed}</b>. A sweep is stamped with the feed its bars came from, so a run under
-          another vendor is a different run and not this one seen differently.
-        </p>
-        {#if allRuns.length > 0}
+      <!-- TWO EMPTY STATES, AND THEY ARE NOT THE SAME FACT.
+           "the ledger is empty" and "this feed has none of the runs the
+           ledger holds" have different causes and different fixes, and the
+           second one blames a filter that is not responsible when the first
+           is true. This shipped conflated: with zero runs recorded it
+           announced "No runs under zerodha", which reads as a feed problem
+           and sends the operator to change a picker that will not help. -->
+      {#if allRuns.length === 0}
+        <div class="panel bt-note">
+          <h2>Nothing has been swept yet</h2>
+          <p>
+            The results ledger exists and is readable — it is simply empty. It is written by
+            <code>cli</code> when a sweep completes, not by this server, so the way to fill it is
+            to run one:
+          </p>
+          <pre class="cmd">cli range-all zerodha NIFTY 2019 12 2026 8 500</pre>
+          <p>
+            Every run that finishes appends one record here and appears on this page on the next
+            read. <b>This is not an error</b> — an empty ledger and an unreadable one are different
+            facts, and this is the first.
+          </p>
+          {#if ledger?.path}
+            <p class="path"><span class="bt-lab">file</span> <code>{ledger.path}</code></p>
+          {/if}
+        </div>
+      {:else}
+        <div class="panel bt-note">
+          <h2>No runs under {activeFeed || 'this feed'}</h2>
+          <p>
+            The ledger holds {exact(allRuns.length)}
+            {allRuns.length === 1 ? 'run' : 'runs'}, none of them recorded against
+            <b>{activeFeed}</b>. A sweep is stamped with the feed its bars came from, so a run under
+            another vendor is a different run and not this one seen differently.
+          </p>
           <button class="btn" onclick={() => (everyFeed = true)}>Show every feed</button>
-        {/if}
-      </div>
+        </div>
+      {/if}
     {:else}
       <!-- ============================================================
            LEVEL 1 — THE ANSWER
@@ -1854,7 +1879,7 @@
             </button>
           </div>
         {:else}
-          <div class="panel note">
+          <div class="panel bt-note">
             <h2>NO COMPLETE RUN</h2>
             <p>
               {#if haltedRuns.length > 0}
@@ -2224,7 +2249,7 @@
               </div>
             {:else if series.phase === 'ready'}
               <div
-                class="chart"
+                class="bt-chart"
                 bind:this={chartHost}
                 role="img"
                 aria-label="Candlestick chart of {openRun.underlying} at the {chartRung} rung, {exact(
@@ -3023,7 +3048,7 @@
     border-left: 3px solid var(--down);
     background: var(--down-soft);
   }
-  .panel.note {
+  .panel.bt-note {
     border-left: 3px solid var(--info);
   }
   .wait {
@@ -3036,12 +3061,26 @@
     color: var(--n10);
     word-break: break-all;
   }
-  .lab {
+  .bt-lab {
     font-size: 0.66rem;
     text-transform: uppercase;
     letter-spacing: 0.09em;
     color: var(--n8);
     margin-right: 0.5rem;
+  }
+
+  /* A COMMAND IS COPIED, so it is set as one: monospace, selectable, and
+     wide enough that it never wraps mid-flag. */
+  .cmd {
+    margin: 0 0 0.8rem;
+    padding: 0.6rem 0.8rem;
+    background: var(--n0);
+    border: 1px solid var(--n6);
+    border-radius: 6px;
+    font-size: 0.79rem;
+    color: var(--n11);
+    overflow-x: auto;
+    user-select: all;
   }
 
   .spin {
@@ -3060,7 +3099,7 @@
   }
 
   /* ---------------- summary strip ---------------- */
-  .strip {
+  .bt-strip {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
     gap: 1px;
@@ -3763,7 +3802,7 @@
      defaults to `flex-shrink: 1` — which took this box to 32px against its
      declared 340px and drew a chart that looked like one that had failed.
      Exactly the defect the `.page > *` rule above fixes one level up. */
-  .chart {
+  .bt-chart {
     height: 340px;
     flex: 0 0 340px;
     width: 100%;
@@ -5697,7 +5736,7 @@
     color: var(--down);
   }
 
-  .term .chart {
+  .term .bt-chart {
     height: 520px;
     flex: 0 0 520px;
     border: 0;
