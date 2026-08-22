@@ -54,6 +54,7 @@ use engine::Ladder;
 use indicators::evaluator::{Evaluator, Widths};
 use indicators::pattern::Thresholds;
 use indicators::vwap::Availability;
+use rayon::prelude::*;
 use runner::excursion::Side;
 use runner::identity::{Direction as RunDirection, Params, Run, data_digest, identity};
 use runner::outcome::Horizon;
@@ -2239,7 +2240,7 @@ const fn min_hits_for(bars: usize, support_ppm: u64) -> u64 {
 /// list is the nine an operator actually pulls rather than everything the path
 /// grammar can spell.
 const EVERY_RUNG: [&str; 9] = [
-    "1day", "60min", "30min", "15min", "10min", "5min", "3min", "2min", "1min",
+    "1min", "2min", "3min", "5min", "10min", "15min", "30min", "60min", "1day",
 ];
 
 /// One rung's row in the comparison table.
@@ -2356,8 +2357,23 @@ pub fn range_all(
          MINUTES on all of them\nand the fills come off the same bars.\n"
     );
 
+    // NINE RUNGS AT ONCE, ON A MACHINE WITH TEN PERFORMANCE CORES.
+    //
+    // Each rung is wholly independent: its own span load, its own evaluator, its
+    // own ladder, its own run identity. Nothing is shared and the only write is
+    // the ledger, which `LEDGER` serialises. This was a `for` loop on one core
+    // while `rayon` was already in this crate's manifest for `batch::sweep_all`.
+    //
+    // MEASURED before this changed: 0.20 GB resident per rung at 20% support, so
+    // nine at once is under 2 GB of 48. Memory is not what bounds this; the
+    // 1-minute rung's 623,546 bars are.
+    //
+    // DETERMINISM (§3 rule 5) IS HELD BY SHAPE. `map` on an INDEXED parallel
+    // iterator preserves order, so `rows` is the same sequence whatever order
+    // the threads finish in -- the same argument `batch::sweep_under` makes, and
+    // for the same reason. A rerun produces the same bytes.
     let rows: Vec<RungRow> = EVERY_RUNG
-        .iter()
+        .par_iter()
         .map(|&rung| one_rung(vendor_word, underlying, rung, from, to, support_ppm))
         .collect();
 
@@ -2611,6 +2627,27 @@ fn project_onto_execution(
     Ok((execution.bars.to_vec(), projected, note))
 }
 
+/// Serialises every write to the results ledger.
+///
+/// # Why a lock and not a lock-free append
+///
+/// `range_all` runs the nine rungs in PARALLEL. `Results::open` reads the whole
+/// file to build its duplicate set and `append` seeks to the end and writes, so
+/// two threads doing that at once can read a stale set, compute the same offset,
+/// and have one record overwrite the other. A fixed-stride file makes that
+/// silent: the survivor parses perfectly and the loser is simply gone.
+///
+/// One append per rung means nine acquisitions for a run that takes minutes, so
+/// contention is nil and the O(1) append is untouched. What is bought is that
+/// the ledger cannot lose a row it was told to keep.
+///
+/// A `Mutex` and not a file lock: every writer here is a thread of one process.
+/// Two PROCESSES appending at once is a different problem and is not solved by
+/// this -- which is why `cli` owns `<store>/logs/cli` rather than sharing the
+/// server's directory, and why a second `range-all` should not be started while
+/// one is running.
+static LEDGER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Everything the RESULTS STORE needs that only the caller knows.
 ///
 /// The computed half — depth, combinations, the chosen exit's figures — is read
@@ -2705,6 +2742,10 @@ fn record_run(
         ],
     };
 
+    // HELD ACROSS THE OPEN AND THE APPEND, not just the append: `open` builds
+    // the duplicate set by reading the whole file, and a set read before another
+    // thread's append is stale by the time this one writes.
+    let _guard = LEDGER.lock();
     let mut store = match results::Results::open(into.root) {
         Ok(store) => store,
         Err(why) => {
@@ -4220,10 +4261,14 @@ mod tests {
             !super::EVERY_RUNG.contains(&"1s"),
             "1s is excluded until its cost is measured"
         );
-        // COARSEST FIRST, so the cheapest rungs report before the expensive
-        // ones and an operator watching a long run sees rows early.
-        assert_eq!(super::EVERY_RUNG.first().copied(), Some("1day"));
-        assert_eq!(super::EVERY_RUNG.last().copied(), Some("1min"));
+        // FINEST FIRST. The rungs run in PARALLEL now, so ordering no longer
+        // decides which reports early -- it decides which STARTS first, and the
+        // one-minute rung is fifteen times the bars of any other. Starting the
+        // longest job first is the standard scheduling answer: the makespan of a
+        // parallel batch is bounded by its longest task, so that task must not
+        // be the last one picked up.
+        assert_eq!(super::EVERY_RUNG.first().copied(), Some("1min"));
+        assert_eq!(super::EVERY_RUNG.last().copied(), Some("1day"));
     }
 
     /// A ledger that can only be appended to is a write-only file.
