@@ -97,6 +97,9 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
        cli audit-stored VENDOR UNDERLYING RUNG YEAR MONTH MIN_HITS
                                    sweep REAL bars, then trade them: exit grid,
                                    walk-forward, PBO and bootstrap p-values
+       cli results      [VENDOR UNDERLYING]
+                                   list every recorded run, newest first, and
+                                   name the best COMPLETE one
        cli range-all    VENDOR UNDERLYING FROM_Y FROM_M TO_Y TO_M MIN_HITS
                                    sweep the span on ALL NINE RUNGS and print one
                                    table comparing them. Every rung is recorded.
@@ -120,6 +123,27 @@ unless it was stamped:
     BRUTEX_COMMIT=$(git rev-parse HEAD) cargo build --release -p cli
 ";
 
+/// The `results` arm, lifted out of [`run`] for the reason [`audit_range_arm`]
+/// gives.
+///
+/// # Two shapes and not three
+///
+/// `results zerodha` — a feed with no instrument — is deliberately NOT a shape.
+/// It would have to either list everything, which reads as a filter that
+/// silently did nothing, or filter on the feed alone, which is a third rule an
+/// operator has to learn. It falls through to the usage refusal instead.
+///
+/// Listing is never `MISUSED`: an empty ledger is an ordinary state on a fresh
+/// store, not an operator error, and returning a failure code for it would make
+/// a first run look broken.
+fn results_arm(out: &mut String, filter: Option<(&str, &str)>) -> u8 {
+    let (feed, underlying) = match filter {
+        None => (None, None),
+        Some((feed, underlying)) => (Some(feed), Some(underlying)),
+    };
+    out.push_str(&results_list(feed, underlying));
+    OK
+}
 /// The `range-all` arm, lifted out of [`run`] for the reason
 /// [`audit_range_arm`] gives.
 ///
@@ -281,6 +305,8 @@ pub fn run(args: &[String], out: &mut String) -> u8 {
             audit_range_arm(out, v, u, r, (fy, fm), (ty, tm), mh)
         }
         ["range-all", v, u, fy, fm, ty, tm, mh] => range_all_arm(out, v, u, (fy, fm), (ty, tm), mh),
+        ["results"] => results_arm(out, None),
+        ["results", feed, underlying] => results_arm(out, Some((feed, underlying))),
         ["sweep-all", vendor, rung, min_hits] => match parse_min_hits(min_hits) {
             Ok(h) => {
                 let text = batch::sweep_all(vendor, rung, h);
@@ -1774,6 +1800,174 @@ fn audit_range_inner(
             months_found: span.found,
         }),
     ))
+}
+
+/// The best COMPLETE run among these rows, as the line the listing ends on.
+///
+/// Separate from the table because a reader scanning forty rows for the largest
+/// number is a reader who will miss it — and because `done: NO` rows must not
+/// win. A halted ladder's total is not comparable with a complete one's: it
+/// covers less of the search while its combination count looks larger.
+fn best_complete_line(rows: &[crate::results::Record]) -> String {
+    let complete: Vec<&crate::results::Record> = rows.iter().filter(|r| r.halted == 0).collect();
+    let Some(best) = complete.iter().max_by_key(|r| r.pessimistic) else {
+        return "  NO COMPLETE RUN to rank: every matching row halted on a \
+                budget, so no total here is comparable with another. Raise \
+                MIN_HITS and rerun.\n"
+            .to_owned();
+    };
+    format!(
+        "  BEST COMPLETE RUN: {} {} {} {}-{:02}..{}-{:02} at min_hits {} -- {} \
+         paisa worst-case over {} trades.\n  Ranked on the WORST-case total, \
+         which is the figure every other surface selects on. Halted rows are \
+         excluded: a truncated ladder's total is not comparable with a complete \
+         one's.\n",
+        crate::results::read_field(&best.feed),
+        crate::results::read_field(&best.underlying),
+        crate::results::read_field(&best.timeframe),
+        best.from_year,
+        best.from_month,
+        best.to_year,
+        best.to_month,
+        best.min_hits,
+        best.pessimistic,
+        best.trades,
+    )
+}
+
+/// Rows the listing prints before it says how many it dropped.
+///
+/// A bound, not a page size: there is no cursor and no second call. A listing
+/// that silently showed the best fifty of four thousand would read as the whole
+/// ledger, so whatever this drops is stated on the line below the table —
+/// `crate::report`'s rule for the exit grid, applied to the same problem.
+const LIST_ROWS: usize = 40;
+
+/// Every recorded run, newest first, optionally narrowed to one feed and
+/// instrument.
+///
+/// # This is the half of the ledger that was missing
+///
+/// Runs have been recorded since the results store landed, and nothing could
+/// READ them. A ledger that can only be appended to is a write-only file: the
+/// operator's actual questions — *which threshold did best on NIFTY 15-minute*,
+/// *did the 7-year run ever complete*, *what did I already try* — all need the
+/// rows back out.
+///
+/// # Ranked by the WORST-case total, deliberately
+///
+/// Selection ranks on the pessimistic figure everywhere else in this workspace,
+/// for the reason `crate::validate` gives: a search ranked on the flattering
+/// reading picks whatever the flattering assumption helped most. A listing that
+/// ordered by the best case would quietly propose a different winner from the
+/// one every other surface names.
+///
+/// # Cost
+///
+/// `O(rows)` — the size of the answer, and every individual read is `O(1)` at
+/// `HEADER + i·STRIDE`. There is no scan of anything larger than the ledger and
+/// no index to maintain, which is `CLAUDE.md` §4's *"the path is the index"*
+/// applied to a file that is one array.
+#[must_use]
+pub fn results_list(feed: Option<&str>, underlying: Option<&str>) -> String {
+    let root = match store_root() {
+        Ok(root) => root,
+        Err(why) => return format!("refused: {why}\n"),
+    };
+    let mut store = match crate::results::Results::open(&root) {
+        Ok(store) => store,
+        Err(why) => return format!("refused: {why}\n"),
+    };
+    let count = match store.len() {
+        Ok(count) => count,
+        Err(why) => return format!("refused: {why}\n"),
+    };
+
+    let mut out = String::from("RECORDED RUNS\n");
+    let _ = writeln!(
+        out,
+        "  file                                    {}",
+        crate::results::Results::path(&root).display()
+    );
+    let _ = writeln!(out, "  rows                                    {count}");
+    if count == 0 {
+        let _ = writeln!(
+            out,
+            "\n  Nothing has been recorded yet. `cli audit-range` and `cli \
+             range-all` write a row each; the other commands do not, because a \
+             synthetic sweep has no feed or instrument to name."
+        );
+        return out;
+    }
+
+    // NEWEST FIRST, read backwards. The ledger is append-only, so the last row
+    // is the most recent and no sort is needed to say so.
+    let mut rows: Vec<crate::results::Record> = Vec::new();
+    for back in 1..=count {
+        match store.read(count.saturating_sub(back)) {
+            Err(why) => return format!("refused: {why}\n"),
+            Ok(record) => {
+                let keep = feed.is_none_or(|f| crate::results::read_field(&record.feed) == f)
+                    && underlying
+                        .is_none_or(|u| crate::results::read_field(&record.underlying) == u);
+                if keep {
+                    rows.push(record);
+                }
+            }
+        }
+    }
+    if let (Some(f), Some(u)) = (feed, underlying) {
+        let _ = writeln!(out, "  filtered to                             {f} {u}");
+    }
+    let _ = writeln!(
+        out,
+        "  matching                                {}",
+        rows.len()
+    );
+    let _ = writeln!(out);
+
+    let _ = writeln!(
+        out,
+        "  {:<9}{:<9}{:<8}{:>18}{:>7}{:>9}{:>8}{:>14}{:>14}{:>10}  identity",
+        "feed", "symbol", "rung", "span", "months", "depth", "done", "worst", "best", "trades"
+    );
+    for record in rows.iter().take(LIST_ROWS) {
+        let _ = writeln!(
+            out,
+            "  {:<9}{:<9}{:<8}{:>18}{:>7}{:>9}{:>8}{:>14}{:>14}{:>10}  {}",
+            crate::results::read_field(&record.feed),
+            crate::results::read_field(&record.underlying),
+            crate::results::read_field(&record.timeframe),
+            format!(
+                "{}-{:02}..{}-{:02}",
+                record.from_year, record.from_month, record.to_year, record.to_month
+            ),
+            format!("{}/{}", record.months_found, record.months_asked),
+            record.depth,
+            if record.halted == 0 { "yes" } else { "NO" },
+            record.pessimistic,
+            record.optimistic,
+            record.trades,
+            // The first sixteen hex characters. The full digest is 64 and would
+            // own the line; sixteen is enough to find a row and short enough to
+            // read, and `cli results` prints the whole one when a row is asked
+            // for by name.
+            record.identity_hex().chars().take(16).collect::<String>(),
+        );
+    }
+    if rows.len() > LIST_ROWS {
+        let _ = writeln!(
+            out,
+            "  ... {} further row(s) NOT SHOWN. The ledger is complete; this \
+             table is not.",
+            rows.len().saturating_sub(LIST_ROWS)
+        );
+    }
+
+    // THE BEST ROW, BY THE FIGURE SELECTION USES.
+    let _ = writeln!(out);
+    out.push_str(&best_complete_line(&rows));
+    out
 }
 
 /// Every rung this engine sweeps, coarsest question to finest.
@@ -3610,5 +3804,93 @@ mod tests {
         // ones and an operator watching a long run sees rows early.
         assert_eq!(super::EVERY_RUNG.first().copied(), Some("1day"));
         assert_eq!(super::EVERY_RUNG.last().copied(), Some("1min"));
+    }
+
+    /// A ledger that can only be appended to is a write-only file.
+    #[test]
+    fn the_listing_ranks_on_the_worst_case_and_excludes_halted_rows() {
+        // THE ASSERTION THAT MATTERS. A halted run's total is not comparable
+        // with a complete one's: it covers less of the ladder while its
+        // combination count looks LARGER. So the largest number in the table
+        // must not automatically win.
+        let halted_but_huge = crate::results::Record {
+            identity: [1; 32],
+            finished_micros: 1,
+            feed: crate::results::field("zerodha"),
+            underlying: crate::results::field("NIFTY"),
+            timeframe: crate::results::field("1min"),
+            from_year: 2019,
+            from_month: 12,
+            to_year: 2026,
+            to_month: 8,
+            months_asked: 81,
+            months_found: 81,
+            bars: 1,
+            min_hits: 120,
+            combinations: 55_000_000,
+            depth: 9,
+            halted: 1,
+            trades: 900,
+            pessimistic: 9_000_000,
+            optimistic: 9_000_000,
+            worst_trade: 0,
+            max_drawdown: -1,
+            winner_mae: 0,
+            winner_mfe: 0,
+            all_mae: 0,
+            exit_rungs: [-1; 5],
+        };
+        let complete_but_smaller = crate::results::Record {
+            identity: [2; 32],
+            min_hits: 500,
+            halted: 0,
+            pessimistic: 1_000,
+            trades: 12,
+            ..halted_but_huge
+        };
+
+        let line = super::best_complete_line(&[halted_but_huge, complete_but_smaller]);
+        assert!(
+            line.contains("min_hits 500"),
+            "the COMPLETE run must win even though the halted one shows a total \
+             nine thousand times larger:\n{line}"
+        );
+        assert!(
+            line.contains("1000 paisa"),
+            "and it must quote that run's own figure:\n{line}"
+        );
+
+        // AND WHEN NOTHING COMPLETED, IT SAYS SO rather than crowning the least
+        // truncated row.
+        let none = super::best_complete_line(&[halted_but_huge]);
+        assert!(
+            none.contains("NO COMPLETE RUN"),
+            "a table of only halted rows has no comparable winner:\n{none}"
+        );
+        assert!(
+            !none.contains("BEST COMPLETE RUN"),
+            "and must not name one anyway:\n{none}"
+        );
+    }
+
+    /// The command is listed, and both of its shapes dispatch.
+    #[test]
+    fn the_results_command_takes_no_filter_or_exactly_two() {
+        assert!(USAGE.contains("cli results"), "the command is listed");
+        // Neither shape may be MISUSED: an empty ledger is an ordinary state,
+        // not an operator error.
+        for args in [vec!["results"], vec!["results", "zerodha", "NIFTY"]] {
+            let mut out = String::new();
+            let code = run(&argv(&args), &mut out);
+            assert_ne!(code, MISUSED, "`{args:?}` is a valid invocation: {out}");
+        }
+        // One filter word is NOT a shape: `results zerodha` would silently list
+        // everything, which reads as a filter that did nothing.
+        let mut out = String::new();
+        assert_eq!(
+            run(&argv(&["results", "zerodha"]), &mut out),
+            MISUSED,
+            "a half-given filter must refuse rather than ignore itself: {out}"
+        );
     }
 }
