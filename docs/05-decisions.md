@@ -20489,3 +20489,64 @@ before either list existed.
 Gate W3: 47 svelte-check errors against a ceiling of 61, and **none in the file
 changed**. `npm run build` exit 0; `web/build` committed with the source, as
 gate W1 requires.
+
+### D-0267 — the minute expectation multiplied where it had to sum, and no pull could ever settle it
+
+**2026-08-22.** D-0266 fixed the holiday table and the `1day` rung went
+`VERIFIED` at exactly **1,671 / 1,671** on all three instruments. The `1min`
+rung stayed `SHORT` — 623,546 against 626,625 — and the operator pulled the
+named months again. Nothing changed, and nothing could have.
+
+**The data was already complete.** The journal records the fetch:
+`rows 1,871,491 → stored 1,870,591` across the three instruments, all nine
+rungs on disk, 2,370 files. NIFTY holds **623,546** minute bars in 81 months.
+What was wrong is the number it was being compared against.
+
+**`sessions × 375` is right for 1,662 of the window's 1,671 days and wrong for
+nine**, and the nine are exactly the ones an operator notices:
+
+```
+1,662 standard days x 375   623,250
+    2021-02-24 outage            54
+    2024-03-02 DR Saturday      105
+    2024-05-18 DR Saturday      105
+    2025-10-21 Muhurat           60
+                             -------
+    true expected            623,574
+    NIFTY holds              623,546   -> short by 28, the vendor holes
+```
+
+The over-count is **3,051**: 1,176 from four sessions that were never 375
+minutes, and 1,875 from five Muhurat days the minute series does not reach,
+counted at 375 apiece.
+
+**So pressing Pull could not help, and would never have.** Those months are
+whole. The vendor returns the same bars, `BarFile::append` correctly refuses
+them as a non-suffix, the count does not move, and the page asks again. A
+verdict that cannot be settled by the action it recommends is worse than a wrong
+number — it is a wrong number with a button attached.
+
+**The day rung keeps multiplying, and that is not an oversight.** A day owes
+exactly one daily bar however long its session ran, so `sessions × 1` is exact
+there. Only the minute rung needs the sum. Writing one rule for both would have
+made the daily rung wrong to make the minute rung right.
+
+**The five Muhurat days contribute NOTHING to the minute expectation**, which is
+a third answer and not zero. Counting 375 claims 1,875 bars Zerodha does not
+hold and can never return; counting 0 would say the exchange was shut when a
+`1day` bar proves otherwise. They still count as sessions for the daily rung,
+because that bar exists. This mirrors `calendar::DayKind::OpenLengthUnmeasured`
+exactly — D-0264.
+
+**Verified by simulation before shipping**, walking 2019-12-02 … 2026-08-21
+through the page's own predicate with the new tables: **623,574**, matching the
+calendar to the bar, and leaving NIFTY short by exactly the 28 minutes that are
+genuinely absent.
+
+**Two copies again, and it is still a defect.** The browser now holds
+`SHORT_SESSIONS` and `NO_MINUTE_SERIES` alongside `crates/pull/src/calendar.rs`'s
+`IRREGULAR` and `LENGTH_UNMEASURED`, derived from the same bars on the same day
+and checked by nothing. `P-03` stays open for that reason.
+
+`npm run build` exit 0; svelte-check 47 against a ceiling of 61, **none in the
+changed file**.

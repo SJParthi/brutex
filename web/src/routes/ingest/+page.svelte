@@ -1046,6 +1046,54 @@
   // bars on disk. `docs/06-limits.md` P-03 named one of them years before this
   // list existed: "it records 2025-02-01, a Saturday, as a full 375-bar
   // session".
+  // NOT EVERY SESSION IS 375 MINUTES, AND MULTIPLYING SAYS IT IS.
+  //
+  // Measured off the stored bars on 2026-08-22, the same way the holiday list
+  // was. Four days in the window traded a session that was never 09:15–15:29,
+  // and `sessions × 375` claims 1,176 bars that the exchange never offered:
+  //
+  //   2021-02-24   54 bars  09:15–10:08  — the exchange halted, an outage shape
+  //   2024-03-02  105 bars  two windows  — disaster-recovery live test
+  //   2024-05-18  105 bars  two windows  — disaster-recovery live test
+  //   2025-10-21   60 bars  13:45–14:44  — Muhurat
+  //
+  // Without this a Muhurat hour reads as 315 missing bars, which is the false
+  // alarm the holiday table was fixed to stop, arriving one rung down.
+  const SHORT_SESSIONS = new Map([
+    ['2021-02-24', 54],
+    ['2024-03-02', 105],
+    ['2024-05-18', 105],
+    ['2025-10-21', 60]
+  ]);
+
+  /**
+   * Minute bars a full NSE equity session holds: 09:15 to 15:29 inclusive.
+   *
+   * 375 and not 376, because the close is EXCLUSIVE — 15:30 is
+   * `AtOrAfterSessionClose` in `crates/pull/src/session.rs`. Expecting a 15:30
+   * bar would report one phantom hole on every one of the 1,671 days.
+   */
+  const FULL_SESSION_BARS = 375;
+
+  // TRADED, AND THE MINUTE SERIES DOES NOT REACH THEM.
+  //
+  // Every Diwali Muhurat before 2025. Each has a `1day` bar — the exchange
+  // traded — and not one minute bar anywhere in the store: 1,671 days of daily
+  // bars against 1,666 of minute bars, and this is the difference.
+  //
+  // They are excluded from the MINUTE expectation rather than counted at 375 or
+  // at 0. Counting 375 claims 1,875 bars Zerodha does not hold and can never
+  // return; counting 0 would say the exchange was shut when a daily bar proves
+  // otherwise. The honest number is unknown, so the minute rung does not claim
+  // one — `crates/pull/src/calendar.rs` calls this `OpenLengthUnmeasured`.
+  const NO_MINUTE_SERIES = new Set([
+    '2020-11-14',
+    '2021-11-04',
+    '2022-10-24',
+    '2023-11-12',
+    '2024-11-01'
+  ]);
+
   const WEEKEND_SESSIONS = new Set([
     '2020-02-01', // Budget, Saturday
     '2020-11-14', // Muhurat
@@ -4491,6 +4539,39 @@
   });
 
   /**
+   * Minute bars each month's sessions actually owe — **summed, never multiplied**.
+   *
+   * `sessions × 375` is right for 1,662 of the window's 1,671 days and wrong for
+   * nine of them, and the nine are exactly the ones an operator notices. Measured
+   * against the store: multiplying claims **626,625** bars where the exchange
+   * offered **623,574**, so all three one-minute series read SHORT by ~3,100 when
+   * every one of them was complete but for 28 minutes.
+   *
+   * The 3,051 difference is not mysterious and is not one bug:
+   *   1,176 — four sessions that were never 375 minutes ([`SHORT_SESSIONS`])
+   *   1,875 — five Muhurat days the minute series does not reach
+   *           ([`NO_MINUTE_SERIES`]), 375 apiece
+   *
+   * A day in `NO_MINUTE_SERIES` contributes **nothing**, which is deliberate and
+   * is not the same as contributing zero bars: the daily rung still counts it as
+   * a session, because a `1day` bar for it exists. Only the minute expectation
+   * declines to name a number nobody has measured.
+   */
+  const minuteBarsByMonth = $derived.by(() => {
+    const m = new Map();
+    if (!windowOk) return m;
+    let d = from;
+    while (d <= to) {
+      if (isSession(d) && !NO_MINUTE_SERIES.has(d)) {
+        const ym = d.slice(0, 7);
+        m.set(ym, (m.get(ym) ?? 0) + (SHORT_SESSIONS.get(d) ?? FULL_SESSION_BARS));
+      }
+      d = addDays(d, 1);
+    }
+    return m;
+  });
+
+  /**
    * THE SEVEN VERDICTS, spelled once: [tone, label, what it means].
    *
    * Read for the chip, for the pill and for the sort ordinal, so a label edited
@@ -4675,7 +4756,21 @@
              * The BARS STORED half is unaffected and stays exact: what is on
              * disk is known, and it is the half worth reading here. */
             const derivable = s.key === 'spot';
-            const expect = r.per === null || !derivable ? null : sessions * r.per;
+            // SUMMED FOR THE MINUTE RUNG, MULTIPLIED FOR THE DAY RUNG.
+            //
+            // A day owes exactly one daily bar however long its session ran, so
+            // `sessions × 1` is exact there. A day owes 375 minute bars only if
+            // it traded 09:15–15:29, and nine days in this window did not —
+            // four short sessions and five Muhurats the minute series never
+            // reached. Multiplying claimed 626,625 where the exchange offered
+            // 623,574, and every one-minute series read SHORT by ~3,100 while
+            // being complete but for 28 minutes. See `minuteBarsByMonth`.
+            const expect =
+              r.per === null || !derivable
+                ? null
+                : r.dir === '1min'
+                  ? (minuteBarsByMonth.get(ym) ?? 0)
+                  : sessions * r.per;
             // WITH `s.key` IN IT. Without the segment this probe answered
             // the same number for every segment in the loop.
             const held = barsBySeg.get(`${m.symbol}|${s.key}|${r.dir}|${ym}`);
