@@ -9,6 +9,7 @@
 //! | [`assets`] | the built front end, read off disk at request time |
 //! | [`audit`] | what every pull did, on disk, one fixed-stride record each |
 //! | [`autopilot`] | the backfill driving itself: what is missing, fetched oldest first |
+//! | [`backtest`] | every recorded sweep, read O(1) at a computed offset, newest first |
 //! | [`master`] | reading one vendor's instrument master off disk |
 //! | [`merge`] | one map from every vendor, and the ISIN cross-check on it |
 //! | [`constituents`] | an NSE tier joined to one vendor's ids on `(exchange, ISIN)` |
@@ -37,8 +38,14 @@ pub mod assets;
 pub mod audit;
 pub mod audit_json;
 pub mod autopilot;
+/// THE RESULTS LEDGER, over HTTP -- every recorded sweep, newest first.
+/// The engine had a page for what it INGESTED and none for what it FOUND.
+pub mod backtest;
 pub mod bars;
 pub mod calendar;
+/// The trading calendar READ OFF THE STORE, so the browser and `pull` stop
+/// holding two copies of one fact that nothing checks.
+pub mod calendar_of;
 pub mod catalog;
 pub mod census;
 pub mod constituents;

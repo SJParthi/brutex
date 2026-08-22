@@ -20609,3 +20609,57 @@ reads one answer instead of owning a second.
 
 `pull`: 329 lib tests, 27 doctests, 0 failures. `fmt` and
 `clippy --all-targets -D warnings` clean.
+
+### D-0269 — the calendar reads the store, and one instrument's bars cannot see a hole
+
+**2026-08-22.** D-0268 built `Calendar::from_observed` and nothing called it.
+`crates/api/src/calendar_of.rs` is the caller: it derives the calendar from the
+operator's own store rather than from any table.
+
+**Cost, because reading everything would have been the lazy answer.** 623,546
+minute bars is ~35 MiB, and reading all of it per page poll is the shape §3 law
+3 bans. So the **counter is asked first** — `BarFile::records()` is one header
+read, and a month whose minute count is exactly `sessions × 375` cannot contain
+an irregular day *by arithmetic*, so no walk is made. Measured on the operator's
+store: **63 months answered by counter, 18 walked**.
+
+**Verified against the real store rather than a fixture.** An `#[ignore]`d test
+reads `~/.brutex/store` and pins **1,671 sessions** and **5**
+`OpenLengthUnmeasured` days — both figures measured by hand before either module
+existed.
+
+**Two readings bracket the truth, and neither reaches it. That is the finding.**
+
+| Reading | Owed | Error |
+|---|---|---|
+| Outer span per day | 623,754 | **+180** — the two DR-Saturday midday breaks counted as bars |
+| Contiguous runs per day | 623,546 | **−28** — the vendor holes counted as breaks |
+| Truth | 623,574 | — |
+
+The first draft kept each day's first and last minute and was over by exactly
+180. Carrying the **runs** instead removed that — and landed on 623,546, which
+is precisely what NIFTY holds, because a seven-minute hole at 2023-06-14 12:41
+arrives as two contiguous runs and is indistinguishable from a scheduled break.
+
+**So a calendar derived from ONE instrument is honest about sessions and blind
+to holes**, and the module says so in its header rather than being read as a
+completeness check. The 180-bar version would have reported NIFTY short by 208
+against a true 28; the 28-bar version reports 0. Both are wrong and the second
+is wrong in the safe direction — it never invents a hole.
+
+**The missing input is a second instrument, and the shape of the fix is already
+proven.** All three instruments break 10:00–11:29 on 2024-03-02 — that is the
+exchange. Only NIFTY breaks 12:41–12:47 on 2023-06-14 — that is a loss. Three
+agreeing is the session; one differing is a hole. It is the same cross-check
+that found the five Muhurats, applied across instruments instead of across
+rungs, and it is not built yet.
+
+**A `sed` inserted the module between `#[cfg(test)]` and the item it belonged
+to**, so `calendar_of` compiled only under test and `scratch` — test-only —
+compiled into the server. Two type errors sat invisible behind it through three
+green builds. That is the **second** time today an insertion has landed between
+an attribute and its item, after the duplicated `#[test]` of D-0247, and the
+lesson is the same: a module list is not a place for a line-based edit.
+
+`pull` 329 lib + 27 doctests, `api` 620 lib, 0 failures. `fmt` and
+`clippy --all-targets -D warnings` clean.

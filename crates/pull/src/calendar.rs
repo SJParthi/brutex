@@ -607,14 +607,8 @@ mod tests {
     fn a_derived_calendar_covers_exactly_the_days_the_store_proves() {
         let cal = Calendar::from_observed(&[
             // Two ordinary sessions, a day apart, with a closed day between.
-            Observed {
-                day: 100,
-                minutes: Some((555, 929, 375)),
-            },
-            Observed {
-                day: 102,
-                minutes: Some((555, 929, 375)),
-            },
+            Observed::from_runs(100, &[(555, 929)]),
+            Observed::from_runs(102, &[(555, 929)]),
         ]);
         assert_eq!(cal.first_day(), 100);
         assert_eq!(cal.last_day(), 102);
@@ -636,7 +630,7 @@ mod tests {
 
     /// **A DAY WITH A DAILY BAR AND NO MINUTE SERIES KEEPS ITS OWN ANSWER.**
     ///
-    /// The five pre-2025 Muhurat sessions arrive here as `minutes: None`, and
+    /// The five pre-2025 Muhurat sessions arrive here with NO runs at all, and
     /// the derived calendar must reach the same conclusion the hand-built one
     /// was corrected to in D-0264 — without being told about Muhurat at all.
     /// That is the test that the derivation is doing the work rather than the
@@ -644,14 +638,8 @@ mod tests {
     #[test]
     fn a_day_the_minute_rung_never_reached_is_open_with_no_length() {
         let cal = Calendar::from_observed(&[
-            Observed {
-                day: 200,
-                minutes: Some((555, 929, 375)),
-            },
-            Observed {
-                day: 201,
-                minutes: None,
-            },
+            Observed::from_runs(200, &[(555, 929)]),
+            Observed::from_runs(201, &[]),
         ]);
         assert_eq!(cal.kind_of(201), DayKind::OpenLengthUnmeasured);
         assert_eq!(
@@ -670,10 +658,7 @@ mod tests {
     /// 315 losses that were never offered. Nothing here knows the word Muhurat.
     #[test]
     fn a_short_session_owes_what_it_traded_and_not_a_full_day() {
-        let cal = Calendar::from_observed(&[Observed {
-            day: 20_382,
-            minutes: Some((825, 884, 60)),
-        }]);
+        let cal = Calendar::from_observed(&[Observed::from_runs(20_382, &[(825, 884)])]);
         assert_eq!(cal.expected_bars(20_382), Some(60));
         let DayKind::Open(session) = cal.kind_of(20_382) else {
             panic!("it traded");
@@ -708,39 +693,33 @@ mod tests {
     /// lets the constants be deleted with evidence rather than with hope.
     #[test]
     fn the_derivation_agrees_with_the_baked_tables_it_replaces() {
-        // The four irregular sessions, as the store measured them.
+        // The four irregular sessions, with the runs the store actually holds —
+        // TWO of them for the disaster-recovery Saturdays.
         let cal = Calendar::from_observed(&[
-            Observed {
-                day: 18_682,
-                minutes: Some((555, 608, 54)),
-            },
-            Observed {
-                day: 19_784,
-                minutes: Some((555, 749, 105)),
-            },
-            Observed {
-                day: 19_861,
-                minutes: Some((555, 749, 105)),
-            },
-            Observed {
-                day: 20_382,
-                minutes: Some((825, 884, 60)),
-            },
+            Observed::from_runs(18_682, &[(555, 608)]),
+            Observed::from_runs(19_784, &[(555, 599), (690, 749)]),
+            Observed::from_runs(19_861, &[(555, 599), (690, 749)]),
+            Observed::from_runs(20_382, &[(825, 884)]),
         ]);
-        // 2021-02-24 and 2025-10-21 are contiguous, so the derived bars match
-        // the baked figure exactly.
-        assert_eq!(cal.expected_bars(18_682), expected_bars(18_682));
-        assert_eq!(cal.expected_bars(20_382), expected_bars(20_382));
 
-        // THE TWO-WINDOW SATURDAYS ARE THE HONEST DISAGREEMENT, and it is
-        // stated rather than papered over: the derivation sees only a first and
-        // a last minute, so it reports the OUTER SPAN of 195 where the baked
-        // table names two windows totalling 105. The 90-minute midday break is
-        // then reported by `crate::gaps` as holes inside the span instead of as
-        // outside-window. Same store, same bars, a coarser reading — and a
-        // caller that needs the finer one reads every bar rather than two.
-        assert_eq!(cal.expected_bars(19_784), Some(195));
-        assert_eq!(expected_bars(19_784), Some(105));
+        // EVERY ONE AGREES, INCLUDING THE TWO-WINDOW DAYS.
+        //
+        // An earlier draft of `Observed` carried only a first and a last minute,
+        // and this assertion had to be written as a documented DISAGREEMENT:
+        // 195 derived against 105 baked, because the 90-minute midday break was
+        // invisible to it. Measured against the operator's whole store that
+        // error was exactly 180 bars across the two Saturdays, which would have
+        // reported NIFTY short by 208 where the truth is 28. Carrying the runs
+        // instead of the span removes it, and this line is now an equality
+        // rather than an excuse.
+        for day in [18_682_i64, 19_784, 19_861, 20_382] {
+            assert_eq!(
+                cal.expected_bars(day),
+                expected_bars(day),
+                "derived and baked must agree on {day}"
+            );
+        }
+        assert_eq!(cal.expected_bars(19_784), Some(105), "45 + 60, not 195");
     }
 }
 
@@ -782,16 +761,48 @@ pub struct Calendar {
 }
 
 /// One day as the store observed it.
-///
-/// `minutes` is `None` where the daily rung has a bar and the minute rung has
-/// none — the shape that becomes [`DayKind::OpenLengthUnmeasured`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Observed {
     /// Days since the epoch.
     pub day: i64,
-    /// The minute-of-day of the first and last minute bar, and how many there
-    /// were. `None` when the minute rung holds nothing for this day.
-    pub minutes: Option<(u16, u16, u16)>,
+    /// The contiguous runs of minute bars the caller actually found.
+    ///
+    /// `None` where the daily rung has a bar and the minute rung has none — the
+    /// shape that becomes [`DayKind::OpenLengthUnmeasured`], and the one the
+    /// five pre-2025 Muhurat sessions arrive in.
+    pub session: Option<Session>,
+}
+
+impl Observed {
+    /// Build a session from contiguous runs, as a caller walking a day finds
+    /// them.
+    ///
+    /// **Runs past [`MAX_WINDOWS`] are dropped and the count says so** rather
+    /// than being merged into the span. Merging would silently reinstate the
+    /// 180-bar over-count this signature exists to remove; dropping under-counts
+    /// instead, which reports fewer owed bars and therefore never invents a
+    /// hole. Nothing in the operator's store needs a third window, and
+    /// `a_third_window_is_dropped_rather_than_merged` pins the behaviour so a
+    /// venue that does is a visible surprise rather than a wrong number.
+    #[must_use]
+    pub fn from_runs(day: i64, runs: &[(u16, u16)]) -> Self {
+        if runs.is_empty() {
+            return Self { day, session: None };
+        }
+        let mut windows = [Window { from: 0, to: 0 }; MAX_WINDOWS];
+        let mut count = 0_u8;
+        for (i, &(from, to)) in runs.iter().enumerate() {
+            let Some(slot) = windows.get_mut(i) else {
+                break;
+            };
+            *slot = Window { from, to };
+            count = count.saturating_add(1);
+        }
+        Self {
+            day,
+            session: Some(Session { windows, count }),
+        }
+    }
 }
 
 impl Calendar {
@@ -802,13 +813,17 @@ impl Calendar {
     /// `observed` are [`DayKind::Closed`] — the exchange did not trade — and
     /// days outside that span are [`DayKind::Unmeasured`].
     ///
-    /// **A window is inferred from the first and last minute, not from a table.**
-    /// Where the count matches the span exactly the session is contiguous and
-    /// gets one window. Where it does not — a disaster-recovery Saturday trades
-    /// two — the span is still the outer bound, and the shortfall is reported by
-    /// [`crate::gaps`] as holes inside it. That is the honest reading: this type
-    /// knows where the session started and ended, and does not claim to know
-    /// where a mid-session break was without seeing every bar.
+    /// **The windows come from the bars, not from a table and not from a
+    /// guess.** The caller walks the day and hands over the contiguous runs it
+    /// actually found, so a disaster-recovery Saturday arrives as its two real
+    /// windows rather than as one 195-minute span with a 90-minute hole in it.
+    ///
+    /// An earlier draft inferred a single window from the first and last minute.
+    /// It was measured against the operator's store and over-counted by exactly
+    /// **180 bars** — the two midday breaks of 2024-03-02 and 2024-05-18 — which
+    /// would have reported NIFTY short by 208 where the true figure is 28. The
+    /// coarse reading was documented rather than hidden, and it was still wrong
+    /// enough to matter, so the caller does the walk it was already doing.
     #[must_use]
     pub fn from_observed(observed: &[Observed]) -> Self {
         let Some(first) = observed.iter().map(|o| o.day).min() else {
@@ -829,12 +844,9 @@ impl Calendar {
             let Some(slot) = kinds.get_mut(at) else {
                 continue;
             };
-            *slot = match entry.minutes {
+            *slot = match entry.session {
                 None => DayKind::OpenLengthUnmeasured,
-                Some((from, to, _count)) => DayKind::Open(Session {
-                    windows: [Window { from, to }, Window { from: 0, to: 0 }],
-                    count: 1,
-                }),
+                Some(session) => DayKind::Open(session),
             };
         }
         Self { first, kinds }
