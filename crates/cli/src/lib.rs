@@ -1502,7 +1502,7 @@ fn audit_stored_inner(
         loaded.bars.len(),
     );
     let bars = u64::try_from(loaded.bars.len()).unwrap_or(u64::MAX);
-    let report = audit_bars(evaluator(), loaded.bars, &header, min_hits, Some(&id));
+    let report = audit_bars(evaluator(), loaded.bars, &header, min_hits, Some(&id), None);
     // THE IDENTITY REACHES THE LOG, which is the half section 3 rule 3 cares
     // about. A report names its identity in text that scrolls past; an operator
     // asking "which run produced the grid I am looking at" needs it in a line
@@ -1549,6 +1549,16 @@ fn audit_stored_inner(
 ///
 /// Every arm of [`stored::load_span`], plus the commit-stamp refusal §3 rule 3
 /// requires before any bar is read.
+/// The rung every position opens and closes on, whatever the signal rung is.
+///
+/// One minute is the finest series this store carries for an index, so it is the
+/// most resolution a fill can be measured at. It is a constant and not a
+/// parameter because it is not a choice: `CLAUDE.md` §6 explains why a knob that
+/// can be set can be set wrongly and silently, and an execution rung coarser
+/// than the data allows would quietly widen every intra-bar ambiguity in the
+/// report.
+const EXECUTION_RUNG: &str = "1min";
+
 fn audit_range_inner(
     vendor_word: &str,
     underlying: &str,
@@ -1610,6 +1620,46 @@ fn audit_range_inner(
         feed: span.vendor.as_str(),
     });
 
+    let signal_length = stored::rung_length_micros(rung)?;
+
+    // THE EXECUTION SERIES, LOADED ALONGSIDE THE SIGNAL ONE.
+    //
+    // Always one-minute, and always the SAME span, feed and instrument -- a
+    // position opened on one instrument's signal and filled on another's would
+    // be a different strategy wearing this one's name.
+    //
+    // When the signal rung IS `1min` this is skipped rather than loaded twice:
+    // projecting a series onto itself is the identity, and `align`'s own test
+    // `a_one_minute_signal_on_one_minute_bars_is_simply_the_next_bar` pins that
+    // it degenerates to "enter on the next bar" -- which is exactly what the
+    // engine did before this layer existed. Loading it anyway would double the
+    // read for no change in the answer.
+    let execution_bars = if rung == EXECUTION_RUNG {
+        None
+    } else {
+        match stored::load_span(&root, vendor, underlying, EXECUTION_RUNG, from, to) {
+            Ok(exec) => Some(exec),
+            // A REFUSAL HERE STOPS THE RUN. It would be easy to fall back to
+            // executing on the signal rung and print a note, and that is exactly
+            // the `CLAUDE.md` §4 fallback: the numbers would be a different
+            // model's, rendered identically. If the one-minute bars are not
+            // there, the answer this command promises cannot be computed.
+            Err(why) => {
+                return Err(format!(
+                    "the {EXECUTION_RUNG} execution series is required and could \
+                     not be loaded: {why} Every entry and exit fills on \
+                     {EXECUTION_RUNG} bars, so without them there is no run to \
+                     make. Pull that rung for this span, or sweep \
+                     {EXECUTION_RUNG} directly."
+                ));
+            }
+        }
+    };
+    let execution = execution_bars.as_ref().map(|exec| Execution {
+        bars: &exec.bars,
+        signal_length_micros: signal_length,
+    });
+
     let mut header = String::from(STORED_PROVENANCE);
     let _ = writeln!(
         header,
@@ -1650,6 +1700,7 @@ fn audit_range_inner(
         &header,
         min_hits,
         Some(&id),
+        execution,
     ))
 }
 
@@ -1700,7 +1751,229 @@ fn audit_with(ev: Result<Evaluator, &'static str>, sessions: i64, min_hits: u64)
         PROVENANCE,
         min_hits,
         None,
+        None,
     )
+}
+
+/// The series a position is actually opened and closed on.
+///
+/// # Signal and execution are two different series, and this is the second one
+///
+/// A bar is stamped at its OPEN (`docs/00-charter.md` §3), so a fifteen-minute
+/// bar stamped 09:15 covers `[09:15, 09:30)` and its mask is not knowable until
+/// 09:30. The earliest bar that mask can be acted on is the ONE-MINUTE bar
+/// stamped 09:30 — the same instant the next fifteen-minute bar opens, reached
+/// with fifteen times the resolution for everything that happens afterwards.
+///
+/// The resolution is the whole point. A stop and a target inside one bar's range
+/// have no order the data can settle; a fifteen-minute bar hides fifteen minutes
+/// of that path. A trailing order tracks a running peak that updates 25 times a
+/// session on fifteen-minute bars and 375 times on one-minute bars, so a trail
+/// measured on the coarse series never saw the peak it was supposed to trail
+/// from.
+#[derive(Clone, Copy)]
+struct Execution<'a> {
+    /// The one-minute bars, over the same span as the signal series.
+    bars: &'a [indicators::Candle],
+    /// How long ONE SIGNAL BAR lasts, in microseconds.
+    ///
+    /// Taken from the rung rather than inferred from timestamps: a gap between
+    /// two signal bars is a halt or a session boundary, not a longer bar, and
+    /// deriving the length from a difference would make the deadline move with
+    /// the data.
+    signal_length_micros: i64,
+}
+
+/// The bars and column a POSITION is taken on, given the ones a SIGNAL was found on.
+///
+/// Split out of [`audit_bars`] so that function stays under
+/// `clippy::too_many_lines`, and because the choice it makes is one idea: the
+/// search stays on the signal series and everything after the decision moves to
+/// the execution series.
+///
+/// # Errors
+///
+/// The alignment refusals, as a sentence the CLI prints. Both are caller bugs
+/// rather than data conditions — a non-positive bar length, or an alignment not
+/// parallel to its own column — so they refuse rather than falling back to
+/// executing on the signal rung. That fallback would produce a different
+/// model's numbers rendered identically, which is what `CLAUDE.md` §4 bans.
+fn project_onto_execution(
+    bars: &[indicators::Candle],
+    column: &indicators::column::Column,
+    execution: Option<Execution<'_>>,
+    horizon: Horizon,
+) -> Result<(Vec<indicators::Candle>, indicators::column::Column, String), String> {
+    // NO EXECUTION SERIES IS NOT A DEGRADED RUN. `cli sweep`, `cli audit` and
+    // `audit-stored` trade on the series they swept, which is what they have
+    // always done and what their reports describe. Only `audit-range` supplies
+    // one, and when the signal rung IS `1min` it deliberately does not -- a
+    // series projected onto itself is the identity.
+    let Some(execution) = execution else {
+        return Ok((bars.to_vec(), column.clone(), String::new()));
+    };
+    let Some(alignment) = runner::align::onto_execution(
+        bars,
+        column.sources(),
+        execution.bars,
+        execution.signal_length_micros,
+    ) else {
+        return Err("the signal series could not be aligned onto the execution \
+                    series. Nothing was traded."
+            .to_owned());
+    };
+    let Some((projected, dropped)) = column.reproject(&alignment.onto) else {
+        return Err("the alignment is not parallel to the column it was built \
+                    from. Nothing was traded."
+            .to_owned());
+    };
+    // DROPPED SIGNALS ARE NAMED. A signal on a session's last bar has no
+    // execution bar after it and cannot be taken; counting it silently would
+    // make a smaller sample read like a whole one.
+    let note = format!(
+        "EXECUTION SERIES\n  \
+         signal bars                                    {:>10}  the rung the conditions were found on\n  \
+         execution bars (1min)                          {:>10}  where every entry and exit fills\n  \
+         signals with no execution bar                  {:>10}  {}\n  \
+         horizon                                        {:>10}  execution bars, so MINUTES\n\n",
+        bars.len(),
+        execution.bars.len(),
+        dropped,
+        if dropped == 0 {
+            "every signal had a bar to act on"
+        } else {
+            "DROPPED -- a session's last bars have nothing after them"
+        },
+        horizon.as_bars(),
+    );
+    Ok((execution.bars.to_vec(), projected, note))
+}
+
+/// The three multiple-testing p-values, and the family they were taken over.
+///
+/// Split out of [`audit_bars`] to keep it under `clippy::too_many_lines`. It is
+/// one idea: build one RETURN SERIES per candidate, then run every bootstrap
+/// over that same family so the three answers are about the same set.
+///
+/// Returns `None` when the family is empty, which is the one state the callers
+/// below must not read as "the tests passed".
+///
+/// **Runs on the SIGNAL series**, deliberately and unlike the trade and the exit
+/// grid above. These are statements about how often a CONDITION precedes a move,
+/// which is a property of the rung it was found on; re-taking them at one-minute
+/// resolution would answer a question nobody asked and would not be comparable
+/// with the sweep's own support figures.
+fn bootstrap_family(
+    bars: &[indicators::Candle],
+    column: &indicators::column::Column,
+    by_evidence: &[&runner::rank::Scored],
+    horizon: Horizon,
+) -> Option<(
+    Option<runner::bootstrap::Verdict>,
+    Option<runner::bootstrap::Verdict>,
+    usize,
+)> {
+    // THE BOOTSTRAP, WHICH NEEDED A DIFFERENT SHAPE OF DATA FROM PBO.
+    //
+    // PBO needed one NUMBER per candidate. This needs one SERIES per candidate —
+    // a return per period — because it resamples periods and asks whether the
+    // best of the family beats what the same search finds on resampled data.
+    // Comparing one strategy against itself answers nothing, so a family is
+    // walked rather than the winner alone.
+    //
+    // Every series is bucketed into the SAME day index, so `bootstrap::aligned`
+    // cannot refuse the set for a length mismatch — alignment is a property of
+    // how this is built.
+    let days = session_index(bars);
+    // BUILT ONCE, PROBED PER TRADE. `session_returns` runs once per candidate
+    // and each walks its own trades, so the index is hoisted here rather than
+    // rebuilt inside — one pass over the sessions for the whole family.
+    let index: std::collections::HashMap<i64, usize> = days
+        .iter()
+        .enumerate()
+        .map(|(slot, day)| (*day, slot))
+        .collect();
+    // THE FAMILY THE REPORT ACTUALLY SELECTS FROM, and it did not used to be.
+    //
+    // White's Reality Check and Hansen's SPA are FAMILY-WISE tests: they ask
+    // whether the best of a set beats what the same search finds on resampled
+    // data, so the set has to be the set the search considered. This walked
+    // `closed.kept` truncated to the first sixteen in canonical mask order —
+    // which `crates/engine` states outright is not a ranking — while the
+    // combination the report chose to trade came from a different rule entirely.
+    // The p-value therefore described a family the reported strategy need not
+    // even have belonged to.
+    //
+    // `by_evidence` is the same list the traded combination is drawn from, so
+    // the head of the family and the strategy under test are now one thing.
+    let family: Vec<Vec<i64>> = by_evidence
+        .iter()
+        .take(BOOTSTRAP_CANDIDATES)
+        .map(|scored| {
+            // EACH CANDIDATE ON ITS OWN SIDE, for the reason the traded
+            // combination above is. Walking the whole family long would give a
+            // short setup a return series that is the negative of what it would
+            // have earned, so the bootstrap's null would be built from returns
+            // no strategy in the family would ever have taken — and the p-value
+            // beside it would describe that fiction rather than the family.
+            let walked = trade::walk(
+                bars,
+                column,
+                &scored.mask,
+                horizon,
+                direction_of(side_of_evidence(scored)),
+            );
+            session_returns(&index, days.len(), bars, &walked)
+        })
+        .collect();
+    // ALL THREE TESTS, AND THE THIRD ONE NOW ACTUALLY RUNS.
+    //
+    // They answer different questions: Reality Check says "something in this
+    // family is real", SPA says the same with poor strategies no longer diluting
+    // the null, and Romano-Wolf is the per-strategy stepdown that says WHICH.
+    //
+    // This comment used to read "…so it is not run rather than run and
+    // discarded", and that was true of the computation and false of the REPORT:
+    // `audit::bootstrap` was handed `family.len()` for its `named` column and
+    // printed, in words, "Only Romano-Wolf says WHICH, and it names 16" — the
+    // size of the family offered, not the count of anything rejected. A reader
+    // was told a stepdown had named sixteen strategies when no stepdown had been
+    // computed at all. That is the failure-wearing-a-success's-clothes shape
+    // `CLAUDE.md` §4 bans, in the one section of the report whose whole job is
+    // to say how much of this is luck.
+    //
+    // The stated reason for not running it — "needs a decision about which
+    // strategies to report" — is answered by the same alpha the two rows beside
+    // it are already judged at, so the decision was available; it just had not
+    // been made.
+    let rc = runner::bootstrap::reality_check(
+        &family,
+        BOOTSTRAP_DRAWS,
+        BOOTSTRAP_SEED,
+        runner::bootstrap::DEFAULT_BLOCK,
+    );
+    let spa = runner::bootstrap::spa(
+        &family,
+        BOOTSTRAP_DRAWS,
+        BOOTSTRAP_SEED,
+        runner::bootstrap::DEFAULT_BLOCK,
+    );
+    // THE STEPDOWN, at the same 5% the two rows above are judged at, so one
+    // report carries one alpha rather than two.
+    let named = runner::bootstrap::romano_wolf(
+        &family,
+        BOOTSTRAP_DRAWS,
+        BOOTSTRAP_SEED,
+        runner::bootstrap::DEFAULT_BLOCK,
+        BOOTSTRAP_ALPHA_PPM,
+    )
+    .len();
+    let boot = (!family.is_empty()).then_some((rc.as_ref(), spa.as_ref(), named));
+    let _ = boot;
+    if family.is_empty() {
+        return None;
+    }
+    Some((rc, spa, named))
 }
 
 /// The whole audit stack over bars the caller supplies, under a banner it names.
@@ -1747,6 +2020,7 @@ fn audit_bars(
     banner: &str,
     min_hits: u64,
     id: Option<&runner::identity::RunId>,
+    execution: Option<Execution<'_>>,
 ) -> String {
     let mut ev = match ev {
         Ok(e) => e,
@@ -1764,8 +2038,30 @@ fn audit_bars(
         .run_ranked(&bars, &mut ev, horizon, AUDIT_KEEP);
     let (outcome, ranked, column) = (run.outcome, run.ranked, run.column);
 
+    // THE POSITION MOVES TO THE EXECUTION SERIES; THE SEARCH DOES NOT.
+    //
+    // The sweep above measured which conditions are FREQUENT, and frequency is a
+    // property of the signal series -- "this fired on 4% of fifteen-minute bars"
+    // is the statement, and re-counting it on one-minute bars would answer a
+    // different question. So `run_ranked`, `render` and `render_findings` all
+    // stay on `bars`.
+    //
+    // What moves is everything AFTER the decision. `trade::walk` and
+    // `grid::evaluate` below take the projected column and the one-minute bars,
+    // so the stop, the target and both trailing orders are checked at
+    // one-minute resolution instead of at the signal rung's. `Horizon` is
+    // counted in bars, so it also becomes MINUTES on every signal timeframe --
+    // which is the only reading under which nine timeframes are comparable at
+    // all.
+    let (trade_bars, trade_column, execution_note) =
+        match project_onto_execution(&bars, &column, execution, horizon) {
+            Ok(triple) => triple,
+            Err(why) => return format!("refused: {why}\n"),
+        };
+
     let mut out = String::from(banner);
     out.push('\n');
+    out.push_str(&execution_note);
     out.push_str(&runner::report::render(&outcome, id));
     // WHICH COMBINATIONS SURVIVED, BY NAME, before anything is traded. The
     // stored SWEEP has printed this since the ranker was wired; the audit did
@@ -1823,8 +2119,21 @@ fn audit_bars(
     // largest |t| selects precisely the strongest signals of EITHER sign — so
     // the better the ranker got, the more often the side was wrong.
     let side = side_of_evidence(first);
-    let taken = trade::walk(&bars, &column, &first.mask, horizon, direction_of(side));
-    let exits = grid::evaluate(&bars, &column, &first.mask, horizon, side, GRID_RUNGS);
+    let taken = trade::walk(
+        &trade_bars,
+        &trade_column,
+        &first.mask,
+        horizon,
+        direction_of(side),
+    );
+    let exits = grid::evaluate(
+        &trade_bars,
+        &trade_column,
+        &first.mask,
+        horizon,
+        side,
+        GRID_RUNGS,
+    );
     out.push('\n');
     // THE WALK-FORWARD, WHICH USED TO BE A `None`.
     //
@@ -1877,102 +2186,12 @@ fn audit_bars(
     let overfit =
         (!placements.is_empty()).then(|| runner::pbo::probability_of_overfitting(&placements));
 
-    // THE BOOTSTRAP, WHICH NEEDED A DIFFERENT SHAPE OF DATA FROM PBO.
-    //
-    // PBO needed one NUMBER per candidate. This needs one SERIES per candidate —
-    // a return per period — because it resamples periods and asks whether the
-    // best of the family beats what the same search finds on resampled data.
-    // Comparing one strategy against itself answers nothing, so a family is
-    // walked rather than the winner alone.
-    //
-    // Every series is bucketed into the SAME day index, so `bootstrap::aligned`
-    // cannot refuse the set for a length mismatch — alignment is a property of
-    // how this is built.
-    let days = session_index(&bars);
-    // BUILT ONCE, PROBED PER TRADE. `session_returns` runs once per candidate
-    // and each walks its own trades, so the index is hoisted here rather than
-    // rebuilt inside — one pass over the sessions for the whole family.
-    let index: std::collections::HashMap<i64, usize> = days
-        .iter()
-        .enumerate()
-        .map(|(slot, day)| (*day, slot))
-        .collect();
-    // THE FAMILY THE REPORT ACTUALLY SELECTS FROM, and it did not used to be.
-    //
-    // White's Reality Check and Hansen's SPA are FAMILY-WISE tests: they ask
-    // whether the best of a set beats what the same search finds on resampled
-    // data, so the set has to be the set the search considered. This walked
-    // `closed.kept` truncated to the first sixteen in canonical mask order —
-    // which `crates/engine` states outright is not a ranking — while the
-    // combination the report chose to trade came from a different rule entirely.
-    // The p-value therefore described a family the reported strategy need not
-    // even have belonged to.
-    //
-    // `by_evidence` is the same list the traded combination is drawn from, so
-    // the head of the family and the strategy under test are now one thing.
-    let family: Vec<Vec<i64>> = by_evidence
-        .iter()
-        .take(BOOTSTRAP_CANDIDATES)
-        .map(|scored| {
-            // EACH CANDIDATE ON ITS OWN SIDE, for the reason the traded
-            // combination above is. Walking the whole family long would give a
-            // short setup a return series that is the negative of what it would
-            // have earned, so the bootstrap's null would be built from returns
-            // no strategy in the family would ever have taken — and the p-value
-            // beside it would describe that fiction rather than the family.
-            let walked = trade::walk(
-                &bars,
-                &column,
-                &scored.mask,
-                horizon,
-                direction_of(side_of_evidence(scored)),
-            );
-            session_returns(&index, days.len(), &bars, &walked)
-        })
-        .collect();
-    // ALL THREE TESTS, AND THE THIRD ONE NOW ACTUALLY RUNS.
-    //
-    // They answer different questions: Reality Check says "something in this
-    // family is real", SPA says the same with poor strategies no longer diluting
-    // the null, and Romano-Wolf is the per-strategy stepdown that says WHICH.
-    //
-    // This comment used to read "…so it is not run rather than run and
-    // discarded", and that was true of the computation and false of the REPORT:
-    // `audit::bootstrap` was handed `family.len()` for its `named` column and
-    // printed, in words, "Only Romano-Wolf says WHICH, and it names 16" — the
-    // size of the family offered, not the count of anything rejected. A reader
-    // was told a stepdown had named sixteen strategies when no stepdown had been
-    // computed at all. That is the failure-wearing-a-success's-clothes shape
-    // `CLAUDE.md` §4 bans, in the one section of the report whose whole job is
-    // to say how much of this is luck.
-    //
-    // The stated reason for not running it — "needs a decision about which
-    // strategies to report" — is answered by the same alpha the two rows beside
-    // it are already judged at, so the decision was available; it just had not
-    // been made.
-    let rc = runner::bootstrap::reality_check(
-        &family,
-        BOOTSTRAP_DRAWS,
-        BOOTSTRAP_SEED,
-        runner::bootstrap::DEFAULT_BLOCK,
-    );
-    let spa = runner::bootstrap::spa(
-        &family,
-        BOOTSTRAP_DRAWS,
-        BOOTSTRAP_SEED,
-        runner::bootstrap::DEFAULT_BLOCK,
-    );
-    // THE STEPDOWN, at the same 5% the two rows above are judged at, so one
-    // report carries one alpha rather than two.
-    let named = runner::bootstrap::romano_wolf(
-        &family,
-        BOOTSTRAP_DRAWS,
-        BOOTSTRAP_SEED,
-        runner::bootstrap::DEFAULT_BLOCK,
-        BOOTSTRAP_ALPHA_PPM,
-    )
-    .len();
-    let boot = (!family.is_empty()).then_some((rc.as_ref(), spa.as_ref(), named));
+    // The three multiple-testing p-values, over one family. See the helper: it
+    // runs on the SIGNAL series on purpose, unlike the trade and the grid above.
+    let boot_owned = bootstrap_family(&bars, &column, &by_evidence, horizon);
+    let boot = boot_owned
+        .as_ref()
+        .map(|(rc, spa, named)| (rc.as_ref(), spa.as_ref(), *named));
 
     out.push_str(&audit::render(
         Some(&taken),

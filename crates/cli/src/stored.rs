@@ -152,6 +152,25 @@ pub fn load(
     })
 }
 
+/// How long one bar of `rung_name` lasts, in microseconds.
+///
+/// # Taken from the rung, never inferred from the data
+///
+/// `runner::align` needs this to know when a signal bar CLOSES, which is the
+/// instant its mask becomes knowable. The alternative — subtracting one bar's
+/// stamp from the next — looks equivalent and is not: a gap between two stamps
+/// is a halt, a holiday or a session boundary, not a longer bar. Deriving the
+/// length that way would make the deadline move with the data and would place
+/// the first entry of every session hours late.
+///
+/// # Errors
+///
+/// Every refusal [`rung`] makes, unchanged, so an unknown rung is named the same
+/// way here as everywhere else.
+pub fn rung_length_micros(rung_name: &str) -> Result<i64, Refusal> {
+    let timeframe = rung(rung_name)?;
+    Ok(i64::from(timeframe.secs()).saturating_mul(1_000_000))
+}
 /// A CONTIGUOUS SPAN of real bars, joined across every month it covers.
 ///
 /// # Why this type exists, and why one month was never the unit
