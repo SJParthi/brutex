@@ -312,6 +312,84 @@ fn flush(ledger: &mut Ledger, run: &mut Option<Gap>) {
     ledger.gaps.push(gap);
 }
 
+/// Minutes this instrument lacks that a peer on the same feed **did** trade.
+///
+/// # Why a peer is the only witness that costs nothing
+///
+/// A calendar derived from one instrument cannot tell a scheduled break from a
+/// hole: both are simply minutes with no bar. [`crate::calendar_of`] measures
+/// that exactly — it reports 623,546 owed for NIFTY, which is what NIFTY holds,
+/// so all 28 of its real holes are invisible.
+///
+/// A peer breaks the tie **for free**, because the bars are already on disk. If
+/// BANKNIFTY traded 12:41 on a day NIFTY did not, the exchange was open at 12:41
+/// and NIFTY is missing a bar. No vendor request, no calendar, no table.
+///
+/// # What it finds, and what it cannot — measured
+///
+/// On the operator's store, of the interior gap-minutes in each series:
+///
+/// | Series | Gap-minutes | Provable by a peer |
+/// |---|---|---|
+/// | NIFTY | 1,204 | **3** |
+/// | BANKNIFTY | 1,252 | **51** |
+/// | INDIAVIX | 1,203 | **2** |
+/// | *common to all three* | *1,201* | *0 — see below* |
+///
+/// **1,201 of them are shared by all three**, and this function is silent about
+/// every one. That is not a weakness in the rule; it is what the evidence
+/// supports. A minute no instrument on the feed traded is either a scheduled
+/// break or a feed-wide outage, and the bars cannot say which — 2023-06-14
+/// 12:41–12:47 is missing from all three identically, which is the signature of
+/// Zerodha's pipeline stopping rather than of three separate holes.
+///
+/// **Only another VENDOR settles those.** If Dhan or Groww holds 12:41 that day,
+/// the exchange was open and Zerodha lost it.
+///
+/// So this is a strict lower bound on loss, and it is the right direction: it
+/// never reports a hole that is not one. BANKNIFTY's 51 are real bars, absent,
+/// and reported by nothing before this.
+///
+/// # Cost
+///
+/// One pass over the day's minutes, and one `expects` per peer per minute —
+/// each a bounded walk of at most [`crate::calendar::MAX_WINDOWS`]. O(1) per
+/// minute per peer, no allocation beyond the answer.
+#[must_use]
+pub fn provable_holes(
+    day: i64,
+    mine: Option<crate::calendar::Session>,
+    peers: &[Option<crate::calendar::Session>],
+) -> Vec<Gap> {
+    let mut out = Vec::new();
+    let mut run: Option<Gap> = None;
+    let mut ledger = Ledger::default();
+    for minute in 0..=1_439_u16 {
+        let i_traded = mine.is_some_and(|s| s.expects(minute));
+        // A PEER IS A WITNESS, AND ONE IS ENOUGH. Requiring a majority would
+        // discard the case this exists for: a hole in two of three series is
+        // still a hole in both.
+        let peer_traded = peers
+            .iter()
+            .any(|peer| peer.is_some_and(|s| s.expects(minute)));
+        if !i_traded && peer_traded {
+            push(
+                &mut ledger,
+                &mut run,
+                day,
+                minute,
+                minute,
+                Reason::VendorHole,
+            );
+        } else {
+            flush(&mut ledger, &mut run);
+        }
+    }
+    flush(&mut ledger, &mut run);
+    out.append(&mut ledger.gaps);
+    out
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic, reason = "test-only assertions")]
 mod tests {
@@ -474,5 +552,76 @@ mod tests {
         let ledger = classify(&[], calendar::FIRST_DAY, calendar::LAST_DAY);
         assert!(ledger.truncated, "the walk hit the bound");
         assert_eq!(ledger.gaps.len(), MAX_GAPS, "and stopped exactly there");
+    }
+
+    /// **A PEER THAT TRADED IS A WITNESS, AND ONE IS ENOUGH.**
+    ///
+    /// The case this exists for: BANKNIFTY holds 51 gap-minutes that NIFTY and
+    /// INDIAVIX do not share, measured on the operator's store. Every one is a
+    /// bar the exchange offered and Zerodha did not deliver, and nothing
+    /// reported them before — `calendar_of` reads 623,546 owed for NIFTY, which
+    /// is exactly what NIFTY holds, so a single-instrument calendar is blind to
+    /// its own holes by construction.
+    #[test]
+    fn a_minute_a_peer_traded_and_this_one_did_not_is_a_provable_hole() {
+        let full = crate::calendar::Session::full();
+        // MINE IS MISSING 12:41-12:47; the peer holds the whole session.
+        let mine = crate::calendar::Observed::from_runs(19_522, &[(555, 760), (768, 929)]).session;
+
+        let holes = provable_holes(19_522, mine, &[Some(full)]);
+        assert_eq!(holes.len(), 1, "ONE run, not seven rows: {holes:?}");
+        let hole = holes.first().expect("the run");
+        assert_eq!(hole.from, 761, "12:41");
+        assert_eq!(hole.to, 767, "through 12:47");
+        assert_eq!(hole.minutes(), 7);
+        assert_eq!(hole.reason, Reason::VendorHole);
+        assert!(hole.reason.is_loss());
+    }
+
+    /// **A MINUTE NO PEER TRADED IS NOT REPORTED, AND THAT IS THE POINT.**
+    ///
+    /// 1,201 of the operator's gap-minutes are shared by all three series —
+    /// 2023-06-14 12:41–12:47 is missing from every one of them identically,
+    /// which is Zerodha's pipeline stopping rather than three separate holes.
+    /// The bars cannot distinguish that from a scheduled break, so this
+    /// function says nothing about it.
+    ///
+    /// Silence is the safe direction: it never reports a hole that is not one.
+    /// Only another VENDOR settles those minutes.
+    #[test]
+    fn a_minute_no_peer_traded_is_silence_and_not_a_guess() {
+        let broken =
+            crate::calendar::Observed::from_runs(19_522, &[(555, 760), (768, 929)]).session;
+
+        // EVERY PEER HAS THE SAME GAP — a feed-wide outage.
+        let holes = provable_holes(19_522, broken, &[broken, broken]);
+        assert!(
+            holes.is_empty(),
+            "a gap every series shares is not provable from bars alone: {holes:?}"
+        );
+
+        // AND THE MIDDAY BREAK OF A DR SATURDAY IS THE SAME SHAPE. All three
+        // stop at 09:59 and resume at 11:30, so nothing is claimed.
+        let dr = crate::calendar::Observed::from_runs(19_784, &[(555, 599), (690, 749)]).session;
+        assert!(provable_holes(19_784, dr, &[dr, dr]).is_empty());
+    }
+
+    /// **A DAY THIS SERIES HAS NO MINUTE BARS FOR IS EVERY PEER MINUTE.**
+    ///
+    /// The five pre-2025 Muhurats arrive as `None`. Where a peer DID trade that
+    /// hour, every minute of it is a provable hole; where no peer did — which is
+    /// the real case, since Zerodha's minute history reaches none of them — the
+    /// answer is silence.
+    #[test]
+    fn a_day_with_no_minute_series_is_all_hole_or_all_silence() {
+        let hour = crate::calendar::Observed::from_runs(20_028, &[(825, 884)]).session;
+
+        // A peer traded the Muhurat hour and this series holds nothing.
+        let holes = provable_holes(20_028, None, &[hour]);
+        assert_eq!(holes.len(), 1);
+        assert_eq!(holes.first().map(|g| g.minutes()), Some(60));
+
+        // No peer traded it either — the operator's actual case.
+        assert!(provable_holes(20_028, None, &[None, None]).is_empty());
     }
 }

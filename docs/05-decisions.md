@@ -20702,3 +20702,52 @@ write is lost. They are named here so the next hand finds them: `server.rs`
 lines near 6783, 10369 and 10544, and the assertion near 18967.
 
 api: 626 tests green, clippy silent, fmt clean.
+
+### D-0271 — a peer that traded is a free witness, and it settles 56 of 1,204 gap-minutes
+
+**2026-08-22.** D-0269 measured the limit of a single-instrument calendar: it
+reports 623,546 minute bars owed for NIFTY, which is exactly what NIFTY holds,
+so all 28 of its real holes are invisible. A minute with no bar and a minute the
+exchange never offered look identical.
+
+**The proposed fix was cross-instrument consensus, and it was tested before it
+was built.** The assumption — that holes differ between instruments — was
+checked first, and 2023-06-14 12:41–12:47 is missing from NIFTY, BANKNIFTY
+**and** INDIAVIX, all seven minutes, identically. Had that been the whole story
+the idea would have been worthless and the honest move would have been to say so
+rather than ship it.
+
+It was not the whole story. Measured across every interior gap-minute in the
+three series:
+
+| Series | Gap-minutes | Not shared by all three |
+|---|---|---|
+| NIFTY | 1,204 | **3** |
+| BANKNIFTY | 1,252 | **51** |
+| INDIAVIX | 1,203 | **2** |
+| *shared by all three* | *1,201* | *—* |
+
+**BANKNIFTY holds 51 gap-minutes its peers do not**, and every one is a bar the
+exchange demonstrably offered — a peer traded that minute — and Zerodha did not
+deliver. Nothing in this build reported them before.
+
+`gaps::provable_holes` is that witness. If any peer on the same feed traded a
+minute this series lacks, the exchange was open and this series is missing a
+bar. **No vendor request, no calendar, no table** — the bars are already on disk.
+
+**One peer is enough, deliberately.** Requiring a majority would discard the
+case the function exists for: a hole in two of three series is still a hole in
+both.
+
+**It is silent about 1,201 minutes and that is the correct answer, not a
+weakness.** A minute no instrument on the feed traded is either a scheduled
+break or a feed-wide outage, and bars cannot say which — the identical
+seven-minute absence across all three is the signature of Zerodha's pipeline
+stopping, not of three separate holes. Only another **vendor** settles those.
+So this is a strict lower bound on loss, and it errs in the only safe direction:
+it never reports a hole that is not one.
+
+`pull`: 332 lib tests, 27 doctests, 0 failures. `fmt` and
+`clippy --all-targets -D warnings` clean. *(Clippy caught the new function
+appended below the test module — "items after a test module" — which is a
+placement error `cargo build` accepts and a reader would trip over.)*
