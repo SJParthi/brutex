@@ -3543,6 +3543,51 @@
     return false;
   });
 
+  /* ---------------------------------------------------------------------
+     THE FACTS ANNOUNCE THEMSELVES WHEN THEY CHANGE.
+
+     `bx-flash-up` and `bx-flash-down` have been in `theme.css` since it was
+     written and the Coverage grid uses them on a month whose bar count moved.
+     The Bars view's four hero figures had nothing: change the instrument and
+     "6,23,498 bars held" becomes "4,11,114" with no more ceremony than a
+     repaint, which on a page that also re-renders fifty rows at the same moment
+     is a change nobody sees.
+
+     THE MOTION CARRIES THE FACT, which is the operator's own rule for this
+     console: green when the number went UP, red when it went DOWN, and nothing
+     at all when it held still. A flash that fired on every render would be
+     decoration; one that fires only on a real change is the number telling you
+     it is a different number.
+
+     `null` ON THE FIRST PASS, so arriving at the page is not a change. The
+     comparison starts once there is something to compare against.
+     --------------------------------------------------------------------- */
+  /** @type {Map<string, 'up' | 'down'>} */
+  let factFlash = $state(new Map());
+  /** @type {Map<string, number>} */
+  const factSeen = new Map();
+  $effect(() => {
+    const now = new Map([
+      ['bars', coverBand.bars],
+      ['months', coverBand.months]
+    ]);
+    /** @type {Map<string, 'up' | 'down'>} */
+    const lit = new Map();
+    for (const [k, v] of now) {
+      const was = factSeen.get(k);
+      if (was !== undefined && was !== v) lit.set(k, v > was ? 'up' : 'down');
+      factSeen.set(k, v);
+    }
+    if (lit.size === 0) return;
+    factFlash = lit;
+    /* CLEARED SO IT CAN FIRE AGAIN. An animation class that stays on never
+       replays, and the next change would land silently — which is the failure
+       this exists to fix, arriving by the other road. 900ms is the keyframe's
+       own length plus room to finish. */
+    const t = setTimeout(() => (factFlash = new Map()), 900);
+    return () => clearTimeout(t);
+  });
+
   /* WHETHER THE PREFIX SUM CAN BE TRUSTED - read by both derivations below,
      so the two can never disagree about which mode the grid is in.
 
@@ -7696,11 +7741,19 @@
     {#if view === 'bars' && coverBand.cells.length > 0}
       <div class="facts">
         <div class="fact">
-          <span class="fv">{fmt(coverBand.bars)}</span>
+          <span
+            class="fv"
+            class:flash-up={factFlash.get('bars') === 'up'}
+            class:flash-down={factFlash.get('bars') === 'down'}>{fmt(coverBand.bars)}</span
+          >
           <span class="fl">bars held</span>
         </div>
         <div class="fact">
-          <span class="fv">{coverBand.months}</span>
+          <span
+            class="fv"
+            class:flash-up={factFlash.get('months') === 'up'}
+            class:flash-down={factFlash.get('months') === 'down'}>{coverBand.months}</span
+          >
           <span class="fl">month{coverBand.months === 1 ? '' : 's'} covered</span>
         </div>
         <div class="fact wide">
@@ -8538,6 +8591,47 @@
      a floor of 0.08 because a flat minute is a real state and a row with no
      mark at all reads as a rendering fault. Multiplying by `1%` drew every
      spine at half a pixel; the unit is `100%`. */
+  /* ---------------------------------------------------------------------
+     THE SPINE AND THE CHANGE BAR GROW INTO PLACE RATHER THAN APPEARING.
+
+     Both are driven by a pixel value computed per row — `--spine` from the
+     bar's range, `--magpx` from its move — and both were painted at their final
+     size the instant the row existed. On a page change fifty of them appeared
+     fully formed, which reads as a static picture being swapped rather than as
+     measurements arriving.
+
+     Animating WIDTH and HEIGHT here rather than transform, because these are
+     one to three pixels wide: a transform-scaled 2px bar is a blurred 2px bar,
+     and the crispness is the whole reason they read as measurements. Fifty rows
+     of a 2px box is nothing to lay out — this is not the case the
+     transform-only rule is written for.
+
+     THEY INHERIT THE ROW'S OWN STAGGER. `--in-delay` already spaces the rows
+     top-down; the bars ride the same clock, so a row and its marks arrive
+     together instead of the marks chasing the text. */
+  @media (prefers-reduced-motion: no-preference) {
+    .brow > td:first-child::before {
+      animation: cb-spine 320ms var(--ease-out) both;
+      animation-delay: var(--in-delay, 0ms);
+    }
+    .bpc::after {
+      animation: cb-mag 320ms var(--ease-out) both;
+      animation-delay: var(--in-delay, 0ms);
+    }
+  }
+  @keyframes cb-spine {
+    from {
+      height: 0;
+      opacity: 0;
+    }
+  }
+  @keyframes cb-mag {
+    from {
+      width: 0;
+      opacity: 0;
+    }
+  }
+
   /* THE ENTRANCE READS TOP-DOWN, AND IS CAPPED AT 160ms.
      Fifty rows arriving in the same instant is a flash, not a transition: it
      tells a reader something changed and nothing about what. An 8ms step lets
@@ -9855,12 +9949,25 @@
        had the rest.
 
        Now that `.board` scrolls (see its own note), the table no longer has to
-       fit in what the chrome leaves. `min(72vh, 680px)` gives it about sixteen
-       rows on this viewport and the page scrolls to reach whatever will not
-       fit, which is the arrangement the pager already assumes. `flex: 1` still
-       lets it take MORE where a tall window offers it.
+       fit in what the chrome leaves. The page scrolls to reach whatever will
+       not fit, which is the arrangement the pager already assumes, and
+       `flex: 1` still lets it take MORE where a tall window offers it.
+
+       THE CEILING WAS 680px AND A REAL WINDOW IS TALLER THAN THAT.
+       Measured on the operator's own screen — a maximised window, not the
+       900px test viewport — 72vh comes to about 930px and the 680 cap threw
+       the difference away: the box stayed letterbox-shaped on a display with
+       room for twice the rows. A cap that binds on every real monitor is not a
+       safety rail, it is the size.
+
+       `min(80vh, 1100px)` keeps a cap for the case the vh term is written for —
+       a very tall or rotated display, where 80vh would otherwise leave no room
+       for the pager under it — while letting an ordinary large screen give the
+       table the space it obviously has. On a 900px viewport this is 720px, and
+       on a 1300px one it is 1040px: about twenty-six rows, which is what a
+       reader of a price table is actually looking for.
        --------------------------------------------------------------------- */
-    min-height: min(72vh, 680px);
+    min-height: min(80vh, 1100px);
     display: flex;
     flex-direction: column;
     position: relative; /* the drawer's containing block */
