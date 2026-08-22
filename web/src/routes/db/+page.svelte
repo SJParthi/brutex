@@ -8374,13 +8374,18 @@
          question a banner over a table is actually asked. Counted from the
          rows, so it narrows with them; an absence is named and never rendered
          as an epoch. -->
-    <p class="pager">
-      <!-- THE ROW COUNT, AND NOTHING ELSE. "N in the DOM" is a fact about the
-           windowing, not about the store; "newest bar" repeats a value the
-           first row of the grid already shows; the keyboard legend is a help
-           text on a page whose shortcuts are one key each. -->
-      <span class="of"><b>{fmt(pageTotal)}</b> row(s)</span>
-    </p>
+    <!-- THE SECOND PAGER IS GONE, AND IT WAS SAYING THE FIRST ONE'S NUMBER.
+         `<p class="pager">` stood here holding one span: `{fmt(pageTotal)}
+         row(s)`. Thirty pixels above it `.pgbar`'s own readout already ends
+         "…of <b>4,225,185</b> rows", from the SAME `pageTotal`. Two elements,
+         one value, stacked — a reader who spots the difference is looking for
+         a difference that cannot exist.
+
+         It had already been trimmed once, down to the row count from a banner
+         carrying DOM counts and the newest bar; the honest end of that trim is
+         zero, because what remained was a duplicate rather than a small fact.
+         Worth 47px of the height the table's 25-row floor needs, but it would
+         have gone anyway. -->
     </div>
   {/if}
 </div>
@@ -8766,7 +8771,12 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
-    padding: var(--s3) var(--s4);
+    /* `--s2` (4px) VERTICALLY RATHER THAN `--s3` (6px). Four pixels off a row
+       whose tallest content is a 30px figure over a micro caption; the cell
+       keeps `--s4` horizontally because the figures sit beside each other and
+       side padding is what separates them. Same reason as `.cband-rail`: small
+       change here, twenty-five rows there. */
+    padding: var(--s2) var(--s4);
     background: var(--bg-2);
     min-width: 0;
   }
@@ -8864,7 +8874,13 @@
     display: flex;
     align-items: flex-end;
     gap: 2px;
-    height: 34px;
+    /* 26px, DOWN FROM 34. The rail's cells are a RELATIVE comparison — each is
+       a percentage of the tallest — so its readability is set by the ratio
+       between neighbouring bars, not by the absolute height of the tallest.
+       Eight pixels off the top changes no ratio and the shortest visible cell
+       still clears the 2px floor `.cb-cell` sets. Given up to the table's
+       25-row floor, which is measured in a unit this band has no claim on. */
+    height: 26px;
     padding-bottom: 1px;
     border-bottom: 1px solid var(--line-soft);
   }
@@ -8961,8 +8977,19 @@
     /* 40px, AND IT IS THE SAME 40 THE WINDOWING ARITHMETIC USES. `ROW = 40` in
        the script places row N at `N * 40px`; if these two ever disagree the
        rows drift away from the scrollbar a pixel per row and the list is
-       unusable by the thousandth. Neither number moves without the other. */
+       unusable by the thousandth. Neither number moves without the other.
+
+       IT WAS 32 ONCE AND THAT IS RECORDED AS CRAMPED at the grid's 14px type —
+       see the script's own note beside `ROW`. Written here because the table's
+       height is now `25 * this + --dbhead`, which makes this token the most
+       tempting thing on the page to shave: it is a 25x lever, one pixel off it
+       buys twenty-five of page. The measurement above is why it stays at 40. */
     --dbrow: 40px;
+    /* 30px, THE SAME `HEAD` THE SCRIPT SUBTRACTS. The sticky header covers the
+       top of the scroll box, so `moveTo` clears the cursor by it and `.tbl`'s
+       floor adds it to the 25 rows. Three readers of one measurement; it is a
+       token so there is one place to change it. */
+    --dbhead: 30px;
   }
 
   /* ---- THE BOARD ------------------------------------------------------
@@ -9181,6 +9208,17 @@
        recorded reason — "a 34px control cannot hold 15px text with a border and
        still look deliberate" — so the height of a control is a decision this
        file does not get to relitigate for a few pixels. */
+    /* STILL 216, AND A 200 WAS TRIED AND REVERTED IN THE SAME COMMIT THAT
+       SHRANK EVERYTHING ELSE ON THIS PAGE. Recorded because the reasoning looks
+       sound and is not: the strip stands two rows tall at 223px, and 200px
+       would fit SEVEN tracks where 216 fits six, which reads like it should
+       close the second row.
+       It cannot. The day window is `grid-column: 1 / -1` — see `.field.wide`,
+       where `-1` over `span 2` is itself a measured decision — so it takes the
+       whole last line at EVERY track count. Five rungs plus a full-width row is
+       two rows at six tracks and two rows at seven. The only thing a narrower
+       minimum changes is that the five rungs get 210px each instead of 247,
+       which is not an improvement anyone asked for. */
     grid-template-columns: repeat(auto-fit, minmax(216px, 1fr));
     /* ---- RESET A ROW TEMPLATE THIS FILE DID NOT WRITE ----------------------
      * `theme.css` §8 also styles `.strip`, and it declares
@@ -9967,60 +10005,126 @@
        on a 1300px one it is 1040px: about twenty-six rows, which is what a
        reader of a price table is actually looking for.
        --------------------------------------------------------------------- */
-    /* AND NOW THERE IS NO FLOOR AT ALL, BECAUSE THERE IS NOTHING TO SHRINK.
-       Every number above is the history of a box that had to survive inside a
-       fixed-height column — 220px to stop it vanishing, then 680, then
-       min(80vh, 1100px) to stop it being a letterbox. With the inner scroller
-       gone this box simply IS its rows: fifty of them at 40px is 2,030px, and
-       the page scrolls to them. A floor would now be a CEILING on nothing, and
-       `flex: 1` would stretch an already-correct height. */
+    /* AND NOW THE FLOOR IS A ROW COUNT, WHICH IS THE UNIT THE READER ASKED IN.
+       ---------------------------------------------------------------------
+       Every number above is the history of a box guessing at a height — 220px
+       to stop it vanishing, then 680, then min(80vh, 1100px), then no floor at
+       all when the box grew to all fifty rows and the page scrolled 2,030px to
+       pass them. Each was a PIXEL answer to a question asked in ROWS, which is
+       why none of them survived contact: nobody looking at a price table wants
+       "eighty percent of the viewport", they want to see twenty-five rows and
+       reach the next page without hunting for the button.
+
+       So the floor is written in rows, and it is the same two constants the
+       windowing arithmetic uses — `ROW` and `HEAD` in the script — rather than
+       a third number that could disagree with them. Twenty-five rows plus the
+       sticky header is 1,030px at the current 40px row.
+
+       `flex: none`, AND "STATIC" IS THE WORD THE REQUEST USED. An earlier pass
+       here wrote `flex: 1` so a tall window would give the box MORE than 25
+       rows. That is a different feature and a worse one: a box that grows with
+       the viewport puts the pager somewhere different on every screen, and
+       turning pages is the frequent act this layout is being cheap for. 25 rows
+       always means the pager is always in the same place.
+
+       IT ALSO BROKE, WHICH IS HOW THE POINT GOT MADE. `flex: 1` here with
+       `overflow: hidden` below is a trap worth naming: a flex item's automatic
+       minimum size — the rule that stops it shrinking under its own content —
+       applies ONLY while overflow is `visible`. `hidden` resolves `min-height:
+       auto` to zero, so `flex: 1` shrank this box to the 484px the chrome left
+       and the 1,030px scroll box inside it was CLIPPED. Measured: the page
+       reported nothing to scroll and the pager sat above the fold, both true,
+       both because fourteen rows had been thrown away rather than fitted.
+       A layout that reports success by discarding its content is the failure
+       wearing a success's clothes that `CLAUDE.md` §4 bans.
+
+       AND IT DOES NOT ALWAYS FIT, WHICH IS THE HONEST PART. `min-height` on a
+       flex child is a promise the PARENT pays for: when 25 rows plus the chrome
+       exceeds `.board`, the board overflows and the page scrolls the
+       difference. Measured on a 1,200px viewport after the trims in this
+       commit, the page runs to about 1,550px, so roughly 350 of it scrolls.
+       "Twenty-five rows minimum" and "nothing scrolls" are the same constraint
+       pulled in opposite directions, and on a short window the row count is the
+       one that was asked for. Everything fits outright at a window height of
+       about 1,550px.
+       --------------------------------------------------------------------- */
+    /* THE FLOOR IS ON `.tbl-scroll`, NOT HERE, AND THE FIRST ATTEMPT PUT IT
+       HERE AND CAME UP HALF A ROW SHORT. Measured: `.tbl` obeyed 1,030px
+       exactly, then spent 17 of them on `.bnotes` and 2 on its own border, so
+       the scroll box got 1,011 and showed 24.5 rows under a comment promising
+       25. The floor is a statement about how many rows the SCROLLER shows, so
+       it belongs on the scroller; this box is then whatever that needs plus its
+       own furniture, and a note added under the table later cannot silently
+       eat a row. */
     flex: none;
     display: flex;
     flex-direction: column;
     position: relative; /* the drawer's containing block */
     border: 1px solid var(--line);
     border-radius: var(--r4);
-    /* `visible`, SO THE STICKY HEADER CAN SEE THE PAGE. See `.tbl-scroll`:
-       a non-visible overflow anywhere between the `<th>` and `.board` makes
-       THAT box the sticky scroller, and the header would then scroll away with
-       the table instead of holding at the top of the page. The rounded corners
-       lose their clip, which is what the border is drawn for anyway. */
-    overflow: visible;
+    /* `hidden` AGAIN, AND NOW IT IS WANTED RATHER THAN TOLERATED. With the
+       rows scrolling inside `.tbl-scroll` once more, the sticky `<th>` should
+       pin to THAT box — which is the whole point of a fixed-height table — so
+       an ancestor clip here is no longer the trap it was when the header had to
+       see the page. It buys back the rounded corners the drawer and the header
+       were spilling out of. */
+    overflow: hidden;
     background: var(--panel);
     box-shadow: var(--e2);
   }
   .tbl-scroll {
-    flex: 1;
-    min-height: 0;
+    /* TWENTY-FIVE ROWS AND THE STICKY HEADER — `height`, NOT `min-height`, AND
+       BOTH WRONG ANSWERS WERE TRIED FIRST.
+       ---------------------------------------------------------------------
+       `--dbrow` and `--dbhead` are the same two measurements the windowing
+       arithmetic reads as `ROW` and `HEAD`, so the box cannot promise a row
+       count the script places differently. That part was right from the start;
+       the PROPERTY took two goes.
+
+       `min-height` with `flex: 1` on `.tbl` CLIPPED — `overflow: hidden` there
+       zeroes a flex item's automatic minimum size, so the panel shrank to 484px
+       and cut fourteen rows off the bottom.
+       `min-height` with `flex: none` on `.tbl` OVERGREW — a floor is not a
+       ceiling, nothing capped the box, and it stood at 2,030px with all fifty
+       rows and an inner scroll range of ZERO. Measured both.
+
+       A STATIC BOX HAS ONE HEIGHT, so it is stated once as a height and neither
+       failure is reachable. `flex: none` beside it stops `.tbl`'s column from
+       stretching it back out. */
+    flex: none;
+    height: calc(25 * var(--dbrow) + var(--dbhead));
     /* ---------------------------------------------------------------------
-       THIS NO LONGER SCROLLS, AND THAT IS THE POINT.
+       THIS SCROLLS AGAIN, AND THE ROUND TRIP IS WORTH STATING PLAINLY BECAUSE
+       BOTH ARRANGEMENTS ARE DEFENSIBLE AND ONLY ONE ANSWERS THIS PAGE.
 
-       TWO SCROLLERS IS THE BUG, NOT THE HANDOFF. d34bd03 fixed the handoff —
-       reaching the last row now chains into the page instead of stopping dead —
-       and the operator's answer to that was the right one: with a scroller
-       inside a scroller, the pointer's position decides which one moves, so you
-       never know which you are driving and either can feel stuck. Chaining made
-       it recoverable. It did not make it legible.
+       It scrolled originally by ACCIDENT: `.board` could not scroll at all, so
+       the rows were the only thing that could, and reaching the last one
+       stopped the wheel dead with the pager stranded below. That was fixed
+       twice — first by letting the scroll chain out (d34bd03), then by removing
+       this scroller entirely so the page held exactly one (8692c60).
 
-       ONE SCROLLBAR NOW. `.board` scrolls the page; this box grows to its
-       content and the rows go with it. The `<th>`s are already
-       `position: sticky; top: 0` — they were sticking to the top of THIS box,
-       and with no scroll container here they stick to the page instead, so the
-       column heads stay put as the whole page moves. That is the arrangement
-       that needed no explaining in the first place.
+       ONE SCROLLER WAS THE RIGHT FIX FOR THE WRONG COMPLAINT. It did make the
+       page legible — no more guessing which box the wheel was driving — but it
+       bought that by letting the table grow to all fifty rows, 2,030px, which
+       put the pager 2,030px below the header. The reader who wants page 6,001
+       now scrolls the length of a page they did not want in order to leave it.
+       Turning pages is the frequent act on this surface; reading to the bottom
+       of one is the rare act. The layout should be cheap for the frequent one.
 
-       `overflow: visible` RATHER THAN REMOVING THE LINE, and on `.tbl` too:
-       any ancestor with a non-visible overflow becomes the sticky element's
-       containing scroller, so a leftover `hidden` between the `<th>` and
-       `.board` would pin the header to a box that scrolls away with the page.
+       So it scrolls, by CHOICE this time, inside a box with a floor written in
+       rows — see `.tbl`. Twenty-five rows is enough to read and short enough
+       that the pager stays near the fold. The `<th>`s pin to this box, which is
+       what a fixed-height table is for.
+
+       THE PAGE IS STILL A SCROLLER TOO, and that is unavoidable rather than a
+       regression: 25 rows plus the chrome exceeds a 1,200px window. What has
+       changed is that the inner box is now a KNOWN size the reader can learn,
+       instead of one that grew with the row count, and the page beneath it
+       scrolls ~350px instead of ~1,700px. `overscroll-behavior` is deliberately
+       NOT set: the chain from the last row into the page is what makes two
+       scrollers survivable, and `contain` is what broke it the first time.
        --------------------------------------------------------------------- */
-    overflow: visible;
-    /* SCROLL CHAINS OUT OF THE ROWS AND ON INTO THE PAGE.
-       `overscroll-behavior: contain` is right for a popover — the instrument
-       menu keeps it, because scrolling a dropdown must not move the page behind
-       it — and wrong here, where these rows are the page's own content. With
-       `contain`, reaching the last row stopped the wheel dead while the pager
-       waited below; now the scroll hands on to `.board` and carries there. */
+    overflow: auto;
   }
   .tbl-scroll:focus-visible {
     outline: 2px solid var(--focus);
@@ -10549,28 +10653,12 @@
      nothing to point at. Everything a pager's `.of` says is here: where you are
      standing in the run, how much of it is real right now, how fresh it is, and
      the keys that move you through it. */
-  .pager {
-    flex: none;
-    display: flex;
-    align-items: baseline;
-    flex-wrap: wrap;
-    gap: var(--s2) var(--s5);
-    margin: 0;
-    padding: var(--s4) var(--s5);
-    border: 1px solid var(--line);
-    border-radius: var(--r4);
-    background: var(--panel-2);
-  }
-  .pager .of {
-    font-size: var(--fs-xs);
-    color: var(--faint);
-  }
-  .pager .of b {
-    color: var(--ink-2);
-    font-family: var(--mono);
-    font-weight: var(--w-semi);
-    font-variant-numeric: tabular-nums;
-  }
+  /* `.pager`, `.pager .of` AND `.pager .of b` ARE GONE WITH THE ELEMENT THEY
+     STYLED — see the markup note where the second pager stood. Svelte reports
+     an unused selector as a warning rather than an error, so dead rules here
+     survive a build and accumulate; three of them for one deleted `<p>` is
+     exactly the drift worth not starting. `.pgbar` carries the surviving pager
+     and its own rules are untouched. */
   .dclose .kbd {
     margin: 0 1px;
   }
@@ -10689,15 +10777,23 @@
 
   /* ---- THE BAR GRID. A real table: paged, not windowed, so the browser's
      own column algorithm can do the work. */
-  /* `.bscroll` NO LONGER SCROLLS EITHER, AND IT IS WHY THE FIRST ATTEMPT FAILED.
-     The scroll region carries BOTH classes — `class="tbl-scroll bscroll"` — so
-     setting `overflow: visible` on `.tbl-scroll` alone left this rule standing
-     and the box went on scrolling. Measured: the `<th>` still reported its
-     nearest scroller as `.tbl-scroll`, so it stuck to a box 2,049px tall and
-     scrolled off the screen with it — the header vanished at -857px.
-     Two class names for one box is how a change lands on half of it. */
+  /* THE BOX SCROLLS AGAIN, AND THIS TIME IT IS THE DECISION RATHER THAN THE
+     ACCIDENT.
+     ---------------------------------------------------------------------
+     It scrolled before because nobody had chosen; the page could not scroll at
+     all, so the rows had to. That produced two scrollers and the pointer
+     deciding which one moved.
+     The operator chose the other arrangement, and it is the better one for this
+     page: a box of fixed size that holds a useful number of rows, with the
+     pager ALWAYS in reach beneath it rather than at the end of two thousand
+     pixels of scrolling. You turn pages far more often than you read to the
+     bottom of one.
+     Both classes are set here — `class="tbl-scroll bscroll"` — because setting
+     one and leaving the other is how the previous change landed on half the
+     element and the sticky header rode off to -857px.
+     --------------------------------------------------------------------- */
   .bscroll {
-    overflow: visible;
+    overflow: auto;
   }
   .bgrid {
     border-collapse: separate;
@@ -11208,6 +11304,39 @@
     border: 1px solid var(--line);
     border-radius: var(--r4);
     background: var(--panel-2);
+    /* ---------------------------------------------------------------------
+       PINNED TO THE BOTTOM, AND IT IS WHAT RESOLVES A CONTRADICTION RATHER
+       THAN A PREFERENCE.
+
+       The two things asked of this page pull against each other on any ordinary
+       screen: twenty-five rows costs 1,030px, the chrome above costs ~465, and
+       a 1,200px window cannot hold 1,672px. MEASURED before this rule: 25 rows
+       rendered correctly and the pager sat at 1,753px against a 1,200px fold —
+       553px below it. Every earlier attempt at this fought the arithmetic by
+       shaving panels, and the arithmetic won each time, because 505px is not
+       hiding in a coverage band.
+
+       So the layout stops trying to fit the pager on the screen and PINS it to
+       the screen instead. `bottom: 0` inside `.board` — the page's scroller —
+       holds it at the fold wherever the reader has scrolled to, and the answer
+       to "how do I reach the next page" becomes "you never have to". The rows
+       above it scroll; the control that leaves them does not.
+
+       WHY IT WORKS HERE AND NOT ON THE TABLE: sticky resolves against the
+       nearest ancestor with a non-visible overflow, and this is a DIRECT child
+       of `.board`, so nothing clips in between. The sticky `<th>` learned that
+       rule the expensive way when `.bscroll`'s leftover `overflow: auto` pinned
+       it to a box that scrolled away.
+
+       `z-index` above the rows because they pass UNDER it, and the negative
+       bottom margin swallows `.board`'s own 12px padding so no strip of table
+       shows below the bar. The background is already opaque — a translucent one
+       would let the rows read through the page numbers. */
+    position: sticky;
+    bottom: calc(-1 * var(--s5));
+    z-index: 3;
+    margin-bottom: 0;
+    box-shadow: var(--e2), 0 -8px 20px -12px rgb(0 0 0 / 45%);
   }
   .pgof,
   .pgof2 {

@@ -29,6 +29,25 @@ const ROUTES = [
 	'/instruments.json',
 	'/feeds.json',
 	'/bars.json',
+	// THE SORTED/PAGED WINDOW OVER ONE INSTRUMENT'S BARS, and it shipped
+	// missing from this list. `/db` calls it whenever the reader sorts by a
+	// column the census cannot answer from its prefix sums, so the gap was not
+	// an edge case — it was every sort on the page. Caught by
+	// `tests/proxy.test.js`, which walks what `web/src` fetches and asserts a
+	// ROUTES entry covers each: without it `npm run dev` answers the request
+	// with the dev server's HTML fallback at 200 and the grid empties under a
+	// pager still reporting twelve thousand pages. Production was fine — the
+	// binary serves both — which is exactly how a dev-only gap survives review.
+	'/bars/window.json',
+	// THE INDEX-SYMBOL JOIN `/mapping` READS. Registered in
+	// `crates/api/src/server.rs` and missing from this list, so the page works
+	// against the binary and fails against `npm run dev` — the same dev-only
+	// shape as the entry above it, arriving by the same route: a feature added
+	// end to end without this file being the third place it had to land.
+	// Two consecutive misses is what makes `tests/proxy.test.js` worth having;
+	// it reports one gap per run, so a green suite after adding an entry is not
+	// evidence the list is complete.
+	'/indexmap.json',
 	'/store.json',
 	'/audit.json',
 	// THE RESULTS LEDGER. Its page at `/backtest` is a SvelteKit route and is
