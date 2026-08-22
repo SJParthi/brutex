@@ -2725,8 +2725,61 @@ async fn verify_json(
     (code, headers, body)
 }
 
+/// One census body's validator, for conditional requests.
+///
+/// # Why this endpoint of all of them
+///
+/// `/store.json` is the whole census and it GROWS WITH THE STORE. Measured on a
+/// running binary mid-pull: 329 KB, then 377,735 bytes minutes later, for ONE
+/// feed. The console polls it every five seconds while a run is in flight —
+/// `watchStore(5000)` — so an unchanged store was still costing a full transfer
+/// and a full `JSON.parse` on the reader's main thread, every tick, for the
+/// length of a run.
+///
+/// A poll that changes nothing should cost nothing. With a validator it costs a
+/// 304 and an empty body.
+///
+/// # Why the digest and not a counter
+///
+/// A generation counter would be cheaper to compute and WRONG: it advances when
+/// the store is re-read, not when the answer changes, so a re-read that found
+/// the same bytes would still force a full transfer. The digest is over the
+/// bytes actually being sent, so the validator means what a validator is
+/// supposed to mean — this is the same answer you already have.
+///
+/// `brutex_core::blake3` is the repository's own primitive, the one `CLAUDE.md`
+/// §3 rule 3 already uses for run identity. No new dependency.
+///
+/// # Cost
+///
+/// O(body). The body is built either way — this hashes what was already
+/// produced — so the server pays one pass over bytes it is holding, and the
+/// READER is spared the transfer and the parse entirely. That is where the time
+/// an operator actually feels was going.
+fn census_etag(body: &str) -> String {
+    // `hex32` AND NOT A SECOND LOOP. This file already renders 32 bytes as hex
+    // at its foot, under a test that pins the width — writing the same fold
+    // again here is the duplicate-spelling this repository keeps removing, and
+    // it would drift the first time either was touched.
+    format!("\"{}\"", hex32(brutex_core::blake3::hash(body.as_bytes())))
+}
+
+/// Whether the reader already holds this exact answer.
+///
+/// `If-None-Match` is a COMMA-SEPARATED LIST and a reader may legitimately send
+/// several, so this compares each in turn rather than the header as one string.
+/// `*` is deliberately not honoured: it means "if any representation exists",
+/// which for an endpoint that always has one would answer 304 forever.
+fn none_match_hit(headers: &axum::http::HeaderMap, etag: &str) -> bool {
+    headers
+        .get(axum::http::header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|sent| sent.split(',').any(|one| one.trim() == etag))
+}
+
 async fn store_json(
     axum::extract::State(site): axum::extract::State<Loaded>,
+    asked_with: axum::http::HeaderMap,
     uri: axum::http::Uri,
 ) -> (axum::http::StatusCode, axum::http::HeaderMap, String) {
     let query = uri.query().unwrap_or("");
@@ -2763,9 +2816,32 @@ async fn store_json(
     } else {
         axum::http::StatusCode::OK
     };
-    let headers = census_headers(census);
+    let mut headers = census_headers(census);
 
-    (code, headers, store_body(&censuses, &entries, feed))
+    let body = store_body(&censuses, &entries, feed);
+    let etag = census_etag(&body);
+    // `from_str` cannot fail on this value — it is quotes and hex — but the
+    // header map takes a `Result` and a silently dropped validator would mean a
+    // reader never gets a 304 and never knows why. Refusing to guess: if it
+    // could not be built the response simply carries no validator, which is the
+    // pre-existing behaviour rather than a new failure.
+    if let Ok(value) = axum::http::HeaderValue::from_str(&etag) {
+        headers.insert(axum::http::header::ETAG, value);
+    }
+
+    // A MATCH IS A 304 AND NO BODY — but ONLY on a 200.
+    //
+    // `census_is_unreadable` answers 503 with an empty array, and two different
+    // damaged reads produce the same bytes and therefore the same tag. Serving
+    // 304 for that would tell a reader "nothing changed" about a state whose
+    // whole point is that the counter is broken — and `census_headers` carries
+    // the reason in `x-brutex-census-note`, which a 304 body would still deliver
+    // but a caching reader might not re-read. A failure keeps its status.
+    if code == axum::http::StatusCode::OK && none_match_hit(&asked_with, &etag) {
+        return (axum::http::StatusCode::NOT_MODIFIED, headers, String::new());
+    }
+
+    (code, headers, body)
 }
 
 /// The health endpoint.
@@ -21587,6 +21663,58 @@ mod universe_route_tests {
         assert!(json.contains(r#""publishable":false"#), "{json}");
         assert!(json.contains("a-listing"), "it names what failed: {json}");
         assert!(json.contains(r#""identity":true"#), "{json}");
+    }
+
+    #[test]
+    fn a_census_validator_answers_for_the_bytes_and_not_for_the_read() {
+        let one = census_etag("[]");
+        let same = census_etag("[]");
+        let other = census_etag(r#"[{"instrument":"BANKNIFTY"}]"#);
+
+        assert_eq!(
+            one, same,
+            "the same bytes are the same answer — a validator that changed on a \
+             re-read would force a full transfer for an unchanged census, which \
+             is the whole cost this exists to remove"
+        );
+        assert_ne!(one, other, "different bytes are a different answer");
+        assert_eq!(one.len(), 66, "a quoted 32-byte digest: {one}");
+        assert!(
+            one.starts_with('"') && one.ends_with('"'),
+            "an ETag is a quoted-string by RFC 9110: {one}"
+        );
+    }
+
+    #[test]
+    fn a_reader_holding_the_answer_is_recognised_and_a_wildcard_is_not() {
+        let etag = census_etag("[]");
+        let with = |value: &str| {
+            let mut map = axum::http::HeaderMap::new();
+            map.insert(
+                axum::http::header::IF_NONE_MATCH,
+                axum::http::HeaderValue::from_str(value).expect("a header value"),
+            );
+            map
+        };
+
+        assert!(none_match_hit(&with(&etag), &etag), "the exact tag");
+        assert!(
+            none_match_hit(&with(&format!("\"deadbeef\", {etag}")), &etag),
+            "If-None-Match is a LIST and a reader may legitimately send several"
+        );
+        assert!(
+            !none_match_hit(&with("\"deadbeef\""), &etag),
+            "a tag for another answer is not this answer"
+        );
+        assert!(
+            !none_match_hit(&with("*"), &etag),
+            "`*` means \"if any representation exists\", which for an endpoint \
+             that always has one would answer 304 for ever"
+        );
+        assert!(
+            !none_match_hit(&axum::http::HeaderMap::new(), &etag),
+            "a reader holding nothing gets the body"
+        );
     }
 }
 

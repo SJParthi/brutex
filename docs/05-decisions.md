@@ -19880,3 +19880,49 @@ Gate 17 is untouched: one event per run, at a boundary, with no loop over bars
 and no loop over candidates reaching either line.
 
 `cli`: 45 tests, 0 failures. `fmt` and `clippy --all-targets -D warnings` clean.
+
+### D-0256 — a poll that changed nothing still paid full price
+
+`/store.json` is the whole census and it GROWS WITH THE STORE. Measured on the
+running binary during a live pull: 329 KB, then **377,735 bytes** minutes later,
+for ONE feed. The console polls it every five seconds while a run is in flight —
+`watchStore(5000)` — and the response carried **no validators at all**: no
+ETag, no Last-Modified, no Cache-Control, checked against the running server.
+
+So an unchanged store cost a full transfer and a full `JSON.parse` on the
+reader's main thread, every tick, for the length of a run. That is where the
+slowness an operator reported when changing a selection was going: the page was
+parsing a third of a megabyte on a timer.
+
+**A poll that changes nothing should cost nothing.** With a validator it costs a
+304 and an empty body.
+
+THE DIGEST AND NOT A COUNTER, and the difference is the whole point. A
+generation counter is cheaper to compute and wrong: it advances when the store
+is RE-READ, not when the answer CHANGES, so a re-read that found identical bytes
+would still force a full transfer. The digest is over the bytes actually being
+sent, so the validator means what a validator is supposed to mean — *this is the
+same answer you already have*.
+
+`brutex_core::blake3` is the repository's own primitive, the one §3 rule 3
+already uses for run identity, so no dependency was added. `hex32` at the foot
+of `server.rs` already renders 32 bytes as hex under a test that pins the
+width; a second fold was written and removed, because two spellings of one
+rendering drift the first time either is touched.
+
+**A FAILURE KEEPS ITS STATUS.** `census_is_unreadable` answers 503 with an
+empty array, and two different damaged reads produce the same bytes and
+therefore the same tag. Answering 304 there would tell a reader "nothing
+changed" about a state whose entire point is that the counter is broken, so the
+304 arm is reachable only from 200.
+
+**`*` IS DELIBERATELY NOT HONOURED.** It means "if any representation exists",
+which for an endpoint that always has one would answer 304 for ever.
+`If-None-Match` is also a comma-separated LIST and a reader may legitimately
+send several, so each is compared in turn rather than the header as one string.
+Both are pinned by
+`a_reader_holding_the_answer_is_recognised_and_a_wildcard_is_not`.
+
+Cost: O(body) on the server, which builds the body either way — this hashes what
+it is already holding. The reader is spared the transfer and the parse entirely,
+which is the half an operator feels.
