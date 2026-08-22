@@ -156,6 +156,7 @@ pub mod manifest;
 /// Read-only decoders over bytes somebody else fetched — no socket here, the
 /// same seam `fetch::BarSource` draws for vendor bars.
 pub mod nse;
+pub mod nseindex;
 pub mod pricing;
 pub mod rate;
 /// THE OTHER AXIS A VENDOR ANSWERS ON -- its own error name, inside the body,

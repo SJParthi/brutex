@@ -20933,3 +20933,77 @@ line without reading what sits above it.
 `P-03` is **not** closed by this. The route exists and the browser still owns
 its four tables; deleting them is the next commit, and until it lands there are
 two answers where there should be one.
+
+### D-0275 — the exchange is the authority, and the digits are what make the join sound
+
+**2026-08-22.** A symbol arriving from a feed could not be checked against the
+exchange, because nothing in this workspace held what the exchange publishes.
+`Feed::index_alias` held two entries — `NIFTY50 -> NIFTY` and
+`NIFTYBANK -> BANKNIFTY` — and every other index symbol was taken on the
+vendor's word. `crates/pull/src/nseindex.rs` is the join, and this is what it
+decided.
+
+**Vendor against exchange, never vendor against vendor.** Two feeds agreeing
+proves they bought the same upstream, not that either is right; the operator's
+standing rule is that the cross-check runs against NSE's own published list and
+nothing else. The list used here is the 205 index names read directly from
+`niftyindices.com`, and the vendor side is Zerodha's 136 index symbols.
+
+**The census, measured rather than asserted:**
+
+| | count | what it means |
+|---|---|---|
+| Published verbatim | 46 | the collapsed symbol IS the NSE name — proof |
+| Abbreviation | 61 | exactly one NSE name accepts it — inference, and labelled |
+| Ambiguous | 12 | several accept it; refused |
+| Absent | 17 | none accepts it; refused |
+
+107 of 136 resolve. The two strengths are kept apart by `Basis` rather than
+merged, because a caller that treats the second as the first is doing the
+inventing §3 rule 1 forbids.
+
+**Ordered-subsequence alone is unsound, and it was caught rather than feared.**
+The first rule — every letter of the abbreviation appearing in order in the NSE
+name — handed `NIFTYGS813YR`, the 8-13 year G-Sec benchmark, to
+`Nifty LargeMidcap 250 plus 8-13 yr G-Sec 70:30`, a hybrid equity-and-debt index
+that is not the same instrument in any sense. Subsequence has no notion of a
+word boundary, so its false-positive rate rises with the length of the
+candidate, and a long name has room for stray letters to line up. Encoding that
+result would have mapped a government-bond benchmark to an equity hybrid
+silently, which is the failure wearing a success's clothes that §4 bans.
+
+**The numbers separate them.** The abbreviation names one, `813`; the expansion
+names three, `250`, `813`, `7030`. `digits_agree` requires the counts to match
+and each abbreviation run to be a *suffix* of its expansion run — a suffix
+rather than an equality, because `BHARATBONDAPR30` legitimately shortens
+`APRIL2030`. Adding it refused the false match, and because it also rules
+candidates out it *raised* the unambiguous count from 57 to 61.
+
+**It costs eight true mappings and that is the trade taken deliberately.** Of
+the 17 absent, two are correct refusals — `HANGSENGBEESNAV` is an ETF net asset
+value and `INDIAVIX` is published by NSE outside the index catalogue, so neither
+is in the list to be found. Seven are the G-Sec family, where Zerodha writes
+`GS` ahead of the tenor and NSE writes it behind; subsequence cannot see through
+a reorder. The remaining eight — `NIFTY500FLEXICAP`, `NIFTY500MULTICAP`,
+`NIFTYMULTIINFRA`, `NIFTYMULTIMFG`, `NIFTYMULTIMQ50`, `NIFTYCONGLOMERATE`,
+`NIFTYALPHALOWVOL`, `NIFTYCORPMAATR` — are ones the looser rule resolved
+correctly and the digit constraint now refuses, because the vendor dropped a
+number the NSE name carries. **Eight correct mappings were given up to refuse
+one wrong one**, and that is the right direction here: a refused symbol is
+visible and an operator can confirm it, whereas a wrong mapping is silent and
+lands in the store.
+
+**Cost.** `resolve` is a hash lookup when the symbol is published verbatim and a
+bounded scan of the catalogue otherwise. **The scan is not O(1) and the module
+does not pretend it is.** `Catalogue::index` exists so it is paid once, per
+distinct symbol, at master load; every lookup through `Mapping::get` afterwards
+is a hash hit. That is the shape §3 rule 4 asks for — constant on the hot path,
+with the non-constant part paid once and stated.
+
+**What this does NOT do, stated because the gap is the point.** The module has
+no caller. It is a library `pull` exports and nothing on the pull path consults
+yet, which is exactly the compiled-and-unreachable shape §5 records against
+`cli` before D-0169. The 29 refusals are computed here and displayed nowhere.
+Wiring it — `Feed::index_alias` reading the mapping instead of its two literals,
+and the refusals reaching a page — is the next unit and is not claimed by this
+entry. `docs/04-invariants.md` P-52 is the invariant.
