@@ -199,7 +199,7 @@ struct Case {
 ///
 /// Pinned so that a row deleted rather than fixed fails here instead of quietly
 /// lowering the proportion that is proven.
-const ROWS: usize = 18;
+const ROWS: usize = 20;
 
 /// How many distinct production emit sites those rows cover.
 ///
@@ -660,6 +660,83 @@ fn cases() -> Vec<Case> {
         });
     }
 
+    // crates/api/src/sweeprun.rs — the two refusals that never start a sweep.
+    //
+    // ADDED BECAUSE THE MODULE ARRIVED WITH NO TESTS AT ALL. Four emit sites
+    // landed with `/backtest/run` and nothing drove any of them, which the
+    // accounting below caught: `lib_sites` went 33 -> 37 while every column
+    // stayed still. The two refusal paths cost nothing to drive — neither
+    // touches the store, the ledger or a bar file — so they are proven here
+    // rather than named as unreachable. The two that remain unreachable are
+    // named in `UNREACHABLE`, because reaching them means running a real
+    // sweep over stored bars.
+    {
+        let site = json_site("emit-sweep-malformed");
+        cases.push(Case {
+            site: "sweeprun.rs api.sweep a sweep was refused before it started",
+            target: "api.sweep",
+            message: "a sweep was refused before it started",
+            level: telemetry::Level::Warn,
+            drive: {
+                let site = std::sync::Arc::clone(&site);
+                Box::new(move || {
+                    // No `feed`, which is the first thing `asked_from` demands
+                    // and the one term of the run identity that cannot be
+                    // defaulted.
+                    let (status, _headers, body) = block_on(crate::sweeprun::run(
+                        axum::extract::State(std::sync::Arc::clone(&site)),
+                        "{\"underlying\":\"NIFTY\"}".to_owned(),
+                    ));
+                    assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+                    assert!(body.contains("\"accepted\":false"), "{body}");
+                    assert!(body.contains("feed"), "{body}");
+                })
+            },
+            mine: Box::new(|record| says(record, "why", "feed")),
+        });
+    }
+    {
+        let site = json_site("emit-sweep-busy");
+        // ONE ALREADY IN FLIGHT, planted rather than started: a real first
+        // sweep would put the store on this test's critical path for the sake
+        // of a guard that never reads it.
+        {
+            let mut held = site.sweep.lock().expect("a fresh mutex");
+            *held = Some(crate::sweeprun::Progress::started(
+                "zerodha",
+                "NIFTY",
+                (2024, 1),
+                (2024, 1),
+                47_000,
+                0,
+            ));
+        }
+        cases.push(Case {
+            site: "sweeprun.rs api.sweep a second sweep was refused while one was in flight",
+            target: "api.sweep",
+            message: "a second sweep was refused while one was in flight",
+            level: telemetry::Level::Warn,
+            drive: {
+                let site = std::sync::Arc::clone(&site);
+                Box::new(move || {
+                    let (status, _headers, body) = block_on(crate::sweeprun::run(
+                        axum::extract::State(std::sync::Arc::clone(&site)),
+                        "{\"feed\":\"zerodha\",\"underlying\":\"NIFTY\",\"from_year\":2024,\
+                         \"from_month\":1,\"to_year\":2024,\"to_month\":1,\
+                         \"support_ppm\":47000}"
+                            .to_owned(),
+                    ));
+                    assert_eq!(
+                        status,
+                        axum::http::StatusCode::CONFLICT,
+                        "a second press is refused, not queued: {body}"
+                    );
+                    assert!(body.contains("\"accepted\":false"), "{body}");
+                })
+            },
+            mine: Box::new(|record| says(record, "why", "already running")),
+        });
+    }
     cases
 }
 
@@ -1122,17 +1199,32 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     /// failure; a path that hides its own progress is that rule pointing
     /// inward.
     ///
+    /// AND TWO MORE FROM `sweeprun.rs`, added with `/backtest/run`:
+    /// `a sweep was accepted from the browser` and `a sweep finished and its
+    /// record is in the ledger`. Reaching either means RUNNING A SWEEP — the
+    /// first is emitted after the blocking thread is spawned and the second
+    /// from inside it — so driving them puts a real walk over stored bars on
+    /// this suite's critical path, which is a different kind of test from the
+    /// one this table is.
+    ///
+    /// **The module's other two sites are NOT here, and that is the point of
+    /// the distinction.** Both refusals return before anything is spawned and
+    /// touch no store, no ledger and no bar file, so they are proven in the
+    /// table above. `sweeprun` arrived with no tests at all and this accounting
+    /// is what said so: `lib_sites` went 33 to 37 while every column stood
+    /// still.
+    ///
     /// The rows of the table above, every one of them struck through — plus
-    /// `pull.fno discovery refused` and the three named here, which are the
-    /// sites no test in this binary can drive.
-    const UNREACHABLE: usize = 4;
-    // COUNTED FROM THE SOURCE, not declared. A thirty-FOURTH emit added
+    /// `pull.fno discovery refused`, the three named before it and the two
+    /// named here, which are the sites no test in this binary can drive.
+    const UNREACHABLE: usize = 6;
+    // COUNTED FROM THE SOURCE, not declared. A thirty-EIGHTH emit added
     // anywhere under `crates/api/src` fails this test until somebody decides
     // which of the three columns it belongs in, which is the whole point of
     // the accounting.
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 33,
+        lib_sites, 37,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"

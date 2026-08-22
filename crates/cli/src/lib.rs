@@ -2017,6 +2017,30 @@ fn best_complete_line(rows: &[crate::results::Record]) -> String {
     )
 }
 
+/// A count with thousands separators, so a reader can see its magnitude.
+///
+/// # 54895691 and 54,895,691 are not equally readable
+///
+/// The combination count is the single number this engine exists to produce and
+/// the one an operator most wants to size at a glance. Unseparated it takes
+/// deliberate counting to tell fifty-four million from five hundred and forty
+/// million, which is the difference between a search that finished and one that
+/// hit the ceiling.
+///
+/// Plain 3-3-3 grouping and not the Indian 2-2-3 that [`rupees`] uses: this is a
+/// COUNT and not money, and the two conventions are for different things.
+fn grouped(n: u64) -> String {
+    let digits: Vec<char> = n.to_string().chars().collect();
+    let mut out = String::with_capacity(digits.len().saturating_add(digits.len() / 3));
+    for (i, ch) in digits.iter().enumerate() {
+        if i > 0 && digits.len().saturating_sub(i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(*ch);
+    }
+    out
+}
+
 /// Paisa as rupees, with two decimals and thousands separators.
 ///
 /// # An accounting unit is not an answer
@@ -2516,20 +2540,30 @@ pub fn results_list(feed: Option<&str>, underlying: Option<&str>) -> String {
 
     let _ = writeln!(
         out,
-        "  {:<9}{:<9}{:<8}{:>18}{:>7}{:>9}{:>8}{:>18}{:>18}{:>10}  identity",
-        "feed", "symbol", "rung", "span", "months", "depth", "done", "worst", "best", "trades"
+        "  {:<9}{:<8}{:>16}{:>16}{:>7}{:>6}{:>6}{:>17}{:>17}{:>9}",
+        "feed",
+        "rung",
+        "COMBINATIONS",
+        "min_hits",
+        "months",
+        "depth",
+        "done",
+        "worst",
+        "best",
+        "trades"
     );
     for record in rows.iter().take(LIST_ROWS) {
         let _ = writeln!(
             out,
-            "  {:<9}{:<9}{:<8}{:>18}{:>7}{:>9}{:>8}{:>18}{:>18}{:>10}  {}",
+            "  {:<9}{:<8}{:>16}{:>16}{:>7}{:>6}{:>6}{:>17}{:>17}{:>9}",
             crate::results::read_field(&record.feed),
-            crate::results::read_field(&record.underlying),
             crate::results::read_field(&record.timeframe),
-            format!(
-                "{}-{:02}..{}-{:02}",
-                record.from_year, record.from_month, record.to_year, record.to_month
-            ),
+            // THE NUMBER THE WHOLE ENGINE EXISTS TO PRODUCE, and the listing did
+            // not print it. An operator asking "how many combinations did this
+            // actually weigh" had no answer on this surface at all -- the field
+            // has been in every record since the ledger landed.
+            grouped(record.combinations),
+            grouped(record.min_hits),
             format!("{}/{}", record.months_found, record.months_asked),
             record.depth,
             if record.halted == 0 { "yes" } else { "NO" },
@@ -2540,7 +2574,6 @@ pub fn results_list(feed: Option<&str>, underlying: Option<&str>) -> String {
             // own the line; sixteen is enough to find a row and short enough to
             // read, and `cli results` prints the whole one when a row is asked
             // for by name.
-            record.identity_hex().chars().take(16).collect::<String>(),
         );
     }
     if rows.len() > LIST_ROWS {
@@ -4713,7 +4746,11 @@ mod tests {
              nine thousand times larger:\n{line}"
         );
         assert!(
-            line.contains("1000 paisa"),
+            // ₹10.00 IS 1000 paisa. The renderer moved to rupees in the
+            // `rupees, and what the run RISKED` commit and this assertion did
+            // not, so it was checking a spelling the surface no longer uses
+            // while the figure it exists to pin was unchanged.
+            line.contains("₹10.00"),
             "and it must quote that run's own figure:\n{line}"
         );
 

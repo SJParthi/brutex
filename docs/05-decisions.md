@@ -21239,3 +21239,45 @@ unchanged — 7 G-Sec indices whose words the vendor reorders, 8 that drop a
 number the published name carries, 12 ambiguous, and 2 that are correctly
 refused because NSE does not publish them as indices at all. This entry moves
 two rows, and they are the two that mattered most.
+
+### D-0280 — the sweep route arrived with four emit sites and no test, and the accounting is what said so
+
+**2026-08-22.** `f73fac4` gave the console a `/backtest/run` and with it
+`crates/api/src/sweeprun.rs` — 4 `telemetry::emit_if!` sites, **0 tests**, and
+nothing anywhere else that drives the module. Two gates went red on the same
+commit and neither was noise:
+
+* `emitted::the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten`
+  counts emit sites from the source and requires every one to sit in exactly one
+  of three columns. `lib_sites` went 33 → 37 while every column stood still.
+* `core --test graph` — `crates/api/Cargo.toml` gained `cli` and
+  `docs/01-architecture.md` §1 still listed four dependencies. `cargo tree` is
+  the arbiter and the document was the stale copy, which is what that test says
+  in its own failure message.
+
+**The two refusals are proven, not excused.** `a sweep was refused before it
+started` and `a second sweep was refused while one was in flight` both return
+before anything is spawned and touch no store, no ledger and no bar file, so
+driving them costs nothing and they are now rows in the table. The second plants
+a `Progress::started` rather than running a first sweep — a real one would put
+the store on this suite's critical path for the sake of a guard that never reads
+it. **Between them they are the concurrency guard**, which is the part of that
+route most worth a test and had none.
+
+**The two that remain unreachable are named, as the column requires.** `a sweep
+was accepted from the browser` is emitted after the blocking thread is spawned
+and `a sweep finished and its record is in the ledger` from inside it, so
+reaching either means running a real walk over stored bars. That is a different
+kind of test from the one this table is, and pretending otherwise by loosening
+the count is the thing the accounting exists to prevent.
+
+**The count was raised only after every site was placed.** `ROWS` 18 → 20,
+`UNREACHABLE` 4 → 6, `lib_sites` 33 → 37. The gate's own instruction is to *move
+the row into the table above or into the unreachable list and update this figure
+in the same commit* — updating the figure alone would have turned a gate that
+caught an untested module into a number somebody edits when it complains.
+
+**What this does not do.** `sweeprun` still has no test of its own for the
+accepted path, the span parse, or `conduct`. Two of its four emit sites are
+covered and the other two are declared; that is the accounting being honest, not
+the module being tested. Whoever owns that route owes it a test.
