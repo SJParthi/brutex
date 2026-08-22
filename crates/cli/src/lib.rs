@@ -1856,6 +1856,114 @@ fn audit_range_inner(
     ))
 }
 
+/// The trade-quality block: the question "minimal stop, maximum profit" as
+/// numbers.
+///
+/// # These were stored from the first row and shown by nothing
+///
+/// The listing printed totals — worst, best, trades — and every one of them
+/// answers *how much did it make*. None answered *what did it risk to make it*,
+/// which is the operator's actual question and the one the exit grid exists to
+/// price. `winner_mae`, `winner_mfe`, `all_mae`, `worst_trade` and
+/// `max_drawdown` have been in every record since the ledger landed; nothing
+/// rendered them.
+///
+/// **`winner MAE` is the headline.** It is how far the winning trades went
+/// AGAINST the position before they worked — so it is the tightest stop that
+/// would not have killed a winner. A strategy whose winners never dip 0.2%
+/// can be run with a 0.2% stop; that is "very minimal stop loss" as a measured
+/// figure rather than a wish.
+///
+/// **`per trade` is the other one.** A total of five lakh over eleven thousand
+/// trades is forty-five rupees a trade, which is a different proposition from
+/// five lakh over twelve. Division the reader should not have to do.
+fn quality_block(record: &crate::results::Record) -> String {
+    let mut out = String::from("\n  TRADE QUALITY -- what it risked to make it\n");
+    let per_trade = if record.trades == 0 {
+        0
+    } else {
+        record.pessimistic / i64::try_from(record.trades).unwrap_or(1)
+    };
+    for (label, value, note) in [
+        (
+            "tightest stop that keeps every winner",
+            as_percent(record.winner_mae),
+            "winners went this far AGAINST before working",
+        ),
+        (
+            "how far winners went FOR",
+            as_percent(record.winner_mfe),
+            "the move the stop above is protecting",
+        ),
+        (
+            "every trade's adverse excursion",
+            as_percent(record.all_mae),
+            "losers included -- always worse than winners alone",
+        ),
+        (
+            "worst single round trip",
+            rupees(record.worst_trade),
+            "the largest loss one trade took",
+        ),
+        (
+            "worst peak-to-trough",
+            rupees(record.max_drawdown),
+            "the deepest the equity curve fell",
+        ),
+        (
+            "per trade, worst-case fills",
+            rupees(per_trade),
+            "total divided by round trips",
+        ),
+    ] {
+        let _ = writeln!(out, "  {label:<40}{value:>16}  {note}");
+    }
+    // THE RATIO THE WHOLE THING IS FOR. Reward against the risk actually taken,
+    // both measured on the same trades. `winner_mae` of zero means no winner
+    // ever dipped -- a real answer on a small sample and not a division to make.
+    // INTEGER ARITHMETIC, because `CLAUDE.md` section 7 keeps floats out of any
+    // value that is compared. Tenths of a multiple: 47 renders as 4.7x, which is
+    // all a reader needs and all the sample supports.
+    let ratio = if record.winner_mae == 0 {
+        "no winner dipped".to_owned()
+    } else {
+        let tenths = record.winner_mfe.saturating_mul(10) / record.winner_mae;
+        format!("{}.{}x", tenths / 10, tenths % 10)
+    };
+    let _ = writeln!(
+        out,
+        "  {:<40}{ratio:>16}  how far winners ran vs the worst they dipped",
+        "reward per unit of risk"
+    );
+    let stop = record.exit_rungs.first().copied().unwrap_or(-1);
+    let target = record.exit_rungs.get(1).copied().unwrap_or(-1);
+    let tsl = record.exit_rungs.get(2).copied().unwrap_or(-1);
+    let arm = record.exit_rungs.get(3).copied().unwrap_or(-1);
+    let trail = record.exit_rungs.get(4).copied().unwrap_or(-1);
+    let rung = |r: i16| {
+        if r < 0 {
+            "none".to_owned()
+        } else {
+            r.to_string()
+        }
+    };
+    let _ = writeln!(
+        out,
+        "  {:<40}{:>16}  stop/target/trailing-stop/ttp-arm/ttp-trail, `none` is \
+         that axis switched OFF",
+        "the exit variant that won",
+        format!(
+            "{}/{}/{}/{}/{}",
+            rung(stop),
+            rung(target),
+            rung(tsl),
+            rung(arm),
+            rung(trail)
+        )
+    );
+    out
+}
+
 /// The best COMPLETE run among these rows, as the line the listing ends on.
 ///
 /// Separate from the table because a reader scanning forty rows for the largest
@@ -1872,7 +1980,7 @@ fn best_complete_line(rows: &[crate::results::Record]) -> String {
     };
     format!(
         "  BEST COMPLETE RUN: {} {} {} {}-{:02}..{}-{:02} at min_hits {} -- {} \
-         paisa worst-case over {} trades.\n  Ranked on the WORST-case total, \
+         worst-case over {} trades.\n  Ranked on the WORST-case total, \
          which is the figure every other surface selects on. Halted rows are \
          excluded: a truncated ladder's total is not comparable with a complete \
          one's.\n",
@@ -1884,8 +1992,70 @@ fn best_complete_line(rows: &[crate::results::Record]) -> String {
         best.to_year,
         best.to_month,
         best.min_hits,
-        best.pessimistic,
+        rupees(best.pessimistic),
         best.trades,
+    )
+}
+
+/// Paisa as rupees, with two decimals and thousands separators.
+///
+/// # An accounting unit is not an answer
+///
+/// Every money figure in this workspace is a paisa `i64`, because
+/// `CLAUDE.md` §7 forbids a float anywhere a price is compared. That is right
+/// for the ENGINE and wrong for the operator: a listing that prints `2459160`
+/// makes a reader do the division before they can tell whether the run made
+/// twenty-four thousand rupees or two hundred and forty-six thousand.
+///
+/// The conversion happens HERE, at the render boundary, and nowhere else — the
+/// same rule the tick grid follows. Integer arithmetic throughout: the rupees
+/// and the paise are separated by division and remainder, never by a float.
+fn rupees(paisa: i64) -> String {
+    let negative = paisa < 0;
+    // `unsigned_abs` and not `abs`: `i64::MIN` has no positive counterpart, and
+    // it is exactly the value `saturating_add` produces for a variant that lost
+    // without bound. A sort that panicked on the worst possible result would be
+    // the report killing the process over the answer.
+    let magnitude = paisa.unsigned_abs();
+    let whole = magnitude / 100;
+    let fraction = magnitude % 100;
+
+    // Thousands separators, built right to left. Indian grouping is 2-2-3 rather
+    // than 3-3-3, so a crore reads as 1,00,00,000 and not 10,000,000 -- which is
+    // the grouping the operator reads prices in.
+    let digits: Vec<char> = whole.to_string().chars().collect();
+    let mut grouped = String::new();
+    for (i, ch) in digits.iter().enumerate() {
+        let from_right = digits.len().saturating_sub(i);
+        // A separator before the last three digits, then every two after.
+        if i > 0 && (from_right == 3 || (from_right > 3 && from_right % 2 == 1)) {
+            grouped.push(',');
+        }
+        grouped.push(*ch);
+    }
+    format!(
+        "{}{}{}.{:02}",
+        if negative { "-" } else { "" },
+        "\u{20b9}",
+        grouped,
+        fraction
+    )
+}
+
+/// Parts per million as a percentage, to two decimals, in integers.
+///
+/// The excursion columns are ppm because a rung must mean the same distance on
+/// NIFTY and BANKNIFTY. A reader wants the percentage.
+fn as_percent(ppm: i64) -> String {
+    let negative = ppm < 0;
+    let magnitude = ppm.unsigned_abs();
+    // ppm to hundredths of a percent: 10,000 ppm is 1%, so 100 ppm is 0.01%.
+    let hundredths = magnitude / 100;
+    format!(
+        "{}{}.{:02}%",
+        if negative { "-" } else { "" },
+        hundredths / 100,
+        hundredths % 100
     )
 }
 
@@ -1982,13 +2152,13 @@ pub fn results_list(feed: Option<&str>, underlying: Option<&str>) -> String {
 
     let _ = writeln!(
         out,
-        "  {:<9}{:<9}{:<8}{:>18}{:>7}{:>9}{:>8}{:>14}{:>14}{:>10}  identity",
+        "  {:<9}{:<9}{:<8}{:>18}{:>7}{:>9}{:>8}{:>18}{:>18}{:>10}  identity",
         "feed", "symbol", "rung", "span", "months", "depth", "done", "worst", "best", "trades"
     );
     for record in rows.iter().take(LIST_ROWS) {
         let _ = writeln!(
             out,
-            "  {:<9}{:<9}{:<8}{:>18}{:>7}{:>9}{:>8}{:>14}{:>14}{:>10}  {}",
+            "  {:<9}{:<9}{:<8}{:>18}{:>7}{:>9}{:>8}{:>18}{:>18}{:>10}  {}",
             crate::results::read_field(&record.feed),
             crate::results::read_field(&record.underlying),
             crate::results::read_field(&record.timeframe),
@@ -1999,8 +2169,8 @@ pub fn results_list(feed: Option<&str>, underlying: Option<&str>) -> String {
             format!("{}/{}", record.months_found, record.months_asked),
             record.depth,
             if record.halted == 0 { "yes" } else { "NO" },
-            record.pessimistic,
-            record.optimistic,
+            rupees(record.pessimistic),
+            rupees(record.optimistic),
             record.trades,
             // The first sixteen hex characters. The full digest is 64 and would
             // own the line; sixteen is enough to find a row and short enough to
@@ -2021,6 +2191,16 @@ pub fn results_list(feed: Option<&str>, underlying: Option<&str>) -> String {
     // THE BEST ROW, BY THE FIGURE SELECTION USES.
     let _ = writeln!(out);
     out.push_str(&best_complete_line(&rows));
+    // AND WHAT IT RISKED, for the row just named. A total answers "how much did
+    // it make" and nothing else; these answer "what did it risk to make it",
+    // which is the question the exit grid exists to price.
+    if let Some(best) = rows
+        .iter()
+        .filter(|r| r.halted == 0)
+        .max_by_key(|r| r.pessimistic)
+    {
+        out.push_str(&quality_block(best));
+    }
     out
 }
 
