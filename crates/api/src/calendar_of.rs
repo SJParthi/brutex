@@ -86,6 +86,15 @@ use store::path::{Timeframe, YearMonth};
 /// right that the third reading of `Vec<(i64, Vec<(u16, u16)>)>` is a puzzle.
 type DayRuns = Vec<(i64, Vec<(u16, u16)>)>;
 
+/// The per-instrument calendar cache `Site` holds.
+///
+/// A named alias because the bare type is four levels deep and appears in both
+/// the field and the accessor, where clippy is right that a reader has to parse
+/// it twice to learn it is a map.
+pub type Cache = std::sync::Mutex<
+    std::collections::HashMap<(Vendor, String), (std::time::SystemTime, Calendar)>,
+>;
+
 /// Bars a full NSE equity session holds.
 ///
 /// Read from [`pull::calendar::FULL_BARS`] rather than spelled again, so the
@@ -469,5 +478,183 @@ mod against_the_real_store {
              The truth is 623,574 and reaching it needs a second instrument; \
              see this module header."
         );
+    }
+}
+
+/// The manifest file whose modification time keys the cache.
+///
+/// One file per vendor, rewritten on every pull that stores anything, so its
+/// mtime is the cheapest honest "has the store changed" signal available — one
+/// `stat`, no directory walk, no counter to maintain.
+fn manifest_stamp(store_root: &Path, vendor: Vendor) -> Option<std::time::SystemTime> {
+    std::fs::metadata(
+        store_root
+            .join("manifest")
+            .join(format!("{}.man", vendor.as_str())),
+    )
+    .ok()?
+    .modified()
+    .ok()
+}
+
+/// The calendar for one instrument, derived once per store change.
+///
+/// # Why this is not just [`derive`]
+///
+/// `derive` measured **0.28 s** for one instrument across 81 months — fine once
+/// after a pull, and not fine on a page that polls every two seconds. This
+/// returns the cached answer when the vendor's manifest has not been rewritten
+/// since it was built, which is one `stat` and one map probe.
+///
+/// **A store that has never been written has no manifest and therefore no
+/// stamp.** That case re-derives every call, which is correct rather than
+/// unfortunate: an empty store derives an empty calendar in microseconds, and
+/// caching "I found nothing" against a key that cannot change would answer
+/// `Unmeasured` for ever once the first pull landed.
+pub fn cached(
+    site_calendars: &Cache,
+    store_root: &Path,
+    vendor: Vendor,
+    exchange: &str,
+    segment: &str,
+    symbol: &str,
+    months: &[YearMonth],
+) -> Calendar {
+    let stamp = manifest_stamp(store_root, vendor);
+    let key = (vendor, symbol.to_owned());
+    if let Some(now) = stamp {
+        // READ THROUGH A POISONED LOCK rather than around it. A panic while
+        // holding it means some other request died; the map is still readable,
+        // and refusing to look would make one panicked request cost every later
+        // one a 0.28 s re-derivation for the life of the process.
+        let held = site_calendars
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((at, calendar)) = held.get(&key)
+            && *at == now
+        {
+            return calendar.clone();
+        }
+    }
+
+    let (calendar, _report) = derive(store_root, vendor, exchange, segment, symbol, months);
+    if let Some(now) = stamp {
+        let mut held = site_calendars
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        held.insert(key, (now, calendar.clone()));
+    }
+    calendar
+}
+
+/// The calendar as JSON: which days traded, and how many minute bars each owes.
+///
+/// # The shape, and why it is days rather than tables
+///
+/// The browser held four tables of this — 92 holidays, 8 weekend sessions, 4
+/// short sessions, 5 with no minute series — derived from the same bars on the
+/// same afternoon as `crates/pull/src/calendar.rs` and checked against it by
+/// nothing. Serving **days** instead of **rules** removes the duplication
+/// entirely: there is no rule to keep in step, only an answer to read.
+///
+/// `owed` is `null` for a day the exchange traded and this build cannot size —
+/// the five pre-2025 Muhurats. `null` is not `0`: one says nobody has measured
+/// the session, the other says the exchange was shut, and a page that renders
+/// them the same reports a Muhurat as a holiday.
+///
+/// Closed days are **omitted** rather than listed as `owed: 0`. A reader wants
+/// the sessions; the gaps between them are the closed days by construction, and
+/// listing 784 zeroes would be most of the payload.
+#[must_use]
+pub fn json(calendar: &Calendar) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(64 * 1024);
+    out.push_str("{\"firstDay\":");
+    let _ = write!(out, "{}", calendar.first_day());
+    out.push_str(",\"lastDay\":");
+    let _ = write!(out, "{}", calendar.last_day());
+    out.push_str(",\"sessions\":");
+    let _ = write!(out, "{}", calendar.sessions());
+    out.push_str(",\"days\":[");
+    let mut first = true;
+    for day in calendar.first_day()..=calendar.last_day() {
+        let kind = calendar.kind_of(day);
+        if matches!(
+            kind,
+            pull::calendar::DayKind::Closed | pull::calendar::DayKind::Unmeasured
+        ) {
+            continue;
+        }
+        if !first {
+            out.push(',');
+        }
+        first = false;
+        let _ = write!(out, "{{\"day\":{day},\"owed\":");
+        match calendar.expected_bars(day) {
+            Some(bars) => {
+                let _ = write!(out, "{bars}");
+            }
+            None => out.push_str("null"),
+        }
+        out.push('}');
+    }
+    out.push_str("]}");
+    out
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic, reason = "test-only assertions")]
+mod wire {
+    use super::*;
+
+    /// **CLOSED DAYS ARE OMITTED AND UNSIZED DAYS ARE `null`, NOT `0`.**
+    ///
+    /// Both halves matter. Listing 784 closed days as `owed: 0` would be most
+    /// of the payload for no information — the gaps between sessions ARE the
+    /// closed days. And rendering an unsized Muhurat as `0` would tell the page
+    /// the exchange was shut on a day a daily bar proves it traded, which is the
+    /// confident wrong answer the whole calendar exists to remove.
+    #[test]
+    fn the_wire_distinguishes_a_closed_day_from_one_it_cannot_size() {
+        let cal = Calendar::from_observed(&[
+            // A full session.
+            pull::calendar::Observed::from_runs(100, &[(555, 929)]),
+            // Day 101 is absent entirely -> Closed -> omitted.
+            // A day that traded with no minute series -> owed null.
+            pull::calendar::Observed::from_runs(102, &[]),
+        ]);
+        let wire = json(&cal);
+
+        assert!(wire.contains("\"firstDay\":100"), "{wire}");
+        assert!(wire.contains("\"lastDay\":102"), "{wire}");
+        assert!(wire.contains("\"sessions\":2"), "{wire}");
+        assert!(
+            wire.contains("{\"day\":100,\"owed\":375}"),
+            "a full session is sized: {wire}"
+        );
+        assert!(
+            wire.contains("{\"day\":102,\"owed\":null}"),
+            "a day that traded and cannot be sized is null, NOT 0: {wire}"
+        );
+        assert!(
+            !wire.contains("\"day\":101"),
+            "a closed day is omitted rather than listed as zero: {wire}"
+        );
+    }
+
+    /// **AN EMPTY CALENDAR IS VALID JSON THAT CLAIMS NOTHING.**
+    ///
+    /// The state the operator was in after clearing the store. A page fed a
+    /// truncated or malformed document here would fail in the renderer, which
+    /// is a worse place to discover an empty store than the payload.
+    #[test]
+    fn an_empty_calendar_is_still_well_formed() {
+        let wire = json(&Calendar::from_observed(&[]));
+        assert!(wire.starts_with('{') && wire.ends_with('}'), "{wire}");
+        assert!(
+            wire.contains("\"days\":[]"),
+            "no days, and the array is there: {wire}"
+        );
+        assert!(wire.contains("\"sessions\":0"), "{wire}");
     }
 }

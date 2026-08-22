@@ -20887,3 +20887,49 @@ failing run would have passed before this change.
 
 `pull`: 13 targets, 622 tests, 0 failures. `fmt` and
 `clippy --all-targets -D warnings` clean.
+
+### D-0274 — `/calendar.json`, so the browser reads one answer instead of owning a second
+
+**2026-08-22.** D-0269 derived the calendar from the store and nothing served
+it. This is the route, and it is the half that lets the duplicate tables go.
+
+**What it serves is DAYS, not RULES.** The browser holds four tables of these
+facts — 92 holidays, 8 weekend sessions, 4 short sessions, 5 with no minute
+series — and `crates/pull/src/calendar.rs` holds four more, derived from the
+same bars on the same afternoon and checked against each other by nothing.
+Serving an answer rather than a rule removes the duplication entirely: there is
+no rule to keep in step.
+
+**`owed: null` is not `owed: 0`.** One says nobody has measured that session —
+the five pre-2025 Muhurats — and the other says the exchange was shut. A page
+rendering them the same reports a Muhurat as a holiday. Closed days are
+**omitted** rather than listed as zero: the gaps between sessions are the closed
+days by construction, and 784 zeroes would be most of the payload.
+
+**The cache is keyed on the manifest's mtime.** `derive` measured 0.28 s for one
+instrument across 81 months — affordable once after a pull, not affordable on a
+page polling every two seconds. A hit is one `stat` and one map probe. A store
+with no manifest has no stamp and re-derives every call, which is correct rather
+than unfortunate: an empty store derives in microseconds, and caching "I found
+nothing" against a key that cannot change would answer `Unmeasured` for ever
+once the first pull landed.
+
+**The route refuses a missing `symbol` rather than defaulting.** A derived
+calendar is ONE instrument's reading of the exchange; answering NIFTY's to a
+caller asking about BANKNIFTY is the wrong-number-with-confidence shape this
+whole line of work exists to end.
+
+**A third insertion landed between a doc comment and its item.** The `calendars`
+field was written into the middle of `budgets`'s documentation, leaving
+`budgets` bare and the new field carrying prose about token buckets. Clippy's
+`missing documentation for a struct field` found it; `cargo build` did not.
+After D-0247's duplicated `#[test]` and D-0269's `#[cfg(test)]` stealing a
+module, that is three in one session, all from the same habit of inserting a
+line without reading what sits above it.
+
+`api`: 622 lib tests, 0 failures, and the ignored real-store check still reports
+1,671 sessions. `fmt` and `clippy --all-targets -D warnings` clean.
+
+`P-03` is **not** closed by this. The route exists and the browser still owns
+its four tables; deleting them is the next commit, and until it lands there are
+two answers where there should be one.

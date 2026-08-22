@@ -3307,6 +3307,25 @@ pub struct Site {
     /// is a single decision over three numbers, and splitting it would let a
     /// request the day window refused still drain the second window.
     pub budgets: std::sync::Mutex<Vec<Option<SharedGovernor>>>,
+    /// The derived trading calendar per instrument, and the manifest mtime it
+    /// was derived at.
+    ///
+    /// # Why a cache and not a startup snapshot
+    ///
+    /// `censuses` and `entries` beside it are read once at startup, which is
+    /// right for them: `census_now` exists for the caller that needs fresher.
+    /// A calendar cannot take that shape, because it is **wrong** rather than
+    /// stale after a pull — a month that arrived since startup would read as a
+    /// run of holidays, which is the confident-wrong-answer failure the whole
+    /// calendar exists to remove.
+    ///
+    /// So it is keyed on the manifest's modification time. A hit is one `stat`
+    /// and one map probe; a miss re-derives. `crate::calendar_of::derive`
+    /// measured 0.28 s for one instrument across 81 months, which is affordable
+    /// once after a pull and not affordable on a page that polls every two
+    /// seconds — which is the whole reason this field exists rather than the
+    /// route calling `derive` directly.
+    pub calendars: crate::calendar_of::Cache,
     /// The run the operator started, if one is in flight or has just ended.
     ///
     /// # Why it is state on the site and not a global
@@ -3456,6 +3475,7 @@ impl Site {
         // is: once, at startup. See census::held_entries.
         let entries = census::held_entries(&censuses);
         Self {
+            calendars: std::sync::Mutex::new(std::collections::HashMap::new()),
             budgets: std::sync::Mutex::new(feed_budgets()),
             // NO RUN UNTIL SOMEBODY PRESSES PULL. A site that started life
             // holding one would answer `/pull/run.json` for a run nobody asked
@@ -11337,6 +11357,7 @@ pub fn router_serving(site: Loaded, assets: std::sync::Arc<assets::Assets>) -> a
         // `/ingest` needed to stop drawing four tiers as `no target`, and the
         // one thing no route said. D-0120.
         .route("/universes.json", axum::routing::get(universe_reach_json))
+        .route("/calendar.json", axum::routing::get(calendar_json))
         // HOW FAR A FOLDER FEED REACHES — the files present, and nothing else.
         // Its own route rather than a field on `/feeds.json` because answering
         // it means WALKING the folder, and `/feeds.json` renders on every page
@@ -22038,4 +22059,82 @@ fn hex32(bytes: [u8; 32]) -> String {
         let _ = write!(acc, "{b:02x}");
         acc
     })
+}
+
+/// `GET /calendar.json` — which days the exchange traded, and what each owes.
+///
+/// # Why this route exists
+///
+/// The browser held four tables of these facts and `crates/pull/src/calendar.rs`
+/// held four more, derived from the same bars on the same afternoon and checked
+/// against each other by nothing. Every hardcoded calendar in this repository
+/// has drifted, each was found by measuring it against bars, and duplicating one
+/// is how the next drift is born. This is the single answer both should read.
+///
+/// # Cost
+///
+/// One `stat` and one map probe on a hit; a re-derivation only after the
+/// vendor's manifest has been rewritten, which is what a pull does. See
+/// [`crate::calendar_of::cached`].
+async fn calendar_json(
+    axum::extract::State(site): axum::extract::State<Loaded>,
+    uri: axum::http::Uri,
+) -> (
+    axum::http::StatusCode,
+    [(axum::http::HeaderName, &'static str); 1],
+    String,
+) {
+    let json = "application/json; charset=utf-8";
+    let query = uri.query().unwrap_or("");
+    let asked = param(query, "feed");
+    let Some(feed) = ingest::parse_vendor(&asked) else {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            [(axum::http::header::CONTENT_TYPE, json)],
+            no_such_feed_json(&asked),
+        );
+    };
+    // THE SYMBOL DECIDES THE CALENDAR, and it must be asked for rather than
+    // assumed: a derived calendar is one instrument's reading of the exchange,
+    // and answering NIFTY's for a caller asking about BANKNIFTY would be the
+    // wrong-number-with-confidence shape this route exists to end.
+    let symbol = param(query, "symbol");
+    if symbol.is_empty() {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            [(axum::http::header::CONTENT_TYPE, json)],
+            "{\"error\":\"name the instrument: /calendar.json?feed=zerodha&symbol=NIFTY. \
+             A calendar is one instrument's reading of the exchange, so there is no \
+             default that is not a guess.\"}"
+                .to_owned(),
+        );
+    }
+
+    // EVERY MONTH THE CENSUS NAMES FOR THIS FEED. Asking the census rather than
+    // walking `bars/` is layer 13 of `docs/07-o1-architecture.md`: the counter
+    // answers what a directory walk would take ~248,000 `stat` calls to learn.
+    // `Series` carries no vendor — the censuses are already per feed — so the
+    // symbol is the whole filter here and the feed is carried by `store_root`
+    // plus the path the derivation builds.
+    let months: Vec<store::path::YearMonth> = site
+        .entries
+        .iter()
+        .filter(|(series, _)| series.symbol.as_str() == symbol)
+        .map(|(_, month)| *month)
+        .collect();
+
+    let calendar = crate::calendar_of::cached(
+        &site.calendars,
+        &site.store_root,
+        feed,
+        "NSE",
+        "INDEX",
+        &symbol,
+        &months,
+    );
+    (
+        axum::http::StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, json)],
+        crate::calendar_of::json(&calendar),
+    )
 }
