@@ -7440,6 +7440,9 @@
                       class="brow"
                       class:odd={i % 2 === 1}
                       class:row-in={entering}
+                      class:dayfirst={barSortKey === 'ts' &&
+                        i > 0 &&
+                        barPage[i - 1].day !== b.day}
                       data-dir={b.c > b.o ? 'up' : b.c < b.o ? 'down' : 'flat'}
                       style="--rng:{rngMag(b.h - b.l, b.tf)};--spine:{Math.round(
                         rngMag(b.h - b.l, b.tf) * 24
@@ -7449,8 +7452,26 @@
                            and the instrument that produced the bar are on the
                            title, because a grid that mixes two files must be
                            able to say which row came from which. -->
+                      <!-- THE DAY IS DIMMED WHERE IT REPEATS, AND NEVER
+                           REMOVED. Measured on this page: fifty rows of
+                           one-minute bars carried ONE distinct date — the same
+                           `21 Aug 2026` fifty times — which is the shape line
+                           3308 already refuses for another column, "repeat one
+                           value down every row and earn none of its width".
+
+                           DIMMED, NOT BLANKED. The text stays in the cell so a
+                           copy, an export and a screen reader all still get a
+                           date on every row; only its weight in the eye
+                           changes. A blank cell would make the fiftieth row
+                           unidentifiable on its own.
+
+                           ONLY WHEN THE GRID IS IN TIME ORDER. Sorted by close,
+                           two adjacent rows are two unrelated minutes, so
+                           "same as the one above" is not a day boundary and
+                           dimming on it would hide dates at random. -->
                       <td
                         class="bt"
+                        class:dayrep={barSortKey === 'ts' && i > 0 && barPage[i - 1].day === b.day}
                         title="{stampLabel(b.ts)} IST · {b.tf} bar · {b.instrument} · month file {b.month}"
                         >{dayLabel(b.ts)}</td
                       >
@@ -8041,6 +8062,28 @@
      a floor of 0.08 because a flat minute is a real state and a row with no
      mark at all reads as a rendering fault. Multiplying by `1%` drew every
      spine at half a pixel; the unit is `100%`. */
+  /* A REPEATED DAY STAYS LEGIBLE AND STOPS COMPETING.
+     Two thirds of the ink, not none of it: the date is still readable if you
+     look at it and no longer the first thing you see on fifty consecutive rows.
+     The row that BEGINS a day keeps full strength, so the boundaries are what
+     the column now marks — which is the only thing it was ever telling you
+     across a page of one-minute bars. */
+  .bt.dayrep {
+    opacity: 0.42;
+    font-weight: var(--w-reg);
+  }
+  /* AND THE BOUNDARY GETS A LINE ACROSS THE WHOLE ROW. A day change is the one
+     structural break in a minute series, and a reader scanning for "where does
+     the 20th start" was reading fifty identical strings to find it.
+     ON THE ROW AND NOT ON THE DATE CELL. A first attempt put the rule on
+     `td.bt:not(.dayrep)`, which draws a 116px stub under one column instead of
+     a break across the grid — a line that stops in the middle reads as a
+     rendering fault, not a boundary. `dayfirst` is on the `<tr>`, and every
+     cell in it carries the top edge. */
+  .brow.dayfirst > td {
+    box-shadow: inset 0 1px 0 0 var(--line);
+  }
+
   /* ON THE FIRST CELL, AND IN PIXELS, AND BOTH ARE FORCED.
      A `<tr>` is not a containing block an absolutely-positioned child can
      resolve a PERCENTAGE height against — its own height is content-driven, so
