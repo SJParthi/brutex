@@ -1018,7 +1018,7 @@
           owed: new Map(),
           from: [],
           clashes: 0,
-          why: `/calendar.json answered ${response.status}, so no measured calendar is available and every weekday below is ASSUMED to be a session`
+          why: `/calendar.json answered ${response.status}`
         };
         return;
       }
@@ -1034,7 +1034,7 @@
         owed,
         from: body?.derivedFrom ?? [],
         clashes: (body?.disagreements ?? []).length,
-        why: owed.size ? '' : 'the store holds no bars for this feed, so there is no calendar to derive'
+        why: owed.size ? '' : 'the store holds no bars for this feed'
       };
     } catch (error) {
       calendar = {
@@ -1045,8 +1045,8 @@
         clashes: 0,
         why:
           error instanceof Error
-            ? `the calendar request failed (${error.message}), so every weekday below is ASSUMED to be a session`
-            : 'the calendar request failed, so every weekday below is ASSUMED to be a session'
+            ? `the calendar request failed (${error.message})`
+            : 'the calendar request failed'
       };
     }
   }
@@ -1090,11 +1090,23 @@
     return calendar.owed.size > 0 && isoDay >= calendar.first && isoDay <= calendar.last;
   }
 
-  /** The measured span in words, for the two sentences that must name it. */
+  /** The measured span in words, or empty when there is no span at all. */
   const calendarSpan = $derived(
-    calendar.owed.size
-      ? `${dayLabel(calendar.first)} – ${dayLabel(calendar.last)}`
-      : calendar.why || `no measured span yet`
+    calendar.owed.size ? `${dayLabel(calendar.first)} – ${dayLabel(calendar.last)}` : ''
+  );
+  /**
+   * WHY A DAY OUTSIDE THE CALENDAR IS A GUESS, in one clause both callers use.
+   *
+   * TWO SHAPES, because they send a reader to different places. "Outside a span
+   * that exists" means the bars stop there and a backfill would move it. "There
+   * is no span at all" means the route did not answer, which is a server to
+   * restart rather than data to fetch — and reporting the second as the first
+   * would send an operator to pull bars he already has.
+   */
+  const calendarGap = $derived(
+    calendarSpan
+      ? `the exchange calendar this feed's own bars measure covers ${calendarSpan} only, so a weekday outside it is ASSUMED to be a session and an NSE holiday would be offered and come back empty`
+      : `no measured calendar is available — ${calendar.why || 'it has not loaded yet'} — so a weekday is ASSUMED to be a session and an NSE holiday would be offered and come back empty`
   );
 
   /** NSE equity close, 15:30 IST. The minute a session stops being partial. */
@@ -2438,7 +2450,7 @@
   const ceilReason = $derived.by(() => {
     const today = istToday;
     const guessing = !holidaysKnownFor(today)
-      ? ` The exchange calendar the store derives from this feed's own bars covers ${calendarSpan} and today is outside it, so a weekday here is ASSUMED to be a session — an NSE holiday would be offered and would come back empty.`
+      ? ` Note that ${calendarGap}.`
       : '';
     if (isSession(today) && istMin < CLOSE_MIN) {
       return `Today, ${dayLabel(today)}, is a trading session and it has not closed yet — NSE closes 15:30 IST and it is ${pad(Math.floor(istMin / 60))}:${pad(istMin % 60)} — so no feed has a final bar for it. The newest day that can be asked for is ${dayLabel(maxDay)}, the last session that closed.${guessing}`;
@@ -6044,7 +6056,7 @@
     // end, and past that the page says so rather than projecting.
     const approx = holidaysKnownFor(isoDay)
       ? ''
-      : ` · outside ${calendarSpan}, the span this feed's own bars measure, so a weekday here is assumed to be a session and an NSE holiday would be offered and come back empty`;
+      : ` · ${calendarGap}`;
     const ceiling = isoDay === maxDay ? ` · the newest day that can be asked for. ${ceilReason}` : '';
     return `${dayLabel(isoDay)} · ${ns ?? 'trading session'}${approx}${ceiling}`;
   }
