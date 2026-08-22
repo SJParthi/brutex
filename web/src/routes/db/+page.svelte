@@ -2046,6 +2046,36 @@
     if (tfAll.length > 0) return null;
     if (deco.length === 0)
       return `nothing has been read for ${feedDisplay(feeds.active)} yet, so no row has named a rung — this is an unread store, not a store without bar lengths`;
+    /* NAME THE CONTROL THAT ACTUALLY NARROWED IT, AND NEVER ADVISE WIDENING
+       ONE ALREADY AT ITS WIDEST.
+
+       This blamed the universe unconditionally. MEASURED with Everything
+       selected and the segment set to Expired futures, over a store holding
+       2,187 instrument-months, it read:
+
+         "Zerodha holds 2,187 instrument-month(s) and none of them is in
+          Everything, so there is no row here to read a rung off. Widen the
+          universe above and the rungs come back."
+
+       Both halves are wrong. "None of them is in Everything" is a
+       contradiction — Everything is the widest set there is and nothing can sit
+       outside it. And "widen the universe" is advice that cannot work, because
+       the universe is already as wide as it goes. The real cause was the
+       SEGMENT, which the sentence never mentioned. A refusal that names the
+       wrong rung sends a reader to a control that will not fix it, which is
+       worse than one that says only "nothing matched". */
+    const wideOpen = universe === '';
+    const segName = kind ? (SEG_VIEW.find((s) => s.key === kind)?.name ?? kind) : null;
+    if (wideOpen && segName) {
+      /* NO ARTICLE BEFORE THE SEGMENT NAME. "a Expired futures series" is what
+         a fixed `a` produces, and the three labels do not agree on which
+         article they take — Spot wants "a", Expired futures wants "an". The
+         preposition sidesteps the question rather than special-casing it. */
+      return `${feedDisplay(feeds.active)} holds ${fmt(deco.length)} instrument-month(s) and none of them is stored under ${segName}, so there is no row here to read a rung off. The universe is already at Everything — it is the segment above that is narrowing this to nothing.`;
+    }
+    if (wideOpen) {
+      return `${feedDisplay(feeds.active)} holds ${fmt(deco.length)} instrument-month(s) and none of them survives the rungs above, so there is no row here to read a rung off. The universe is already at Everything, so the narrowing is one of the rungs below it.`;
+    }
     return `${feedDisplay(feeds.active)} holds ${fmt(deco.length)} instrument-month(s) and none of them is in ${chosenUniverse.label}, so there is no row here to read a rung off. Widen the universe above and the rungs come back.`;
   });
 
@@ -4656,11 +4686,18 @@
     if (universe && universed.length === 0)
       return {
         tsub: 'nothing stored in this universe',
-        why: `${feedName} holds ${fmt(deco.length)} instrument-month(s) and none of them is in ${chosenUniverse.label}. ${
-          universeCount.get(universe)
-            ? `${fmt(universeCount.get(universe).held)} of ${fmt(universeCount.get(universe).members)} member(s) are held.`
-            : 'Membership was not counted — see the note beside the universe row.'
-        } Not stored is not the same as not offered: this page reads the store, and what a vendor could have served is not a question /store.json can answer.`
+        /* THE SAME CORRECTION AS `tfRefusal`, AND FOR THE SAME REASON. With
+           Everything selected this said "none of them is in Everything", which
+           is a contradiction, and pointed at the universe row — the one rung
+           that cannot be the cause when it is already at its widest. */
+        why:
+          universe === ''
+            ? `${feedName} holds ${fmt(deco.length)} instrument-month(s) and none of them survives the rungs below the universe — which is already at Everything, so it is not the universe narrowing this. Not stored is not the same as not offered: this page reads the store, and what a vendor could have served is not a question /store.json can answer.`
+            : `${feedName} holds ${fmt(deco.length)} instrument-month(s) and none of them is in ${chosenUniverse.label}. ${
+                universeCount.get(universe)
+                  ? `${fmt(universeCount.get(universe).held)} of ${fmt(universeCount.get(universe).members)} member(s) are held.`
+                  : 'Membership was not counted — see the note beside the universe row.'
+              } Not stored is not the same as not offered: this page reads the store, and what a vendor could have served is not a question /store.json can answer.`
       };
     /* THE GATE GETS ITS OWN BRANCH, ABOVE THE GENERIC ONE, for the same
        reason the universe does: "none of them match the current selection" is
