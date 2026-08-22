@@ -3406,6 +3406,58 @@
      microseconds - which is not constant and does not need to be, because it
      is in memory and the thing it replaces was 2,187 HTTP round trips.
      --------------------------------------------------------------------- */
+  /* ---------------------------------------------------------------------
+     THE SHAPE OF THE WINDOW, BEFORE A SINGLE NUMBER IS READ.
+
+     `/ingest` shows a reach lane and a coverage column, so an operator sees
+     WHAT THEY HOLD before they read anything. This page showed a form and then
+     a wall of digits: 699px of chrome above the table on a 960px viewport, so
+     four rows were visible and none of them said whether the months either side
+     of them existed at all.
+
+     Built from `matched`, which is already in memory off the ONE `/store.json`
+     the page loads. No request, no bar file, no new endpoint - the census
+     carries `rows` per instrument-month and that is the whole input.
+
+     A MONTH IS SHORT RELATIVE TO ITS OWN NEIGHBOURS, not to a calendar. This
+     page cannot know how many sessions a month held without the NSE calendar
+     `/ingest` uses, so it compares each month against the FULLEST month in the
+     same selection and says so in the legend. A month at less than half the
+     fullest is drawn short; that is a ratio this page can defend, and
+     "complete" is a claim it cannot make and does not.
+     --------------------------------------------------------------------- */
+  const coverBand = $derived.by(() => {
+    /** @type {Map<string, number>} */
+    const perMonth = new Map();
+    for (const r of matched) {
+      const n = Number(r.rows) || 0;
+      perMonth.set(r.month, (perMonth.get(r.month) ?? 0) + n);
+    }
+    if (perMonth.size === 0) return { cells: [], fullest: 0, months: 0, bars: 0 };
+    const months = [...perMonth.keys()].sort();
+    let fullest = 0;
+    let bars = 0;
+    for (const n of perMonth.values()) {
+      if (n > fullest) fullest = n;
+      bars += n;
+    }
+    const cells = months.map((m) => {
+      const n = perMonth.get(m) ?? 0;
+      const share = fullest > 0 ? n / fullest : 0;
+      return {
+        month: m,
+        rows: n,
+        share,
+        /* THREE STATES AND NO FOURTH. `absent` is a month the selection names
+           with nothing behind it; `short` is one holding less than half the
+           fullest; `held` is everything else. A month is never called COMPLETE
+           because this page has no session calendar to check that against. */
+        state: n === 0 ? 'absent' : share < 0.5 ? 'short' : 'held'
+      };
+    });
+    return { cells, fullest, months: months.length, bars };
+  });
+
   /* WHETHER THE PREFIX SUM CAN BE TRUSTED - read by both derivations below,
      so the two can never disagree about which mode the grid is in.
 
@@ -6376,7 +6428,12 @@
          only when the chosen segment actually HAS it. That is better than the
          fold: a control that does not exist for a thing is not the same as a
          control disabled for it. See `contractRungs`. -->
-    <section class="strip sub" aria-label="Contract">
+    <!-- `bare` WHEN THERE IS NOTHING TO CHOOSE. With Spot selected this strip
+         has a heading, one sentence, and no controls at all — and it still took
+         181px of a 960px viewport (measured) to explain that there was nothing
+         to configure. The sentence stays and says the same thing; only the
+         panel around it stops behaving like a panel of rungs. -->
+    <section class="strip sub" class:bare={!contractRungs.expiry} aria-label="Contract">
       <span class="lead">Contract</span>
       {#if !contractRungs.expiry}
         <span class="note quiet"
@@ -7209,6 +7266,48 @@
       </p>
     {/if}
 
+    <!-- ==================================================================
+         THE WINDOW'S SHAPE, ABOVE THE NUMBERS.
+
+         One block per month in the selection, oldest to newest, its height the
+         month's share of the fullest month in the same selection. It answers
+         at a glance the question the table answers one row at a time: is this
+         window solid, or does it have holes in it.
+
+         DISPLAY ONLY. No block is a click target, and that is deliberate: the
+         page already has one control that chooses what is DRAWN (the query) and
+         adding a second that narrows it from here would be two answers to one
+         question — the same rule `/ingest` keeps about its verdict strip.
+         ================================================================== -->
+    {#if view === 'bars' && coverBand.cells.length > 0}
+      <div class="cband" role="img"
+           aria-label="{coverBand.months} months in this selection, {fmt(coverBand.bars)} bars.">
+        <div class="cband-head">
+          <span class="cb-title">WINDOW</span>
+          <span class="cb-facts">
+            <b>{coverBand.months}</b> month{coverBand.months === 1 ? '' : 's'}
+            · <b>{fmt(coverBand.bars)}</b> bars
+            · <span class="cb-span">{coverBand.cells[0].month} → {coverBand.cells[coverBand.cells.length - 1].month}</span>
+          </span>
+        </div>
+        <div class="cband-rail">
+          {#each coverBand.cells as c, i (c.month)}
+            <span
+              class="cb-cell {c.state}"
+              style="--h:{Math.max(8, Math.round(c.share * 100))}%;--d:{Math.min(i * 9, 700)}ms"
+              title="{c.month} — {c.rows === 0 ? 'no bars' : fmt(c.rows) + ' bars'}{c.state === 'short' ? ', short of the fullest month in this selection' : ''}"
+            ></span>
+          {/each}
+        </div>
+        <div class="cband-legend">
+          <span class="cb-key held"></span> held
+          <span class="cb-key short"></span> short of the fullest month here
+          <span class="cb-key absent"></span> nothing stored
+          <span class="cb-note">height is each month against the fullest in this selection — not against a session calendar, which this page does not read</span>
+        </div>
+      </div>
+    {/if}
+
     <div class="tbl">
         <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
         <div
@@ -7881,6 +7980,157 @@
      ====================================================================== -->
 
 <style>
+  /* ---------------------------------------------------------------------
+     THE WINDOW BAND. One block per month, height = share of the fullest month
+     in the same selection.
+
+     EVERY COLOUR IS A TOKEN, never a literal, so the band resolves in both
+     themes from the same ramp the rest of the console uses. `--up` for a month
+     that is held, `--warn` for one that is short, `--line-hard` for one holding
+     nothing — the same three readings `/ingest` gives a coverage cell.
+     --------------------------------------------------------------------- */
+  /* A STRIP WITH NO RUNGS IS A SENTENCE, NOT A PANEL.
+     `.strip` is a grid with a label row and a control row, which is right when
+     it holds controls and pure cost when it holds none. `display: flex`
+     overrides the grid and the row template together, so the heading and the
+     note sit on one line and the whole thing is the height of its text.
+     THE NOTE IS NOT HIDDEN. It is the answer to "why is there nothing here",
+     and a reader who cannot see it would reasonably think the page was broken
+     rather than that Spot has no contract to narrow. */
+  .strip.bare {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: var(--s1) var(--s3);
+    padding-top: var(--s3);
+    padding-bottom: var(--s3);
+  }
+  .strip.bare .note {
+    margin: 0;
+    flex: 1 1 30ch;
+  }
+
+  .cband {
+    margin: var(--s3) 0 var(--s2);
+    padding: var(--s3) var(--s4);
+    border: 1px solid var(--line);
+    border-radius: var(--r2);
+    background: var(--bg-2);
+  }
+  .cband-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--s3);
+    flex-wrap: wrap;
+    margin-bottom: var(--s2);
+  }
+  .cb-title {
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    letter-spacing: 0.14em;
+    color: var(--dim);
+  }
+  .cb-facts {
+    font-size: var(--fs-mini);
+    color: var(--ink-2);
+    font-variant-numeric: tabular-nums;
+  }
+  .cb-facts b {
+    color: var(--ink);
+    font-weight: var(--w-mid);
+  }
+  .cb-span {
+    font-family: var(--mono);
+    color: var(--dim);
+  }
+  /* THE RAIL IS A FLEX ROW OF EQUAL COLUMNS, so 81 months and 3 months both
+     fill the width and neither needs a horizontal scrollbar. `align-items:
+     flex-end` is what makes the height read as a quantity growing off a
+     baseline rather than as a floating block. */
+  .cband-rail {
+    display: flex;
+    align-items: flex-end;
+    gap: 2px;
+    height: 34px;
+    padding-bottom: 1px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .cb-cell {
+    flex: 1 1 0;
+    min-width: 2px;
+    height: var(--h);
+    border-radius: 1px;
+    background: var(--up-soft);
+    border-bottom: 2px solid var(--up);
+    /* THE GROW IS THE ONE PIECE OF MOTION HERE, and it carries a fact: the
+       block rises to the height that IS its share, so the animation is the
+       measurement arriving rather than decoration. Staggered by index so the
+       window reads left to right, which is the order the months are in. */
+    animation: cb-grow 420ms var(--ease, cubic-bezier(0.2, 0.7, 0.3, 1)) both;
+    animation-delay: var(--d);
+  }
+  .cb-cell.short {
+    background: var(--warn-soft);
+    border-bottom-color: var(--warn);
+  }
+  .cb-cell.absent {
+    background: transparent;
+    border-bottom-color: var(--line-hard);
+  }
+  @keyframes cb-grow {
+    from {
+      height: 0;
+      opacity: 0;
+    }
+    to {
+      height: var(--h);
+      opacity: 1;
+    }
+  }
+  /* A READER WHO ASKED FOR LESS MOTION GETS THE MEASUREMENT AND NOT THE
+     ARRIVAL. The height is the fact; the growth is only how it got there. */
+  @media (prefers-reduced-motion: reduce) {
+    .cb-cell {
+      animation: none;
+    }
+  }
+  .cband-legend {
+    display: flex;
+    align-items: center;
+    gap: var(--s1);
+    flex-wrap: wrap;
+    margin-top: var(--s2);
+    font-size: var(--fs-micro);
+    color: var(--dim);
+  }
+  .cb-key {
+    display: inline-block;
+    width: 10px;
+    height: 6px;
+    border-radius: 1px;
+    background: var(--up-soft);
+    border-bottom: 2px solid var(--up);
+  }
+  .cb-key.short {
+    background: var(--warn-soft);
+    border-bottom-color: var(--warn);
+  }
+  .cb-key.absent {
+    background: transparent;
+    border-bottom-color: var(--line-hard);
+  }
+  .cb-key + .cb-key {
+    margin-left: var(--s2);
+  }
+  /* THE CAVEAT TRAVELS WITH THE PICTURE. A band that implied "complete" would
+     be claiming a session count this page never reads. */
+  .cb-note {
+    margin-left: auto;
+    font-style: italic;
+    max-width: 46ch;
+  }
+
   /* THE HAND-ROLLED FEED MENU IS GONE, and with it the last place this page
      drew a control of its own. `.mnyb`, `.menu`, `.opt` and their tick/name/
      count children styled ONE dropdown — the broker feed — while every other
@@ -8077,7 +8327,28 @@
        the panel's edge with nothing to scroll them into view. */
     flex: none;
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(248px, 1fr));
+    /* 216px, AND THE NUMBER IS ARITHMETIC RATHER THAN TASTE.
+       MEASURED on the running page: the strip's CONTENT box is 712px — 744
+       border box less 16px of padding each side — with a 12px column gap. Three
+       columns therefore need `3 x W + 24 <= 712`, so `W <= 229`.
+       At the 248 this read before, the third column did not fit and `auto-fit`
+       fell back to two: five rungs laid out 2 + 2 + 1 with the last row half
+       empty, and the table pushed to 828px on a 960px viewport — three rows of
+       data visible. At 216 the same five lay out 3 + 2, one row shorter, and it
+       costs nothing because a rung's control is `--ctl-h` tall whatever column
+       it sits in.
+       216 AND NOT 229 ON PURPOSE. The ceiling is where it breaks, so sitting on
+       it means a scrollbar appearing or a border changing drops it silently
+       back to two. 216 also stays clear of the other edge: four columns would
+       need `4 x W + 36 <= 712`, `W <= 169`, which 216 cannot reach.
+       A FIRST ATTEMPT AT 232 STILL DREW TWO, because it was measured against
+       the 744 border box instead of the 712 content box. Padding is not part of
+       the track budget.
+       `--ctl-h` ITSELF IS NOT TOUCHED. `theme.css` sets it to 42px under a
+       recorded reason — "a 34px control cannot hold 15px text with a border and
+       still look deliberate" — so the height of a control is a decision this
+       file does not get to relitigate for a few pixels. */
+    grid-template-columns: repeat(auto-fit, minmax(216px, 1fr));
     /* ---- RESET A ROW TEMPLATE THIS FILE DID NOT WRITE ----------------------
      * `theme.css` §8 also styles `.strip`, and it declares
      * `grid-template-rows: var(--lab-h) var(--ctl-h) auto` for a SUBGRID
