@@ -453,6 +453,371 @@ table.bars td.oi{color:var(--dim)}\
 table.bars tbody tr:hover{background:color-mix(in srgb,var(--acc) 6%,transparent)}\
 ";
 
+/// The most months one window request may span.
+///
+/// `CLAUDE.md` §3 rule 4 is about per-operation cost and this is the operation:
+/// a caller naming a thousand-year range must not turn one request into a
+/// thousand file opens. Eighty-one months is the whole of this store today, so
+/// 240 leaves two decades of headroom and still bounds the work.
+pub const MAX_WINDOW_MONTHS: usize = 240;
+
+/// The most rows one window request may return.
+pub const MAX_WINDOW_LIMIT: usize = 1_000;
+
+/// Which column a window is ordered by.
+///
+/// # Why `Ts` is not just another variant
+///
+/// The store is indexed by TIME — `docs/02-store-format.md`, the path is the
+/// index — so a window ordered by `Ts` is answered by SEEKING: the prefix sum
+/// over `n_valid` says which file holds row N and `page` reads it by index.
+/// Nothing scans, and page 12,470 costs what page 1 costs.
+///
+/// Every other variant asks a question no index answers. "The fifty largest
+/// closes" cannot be known without reading the closes, and `CLAUDE.md` §4 bans
+/// a query planner precisely because there is no second path to choose. So
+/// those variants scan, once, here — in Rust over local files — instead of
+/// moving four million rows to a browser to be sorted there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortKey {
+    /// The store's own order.
+    Ts,
+    /// Open, high, low, close.
+    Open,
+    /// The high.
+    High,
+    /// The low.
+    Low,
+    /// The close.
+    Close,
+    /// Traded volume.
+    Volume,
+    /// Open interest, nulls last.
+    OpenInterest,
+}
+
+impl SortKey {
+    /// Reads the wire spelling, which is the column key the grid sorts on.
+    #[must_use]
+    pub fn parse(word: &str) -> Option<Self> {
+        match word {
+            "" | "ts" => Some(Self::Ts),
+            "o" => Some(Self::Open),
+            "h" => Some(Self::High),
+            "l" => Some(Self::Low),
+            "c" => Some(Self::Close),
+            "v" => Some(Self::Volume),
+            "oi" => Some(Self::OpenInterest),
+            _ => None,
+        }
+    }
+
+    /// Whether answering this order requires reading every row.
+    #[must_use]
+    pub const fn scans(self) -> bool {
+        !matches!(self, Self::Ts)
+    }
+
+    /// The field this orders on, for one bar.
+    ///
+    /// `OI_NULL` is mapped to `i64::MIN` — which it already is — so a null open
+    /// interest sorts as the smallest value rather than as a real number. Zero
+    /// means zero here exactly as `CLAUDE.md` §7 says it does.
+    #[must_use]
+    const fn of(self, bar: &Bar) -> i64 {
+        match self {
+            Self::Ts => bar.ts_micros,
+            Self::Open => bar.open,
+            Self::High => bar.high,
+            Self::Low => bar.low,
+            Self::Close => bar.close,
+            Self::Volume => bar.volume,
+            Self::OpenInterest => bar.open_interest,
+        }
+    }
+}
+
+/// The widest move and the heaviest volume in a window.
+///
+/// # Why this is computed here and not in the browser
+///
+/// The grid scales its magnitude bars against the widest range in the QUERY, so
+/// that turning a page cannot change what a full bar means. Computing that in
+/// the browser meant fetching every row of every month first, which is the
+/// 2,187-request storm the window endpoint exists to end. One scan here, in
+/// Rust, over files already on this disk, answers it in one number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Extremes {
+    /// The widest `high - low` in the window, in paisa.
+    pub range: i64,
+    /// The heaviest `volume`. Zero is a real zero — a spot index has none.
+    pub volume: i64,
+}
+
+/// One page of bars drawn from a RANGE of months.
+#[derive(Debug, Clone)]
+pub struct Window {
+    /// Every row the window holds, across every month that opened.
+    pub total: u64,
+    /// Months that opened.
+    pub months_read: usize,
+    /// Months named by the range that hold no file. Not an error: a store is
+    /// allowed to be sparse, and saying so is how a reader tells a gap from a
+    /// refusal.
+    pub months_missing: usize,
+    /// The rows asked for.
+    pub bars: Vec<Bar>,
+    /// Records that would not read, named. Never silently dropped.
+    pub faults: Vec<String>,
+    /// Present only when asked for, because it costs a scan.
+    pub extremes: Option<Extremes>,
+}
+
+/// The months of a range, oldest first, bounded.
+///
+/// Returns `None` when the range is inverted or longer than
+/// [`MAX_WINDOW_MONTHS`] — both are refusals rather than clamps, because a
+/// silently shortened range answers a narrower question than the one asked and
+/// nothing on the page would say so.
+#[must_use]
+pub fn months_of(from: YearMonth, to: YearMonth) -> Option<Vec<YearMonth>> {
+    let (fy, fm) = (i32::from(from.year()), i32::from(from.month()));
+    let (ty, tm) = (i32::from(to.year()), i32::from(to.month()));
+    let span = (ty - fy) * 12 + (tm - fm);
+    if span < 0 {
+        return None;
+    }
+    let count = usize::try_from(span).ok()?.checked_add(1)?;
+    if count > MAX_WINDOW_MONTHS {
+        return None;
+    }
+    let mut out = Vec::with_capacity(count);
+    let (mut y, mut m) = (fy, fm);
+    for _ in 0..count {
+        let year = u16::try_from(y).ok()?;
+        let month = u8::try_from(m).ok()?;
+        out.push(YearMonth::new(year, month).ok()?);
+        m += 1;
+        if m > 12 {
+            m = 1;
+            y += 1;
+        }
+    }
+    Some(out)
+}
+
+/// The widest range and heaviest volume over a set of bars.
+///
+/// One pass, no allocation. Separate from [`window`] because it is the whole of
+/// what `extremes=1` buys and reads as one sentence on its own.
+#[must_use]
+fn extremes_of(bars: &[Bar]) -> Extremes {
+    bars.iter().fold(Extremes::default(), |mut top, bar| {
+        let range = bar.high.saturating_sub(bar.low);
+        if range > top.range {
+            top.range = range;
+        }
+        if bar.volume > top.volume {
+            top.volume = bar.volume;
+        }
+        top
+    })
+}
+
+/// The rows at `offset..offset+limit` of a window, WITHOUT reading the rest.
+///
+/// The files arrive in the order their rows come out in, so the prefix sum over
+/// each header's `n_valid` finds the file holding `offset` without touching a
+/// record. Only the records returned are read: this is `O(months)` header reads
+/// plus `O(limit)` record reads, and the four million rows a deep page sits past
+/// cost nothing.
+///
+/// DESCENDING IS THE FILE READ BACKWARDS, and that is the half a single-file
+/// test cannot catch. A month's records are written oldest-first, so newest-first
+/// over a whole window is each file reversed **as well as** the files reversed.
+/// Reading a file forwards and reversing afterwards is right for one file and
+/// wrong the moment a page straddles two.
+fn seek_page(
+    files: &[BarFile],
+    desc: bool,
+    offset: usize,
+    limit: usize,
+) -> (Vec<Bar>, Vec<String>) {
+    let mut bars = Vec::with_capacity(limit.min(PAGE_BARS));
+    let mut faults = Vec::new();
+    let mut seen = 0usize;
+    for file in files {
+        if bars.len() >= limit {
+            break;
+        }
+        let held = usize::try_from(file.header().n_valid).unwrap_or(usize::MAX);
+        let lo = seen;
+        seen = seen.saturating_add(held);
+        if seen <= offset {
+            continue;
+        }
+        let skip_in_file = offset.saturating_sub(lo);
+        let take = limit.saturating_sub(bars.len());
+        let (mut got, mut bad) = if desc {
+            let end = held.saturating_sub(skip_in_file);
+            let start = end.saturating_sub(take);
+            let (mut rows, bad) = page(file, start, end.saturating_sub(start));
+            rows.reverse();
+            (rows, bad)
+        } else {
+            page(file, skip_in_file, take)
+        };
+        bars.append(&mut got);
+        faults.append(&mut bad);
+    }
+    (bars, faults)
+}
+
+/// One page of bars across a range of months, in one request.
+///
+/// # The two paths, and why only one of them scans
+///
+/// Ordered by `ts`, this SEEKS. `n_valid` is in each file's header, so the
+/// prefix sum over the opened months says which file holds row `offset` without
+/// reading a single record, and `page` then reads `limit` of them by index. The
+/// cost is `O(months)` header reads plus `O(limit)` record reads — page 12,470
+/// costs what page 1 costs, and neither costs the four million rows between
+/// them.
+///
+/// Ordered by anything else, it reads every row once, sorts, and slices. That
+/// is the honest price of a question the store has no index for, and it is paid
+/// here rather than by moving every row to a browser.
+///
+/// `want_extremes` forces the reading path either way, because the widest range
+/// in a window is not knowable from a header.
+///
+/// # Errors
+///
+/// The range being inverted or too long, or every named month failing to open
+/// for a reason other than absence.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every argument names one coordinate of the same address — feed, \
+              exchange, segment, symbol, contract, rung, month range — and the \
+              alternative is a struct whose only caller builds it inline at the \
+              one call site, which hides nothing and names the same seven."
+)]
+pub fn window(
+    store_root: &std::path::Path,
+    vendor: Vendor,
+    exchange: &str,
+    segment: &str,
+    symbol: &str,
+    timeframe: Timeframe,
+    contract: Option<brutex_core::instrument::Contract>,
+    from: YearMonth,
+    to: YearMonth,
+    sort: SortKey,
+    desc: bool,
+    offset: usize,
+    limit: usize,
+    want_extremes: bool,
+) -> Result<Window, String> {
+    let Some(months) = months_of(from, to) else {
+        return Err(format!(
+            "{}-{:02} to {}-{:02} is not a month range this build will read: it \
+             must run forwards and span at most {MAX_WINDOW_MONTHS} months.",
+            from.year(),
+            from.month(),
+            to.year(),
+            to.month()
+        ));
+    };
+    let limit = limit.min(MAX_WINDOW_LIMIT);
+
+    /* NEWEST FIRST WHEN THE ORDER IS NEWEST FIRST. The seek path walks the
+    files in the order the rows come out in, so descending time reads the
+    months backwards and the prefix sum needs no second thought. */
+    let mut ordered = months;
+    if desc && !sort.scans() {
+        ordered.reverse();
+    }
+
+    /* OPENED ONCE, HELD FOR THE REQUEST. A month with no file is counted and
+    skipped: a sparse store is legal and the count is what tells a reader a
+    gap from a refusal. */
+    let mut files = Vec::with_capacity(ordered.len());
+    let mut missing = 0usize;
+    for month in ordered {
+        match open(
+            store_root, vendor, exchange, segment, symbol, timeframe, month, contract,
+        ) {
+            Ok(file) => files.push(file),
+            Err(_) => missing = missing.saturating_add(1),
+        }
+    }
+    if files.is_empty() {
+        return Ok(Window {
+            total: 0,
+            months_read: 0,
+            months_missing: missing,
+            bars: Vec::new(),
+            faults: Vec::new(),
+            extremes: want_extremes.then(Extremes::default),
+        });
+    }
+
+    let total: u64 = files
+        .iter()
+        .map(|f| f.header().n_valid)
+        .fold(0u64, u64::saturating_add);
+
+    if !sort.scans() && !want_extremes {
+        let (bars, faults) = seek_page(&files, desc, offset, limit);
+        return Ok(Window {
+            total,
+            months_read: files.len(),
+            months_missing: missing,
+            bars,
+            faults,
+            extremes: None,
+        });
+    }
+
+    /* ---- THE READING PATH. One pass, then order, then slice. ---- */
+    let mut all = Vec::with_capacity(usize::try_from(total).unwrap_or(0));
+    let mut faults = Vec::new();
+    for file in &files {
+        let held = usize::try_from(file.header().n_valid).unwrap_or(usize::MAX);
+        let (mut rows, mut bad) = page(file, 0, held);
+        all.append(&mut rows);
+        faults.append(&mut bad);
+    }
+
+    let extremes = want_extremes.then(|| extremes_of(&all));
+
+    /* A TOTAL ORDER, SO THE PAGE BOUNDARY IS STABLE. Two bars with the same
+    close must not swap between one request and the next, or a reader paging
+    through them would see one row twice and another never. The timestamp is
+    unique within a series, so it is the tie-break and it is NOT inverted
+    with the direction. */
+    all.sort_by(|a, b| {
+        let (x, y) = (sort.of(a), sort.of(b));
+        let primary = if desc { y.cmp(&x) } else { x.cmp(&y) };
+        primary.then_with(|| a.ts_micros.cmp(&b.ts_micros))
+    });
+
+    let bars = all
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .collect::<Vec<Bar>>();
+
+    Ok(Window {
+        total,
+        months_read: files.len(),
+        months_missing: missing,
+        bars,
+        faults,
+        extremes,
+    })
+}
+
 #[cfg(test)]
 #[allow(
     clippy::expect_used,
@@ -716,5 +1081,462 @@ mod ist_day_tests {
     fn an_unrepresentable_stamp_says_so_instead_of_inventing_a_day() {
         assert_eq!(ist_day(i64::MIN), "—");
         assert_eq!(ist_day(i64::MAX), "—");
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "a test that cannot panic cannot fail, and these lints exist to \
+              keep panics out of the crate rather than out of its tests"
+)]
+mod window_tests {
+    use super::*;
+    use store::path::PathParts;
+
+    const SYMBOL: &str = "WINDOWTEST";
+
+    /// A scratch store nobody else in this process shares, emptied first.
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "brutex-window-{}-{}-{tag}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch root");
+        root
+    }
+
+    /// Writes `n` one-minute bars into one month, closing at `base + i`.
+    ///
+    /// The close CARRIES THE INDEX so a sorted page can be checked against the
+    /// value rather than against a position: a test that only counted rows
+    /// would pass on a sort that returned the right number of the wrong ones.
+    fn write_month(root: &std::path::Path, month: YearMonth, n: usize, base: i64) {
+        let parts = PathParts {
+            vendor: Vendor::Dhan,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: SYMBOL,
+            contract: None,
+            timeframe: Timeframe::MINUTE_1,
+            month,
+            file: FileKind::Bars,
+        };
+        let path = StorePath::new(parts).expect("a legal path");
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the id is the same cross-check `open` folds, and any 32 \
+                      bits serve — a different fold would fail to reopen."
+        )]
+        let symbol_id = brutex_core::universe::fnv1a(SYMBOL) as u32;
+        let mut file =
+            store::file::BarFile::open_or_create(root, path, symbol_id).expect("a bar file");
+        // ONE MINUTE APART, INSIDE THE MONTH THE PATH NAMES. The store resolves
+        // a record's slot from its timestamp, so a bar stamped outside its own
+        // month is not a smaller test, it is a different one.
+        let start = month_start_micros(month);
+        let rows: Vec<Bar> = (0..n)
+            .map(|i| {
+                let nth = i64::try_from(i).expect("a test month is far short of i64");
+                let close = base + nth;
+                Bar {
+                    ts_micros: start + nth * 60_000_000,
+                    open: close,
+                    high: close + 10,
+                    low: close - 10,
+                    close,
+                    volume: nth * 2,
+                    open_interest: OI_NULL,
+                }
+            })
+            .collect();
+        file.append(&rows).expect("the batch appends");
+    }
+
+    /// Midnight UTC on the first of a month, in micros.
+    fn month_start_micros(month: YearMonth) -> i64 {
+        let (y, m) = (i64::from(month.year()), i64::from(month.month()));
+        // Days since the epoch, by the civil-from-days algorithm the store uses.
+        let (y2, m2) = if m <= 2 { (y - 1, m + 9) } else { (y, m - 3) };
+        let era = y2.div_euclid(400);
+        let yoe = y2 - era * 400;
+        let doy = (153 * m2 + 2) / 5;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        let days = era * 146_097 + doe - 719_468;
+        days * 86_400 * 1_000_000
+    }
+
+    #[test]
+    fn a_range_that_runs_backwards_is_refused_rather_than_swapped() {
+        let from = YearMonth::new(2026, 8).expect("a month");
+        let to = YearMonth::new(2026, 1).expect("a month");
+        assert!(
+            months_of(from, to).is_none(),
+            "swapping the ends would answer a range nobody asked for"
+        );
+    }
+
+    #[test]
+    fn a_range_longer_than_the_ceiling_is_refused_rather_than_clamped() {
+        // 1970 IS THE FLOOR AND NOT AN ARBITRARY ONE: a timestamp is micros
+        // since the epoch, so below it no bar can exist. `store::path` refuses
+        // the year before this function ever sees it, which is why the
+        // over-long case is spelled from a year the store admits.
+        let from = YearMonth::new(1970, 1).expect("the earliest month a bar can have");
+        let to = YearMonth::new(2026, 8).expect("a month");
+        assert!(
+            months_of(from, to).is_none(),
+            "a silently shortened range answers a narrower question and nothing \
+             on the page would say so"
+        );
+        // And exactly at the ceiling it is allowed.
+        let edge = months_of(
+            YearMonth::new(2006, 9).expect("a month"),
+            YearMonth::new(2026, 8).expect("a month"),
+        )
+        .expect("240 months is the ceiling, not past it");
+        assert_eq!(edge.len(), MAX_WINDOW_MONTHS);
+    }
+
+    #[test]
+    fn the_months_of_a_range_roll_the_year_and_include_both_ends() {
+        let got = months_of(
+            YearMonth::new(2025, 11).expect("a month"),
+            YearMonth::new(2026, 2).expect("a month"),
+        )
+        .expect("a forwards range");
+        let spelled: Vec<String> = got
+            .iter()
+            .map(|m| format!("{}-{:02}", m.year(), m.month()))
+            .collect();
+        assert_eq!(spelled, ["2025-11", "2025-12", "2026-01", "2026-02"]);
+
+        let one = months_of(
+            YearMonth::new(2026, 3).expect("a month"),
+            YearMonth::new(2026, 3).expect("a month"),
+        )
+        .expect("one month is a legal range");
+        assert_eq!(one.len(), 1, "from == to is ONE month, never zero");
+    }
+
+    /// The seek path returns the same rows the whole-window read would, and
+    /// **costs the same at the far end as at the near one**.
+    #[test]
+    fn a_time_ordered_page_seeks_and_straddles_a_file_boundary() {
+        let root = scratch("seek");
+        write_month(&root, YearMonth::new(2026, 1).expect("m"), 100, 1_000);
+        write_month(&root, YearMonth::new(2026, 2).expect("m"), 100, 2_000);
+
+        // ASCENDING: rows 95..105 straddle the January/February boundary.
+        let got = window(
+            &root,
+            Vendor::Dhan,
+            "NSE",
+            "INDEX",
+            SYMBOL,
+            Timeframe::MINUTE_1,
+            None,
+            YearMonth::new(2026, 1).expect("m"),
+            YearMonth::new(2026, 2).expect("m"),
+            SortKey::Ts,
+            false,
+            95,
+            10,
+            false,
+        )
+        .expect("a legal window");
+
+        assert_eq!(got.total, 200, "both months count toward the total");
+        assert_eq!(got.months_read, 2);
+        assert_eq!(got.months_missing, 0);
+        assert_eq!(got.bars.len(), 10, "the page is the size asked for");
+        assert!(got.extremes.is_none(), "not asked for, so not paid for");
+        let closes: Vec<i64> = got.bars.iter().map(|b| b.close).collect();
+        assert_eq!(
+            closes,
+            [
+                1_095, 1_096, 1_097, 1_098, 1_099, 2_000, 2_001, 2_002, 2_003, 2_004
+            ],
+            "five rows from January then five from February, contiguous across \
+             the file boundary and in order"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Descending is the window read backwards — **each file reversed as well
+    /// as the files reversed**, which is the half a single-file test cannot
+    /// catch.
+    #[test]
+    fn a_descending_page_reverses_within_the_file_and_across_them() {
+        let root = scratch("desc");
+        write_month(&root, YearMonth::new(2026, 1).expect("m"), 100, 1_000);
+        write_month(&root, YearMonth::new(2026, 2).expect("m"), 100, 2_000);
+
+        let got = window(
+            &root,
+            Vendor::Dhan,
+            "NSE",
+            "INDEX",
+            SYMBOL,
+            Timeframe::MINUTE_1,
+            None,
+            YearMonth::new(2026, 1).expect("m"),
+            YearMonth::new(2026, 2).expect("m"),
+            SortKey::Ts,
+            true,
+            95,
+            10,
+            false,
+        )
+        .expect("a legal window");
+
+        let closes: Vec<i64> = got.bars.iter().map(|b| b.close).collect();
+        assert_eq!(
+            closes,
+            [
+                2_004, 2_003, 2_002, 2_001, 2_000, 1_099, 1_098, 1_097, 1_096, 1_095
+            ],
+            "newest first is February counting down, then January counting down"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A page past the end is empty rather than wrapping or refusing.
+    #[test]
+    fn an_offset_past_the_last_row_is_an_empty_page_and_a_true_total() {
+        let root = scratch("past");
+        write_month(&root, YearMonth::new(2026, 1).expect("m"), 50, 1_000);
+
+        let got = window(
+            &root,
+            Vendor::Dhan,
+            "NSE",
+            "INDEX",
+            SYMBOL,
+            Timeframe::MINUTE_1,
+            None,
+            YearMonth::new(2026, 1).expect("m"),
+            YearMonth::new(2026, 1).expect("m"),
+            SortKey::Ts,
+            false,
+            10_000,
+            50,
+            false,
+        )
+        .expect("a legal window");
+        assert!(got.bars.is_empty(), "no rows out there");
+        assert_eq!(
+            got.total, 50,
+            "and the total still names every row, so a pager can walk BACK"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A month the store never wrote is COUNTED, not an error and not silence.
+    #[test]
+    fn a_month_with_no_file_is_counted_rather_than_failing_the_window() {
+        let root = scratch("sparse");
+        write_month(&root, YearMonth::new(2026, 1).expect("m"), 10, 1_000);
+        // 2026-02 is never written.
+        write_month(&root, YearMonth::new(2026, 3).expect("m"), 10, 3_000);
+
+        let got = window(
+            &root,
+            Vendor::Dhan,
+            "NSE",
+            "INDEX",
+            SYMBOL,
+            Timeframe::MINUTE_1,
+            None,
+            YearMonth::new(2026, 1).expect("m"),
+            YearMonth::new(2026, 3).expect("m"),
+            SortKey::Ts,
+            false,
+            0,
+            100,
+            false,
+        )
+        .expect("a sparse store is legal");
+        assert_eq!(got.months_read, 2);
+        assert_eq!(
+            got.months_missing, 1,
+            "the gap is REPORTED — a reader must be able to tell a hole from a \
+             refusal, which is `CLAUDE.md` §4"
+        );
+        assert_eq!(got.total, 20);
+        assert_eq!(got.bars.len(), 20);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A window over a store that holds nothing at all answers empty, with the
+    /// extremes still present when asked for.
+    #[test]
+    fn a_window_over_nothing_is_empty_and_says_how_many_months_were_absent() {
+        let root = scratch("empty");
+        let got = window(
+            &root,
+            Vendor::Dhan,
+            "NSE",
+            "INDEX",
+            SYMBOL,
+            Timeframe::MINUTE_1,
+            None,
+            YearMonth::new(2026, 1).expect("m"),
+            YearMonth::new(2026, 3).expect("m"),
+            SortKey::Ts,
+            false,
+            0,
+            50,
+            true,
+        )
+        .expect("an empty store is not an error");
+        assert_eq!(got.total, 0);
+        assert_eq!(got.months_read, 0);
+        assert_eq!(got.months_missing, 3);
+        assert!(got.bars.is_empty());
+        assert_eq!(
+            got.extremes,
+            Some(Extremes::default()),
+            "asked for, so answered — and zero is the honest answer over no rows"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **THE SCAN PATH RETURNS THE LARGEST, NOT MERELY FIFTY OF THEM.**
+    #[test]
+    fn a_price_ordered_page_is_the_top_of_the_whole_window() {
+        let root = scratch("sort");
+        write_month(&root, YearMonth::new(2026, 1).expect("m"), 100, 1_000);
+        write_month(&root, YearMonth::new(2026, 2).expect("m"), 100, 5_000);
+
+        let got = window(
+            &root,
+            Vendor::Dhan,
+            "NSE",
+            "INDEX",
+            SYMBOL,
+            Timeframe::MINUTE_1,
+            None,
+            YearMonth::new(2026, 1).expect("m"),
+            YearMonth::new(2026, 2).expect("m"),
+            SortKey::Close,
+            true,
+            0,
+            5,
+            false,
+        )
+        .expect("a legal window");
+        let closes: Vec<i64> = got.bars.iter().map(|b| b.close).collect();
+        assert_eq!(
+            closes,
+            [5_099, 5_098, 5_097, 5_096, 5_095],
+            "the five largest closes IN THE WINDOW, which live in the second \
+             month — a page that returned January's five largest would be the \
+             right count of the wrong rows"
+        );
+        assert_eq!(got.total, 200, "the total is every row, not the page");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The extremes are the widest range and heaviest volume in the WINDOW.
+    #[test]
+    fn the_extremes_are_folded_over_every_month_the_window_names() {
+        let root = scratch("extremes");
+        write_month(&root, YearMonth::new(2026, 1).expect("m"), 10, 1_000);
+        write_month(&root, YearMonth::new(2026, 2).expect("m"), 40, 2_000);
+
+        let got = window(
+            &root,
+            Vendor::Dhan,
+            "NSE",
+            "INDEX",
+            SYMBOL,
+            Timeframe::MINUTE_1,
+            None,
+            YearMonth::new(2026, 1).expect("m"),
+            YearMonth::new(2026, 2).expect("m"),
+            SortKey::Ts,
+            false,
+            0,
+            5,
+            true,
+        )
+        .expect("a legal window");
+        let top = got.extremes.expect("asked for");
+        assert_eq!(top.range, 20, "high is close+10 and low is close-10");
+        assert_eq!(
+            top.volume, 78,
+            "the heaviest volume is the 40th bar of the SECOND month — 39*2 — \
+             so this is folded over the whole window and not over the page, \
+             which is only five rows long"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_sort_key_reads_the_wire_and_refuses_a_column_it_has_no_index_for() {
+        assert_eq!(SortKey::parse(""), Some(SortKey::Ts));
+        assert_eq!(SortKey::parse("ts"), Some(SortKey::Ts));
+        assert_eq!(SortKey::parse("c"), Some(SortKey::Close));
+        assert_eq!(SortKey::parse("oi"), Some(SortKey::OpenInterest));
+        assert_eq!(SortKey::parse("close"), None, "the wire spells it `c`");
+        assert_eq!(SortKey::parse("; DROP"), None);
+
+        assert!(!SortKey::Ts.scans(), "the store IS this index");
+        for key in [
+            SortKey::Open,
+            SortKey::High,
+            SortKey::Low,
+            SortKey::Close,
+            SortKey::Volume,
+            SortKey::OpenInterest,
+        ] {
+            assert!(key.scans(), "{key:?} has no index and must say so");
+        }
+    }
+
+    /// A limit past the ceiling is CLAMPED, and that is deliberate: unlike a
+    /// range, a shorter page is still an answer to the question asked — the
+    /// pager simply asks again — whereas a shorter RANGE silently answers a
+    /// different question.
+    #[test]
+    fn a_limit_past_the_ceiling_is_clamped_to_it() {
+        let root = scratch("limit");
+        write_month(&root, YearMonth::new(2026, 1).expect("m"), 100, 1_000);
+        let got = window(
+            &root,
+            Vendor::Dhan,
+            "NSE",
+            "INDEX",
+            SYMBOL,
+            Timeframe::MINUTE_1,
+            None,
+            YearMonth::new(2026, 1).expect("m"),
+            YearMonth::new(2026, 1).expect("m"),
+            SortKey::Ts,
+            false,
+            0,
+            usize::MAX,
+            false,
+        )
+        .expect("a legal window");
+        assert!(
+            got.bars.len() <= MAX_WINDOW_LIMIT,
+            "one request cannot be asked for an unbounded page"
+        );
+        assert_eq!(got.bars.len(), 100, "and it still returns what exists");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

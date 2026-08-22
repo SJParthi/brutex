@@ -20154,3 +20154,60 @@ join itself held.
 
 `cli`: 55 lib, 4 binary, 0 failures. `fmt` and `clippy --all-targets -D warnings`
 clean.
+
+### D-0261 — one window, read where the bytes are
+
+`/bars.json` serves ONE instrument-month. That is the right shape for a chart of
+a month and the wrong shape for a grid over a store, and asking the first for the
+second is what produced the failure D-0260's fix measured: **2,187 requests, 498
+of them captured, every one `net::ERR_INSUFFICIENT_RESOURCES`, zero succeeded.**
+
+Paging by TIME was then answered in the browser, and answered well: the census
+already carries `rows` per instrument-month, so a prefix sum finds the file
+holding row N and only that file is opened. Measured flat — page 1 and page
+12,470 both cost **one request**.
+
+**What that could not fix is a sort on a price column.** The store is indexed by
+time — the path IS the index, and `CLAUDE.md` §4 bans a query planner precisely
+because there is no second path to choose — so "the fifty largest closes" cannot
+be answered without reading the closes. The grid therefore fetched every row of
+every month and sorted them in JavaScript: **76 requests and 9.4 seconds**, and
+the network was never the cost. Parsing 623,498 rows into objects to keep fifty
+was.
+
+`GET /bars/window.json` answers the same question against the files already on
+local disk. `bars::window` takes a month RANGE and returns one page.
+
+**IT SEEKS OR IT SCANS, AND IT SAYS WHICH.** Ordered by `ts` it reads `n_valid`
+from each header, runs the prefix sum, and reads `limit` records by index —
+`O(months)` header reads plus `O(limit)` record reads, and none of the four
+million rows in between. Ordered by any other column it reads every row once,
+sorts, and slices. `scanned` is on the wire because a reader who cannot tell the
+two apart cannot tell why one sort is instant and another is not, and would
+reasonably call the slow one a bug.
+
+**THE EXTREMES RIDE ALONG, AND THAT REPAYS A DEBT D-0260 TOOK ON.** The grid
+scales its magnitude bars against the widest range in the QUERY so that turning a
+page cannot change what a full bar means. That property held only while the
+browser read every month, so the prefix-sum fix lost it and said so. `extremes=1`
+returns it as one number folded where the bytes are, for the cost of a scan the
+sort path was already paying.
+
+**Two ceilings, and they are deliberately different in kind.** A `limit` past
+`MAX_WINDOW_LIMIT` is CLAMPED: a shorter page still answers the question asked
+and the pager simply asks again. A month RANGE past `MAX_WINDOW_MONTHS` is
+REFUSED, because a silently shortened range answers a narrower question and
+nothing on the page would say so — the same distinction D-0260 records under the
+read budget.
+
+A month the store never wrote is COUNTED, never an error and never silence:
+`months_missing` is on the wire so a reader can tell a sparse store from a
+refusal. §4.
+
+**What this does NOT yet do.** The front end still reads the old route; wiring it
+is a separate change, and the running binary must be restarted before the new
+route exists at all. Twelve tests cover the endpoint — boundary straddle, both
+directions, offset past the end, sparse months, an empty store, the sort path
+returning the window's true top rather than the page's, the extremes folded over
+every month, and both ceilings. `CLAUDE.md` §3 rule 6: nothing here claims the
+grid is faster until the grid calls it.

@@ -2040,6 +2040,229 @@ async fn bars_json(
     (axum::http::StatusCode::OK, json(), out)
 }
 
+/// One page of bars across a RANGE of months, answered in ONE request.
+///
+/// # The 2,187 requests this replaces
+///
+/// `/bars.json` serves ONE instrument-month, which is the right shape for a
+/// chart of one month and the wrong shape for a grid over a store. The grid
+/// fanned out one request per matched instrument-month — measured on a store
+/// holding 2019-12..2026-08 for three instruments at nine rungs, that is
+/// **2,187 requests**, past what a browser will open, and every one of them
+/// failed `net::ERR_INSUFFICIENT_RESOURCES`.
+///
+/// Paging by time was then fixed in the browser by reading the census counts
+/// and opening only the file the page sits in — one request, any depth. What
+/// that could NOT fix is a sort on a price column: no index answers "the fifty
+/// largest closes", so the grid fetched every row of every month and sorted
+/// them in JavaScript. Measured: **76 requests and 9.4 seconds**, and the cost
+/// was never the network — it was parsing 623,498 rows into objects to throw
+/// away all but fifty.
+///
+/// This route answers the same question by reading the files it already has on
+/// local disk and returning the fifty. `bars::window` seeks when the order is
+/// the store's own and scans when it is not, and says which it did.
+///
+/// # Why the extremes ride along
+///
+/// The grid scales its magnitude bars against the widest range in the QUERY so
+/// that turning a page cannot change what a full bar means. That property was
+/// lost when the browser stopped reading every month. `extremes=1` restores it
+/// for the cost of the scan it already takes — one number, computed where the
+/// bytes are.
+/// Everything `/bars/window.json` reads off the query string.
+///
+/// Parsed as one step so the handler is dispatch rather than a wall of
+/// `match … return refuse`. Every field REFUSES rather than defaulting where a
+/// default would answer a different question than the one asked.
+struct WindowAsk {
+    vendor: brutex_core::vendor::Vendor,
+    timeframe: store::path::Timeframe,
+    contract: Option<brutex_core::instrument::Contract>,
+    from: store::path::YearMonth,
+    to: store::path::YearMonth,
+    sort: bars::SortKey,
+    desc: bool,
+    offset: usize,
+    limit: usize,
+    want_extremes: bool,
+}
+
+impl WindowAsk {
+    /// Reads one, or names the first thing wrong with it.
+    fn parse(query: &str) -> Result<Self, String> {
+        let Some(vendor) = ingest::parse_vendor(&param(query, "feed")) else {
+            return Err(format!(
+                "{:?} is not a feed this build can read",
+                param(query, "feed")
+            ));
+        };
+        let month_of = |key: &str| {
+            let raw = param(query, key);
+            raw.split_once('-')
+                .and_then(|(y, m)| {
+                    store::path::YearMonth::new(y.parse().ok()?, m.parse().ok()?).ok()
+                })
+                .ok_or_else(|| format!("{raw:?} is not a YYYY-MM month for {key:?}"))
+        };
+        let from = month_of("from")?;
+        let to = month_of("to")?;
+        let timeframe = timeframe_param(query)?;
+        let raw_contract = param(query, "contract");
+        let contract = if raw_contract.is_empty() {
+            None
+        } else {
+            Some(
+                brutex_core::instrument::Contract::parse(&raw_contract).ok_or_else(|| {
+                    format!("{raw_contract:?} is not a contract segment this store can name")
+                })?,
+            )
+        };
+        let sort = bars::SortKey::parse(&param(query, "sort")).ok_or_else(|| {
+            format!(
+                "{:?} is not a column this grid sorts on. Accepted: ts, o, h, l, c, v, oi.",
+                param(query, "sort")
+            )
+        })?;
+        // A NON-NUMBER IS A REFUSAL, NOT A ZERO. `offset=banana` silently
+        // reading from the top would answer a different question than the one
+        // asked, and the pager would look right while showing the wrong rows.
+        let number = |key: &str, fallback: usize| {
+            let raw = param(query, key);
+            if raw.is_empty() {
+                Ok(fallback)
+            } else {
+                raw.parse::<usize>()
+                    .map_err(|_| format!("{raw:?} is not a whole number for {key:?}"))
+            }
+        };
+        Ok(Self {
+            vendor,
+            timeframe,
+            contract,
+            from,
+            to,
+            sort,
+            // ABSENT MEANS DESCENDING, which is what the grid opens on and what
+            // a reader of a store asks for first: the newest row.
+            desc: !matches!(param(query, "dir").as_str(), "asc"),
+            offset: number("offset", 0)?,
+            limit: number("limit", bars::PAGE_BARS)?,
+            want_extremes: matches!(param(query, "extremes").as_str(), "1" | "true"),
+        })
+    }
+}
+
+async fn bars_window_json(
+    axum::extract::State(site): axum::extract::State<Loaded>,
+    uri: axum::http::Uri,
+) -> (
+    axum::http::StatusCode,
+    [(axum::http::HeaderName, &'static str); 1],
+    String,
+) {
+    let query = uri.query().unwrap_or("");
+    let json = || {
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/json; charset=utf-8",
+        )]
+    };
+    let refuse = |why: String| {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            json(),
+            format!(r#"{{"error":{}}}"#, render::json_string(&why)),
+        )
+    };
+
+    let asked = match WindowAsk::parse(query) {
+        Ok(asked) => asked,
+        Err(why) => return refuse(why),
+    };
+    let window = match bars::window(
+        &site.store_root,
+        asked.vendor,
+        &param(query, "exchange"),
+        &param(query, "segment"),
+        &param(query, "symbol"),
+        asked.timeframe,
+        asked.contract,
+        asked.from,
+        asked.to,
+        asked.sort,
+        asked.desc,
+        asked.offset,
+        asked.limit,
+        asked.want_extremes,
+    ) {
+        Ok(window) => window,
+        Err(why) => return refuse(why),
+    };
+    let (sort, want_extremes) = (asked.sort, asked.want_extremes);
+
+    let body = render_window(&window, sort.scans() || want_extremes);
+    // PARTIAL CONTENT WHEN A RECORD WOULD NOT READ, the same status
+    // `/bars.json` answers with, for the same reason: the rows are real and
+    // the set is not whole, and one status must not mean both.
+    let status = if window.faults.is_empty() {
+        axum::http::StatusCode::OK
+    } else {
+        axum::http::StatusCode::PARTIAL_CONTENT
+    };
+    (status, json(), body)
+}
+
+/// A [`bars::Window`] as the JSON the grid reads.
+///
+/// `scanned` IS ON THE WIRE BECAUSE THE TWO PATHS COST DIFFERENT THINGS. A
+/// reader that cannot tell a seek from a scan cannot tell why one sort is
+/// instant and another is not, and would reasonably call the slow one a bug.
+///
+/// `months_missing` is on it for the same reason: a sparse store is legal, and
+/// a reader must be able to tell a gap from a refusal — `CLAUDE.md` §4.
+fn render_window(window: &bars::Window, scanned: bool) -> String {
+    let mut rows = String::with_capacity(window.bars.len() * 96 + 32);
+    rows.push('[');
+    for (n, bar) in window.bars.iter().enumerate() {
+        if n > 0 {
+            rows.push(',');
+        }
+        let _ = write!(
+            rows,
+            r#"{{"t":{},"o":{},"h":{},"l":{},"c":{},"v":{},"oi":{}}}"#,
+            bar.ts_micros / 1_000_000,
+            bar.open,
+            bar.high,
+            bar.low,
+            bar.close,
+            bar.volume,
+            if bar.open_interest == store::format::OI_NULL {
+                "null".to_owned()
+            } else {
+                bar.open_interest.to_string()
+            }
+        );
+    }
+    rows.push(']');
+
+    let extremes = window.extremes.map_or_else(
+        || "null".to_owned(),
+        |top| format!(r#"{{"range":{},"volume":{}}}"#, top.range, top.volume),
+    );
+    format!(
+        r#"{{"total":{},"months_read":{},"months_missing":{},"scanned":{scanned},"extremes":{extremes},"faults":{},"bars":{rows}}}"#,
+        window.total,
+        window.months_read,
+        window.months_missing,
+        if window.faults.is_empty() {
+            "null".to_owned()
+        } else {
+            render::json_string(&window.faults.join("; "))
+        }
+    )
+}
+
 /// The census as it is on disk RIGHT NOW, not as it was at startup.
 ///
 /// # Why this is read per request
@@ -11107,6 +11330,10 @@ pub fn router_serving(site: Loaded, assets: std::sync::Arc<assets::Assets>) -> a
             axum::routing::get(crate::folder::folder_json),
         )
         .route("/bars.json", axum::routing::get(bars_json))
+        // ONE MONTH, AND ONE WINDOW OVER MANY. The first is what a chart of a
+        // month wants; the second is what a grid over a store wants, and asking
+        // the first for the second is the 2,187-request storm it replaces.
+        .route("/bars/window.json", axum::routing::get(bars_window_json))
         .route("/store.json", axum::routing::get(store_json))
         // THE ONLY ROUTE THAT OPENS A BAR FILE TO CHECK THE COUNTER.
         .route("/verify.json", axum::routing::get(verify_json))
