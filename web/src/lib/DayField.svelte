@@ -164,6 +164,22 @@
   let typing = $state(/** @type {string | null} */ (null));
   const text = $derived(typing ?? render(value));
   const bad = $derived(typing !== null && typing.trim() !== '' && parse(typing) === '');
+
+  /* THE CALLER'S REASON, PUNCTUATED ONCE.
+     `boundsReason` is prose the caller writes and it may or may not end in a
+     stop — /db's ends "…is its expiry." — so appending one produced
+     "…its expiry..". The tail owns the punctuation: it trims whatever the
+     caller ended with and supplies exactly one.
+     ONLY THE FIRST SENTENCE. These reasons run to two and three sentences,
+     which is right on the calendar's own footer where there is room, and is a
+     paragraph under a form field. The first sentence is the bound; the rest is
+     background the opener's title still carries in full. */
+  const reasonTail = $derived.by(() => {
+    const raw = String(boundsReason ?? '').trim();
+    if (raw === '') return '.';
+    const first = raw.split(/(?<=\.)\s+/)[0] ?? raw;
+    return ` — ${first.replace(/[.;,\s]+$/, '')}.`;
+  });
   const outOfRange = $derived.by(() => {
     const iso = typing === null ? value : parse(typing);
     return isIso(iso) && !inRange(iso);
@@ -393,6 +409,7 @@
       placeholder="dd Mon yyyy"
       aria-label={label}
       aria-invalid={bad || outOfRange}
+      aria-describedby={bad || outOfRange ? `${id}-why` : undefined}
       {disabled}
       value={text}
       oninput={(e) => type(e.currentTarget.value)}
@@ -409,6 +426,44 @@
       onclick={toggle}>▦</button
     >
   </div>
+
+  <!-- ==================================================================
+       THE REASON, WHERE THE FIELD IS — NOT ONLY INSIDE THE CALENDAR.
+
+       The header above this component already promises that a refused day
+       "leaves `aria-invalid` on the input with the bound stated under the
+       grid". That grid is the CALENDAR POPOVER, and it is shut almost all of
+       the time.
+
+       MEASURED on /db by typing a from-date after the to-date: the input took
+       `aria-invalid="true"` and an amber border, and that was the whole of it —
+       no `aria-describedby`, no title, no text anywhere on the page. Colour
+       alone is not a reason: it dies in greyscale, it is nothing to a screen
+       reader beyond a bare "invalid", and it does not say WHICH bound was
+       crossed or what to do. Fifty rows went on being drawn underneath it.
+
+       `CLAUDE.md` §4 — degrade loudly and NAME the reason.
+
+       `role="alert"` because it appears in response to what the reader just
+       typed, and `aria-describedby` ties it to the input so the two are one
+       control to anything reading rather than looking.
+       ================================================================== -->
+  {#if bad || outOfRange}
+    <p class="dbad" id={`${id}-why`} role="alert">
+      {#if bad}
+        <b>{typing}</b> is not a date this field can read — it takes
+        <b>dd Mon yyyy</b>, like <b>{render(min || max || '2026-01-31')}</b>.
+      {:else if min && max}
+        Outside <b>{render(min)}</b> to <b>{render(max)}</b>{reasonTail}
+      {:else if min}
+        Earlier than <b>{render(min)}</b>{reasonTail}
+      {:else if max}
+        Later than <b>{render(max)}</b>{reasonTail}
+      {:else}
+        Outside the range this field accepts.
+      {/if}
+    </p>
+  {/if}
 
   {#if open}
     <div
@@ -597,6 +652,22 @@
   .din[aria-invalid='true'] {
     border-color: var(--warn);
   }
+  /* THE REJECTED-DAY LINE. Warn tone, matching the border the input already
+     takes — one state, one colour, said twice: once as a shape a glance
+     catches and once as a sentence that survives greyscale and reaches a
+     screen reader. */
+  .dbad {
+    margin: var(--s1) 0 0;
+    font-size: var(--fs-micro);
+    line-height: 1.45;
+    color: var(--warn);
+    max-width: 34ch;
+  }
+  .dbad b {
+    font-weight: var(--w-semi);
+    font-variant-numeric: tabular-nums;
+  }
+
   .din:disabled,
   .dbtn:disabled {
     opacity: 0.45;
