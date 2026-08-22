@@ -97,6 +97,9 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
        cli audit-stored VENDOR UNDERLYING RUNG YEAR MONTH MIN_HITS
                                    sweep REAL bars, then trade them: exit grid,
                                    walk-forward, PBO and bootstrap p-values
+       cli range-all    VENDOR UNDERLYING FROM_Y FROM_M TO_Y TO_M MIN_HITS
+                                   sweep the span on ALL NINE RUNGS and print one
+                                   table comparing them. Every rung is recorded.
        cli audit-range  VENDOR UNDERLYING RUNG FROM_Y FROM_M TO_Y TO_M MIN_HITS
                                    sweep a CONTIGUOUS SPAN of months as ONE
                                    series -- the seven-year question, not twelve
@@ -117,6 +120,40 @@ unless it was stamped:
     BRUTEX_COMMIT=$(git rev-parse HEAD) cargo build --release -p cli
 ";
 
+/// The `range-all` arm, lifted out of [`run`] for the reason
+/// [`audit_range_arm`] gives.
+///
+/// The same four number parses and the same four refusals, in the same order,
+/// because two commands taking one shape of argument must reject a bad one
+/// identically or an operator learns two rules.
+fn range_all_arm(
+    out: &mut String,
+    vendor: &str,
+    underlying: &str,
+    from: (&str, &str),
+    to: (&str, &str),
+    min_hits: &str,
+) -> u8 {
+    match (
+        from.0.parse::<u16>(),
+        from.1.parse::<u8>(),
+        to.0.parse::<u16>(),
+        to.1.parse::<u8>(),
+        parse_min_hits(min_hits),
+    ) {
+        (Ok(fy), Ok(fm), Ok(ty), Ok(tm), Ok(h)) => {
+            let text = range_all(vendor, underlying, (fy, fm), (ty, tm), h);
+            let refused = text.starts_with("refused: ");
+            out.push_str(&text);
+            if refused { MISUSED } else { OK }
+        }
+        (Err(_), _, _, _, _) | (_, _, Err(_), _, _) => {
+            refuse(out, "YEAR must be a number like 2026")
+        }
+        (_, Err(_), _, _, _) | (_, _, _, Err(_), _) => refuse(out, "MONTH must be 1..=12"),
+        (_, _, _, _, Err(why)) => refuse(out, why),
+    }
+}
 /// The `audit-range` arm, lifted out of [`run`].
 ///
 /// # Why it is a function and not five more lines in the match
@@ -243,6 +280,7 @@ pub fn run(args: &[String], out: &mut String) -> u8 {
         ["audit-range", v, u, r, fy, fm, ty, tm, mh] => {
             audit_range_arm(out, v, u, r, (fy, fm), (ty, tm), mh)
         }
+        ["range-all", v, u, fy, fm, ty, tm, mh] => range_all_arm(out, v, u, (fy, fm), (ty, tm), mh),
         ["sweep-all", vendor, rung, min_hits] => match parse_min_hits(min_hits) {
             Ok(h) => {
                 let text = batch::sweep_all(vendor, rung, h);
@@ -1735,6 +1773,178 @@ fn audit_range_inner(
             months_asked: span.asked,
             months_found: span.found,
         }),
+    ))
+}
+
+/// Every rung this engine sweeps, coarsest question to finest.
+///
+/// # Nine, and `1s` is deliberately not among them
+///
+/// `store::path::Timeframe::KNOWN` carries a one-second rung. It is not swept
+/// here: a second-resolution span of seven years is roughly sixty times the
+/// one-minute series, and nothing in this repository has measured what that
+/// costs. `CLAUDE.md` §3 rule 6 says an unmeasured bound is not a bound, so the
+/// list is the nine an operator actually pulls rather than everything the path
+/// grammar can spell.
+const EVERY_RUNG: [&str; 9] = [
+    "1day", "60min", "30min", "15min", "10min", "5min", "3min", "2min", "1min",
+];
+
+/// One rung's row in the comparison table.
+struct RungRow {
+    rung: &'static str,
+    outcome: Result<crate::results::Record, String>,
+}
+
+/// Sweeps a span on EVERY rung and prints one table comparing them.
+///
+/// # Why this is one command and not nine invocations
+///
+/// Nine invocations produce nine reports of eight hundred lines each, and the
+/// question an operator actually has — *which timeframe carries the edge?* — is
+/// answerable only by reading all nine and lining them up by hand. The figures
+/// are already comparable: every rung executes on the SAME one-minute series, so
+/// the horizon means minutes on all of them and the fills come off the same
+/// bars. What was missing was somewhere to put them side by side.
+///
+/// Every rung is also RECORDED, so the table is a view of the results store
+/// rather than a thing computed and thrown away. A later run can be compared
+/// against this one without re-sweeping.
+///
+/// A rung that refuses does NOT stop the others. A span missing one timeframe
+/// is a smaller answer, not no answer — and the refusal is printed in that
+/// rung's own row rather than as a footnote, so a reader cannot mistake an
+/// absent row for a poor result.
+#[must_use]
+pub fn range_all(
+    vendor_word: &str,
+    underlying: &str,
+    from: (u16, u8),
+    to: (u16, u8),
+    min_hits: u64,
+) -> String {
+    let mut out = String::from(STORED_PROVENANCE);
+    let _ = writeln!(
+        out,
+        "feed {vendor_word} · {underlying} · ALL NINE RUNGS · {}-{:02}..{}-{:02} · \
+         min_hits {min_hits}\nEvery rung executes on the SAME 1min series, so the \
+         horizon means MINUTES on all of them and the fills come off the same \
+         bars.\n",
+        from.0, from.1, to.0, to.1
+    );
+
+    let rows: Vec<RungRow> = EVERY_RUNG
+        .iter()
+        .map(|&rung| {
+            // The long report is DISCARDED here on purpose: it has already been
+            // rendered once per rung and nine of them is six thousand lines. The
+            // row below is read back from the store, which is the point of
+            // having one.
+            let text = audit_range(vendor_word, underlying, rung, from, to, min_hits);
+            let outcome = if let Some(why) = text.strip_prefix("refused: ") {
+                Err(why.lines().next().unwrap_or(why).to_owned())
+            } else {
+                latest_for(vendor_word, underlying, rung, from, to, min_hits)
+            };
+            RungRow { rung, outcome }
+        })
+        .collect();
+
+    let _ = writeln!(
+        out,
+        "  {:<8}{:>10}{:>8}{:>14}{:>7}{:>10}{:>9}{:>14}{:>14}{:>10}",
+        "rung",
+        "bars",
+        "months",
+        "combinations",
+        "depth",
+        "complete",
+        "trades",
+        "worst",
+        "best",
+        "ret/DD"
+    );
+    for row in &rows {
+        match &row.outcome {
+            Err(why) => {
+                let _ = writeln!(out, "  {:<8}REFUSED: {why}", row.rung);
+            }
+            Ok(r) => {
+                let _ = writeln!(
+                    out,
+                    "  {:<8}{:>10}{:>8}{:>14}{:>7}{:>10}{:>9}{:>14}{:>14}{:>10}",
+                    row.rung,
+                    r.bars,
+                    format!("{}/{}", r.months_found, r.months_asked),
+                    r.combinations,
+                    r.depth,
+                    // THE ONE COLUMN THAT DECIDES WHETHER THE REST MEAN
+                    // ANYTHING. A halted sweep's depth is PARTIAL and its
+                    // combination count covers less of the ladder than it looks
+                    // like, so a `no` here is not a footnote.
+                    if r.halted == 0 { "yes" } else { "NO" },
+                    r.trades,
+                    r.pessimistic,
+                    r.optimistic,
+                    if r.max_drawdown < 0 && r.pessimistic > 0 {
+                        (r.pessimistic.saturating_mul(100) / -r.max_drawdown).to_string()
+                    } else {
+                        "-".to_owned()
+                    },
+                );
+            }
+        }
+    }
+    let _ = writeln!(
+        out,
+        "\n  `worst` and `best` are the CHOSEN exit variant's total in paisa \
+         under adverse-extreme and open fills. Selection ranks on `worst`.\n  \
+         `complete` NO means a budget stopped that rung's ladder short: its \
+         depth is partial and its combination count is not comparable with a \
+         complete one.\n  Every row above is a stored record; nothing here was \
+         computed twice."
+    );
+    out
+}
+
+/// The record just written for this exact run, read back from the store.
+///
+/// Reads BACKWARDS from the newest row and stops at the first match, because the
+/// row this command just appended is the last one. That is `O(1)` in the ordinary
+/// case and `O(rows)` only if the run was somehow not recorded — which is
+/// reported as the refusal it is rather than absorbed.
+fn latest_for(
+    vendor_word: &str,
+    underlying: &str,
+    rung: &str,
+    from: (u16, u8),
+    to: (u16, u8),
+    min_hits: u64,
+) -> Result<crate::results::Record, String> {
+    let root = store_root()?;
+    let mut store = crate::results::Results::open(&root)?;
+    let count = store.len()?;
+    let (feed, name, tf) = (
+        crate::results::field(vendor_word),
+        crate::results::field(underlying),
+        crate::results::field(rung),
+    );
+    for back in 1..=count {
+        let record = store.read(count.saturating_sub(back))?;
+        if record.feed == feed
+            && record.underlying == name
+            && record.timeframe == tf
+            && record.from_year == from.0
+            && record.from_month == from.1
+            && record.to_year == to.0
+            && record.to_month == to.1
+            && record.min_hits == min_hits
+        {
+            return Ok(record);
+        }
+    }
+    Err(format!(
+        "the {rung} run completed but no row for it is in the results store"
     ))
 }
 
@@ -3318,5 +3528,87 @@ mod tests {
         assert_eq!(store.len().expect("measurable"), 1);
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `range-all` refuses a bad argument exactly as `audit-range` does.
+    #[test]
+    fn the_all_rungs_command_refuses_the_same_way_its_sibling_does() {
+        // TWO COMMANDS, ONE ARGUMENT SHAPE, ONE SET OF RULES. An operator who
+        // learned `audit-range`'s refusals must not have to learn a second set.
+        for (args, want) in [
+            (
+                [
+                    "range-all",
+                    "zerodha",
+                    "NIFTY",
+                    "x",
+                    "1",
+                    "2026",
+                    "8",
+                    "500",
+                ],
+                "YEAR must be a number",
+            ),
+            (
+                [
+                    "range-all",
+                    "zerodha",
+                    "NIFTY",
+                    "2019",
+                    "300",
+                    "2026",
+                    "8",
+                    "500",
+                ],
+                "MONTH must be 1..=12",
+            ),
+            (
+                [
+                    "range-all",
+                    "zerodha",
+                    "NIFTY",
+                    "2019",
+                    "12",
+                    "2026",
+                    "8",
+                    "0",
+                ],
+                "MIN_HITS must be 1 or more",
+            ),
+        ] {
+            let mut out = String::new();
+            assert_eq!(run(&argv(&args), &mut out), MISUSED, "{out}");
+            assert!(out.contains(want), "wanted {want}, got: {out}");
+        }
+    }
+
+    /// It is listed, and it sweeps every rung an operator pulls.
+    #[test]
+    fn the_all_rungs_command_covers_the_nine_rungs_and_says_so() {
+        assert!(USAGE.contains("range-all"), "the command is listed");
+        assert!(
+            USAGE.contains("ALL NINE RUNGS"),
+            "and usage says what makes it different from `audit-range`"
+        );
+        // The nine an operator actually pulls. `1s` is deliberately absent --
+        // nothing has measured what a seven-year second-resolution span costs,
+        // and §3 rule 6 says an unmeasured bound is not a bound.
+        assert_eq!(super::EVERY_RUNG.len(), 9);
+        for rung in [
+            "1min", "2min", "3min", "5min", "10min", "15min", "30min", "60min", "1day",
+        ] {
+            assert!(
+                super::EVERY_RUNG.contains(&rung),
+                "{rung} is a rung the operator pulls and must be swept"
+            );
+        }
+        assert!(
+            !super::EVERY_RUNG.contains(&"1s"),
+            "1s is excluded until its cost is measured"
+        );
+        // COARSEST FIRST, so the cheapest rungs report before the expensive
+        // ones and an operator watching a long run sees rows early.
+        assert_eq!(super::EVERY_RUNG.first().copied(), Some("1day"));
+        assert_eq!(super::EVERY_RUNG.last().copied(), Some("1min"));
     }
 }
