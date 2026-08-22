@@ -809,6 +809,25 @@
 
   /** Which of the tester's three views is showing. */
   let testerView = $state('metrics');
+  /** The period scale on every periodic chart. TradingView's four. */
+  let periodScale = $state('weekly');
+  /** "Profits and losses" split. TradingView's two. */
+  let plSplit = $state('signals');
+  /** The streak chart's unit. TradingView's two. */
+  let streakMode = $state('count');
+  /** Whether the testing-period menu is open. */
+  let periodOpen = $state(false);
+  /** Which testing period is selected. TradingView's list, verbatim. */
+  let testingPeriod = $state('Available chart range');
+  /** TradingView's testing-period menu, in its order. */
+  const TESTING_PERIODS = [
+    'Available chart range',
+    'Last 7 days',
+    'Last 30 days',
+    'Last 90 days',
+    'Last 365 days',
+    'Entire history'
+  ];
   /** Which "Performance analysis" tab. TradingView's five, in its order. */
   let paTab = $state('breakdown');
   /** Which "Trades analysis" tab. TradingView's three, in its order. */
@@ -865,6 +884,19 @@
       Math.abs(openRun?.winner_mfe ?? 0),
       Math.abs(openRun?.all_mae ?? 0)
     )
+  );
+
+  /** The heading TradingView puts above each periodic chart. */
+  const PERIOD_LABEL = {
+    daily: 'Daily',
+    weekly: 'Weekly',
+    quarterly: 'Quarterly',
+    yearly: 'Yearly'
+  };
+
+  /** One scale for the two benchmark bars. */
+  const benchScale = $derived(
+    Math.max(1, Math.abs(outperformance?.strategy ?? 0), Math.abs(outperformance?.hold ?? 0))
   );
 
   /** A basis-point integer as a percent string, or the em dash. */
@@ -1183,6 +1215,42 @@
 </script>
 
 <svelte:head><title>Backtest · brutex</title></svelte:head>
+
+<!-- ============================================================
+     A CHART FRAME WITH NO SERIES IN IT.
+     Axes, gridlines, the zero line, the legend and the pager are all
+     drawn, because they are part of the design and they are all TRUE --
+     the shape of the plot is not in doubt, only its contents. The plot
+     area carries the sentence saying which field the sweep would have to
+     write for the series to appear.
+
+     Drawing the frame rather than hiding the panel is the same choice
+     the padlock makes one level down: the thing keeps its place, and the
+     absence is legible instead of invisible.
+     ============================================================ -->
+{#snippet chartFrame(why, legend)}
+  <div class="cf">
+    <div class="cf-plot">
+      <svg class="cf-grid" viewBox="0 0 100 60" preserveAspectRatio="none" aria-hidden="true">
+        {#each [0, 15, 30, 45, 60] as y (y)}
+          <line x1="0" y1={y} x2="100" y2={y} stroke="var(--n5)" stroke-width="0.3" />
+        {/each}
+        <line x1="0" y1="30" x2="100" y2="30" stroke="var(--n7)" stroke-width="0.5" />
+      </svg>
+      <div class="cf-axis">
+        <span>+</span><span>0</span><span>−</span>
+      </div>
+      <div class="cf-msg"><Lock /> <span>{why}</span></div>
+    </div>
+    {#if legend.length > 0}
+      <ul class="cf-legend">
+        {#each legend as l, i (l)}
+          <li><span class="cf-sw s{i}"></span>{l}</li>
+        {/each}
+      </ul>
+    {/if}
+  </div>
+{/snippet}
 
 <div class="page">
   <!-- WHAT CHANGED, FOR A READER WHO CANNOT SEE IT CHANGE.
@@ -1800,44 +1868,86 @@
             {/if}
           </div>
 
-
           <!-- ==========================================================
                THE STRATEGY TESTER
-               TradingView's own layout, its own order, its own lock glyph
-               for a cell that cannot be filled. See the block comment on
-               `testerView` for why the padlock is the right idiom here.
+               Built to the operator's screenshots: TradingView's toolbar,
+               its three views, its five and three pill tabs, its stat
+               quads with the percentage under the absolute, its chart
+               frames with axes and legends and toggles, and its padlock
+               for a cell that cannot be filled.
+
+               A CHART WITHOUT A SOURCE STILL DRAWS ITS FRAME. Axes,
+               legend, period toggles and pagers are all present and all
+               work; what is missing is the series, and the plot area says
+               so. That is the same design with an honest interior, and it
+               is the only version of this panel that cannot mislead
+               somebody about money.
                ========================================================== -->
           <section class="tester">
             <!-- ---- toolbar ---- -->
             <div class="tt-bar">
               <div class="tt-name">
                 <svg viewBox="0 0 16 16" class="tt-ico" aria-hidden="true"
-                  ><path
-                    d="M2 12l3.5-4 3 3L13 4"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="1.6"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                  /></svg
+                  ><path d="M2 12l3.5-4 3 3L13 4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg
                 >
                 <b>Brute-force sweep</b>
                 <span class="tt-dim">{openRun.underlying} · {openRun.timeframe}</span>
               </div>
+
               <div class="tt-views" role="group" aria-label="Report view">
-                <button class="tt-view" class:on={testerView === 'metrics'} onclick={() => (testerView = 'metrics')}>Metrics</button>
-                <button class="tt-view" class:on={testerView === 'trades'} onclick={() => (testerView = 'trades')}>Trades</button>
+                <button class="tt-view ic" class:on={testerView === 'metrics'} onclick={() => (testerView = 'metrics')} title="Metrics">
+                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 11l3.5-4.5L8.5 9 14 3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                </button>
+                <button class="tt-view ic" class:on={testerView === 'trades'} onclick={() => (testerView = 'trades')} title="List of trades">
+                  <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="1" fill="none" stroke="currentColor" stroke-width="1.3" /><path d="M2 6.5h12M6 6.5V13" stroke="currentColor" stroke-width="1.1" /></svg>
+                </button>
                 <button class="tt-view" class:on={testerView === 'properties'} onclick={() => (testerView = 'properties')}>Properties</button>
               </div>
+
+              <!-- TESTING PERIOD, with TradingView's own menu -->
+              <div class="tt-period">
+                <button class="tt-ctl" onclick={() => (periodOpen = !periodOpen)} aria-expanded={periodOpen}>
+                  <svg viewBox="0 0 16 16" class="tt-cico" aria-hidden="true"><rect x="2" y="3" width="12" height="11" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.3" /><path d="M2 6.5h12M5.5 2v2.5M10.5 2v2.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" /></svg>
+                  {span(openRun)}
+                  <span class="tt-caret" aria-hidden="true">⌄</span>
+                </button>
+                {#if periodOpen}
+                  <div class="tt-menu">
+                    <div class="tt-menuhead">
+                      <span>Testing period</span>
+                      <button class="tt-reset" onclick={() => { testingPeriod = 'Available chart range'; periodOpen = false; }}>Reset</button>
+                    </div>
+                    {#each TESTING_PERIODS as p (p)}
+                      <button
+                        class="tt-menuitem"
+                        class:sel={testingPeriod === p}
+                        onclick={() => { testingPeriod = p; periodOpen = false; }}
+                      >
+                        {p}
+                        {#if p === 'Available chart range'}<span class="tt-default">Default</span>{/if}
+                        {#if p !== 'Available chart range'}<Lock small why="The run's span is fixed at the moment the sweep ran and recorded. Re-testing a different window means running the sweep again, not re-reading this record." />{/if}
+                      </button>
+                    {/each}
+                  </div>
+                {/if}
+              </div>
+
+              <button class="tt-ctl" title="Initial capital">
+                <svg viewBox="0 0 16 16" class="tt-cico" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.3" /><path d="M8 5v6M6.3 6.5h3.4M6.3 9.5h3.4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" /></svg>
+                1 unit <span class="tt-dim2">index points</span>
+              </button>
+              <button class="tt-ctl" title="Detalization">
+                <svg viewBox="0 0 16 16" class="tt-cico" aria-hidden="true"><path d="M3 13V7M8 13V3M13 13V9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" /></svg>
+                {openRun.timeframe} signal · 1min execution
+              </button>
+
               <div class="tt-meta">
-                <span class="tt-chip">{span(openRun)}</span>
-                <span class="tt-chip">{exact(openRun.months_found)}/{exact(openRun.months_asked)} months</span>
-                <span class="tt-chip">support ≥ {(supportPerMille(openRun) / 10).toFixed(1)}%</span>
                 {#if openRun.halted}
                   <span class="tt-chip warn">halted · depth {openRun.depth} partial</span>
                 {:else}
                   <span class="tt-chip good">complete · depth {openRun.depth}</span>
                 {/if}
+                <span class="tt-chip" class:warn={!openRun.whole_span}>{exact(openRun.months_found)}/{exact(openRun.months_asked)} months</span>
               </div>
             </div>
 
@@ -1845,35 +1955,31 @@
               <!-- ================= KEY STATS ================= -->
               <div class="tt-sec">
                 <h4 class="tt-h">Key stats</h4>
-                <div class="tt-stats">
-                  <div class="tt-stat">
+                <div class="tt-quad">
+                  <div class="tt-q">
                     <span class="tt-k">Total PnL</span>
-                    <span class="tt-v" class:up={openRun.pessimistic >= 0} class:down={openRun.pessimistic < 0}>
-                      {money(openRun.pessimistic)}
-                      <em class="tt-sub">{pct(strategyBps)}</em>
+                    <span class="tt-qv big" class:up={openRun.pessimistic >= 0} class:down={openRun.pessimistic < 0}>
+                      {money(openRun.pessimistic)}<em class="tt-unit">POINTS</em>
+                      <em class="tt-pc">{pct(strategyBps)}</em>
                     </span>
                     <span class="tt-note">worst-case fills · {money(openRun.optimistic)} at best</span>
                   </div>
-                  <div class="tt-stat">
+                  <div class="tt-q">
                     <span class="tt-k">Max drawdown</span>
-                    <span class="tt-v down">
-                      {money(Math.abs(openRun.max_drawdown))}
-                      <em class="tt-sub">{drawdownBps === null ? '' : `${(drawdownBps / 100).toFixed(2)}%`}</em>
+                    <span class="tt-qv big down">
+                      {money(Math.abs(openRun.max_drawdown))}<em class="tt-unit">POINTS</em>
+                      <em class="tt-pc">{drawdownBps === null ? '' : `${(drawdownBps / 100).toFixed(2)}%`}</em>
                     </span>
                     <span class="tt-note">worst peak-to-trough</span>
                   </div>
-                  <div class="tt-stat">
+                  <div class="tt-q">
                     <span class="tt-k">Profitable trades</span>
-                    <span class="tt-v"
-                      ><Lock why="No win count is recorded. A net total cannot be split into winners and losers after the fact." /></span
-                    >
+                    <span class="tt-qv big"><Lock why="No win count is recorded. A net total cannot be split into winners and losers after the fact." /></span>
                     <span class="tt-note">of {exact(openRun.trades)} closed</span>
                   </div>
-                  <div class="tt-stat">
+                  <div class="tt-q">
                     <span class="tt-k">Profit factor</span>
-                    <span class="tt-v"
-                      ><Lock why="Needs gross profit and gross loss separately; the sweep records only the net." /></span
-                    >
+                    <span class="tt-qv big"><Lock why="Needs gross profit and gross loss separately; the sweep records only the net." /></span>
                     <span class="tt-note">gross profit ÷ gross loss</span>
                   </div>
                 </div>
@@ -1881,7 +1987,14 @@
 
               <!-- ================= PERFORMANCE ================= -->
               <div class="tt-sec">
-                <h4 class="tt-h">Performance</h4>
+                <div class="tt-hrow">
+                  <h4 class="tt-h">Performance</h4>
+                  <div class="tt-icons">
+                    <button class="tt-iconbtn" title="Chart settings" aria-label="Chart settings"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.2" fill="none" stroke="currentColor" stroke-width="1.3" /><path d="M8 1.6v2M8 12.4v2M1.6 8h2M12.4 8h2M3.5 3.5l1.4 1.4M11.1 11.1l1.4 1.4M12.5 3.5l-1.4 1.4M4.9 11.1l-1.4 1.4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" /></svg></button>
+                    <button class="tt-iconbtn" title="Snapshot" aria-label="Snapshot"><svg viewBox="0 0 16 16"><rect x="1.8" y="4.5" width="12.4" height="8.5" rx="1.4" fill="none" stroke="currentColor" stroke-width="1.3" /><circle cx="8" cy="8.7" r="2.4" fill="none" stroke="currentColor" stroke-width="1.3" /><path d="M5.6 4.5l1-1.5h2.8l1 1.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" /></svg></button>
+                    <button class="tt-iconbtn" title="Expand" aria-label="Expand"><svg viewBox="0 0 16 16"><path d="M6 2H2v4M10 14h4v-4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" /></svg></button>
+                  </div>
+                </div>
                 <div class="tt-perf">
                   <ul class="tt-plots">
                     <li class="off">Cumulative PnL <Lock small why="No equity series is recorded — four scalars cannot make a curve." /></li>
@@ -1893,27 +2006,21 @@
                     {#if bench.phase === 'loading'}
                       <div class="tt-empty"><span class="spin sm" aria-hidden="true"></span> Reading the span's opening price…</div>
                     {:else if outperformance && buyHold}
-                      {@const scale = Math.max(1, Math.abs(outperformance.strategy), Math.abs(outperformance.hold))}
                       <div class="tt-bench">
                         <div class="tt-brow">
                           <span class="tt-blab">Strategy</span>
-                          <span class="tt-bbar"
-                            ><span class="tt-bfill" class:down={outperformance.strategy < 0} style="width:{(Math.abs(outperformance.strategy) / scale) * 100}%"></span></span
-                          >
+                          <span class="tt-bbar"><span class="tt-bfill" class:down={outperformance.strategy < 0} style="width:{(Math.abs(outperformance.strategy) / benchScale) * 100}%"></span></span>
                           <span class="tt-bval strong">{money(outperformance.strategy)}</span>
                         </div>
                         <div class="tt-brow">
                           <span class="tt-blab">Buy and hold</span>
-                          <span class="tt-bbar"
-                            ><span class="tt-bfill hold" class:down={outperformance.hold < 0} style="width:{(Math.abs(outperformance.hold) / scale) * 100}%"></span></span
-                          >
+                          <span class="tt-bbar"><span class="tt-bfill hold" class:down={outperformance.hold < 0} style="width:{(Math.abs(outperformance.hold) / benchScale) * 100}%"></span></span>
                           <span class="tt-bval">{money(outperformance.hold)}</span>
                         </div>
                       </div>
                       <p class="tt-plotnote">
-                        The cumulative-PnL curve TradingView draws here needs an equity series the sweep never wrote.
-                        <b>Buy and hold is the one plot on this list that is computable</b> — from the bars on disk — so it is
-                        the one that is drawn.
+                        Three of the four plots above need a series the sweep never wrote. <b>Buy and hold is the one that is
+                        computable</b> — from the bars on disk — so it is the one drawn.
                       </p>
                     {:else}
                       <div class="tt-empty"><Lock /> {bench.why || 'No plot on this list can be drawn from what is recorded.'}</div>
@@ -1936,15 +2043,33 @@
                     <div class="tt-q"><span class="tt-k">Gross profit</span><span class="tt-qv"><Lock why="Only the net total is recorded." /></span></div>
                     <div class="tt-q"><span class="tt-k">Gross loss</span><span class="tt-qv"><Lock why="Only the net total is recorded." /></span></div>
                     <div class="tt-q"><span class="tt-k">Profit factor</span><span class="tt-qv"><Lock why="Needs gross profit and gross loss." /></span></div>
-                    <div class="tt-q"><span class="tt-k">Commission load</span><span class="tt-qv"><Lock why="`crates/costs` applies costs inside the sweep; the record keeps the net, not the fee line." /></span></div>
+                    <div class="tt-q"><span class="tt-k">Commission load</span><span class="tt-qv"><Lock why="crates/costs applies costs inside the sweep; the record keeps the net, not the fee line." /></span></div>
                   </div>
-                  <!-- OURS, NOT TRADINGVIEW'S. Marked so, because a row nobody
-                       can find in the Strategy Tester should say where it came
-                       from rather than look like one they missed. -->
+
+                  <div class="tt-hrow tight">
+                    <h5 class="tt-h5">Profits and losses</h5>
+                    <div class="tt-seg" role="group" aria-label="Split">
+                      <button class="tt-segbtn" class:on={plSplit === 'signals'} onclick={() => (plSplit = 'signals')}>By signals</button>
+                      <button class="tt-segbtn" class:on={plSplit === 'side'} onclick={() => (plSplit = 'side')}>By side</button>
+                    </div>
+                  </div>
+                  <div class="tt-lockpanel">
+                    <Lock />
+                    <span>
+                      {#if plSplit === 'signals'}
+                        Splitting profit and loss <b>by signal</b> needs each trade tagged with the entry that opened it. The
+                        sweep records one total for the whole run.
+                      {:else}
+                        Splitting <b>by side</b> needs a long/short tag per trade. Direction is one of the nine terms inside
+                        the run's identity hash, not a field beside it.
+                      {/if}
+                    </span>
+                  </div>
+
                   <h5 class="tt-h5">Fill models <span class="tt-own">brutex</span></h5>
                   <p class="tt-note2">
                     TradingView simulates one fill model. This sweep records the same combination under both ends of every
-                    bar, and ranks on the worse — so the spread between them is a figure the Strategy Tester has no row for.
+                    bar and ranks on the worse, so the spread between them is a figure the Strategy Tester has no row for.
                   </p>
                   <div class="tt-pl">
                     <div class="tt-plrow">
@@ -1967,18 +2092,27 @@
                   <div class="tt-quad">
                     <div class="tt-q"><span class="tt-k">Annualized return (CAGR)</span><span class="tt-qv" class:up={(cagrBps ?? 0) >= 0} class:down={(cagrBps ?? 0) < 0}>{cagrBps === null ? '—' : pct(cagrBps)}</span></div>
                     <div class="tt-q"><span class="tt-k">Total return</span><span class="tt-qv" class:up={(strategyBps ?? 0) >= 0} class:down={(strategyBps ?? 0) < 0}>{pct(strategyBps)}</span></div>
-                    <div class="tt-q"><span class="tt-k">Sharpe ratio</span><span class="tt-qv"><Lock why="`crates/runner` computes significance, but no ratio reaches the record." /></span></div>
+                    <div class="tt-q"><span class="tt-k">Sharpe ratio</span><span class="tt-qv"><Lock why="crates/runner computes significance, but no ratio reaches the record." /></span></div>
                     <div class="tt-q"><span class="tt-k">Sortino ratio</span><span class="tt-qv"><Lock why="Same — not written to the ledger." /></span></div>
                   </div>
-                  <p class="tt-note2">
-                    Return is on <b>one unit of the index</b>, against the price at the span's start
-                    ({money(bench.open)}). The ledger records no capital, so a return on equity has no denominator on disk —
-                    and inventing one would make every percentage here a number of my choosing. Annualised over the
-                    {exact(openRun.months_found)} months actually found, not the {exact(openRun.months_asked)} asked for.
-                  </p>
-                  <div class="tt-lockpanel">
-                    <Lock /> <span>Daily / weekly / quarterly / yearly PnL needs per-period totals. The sweep records one total for the whole span.</span>
+
+                  <div class="tt-hrow tight">
+                    <h5 class="tt-h5">{PERIOD_LABEL[periodScale]} PnL</h5>
+                    <div class="tt-seg" role="group" aria-label="Period">
+                      {#each ['daily', 'weekly', 'quarterly', 'yearly'] as s (s)}
+                        <button class="tt-segbtn" class:on={periodScale === s} onclick={() => (periodScale = s)}>{s[0].toUpperCase() + s.slice(1)}</button>
+                      {/each}
+                    </div>
                   </div>
+                  {@render chartFrame(
+                    'Per-period totals need the sweep to record when each trade resolved. It records one total for the whole span, so there is no series to bucket by ' + periodScale.replace('ly', '') + '.',
+                    ['Realized profit', 'Realized loss', 'Favorable excursion', 'Adverse excursion']
+                  )}
+                  <p class="tt-note2">
+                    Return is on <b>one unit of the index</b>, against the price at the span's start ({money(bench.open)}).
+                    The ledger records no capital, so a return on equity has no denominator on disk. Annualised over the
+                    {exact(openRun.months_found)} months actually found.
+                  </p>
                 {:else if paTab === 'benchmarking'}
                   <div class="tt-quad">
                     <div class="tt-q"><span class="tt-k">Strategy return</span><span class="tt-qv" class:up={(strategyBps ?? 0) >= 0} class:down={(strategyBps ?? 0) < 0}>{pct(strategyBps)}</span></div>
@@ -2001,6 +2135,18 @@
                       {/if}
                     </p>
                   {/if}
+                  <div class="tt-hrow tight">
+                    <h5 class="tt-h5">Strategy vs benchmark</h5>
+                    <div class="tt-seg" role="group" aria-label="Period">
+                      {#each ['daily', 'weekly', 'quarterly', 'yearly'] as s (s)}
+                        <button class="tt-segbtn" class:on={periodScale === s} onclick={() => (periodScale = s)}>{s[0].toUpperCase() + s.slice(1)}</button>
+                      {/each}
+                    </div>
+                  </div>
+                  {@render chartFrame(
+                    'The per-period comparison needs a strategy PnL series. Only the two whole-span totals are recorded, and those are the bars drawn under Performance above.',
+                    ['Strategy PnL', 'Buy and hold PnL']
+                  )}
                 {:else if paTab === 'margin'}
                   <div class="tt-quad">
                     <div class="tt-q"><span class="tt-k">Margin efficiency</span><span class="tt-qv"><Lock why="The engine models no account." /></span></div>
@@ -2008,21 +2154,23 @@
                     <div class="tt-q"><span class="tt-k">Margin calls</span><span class="tt-qv"><Lock why="The engine models no account." /></span></div>
                     <div class="tt-q"><span class="tt-k">Total liquidated volume</span><span class="tt-qv"><Lock why="The engine models no account." /></span></div>
                   </div>
-                  <div class="tt-lockpanel">
-                    <Lock />
-                    <span>
-                      <b>Every row on this tab is locked, and that is a design fact rather than a gap to fill.</b> The engine
-                      computes totals in index points with no capital, no position size and no broker. There is no margin to
-                      use, so there is nothing here to record.
-                    </span>
-                  </div>
+                  <h5 class="tt-h5">Margin utilization</h5>
+                  {@render chartFrame(
+                    'Every row on this tab is locked, and that is a DESIGN FACT rather than a gap to fill. The engine computes totals in index points with no capital, no position size and no broker. There is no margin to use, so there is nothing here to record.',
+                    []
+                  )}
                 {:else}
                   <div class="tt-quad">
                     <div class="tt-q"><span class="tt-k">Average run-up duration</span><span class="tt-qv"><Lock why="Needs a run-up series over time." /></span></div>
                     <div class="tt-q"><span class="tt-k">Average drawdown duration</span><span class="tt-qv"><Lock why="Needs a drawdown series over time." /></span></div>
-                    <div class="tt-q"><span class="tt-k">Max drawdown</span><span class="tt-qv down">{money(Math.abs(openRun.max_drawdown))}</span></div>
+                    <div class="tt-q"><span class="tt-k">Max drawdown</span><span class="tt-qv down">{money(Math.abs(openRun.max_drawdown))}<em class="tt-pc">{drawdownBps === null ? '' : `${(drawdownBps / 100).toFixed(2)}%`}</em></span></div>
                     <div class="tt-q"><span class="tt-k">Max drawdown as % of opening price</span><span class="tt-qv">{drawdownBps === null ? '—' : `${(drawdownBps / 100).toFixed(2)}%`}</span></div>
                   </div>
+                  <h5 class="tt-h5">Alternating growth and decline</h5>
+                  {@render chartFrame(
+                    'Alternating run-up and drawdown periods need an equity series to segment. One drawdown figure is recorded, and it is the number in the quad above.',
+                    ['Run-up', 'Drawdown', 'Current run-up']
+                  )}
                   <h5 class="tt-h5">Excursion <span class="tt-own">brutex</span></h5>
                   <p class="tt-note2">
                     How far trades went against the position before resolving, in parts per million. The winners' adverse
@@ -2057,13 +2205,38 @@
                     <div class="tt-q"><span class="tt-k">Largest profit</span><span class="tt-qv"><Lock why="Only the worst single trade is kept." /></span></div>
                     <div class="tt-q"><span class="tt-k">Largest loss</span><span class="tt-qv down">{money(openRun.worst_trade)}</span></div>
                   </div>
-                  <div class="tt-lockpanel">
-                    <Lock />
-                    <span>
-                      The returns histogram and the winners/losers donut both need the outcome of every individual trade. The
-                      sweep records <b>{exact(openRun.trades)}</b> as a count and keeps no list, so neither can be drawn — and
-                      a donut split on a guess would be the most convincing wrong picture on this page.
-                    </span>
+                  <div class="tt-two">
+                    <div>
+                      <h5 class="tt-h5">Returns distribution</h5>
+                      {@render chartFrame('A histogram of per-trade returns needs the return of every trade. The sweep records ' + exact(openRun.trades) + ' as a count and keeps no list.', ['Losers', 'Winners'])}
+                    </div>
+                    <div>
+                      <h5 class="tt-h5">Trades distribution</h5>
+                      <!-- THE DONUT, DRAWN AS A RING WITH NO SPLIT. The total is
+                           real and sits in the middle where TradingView puts it;
+                           the arc is not divided because the winner/loser split
+                           is exactly what is not recorded. A guessed split here
+                           would be the most convincing wrong picture on the page. -->
+                      <div class="tt-donutwrap">
+                        <svg class="tt-donut" viewBox="0 0 120 120" role="img" aria-label="{exact(openRun.trades)} total trades. The winner and loser split is not recorded.">
+                          <circle cx="60" cy="60" r="44" fill="none" stroke="var(--n5)" stroke-width="16" />
+                          <circle cx="60" cy="60" r="44" fill="none" stroke="var(--n7)" stroke-width="16" stroke-dasharray="4 6" opacity="0.7" />
+                        </svg>
+                        <div class="tt-donutmid">
+                          <b>{exact(openRun.trades)}</b>
+                          <span>Total trades</span>
+                        </div>
+                        <ul class="tt-donutleg">
+                          <li><span class="sw up"></span>Winners<span class="v"><Lock small why="No win count is recorded." /></span></li>
+                          <li><span class="sw down"></span>Losers<span class="v"><Lock small why="No loss count is recorded." /></span></li>
+                          <li><span class="sw flat"></span>Breakevens<span class="v"><Lock small why="No breakeven count is recorded." /></span></li>
+                        </ul>
+                      </div>
+                      <p class="tt-note2">
+                        The ring is <b>undivided on purpose</b>. The total is real; the split is the thing that is not
+                        recorded, and a donut cut on a guess would look exactly like one cut on data.
+                      </p>
+                    </div>
                   </div>
                 {:else if taTab === 'streaks'}
                   <div class="tt-quad">
@@ -2072,13 +2245,17 @@
                     <div class="tt-q"><span class="tt-k">Average winning streak</span><span class="tt-qv"><Lock why="Needs the ordered win/loss outcome of every trade." /></span></div>
                     <div class="tt-q"><span class="tt-k">Average losing streak</span><span class="tt-qv"><Lock why="Needs the ordered win/loss outcome of every trade." /></span></div>
                   </div>
-                  <div class="tt-lockpanel">
-                    <Lock />
-                    <span>
-                      Every figure on this tab is a property of the ORDER trades resolved in. The ledger keeps a count and a
-                      net, both of which are order-independent, so nothing here is recoverable from it.
-                    </span>
+                  <div class="tt-hrow tight">
+                    <h5 class="tt-h5">Winning and losing streaks</h5>
+                    <div class="tt-seg" role="group" aria-label="Streak unit">
+                      <button class="tt-segbtn" class:on={streakMode === 'count'} onclick={() => (streakMode = 'count')}>Count</button>
+                      <button class="tt-segbtn" class:on={streakMode === 'amount'} onclick={() => (streakMode = 'amount')}>Amount</button>
+                    </div>
                   </div>
+                  {@render chartFrame(
+                    'Every figure on this tab is a property of the ORDER trades resolved in. The ledger keeps a count and a net, both order-independent, so nothing here is recoverable from it.',
+                    []
+                  )}
                 {:else}
                   <div class="tt-tblwrap">
                     <table class="tt-tbl">
@@ -2096,9 +2273,16 @@
                         <tr><td>Average loss</td><td class="n"><Lock small why="Needs gross loss and a loser count." /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         <tr><td>Average profit / average loss</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         <tr><td>Largest profit</td><td class="n"><Lock small why="Only the worst single trade is kept." /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
+                        <tr><td>Largest profit %</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
+                        <tr><td>Largest profit as % of gross profit</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         <tr><td>Largest loss</td><td class="n down">{money(openRun.worst_trade)}</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
+                        <tr><td>Largest loss %</td><td class="n"><Lock small why="Needs the entry price of that trade." /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
+                        <tr><td>Largest loss as % of gross loss</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         <tr><td>Outliers</td><td class="n"><Lock small why="Needs a per-trade list." /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
+                        <tr><td>Outliers P&amp;L</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         <tr><td>Average bars in trades</td><td class="n"><Lock small why="bars ÷ trades is the average gap BETWEEN trades, a different quantity. Not shown rather than shown wrong." /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
+                        <tr><td>Average bars in winners</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
+                        <tr><td>Average bars in losers</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         <tr class="own"><td>Winners' adverse excursion <span class="tt-own">brutex</span></td><td class="n">{group(openRun.winner_mae)} ppm</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         <tr class="own"><td>Winners' favourable excursion <span class="tt-own">brutex</span></td><td class="n">{group(openRun.winner_mfe)} ppm</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         <tr class="own"><td>All trades' adverse excursion <span class="tt-own">brutex</span></td><td class="n">{group(openRun.all_mae)} ppm</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
@@ -2111,12 +2295,18 @@
             {:else if testerView === 'trades'}
               <!-- ================= LIST OF TRADES ================= -->
               <div class="tt-sec">
-                <h4 class="tt-h">List of trades</h4>
+                <div class="tt-hrow">
+                  <h4 class="tt-h">List of trades</h4>
+                  <div class="tt-icons">
+                    <button class="tt-iconbtn" title="Download" aria-label="Download"><svg viewBox="0 0 16 16"><path d="M8 2v8m0 0L5 7m3 3l3-3M3 13h10" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" /></svg></button>
+                    <button class="tt-iconbtn" title="Columns" aria-label="Columns"><svg viewBox="0 0 16 16"><rect x="2" y="3" width="3.2" height="10" rx="1" fill="none" stroke="currentColor" stroke-width="1.3" /><rect x="6.4" y="3" width="3.2" height="10" rx="1" fill="none" stroke="currentColor" stroke-width="1.3" /><rect x="10.8" y="3" width="3.2" height="10" rx="1" fill="none" stroke="currentColor" stroke-width="1.3" /></svg></button>
+                  </div>
+                </div>
                 <div class="tt-tblwrap">
                   <table class="tt-tbl ghosted">
                     <thead>
                       <tr>
-                        <th>Trade #</th><th>Type</th><th>Date and time</th><th>Signal</th><th class="n">Price</th>
+                        <th>Trade number</th><th>Type</th><th>Date and time</th><th>Signal</th><th class="n">Price</th>
                         <th class="n">Size</th><th class="n">Net PnL</th><th class="n">Return</th>
                         <th class="n">Favorable excursion</th><th class="n">Adverse excursion</th>
                         <th class="n">Cumulative PnL</th><th class="n">Duration (bars)</th>
@@ -3383,6 +3573,373 @@
   .tt-chip.warn {
     background: var(--warn-soft);
     color: var(--warn);
+  }
+
+  /* ---- toolbar controls (TradingView's pill-shaped buttons) ---- */
+  .tt-ctl {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    background: transparent;
+    border: 0;
+    border-radius: 6px;
+    padding: 0.3rem 0.55rem;
+    font: inherit;
+    font-size: 0.75rem;
+    color: var(--n10);
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.14s ease;
+  }
+  .tt-ctl:hover {
+    background: var(--n4);
+  }
+  .tt-ctl:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 1px;
+  }
+  .tt-cico {
+    width: 14px;
+    height: 14px;
+    color: var(--n8);
+    flex: none;
+  }
+  .tt-caret {
+    color: var(--n8);
+    font-size: 0.7rem;
+  }
+  .tt-dim2 {
+    color: var(--n8);
+  }
+  .tt-period {
+    position: relative;
+  }
+  .tt-menu {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    z-index: 20;
+    min-width: 230px;
+    background: var(--n2);
+    border: 1px solid var(--n6);
+    border-radius: 8px;
+    box-shadow: var(--e3);
+    padding: 0.35rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+  .tt-menuhead {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.35rem 0.5rem 0.45rem;
+    font-size: 0.75rem;
+    color: var(--n11);
+    border-bottom: 1px solid var(--n5);
+    margin-bottom: 0.25rem;
+  }
+  .tt-reset {
+    background: none;
+    border: 0;
+    padding: 0;
+    font: inherit;
+    font-size: 0.72rem;
+    color: var(--n8);
+    cursor: pointer;
+  }
+  .tt-reset:hover {
+    color: var(--acc);
+  }
+  .tt-menuitem {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 5px;
+    padding: 0.35rem 0.5rem;
+    font: inherit;
+    font-size: 0.76rem;
+    color: var(--n10);
+    cursor: pointer;
+    text-align: left;
+  }
+  .tt-menuitem:hover {
+    background: var(--n4);
+  }
+  .tt-menuitem.sel {
+    border-color: var(--acc);
+    color: var(--n12);
+  }
+  .tt-default {
+    font-size: 0.68rem;
+    color: var(--n8);
+  }
+
+  /* ---- icon buttons on a panel header ---- */
+  .tt-hrow {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+  }
+  .tt-hrow.tight {
+    margin-top: 1rem;
+  }
+  .tt-icons {
+    display: flex;
+    gap: 0.2rem;
+  }
+  .tt-iconbtn {
+    background: transparent;
+    border: 0;
+    border-radius: 5px;
+    padding: 0.28rem;
+    color: var(--n8);
+    cursor: pointer;
+    line-height: 0;
+    transition:
+      background 0.14s ease,
+      color 0.14s ease;
+  }
+  .tt-iconbtn svg {
+    width: 15px;
+    height: 15px;
+  }
+  .tt-iconbtn:hover {
+    background: var(--n4);
+    color: var(--n11);
+  }
+  .tt-iconbtn:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 1px;
+  }
+  .tt-view.ic {
+    padding: 0.28rem 0.5rem;
+    line-height: 0;
+  }
+  .tt-view.ic svg {
+    width: 15px;
+    height: 15px;
+  }
+
+  /* ---- segmented toggles (Daily/Weekly/…, By signals/By side, Count/Amount) ---- */
+  .tt-seg {
+    display: flex;
+    gap: 2px;
+    background: var(--n0);
+    padding: 2px;
+    border-radius: 7px;
+  }
+  .tt-segbtn {
+    background: transparent;
+    border: 0;
+    border-radius: 5px;
+    padding: 0.26rem 0.62rem;
+    font: inherit;
+    font-size: 0.73rem;
+    color: var(--n9);
+    cursor: pointer;
+    white-space: nowrap;
+    transition:
+      background 0.14s ease,
+      color 0.14s ease;
+  }
+  .tt-segbtn:hover {
+    background: var(--n4);
+    color: var(--n11);
+  }
+  .tt-segbtn.on {
+    background: var(--n3);
+    color: var(--n12);
+    box-shadow: var(--e1);
+  }
+  .tt-segbtn:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 1px;
+  }
+
+  /* ---- the two-line stat value ---- */
+  .tt-qv.big {
+    font-size: 1.24rem;
+    display: flex;
+    align-items: baseline;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+  }
+  .tt-unit {
+    font-size: 0.6rem;
+    font-style: normal;
+    letter-spacing: 0.08em;
+    color: var(--n8);
+  }
+  .tt-pc {
+    font-size: 0.82rem;
+    font-style: normal;
+    color: inherit;
+    opacity: 0.85;
+  }
+
+  /* ---- the chart frame ---- */
+  .cf {
+    margin-top: 0.55rem;
+  }
+  .cf-plot {
+    position: relative;
+    height: 190px;
+    border: 1px solid var(--n6);
+    border-radius: 8px;
+    background: var(--n2);
+    overflow: hidden;
+  }
+  .cf-grid {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+  }
+  /* The axis labels sit where TradingView puts them -- right edge, three
+     ticks around the zero line -- so the frame reads as a real plot. */
+  .cf-axis {
+    position: absolute;
+    right: 0.55rem;
+    top: 0;
+    bottom: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    padding: 0.35rem 0;
+    font-size: 0.64rem;
+    color: var(--n8);
+    font-variant-numeric: tabular-nums;
+  }
+  .cf-msg {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.6rem;
+    padding: 1rem 2.5rem;
+    text-align: center;
+    font-size: 0.77rem;
+    color: var(--n9);
+  }
+  .cf-msg span {
+    max-width: 72ch;
+  }
+  .cf-legend {
+    list-style: none;
+    display: flex;
+    gap: 1rem;
+    flex-wrap: wrap;
+    justify-content: center;
+    margin: 0.5rem 0 0;
+    padding: 0;
+    font-size: 0.71rem;
+    color: var(--n9);
+  }
+  .cf-legend li {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+  }
+  .cf-sw {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--n7);
+  }
+  .cf-sw.s0 {
+    background: var(--up);
+  }
+  .cf-sw.s1 {
+    background: var(--down);
+  }
+  .cf-sw.s2 {
+    background: var(--acc);
+  }
+  .cf-sw.s3 {
+    background: var(--warn);
+  }
+
+  /* ---- two-column analysis row ---- */
+  .tt-two {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 1.4rem;
+    margin-top: 0.3rem;
+  }
+
+  /* ---- the donut ---- */
+  .tt-donutwrap {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 1.2rem;
+    flex-wrap: wrap;
+    margin-top: 0.55rem;
+  }
+  .tt-donut {
+    width: 132px;
+    height: 132px;
+    flex: none;
+  }
+  .tt-donutmid {
+    position: absolute;
+    left: 66px;
+    top: 66px;
+    transform: translate(-50%, -50%);
+    text-align: center;
+    pointer-events: none;
+  }
+  .tt-donutmid b {
+    display: block;
+    font-size: 1.1rem;
+    color: var(--n12);
+    font-variant-numeric: tabular-nums;
+    line-height: 1.1;
+  }
+  .tt-donutmid span {
+    font-size: 0.63rem;
+    color: var(--n8);
+  }
+  .tt-donutleg {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    font-size: 0.76rem;
+    color: var(--n10);
+    min-width: 170px;
+  }
+  .tt-donutleg li {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .tt-donutleg .v {
+    margin-left: auto;
+  }
+  .tt-donutleg .sw {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    flex: none;
+  }
+  .tt-donutleg .sw.up {
+    background: var(--up);
+  }
+  .tt-donutleg .sw.down {
+    background: var(--down);
+  }
+  .tt-donutleg .sw.flat {
+    background: var(--warn);
   }
 
   /* ---- sections ---- */
