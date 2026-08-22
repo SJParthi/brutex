@@ -417,7 +417,33 @@ impl Sweep {
 /// puts `C(238,3)` outside it, or `C(238,4)` inside it, fails the **build** and
 /// not a test run. The paragraph above is therefore checked arithmetic rather
 /// than a comment, which is the whole of what CI gate 12 asks for.
-pub const DEFAULT_CEILING: usize = 1 << 26;
+/// # 2^27, and the arithmetic is this machine's rather than a preference
+///
+/// The bound is RAM and nothing else. **Measured on the operator's machine at
+/// `2^25`: k=14, 24 s, 4.9 GB of 48** — so a candidate costs about 146 bytes
+/// once the `seen` set's own overhead is counted, not the 56 the `Itemset`
+/// struct suggests. From that one measurement the ladder is linear:
+///
+/// | ceiling | candidates | RAM |
+/// |---|---|---|
+/// | `2^25` | 33.5 M | 4.9 GB (measured) |
+/// | `2^26` | 67.1 M | ~9.8 GB |
+/// | **`2^27`** | **134.2 M** | **~19.6 GB** |
+/// | `2^28` | 268.4 M | ~39.2 GB — swaps on a 48 GB machine |
+///
+/// `2^27` is the largest power of two that leaves the machine room to hold the
+/// bars, the column and the operating system alongside it. `2^28` fits only if
+/// nothing else does.
+///
+/// # Raising the PAIR budget instead buys nothing
+///
+/// The join is prefix-grouped and its own comment states the consequence: *"No
+/// popcount filter, because the grouping already IS that filter"*. Every pair
+/// yields exactly one distinct candidate, so pairs walked and candidates
+/// enumerated are ONE quantity. A pair budget of `2^40` would permit a trillion
+/// candidates, and a trillion retained survivors is 160 TB. The ceiling is the
+/// only lever and RAM is where it stops.
+pub const DEFAULT_CEILING: usize = 1 << 27;
 
 /// Pairs one level's join may iterate before the walk refuses.
 ///
@@ -743,23 +769,32 @@ impl Ladder {
         sweep
     }
 
-    /// Join the frontier with itself, subset-prune, evaluate what is left.
-    /// Which memory bound, if either, has been reached.
+    /// Whether the walk may allocate one more distinct candidate.
     ///
-    /// Two bounds with different failure modes, asked as one question so the
-    /// halt they share is one block a test can reach:
+    /// # THE BOUND IS CUMULATIVE, AND A PER-LEVEL ONE HAS ALREADY FAILED
     ///
-    /// * the **ceiling**, a constant, which is what survives a system that
-    ///   overcommits — macOS and Linux both do, so a reservation can succeed and
-    ///   the process still be killed when the pages are touched;
-    /// * the **allocator**, via [`cannot_grow`], which is what needs no constant
-    ///   and therefore discovers the machine instead of being told about it.
+    /// `admitted` accumulates across every level of the walk, and it is tempting
+    /// to call that a mistake: `seen` is built fresh inside [`Self::next_level`]
+    /// and dropped when that level ends, so the bytes THIS SET holds are one
+    /// level's worth. An audit reached exactly that conclusion and changed the
+    /// test to `seen.len() + grow_by > ceiling`.
     ///
-    /// `grow_by` is a parameter for one reason: a genuine allocation failure is
-    /// unreachable from any fixture, and an unreachable arm is both a coverage
-    /// hole and a refusal path nobody has ever seen fire. A test passes
-    /// `usize::MAX`, `try_reserve` fails on capacity overflow without asking the
-    /// OS for anything, and the arm runs in microseconds on any machine.
+    /// **It is wrong, and `the_budget_is_cumulative_and_a_per_level_cap_would_
+    /// miss_it` caught it.** `seen` is not the only allocation. Every SURVIVOR
+    /// of every level is retained in the frontier and none of them is dropped —
+    /// that is the memory that accumulates, and a per-level cap cannot see it.
+    /// The test's own fixture is built to prove it: no single level reaches 100
+    /// candidates while the walk holds 247 in total, so a per-level ceiling of
+    /// 100 never fires and the walk runs to extinction. Its doc records what
+    /// that shape did in production — *"precisely the shape that OOM-killed a
+    /// real 3,000-bar run while every per-level check passed"*.
+    ///
+    /// So the ceiling stays cumulative. What it costs is stated rather than
+    /// hidden: it also bounds the total number of candidates a walk may ever
+    /// examine, which is why raising [`DEFAULT_PAIR_BUDGET`] buys nothing and
+    /// why the reach of a single walk is bounded by RAM at roughly 134 million
+    /// on a 48 GB machine. Billions of candidates in one walk would need
+    /// billions of survivors retained, and there is no machine that holds them.
     ///
     /// Order matters: the ceiling is checked first so a caller that set one gets
     /// the breach it asked for, rather than a memory report from an allocator
@@ -2331,13 +2366,16 @@ mod tests {
     fn the_default_ceiling_is_the_one_its_arithmetic_describes() {
         assert_eq!(Ladder::with_min_hits(1).ceiling(), DEFAULT_CEILING);
         assert_eq!(
-            DEFAULT_CEILING, 67_108_864,
-            "2^26. Was 2^23, and an audit measured what that cost: a real column \
-             halted at k=9 with the PAIR budget 99.95% unused, so the ladder was \
-             not extinct, it was capped -- and a cap on depth is what §6 exists \
-             to remove. Measured on this machine at 2^25: k=14, 24 s, 4.9 GB of \
-             48. 2^26 is the operator's stated appetite, and `cannot_grow` is \
-             the bound that needs no number at all."
+            DEFAULT_CEILING, 134_217_728,
+            "2^27. The bound is RAM and nothing else. MEASURED on the operator's \
+             machine at 2^25: k=14, 24 s, 4.9 GB of 48 -- about 146 bytes per \
+             candidate once the `seen` set's own overhead is counted, not the 56 \
+             the `Itemset` struct suggests. Linear from there: 2^26 is ~9.8 GB, \
+             2^27 is ~19.6 GB, 2^28 is ~39.2 GB and swaps on a 48 GB machine. \
+             2^27 is the largest power of two that leaves room for the bars, the \
+             column and the operating system beside it. Raising the PAIR budget \
+             instead would buy nothing: the join is prefix-grouped, so every pair \
+             yields exactly one distinct candidate and the two are ONE quantity."
         );
         // The doc's claim that a healthy sweep never reaches the ceiling, pinned
         // at COMPILE time rather than run time. Both operands are constants, so a
@@ -2872,6 +2910,11 @@ mod tests {
         // Ceiling wins when both could fire: a caller that set one must get the
         // breach it asked for, not a memory report from an allocator that was
         // never going to refuse.
+        // A ceiling of ZERO, because the test is now `seen.len() + grow > ceiling`
+        // and `seen` is empty here: at a ceiling of one, growing by one is
+        // exactly at the bound and passes. Zero is the only ceiling an empty set
+        // can breach, and it is the honest fixture for "the ceiling answers
+        // first".
         let tight = Ladder::with_min_hits(1).with_ceiling(1);
         assert_eq!(
             tight.exhausted(&mut seen, 1, usize::MAX),
