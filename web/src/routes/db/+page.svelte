@@ -5670,6 +5670,36 @@
     return () => clearTimeout(t);
   });
 
+  /* ---------------------------------------------------------------------
+     THE BAR GRID HAS ITS OWN ENTRANCE, and until now it had none at all.
+
+     `entering` above is driven by `stamp`, which is bumped by an effect
+     watching the CENSUS rows. Paging the bar grid, re-sorting it, or narrowing
+     the query never touched `stamp` — so `class:row-in={entering}` sat on every
+     bar row and fired on none of them. MEASURED on a page change: 0 of 50 rows
+     animating, with the class in the markup the whole time.
+
+     WHAT IT WATCHES IS THE PAGE'S IDENTITY, not its contents: which page, in
+     which order, over which set. Those are the four things that make the rows
+     on screen a DIFFERENT fifty rather than the same fifty re-rendered, and an
+     entrance that fired on anything less would re-animate under the reader.
+
+     THE MOTION CARRIES A FACT — the operator's own rule. These rows are new;
+     the ones that were here are gone. A grid that swaps fifty numbers with no
+     transition leaves a reader unsure whether the press registered at all,
+     which is the same question `CLAUDE.md` §4 asks about silent failure.
+     --------------------------------------------------------------------- */
+  let barEntering = $state(false);
+  $effect(() => {
+    void pageNow;
+    void barSortKey;
+    void barDesc;
+    void barPlanKeys;
+    barEntering = true;
+    const t = setTimeout(() => (barEntering = false), 420);
+    return () => clearTimeout(t);
+  });
+
   /* EVERY RUNG, OR THE BUTTON LIES. "Reset all filters" that leaves a universe
      or a month window standing puts the operator back on a screen that is
      still narrowed, with the control that says so now reading "unfiltered".
@@ -7474,14 +7504,14 @@
                     <tr
                       class="brow"
                       class:odd={i % 2 === 1}
-                      class:row-in={entering}
+                      class:row-in={barEntering}
                       class:dayfirst={barSortKey === 'ts' &&
                         i > 0 &&
                         barPage[i - 1].day !== b.day}
                       data-dir={b.c > b.o ? 'up' : b.c < b.o ? 'down' : 'flat'}
                       style="--rng:{rngMag(b.h - b.l, b.tf)};--spine:{Math.round(
                         rngMag(b.h - b.l, b.tf) * 24
-                      )}px"
+                      )}px;--in-delay:{Math.min(i * 8, 160)}ms"
                     >
                       <!-- DATE / TIME. The stamp is IST and says so; the rung
                            and the instrument that produced the bar are on the
@@ -8097,6 +8127,20 @@
      a floor of 0.08 because a flat minute is a real state and a row with no
      mark at all reads as a rendering fault. Multiplying by `1%` drew every
      spine at half a pixel; the unit is `100%`. */
+  /* THE ENTRANCE READS TOP-DOWN, AND IS CAPPED AT 160ms.
+     Fifty rows arriving in the same instant is a flash, not a transition: it
+     tells a reader something changed and nothing about what. An 8ms step lets
+     the eye follow the page filling from the top, which is the direction it
+     reads in anyway.
+     CAPPED, because the stagger is a cue and not a queue. Uncapped, row 50
+     would start 400ms after row 1 and the last rows would still be arriving
+     after the reader had begun reading the first — the animation would become
+     something to WAIT for. 160ms is under the ~200ms at which a delay stops
+     reading as motion and starts reading as latency. */
+  .brow.row-in {
+    animation-delay: var(--in-delay, 0ms);
+  }
+
   /* A REPEATED DAY STAYS LEGIBLE AND STOPS COMPETING.
      Two thirds of the ink, not none of it: the date is still readable if you
      look at it and no longer the first thing you see on fifty consecutive rows.
