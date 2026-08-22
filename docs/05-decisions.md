@@ -20211,3 +20211,74 @@ directions, offset past the end, sparse months, an empty store, the sort path
 returning the window's true top rather than the page's, the extremes folded over
 every month, and both ceilings. `CLAUDE.md` §3 rule 6: nothing here claims the
 grid is faster until the grid calls it.
+
+### D-0262 — the trading calendar, measured from the bars rather than typed from a page
+
+**2026-08-22.** `P-03` has been open since the charter was written: *"no trading
+calendar and no holiday list exist"*, and `crates/pull/src/session.rs` says so in
+its own header. The reason it stayed open is golden rule 1 — inventing a holiday
+list is forbidden — and the reason it mattered was measured today.
+
+**What the absence cost.** The `/ingest` page computes an expected bar count
+arithmetically. It knew **24** non-trading days across six and a half years; NSE
+closes **92**. So all six stored series reported **SHORT** while every one of
+them was complete, and the operator could not tell a real hole from a public
+holiday. An alarm that fires on complete data is worse than no alarm: a true gap
+hides among the false ones.
+
+**The source is the exchange's own record, not a webpage.** `nseindia.com` is
+unreachable from this environment — the documentation fetch timed out and the
+browser refused the host — so nothing here was typed off a published calendar.
+The list is derived from **days that actually traded**: every day carrying a
+`1day` bar in the operator's Zerodha store over 2019-12-02 … 2026-08-21. Three
+instruments were walked — NIFTY, BANKNIFTY, INDIAVIX — and they agree on the
+**identical** 1,671-day set, which is what makes this a measurement rather than
+one feed's opinion.
+
+**It reconciles, and the reconciliation is the test rather than a remark:**
+
+```
+1,755  weekdays in the window
+-  92  days nothing traded    (13.7/yr — the NSE norm)
++   8  weekend days all three DID trade
+= 1,671  exactly the 1day bars on disk
+```
+
+`the_calendar_reconciles_to_the_bars_it_was_derived_from` asserts every term.
+The 92 are self-validating — Republic Day, Independence Day, Gandhi Jayanti,
+Christmas, Good Friday, Holi, Mahashivratri — and include one-offs no rule would
+generate: **2024-01-22** (Ram Mandir consecration) and **2024-05-20** (Mumbai
+election day). The 8 weekend sessions include the three Budget Saturdays and the
+exact date `docs/06-limits.md` P-03 warned about, **2025-02-01**.
+
+**Four sessions are not 09:15–15:29, and their windows were read off the bars.**
+2021-02-24 traded 09:15–10:08 and stopped, which is the shape of an exchange
+outage rather than an announced short day. 2024-03-02 and 2024-05-18 each traded
+09:15–09:59 **and** 11:30–12:29 — two windows, which is why `Session` carries an
+array and `MAX_WINDOWS` is pinned at 2. 2025-10-21 traded 13:45–14:44 only:
+Muhurat. Without these a Muhurat hour reads as 315 missing bars, which is the
+false alarm inverted.
+
+**The event names are identifications, not labels.** The DATA binds; the prose
+beside each entry says what the shape and date suggest, and rule 1 keeps that
+distinction explicit in the source.
+
+**Outside the window it answers `Unmeasured`, which is a third answer and not a
+closed day.** The operator's next backfill reaches 2015 and this calendar does
+not, because no 2015 bar has been seen here. `expected_bars` returns `Some(0)`
+for a closed day and `None` for an unmeasured one — the exchange was shut, versus
+nobody has looked. `sessions_between` refuses a partially-covered range whole
+rather than returning a total that silently begins in December 2019, which is
+the exact shape of wrong answer that made six complete series read SHORT.
+**Extending it is a measurement, never a typed date.**
+
+**Cost.** One `contains`, one subtraction, one array index, one bit test, and —
+only for a day that traded — a walk of a four-element table whose length is a
+compile-time constant. O(1), no hash, no search, no allocation. 307 bytes of
+`.rodata` for 2,455 days.
+
+`P-03` is not yet closed by this: the calendar exists, and nothing consumes it.
+Wiring it into the expected-count and into a gap classifier is the next step.
+
+`pull`: 12 targets, 579 tests, plus 27 doctests, 0 failures. `fmt` and
+`clippy --all-targets -D warnings` clean.
