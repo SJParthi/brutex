@@ -4720,6 +4720,72 @@
   const coverage = $derived(new Map(censusSlice.map((r) => [r.id, coverageOf(r.months)])));
 
   /**
+   * WHICH ROWS ACTUALLY MOVED — the difference between an animation and a lie.
+   *
+   * The census re-reads on its own clock, and during a run most readings change
+   * NOTHING. A flash wired to the redraw would fire fifty times a poll and say
+   * "look, something happened" fifty times when nothing did. That is the exact
+   * shape of the illusion this page is built against: motion is a claim, and a
+   * claim made on every render is a claim about the renderer rather than about
+   * the store.
+   *
+   * So the flash is wired to a CHANGE OF VERDICT and nothing else. `was` is the
+   * verdict this row held at the previous reading; if there is no previous
+   * reading the row is not new, it is simply first seen, and a first sighting is
+   * not news.
+   *
+   * `seen` IS DELIBERATELY NOT `$state`. It is the memory a comparison needs,
+   * not a value anything renders — making it reactive would have this effect
+   * depend on its own write and re-run forever.
+   *
+   * The timer here does not decide WHETHER anything animates, only how long the
+   * mark stays on after it did; `--d-flash` is 720ms and this clears at 760.
+   *
+   * THE DIRECTION IS CARRIED, NOT GUESSED. `VORDER` runs worst-first, so a
+   * SMALLER rank is a worse verdict: a row moving from `never pulled` to
+   * `verified` has gone up, and one falling to `failed` has gone down. Green for
+   * one and red for the other is the whole value of the mark — a single neutral
+   * flash would say "this row changed" and leave the reader to find out which
+   * way, which is the work the flash was supposed to save.
+   */
+  /** @type {Map<string, Verdict>} */
+  let seen = new Map();
+  /** @type {Map<string, 'up' | 'down'>} */
+  let moved = $state(new Map());
+  /** @type {ReturnType<typeof setTimeout> | undefined} */
+  let movedTimer;
+
+  $effect(() => {
+    const rows = censusRows;
+    untrack(() => {
+      /** @type {Map<string, Verdict>} */
+      const next = new Map();
+      /** @type {Map<string, 'up' | 'down'>} */
+      const changed = new Map();
+      for (const row of rows) {
+        const was = seen.get(row.id);
+        if (was !== undefined && was !== row.state) {
+          const better = (VRANK.get(row.state) ?? 0) > (VRANK.get(was) ?? 0);
+          changed.set(row.id, better ? 'up' : 'down');
+        }
+        next.set(row.id, row.state);
+      }
+      seen = next;
+      if (changed.size === 0) return;
+      moved = changed;
+      clearTimeout(movedTimer);
+      movedTimer = setTimeout(() => (moved = new Map()), 760);
+    });
+  });
+
+  /* THE READING HAS NOTHING TO SHOW YET, WHICH IS NOT THE SAME AS EMPTY.
+     A skeleton is drawn only when the census is genuinely blank AND a read is in
+     flight. With rows already on screen the honest thing is to leave them there
+     and let the provenance line say "reading" — replacing real numbers with a
+     shimmer would hide a measurement to advertise that a newer one is coming. */
+  const censusBlank = $derived(store.state === 'reading' && censusRows.length === 0);
+
+  /**
    * IS EVERY SERIES SETTLED? `ok` and `beyond` are the two verdicts that need
    * no action — one is proved, the other cannot be reached at this feed and
    * timeframe and no attempt would help. Everything else is work.
@@ -8166,7 +8232,26 @@
                 </tr>
               </thead>
               <tbody>
-                {#if censusSlice.length === 0}
+                {#if censusBlank}
+                  <!-- READING IS NOT EMPTY, AND THE TWO USED TO LOOK ALIKE.
+                       An empty census and a census whose read is still in flight
+                       drew the same blank table with the same blocker sentence
+                       under it — so a slow disk read was indistinguishable from
+                       "this window holds nothing", which are opposite facts.
+                       Skeleton rows only when there is genuinely nothing to show
+                       AND a read is in flight: with rows already on screen the
+                       honest thing is to leave them and let the provenance line
+                       say "reading". Replacing measurements with a shimmer to
+                       advertise that newer ones are coming hides the very thing
+                       the reader came for. -->
+                  {#each Array(6) as _, i}
+                    <tr>
+                      <td colspan={censusColCount}>
+                        <span class="skel line" style="--row-i:{i}"></span>
+                      </td>
+                    </tr>
+                  {/each}
+                {:else if censusSlice.length === 0}
                   {@const why = censusBlocker()}
                   <tr>
                     <td colspan={censusColCount}>
@@ -8177,8 +8262,27 @@
                     </td>
                   </tr>
                 {:else}
-                  {#each censusSlice as r (r.id)}
-                    <tr>
+                  <!-- `{#key}` ON THE SORT, SO A RE-ORDER READS AS A RE-ORDER.
+                       Keyed by the sort and the page, the rows are rebuilt when
+                       either changes and take `.row-in` on the way; keyed by
+                       `r.id` inside, a POLL that changes only numbers reuses
+                       every row and animates nothing. The distinction is the
+                       point — sorting is something the reader did, and a poll
+                       is not.
+                       NOT keyed on the search text: that filters per keystroke,
+                       and a 220ms entrance on every keystroke would leave the
+                       table permanently mid-flight while you type. -->
+                  {#key `${cSort.key}${cSort.dir}${censusPage}`}
+                    {#each censusSlice as r, i (r.id)}
+                    <!-- `.flash-up` / `.flash-down` fire on a VERDICT CHANGE and
+                         never on a redraw — see `moved`. Green when the row got
+                         better, red when it got worse. -->
+                    <tr
+                      class:row-in={true}
+                      class:flash-up={moved.get(r.id) === 'up'}
+                      class:flash-down={moved.get(r.id) === 'down'}
+                      style="--row-i:{i}"
+                    >
                       <td>
                         <b class="mono">{r.sym}</b>
                         <span class="kindtag">{r.kind}</span>
@@ -8303,7 +8407,8 @@
                         {/if}
                       </td>
                     </tr>
-                  {/each}
+                    {/each}
+                  {/key}
                 {/if}
               </tbody>
             </table>
@@ -10915,6 +11020,14 @@
     .ldead,
     .llive {
       transition: width var(--d-enter) var(--ease-out);
+    }
+    /* THE STAGGER IS CAPPED AT EIGHT ROWS. `--row-i` counts up the page, so an
+       uncapped delay would make the twenty-fifth row arrive 600ms after the
+       first — long enough to read as lag rather than as sequence. Eight rows of
+       stagger reads as a cascade; the rest arrive together, which nobody
+       notices because the eye is already at the top of the table. */
+    :global(tbody tr.row-in) {
+      animation-delay: calc(min(var(--row-i, 0), 8) * 24ms);
     }
     .din,
     .dbtn,
