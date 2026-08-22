@@ -178,6 +178,20 @@ pub struct FeedReport {
     /// Set once, never cleared for the life of the run. It is per FEED, because
     /// a credential is — the same reason the seats and the governors are.
     pub credential_dead: bool,
+    /// Legs this pass declined to attempt because a leg they depend on failed.
+    ///
+    /// **A request not made leaves no trace, which is exactly why it needs a
+    /// counter.** An expired derivative is priced against the underlying's bar
+    /// at the same minute, so a feed whose spot leg failed cannot price one —
+    /// and every derivative request behind it would be spent against a shared
+    /// token to be refused. Skipping them is right; skipping them *silently*
+    /// would leave the page showing a feed that did less work for no stated
+    /// reason, which is the `CLAUDE.md` §4 failure wearing a success's clothes.
+    ///
+    /// Separate from `last_error`, which deliberately keeps the FIRST cause: the
+    /// spot failure is what an operator must read, and the skips are its
+    /// consequence. One number says how much was deferred; the error says why.
+    pub skipped: u32,
 }
 
 /// The whole run, as the page reads it.
@@ -289,6 +303,11 @@ impl Progress {
             } else {
                 "false"
             });
+            // ON THE WIRE FOR THE SAME REASON `credentialDead` IS: without it a
+            // feed that deferred half its legs and a feed that had half as many
+            // read identically on the page.
+            out.push_str(",\"skipped\":");
+            out.push_str(&feed.skipped.to_string());
             out.push_str(",\"lastError\":");
             match &feed.last_error {
                 Some(word) => out.push_str(&quote_for_json(word)),
@@ -584,9 +603,48 @@ impl Drop for Finisher {
 /// document would be a second, drifting copy of it.
 async fn run_chain(site: Loaded, nth: usize, legs: Vec<Leg>) -> bool {
     let mut failed = false;
+    // DID THIS FEED'S SPOT LEG FAIL? Asked because the derivative legs behind
+    // it cannot succeed without it, and asking anyway spends a shared token to
+    // be told so.
+    //
+    // `by_feed` sorts every leg by `ladder_rank`, whose order is
+    // `1day, 1min, 1s, futures, options` — so by the time an `Fno` leg is
+    // reached, every spot leg for this feed has already run and this flag is
+    // final. The ORDER was enforced; the dependency it exists to express was
+    // not, which is the half `pull::fold::Ladder` documents as "only a
+    // completely clean stage advances" and nothing implemented.
+    let mut spot_failed = false;
     for (index, leg) in legs.iter().enumerate() {
         if stopping(&site) {
             break;
+        }
+        // THE SAME SHAPE AS THE DEAD-CREDENTIAL BREAK BELOW, and for the same
+        // reason: these requests would each earn the same refusal.
+        //
+        // `pricing::NoSpotAtStamp` is that refusal by name — an expired
+        // option's implied volatility is solved against the underlying's bar at
+        // the same minute, so a chain whose spot leg failed prices nothing. A
+        // SKIP rather than a break, so the reason reaches the page per leg
+        // instead of the chain simply ending short.
+        if spot_failed && leg.route == Route::Fno {
+            let owed = leg.label.clone();
+            with_progress(&site, |progress| {
+                if let Some(feed) = progress.feeds.get_mut(nth) {
+                    feed.skipped = feed.skipped.saturating_add(1);
+                    // `get_or_insert`, NOT an overwrite. `last_error` keeps the
+                    // FIRST cause on purpose, and on this path that cause is
+                    // the spot failure itself — which is what an operator needs
+                    // to read. This sentence only lands when a leg was somehow
+                    // deferred without one being recorded.
+                    feed.last_error.get_or_insert(format!(
+                        "{owed} was not attempted: this feed's spot leg failed, and an \
+                         expired derivative is priced against the underlying's bar at \
+                         the same minute. The leg is owed and will be asked for once \
+                         spot lands."
+                    ));
+                }
+            });
+            continue;
         }
         let label = leg.label.clone();
         with_progress(&site, |progress| {
@@ -617,6 +675,10 @@ async fn run_chain(site: Loaded, nth: usize, legs: Vec<Leg>) -> bool {
 
         if !(status.is_success() && html.contains("badge good")) {
             failed = true;
+            // RECORDED PER ROUTE, not as one flag for the chain. `failed`
+            // already says the chain is dirty; this says WHICH half, and only
+            // the spot half is a prerequisite for anything else.
+            spot_failed |= leg.route == Route::Spot;
 
             // IS THIS THE CREDENTIAL? ASKED HERE, BECAUSE NOTHING ON THIS PATH
             // EVER ASKED IT.
@@ -1212,6 +1274,7 @@ mod tests {
                 last_error: Some("a leg failed".to_owned()),
                 finished: false,
                 credential_dead: false,
+                skipped: 0,
             }],
         };
         let doc = progress.json();
@@ -1785,6 +1848,7 @@ mod tests {
                     last_error: Some("the reason is the CREDENTIAL".to_owned()),
                     finished: true,
                     credential_dead: true,
+                    skipped: 0,
                 },
                 FeedReport {
                     vendor: "groww".to_owned(),
@@ -1795,6 +1859,7 @@ mod tests {
                     last_error: None,
                     finished: false,
                     credential_dead: false,
+                    skipped: 0,
                 },
             ],
         };
@@ -1813,6 +1878,129 @@ mod tests {
         assert!(
             doc.contains("\"running\":true"),
             "one dead token must not stop the feeds that still have a live one: {doc}"
+        );
+    }
+
+    /// **A FEED WHOSE SPOT LEG FAILED DOES NOT SPEND REQUESTS ON ITS
+    /// DERIVATIVES.**
+    ///
+    /// `by_feed` has always sorted legs by `ladder_rank` — `1day, 1min, 1s,
+    /// futures, options` — so the ORDER was enforced from the start. The
+    /// dependency that order exists to express was not: a failed spot leg set
+    /// `failed = true` and the loop went straight on to `futures`, which is the
+    /// half `pull::fold::Ladder` documents as *"only a completely clean stage
+    /// advances"* and which nothing implemented.
+    ///
+    /// The cost of the gap is not abstract. An expired option's implied
+    /// volatility is solved against the underlying's bar at the same minute —
+    /// `pull::pricing`'s `NoSpotAtStamp` is that refusal by name — so every
+    /// derivative request behind a failed spot leg was spent against a token
+    /// **another system shares** to be told what the chain already knew.
+    ///
+    /// The fixture makes spot fail the cheapest honest way: a folder that is
+    /// not there. No socket opens on either leg, so a derivative leg that ran
+    /// anyway would fail for reasons of its own and a test asserting only the
+    /// outcome would pass either way. The assertion is therefore on the REASON
+    /// reaching the page.
+    ///
+    /// # Why this drives `run_chain` and not `conduct`
+    ///
+    /// Measured, by writing it the other way first: `conduct`'s pass loop is
+    /// unbounded on failure by design — a dirty pass sleeps `RETRY_WAIT` and
+    /// goes again, up to `MAX_PASSES` — and this fixture's spot leg fails on
+    /// EVERY pass, because a folder that is absent stays absent. The test ran
+    /// to its own 30-second bound instead of finishing. Unbounded it would have
+    /// taken `MAX_PASSES` × `RETRY_WAIT` ≈ two hours and WEDGED CI rather than
+    /// reddening it.
+    ///
+    /// `run_chain` is one pass, which is the unit this behaviour lives in: the
+    /// skip is a decision inside a single walk of the legs, and the retry loop
+    /// around it is a different property with its own tests.
+    #[tokio::test]
+    async fn a_failed_spot_leg_stops_the_derivative_legs_behind_it() {
+        let site = site("spotfirst");
+        claim(&site);
+
+        let missing = crate::scratch::path("pullrun-no-such-folder");
+        let _ = std::fs::remove_dir_all(&missing);
+
+        // ONE FEED REPORT, because `run_chain` writes into `feeds[nth]` and
+        // `conduct` is what normally builds that list.
+        with_progress(&site, |progress| {
+            progress.feeds = vec![FeedReport {
+                vendor: pull::vendor::Feed::TrueData.wire().to_owned(),
+                legs: 2,
+                ..FeedReport::default()
+            }];
+        });
+
+        let bound = core::time::Duration::from_secs(30);
+        let ran = tokio::time::timeout(
+            bound,
+            run_chain(
+                Loaded::clone(&site),
+                0,
+                vec![
+                    Leg {
+                        route: Route::Spot,
+                        vendor: pull::vendor::Feed::TrueData.wire().to_owned(),
+                        dir: "1min".to_owned(),
+                        label: "archive · 1 minute".to_owned(),
+                        body: format!(
+                            "target=swept&vendor={}&from=2025-07-01&to=2025-07-01&folder={}",
+                            pull::vendor::Feed::TrueData.wire(),
+                            missing.display()
+                        ),
+                    },
+                    Leg {
+                        route: Route::Fno,
+                        vendor: pull::vendor::Feed::TrueData.wire().to_owned(),
+                        dir: "options".to_owned(),
+                        label: "expired options".to_owned(),
+                        body: "underlying=NIFTY&series=opt&vendor=truedata\
+                               &from=2025-07-01&to=2025-07-01"
+                            .to_owned(),
+                    },
+                ],
+            ),
+        )
+        .await;
+        assert!(
+            ran.is_ok(),
+            "one pass over two legs, neither of which opens a socket, did not \
+             finish inside {bound:?}"
+        );
+
+        let progress = observed(&site);
+        let feed = progress
+            .feeds
+            .first()
+            .expect("the press reports the one feed it was given");
+        assert_eq!(
+            feed.skipped, 1,
+            "the options leg must be DEFERRED and counted, not attempted: a \
+             request not made leaves no trace, so this counter is the only \
+             thing that distinguishes a deferred leg from one that was never \
+             asked for"
+        );
+
+        // THE CAUSE IS THE SPOT FAILURE, NOT THE SKIP. `last_error` keeps the
+        // FIRST reason deliberately, so an operator reads what went wrong
+        // rather than what happened last. Asserted here because a later change
+        // that overwrote it would still leave `skipped` at 1 and look correct.
+        let why = feed.last_error.clone().unwrap_or_default();
+        assert!(
+            why.contains("archive · 1 minute"),
+            "the reported cause must be the spot leg that actually failed: {why}"
+        );
+
+        // AND IT REACHES THE PAGE. A counter no document carries is a counter
+        // the operator cannot read.
+        let doc = observed(&site).json();
+        assert!(
+            doc.contains("\"skipped\":1"),
+            "the deferral must be on the wire, or a feed that deferred half its \
+             legs reads like one that had half as many: {doc}"
         );
     }
 }

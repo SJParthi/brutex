@@ -19685,3 +19685,150 @@ operator believing a fixture exists when none does.
 
 `pull`: 13 targets, 602 tests, 0 failures. `fmt` and
 `clippy --all-targets -D warnings` clean.
+
+### D-0253
+
+**The exit table showed one of its seventeen figures, and the row it called the
+answer was chosen by a different comparator than the answer.**
+
+`crates/runner/src/grid.rs`, `crates/runner/src/audit.rs`,
+`crates/runner/src/validate.rs`.
+
+Five things were wrong at once and each was independently sufficient to mislead.
+
+**1. Three different exits incremented one counter.** `Ended::Stop |
+Ended::Trail { .. } => cell.stopped`, defended in a comment as *"a trailing exit
+IS a stop"*. That held while a cell carried ONE trailing order. A cell now
+carries a fixed stop, a trailing STOP LOSS and a trailing TAKE PROFIT — a loss
+taken at a distance, a gain protected, and a winner let run then closed. Three
+different things happening to a position, reported as one number that told the
+operator only "it did not time out", which the timeout column already said.
+`Ended::Trail` now carries `TrailKind`, and `count_exit` charges five counters.
+
+**2. `FoldResult::halted` was recorded per fold and summed nowhere.** A halt
+means a level breached a budget, so that fold's deepest level is PARTIAL and its
+chosen combination is the best of a TRUNCATED set. The only figures a caller had
+were `decided()` and `folds.len()`, and a halted fold still decides — so a
+walk-forward in which every fold truncated was indistinguishable from one in
+which none did. That is the fallback that hides a failure §4 bans.
+`Validated::halted_folds()` counts them and the audit prints the row, zero
+included.
+
+**MEASURED, and it changes how the module's own tests read:** the shipped test
+sweeper `Ladder::with_min_hits(120).with_ceiling(20_000)` HALTS TWO OF THREE
+FOLDS on `synthetic::sessions(12)`. Every walk-forward test in `validate.rs` runs
+on it. Across `min_hits` at that ceiling: 120 → 2 halted, 600 → 0, 1200 → 0,
+2400 → 0, 4800 → 0.
+
+**3. Five accumulated figures were rendered nowhere.** `worst_trade`,
+`max_drawdown`, `return_over_drawdown`, `winner_mfe` and `all_mae` were computed
+per cell and printed by nothing. A figure computed and not shown is a figure the
+operator cannot act on, at the cost of computing it. The table is seventeen
+columns now and `stop+tsl+ttp+target+time = trades` is checkable by eye.
+
+**4. A rung index was a subscript into a table nobody could see.** `exit` reads
+`2/3/1+1@0`; every digit indexes a ladder placed at quantiles of THIS
+combination's own excursions, so rung 2 is a different distance on every
+instrument, month and combination. "Stop at rung 2" cannot be placed on a broker
+screen. Three `ladder, … (ppm)` rows now print `index=ppm`. Their labels
+deliberately do not begin `stop rungs`, because the count row does and a prefix
+match would bind to whichever came first.
+
+**5. The table's top row and `Grid::best()` were chosen by different
+comparators.** The sort key was `Reverse(c.pessimistic)` while `best()` ranked on
+`(pessimistic, merit)` and settled full ties by `max_by_key`'s LAST-maximum rule.
+On any tie the table named one variant while `validate` and `pbo` consumed
+another. The key is now `Reverse((pessimistic, merit(c), index))`, which
+reproduces last-maximum exactly. `merit` became `pub(crate)` for this and for no
+other caller.
+
+`best()` and `sharpest()` mark their own rows, and are printed BELOW the `keep`
+cut when they fall past it — a display bound must not hide the report's own
+answer. The SHARPEST line names its variant through `exit_name`; it reported
+three numbers and never said which variant produced them.
+
+**Two rendering defects were found by the tests written for the above, not by
+review.** `unknown` was ten wide and `uncertainty()` returned a ten-digit value,
+welding it to `ret/DD`; two numbers with nothing between them are one unreadable
+number. And `return_over_drawdown` returns `i64::MAX` as the zero-drawdown
+sentinel, which printed as nineteen digits of noise reading as a measured ratio
+of nine quintillion — it renders as `no DD` now.
+
+**`writeln!` needs a literal format string, so the seventeen-field width spec
+cannot be a shared constant.** The duplication between `grid_columns` and
+`grid_row` is unavoidable; what is avoidable is nothing checking it.
+`every_exit_column_heading_ends_where_its_number_ends` owns the spec and measures
+both renderers against it — every heading flush at its field end, and a space
+before every value on EVERY row, which is the assertion that caught both column
+defects.
+
+**Six mutants, six kills.** Merging the armed trail into `trailed_stop`; deleting
+the below-cut rescue; unnaming the SHARPEST line; dropping a ladder row; dropping
+the index from the sort key; dropping `merit` from the sort key. The last two
+SURVIVED the first battery and are the reason two more fixtures exist —
+`sort_by_key` is stable and keeps the FIRST of a tie while `max_by_key` returns
+the LAST, so a fixture that ties on merit cannot detect a missing merit term.
+
+O(1) is untouched. `count_exit` is a five-arm match on a copied enum.
+`halted_folds` is O(folds), and folds are the walk-forward window count — a
+handful, fixed before the sweep starts. `ladder` is O(rungs), four or five,
+likewise fixed. None is on the per-bar or per-candidate path golden rule 4
+governs; gate 17 keeps `runner` silent and nothing here emits.
+
+`runner`: 25 audit tests, 237 lib tests, 3 integration tests, 0 failures. `fmt`
+and `clippy --all-targets -D warnings` clean.
+
+### D-0254 — the ladder's order was enforced and the dependency it expresses was not
+
+**2026-08-22.** An audit found `pull::fold::Ladder` — a ten-stage state machine
+pinned by two `const` assertions, with `record(clean)` documented as *"only a
+completely clean stage advances"* — and **zero production callers**. The first
+reading of that was that the pull enforces no ordering at all. **That reading
+was wrong and is corrected here**, because the correction is the interesting
+part.
+
+`api::pullrun::by_feed` has always sorted each feed's legs by `ladder_rank`,
+whose table is `1day, 1min, 1s, futures, options` and whose own doc says *"where
+a rung sits on the ladder `pull::fold` requires"*. Day before minute, spot
+before derivatives, an unranked rung last and never first. So the ORDER was
+enforced from the beginning, by a different function than the one that
+documents it. `fold::Ladder` is the specification; `ladder_rank` is the
+implementation; nothing said so, and an auditor reading either alone concludes
+the opposite of the truth.
+
+**What was genuinely missing is the other half.** `run_chain` broke out of the
+leg loop for exactly one reason — a dead credential, *"they would each earn the
+same 401 against the same dead token"* — and for every other failure set
+`failed = true` and continued to the next leg. So a feed whose spot leg failed
+went straight on to `futures` and `options` in the same pass.
+
+**That is not merely untidy, and the cost is measurable in requests.** An
+expired option's implied volatility is solved against the underlying's bar at
+the same minute; `pull::pricing`'s `NoSpotAtStamp` is that refusal by name. A
+chain whose spot leg failed can price nothing, so every derivative request
+behind it was spent — against a token **another system shares** — to be told
+what the chain already knew. This is the same argument the credential break
+already makes, applied to the dependency the ladder exists to express.
+
+Derivative legs behind a failed spot leg are now skipped, and the skip is
+**counted rather than silent**. `FeedReport::skipped` reaches `/pullrun.json`
+beside `credentialDead`, because a request not made leaves no trace and a feed
+that deferred half its legs would otherwise read exactly like a feed that had
+half as many — the §4 failure wearing a success's clothes. `last_error` is left
+holding the FIRST cause, which on this path is the spot failure itself: one
+number says how much was deferred, the error says why.
+
+**A skip and not a break**, so the reason is recorded per leg rather than the
+chain simply ending short, and so a future route with no spot dependency is
+unaffected by position alone.
+
+`a_failed_spot_leg_stops_the_derivative_legs_behind_it` drives **`run_chain`
+rather than `conduct`**, and that choice is measured rather than stylistic: the
+fixture's spot leg fails on every pass because an absent folder stays absent, so
+`conduct`'s deliberately-unbounded retry loop ran the first draft of this test to
+its own 30-second bound. Unbounded it would have taken `MAX_PASSES` ×
+`RETRY_WAIT` ≈ two hours and **wedged CI rather than reddening it** — the same
+trap `one_press_over_an_archive_feed_puts_bars_on_disk` records.
+
+`api`: 4 targets, 577 tests, 0 failures. `fmt` and
+`clippy --all-targets -D warnings` clean.
