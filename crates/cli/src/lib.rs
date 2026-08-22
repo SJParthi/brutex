@@ -100,9 +100,13 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
        cli results      [VENDOR UNDERLYING]
                                    list every recorded run, newest first, and
                                    name the best COMPLETE one
-       cli range-all    VENDOR UNDERLYING FROM_Y FROM_M TO_Y TO_M MIN_HITS
+       cli range-all    VENDOR UNDERLYING FROM_Y FROM_M TO_Y TO_M SUPPORT_PPM
                                    sweep the span on ALL NINE RUNGS and print one
-                                   table comparing them. Every rung is recorded.
+                                   table comparing them. SUPPORT_PPM is parts per
+                                   million -- 200000 is 20% -- and each rung's
+                                   min_hits comes from its OWN bar count, because
+                                   81 months holds 1,671 daily bars and 623,546
+                                   one-minute ones. Every rung is recorded.
        cli audit-range  VENDOR UNDERLYING RUNG FROM_Y FROM_M TO_Y TO_M MIN_HITS
                                    sweep a CONTIGUOUS SPAN of months as ONE
                                    series -- the seven-year question, not twelve
@@ -156,14 +160,14 @@ fn range_all_arm(
     underlying: &str,
     from: (&str, &str),
     to: (&str, &str),
-    min_hits: &str,
+    support_ppm: &str,
 ) -> u8 {
     match (
         from.0.parse::<u16>(),
         from.1.parse::<u8>(),
         to.0.parse::<u16>(),
         to.1.parse::<u8>(),
-        parse_min_hits(min_hits),
+        parse_support_ppm(support_ppm),
     ) {
         (Ok(fy), Ok(fm), Ok(ty), Ok(tm), Ok(h)) => {
             let text = range_all(vendor, underlying, (fy, fm), (ty, tm), h);
@@ -358,6 +362,33 @@ fn parse_sessions(text: &str) -> Result<i64, &'static str> {
     }
 }
 
+/// `SUPPORT_PPM` as parts per million, or the sentence that refuses it.
+///
+/// # Bounded at both ends, and both bounds are real
+///
+/// Zero would make every candidate frequent, which disables extinction — the
+/// defect `engine::Ladder::with_min_hits` raises zero to one to prevent, arriving
+/// through a different door.
+///
+/// A million is 100% support: a combination that fires on EVERY bar. Above that
+/// nothing can be frequent and the sweep is guaranteed to find nothing, so it is
+/// refused rather than run — a report of zero combinations that took an hour to
+/// produce is a waste, not a finding.
+///
+/// # Errors
+///
+/// A non-number, zero, or anything above 1,000,000.
+fn parse_support_ppm(text: &str) -> Result<u64, &'static str> {
+    match text.parse::<u64>() {
+        Err(_) => Err("SUPPORT_PPM is not a whole number"),
+        Ok(0) => Err("SUPPORT_PPM must be 1 or more; 0 would disable extinction"),
+        Ok(ppm) if ppm > 1_000_000 => Err(
+            "SUPPORT_PPM is parts per million, so 1000000 is 100%. Above \
+                 that nothing can be frequent",
+        ),
+        Ok(ppm) => Ok(ppm),
+    }
+}
 /// `min_hits` must be at least one.
 ///
 /// Zero is refused HERE as well as clamped in [`Ladder::with_min_hits`], and
@@ -1970,6 +2001,30 @@ pub fn results_list(feed: Option<&str>, underlying: Option<&str>) -> String {
     out
 }
 
+/// One rung's `min_hits`, derived from that rung's own bar count.
+///
+/// # Why `range-all` takes SUPPORT and not a hit count
+///
+/// Over 81 months of NIFTY the nine rungs hold wildly different numbers of bars:
+/// **1,671 on `1day` and 623,546 on `1min`, a 373-fold spread.** One absolute
+/// `min_hits` therefore means a different question on every rung — 300 hits is
+/// 20% support on daily and 0.05% on one-minute — so the coarse rungs finish in
+/// seconds while the fine ones blow through the candidate ceiling and report
+/// `REFUSED`. A table of nine rows built that way compares nothing.
+///
+/// "This combination fired on 20% of bars" means the same thing on every rung.
+/// "It fired 300 times" does not. So the argument is support, in parts per
+/// million for the same reason every other ratio in this workspace is an
+/// integer — `CLAUDE.md` §7 keeps floats out of anything compared.
+///
+/// Floored at one: a support so small it rounds to zero hits would disable
+/// extinction entirely, which is the defect `engine::Ladder::with_min_hits`
+/// raises zero to one to prevent.
+const fn min_hits_for(bars: usize, support_ppm: u64) -> u64 {
+    let hits = (bars as u64).saturating_mul(support_ppm) / 1_000_000;
+    if hits == 0 { 1 } else { hits }
+}
+
 /// Every rung this engine sweeps, coarsest question to finest.
 ///
 /// # Nine, and `1s` is deliberately not among them
@@ -1988,6 +2043,65 @@ const EVERY_RUNG: [&str; 9] = [
 struct RungRow {
     rung: &'static str,
     outcome: Result<crate::results::Record, String>,
+}
+
+/// One rung's row: count its bars, derive its threshold, sweep it, read it back.
+///
+/// Split out of [`range_all`] to keep it under `clippy::too_many_lines`, and
+/// because it is one idea — everything that happens to a single rung.
+///
+/// The span is COUNTED before it is swept, because `min_hits` cannot be known
+/// until that rung's own bar count is. It is a second read of the same files:
+/// one open per month, and it buys the only thing that makes nine rungs
+/// comparable.
+fn one_rung(
+    vendor_word: &str,
+    underlying: &str,
+    rung: &'static str,
+    from: (u16, u8),
+    to: (u16, u8),
+    support_ppm: u64,
+) -> RungRow {
+    let first_line = |why: String| why.lines().next().unwrap_or(&why).to_owned();
+    let root = match store_root() {
+        Ok(root) => root,
+        Err(why) => {
+            return RungRow {
+                rung,
+                outcome: Err(first_line(why)),
+            };
+        }
+    };
+    let vendor = match parse_vendor(vendor_word) {
+        Ok(vendor) => vendor,
+        Err(why) => {
+            return RungRow {
+                rung,
+                outcome: Err(first_line(why)),
+            };
+        }
+    };
+    let bars = match stored::load_span(&root, vendor, underlying, rung, from, to) {
+        Ok(span) => span.bars.len(),
+        Err(why) => {
+            return RungRow {
+                rung,
+                outcome: Err(first_line(why)),
+            };
+        }
+    };
+    let min_hits = min_hits_for(bars, support_ppm);
+
+    // The long report is DISCARDED on purpose: nine of them is six thousand
+    // lines. The row is read back from the store, which is the point of having
+    // one.
+    let text = audit_range(vendor_word, underlying, rung, from, to, min_hits);
+    let outcome = if let Some(why) = text.strip_prefix("refused: ") {
+        Err(first_line(why.to_owned()))
+    } else {
+        latest_for(vendor_word, underlying, rung, from, to, min_hits)
+    };
+    RungRow { rung, outcome }
 }
 
 /// Sweeps a span on EVERY rung and prints one table comparing them.
@@ -2015,40 +2129,41 @@ pub fn range_all(
     underlying: &str,
     from: (u16, u8),
     to: (u16, u8),
-    min_hits: u64,
+    support_ppm: u64,
 ) -> String {
     let mut out = String::from(STORED_PROVENANCE);
     let _ = writeln!(
         out,
-        "feed {vendor_word} · {underlying} · ALL NINE RUNGS · {}-{:02}..{}-{:02} · \
-         min_hits {min_hits}\nEvery rung executes on the SAME 1min series, so the \
-         horizon means MINUTES on all of them and the fills come off the same \
-         bars.\n",
-        from.0, from.1, to.0, to.1
+        "feed {vendor_word} · {underlying} · ALL NINE RUNGS · {}-{:02}..{}-{:02} · support {}.{}%",
+        from.0,
+        from.1,
+        to.0,
+        to.1,
+        support_ppm / 10_000,
+        (support_ppm / 1_000) % 10
+    );
+    let _ = writeln!(
+        out,
+        "SUPPORT, not a hit count: each rung's `min_hits` is derived from that \
+         rung's OWN bar count.\n\
+         81 months holds 1,671 daily bars and 623,546 one-minute ones -- a \
+         373-fold spread -- so one absolute\nthreshold would ask nine different \
+         questions and the table would compare nothing.\n\
+         Every rung executes on the SAME 1min series, so the horizon means \
+         MINUTES on all of them\nand the fills come off the same bars.\n"
     );
 
     let rows: Vec<RungRow> = EVERY_RUNG
         .iter()
-        .map(|&rung| {
-            // The long report is DISCARDED here on purpose: it has already been
-            // rendered once per rung and nine of them is six thousand lines. The
-            // row below is read back from the store, which is the point of
-            // having one.
-            let text = audit_range(vendor_word, underlying, rung, from, to, min_hits);
-            let outcome = if let Some(why) = text.strip_prefix("refused: ") {
-                Err(why.lines().next().unwrap_or(why).to_owned())
-            } else {
-                latest_for(vendor_word, underlying, rung, from, to, min_hits)
-            };
-            RungRow { rung, outcome }
-        })
+        .map(|&rung| one_rung(vendor_word, underlying, rung, from, to, support_ppm))
         .collect();
 
     let _ = writeln!(
         out,
-        "  {:<8}{:>10}{:>8}{:>14}{:>7}{:>10}{:>9}{:>14}{:>14}{:>10}",
+        "  {:<8}{:>10}{:>10}{:>8}{:>14}{:>7}{:>10}{:>9}{:>14}{:>14}{:>10}",
         "rung",
         "bars",
+        "min_hits",
         "months",
         "combinations",
         "depth",
@@ -2066,9 +2181,10 @@ pub fn range_all(
             Ok(r) => {
                 let _ = writeln!(
                     out,
-                    "  {:<8}{:>10}{:>8}{:>14}{:>7}{:>10}{:>9}{:>14}{:>14}{:>10}",
+                    "  {:<8}{:>10}{:>10}{:>8}{:>14}{:>7}{:>10}{:>9}{:>14}{:>14}{:>10}",
                     row.rung,
                     r.bars,
+                    r.min_hits,
                     format!("{}/{}", r.months_found, r.months_asked),
                     r.combinations,
                     r.depth,
@@ -3767,7 +3883,7 @@ mod tests {
                     "8",
                     "0",
                 ],
-                "MIN_HITS must be 1 or more",
+                "SUPPORT_PPM must be 1 or more",
             ),
         ] {
             let mut out = String::new();
