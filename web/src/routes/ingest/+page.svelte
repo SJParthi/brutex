@@ -6301,7 +6301,15 @@
       /* ANNOTATED BECAUSE THE DOCUMENT IS UNTYPED ON PURPOSE. `runState` holds
          whatever `/pull/run.json` sent; pinning a shape here would be a second
          declaration of it, and the server's is the one that is true. */
-      /** @type {{ legs?: number, legsDone?: number, doing?: string, lastError?: string }[]} */
+      /* `credentialDead` AND `skipped` ARE ON THE WIRE AND WERE MISSING HERE.
+         `pullrun.rs` sends both, and says exactly why it bothers: without
+         `credentialDead` "a halted feed and a finished one are the same two
+         booleans, and the operator is left to infer a credential death from a
+         retry counter that has stopped moving"; without `skipped` "a feed that
+         deferred half its legs and a feed that had half as many read
+         identically on the page". This annotation declared four of the six and
+         the card then guessed at the other two. */
+      /** @type {{ legs?: number, legsDone?: number, doing?: string, lastError?: string, credentialDead?: boolean, skipped?: number }[]} */
       const feeds = doc.feeds ?? [];
       const legs = feeds.reduce((sum, f) => sum + (f.legs ?? 0), 0);
       const done = feeds.reduce((sum, f) => sum + (f.legsDone ?? 0), 0);
@@ -7962,7 +7970,23 @@
                              DRAWN is the vendor's own first clause, which is
                              where the actionable half lives. -->
                         <td class="rf-e" title={f.lastError ?? ''}>
-                          {#if f.lastError}
+                          {#if f.credentialDead}
+                            <!-- THE SERVER ALREADY KNOWS, AND SAYS SO ON THE
+                                 WIRE. `pullrun.rs` sets `credential_dead` per
+                                 feed, breaks out of that feed's remaining legs
+                                 — "they would each earn the same 401 against
+                                 the same dead token" — and SKIPS it on every
+                                 later pass, because §8 forbids minting a token
+                                 here so the value cannot change until somebody
+                                 refreshes it outside this process.
+                                 The feed is therefore HALTED, not retrying, and
+                                 this is the word for it. Reading `lastError`
+                                 alone could not tell the two apart: a dropped
+                                 socket and a dead credential both set it, and
+                                 only one of them is worth waiting for. -->
+                            <span class="rf-halt">halted · credential dead</span>
+                            <span class="rf-said">{firstClause(f.lastError ?? '')}</span>
+                          {:else if f.lastError}
                             <span class="rf-said">{firstClause(f.lastError)}</span>
                           {/if}
                         </td>
@@ -11238,5 +11262,18 @@
     color: var(--down);
   }
   .rf-said { font-family: var(--mono); font-size: var(--fs-micro); }
+  /* HALTED IS NOT THE SAME NEWS AS FAILED, so it does not share the tone. A
+     transient failure is red because it may yet resolve; a dead credential is
+     an instruction — go and refresh it — and reads as a state rather than an
+     alarm. It leads the cell because it is the actionable half. */
+  .rf-halt {
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    font-weight: var(--w-bold);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    color: var(--warn);
+    margin-right: var(--s3);
+  }
 </style>
 
