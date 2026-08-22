@@ -3390,6 +3390,78 @@
   let barState = $state({ loading: false, error: null, files: [] });
   let barToken = 0;
 
+  /* ---------------------------------------------------------------------
+     HOW MANY OF THOSE REQUESTS ARE IN FLIGHT AT ONCE - and it is a constant,
+     which is the whole point.
+
+     `Promise.all(want.map(read))` starts EVERY request in the same tick. The
+     budget above deliberately reads every matched instrument-month, so `want`
+     is as long as the query is wide, and the number of open sockets was
+     therefore a function of how much history the store holds.
+
+     MEASURED on this build, 2026-08-22, a store holding 2019-12..2026-08 for
+     NIFTY, BANKNIFTY and INDIAVIX at nine rungs - 81 months x 9 x 3 = 2,187
+     matched instrument-months:
+
+       requests fired                     498+ (the capture cut off)
+       succeeded                          0
+       every one of them                  net::ERR_INSUFFICIENT_RESOURCES
+
+     Chrome refuses to open more sockets long before 2,187 and fails the
+     REQUEST rather than queueing it, so the grid rendered nothing at all. Not
+     slow - empty, with a console full of failures and no sentence on the page
+     saying why. That is the shape `CLAUDE.md` §4 bans: a failure wearing an
+     empty table's clothes.
+
+     A POOL, NOT A SMALLER BUDGET. Capping `readBudget` would answer a narrower
+     question than the operator asked, which the block above rejects in the
+     operator's own words - "a page that answers a narrower question than the
+     one it was asked is worse than a slow one". Every matched month is still
+     read. What is bounded is how many are in flight, so the cost per reader is
+     constant no matter how wide the query gets, and a store ten years deep
+     costs the same sockets as one month does.
+
+     SIX because that is what a browser gives a single origin over HTTP/1.1;
+     asking for more does not make more, it makes a queue this code cannot see
+     and cannot report on.
+     --------------------------------------------------------------------- */
+  const IN_FLIGHT = 6;
+
+  /**
+   * Runs `job` over `items` with at most `limit` outstanding at any moment.
+   *
+   * Results come back in the ORDER OF `items`, not the order they finished,
+   * because the caller indexes them against its own plan and a pool that
+   * reordered would silently shuffle the grid.
+   *
+   * A job that throws lands as a rejection in its own slot rather than taking
+   * the pool down - `readBarFile` already returns failures as values, so this
+   * is the belt to that braces.
+   *
+   * @template T, R
+   * @param {T[]} items
+   * @param {number} limit
+   * @param {(item: T) => Promise<R>} job
+   * @returns {Promise<R[]>}
+   */
+  async function pooled(items, limit, job) {
+    /** @type {R[]} */
+    const out = new Array(items.length);
+    let next = 0;
+    const worker = async () => {
+      for (;;) {
+        const i = next;
+        next += 1;
+        if (i >= items.length) return;
+        out[i] = await job(/** @type {T} */ (items[i]));
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, worker)
+    );
+    return out;
+  }
+
   /**
    * One month file, for one series.
    *
@@ -3518,7 +3590,7 @@
     const mine = ++barToken;
     let dead = false;
     barState = { loading: true, error: null, files: untrack(() => barState.files) };
-    Promise.all(want.map((/** @type {any} */ r) => readBarFile(feed, r)))
+    pooled(want, IN_FLIGHT, (/** @type {any} */ r) => readBarFile(feed, r))
       .then((files) => {
         if (dead || mine !== barToken) return;
         barState = { loading: false, error: null, files };
