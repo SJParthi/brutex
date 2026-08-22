@@ -20751,3 +20751,87 @@ it never reports a hole that is not one.
 `clippy --all-targets -D warnings` clean. *(Clippy caught the new function
 appended below the test module — "items after a test module" — which is a
 placement error `cargo build` accepts and a reader would trip over.)*
+
+### D-0272 — the sweep gets a page, and `api` does not gain the engine to do it
+
+**Decided.** `crates/api` grows one module, `backtest.rs`, that READS the
+results ledger `cli::results` writes, and one route, `GET /backtest.json`.
+`web/src/routes/backtest/` renders it. The crate graph in `CLAUDE.md` §5 is
+UNCHANGED: no new arrow, and in particular no `runner` and no `cli`.
+
+**The problem.** `/audit` is the INGEST console — what a PULL did. Nothing
+served by this crate said anything about what the ENGINE found. `cli::results`
+recorded every completed sweep into an append-only file and the only reader was
+a terminal command, so "which rung carries the edge on NIFTY" was a question
+answerable only by rerunning a CLI. Measured at the time of writing: four
+recorded runs, none of them visible anywhere in the application.
+
+**The handover proposed `api -> runner`, and the premise does not hold.**
+`docs/HANDOVER`'s option B said to add a `runner` dependency so the page could
+START a sweep. `runner` exposes `Sweeper::run`, `run_ranked` and `auto`, all
+over a `&[Candle]` the caller already has. The functions that LOAD a stored span
+and sweep it — `stored::load_span`, `range_all`, `audit_range` — live in
+`cli`, not `runner`. So that arrow buys nothing that can be run, and the real
+choice was `api -> cli` (pulling `engine`, `indicators`, `vocab`, `costs` and
+`runner` behind it, into the crate every page waits on) or no arrow at all.
+
+**No arrow.** The page is a viewer; the operator starts sweeps from the CLI as
+before. Adding the run-trigger later is purely additive on top of this, and the
+honest way to get it without the arrow is to lift `cli`'s span orchestration
+into a small shared crate — which is `cli`'s file to move, not this one's.
+
+**The layout is re-declared rather than imported, and three things hold it
+together.** Nothing here writes: the reader opens read-only and has no append
+path. `FIELD_SUM` asserts the twenty-four field widths against `STRIDE_BYTES`
+at compile time, so a field added in `cli` stops THIS crate compiling. And the
+version is checked at open, because `CLAUDE.md` §3 rule 8 makes a new field a
+new version. Verified against a real record before the first test was written:
+the ledger's byte 146 is `halted`, and reading it at 147 — an arithmetic slip
+in a hand-decode — returned `0x2e`, which is neither 0 nor 1 and is exactly the
+plausible-but-wrong value a wrong stride produces silently.
+
+**`/backtest` is deliberately NOT a registered route.** A registered route beats
+`Router::fallback` unconditionally, so a Rust page at that path would make a
+click render the Svelte page and a reload render the Rust one — different
+navigation, no feed picker, no theme. That is not hypothetical: it is the defect
+`web/vite.config.js` records at length against `/audit`, where it is still
+live. One path, one application; only `/backtest.json` is registered.
+
+**What the page will not draw, and why the absences are visible.** The ledger
+carries four money scalars per run and no series, so there is NO equity
+sparkline — a curve shaped from four numbers is the invention §3 rule 1 bans.
+It carries `depth` and `combinations` as scalars and not per-level survivor
+counts, so where the frequent frontier emptied cannot be shown. It carries the
+run's blake3 identity and not the mask, so the winning condition bits cannot be
+named. Each of those three is rendered as a NAMED GAP with its reason, because a
+drill-down that says why it is empty is information and one that is merely
+absent is a page that looks finished and is not. Closing the last two needs a
+second fixed-stride file written by the same sweep — a change in `cli`.
+
+**A real price chart, and no trade markers on it.** The drill-down draws the
+actual OHLCV the run swept, from `/bars/window.json` at the run's own feed,
+instrument, rung and span, using the `lightweight-charts` build already bundled
+for `/`. The exchange and segment come from the feed's instrument master rather
+than from literals, so `NSE`/`INDEX` is resolved and not assumed. Entries and
+exits are NOT marked: the ledger records `trades` as a count and keeps no trade
+list, so there is no timestamp to put a marker at, and a chart with plausible
+markers would look like the answer to "when did it trade". The route's
+`MAX_WINDOW_LIMIT` is 1,000 against 21,620 bars in that span and is NOT raised —
+`/db` reads the same route — so the card says "newest 1,000 of 21,620", which
+is the contract `hit_scan_cap` already keeps one level up.
+
+**Grouping is on the support RATIO, not on `min_hits`.** A `range-all` sweep
+holds the support percentage constant across rungs, so the absolute threshold
+necessarily differs at every rung because the bar count does. Measured on the
+store's own ledger: 4,324/21,620 at 30min, 2,328/11,643 at 60min and 334/1,671
+at 1day are all 20.0% — three views of one question — and keying on `min_hits`
+split them into three groups of one, defeating the comparison the section exists
+to make. This shipped for one screenshot and was caught by looking at the page.
+
+**Cost.** Count is O(1) — a division. Record *i* is O(1) — `16 + i · 205`, one
+seek. A request is O(limit) with `limit` clamped to a constant ceiling, so it is
+O(1) in the size of the store, which is the quantity that grows. The one cost
+that is NOT constant is `cli`'s duplicate-identity set, O(runs) once at process
+open, and it is stated rather than hidden — it is not on a request path.
+
+Invariants BT-01 … BT-12 in `docs/04-invariants.md`.
