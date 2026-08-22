@@ -596,4 +596,305 @@ mod tests {
         // session and this list must not swallow it.
         assert_eq!(expected_bars(20_382), Some(60), "2025-10-21 IS measured");
     }
+
+    /// **A DERIVED CALENDAR NEEDS NO TABLE, AND EXTENDS ITSELF.**
+    ///
+    /// This is the whole point of [`Calendar`] beside the constants above. Every
+    /// hardcoded list in this repository has drifted and each was found by
+    /// measuring it against bars; this one cannot drift, because it IS the bars.
+    /// A 2015 month arriving in the store widens the answer with no edit.
+    #[test]
+    fn a_derived_calendar_covers_exactly_the_days_the_store_proves() {
+        let cal = Calendar::from_observed(&[
+            // Two ordinary sessions, a day apart, with a closed day between.
+            Observed {
+                day: 100,
+                minutes: Some((555, 929, 375)),
+            },
+            Observed {
+                day: 102,
+                minutes: Some((555, 929, 375)),
+            },
+        ]);
+        assert_eq!(cal.first_day(), 100);
+        assert_eq!(cal.last_day(), 102);
+        assert_eq!(cal.span(), 3);
+        assert_eq!(cal.sessions(), 2);
+
+        assert_eq!(cal.expected_bars(100), Some(375));
+        assert_eq!(cal.expected_bars(102), Some(375));
+        // THE DAY BETWEEN IS CLOSED, not unmeasured: it is inside the span the
+        // store proves, and no bar exists for it.
+        assert_eq!(cal.kind_of(101), DayKind::Closed);
+        assert_eq!(cal.expected_bars(101), Some(0));
+        // OUTSIDE THE SPAN IS UNMEASURED, not closed. The distinction is the
+        // one an operator backfilling 2015 depends on.
+        assert_eq!(cal.kind_of(99), DayKind::Unmeasured);
+        assert_eq!(cal.kind_of(103), DayKind::Unmeasured);
+        assert_eq!(cal.expected_bars(99), None);
+    }
+
+    /// **A DAY WITH A DAILY BAR AND NO MINUTE SERIES KEEPS ITS OWN ANSWER.**
+    ///
+    /// The five pre-2025 Muhurat sessions arrive here as `minutes: None`, and
+    /// the derived calendar must reach the same conclusion the hand-built one
+    /// was corrected to in D-0264 — without being told about Muhurat at all.
+    /// That is the test that the derivation is doing the work rather than the
+    /// table.
+    #[test]
+    fn a_day_the_minute_rung_never_reached_is_open_with_no_length() {
+        let cal = Calendar::from_observed(&[
+            Observed {
+                day: 200,
+                minutes: Some((555, 929, 375)),
+            },
+            Observed {
+                day: 201,
+                minutes: None,
+            },
+        ]);
+        assert_eq!(cal.kind_of(201), DayKind::OpenLengthUnmeasured);
+        assert_eq!(
+            cal.expected_bars(201),
+            None,
+            "not 375, which would claim bars the vendor cannot return, and not \
+             0, which would deny a session the daily bar proves happened"
+        );
+        assert_eq!(cal.sessions(), 2, "it still COUNTS as a session");
+    }
+
+    /// **A SHORT SESSION IS MEASURED, NEVER ASSUMED.**
+    ///
+    /// Muhurat 2025-10-21 traded 13:45–14:44. The derivation is handed those
+    /// bounds and must report sixty bars owed — where `sessions × 375` reports
+    /// 315 losses that were never offered. Nothing here knows the word Muhurat.
+    #[test]
+    fn a_short_session_owes_what_it_traded_and_not_a_full_day() {
+        let cal = Calendar::from_observed(&[Observed {
+            day: 20_382,
+            minutes: Some((825, 884, 60)),
+        }]);
+        assert_eq!(cal.expected_bars(20_382), Some(60));
+        let DayKind::Open(session) = cal.kind_of(20_382) else {
+            panic!("it traded");
+        };
+        assert!(
+            !session.expects(OPEN_MINUTE),
+            "09:15 was not a bar that day"
+        );
+        assert!(session.expects(825), "13:45 was");
+        assert!(!session.expects(885), "and 14:45 was not");
+    }
+
+    /// **AN EMPTY STORE PRODUCES A CALENDAR THAT CLAIMS NOTHING.**
+    ///
+    /// The state the operator was in an hour ago, after deleting every bar. A
+    /// calendar that answered `Closed` for every day of an empty store would
+    /// report the whole history as holidays — a confident wrong answer, which
+    /// is the failure mode this type exists to remove.
+    #[test]
+    fn an_empty_store_yields_a_calendar_that_answers_unmeasured_everywhere() {
+        let cal = Calendar::from_observed(&[]);
+        assert_eq!(cal.span(), 0);
+        assert_eq!(cal.sessions(), 0);
+        assert_eq!(cal.kind_of(20_000), DayKind::Unmeasured);
+        assert_eq!(cal.expected_bars(20_000), None);
+    }
+
+    /// **THE DERIVED ANSWER MATCHES THE HAND-BUILT ONE ON THE DAYS BOTH KNOW.**
+    ///
+    /// The baked tables were themselves derived from this store on 2026-08-22,
+    /// so a disagreement means the derivation is wrong — this is the bridge that
+    /// lets the constants be deleted with evidence rather than with hope.
+    #[test]
+    fn the_derivation_agrees_with_the_baked_tables_it_replaces() {
+        // The four irregular sessions, as the store measured them.
+        let cal = Calendar::from_observed(&[
+            Observed {
+                day: 18_682,
+                minutes: Some((555, 608, 54)),
+            },
+            Observed {
+                day: 19_784,
+                minutes: Some((555, 749, 105)),
+            },
+            Observed {
+                day: 19_861,
+                minutes: Some((555, 749, 105)),
+            },
+            Observed {
+                day: 20_382,
+                minutes: Some((825, 884, 60)),
+            },
+        ]);
+        // 2021-02-24 and 2025-10-21 are contiguous, so the derived bars match
+        // the baked figure exactly.
+        assert_eq!(cal.expected_bars(18_682), expected_bars(18_682));
+        assert_eq!(cal.expected_bars(20_382), expected_bars(20_382));
+
+        // THE TWO-WINDOW SATURDAYS ARE THE HONEST DISAGREEMENT, and it is
+        // stated rather than papered over: the derivation sees only a first and
+        // a last minute, so it reports the OUTER SPAN of 195 where the baked
+        // table names two windows totalling 105. The 90-minute midday break is
+        // then reported by `crate::gaps` as holes inside the span instead of as
+        // outside-window. Same store, same bars, a coarser reading — and a
+        // caller that needs the finer one reads every bar rather than two.
+        assert_eq!(cal.expected_bars(19_784), Some(195));
+        assert_eq!(expected_bars(19_784), Some(105));
+    }
+}
+
+/// A calendar **derived from bars on disk** rather than baked into this file.
+///
+/// # Why this exists beside the constants above
+///
+/// Every hardcoded table in this repository has drifted, and each one was found
+/// by measuring it against bars: the browser's holiday list had 28 dates,
+/// started in September 2024 and was wrong on five of them; the Zerodha history
+/// floor claimed a rolling ten years against a vendor that holds from 2015; the
+/// minute expectation multiplied 375 across nine days that never traded 375.
+/// The constants above are correct **today** because they were derived from the
+/// store this afternoon — and nothing keeps them correct tomorrow.
+///
+/// This type removes the table. The **daily rung is the calendar**: a `1day` bar
+/// is proof the exchange traded, and the first and last minute bar of that day
+/// are proof of how long. Nothing is typed, so nothing can be typed wrong, and
+/// the answer extends itself the moment an earlier month is pulled.
+///
+/// # Why it is not circular
+///
+/// Deriving "which days traded" from the rung you are validating would be: a
+/// failed pull would read as a holiday. **Two independent rungs cross-check.**
+/// The daily rung says which days traded; the minute rung is measured against
+/// it. A day with a daily bar and no minute bars is a real gap — which is
+/// exactly how the five pre-2025 Muhurat sessions were found, after an audit
+/// had already called the store complete.
+///
+/// # Cost
+///
+/// O(days) to build, once, and **O(1) to query**: one compare, one subtract and
+/// one index into a `Vec` whose length is the observed span. No hash, no
+/// search, no allocation per lookup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Calendar {
+    first: i64,
+    kinds: Vec<DayKind>,
+}
+
+/// One day as the store observed it.
+///
+/// `minutes` is `None` where the daily rung has a bar and the minute rung has
+/// none — the shape that becomes [`DayKind::OpenLengthUnmeasured`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Observed {
+    /// Days since the epoch.
+    pub day: i64,
+    /// The minute-of-day of the first and last minute bar, and how many there
+    /// were. `None` when the minute rung holds nothing for this day.
+    pub minutes: Option<(u16, u16, u16)>,
+}
+
+impl Calendar {
+    /// Build from the days the daily rung proves traded.
+    ///
+    /// `observed` need not be sorted and may hold duplicates; the last entry for
+    /// a day wins. Days between the first and last that are absent from
+    /// `observed` are [`DayKind::Closed`] — the exchange did not trade — and
+    /// days outside that span are [`DayKind::Unmeasured`].
+    ///
+    /// **A window is inferred from the first and last minute, not from a table.**
+    /// Where the count matches the span exactly the session is contiguous and
+    /// gets one window. Where it does not — a disaster-recovery Saturday trades
+    /// two — the span is still the outer bound, and the shortfall is reported by
+    /// [`crate::gaps`] as holes inside it. That is the honest reading: this type
+    /// knows where the session started and ended, and does not claim to know
+    /// where a mid-session break was without seeing every bar.
+    #[must_use]
+    pub fn from_observed(observed: &[Observed]) -> Self {
+        let Some(first) = observed.iter().map(|o| o.day).min() else {
+            return Self {
+                first: 0,
+                kinds: Vec::new(),
+            };
+        };
+        let last = observed.iter().map(|o| o.day).max().unwrap_or(first);
+        // The span is bounded by the store's own extent, so this cannot be
+        // unbounded; a `usize` that would not fit is a span of 5 billion days.
+        let span = usize::try_from(last - first).unwrap_or(0).saturating_add(1);
+        let mut kinds = vec![DayKind::Closed; span];
+        for entry in observed {
+            let Ok(at) = usize::try_from(entry.day - first) else {
+                continue;
+            };
+            let Some(slot) = kinds.get_mut(at) else {
+                continue;
+            };
+            *slot = match entry.minutes {
+                None => DayKind::OpenLengthUnmeasured,
+                Some((from, to, _count)) => DayKind::Open(Session {
+                    windows: [Window { from, to }, Window { from: 0, to: 0 }],
+                    count: 1,
+                }),
+            };
+        }
+        Self { first, kinds }
+    }
+
+    /// The first day this calendar knows.
+    #[must_use]
+    pub const fn first_day(&self) -> i64 {
+        self.first
+    }
+
+    /// The last day this calendar knows.
+    ///
+    /// Equal to [`Self::first_day`] minus one for an empty calendar, which is
+    /// the honest reading of a span that holds nothing: the range is empty
+    /// rather than one day wide.
+    #[must_use]
+    pub fn last_day(&self) -> i64 {
+        // `try_from` RATHER THAN `as`. The length is bounded by the store's own
+        // extent, so it always fits; a length past `i64::MAX` would be a span of
+        // nine quintillion days, and saturating there is the safe direction
+        // because it can only ever make the range look SMALLER, never claim a
+        // day nobody measured.
+        let span = i64::try_from(self.kinds.len()).unwrap_or(i64::MAX);
+        self.first.saturating_add(span).saturating_sub(1)
+    }
+
+    /// How many days it covers.
+    #[must_use]
+    pub fn span(&self) -> usize {
+        self.kinds.len()
+    }
+
+    /// What `epoch_day` was — O(1).
+    #[must_use]
+    pub fn kind_of(&self, epoch_day: i64) -> DayKind {
+        let Ok(at) = usize::try_from(epoch_day - self.first) else {
+            return DayKind::Unmeasured;
+        };
+        self.kinds.get(at).copied().unwrap_or(DayKind::Unmeasured)
+    }
+
+    /// Bars `epoch_day` owes, or `None` where that is not known.
+    #[must_use]
+    pub fn expected_bars(&self, epoch_day: i64) -> Option<u16> {
+        match self.kind_of(epoch_day) {
+            DayKind::Open(session) => Some(session.bars()),
+            DayKind::Closed => Some(0),
+            DayKind::OpenLengthUnmeasured | DayKind::Unmeasured => None,
+        }
+    }
+
+    /// Days the exchange traded, counting both open kinds.
+    #[must_use]
+    pub fn sessions(&self) -> u32 {
+        self.kinds
+            .iter()
+            .filter(|k| matches!(k, DayKind::Open(_) | DayKind::OpenLengthUnmeasured))
+            .count()
+            .try_into()
+            .unwrap_or(u32::MAX)
+    }
 }

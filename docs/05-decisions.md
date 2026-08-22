@@ -20550,3 +20550,62 @@ and checked by nothing. `P-03` stays open for that reason.
 
 `npm run build` exit 0; svelte-check 47 against a ceiling of 61, **none in the
 changed file**.
+
+### D-0268 — the calendar stops being a table and becomes a reading of the bars
+
+**2026-08-22.** Five tables were corrected today and every one was found the
+same way — by measuring it against bars:
+
+| Table | Was | Found |
+|---|---|---|
+| Browser holidays | 28 dates from 2024-09 | wrong on 5, blind before 2024 |
+| Zerodha history floor | rolling 10 years | vendor holds from 2015 |
+| Minute expectation | `sessions × 375` | wrong on 9 of 1,671 days |
+| `calendar.rs` holidays | 92 dates | correct — derived this afternoon |
+| Muhurat sessions | absent | 5 days with a daily bar and no minutes |
+
+The last two are correct **today** and nothing keeps them correct. D-0266 and
+D-0267 then created a **second** copy in the browser, derived from the same bars
+on the same day and checked by nothing. Three tables of the same facts is a
+drift waiting for a date.
+
+**`Calendar::from_observed` removes the table.** The daily rung IS the calendar
+— a `1day` bar is proof the exchange traded — and the first and last minute bar
+of that day are proof of how long. Nothing is typed, so nothing can be typed
+wrong, and the answer widens the moment an earlier month lands.
+
+**It is not circular, and that is the load-bearing part.** Deriving "which days
+traded" from the rung being validated would be: a failed pull would read as a
+holiday. **Two independent rungs cross-check.** The daily rung says which days
+traded; the minute rung is measured against it. A day with a daily bar and no
+minute bars is a real gap — which is precisely how the five pre-2025 Muhurats
+were found, *after* an audit had already called the store complete.
+
+**Where the derivation is coarser, the test says so rather than hiding it.**
+`the_derivation_agrees_with_the_baked_tables_it_replaces` pins agreement on
+2021-02-24 and 2025-10-21, and pins the **disagreement** on the two
+disaster-recovery Saturdays: from a first and a last minute alone the derivation
+reports the outer span of **195** where the baked table names two windows
+totalling **105**. That is honest rather than wrong — the 90-minute midday break
+is then reported by `crate::gaps` as holes inside the span instead of as
+outside-window, and a caller needing the finer reading walks every bar rather
+than two. Recording the difference is what lets the constants be deleted with
+evidence instead of hope.
+
+**An empty store answers `Unmeasured` everywhere**, which is the state the
+operator was in an hour ago after clearing every bar. A calendar answering
+`Closed` for every day of an empty store would report the whole history as
+holidays — a confident wrong answer, and the failure mode this type exists to
+remove.
+
+**Cost.** O(days) to build, once; **O(1)** to query — one compare, one subtract,
+one index into a `Vec` whose length is the observed span. No hash, no search, no
+per-lookup allocation.
+
+The baked constants are **not deleted yet**: nothing calls the derived type in
+production, and removing a table before its replacement is wired is how a page
+goes blank. Wiring is the next commit, and `P-03` stays open until the browser
+reads one answer instead of owning a second.
+
+`pull`: 329 lib tests, 27 doctests, 0 failures. `fmt` and
+`clippy --all-targets -D warnings` clean.
