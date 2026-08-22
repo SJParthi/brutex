@@ -19970,3 +19970,69 @@ weeklies fired six requests against a ceiling of four a second and earned a 429.
 dated 2026-08-20; the log runs to 2026-08-22 and holds no F&O attempt after the
 fix. Nothing here claims Groww's F&O now works — only that the next attempt will
 be able to say why if it does not. `CLAUDE.md` §3 rule 6.
+
+### D-0258 — the Zerodha minute floor refused nineteen months the vendor holds, and the contest was vendor-versus-vendor all along
+
+**2026-08-22.** The operator asked whether Zerodha serves one-minute history
+from 2015, and said to check the vendor's page rather than this repository's
+copy of it. Both were checked. The answer changes a floor, withdraws a stated
+cost, and corrects the shape of the type that carried it.
+
+**What the page says: nothing.** `https://kite.trade/docs/connect/v3/historical/`
+was fetched. It states no depth at any interval — its closest sentence is data
+*"spanning back several years"*, a phrase and not a figure. It **does** confirm
+the `continuous=1` route verbatim: it *"works for NFO and MCX futures
+contracts"*, returns day candles for expired contracts through a live contract's
+token, and exists because *"the exchanges flush the `instrument_token` for
+futures and options contracts for every expiry"* — which is D-0248's third
+reason, now confirmed from the page rather than inferred.
+
+**What the vendor says, twice, four years apart.** `ZERODHA_HISTORY` weighed the
+operator's rolling ten years against `kite.trade/forum/discussion/7756`
+(`kiteapi` staff, August 2020): every intraday rung reaches **3 years**. On that
+reading the operator was widening past the vendor by seven years, and the row
+said so — naming, as a cost, that *"a 10-year one-minute backfill spends about
+seven years of windows on answers that come back EMPTY"*.
+
+Then `kite.trade/forum/discussion/14149`, staff `sujith`, **June 2024**: *"There
+is no fixed date for day candle data but for minute level data it starts
+somewhere around early 2015"*.
+
+**So the tie was never operator-versus-vendor.** It is vendor versus vendor, and
+the later word — same forum, same standing, four years newer — puts the minute
+rung at roughly eleven and a half years. The operator was not widening past the
+vendor. He was reading it correctly and **undershooting by nineteen months**: a
+rolling ten years reaches August 2016, and the vendor holds from early 2015.
+
+**The seven-years-of-empty-windows cost is withdrawn rather than restated.** It
+was sound while the 2020 figure was the vendor's latest word and is not sound
+now. `CLAUDE.md` §3 rule 6 forbids claiming a measurement not taken; it equally
+forbids keeping a cost whose premise has been retracted by its own source.
+
+**`Fixed` rather than `Rolling` is a correction of SHAPE, not only of number.**
+Zerodha's minute history begins at a fixed point and grows forward. A rolling
+window moves with the clock, so `Rolling { years: 10 }` would refuse 2015–2020
+by the year 2030 — data the vendor will still hold. Dhan's floor is genuinely
+rolling and keeps the variant; this one never should have had it. Both rungs and
+the descriptor-level `history_floor` are now `Fixed { 2015-01-01 }`.
+
+**The day rung is matched to the minute rung deliberately, and it is not what
+the vendor says day holds.** `sujith` says there is no fixed date for day
+candles and some NSE stocks reach the late 1990s. A day floor *shallower* than
+the minute floor beside it would be incoherent — the ladder pulls day before
+minute, so it would fetch a month of minutes for a month whose day pass was
+refused. Widening day to 1990 instead would mean inventing a per-instrument
+guarantee nobody made: the vendor's own figure is hedged *"for some NSE
+instruments"*.
+
+**What stays UNVERIFIED, and it is much narrower than what it replaces.**
+*"Somewhere around early 2015"* is the vendor's hedge, so a window opening on 1
+January 2015 may spend a few weeks on empty answers. That is the safe direction:
+asking for slightly more than exists costs empty windows, asking for less loses
+data silently, and §4 prefers the loud failure.
+
+`pull`: 12 real targets, 575 tests, plus 27 doctests, 0 failures. `fmt` and
+`clippy --all-targets -D warnings` clean. *(A first run reported 27 doctest
+failures, all `E0460: found possibly newer version of crate store` — a build
+artifact race with the other session rebuilding `store`, not a defect; they pass
+on re-run.)*

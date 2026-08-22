@@ -4989,26 +4989,53 @@ const GDFL: Descriptor = Descriptor {
 /// several years"*, a phrase and not a figure — so there is nothing to weigh
 /// against and `contested` is `None`. That is not agreement; it is silence, and
 /// the row says so.
-/// Zerodha's history floors — **and there is a second claim now.**
+/// Zerodha's history floors — **and the vendor has now contradicted itself.**
 ///
 /// Both rows carried `contested: None` with the reason that kite.trade's
 /// historical page states no depth at any interval, so nothing weighed against
 /// the operator's figure. That is still true **of the page** and it was never
 /// true of the vendor: the same developer forum that publishes the window caps
-/// publishes depths, and they are shorter than the operator's at one rung by
-/// seven years.
+/// publishes depths.
 ///
-/// The tie resolves the way [`ClaimStanding`] says it does —
-/// `OperatorObservation` outranks a vendor claim, so 10 years still binds at
-/// both rungs — and the cost of that tier-1 widening is named in each
-/// `binds_because` rather than discovered during a backfill.
+/// # Three claims, and the newest is the vendor agreeing with the operator
+///
+/// The 2020 forum post said every intraday rung reaches **3 years**, and this
+/// block was written to weigh that against the operator's rolling ten. In June
+/// 2024, on the same forum, Zerodha staff `sujith` said something different:
+/// *"There is no fixed date for day candle data but for minute level data it
+/// starts somewhere around early 2015"* — thread 14149, captured 22 Aug 2026.
+///
+/// So the contest was never operator-versus-vendor. It is **vendor versus
+/// vendor, four years apart**, and the later word puts the minute rung at
+/// roughly eleven and a half years — LONGER than the ten the operator claimed.
+/// The rolling floor was not a risky widening; it was an undershoot that
+/// refused nineteen months of history the vendor holds.
+///
+/// # Why `Fixed` and not `Rolling`
+///
+/// A rolling window is the wrong SHAPE for this vendor, independently of the
+/// number. Zerodha's minute history starts at a fixed point and grows forward;
+/// `Rolling { years: 10 }` moves the floor with the clock, so in 2030 it would
+/// refuse 2015–2020 — data the vendor will still hold. Dhan's floor is genuinely
+/// rolling and keeps that variant. This one never was.
 const ZERODHA_HISTORY: &[FloorRow] = &[
     FloorRow {
         granularity: Granularity::Minute1,
         binding: FloorClaim {
-            floor: HistoryFloor::Rolling { years: 10 },
-            source: "the operator, 11 Aug 2026, restated 14 Aug 2026: a rolling \
-                     10 years",
+            floor: HistoryFloor::Fixed {
+                year: 2015,
+                month: 1,
+                day: 1,
+            },
+            source: "the operator, 22 Aug 2026, and Zerodha staff `sujith` on \
+                     kite.trade/forum/discussion/14149 in June 2024: \"There is \
+                     no fixed date for day candle data but for minute level \
+                     data it starts somewhere around early 2015\". Captured 22 \
+                     Aug 2026. The operator's earlier figure — a rolling 10 \
+                     years, 11 and 14 Aug 2026 — is superseded by this one and \
+                     was NARROWER: ten rolling years reaches Aug 2016, so it \
+                     refused nineteen months of one-minute history the vendor \
+                     holds.",
             standing: ClaimStanding::OperatorObservation,
         },
         contested: Some(FloorClaim {
@@ -5018,30 +5045,50 @@ const ZERODHA_HISTORY: &[FloorRow] = &[
                      staff account in August 2020: every intraday rung — minute \
                      through 60minute — reaches up to 3 years. Captured 19 Aug \
                      2026. NOT on the historical documentation page, which \
-                     states no depth at any interval.",
+                     states no depth at any interval. SUPERSEDED BY THE SAME \
+                     VENDOR: `sujith`, June 2024, on thread 14149, puts the \
+                     minute rung at early 2015 — four years later, the same \
+                     forum, the same staff standing. Kept rather than deleted \
+                     because it is what a reader auditing thread 7756 will \
+                     find, and this row is where they learn it is not current.",
             standing: ClaimStanding::VendorDocument,
         }),
-        binds_because: "tier 1 of `ClaimStanding::outranks`, and nothing else: \
-                        an operator reporting what his own entitlement answered \
-                        beats a general statement made by a party who does not \
-                        know which entitlement is asking. It is NOT the \
-                        stricter claim — tier 2 would have taken the forum's 3 \
-                        years — and this is the one row in this build where \
-                        tier 1 widens a floor at the ONE-MINUTE rung. THE COST, \
-                        STATED RATHER THAN DISCOVERED: if the forum is right, a \
+        binds_because: "tier 1 of `ClaimStanding::outranks`, AND the vendor's \
+                        own later statement agrees with it — which is why the \
+                        cost this row used to name has been withdrawn rather \
+                        than restated. It read: \"if the forum is right, a \
                         10-year one-minute backfill spends about seven years of \
-                        windows on answers that come back EMPTY, and an empty \
-                        answer is indistinguishable from a market holiday. \
-                        UNVERIFIED until a request measures it; \
-                        docs/00-charter.md section 4z is where that costs \
-                        something.",
+                        windows on answers that come back EMPTY\". That was \
+                        sound while the 2020 claim was the vendor's latest \
+                        word. It is not: `sujith` put the rung at early 2015 in \
+                        June 2024, so the operator was not widening past the \
+                        vendor at all — he was reading it correctly and \
+                        UNDERSHOOTING by nineteen months. WHAT REMAINS \
+                        UNVERIFIED is narrower and worth keeping: \"somewhere \
+                        around early 2015\" is the vendor's own hedge, so a \
+                        window opening on 1 Jan 2015 may spend a few weeks on \
+                        empty answers at the very start. That is the safe \
+                        direction — asking for slightly more than exists costs \
+                        empty windows, asking for less loses data silently, and \
+                        `CLAUDE.md` §4 prefers the loud failure.",
     },
     FloorRow {
         granularity: Granularity::Day1,
         binding: FloorClaim {
-            floor: HistoryFloor::Rolling { years: 10 },
-            source: "the operator, 11 Aug 2026, restated 14 Aug 2026: a rolling \
-                     10 years",
+            floor: HistoryFloor::Fixed {
+                year: 2015,
+                month: 1,
+                day: 1,
+            },
+            source: "the operator, 22 Aug 2026, and Zerodha staff `sujith` on \
+                     kite.trade/forum/discussion/14149 in June 2024. MATCHED TO \
+                     THE MINUTE RUNG DELIBERATELY, and it is not what the \
+                     vendor says the day rung holds — `sujith` says there is no \
+                     fixed date for day candles and some NSE stocks are filled \
+                     to the late 1990s. A day floor SHALLOWER than the minute \
+                     floor beside it would be incoherent: the ladder pulls day \
+                     before minute, so it would fetch a month of minutes for a \
+                     month whose day pass was refused.",
             standing: ClaimStanding::OperatorObservation,
         },
         contested: Some(FloorClaim {
@@ -5056,16 +5103,18 @@ const ZERODHA_HISTORY: &[FloorRow] = &[
                      BSE. Captured 19 Aug 2026.",
             standing: ClaimStanding::VendorDocument,
         }),
-        binds_because: "tier 1 again, and here it NARROWS rather than widens — \
-                        which is the opposite direction from the rung above and \
-                        costs nothing at all. The forum's day floor is 1990 and \
-                        the operator's is ten rolling years, so believing the \
-                        operator asks for LESS history than the vendor says it \
-                        holds. No request is spent on an empty answer by this \
-                        row; what is given up is depth nobody has asked for. \
-                        The 1990 figure is also hedged in its own source — \
-                        \"for some NSE instruments\" — so it is not a floor \
-                        that would hold per instrument even if it bound.",
+        binds_because: "tier 1 again, and here it still NARROWS rather than \
+                        widens, which is the opposite direction from the rung \
+                        above and costs nothing at all. The forum's day floor \
+                        is 1990 and this one is 2015, so believing it asks for \
+                        LESS history than the vendor says it holds. No request \
+                        is spent on an empty answer by this row; what is given \
+                        up is depth nobody has asked for. The 1990 figure is \
+                        also hedged in its own source — \"for some NSE \
+                        instruments\" — so it is not a floor that would hold \
+                        per instrument even if it bound, which is why widening \
+                        to it would be inventing a per-instrument guarantee \
+                        nobody made.",
     },
 ];
 
@@ -5207,7 +5256,17 @@ const ZERODHA: Descriptor = Descriptor {
             // is the error the Dhan window-cap row names.
             per_day: None,
         },
-        history_floor: HistoryFloor::Rolling { years: 10 },
+        // THE DESCRIPTOR-LEVEL FLOOR, kept in step with `ZERODHA_HISTORY`'s
+        // rows above. It was `Rolling { years: 10 }` and is now the same fixed
+        // 2015 date both rungs carry — see that block's header for why a
+        // rolling window was the wrong SHAPE here and not merely the wrong
+        // number: Zerodha's minute history starts at a fixed point and grows,
+        // so a floor that moves with the clock refuses more every year.
+        history_floor: HistoryFloor::Fixed {
+            year: 2015,
+            month: 1,
+            day: 1,
+        },
         // PRESENT NOW, AND NOT FROM THE PAGE.
         //
         // This row was empty and its comment said the vendor bounds nothing
