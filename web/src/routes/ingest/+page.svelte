@@ -11177,7 +11177,29 @@
   .cscroll {
     max-height: min(58vh, 640px);
     overflow: auto;
-    overscroll-behavior: contain;
+    /* SCROLL CHAINS OUT OF HERE, AND IT USED TO STOP DEAD.
+       ---------------------------------------------------------------------
+       This carried `overscroll-behavior: contain`, which is right for a
+       POPOVER — `.inslist` in the instrument menu keeps it, because scrolling a
+       dropdown must not move the page behind it — and wrong for the primary
+       content of the page, which this is.
+
+       MEASURED on the running page at 900px tall: this box shows 522px of
+       1,140, and it sits inside `.grid`, which shows 814px of 1,094 and scrolls
+       too. `body` is `overflow: hidden` at a fixed viewport height, so the
+       DOCUMENT never scrolls at all. That is two live scrollers stacked, and
+       which one answers the wheel depends on where the pointer happens to be.
+
+       `contain` then refuses to hand the scroll on when this list reaches its
+       end, so the wheel does nothing while more page waits below — the
+       "sometimes it scrolls, sometimes it is stuck" an operator reported. With
+       chaining restored the end of the census carries straight on into the
+       page, which is what one continuous surface should do.
+
+       THIS DOES NOT FIX THE STACKING, only the handoff. Two nested scrollers
+       under a non-scrolling body is the shape that makes the pointer's position
+       matter at all, and flattening it is a layout change this comment is not.
+       --------------------------------------------------------------------- */
   }
   /* ══ ONE TYPE SCALE PER ROW, AND THIS TABLE HAD TWO ══
 

@@ -8883,6 +8883,27 @@
     min-height: 0;
     display: flex;
     flex-direction: column;
+    /* THE PAGE SCROLLS HERE, AND UNTIL NOW NOTHING DID.
+       ---------------------------------------------------------------------
+       `.tbl`'s own comment states the intended design — "past the floor the
+       page scrolls, which is the honest outcome". It did not. `body` is
+       `overflow: hidden` at a fixed viewport height and `.main` is
+       `overflow: hidden` too, so past the floor the content was simply CUT
+       OFF, with no scroller anywhere able to reach it.
+
+       MEASURED at a 900px viewport: this column's children run to 983px.
+       `.pgbar` sits at 870-936 and `.pager` at 944-983 — the rows-per-page
+       control and the page buttons, the two things a reader needs to move
+       through 12,470 pages, BELOW THE FOLD AND UNREACHABLE. The only scroller
+       on the page was the 201px slot inside the table, so scrolling moved a
+       strip and never the page: "sometimes it scrolls, sometimes it is stuck".
+
+       `overflow-y: auto` here makes this column the page's own scroller, which
+       is what `.main` clipping it always assumed existed. The table keeps its
+       inner scroll for the rows; what changes is that everything BELOW the
+       table can now be reached.
+       --------------------------------------------------------------------- */
+    overflow-y: auto;
     gap: var(--s4);
     padding: var(--s5);
     background-color: var(--bg);
@@ -9832,7 +9853,12 @@
     flex: 1;
     min-height: 0;
     overflow: auto;
-    overscroll-behavior: contain;
+    /* SCROLL CHAINS OUT OF THE ROWS AND ON INTO THE PAGE.
+       `overscroll-behavior: contain` is right for a popover — the instrument
+       menu keeps it, because scrolling a dropdown must not move the page behind
+       it — and wrong here, where these rows are the page's own content. With
+       `contain`, reaching the last row stopped the wheel dead while the pager
+       waited below; now the scroll hands on to `.board` and carries there. */
   }
   .tbl-scroll:focus-visible {
     outline: 2px solid var(--focus);
