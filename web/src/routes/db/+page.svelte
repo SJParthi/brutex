@@ -9838,8 +9838,29 @@
        that was never broken. `min-height: 0` is still what stops a flex child
        from refusing to shrink at all, so the floor replaces it rather than
        removing it: shrink, yes — to nothing, no. Past the floor the page
-       scrolls, which is the honest outcome. */
-    min-height: 220px;
+       scrolls, which is the honest outcome.
+
+       THE FLOOR WAS 220px, AND THAT WAS A SURVIVAL HEIGHT, NOT A USEFUL ONE.
+       ---------------------------------------------------------------------
+       220 was chosen when NOTHING on this page could scroll: it was the last
+       resort that stopped the table disappearing entirely, and at that job it
+       worked. It was never a size anyone would choose for the thing the page
+       exists to show.
+
+       MEASURED at a 900px viewport, before this line changed: 477px of chrome
+       above — two strips, the anchor, the facts row and the window band — left
+       the table at its 220px floor with a 201px scrolling area. At 40px a row
+       that is FIVE ROWS VISIBLE out of fifty rendered, on a screen tall enough
+       for twenty. The table had 22% of the viewport and the controls above it
+       had the rest.
+
+       Now that `.board` scrolls (see its own note), the table no longer has to
+       fit in what the chrome leaves. `min(72vh, 680px)` gives it about sixteen
+       rows on this viewport and the page scrolls to reach whatever will not
+       fit, which is the arrangement the pager already assumes. `flex: 1` still
+       lets it take MORE where a tall window offers it.
+       --------------------------------------------------------------------- */
+    min-height: min(72vh, 680px);
     display: flex;
     flex-direction: column;
     position: relative; /* the drawer's containing block */
