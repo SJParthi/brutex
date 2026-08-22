@@ -19832,3 +19832,51 @@ trap `one_press_over_an_archive_feed_puts_bars_on_disk` records.
 
 `api`: 4 targets, 577 tests, 0 failures. `fmt` and
 `clippy --all-targets -D warnings` clean.
+
+### D-0255
+
+**`audit-stored` said it was recording events and recorded none.**
+
+`crates/cli/src/lib.rs`.
+
+**MEASURED, on a real month.** `cli audit-stored groww BANKNIFTY 15min 2026 03
+100` completed in 0.079 s, read 475 real bars, printed 795 lines — and wrote a
+log file of **zero bytes**. The banner above the report said `events -> <dir>`,
+because `telemetry::install` had succeeded and the directory did resolve. The
+run therefore reported that it was being recorded, and recorded nothing: the
+failure wearing a success's clothes §4 bans.
+
+`sweep_stored` carried two `note` calls — `stored month loaded` and `ladder
+walked` — and `audit_stored_inner` carried neither. So the LESSER command was
+observable and the one that produces the exit grid, the walk-forward, the PBO
+and the bootstrap was dark. An operator watching `/logs` during a long audit saw
+a blank page and could not distinguish a running sweep from a dead process.
+D-0226 added `telemetry` to this crate's dependency set precisely to close that,
+and closed it on one of the two paths.
+
+Two events now, and the pair is a SPAN rather than two facts: `stored month
+loaded` opens it and `audit rendered` closes it, so a `loaded` with no matching
+`rendered` is a run that died in between — which a single event could not have
+said. `audit rendered` carries the run identity, which is the half §3 rule 3
+cares about: a report names its identity in text that scrolls past, and an
+operator asking which run produced the grid in front of them needs it in a line
+`/logs` can search.
+
+**What the events do NOT carry, stated rather than implied.** Depth, kept and
+ranked are absent, because `audit_bars` returns rendered text and keeps its
+`Outcome` private; reporting them would mean widening its signature.
+`sweep_stored`'s `ladder walked` carries them for the command that exposes them.
+
+**This is verified by measurement and NOT by a test, and that is a limit, not an
+omission.** `commit_stamp()` is `option_env!("BRUTEX_COMMIT")`, so an unstamped
+`cargo test` build refuses at the commit gate before the store is touched —
+`the_stored_audit_refuses_for_the_same_cause_and_names_itself` already documents
+that limit for the refusal path, and `sweep_stored`'s two events have always sat
+in the same unreachable region. Recorded in `docs/06-limits.md`. The measurement:
+zero lines before, two after, both `target: "cli.audit"`, identity
+`d209e205365c088ab3d5b15852a029aadb08ff080c2bff1c0cefed4a01b6a12a`.
+
+Gate 17 is untouched: one event per run, at a boundary, with no loop over bars
+and no loop over candidates reaching either line.
+
+`cli`: 45 tests, 0 failures. `fmt` and `clippy --all-targets -D warnings` clean.

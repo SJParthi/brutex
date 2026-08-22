@@ -5274,3 +5274,32 @@ accurate but silent.
 **Not measured:** how many contracts a typical month-end request loses to this.
 It is bounded by the month's own expiry count and is not a figure this build
 has taken.
+
+## The two stored commands' events are verified by measurement, not by a test — D-0255
+
+`cli::commit_stamp` is `option_env!("BRUTEX_COMMIT")`, read at COMPILE time. A
+`cargo test` build carries no stamp, so `sweep_stored` and `audit_stored_inner`
+both refuse at the commit gate before the store is touched — which is correct,
+because §3 rule 3 forbids a computation whose identity cannot be recorded, and
+the gate must therefore come first. The consequence is that **the four `note`
+calls on those two paths are in a region `cargo test` cannot enter**, and no
+amount of fixture work inside the crate changes that; only a stamped build does.
+
+`the_stored_audit_refuses_for_the_same_cause_and_names_itself` already states
+this limit for the refusal path, and says why asserting more would be worse than
+asserting less: a test that looks like it covers the store path and does not is
+worse than an absent one.
+
+**What was measured instead**, on a stamped release build against real stored
+bars — `groww BANKNIFTY 15min 2026-03`, 475 bars, `min_hits` 100:
+
+| | `events.ndjson` lines |
+|---|---|
+| `audit-stored` before D-0255 | **0** |
+| `audit-stored` after D-0255 | **2** — `stored month loaded`, `audit rendered` |
+
+**Not measured:** whether the events land when the process is killed mid-render.
+`audit rendered` is emitted after `audit_bars` returns and before the string is
+printed, so a kill during printing keeps it and a kill during the sweep does
+not — which is the intended span semantics, but the kill itself has not been
+performed.

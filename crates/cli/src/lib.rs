@@ -1376,6 +1376,45 @@ fn audit_stored_inner(
     let root = store_root()?;
     let loaded = stored::load(&root, vendor, underlying, rung, year, month)?;
 
+    // THE FILE WAS OPENED AND THIS IS WHERE AN OPERATOR LEARNS IT.
+    //
+    // MEASURED, on a real month: `audit-stored groww BANKNIFTY 15min 2026 03`
+    // completed, printed 795 lines, and wrote a log file of ZERO BYTES. The
+    // banner above it said `events -> <dir>` because `telemetry::install`
+    // succeeded, so the run reported that it was being recorded and recorded
+    // nothing -- the failure wearing a success's clothes `CLAUDE.md` section 4
+    // bans, and the exact defect D-0226 added `telemetry` to this crate's
+    // dependency set to remove.
+    //
+    // `sweep_stored` carried both of these calls and this function carried
+    // neither, so the LESSER command was observable and the one that produces
+    // the exit grid, the walk-forward, the PBO and the bootstrap was dark. An
+    // operator watching /logs during a long audit saw a blank page and could not
+    // tell a running sweep from a dead process.
+    //
+    // Gate 17's granularity holds: one event per run, at a boundary. No loop
+    // over bars and no loop over candidates reaches this line.
+    //
+    // NOT REACHED BY `cargo test`, AND THAT IS STATED RATHER THAN PAPERED OVER.
+    // `commit_stamp()` is `option_env!`, so an unstamped test build refuses at
+    // the gate above before the store is touched --
+    // `the_stored_audit_refuses_for_the_same_cause_and_names_itself` documents
+    // the same limit for the refusal path, and `sweep_stored`'s two events sit
+    // in the identical region. The verification is therefore a MEASUREMENT on a
+    // stamped build, recorded in `docs/05-decisions.md` and `docs/06-limits.md`
+    // rather than claimed here: zero lines before, two after, on
+    // `groww BANKNIFTY 15min 2026-03`.
+    note(
+        &telemetry::Event::info("cli.audit", "stored month loaded")
+            .with("feed", loaded.vendor.as_str())
+            .with("underlying", underlying)
+            .with("rung", loaded.timeframe)
+            .with("year", u64::from(year))
+            .with("month", u64::from(month))
+            .with("bars", u64::try_from(loaded.bars.len()).unwrap_or(u64::MAX))
+            .with("min_hits", min_hits),
+    );
+
     let ladder = Ladder::with_min_hits(min_hits);
     let id = identity(&Run {
         #[expect(
@@ -1412,13 +1451,33 @@ fn audit_stored_inner(
         loaded.timeframe,
         loaded.bars.len(),
     );
-    Ok(audit_bars(
-        evaluator(),
-        loaded.bars,
-        &header,
-        min_hits,
-        Some(&id),
-    ))
+    let bars = u64::try_from(loaded.bars.len()).unwrap_or(u64::MAX);
+    let report = audit_bars(evaluator(), loaded.bars, &header, min_hits, Some(&id));
+    // THE IDENTITY REACHES THE LOG, which is the half section 3 rule 3 cares
+    // about. A report names its identity in text that scrolls past; an operator
+    // asking "which run produced the grid I am looking at" needs it in a line
+    // `/logs` can search.
+    //
+    // Emitted AFTER the render rather than before, so the event means the audit
+    // finished. The pair is then readable as a span: `stored month loaded`
+    // opened it, this closes it, and a `loaded` with no matching `rendered` is a
+    // run that died in between -- which is the one thing a single event could
+    // not have said.
+    //
+    // The sweep's own figures -- depth, kept, ranked -- are NOT here, and that is
+    // a stated gap rather than an oversight: `audit_bars` returns rendered text
+    // and keeps its `Outcome` private, so reporting them would mean widening its
+    // signature. `sweep_stored`'s `ladder walked` event carries them for the
+    // command that does expose them.
+    note(
+        &telemetry::Event::info("cli.audit", "audit rendered")
+            .with("identity", id.hex().as_str())
+            .with("feed", loaded.vendor.as_str())
+            .with("underlying", underlying)
+            .with("rung", loaded.timeframe)
+            .with("bars", bars),
+    );
+    Ok(report)
 }
 
 /// [`audit_stored_inner`], with every refusal rendered the way the CLI prints one.
