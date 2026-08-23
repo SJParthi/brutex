@@ -4255,11 +4255,29 @@ fn audit_bars(
         Ok(e) => e,
         Err(why) => return format!("refused: {why}\n"),
     };
+    // THE WALK-FORWARD TAKES THE SIDE THE EVIDENCE CHOSE, and until now it did
+    // not.
+    //
+    // `rank` orders by |t| -- the ABSOLUTE value, deliberately, because a
+    // combination that reliably precedes a FALL is as tradeable as one that
+    // precedes a rise. `side_of_evidence` then reads the sign, and the trade
+    // walk, the fills, the 625-cell grid and the screener all follow it.
+    //
+    // This call did not. It passed `Direction::Long` unconditionally, so every
+    // SHORT combination was validated out of sample as though it were long --
+    // its out-of-sample figure was the P&L of taking the opposite side of its
+    // own signal. A combination with a strong downward edge would look like a
+    // strong loser and be reported as failing to hold up.
+    //
+    // The comment directly above `side_of_evidence` records this exact defect
+    // being fixed for the audit's own trade. It was not fixed here, which is the
+    // shape of most of what this session found: one call site corrected and its
+    // sibling left behind.
     let folds = runner::validate::walk_forward(
         &bars,
         horizon,
         WALK_FORWARD_SPLITS,
-        Direction::Long,
+        direction_of(side_of_evidence(first)),
         &Sweeper::new(ladder),
         move || fresh,
     );
