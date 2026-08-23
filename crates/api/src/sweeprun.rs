@@ -726,4 +726,66 @@ mod tests {
         // epoch; anything else here would be a real timestamp.
         assert!(now_micros() > 0);
     }
+
+    #[test]
+    fn a_backwards_span_is_refused_however_the_months_fall() {
+        // MUTATION TESTING FOUND THE HOLE THIS CLOSES. `from_key` is
+        // `year * 12 + month`; the mutant made it `year * 12 - month` and
+        // every existing span test still passed, because they all compared
+        // two keys that moved together.
+        //
+        // 2020-11 -> 2019-12 is the case that separates them. The `to` key is
+        // 24240; the `from` key is 24251 correct and 24229 mutated, so the
+        // comparison lands on opposite sides and a BACKWARDS SPAN IS ACCEPTED
+        // by the mutant. That is a real defect, not a formality: the sweep
+        // would have run over a window nobody asked for and recorded it under
+        // an identity naming the span it was given.
+        for span in [
+            r#""from_year":2020,"from_month":11,"to_year":2019,"to_month":12"#,
+            r#""from_year":2020,"from_month":2,"to_year":2019,"to_month":11"#,
+            r#""from_year":2026,"from_month":1,"to_year":2025,"to_month":12"#,
+        ] {
+            let why = asked_from(&body("zerodha", span, "200000"))
+                .expect_err("a backwards span must be refused");
+            assert!(matches!(why, Refusal::Span(_)), "{span}");
+            assert!(why.why().contains("ends before it starts"), "{}", why.why());
+        }
+
+        // And the mirrors, which must all be ACCEPTED — a rule that refuses a
+        // backwards span by refusing everything is not a rule.
+        for span in [
+            r#""from_year":2019,"from_month":12,"to_year":2020,"to_month":11"#,
+            r#""from_year":2019,"from_month":11,"to_year":2020,"to_month":2"#,
+            r#""from_year":2025,"from_month":12,"to_year":2026,"to_month":1"#,
+        ] {
+            assert!(
+                asked_from(&body("zerodha", span, "200000")).is_ok(),
+                "forward span refused: {span}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_clock_returns_a_real_epoch_stamp_and_not_a_placeholder() {
+        // MUTATION TESTING FOUND THIS TOO. The old assertion was `> 0`, and
+        // the mutant `now_micros() -> 1` satisfies it. A stamp of 1 is 1
+        // microsecond after 1970: it would sort every run before every other
+        // run and render as 01 Jan 1970 on the page.
+        //
+        // The floor is 2023-11-14, which is in the past and will stay there,
+        // so this cannot fail on a correct clock. The ceiling catches the
+        // other direction: seconds or milliseconds returned where micros were
+        // promised would land far below it.
+        let now = now_micros();
+        assert!(
+            now > 1_700_000_000_000_000,
+            "not a microsecond epoch stamp: {now}"
+        );
+        assert!(
+            now < 100_000_000_000_000_000,
+            "implausibly far in the future: {now}"
+        );
+        // Two reads are ordered, which a constant could not be.
+        assert!(now_micros() >= now);
+    }
 }

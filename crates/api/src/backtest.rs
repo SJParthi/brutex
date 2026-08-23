@@ -1438,4 +1438,65 @@ mod tests {
         assert_eq!(newer.pessimistic, 222);
         assert_eq!(newer.identity, "02".repeat(32));
     }
+
+    #[test]
+    fn the_runs_array_has_no_comma_before_its_first_element() {
+        // MUTATION TESTING FOUND THIS. `if n > 0` guards the separator; the
+        // mutant `n >= 0` emits a comma before the FIRST run too, producing
+        // `"runs":[,{…}]` — a document no parser accepts. The existing test
+        // checked for a TRAILING comma and for `},{` between elements, and a
+        // leading one is neither.
+        let one = over(file(1, &[record(1, false, 10)]), 10).to_json();
+        assert!(one.contains(r#""runs":[{"#), "no leading comma: {one}");
+        assert!(!one.contains(r#""runs":[,"#), "{one}");
+
+        let many = over(file(1, &[record(1, false, 10), record(2, false, 20)]), 10).to_json();
+        assert!(many.contains(r#""runs":[{"#), "{many}");
+        assert!(many.contains("},{"), "one separator between two");
+        assert!(!many.contains(",]"), "and none at the end");
+
+        // An empty ledger emits an empty array, not one holding a comma.
+        assert!(over(file(1, &[]), 10).to_json().contains(r#""runs":[]"#));
+    }
+
+    #[test]
+    fn the_best_complete_run_does_not_depend_on_the_order_it_is_given() {
+        // `read` always returns newest-first, so `best_complete`'s tie-break
+        // and a bare `>=` agree on every payload this crate produces — which
+        // is why mutation testing could flip the comparison and see nothing
+        // fail. The reduce is `pub`, so it must not quietly depend on its
+        // caller's ordering: the same runs in EITHER order must name the same
+        // winner, and on a tie that winner is the LOWER index.
+        let newest_first = over(file(1, &[record(1, false, 500), record(2, false, 500)]), 10);
+        assert_eq!(
+            newest_first.best_complete().expect("a winner").index,
+            0,
+            "newest-first: the tie goes to the earlier run"
+        );
+
+        // The same two runs, handed over ascending.
+        let mut ascending = newest_first.clone();
+        ascending.runs.reverse();
+        assert_eq!(
+            ascending.best_complete().expect("a winner").index,
+            0,
+            "ascending: the SAME winner, or the reduce depends on its input order"
+        );
+
+        // And a clear winner is found from either end.
+        let mut mixed = over(
+            file(
+                1,
+                &[
+                    record(1, false, 100),
+                    record(2, false, 900),
+                    record(3, false, 300),
+                ],
+            ),
+            10,
+        );
+        assert_eq!(mixed.best_complete().expect("a winner").index, 1);
+        mixed.runs.reverse();
+        assert_eq!(mixed.best_complete().expect("a winner").index, 1);
+    }
 }
