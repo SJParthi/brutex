@@ -941,7 +941,7 @@ pub const fn variants(stops: usize, targets: usize, trails: usize) -> usize {
 /// operator's rule with the rule merged in as a step. The mistake would produce
 /// a plausible-looking table.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Levels {
+pub struct Levels<'a> {
     /// Rungs per ladder. With a step, this alone decides the REACH — `rungs`
     /// times `step_ppm` — so raising it extends the ladder without moving a
     /// level already tried.
@@ -962,6 +962,24 @@ pub struct Levels {
     /// a percentile is a grid in which a reward-to-risk rule stated in points
     /// has no cell to land in.
     pub step_ppm: Option<Ppm>,
+    /// The stop ladder, in ppm, supplied outright by the caller.
+    ///
+    /// # Why the stop gets its own ladder and the other axes do not
+    ///
+    /// Every axis shared one derived step, which made the stop a function of
+    /// the instrument's median bar range. That is the right quantity for a
+    /// RESOLUTION and the wrong one for a FLOOR: it reached below a point on a
+    /// quiet instrument, and on one-minute execution a level closer than a
+    /// typical bar's own range is hit by the entry bar itself.
+    ///
+    /// The stop is the one axis with a physical floor, so a caller that knows
+    /// the instrument supplies it. Targets and trails keep the derived step,
+    /// because nothing stops a target being far and everything argues for
+    /// resolving it finely.
+    ///
+    /// Empty falls back to the stepped or quantile ladder, so a caller with no
+    /// opinion is not forced to invent one.
+    pub stops_ppm: &'a [Ppm],
     /// A stop the caller wants tried, merged into the stops ladder as an
     /// ordinary rung. `None` leaves the ladder as built.
     pub forced: Option<Ppm>,
@@ -998,7 +1016,7 @@ pub struct Levels {
     pub ratios: bool,
 }
 
-impl Levels {
+impl Levels<'_> {
     /// The quantile ladders, as every caller had before a step existed.
     #[must_use]
     pub const fn derived(rungs: usize) -> Self {
@@ -1007,6 +1025,7 @@ impl Levels {
             step_ppm: None,
             forced: None,
             ratios: false,
+            stops_ppm: &[],
         }
     }
 }
@@ -1337,13 +1356,14 @@ pub fn evaluate(
     mask: &ConditionMask,
     horizon: Horizon,
     side: Side,
-    levels: Levels,
+    levels: Levels<'_>,
 ) -> Grid {
     let Levels {
         rungs,
         step_ppm,
         forced,
         ratios,
+        stops_ppm,
     } = levels;
     // PASS ONE: every signal that could open a position, and its path.
     // `crate::trade::walk` already applies the intraday rules, so its trades
@@ -1433,9 +1453,16 @@ pub fn evaluate(
         }),
         None => Ladder::from_excursions(&mut observed.to_vec(), rungs).unwrap_or_default(),
     };
-    let stops = match step_ppm {
-        Some(_) => merged(&ladder_of(&adverse), forced),
-        None => merged_stops(&adverse, rungs, forced),
+    // A caller-supplied stop ladder wins over both derivations: it is the one
+    // axis where the instrument's fill behaviour, not its excursion
+    // distribution, decides how tight a level can be.
+    let stops = if stops_ppm.is_empty() {
+        match step_ppm {
+            Some(_) => merged(&ladder_of(&adverse), forced),
+            None => merged_stops(&adverse, rungs, forced),
+        }
+    } else {
+        merged(&Ladder::new(stops_ppm.to_vec()).unwrap_or_default(), forced)
     };
     // THE TARGETS LADDER IS THE UNION OF EVERY `stop * ratio`, WHEN RATIOS ARE
     // GIVEN.
@@ -1928,6 +1955,25 @@ fn read_trip(
     }
 }
 
+/// One completed round trip as a row, from the values [`one_variant`] already
+/// holds.
+///
+/// Extracted so `one_variant` stays inside its line budget without dropping the
+/// comments that explain why the row is emitted where it is — a budget met by
+/// deleting reasoning is a budget met by making the next reader guess.
+fn row_of(bars: &[Candle], c: &Candidate, pnl: i64, adverse: Ppm) -> TradeRow {
+    TradeRow {
+        ts_micros: bars.get(c.entry).map_or(0, |b| b.ts_micros),
+        pnl,
+        adverse,
+        // The ppm figure taken back to paisa at THIS trade's own entry, which is
+        // the price it was measured against in the first place -- so the round
+        // trip is exact rather than referenced against a span-wide price that is
+        // wrong at both ends of a long span.
+        adverse_paisa: paisa_of(adverse, c.entry_pess),
+    }
+}
+
 fn one_variant(
     bars: &[Candle],
     candidates: &[Candidate],
@@ -2123,15 +2169,7 @@ fn one_variant(
         // for it on the handful of combinations they report, never on the
         // millions they weigh.
         if let Some(rows) = trades.as_deref_mut() {
-            rows.push(TradeRow {
-                ts_micros: bars.get(c.entry).map_or(0, |b| b.ts_micros),
-                pnl: pess,
-                adverse: went_against,
-                // The ppm figure taken back to paisa at THIS trade's entry,
-                // which is the price it was measured against in the first
-                // place -- so the round trip is exact rather than referenced.
-                adverse_paisa: paisa_of(went_against, c.entry_pess),
-            });
+            rows.push(row_of(bars, c, pess, went_against));
         }
         if went_against > cell.worst_mae {
             cell.worst_mae = went_against;

@@ -1315,6 +1315,11 @@ fn auto_stored_inner(
 /// coarser than the threshold it is compared against. More draws narrow the
 /// Monte Carlo error and cost linearly; nothing in the data says where that
 /// trade sits, so this is the assumption and the report prints it.
+/// Superseded by [`bootstrap_draws`], which derives the count from the alpha
+/// the answer is read at. Kept as the FLOOR that derivation clamps to: a
+/// thousand is the conventional minimum for a test read at 5%, and a derived
+/// figure below it would be quantised coarser than the threshold it is compared
+/// against.
 const BOOTSTRAP_DRAWS: usize = 1_000;
 
 /// Resamples to take, DERIVED from the alpha the answer is compared against.
@@ -1352,7 +1357,7 @@ fn bootstrap_draws(observations: usize) -> usize {
     per_alpha
         .saturating_mul(100)
         .max(observations)
-        .clamp(1_000, 100_000)
+        .clamp(BOOTSTRAP_DRAWS, 100_000)
 }
 
 /// The family-wise error rate the stepdown is judged at, in parts per million.
@@ -1446,7 +1451,7 @@ fn audit_keep() -> usize {
 ///
 /// [`points_to_ppm`] converts against [`NIFTY_REFERENCE`], which is a stated
 /// approximation the report names on its own page. No operator supplies this
-/// and no percentage appears in it: `grid_rungs()` alone decides how far the
+/// and no percentage appears in it: `grid_rungs(bars)` alone decides how far the
 /// ladder reaches, so raising the depth extends 1pt…4pt to 1pt…25pt without
 /// moving a single level that was already tried.
 /// The exit ladder's step, in ppm, DERIVED from the bars it will sweep.
@@ -1469,6 +1474,79 @@ fn audit_keep() -> usize {
 /// would state, and the tick is finer still at 0.05. This is the one figure
 /// here that is a choice about language rather than about data, and it is
 /// stated as one.
+/// The tightest stop worth testing, in index points.
+///
+/// # Why five and not a half
+///
+/// A derived step reached down to fractions of a point, and a half-point stop on
+/// one-minute execution is not a stop — it is inside the bar it would be placed
+/// on. Both legs fill at the extremes the bar PRINTED, so a level closer than a
+/// typical bar's own range is hit by the entry bar itself, and the grid spends
+/// its cells on trades that could not have been taken.
+///
+/// The operator's own reading, and it is a statement about the instrument rather
+/// than about preference: on one-minute NIFTY the worst case is ten to
+/// twenty-five points, so a floor of five is the tightest level that survives
+/// contact with a real fill.
+///
+/// # Stated, not derived, and that is the honest label
+///
+/// This is domain knowledge about how the instrument fills. No amount of
+/// arithmetic over the bars produces "five points" — the median bar range
+/// produces a RESOLUTION, which is a different quantity, and using it as a floor
+/// was the mistake this replaces.
+const STOP_FLOOR_POINTS: i64 = 5;
+
+/// How far apart the stop rungs sit, in index points.
+///
+/// Two and a half points, for the same reason the floor is five: it is the
+/// coarsest step that still distinguishes two stops a trader would place
+/// differently, and the finest that does not multiply the grid with levels
+/// nobody would name. Nine rungs from five to twenty-five.
+const STOP_STEP_POINTS_HALVES: i64 = 5;
+
+/// The stop ladder in ppm: `5, 7.5, 10 … 25` points, at the measured price.
+///
+/// # Why the stops no longer share the general step
+///
+/// Every axis used one derived step, which made the stop ladder a function of
+/// the instrument's median bar range. That is the right quantity for a
+/// RESOLUTION and the wrong one for a FLOOR: it reached below a point on a quiet
+/// instrument, and those rungs are unfillable on one-minute execution.
+///
+/// The stop is the one axis with a real physical floor, so it gets its own
+/// ladder. Targets and trails keep the derived step, because there is no reason
+/// a target cannot be far and every reason to resolve it finely.
+///
+/// # Halves without floating point
+///
+/// Points are counted in HALVES so 7.5 is expressible in integers — §7 keeps
+/// floats out of anything compared, and a ladder printed beside a rule is
+/// compared by the person reading it.
+fn stop_ladder_ppm(bars: &[indicators::Candle]) -> Vec<i64> {
+    let reference = reference_price(bars);
+    let cap_halves = max_stop_points(bars).saturating_mul(2);
+    let floor_halves = STOP_FLOOR_POINTS.saturating_mul(2);
+    let mut out: Vec<i64> = Vec::with_capacity(16);
+    let mut halves = floor_halves;
+    while halves <= cap_halves {
+        // `points_to_ppm_at` takes whole points, so the halves are converted by
+        // taking the ppm of a whole point and halving it -- exact in integers.
+        let ppm = points_to_ppm_at(halves, reference) / 2;
+        if ppm > 0 {
+            out.push(ppm);
+        }
+        halves = halves.saturating_add(STOP_STEP_POINTS_HALVES);
+    }
+    // A cap below the floor leaves nothing; one rung at the floor is still a
+    // ladder and refusing here would drop the whole grid for a quiet
+    // instrument.
+    if out.is_empty() {
+        out.push(points_to_ppm_at(STOP_FLOOR_POINTS, reference).max(1));
+    }
+    out
+}
+
 fn grid_step_ppm(bars: &[indicators::Candle]) -> i64 {
     // NO PRICE, NO POINTS, NO REFERENCE -- THE LADDER IS SIZED IN THE UNIT THE
     // ENGINE ALREADY MEASURES IN.
@@ -1683,7 +1761,7 @@ const _GRID_COST_TABLE: () = ();
 ///
 /// # Why this stopped being a constant
 ///
-/// It was `625`, then `12_393`, each pinned to `grid_rungs()` by a `const`
+/// It was `625`, then `12_393`, each pinned to `grid_rungs(bars)` by a `const`
 /// assertion — a good guard, and it forced the two to move together. But the
 /// rung count is the REACH: the ladder is stepped at half an index point, so
 /// four rungs stop at 2.0 points and eight reach 4.0, and no fixed number is
@@ -1694,8 +1772,9 @@ const _GRID_COST_TABLE: () = ();
 ///
 /// So the width follows the depth at runtime and cannot drift from it, which is
 /// what the assertion was protecting.
-fn grid_variants() -> u64 {
-    u64::try_from(grid::variants(grid_rungs(), grid_rungs(), grid_rungs())).unwrap_or(u64::MAX)
+fn grid_variants(bars: &[indicators::Candle]) -> u64 {
+    let n = grid_rungs(bars);
+    u64::try_from(grid::variants(n, n, n)).unwrap_or(u64::MAX)
 }
 
 /// How many rungs each exit ladder carries — the REACH, in half-points.
@@ -1721,13 +1800,41 @@ fn grid_variants() -> u64 {
 /// rung count whose full-search cost was actually measured on this machine;
 /// it is a starting point, not a ceiling, and nothing in the engine treats it
 /// as one.
-fn grid_rungs() -> usize {
-    const DEFAULT: usize = 8;
-    std::env::var("BRUTEX_GRID_RUNGS")
+fn grid_rungs(bars: &[indicators::Candle]) -> usize {
+    // THE REACH IS THE CAP, SO THE RUNG COUNT FOLLOWS IT.
+    //
+    // # The contradiction this closes
+    //
+    // `max_stop_points` says the stop may reach twenty-five points. The rung
+    // count was a fixed eight, and the step is derived from the bars, so the
+    // ladder's actual reach was `8 * step` -- whatever that happened to be.
+    // On 15-minute NIFTY the step derives to about 3.75 points, so eight rungs
+    // reached thirty and blew past the cap; on a quiet instrument the same
+    // eight would have stopped far short of it.
+    //
+    // Either way the reach was an ACCIDENT of two numbers that never spoke to
+    // each other. The cap is the statement about how far a stop may sit, the
+    // step is the resolution the data supports, and the rung count is simply
+    // one divided by the other.
+    //
+    // # An override still exists, and it overrides the REACH
+    //
+    // `BRUTEX_GRID_RUNGS` sets the count outright for an operator who wants a
+    // deeper grid than the cap implies -- the cost table on `Levels::rungs`
+    // says what that buys and what it costs. Absent it, nothing here is chosen.
+    if let Some(n) = std::env::var("BRUTEX_GRID_RUNGS")
         .ok()
         .and_then(|raw| raw.parse::<usize>().ok())
         .filter(|&n| n > 0)
-        .unwrap_or(DEFAULT)
+    {
+        return n;
+    }
+    let reference = reference_price(bars);
+    let step_points = ppm_to_points_at(grid_step_ppm(bars), reference).max(1);
+    let cap = max_stop_points(bars);
+    // At least two rungs, so a ladder always offers a tighter and a looser
+    // choice rather than one level dressed as a grid.
+    usize::try_from(cap / step_points).unwrap_or(2).max(2)
 }
 
 /// The strongest combination by evidence that is also **closed**.
@@ -1798,7 +1905,7 @@ fn closed_by_evidence<'a>(
 /// `sweep-stored`, which ranks on forward returns and builds no grid.
 ///
 /// It is not the whole search here. This command evaluates the chosen
-/// combination at [`grid_variants()`] stop/target/trail settings and keeps the
+/// combination at [`grid_variants(bars)`] stop/target/trail settings and keeps the
 /// best of them, and selecting a maximum over 125 cells is 125 more chances to
 /// look good by luck. None of it entered the bar printed above.
 ///
@@ -1806,18 +1913,18 @@ fn closed_by_evidence<'a>(
 ///
 /// Because the true correction is **unknown and this one is only a ceiling**.
 /// The cells share a single trade walk, so they are heavily correlated and the
-/// effective trial count is somewhere between 1 and [`grid_variants()`] —
+/// effective trial count is somewhere between 1 and [`grid_variants(bars)`] —
 /// unmeasured.
 /// Replacing the printed bar with the ceiling would reject real findings;
 /// leaving it alone accepts noise. Printing both, and saying which is which,
 /// hands the reader the range that is actually known. `CLAUDE.md` §3 rule 6
 /// asks for exactly that when a bound cannot be met, and §3 rule 1 forbids
 /// inventing the discount that would collapse the range to a point.
-fn grid_exposure(sweep: &engine::Sweep) -> String {
+fn grid_exposure(sweep: &engine::Sweep, bars: &[indicators::Candle]) -> String {
     let plain = runner::significance::effective_trials(sweep);
     // THE SAME `plain` ON BOTH SIDES OF THE SENTENCE.
     //
-    // This read `trials_with_grid(sweep, grid_variants())`, which multiplied the
+    // This read `trials_with_grid(sweep, grid_variants(bars))`, which multiplied the
     // RAW trial count while the line beside it printed the DUPLICATE-DEFLATED
     // one -- so the sentence "with N exit settings each, at most {ceiling}"
     // claimed the only difference was the grid, and the measured ratio was
@@ -1827,7 +1934,7 @@ fn grid_exposure(sweep: &engine::Sweep) -> String {
     // Passing `plain` makes the claim true by construction rather than by two
     // calls happening to agree, and `trials_with_grid` now takes a count for
     // exactly that reason.
-    let ceiling = runner::significance::trials_with_grid(plain, grid_variants());
+    let ceiling = runner::significance::trials_with_grid(plain, grid_variants(bars));
     let mut out = String::with_capacity(512);
     let _ = writeln!(
         out,
@@ -1842,7 +1949,7 @@ fn grid_exposure(sweep: &engine::Sweep) -> String {
          The upper figure cannot be cleared by luck; the lower one can.",
         runner::significance::bonferroni_t(plain),
         runner::significance::bonferroni_t(ceiling),
-        width = grid_variants(),
+        width = grid_variants(bars),
     );
     out
 }
@@ -3431,6 +3538,8 @@ fn trade_and_screen(
     // rows are built from one ladder. Two ladders would let the report show a
     // variant in one table that cannot exist in the other.
     //
+    // `Levels` borrows the ladder, so it is bound before the call.
+    let stop_rungs = stop_ladder_ppm(bars);
     let exits = grid::evaluate(
         bars,
         column,
@@ -3438,10 +3547,11 @@ fn trade_and_screen(
         horizon,
         side,
         grid::Levels {
-            rungs: grid_rungs(),
+            rungs: grid_rungs(bars),
             step_ppm: Some(grid_step_ppm(bars)),
             forced: (rules.max_mae_ppm > 0).then_some(rules.max_mae_ppm),
             ratios: true,
+            stops_ppm: &stop_rungs,
         },
     );
     // THE CASCADE, NOT ONE POLICY. A single screen answers "0 of 21 satisfy
@@ -3462,9 +3572,14 @@ fn trade_and_screen(
 /// Split from [`audit_bars`] to keep it under `clippy::too_many_lines`. One
 /// idea: everything a reader needs BEFORE a number, so no figure below arrives
 /// without the sample size and the exposure that qualify it.
-fn traded_preamble(first: &runner::rank::Scored, sweep: &engine::Sweep, sessions: usize) -> String {
+fn traded_preamble(
+    first: &runner::rank::Scored,
+    sweep: &engine::Sweep,
+    sessions: usize,
+    bars: &[indicators::Candle],
+) -> String {
     let mut out = traded_line(first);
-    out.push_str(&grid_exposure(sweep));
+    out.push_str(&grid_exposure(sweep, bars));
     out.push_str(&sample_warning(sessions));
     out
 }
@@ -3658,7 +3773,7 @@ fn stop_rungs_in_points(bars: &[indicators::Candle]) -> Vec<i64> {
     let reference = reference_price(bars);
     let per_point = points_to_ppm_at(1, reference).max(1);
     let step = grid_step_ppm(bars);
-    (1..=grid_rungs())
+    (1..=grid_rungs(bars))
         .filter_map(|i| i64::try_from(i).ok())
         .map(|i| {
             let ppm = step.saturating_mul(i);
@@ -4048,6 +4163,9 @@ fn screen(
     rules: Rules,
 ) -> String {
     let mut rows: Vec<Screened> = Vec::with_capacity(by_evidence.len().min(screen_cap()));
+    // Built ONCE for the whole screen: the same ladder judges every combination,
+    // and `Levels` only borrows it.
+    let stop_rungs = stop_ladder_ppm(bars);
     for (rank, scored) in by_evidence.iter().take(screen_cap()).enumerate() {
         let side = side_of_evidence(scored);
         // THE OPERATOR'S OWN STOP IS TRIED, NOT MERELY USED AS A FILTER.
@@ -4076,10 +4194,11 @@ fn screen(
             horizon,
             side,
             grid::Levels {
-                rungs: grid_rungs(),
+                rungs: grid_rungs(bars),
                 step_ppm: Some(grid_step_ppm(bars)),
                 forced: (rules.max_mae_ppm > 0).then_some(rules.max_mae_ppm),
                 ratios: true,
+                stops_ppm: &stop_rungs,
             },
         );
         // THE BEST VARIANT THAT SATISFIES THE RULES, falling back to the best
@@ -5338,6 +5457,7 @@ fn audit_bars(
         first,
         &outcome.sweep,
         session_index(&bars).len(),
+        &bars,
     ));
 
     // THE SIDE IS READ OFF THE EVIDENCE, NOT ASSUMED.

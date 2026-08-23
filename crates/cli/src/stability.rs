@@ -279,9 +279,12 @@ pub fn at(rows: &[TradeRow], grain: Grain) -> Stability {
 }
 
 #[cfg(test)]
-#[expect(
+#[allow(
     clippy::expect_used,
-    reason = "the exception every test module in this workspace takes"
+    reason = "the exception every test module in this workspace takes. `allow` \
+              and not `expect`: the fixtures here are plain constructors and \
+              may legitimately stop needing an `expect` at all, which would \
+              make an expectation unfulfilled and fail the build for tidying."
 )]
 mod tests {
     use super::{Grain, at, year_month};
