@@ -6441,14 +6441,20 @@ fn audit_bars(
     // being fixed for the audit's own trade. It was not fixed here, which is the
     // shape of most of what this session found: one call site corrected and its
     // sibling left behind.
-    let folds = runner::validate::walk_forward(
-        &bars,
-        horizon,
-        walk_forward_splits(bars.len()),
-        direction_of(side_of_evidence(first)),
-        &Sweeper::new(ladder),
-        move || fresh,
-    );
+    // BOTH WINDOW SHAPES, because neither answers the other's question.
+    //
+    // Anchored grows from bar zero: "does this edge survive as history
+    // accumulates". Rolling slides a fixed width: "does it survive on RECENT
+    // history alone". A strategy that passes anchored and fails rolling has an
+    // edge that DECAYED -- the early years carried it, and the growing window
+    // kept them in scope long after they stopped being informative. Neither
+    // shape can show that alone, which is the whole reason both run.
+    //
+    // The cost is one extra walk-forward: `walk_forward_splits` sweeps, which
+    // is two to twenty on any real span. That is stated rather than hidden
+    // because it is a real doubling of this stage, and an operator who does not
+    // want it should be able to see what he is paying for.
+    let (folds, rolling) = both_shapes(&bars, horizon, first, ladder, &fresh);
     // PBO, WHICH USED TO BE A `None` FOR A REASON THAT IS NOW FIXED.
     //
     // `pbo::place` ranks a fold's candidates in-sample, finds where the winner
@@ -6509,6 +6515,129 @@ fn audit_bars(
         boot,
         12,
     ));
+    out.push_str(&decay_block(&folds, &rolling));
+    out
+}
+
+/// The walk-forward in BOTH window shapes, anchored first.
+///
+/// # Why both, and what the second one costs
+///
+/// Anchored grows from bar zero: *"does this edge survive as history
+/// accumulates"*. Rolling slides a fixed width: *"does it survive on RECENT
+/// history alone"*. A strategy that passes anchored and fails rolling has an
+/// edge that DECAYED -- the early years carried it, and the growing window kept
+/// them in scope long after they stopped being informative. Neither shape can
+/// show that alone.
+///
+/// The cost is one extra walk-forward: `walk_forward_splits` sweeps, two to
+/// twenty on any real span. Stated rather than hidden, because it is a real
+/// doubling of this stage.
+///
+/// Split from `audit_bars` to keep it under `clippy::too_many_lines`, and
+/// because it is one idea.
+fn both_shapes(
+    bars: &[indicators::Candle],
+    horizon: Horizon,
+    first: &runner::rank::Scored,
+    ladder: engine::Ladder,
+    // BY REFERENCE, then copied per fold inside the closure. `Evaluator` is
+    // 1,776 bytes and `Copy`, so passing it by value moves that once per call
+    // for no reason -- the closure needs its own copy either way, and it takes
+    // one from the borrow.
+    fresh: &Evaluator,
+) -> (runner::validate::Validated, runner::validate::Validated) {
+    let splits = walk_forward_splits(bars.len());
+    let side = direction_of(side_of_evidence(first));
+    let sweeper = Sweeper::new(ladder);
+    let anchored = runner::validate::walk_forward_shaped(
+        bars,
+        horizon,
+        splits,
+        side,
+        &sweeper,
+        &mut || *fresh,
+        runner::split::Shape::Anchored,
+    );
+    let rolling = runner::validate::walk_forward_shaped(
+        bars,
+        horizon,
+        splits,
+        side,
+        &sweeper,
+        &mut || *fresh,
+        runner::split::Shape::Rolling,
+    );
+    (anchored, rolling)
+}
+
+/// The two window shapes side by side, and what their disagreement means.
+///
+/// # Why a comparison and not a second table
+///
+/// `audit::walk_forward` already renders one `Validated` in full, and printing
+/// a second identical block would leave the reader to diff twenty rows by eye
+/// for the one fact that matters: whether the edge survived on RECENT history
+/// as well as on all of it.
+///
+/// The anchored shape trains from bar zero every time, so its later folds carry
+/// years that may have stopped being informative. The rolling shape slides a
+/// fixed width and cannot. **Anchored passing while rolling fails is edge
+/// decay**, and it is invisible in either report alone.
+fn decay_block(
+    anchored: &runner::validate::Validated,
+    rolling: &runner::validate::Validated,
+) -> String {
+    let mut out = String::from("\nWINDOW SHAPE -- did the edge survive on RECENT history too\n");
+    let _ = writeln!(
+        out,
+        "  {:<12}{:>8}{:>10}{:>12}{:>14}",
+        "shape", "folds", "decided", "positive", "train bars"
+    );
+    for (shape, v) in [("anchored", anchored), ("rolling", rolling)] {
+        // `held_up` and not a hand-rolled comparison: it already encodes what
+        // counts as a fold that survived -- an exit total above zero where one
+        // exists, and the worst-case-positive test otherwise -- and a second
+        // definition beside it would drift from the audit table above.
+        let positive = v.held_up();
+        let width = v.folds.last().map_or(0, |f| f.train_bars);
+        let _ = writeln!(
+            out,
+            "  {:<12}{:>8}{:>10}{:>12}{:>14}",
+            shape,
+            v.folds.len(),
+            v.decided(),
+            format!("{positive}/{}", v.folds.len()),
+            width
+        );
+    }
+    let anchored_positive = anchored.held_up();
+    let rolling_positive = rolling.held_up();
+    let _ = writeln!(
+        out,
+        "\n  {}",
+        if anchored.folds.is_empty() || rolling.folds.is_empty() {
+            "One shape produced no folds, so the two cannot be compared. The \
+             slice was too short to split."
+        } else if anchored_positive > rolling_positive {
+            "EDGE DECAY. The anchored windows held up better than the rolling \
+             ones, which means the early\n  years are carrying the result and \
+             recent history alone does not reproduce it."
+        } else if rolling_positive > anchored_positive {
+            "The rolling windows held up BETTER, which means recent history is \
+             the stronger half and the\n  early years are diluting the anchored \
+             figure."
+        } else {
+            "Both shapes agree, so the result does not depend on how far back \
+             the training window reaches."
+        }
+    );
+    let _ = writeln!(
+        out,
+        "  A rolling window warms its evaluator INSIDE itself, so its first \
+         bars build state and are not\n  swept. That makes it a harsher test \
+         than the anchored shape, not a laxer one."
+    );
     out
 }
 

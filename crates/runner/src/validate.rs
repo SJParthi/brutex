@@ -50,7 +50,7 @@ use indicators::evaluator::Evaluator;
 use vocab::ConditionMask;
 
 use crate::outcome::Horizon;
-use crate::split::anchored_folds;
+use crate::split::Shape;
 use crate::trade::{Trades, walk};
 use costs::fill::Direction;
 
@@ -424,6 +424,54 @@ fn scale_min_hits(whole_min_hits: u64, train: usize, whole: usize) -> u64 {
 ///
 /// UNVERIFIED as a measured figure: no bench row covers this yet.
 #[must_use]
+pub fn walk_forward(
+    bars: &[Candle],
+    horizon: Horizon,
+    splits: usize,
+    direction: Direction,
+    sweeper: &crate::Sweeper,
+    mut evaluator: impl FnMut() -> Evaluator,
+) -> Validated {
+    walk_forward_shaped(
+        bars,
+        horizon,
+        splits,
+        direction,
+        sweeper,
+        &mut evaluator,
+        Shape::Anchored,
+    )
+}
+
+/// A walk-forward in either window shape.
+///
+/// # Why the shape was hardcoded, and what wiring it required
+///
+/// `rolling_folds` existed, was tested, and had **no caller** — because this
+/// function took `bars.get(..train_end)`, a prefix from bar zero. For an
+/// anchored fold that is exactly right: its window starts at zero. For a
+/// rolling one it silently discards the whole point, sweeping everything from
+/// the beginning and producing an anchored result under a rolling name.
+///
+/// So the training slice is now the fold's OWN range, `start..end`, and for the
+/// anchored shape `start` is zero and nothing changes.
+///
+/// # The warm-up, stated rather than glossed
+///
+/// `indicators::Evaluator` is stateful, so a window beginning at bar 100,000
+/// warms up INSIDE itself: its first bars build EMA state and are not swept.
+/// `Column::first_swept` records exactly where sweeping began, so the cost is
+/// visible in the outcome rather than hidden.
+///
+/// `rolling_folds`' own comment describes a better arrangement — feed the
+/// evaluator from bar zero while sweeping only from `warm` — and that needs an
+/// entry point which does not exist. Building it means a `Column` that folds
+/// over one range and admits over another, in `indicators`, which
+/// `docs/10-shared-core.md` shares with `tickvault`. It is not done here.
+///
+/// What this shape does measure is a fair question in its own right: *if the
+/// system were deployed today with only this window of history, would it hold
+/// up.* That is a harsher test than warming from 2019, not a laxer one.
 #[expect(
     clippy::too_many_lines,
     reason = "one fold is one procedure: sweep, close, rank jointly, then judge \
@@ -434,22 +482,25 @@ fn scale_min_hits(whole_min_hits: u64, train: usize, whole: usize) -> u64 {
               level-less out-of-sample walk -- came from those two halves \
               drifting apart in a reader's head."
 )]
-pub fn walk_forward(
+pub fn walk_forward_shaped(
     bars: &[Candle],
     horizon: Horizon,
     splits: usize,
     direction: Direction,
     sweeper: &crate::Sweeper,
-    mut evaluator: impl FnMut() -> Evaluator,
+    evaluator: &mut impl FnMut() -> Evaluator,
+    shape: Shape,
 ) -> Validated {
     let mut out = Validated::default();
 
-    for (index, fold) in anchored_folds(bars.len(), horizon, splits)
+    for (index, fold) in shape
+        .folds(bars.len(), horizon, splits)
         .into_iter()
         .enumerate()
     {
-        let train_end = fold.train.0.end;
-        let Some(train) = bars.get(..train_end) else {
+        // THE FOLD'S OWN RANGE, not a prefix. See the doc block above: taking
+        // `..end` made every rolling fold anchored.
+        let Some(train) = bars.get(fold.train.0.clone()) else {
             continue;
         };
         // THE THRESHOLD IS RESCALED TO THIS FOLD, AND UNTIL NOW IT WAS NOT.
@@ -801,7 +852,11 @@ pub fn walk_forward(
 
         out.folds.push(FoldResult {
             index,
-            train_bars: train_end,
+            // The window's LENGTH, not its end index. Under the anchored shape
+            // the two are equal because the window starts at zero; under the
+            // rolling one they are not, and reporting the end index would say a
+            // sliding window grew.
+            train_bars: train.len(),
             purged: fold.purged,
             test_bars: fold.test.len(),
             considered,
@@ -849,7 +904,7 @@ fn restricted(column: &Column, from: usize) -> Column {
     reason = "the exception every test module in this workspace takes."
 )]
 mod tests {
-    use super::{Validated, walk_forward};
+    use super::{Shape, Validated, walk_forward, walk_forward_shaped};
     use crate::Sweeper;
     use crate::outcome::Horizon;
     use costs::fill::Direction;
@@ -874,6 +929,118 @@ mod tests {
 
     fn sweeper() -> Sweeper {
         Sweeper::new(Ladder::with_min_hits(120).with_ceiling(20_000))
+    }
+
+    /// A ROLLING walk-forward slides; an anchored one grows.
+    ///
+    /// # The defect this closes, and it made a whole function unreachable
+    ///
+    /// `split::rolling_folds` was written, tested against its fold ranges, and
+    /// had **no caller** — because `walk_forward` took `bars.get(..train_end)`,
+    /// a prefix from bar zero. Handing it a rolling fold discarded the fold's
+    /// `start` and swept everything from the beginning: an anchored result
+    /// wearing a rolling name, with nothing in the output to say so.
+    ///
+    /// `train_bars` is what exposes it. Under the anchored shape the windows
+    /// must GROW, one block per fold. Under the rolling shape they must stay
+    /// the same width. If the wiring ever regresses to a prefix, the rolling
+    /// windows grow and this fails.
+    #[test]
+    fn a_rolling_walk_forward_slides_its_window_and_an_anchored_one_grows() {
+        let bars = crate::synthetic::sessions(12);
+
+        let anchored = walk_forward_shaped(
+            &bars,
+            h(15),
+            3,
+            Direction::Long,
+            &sweeper(),
+            &mut evaluator,
+            Shape::Anchored,
+        );
+        let rolling = walk_forward_shaped(
+            &bars,
+            h(15),
+            3,
+            Direction::Long,
+            &sweeper(),
+            &mut evaluator,
+            Shape::Rolling,
+        );
+
+        assert_eq!(anchored.folds.len(), 3, "three splits, three folds");
+        assert_eq!(rolling.folds.len(), 3, "and the same for rolling");
+
+        // ANCHORED GROWS.
+        for pair in anchored.folds.windows(2) {
+            let (Some(a), Some(b)) = (pair.first(), pair.get(1)) else {
+                continue;
+            };
+            assert!(
+                b.train_bars > a.train_bars,
+                "an anchored window must GROW: fold {} trained on {} bars and \
+                 fold {} on {}",
+                a.index,
+                a.train_bars,
+                b.index,
+                b.train_bars
+            );
+        }
+
+        // ROLLING HOLDS ITS WIDTH.
+        for pair in rolling.folds.windows(2) {
+            let (Some(a), Some(b)) = (pair.first(), pair.get(1)) else {
+                continue;
+            };
+            assert_eq!(
+                a.train_bars, b.train_bars,
+                "a rolling window must hold its WIDTH: fold {} trained on {} \
+                 bars and fold {} on {} -- unequal widths mean the fold's start \
+                 was discarded and this is an anchored run under another name",
+                a.index, a.train_bars, b.index, b.train_bars
+            );
+        }
+
+        // AND THE TWO MUST DIFFER, or the shapes are not doing different work.
+        let last_anchored = anchored.folds.last().map(|f| f.train_bars);
+        let last_rolling = rolling.folds.last().map(|f| f.train_bars);
+        assert_ne!(
+            last_anchored, last_rolling,
+            "by the final fold the anchored window has grown past the rolling \
+             one; equal widths mean one shape silently became the other"
+        );
+    }
+
+    /// The default entry point is still ANCHORED, byte for byte.
+    ///
+    /// `walk_forward` is called from `cli` and from the audit, and its numbers
+    /// are recorded in the ledger. Adding a shape must not have moved them --
+    /// §3 rule 5 makes a rerun byte-identical, and a silent change of window
+    /// shape would break that without any signal at all.
+    #[test]
+    fn the_default_walk_forward_is_still_anchored() {
+        let bars = crate::synthetic::sessions(12);
+        let plain = walk_forward(&bars, h(15), 3, Direction::Long, &sweeper(), evaluator);
+        let shaped = walk_forward_shaped(
+            &bars,
+            h(15),
+            3,
+            Direction::Long,
+            &sweeper(),
+            &mut evaluator,
+            Shape::Anchored,
+        );
+
+        assert_eq!(
+            plain.folds.len(),
+            shaped.folds.len(),
+            "the default must produce the same folds it always did"
+        );
+        for (a, b) in plain.folds.iter().zip(shaped.folds.iter()) {
+            assert_eq!(a.train_bars, b.train_bars, "same training window");
+            assert_eq!(a.test_bars, b.test_bars, "same test window");
+            assert_eq!(a.considered, b.considered, "same candidates weighed");
+        }
     }
 
     #[test]

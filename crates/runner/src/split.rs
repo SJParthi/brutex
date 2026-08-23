@@ -124,6 +124,50 @@ pub fn purged_folds(bars: usize, horizon: Horizon, folds: usize) -> Vec<Fold> {
     out
 }
 
+/// Which way a walk-forward's training window moves.
+///
+/// # Two questions, not one preference
+///
+/// [`anchored_folds`] grows the window: every fold trains on everything from
+/// bar zero. It answers *"does this edge survive as history accumulates"*.
+///
+/// [`rolling_folds`] slides a fixed-width window. It answers *"does this edge
+/// survive on RECENT history alone"* — which is the harder question and the one
+/// an operator describing *"2021 training, 2022 testing, then 2022 training and
+/// 2023 testing"* is actually asking.
+///
+/// A strategy that passes anchored and fails rolling has an edge that DECAYED:
+/// the early years carried it, and the accumulating window kept them in scope
+/// long after they stopped being informative. Neither shape can show that on
+/// its own, which is why the report runs both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shape {
+    /// Expanding window, always from bar zero.
+    Anchored,
+    /// Fixed-width sliding window.
+    Rolling,
+}
+
+impl Shape {
+    /// The folds this shape produces.
+    #[must_use]
+    pub fn folds(self, bars: usize, horizon: Horizon, splits: usize) -> Vec<Fold> {
+        match self {
+            Self::Anchored => anchored_folds(bars, horizon, splits),
+            Self::Rolling => rolling_folds(bars, horizon, splits),
+        }
+    }
+
+    /// How the shape prints in a report.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Anchored => "anchored",
+            Self::Rolling => "rolling",
+        }
+    }
+}
+
 /// Folds whose training window is a FIXED WIDTH that slides forward.
 ///
 /// # The question this asks that [`anchored_folds`] cannot
