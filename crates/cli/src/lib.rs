@@ -1336,7 +1336,7 @@ fn audit_keep() -> usize {
 /// Named rather than repeated as a bare `4` at the `grid::evaluate` call site,
 /// because [`GRID_VARIANTS`] is derived from it and the two drifting apart would
 /// make the printed exposure describe a grid that was not run.
-const GRID_RUNGS: usize = 4;
+const GRID_RUNGS: usize = 8;
 
 /// The exit grid's step, in ppm — ONE INDEX POINT, and the engine chooses it.
 ///
@@ -1419,9 +1419,9 @@ const _GRID_COST_TABLE: () = ();
 /// deriving a `u64` from that `usize` inside a `const` is not expressible — but a
 /// compile-time equality is. A stale figure here would make the printed exposure
 /// charge for a grid that was never run.
-const GRID_VARIANTS: u64 = 625;
+const GRID_VARIANTS: u64 = 12_393;
 const _: () = assert!(
-    grid::variants(GRID_RUNGS, GRID_RUNGS, GRID_RUNGS) == 625,
+    grid::variants(GRID_RUNGS, GRID_RUNGS, GRID_RUNGS) == 12_393,
     "GRID_VARIANTS must equal grid::variants(GRID_RUNGS, ..); the exit-grid \
      exposure would otherwise charge for a grid that was not evaluated"
 );
