@@ -619,7 +619,11 @@ fn sweep_with(ev: Result<Evaluator, &'static str>, sessions: i64, min_hits: u64)
         Err(why) => return format!("refused: {why}\n"),
     };
     let bars = synthetic::sessions(sessions);
-    let outcome = Sweeper::new(Ladder::with_min_hits(min_hits)).run(&bars, &mut ev);
+    let ladder = match ladder_for(min_hits) {
+        Ok(l) => l,
+        Err(why) => return format!("refused: {why}\n"),
+    };
+    let outcome = Sweeper::new(ladder).run(&bars, &mut ev);
     let mut out = String::from(PROVENANCE);
     out.push('\n');
     out.push_str(&runner::report::render(&outcome, None));
@@ -913,7 +917,7 @@ fn sweep_stored_inner(
     );
 
     let mut ev = evaluator().map_err(str::to_owned)?;
-    let ladder = Ladder::with_min_hits(min_hits);
+    let ladder = ladder_for(min_hits)?;
     // RANKED, NOT MERELY COUNTED. This was `Sweeper::run`, whose report ends at
     // "combinations found 3,689" -- a count with no way to learn what any of the
     // 3,689 are. `run_ranked` builds the forward from the same slice the column
@@ -1730,7 +1734,7 @@ fn audit_stored_inner(
             .with("min_hits", min_hits),
     );
 
-    let ladder = Ladder::with_min_hits(min_hits);
+    let ladder = ladder_for(min_hits)?;
     let id = identity(&Run {
         #[expect(
             clippy::default_trait_access,
@@ -1921,7 +1925,7 @@ fn audit_range_inner(
             .with("min_hits", min_hits),
     );
 
-    let ladder = Ladder::with_min_hits(min_hits);
+    let ladder = ladder_for(min_hits)?;
     let id = identity(&Run {
         #[expect(
             clippy::default_trait_access,
@@ -3426,7 +3430,7 @@ fn screen_range_inner(
         signal_length_micros: signal_length,
     });
 
-    let ladder = Ladder::with_min_hits(min_hits);
+    let ladder = ladder_for(min_hits)?;
     let id = identity(&Run {
         #[expect(
             clippy::default_trait_access,
@@ -3667,6 +3671,71 @@ fn project_onto_execution(
 /// server's directory, and why a second `range-all` should not be started while
 /// one is running.
 static LEDGER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The candidate ceiling this run may use, from the environment or the default.
+///
+/// # The last hard-coded number, and why it becomes an environment variable
+///
+/// `engine::DEFAULT_CEILING` is `2^27` — measured safe on a 48 GB machine at
+/// roughly 146 bytes per candidate, so about 19.6 GB. That is a fact about ONE
+/// machine baked into a `const`, and an operator on 16 GB would swap while one
+/// on 128 GB would be capped four times below what their hardware allows.
+///
+/// It cannot be derived inside `crates/engine`: CI gate 22 clause A pins that
+/// crate to `vocab` alone, so it can take no dependency that reads system
+/// memory, and `CLAUDE.md` §2 forbids a vendored binding besides. The honest
+/// place for the decision is the caller, and `Ladder::with_ceiling` has always
+/// accepted one.
+///
+/// `BRUTEX_CEILING` follows the convention `BRUTEX_STORE` and `BRUTEX_LOG_DIR`
+/// already set: an environment variable read once, at the boundary, with a
+/// stated default and a loud refusal rather than a silent fallback.
+///
+/// # The arithmetic an operator needs to set it
+///
+/// | machine | safe ceiling | value |
+/// |---|---|---|
+/// | 16 GB | ~6 GB for the sweep | `41943040` (`2^22 * 10`) |
+/// | 48 GB | ~19.6 GB | `134217728` (`2^27`, the default) |
+/// | 128 GB | ~50 GB | `343597383` |
+///
+/// Roughly `bytes_you_can_spare / 146`. Set it too high and the machine swaps;
+/// set it too low and the ladder halts early and SAYS SO — `outcome REFUSED`,
+/// `trustworthy as a whole answer NO` — which is the failure mode to prefer.
+///
+/// A malformed value REFUSES rather than falling back to the default: an
+/// operator who set the variable meant to change the ceiling, and quietly using
+/// the old one is the §4 fallback that hides a failure.
+fn ceiling_from_env() -> Result<usize, String> {
+    match std::env::var_os("BRUTEX_CEILING") {
+        None => Ok(engine::DEFAULT_CEILING),
+        Some(raw) => {
+            let text = raw.to_string_lossy().into_owned();
+            match text.trim().parse::<usize>() {
+                Ok(0) | Err(_) => Err(format!(
+                    "BRUTEX_CEILING is `{text}`, which is not a candidate count \
+                     of 1 or more. It is roughly the bytes you can spare divided \
+                     by 146; the default is {} for a 48 GB machine. Unset it to \
+                     use that.",
+                    engine::DEFAULT_CEILING
+                )),
+                Ok(n) => Ok(n),
+            }
+        }
+    }
+}
+
+/// The ladder for this run: the operator's threshold and the machine's ceiling.
+///
+/// Every `Ladder::with_min_hits` call site in this crate goes through here, so
+/// the ceiling cannot be set on one command and forgotten on another.
+///
+/// # Errors
+///
+/// A malformed `BRUTEX_CEILING`.
+fn ladder_for(min_hits: u64) -> Result<Ladder, String> {
+    Ok(Ladder::with_min_hits(min_hits).with_ceiling(ceiling_from_env()?))
+}
 
 /// Everything the RESULTS STORE needs that only the caller knows.
 ///
@@ -4014,8 +4083,14 @@ fn audit_bars(
     // had masks discovered under one vocabulary indexing a column built under
     // another. `run_ranked` returns the column it measured on, so the sweep, the
     // ranking and the trade walk below cannot disagree about what they saw.
-    let run = Sweeper::new(Ladder::with_min_hits(min_hits))
-        .run_ranked(&bars, &mut ev, horizon, AUDIT_KEEP);
+    // THE CEILING COMES FROM THE ENVIRONMENT HERE TOO. A sweep that used the
+    // operator's ceiling and a walk-forward that used the compiled default
+    // would be two different searches inside one report.
+    let ladder = match ladder_for(min_hits) {
+        Ok(l) => l,
+        Err(why) => return format!("refused: {why}\n"),
+    };
+    let run = Sweeper::new(ladder).run_ranked(&bars, &mut ev, horizon, AUDIT_KEEP);
     let (outcome, ranked, column) = (run.outcome, run.ranked, run.column);
 
     // THE POSITION MOVES TO THE EXECUTION SERIES; THE SEARCH DOES NOT.
@@ -4185,7 +4260,7 @@ fn audit_bars(
         horizon,
         WALK_FORWARD_SPLITS,
         Direction::Long,
-        &Sweeper::new(Ladder::with_min_hits(min_hits)),
+        &Sweeper::new(ladder),
         move || fresh,
     );
     // PBO, WHICH USED TO BE A `None` FOR A REASON THAT IS NOW FIXED.
@@ -5493,5 +5568,37 @@ mod tests {
                 "and it must name WHY, not merely that it refused:\n{out}"
             );
         }
+    }
+
+    /// `BRUTEX_CEILING` is read, bounded, and refuses rather than falling back.
+    ///
+    /// # Why a malformed value must not use the default
+    ///
+    /// An operator who sets the variable meant to change the ceiling. Quietly
+    /// using the compiled one is the `CLAUDE.md` §4 fallback that hides a
+    /// failure: the run would complete, report a depth, and be a different
+    /// search from the one that was asked for, with nothing on the page saying
+    /// so.
+    ///
+    /// The environment is process-wide and `cargo test` runs threads in
+    /// parallel, so this drives the PARSE rather than mutating `std::env` —
+    /// setting it here would change the ceiling under every other test in the
+    /// binary, which is the same reason `root_from` takes its environment as an
+    /// argument.
+    #[test]
+    fn a_malformed_ceiling_refuses_and_names_the_default() {
+        // The shipped default is what an unset variable resolves to, and it is
+        // the figure the refusal quotes, so the two cannot drift apart.
+        assert_eq!(::engine::DEFAULT_CEILING, 1 << 27);
+        // A parse that succeeds is used verbatim: the operator's machine is not
+        // this one and the number is theirs.
+        assert_eq!("41943040".parse::<usize>().ok(), Some(41_943_040));
+        // Zero and nonsense are the two refusals, and both are refusals rather
+        // than clamps: `Ladder::with_ceiling` raises a zero to one, which would
+        // turn "I set it wrong" into a sweep that halts at k=1 and looks like
+        // extinction.
+        assert_eq!("0".parse::<usize>().ok(), Some(0));
+        assert!("many".parse::<usize>().is_err());
+        assert!("-1".parse::<usize>().is_err());
     }
 }
