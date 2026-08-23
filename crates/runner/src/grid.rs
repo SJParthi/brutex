@@ -241,6 +241,58 @@ pub struct Cell {
     /// make me sweat"* remains a real diagnostic. It is no longer the thing a
     /// variant is chosen by.
     pub all_mae: Ppm,
+    /// The WORST adverse excursion any single trade suffered, in ppm.
+    ///
+    /// # A mean cannot answer the question an operator actually asks
+    ///
+    /// [`Self::winner_mae`] and [`Self::all_mae`] are MEANS — `adverse_won / n`
+    /// and `adverse_all / trades`. They answer *"how much did a typical trade
+    /// make me sweat"*, and that is a useful diagnostic and the wrong question
+    /// for sizing a stop.
+    ///
+    /// The question is *"did ANY trade go more than X against me"*, because a
+    /// stop is placed once and every trade must survive it. A mean of 30 ppm
+    /// across ten thousand trades is entirely consistent with one trade that
+    /// went 4,000 ppm against — and that one trade is the one that takes the
+    /// account out. An operator promised "no trade ever went beyond thirty
+    /// points" needs the MAXIMUM, and until this field there was no number in
+    /// this workspace that could be checked against that promise.
+    ///
+    /// Taken over every trade, winners included: a winner that dipped hard
+    /// before recovering would still have hit a stop placed under it.
+    pub worst_mae: Ppm,
+    /// Sum of every PROFITABLE round trip, in paisa. `TradingView`'s *gross
+    /// profit*.
+    ///
+    /// Kept separately from [`Self::pessimistic`] because a net total cannot be
+    /// decomposed: ₹10,000 net is a different proposition from ₹110,000 gross
+    /// against ₹100,000 of losses, and the second is the one that fails the
+    /// moment costs move.
+    pub gross_win: i64,
+    /// Sum of every LOSING round trip, in paisa, as a NEGATIVE number.
+    ///
+    /// With [`Self::gross_win`] this gives the profit factor —
+    /// `gross_win / |gross_loss|` — which is the single figure a strategy report
+    /// is usually judged on and which no field here could previously produce.
+    pub gross_loss: i64,
+    /// The largest single WINNING round trip, in paisa.
+    ///
+    /// The counterpart of [`Self::worst_trade`]. A total carried by one
+    /// enormous winner is not the same strategy as one built from ten thousand
+    /// small ones, and only these two together can tell them apart.
+    pub best_trade: i64,
+    /// Total bars held across every round trip, for the average holding time.
+    ///
+    /// Execution bars, so MINUTES once the one-minute execution layer is in
+    /// play. A strategy whose average trade runs four minutes and one whose
+    /// average runs four hours are different instruments wearing one name.
+    pub bars_held: u64,
+    /// The longest run of consecutive LOSING trades.
+    ///
+    /// What an operator has to sit through. A 60% win rate with a
+    /// twenty-two-loss streak inside it is not tradeable by a human, and the
+    /// win rate alone cannot show that.
+    pub max_losing_streak: u32,
     /// The single worst round trip, in paisa, under pessimistic fills.
     ///
     /// **Zero when nothing lost.** The tightest stop that would have been
@@ -258,6 +310,69 @@ pub struct Cell {
 }
 
 impl Cell {
+    /// Winning trades as a percentage, in hundredths. `6042` reads 60.42%.
+    ///
+    /// Integer, in hundredths, for the reason `CLAUDE.md` §7 gives everywhere
+    /// else: a ratio that is compared must not be a float.
+    #[must_use]
+    pub const fn win_rate_bp(&self) -> i64 {
+        if self.trades == 0 {
+            return 0;
+        }
+        // `cast_signed` and not `as`: a trade count past `i64::MAX` cannot arise
+        // from any slice this engine can hold, and a wrapping cast would turn an
+        // impossible count into a negative win rate rather than refusing.
+        self.wins
+            .cast_signed()
+            .saturating_mul(10_000)
+            .saturating_div(self.trades.cast_signed())
+    }
+
+    /// Gross profit over gross loss, in hundredths. `250` reads 2.50.
+    ///
+    /// **The figure a strategy report is usually judged on.** Above 1.00 the
+    /// winners outweigh the losers; below it they do not, whatever the net total
+    /// says on a lucky sample.
+    ///
+    /// Returns [`i64::MAX`] when there were no losing trades at all — a real
+    /// answer on a small sample and not a division to make.
+    #[must_use]
+    pub const fn profit_factor_bp(&self) -> i64 {
+        let lost = self.gross_loss.saturating_neg();
+        if lost <= 0 {
+            return i64::MAX;
+        }
+        self.gross_win.saturating_mul(100) / lost
+    }
+
+    /// Mean profit of the WINNING trades, in paisa.
+    #[must_use]
+    pub const fn avg_win(&self) -> i64 {
+        if self.wins == 0 {
+            return 0;
+        }
+        self.gross_win.saturating_div(self.wins.cast_signed())
+    }
+
+    /// Mean loss of the LOSING trades, in paisa. Negative.
+    #[must_use]
+    pub const fn avg_loss(&self) -> i64 {
+        let losers = self.trades.saturating_sub(self.wins);
+        if losers == 0 {
+            return 0;
+        }
+        self.gross_loss.saturating_div(losers.cast_signed())
+    }
+
+    /// Mean holding time, in execution bars — minutes under the 1-minute layer.
+    #[must_use]
+    pub const fn avg_bars_held(&self) -> u64 {
+        if self.trades == 0 {
+            return 0;
+        }
+        self.bars_held / self.trades
+    }
+
     /// What a winner ran, over what **every** trade cost in adverse excursion.
     ///
     /// The precision of the setup as a single number, in hundredths — integers
@@ -1035,6 +1150,8 @@ fn one_variant(
         ..Cell::default()
     };
     let mut open_until: Option<usize> = None;
+    // Reset to zero by every winner, so it measures a RUN and not a total.
+    let mut losing_streak: u32 = 0;
     let mut adverse_on_winners: i64 = 0;
     let mut adverse_on_all: i64 = 0;
     let mut gain_on_winners: i64 = 0;
@@ -1136,6 +1253,8 @@ fn one_variant(
         // fixture, which is not the same as being ordered.
         let (pess, opt) = (pess.min(opt), pess.max(opt));
 
+        tally_trade(&mut cell, pess, pess_off, &mut losing_streak);
+
         cell.trades = cell.trades.saturating_add(1);
         cell.pessimistic = cell.pessimistic.saturating_add(pess);
         cell.optimistic = cell.optimistic.saturating_add(opt);
@@ -1152,6 +1271,12 @@ fn one_variant(
         let exit = c.entry.saturating_add(pess_off);
         let went_against = peak_adverse(bars, c.entry, exit, entry_price, side);
         adverse_on_all = adverse_on_all.saturating_add(went_against);
+        // THE MAXIMUM, NOT THE SUM. A stop is placed once and every trade must
+        // survive it, so the figure that decides whether a stop is survivable is
+        // the worst single excursion and not the average of ten thousand.
+        if went_against > cell.worst_mae {
+            cell.worst_mae = went_against;
+        }
 
         if pess > 0 {
             cell.wins = cell.wins.saturating_add(1);
@@ -1212,6 +1337,44 @@ const fn count_exit(cell: &mut Cell, ended: Ended) {
         Ended::Target => cell.targeted = cell.targeted.saturating_add(1),
         Ended::Time => cell.timed_out = cell.timed_out.saturating_add(1),
     }
+}
+
+/// Folds one round trip's result into the strategy-report counters.
+///
+/// # Why these are separate from the two totals
+///
+/// `pessimistic` and `optimistic` answer *how much did it make*. Every field
+/// here answers a question a net total cannot: ₹10,000 net is a different
+/// proposition from ₹110,000 gross against ₹100,000 of losses, and the second
+/// fails the moment costs move. A total carried by one enormous winner is not
+/// the same strategy as one built from ten thousand small ones. A 60% win rate
+/// with a twenty-two-loss streak inside it is not tradeable by a human.
+///
+/// All of it is accumulated on the SAME reading the total is — `pess`, the
+/// worst-case fill. Mixing a gross profit taken at the best case with a net
+/// total taken at the worst would produce a profit factor no single set of fills
+/// ever produced.
+///
+/// `streak` is carried by the caller because it measures a RUN: it is reset to
+/// zero by every winner, which a per-trade function cannot do for itself.
+const fn tally_trade(cell: &mut Cell, pess: i64, held: usize, streak: &mut u32) {
+    if pess > 0 {
+        cell.gross_win = cell.gross_win.saturating_add(pess);
+        if pess > cell.best_trade {
+            cell.best_trade = pess;
+        }
+        *streak = 0;
+    } else {
+        cell.gross_loss = cell.gross_loss.saturating_add(pess);
+        *streak = streak.saturating_add(1);
+        if *streak > cell.max_losing_streak {
+            cell.max_losing_streak = *streak;
+        }
+    }
+    // Holding time in EXECUTION bars, so minutes once the one-minute layer is in
+    // play. A strategy whose average trade runs four minutes and one whose
+    // average runs four hours are different instruments wearing one name.
+    cell.bars_held = cell.bars_held.saturating_add(held as u64);
 }
 
 /// Fold one round trip's result into the cell's two risk figures.

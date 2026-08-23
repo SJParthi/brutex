@@ -108,7 +108,7 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    list every recorded run, newest first, and
                                    name the best COMPLETE one
        cli range-all    VENDOR UNDERLYING FROM_Y FROM_M TO_Y TO_M SUPPORT_PPM
-                                   sweep the span on ALL NINE RUNGS and print one
+                                   sweep the span on ALL EIGHT INTRADAY RUNGS and
                                    table comparing them. SUPPORT_PPM is parts per
                                    million -- 200000 is 20% -- and each rung's
                                    min_hits comes from its OWN bar count, because
@@ -2625,19 +2625,185 @@ const fn min_hits_for(bars: usize, support_ppm: u64) -> u64 {
     if hits == 0 { 1 } else { hits }
 }
 
-/// Every rung this engine sweeps, coarsest question to finest.
+/// Every rung this engine SWEEPS, finest first.
 ///
-/// # Nine, and `1s` is deliberately not among them
+/// # EIGHT, and `1day` is deliberately not among them
 ///
-/// `store::path::Timeframe::KNOWN` carries a one-second rung. It is not swept
-/// here: a second-resolution span of seven years is roughly sixty times the
-/// one-minute series, and nothing in this repository has measured what that
-/// costs. `CLAUDE.md` §3 rule 6 says an unmeasured bound is not a bound, so the
-/// list is the nine an operator actually pulls rather than everything the path
-/// grammar can spell.
-const EVERY_RUNG: [&str; 9] = [
-    "1min", "2min", "3min", "5min", "10min", "15min", "30min", "60min", "1day",
+/// This engine is intraday: §1, and `outcome::AUTO_CLOSE_MINUTE` squares every
+/// position off at 15:10. A daily bar IS one whole session, so sweeping it as a
+/// signal rung produces at most one trade per day — **365 round trips in 6.75
+/// years**, measured — and every one of them acts on a condition that was not
+/// knowable until the session it describes had already closed.
+///
+/// **Daily data is an INPUT, not a rung.** The previous session's high, low and
+/// close feed `indicators::daily`, which derives PDH, PDL, the CPR band and the
+/// five pivot bands — and those are already in the vocabulary and already
+/// firing. Every one of `close_above_pdh`, `gap_down_day`, `below_cpr_bc` and
+/// `close_below_pivot_r2_band` appeared in a 15-minute sweep's own findings.
+///
+/// `Daily::from_previous_session` is fed by the ROLLOVER inside whatever series
+/// the evaluator is given, so a 15-minute sweep already carries yesterday's OHLC
+/// without a daily file being opened. Sweeping `1day` separately adds no
+/// condition the intraday rungs lack and costs a full pass to produce a sample
+/// too small to judge.
+///
+/// `1s` is absent for a different reason: a seven-year second-resolution span is
+/// roughly sixty times the one-minute series and nothing here has measured what
+/// that costs. §3 rule 6 — an unmeasured bound is not a bound.
+const EVERY_RUNG: [&str; 8] = [
+    "1min", "2min", "3min", "5min", "10min", "15min", "30min", "60min",
 ];
+
+/// The trade walk, the exit grid and the screen, for one chosen combination.
+///
+/// Split from [`audit_bars`] to keep it under `clippy::too_many_lines`, and
+/// because these three belong together: they are the only things in the whole
+/// report that run on the EXECUTION series rather than the signal one, and
+/// keeping them in one function makes that boundary visible instead of
+/// scattered.
+fn trade_and_screen(
+    bars: &[indicators::Candle],
+    column: &indicators::column::Column,
+    first: &runner::rank::Scored,
+    by_evidence: &[&runner::rank::Scored],
+    horizon: Horizon,
+) -> (runner::trade::Trades, grid::Grid, String) {
+    let side = side_of_evidence(first);
+    let taken = trade::walk(bars, column, &first.mask, horizon, direction_of(side));
+    let exits = grid::evaluate(bars, column, &first.mask, horizon, side, GRID_RUNGS);
+    // 2,000 ppm is 0.20% -- about fifty points on a 25,000 index -- and is a
+    // STATED default rather than a derived one: no document defines the right
+    // stop and nothing in the data implies one, so the number is the operator's
+    // to move rather than the engine's to invent.
+    let screened = screen(bars, column, by_evidence, horizon, 2_000);
+    (taken, exits, screened)
+}
+
+/// The three lines that precede the trade figures: which combination was taken,
+/// how much of the grid it exposed, and how large the sample is.
+///
+/// Split from [`audit_bars`] to keep it under `clippy::too_many_lines`. One
+/// idea: everything a reader needs BEFORE a number, so no figure below arrives
+/// without the sample size and the exposure that qualify it.
+fn traded_preamble(first: &runner::rank::Scored, sweep: &engine::Sweep, sessions: usize) -> String {
+    let mut out = traded_line(first);
+    out.push_str(&grid_exposure(sweep));
+    out.push_str(&sample_warning(sessions));
+    out
+}
+
+/// How many combinations the screener prices in full. Twenty-five is the number
+/// an operator asked for; each costs a 625-cell exit grid, so the bound is real
+/// work and not a display cut.
+const SCREEN_TOP: usize = 25;
+
+/// The top combinations, each priced in full and judged against a stop-loss rule.
+///
+/// # What this answers that no other surface did
+///
+/// The audit prints ONE combination's report. The findings block prints 250
+/// NAMES with no trade figures. Neither answers the operator's actual question:
+///
+/// > *of the top twenty-five, which ones never let a single trade run further
+/// > against me than X — and of those, which made the most?*
+///
+/// That is a SCREEN, and it needs both halves at once: the condition names, and
+/// the full trade statistics of the exit variant chosen for that combination.
+/// Every column below is measured per combination rather than for the run.
+///
+/// # `max_mae_ppm` is a HARD rule, not a ranking weight
+///
+/// A stop is placed once and every trade must survive it, so a combination whose
+/// WORST single adverse excursion exceeds the rule is not a worse candidate —
+/// it is a disqualified one, however much it made. `Cell::worst_mae` is the
+/// maximum across every trade and is the only field that can answer it; the
+/// three MAE means cannot, because a mean of 0.12% is entirely consistent with
+/// one trade at 4%.
+///
+/// # Cost
+///
+/// `SCREEN_TOP` exit grids, each 625 cells over that combination's own trades.
+/// Bounded before any bar is read and independent of the sweep's size, so a
+/// search that found a million combinations costs the same here as one that
+/// found a thousand.
+fn screen(
+    bars: &[indicators::Candle],
+    column: &indicators::column::Column,
+    by_evidence: &[&runner::rank::Scored],
+    horizon: Horizon,
+    max_mae_ppm: i64,
+) -> String {
+    let mut out = String::from("TOP COMBINATIONS, SCREENED\n");
+    let _ = writeln!(
+        out,
+        "  the stop-loss rule: no single trade may run more than {} against \
+         entry.\n  A combination that breaks it once is DISQUALIFIED, however \
+         much it made -- a stop is\n  placed once and every trade must survive \
+         it.\n",
+        ppm_as_percent(max_mae_ppm)
+    );
+    let _ = writeln!(
+        out,
+        "  {:<5}{:>8}{:>7}{:>10}{:>10}{:>8}{:>14}{:>8}  conditions",
+        "rank", "trades", "win%", "worstMAE", "meanMAE", "PF", "net", "rule"
+    );
+
+    let mut rows = 0_usize;
+    for (index, scored) in by_evidence.iter().take(SCREEN_TOP).enumerate() {
+        let side = side_of_evidence(scored);
+        let g = grid::evaluate(bars, column, &scored.mask, horizon, side, GRID_RUNGS);
+        let Some(cell) = g.best() else { continue };
+        if cell.trades == 0 {
+            continue;
+        }
+        rows = rows.saturating_add(1);
+        let pf = cell.profit_factor_bp();
+        let _ = writeln!(
+            out,
+            "  {:<5}{:>8}{:>7}{:>10}{:>10}{:>8}{:>14}{:>8}  {}",
+            index.saturating_add(1),
+            cell.trades,
+            format!("{}%", cell.win_rate_bp() / 100),
+            ppm_as_percent(cell.worst_mae),
+            ppm_as_percent(cell.all_mae),
+            if pf == i64::MAX {
+                "inf".to_owned()
+            } else {
+                format!("{}.{:02}", pf / 100, (pf % 100).abs())
+            },
+            rupees(cell.pessimistic),
+            // THE VERDICT, AND IT IS NOT A RANKING NUDGE. A combination that
+            // broke the rule once is out, whatever its total says.
+            if cell.worst_mae <= max_mae_ppm {
+                "PASS"
+            } else {
+                "FAIL"
+            },
+            runner::report::condition_names(&scored.mask).join(" · ")
+        );
+    }
+    if rows == 0 {
+        let _ = writeln!(
+            out,
+            "  NO COMBINATION TOOK A TRADE. The sweep found candidates and none \
+             of them produced a round trip, which is a finding about the exit \
+             rules rather than about the conditions."
+        );
+    }
+    let _ = writeln!(out);
+    out
+}
+
+/// Parts per million as a percentage AND as index points, both to two decimals.
+///
+/// Points because that is how a stop is spoken about — "thirty points" — and a
+/// percentage because a rung must mean the same thing on NIFTY and BANKNIFTY.
+/// The point figure assumes a 25,000 index, which is stated rather than implied:
+/// it is a reading aid and not a measurement.
+fn ppm_as_percent(ppm: i64) -> String {
+    let hundredths = ppm.unsigned_abs() / 100;
+    format!("{}.{:02}%", hundredths / 100, hundredths % 100)
+}
 
 /// One rung's row in the comparison table.
 struct RungRow {
@@ -2734,7 +2900,7 @@ pub fn range_all(
     let mut out = String::from(STORED_PROVENANCE);
     let _ = writeln!(
         out,
-        "feed {vendor_word} · {underlying} · ALL NINE RUNGS · {}-{:02}..{}-{:02} · support {}.{}%",
+        "feed {vendor_word} · {underlying} · ALL EIGHT INTRADAY RUNGS · {}-{:02}..{}-{:02} · support {}.{}%",
         from.0,
         from.1,
         to.0,
@@ -3520,9 +3686,15 @@ fn audit_bars(
         out.push_str(&nothing_to_trade(outcome.sweep.all_frequent().count()));
         return out;
     };
-    out.push_str(&traded_line(first));
-    out.push_str(&grid_exposure(&outcome.sweep));
-    out.push_str(&sample_warning(session_index(&bars).len()));
+    // THE SCREEN, before the single-combination report below. 0.20% is 20
+    // basis points -- about fifty points on a 25,000 index -- and is a stated
+    // default rather than a derived one: no document defines the right stop and
+    // nothing in the data implies one, so the number is the operator's to move.
+    out.push_str(&traded_preamble(
+        first,
+        &outcome.sweep,
+        session_index(&bars).len(),
+    ));
 
     // THE SIDE IS READ OFF THE EVIDENCE, NOT ASSUMED.
     //
@@ -3542,22 +3714,9 @@ fn audit_bars(
     // canonical mask order, so its sign was incidental. Selecting for the
     // largest |t| selects precisely the strongest signals of EITHER sign — so
     // the better the ranker got, the more often the side was wrong.
-    let side = side_of_evidence(first);
-    let taken = trade::walk(
-        &trade_bars,
-        &trade_column,
-        &first.mask,
-        horizon,
-        direction_of(side),
-    );
-    let exits = grid::evaluate(
-        &trade_bars,
-        &trade_column,
-        &first.mask,
-        horizon,
-        side,
-        GRID_RUNGS,
-    );
+    let (taken, exits, screened) =
+        trade_and_screen(&trade_bars, &trade_column, first, &by_evidence, horizon);
+    out.push_str(&screened);
     out.push('\n');
     // THE WALK-FORWARD, WHICH USED TO BE A `None`.
     //
@@ -4664,18 +4823,18 @@ mod tests {
 
     /// It is listed, and it sweeps every rung an operator pulls.
     #[test]
-    fn the_all_rungs_command_covers_the_nine_rungs_and_says_so() {
+    fn the_all_rungs_command_covers_the_eight_intraday_rungs_and_says_so() {
         assert!(USAGE.contains("range-all"), "the command is listed");
         assert!(
-            USAGE.contains("ALL NINE RUNGS"),
+            USAGE.contains("ALL EIGHT INTRADAY RUNGS"),
             "and usage says what makes it different from `audit-range`"
         );
         // The nine an operator actually pulls. `1s` is deliberately absent --
         // nothing has measured what a seven-year second-resolution span costs,
         // and §3 rule 6 says an unmeasured bound is not a bound.
-        assert_eq!(super::EVERY_RUNG.len(), 9);
+        assert_eq!(super::EVERY_RUNG.len(), 8);
         for rung in [
-            "1min", "2min", "3min", "5min", "10min", "15min", "30min", "60min", "1day",
+            "1min", "2min", "3min", "5min", "10min", "15min", "30min", "60min",
         ] {
             assert!(
                 super::EVERY_RUNG.contains(&rung),
@@ -4693,7 +4852,18 @@ mod tests {
         // parallel batch is bounded by its longest task, so that task must not
         // be the last one picked up.
         assert_eq!(super::EVERY_RUNG.first().copied(), Some("1min"));
-        assert_eq!(super::EVERY_RUNG.last().copied(), Some("1day"));
+        assert_eq!(super::EVERY_RUNG.last().copied(), Some("60min"));
+        // 1day IS NOT A RUNG. It is one whole session, so sweeping it produces
+        // at most one trade per day -- 365 in 6.75 years, measured -- on an
+        // engine that squares off at 15:10. Daily data is an INPUT: the previous
+        // session's HLC feeds `indicators::daily`, whose PDH, PDL, CPR and pivot
+        // conditions are already in the vocabulary and already fire on every
+        // intraday rung.
+        assert!(
+            !super::EVERY_RUNG.contains(&"1day"),
+            "a daily bar is one session; it is an input to the conditions, not \
+             a rung to sweep"
+        );
     }
 
     /// A ledger that can only be appended to is a write-only file.

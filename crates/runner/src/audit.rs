@@ -120,7 +120,19 @@ pub fn render(
         None => absent(&mut out, "TRADES"),
     }
     match exits {
-        Some(x) => grid(&mut out, x, rows),
+        Some(x) => {
+            grid(&mut out, x, rows);
+            // THE FULL STRATEGY REPORT FOR THE CHOSEN VARIANT. The grid above is
+            // 625 rows wide and answers "which exit"; this answers "and what is
+            // that one actually like to trade" -- profit factor, win rate, the
+            // largest single loss, the longest losing streak, and the WORST
+            // adverse excursion any trade suffered. A grid row cannot carry
+            // seventeen more columns, and an operator choosing a strategy needs
+            // all of them for the one they picked.
+            if let Some(best) = x.best() {
+                strategy_report(&mut out, best, &exit_name(best));
+            }
+        }
         None => absent(&mut out, "EXIT GRID"),
     }
     match folds {
@@ -419,6 +431,213 @@ fn grid_row(out: &mut String, c: &Cell, mark: &str) {
         c.edge_ratio(),
         mark,
     );
+}
+
+/// Paisa as rupees, with two decimals and Indian 2-2-3 grouping.
+///
+/// An accounting unit is not an answer. Every money figure in this workspace is
+/// a paisa `i64` because `CLAUDE.md` §7 forbids a float wherever a price is
+/// compared — right for the engine and wrong for the operator, who should not
+/// have to divide by a hundred before knowing whether a run made twenty-four
+/// thousand rupees or two hundred and forty-six thousand.
+///
+/// Integer throughout: rupees and paise separated by division and remainder,
+/// never by a float. Grouping is 2-2-3 because that is how a price is read here,
+/// so a crore prints as `1,00,00,000`.
+fn money(paisa: i64) -> String {
+    let negative = paisa < 0;
+    // `unsigned_abs` and not `abs`: `i64::MIN` has no positive counterpart and is
+    // exactly the value `saturating_add` produces for a variant that lost without
+    // bound. A report that panicked on the worst possible result would be the
+    // rendering killing the process over the answer.
+    let magnitude = paisa.unsigned_abs();
+    let digits: Vec<char> = (magnitude / 100).to_string().chars().collect();
+    let mut grouped = String::new();
+    for (i, ch) in digits.iter().enumerate() {
+        let from_right = digits.len().saturating_sub(i);
+        if i > 0 && (from_right == 3 || (from_right > 3 && from_right % 2 == 1)) {
+            grouped.push(',');
+        }
+        grouped.push(*ch);
+    }
+    format!(
+        "{}\u{20b9}{grouped}.{:02}",
+        if negative { "-" } else { "" },
+        magnitude % 100
+    )
+}
+
+/// The excursion block: how far price moved while a position was open.
+///
+/// Split from [`strategy_report`] so it stays under `clippy::too_many_lines`,
+/// and because it is one idea — the money figures say what a trade RETURNED,
+/// these say what it PUT YOU THROUGH to return it.
+///
+/// **`worst_mae` is the only bound in the whole report.** Every other figure is
+/// a summary: a mean of 30 ppm across ten thousand trades is entirely consistent
+/// with one trade that went 4,000 ppm against, and that one trade is the one
+/// that takes the account out. A stop is placed once and every trade must
+/// survive it, so the maximum is the number that decides whether a stop is
+/// survivable at all.
+fn excursion_block(out: &mut String, cell: &Cell) {
+    let _ = writeln!(
+        out,
+        "\n  EXCURSIONS — how far price moved while a position was open"
+    );
+    for (label, value, note) in [
+        (
+            "WORST MAE, any single trade",
+            ppm_pct(cell.worst_mae),
+            "THE BOUND. No trade in this run went further against than this",
+        ),
+        (
+            "mean MAE, all trades",
+            ppm_pct(cell.all_mae),
+            "the typical trade, losers included",
+        ),
+        (
+            "mean MAE, winners only",
+            ppm_pct(cell.winner_mae),
+            "the tightest stop that keeps every winner",
+        ),
+        (
+            "mean MFE, winners only",
+            ppm_pct(cell.winner_mfe),
+            "how far winners ran",
+        ),
+    ] {
+        let _ = writeln!(out, "  {label:<32}{value:>18}  {note}");
+    }
+    let _ = writeln!(out);
+}
+
+/// The full strategy report for one exit variant, in the shape a trading
+/// platform's tester prints it.
+///
+/// # Why every one of these is here
+///
+/// The audit printed a net total, a trade count and two excursion means. A
+/// platform's strategy tester prints twenty figures, and the difference is not
+/// decoration — each one answers a question the net total cannot:
+///
+/// | figure | the question it answers |
+/// |---|---|
+/// | profit factor | do the winners outweigh the losers, or did one lucky trade carry it |
+/// | win rate | how often is this right |
+/// | avg win vs avg loss | is it many small wins or one big one |
+/// | **worst MAE** | **did ANY trade go further against me than my stop** |
+/// | max losing streak | what must a human sit through |
+/// | avg bars held | is this a four-minute trade or a four-hour one |
+/// | largest win / loss | is the total carried by an outlier |
+///
+/// **The worst MAE is the one that decides whether a stop is survivable.** A
+/// mean of 30 ppm across ten thousand trades is entirely consistent with one
+/// trade that went 4,000 ppm against, and that one trade is the one that takes
+/// the account out. Every other figure here is a summary; that one is a bound.
+pub fn strategy_report(out: &mut String, cell: &Cell, name: &str) {
+    let _ = writeln!(out, "STRATEGY REPORT — exit variant {name}");
+    let losers = cell.trades.saturating_sub(cell.wins);
+    let pf = cell.profit_factor_bp();
+
+    for (label, value, note) in [
+        (
+            "net profit, worst-case fills",
+            money(cell.pessimistic),
+            "what selection ranks on",
+        ),
+        (
+            "net profit, best-case fills",
+            money(cell.optimistic),
+            "both fills at the open",
+        ),
+        (
+            "gross profit",
+            money(cell.gross_win),
+            "every winning trade summed",
+        ),
+        (
+            "gross loss",
+            money(cell.gross_loss),
+            "every losing trade summed",
+        ),
+        (
+            "PROFIT FACTOR",
+            if pf == i64::MAX {
+                "no losing trade".to_owned()
+            } else {
+                hundredths(pf)
+            },
+            "gross profit / gross loss. Below 1.00 the losers win",
+        ),
+        ("total closed trades", cell.trades.to_string(), ""),
+        ("winning trades", cell.wins.to_string(), ""),
+        ("losing trades", losers.to_string(), ""),
+        (
+            "PERCENT PROFITABLE",
+            format!("{}%", hundredths(cell.win_rate_bp())),
+            "winners / trades",
+        ),
+        ("avg winning trade", money(cell.avg_win()), ""),
+        ("avg losing trade", money(cell.avg_loss()), ""),
+        (
+            "largest winning trade",
+            money(cell.best_trade),
+            "is the total carried by one trade?",
+        ),
+        (
+            "largest losing trade",
+            money(cell.worst_trade),
+            "the single worst round trip",
+        ),
+        (
+            "max drawdown",
+            money(cell.max_drawdown),
+            "deepest peak-to-trough",
+        ),
+        (
+            "return over drawdown",
+            hundredths(cell.return_over_drawdown()),
+            "profit per unit of pain",
+        ),
+        (
+            "MAX LOSING STREAK",
+            cell.max_losing_streak.to_string(),
+            "consecutive losers to sit through",
+        ),
+        (
+            "avg bars held",
+            cell.avg_bars_held().to_string(),
+            "execution bars, so MINUTES",
+        ),
+    ] {
+        let _ = writeln!(out, "  {label:<32}{value:>18}  {note}");
+    }
+
+    excursion_block(out, cell);
+}
+
+/// An integer in hundredths, rendered with its decimal point. `250` is `2.50`.
+fn hundredths(n: i64) -> String {
+    let negative = n < 0;
+    let m = n.unsigned_abs();
+    format!(
+        "{}{}.{:02}",
+        if negative { "-" } else { "" },
+        m / 100,
+        m % 100
+    )
+}
+
+/// Parts per million as a percentage to two decimals, in integers.
+fn ppm_pct(ppm: i64) -> String {
+    let negative = ppm < 0;
+    let m = ppm.unsigned_abs() / 100;
+    format!(
+        "{}{}.{:02}%",
+        if negative { "-" } else { "" },
+        m / 100,
+        m % 100
+    )
 }
 
 /// The exit grid: with levels against without them.
