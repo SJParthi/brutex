@@ -21281,3 +21281,41 @@ caught an untested module into a number somebody edits when it complains.
 accepted path, the span parse, or `conduct`. Two of its four emit sites are
 covered and the other two are declared; that is the accounting being honest, not
 the module being tested. Whoever owns that route owes it a test.
+
+### D-0281 — a mean was labelled as a bound, and the bound is not in the ledger
+
+**2026-08-23.** The operator was shown `tightest stop that keeps every winner —
+0.01%` and did not believe it. He was right not to.
+
+`grid::Cell::winner_mae` is the **mean** of the winners' adverse excursions.
+`runner::audit` prints it as *"mean MAE, winners only"* with
+`grid::Cell::worst_mae` beside it under *"THE BOUND"*. `cli::results` printed the
+same mean under audit's secondary note, promoted to a headline, with the word
+*mean* removed and the bound nowhere on the screen.
+
+**A stop placed at a mean stops out half the distribution.** The label named the
+one thing the number cannot do. On 2024-06, 816 trades: the mean read 0.00% and
+the bound read **0.24%** — at NIFTY 23,000 that is **55 points**, twenty-four
+times the figure being read as the worst case.
+
+**Relabelling is the whole fix available here, and that is itself the finding.**
+`results::Record` persists `worst_trade`, `winner_mae` and `all_mae` and not
+`worst_mae`, so this surface cannot show the bound however its rows are headed —
+`cli screen` filters on `cell.worst_mae` and never had that problem. Adding the
+field is a new record version at its own stride under §8, not an edit. So the
+rows now say *mean*, the ratio is marked `(means)`, and the block ends by saying
+the bound is absent and naming `audit-stored` as the surface that carries it.
+**An admitted gap beats a confident wrong number**, which is the same rule §4
+applies to a fallback.
+
+**What the operator's question actually exposed.** He asked how an unstopped
+15-bar hold could never run more than a few points against, on a store that
+contains 2024-06-04 — a 1,898-point session whose worst 15-minute move against a
+long was **789.6 points**, measured from his own bars. The reconciliation is that
+the average hold is **2 bars, not 15**, so the horizon rarely binds. But that
+reconciles the *realised* loss, not the excursion, and the excursion was the
+number on the screen wearing the wrong name.
+
+**Left undone, deliberately.** `runner::audit.rs` still carries the same claim as
+a note on the mean row. Another session held that file open; it is one line and
+`docs/06-limits.md` §90 records that it is owed.

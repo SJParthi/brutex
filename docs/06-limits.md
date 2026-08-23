@@ -5349,3 +5349,55 @@ figures above assumes the combination count at constant SUPPORT is
 scale-invariant, and that has NOT been tested — only one month has been swept.
 The arithmetic is recorded so a later measurement can be compared against it,
 not so it can be quoted as a result.
+
+---
+
+## 90. `cli results` reported a MEAN under a label that promised a BOUND, and the bound is not in the ledger at all
+
+**Found 2026-08-23, by the operator refusing to believe a number.** He was shown
+`tightest stop that keeps every winner — 0.01%` and asked how a strategy holding
+an unstopped position could never run more than a few points against. The answer
+is that it can, and does; the label was wrong.
+
+**What the field is.** `grid::Cell::winner_mae` is the MEAN of the winners'
+adverse excursions. `runner::audit` prints it correctly as *"mean MAE, winners
+only"*, and prints `grid::Cell::worst_mae` beside it as *"WORST MAE, any single
+trade — THE BOUND. No trade in this run went further against than this"*.
+`cli::results` took the same mean, dropped the word, and promoted audit's
+secondary note to the headline.
+
+**Why that is not a wording quibble.** A stop placed at the mean of a
+distribution stops out roughly half of it. The label named the one thing the
+number cannot do. Measured on 2024-06 alone, 816 trades:
+
+| | value | at NIFTY 23,000 |
+|---|---:|---:|
+| mean MAE, winners only | 0.00% | ~0 points |
+| mean MAE, all trades | 0.03% | ~7 points |
+| **WORST MAE, any single trade** | **0.24%** | **~55 points** |
+
+The number the operator was reading was **24× smaller** than the bound it was
+being read as.
+
+**Why relabelling alone cannot fix it.** `cli::results::Record` persists
+`worst_trade`, `winner_mae` and `all_mae` and **not** `worst_mae`. The grid
+computes the bound and `cli screen` filters on it — `cell.worst_mae <=
+max_mae_ppm` is what `MAX_POINTS` means — but nothing writes it to the ledger,
+so that surface cannot show it however its rows are headed. Adding it is a new
+record version at its own stride, which `CLAUDE.md` §8 forbids doing in place.
+
+**What was done.** The three excursion rows on `cli results` now say *mean*, the
+reward ratio is marked `(means)`, and the block closes by stating that the bound
+is absent from this ledger and naming `audit-stored` as the surface that has it.
+An honest gap beats a confident wrong number.
+
+**What was NOT done.** `runner::audit.rs` still carries *"the tightest stop that
+keeps every winner"* as the note on `mean MAE, winners only` — the same false
+claim, demoted to a note. It was left because another session held that file
+open at the time; it is a one-line change and it is still owed.
+
+**Also unaddressed and larger:** on 2024-06 the engine's own significance tests
+refused the result — White's Reality Check p = 0.9920, Hansen's SPA p = 1.0000,
+Romano-Wolf named zero. §4's warning that no full production sweep has been run
+applies, and so does the report's own note that at ten periods these tests
+misfire 21% of the time. Neither makes a p of 0.99 into evidence.

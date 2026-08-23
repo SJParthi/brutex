@@ -2041,18 +2041,31 @@ fn quality_block(record: &crate::results::Record) -> String {
         record.pessimistic / i64::try_from(record.trades).unwrap_or(1)
     };
     for (label, value, note) in [
+        // THESE THREE ARE MEANS, AND TWO OF THEM USED TO BE LABELLED AS BOUNDS.
+        //
+        // `winner_mae` was headed "tightest stop that keeps every winner". It
+        // is the MEAN of the winners' adverse excursions, so a stop placed
+        // there stops out roughly half of them -- the opposite of what the
+        // label promised. `runner::audit` prints the same field correctly, as
+        // "mean MAE, winners only", and prints `worst_mae` beside it under
+        // "THE BOUND". Measured on June 2024: the mean read 0.00% and the bound
+        // read 0.24%, which at NIFTY 23,000 is 55 points.
+        //
+        // `worst_mae` is NOT in the ledger record, so this surface cannot show
+        // it however it is labelled -- see `docs/06-limits.md`. Until it is,
+        // the honest thing is to stop calling a mean a maximum.
         (
-            "tightest stop that keeps every winner",
+            "mean adverse move, winners only",
             as_percent(record.winner_mae),
-            "winners went this far AGAINST before working",
+            "the AVERAGE winner's dip -- NOT a stop that keeps them all",
         ),
         (
-            "how far winners went FOR",
+            "mean favourable move, winners only",
             as_percent(record.winner_mfe),
-            "the move the stop above is protecting",
+            "how far the average winner ran",
         ),
         (
-            "every trade's adverse excursion",
+            "mean adverse move, all trades",
             as_percent(record.all_mae),
             "losers included -- always worse than winners alone",
         ),
@@ -2088,8 +2101,19 @@ fn quality_block(record: &crate::results::Record) -> String {
     };
     let _ = writeln!(
         out,
-        "  {:<40}{ratio:>16}  how far winners ran vs the worst they dipped",
-        "reward per unit of risk"
+        "  {:<40}{ratio:>16}  mean winner run vs mean winner dip -- not a bound",
+        "reward per unit of risk (means)"
+    );
+    // THE BOUND IS NOT IN THIS FILE, and saying so is the only honest option.
+    // `grid::Cell::worst_mae` answers "did ANY single trade run further against
+    // than X" and `cli screen` filters on it, but `results::Record` never
+    // persisted it, so no relabelling of the rows above can produce it here.
+    let _ = writeln!(
+        out,
+        "\n  Every excursion above is a MEAN. The BOUND -- the worst any single\n  \
+         trade ran against -- is not recorded in this ledger. Run `audit-stored`\n  \
+         for that month to see it; on June 2024 the mean read 0.00% and the\n  \
+         bound read 0.24%."
     );
     let stop = record.exit_rungs.first().copied().unwrap_or(-1);
     let target = record.exit_rungs.get(1).copied().unwrap_or(-1);
