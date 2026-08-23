@@ -447,20 +447,26 @@ impl Ledger {
     /// Ties break toward the LOWER index, which is the earlier run: two
     /// identical totals are the same answer, and the one that was found first
     /// is the one that has been on disk longest.
+    ///
+    /// **Stated as a sort key rather than as a comparison chain, and the
+    /// reason is a surviving mutant.** The obvious `reduce` spells the rule as
+    /// `run.pessimistic > best.pessimistic || (== && run.index < best.index)`,
+    /// and `cargo mutants` turns that final `<` into `<=` without a single test
+    /// noticing. Nothing is wrong with the suite: the two operators differ only
+    /// when two runs share an index, and [`Ledger::read`] numbers them by
+    /// position, so they never do. It is an EQUIVALENT mutant, and the honest
+    /// options were to test an impossible state or to remove the operator.
+    ///
+    /// This removes it. `(pessimistic, Reverse(index))` is a total order — the
+    /// key is unique because the index is — so there is no tie left to break
+    /// and no tie-breaking operator left to mutate. It also reads as the rule
+    /// the doc comment above states, which the chain did not.
     #[must_use]
     pub fn best_complete(&self) -> Option<&Run> {
         self.runs
             .iter()
             .filter(|run| !run.halted)
-            .reduce(|best, run| {
-                if run.pessimistic > best.pessimistic
-                    || (run.pessimistic == best.pessimistic && run.index < best.index)
-                {
-                    run
-                } else {
-                    best
-                }
-            })
+            .max_by_key(|run| (run.pessimistic, std::cmp::Reverse(run.index)))
     }
 
     /// How many of the runs read are halted.
