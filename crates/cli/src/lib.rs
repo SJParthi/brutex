@@ -107,6 +107,15 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
        cli results      [VENDOR UNDERLYING]
                                    list every recorded run, newest first, and
                                    name the best COMPLETE one
+       cli screen       VENDOR UNDERLYING RUNG FROM_Y FROM_M TO_Y TO_M
+                        SUPPORT_PPM MAX_POINTS MIN_RR TOP
+                                   sweep, then report ONLY the combinations that
+                                   satisfy YOUR rules. MAX_POINTS is the stop in
+                                   index points -- no single trade may run more
+                                   than that against entry. MIN_RR is hundredths:
+                                   200 demands the SMALLEST win be twice the
+                                   LARGEST loss, 0 drops the rule. TOP is how many
+                                   to print.
        cli range-all    VENDOR UNDERLYING FROM_Y FROM_M TO_Y TO_M SUPPORT_PPM
                                    sweep the span on ALL EIGHT INTRADAY RUNGS and
                                    table comparing them. SUPPORT_PPM is parts per
@@ -166,6 +175,128 @@ fn results_arm(out: &mut String, filter: Option<(&str, &str)>) -> u8 {
     };
     out.push_str(&results_list(feed, underlying));
     OK
+}
+
+/// The `screen` arm, lifted out of [`run`] for the reason [`audit_range_arm`]
+/// gives.
+///
+/// # The stop is given in POINTS and converted against the instrument
+///
+/// An operator says "twenty points", not "eight hundred parts per million". The
+/// conversion needs a price, and the honest one is the instrument's own — a rule
+/// stated in points on a 25,000 index and applied unchanged to a 52,000 one
+/// would be a different rule. `NIFTY_REFERENCE` is a stated approximation and
+/// is named as one on the page.
+fn screen_arm(
+    out: &mut String,
+    vendor: &str,
+    underlying: &str,
+    rung: &str,
+    // The span as one tuple and the four rule words as another: the arm above
+    // is a positional list and `clippy::too_many_arguments` is right that ten of
+    // them is unreadable.
+    span: (&str, &str, &str, &str),
+    // Four rule words as one tuple: the arm above is a positional list and
+    // `clippy::too_many_arguments` is right that ten of them is unreadable.
+    limits: (&str, &str, &str, &str),
+) -> u8 {
+    let (support, max_points, min_rr, top) = limits;
+    let (from_y, from_m, to_y, to_m) = span;
+    let numbers = (
+        from_y.parse::<u16>(),
+        from_m.parse::<u8>(),
+        to_y.parse::<u16>(),
+        to_m.parse::<u8>(),
+        parse_support_ppm(support),
+    );
+    let rules = (
+        max_points.parse::<i64>(),
+        min_rr.parse::<i64>(),
+        top.parse::<usize>(),
+    );
+    match (numbers, rules) {
+        ((Ok(fy), Ok(fm), Ok(ty), Ok(tm), Ok(sup)), (Ok(pts), Ok(rr), Ok(n))) => {
+            // VALIDATED HERE AND NOT IN A GUARD. A match guard on the happy arm
+            // leaves the compiler unable to prove the match exhaustive, and the
+            // arms it then demands are shapes no parse can produce.
+            if pts <= 0 {
+                return refuse(
+                    out,
+                    "MAX_POINTS must be a whole number of index points, 1 or more",
+                );
+            }
+            if n == 0 {
+                return refuse(out, "TOP must be 1 or more");
+            }
+            let text = screen_range(
+                vendor,
+                underlying,
+                rung,
+                (fy, fm),
+                (ty, tm),
+                sup,
+                Rules {
+                    max_mae_ppm: points_to_ppm(pts),
+                    min_rr_bp: rr,
+                    top: n,
+                },
+            );
+            let refused = text.starts_with("refused: ");
+            out.push_str(&text);
+            if refused { MISUSED } else { OK }
+        }
+        ((Err(_), _, _, _, _) | (_, _, Err(_), _, _), _) => {
+            refuse(out, "YEAR must be a number like 2026")
+        }
+        ((_, Err(_), _, _, _) | (_, _, _, Err(_), _), _) => refuse(out, "MONTH must be 1..=12"),
+        ((_, _, _, _, Err(why)), _) => refuse(out, why),
+        (_, (Err(_), _, _)) => refuse(
+            out,
+            "MAX_POINTS must be a whole number of index points, 1 or more",
+        ),
+        (_, (_, Err(_), _)) => refuse(out, "MIN_RR is hundredths; 200 is 1:2, 0 drops the rule"),
+        (_, (_, _, Err(_))) => refuse(out, "TOP must be 1 or more"),
+    }
+}
+
+/// The index level a points-stated stop is converted against.
+///
+/// **A stated approximation, and it is printed as one.** NIFTY has traded
+/// between roughly 7,500 and 26,000 across the span this store holds, so no
+/// single number converts points to a fraction exactly. Twenty-five thousand is
+/// the recent level; a rule of twenty points against it is 800 ppm, and at the
+/// 2020 low the same 800 ppm is six points.
+///
+/// `CLAUDE.md` §3 rule 1 forbids inventing a figure, so this is not used to
+/// MEASURE anything — every excursion in the report is ppm, taken against the
+/// entry price of its own trade. It converts the OPERATOR'S RULE into the unit
+/// the engine measures in, and the report prints both so the assumption is
+/// visible rather than buried.
+const NIFTY_REFERENCE: i64 = 25_000;
+
+/// Index points as parts per million against [`NIFTY_REFERENCE`].
+const fn points_to_ppm(points: i64) -> i64 {
+    points.saturating_mul(1_000_000) / NIFTY_REFERENCE
+}
+
+/// Parts per million back to index points, the unit a stop is spoken in.
+const fn ppm_to_points(ppm: i64) -> i64 {
+    ppm.saturating_mul(NIFTY_REFERENCE) / 1_000_000
+}
+
+/// The `sweep-all` arm, lifted out of [`run`] for the reason
+/// [`audit_range_arm`] gives: the dispatch is a command LIST and every inline
+/// arm makes the list harder to read as one.
+fn sweep_all_arm(out: &mut String, vendor: &str, rung: &str, min_hits: &str) -> u8 {
+    match parse_min_hits(min_hits) {
+        Ok(h) => {
+            let text = batch::sweep_all(vendor, rung, h);
+            let refused = text.starts_with("refused: ");
+            out.push_str(&text);
+            if refused { MISUSED } else { OK }
+        }
+        Err(why) => refuse(out, why),
+    }
 }
 /// The `range-all` arm, lifted out of [`run`] for the reason
 /// [`audit_range_arm`] gives.
@@ -327,19 +458,14 @@ pub fn run(args: &[String], out: &mut String) -> u8 {
         ["audit-range", v, u, r, fy, fm, ty, tm, mh] => {
             audit_range_arm(out, v, u, r, (fy, fm), (ty, tm), mh)
         }
+        ["screen", v, u, r, fy, fm, ty, tm, sup, pts, rr, n] => {
+            screen_arm(out, v, u, r, (fy, fm, ty, tm), (sup, pts, rr, n))
+        }
         ["range-all", v, u, fy, fm, ty, tm, mh] => range_all_arm(out, v, u, (fy, fm), (ty, tm), mh),
         ["verify", feed, underlying] => verify_arm(out, feed, underlying),
         ["results"] => results_arm(out, None),
         ["results", feed, underlying] => results_arm(out, Some((feed, underlying))),
-        ["sweep-all", vendor, rung, min_hits] => match parse_min_hits(min_hits) {
-            Ok(h) => {
-                let text = batch::sweep_all(vendor, rung, h);
-                let refused = text.starts_with("refused: ");
-                out.push_str(&text);
-                if refused { MISUSED } else { OK }
-            }
-            Err(why) => refuse(out, why),
-        },
+        ["sweep-all", vendor, rung, min_hits] => sweep_all_arm(out, vendor, rung, min_hits),
         ["auto", sessions] => match parse_sessions(sessions) {
             Ok(s) => {
                 out.push_str(&auto(s));
@@ -1647,8 +1773,11 @@ fn audit_stored_inner(
         &header,
         min_hits,
         Some(&id),
-        None,
-        None,
+        AuditOptions {
+            execution: None,
+            recording: None,
+            rules: Rules::BASELINE,
+        },
     );
     // THE IDENTITY REACHES THE LOG, which is the half section 3 rule 3 cares
     // about. A report names its identity in text that scrolls past; an operator
@@ -1862,17 +1991,20 @@ fn audit_range_inner(
         &header,
         min_hits,
         Some(&id),
-        execution,
-        Some(Recording {
-            root: &root,
-            feed: vendor.as_str(),
-            underlying,
-            timeframe: span.timeframe,
-            from,
-            to,
-            months_asked: span.asked,
-            months_found: span.found,
-        }),
+        AuditOptions {
+            execution,
+            recording: Some(Recording {
+                root: &root,
+                feed: vendor.as_str(),
+                underlying,
+                timeframe: span.timeframe,
+                from,
+                to,
+                months_asked: span.asked,
+                months_found: span.found,
+            }),
+            rules: Rules::BASELINE,
+        },
     ))
 }
 
@@ -2169,8 +2301,16 @@ pub fn verify(vendor_word: &str, underlying: &str) -> String {
     // Two sweeps of the same slice, compared as bytes.
     if let Ok(span) = &span {
         let short: Vec<indicators::Candle> = span.bars.iter().take(600).copied().collect();
-        let first = audit_bars(evaluator(), short.clone(), "", 120, None, None, None);
-        let second = audit_bars(evaluator(), short, "", 120, None, None, None);
+        // The BASELINE options: no execution series, no ledger row, the stated
+        // rules. Determinism is a property of the ENGINE and must not depend on
+        // which options were passed, so the two runs differ in nothing at all.
+        let plain = AuditOptions {
+            execution: None,
+            recording: None,
+            rules: Rules::BASELINE,
+        };
+        let first = audit_bars(evaluator(), short.clone(), "", 120, None, plain);
+        let second = audit_bars(evaluator(), short, "", 120, None, plain);
         checks.push(Check {
             claim: "two runs of one slice agree byte for byte",
             held: first == second,
@@ -2667,15 +2807,12 @@ fn trade_and_screen(
     first: &runner::rank::Scored,
     by_evidence: &[&runner::rank::Scored],
     horizon: Horizon,
+    rules: Rules,
 ) -> (runner::trade::Trades, grid::Grid, String) {
     let side = side_of_evidence(first);
     let taken = trade::walk(bars, column, &first.mask, horizon, direction_of(side));
     let exits = grid::evaluate(bars, column, &first.mask, horizon, side, GRID_RUNGS);
-    // 2,000 ppm is 0.20% -- about fifty points on a 25,000 index -- and is a
-    // STATED default rather than a derived one: no document defines the right
-    // stop and nothing in the data implies one, so the number is the operator's
-    // to move rather than the engine's to invent.
-    let screened = screen(bars, column, by_evidence, horizon, 2_000);
+    let screened = screen(bars, column, by_evidence, horizon, rules);
     (taken, exits, screened)
 }
 
@@ -2692,106 +2829,250 @@ fn traded_preamble(first: &runner::rank::Scored, sweep: &engine::Sweep, sessions
     out
 }
 
+/// The operator's three rules, supplied at the command line and never inferred.
+///
+/// # Every one of these is the operator's to set, and none is the engine's to invent
+///
+/// `CLAUDE.md` §6 explains why a parameter that can be set wrongly and silently
+/// is worse than no parameter: the predecessor's depth flag defaulted to a token
+/// that was unreachable on the only vocabulary that existed, and nobody could
+/// see it from the flag. These three are the opposite case — they encode a
+/// TRADING POLICY the engine has no way to derive, so they must be stated, and
+/// a default would be the engine inventing a risk appetite it cannot know.
+#[derive(Clone, Copy, Debug)]
+pub struct Rules {
+    /// No single trade may run more than this against entry, in ppm.
+    ///
+    /// Checked against [`grid::Cell::worst_mae`], the MAXIMUM across every
+    /// trade, because a stop is placed once and every trade must survive it.
+    /// The three MAE means cannot answer it: a mean of 0.05% is entirely
+    /// consistent with one trade at 1.06%, which is exactly what a real
+    /// sixty-minute run produced.
+    pub max_mae_ppm: i64,
+    /// The average win must be at least this multiple of the average loss, in
+    /// hundredths. `200` reads 2.00, which is the 1:2 an operator asks for.
+    ///
+    /// **This is the rule an 81%-win-rate strategy fails.** A real run scored
+    /// 81.19% profitable with an average win of ₹7.57 against an average loss of
+    /// ₹18.65 — a reward-to-risk of 0.41, wearing an exceptional win rate. Win
+    /// rate alone cannot see that shape and this ratio is what catches it.
+    pub min_rr_bp: i64,
+    /// How many combinations to report. Ten or twenty-five, the operator's call.
+    pub top: usize,
+}
+
+impl Rules {
+    /// Whether a variant satisfies every rule. All of them, not a score.
+    ///
+    /// A rule broken once is a disqualification and not a lower rank: a stop
+    /// that one trade in ten thousand ran through is a stop that did not hold.
+    #[must_use]
+    pub const fn admits(&self, cell: &grid::Cell) -> bool {
+        cell.worst_mae <= self.max_mae_ppm && cell.reward_to_risk_bp() >= self.min_rr_bp
+    }
+}
+
+impl Rules {
+    /// The rules a command that does not take them uses.
+    ///
+    /// # A default here is not the §6 defect, and the difference matters
+    ///
+    /// `CLAUDE.md` §6 refuses a DEPTH default because depth is decided by
+    /// extinction and a parameter that can be set wrongly is set wrongly and
+    /// silently. These encode a trading POLICY, and the commands that carry this
+    /// default — `sweep`, `audit`, `audit-stored`, `audit-range` — do not take a
+    /// policy argument at all. Printing no screen would be worse than printing
+    /// one against a STATED baseline, so long as the baseline is on the page.
+    ///
+    /// It IS on the page: `screen` prints all three rules above its table, in
+    /// the operator's units, on every run. A reader can always see which numbers
+    /// produced the PASS and FAIL column, and `cli screen` takes all three.
+    ///
+    /// 2,000 ppm is 0.20% — about fifty points on a 25,000 index. 200 is a 1:2
+    /// reward-to-risk. Twenty-five is the count an operator asked for.
+    const BASELINE: Self = Self {
+        max_mae_ppm: 2_000,
+        min_rr_bp: 200,
+        top: 25,
+    };
+}
+
 /// How many combinations the screener prices in full. Twenty-five is the number
 /// an operator asked for; each costs a 625-cell exit grid, so the bound is real
 /// work and not a display cut.
-const SCREEN_TOP: usize = 25;
+const SCREEN_CAP: usize = 60;
 
-/// The top combinations, each priced in full and judged against a stop-loss rule.
+/// One screened combination, priced in full and judged.
+struct Screened {
+    /// Its rank in the evidence ordering, so a reader can see what the screen
+    /// moved.
+    rank: usize,
+    /// The chosen exit variant's full statistics.
+    cell: grid::Cell,
+    /// The tightest containment ANY variant of this combination achieved, and
+    /// what it cost. A rule tighter than this cannot be met by any exit, so it
+    /// tells an operator whether their number is reachable before guessing again.
+    tightest: Option<grid::Cell>,
+    /// The conditions, by name.
+    names: String,
+    /// Whether every rule held.
+    admitted: bool,
+}
+
+/// The top combinations, priced in full and ranked with the PASSING ones first.
 ///
-/// # What this answers that no other surface did
+/// # Ordering is the whole point
 ///
-/// The audit prints ONE combination's report. The findings block prints 250
-/// NAMES with no trade figures. Neither answers the operator's actual question:
+/// The evidence ordering answers *which condition precedes a move most
+/// reliably*. It does not answer *which one can I actually trade*, and those are
+/// different questions: a real run's most-evident combination scored 81%
+/// profitable with a reward-to-risk of 0.41 and a worst trade that ran 1.06%
+/// against — evident, and untradeable under any sane stop.
 ///
-/// > *of the top twenty-five, which ones never let a single trade run further
-/// > against me than X — and of those, which made the most?*
-///
-/// That is a SCREEN, and it needs both halves at once: the condition names, and
-/// the full trade statistics of the exit variant chosen for that combination.
-/// Every column below is measured per combination rather than for the run.
-///
-/// # `max_mae_ppm` is a HARD rule, not a ranking weight
-///
-/// A stop is placed once and every trade must survive it, so a combination whose
-/// WORST single adverse excursion exceeds the rule is not a worse candidate —
-/// it is a disqualified one, however much it made. `Cell::worst_mae` is the
-/// maximum across every trade and is the only field that can answer it; the
-/// three MAE means cannot, because a mean of 0.12% is entirely consistent with
-/// one trade at 4%.
-///
-/// # Cost
-///
-/// `SCREEN_TOP` exit grids, each 625 cells over that combination's own trades.
-/// Bounded before any bar is read and independent of the sweep's size, so a
-/// search that found a million combinations costs the same here as one that
-/// found a thousand.
+/// So the screen re-orders: every combination that satisfies ALL the operator's
+/// rules first, best net first among them; everything that broke a rule after,
+/// with the rule it broke named. A failing combination is never hidden — a
+/// listing that dropped them would leave a reader unable to tell "nothing
+/// passed" from "nothing was tried".
 fn screen(
     bars: &[indicators::Candle],
     column: &indicators::column::Column,
     by_evidence: &[&runner::rank::Scored],
     horizon: Horizon,
-    max_mae_ppm: i64,
+    rules: Rules,
 ) -> String {
-    let mut out = String::from("TOP COMBINATIONS, SCREENED\n");
-    let _ = writeln!(
-        out,
-        "  the stop-loss rule: no single trade may run more than {} against \
-         entry.\n  A combination that breaks it once is DISQUALIFIED, however \
-         much it made -- a stop is\n  placed once and every trade must survive \
-         it.\n",
-        ppm_as_percent(max_mae_ppm)
-    );
-    let _ = writeln!(
-        out,
-        "  {:<5}{:>8}{:>7}{:>10}{:>10}{:>8}{:>14}{:>8}  conditions",
-        "rank", "trades", "win%", "worstMAE", "meanMAE", "PF", "net", "rule"
-    );
-
-    let mut rows = 0_usize;
-    for (index, scored) in by_evidence.iter().take(SCREEN_TOP).enumerate() {
+    let mut rows: Vec<Screened> = Vec::with_capacity(by_evidence.len().min(SCREEN_CAP));
+    for (rank, scored) in by_evidence.iter().take(SCREEN_CAP).enumerate() {
         let side = side_of_evidence(scored);
         let g = grid::evaluate(bars, column, &scored.mask, horizon, side, GRID_RUNGS);
-        let Some(cell) = g.best() else { continue };
+        // THE BEST VARIANT THAT SATISFIES THE RULES, falling back to the best
+        // overall only so a failing combination can still be SHOWN with the rule
+        // it broke. Asking `best()` first and judging that was the error: the
+        // profit-maximising cell is the one with no stop at all, so every
+        // combination failed a stop rule by construction.
+        let within = g.best_within(|c| rules.admits(c)).copied();
+        let Some(cell) = within.or_else(|| g.best().copied()) else {
+            continue;
+        };
         if cell.trades == 0 {
             continue;
         }
-        rows = rows.saturating_add(1);
-        let pf = cell.profit_factor_bp();
+        rows.push(Screened {
+            rank: rank.saturating_add(1),
+            tightest: g.tightest_containment().copied(),
+            admitted: within.is_some(),
+            names: runner::report::condition_names(&scored.mask).join(" · "),
+            cell,
+        });
+    }
+
+    // PASSERS FIRST, then by net. `Reverse` and not a negation, for the reason
+    // `audit::grid` gives: `pessimistic` saturates at `i64::MIN` and negating
+    // that panics under `overflow-checks`, killing the process over a sort.
+    rows.sort_by_key(|r| (!r.admitted, core::cmp::Reverse(r.cell.pessimistic)));
+
+    let passed = rows.iter().filter(|r| r.admitted).count();
+    let mut out = String::from("TOP COMBINATIONS, SCREENED\n");
+    let _ = writeln!(
+        out,
+        "  RULES, all yours and all required together:\n    \
+         1. no single trade may run more than {} against entry (the WORST, not the mean)\n    \
+         2. the SMALLEST win must be at least {} times the LARGEST loss\n    \
+         3. report the top {}\n\n  \
+         {passed} of {} priced combinations satisfy every rule.{}\n",
+        ppm_as_percent(rules.max_mae_ppm),
+        hundredths_of(rules.min_rr_bp),
+        rules.top,
+        rows.len(),
+        if passed == 0 {
+            " NOTHING PASSED -- the rows below are shown so a reader can see what \
+             was tried and by how much each missed, which is a finding rather \
+             than an empty table."
+        } else {
+            ""
+        }
+    );
+    let _ = writeln!(
+        out,
+        "  {:<5}{:>8}{:>6}{:>10}{:>11}{:>6}{:>13}{:>13}{:>6}  conditions",
+        "rank", "trades", "win%", "worstMAE", "TIGHTEST", "PF", "net", "exit", "rule"
+    );
+    for row in rows.iter().take(rules.top) {
+        let pf = row.cell.profit_factor_bp();
+        // `pf` is still printed; `rr` moved into the TIGHTEST column, which
+        // answers a question the ratio could not: what stop is REACHABLE.
+        let _ = row.cell.reward_to_risk_bp();
         let _ = writeln!(
             out,
-            "  {:<5}{:>8}{:>7}{:>10}{:>10}{:>8}{:>14}{:>8}  {}",
-            index.saturating_add(1),
-            cell.trades,
-            format!("{}%", cell.win_rate_bp() / 100),
-            ppm_as_percent(cell.worst_mae),
-            ppm_as_percent(cell.all_mae),
+            "  {:<5}{:>8}{:>6}{:>10}{:>11}{:>6}{:>13}{:>13}{:>6}  {}",
+            row.rank,
+            row.cell.trades,
+            format!("{}%", row.cell.win_rate_bp() / 100),
+            ppm_as_percent(row.cell.worst_mae),
+            // THE TIGHTEST ANY VARIANT ACHIEVED, in points, so a reader learns
+            // what is REACHABLE instead of guessing another threshold. A rule
+            // below this cannot be met by any of the 625 exits.
+            row.tightest.map_or_else(
+                || "-".to_owned(),
+                |t| format!("{}pt", ppm_to_points(t.worst_mae)),
+            ),
             if pf == i64::MAX {
                 "inf".to_owned()
             } else {
-                format!("{}.{:02}", pf / 100, (pf % 100).abs())
+                hundredths_of(pf)
             },
-            rupees(cell.pessimistic),
-            // THE VERDICT, AND IT IS NOT A RANKING NUDGE. A combination that
-            // broke the rule once is out, whatever its total says.
-            if cell.worst_mae <= max_mae_ppm {
+            rupees(row.cell.pessimistic),
+            exit_label(&row.cell),
+            if row.admitted {
                 "PASS"
             } else {
-                "FAIL"
+                why_refused(&row.cell, rules)
             },
-            runner::report::condition_names(&scored.mask).join(" · ")
-        );
-    }
-    if rows == 0 {
-        let _ = writeln!(
-            out,
-            "  NO COMBINATION TOOK A TRADE. The sweep found candidates and none \
-             of them produced a round trip, which is a finding about the exit \
-             rules rather than about the conditions."
+            row.names
         );
     }
     let _ = writeln!(out);
     out
+}
+
+/// The exit variant's rungs, as the `exit` column prints them.
+///
+/// `stop/target/tsl+arm@ttp`, with `-` for an axis that is switched off. A
+/// screen row that says PASS without naming the variant leaves an operator
+/// unable to place the trade: the stop that made it pass IS the answer.
+fn exit_label(cell: &grid::Cell) -> String {
+    let rung = |r: Option<usize>| r.map_or_else(|| "-".to_owned(), |v| v.to_string());
+    let levels = format!(
+        "{}/{}/{}",
+        rung(cell.stop),
+        rung(cell.target),
+        rung(cell.tsl)
+    );
+    cell.ttp.map_or(levels.clone(), |t| {
+        format!("{levels}+{}@{}", t.arm, t.trail)
+    })
+}
+/// Which rule a variant broke, named rather than left to be inferred.
+fn why_refused(cell: &grid::Cell, rules: Rules) -> &'static str {
+    if cell.worst_mae > rules.max_mae_ppm {
+        "MAE"
+    } else if cell.reward_to_risk_bp() < rules.min_rr_bp {
+        "R:R"
+    } else {
+        "-"
+    }
+}
+
+/// An integer in hundredths with its decimal point. `200` is `2.00`.
+fn hundredths_of(n: i64) -> String {
+    let negative = n < 0;
+    let m = n.unsigned_abs();
+    format!(
+        "{}{}.{:02}",
+        if negative { "-" } else { "" },
+        m / 100,
+        m % 100
+    )
 }
 
 /// Parts per million as a percentage AND as index points, both to two decimals.
@@ -3068,6 +3349,122 @@ fn latest_for(
     ))
 }
 
+/// `screen`: sweep a span and report only the combinations that satisfy the
+/// operator's own rules.
+///
+/// # Every number is the operator's
+///
+/// `MAX_POINTS` is a stop in INDEX POINTS, because that is how a stop is
+/// spoken about — *"never more than twenty points against"* — and it is
+/// converted to ppm against the span's own mean price rather than against a
+/// guessed index level. A rule stated in points on a 25,000 index and applied
+/// unchanged to a 52,000 one would be a different rule.
+///
+/// `MIN_RR` is the worst-case reward-to-risk in hundredths: `200` demands the
+/// SMALLEST win be twice the LARGEST loss. Set it to `0` to drop the rule
+/// entirely, which is the honest way to ask "show me everything that survives
+/// the stop".
+///
+/// `TOP` is how many to print.
+///
+/// # Errors
+///
+/// Every refusal `audit_range` makes, plus a non-numeric or zero rule.
+#[must_use]
+pub fn screen_range(
+    vendor_word: &str,
+    underlying: &str,
+    rung: &str,
+    from: (u16, u8),
+    to: (u16, u8),
+    support_ppm: u64,
+    rules: Rules,
+) -> String {
+    match screen_range_inner(vendor_word, underlying, rung, from, to, support_ppm, rules) {
+        Ok(text) => text,
+        Err(why) => format!("refused: {why}\n"),
+    }
+}
+
+/// [`screen_range`]'s work, with its refusals unrendered.
+fn screen_range_inner(
+    vendor_word: &str,
+    underlying: &str,
+    rung: &str,
+    from: (u16, u8),
+    to: (u16, u8),
+    support_ppm: u64,
+    rules: Rules,
+) -> Result<String, stored::Refusal> {
+    let commit = commit_stamp().ok_or_else(|| {
+        "this build carries no commit stamp, so §3 rule 3's run identity cannot \
+         be recorded and the screen will not run. Rebuild with \
+         `BRUTEX_COMMIT=$(git rev-parse HEAD) cargo build --release -p cli`"
+            .to_owned()
+    })?;
+    let vendor = parse_vendor(vendor_word)?;
+    let root = store_root()?;
+    let span = stored::load_span(&root, vendor, underlying, rung, from, to)?;
+    let signal_length = stored::rung_length_micros(rung)?;
+    let bars = span.bars.len();
+    let min_hits = min_hits_for(bars, support_ppm);
+
+    let execution_bars = if rung == EXECUTION_RUNG {
+        None
+    } else {
+        Some(stored::load_span(
+            &root,
+            vendor,
+            underlying,
+            EXECUTION_RUNG,
+            from,
+            to,
+        )?)
+    };
+    let execution = execution_bars.as_ref().map(|exec| Execution {
+        bars: &exec.bars,
+        signal_length_micros: signal_length,
+    });
+
+    let ladder = Ladder::with_min_hits(min_hits);
+    let id = identity(&Run {
+        #[expect(
+            clippy::default_trait_access,
+            reason = "the named path would add a dependency arrow §5 does not draw"
+        )]
+        mask: Default::default(),
+        direction: RunDirection::Undirected,
+        instrument: &span.key,
+        timeframe: span.timeframe,
+        params: Params::of(ladder),
+        data_digest: data_digest(&span.bars),
+        commit,
+        feed: span.vendor.as_str(),
+    });
+    let header = span_banner(&span, underlying, from, to, commit);
+    Ok(audit_bars(
+        evaluator(),
+        span.bars,
+        &header,
+        min_hits,
+        Some(&id),
+        AuditOptions {
+            execution,
+            recording: Some(Recording {
+                root: &root,
+                feed: vendor.as_str(),
+                underlying,
+                timeframe: span.timeframe,
+                from,
+                to,
+                months_asked: span.asked,
+                months_found: span.found,
+            }),
+            rules,
+        },
+    ))
+}
+
 /// [`audit_range_inner`], with every refusal rendered the way the CLI prints one.
 #[must_use]
 pub fn audit_range(
@@ -3119,9 +3516,41 @@ fn audit_with(ev: Result<Evaluator, &'static str>, sessions: i64, min_hits: u64)
         PROVENANCE,
         min_hits,
         None,
-        None,
-        None,
+        AuditOptions {
+            execution: None,
+            recording: None,
+            rules: Rules::BASELINE,
+        },
     )
+}
+
+/// Everything about an audit that is not the bars themselves.
+///
+/// # Three parameters that arrived one at a time
+///
+/// `audit_bars` took the evaluator, the bars, a banner, a threshold and an
+/// identity. The one-minute execution layer added a sixth argument, the results
+/// ledger a seventh, and the screening rules an eighth — at which point clippy
+/// refused it, correctly. Eight positional arguments is a call site where a
+/// reader cannot tell which `None` is which.
+///
+/// Grouping them is not cosmetic: all three are OPTIONS ABOUT THE RUN rather
+/// than inputs to it, and every one of them has a meaningful absence. A
+/// synthetic sweep has no execution series, no ledger row to write and no feed
+/// to name; a stored month has all three.
+#[derive(Clone, Copy)]
+struct AuditOptions<'a> {
+    /// The series positions are opened and closed on. `None` trades on the
+    /// series it swept, which is what `cli sweep` and `audit-stored` do.
+    execution: Option<Execution<'a>>,
+    /// Where to record the run. `None` records nothing, which is right for
+    /// generated bars: a row for a synthetic sweep would carry a feed and an
+    /// instrument it does not have.
+    recording: Option<Recording<'a>>,
+    /// The operator's screening rules, always present because the screen always
+    /// prints — with the rules it applied above it, so a reader can see which
+    /// numbers produced the PASS and FAIL column.
+    rules: Rules,
 }
 
 /// The series a position is actually opened and closed on.
@@ -3566,9 +3995,13 @@ fn audit_bars(
     banner: &str,
     min_hits: u64,
     id: Option<&runner::identity::RunId>,
-    execution: Option<Execution<'_>>,
-    recording: Option<Recording<'_>>,
+    opts: AuditOptions<'_>,
 ) -> String {
+    let AuditOptions {
+        execution,
+        recording,
+        rules,
+    } = opts;
     let mut ev = match ev {
         Ok(e) => e,
         Err(why) => return format!("refused: {why}\n"),
@@ -3714,8 +4147,14 @@ fn audit_bars(
     // canonical mask order, so its sign was incidental. Selecting for the
     // largest |t| selects precisely the strongest signals of EITHER sign — so
     // the better the ranker got, the more often the side was wrong.
-    let (taken, exits, screened) =
-        trade_and_screen(&trade_bars, &trade_column, first, &by_evidence, horizon);
+    let (taken, exits, screened) = trade_and_screen(
+        &trade_bars,
+        &trade_column,
+        first,
+        &by_evidence,
+        horizon,
+        rules,
+    );
     out.push_str(&screened);
     out.push('\n');
     // THE WALK-FORWARD, WHICH USED TO BE A `None`.

@@ -281,6 +281,21 @@ pub struct Cell {
     /// enormous winner is not the same strategy as one built from ten thousand
     /// small ones, and only these two together can tell them apart.
     pub best_trade: i64,
+    /// The SMALLEST winning round trip, in paisa. Zero when nothing won.
+    ///
+    /// # The operator's rule is about the extremes, not the averages
+    ///
+    /// The rule is *"the worst losing trade is 1 and the smallest winning trade
+    /// must be 2"* — a 1:2 taken over the WORST case on both sides, not over the
+    /// means. An average-based ratio can be satisfied by a distribution where
+    /// some winners are smaller than some losers; this one cannot, because it
+    /// compares the floor of the wins against the ceiling of the losses.
+    ///
+    /// It is a far harder test and it is the one that was asked for. Kept
+    /// alongside [`Self::best_trade`] so the whole winning range is visible:
+    /// a strategy whose winners run from ₹2 to ₹150 is a different instrument
+    /// from one whose winners are all ₹40.
+    pub min_win: i64,
     /// Total bars held across every round trip, for the average holding time.
     ///
     /// Execution bars, so MINUTES once the one-minute execution layer is in
@@ -371,6 +386,32 @@ impl Cell {
             return 0;
         }
         self.bars_held / self.trades
+    }
+
+    /// The SMALLEST win over the LARGEST loss, in hundredths. `200` reads 2.00.
+    ///
+    /// # A worst-case 1:2, not an average one
+    ///
+    /// The operator's rule is *"our maximised worst losing trade is 1 and the
+    /// minimum winning trade should always be 2"*. That compares the FLOOR of
+    /// the wins against the CEILING of the losses, and it is far stricter than
+    /// the average-based ratio it replaced.
+    ///
+    /// The difference is not academic. A real sixty-minute run scored **81.19%
+    /// profitable** with an average win of ₹7.57 against an average loss of
+    /// ₹18.65 — and inside that, a smallest win far under its largest loss of
+    /// ₹178.45. An averages ratio can be satisfied by a distribution in which
+    /// many winners are smaller than many losers; this one cannot.
+    ///
+    /// [`i64::MAX`] when nothing lost. Zero when nothing won, which fails every
+    /// positive rule and is the honest answer for a variant with no winners.
+    #[must_use]
+    pub const fn reward_to_risk_bp(&self) -> i64 {
+        let worst_loss = self.worst_trade.saturating_neg();
+        if worst_loss <= 0 {
+            return i64::MAX;
+        }
+        self.min_win.saturating_mul(100) / worst_loss
     }
 
     /// What a winner ran, over what **every** trade cost in adverse excursion.
@@ -559,6 +600,63 @@ impl Grid {
     #[must_use]
     pub fn best(&self) -> Option<&Cell> {
         self.cells.iter().max_by_key(|c| (c.pessimistic, merit(c)))
+    }
+
+    /// The tightest containment any variant of this combination achieved.
+    ///
+    /// # The answer to "what stop is even possible here"
+    ///
+    /// A screen that only says PASS or FAIL leaves the operator guessing the
+    /// threshold: try twenty points, everything fails; try fifty, everything
+    /// fails; try two hundred, everything passes and the rule stopped meaning
+    /// anything. That is a search the TOOL should do, because it already priced
+    /// all 625 variants and knows the answer.
+    ///
+    /// This is `min(worst_mae)` across every variant that took a trade — the
+    /// smallest maximum adverse excursion the grid could achieve on this
+    /// combination, whatever it cost in profit. A rule tighter than this figure
+    /// cannot be met by ANY exit, so an operator reading it knows immediately
+    /// whether their number is reachable or whether the combination has to go.
+    ///
+    /// `None` when no variant took a trade.
+    #[must_use]
+    pub fn tightest_containment(&self) -> Option<&Cell> {
+        self.cells
+            .iter()
+            .filter(|c| c.trades > 0)
+            .min_by_key(|c| (c.worst_mae, core::cmp::Reverse(c.pessimistic)))
+    }
+
+    /// The best variant that satisfies every rule, not the best variant overall.
+    ///
+    /// # THE GRID EXISTS TO FIND THIS, and asking `best()` throws that away
+    ///
+    /// `Grid::best` returns the variant with the largest total, and the screen
+    /// then judged THAT one against the operator's stop. On a real run every top
+    /// combination failed, because the profit-maximising cell is the one with
+    /// **no stop at all** — `-/-/-+0@0` — and a variant with no stop obviously
+    /// lets a trade run 1.06% against.
+    ///
+    /// That is the wrong question. There are 625 variants and 24 of them place a
+    /// fixed stop; the operator's rule is a constraint on WHICH VARIANT to
+    /// trade, not a verdict on the combination. A combination whose best-overall
+    /// cell breaks the rule may have a stopped cell that keeps it, makes less,
+    /// and is the one they would actually take.
+    ///
+    /// So the search is: among the cells that satisfy every rule, the one with
+    /// the largest pessimistic total; `None` when no variant of this combination
+    /// can be traded within the rules, which is a real finding about the
+    /// combination rather than about the grid.
+    ///
+    /// Ties break exactly as [`Self::best`] does — `(pessimistic, merit)` with
+    /// `max_by_key`'s last-maximum rule — so a constrained search and an
+    /// unconstrained one agree wherever the constraint does not bind.
+    #[must_use]
+    pub fn best_within(&self, admits: impl Fn(&Cell) -> bool) -> Option<&Cell> {
+        self.cells
+            .iter()
+            .filter(|c| c.trades > 0 && admits(c))
+            .max_by_key(|c| (c.pessimistic, merit(c)))
     }
 
     /// The variant with the sharpest winners, among those that survive.
@@ -1362,6 +1460,12 @@ const fn tally_trade(cell: &mut Cell, pess: i64, held: usize, streak: &mut u32) 
         cell.gross_win = cell.gross_win.saturating_add(pess);
         if pess > cell.best_trade {
             cell.best_trade = pess;
+        }
+        // THE FLOOR OF THE WINS. `min_win` starts at zero, which is below every
+        // winner, so the first winner must set it unconditionally rather than
+        // by comparison.
+        if cell.min_win == 0 || pess < cell.min_win {
+            cell.min_win = pess;
         }
         *streak = 0;
     } else {
