@@ -124,6 +124,14 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    200 demands the SMALLEST win be twice the
                                    LARGEST loss, 0 drops the rule. TOP is how many
                                    to print.
+       cli descend      VENDOR UNDERLYING RUNG FROM_Y FROM_M TO_Y TO_M
+                        CEILING_PPM PER_WEEK
+                                   sweep ONE rung at successively LOWER supports,
+                                   from CEILING_PPM down to the floor PER_WEEK
+                                   trades a week implies on that rung's own bar
+                                   count. A rare setup is pruned by a high
+                                   support before it is ever priced, so a fixed
+                                   threshold cannot find one -- this walks it.
        cli range-all    VENDOR UNDERLYING FROM_Y FROM_M TO_Y TO_M SUPPORT_PPM
                                    sweep the span on ALL EIGHT INTRADAY RUNGS and
                                    table comparing them. SUPPORT_PPM is parts per
@@ -414,6 +422,69 @@ fn sweep_all_arm(out: &mut String, vendor: &str, rung: &str, min_hits: &str) -> 
         Err(why) => refuse(out, why),
     }
 }
+/// `descend`'s argument parsing, in the shape [`range_all_arm`] uses.
+///
+/// `PER_WEEK` is the operator's cadence and the only argument here that is not
+/// also on `range-all`. It is a whole number of trades per week, refused at
+/// zero -- a cadence of zero trades has no floor and would sweep to a support
+/// of one hit, which is every combination that ever fires once.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the command takes eight words and each is a separate parse that \
+              refuses with its own sentence. Bundling them into a struct would \
+              move the parsing, not remove it, and `range_all_arm` beside it \
+              takes six for the same reason."
+)]
+fn descend_arm(
+    out: &mut String,
+    vendor: &str,
+    underlying: &str,
+    rung: &str,
+    from: (&str, &str),
+    to: (&str, &str),
+    ceiling_ppm: &str,
+    per_week: &str,
+) -> u8 {
+    match (
+        from.0.parse::<u16>(),
+        from.1.parse::<u8>(),
+        to.0.parse::<u16>(),
+        to.1.parse::<u8>(),
+        parse_support_ppm(ceiling_ppm),
+        per_week.parse::<u64>(),
+    ) {
+        (Ok(fy), Ok(fm), Ok(ty), Ok(tm), Ok(h), Ok(w)) => {
+            // Checked HERE and not as a match guard: a guard on this arm makes
+            // the match non-exhaustive, and the compiler is right -- the zero
+            // case would fall through to a later arm that says nothing about
+            // cadence.
+            if w == 0 {
+                return refuse(
+                    out,
+                    "PER_WEEK must be a whole number of trades per week, at \
+                     least 1. A cadence of zero has no support floor and would \
+                     sweep every combination that fires even once.",
+                );
+            }
+            let text = descend(vendor, underlying, rung, (fy, fm), (ty, tm), h, w);
+            let refused = text.starts_with("refused: ");
+            out.push_str(&text);
+            if refused { MISUSED } else { OK }
+        }
+        (_, _, _, _, _, Err(_)) => refuse(
+            out,
+            "PER_WEEK must be a whole number of trades per week, at least 1.",
+        ),
+        (Err(_), _, _, _, _, _) | (_, _, Err(_), _, _, _) => {
+            refuse(out, "YEAR must be a number like 2026")
+        }
+        (_, Err(_), _, _, _, _) | (_, _, _, Err(_), _, _) => {
+            refuse(out, "MONTH must be a number from 1 to 12")
+        }
+        (_, _, _, _, Err(why), _) => refuse(out, why),
+    }
+}
+
 /// The `range-all` arm, lifted out of [`run`] for the reason
 /// [`audit_range_arm`] gives.
 ///
@@ -578,6 +649,9 @@ pub fn run(args: &[String], out: &mut String) -> u8 {
             screen_arm(out, v, u, r, (fy, fm, ty, tm), (sup, pts, rr, n))
         }
         ["range-all", v, u, fy, fm, ty, tm, mh] => range_all_arm(out, v, u, (fy, fm), (ty, tm), mh),
+        ["descend", v, u, r, fy, fm, ty, tm, sup, pw] => {
+            descend_arm(out, v, u, r, (fy, fm), (ty, tm), sup, pw)
+        }
         ["verify", feed, underlying] => verify_arm(out, feed, underlying),
         ["auto-stored", v, u, r, fy, fm, ty, tm] => auto_stored_arm(out, v, u, r, (fy, fm, ty, tm)),
         ["results"] => results_arm(out, None),
@@ -4520,6 +4594,280 @@ fn one_rung(
     RungRow { rung, outcome }
 }
 
+/// Trading weeks a month holds, times one hundred.
+///
+/// # Why a scaled integer and not 4.348
+///
+/// A month is 30.44 days and a trading week is five of them, so the weeks in a
+/// month is 4.348 -- a number §7 will not let near a float when it feeds a
+/// count. Scaled by a hundred it stays exact through the multiply and divides
+/// out once, at the end, where a single rounding is visible.
+const WEEKS_PER_MONTH_CENTI: u64 = 435;
+
+/// The support a target CADENCE implies on a span, in parts per million.
+///
+/// # The number the operator actually has
+///
+/// An operator does not think in support. He thinks *"one intraday trade a
+/// week"* -- and that is a claim about the calendar, not about bars. Over 81
+/// months it is 352 trades, and whether that is 0.4% or 0.03% of the bars
+/// depends entirely on the rung: the same cadence is 3,656 ppm on 15-minute
+/// bars and 244 ppm on 1-minute ones, a fifteen-fold spread from one number.
+///
+/// So the floor is DERIVED, at the rung's own bar count, from a cadence the
+/// operator can state. Nothing here is a constant anybody picked.
+///
+/// # Why this matters more than any other threshold in the crate
+///
+/// Measured, on the 81-month NIFTY span at 15 minutes: a support of 20,000 ppm
+/// -- the value a real run was launched with -- admits only combinations firing
+/// on 2% of bars or more, which is 1,926 trades, better than five a week. Every
+/// cadence an operator would call *rare* sits BELOW it and is pruned before it
+/// is ever priced. The engine was not failing to find rare winners; it was
+/// never allowed to look at one.
+///
+/// Returns `None` when the span holds no bars, because a support over zero bars
+/// is a division and not an answer.
+#[must_use]
+pub fn cadence_floor_ppm(bars: u64, months: u64, trades_per_week: u64) -> Option<u64> {
+    if bars == 0 || months == 0 || trades_per_week == 0 {
+        return None;
+    }
+    let weeks = months.saturating_mul(WEEKS_PER_MONTH_CENTI) / 100;
+    let trades = weeks.saturating_mul(trades_per_week).max(1);
+    // Multiply BEFORE dividing: `trades / bars` is zero for every cadence that
+    // matters, and scaling a zero is still zero. At 1-minute resolution the
+    // honest answer is 244 ppm and the naive order returns 0 ppm, which would
+    // read as "no floor at all" and sweep everything.
+    Some((trades.saturating_mul(1_000_000) / bars).max(1))
+}
+
+/// Months between two (year, month) points, inclusive of both.
+#[must_use]
+pub fn months_between(from: (u16, u8), to: (u16, u8)) -> u64 {
+    let a = u64::from(from.0) * 12 + u64::from(from.1);
+    let b = u64::from(to.0) * 12 + u64::from(to.1);
+    b.saturating_sub(a).saturating_add(1)
+}
+
+/// The support ladder a descent walks, ceiling first, floor last.
+///
+/// # Why geometric, and why the floor is always ON it
+///
+/// Combination count grows by roughly an order of magnitude per halving --
+/// measured on one month of NIFTY 15-minute bars: 2,272 at 43.6% support,
+/// 77,384 at 21.8%, 1,442,215 at 10.9%, 15,372,419 at 5.4%. A linear ladder
+/// would spend every one of its steps in the cheap region and then fall off a
+/// cliff; a geometric one spends equal COST per step, which is the only spacing
+/// that makes an incremental report useful.
+///
+/// The floor is appended explicitly rather than reached by division, because
+/// halving from an arbitrary ceiling lands near it and not on it -- and the
+/// floor is the whole point of the walk. Landing at 1.06× the operator's
+/// cadence would prune exactly what he asked for and report a completed
+/// descent, which is the failure wearing a success's clothes §4 bans.
+#[must_use]
+pub fn support_ladder(ceiling_ppm: u64, floor_ppm: u64) -> Vec<u64> {
+    if floor_ppm == 0 || ceiling_ppm <= floor_ppm {
+        return vec![floor_ppm.max(1)];
+    }
+    let mut rungs = Vec::new();
+    let mut at = ceiling_ppm;
+    while at > floor_ppm {
+        rungs.push(at);
+        at /= 2;
+    }
+    rungs.push(floor_ppm);
+    rungs
+}
+
+/// Sweep ONE rung at successively lower supports, until the operator's cadence.
+///
+/// # The command that exists because a threshold was hiding the answer
+///
+/// `range-all` takes one `SUPPORT_PPM` and sweeps every rung at it. That is the
+/// right shape for comparing rungs and the wrong shape for finding a RARE
+/// combination, because the support is exactly what decides whether a rare
+/// combination is allowed to exist. A run launched at 20,000 ppm cannot report
+/// a once-a-week setup no matter how long it runs -- the setup was pruned in
+/// the first level of the ladder, and the report says nothing about it because
+/// nothing counted it.
+///
+/// So this walks the threshold instead of fixing it. The ceiling is where the
+/// operator starts, the floor is [`cadence_floor_ppm`] for the cadence he
+/// actually wants, and every step in between is reported as it completes.
+///
+/// # Why incremental rather than one run at the floor
+///
+/// The floor is the expensive end -- combination count grows by roughly an
+/// order of magnitude per halving -- so a single run at the floor gives an
+/// operator nothing at all until it finishes, and no way to tell a long run
+/// from a stuck one. Walking down means the cheap answers arrive first, each
+/// one is comparable with the last, and the walk can be stopped the moment a
+/// row is good enough. That is the "dynamic incremental scalable" shape the
+/// operator asked for, and it is also the only shape that lets him see the
+/// combination count explode BEFORE he commits a machine to it.
+///
+/// Progress goes to STDERR as each step lands; the report is the returned
+/// string, on stdout. A descent buffering its whole walk printed nothing for
+/// 280 seconds when this was first run, which is the one thing it must not do.
+///
+/// # What each row proves
+///
+/// `trades` falling toward the cadence and `all_mae` falling toward the stop
+/// ceiling is the signature being hunted. A row where `trades` stays in the
+/// thousands is a grinder however good its total looks, and the descent prints
+/// both so the two cannot be confused.
+#[must_use]
+pub fn descend(
+    vendor_word: &str,
+    underlying: &str,
+    rung: &str,
+    from: (u16, u8),
+    to: (u16, u8),
+    ceiling_ppm: u64,
+    per_week: u64,
+) -> String {
+    let Some(known) = EVERY_RUNG.iter().find(|r| **r == rung) else {
+        return format!(
+            "refused: `{rung}` is not a rung this engine sweeps. The eight are: \
+             {}.\n",
+            EVERY_RUNG.join(", ")
+        );
+    };
+    let months = months_between(from, to);
+    let mut out = String::from(STORED_PROVENANCE);
+    let _ = writeln!(
+        out,
+        "feed {vendor_word} · {underlying} · {known} · {}-{:02}..{}-{:02} · \
+         {months} months · descending to {per_week} trade(s) per week",
+        from.0, from.1, to.0, to.1
+    );
+
+    // THE FIRST STEP IS ALSO THE MEASUREMENT THE FLOOR NEEDS.
+    //
+    // The floor is a support, and a support is a fraction of a bar count that
+    // nobody knows until the span is opened. Guessing it from the rung's name
+    // would be arithmetic on an assumption -- §3 rule 1's `UNVERIFIED` -- so the
+    // ceiling runs first and its `bars` is what the floor is derived from.
+    let first = one_rung(vendor_word, underlying, known, from, to, ceiling_ppm);
+    let Ok(ref seed) = first.outcome else {
+        let why = first
+            .outcome
+            .as_ref()
+            .err()
+            .map_or_else(|| "no reason given".to_owned(), Clone::clone);
+        let _ = writeln!(
+            out,
+            "\nrefused at the ceiling, so no floor could be \
+                               derived and nothing was walked.\n  {why}"
+        );
+        return out;
+    };
+    let Some(floor) = cadence_floor_ppm(seed.bars, months, per_week) else {
+        let _ = writeln!(
+            out,
+            "\nrefused: the span reported {} bars over {months} months, so a \
+             cadence floor is a division by zero rather than a threshold.",
+            seed.bars
+        );
+        return out;
+    };
+
+    let ladder = support_ladder(ceiling_ppm, floor);
+    let _ = writeln!(
+        out,
+        "  {} bars · one trade per week is {} of them · floor {floor} ppm · \
+         {} step(s)\n",
+        seed.bars,
+        seed.bars.saturating_mul(floor) / 1_000_000,
+        ladder.len()
+    );
+    let _ = writeln!(
+        out,
+        "  {:<10}{:>10}{:>14}{:>7}{:>10}{:>9}{:>12}{:>12}{:>14}",
+        "support",
+        "min_hits",
+        "combinations",
+        "depth",
+        "complete",
+        "trades",
+        "worst_mae",
+        "all_mae",
+        "worst"
+    );
+
+    // SEQUENTIAL, and deliberately so.
+    //
+    // `range_all` runs its nine rungs in parallel because they are independent.
+    // These are not independent in the way that matters: each step is roughly an
+    // order of magnitude more expensive than the last, so running them at once
+    // would hold the cheap answers hostage to the expensive one -- which is the
+    // exact failure this command exists to avoid. One at a time, printed as it
+    // lands.
+    for (step, &support) in ladder.iter().enumerate() {
+        let row = if step == 0 {
+            // Already swept, above. Re-sweeping it would be a second identical
+            // run that §3 rule 5 says produces identical bytes -- pure waste.
+            first.outcome.clone()
+        } else {
+            one_rung(vendor_word, underlying, known, from, to, support).outcome
+        };
+        let line = match row {
+            Err(why) => format!(
+                "  {:<10}REFUSED: {}",
+                format!("{support}ppm"),
+                why.lines().next().unwrap_or(&why)
+            ),
+            Ok(r) => format!(
+                "  {:<10}{:>10}{:>14}{:>7}{:>10}{:>9}{:>12}{:>12}{:>14}",
+                format!("{support}ppm"),
+                r.min_hits,
+                r.combinations,
+                r.depth,
+                if r.halted == 0 { "yes" } else { "NO" },
+                r.trades,
+                r.winner_mae,
+                r.all_mae,
+                r.pessimistic,
+            ),
+        };
+        // EACH ROW IS ANNOUNCED THE MOMENT IT LANDS, ON STDERR.
+        //
+        // # The defect this closes, found by running the command
+        //
+        // Every command in this crate builds a `String` and hands it to the
+        // caller to print, which is right for a command that finishes. This one
+        // does not: the last step of a descent is roughly an order of magnitude
+        // dearer than the first, so a walk that buffers prints NOTHING for the
+        // whole run and then everything at once. Measured -- a three-step
+        // descent produced a zero-byte file after 280 seconds.
+        //
+        // That is worse than slow. An operator cannot tell a descent that is
+        // working from one that is wedged, which is exactly the "cheap answers
+        // first" property this command was built for, and the doc comment above
+        // claimed it while the code did not do it.
+        //
+        // Stderr and not stdout, so the REPORT stays a single clean artifact on
+        // stdout that a pipe or a file capture sees whole. Progress is for the
+        // human watching; the report is for whatever reads the output.
+        eprintln!("  [{}/{}] {line}", step + 1, ladder.len());
+        let _ = writeln!(out, "{line}");
+    }
+
+    let _ = writeln!(
+        out,
+        "\n  `trades` is the whole point: a row in the thousands is a grinder \
+         whatever its total reads.\n  \
+         `all_mae` is every trade's adverse excursion in ppm -- the tightest \
+         stop that would have held ALL of them.\n  \
+         Each step is roughly an order of magnitude more expensive than the one \
+         above it. A `complete` of NO\n  means a budget stopped that step's \
+         ladder short and its combination count is not comparable."
+    );
+    out
+}
+
 /// Sweeps a span on EVERY rung and prints one table comparing them.
 ///
 /// # Why this is one command and not nine invocations
@@ -5736,6 +6084,7 @@ mod tests {
         nothing_to_trade, parse_min_hits, parse_sessions, parse_vendor, root_from, run,
         sample_warning, side_of_evidence, sweep, sweep_stored, sweep_with,
     };
+    use super::{cadence_floor_ppm, months_between, support_ladder};
 
     fn argv(words: &[&str]) -> Vec<String> {
         words.iter().map(|w| (*w).to_owned()).collect()
@@ -7252,5 +7601,152 @@ mod tests {
             worst_mae: 0,
             ..runner::grid::Cell::default()
         }
+    }
+
+    /// The support a real run was launched with PRUNES the cadence it wanted.
+    ///
+    /// # The measurement this pins, and it is the reason the descent exists
+    ///
+    /// A real `range-all` was launched on the 81-month NIFTY span at
+    /// `SUPPORT_PPM 20000`. The operator's requirement was "one intraday trade a
+    /// week, every one a winner". Those two numbers are incompatible and nothing
+    /// in the engine said so: the run banner reported its support, the sweep
+    /// reported its combinations, and the one combination shape that was asked
+    /// for had been pruned before the first exit grid was built.
+    ///
+    /// 15-minute bars, 81 months, 96,280 bars. One trade a week is 352 trades,
+    /// which is 3,655 ppm. The floor was 20,000. **Five times too strict**, and
+    /// the only combinations that could survive it fire on 2% of all bars --
+    /// better than five trades a week, which is a grinder by any reading.
+    ///
+    /// If this assertion ever fails, either the arithmetic moved or the cadence
+    /// did, and the descent's floor is no longer the operator's requirement.
+    #[test]
+    fn the_support_a_real_run_used_prunes_the_cadence_it_was_hunting() {
+        let floor = cadence_floor_ppm(96_280, 81, 1).expect("a real span has bars");
+
+        assert!(
+            floor < 20_000,
+            "one trade a week needs {floor} ppm; the run was launched at 20,000. \
+             If this no longer holds, the descent is solving a problem that went \
+             away"
+        );
+        // Pinned as a range rather than a literal so a rounding change does not
+        // fail the build, but a FIVEFOLD error does.
+        assert!(
+            (3_000..4_500).contains(&floor),
+            "one trade a week over 81 months of 15-minute bars is about 3,655 \
+             ppm; got {floor}"
+        );
+    }
+
+    /// The same cadence is a DIFFERENT support on every rung.
+    ///
+    /// # Why the floor cannot be a constant
+    ///
+    /// 81 months holds 96,280 fifteen-minute bars and 1,444,200 one-minute ones.
+    /// One trade a week is the same 352 trades on both -- and 3,655 ppm on one,
+    /// 243 ppm on the other. A single `SUPPORT_PPM` applied across rungs asks a
+    /// fifteen-fold different question at each, which is the same defect
+    /// `range_all`'s own banner already warns about for `min_hits`.
+    #[test]
+    fn one_cadence_is_a_different_support_on_every_rung() {
+        let fifteen = cadence_floor_ppm(96_280, 81, 1).expect("bars");
+        let one = cadence_floor_ppm(1_444_200, 81, 1).expect("bars");
+
+        assert!(
+            fifteen > one * 10,
+            "a fifteen-fold bar count must move the floor by roughly fifteen: \
+             15min {fifteen} ppm against 1min {one} ppm"
+        );
+        assert!(
+            one >= 1,
+            "and the finer rung must not round away to nothing"
+        );
+    }
+
+    /// Multiplying before dividing is what keeps a fine rung from reading zero.
+    ///
+    /// # The bug this would be
+    ///
+    /// `trades / bars` is integer zero for every cadence worth hunting -- 352
+    /// over 1,444,200 is 0 -- and scaling a zero gives 0 ppm, which reads as "no
+    /// floor at all" and sweeps the entire space. The order of operations is the
+    /// whole defence and nothing else in the function would catch it.
+    #[test]
+    fn a_fine_rung_never_rounds_its_floor_away_to_nothing() {
+        for bars in [500_000_u64, 1_444_200, 10_000_000, 100_000_000] {
+            let floor = cadence_floor_ppm(bars, 81, 1).expect("bars");
+            assert!(
+                floor >= 1,
+                "a floor of zero prunes nothing and sweeps everything: \
+                 {bars} bars gave {floor} ppm"
+            );
+        }
+    }
+
+    /// A span with no bars has no floor, and says so rather than dividing.
+    #[test]
+    fn an_empty_span_has_no_floor_rather_than_a_division() {
+        assert_eq!(cadence_floor_ppm(0, 81, 1), None);
+        assert_eq!(cadence_floor_ppm(96_280, 0, 1), None);
+        assert_eq!(cadence_floor_ppm(96_280, 81, 0), None);
+    }
+
+    /// The ladder ends ON the floor, never merely near it.
+    ///
+    /// # Why the last rung is appended and not divided into
+    ///
+    /// Halving from an arbitrary ceiling lands somewhere above the floor and
+    /// stops. At 20,000 halving toward 3,655 the last computed rung is 5,000 --
+    /// still 1.4x too strict, still pruning exactly the cadence the walk exists
+    /// to reach. The descent would report itself complete having never asked the
+    /// question. §4 bans that shape by name.
+    #[test]
+    fn the_ladder_lands_exactly_on_the_floor() {
+        let ladder = support_ladder(20_000, 3_655);
+
+        assert_eq!(
+            ladder.last().copied(),
+            Some(3_655),
+            "the walk must END on the operator's cadence: {ladder:?}"
+        );
+        assert_eq!(
+            ladder.first().copied(),
+            Some(20_000),
+            "and start where it was told to: {ladder:?}"
+        );
+        for pair in ladder.windows(2) {
+            // `.expect` and not `unreachable!`: the latter is a project region
+            // that can never execute, so it can never be covered, and the
+            // coverage floor in `CLAUDE.md` §9 is 100%. `.expect` panics inside
+            // std, which is not instrumented, and costs nothing.
+            let a = pair.first().copied().expect("windows(2) yields two");
+            let b = pair.get(1).copied().expect("windows(2) yields two");
+            assert!(a > b, "the ladder must descend strictly: {a} then {b}");
+        }
+    }
+
+    /// A ceiling already at or below the floor is one rung, not an empty walk.
+    ///
+    /// An empty ladder would sweep nothing and report a finished descent, which
+    /// is indistinguishable from a descent that found nothing.
+    #[test]
+    fn a_ceiling_below_the_floor_still_walks_once() {
+        assert_eq!(support_ladder(1_000, 3_655), vec![3_655]);
+        assert_eq!(support_ladder(3_655, 3_655), vec![3_655]);
+        assert_eq!(support_ladder(500, 0), vec![1]);
+    }
+
+    /// Months are counted inclusively, because a span holds both its ends.
+    #[test]
+    fn a_span_holds_both_of_its_ends() {
+        assert_eq!(months_between((2019, 12), (2026, 8)), 81);
+        assert_eq!(months_between((2024, 6), (2024, 6)), 1);
+        assert_eq!(months_between((2024, 1), (2024, 12)), 12);
+        // Backwards is not negative months; it saturates to the single month it
+        // was given, because a negative span cannot be swept and the caller's
+        // own range check is what refuses it.
+        assert_eq!(months_between((2026, 8), (2019, 12)), 1);
     }
 }
