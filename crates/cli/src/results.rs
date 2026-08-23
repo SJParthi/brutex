@@ -391,6 +391,49 @@ impl Results {
                     path.display()
                 ));
             }
+            // A TRAILING PART-RECORD IS A REFUSAL, NOT A ROUNDING.
+            //
+            // # The failure this closes, reproduced before it was written
+            //
+            // `len()` is `(file_len - HEADER) / STRIDE`, and integer division
+            // DISCARDS the remainder. A machine that lost power partway through
+            // an append left a part-record that no reader ever mentioned:
+            // measured on a copy of a real ledger, appending 100 bytes and
+            // listing it printed the same fourteen rows, said nothing, and
+            // exited 0.
+            //
+            // Silence was only half of it. `append` seeks `SeekFrom::End(0)`,
+            // so the NEXT record lands after the orphan bytes and every record
+            // from then on is offset by however many they were — while `read`
+            // still seeks `HEADER + index * STRIDE`. The same measurement showed
+            // what that renders as: a row with `18,446,744,073,709,551,615`
+            // combinations, no vendor, no rung, months `4294901760/0`, and a
+            // total of -₹0.01. It was counted in the row total and it was
+            // printed as data.
+            //
+            // Whether such a row can also WIN `BEST COMPLETE RUN` is decided by
+            // whichever byte lands on `halted`. In that run it happened to be
+            // non-zero and the row was skipped — luck, not design.
+            //
+            // Refused rather than healed. Truncating the orphan would be a
+            // silent repair of a file whose history §3 rule 8 protects, and §4
+            // bans a fallback that hides a failure. The count of intact records
+            // is named so an operator can see exactly what survived.
+            let payload = len.saturating_sub(HEADER);
+            let orphan = payload % STRIDE;
+            if orphan != 0 {
+                return Err(format!(
+                    "{} ends with {orphan} bytes that are not a whole record: \
+                     {} complete records occupy {} bytes after the {HEADER}-byte \
+                     header, and the file is {len}. A write was interrupted. \
+                     Nothing here is repaired automatically — the intact records \
+                     are readable and the orphan bytes are not, and truncating \
+                     them is a decision about history that belongs to you.",
+                    path.display(),
+                    payload / STRIDE,
+                    payload - orphan,
+                ));
+            }
         }
 
         // ONE PASS, ONCE, AT OPEN. Stated rather than hidden: this is O(runs)
@@ -670,6 +713,82 @@ mod tests {
             [1; 32],
             "the first is untouched"
         );
+    }
+
+    /// A WRITE CUT SHORT BY A DEAD MACHINE IS NAMED, NOT ROUNDED AWAY.
+    ///
+    /// # What this reproduces
+    ///
+    /// `len()` divides the payload by `STRIDE`, and integer division discards
+    /// the remainder. Before this refusal existed, a ledger with a part-record
+    /// on the end listed its intact rows, said nothing about the orphan, and
+    /// exited 0 — so the operator's evidence that a run had been interrupted
+    /// was a file size nobody looks at.
+    ///
+    /// The silence was the smaller half. `append` seeks to the END of the file,
+    /// while `read` seeks `HEADER + index * STRIDE`, so one interrupted write
+    /// puts every later record permanently out of phase with every later read.
+    /// Reproduced on a copy of a real ledger, the first misaligned row rendered
+    /// as `18,446,744,073,709,551,615` combinations with no vendor and no rung,
+    /// and was counted in the row total as though it were a run.
+    ///
+    /// # Why every remainder is tried
+    ///
+    /// One orphan byte and `STRIDE - 1` orphan bytes are the two ends of the
+    /// same defect, and a check written as `!= STRIDE` or `< STRIDE / 2` would
+    /// pass one and fail the other. The loop is the cheapest way to say that the
+    /// only acceptable remainder is zero.
+    #[test]
+    fn a_part_record_from_an_interrupted_write_is_refused_and_counted() {
+        for orphan in [1_u64, 7, 100, STRIDE - 1] {
+            let r = root(&format!("torn{orphan}"));
+            {
+                let mut store = Results::open(&r).expect("opens");
+                store.append(&record(1)).expect("appends");
+                store.append(&record(2)).expect("appends");
+            }
+            // The interrupted write itself: bytes that are not a whole record.
+            let path = Results::path(&r);
+            use std::io::Write as _;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .expect("the ledger reopens for the torn write");
+            f.write_all(&vec![0_u8; usize::try_from(orphan).expect("fits")])
+                .expect("the partial write lands");
+            drop(f);
+
+            let why = Results::open(&r).expect_err("a torn ledger is refused");
+            assert!(
+                why.contains(&orphan.to_string()),
+                "the refusal must name how many bytes are orphaned, or the \
+                 operator cannot tell a one-byte tear from a near-whole one: \
+                 {why}"
+            );
+            assert!(
+                why.contains('2'),
+                "and how many records survived, which is what makes it \
+                 actionable rather than merely alarming: {why}"
+            );
+        }
+    }
+
+    /// The refusal is about the REMAINDER, so a whole number of records opens.
+    ///
+    /// Without this row the check above would pass just as well if `open`
+    /// refused every non-empty ledger, which would be a far worse defect wearing
+    /// the same test's approval.
+    #[test]
+    fn a_ledger_whose_length_is_a_whole_number_of_records_still_opens() {
+        let r = root("whole");
+        {
+            let mut store = Results::open(&r).expect("opens");
+            for i in 1..=3 {
+                store.append(&record(i)).expect("appends");
+            }
+        }
+        let store = Results::open(&r).expect("a ledger with no orphan bytes reopens");
+        assert_eq!(store.len().expect("measurable"), 3);
     }
 
     #[test]
