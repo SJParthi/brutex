@@ -52,7 +52,7 @@ const MAGIC: [u8; 8] = *b"BRUTEXRS";
 /// Version TWO: version one had no seal. A new field is a new version at its own
 /// stride, never a
 /// widened record — `CLAUDE.md` §4 and §3 rule 8 together.
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 
 /// Magic, version, and four bytes reserved so the header is a round sixteen.
 const HEADER: u64 = 16;
@@ -86,14 +86,14 @@ const _: () = assert!(HEADER_BYTES as u64 == HEADER);
 /// Not padded to a round number: §4 says a new field is a new file version at
 /// its own stride, so reserved space would be space for a change the format
 /// does not permit.
-pub const STRIDE: u64 = 213;
+pub const STRIDE: u64 = 261;
 
 /// [`STRIDE`] as a `usize`, for the record arrays.
 ///
 /// Declared rather than cast: `STRIDE as usize` is a narrowing on a 32-bit
 /// target and clippy is right to refuse it. Two constants that must agree, and
 /// a `const` assertion that they do -- which a cast could not give.
-pub const STRIDE_BYTES: usize = 213;
+pub const STRIDE_BYTES: usize = 261;
 
 const _: () = assert!(STRIDE_BYTES as u64 == STRIDE);
 
@@ -191,6 +191,24 @@ pub struct Record {
     /// trail. Five axes, so five fields — a packed integer would be a schema
     /// inside a schema.
     pub exit_rungs: [i16; 5],
+    /// The combination itself, as its six mask words.
+    ///
+    /// # What version 2 could not say
+    ///
+    /// A record carried `identity` -- a blake3 over the nine terms §3 rule 3
+    /// names -- and that hash identifies the RUN. It cannot be turned back into
+    /// the conditions, so `cli results` could print the money a combination
+    /// made and never which conditions made it. The names existed only in the
+    /// audit's own output, which is stdout and gone.
+    ///
+    /// Forty-eight bytes, and `vocab` turns them back into names on read. The
+    /// ledger becomes the thing it was always supposed to be: a permanent
+    /// record of what was found, not just of what it was worth.
+    ///
+    /// Six `u64` and not a variable list of positions, for the reason the
+    /// header gives: a variable record has no stride and therefore no O(1)
+    /// address.
+    pub mask_words: [u64; 6],
 }
 
 impl Record {
@@ -235,6 +253,13 @@ impl Record {
         put(&self.all_mae.to_le_bytes(), &mut at);
         for rung in self.exit_rungs {
             put(&rung.to_le_bytes(), &mut at);
+        }
+        // LAST, so every version-2 offset is unchanged. A field inserted in the
+        // middle would move every one after it, and a version-2 file read at
+        // version 3 would parse cleanly into nonsense -- which the version check
+        // prevents, but only because it refuses the file outright.
+        for word in self.mask_words {
+            put(&word.to_le_bytes(), &mut at);
         }
         debug_assert_eq!(at, PAYLOAD_BYTES, "every field is written before the seal");
         let seal = seal_of(&out);
@@ -320,6 +345,10 @@ impl Record {
         for slot in &mut exit_rungs {
             *slot = i16::from_le_bytes(take(2, &mut at).try_into().unwrap_or([0; 2]));
         }
+        let mut mask_words = [0_u64; 6];
+        for slot in &mut mask_words {
+            *slot = u64::from_le_bytes(take(8, &mut at).try_into().unwrap_or([0; 8]));
+        }
         Self {
             identity: id,
             finished_micros,
@@ -346,6 +375,7 @@ impl Record {
             winner_mfe: mfe_winners,
             all_mae,
             exit_rungs,
+            mask_words,
         }
     }
 
@@ -894,6 +924,9 @@ mod tests {
             winner_mfe: 8_876,
             all_mae: 2_295,
             exit_rungs: [2, 3, -1, 1, 0],
+            // Distinct per fixture so a round trip that dropped or reordered
+            // the words fails rather than passing on symmetry.
+            mask_words: [u64::from(n), 0, u64::from(n) << 32, 0, 0, 7],
         }
     }
 
@@ -920,6 +953,7 @@ mod tests {
             + 8 + 8                // worst_trade, max_drawdown
             + 8 + 8 + 8            // winner_mae, winner_mfe, all_mae
             + 2 * 5                // exit_rungs
+            + 8 * 6                // mask_words -- version 3's difference from version 2
             + 8; // the seal, which is version 2's whole difference from version 1
         assert_eq!(
             STRIDE, EXPECTED,

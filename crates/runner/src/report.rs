@@ -703,6 +703,33 @@ pub fn render_auto(auto: &Auto, id: Option<&RunId>) -> String {
     out
 }
 
+/// The same names, from the six raw words a stored row carries.
+///
+/// # Why `cli` cannot call `condition_names` directly
+///
+/// It takes a `&ConditionMask`, and that type lives in `vocab`. `CLAUDE.md` §5
+/// lists `cli`'s arrows and `vocab` is **not among them** -- adding one so a
+/// listing could print a name would be the silent scope change §3 rule 2
+/// forbids, and it would be invisible in review because `Cargo.toml` is the
+/// only file that changes.
+///
+/// So the conversion lives here, in a crate that already holds the arrow
+/// legitimately, and `cli` passes the `[u64; WORDS]` it read off disk. The
+/// caller needs no vocabulary type at all.
+///
+/// # Why the ledger stores WORDS and not NAMES
+///
+/// A name is a `vocab_version` fact, not a run fact. Bit 143 means whatever
+/// today's table says it means; freezing the string at write time would make an
+/// old row render a claim the current table no longer makes, and nothing would
+/// flag it. Storing the bits and resolving late means a bit that has moved
+/// renders as `?143` -- visibly wrong rather than quietly stale. That is the
+/// same reason `vocab_version` is one of the nine terms in §3 rule 3.
+#[must_use]
+pub fn names_from_words(words: [u64; vocab::mask::WORDS]) -> Vec<String> {
+    condition_names(&ConditionMask::from_words(words))
+}
+
 #[cfg(test)]
 #[allow(
     clippy::expect_used,

@@ -369,6 +369,106 @@ impl Cell {
             .saturating_mul(10_000)
             .saturating_div(self.trades.cast_signed())
     }
+    /// The **95% lower confidence bound** on the win rate, in basis points.
+    ///
+    /// # The number `win_rate_bp` cannot produce
+    ///
+    /// Forty winners out of forty and twelve out of twelve are both `10_000`.
+    /// They are not the same evidence and no ranking built on the raw rate can
+    /// tell them apart -- so a twelve-trade fluke and a forty-trade sniper sort
+    /// as equals, and the fluke usually wins on some tiebreak.
+    ///
+    /// This is the Wilson score interval's lower end, which answers "given what
+    /// was observed, how low could the TRUE rate plausibly be". It reads:
+    ///
+    /// | observed | trades | `win_rate_bp` | this |
+    /// |---|---|---|---|
+    /// | 12 of 12 | 12 | `10_000` | `7_575` |
+    /// | 40 of 40 | 40 | `10_000` | `9_123` |
+    /// | 900 of 1000 | 1000 | `9_000` | `8_798` |
+    ///
+    /// **That ordering is the whole point.** A forty-trade perfect record beats
+    /// a thousand-trade ninety-percent one, and a twelve-trade perfect record
+    /// beats neither. Rarity is not penalised; INSUFFICIENCY is, and by exactly
+    /// the amount the arithmetic warrants rather than by a floor someone picked.
+    ///
+    /// # Why not a `min_trades` floor instead
+    ///
+    /// A floor is a guess that applies the same number to a 55% strategy and a
+    /// 100% one, when the evidence they need is wildly different. This bound
+    /// scales with what was actually seen. It also cannot be gamed by finding a
+    /// rarer combination, which a total-P&L ranking rewards backwards.
+    ///
+    /// # Cost, and why a float is allowed here
+    ///
+    /// One `sqrt` and a fixed number of arithmetic operations -- O(1), on the
+    /// same terms as every other accessor `CLAUDE.md` §3 rule 4 bounds. §7 bans
+    /// floats for PRICES; this is a statistic, and §7's own last line keeps
+    /// statistical values at full precision. Only the final conversion to basis
+    /// points is integral, and it FLOORS, so a reported bound is never better
+    /// than the true one.
+    // SCOPED TO THIS FUNCTION, and deliberately not to the module.
+    //
+    // `significance`, `bootstrap` and `outcome` each take this exception at
+    // module level, and they can: none of them ever sees a price. `grid` does --
+    // it carries paisa in `gross_win`, `gross_loss` and every P&L field on this
+    // same struct -- so a module-level allow here would switch off the lint that
+    // keeps §7's integer rule enforceable for the rest of the file.
+    #[expect(
+        clippy::float_arithmetic,
+        reason = "CLAUDE.md §7 keeps statistical values at full precision and \
+                  bans floats for PRICES. This is a confidence bound over two \
+                  COUNTS; no paisa figure enters it and none leaves."
+    )]
+    #[must_use]
+    pub fn assurance_bp(&self) -> i64 {
+        // 1.959964 is the two-sided 95% normal quantile. Written out rather than
+        // named 1.96, because the rounded value shifts the bound in the fourth
+        // basis point and this number is compared against a rule.
+        const Z: f64 = 1.959_964;
+        if self.trades == 0 {
+            return 0;
+        }
+        // `as` and not `try_from`: a u64 past f64's exact-integer range still
+        // converts to the nearest representable double, which for a trade count
+        // is a relative error below 2^-52 and cannot move a basis point.
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a trade count large enough to lose f64 precision is 2^53 \
+                      round trips, which no slice this engine can hold produces"
+        )]
+        let n = self.trades as f64;
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "wins <= trades, so the same bound applies"
+        )]
+        let w = self.wins as f64;
+        let p = w / n;
+        let z2 = Z * Z;
+        let denominator = 1.0 + z2 / n;
+        let centre = p + z2 / (2.0 * n);
+        let margin = Z * (p * (1.0 - p) / n + z2 / (4.0 * n * n)).sqrt();
+        let lower = (centre - margin) / denominator;
+        // Clamped before the cast, and the bounds are CONSTANTS -- `clamp` panics
+        // only when a bound is NaN or inverted, and neither can happen here.
+        //
+        // `lower` cannot itself be NaN for any reachable input: `n` is non-zero
+        // past the guard above, `p` is therefore finite, the square root's
+        // argument is a sum of two non-negative terms, and the denominator
+        // exceeds one. The clamp is not defending against that -- it is pinning
+        // the RANGE, so that a future edit to the formula cannot produce a bound
+        // outside [0, 10_000] and have it silently compared against a rule.
+        // Were a NaN ever to reach the cast, Rust's saturating float-to-int
+        // conversion yields 0, which is the refusal we want rather than a
+        // passing score.
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the value is clamped to [0, 10_000] immediately above the \
+                      cast, so no truncation beyond the intended floor occurs"
+        )]
+        let bp = (lower * 10_000.0).clamp(0.0, 10_000.0) as i64;
+        bp
+    }
 
     /// Gross profit over gross loss, in hundredths. `250` reads 2.50.
     ///
@@ -3707,6 +3807,141 @@ mod tests {
         assert!(saw_tsl, "no cell fired a trailing stop loss");
         assert!(saw_ttp, "no cell fired a trailing take profit");
         assert!(saw_target, "no cell hit a target");
+    }
+
+    /// A sniper with forty perfect trades OUTRANKS a grinder with a thousand.
+    ///
+    /// # The ordering this pins is the entire reason the bound exists
+    ///
+    /// The operator's requirement is "very few trades, but every one assured".
+    /// A raw win rate cannot express it: it scores 12-of-12 and 40-of-40
+    /// identically at 100%, so the ranking has to fall back on trade count or
+    /// total P&L, and BOTH of those reward volume -- the opposite of the ask.
+    ///
+    /// The Wilson lower bound resolves it without a `min_trades` floor. If this
+    /// ordering ever inverts, the engine has gone back to rewarding volume and
+    /// the whole sniper premise is broken, so it is asserted as a chain rather
+    /// than as three independent values.
+    #[test]
+    fn few_and_certain_outranks_many_and_merely_good() {
+        let sniper = Cell {
+            trades: 40,
+            wins: 40,
+            ..Cell::default()
+        };
+        let grinder = Cell {
+            trades: 1_000,
+            wins: 900,
+            ..Cell::default()
+        };
+        let fluke = Cell {
+            trades: 12,
+            wins: 12,
+            ..Cell::default()
+        };
+
+        // The raw rate CANNOT separate the sniper from the fluke. Asserted so
+        // the next reader sees why a second statistic was needed at all.
+        assert_eq!(
+            sniper.win_rate_bp(),
+            fluke.win_rate_bp(),
+            "the raw win rate is blind to sample size -- this is the defect"
+        );
+        assert!(
+            sniper.win_rate_bp() > grinder.win_rate_bp(),
+            "and it ranks the sniper above the grinder for the wrong reason"
+        );
+
+        // The bound separates all three, in the order the operator wants.
+        assert!(
+            sniper.assurance_bp() > grinder.assurance_bp(),
+            "forty perfect trades must beat a thousand at ninety percent: \
+             {} vs {}",
+            sniper.assurance_bp(),
+            grinder.assurance_bp()
+        );
+        assert!(
+            grinder.assurance_bp() > fluke.assurance_bp(),
+            "and a thousand at ninety percent must beat twelve perfect ones, \
+             because twelve is not yet evidence: {} vs {}",
+            grinder.assurance_bp(),
+            fluke.assurance_bp()
+        );
+    }
+
+    /// The bound is never better than the observed rate, and never negative.
+    ///
+    /// # Why both ends are pinned
+    ///
+    /// A LOWER bound that exceeded the point estimate would be a bound in name
+    /// only, and every rule built on it would admit more than it promised --
+    /// exactly the fallback-that-hides-a-failure `CLAUDE.md` §4 bans. The zero
+    /// end matters because the value is cast to `i64` for comparison and a
+    /// negative would compare as "worse than impossible" rather than refusing.
+    #[test]
+    fn the_bound_is_a_bound_at_both_ends() {
+        for (wins, trades) in [
+            (0_u64, 1_u64),
+            (0, 100),
+            (1, 1),
+            (1, 2),
+            (50, 100),
+            (99, 100),
+            (100, 100),
+            (7, 9),
+        ] {
+            let cell = Cell {
+                trades,
+                wins,
+                ..Cell::default()
+            };
+            let bound = cell.assurance_bp();
+            assert!(
+                bound >= 0,
+                "a bound below zero cannot be compared honestly: {wins}/{trades} gave {bound}"
+            );
+            assert!(
+                bound <= cell.win_rate_bp(),
+                "a LOWER bound above the observed rate is not a bound: \
+                 {wins}/{trades} gave {bound} against an observed {}",
+                cell.win_rate_bp()
+            );
+        }
+    }
+
+    /// No trades is no evidence, and is stated as zero rather than as a divide.
+    #[test]
+    fn an_empty_cell_has_no_assurance_and_does_not_divide_by_zero() {
+        assert_eq!(Cell::default().assurance_bp(), 0);
+    }
+
+    /// More of the same evidence RAISES the bound, monotonically.
+    ///
+    /// # The property that makes it usable as a ranking key
+    ///
+    /// If the bound could fall as more confirming trades arrived, an operator
+    /// could improve a candidate's rank by DELETING trades from it, and the
+    /// ranking would be selecting for small samples rather than for confidence.
+    /// Asserted across the whole ladder rather than at one point, because a
+    /// single pair can pass on an arithmetic accident.
+    #[test]
+    fn more_confirming_trades_can_only_raise_the_bound() {
+        let mut previous = 0;
+        for trades in 1_u64..=200 {
+            let cell = Cell {
+                trades,
+                wins: trades,
+                ..Cell::default()
+            };
+            let bound = cell.assurance_bp();
+            assert!(
+                bound >= previous,
+                "a perfect record of {trades} scored {bound}, below the {previous} \
+                 that {} scored -- the bound must not fall as evidence accrues",
+                trades - 1
+            );
+            previous = bound;
+        }
     }
 }
 

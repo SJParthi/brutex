@@ -299,6 +299,7 @@ fn screen_arm(
                     // off rather than guessed. A win-rate floor an operator did
                     // not type is a policy the engine invented.
                     min_win_rate_bp: 0,
+                    min_assurance_bp: 0,
                     min_trades: 0,
                     top: n,
                 },
@@ -2836,7 +2837,55 @@ fn quality_block(record: &crate::results::Record) -> String {
             rung(trail)
         )
     );
+
+    append_condition_names(&mut out, record);
     out
+}
+
+/// The winning combination, BY NAME, appended to a quality block.
+///
+/// # Why this is its own function
+///
+/// It was inline in [`quality_block`] and pushed it past the hundred-line
+/// ceiling clippy enforces. Splitting on that boundary is the right cut
+/// anyway: everything above it is MONEY, derived from figures the record
+/// already held, and this is the one part that decodes a stored field back
+/// through the vocabulary. The two fail for different reasons and read
+/// better apart.
+fn append_condition_names(out: &mut String, record: &crate::results::Record) {
+    // THE CONDITIONS THEMSELVES, which no stored surface has ever printed.
+    //
+    // Every figure above is money, and money without the combination that
+    // earned it is a number an operator cannot act on, cannot reproduce and
+    // cannot argue with. The winner scrolled past in the live run's output and
+    // the ledger kept only its P&L, so a row read back a week later said what
+    // was made and never what made it. Version 3 of the ledger carries the six
+    // mask words for exactly this line.
+    //
+    // `runner::report::names_from_words` and not `vocab` directly: see its own
+    // comment -- `CLAUDE.md` §5 does not give `cli` a `vocab` arrow.
+    let names = runner::report::names_from_words(record.mask_words);
+    if names.is_empty() {
+        // Distinguishable from "the names are missing". An all-zero mask means
+        // the run recorded no winning combination at all -- a halt, or a sweep
+        // whose frontier emptied at k=1 -- and saying that is not the same as
+        // printing nothing, which reads as a rendering bug.
+        let _ = writeln!(
+            out,
+            "  {:<40}{:>16}  no combination was recorded for this row",
+            "the conditions it required", "NONE"
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "  {:<40}{:>16}  every one must hold on the same bar, ANDed",
+            "the conditions it required",
+            format!("{} of them", names.len())
+        );
+        for (ordinal, name) in names.iter().enumerate() {
+            let _ = writeln!(out, "        {:>2}. {name}", ordinal + 1);
+        }
+    }
 }
 
 /// The best COMPLETE run among these rows, as the line the listing ends on.
@@ -3284,6 +3333,7 @@ fn ledger_round_trip() -> Check {
         winner_mfe: 700,
         all_mae: 500,
         exit_rungs: [-1, -1, 3, 0, 0],
+        mask_words: [0xDEAD_BEEF, 0, 0, 0, 0, 0x1234],
     };
     let outcome = crate::results::Results::open(&dir)
         .and_then(|mut store| {
@@ -3648,6 +3698,42 @@ pub struct Rules {
     ///
     /// Zero drops the rule.
     pub min_trades: u64,
+    /// The **95% lower bound** on the win rate that a row must still clear, in
+    /// basis points. `9_000` reads "even pessimistically, ninety percent".
+    ///
+    /// # The rule that lets `min_trades` come DOWN
+    ///
+    /// The operator's requirement is not "many trades". It is *"very minimal
+    /// trades, but confirmed"* -- a rare, high-conviction setup that fires forty
+    /// times in seven years and never loses. Every other rule here fights that:
+    /// `min_trades` rejects it outright, and the ranking it feeds sorts by total
+    /// P&L, which is volume times edge and so always prefers the grinder.
+    ///
+    /// [`grid::Cell::assurance_bp`] settles it without a floor anyone has to
+    /// guess. Measured, from the tests that pin it:
+    ///
+    /// | record | raw rate | this bound |
+    /// |---|---|---|
+    /// | 12 of 12 | 100.00% | 75.75% |
+    /// | 40 of 40 | 100.00% | 91.23% |
+    /// | 900 of 1,000 | 90.00% | 87.98% |
+    /// | 18,560 of 19,759 | 93.93% | 93.59% |
+    ///
+    /// A forty-trade perfect record clears a 90% bar. A twelve-trade one does
+    /// not. **Neither number was chosen** -- the arithmetic ranked them, and it
+    /// is the same arithmetic whether the sample is forty or forty thousand.
+    ///
+    /// # Why this does not make `min_trades` redundant
+    ///
+    /// It very nearly does, and that is deliberate: with this rule set, the
+    /// honest `min_trades` is small or zero, because the bound already refuses
+    /// what a floor was standing in for. It is kept because the two refuse for
+    /// different reasons and an operator is entitled to both -- a bound of 90%
+    /// admits 40 of 40, and an operator who will not trade a system on forty
+    /// observations regardless of its statistics may still say so.
+    ///
+    /// Zero drops the rule, the way `min_rr_bp` of zero does.
+    pub min_assurance_bp: i64,
     /// How many combinations to report. Ten or twenty-five, the operator's call.
     pub top: usize,
 }
@@ -3658,7 +3744,7 @@ impl Rules {
     /// A rule broken once is a disqualification and not a lower rank: a stop
     /// that one trade in ten thousand ran through is a stop that did not hold.
     #[must_use]
-    pub const fn admits(&self, cell: &grid::Cell) -> bool {
+    pub fn admits(&self, cell: &grid::Cell) -> bool {
         // FOUR RULES, AND EACH ANSWERS A QUESTION THE OTHERS CANNOT.
         //
         // A combination can pass any three and fail the fourth, which is why
@@ -3675,10 +3761,22 @@ impl Rules {
         // All of them, and a rule broken once is a disqualification rather than
         // a lower rank: a stop that one trade in ten thousand ran through is a
         // stop that did not hold.
+        // AND A FIFTH, WHICH IS THE ONE THAT ADMITS A SNIPER.
+        //
+        // The four above can all be satisfied by a rare, perfect, tiny sample --
+        // and `min_trades` is the only thing that was stopping one, by refusing
+        // it outright rather than by weighing it. `assurance_bp` weighs it: a
+        // forty-trade perfect record clears 90%, a twelve-trade one does not,
+        // and no floor had to be guessed to separate them.
+        //
+        // It is NOT `const`-incompatible by accident -- `assurance_bp` takes a
+        // square root, so this function loses `const`. That is the price of the
+        // only statistic that can rank a sniper against a grinder honestly.
         cell.worst_mae <= self.max_mae_ppm
             && cell.reward_to_risk_bp() >= self.min_rr_bp
             && cell.win_rate_bp() >= self.min_win_rate_bp
             && cell.trades >= self.min_trades
+            && cell.assurance_bp() >= self.min_assurance_bp
     }
 }
 
@@ -3708,6 +3806,7 @@ impl Rules {
         // page. A win-rate floor nobody typed would be a fourth number an
         // operator never chose, silently disqualifying rows.
         min_win_rate_bp: 0,
+        min_assurance_bp: 0,
         min_trades: 0,
         top: 25,
     };
@@ -3921,11 +4020,25 @@ fn tiers(bars: &[indicators::Candle], trades: u64) -> Vec<Tier> {
 impl Tier {
     /// This tier as the rules the screen applies.
     #[must_use]
-    pub const fn rules(&self, top: usize) -> Rules {
+    pub fn rules(&self, top: usize) -> Rules {
         Rules {
             max_mae_ppm: points_to_ppm(self.max_points),
             min_rr_bp: self.min_rr_bp,
             min_win_rate_bp: self.min_win_rate_bp,
+            // THE TIER'S WIN RATE, DEMANDED PESSIMISTICALLY.
+            //
+            // A tier says "ninety-five of a hundred win". Applied to the raw
+            // rate that is satisfied by 20 of 20, which is a rate of 100% and a
+            // 95% lower bound of 83.88% -- the claim is not supported and the
+            // tier admitted it anyway. Applied to the bound, the same tier needs
+            // roughly 120 perfect trades, or 19 of 19 will not do.
+            //
+            // This SUBSUMES `min_win_rate_bp` above, because the bound is never
+            // greater than the observed rate -- a test pins that. The raw rule is
+            // kept rather than deleted because it states the tier's intent in
+            // the terms an operator wrote it in, and because a future tier may
+            // legitimately want the two to differ.
+            min_assurance_bp: self.min_win_rate_bp,
             min_trades: self.min_trades,
             top,
         }
@@ -5034,6 +5147,9 @@ fn record_run(
     exits: &runner::grid::Grid,
     bars: u64,
     min_hits: u64,
+    // The combination this run traded, so the ledger can name it. A run identity
+    // is a hash and cannot be turned back into conditions.
+    mask_words: [u64; 6],
 ) -> String {
     let chosen = exits.best();
     let rung =
@@ -5081,6 +5197,10 @@ fn record_run(
             rung(chosen.and_then(|c| c.ttp.map(|t| t.arm))),
             rung(chosen.and_then(|c| c.ttp.map(|t| t.trail))),
         ],
+        // THE COMBINATION ITSELF, which the ledger could not name until now.
+        // `identity` is a hash over the nine terms and cannot be turned back
+        // into conditions; these six words can, through `vocab`.
+        mask_words,
     };
 
     // HELD ACROSS THE OPEN AND THE APPEND, not just the append: `open` builds
@@ -5585,6 +5705,7 @@ fn audit_bars(
             &exits,
             u64::try_from(bars.len()).unwrap_or(u64::MAX),
             min_hits,
+            first.mask.words(),
         ));
     }
     out.push_str(walk_forward_caveat(execution.is_some(), folds.decided()));
@@ -6599,6 +6720,7 @@ mod tests {
             winner_mfe: 8_876,
             all_mae: 2_295,
             exit_rungs: [2, 3, -1, 1, 0],
+            mask_words: [1, 0, 0, 0, 0, 0],
         };
 
         let mut store = crate::results::Results::open(&root).expect("the store opens");
@@ -6751,6 +6873,7 @@ mod tests {
             winner_mfe: 0,
             all_mae: 0,
             exit_rungs: [-1; 5],
+            mask_words: [0; 6],
         };
         let complete_but_smaller = crate::results::Record {
             identity: [2; 32],
@@ -6938,5 +7061,196 @@ mod tests {
         assert_eq!("0".parse::<usize>().ok(), Some(0));
         assert!("many".parse::<usize>().is_err());
         assert!("-1".parse::<usize>().is_err());
+    }
+
+    /// The stored winner is printed BY NAME, not only by its P&L.
+    ///
+    /// # The gap this closes
+    ///
+    /// Version 2 of the ledger held twenty-four fields and every one of them
+    /// was a number. A row read back said a sweep made ₹13,504 over 19,759
+    /// trades and had **no way at all** to say which conditions did it: the
+    /// combination existed only in the live run's stdout, which scrolls. So the
+    /// one fact an operator would act on was the one fact the durable surface
+    /// dropped, and §3 rule 3's whole promise -- that a run is identified and
+    /// reproducible -- covered the identity and not the content.
+    ///
+    /// Version 3 carries the six mask words. This asserts the round trip is
+    /// end to end: words written, words read, words resolved to names, names
+    /// rendered. Asserting the SHAPE and not a literal string is deliberate --
+    /// pinning `"bar_bullish"` here would make an unrelated vocabulary edit
+    /// fail a rendering test, and §3 rule 8 lets positions be tombstoned.
+    #[test]
+    fn the_stored_winner_is_named_and_not_only_priced() {
+        let mut record = record_for_naming();
+        // Three bits, deliberately spread across words so a renderer that only
+        // ever reads word zero fails here. Bit 0, bit 64 (word 1) and bit 320
+        // (word 5) -- the first and last words plus one in between.
+        record.mask_words = [1, 1, 0, 0, 0, 1];
+
+        let block = crate::quality_block(&record);
+
+        assert!(
+            block.contains("the conditions it required"),
+            "the block must name the row, got:\n{block}"
+        );
+        assert!(
+            block.contains("3 of them"),
+            "all three bits must be counted, including the ones outside word \
+             zero. got:\n{block}"
+        );
+        for ordinal in ["1.", "2.", "3."] {
+            assert!(
+                block.contains(ordinal),
+                "each condition is listed on its own numbered line; {ordinal} \
+                 is missing from:\n{block}"
+            );
+        }
+    }
+
+    /// An empty mask says NONE rather than printing nothing.
+    ///
+    /// # Why this is a separate test and not an edge case
+    ///
+    /// A halted run, or one whose frequent frontier emptied at k=1, records no
+    /// combination and stores six zero words. A renderer that simply loops over
+    /// an empty list emits a header and no rows, which is indistinguishable
+    /// from a rendering bug -- and §4 bans a failure wearing a success's
+    /// clothes. The absence has to be STATED.
+    #[test]
+    fn a_row_with_no_combination_says_so_rather_than_rendering_blank() {
+        let mut record = record_for_naming();
+        record.mask_words = [0; 6];
+
+        let block = crate::quality_block(&record);
+
+        assert!(
+            block.contains("NONE"),
+            "an absent combination is stated, not implied by silence. got:\n{block}"
+        );
+        assert!(
+            block.contains("no combination was recorded"),
+            "and the reason is given rather than left to be inferred. got:\n{block}"
+        );
+        assert!(
+            !block.contains("of them"),
+            "and it must NOT also print a count. got:\n{block}"
+        );
+    }
+
+    /// A record with the money fields filled and the mask left to the caller.
+    fn record_for_naming() -> crate::results::Record {
+        crate::results::Record {
+            identity: [7; 32],
+            finished_micros: 1_785_727_500_000_000,
+            feed: crate::results::field("zerodha"),
+            from_year: 2019,
+            from_month: 1,
+            to_year: 2025,
+            to_month: 9,
+            underlying: crate::results::field("NIFTY"),
+            timeframe: crate::results::field("15min"),
+            months_asked: 81,
+            months_found: 81,
+            bars: 96_280,
+            combinations: 1_024_058,
+            min_hits: 600,
+            depth: 3,
+            halted: 0,
+            trades: 19_759,
+            pessimistic: 1_350_424,
+            optimistic: 1_450_424,
+            worst_trade: -18_400,
+            max_drawdown: -76_543,
+            winner_mae: 2_291,
+            winner_mfe: 8_876,
+            all_mae: 2_295,
+            exit_rungs: [2, 3, -1, 1, 0],
+            mask_words: [0; 6],
+        }
+    }
+
+    /// A tier refuses a PERFECT record that is too small to support its claim.
+    ///
+    /// # The hole this closes
+    ///
+    /// A tier that reads "95% win rate" was satisfied by twenty winners out of
+    /// twenty. That is a raw rate of 100% and a 95% lower bound of 83.88% -- the
+    /// sample does not support a 95% claim, and the tier stamped it `S++++++`
+    /// anyway. An operator reading that label would believe the engine had found
+    /// a 95% system when what it had found was twenty coin flips landing heads.
+    ///
+    /// The fix is not a `min_trades` floor. A floor set high enough to make 95%
+    /// safe would also throw away the rare high-conviction setup the operator is
+    /// actually hunting. The bound refuses only what is genuinely unsupported,
+    /// and admits the same combination the moment enough trades confirm it.
+    #[test]
+    fn a_tier_refuses_a_perfect_record_too_small_to_support_its_claim() {
+        let strict = crate::Tier {
+            name: "S++++++",
+            max_points: 25,
+            min_rr_bp: 300,
+            min_win_rate_bp: 9_500,
+            min_trades: 0,
+        };
+        let rules = strict.rules(25);
+
+        // The money shape is identical in both cells. ONLY the sample differs,
+        // so anything that separates them is separating on evidence alone.
+        let tiny = perfect_cell(20);
+        let ample = perfect_cell(200);
+
+        assert_eq!(
+            tiny.win_rate_bp(),
+            ample.win_rate_bp(),
+            "both are perfect records -- the raw rate cannot separate them"
+        );
+        assert!(
+            !rules.admits(&tiny),
+            "twenty perfect trades bound to {}bp, below the {}bp this tier \
+             claims, and must be refused",
+            tiny.assurance_bp(),
+            rules.min_assurance_bp
+        );
+        assert!(
+            rules.admits(&ample),
+            "two hundred perfect trades bound to {}bp and must be admitted -- \
+             the rule refuses INSUFFICIENCY, not rarity",
+            ample.assurance_bp()
+        );
+    }
+
+    /// Turning the rule off restores the old behaviour exactly.
+    ///
+    /// Asserted because every other rule in [`Rules`] documents "zero drops the
+    /// rule", and a rule that quietly kept filtering at zero would disqualify
+    /// rows an operator had explicitly stopped asking about.
+    #[test]
+    fn an_assurance_of_zero_drops_the_rule() {
+        let rules = crate::Rules {
+            max_mae_ppm: i64::MAX,
+            min_rr_bp: 0,
+            min_win_rate_bp: 0,
+            min_assurance_bp: 0,
+            min_trades: 0,
+            top: 25,
+        };
+        assert!(
+            rules.admits(&perfect_cell(1)),
+            "a single trade must pass once the rule is switched off"
+        );
+    }
+
+    /// A cell with `n` trades, all winners, and a shape that clears every rule
+    /// except the one under test.
+    fn perfect_cell(n: u64) -> runner::grid::Cell {
+        runner::grid::Cell {
+            trades: n,
+            wins: n,
+            gross_win: 100_000 * i64::try_from(n).unwrap_or(1),
+            gross_loss: 0,
+            worst_mae: 0,
+            ..runner::grid::Cell::default()
+        }
     }
 }
