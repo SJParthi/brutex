@@ -286,8 +286,37 @@
   const hiddenByFeed = $derived(allRuns.length - runs.length);
 
   /* ---- the summary ---------------------------------------------------- */
-  const completeRuns = $derived(runs.filter((r) => !r.halted));
+
+  /**
+   * Whether a row's bytes can be vouched for by its own `blake3` seal.
+   *
+   * `=== false` and NOT `!r.sealed`, deliberately. A payload from an API
+   * that predates the seal carries no `sealed` field at all, and
+   * `!undefined` is `true` — which would paint every row on the page as
+   * damaged the instant this page is newer than the binary serving it.
+   * That exact page-ahead-of-binary disagreement has already cost this
+   * console a day. An absent flag means NOT KNOWN, and not-known must never
+   * render as damaged.
+   *
+   * The failure mode this protects against is worth naming: crying wolf on
+   * a healthy ledger is not a smaller error than missing a damaged one. An
+   * alarm that fires on every row teaches the operator to ignore it, and
+   * then the real one goes unread too.
+   */
+  const trustworthy = (r) => r.sealed !== false;
+
+  /**
+   * The rows eligible to be RANKED: ran to extinction, and readable back.
+   *
+   * Two different disqualifications, and they are not the same fault. A
+   * halted run is honest and incomplete — the engine stopped it. An
+   * unsealed run is bytes that parse but cannot be vouched for, and it may
+   * be neither halted nor complete but noise that happens to be the right
+   * length.
+   */
+  const completeRuns = $derived(runs.filter((r) => !r.halted && trustworthy(r)));
   const haltedRuns = $derived(runs.filter((r) => r.halted));
+  const unsealedRuns = $derived(runs.filter((r) => !trustworthy(r)));
   const holedRuns = $derived(runs.filter((r) => !r.whole_span));
 
   /**
@@ -416,7 +445,7 @@
       .map((g) => {
         const names = [...g.rungs.keys()].sort(byRung);
         const present = names.map((n) => g.rungs.get(n));
-        const complete = present.filter((r) => !r.halted);
+        const complete = present.filter((r) => !r.halted && trustworthy(r));
         // ONE SHARED SCALE, so bar heights are comparable across the row.
         // Taken over the absolute value so a losing rung is as legible as a
         // winning one.
@@ -431,7 +460,11 @@
           present,
           scale,
           leader,
-          haltedCount: present.length - complete.length
+          // COUNTED APART, because they disqualify a rung for different
+          // reasons and the operator's next move differs: a halted rung
+          // wants a larger budget, an unsealed one wants the run repeated.
+          haltedCount: present.filter((r) => r.halted).length,
+          unsealedCount: present.filter((r) => !trustworthy(r)).length
         };
       })
       .sort(
@@ -1929,6 +1962,41 @@
     </div>
   {:else}
     <!-- ==============================================================
+         INTEGRITY — shown ONLY when it has something to say
+
+         Every other panel on this page renders its zero: "0 halted", "0
+         span holes". This one does not, and the difference is deliberate.
+         Halting and short spans are ORDINARY outcomes of ordinary
+         operation, so their zero is information — it says the sweep had
+         room. A broken seal is not ordinary; on a healthy store this reads
+         zero forever, and a figure that reads zero forever trains the eye
+         to skip it. By the time it matters, it has been furniture for
+         months.
+
+         So it is absent until it is not, and when it appears it is a
+         full-width bar above the summary rather than a fourth tile inside
+         it — because the summary is where the eye goes to be reassured,
+         and this is the one thing on the page that must interrupt.
+         ============================================================== -->
+    {#if unsealedRuns.length > 0}
+      <section class="bt-integrity" role="alert">
+        <span class="bt-integrity-mark" aria-hidden="true">⚠</span>
+        <div class="bt-integrity-say">
+          <strong>
+            {exact(unsealedRuns.length)}
+            {unsealedRuns.length === 1 ? 'record' : 'records'} failed the integrity seal
+          </strong>
+          <span>
+            Each one read back whole and every field holds a legal value — which is exactly why
+            this check exists. The bytes do not match the <code>blake3</code> seal written beside
+            them, so they are shown, marked, and kept out of every ranking on this page. Treat
+            their figures as unknown rather than wrong, and run the sweep again to replace them.
+          </span>
+        </div>
+      </section>
+    {/if}
+
+    <!-- ==============================================================
          SUMMARY — the four facts before any detail
          ============================================================== -->
     <section class="bt-strip">
@@ -1946,7 +2014,13 @@
       <div class="fact" class:good={completeRuns.length > 0}>
         <span class="k">Complete</span>
         <span class="v">{exact(completeRuns.length)}</span>
-        <span class="n">comparable against each other</span>
+        <span class="n">
+          {#if unsealedRuns.length > 0}
+            ran to extinction AND read back intact
+          {:else}
+            comparable against each other
+          {/if}
+        </span>
       </div>
       <div class="fact" class:warn={haltedRuns.length > 0}>
         <span class="k">Halted</span>
@@ -2117,17 +2191,23 @@
               {#if g.haltedCount > 0}
                 <span class="pill warn">{g.haltedCount} halted</span>
               {/if}
+              {#if g.unsealedCount > 0}
+                <span class="pill seal">{g.unsealedCount} unsealed</span>
+              {/if}
             </div>
             <div class="multiples">
               {#each g.present as r (r.index)}
                 <button
                   class="mult"
                   class:halted={r.halted}
+                  class:unsealed={!trustworthy(r)}
                   class:leader={g.leader && r.index === g.leader.index}
                   onclick={() => toggle(r)}
-                  title={r.halted
-                    ? 'Halted — not comparable with the complete rungs beside it'
-                    : `Worst-case ${money(r.pessimistic)} over ${exact(r.trades)} trades`}
+                  title={!trustworthy(r)
+                    ? 'Failed its integrity seal — this figure may not be what the sweep wrote, so it is charted but never ranked'
+                    : r.halted
+                      ? 'Halted — not comparable with the complete rungs beside it'
+                      : `Worst-case ${money(r.pessimistic)} over ${exact(r.trades)} trades`}
                 >
                   <!-- A FLOOR OF 4%, SO NOTHING VANISHES. On this store's own
                        ledger 15min returns twenty times what 1day does, which
@@ -2152,7 +2232,8 @@
                   </span>
                   <span class="mult-rung">{r.timeframe}</span>
                   <span class="mult-fig">{money(r.pessimistic)}</span>
-                  {#if r.halted}<span class="mult-flag">halted</span>{/if}
+                  {#if !trustworthy(r)}<span class="mult-flag seal">seal</span>{:else if r.halted}<span
+                      class="mult-flag">halted</span>{/if}
                 </button>
               {/each}
             </div>
@@ -2251,6 +2332,7 @@
                 <div
                   class="row"
                   class:halted={r.halted}
+                  class:unsealed={!trustworthy(r)}
                   class:crowned={best && r.index === best.index}
                   class:open={openIndex === r.index}
                   style="top:{(firstVisible + i) * ROW_H}px"
@@ -2277,7 +2359,13 @@
                     <span class="sm dim">{r.months_found}/{r.months_asked}</span>
                   </span>
                   <span class="cell">
-                    {#if r.halted}
+                    {#if !trustworthy(r)}
+                      <!-- SEAL BEFORE DEPTH. A row that failed its seal has a
+                           `depth` that is itself one of the bytes in doubt, so
+                           printing "depth 15 partial" would be reporting a
+                           number as the reason it cannot be trusted. -->
+                      <span class="pill seal">NO · seal failed</span>
+                    {:else if r.halted}
                       <span class="pill warn">NO · depth {r.depth} partial</span>
                     {:else}
                       <span class="pill good">yes · depth {r.depth}</span>
@@ -3797,6 +3885,121 @@
     text-transform: uppercase;
     letter-spacing: 0.08em;
     color: var(--warn);
+  }
+
+  /* ====================================================================
+     INTEGRITY — a register of its own, not a louder amber
+
+     The page already spends amber on halted and on span holes, and both
+     mean "this figure is real but does not cover what you asked for". A
+     failed seal means something categorically different: the figure may
+     not be a figure. Painting it amber would file it under "incomplete"
+     beside the two, which is precisely the merge the API refuses to make
+     when it counts `unsealed` apart from `halted`.
+
+     It borrows `--down` rather than inventing a token, and that IS a
+     collision worth naming: `--down` is the loss red, so a struck-out
+     PROFIT will render in the colour this page otherwise reserves for
+     losing money. The alternative was a fourth semantic colour, which
+     would have to earn its place in `theme.css` across three theme states
+     for one state that should never occur.
+
+     The distinction is therefore carried STRUCTURALLY, not chromatically:
+     nothing else on this page strikes a figure through. Amber says "mind
+     this number", a strike says "do not use this number", and those read
+     apart at a glance even when the hue does not.
+     ==================================================================== */
+  .bt-integrity {
+    display: flex;
+    gap: 0.75rem;
+    align-items: flex-start;
+    padding: 0.8rem 1rem;
+    border-left: 3px solid var(--down);
+    background: var(--down-soft);
+    /* A FACT ARRIVED, so something moves — once, briefly, and never
+       again. The banner is absent on every healthy load, so this plays
+       only when there is something new to say. */
+    animation: bt-integrity-in 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  @keyframes bt-integrity-in {
+    from {
+      opacity: 0;
+      transform: translateY(-4px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
+  .bt-integrity-mark {
+    font-size: 1.05rem;
+    line-height: 1.35;
+    color: var(--down);
+  }
+
+  .bt-integrity-say {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    /* 65ch, so the sentence is read rather than scanned past. */
+    max-width: 68ch;
+  }
+
+  .bt-integrity-say strong {
+    font-size: 0.82rem;
+    letter-spacing: 0.01em;
+    color: var(--down);
+  }
+
+  .bt-integrity-say span {
+    font-size: 0.76rem;
+    line-height: 1.5;
+    color: var(--n9);
+  }
+
+  .bt-integrity-say code {
+    font-family: var(--mono);
+    font-size: 0.92em;
+  }
+
+  .pill.seal {
+    background: var(--down-soft);
+    color: var(--down);
+  }
+
+  .mult-flag.seal {
+    color: var(--down);
+  }
+
+  /* THE FIGURE ITSELF IS STRUCK, not the whole row. The rung name and the
+     span are facts about which record this is and are not in doubt; only
+     the number the seal covers is. Striking the row would deny the
+     operator the very labels they need to go and re-run it. */
+  .mult.unsealed .mult-fig,
+  .row.unsealed .cell.num {
+    text-decoration: line-through;
+    text-decoration-color: var(--down);
+    text-decoration-thickness: 1px;
+    opacity: 0.72;
+  }
+
+  .mult.unsealed .mult-bar,
+  .mult.unsealed .mult-ghost {
+    /* Hatched rather than solid: a bar drawn to a height derived from a
+       number in doubt must not read as a measurement. */
+    opacity: 0.45;
+  }
+
+  .row.unsealed {
+    background: var(--down-soft);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .bt-integrity {
+      animation: none;
+    }
   }
 
   /* ---------------- the table ---------------- */
