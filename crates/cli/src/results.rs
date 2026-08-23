@@ -767,6 +767,44 @@ impl Results {
     ///
     /// An index past the end, or an unreadable file.
     pub fn read(&mut self, index: u64) -> Result<Record, Refusal> {
+        // A SHARED LOCK, BECAUSE THE SEAL WOULD OTHERWISE CRY WOLF.
+        //
+        // `append` holds an EXCLUSIVE lock while it writes, and this took none,
+        // so a reader could land in the middle of another process's 213-byte
+        // write. Before the seal existed that produced a garbled record read as
+        // data; with the seal it produces a REFUSAL naming corruption — on a
+        // ledger that is perfectly healthy a millisecond later.
+        //
+        // A false alarm is its own defect. An operator who is told a record is
+        // damaged, checks, and finds it intact learns to disbelieve the message,
+        // and the next one will be real. The shared lock makes a reader wait for
+        // an in-progress append rather than see half of it.
+        //
+        // Shared and not exclusive: any number of readers may hold it at once,
+        // so `cli results` and the HTTP server do not queue behind each other.
+        // Only a writer excludes them.
+        self.file
+            .lock_shared()
+            .map_err(|why| format!("the results file could not be locked for reading: {why}"))?;
+        let out = self.read_locked(index);
+        let released = self
+            .file
+            .unlock()
+            .map_err(|why| format!("the results file could not be unlocked: {why}"));
+        return match (out, released) {
+            (Ok(record), Ok(())) => Ok(record),
+            (Err(why), _) | (Ok(_), Err(why)) => Err(why),
+        };
+    }
+
+    /// [`Results::read`] with the shared lock already held.
+    ///
+    /// Split for the reason [`Results::append_locked`] gives: an early `return`
+    /// inside the locked region would strand the lock until the process exited.
+    /// It calls [`Results::len`] rather than locking again — a second `flock` on
+    /// the same descriptor is not a second lock, and the `unlock` that followed
+    /// it would release the one this function is standing on.
+    fn read_locked(&mut self, index: u64) -> Result<Record, Refusal> {
         let count = self.len()?;
         if index >= count {
             return Err(format!(
