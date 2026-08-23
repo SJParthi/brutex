@@ -156,10 +156,37 @@ pub struct Cell {
     pub trades: u64,
     /// Trades that ended above water, resolving ambiguity against you.
     pub wins: u64,
-    /// Total paisa per unit, ambiguity resolved as the STOP first.
+    /// Total paisa per unit under the WORST reading of BOTH legs: entered at
+    /// the worst price the execution bar PRINTED, ambiguity resolved as
+    /// the STOP first.
+    ///
+    /// The entry half of that sentence is new. This was a worst-case exit off a
+    /// the bar's OPEN — a best-case entry — so the figure every selector in this
+    /// module ranks on was never charged for entering badly. See
+    /// [`Cell::fill_cost`] for the amount and why it is reported apart.
     pub pessimistic: i64,
-    /// Total paisa per unit, ambiguity resolved as the TARGET first.
+    /// Total paisa per unit under the BEST reading of BOTH legs: entered at the
+    /// execution bar's open, ambiguity resolved as the TARGET first.
     pub optimistic: i64,
+    /// Paisa given up by taking the ADVERSE FILL on both legs instead of the
+    /// open, summed over trades.
+    ///
+    /// # Both legs, and the second one is why this is not called `entry_cost`
+    ///
+    /// It was, for about an hour, and the test suite refused it: with the entry
+    /// bracketed but the exit still priced at a single close,
+    /// [`Self::uncertainty`] came back non-zero on cells with no ambiguous bar
+    /// at all. A square-off is a market order too, so it has a knowable spread
+    /// of its own, and subtracting only the entry's half left the exit's half
+    /// sitting in a column that claims to report the UNKNOWABLE.
+    ///
+    /// So this is the whole knowable spread: entering at the bar's high
+    /// rather than its open, and leaving at the low rather than the
+    /// open. Non-negative by construction on both legs.
+    ///
+    /// Stored rather than derived, because deriving it would need the third
+    /// reading again at every read.
+    pub fill_cost: i64,
     /// Trades whose exit came from the FIXED stop.
     ///
     /// # Three exits used to share this counter, and a reader could not separate
@@ -518,8 +545,56 @@ impl Cell {
     /// on the pessimistic figure, and
     /// `runner::grid::no_selector_can_be_moved_by_the_optimistic_figure` holds
     /// that as a property rather than a habit.
+    /// What the WORST entry fill cost, in paisa, summed over every trade.
+    ///
+    /// Both readings used to enter at the execution bar's OPEN, so a
+    /// `pessimistic` figure was a worst-case exit off a best-case entry — the
+    /// one leg of the round trip nothing in this module ever charged.
+    /// `crate::trade::walk` had carried both readings on both legs since it
+    /// gained `costs::fill::Anchor`; this module carried none, and a search for
+    /// `Anchor` in it returned nothing.
+    ///
+    /// Non-negative by construction: the adverse extreme is never a
+    /// better fill than the open, on either side.
+    ///
+    /// Read [`Cell::fill_cost`] directly — every field on this struct is
+    /// public and an accessor that only returned one would be the odd one out.
+    ///
+    /// The gap between the two readings that intra-bar ORDERING is responsible
+    /// for — and only that.
+    ///
+    /// # Why the entry cost is subtracted rather than left in
+    ///
+    /// This is the `unknown` column, and it has always answered one question:
+    /// *how much of this result turns on a path the data cannot settle?* Once
+    /// the two readings also bracket the ENTRY fill, `optimistic - pessimistic`
+    /// answers a second, different question — the full money bracket — and
+    /// letting one number carry both would have redefined every existing report
+    /// while its heading stayed the same. The entry cost is knowable; the
+    /// ordering is not. Only the unknowable half belongs here.
+    ///
+    /// The full bracket has not gone anywhere: it is
+    /// `optimistic - pessimistic`, which [`Self::bracket`] names.
+    ///
+    /// **Nothing selects on it, and nothing selects on
+    /// [`Self::optimistic`].** [`Grid::best`] and [`Grid::sharpest`] both rank
+    /// on the pessimistic figure, and
+    /// `runner::grid::no_selector_can_be_moved_by_the_optimistic_figure` holds
+    /// that as a property rather than a habit.
     #[must_use]
     pub const fn uncertainty(&self) -> i64 {
+        self.optimistic
+            .saturating_sub(self.pessimistic)
+            .saturating_sub(self.fill_cost)
+    }
+
+    /// The whole spread between the best and worst readings of both legs.
+    ///
+    /// [`Self::fill_cost`] plus [`Self::uncertainty`]: what the adverse fills on
+    /// both legs cost, which is knowable, plus what the intra-bar ordering could
+    /// cost, which is not.
+    #[must_use]
+    pub const fn bracket(&self) -> i64 {
         self.optimistic.saturating_sub(self.pessimistic)
     }
 
@@ -862,6 +937,119 @@ struct Candidate {
     /// The last bar the position may be held to: horizon or square-off.
     time_exit: usize,
     cross: Crossings,
+    /// The entry fill under the WORST reading: the execution bar's adverse
+    /// extreme it PRINTED: a buy at the high for a long and a sell at
+    /// the low for a short.
+    ///
+    /// # Why this is a field and not a recomputation
+    ///
+    /// It was neither. Every one of the four sites that needed an entry price
+    /// wrote `bars.get(i).map_or(0, |b| b.open)` — the OPEN, on both readings —
+    /// so `Cell::pessimistic` was a worst-case EXIT priced off a best-case
+    /// ENTRY, and no combination in this crate was ever charged for entering
+    /// badly. `crate::trade::walk` had both readings on both legs since it
+    /// gained `costs::fill::Anchor`; this module never did, and `grep -c Anchor
+    /// crates/runner/src/grid.rs` returned 0.
+    ///
+    /// A field rather than a helper call at each site because the same price
+    /// must reach `realised` and `peak_adverse`: computing it twice is how the
+    /// two readings drifted apart in the first place.
+    entry_pess: i64,
+    /// The entry fill under the BEST reading: the execution bar's open, a price
+    /// that printed.
+    entry_opt: i64,
+}
+
+/// Both entry fills for the execution bar at `index`, worst first.
+///
+/// # `PrintedExtreme` and NOT `AdverseExtreme`, which is the whole distinction
+///
+/// `AdverseExtreme` buys at the high plus one [`costs::rate::TICK`] and sells at
+/// the low minus one. That tick is a modelled slippage cost, and on a series
+/// whose finest resolution is one minute it is also a claim about a price at
+/// which nothing traded. The bar's four numbers are the entire record of that
+/// minute; a fill placed outside them is invented, which `CLAUDE.md` §3 rule 1
+/// forbids and which `costs::fill::Anchor` already objects to in its own words
+/// about the adverse-extreme buy not being a price that printed.
+///
+/// So the worst fill here is the extreme ITSELF. Nothing is added, no spread is
+/// assumed, and no percentage is applied.
+///
+/// It still goes through `costs::fill` rather than reading `bar.high` directly,
+/// because the bracket and sub-tick checks in `costs::fill::Bar::new` are the
+/// same ones `crate::trade::walk` gets, and re-deriving them here is the
+/// duplication that let the entry price diverge from that module in the first
+/// place.
+///
+/// # Refusal
+///
+/// A missing bar, a bar `costs::fill::Bar::new` refuses, or a fill computation
+/// that errors all yield `0` — the sentinel this module already treats as *no
+/// usable entry*: [`peak`] returns early on `entry <= 0` and so does
+/// [`crate::excursion::crossings`]. Zero is not a price and cannot be mistaken
+/// for one.
+fn entry_fills(bars: &[Candle], index: usize, side: Side) -> (i64, i64) {
+    let Some(bar) = bars.get(index) else {
+        return (0, 0);
+    };
+    let open = bar.open;
+    // The bracket check `costs::fill::Bar::new` runs is a real invariant, so a
+    // candle whose open sits outside its own high-low is refused HERE rather
+    // than priced off extremes that never contained it — the same reasoning
+    // `crate::trade::price_one` gives at its own `FillBar::new`.
+    let raw = brutex_core::price::Paisa::from_raw;
+    let Ok(fill_bar) = costs::fill::Bar::new(raw(open), raw(bar.high), raw(bar.low)) else {
+        return (0, open);
+    };
+    let Ok(fills) = costs::fill::fills_at(
+        fill_bar,
+        fill_bar,
+        direction_of(side),
+        costs::fill::Anchor::PrintedExtreme,
+    ) else {
+        return (0, open);
+    };
+    let worst = match side {
+        Side::Long => fills.buy().raw(),
+        Side::Short => fills.sell().raw(),
+    };
+    (worst, open)
+}
+
+/// The fill for a market EXIT on the bar at `index`, under one reading.
+///
+/// # The mirror of [`entry_fills`], and the sides swap
+///
+/// Getting out of a long is a SELL, so its adverse extreme is the bar's low
+/// — where [`entry_fills`] takes the buy leg, this takes the sell.
+/// A reading that took the same leg for both would charge a long twice for
+/// buying and never for selling.
+///
+/// `None` when the bar is missing or `costs::fill::Bar::new` refuses it; the
+/// caller falls back to the entry price, which books the trade flat rather than
+/// inventing an exit.
+fn exit_fill(bars: &[Candle], index: usize, side: Side, pessimistic: bool) -> Option<i64> {
+    let bar = bars.get(index)?;
+    if !pessimistic {
+        // The open is a price that PRINTED, and it is the best a market order on
+        // this bar could have done. Not the close: the close is neither extreme
+        // nor a bound, which is exactly why pricing both readings at it hid the
+        // spread entirely.
+        return Some(bar.open);
+    }
+    let raw = brutex_core::price::Paisa::from_raw;
+    let fill_bar = costs::fill::Bar::new(raw(bar.open), raw(bar.high), raw(bar.low)).ok()?;
+    let fills = costs::fill::fills_at(
+        fill_bar,
+        fill_bar,
+        direction_of(side),
+        costs::fill::Anchor::PrintedExtreme,
+    )
+    .ok()?;
+    Some(match side {
+        Side::Long => fills.sell().raw(),
+        Side::Short => fills.buy().raw(),
+    })
 }
 
 /// Evaluate every stop/target variant of `mask` over `bars`.
@@ -983,11 +1171,20 @@ pub fn evaluate(
         .eligible
         .iter()
         .map(|t| {
-            let entry_price = bars.get(t.entry_bar).map_or(0, |b| b.open);
+            // `entry_price` stays the OPEN and keeps its name, because the
+            // `crossings` call below places the rung ladders on the excursion
+            // distribution measured from it. Shifting that to the worst entry
+            // would move every rung and so re-price every result already banked,
+            // for a search grid that is a choice of levels to TRY rather than a
+            // reported figure. What the worst entry must move is the money and
+            // the MAE, and those read `entry_pess` in `one_variant`.
+            let (entry_pess, entry_price) = entry_fills(bars, t.entry_bar, side);
             Candidate {
                 signal: t.signal_bar,
                 entry: t.entry_bar,
                 time_exit: t.exit_bar,
+                entry_pess,
+                entry_opt: entry_price,
                 cross: crossings(
                     bars,
                     t.entry_bar,
@@ -1152,11 +1349,20 @@ pub fn with_levels(
         .eligible
         .iter()
         .map(|t| {
-            let entry_price = bars.get(t.entry_bar).map_or(0, |b| b.open);
+            // `entry_price` stays the OPEN and keeps its name, because the
+            // `crossings` call below places the rung ladders on the excursion
+            // distribution measured from it. Shifting that to the worst entry
+            // would move every rung and so re-price every result already banked,
+            // for a search grid that is a choice of levels to TRY rather than a
+            // reported figure. What the worst entry must move is the money and
+            // the MAE, and those read `entry_pess` in `one_variant`.
+            let (entry_pess, entry_price) = entry_fills(bars, t.entry_bar, side);
             Candidate {
                 signal: t.signal_bar,
                 entry: t.entry_bar,
                 time_exit: t.exit_bar,
+                entry_pess,
+                entry_opt: entry_price,
                 cross: crossings(bars, t.entry_bar, t.exit_bar, entry_price, side, ladders),
             }
         })
@@ -1217,6 +1423,82 @@ const fn direction_of(side: Side) -> costs::fill::Direction {
     match side {
         Side::Long => costs::fill::Direction::Long,
         Side::Short => costs::fill::Direction::Short,
+    }
+}
+
+/// The three prices one variant puts on one candidate's round trip.
+///
+/// # Why three and not two
+///
+/// Two of them are the answer: the worst reading of BOTH legs and the best
+/// reading of BOTH legs. The third exists so those two can be told apart for
+/// the right reason — it is the pessimistic EXIT priced at the optimistic
+/// ENTRY, so subtracting it from the pessimistic total isolates what the entry
+/// fill cost and leaves [`Cell::uncertainty`] meaning intra-bar ordering alone,
+/// which is what its column has always claimed to mean.
+struct Readings {
+    /// Worst fills, worst ordering. What [`Grid::best`] and [`Grid::sharpest`]
+    /// rank, and the only one of the three a reader is shown as a total.
+    pess: i64,
+    /// Best fills, best ordering.
+    opt: i64,
+    /// The pessimistic ORDERING at the optimistic FILLS — the same exit
+    /// attribution as `pess`, priced at the open on both legs.
+    ///
+    /// Never reported; only differenced. `pess_best_fills - pess` is the
+    /// knowable fill spread and `opt - pess_best_fills` is the unknowable
+    /// ordering, which is the split [`Cell::uncertainty`] exists to preserve.
+    pess_best_fills: i64,
+}
+
+/// Price one candidate's trip under all three readings.
+///
+/// Each tuple is one reading's `(offset, attribution, level)` — bundled because
+/// the two offsets and the two levels are permutable without a compile error,
+/// and swapping them silently prices the optimistic exit as the pessimistic one.
+fn read_trip(
+    bars: &[Candle],
+    c: &Candidate,
+    side: Side,
+    pess: (usize, Ended, Option<Ppm>),
+    opt: (usize, Ended, Option<Ppm>),
+) -> Readings {
+    let (pess_off, pess_by, pess_level) = pess;
+    let (opt_off, opt_by, opt_level) = opt;
+    Readings {
+        // The trailing `true`/`false` is the READING, and the three lines are
+        // the whole bracket: worst exit at worst entry, best at best, and worst
+        // exit at the BEST entry so the two causes stay separable.
+        pess: realised(
+            bars,
+            c.entry,
+            pess_off,
+            c.entry_pess,
+            side,
+            pess_by,
+            pess_level,
+            true,
+        ),
+        opt: realised(
+            bars,
+            c.entry,
+            opt_off,
+            c.entry_opt,
+            side,
+            opt_by,
+            opt_level,
+            false,
+        ),
+        pess_best_fills: realised(
+            bars,
+            c.entry,
+            pess_off,
+            c.entry_opt,
+            side,
+            pess_by,
+            pess_level,
+            false,
+        ),
     }
 }
 
@@ -1307,7 +1589,12 @@ fn one_variant(
         let opt_by = ended_by(firing, opt_off, false);
         let ended = pess_by;
 
-        let entry_price = bars.get(c.entry).map_or(0, |b| b.open);
+        // NO `entry_price` HERE ANY MORE, AND ITS ABSENCE IS THE FIX.
+        //
+        // This read the execution bar's OPEN and handed the SAME price to both
+        // readings, so `pessimistic` was a worst-case exit off a best-case
+        // entry: the one leg of the round trip that was never charged. The
+        // candidate now carries both fills and each reading takes its own.
         // The two FIXED rung values. The trailing distances are not here: each
         // trailing order carries its own, in `Trailing::ppm`, because a cell can
         // now hold two of them and looking one up by kind would be able to pick
@@ -1316,23 +1603,16 @@ fn one_variant(
             stop.and_then(|r| stops_rungs.get(r).copied()),
             target.and_then(|r| targets_rungs.get(r).copied()),
         );
-        let pess = realised(
+        let Readings {
+            pess,
+            opt,
+            pess_best_fills,
+        } = read_trip(
             bars,
-            c.entry,
-            pess_off,
-            entry_price,
+            c,
             side,
-            pess_by,
-            level_for(pess_by, stop_ppm, target_ppm),
-        );
-        let opt = realised(
-            bars,
-            c.entry,
-            opt_off,
-            entry_price,
-            side,
-            opt_by,
-            level_for(opt_by, stop_ppm, target_ppm),
+            (pess_off, pess_by, level_for(pess_by, stop_ppm, target_ppm)),
+            (opt_off, opt_by, level_for(opt_by, stop_ppm, target_ppm)),
         );
         // PESSIMISTIC IS THE SMALLER FIGURE, BY CONSTRUCTION AND NOT BY HABIT.
         //
@@ -1356,6 +1636,12 @@ fn one_variant(
         cell.trades = cell.trades.saturating_add(1);
         cell.pessimistic = cell.pessimistic.saturating_add(pess);
         cell.optimistic = cell.optimistic.saturating_add(opt);
+        // The SAME exit, priced at the two entries. Their difference is the
+        // entry's own cost with the ordering held fixed, which is what lets
+        // `Cell::uncertainty` keep meaning ordering alone.
+        cell.fill_cost = cell
+            .fill_cost
+            .saturating_add(pess_best_fills.saturating_sub(pess));
         accrue_risk(&mut cell, pess, (&mut running, &mut peak_equity));
         cell.ambiguous_bars = cell
             .ambiguous_bars
@@ -1367,7 +1653,12 @@ fn one_variant(
         // ranking key blind to losers, so a variant with no stop was rewarded
         // for the very trades a stop exists to cut.
         let exit = c.entry.saturating_add(pess_off);
-        let went_against = peak_adverse(bars, c.entry, exit, entry_price, side);
+        // `entry_pess` AND NOT THE OPEN, BECAUSE THIS IS THE FIGURE THE RULE IS
+        // JUDGED ON. `worst_mae` is what answers "did any single trade ever run
+        // more than N points against me", and a trade entered at the adverse
+        // extreme runs further against than the same trade entered at the open.
+        // Measuring it from the best entry understated every stop requirement.
+        let went_against = peak_adverse(bars, c.entry, exit, c.entry_pess, side);
         adverse_on_all = adverse_on_all.saturating_add(went_against);
         // THE MAXIMUM, NOT THE SUM. A stop is placed once and every trade must
         // survive it, so the figure that decides whether a stop is survivable is
@@ -1382,11 +1673,15 @@ fn one_variant(
             // "how much did a WINNER make me sweat" diagnostic and is still
             // rendered. It is simply no longer what a variant is chosen by.
             adverse_on_winners = adverse_on_winners.saturating_add(went_against);
+            // `entry_opt`, the mirror of the line above: the FAVOURABLE peak is
+            // the optimistic quantity, so it is measured from the optimistic
+            // entry. Pairing it with `entry_pess` would flatter the ratio at
+            // both ends at once.
             gain_on_winners = gain_on_winners.saturating_add(peak_favourable(
                 bars,
                 c.entry,
                 exit,
-                entry_price,
+                c.entry_opt,
                 side,
             ));
         }
@@ -1539,6 +1834,16 @@ fn mean_excursions(cell: &mut Cell, adverse_won: i64, gain_won: i64, adverse_all
 }
 
 /// Close-to-entry move at `entry + offset`, in paisa.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "eight, and the eighth is the reading. Bundling the exit's four \
+              into a struct was the alternative and it buys nothing: they are \
+              already assembled together in `read_trip` and destructured \
+              immediately here, so the struct would exist for one call and one \
+              unpack. The permutation hazard the bundle guards against is \
+              absent -- `offset` is the only bare `usize` and the other three \
+              have distinct types."
+)]
 fn realised(
     bars: &[Candle],
     entry: usize,
@@ -1547,6 +1852,9 @@ fn realised(
     side: Side,
     by: Ended,
     level_ppm: Option<Ppm>,
+    // Resolve an exit the bar does not price -- a square-off, or a trail with
+    // no recorded peak -- against the position rather than for it.
+    pessimistic: bool,
 ) -> i64 {
     // A LEVEL EXIT FILLS AT ITS LEVEL, NOT AT THE BAR'S CLOSE.
     //
@@ -1592,12 +1900,28 @@ fn realised(
             }
         }
         // Everything else -- a time exit, or a trailing exit whose peak was not
-        // recorded -- fills at the bar's close, which is correct for a position
-        // squared off by the clock.
+        // recorded -- is a MARKET ORDER on that bar, and a market order has two
+        // readings like every other fill on this path.
+        //
+        // # This priced at the CLOSE under both readings, and that was the last
+        // unbracketed leg in the module
+        //
+        // The comment above used to end *"which is correct for a position
+        // squared off by the clock"*, and it is the same mistake the entry made:
+        // correct about WHICH BAR, silent about WHAT PRICE. A square-off is a
+        // market order placed during the bar, not a guaranteed print at its
+        // close -- so the honest reading is the bracket `costs::fill` already
+        // draws for every other market order, and `crate::trade::walk` has drawn
+        // for its own time exits since it gained `Anchor`.
+        //
+        // It matters more than the entry did. A stop or a target exit is at
+        // least priced at the level the order rested at; a time exit had no
+        // level to fall back on, and on most variants time exits are the
+        // MAJORITY of trades -- the `time` column of the grid table is the
+        // count. Every one of them was priced at a single mid-range print.
         _ => {
-            let exit = bars
-                .get(entry.saturating_add(offset))
-                .map_or(entry_price, |b| b.close);
+            let exit = exit_fill(bars, entry.saturating_add(offset), side, pessimistic)
+                .unwrap_or(entry_price);
             match side {
                 Side::Long => exit.saturating_sub(entry_price),
                 Side::Short => entry_price.saturating_sub(exit),
@@ -2380,10 +2704,29 @@ mod tests {
             4,
         );
         for c in g.cells.iter().filter(|c| c.ambiguous_bars == 0) {
+            // SHARPER THAN THE EQUALITY IT REPLACES, NOT WEAKER.
+            //
+            // This read `pessimistic == optimistic`, which held only while both
+            // readings entered at the same price. They no longer do: the worst
+            // reading enters at the adverse extreme, so the two differ by the
+            // entry cost even when nothing about the path is unknowable.
+            //
+            // The property the test was always protecting is that with no
+            // ambiguous bar there is nothing UNKNOWABLE left — and that is now
+            // asserted directly, together with the stronger claim that the whole
+            // remaining gap is accounted for. An equality would have passed a
+            // cell whose two causes cancelled; this cannot.
             assert_eq!(
-                c.pessimistic, c.optimistic,
+                c.uncertainty(),
+                0,
                 "with no ambiguous bar there is nothing for the two readings to \
-                 disagree about"
+                 disagree about that the data could settle"
+            );
+            assert_eq!(
+                c.bracket(),
+                c.fill_cost,
+                "with no ambiguous bar the entire spread is the entry fill, and \
+                 any remainder is a third cause nothing is measuring"
             );
         }
     }
@@ -2479,8 +2822,8 @@ mod tests {
             "the optimistic reading anchors it at the peak the bar itself made"
         );
 
-        let priced_pess = super::realised(&[], 0, 1, 100_000, Side::Long, pess, None);
-        let priced_opt = super::realised(&[], 0, 1, 100_000, Side::Long, opt, None);
+        let priced_pess = super::realised(&[], 0, 1, 100_000, Side::Long, pess, None, true);
+        let priced_opt = super::realised(&[], 0, 1, 100_000, Side::Long, opt, None, false);
         assert_eq!(
             priced_pess, 800,
             "105,000 less 4,200, less the 100,000 entry"
@@ -2491,6 +2834,31 @@ mod tests {
             "the pessimistic anchor must be the worse fill, or the two readings \
              are labelled backwards"
         );
+    }
+
+    /// The three bars and two ladders the trailing-ambiguity case needs.
+    ///
+    /// Bar 1 is the whole fixture: it opens with the peak at 105,000, dips to
+    /// 101,000 — exactly the 40,000-ppm rung below that peak — and also prints a
+    /// new high at 107,000. Stops and targets sit at 900,000 ppm so neither can
+    /// ever fire, leaving the trail as the only exit competing with the clock
+    /// and the trail's own ordering as the only ambiguity in the cell.
+    ///
+    /// Extracted so the test that uses it stays inside the line budget without
+    /// any of its assertions being dropped to fit.
+    fn trail_ambiguity_fixture() -> (
+        Vec<indicators::Candle>,
+        crate::excursion::Ladder,
+        crate::excursion::Ladder,
+    ) {
+        let bars = vec![
+            candle(0, 100_000, 105_000, 100_000, 105_000),
+            candle(1, 104_000, 107_000, 101_000, 106_000),
+            candle(2, 106_000, 106_500, 105_500, 106_000),
+        ];
+        let never = crate::excursion::Ladder::new(vec![900_000]).expect("an ascending ladder");
+        let trails = crate::excursion::Ladder::new(vec![40_000]).expect("an ascending ladder");
+        (bars, never, trails)
     }
 
     #[test]
@@ -2507,16 +2875,7 @@ mod tests {
         // is the pessimistic total that `Grid::best` and `Grid::sharpest` rank
         // on. Nothing here is a haircut applied for safety -- it is the reading
         // the data supports.
-        let bars = vec![
-            candle(0, 100_000, 105_000, 100_000, 105_000),
-            candle(1, 104_000, 107_000, 101_000, 106_000),
-            candle(2, 106_000, 106_500, 105_500, 106_000),
-        ];
-        // Stops and targets far enough out that neither ever fires, so the only
-        // exit competing with the clock is the trail and the only ambiguity in
-        // the cell is the one under test.
-        let never = crate::excursion::Ladder::new(vec![900_000]).expect("an ascending ladder");
-        let trails = crate::excursion::Ladder::new(vec![40_000]).expect("an ascending ladder");
+        let (bars, never, trails) = trail_ambiguity_fixture();
         let cross = crate::excursion::crossings(
             &bars,
             0,
@@ -2534,11 +2893,17 @@ mod tests {
             &[1],
             "the fixture must produce the case, or this test asserts nothing"
         );
+        // The fills come from `entry_fills` rather than being written in, so the
+        // fixture cannot drift from what `evaluate` would actually build for
+        // this bar. Both variants below take `Side::Long`.
+        let (entry_pess, entry_opt) = super::entry_fills(&bars, 0, Side::Long);
         let candidates = vec![super::Candidate {
             signal: 0,
             entry: 0,
             time_exit: 2,
             cross,
+            entry_pess,
+            entry_opt,
         }];
         let rungs = (never.rungs(), never.rungs(), trails.rungs());
 
@@ -2560,9 +2925,20 @@ mod tests {
             "the bar that fired the trail and raised the peak must be counted, \
              or the uncertainty is reported with nothing behind it"
         );
+        // Bar 0 opens at 100,000 with a high of 105,000, so the worst entry is a
+        // the high itself -- 105,000 -- and gives up 5,000 against the open. Nothing
+        // is added to it: a tick beyond the high is a price the bar never printed.
+        // 800 was this exit with the entry at the open; both terms are written
+        // out because a single new number would record the sum and lose which
+        // half of the round trip moved.
         assert_eq!(
-            trailed.pessimistic, 800,
-            "priced off 105,000, the peak the resting order hung from"
+            trailed.fill_cost, 5_000,
+            "in at the printed high, and charged"
+        );
+        assert_eq!(
+            trailed.pessimistic,
+            800 - 5_000,
+            "priced off 105,000, the peak the order hung from, less that entry"
         );
         assert_eq!(
             trailed.optimistic, 2_720,
@@ -2597,9 +2973,33 @@ mod tests {
              ambiguity"
         );
         assert_eq!(timed.uncertainty(), 0);
+        // 5,510 AND NOT 5,005, AND THE DIFFERENCE IS THE WHOLE POINT OF THIS
+        // VARIANT SITTING BESIDE THE TRAILING ONE.
+        //
+        // They share an entry bar, so both are charged the same 5,005 to get in.
+        // They do NOT share an exit: the trailing variant fills at the peak its
+        // resting order hung from, a level, which has no spread of its own. This
+        // one is squared off by the clock -- a MARKET order on bar 2, whose open
+        // is 106,000 and whose low is 105,500, so the adverse fill is 105,500 and
+        // getting out costs a further 500.
+        //
+        // A test asserting the two were equal is what this replaces, and it was
+        // wrong for a reason worth keeping: it assumed the charge belonged to the
+        // entry alone, which is exactly the assumption that left the exit leg
+        // unbracketed in the first place.
         assert_eq!(
-            timed.pessimistic, 6_000,
-            "held to bar 2 and squared off at its close of 106,000"
+            timed.fill_cost,
+            5_000 + 500,
+            "in at the extreme AND out at it -- a level exit is charged only once"
+        );
+        assert_eq!(
+            trailed.fill_cost, 5_000,
+            "a level exit has no spread of its own"
+        );
+        assert_eq!(
+            timed.pessimistic,
+            6_000 - 5_500,
+            "squared off on bar 2 at its printed low of 105,500, not its close"
         );
     }
 
@@ -2861,11 +3261,17 @@ mod arming_tests {
         assert_eq!(cross.target_at(0), 1, "and arm on bar 1");
         assert_eq!(cross.armed_at(0, 0), 2, "and fire the armed trail on bar 2");
 
+        // The fills come from `entry_fills` rather than being written in, so the
+        // fixture cannot drift from what `evaluate` would actually build for
+        // this bar. Both tests below take `Side::Long`.
+        let (entry_pess, entry_opt) = super::entry_fills(&bars, 0, Side::Long);
         let candidates = vec![super::Candidate {
             signal: 0,
             entry: 0,
             time_exit: 2,
             cross,
+            entry_pess,
+            entry_opt,
         }];
         let rungs = (never.rungs(), targets.rungs(), trails.rungs());
         let tsl = one_variant(

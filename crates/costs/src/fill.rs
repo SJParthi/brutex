@@ -325,6 +325,28 @@ pub enum Anchor {
     /// plus a tick and a sell at the bar low minus a tick, both legs adverse on
     /// both directions.
     AdverseExtreme,
+    /// The adverse extreme itself, with NO tick — the worst price the bar
+    /// actually PRINTED.
+    ///
+    /// # Why this exists beside [`Self::AdverseExtreme`]
+    ///
+    /// The tick in the variant above is a claim about microstructure, not a
+    /// reading of the data: it names a price at which nothing traded in that
+    /// minute. On a series whose finest resolution IS one minute, the four
+    /// numbers of the bar are the whole of what is known, and a fill invented
+    /// one tick outside them is exactly the invention `CLAUDE.md` §3 rule 1
+    /// forbids — the same objection this enum already records against the
+    /// adverse-extreme buy, in the words *"a price that PRINTED, which the
+    /// adverse-extreme buy deliberately is not"*.
+    ///
+    /// So this is the honest worst case FROM ONE-MINUTE BARS: a buy at the high,
+    /// a sell at the low, nothing added and nothing assumed.
+    ///
+    /// [`Self::AdverseExtreme`] is not deprecated and keeps every caller it had.
+    /// It is the right reading where a tick of slippage is a modelled cost
+    /// rather than a claim about a printed price; this one is the right reading
+    /// where the bar is all there is.
+    PrintedExtreme,
 }
 
 impl Anchor {
@@ -334,6 +356,10 @@ impl Anchor {
         match self {
             Self::Open => "best",
             Self::AdverseExtreme => "worst",
+            // Distinct from "worst" on purpose: one word for both would hide
+            // the difference between a modelled tick and a printed price, which
+            // is the only thing separating the two readings.
+            Self::PrintedExtreme => "worst printed",
         }
     }
 }
@@ -391,6 +417,21 @@ pub fn fills_at(
 ) -> Result<Fills, CostError> {
     match anchor {
         Anchor::AdverseExtreme => worst_case_fills(entry, exit, direction),
+        // THE SAME ANCHORS, WITH NOTHING ADDED TO THEM.
+        //
+        // `worst_case_fills` picks the identical two prices and then moves each
+        // one tick further against the position. That tick is a modelled cost;
+        // here the anchors ARE the fills, so the pair is exactly two numbers the
+        // bar printed. No floor is applied and none is needed: `Bar::new` has
+        // already refused a sub-tick high, and a low it accepted is a price that
+        // traded.
+        Anchor::PrintedExtreme => {
+            let (buy, sell) = match direction {
+                Direction::Long => (entry.high, exit.low),
+                Direction::Short => (exit.high, entry.low),
+            };
+            Ok(Fills::at_open(buy, sell))
+        }
         Anchor::Open => {
             // Direction selects which BAR each leg is on, and nothing else:
             // there is no adverse extreme to choose between.
@@ -518,6 +559,94 @@ mod tests {
 
     fn flat(price: i64) -> Bar {
         Bar::flat(Paisa::from_raw(price)).expect("a legal bar")
+    }
+
+    /// THE PRINTED EXTREME ADDS NOTHING, AND THE TICK IS THE WHOLE DIFFERENCE.
+    ///
+    /// # What this pins
+    ///
+    /// [`Anchor::AdverseExtreme`] and [`Anchor::PrintedExtreme`] choose the
+    /// SAME two anchors — a buy at the entry high and a sell at the exit low on
+    /// a long, mirrored on a short. They differ only in what happens next: one
+    /// moves each leg a tick further against the position, the other leaves it
+    /// where the bar printed it.
+    ///
+    /// Asserting the difference is EXACTLY one tick per leg, rather than
+    /// asserting two literals side by side, is what makes this a test of the
+    /// relationship instead of two independent copies of the arithmetic. A
+    /// change to `TICK` moves both figures and this row still holds; a change
+    /// that made the printed reading drift off the bar's own numbers does not.
+    #[test]
+    fn the_printed_extreme_is_the_bar_and_the_adverse_one_is_a_tick_beyond_it() {
+        for direction in [Direction::Long, Direction::Short] {
+            let entry = bar(120_00, 119_00);
+            let exit = bar(125_00, 118_00);
+            let printed =
+                fills_at(entry, exit, direction, Anchor::PrintedExtreme).expect("legal bars");
+            let adverse =
+                fills_at(entry, exit, direction, Anchor::AdverseExtreme).expect("legal bars");
+
+            // Every price the printed reading names is one the bar carried.
+            let (want_buy, want_sell) = match direction {
+                Direction::Long => (entry.high(), exit.low()),
+                Direction::Short => (exit.high(), entry.low()),
+            };
+            assert_eq!(printed.buy(), want_buy, "{direction:?}: the buy is a print");
+            assert_eq!(
+                printed.sell(),
+                want_sell,
+                "{direction:?}: the sell is a print"
+            );
+
+            // And the adverse reading is that, plus a tick against, on each leg.
+            assert_eq!(
+                adverse.buy().raw() - printed.buy().raw(),
+                TICK.raw(),
+                "{direction:?}: the adverse buy is exactly one tick worse"
+            );
+            assert_eq!(
+                printed.sell().raw() - adverse.sell().raw(),
+                TICK.raw(),
+                "{direction:?}: the adverse sell is exactly one tick worse"
+            );
+        }
+    }
+
+    /// The printed reading reports no slippage, because it models none.
+    ///
+    /// `realized_slip_per_unit` is what a fill gave up against its anchor.
+    /// `PrintedExtreme` IS its anchor, so the honest figure is zero — the same
+    /// answer [`Anchor::Open`] gives, and for the same reason. A non-zero one
+    /// would be a cost with nothing behind it.
+    #[test]
+    fn the_printed_extreme_reports_no_slippage_because_it_assumes_none() {
+        let fills = fills_at(
+            bar(120_00, 119_00),
+            bar(125_00, 118_00),
+            Direction::Long,
+            Anchor::PrintedExtreme,
+        )
+        .expect("legal bars");
+        assert_eq!(fills.realized_slip_per_unit(), p(0));
+    }
+
+    /// Every anchor prints a word, and no two share one.
+    ///
+    /// A report that showed `PrintedExtreme` as `"worst"` would be indis-
+    /// tinguishable from `AdverseExtreme` on the page, which is the one place
+    /// the difference has to be visible.
+    #[test]
+    fn each_anchor_names_itself_distinctly() {
+        let words = [
+            Anchor::Open.as_str(),
+            Anchor::AdverseExtreme.as_str(),
+            Anchor::PrintedExtreme.as_str(),
+        ];
+        for (i, a) in words.iter().enumerate() {
+            for b in words.iter().skip(i + 1) {
+                assert_ne!(a, b, "two anchors print the same word");
+            }
+        }
     }
 
     fn triple(entry: Bar, exit: Bar, direction: Direction) -> (i64, i64, i64) {

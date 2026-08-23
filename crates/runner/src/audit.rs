@@ -357,7 +357,7 @@ fn grid_header(out: &mut String, g: &Grid) {
 fn grid_columns(out: &mut String) {
     let _ = writeln!(
         out,
-        "  {:<15}{:>7}{:>6}{:>6}{:>6}{:>6}{:>7}{:>6}{:>14}{:>12}{:>12}{:>9}{:>13}{:>11}{:>11}{:>9}{:>11}",
+        "  {:<15}{:>7}{:>6}{:>6}{:>6}{:>6}{:>7}{:>6}{:>14}{:>11}{:>12}{:>12}{:>9}{:>13}{:>11}{:>11}{:>9}{:>11}",
         "exit",
         "trades",
         "won",
@@ -367,6 +367,18 @@ fn grid_columns(out: &mut String) {
         "target",
         "time",
         "total",
+        // BESIDE `total` BECAUSE IT IS PART OF IT, NOT A FOOTNOTE TO IT.
+        //
+        // `total` is the pessimistic reading, and until this column existed that
+        // reading entered every trade at the bar's OPEN -- a best-case entry
+        // under a worst-case heading. This is what the worst entry costs, and
+        // showing it next to the total is what lets a reader see that the two
+        // legs are now charged the same way.
+        //
+        // Distinct from `unknown` on purpose: this is money the fill model
+        // KNOWS was given up, where `unknown` is money whose fate one-minute
+        // bars cannot settle either way.
+        "fill cost",
         "worst trip",
         "drawdown",
         "ret/DD",
@@ -378,8 +390,11 @@ fn grid_columns(out: &mut String) {
     );
     let _ = writeln!(
         out,
-        "  stop+tsl+ttp+target+time = trades. total/worst trip/drawdown are \
-         paisa; the MAE/MFE columns and ret/DD are ppm."
+        "  stop+tsl+ttp+target+time = trades. total/fill cost/worst trip/drawdown \
+         are paisa; the MAE/MFE columns and ret/DD are ppm.\n  total is the WORST \
+         reading of BOTH legs: in at the worst price the bar PRINTED, out \
+         at the worse of the two orderings. entry cost is what that entry gave \
+         up against the open; unknown is what the ordering could still be worth."
     );
 }
 
@@ -411,7 +426,7 @@ fn ret_dd(c: &Cell) -> String {
 fn grid_row(out: &mut String, c: &Cell, mark: &str) {
     let _ = writeln!(
         out,
-        "  {:<15}{:>7}{:>6}{:>6}{:>6}{:>6}{:>7}{:>6}{:>14}{:>12}{:>12}{:>9}{:>13}{:>11}{:>11}{:>9}{:>11}{}",
+        "  {:<15}{:>7}{:>6}{:>6}{:>6}{:>6}{:>7}{:>6}{:>14}{:>11}{:>12}{:>12}{:>9}{:>13}{:>11}{:>11}{:>9}{:>11}{}",
         exit_name(c),
         c.trades,
         c.wins,
@@ -421,6 +436,7 @@ fn grid_row(out: &mut String, c: &Cell, mark: &str) {
         c.targeted,
         c.timed_out,
         c.pessimistic,
+        c.fill_cost,
         c.worst_trade,
         c.max_drawdown,
         ret_dd(c),
@@ -1645,12 +1661,35 @@ mod tests {
         assert!(out.contains("25 further"));
     }
 
+    /// Is this rendered line a row of the exit grid, rather than a heading or a
+    /// line of the units note?
+    ///
+    /// # Why three tests navigate by this instead of by a line offset
+    ///
+    /// They used to count lines from the headings — `head + 2` for the first
+    /// row, `head + 3` for the top variant. That encodes the units note's LINE
+    /// COUNT as a constant, in three places, with nothing declaring it. The day
+    /// the note grew a second line explaining what `total` now means, all three
+    /// failed at once and pointed at the table's alignment, which was correct.
+    ///
+    /// The shape test cannot drift the same way: every grid row carries the exit
+    /// name and then the trade count, so its second whitespace-separated token
+    /// is an integer. No heading or prose line has that shape — the units note's
+    /// second token is `=` on one line and `is` on the other.
+    fn is_grid_row(line: &str) -> bool {
+        line.starts_with("  ")
+            && line
+                .split_whitespace()
+                .nth(1)
+                .is_some_and(|t| t.parse::<i64>().is_ok())
+    }
+
     /// The exit table's heading line and its data rows must line up.
     ///
     /// # Why a test and not a shared constant
     ///
-    /// `grid_columns` and `grid_row` carry two copies of one seventeen-field
-    /// width spec, and they CANNOT share a constant: `writeln!` requires a
+    /// `grid_columns` and `grid_row` carry two copies of one per-field
+    /// width spec — eighteen since `fill cost` joined them — and they CANNOT share a constant: `writeln!` requires a
     /// literal format string, so a `const GRID_FMT` is not expressible in Rust.
     /// The duplication is unavoidable, and an unavoidable duplication with
     /// nothing checking it is a table whose headings sit over the wrong numbers
@@ -1672,7 +1711,7 @@ mod tests {
         // The spec, first thing in the function: `clippy::items_after_statements`
         // and, more usefully, a reader who wants to know what the table claims
         // to be does not have to scroll past a fixture to find out.
-        const COLUMNS: [(&str, usize); 17] = [
+        const COLUMNS: [(&str, usize); 18] = [
             ("exit", 15),
             ("trades", 7),
             ("won", 6),
@@ -1682,6 +1721,7 @@ mod tests {
             ("target", 7),
             ("time", 6),
             ("total", 14),
+            ("fill cost", 11),
             ("worst trip", 12),
             ("drawdown", 12),
             ("ret/DD", 9),
@@ -1703,6 +1743,9 @@ mod tests {
             timed_out: 74_705,
             pessimistic: -987_654_321,
             optimistic: 123_456_789,
+            // Ten digits in an eleven-wide field: one space left, which is the
+            // separator property this fixture exists to squeeze.
+            fill_cost: 1_234_567_890,
             worst_trade: -87_654_321,
             max_drawdown: -76_543_210,
             winner_mae: 65_432,
@@ -1737,13 +1780,20 @@ mod tests {
             .position(|l| l.contains("mfe/allMAE"))
             .expect("the exit table must print its headings");
         let heading = *lines.get(head).expect("heading line");
-        // The line after the headings is the units note; rows follow it, and
-        // EVERY one of them is checked -- a column only overflows on the value
-        // that is widest, and that value is rarely on row one.
+        // EVERY row is checked -- a column only overflows on the value that is
+        // widest, and that value is rarely on row one.
+        //
+        // FOUND BY SHAPE AND NOT BY OFFSET, WHICH IS A REPAIR.
+        //
+        // This skipped a fixed two lines past the headings, so the day the units
+        // note grew from one line to two, this test and the two below all failed
+        // together -- pointing at the table's alignment, which was fine, rather
+        // than at the note, which had moved. An offset into rendered prose is a
+        // dependency on the prose's line count that nothing declares.
         let rows: Vec<&str> = lines
             .iter()
-            .skip(head.saturating_add(2))
-            .take_while(|l| l.starts_with("  ") && !l.trim_start().starts_with("..."))
+            .skip(head)
+            .filter(|l| is_grid_row(l))
             .copied()
             .collect();
         assert_eq!(rows.len(), 2, "both fixture cells must render:\n{out}");
@@ -1970,7 +2020,16 @@ mod tests {
             .expect("headings");
         // head+0 headings, head+1 units note, head+2 the baseline row (which
         // sorts first unconditionally), head+3 the top VARIANT row.
-        let top = lines.get(head.saturating_add(3)).expect("a variant row");
+        // The SECOND grid row: the baseline sorts first unconditionally. Found by
+        // shape rather than by a fixed offset past the units note -- see
+        // `is_grid_row` for what a fixed offset cost.
+        let top = lines
+            .iter()
+            .skip(head)
+            .filter(|l| is_grid_row(l))
+            .nth(1)
+            .copied()
+            .expect("a variant row");
         assert!(
             top.trim_start().starts_with(&chosen),
             "the top variant row must be the cell `best()` returns, not the \
@@ -2025,7 +2084,16 @@ mod tests {
             .iter()
             .position(|l| l.contains("mfe/allMAE"))
             .expect("headings");
-        let top = lines.get(head.saturating_add(3)).expect("a variant row");
+        // The SECOND grid row: the baseline sorts first unconditionally. Found by
+        // shape rather than by a fixed offset past the units note -- see
+        // `is_grid_row` for what a fixed offset cost.
+        let top = lines
+            .iter()
+            .skip(head)
+            .filter(|l| is_grid_row(l))
+            .nth(1)
+            .copied()
+            .expect("a variant row");
         assert!(
             top.trim_start().starts_with(&chosen),
             "the table must lead with the variant that reached the same total \
