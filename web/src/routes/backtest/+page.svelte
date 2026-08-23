@@ -160,7 +160,7 @@
      ==================================================================== */
 
   /** The span and threshold the Run control will send. */
-  let ask = $state({ from: '2019-12', to: '2026-08', supportPpm: 200_000 });
+  let ask = $state({ from: '2019-12', to: '2026-08' });
   /** @type {{ phase: 'idle'|'starting'|'running'|'done'|'failed', run: any, why: string }} */
   let sweep = $state({ phase: 'idle', run: null, why: '' });
   /** @type {ReturnType<typeof setTimeout> | null} */
@@ -224,8 +224,7 @@
           from_year: from.year,
           from_month: from.month,
           to_year: to.year,
-          to_month: to.month,
-          support_ppm: ask.supportPpm
+          to_month: to.month
         })
       });
       const body = await response.json().catch(() => ({}));
@@ -1876,15 +1875,20 @@
       <span>to</span>
       <input class="find sm" bind:value={ask.to} placeholder="YYYY-MM" aria-label="Last month" />
     </label>
-    <label class="runf">
-      <span>support</span>
-      <select class="find sm" bind:value={ask.supportPpm} aria-label="Support threshold">
-        <option value={50_000}>5% of bars</option>
-        <option value={100_000}>10% of bars</option>
-        <option value={200_000}>20% of bars</option>
-        <option value={300_000}>30% of bars</option>
-      </select>
-    </label>
+    <!-- THE SUPPORT CONTROL IS GONE, AND ITS ABSENCE IS THE FEATURE.
+
+         An instrument and a span are facts about what the operator wants to
+         study. A support percentage is a knob on the machine, and offering it
+         made the form ask a question only the machine can answer well: too low
+         and the frequent frontier never empties, too high and the sweep finds
+         nothing and reports that as a result. Both look like an answer.
+
+         This is CLAUDE.md §6's argument for `k`, applied where it applies
+         equally: "a parameter that can be set can be set wrongly and
+         silently." The engine holds it at 20% and derives the actual hit count
+         per rung from that rung's own bars, so nine rungs get nine different
+         thresholds without anyone typing one. It is printed beside the result
+         rather than hidden -- see the note at the end of this bar. -->
     <button
       class="btn run"
       onclick={startSweep}
@@ -1896,7 +1900,12 @@
       {#if !activeFeed}
         choose a feed first — a run is stamped with the feed its bars came from
       {:else}
-        on <b>{activeFeed}</b> · every rung the store holds
+        <!-- STATED, NOT SETTABLE. The threshold is no longer a control, so it
+             has to be readable somewhere or it becomes the hidden default that
+             removing the control was supposed to avoid. It reads as a
+             condition of the run, which is what it is. -->
+        on <b>{activeFeed}</b> · every rung the store holds · support
+        <b>20%</b> of each rung's own bars
       {/if}
     </span>
   </section>
@@ -4405,34 +4414,11 @@
     transform: translateY(0);
   }
 
-  /* ---- SELECTS: the native arrow is replaced, and it turns --------- */
-  select.find {
-    appearance: none;
-    -webkit-appearance: none;
-    padding-right: 1.9rem;
-    background-image: linear-gradient(45deg, transparent 50%, var(--n9) 50%),
-      linear-gradient(135deg, var(--n9) 50%, transparent 50%);
-    background-position:
-      calc(100% - 1.05rem) 55%,
-      calc(100% - 0.72rem) 55%;
-    background-size:
-      5px 5px,
-      5px 5px;
-    background-repeat: no-repeat;
-    cursor: pointer;
-    transition:
-      border-color 0.16s ease,
-      background-position 0.18s cubic-bezier(0.22, 0.7, 0.3, 1);
-  }
-  select.find:hover {
-    border-color: var(--acc);
-  }
-  select.find:focus {
-    border-color: var(--acc);
-    background-position:
-      calc(100% - 0.72rem) 55%,
-      calc(100% - 1.05rem) 55%;
-  }
+  /* ---- SELECTS: gone with the support control ----------------------
+     Twenty-seven lines dressed the native dropdown arrow and turned it on
+     focus. The support threshold was the only <select> on this page, so
+     they now style nothing. Kept as a note rather than silently deleted:
+     if a select ever returns here, it should look like that again. ---- */
 
   /* Text inputs get the same focus treatment, so the strip reads as one
      set of controls rather than as two kinds. */
@@ -4530,8 +4516,7 @@
     .fact,
     .row,
     .btn.run,
-    .find,
-    select.find {
+    .find {
       animation: none !important;
       transition: none !important;
       transform: none !important;

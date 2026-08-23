@@ -151,11 +151,19 @@ pub enum Refusal {
     Malformed(String),
     /// A month outside `1..=12`, or a `to` before its `from`.
     Span(String),
-    /// A support threshold of zero, which would make every combination
-    /// frequent and the ladder infinite.
-    Support(String),
     /// A run is already in flight in this process.
     Busy(String),
+    //
+    // THERE WAS A `Support` VARIANT HERE AND IT IS GONE. It refused a
+    // threshold of zero, which makes every combination frequent so the
+    // frontier never empties and the walk has no end. The refusal was right
+    // and it is now unreachable: the threshold is `SUPPORT_PPM`, a constant,
+    // and no request can name it.
+    //
+    // Deleted rather than kept as a variant nothing constructs. A dead arm is
+    // a region that can never run, which is the 100% coverage floor `CLAUDE.md`
+    // §9 sets, and it would also tell the next reader that a request can still
+    // get this wrong. It cannot.
 }
 
 impl Refusal {
@@ -163,10 +171,7 @@ impl Refusal {
     #[must_use]
     pub fn why(&self) -> &str {
         match *self {
-            Self::Malformed(ref s)
-            | Self::Span(ref s)
-            | Self::Support(ref s)
-            | Self::Busy(ref s) => s,
+            Self::Malformed(ref s) | Self::Span(ref s) | Self::Busy(ref s) => s,
         }
     }
 
@@ -195,9 +200,50 @@ pub struct Asked {
     pub from: (u16, u8),
     /// Last month of the span.
     pub to: (u16, u8),
-    /// Support threshold in parts per million of bars.
-    pub support_ppm: u64,
 }
+
+/// The support threshold, in parts per million of a rung's own bars.
+///
+/// # It is not a request field, and that is the whole point
+///
+/// `CLAUDE.md` §6 refuses a depth parameter in these words: *"A parameter that
+/// can be set can be set wrongly and silently."* It gives the history — a flag
+/// that defaulted to a dynamic token, a width guard that tripped on every real
+/// run, and a silent fall back to a hardcoded `k = [1, 2]` that nobody could
+/// see from the flag. Support is the same shape of parameter with the same
+/// failure available to it: too low and the frequent frontier never empties,
+/// too high and the sweep finds nothing and reports that as an answer.
+///
+/// So the operator asks for an instrument and a span. Those are FACTS about
+/// what they want to study. A support percentage is a knob on the machine, and
+/// a machine that needs its knobs set by the person asking the question is not
+/// finished.
+///
+/// # What stays dynamic, which is the part that matters
+///
+/// This is a percentage, never a count. `cli::min_hits_for` turns it into an
+/// absolute threshold as `bars × ppm / 1_000_000`, so the number of hits a mask
+/// must actually clear is derived per rung, per span, per instrument, at the
+/// moment of the run:
+///
+/// | rung | bars in a span | threshold at 20% |
+/// |---|---|---|
+/// | 1min | 21,620 | 4,324 |
+/// | 15min | 11,643 | 2,328 |
+/// | 1day | 1,671 | 334 |
+///
+/// Nine rungs, nine different thresholds, none of them written down anywhere.
+/// A longer span raises it; a coarser rung lowers it. Fixing the PERCENTAGE is
+/// what makes those nine comparable — it is the reason `/backtest` can group
+/// rungs into one comparison at all, and grouping on the absolute count instead
+/// is a bug this page has already had and fixed.
+///
+/// # 20%, and it is reported rather than hidden
+///
+/// The value the ladder ran at is written into [`Progress`] and rendered on the
+/// page. A constant nobody can see is the hidden default §6 objects to; a
+/// constant printed beside its result is a stated condition of the run.
+const SUPPORT_PPM: u64 = 200_000;
 
 /// One field out of a flat JSON object, as text.
 ///
@@ -247,7 +293,6 @@ pub fn asked_from(body: &str) -> Result<Asked, Refusal> {
     let from_month = num("from_month")?;
     let to_year = num("to_year")?;
     let to_month = num("to_month")?;
-    let support_ppm = num("support_ppm")?;
 
     let month_ok = |m: u64| (1..=12).contains(&m);
     if !month_ok(from_month) || !month_ok(to_month) {
@@ -264,14 +309,13 @@ pub fn asked_from(body: &str) -> Result<Asked, Refusal> {
              refused rather than swept as nothing."
         )));
     }
-    if support_ppm == 0 {
-        return Err(Refusal::Support(
-            "a support threshold of zero makes every combination frequent, so the ladder \
-             never empties and the walk has no end. CLAUDE.md §6: depth is decided by \
-             extinction, and extinction needs a threshold above zero."
-                .to_owned(),
-        ));
-    }
+    // NO SUPPORT CHECK, BECAUSE THERE IS NO SUPPORT FIELD. This used to refuse
+    // a threshold of zero -- which makes every combination frequent, so the
+    // frontier never empties and the walk has no end. That refusal was correct
+    // and it is now unreachable: `SUPPORT_PPM` is a constant above zero and no
+    // request can name it. Removing the parameter removed the failure, which is
+    // exactly what §6 claims for `k` and is the reason to prefer absence over a
+    // validated default.
 
     // `u16`/`u8` by construction: the month is checked above and a year past
     // u16 is not a year this store can file a month under.
@@ -285,7 +329,6 @@ pub fn asked_from(body: &str) -> Result<Asked, Refusal> {
         underlying,
         from: (year(from_year, "from_year")?, month(from_month)),
         to: (year(to_year, "to_year")?, month(to_month)),
-        support_ppm,
     })
 }
 
@@ -308,7 +351,7 @@ pub fn conduct(asked: &Asked, now_micros: i64) -> Progress {
         &asked.underlying,
         asked.from,
         asked.to,
-        asked.support_ppm,
+        SUPPORT_PPM,
         now_micros,
     );
     let report = cli::range_all(
@@ -316,7 +359,7 @@ pub fn conduct(asked: &Asked, now_micros: i64) -> Progress {
         &asked.underlying,
         asked.from,
         asked.to,
-        asked.support_ppm,
+        SUPPORT_PPM,
     );
     progress.report = Some(report);
     progress.finished_micros = Some(now_micros);
@@ -421,7 +464,7 @@ pub async fn run(
             &asked.underlying,
             asked.from,
             asked.to,
-            asked.support_ppm,
+            SUPPORT_PPM,
             now_micros(),
         ));
     }
@@ -439,7 +482,7 @@ pub async fn run(
         "from_month" => telemetry::Value::Uint(u64::from(asked.from.1)),
         "to_year" => telemetry::Value::Uint(u64::from(asked.to.0)),
         "to_month" => telemetry::Value::Uint(u64::from(asked.to.1)),
-        "support_ppm" => telemetry::Value::Uint(asked.support_ppm),
+        "support_ppm" => telemetry::Value::Uint(SUPPORT_PPM),
     );
 
     // A BLOCKING THREAD, NOT A WORKER. `cli::range_all` is CPU-bound over
@@ -502,10 +545,10 @@ pub async fn run_json(
               that cannot panic cannot fail"
 )]
 mod tests {
-    use super::{Asked, Progress, Refusal, asked_from, field, now_micros};
+    use super::{Asked, Progress, Refusal, SUPPORT_PPM, asked_from, field, now_micros};
 
-    fn body(feed: &str, span: &str, support: &str) -> String {
-        format!(r#"{{"feed":"{feed}","underlying":"NIFTY",{span},"support_ppm":{support}}}"#)
+    fn body(feed: &str, span: &str) -> String {
+        format!(r#"{{"feed":"{feed}","underlying":"NIFTY",{span}}}"#)
     }
 
     const SPAN: &str = r#""from_year":2019,"from_month":12,"to_year":2026,"to_month":8"#;
@@ -514,7 +557,7 @@ mod tests {
 
     #[test]
     fn a_whole_body_parses_into_the_five_things_a_sweep_needs() {
-        let asked = asked_from(&body("zerodha", SPAN, "200000")).expect("a good body");
+        let asked = asked_from(&body("zerodha", SPAN)).expect("a good body");
         assert_eq!(
             asked,
             Asked {
@@ -522,7 +565,6 @@ mod tests {
                 underlying: "NIFTY".to_owned(),
                 from: (2019, 12),
                 to: (2026, 8),
-                support_ppm: 200_000,
             }
         );
     }
@@ -537,7 +579,11 @@ mod tests {
         assert_eq!(asked.feed, "dhan");
         assert_eq!(asked.underlying, "BANKNIFTY");
         assert_eq!(asked.from, (2020, 1));
-        assert_eq!(asked.support_ppm, 50_000);
+        assert_eq!(asked.to, (2020, 3));
+        // The body above still carries a spaced `"support_ppm" : 50000`, and
+        // it is read past like any other field this route does not want. The
+        // run is swept at `SUPPORT_PPM` regardless.
+        assert_ne!(SUPPORT_PPM, 50_000);
     }
 
     #[test]
@@ -551,7 +597,7 @@ mod tests {
 
     #[test]
     fn an_empty_feed_is_as_absent_as_a_missing_one() {
-        let why = asked_from(&body("", SPAN, "200000")).expect_err("a refusal");
+        let why = asked_from(&body("", SPAN)).expect_err("a refusal");
         assert!(matches!(why, Refusal::Malformed(_)));
     }
 
@@ -564,14 +610,8 @@ mod tests {
 
     #[test]
     fn every_numeric_field_is_required_and_named_when_absent() {
-        for missing in [
-            "from_year",
-            "from_month",
-            "to_year",
-            "to_month",
-            "support_ppm",
-        ] {
-            let raw = body("zerodha", SPAN, "200000").replace(missing, "x_gone");
+        for missing in ["from_year", "from_month", "to_year", "to_month"] {
+            let raw = body("zerodha", SPAN).replace(missing, "x_gone");
             let why = asked_from(&raw).expect_err("a refusal");
             assert!(
                 why.why().contains(missing),
@@ -583,9 +623,48 @@ mod tests {
 
     #[test]
     fn a_number_that_is_not_a_number_is_refused_rather_than_defaulted() {
-        let why = asked_from(&body("zerodha", SPAN, "\"lots\"")).expect_err("a refusal");
+        let span = r#""from_year":"lots","from_month":12,"to_year":2026,"to_month":8"#;
+        let why = asked_from(&body("zerodha", span)).expect_err("a refusal");
         assert!(matches!(why, Refusal::Malformed(_)));
-        assert!(why.why().contains("support_ppm"), "{}", why.why());
+        assert!(why.why().contains("from_year"), "{}", why.why());
+    }
+
+    #[test]
+    fn a_support_field_in_the_body_is_ignored_rather_than_obeyed() {
+        // THE OLD PAGE IS STILL OUT THERE, and so is anyone's curl. A body
+        // that still carries `support_ppm` must not fail -- it names a field
+        // this route no longer has, which is not the same as being malformed.
+        //
+        // It must ALSO not take effect. A request that could still set the
+        // threshold would mean the parameter had merely been hidden from the
+        // form rather than removed, and a hidden settable parameter is worse
+        // than a visible one: nothing on the page would show it was in play.
+        let with =
+            format!(r#"{{"feed":"zerodha","underlying":"NIFTY",{SPAN},"support_ppm":999999}}"#);
+        let without = asked_from(&body("zerodha", SPAN)).expect("a good body");
+        assert_eq!(
+            asked_from(&with).expect("a body with a stale field is still good"),
+            without,
+            "the extra field must change nothing about what was asked"
+        );
+    }
+
+    #[test]
+    fn the_threshold_is_a_percentage_so_every_rung_gets_its_own_count() {
+        // The constant is a RATIO, and that is what keeps nine rungs
+        // comparable. Held as an absolute count instead, a 1min rung and a
+        // 1day rung would be asked to clear the same number of hits from
+        // twenty times different bar counts, and the daily rung would find
+        // nothing for a reason that has nothing to do with the market.
+        //
+        // These are this store's own bar counts for the recorded span.
+        let hits = |bars: u64| bars * SUPPORT_PPM / 1_000_000;
+        assert_eq!(hits(21_620), 4_324, "1min");
+        assert_eq!(hits(11_643), 2_328, "15min");
+        assert_eq!(hits(1_671), 334, "1day");
+        // Three rungs, three thresholds, one ratio, and nobody typed any of
+        // the three.
+        assert_ne!(hits(21_620), hits(1_671));
     }
 
     #[test]
@@ -596,7 +675,7 @@ mod tests {
             r#""from_year":2019,"from_month":1,"to_year":2026,"to_month":0"#,
             r#""from_year":2019,"from_month":1,"to_year":2026,"to_month":99"#,
         ] {
-            let why = asked_from(&body("zerodha", span, "200000")).expect_err("a refusal");
+            let why = asked_from(&body("zerodha", span)).expect_err("a refusal");
             assert!(matches!(why, Refusal::Span(_)), "{span}");
             assert!(why.why().contains("1..=12"), "{}", why.why());
         }
@@ -605,7 +684,7 @@ mod tests {
     #[test]
     fn a_span_that_ends_before_it_starts_is_refused_rather_than_swept_as_nothing() {
         let span = r#""from_year":2026,"from_month":8,"to_year":2019,"to_month":12"#;
-        let why = asked_from(&body("zerodha", span, "200000")).expect_err("a refusal");
+        let why = asked_from(&body("zerodha", span)).expect_err("a refusal");
         assert!(matches!(why, Refusal::Span(_)));
         assert!(why.why().contains("ends before it starts"), "{}", why.why());
     }
@@ -615,7 +694,7 @@ mod tests {
         // The boundary: `to` EQUAL to `from` is a one-month span, not a
         // backwards one, and refusing it would refuse the cheapest useful run.
         let span = r#""from_year":2026,"from_month":8,"to_year":2026,"to_month":8"#;
-        let asked = asked_from(&body("zerodha", span, "200000")).expect("one month");
+        let asked = asked_from(&body("zerodha", span)).expect("one month");
         assert_eq!(asked.from, asked.to);
     }
 
@@ -624,21 +703,33 @@ mod tests {
         // 2019-12 -> 2020-01 crosses a year with a SMALLER month, which a
         // naive month-only comparison would call backwards.
         let span = r#""from_year":2019,"from_month":12,"to_year":2020,"to_month":1"#;
-        assert!(asked_from(&body("zerodha", span, "200000")).is_ok());
+        assert!(asked_from(&body("zerodha", span)).is_ok());
     }
 
     #[test]
-    fn a_support_threshold_of_zero_is_refused_because_the_ladder_would_not_end() {
-        let why = asked_from(&body("zerodha", SPAN, "0")).expect_err("a refusal");
-        assert!(matches!(why, Refusal::Support(_)));
-        assert!(why.why().contains("extinction"), "{}", why.why());
-        assert_eq!(why.status(), axum::http::StatusCode::BAD_REQUEST);
+    fn a_support_threshold_of_zero_cannot_be_asked_for_at_all() {
+        // THIS TEST USED TO ASSERT A REFUSAL. It sent `"support_ppm":0` and
+        // checked for `Refusal::Support`, because zero makes every combination
+        // frequent, so the frontier never empties and the walk has no end.
+        //
+        // The refusal is gone and the test is kept, because what it guards is
+        // not gone: the property is now that the failure is UNREACHABLE rather
+        // than caught. Deleting the test with the variant would have left
+        // nothing saying why the constant may never be zero.
+        assert!(SUPPORT_PPM > 0, "extinction needs a threshold above zero");
+        // And a body that tries is simply a body with a field this route does
+        // not read -- accepted, ignored, and swept at the real threshold.
+        let raw = format!(r#"{{"feed":"zerodha","underlying":"NIFTY",{SPAN},"support_ppm":0}}"#);
+        assert!(
+            asked_from(&raw).is_ok(),
+            "a stale field is not a malformed request"
+        );
     }
 
     #[test]
     fn a_year_past_u16_is_refused_rather_than_truncated() {
         let span = r#""from_year":99999999,"from_month":1,"to_year":99999999,"to_month":2"#;
-        let why = asked_from(&body("zerodha", span, "200000")).expect_err("a refusal");
+        let why = asked_from(&body("zerodha", span)).expect_err("a refusal");
         assert!(matches!(why, Refusal::Span(_)));
         assert!(why.why().contains("not a year"), "{}", why.why());
     }
@@ -745,8 +836,8 @@ mod tests {
             r#""from_year":2020,"from_month":2,"to_year":2019,"to_month":11"#,
             r#""from_year":2026,"from_month":1,"to_year":2025,"to_month":12"#,
         ] {
-            let why = asked_from(&body("zerodha", span, "200000"))
-                .expect_err("a backwards span must be refused");
+            let why =
+                asked_from(&body("zerodha", span)).expect_err("a backwards span must be refused");
             assert!(matches!(why, Refusal::Span(_)), "{span}");
             assert!(why.why().contains("ends before it starts"), "{}", why.why());
         }
@@ -759,7 +850,7 @@ mod tests {
             r#""from_year":2025,"from_month":12,"to_year":2026,"to_month":1"#,
         ] {
             assert!(
-                asked_from(&body("zerodha", span, "200000")).is_ok(),
+                asked_from(&body("zerodha", span)).is_ok(),
                 "forward span refused: {span}"
             );
         }
