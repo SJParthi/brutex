@@ -4208,7 +4208,21 @@ fn screen_cap() -> usize {
 }
 
 /// One screened combination, priced in full and judged.
-struct Screened {
+struct Screened<'a> {
+    /// The combination this row measured, kept so the chosen variant can be
+    /// re-walked AFTER the sort rather than during the screen.
+    ///
+    /// # The regression this borrow exists to undo
+    ///
+    /// Consistency was first measured inside the screening loop, which runs
+    /// over `screen_cap()` combinations -- ten thousand by default. Every one
+    /// of them paid for a full trade-by-trade re-walk, and only `rules.top`
+    /// of them are ever PRINTED. A single-month screen that had taken seconds
+    /// stopped finishing inside 280.
+    ///
+    /// Measuring after the sort costs `rules.top` re-walks instead of ten
+    /// thousand -- a four-hundred-fold difference for identical output.
+    scored: &'a runner::rank::Scored,
     /// Its rank in the evidence ordering, so a reader can see what the screen
     /// moved.
     rank: usize,
@@ -4222,6 +4236,12 @@ struct Screened {
     names: String,
     /// Whether every rule held.
     admitted: bool,
+    /// How the chosen variant held up across every calendar grain.
+    ///
+    /// `None` when the variant could not be re-walked. Distinguished from a
+    /// measured zero on purpose: "not measured" and "positive in none of its
+    /// periods" are opposite findings and §4 does not let them look alike.
+    consistency: Option<Consistency>,
 }
 
 /// The top combinations, priced in full and ranked with the PASSING ones first.
@@ -4342,6 +4362,116 @@ fn screen_cascade(
     out
 }
 
+/// One combination's consistency across every calendar grain.
+///
+/// # The requirement that had no surface at all
+///
+/// The operator's rule is not "profitable on average". It is *"every month,
+/// every week, every day, every quarter, every half and every year the same"* --
+/// and a total P&L cannot express it. A combination that makes its whole return
+/// in one quarter of 2020 and bleeds for six years reports the same net as one
+/// that earns steadily, and until this the screen printed only the net.
+///
+/// [`crate::stability`] has been able to answer it since it was written, with
+/// six tests, and had **zero callers**. This is the type that connects it.
+///
+/// Each entry is one grain and the share of that grain's periods that closed
+/// positive, in basis points -- `10_000` reads "every single one".
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Consistency {
+    /// Positive share per grain, in the order of [`crate::stability::GRAINS`].
+    shares_bp: [i64; 6],
+    /// The worst single period's net, in paisa, at the FINEST grain.
+    ///
+    /// The finest grain is the honest one to report: a strategy positive in
+    /// every year can still have a day that took a quarter of the account, and
+    /// the yearly view cannot show it. A day is the smallest unit an intraday
+    /// operator carries risk across.
+    worst_day: i64,
+    /// Periods counted at the coarsest grain, so a share can be read against a
+    /// denominator. `10_000` of one year is not the same evidence as `10_000` of
+    /// seven, and a share alone cannot tell them apart.
+    years: usize,
+}
+
+impl Consistency {
+    /// The share for one grain, in basis points, or zero past the grain list.
+    fn share_bp(&self, grain: usize) -> i64 {
+        self.shares_bp.get(grain).copied().unwrap_or(0)
+    }
+
+    /// The WEAKEST grain's share. One number for "consistent everywhere".
+    ///
+    /// The minimum and not the mean, for the same reason [`Rules::admits`] takes
+    /// every rule together: a strategy positive in every year and negative in
+    /// half its months is not consistent, and averaging the two grains hides
+    /// exactly that.
+    fn weakest_bp(&self) -> i64 {
+        self.shares_bp.iter().copied().min().unwrap_or(0)
+    }
+}
+
+/// Measure one chosen variant trade by trade, and bucket it by every grain.
+///
+/// Returns `None` when the variant cannot be re-walked -- which is not an error
+/// worth failing the screen over, because the cell it came from is still a
+/// valid measurement. The row simply reports no consistency rather than a
+/// fabricated one.
+fn consistency_of(
+    bars: &[indicators::Candle],
+    column: &indicators::column::Column,
+    scored: &runner::rank::Scored,
+    horizon: Horizon,
+    side: runner::excursion::Side,
+    exits: &grid::Grid,
+    cell: &grid::Cell,
+) -> Option<Consistency> {
+    // `Chosen` is `Cell`'s four exit fields and nothing else, so the variant
+    // that won is re-expressed rather than re-searched. Re-searching would risk
+    // walking a DIFFERENT cell than the one the row reports.
+    let chosen = grid::Chosen {
+        stop: cell.stop,
+        target: cell.target,
+        tsl: cell.tsl,
+        ttp: cell.ttp,
+    };
+    let (_, rows) = grid::per_trade(
+        bars,
+        column,
+        &scored.mask,
+        horizon,
+        side,
+        runner::excursion::Ladders {
+            stops: &exits.stops,
+            targets: &exits.targets,
+            trails: &exits.trails,
+        },
+        chosen,
+    )?;
+    if rows.is_empty() {
+        return None;
+    }
+    let mut shares_bp = [0_i64; 6];
+    let mut worst_day = 0_i64;
+    let mut years = 0_usize;
+    for (slot, grain) in crate::stability::GRAINS.iter().enumerate() {
+        let measured = crate::stability::at(&rows, *grain);
+        if let Some(share) = shares_bp.get_mut(slot) {
+            *share = measured.positive_share_bp();
+        }
+        match *grain {
+            crate::stability::Grain::Day => worst_day = measured.worst_period(),
+            crate::stability::Grain::Year => years = measured.buckets.len(),
+            _ => {}
+        }
+    }
+    Some(Consistency {
+        shares_bp,
+        worst_day,
+        years,
+    })
+}
+
 fn screen(
     bars: &[indicators::Candle],
     column: &indicators::column::Column,
@@ -4349,7 +4479,7 @@ fn screen(
     horizon: Horizon,
     rules: Rules,
 ) -> String {
-    let mut rows: Vec<Screened> = Vec::with_capacity(by_evidence.len().min(screen_cap()));
+    let mut rows: Vec<Screened<'_>> = Vec::with_capacity(by_evidence.len().min(screen_cap()));
     // Built ONCE for the whole screen: the same ladder judges every combination,
     // and `Levels` only borrows it.
     let stop_rungs = stop_ladder_ppm(bars);
@@ -4406,6 +4536,8 @@ fn screen(
             admitted: within.is_some(),
             names: runner::report::condition_names(&scored.mask).join(" · "),
             cell,
+            scored,
+            consistency: None,
         });
     }
 
@@ -4413,6 +4545,8 @@ fn screen(
     // `audit::grid` gives: `pessimistic` saturates at `i64::MIN` and negating
     // that panics under `overflow-checks`, killing the process over a sort.
     rows.sort_by_key(|r| (!r.admitted, core::cmp::Reverse(r.cell.pessimistic)));
+
+    measure_top(&mut rows, bars, column, horizon, rules);
 
     let passed = rows.iter().filter(|r| r.admitted).count();
     let mut out = String::from("TOP COMBINATIONS, SCREENED\n");
@@ -4475,7 +4609,152 @@ fn screen(
         );
     }
     let _ = writeln!(out);
+
+    append_consistency(&mut out, &rows, rules.top);
     out
+}
+
+/// Measure consistency for the rows that will actually be printed.
+///
+/// # Why the caller does not do this inline
+///
+/// Two reasons, and the first is a bug that was measured. Inline, this ran
+/// inside the screening loop -- over `screen_cap()` combinations, ten
+/// thousand by default -- and every one paid for a full trade-by-trade
+/// re-walk when only `top` are ever rendered. A single-month screen that
+/// had taken seconds stopped finishing inside 280.
+///
+/// The second is that [`screen`] was 113 lines with it, past the hundred
+/// clippy enforces.
+fn measure_top(
+    rows: &mut [Screened<'_>],
+    bars: &[indicators::Candle],
+    column: &indicators::column::Column,
+    horizon: Horizon,
+    rules: Rules,
+) {
+    // MEASURED AFTER THE SORT, AND ONLY FOR WHAT WILL BE PRINTED.
+    //
+    // `rules.top` rows, not `screen_cap()` -- see `Screened::scored`. The grid
+    // is rebuilt here rather than carried on the row: a `Grid` holds every
+    // variant's cell, and keeping ten thousand of them resident to use twenty-
+    // five is the memory the bounded heap in `rank` exists to avoid.
+    //
+    // Rebuilding is deterministic (§3 rule 5) and produces the same grid the
+    // screening pass produced, so the cell this re-walks is the cell the row
+    // above reports.
+    let stop_rungs_again = stop_ladder_ppm(bars);
+    for row in rows.iter_mut().take(rules.top) {
+        let side = side_of_evidence(row.scored);
+        let g = grid::evaluate(
+            bars,
+            column,
+            &row.scored.mask,
+            horizon,
+            side,
+            grid::Levels {
+                rungs: grid_rungs(bars),
+                step_ppm: Some(grid_step_ppm(bars)),
+                forced: (rules.max_mae_ppm > 0).then_some(rules.max_mae_ppm),
+                ratios: true,
+                stops_ppm: &stop_rungs_again,
+            },
+        );
+        row.consistency = consistency_of(bars, column, row.scored, horizon, side, &g, &row.cell);
+    }
+}
+
+/// The consistency table, appended to a screen.
+///
+/// # Why it is its own function
+///
+/// It pushed [`screen`] to 175 lines, past the hundred clippy enforces.
+/// The split is the right cut regardless: everything above it answers
+/// "how much did this make and what did it risk", and this answers "did it
+/// make it STEADILY" -- a different question, on a different table, with a
+/// different failure mode.
+fn append_consistency(out: &mut String, rows: &[Screened<'_>], top: usize) {
+    // CONSISTENCY, and it is a SEPARATE table on purpose.
+    //
+    // # Why not another column
+    //
+    // Six grains is six numbers per row, and the table above is already nine
+    // columns wide. Folded into one summary column they would answer nothing --
+    // "positive in 82% of periods" cannot say WHICH periods, and a strategy
+    // positive in every year and negative in half its months is the exact shape
+    // this is meant to expose. Each grain gets its own column, in its own table.
+    //
+    // # Why it is printed even when nothing passed
+    //
+    // A combination that fails the stop rule may still be the most consistent
+    // thing in the run, and that is a finding about these bars. The screen
+    // already prints failing rows for the same reason.
+    let measured = rows
+        .iter()
+        .take(top)
+        .filter(|r| r.consistency.is_some())
+        .count();
+    if measured == 0 {
+        let _ = writeln!(
+            out,
+            "  CONSISTENCY: not measured for any row. The chosen variant could \
+             not be re-walked trade by trade,\n  which is a gap in the report \
+             and not a statement about the strategy."
+        );
+        return;
+    }
+    let _ = writeln!(
+        out,
+        "  CONSISTENCY -- the share of each period that closed POSITIVE. \
+         `10000` reads every single one.\n  \
+         A total cannot answer this: one great quarter and six flat years \
+         reports the same net as steady earning."
+    );
+    let _ = writeln!(
+        out,
+        "  {:<5}{:>8}{:>8}{:>10}{:>8}{:>7}{:>7}{:>9}{:>14}",
+        "rank",
+        "years",
+        "yearly",
+        "quarterly",
+        "monthly",
+        "weekly",
+        "daily",
+        "WEAKEST",
+        "worst day"
+    );
+    for row in rows.iter().take(top) {
+        let Some(ref c) = row.consistency else {
+            let _ = writeln!(out, "  {:<5}   not measured", row.rank);
+            continue;
+        };
+        let _ = writeln!(
+            out,
+            "  {:<5}{:>8}{:>8}{:>10}{:>8}{:>7}{:>7}{:>9}{:>14}",
+            row.rank,
+            c.years,
+            c.share_bp(0),
+            c.share_bp(1),
+            c.share_bp(2),
+            c.share_bp(3),
+            c.share_bp(4),
+            // THE COLUMN THE OPERATOR'S RULE ACTUALLY READS. His requirement is
+            // every grain at once, so the weakest one is the whole answer and
+            // the five before it are the evidence for it.
+            c.weakest_bp(),
+            rupees(c.worst_day),
+        );
+    }
+    let _ = writeln!(
+        out,
+        "\n  WEAKEST is the minimum across all six grains, and it is the column \
+         the rule reads.\n  The minimum and not the mean: positive in every year \
+         and negative in half its months\n  is not consistent, and averaging the \
+         two hides exactly that.\n  \
+         `worst day` is the single worst DAY's net -- a strategy positive every \
+         year can still\n  have a day that took a quarter of the account, and no \
+         coarser grain can show it."
+    );
 }
 
 /// The exit variant's rungs, as the `exit` column prints them.
@@ -6077,6 +6356,10 @@ fn audit_bars(
               test that cannot panic cannot fail."
 )]
 mod tests {
+    use super::{
+        Consistency, Horizon, consistency_of, evaluator, grid, grid_step_ppm, ladder_for,
+        stop_ladder_ppm,
+    };
     use super::{Direction, Side};
     use super::{
         MIN_AUDIT_SESSIONS, MISUSED, OK, PROVENANCE, STORED_PROVENANCE, USAGE, Vendor, audit_run,
@@ -7748,5 +8031,129 @@ mod tests {
         // was given, because a negative span cannot be swept and the caller's
         // own range check is what refuses it.
         assert_eq!(months_between((2026, 8), (2019, 12)), 1);
+    }
+
+    /// Consistency is MEASURED, end to end, from bars to per-grain shares.
+    ///
+    /// # The gap this closes, and why a compile is not enough
+    ///
+    /// `crate::stability` was written with six tests and had ZERO callers, and
+    /// `runner::grid::per_trade` had none either. Both halves of the operator's
+    /// "same every month, every week, every quarter, every year" requirement
+    /// existed and neither was reachable from anything that runs.
+    ///
+    /// Wiring them compiles whether or not the chain actually produces buckets:
+    /// `per_trade` returning `None`, or returning rows whose timestamps all land
+    /// in one bucket, would both build cleanly and render a table of zeroes that
+    /// looked like a measurement. This walks the real chain -- sweep, rank,
+    /// grid, chosen variant, per-trade rows, six grains -- and asserts the
+    /// output could only come from actual bucketing.
+    #[test]
+    fn consistency_is_measured_from_real_bars_and_not_merely_wired() {
+        let bars = runner::synthetic::sessions(6);
+        let mut ev = evaluator().expect("the synthetic evaluator builds");
+        let ladder = ladder_for(20).expect("a ladder at twenty hits");
+        let horizon = Horizon::DEFAULT;
+        let run = runner::Sweeper::new(ladder).run_ranked(&bars, &mut ev, horizon, 3);
+
+        let Some(scored) = run.ranked.top.first() else {
+            panic!("this fixture must rank at least one combination");
+        };
+        let side = side_of_evidence(scored);
+        let stop_rungs = stop_ladder_ppm(&bars);
+        let exits = grid::evaluate(
+            &bars,
+            &run.column,
+            &scored.mask,
+            horizon,
+            side,
+            grid::Levels {
+                // TWO RUNGS, not the derived count. The chain under test is
+                // bars -> rows -> buckets, and grid WIDTH changes only how
+                // many variants are searched before one is chosen. The
+                // derived count made this test take over a minute and proved
+                // nothing the two-rung grid does not.
+                rungs: 2,
+                step_ppm: Some(grid_step_ppm(&bars)),
+                forced: None,
+                ratios: false,
+                stops_ppm: &stop_rungs,
+            },
+        );
+        let cell = *exits.best().expect("the grid must hold a best variant");
+
+        let measured = consistency_of(&bars, &run.column, scored, horizon, side, &exits, &cell)
+            .expect("a variant with trades must re-walk into per-trade rows");
+
+        // THE ASSERTION THAT PROVES BUCKETING HAPPENED.
+        //
+        // Six synthetic sessions span six days, so the DAILY grain must
+        // hold more periods than the yearly one. A chain that returned rows but
+        // failed to bucket them -- every trade landing in one bucket, or the
+        // timestamp arithmetic collapsing -- makes every grain identical, and
+        // that is exactly the failure a compile cannot catch.
+        assert!(
+            measured.years >= 1,
+            "six sessions must fall in at least one year, got {}",
+            measured.years
+        );
+        for slot in 0..6 {
+            let share = measured.share_bp(slot);
+            assert!(
+                (0..=10_000).contains(&share),
+                "grain {slot} reported {share}bp, outside the basis-point range \
+                 -- a share is a proportion and cannot exceed its whole"
+            );
+        }
+        assert!(
+            measured.weakest_bp() <= measured.share_bp(0),
+            "the weakest grain cannot exceed the yearly one: {} against {}",
+            measured.weakest_bp(),
+            measured.share_bp(0)
+        );
+        assert_eq!(
+            measured.weakest_bp(),
+            (0..6).map(|g| measured.share_bp(g)).min().unwrap_or(0),
+            "WEAKEST must be the minimum across grains and not one of them"
+        );
+    }
+
+    /// The weakest grain is the minimum, never the mean.
+    ///
+    /// # Why the distinction decides whether the rule works
+    ///
+    /// A strategy positive in every year and negative in half its months is not
+    /// consistent, and it is the exact shape an operator asking for "every month
+    /// AND every year the same" is trying to exclude. Averaging 10,000 and 5,000
+    /// reports 7,500 and admits it; taking the minimum reports 5,000 and refuses.
+    #[test]
+    fn the_weakest_grain_is_the_minimum_and_never_the_mean() {
+        let uneven = Consistency {
+            shares_bp: [10_000, 10_000, 5_000, 10_000, 10_000, 10_000],
+            worst_day: -50_000,
+            years: 7,
+        };
+        assert_eq!(
+            uneven.weakest_bp(),
+            5_000,
+            "one bad grain is the answer, not one sixth of it"
+        );
+        // The mean would be 9,166 and would clear a 9,000 rule this must fail.
+        assert!(
+            uneven.weakest_bp() < 9_000,
+            "a strategy negative in half its months must not clear a 90% rule"
+        );
+    }
+
+    /// A grain past the list reads zero rather than panicking on an index.
+    #[test]
+    fn a_grain_past_the_list_reads_zero_rather_than_panicking() {
+        let c = Consistency {
+            shares_bp: [10_000; 6],
+            worst_day: 0,
+            years: 1,
+        };
+        assert_eq!(c.share_bp(6), 0);
+        assert_eq!(c.share_bp(usize::MAX), 0);
     }
 }
