@@ -1307,10 +1307,29 @@ const STORED_KEEP: usize = 25;
 /// reports extinction on a sweep that found plenty — a refusal that would be a
 /// lie about the market rather than a fact about it.
 ///
-/// Two hundred and fifty is a stated assumption, not a derivation, and it is
-/// cheap: `crate::rank` is a bounded heap at 80 bytes per entry, so this is
-/// 20 KB and O(keep) regardless of how many combinations exist.
-const AUDIT_KEEP: usize = 250;
+/// # It was 250, and that number capped the whole search
+///
+/// [`screen_cap`] decides how many combinations get an exit grid, and this
+/// decides how many the screen can even see. Raising the first without the
+/// second changes nothing: on a real 15-minute run over 81 months the pipeline
+/// read **1,024,058 found, 250 kept, 21 priced**, and the 250 was this constant.
+///
+/// The cut is made by `|t|` over a LEVEL-LESS return, so it is not a
+/// tie-break among equals — it is a different question from the one being
+/// asked. A combination that is unremarkable unstopped and excellent under a
+/// ten-point stop ranks low here and is discarded before any grid exists to
+/// show otherwise.
+///
+/// So this follows [`screen_cap`] rather than standing beside it, and the two
+/// can no longer disagree. `crate::rank` is a bounded min-heap at 80 bytes per
+/// entry, so ten thousand is 0.80 MB and a million is 80 MB — O(keep) whatever
+/// the sweep produced, which is the property that makes raising it safe.
+fn audit_keep() -> usize {
+    // At least the screen's own cap: keeping fewer than the screen will price
+    // is the defect this replaces, expressed as an invariant rather than as two
+    // constants an editor has to remember to move together.
+    screen_cap().max(250)
+}
 
 /// How many rungs each of the exit grid's ladders carries.
 ///
@@ -1593,7 +1612,7 @@ fn sample_warning(sessions: usize) -> String {
 ///
 /// The audit printed *"no closed combination survived, so there is nothing to
 /// trade. This is extinction, not a failure."* unconditionally. Its input is
-/// `closed_by_evidence`, the strongest [`AUDIT_KEEP`] by |t| intersected with
+/// `closed_by_evidence`, the strongest [`audit_keep()`] by |t| intersected with
 /// the closed set, so it can be empty two ways:
 ///
 /// * the sweep genuinely found nothing — that **is** extinction, and §6 says so:
@@ -1601,7 +1620,7 @@ fn sample_warning(sessions: usize) -> String {
 /// * the sweep found plenty and none of the strongest 250 happened to be closed.
 ///
 /// The second is not extinction and saying so is a claim about the market that
-/// the code cannot support. [`AUDIT_KEEP`]'s own doc block predicts this exact
+/// the code cannot support. [`audit_keep()`]'s own doc block predicts this exact
 /// failure — *"the audit reports extinction on a sweep that found plenty, a
 /// refusal that would be a lie about the market rather than a fact about it"* —
 /// and the constant was raised to make it unlikely while the message was left
@@ -1620,10 +1639,11 @@ fn nothing_to_trade(frequent: usize) -> String {
     let _ = writeln!(
         out,
         "\nAUDIT\n  REFUSED. The sweep kept {frequent} combination(s), and none \
-         of the strongest {AUDIT_KEEP} by |t| is closed — each is a superset of \
+         of the strongest {kept} by |t| is closed — each is a superset of \
          a subset with the same support, so trading one would report a result of \
          one arity that is really another.\n  This is NOT extinction. Raise \
-         AUDIT_KEEP, or raise min_hits and run again."
+         BRUTEX_SCREEN_CAP, or raise min_hits and run again.",
+        kept = audit_keep(),
     );
     out
 }
@@ -3275,8 +3295,17 @@ pub struct Tier {
 /// The ladder, strictest first.
 ///
 /// Read the first row as the operator's own words: **max loss 10 points,
-/// minimum win 30 points — a 1:3 — and 90 of 100 winning, over at least 300
-/// trades.** Each row after it relaxes exactly one dimension at a time, so a
+/// minimum win 30 points — a 1:3 — and 90 of 100 winning, over at least 1,000
+/// trades.**
+///
+/// # The trade floor, and why it never drops below 500
+///
+/// Seven years is about 1,700 trading days. A thousand trades is one every
+/// 1.7 days and five hundred is one every 3.4 -- both genuinely SELECTIVE
+/// against the 16,745 the first banked 15-minute run took, which is ten a day.
+/// Below five hundred a win rate over eighty-one months is a claim about a
+/// handful of weeks, and the mildest tier is the one most likely to be read
+/// as a result, so it carries the floor rather than being exempted from it. Each row after it relaxes exactly one dimension at a time, so a
 /// reader can see WHICH requirement the market would not meet rather than only
 /// that some of them were not met together.
 ///
@@ -3289,56 +3318,56 @@ const TIERS: [Tier; 8] = [
         max_points: 10,
         min_rr_bp: 300,
         min_win_rate_bp: 9_000,
-        min_trades: 300,
+        min_trades: 1_000,
     },
     Tier {
         name: "S++",
         max_points: 10,
         min_rr_bp: 300,
         min_win_rate_bp: 8_000,
-        min_trades: 300,
+        min_trades: 1_000,
     },
     Tier {
         name: "S+",
         max_points: 10,
         min_rr_bp: 250,
         min_win_rate_bp: 7_000,
-        min_trades: 300,
+        min_trades: 1_000,
     },
     Tier {
         name: "S",
         max_points: 15,
         min_rr_bp: 250,
         min_win_rate_bp: 6_500,
-        min_trades: 300,
+        min_trades: 750,
     },
     Tier {
         name: "A+",
         max_points: 15,
         min_rr_bp: 200,
         min_win_rate_bp: 6_000,
-        min_trades: 200,
+        min_trades: 750,
     },
     Tier {
         name: "A",
         max_points: 20,
         min_rr_bp: 200,
         min_win_rate_bp: 5_500,
-        min_trades: 200,
+        min_trades: 500,
     },
     Tier {
         name: "B",
         max_points: 30,
         min_rr_bp: 150,
         min_win_rate_bp: 5_000,
-        min_trades: 100,
+        min_trades: 500,
     },
     Tier {
         name: "C",
         max_points: 50,
         min_rr_bp: 100,
         min_win_rate_bp: 4_000,
-        min_trades: 100,
+        min_trades: 500,
     },
 ];
 
@@ -3378,10 +3407,52 @@ impl Tier {
     }
 }
 
-/// How many combinations the screener prices in full. Twenty-five is the number
-/// an operator asked for; each costs a 625-cell exit grid, so the bound is real
-/// work and not a display cut.
-const SCREEN_CAP: usize = 60;
+/// How many combinations the screener prices in full.
+///
+/// # This was 60, and it is the reason nothing was ever found
+///
+/// The pipeline is: Apriori produces the combinations, they are ranked by
+/// `|t|`, and the first `SCREEN_CAP` of that ordering get an exit grid. On a
+/// real 15-minute run over 81 months that read: **1,024,058 combinations found,
+/// 250 kept, 21 priced, 13,125 grid cells evaluated.**
+///
+/// The ranking that makes the cut is `outcome::edge` — a LEVEL-LESS forward
+/// return, with no stop, no target and no trail. So the question it answers is
+/// *"how far does this signal run unstopped"*, and the question an operator
+/// asks is *"which signal keeps every loser inside ten points and every winner
+/// past thirty"*. A combination that is unremarkable unstopped and excellent
+/// under a tight stop scores low on the first question, is cut at 60, and never
+/// meets an exit grid at all.
+///
+/// No tier ladder, no rule and no report can recover that. They all filter
+/// cells, and the cells were never computed.
+///
+/// # Why a cap remains, and what governs it now
+///
+/// Removing it outright is not free: each combination costs a full grid, which
+/// is one trade walk plus `variants` cells. Measured with the engine's own
+/// counter at four rungs that is 625 cells, and the whole 1,024,058 would be
+/// 640,036,250 — roughly a quarter hour per rung across fourteen cores, which
+/// is affordable, and 27,637,321 cells per combination at forty rungs, which is
+/// not.
+///
+/// So the bound is stated in CELLS rather than in combinations, and the count
+/// follows from the grid's own width. `BRUTEX_SCREEN_CAP` overrides it for an
+/// operator who wants the full search and has the hours; the default is sized
+/// so an audit still returns in seconds on a laptop.
+///
+/// UNVERIFIED as a measured figure: no bench row covers the screen's own cost.
+fn screen_cap() -> usize {
+    // `10_000` at 625 cells is 6.25 million per audit -- two orders of magnitude
+    // past the 60 it replaces, and still seconds rather than hours. It is a
+    // starting point an operator raises, not a ceiling anybody derived.
+    const DEFAULT: usize = 10_000;
+    std::env::var("BRUTEX_SCREEN_CAP")
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT)
+}
 
 /// One screened combination, priced in full and judged.
 struct Screened {
@@ -3503,8 +3574,8 @@ fn screen(
     horizon: Horizon,
     rules: Rules,
 ) -> String {
-    let mut rows: Vec<Screened> = Vec::with_capacity(by_evidence.len().min(SCREEN_CAP));
-    for (rank, scored) in by_evidence.iter().take(SCREEN_CAP).enumerate() {
+    let mut rows: Vec<Screened> = Vec::with_capacity(by_evidence.len().min(screen_cap()));
+    for (rank, scored) in by_evidence.iter().take(screen_cap()).enumerate() {
         let side = side_of_evidence(scored);
         // THE OPERATOR'S OWN STOP IS TRIED, NOT MERELY USED AS A FILTER.
         //
@@ -4678,7 +4749,7 @@ fn audit_bars(
         Ok(l) => l,
         Err(why) => return format!("refused: {why}\n"),
     };
-    let run = Sweeper::new(ladder).run_ranked(&bars, &mut ev, horizon, AUDIT_KEEP);
+    let run = Sweeper::new(ladder).run_ranked(&bars, &mut ev, horizon, audit_keep());
     let (outcome, ranked, column) = (run.outcome, run.ranked, run.column);
 
     // THE POSITION MOVES TO THE EXECUTION SERIES; THE SEARCH DOES NOT.
@@ -4741,7 +4812,7 @@ fn audit_bars(
             &outcome.sweep,
             &trade_column,
             &runner::outcome::forward(&trade_bars, horizon),
-            AUDIT_KEEP,
+            audit_keep(),
         ),
     };
 
@@ -4768,12 +4839,12 @@ fn audit_bars(
         // EXTINCTION.
         //
         // This printed "This is extinction, not a failure" unconditionally.
-        // `by_evidence` is the best AUDIT_KEEP by |t| intersected with the
+        // `by_evidence` is the best audit_keep() by |t| intersected with the
         // closed set — so it can be empty either because the sweep genuinely
         // found nothing, or because none of the top 250 by evidence happened to
         // be closed on a sweep that found millions.
         //
-        // `AUDIT_KEEP`'s own doc block predicts this failure in words — "the
+        // `audit_keep()`'s own doc block predicts this failure in words — "the
         // audit reports extinction on a sweep that found plenty, a refusal that
         // would be a lie about the market rather than a fact about it" — and
         // the constant was raised to make it unlikely while the MESSAGE was
@@ -5304,14 +5375,14 @@ mod tests {
     /// # Two facts wore one sentence
     ///
     /// The audit's no-trade branch printed *"This is extinction, not a
-    /// failure"* unconditionally. Its input is the strongest [`AUDIT_KEEP`] by
+    /// failure"* unconditionally. Its input is the strongest [`audit_keep()`] by
     /// |t| intersected with the closed set, which is empty either because the
     /// sweep found nothing — genuine extinction, and §6's expected answer — or
     /// because none of the top 250 happened to be closed on a sweep that found
     /// millions.
     ///
     /// The second is not extinction, and claiming it is a statement about the
-    /// market the code cannot support. [`AUDIT_KEEP`]'s own doc predicted this
+    /// market the code cannot support. [`audit_keep()`]'s own doc predicted this
     /// and the constant was raised to make it unlikely while the message was
     /// left covering both cases.
     #[test]
