@@ -168,13 +168,33 @@ fn verify_arm(out: &mut String, feed: &str, underlying: &str) -> u8 {
 /// Listing is never `MISUSED`: an empty ledger is an ordinary state on a fresh
 /// store, not an operator error, and returning a failure code for it would make
 /// a first run look broken.
+///
+/// # But an UNREADABLE ledger is `FAILED`, and it used to be `OK`
+///
+/// Measured across six hostile stores: a ledger whose bytes are not this format,
+/// whose version this build does not write, whose tail is a part-record, and one
+/// whose path is a DIRECTORY all printed a clear refusal and then exited **0**.
+/// A bad ARGUMENT exited 2 the whole time, so the two halves of the same command
+/// disagreed about whether a refusal is a failure.
+///
+/// The message was never the problem — an operator reading the terminal saw it.
+/// A script did not: `cli results && deploy` ran the second half after the
+/// ledger refused to open, which is the failure wearing a success's clothes that
+/// §4 bans. `FAILED` and not `MISUSED` because the arguments were fine; what
+/// could not be done was the work.
 fn results_arm(out: &mut String, filter: Option<(&str, &str)>) -> u8 {
     let (feed, underlying) = match filter {
         None => (None, None),
         Some((feed, underlying)) => (Some(feed), Some(underlying)),
     };
-    out.push_str(&results_list(feed, underlying));
-    OK
+    let listing = results_list(feed, underlying);
+    // `results_list` renders its own refusal into the page rather than returning
+    // one, so the code is read back off the rendered text. Ugly, and deliberately
+    // so: the alternative is a second refusal path that can disagree with the
+    // one an operator actually sees.
+    let refused = listing.contains("refused:");
+    out.push_str(&listing);
+    if refused { FAILED } else { OK }
 }
 
 /// The `screen` arm, lifted out of [`run`] for the reason [`audit_range_arm`]

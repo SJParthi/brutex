@@ -49,8 +49,8 @@ pub type Refusal = String;
 /// `BRUTEXRS`, so a file that is not this one is refused before it is parsed.
 const MAGIC: [u8; 8] = *b"BRUTEXRS";
 
-/// Version TWO: version one had no seal. A new field is a new version at its
-/// own stride, never a
+/// Version TWO: version one had no seal. A new field is a new version at its own
+/// stride, never a
 /// widened record — `CLAUDE.md` §4 and §3 rule 8 together.
 const VERSION: u32 = 2;
 
@@ -400,6 +400,64 @@ pub struct Results {
     scanned: u64,
 }
 
+/// Write the sixteen-byte header of a fresh ledger, and prove it was kept.
+///
+/// Split out of [`Results::open`] to keep that function inside its line budget
+/// once the read-back arrived — a budget met by deleting the read-back instead
+/// would have traded a real check for a lint.
+fn write_fresh_header(file: &mut File, path: &Path) -> Result<(), Refusal> {
+    let mut header = [0_u8; HEADER_BYTES];
+    header
+        .get_mut(..8)
+        .ok_or_else(|| "the header is shorter than its magic".to_owned())?
+        .copy_from_slice(&MAGIC);
+    header
+        .get_mut(8..12)
+        .ok_or_else(|| "the header is shorter than its version".to_owned())?
+        .copy_from_slice(&VERSION.to_le_bytes());
+    file.write_all(&header)
+        .map_err(|why| format!("the header could not be written: {why}"))?;
+    // THE HEADER IS READ BACK, BECAUSE A SUCCESSFUL WRITE IS NOT PROOF
+    // THAT ANYTHING WAS STORED.
+    //
+    // # The failure this closes, reproduced on a scratch store
+    //
+    // Point `runs.bin` at `/dev/null` — a symlink, a stale path, a
+    // device node — and every call here SUCCEEDS. The header is written
+    // and discarded, the file measures zero, and the next open writes a
+    // header again. `cli results` reported `rows 0` with no refusal and
+    // exit 0, and a sweep would have recorded hours of work into the
+    // void and called it done.
+    //
+    // The same silence covers anything that accepts a write without
+    // keeping it: a full filesystem that reports success until fsync, a
+    // path on a volume that unmounted, a file another process truncated
+    // between the create and the write.
+    //
+    // One seek and one read of sixteen bytes, once per FRESH ledger.
+    // Not per record and not per bar.
+    file.flush()
+        .map_err(|why| format!("the header could not be flushed: {why}"))?;
+    let mut written_back = [0_u8; HEADER_BYTES];
+    let stored = file
+        .seek(SeekFrom::Start(0))
+        .and_then(|_| file.read_exact(&mut written_back))
+        .is_ok();
+    if !stored || written_back != header {
+        return Err(format!(
+            "{} accepted a header and did not keep it: sixteen bytes \
+             were written and reading them back did not return them. \
+             The path is not a file that stores what it is given — a \
+             link to a device such as /dev/null, a volume that has gone \
+             away, or a filesystem with no room. Nothing is recorded \
+             here, and a run that believed otherwise would lose every \
+             result it produced.",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
 impl Results {
     /// Opens, or creates, the results file beneath `root`.
     ///
@@ -426,17 +484,7 @@ impl Results {
             .map_err(|why| format!("the results file could not be measured: {why}"))?
             .len();
         if len == 0 {
-            let mut header = [0_u8; HEADER_BYTES];
-            header
-                .get_mut(..8)
-                .ok_or_else(|| "the header is shorter than its magic".to_owned())?
-                .copy_from_slice(&MAGIC);
-            header
-                .get_mut(8..12)
-                .ok_or_else(|| "the header is shorter than its version".to_owned())?
-                .copy_from_slice(&VERSION.to_le_bytes());
-            file.write_all(&header)
-                .map_err(|why| format!("the header could not be written: {why}"))?;
+            write_fresh_header(&mut file, &path)?;
         } else {
             let mut header = [0_u8; HEADER_BYTES];
             file.seek(SeekFrom::Start(0))
@@ -1211,6 +1259,39 @@ mod tests {
                 .expect("every row verifies its seal, so no write was interleaved");
             assert!(ids.insert(rec.identity), "row {i} is a duplicate identity");
         }
+    }
+
+    /// A PATH THAT ACCEPTS BYTES AND DOES NOT KEEP THEM IS REFUSED.
+    ///
+    /// # The failure this closes
+    ///
+    /// Every call on the way in succeeds when `runs.bin` points at `/dev/null`:
+    /// the create succeeds, the write succeeds, the flush succeeds. The file
+    /// then measures zero, so the next open writes a header again and the ledger
+    /// is eternally, silently empty. Measured before the fix: `cli results`
+    /// printed `rows 0`, refused nothing, and exited 0 — and a sweep would have
+    /// recorded hours of work into the void and reported success.
+    ///
+    /// `/dev/null` is the cheapest way to construct it, not the likely one. The
+    /// same silence covers a filesystem with no room, a volume that unmounted
+    /// under an open handle, and a file another process truncated between the
+    /// create and the write. What they share is that WRITING SUCCEEDED and
+    /// nothing was stored, which no error code reports.
+    #[test]
+    fn a_ledger_that_does_not_keep_what_it_is_given_is_refused() {
+        let r = root("devnull");
+        std::fs::create_dir_all(r.join("results")).expect("the directory is made");
+        let path = Results::path(&r);
+        let _ = std::fs::remove_file(&path);
+        std::os::unix::fs::symlink("/dev/null", &path).expect("the symlink is made");
+
+        let why = Results::open(&r).expect_err("a sink is not a ledger");
+        assert!(
+            why.contains("did not keep it"),
+            "the refusal must say the bytes were accepted and lost, not merely \
+             that something failed -- nothing failed, which is the problem: \
+             {why}"
+        );
     }
 
     #[test]
