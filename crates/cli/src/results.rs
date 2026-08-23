@@ -52,7 +52,28 @@ const MAGIC: [u8; 8] = *b"BRUTEXRS";
 /// Version TWO: version one had no seal. A new field is a new version at its own
 /// stride, never a
 /// widened record — `CLAUDE.md` §4 and §3 rule 8 together.
+/// The version before this one, which this build READS and never writes.
+///
+/// Named rather than written as `2` at its two use sites, so a future version
+/// 4 that also wants to read 3 changes one constant and not a scattering of
+/// literals whose meaning is only clear in context.
+const VERSION_V2: u32 = 2;
+
 const VERSION: u32 = 3;
+
+/// The stride a given format version addresses records at.
+///
+/// One function and not a scattering of `if version ==` so that a third
+/// version adds one arm here rather than one branch per call site. An unknown
+/// version cannot reach this -- `open` refuses it -- so the fallback arm is
+/// the older format and never a guess.
+const fn stride_of(version: u32) -> u64 {
+    if version == VERSION {
+        STRIDE
+    } else {
+        STRIDE_V2
+    }
+}
 
 /// Magic, version, and four bytes reserved so the header is a round sixteen.
 const HEADER: u64 = 16;
@@ -112,6 +133,109 @@ const PAYLOAD_BYTES: usize = STRIDE_BYTES - SEAL_BYTES;
 /// quintillions. Thirty-two bytes would spend 24 more per record to move a
 /// number that is already far below every other risk in the system.
 const SEAL_BYTES: usize = 8;
+
+/// The stride of the version before this one.
+///
+/// # Why an old format stays readable
+///
+/// `CLAUDE.md` §3 rule 8 is append-only history: *"store format versions are
+/// never mutated in place"*. Refusing to READ one is a different thing from
+/// refusing to mutate it, and the first build of version 3 did both -- a
+/// fourteen-hour sweep still writing version 2 would have produced a file the
+/// new binary would not open, and every figure in it would have been lost to a
+/// version check rather than to anything wrong with the data.
+///
+/// So version 2 is READ and never APPENDED TO. A version-2 record is a whole
+/// record; it simply predates the mask, and the mask reads as six zero words,
+/// which the report already renders as "no combination was recorded".
+const STRIDE_V2: u64 = 213;
+
+/// [`STRIDE_V2`] as a `usize`, for the record arrays.
+const STRIDE_BYTES_V2: usize = 213;
+
+const _: () = assert!(STRIDE_BYTES_V2 as u64 == STRIDE_V2);
+
+/// Version 2's payload, which is its stride less the same eight-byte seal.
+const PAYLOAD_BYTES_V2: usize = STRIDE_BYTES_V2 - SEAL_BYTES;
+
+/// Version 2's payload is EXACTLY version 3's, up to the mask.
+///
+/// This is the assumption the whole read path rests on, and it is checked at
+/// compile time rather than trusted: the mask was appended as the LAST field
+/// before the seal, so every version-2 offset is unchanged in version 3. Were a
+/// field ever inserted rather than appended, this assertion fails the build
+/// instead of the reader silently decoding one field into another.
+const _: () = assert!(PAYLOAD_BYTES_V2 + 8 * 6 == PAYLOAD_BYTES);
+
+/// A version-2 record widened into version 3's byte layout.
+///
+/// The payload is copied verbatim and the mask words are left zero. The seal is
+/// NOT copied: it covers 205 bytes and version 3's covers 253, so carrying it
+/// across would make every widened record fail its own seal check. The seal is
+/// verified against the ORIGINAL bytes, before this runs.
+fn widen_v2(raw: &[u8; STRIDE_BYTES_V2]) -> [u8; STRIDE_BYTES] {
+    let mut wide = [0_u8; STRIDE_BYTES];
+    // Both slices are compile-time-known lengths and `PAYLOAD_BYTES_V2` is less
+    // than `STRIDE_BYTES`, proven by the assertion above.
+    if let (Some(target), Some(source)) = (
+        wide.get_mut(..PAYLOAD_BYTES_V2),
+        raw.get(..PAYLOAD_BYTES_V2),
+    ) {
+        target.copy_from_slice(source);
+    }
+    wide
+}
+
+/// Whether a version-2 record matches the seal written with it.
+///
+/// Separate from [`Record::seal_matches`] because the two hash different
+/// lengths: version 2's seal covers 205 bytes and version 3's covers 253. One
+/// function taking a length would be the dynamic schema §4 bans; two constants
+/// and two functions is the whole of it.
+fn seal_matches_v2(raw: &[u8; STRIDE_BYTES_V2]) -> bool {
+    let mut hasher = brutex_core::blake3::Hasher::new();
+    let Some(payload) = raw.get(..PAYLOAD_BYTES_V2) else {
+        return false;
+    };
+    hasher.update(payload);
+    let full = hasher.finalize();
+    full.get(..SEAL_BYTES) == raw.get(PAYLOAD_BYTES_V2..STRIDE_BYTES_V2)
+}
+
+/// One record at a byte offset, widened to the current layout, and whether its
+/// seal held.
+///
+/// # Why one function for both versions
+///
+/// Two call sites need this -- `open`'s identity pass and `read_locked` -- and
+/// each would otherwise carry its own `if version` with its own array size and
+/// its own seal call. Two copies of a branch that decides how to interpret
+/// bytes on disk is how a reader comes to decode one version with the other's
+/// offsets, which parses cleanly and renders as a run that never happened.
+///
+/// The seal is returned rather than refused here, because the two callers want
+/// different things from a bad seal: `read_locked` refuses that record by name,
+/// and `open`'s identity pass skips it -- a damaged record still occupies its
+/// stride and the records after it are still addressable.
+fn read_at(file: &mut File, at: u64, version: u32) -> Result<([u8; STRIDE_BYTES], bool), Refusal> {
+    if version == VERSION {
+        let mut raw = [0_u8; STRIDE_BYTES];
+        file.seek(SeekFrom::Start(at))
+            .and_then(|_| file.read_exact(&mut raw))
+            .map_err(|why| format!("record at byte {at} could not be read: {why}"))?;
+        let sealed = Record::seal_matches(&raw);
+        return Ok((raw, sealed));
+    }
+    let mut raw = [0_u8; STRIDE_BYTES_V2];
+    file.seek(SeekFrom::Start(at))
+        .and_then(|_| file.read_exact(&mut raw))
+        .map_err(|why| format!("record at byte {at} could not be read: {why}"))?;
+    // SEALED AGAINST ITS OWN LENGTH, then widened. The other order would hash
+    // 253 bytes of which 48 are zeroes this function invented, and every
+    // version-2 record in existence would fail.
+    let sealed = seal_matches_v2(&raw);
+    Ok((widen_v2(&raw), sealed))
+}
 
 /// Eight bytes of `blake3` over the record's payload.
 ///
@@ -421,6 +545,14 @@ pub fn read_field(raw: &[u8; 16]) -> String {
 #[derive(Debug)]
 pub struct Results {
     file: File,
+    /// The version the FILE carries, which may be older than this build writes.
+    ///
+    /// Version 2 is readable and NOT appendable -- see [`STRIDE_V2`]. Held on
+    /// the handle rather than re-read per call: the header is read once at
+    /// open, and a version that could change under a live handle would mean
+    /// another process rewrote the header, which is not a thing this format
+    /// permits.
+    version: u32,
     seen: std::collections::HashSet<[u8; 32]>,
     /// Byte offset this process has absorbed identities up to.
     ///
@@ -513,8 +645,12 @@ impl Results {
             .metadata()
             .map_err(|why| format!("the results file could not be measured: {why}"))?
             .len();
-        if len == 0 {
+        // The branch YIELDS the version rather than setting a mutable above it:
+        // a fresh file is the version this build writes, and an existing one is
+        // whatever its header says. Every read below is scoped to that answer.
+        let version = if len == 0 {
             write_fresh_header(&mut file, &path)?;
+            VERSION
         } else {
             let mut header = [0_u8; HEADER_BYTES];
             file.seek(SeekFrom::Start(0))
@@ -533,12 +669,23 @@ impl Results {
                     .and_then(|s| s.try_into().ok())
                     .unwrap_or([0; 4]),
             );
-            if version != VERSION {
+            // READ, BUT NOT APPENDED TO. See `STRIDE_V2`.
+            //
+            // §3 rule 8 protects a stored format's history; refusing to OPEN
+            // one is a different act from refusing to mutate it, and the first
+            // build of version 3 did both. A sweep that had been running for
+            // fourteen hours was still writing version 2, and every figure in
+            // it would have been lost to a version check rather than to
+            // anything wrong with the data.
+            //
+            // A version this build has never written is still refused: the
+            // offsets of a FUTURE format are unknown, and guessing them is how
+            // a reader renders a run that never happened.
+            if version != VERSION && version != VERSION_V2 {
                 return Err(format!(
-                    "{} is version {version} and this build writes version \
-                     {VERSION}. A new field is a new file version at its own \
-                     stride, never a widened record, so this file is not \
-                     appended to.",
+                    "{} is version {version}. This build reads {VERSION_V2} and \
+                     {VERSION} and writes {VERSION}; it does not know this \
+                     one's field offsets and will not guess them.",
                     path.display()
                 ));
             }
@@ -571,7 +718,8 @@ impl Results {
             // bans a fallback that hides a failure. The count of intact records
             // is named so an operator can see exactly what survived.
             let payload = len.saturating_sub(HEADER);
-            let orphan = payload % STRIDE;
+            let stride = stride_of(version);
+            let orphan = payload % stride;
             if orphan != 0 {
                 return Err(format!(
                     "{} ends with {orphan} bytes that are not a whole record: \
@@ -581,29 +729,39 @@ impl Results {
                      are readable and the orphan bytes are not, and truncating \
                      them is a decision about history that belongs to you.",
                     path.display(),
-                    payload / STRIDE,
+                    payload / stride,
                     payload - orphan,
                 ));
             }
-        }
+            version
+        };
+        let stride = stride_of(version);
 
         // ONE PASS, ONCE, AT OPEN. Stated rather than hidden: this is O(runs)
         // and every other operation on this type is O(1). It is not on the
         // per-bar or per-candidate path §3 rule 4 governs.
         let mut seen = std::collections::HashSet::new();
         let mut at = HEADER;
-        while at + STRIDE <= len {
-            let mut raw = [0_u8; STRIDE_BYTES];
-            file.seek(SeekFrom::Start(at))
-                .and_then(|_| file.read_exact(&mut raw))
-                .map_err(|why| format!("record at byte {at} could not be read: {why}"))?;
-            seen.insert(Record::from_bytes(&raw).identity);
-            at = at.saturating_add(STRIDE);
+        while at + stride <= len {
+            // A DAMAGED RECORD IS SKIPPED HERE, NOT REFUSED.
+            //
+            // This pass exists to learn which identities are already present so
+            // `append` can refuse a rerun. A record whose seal failed cannot be
+            // trusted to say what its identity IS, so admitting it would let a
+            // corrupted 32 bytes block a legitimate run from ever being
+            // recorded. It still occupies its stride, so the records after it
+            // stay addressable, and `read` refuses it BY NAME when asked for.
+            let (raw, sealed) = read_at(&mut file, at, version)?;
+            if sealed {
+                seen.insert(Record::from_bytes(&raw).identity);
+            }
+            at = at.saturating_add(stride);
         }
         Ok(Self {
             file,
             seen,
             scanned: at,
+            version,
         })
     }
 
@@ -611,6 +769,12 @@ impl Results {
     #[must_use]
     pub fn path(root: &Path) -> PathBuf {
         root.join("results").join("runs.bin")
+    }
+
+    /// The stride of the file THIS handle opened, which is not always the
+    /// stride this build writes.
+    const fn stride(&self) -> u64 {
+        stride_of(self.version)
     }
 
     /// How many runs are recorded. **O(1)** — a division, not a walk.
@@ -624,7 +788,10 @@ impl Results {
             .metadata()
             .map_err(|why| format!("the results file could not be measured: {why}"))?
             .len();
-        Ok(len.saturating_sub(HEADER) / STRIDE)
+        // THE FILE'S OWN STRIDE, not this build's. A version-2 ledger addresses
+        // records every 213 bytes, and dividing its length by 261 reports fewer
+        // runs than it holds -- silently, because the arithmetic succeeds.
+        Ok(len.saturating_sub(HEADER) / self.stride())
     }
 
     /// Whether nothing has been recorded yet.
@@ -678,6 +845,24 @@ impl Results {
         // process appended since. Locking without re-scanning would fix the
         // overwrite and leave two copies of one identity, which §3 rule 5 and
         // `self.holds` both refuse in-process.
+        // AN OLDER FORMAT IS READ AND NEVER WRITTEN TO, and the refusal comes
+        // before the lock so a doomed append never blocks a reader.
+        //
+        // §3 rule 8: *"store format versions are never mutated in place"*.
+        // Appending a 261-byte record to a file addressed every 213 bytes would
+        // do exactly that, and every record after it would decode with the
+        // wrong offsets -- which parses cleanly, because every byte pattern
+        // here is a legal record.
+        if self.version != VERSION {
+            return Err(format!(
+                "this ledger is version {} and this build writes version \
+                 {VERSION}. It is READ so nothing already recorded is lost, and \
+                 it is never appended to -- a new field is a new file version \
+                 at its own stride, never a widened record. Move it aside to \
+                 start a version-{VERSION} ledger.",
+                self.version
+            ));
+        }
         self.file
             .lock()
             .map_err(|why| format!("the results file could not be locked: {why}"))?;
@@ -841,12 +1026,9 @@ impl Results {
                 "record {index} does not exist: this file holds {count}."
             ));
         }
-        let at = HEADER.saturating_add(index.saturating_mul(STRIDE));
-        let mut raw = [0_u8; STRIDE_BYTES];
-        self.file
-            .seek(SeekFrom::Start(at))
-            .and_then(|_| self.file.read_exact(&mut raw))
-            .map_err(|why| format!("record {index} could not be read: {why}"))?;
+        let at = HEADER.saturating_add(index.saturating_mul(self.stride()));
+        let version = self.version;
+        let (raw, sealed) = read_at(&mut self.file, at, version)?;
         // THE SEAL IS CHECKED HERE, NOT AT OPEN, AND THAT IS THE POINT.
         //
         // Checking every record at open would make opening O(runs) in HASHING
@@ -860,7 +1042,7 @@ impl Results {
         // legal value of its type, so a damaged record PARSES and renders as
         // data. The seal is the only thing standing between that and a number
         // an operator would act on.
-        if !Record::seal_matches(&raw) {
+        if !sealed {
             return Err(format!(
                 "record {index} does not match its seal: the eight bytes written \
                  with it do not describe the {PAYLOAD_BYTES} bytes now on disk. \
@@ -886,8 +1068,8 @@ impl Results {
 )]
 mod tests {
     use super::{
-        HEADER, HEADER_BYTES, PAYLOAD_BYTES, Record, Results, SEAL_BYTES, STRIDE, STRIDE_BYTES,
-        field, read_field,
+        HEADER, HEADER_BYTES, MAGIC, PAYLOAD_BYTES, PAYLOAD_BYTES_V2, Record, Results, SEAL_BYTES,
+        STRIDE, STRIDE_BYTES, STRIDE_V2, VERSION_V2, field, read_field,
     };
 
     fn root(tag: &str) -> std::path::PathBuf {
@@ -1466,5 +1648,132 @@ mod tests {
         let long = field("an-instrument-name-far-longer-than-sixteen-bytes");
         assert_eq!(long.len(), 16, "the slot is exactly its declared width");
         assert_eq!(read_field(&long), "an-instrument-na");
+    }
+
+    /// A version-2 ledger is READ, and its records come back whole.
+    ///
+    /// # The loss this prevents, and it was hours from happening
+    ///
+    /// Version 3 first shipped refusing any file whose header did not say 3.
+    /// Two sweeps had been running for nine and five hours, both writing
+    /// version 2 to the ledger they had opened before the new binary existed.
+    /// The moment they finished, every figure they had produced would have been
+    /// unreadable -- not because anything was wrong with the data, but because
+    /// a version check treated "cannot append" and "cannot open" as one thing.
+    ///
+    /// `CLAUDE.md` §3 rule 8 protects a stored format's history. Refusing to
+    /// READ that history is not what it asks for.
+    #[test]
+    fn a_version_two_ledger_is_read_and_its_records_come_back_whole() {
+        let root = std::env::temp_dir().join("brutex-v2-read-test");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("results")).expect("a temp root");
+        let path = Results::path(&root);
+
+        let original = record(9);
+        std::fs::write(&path, v2_file_holding(&original)).expect("the v2 file writes");
+
+        let mut store = Results::open(&root).expect("a version-2 ledger must OPEN");
+        assert_eq!(store.len().expect("a length"), 1, "at version 2's stride");
+
+        let back = store.read(0).expect("and its record must READ");
+        assert_eq!(back.identity, original.identity, "identity survived");
+        assert_eq!(back.trades, original.trades, "trade count survived");
+        assert_eq!(
+            back.pessimistic, original.pessimistic,
+            "the money survived, which is the whole point"
+        );
+        assert_eq!(
+            back.exit_rungs, original.exit_rungs,
+            "the LAST version-2 field survived -- if this passes, every offset \
+             before it did too"
+        );
+        assert_eq!(
+            back.mask_words, [0; 6],
+            "and the field version 2 never had reads as absent, which the \
+             report renders as `no combination was recorded`"
+        );
+    }
+
+    /// A version-2 ledger is never APPENDED to, and says why.
+    ///
+    /// Appending a 261-byte record to a file addressed every 213 bytes mutates
+    /// the format in place, which §3 rule 8 forbids, and every record after it
+    /// would decode at the wrong offsets -- parsing cleanly, because every byte
+    /// pattern here is a legal record.
+    #[test]
+    fn a_version_two_ledger_is_never_appended_to() {
+        let root = std::env::temp_dir().join("brutex-v2-append-test");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("results")).expect("a temp root");
+        std::fs::write(Results::path(&root), v2_file_holding(&record(4)))
+            .expect("the v2 file writes");
+
+        let mut store = Results::open(&root).expect("it opens for reading");
+        let refused = store
+            .append(&record(5))
+            .expect_err("a version-2 ledger must refuse an append");
+
+        assert!(
+            refused.contains("version 2"),
+            "the refusal must name the version it found: {refused}"
+        );
+        assert!(
+            refused.contains("READ"),
+            "and must say the data is not lost, or an operator deletes it: \
+             {refused}"
+        );
+        let after = std::fs::metadata(Results::path(&root))
+            .expect("the file still exists")
+            .len();
+        assert_eq!(
+            after,
+            HEADER + STRIDE_V2,
+            "and NOTHING may have been written: {after} bytes"
+        );
+    }
+
+    /// A version this build has never written is refused rather than guessed at.
+    #[test]
+    fn a_version_from_the_future_is_refused_rather_than_guessed_at() {
+        let root = std::env::temp_dir().join("brutex-v9-test");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("results")).expect("a temp root");
+        let mut bytes = v2_file_holding(&record(1));
+        // Stamp a version whose field offsets this build cannot know.
+        bytes.splice(8..12, 9_u32.to_le_bytes());
+        std::fs::write(Results::path(&root), bytes).expect("the file writes");
+
+        let refused = Results::open(&root).expect_err("an unknown version refuses");
+        assert!(
+            refused.contains("version 9"),
+            "the refusal names what it found: {refused}"
+        );
+        assert!(
+            refused.contains("will not guess"),
+            "and says it is declining to guess offsets, which is the reason: \
+             {refused}"
+        );
+    }
+
+    /// A version-2 file holding exactly one record, as bytes.
+    ///
+    /// Built from a version-3 record by keeping its payload up to the mask and
+    /// sealing THAT length -- which is precisely what a version-2 writer did,
+    /// and is only correct because the mask was APPENDED rather than inserted.
+    /// The compile-time assertion beside `PAYLOAD_BYTES_V2` is what holds that.
+    fn v2_file_holding(r: &Record) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&MAGIC);
+        out.extend_from_slice(&VERSION_V2.to_le_bytes());
+        out.extend_from_slice(&[0_u8; 4]);
+        let wide = r.to_bytes();
+        let payload = wide.get(..PAYLOAD_BYTES_V2).expect("the v2 prefix");
+        out.extend_from_slice(payload);
+        let mut hasher = brutex_core::blake3::Hasher::new();
+        hasher.update(payload);
+        let full = hasher.finalize();
+        out.extend_from_slice(full.get(..SEAL_BYTES).expect("eight seal bytes"));
+        out
     }
 }
