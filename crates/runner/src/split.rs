@@ -124,6 +124,80 @@ pub fn purged_folds(bars: usize, horizon: Horizon, folds: usize) -> Vec<Fold> {
     out
 }
 
+/// Folds whose training window is a FIXED WIDTH that slides forward.
+///
+/// # The question this asks that [`anchored_folds`] cannot
+///
+/// Anchored training always starts at bar zero and grows, so every later fold
+/// still contains every earlier year. A combination that worked only in 2020 has
+/// 2020 in all five training sets, propping it up, and the walk reports it
+/// holding up five times.
+///
+/// Rolling drops it. Train on 2020 and test on 2021; train on 2021 and test on
+/// 2022; train on 2022 and test on 2023. **"Does last year predict this year"**
+/// is a far harder question than "does everything so far predict next year", and
+/// it is the one an operator actually faces: at the start of 2023 they have 2022
+/// in hand and a decision to make.
+///
+/// # Both are strictly forward
+///
+/// The test window always follows the training window with a purge between, so
+/// no fold is ever judged on a bar its training saw. `CLAUDE.md` §3 rule 7 holds
+/// here exactly as it does for the anchored shape.
+///
+/// # The warm-up, which is why this did not exist before
+///
+/// `indicators::Evaluator` is stateful — EMAs, session rollovers, a warm-up
+/// prefix — so it consumes bars IN ORDER and cannot begin mid-series with an
+/// empty state. An anchored fold always starts at bar zero, so its warm-up is
+/// real; a rolling window starting at 2021 would spend its first bars warming
+/// and trade on state it did not build.
+///
+/// The left training range solves it: the window is `warm..boundary`, and a
+/// caller feeds the evaluator from `0` while only SWEEPING from `warm`. That is
+/// what the engine already does at the start of every run, applied per fold, and
+/// it is why this returns a range rather than a length.
+///
+/// # Width
+///
+/// `bars / (splits + 1)`, the same block size the anchored shape uses, so the
+/// two are comparable on the same column at the same split count. A fold whose
+/// training window would start before bar zero is clamped there rather than
+/// dropped: an early fold with a shorter window is still a forward test, and
+/// discarding it would silently reduce the split count a caller asked for.
+#[must_use]
+pub fn rolling_folds(bars: usize, horizon: Horizon, splits: usize) -> Vec<Fold> {
+    let h = usize::try_from(horizon.as_bars()).unwrap_or(0);
+    let blocks = splits.saturating_add(1);
+    if splits == 0 || bars == 0 || bars < blocks {
+        return Vec::new();
+    }
+    let width = bars / blocks;
+
+    let mut out: Vec<Fold> = Vec::with_capacity(splits);
+    for s in 0..splits {
+        let boundary = s.saturating_add(1).saturating_mul(width);
+        // THE ONE DIFFERENCE FROM ANCHORED: training starts one width back
+        // rather than at zero, so the window slides instead of growing.
+        let warm = boundary.saturating_sub(width);
+        let test_start = boundary.saturating_add(h).min(bars);
+        let test_end = if s.saturating_add(1) == splits {
+            bars
+        } else {
+            boundary.saturating_add(width).saturating_add(h).min(bars)
+        };
+        out.push(Fold {
+            purged: test_start.saturating_sub(boundary),
+            embargoed: 0,
+            // The right-hand range is empty for the reason the anchored shape
+            // gives: nothing after the test window is knowable when the
+            // decision is made.
+            train: (warm..boundary, 0..0),
+            test: test_start..test_end,
+        });
+    }
+    out
+}
 /// Growing-prefix folds: train on everything before, test on what comes next.
 ///
 /// # Why this exists beside [`purged_folds`], rather than instead of it
@@ -198,6 +272,78 @@ mod tests {
 
     fn h(n: u32) -> Horizon {
         Horizon::bars(n).expect("a positive horizon")
+    }
+
+    /// A ROLLING FOLD FORGETS, AND AN ANCHORED ONE DOES NOT.
+    ///
+    /// # The difference this pins
+    ///
+    /// Anchored training always starts at bar zero, so every later fold still
+    /// contains every earlier year. A combination that worked only in the first
+    /// year has that year in ALL of the training sets, propping it up, and the
+    /// walk reports it holding five times.
+    ///
+    /// Rolling slides a fixed width forward: train on 2020, test 2021; train on
+    /// 2021, test 2022. "Does last year predict this year" is the harder
+    /// question and the one an operator actually faces.
+    ///
+    /// Asserted as a property rather than on one fixture: for every fold past
+    /// the first, an anchored window must still hold bar 0 and a rolling one
+    /// must NOT.
+    #[test]
+    fn a_rolling_window_slides_forward_where_an_anchored_one_grows() {
+        for (bars, splits) in [(1_200_usize, 5_usize), (37_791, 17), (600, 2)] {
+            let rolling = super::rolling_folds(bars, h(15), splits);
+            let anchored = super::anchored_folds(bars, h(15), splits);
+            assert_eq!(rolling.len(), anchored.len(), "same split count");
+
+            for (i, (r, a)) in rolling.iter().zip(anchored.iter()).enumerate() {
+                assert_eq!(r.test, a.test, "fold {i}: the test window is the same");
+                assert!(a.trains_on(0), "fold {i}: anchored always holds bar 0");
+                if i > 0 {
+                    assert!(
+                        !r.trains_on(0),
+                        "fold {i}: a rolling window past the first must have \
+                         slid off bar 0, or it is anchored wearing another name"
+                    );
+                }
+                // AND EVERY WIDTH IS THE SAME, which is what makes it rolling
+                // rather than merely shorter.
+                assert_eq!(
+                    r.train_len(),
+                    bars / splits.saturating_add(1),
+                    "fold {i}: the window width is constant"
+                );
+            }
+        }
+    }
+
+    /// BOTH SHAPES ARE STRICTLY FORWARD, WHICH IS THE RULE THAT MATTERS.
+    ///
+    /// Sliding a window is only safe if it still never trains on a bar it will
+    /// be judged on. §3 rule 7 is the same for both shapes and this asserts it
+    /// for the new one, over the outcome window rather than the bar alone: a
+    /// training bar at `i` carries a label built from `i..i+h`, so `i + h` must
+    /// fall before the test range begins.
+    #[test]
+    fn a_rolling_fold_never_trains_on_a_bar_its_outcome_reaches_into_the_test() {
+        let horizon = 15_usize;
+        for (bars, splits) in [(1_200_usize, 5_usize), (37_791, 17)] {
+            for (i, f) in super::rolling_folds(bars, h(15), splits)
+                .into_iter()
+                .enumerate()
+            {
+                for bar in f.train.0.clone().chain(f.train.1.clone()) {
+                    assert!(
+                        bar.saturating_add(horizon) < f.test.start,
+                        "fold {i}: training bar {bar} has an outcome window \
+                         reaching {} which is inside the test range starting {}",
+                        bar + horizon,
+                        f.test.start
+                    );
+                }
+            }
+        }
     }
 
     #[test]

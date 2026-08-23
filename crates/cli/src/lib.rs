@@ -46,6 +46,7 @@
 /// to a ranked result.
 pub mod batch;
 pub mod results;
+pub mod stability;
 pub mod stored;
 
 use brutex_core::vendor::Vendor;
@@ -335,7 +336,60 @@ fn screen_arm(
 /// visible rather than buried.
 const NIFTY_REFERENCE: i64 = 25_000;
 
+/// The price a rule stated in POINTS is converted against — read off the bars.
+///
+/// # This was a constant, and on any other instrument it was simply wrong
+///
+/// `NIFTY_REFERENCE` is 25,000. A rule of "twenty points" against it is 800 ppm,
+/// and 800 ppm on a 52,000 index is FORTY-ONE points. Sweeping BANKNIFTY with a
+/// NIFTY constant does not approximate the operator's rule, it doubles it — and
+/// the same constant is wrong in the other direction on the 2020 low, where 800
+/// ppm is six points.
+///
+/// The bars carry the price. Taking the MIDPOINT of the swept range — the mean
+/// of the lowest low and the highest high — converts a rule against the
+/// instrument that was actually swept, at the level it actually traded, on every
+/// instrument and every span, with no constant to be wrong.
+///
+/// # Midpoint and not the mean of the closes
+///
+/// A mean is pulled by wherever the series spent most of its time, so a span
+/// that ranged 15,000 to 26,000 but sat at 16,000 would convert a rule as though
+/// the high years did not happen. The midpoint of the range treats both ends
+/// alike, which is what a rule spanning the whole period needs.
+///
+/// # Refusal
+///
+/// An empty slice, or one whose extremes are not positive, falls back to
+/// `NIFTY_REFERENCE` — the only remaining use of that constant, and it is
+/// reached exactly when there is no price to read.
+fn reference_price(bars: &[indicators::Candle]) -> i64 {
+    let lo = bars.iter().map(|b| b.low).filter(|&l| l > 0).min();
+    let hi = bars.iter().map(|b| b.high).filter(|&h| h > 0).max();
+    match (lo, hi) {
+        (Some(l), Some(h)) if h >= l => l.saturating_add(h) / 2,
+        _ => NIFTY_REFERENCE,
+    }
+}
+
+/// Index points as parts per million against a price read off the bars.
+const fn points_to_ppm_at(points: i64, reference: i64) -> i64 {
+    if reference <= 0 {
+        return 0;
+    }
+    points.saturating_mul(1_000_000) / reference
+}
+
+/// Parts per million back to index points, at a price read off the bars.
+const fn ppm_to_points_at(ppm: i64, reference: i64) -> i64 {
+    ppm.saturating_mul(reference) / 1_000_000
+}
+
 /// Index points as parts per million against [`NIFTY_REFERENCE`].
+///
+/// **Superseded by [`points_to_ppm_at`].** Kept for the two `const` contexts
+/// that cannot call a function taking a runtime price; every path that has bars
+/// in hand uses the measured reference instead.
 const fn points_to_ppm(points: i64) -> i64 {
     points.saturating_mul(1_000_000) / NIFTY_REFERENCE
 }
@@ -1263,6 +1317,44 @@ fn auto_stored_inner(
 /// trade sits, so this is the assumption and the report prints it.
 const BOOTSTRAP_DRAWS: usize = 1_000;
 
+/// Resamples to take, DERIVED from the alpha the answer is compared against.
+///
+/// # A thousand was conventional, and convention is not a derivation
+///
+/// The p-value is a proportion of draws, so its resolution is `1/draws`. That
+/// is the whole constraint, and it is expressible: to read an answer at
+/// `alpha`, the resolution must be finer than `alpha` by enough that the
+/// quantisation cannot move a verdict across the threshold.
+///
+/// [`BOOTSTRAP_ALPHA_PPM`] is 50,000 ppm — 5% — so `1/alpha` is 20 draws for a
+/// resolution of exactly one alpha, and a hundred times that puts the
+/// quantisation two orders of magnitude below the threshold it is compared
+/// against. **2,000 draws at 5%**, and an alpha of 1% would take 10,000 without
+/// anyone editing a constant.
+///
+/// # Why it also follows the SAMPLE
+///
+/// Monte Carlo error falls as `1/sqrt(draws)` and sampling error falls as
+/// `1/sqrt(n)`. Draws far below `n` make the resample the binding uncertainty —
+/// the test would then be measuring its own resolution rather than the data. So
+/// the floor above is raised to the observation count when that is larger, and
+/// the two sources of error stay comparable.
+///
+/// # The ceiling is stated
+///
+/// 100,000, because the cost is linear and a million draws on a 650,000-bar
+/// column is hours spent moving a p-value in its fifth decimal. That bound is
+/// chosen; everything above it is derived.
+fn bootstrap_draws(observations: usize) -> usize {
+    let per_alpha = 1_000_000_usize
+        .checked_div(usize::try_from(BOOTSTRAP_ALPHA_PPM).unwrap_or(50_000))
+        .unwrap_or(20);
+    per_alpha
+        .saturating_mul(100)
+        .max(observations)
+        .clamp(1_000, 100_000)
+}
+
 /// The family-wise error rate the stepdown is judged at, in parts per million.
 ///
 /// Fifty thousand ppm is 5%, and it is 5% because the two rows printed beside it
@@ -1357,7 +1449,66 @@ fn audit_keep() -> usize {
 /// and no percentage appears in it: `grid_rungs()` alone decides how far the
 /// ladder reaches, so raising the depth extends 1pt…4pt to 1pt…25pt without
 /// moving a single level that was already tried.
-const GRID_STEP_PPM: i64 = points_to_ppm(1) / 2;
+/// The exit ladder's step, in ppm, DERIVED from the bars it will sweep.
+///
+/// # It was `points_to_ppm(1) / 2` against a constant
+///
+/// Half an index point sounds instrument-neutral and is not: half a point is
+/// 20 ppm on a 25,000 index and 9.6 ppm on a 52,000 one, so the same constant
+/// gives BANKNIFTY a ladder twice as fine as NIFTY's in the unit the engine
+/// actually measures in. The reach differs with it.
+///
+/// Reading the reference off the bars fixes both: half a point is half a point
+/// on whatever was swept, at the level it traded.
+///
+/// # Half a point, and why the fraction is not derived too
+///
+/// A point is the unit a rule is SPOKEN in -- "no trade beyond ten points" --
+/// and half of it is the finest division that still lands on a level anyone
+/// would name. Finer multiplies the grid without adding a rung an operator
+/// would state, and the tick is finer still at 0.05. This is the one figure
+/// here that is a choice about language rather than about data, and it is
+/// stated as one.
+fn grid_step_ppm(bars: &[indicators::Candle]) -> i64 {
+    // NO PRICE, NO POINTS, NO REFERENCE -- THE LADDER IS SIZED IN THE UNIT THE
+    // ENGINE ALREADY MEASURES IN.
+    //
+    // This was `points_to_ppm_at(1, reference_price(bars)) / 2`: half an index
+    // point, converted at a price read off the bars. Better than a constant and
+    // still asking the wrong question -- a POINT is a unit of the instrument's
+    // quote, and the engine measures in ppm of each trade's own entry.
+    //
+    // The scale that needs no translation is the instrument's own movement.
+    // Each bar's range as a fraction of its own close IS a ppm figure, and the
+    // median of those is what a typical bar does, on any instrument, at any
+    // price level, with nothing converted.
+    //
+    // Divided so the ladder resolves WITHIN a typical bar rather than stepping
+    // past it: a stop coarser than one bar's usual move can only sit outside
+    // it. Twenty is the divisor, and it is the one figure here that is chosen
+    // -- chosen as a RESOLUTION, not as a price, so it is right on an
+    // instrument that moves eight points a day and on one that moves four
+    // hundred.
+    let mut ranges: Vec<i64> = bars
+        .iter()
+        .filter(|b| b.close > 0)
+        .map(|b| {
+            let span = i128::from(b.high.saturating_sub(b.low));
+            let ppm = span.saturating_mul(1_000_000) / i128::from(b.close);
+            i64::try_from(ppm).unwrap_or(i64::MAX)
+        })
+        .filter(|&r| r > 0)
+        .collect();
+    if ranges.is_empty() {
+        // No bar moved, so there is no scale to read. One ppm is the finest
+        // non-zero rung and the sweep will find nothing either way -- a refusal
+        // here would stop a report that has other things to say.
+        return 1;
+    }
+    ranges.sort_unstable();
+    let median = ranges.get(ranges.len() / 2).copied().unwrap_or(1);
+    (median / 20).max(1)
+}
 
 /// The reward-to-risk ratios the grid pairs each stop with, in hundredths.
 ///
@@ -1383,7 +1534,97 @@ const GRID_STEP_PPM: i64 = points_to_ppm(1) / 2;
 /// Ten values, so the grid is ten targets per stop rather than forty, and the
 /// collapse is 4x rather than 6.7x -- bought back by reaching further into the
 /// region where the answer would be.
-const GRID_RATIOS: [i64; 10] = [100, 150, 200, 250, 300, 400, 500, 600, 700, 800];
+/// THE STOP IS BOUNDED AND NOTHING ELSE IS.
+///
+/// A stop is a promise about the WORST case, so it has a ceiling: an operator
+/// who says "no trade may run more than twenty-five points against me" means it
+/// absolutely, and a grid rung past that is a rung that breaks the promise.
+///
+/// A target is the opposite. There is no reason to cap what a winner may make,
+/// and capping it is how a search stops looking for the shape being searched
+/// for -- a half-point stop against a hundred-point target is exactly the rare
+/// asymmetry worth finding, and a ratio ladder stopping at 1:8 cannot express
+/// it. So `grid_ratios` reaches 1:150 and the stop ladder is capped here.
+const MAX_STOP_POINTS: i64 = 25;
+
+/// The furthest a stop rung may sit, in points, DERIVED from the bars.
+///
+/// # A typed cap is a rule about an instrument nobody named
+///
+/// Twenty-five points is a sensible ceiling on NIFTY and a meaningless one on
+/// an instrument that moves eight points a day or four hundred. The cap exists
+/// to stop the ladder wasting rungs on stops no trade would ever reach — so the
+/// figure that decides it is how far this instrument actually moves.
+///
+/// # One day's typical range
+///
+/// The median of `high - low` over the swept bars, in points. A stop wider than
+/// a typical bar's whole range is a stop that only fires on the rare bar, and a
+/// ladder reaching past it prices rungs against nothing.
+///
+/// Median rather than mean: one 2020 session moved further than a hundred
+/// ordinary ones, and a mean lets that session set the ladder for the other
+/// eighty months.
+///
+/// # Floors and ceilings, both stated
+///
+/// At least 1 point, so a quiet instrument still gets a ladder. At most
+/// [`MAX_STOP_POINTS`], because a stop is a promise about the worst case and an
+/// operator who says twenty-five means it — the derivation may narrow that
+/// promise, never widen it.
+fn max_stop_points(bars: &[indicators::Candle]) -> i64 {
+    let reference = reference_price(bars);
+    let mut ranges: Vec<i64> = bars
+        .iter()
+        .map(|b| b.high.saturating_sub(b.low))
+        .filter(|&r| r > 0)
+        .collect();
+    if ranges.is_empty() {
+        return MAX_STOP_POINTS;
+    }
+    ranges.sort_unstable();
+    let median = ranges.get(ranges.len() / 2).copied().unwrap_or(0);
+    // Paisa to points: the reference is in the same paisa units the bars are.
+    let in_points = ppm_to_points_at(points_to_ppm_at(median, reference), reference);
+    in_points.clamp(1, MAX_STOP_POINTS)
+}
+
+/// Reward-to-risk ratios, in hundredths, DENSE where strategies live and
+/// SPARSE where the exceptional ones do.
+///
+/// # Why it reaches 1:150
+///
+/// At a one-point stop, 1:8 is an eight-point target. The operator is asking
+/// for a minimal stop against a MAXIMISED win -- a hundred or a hundred and
+/// fifty points -- and no ratio under 1:100 can express that against a stop
+/// that small. A ladder that stops at 1:8 has decided the answer is not there.
+///
+/// # Why the spacing widens
+///
+/// Between 1:1 and 1:3 a quarter-step is a different strategy. Between 1:100
+/// and 1:110 it is nothing -- no combination distinguishes them, and pricing
+/// both spends the grid on a rung nobody would name. So the step grows with
+/// the ratio, which is the same reasoning `win_rate_rungs` uses.
+///
+/// Generated rather than listed: a list is a set of numbers somebody chose, and
+/// every one of them would have to be retyped to reach further.
+fn grid_ratios() -> Vec<i64> {
+    let mut out: Vec<i64> = Vec::with_capacity(32);
+    let mut r = 100_i64;
+    while r <= 15_000 {
+        out.push(r);
+        r += if r < 300 {
+            25
+        } else if r < 1_000 {
+            100
+        } else if r < 3_000 {
+            250
+        } else {
+            2_500
+        };
+    }
+    out
+}
 
 /// What the grid costs at each depth, measured rather than assumed.
 ///
@@ -1476,13 +1717,13 @@ fn grid_variants() -> u64 {
 /// retained state, and `crate::rank`'s heap is sized by [`screen_cap`] alone.
 /// What it costs is TIME, and that is the operator's to spend.
 ///
-/// `BRUTEX_grid_rungs()` sets it. The default is eight because it is the deepest
+/// `BRUTEX_GRID_RUNGS` sets it. The default is eight because it is the deepest
 /// rung count whose full-search cost was actually measured on this machine;
 /// it is a starting point, not a ceiling, and nothing in the engine treats it
 /// as one.
 fn grid_rungs() -> usize {
     const DEFAULT: usize = 8;
-    std::env::var("BRUTEX_grid_rungs()")
+    std::env::var("BRUTEX_GRID_RUNGS")
         .ok()
         .and_then(|raw| raw.parse::<usize>().ok())
         .filter(|&n| n > 0)
@@ -1934,6 +2175,41 @@ fn session_index(bars: &[indicators::Candle]) -> Vec<i64> {
 /// fold count, so this is the assumption and the report prints it beside the
 /// result rather than burying it.
 const WALK_FORWARD_SPLITS: usize = 5;
+
+/// How many anchored folds to split a column into, DERIVED from its length.
+///
+/// # Five was a number, and five is the wrong number twice
+///
+/// A fold count is a trade: more folds mean more independent verdicts and fewer
+/// bars behind each. Five is roughly 18,000 test bars per fold on a 91,874-bar
+/// column, which is reasonable — and on a 1,700-bar column it is 340 bars a
+/// fold, where a fold's verdict is one afternoon and means nothing.
+///
+/// The figure that decides it is not a preference, it is how many bars there
+/// are. This targets a floor of test bars per fold and takes as many folds as
+/// that allows, so a long column gets many verdicts and a short one gets few
+/// rather than many worthless ones.
+///
+/// # The floor
+///
+/// Two thousand test bars is about five trading days at one minute, or a full
+/// quarter at sixty. Below it a fold is measuring a week and calling it
+/// out-of-sample evidence. It is the one figure here that is chosen rather than
+/// derived, and it is chosen against the SAMPLE the fold needs rather than
+/// against a fold count somebody liked.
+///
+/// # Bounds
+///
+/// At least 2 — one fold is not a walk-forward, it is a single split, and the
+/// PBO calculation needs more than one placement to rank. At most 20, because
+/// the anchored design gives the earliest fold the least data and a twenty-first
+/// slice of a column is training on almost nothing.
+fn walk_forward_splits(bars: usize) -> usize {
+    const TEST_BARS_FLOOR: usize = 2_000;
+    // Anchored folds put roughly `bars / (splits + 1)` in each test window, so
+    // the count that hits the floor is `bars / floor - 1`.
+    (bars / TEST_BARS_FLOOR).saturating_sub(1).clamp(2, 20)
+}
 
 /// The sweep, then what its best combination actually did.
 ///
@@ -3154,6 +3430,7 @@ fn trade_and_screen(
     // The same forced rung the screen uses, so the headline grid and the screened
     // rows are built from one ladder. Two ladders would let the report show a
     // variant in one table that cannot exist in the other.
+    //
     let exits = grid::evaluate(
         bars,
         column,
@@ -3162,9 +3439,9 @@ fn trade_and_screen(
         side,
         grid::Levels {
             rungs: grid_rungs(),
-            step_ppm: Some(GRID_STEP_PPM),
+            step_ppm: Some(grid_step_ppm(bars)),
             forced: (rules.max_mae_ppm > 0).then_some(rules.max_mae_ppm),
-            ratios: Some(&GRID_RATIOS),
+            ratios: true,
         },
     );
     // THE CASCADE, NOT ONE POLICY. A single screen answers "0 of 21 satisfy
@@ -3321,6 +3598,77 @@ impl Rules {
     };
 }
 
+/// Win-rate rungs, in basis points, strictest first.
+///
+/// # Generated, not listed
+///
+/// From 95% down to 40% in steps that widen as the rate falls: the difference
+/// between 95% and 93% is a different strategy, and the difference between 45%
+/// and 43% is noise. Two-point steps at the top and five at the bottom is that
+/// asymmetry, and it is derived from the sequence rather than typed as a list.
+fn win_rate_rungs(trades: u64) -> Vec<i64> {
+    // THE RESOLUTION A SAMPLE CAN CARRY, NOT A STEP SOMEBODY TYPED.
+    //
+    // This was three typed steps -- 200, 250 and 500 basis points -- chosen on
+    // the reasoning that fine distinctions matter at the top and not at the
+    // bottom. That reasoning is right and the numbers were still invented.
+    //
+    // A win rate is `wins / trades`, so the FINEST distinction a sample can
+    // express is one trade: at 1,000 trades that is 10 basis points, and at 100
+    // it is 100. A rung finer than that separates two rates the data cannot
+    // tell apart; a rung coarser throws away a distinction it can. So the step
+    // is the sample's own resolution.
+    //
+    // Multiplied by ten so the ladder is a manageable number of rungs rather
+    // than one per possible outcome -- at 1,000 trades that is a rung every 1%,
+    // which is 55 rungs over the range and the tier ladder's own product keeps
+    // it affordable.
+    let per_trade_bp = if trades == 0 {
+        100
+    } else {
+        (10_000 / i64::try_from(trades).unwrap_or(i64::MAX)).max(1)
+    };
+    let step = per_trade_bp.saturating_mul(10).clamp(25, 1_000);
+
+    // THE RANGE IS THE WHOLE RANGE. It stopped at 40% because nothing below
+    // that was thought interesting, which is a judgement about the answer made
+    // before the search. A combination winning 20% of the time at 1:8 is a real
+    // strategy and the ladder now reaches it.
+    let mut out: Vec<i64> = Vec::with_capacity(64);
+    let mut bp = 9_900_i64;
+    while bp > 0 {
+        out.push(bp);
+        bp -= step;
+    }
+    out
+}
+
+/// The stop levels the ladder judges against, in index points.
+///
+/// **The grid's own ladder, read back.** A tier that asked for a stop the grid
+/// never tested would be a rule with no cell to satisfy it, so this is derived
+/// from [`grid_rungs`] and [`GRID_STEP_PPM`] rather than stated: rung `i` is
+/// `i * step`, the same values [`crate::grid::Levels`] hands the engine.
+///
+/// Rounded UP to whole points because a tier is stated in points and a rule at
+/// "2.5 points" reads as a tolerance nobody set. Rounding up is the strict
+/// direction: a tier asking for 2 points is satisfied only by a grid rung at or
+/// under it.
+fn stop_rungs_in_points(bars: &[indicators::Candle]) -> Vec<i64> {
+    let reference = reference_price(bars);
+    let per_point = points_to_ppm_at(1, reference).max(1);
+    let step = grid_step_ppm(bars);
+    (1..=grid_rungs())
+        .filter_map(|i| i64::try_from(i).ok())
+        .map(|i| {
+            let ppm = step.saturating_mul(i);
+            // Ceiling division into whole points.
+            ppm.saturating_add(per_point - 1) / per_point
+        })
+        .filter(|&pt| pt > 0 && pt <= max_stop_points(bars))
+        .collect()
+}
+
 /// One rung of the tier ladder: a name, and the policy it stands for.
 ///
 /// # Why a ladder and not one rule
@@ -3345,6 +3693,11 @@ impl Rules {
 #[derive(Clone, Copy, Debug)]
 pub struct Tier {
     /// What to call it on the page.
+    ///
+    /// Empty on a generated tier: a name cannot be computed from the
+    /// thresholds without inventing a scale, and it is the POSITION in the
+    /// sorted ladder that carries meaning. `Tier::label` derives it from the
+    /// rank once the sort has happened.
     pub name: &'static str,
     /// The furthest a single trade may run against entry, in index points.
     pub max_points: i64,
@@ -3377,64 +3730,78 @@ pub struct Tier {
 /// The last row is deliberately mild: a combination that cannot clear even that
 /// is not a near miss, and saying so is more useful than printing the least-bad
 /// row of a table nothing passed.
-const TIERS: [Tier; 8] = [
-    Tier {
-        name: "S+++",
-        max_points: 10,
-        min_rr_bp: 300,
-        min_win_rate_bp: 9_000,
-        min_trades: 1_000,
-    },
-    Tier {
-        name: "S++",
-        max_points: 10,
-        min_rr_bp: 300,
-        min_win_rate_bp: 8_000,
-        min_trades: 1_000,
-    },
-    Tier {
-        name: "S+",
-        max_points: 10,
-        min_rr_bp: 250,
-        min_win_rate_bp: 7_000,
-        min_trades: 1_000,
-    },
-    Tier {
-        name: "S",
-        max_points: 15,
-        min_rr_bp: 250,
-        min_win_rate_bp: 6_500,
-        min_trades: 750,
-    },
-    Tier {
-        name: "A+",
-        max_points: 15,
-        min_rr_bp: 200,
-        min_win_rate_bp: 6_000,
-        min_trades: 750,
-    },
-    Tier {
-        name: "A",
-        max_points: 20,
-        min_rr_bp: 200,
-        min_win_rate_bp: 5_500,
-        min_trades: 500,
-    },
-    Tier {
-        name: "B",
-        max_points: 30,
-        min_rr_bp: 150,
-        min_win_rate_bp: 5_000,
-        min_trades: 500,
-    },
-    Tier {
-        name: "C",
-        max_points: 50,
-        min_rr_bp: 100,
-        min_win_rate_bp: 4_000,
-        min_trades: 500,
-    },
-];
+///
+/// # It is GENERATED, and it used to be fourteen typed rows
+///
+/// A hand-written ladder is a hand-written answer: it can only ever ask the
+/// questions whoever typed it thought of, and every threshold in it is a number
+/// somebody chose. Fourteen rows also cannot express "one point tighter" without
+/// a fifteenth.
+///
+/// So it is the cross product of the three axes the engine already has —
+/// [`stop_rungs_in_points`], which is the grid's own stepped ladder read back;
+/// [`grid_ratios`], which is what the grid pairs each stop with; and
+/// [`win_rate_rungs`]. Nothing here can ask for a stop the grid never tested or
+/// a ratio it never paired, because the ladder is built from the same values.
+///
+/// Deepening the grid deepens the ladder with it: eight rungs give 8 x 10 x 12
+/// = 960 tiers and forty give 4,800, all derived.
+///
+/// # Ordered by a strictness score, and why it is a product
+///
+/// "Stricter" is three numbers moving in different directions, so a total order
+/// needs a single figure. A tier is stricter when the stop is tighter, the ratio
+/// higher and the win rate higher, and multiplying them ranks a tier that gives
+/// up a little on each below one that gives up a lot on one — which is the
+/// ordering an operator walking down actually wants.
+///
+/// # The trade floor rides down with it
+///
+/// A strict tier over 200 trades is a claim about a handful of weeks. The floor
+/// is 1,000 at the top and eases to 500 at the bottom, on the same reasoning
+/// that put it there: seven years is about 1,700 trading days.
+fn tiers(bars: &[indicators::Candle], trades: u64) -> Vec<Tier> {
+    let stops = stop_rungs_in_points(bars);
+    // The win-rate resolution follows the SAMPLE, so a ladder judging a
+    // thousand-trade combination is finer than one judging fifty.
+    let rates = win_rate_rungs(trades);
+    let ratios = grid_ratios();
+    let mut out: Vec<Tier> = Vec::with_capacity(stops.len() * ratios.len() * rates.len());
+    for &max_points in &stops {
+        for &min_rr_bp in &ratios {
+            for &min_win_rate_bp in &rates {
+                out.push(Tier {
+                    // NAMED BY RANK, ASSIGNED BELOW. A name cannot be computed
+                    // from the thresholds without inventing a scale; it is the
+                    // POSITION in the sorted ladder that means something, and
+                    // that is not known until the sort has happened.
+                    name: "",
+                    max_points,
+                    min_rr_bp,
+                    min_win_rate_bp,
+                    // 1,000 while the win rate is demanding, easing to 500 once
+                    // it is not: a rate of 40% over 500 trades is a real
+                    // measurement, and 95% over 200 is not.
+                    min_trades: if min_win_rate_bp >= 8_000 { 1_000 } else { 500 },
+                });
+            }
+        }
+    }
+    // Strictest first. `Reverse` on the score, then the fields themselves so the
+    // order is TOTAL and identical across processes -- §3 rule 5 applies to a
+    // report's row order as much as to a total.
+    out.sort_by_key(|t| {
+        let score = i128::from(t.min_rr_bp).saturating_mul(i128::from(t.min_win_rate_bp))
+            / i128::from(t.max_points.max(1));
+        (
+            core::cmp::Reverse(score),
+            t.max_points,
+            core::cmp::Reverse(t.min_rr_bp),
+            core::cmp::Reverse(t.min_win_rate_bp),
+        )
+    });
+    out
+}
 
 impl Tier {
     /// This tier as the rules the screen applies.
@@ -3446,6 +3813,25 @@ impl Tier {
             min_win_rate_bp: self.min_win_rate_bp,
             min_trades: self.min_trades,
             top,
+        }
+    }
+
+    /// The tier's name at position `rank` in the sorted ladder.
+    ///
+    /// The strictest few are the S grades an operator names -- `S++++++` at the
+    /// top, one plus fewer each step -- and everything past them is `S`, `A`,
+    /// `B`, `C` and then a bare rank. Derived rather than stored because the
+    /// ladder is generated: at eight grid rungs it holds 960 tiers and at forty
+    /// it holds 4,800, and no list of names could keep up.
+    #[must_use]
+    pub fn label(rank: usize) -> String {
+        match rank {
+            0..=5 => format!("S{}", "+".repeat(6 - rank)),
+            6..=9 => "S".to_owned(),
+            10..=19 => "A".to_owned(),
+            20..=39 => "B".to_owned(),
+            40..=79 => "C".to_owned(),
+            _ => format!("#{rank}"),
         }
     }
 
@@ -3592,12 +3978,28 @@ fn screen_cascade(
          anything, and every tier above it is reported as unmet -- which is a \
          finding about the market, not an empty table."
     );
-    for tier in &TIERS {
-        let _ = writeln!(out, "    {:<5} {}", tier.name, tier.describe());
+    // GENERATED, and printed as a SUMMARY rather than in full. Eight grid
+    // rungs give 960 tiers and forty give 4,800 -- a page listing every one is
+    // a page nobody reads. The strictest, the mildest and the count is what a
+    // reader needs to know what was walked.
+    // The trade count of the strongest candidate, which sets the win-rate
+    // ladder's resolution: a rate over fifty trades cannot be judged as finely
+    // as one over a thousand, and a ladder that pretended otherwise would rank
+    // two rates the sample cannot separate.
+    let sample = by_evidence.first().map_or(0, |s| s.hits);
+    let ladder = tiers(bars, sample);
+    if let (Some(first), Some(last)) = (ladder.first(), ladder.last()) {
+        let _ = writeln!(
+            out,
+            "    {} tiers, generated from the grid's own axes",
+            ladder.len()
+        );
+        let _ = writeln!(out, "    strictest  {}", first.describe());
+        let _ = writeln!(out, "    mildest    {}", last.describe());
     }
     let _ = writeln!(out);
 
-    for tier in &TIERS {
+    for (rank, tier) in ladder.iter().enumerate() {
         let rules = tier.rules(top);
         let body = screen(bars, column, by_evidence, horizon, rules);
         // `screen` prints "0 of N ... NOTHING PASSED" when the rules admit
@@ -3605,22 +4007,28 @@ fn screen_cascade(
         // predicate, so the cascade can never disagree with the table an
         // operator is looking at.
         if body.contains("NOTHING PASSED") {
-            let _ = writeln!(out, "  {:<5} UNMET", tier.name);
+            let _ = writeln!(out, "  {:<8} UNMET", Tier::label(rank));
             continue;
         }
-        let _ = writeln!(out, "  {:<5} MET -- {}\n", tier.name, tier.describe());
+        let _ = writeln!(
+            out,
+            "  {:<8} MET -- {}\n",
+            Tier::label(rank),
+            tier.describe()
+        );
         out.push_str(&body);
         return out;
     }
     let _ = writeln!(
         out,
         "\n  NO TIER MET, INCLUDING THE MILDEST. A combination that cannot clear \
-         `C` is not a near miss, and the TIGHTEST column in the table above is \
+         even the mildest rung is not a near miss, and the TIGHTEST column in \
+         the table below is \
          how far the closest one actually ran. This is a statement about these \
          bars, not a failure of the search."
     );
     // The mildest tier's table, so a reader still sees what was tried.
-    if let Some(mildest) = TIERS.last() {
+    if let Some(mildest) = ladder.last() {
         out.push_str(&screen(
             bars,
             column,
@@ -3669,9 +4077,9 @@ fn screen(
             side,
             grid::Levels {
                 rungs: grid_rungs(),
-                step_ppm: Some(GRID_STEP_PPM),
+                step_ppm: Some(grid_step_ppm(bars)),
                 forced: (rules.max_mae_ppm > 0).then_some(rules.max_mae_ppm),
-                ratios: Some(&GRID_RATIOS),
+                ratios: true,
             },
         );
         // THE BEST VARIANT THAT SATISFIES THE RULES, falling back to the best
@@ -4715,15 +5123,18 @@ fn bootstrap_family(
     // strategies to report" — is answered by the same alpha the two rows beside
     // it are already judged at, so the decision was available; it just had not
     // been made.
+    // Draws follow the alpha the answer is read at and the sample behind it, so
+    // the resample is never the binding uncertainty. See `bootstrap_draws`.
+    let draws = bootstrap_draws(family.first().map_or(0, Vec::len));
     let rc = runner::bootstrap::reality_check(
         &family,
-        BOOTSTRAP_DRAWS,
+        draws,
         BOOTSTRAP_SEED,
         runner::bootstrap::DEFAULT_BLOCK,
     );
     let spa = runner::bootstrap::spa(
         &family,
-        BOOTSTRAP_DRAWS,
+        draws,
         BOOTSTRAP_SEED,
         runner::bootstrap::DEFAULT_BLOCK,
     );
@@ -4731,7 +5142,7 @@ fn bootstrap_family(
     // report carries one alpha rather than two.
     let named = runner::bootstrap::romano_wolf(
         &family,
-        BOOTSTRAP_DRAWS,
+        draws,
         BOOTSTRAP_SEED,
         runner::bootstrap::DEFAULT_BLOCK,
         BOOTSTRAP_ALPHA_PPM,
@@ -5001,7 +5412,7 @@ fn audit_bars(
     let folds = runner::validate::walk_forward(
         &bars,
         horizon,
-        WALK_FORWARD_SPLITS,
+        walk_forward_splits(bars.len()),
         direction_of(side_of_evidence(first)),
         &Sweeper::new(ladder),
         move || fresh,

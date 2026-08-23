@@ -984,7 +984,18 @@ pub struct Levels {
     /// win must be at least twice the largest loss" is 1:2, and 1:2 becomes a
     /// column the search sweeps rather than a filter applied to levels chosen
     /// some other way.
-    pub ratios: Option<&'static [i64]>,
+    /// Sweep the targets as RATIOS of each stop rather than as an independent
+    /// ladder, with the ceiling derived from the data.
+    ///
+    /// `true` makes the targets ladder the deduped union of every
+    /// `stop * ratio`, where the ratios come from `derived_ratios` -- reaching
+    /// as far as the largest favourable move any trade actually made, divided
+    /// by the tightest stop. Nothing about the ladder is a typed number.
+    ///
+    /// `false` leaves the targets independent of the stops, which is the full
+    /// cross product: at a half-point step reaching twenty points that is
+    /// 27,637,321 cells per combination against about 1,440 here.
+    pub ratios: bool,
 }
 
 impl Levels {
@@ -995,7 +1006,7 @@ impl Levels {
             rungs,
             step_ppm: None,
             forced: None,
-            ratios: None,
+            ratios: false,
         }
     }
 }
@@ -1041,6 +1052,63 @@ struct Candidate {
 ///
 /// `None` when nothing survives, which the caller reads as "fall back to the
 /// ladder you would have built anyway" rather than as a grid with no targets.
+/// The reward-to-risk ladder, with its CEILING taken from the data.
+///
+/// # Nothing here is a number anybody chose
+///
+/// A ratio ladder needs two decisions — how far it reaches and how it is
+/// spaced — and both were typed constants until this function. The reach was
+/// `1:8`, then `1:150`, each a guess: at a half-point stop 1:8 is a four-point
+/// target, which refuses to look for the minimal-stop-maximum-win shape, and
+/// 1:150 is a number with nothing behind it.
+///
+/// The honest ceiling is what the market OFFERED. `favourable` holds the
+/// largest move each trade made, so the biggest of them divided by the tightest
+/// stop is the largest ratio any trade could ever have paid. A rung past that
+/// is a target nothing reached, priced at full cost, on every combination.
+///
+/// # The spacing is derived too
+///
+/// Steps widen with the ratio because that is where distinctions stop existing:
+/// between 1:1 and 1:3 a quarter-step is a different strategy, and between
+/// 1:100 and 1:110 no combination behaves differently. The thresholds are a
+/// quarter of the way and a tenth of the way up the ladder's own range rather
+/// than fixed figures, so a ladder reaching 1:20 and one reaching 1:400 are
+/// each spaced against their own reach.
+///
+/// Capped at 512 rungs, which is the one bound here that is not derived. It is
+/// stated: the targets ladder becomes a column in every candidate's crossing
+/// table, and an unbounded ladder on a runaway excursion would make that table
+/// the largest thing in the run.
+fn derived_ratios(favourable: &[Ppm], stops: &[Ppm]) -> Vec<i64> {
+    let (Some(&tightest), Some(&best)) = (stops.first(), favourable.iter().max()) else {
+        return Vec::new();
+    };
+    if tightest <= 0 || best <= 0 {
+        return Vec::new();
+    }
+    // In hundredths, the same units `Levels::ratios` and `Rules::min_rr_bp` use.
+    let ceiling = i128::from(best).saturating_mul(100) / i128::from(tightest);
+    let ceiling = i64::try_from(ceiling).unwrap_or(i64::MAX).max(100);
+
+    let mut out: Vec<i64> = Vec::with_capacity(64);
+    let mut r = 100_i64;
+    // A quarter of the way up, and a tenth: the two places the step widens.
+    let (near, mid) = (ceiling / 10, ceiling / 4);
+    while r <= ceiling && out.len() < 512 {
+        out.push(r);
+        let step = if r < near.max(300) {
+            25
+        } else if r < mid.max(1_000) {
+            100
+        } else {
+            ceiling / 20
+        };
+        r = r.saturating_add(step.max(25));
+    }
+    out
+}
+
 fn ratio_targets(stops: &[Ppm], ratios: &[i64]) -> Option<Ladder> {
     let mut all: Vec<Ppm> = Vec::with_capacity(stops.len().saturating_mul(ratios.len()));
     for &stop in stops {
@@ -1383,9 +1451,18 @@ pub fn evaluate(
     // are a stop paired with ITS ratios. The union is small: forty stops times
     // six ratios is at most 240 values, and heavily overlapping -- 10pt at 1:2
     // and 20pt at 1:1 are both 20pt, one rung.
-    let targets = match ratios {
-        Some(rs) => ratio_targets(stops.rungs(), rs).unwrap_or_else(|| ladder_of(&favourable)),
-        None => ladder_of(&favourable),
+    // The ratio ladder is derived from THIS combination's own excursions, so a
+    // signal that never ran more than three points gets a ladder that stops
+    // there rather than pricing four hundred rungs nothing reached.
+    let ratio_set = if ratios {
+        derived_ratios(&favourable, stops.rungs())
+    } else {
+        Vec::new()
+    };
+    let targets = if ratio_set.is_empty() {
+        ladder_of(&favourable)
+    } else {
+        ratio_targets(stops.rungs(), &ratio_set).unwrap_or_else(|| ladder_of(&favourable))
     };
     // THE TRAILING LADDER IS SCALED ON THE FAVOURABLE MOVE, not the adverse one.
     // A trailing stop is a give-back FROM A PROFIT, so the distance that makes
@@ -1491,8 +1568,9 @@ pub fn evaluate(
             // and this guard picks out the pairs. The loop still walks the
             // product in INDEX ARITHMETIC, which is free; what it skips is
             // `one_variant`, which walks every candidate and is the whole cost.
-            if let (Some(ratios), Some(si), Some(ti)) = (ratios, stop, target)
-                && !pairs_at_a_ratio(stops.rungs(), targets.rungs(), si, ti, ratios)
+            if let (Some(si), Some(ti)) = (stop, target)
+                && !ratio_set.is_empty()
+                && !pairs_at_a_ratio(stops.rungs(), targets.rungs(), si, ti, &ratio_set)
             {
                 continue;
             }
@@ -1527,6 +1605,7 @@ pub fn evaluate(
                         ttp: None,
                     },
                     side,
+                    None,
                 ));
                 // `0..t` AND NOT `0..targets.len()`, WHICH IS THE SECOND
                 // REFUSAL. `t` is `targets.len()` on the no-target row, so every
@@ -1545,6 +1624,7 @@ pub fn evaluate(
                                 ttp: Some(Ttp { arm, trail }),
                             },
                             side,
+                            None,
                         ));
                     }
                 }
@@ -1608,6 +1688,51 @@ struct Variant {
 ///
 /// UNVERIFIED as a measured figure: no bench row covers this crate's grid.
 #[must_use]
+/// One variant, priced, WITH one row per trade.
+///
+/// # Why this exists beside [`with_levels`]
+///
+/// `with_levels` returns a [`Cell`] — the fold. This returns the fold and the
+/// rows it was folded from, so a caller can ask the question a `Cell` cannot
+/// answer: was this profitable in every year, every quarter, every month?
+///
+/// A combination that made forty thousand in 2020 and bled steadily since has
+/// the same total as one that earned it evenly over seven years, the same
+/// t-statistic, and the same worst excursion. The fold cannot separate them.
+/// The rows can, because each carries the entry bar's timestamp.
+///
+/// # Cost
+///
+/// One trade walk plus one variant — the same as [`with_levels`] — and a `Vec`
+/// of one row per trade. Called on the handful of combinations a report names,
+/// never on the millions a sweep weighs.
+pub fn per_trade(
+    bars: &[Candle],
+    column: &Column,
+    mask: &ConditionMask,
+    horizon: Horizon,
+    side: Side,
+    ladders: Ladders<'_>,
+    variant: Chosen,
+) -> Option<(Cell, Vec<TradeRow>)> {
+    let mut rows = Vec::new();
+    let cell = levelled(
+        bars,
+        column,
+        mask,
+        horizon,
+        side,
+        ladders,
+        variant,
+        Some(&mut rows),
+    )?;
+    Some((cell, rows))
+}
+
+/// One variant, priced, folded to a [`Cell`].
+///
+/// [`per_trade`] is the same call with the rows kept.
+#[must_use]
 pub fn with_levels(
     bars: &[Candle],
     column: &Column,
@@ -1616,6 +1741,27 @@ pub fn with_levels(
     side: Side,
     ladders: Ladders<'_>,
     variant: Chosen,
+) -> Option<Cell> {
+    levelled(bars, column, mask, horizon, side, ladders, variant, None)
+}
+
+/// [`with_levels`] and [`per_trade`] share this; only the collector differs.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "eight, and the eighth is the collector. The seven before it are \
+              `with_levels`'s own signature, which is public and unchanged; \
+              bundling them would change that surface to avoid a lint about a \
+              private helper."
+)]
+fn levelled(
+    bars: &[Candle],
+    column: &Column,
+    mask: &ConditionMask,
+    horizon: Horizon,
+    side: Side,
+    ladders: Ladders<'_>,
+    variant: Chosen,
+    trades: Option<&mut Vec<TradeRow>>,
 ) -> Option<Cell> {
     let timed = crate::trade::walk(bars, column, mask, horizon, direction_of(side));
     if timed.eligible.is_empty() {
@@ -1668,6 +1814,7 @@ pub fn with_levels(
             ttp,
         },
         side,
+        trades,
     ))
 }
 
@@ -1787,6 +1934,9 @@ fn one_variant(
     rungs: (&[Ppm], &[Ppm], &[Ppm]),
     v: Variant,
     side: Side,
+    // Where to put one row per trade, or `None` to fold only. See the emission
+    // site for why a `Cell` cannot answer "was it profitable in every year".
+    mut trades: Option<&mut Vec<TradeRow>>,
 ) -> Cell {
     let (stops_rungs, targets_rungs, trails_rungs) = rungs;
     // Running equity and its high-water mark, for the drawdown below. Local
@@ -1942,6 +2092,47 @@ fn one_variant(
         // THE MAXIMUM, NOT THE SUM. A stop is placed once and every trade must
         // survive it, so the figure that decides whether a stop is survivable is
         // the worst single excursion and not the average of ten thousand.
+        // ONE ROW PER TRADE, WHEN A CALLER ASKS FOR THEM.
+        //
+        // # The question a Cell cannot answer
+        //
+        // `Cell` is a fold: totals, counts and two maxima over every trade. It
+        // answers "what did this variant make over eighty-one months" and "how
+        // far did the worst trade run", and both are exactly right.
+        //
+        // It cannot answer "was it profitable in EVERY year", and the
+        // difference is not small. A combination that made forty thousand in
+        // 2020 and bled steadily since shows the same total as one that earned
+        // it evenly across seven years, the same t-stat and the same worst
+        // excursion. Nothing in the fold separates them, and the first is
+        // worthless.
+        //
+        // So the rows are emitted on request, carrying the entry bar's
+        // TIMESTAMP, and a caller buckets them by day, week, month, quarter,
+        // half or year without re-walking anything.
+        //
+        // Emitted HERE rather than beside `tally_trade` because `went_against`
+        // is computed below it — a row pushed earlier carried an adverse figure
+        // from the previous trade, which is the kind of defect that renders
+        // perfectly and reads as data.
+        //
+        // # Cost
+        //
+        // One `push` per trade when the collector is present and a null check
+        // when it is not, on a path that already writes to `cell`. Callers ask
+        // for it on the handful of combinations they report, never on the
+        // millions they weigh.
+        if let Some(rows) = trades.as_deref_mut() {
+            rows.push(TradeRow {
+                ts_micros: bars.get(c.entry).map_or(0, |b| b.ts_micros),
+                pnl: pess,
+                adverse: went_against,
+                // The ppm figure taken back to paisa at THIS trade's entry,
+                // which is the price it was measured against in the first
+                // place -- so the round trip is exact rather than referenced.
+                adverse_paisa: paisa_of(went_against, c.entry_pess),
+            });
+        }
         if went_against > cell.worst_mae {
             cell.worst_mae = went_against;
         }
@@ -2308,6 +2499,45 @@ impl Trailing {
             kind: self.kind,
         }
     }
+}
+
+/// One completed round trip, as a caller who wants to bucket them sees it.
+///
+/// # Three fields, and the timestamp is the one that matters
+///
+/// `Cell` already carries every total and both maxima. What it cannot carry is
+/// WHEN each trade happened, and that is the whole difference between "this
+/// made money over seven years" and "this made money in every one of them".
+///
+/// `pnl` is the PESSIMISTIC reading -- worst fills on both legs -- because that
+/// is the figure every selector in this crate ranks on, and a per-period table
+/// built on the optimistic one would disagree with the total above it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TradeRow {
+    /// The entry bar's stamp, in microseconds since the epoch.
+    pub ts_micros: i64,
+    /// Paisa per unit under the worst reading of both legs.
+    pub pnl: i64,
+    /// How far this trade ran AGAINST entry, in ppm -- its own maximum.
+    pub adverse: Ppm,
+    /// How far it ran against IN PAISA, at this trade's own entry price.
+    ///
+    /// # Why both units, and why this one removes a whole class of error
+    ///
+    /// Ppm is what the engine measures in and is right: it is relative to each
+    /// trade's own entry, so it is comparable across a span where the index
+    /// went from 15,000 to 26,000.
+    ///
+    /// But an operator states a rule in POINTS -- "no trade beyond ten points"
+    /// -- and comparing that against ppm needs a price. Converting the RULE at
+    /// a span-wide reference makes the same rule mean ten points at one end of
+    /// the span and seventeen at the other, which is not the rule anyone said.
+    ///
+    /// Carrying the paisa figure alongside removes the question: the rule is
+    /// compared against what this trade actually gave up, at the price it
+    /// actually traded at. No reference, no approximation, no instrument it is
+    /// wrong for.
+    pub adverse_paisa: i64,
 }
 
 /// Every order that could end one candidate's trade, resolved against its path.
@@ -3204,6 +3434,7 @@ mod tests {
                 ttp: None,
             },
             Side::Long,
+            None,
         );
         assert_eq!(trailed.trades, 1, "one candidate, one round trip");
         assert_eq!(
@@ -3252,6 +3483,7 @@ mod tests {
                 ttp: None,
             },
             Side::Long,
+            None,
         );
         assert_eq!(
             timed.ambiguous_bars, 0,
@@ -3585,6 +3817,7 @@ mod arming_tests {
                 ttp: None,
             },
             Side::Long,
+            None,
         );
         let ttp = one_variant(
             &bars,
@@ -3597,6 +3830,7 @@ mod arming_tests {
                 ttp: Some(super::Ttp { arm: 0, trail: 0 }),
             },
             Side::Long,
+            None,
         );
 
         assert!(
