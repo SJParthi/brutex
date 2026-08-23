@@ -686,10 +686,40 @@ impl Results {
             .map_err(|why| format!("the results file could not be extended: {why}"))?;
         self.file
             .write_all(&record.to_bytes())
-            .map_err(|why| format!("the record could not be written: {why}"))?;
-        self.file
-            .flush()
-            .map_err(|why| format!("the record could not be flushed: {why}"))?;
+            .and_then(|()| self.file.flush())
+            // A FAILED WRITE IS ROLLED BACK, AND THIS IS THE ONE PLACE THAT IS
+            // NOT A SILENT REPAIR.
+            //
+            // `write_all` on a full filesystem can put SOME of the 213 bytes
+            // down before it fails, and `Results::open` refuses a ledger whose
+            // tail is a part-record — correctly, since it cannot know what put
+            // the bytes there. So one `ENOSPC` would leave a ledger that every
+            // later process refuses to open, over bytes that were never a record
+            // and that nobody wants.
+            //
+            // Here the cause IS known: this call just failed, and `at` is where
+            // the file ended before it started. Truncating back to `at` removes
+            // bytes this function wrote and nothing else. That is not the
+            // history §3 rule 8 protects — a record that was never completed was
+            // never a record — and it is the difference between a disk that
+            // filled up and a ledger that has to be repaired by hand.
+            //
+            // The refusal still names the write failure, so nothing is hidden.
+            // If the rollback ITSELF fails, both reasons are reported: an
+            // operator facing a truncate that cannot run needs to know the tail
+            // is still there.
+            .map_err(|why| match self.file.set_len(at) {
+                Ok(()) => format!(
+                    "the record could not be written: {why}. The partial write \
+                     was rolled back, so the ledger still ends on a whole record."
+                ),
+                Err(and) => format!(
+                    "the record could not be written: {why}. Rolling the partial \
+                     write back ALSO failed: {and}. The file may now end mid-record \
+                     and will be refused on the next open until its tail is cut \
+                     back to byte {at}."
+                ),
+            })?;
         self.seen.insert(record.identity);
         self.scanned = at.saturating_add(STRIDE);
         Ok(at.saturating_sub(HEADER) / STRIDE)
