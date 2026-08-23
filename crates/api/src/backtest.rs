@@ -83,7 +83,7 @@ const MAGIC: [u8; 8] = *b"BRUTEXRS";
 /// byte pattern is a legal value of its type — and produce a page of confident
 /// nonsense, which is the failure wearing a success's clothes `CLAUDE.md` §4
 /// bans.
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 /// Magic, version, and four reserved bytes.
 const HEADER: u64 = 16;
@@ -97,17 +97,51 @@ const HEADER_BYTES: usize = 16;
 
 const _: () = assert!(HEADER_BYTES as u64 == HEADER);
 
-/// Bytes per record.
+/// Bytes per record: 205 of fields and 8 of seal.
 ///
-/// The number is `cli::results::STRIDE` and it is not a guess: [`FIELD_SUM`]
-/// below adds the fields up and the assertion fails the build if they disagree.
-const STRIDE: u64 = 205;
+/// The number is `cli::results::STRIDE`, and it is now PINNED to it rather than
+/// merely copied from it — see the assertion below.
+const STRIDE: u64 = 213;
 
 /// [`STRIDE`] as a `usize`, for the record array. Same reason as
 /// [`HEADER_BYTES`].
-const STRIDE_BYTES: usize = 205;
+const STRIDE_BYTES: usize = 213;
 
 const _: () = assert!(STRIDE_BYTES as u64 == STRIDE);
+
+/// **The link to the writer, which until version 2 was a claim rather than a
+/// check — and the claim was false.**
+///
+/// The comment on [`FIELD_SUM`] used to argue that `cli` could not change the
+/// stride without breaking this crate's build. It could, and it did. When `cli`
+/// went from 205 to 213 nothing here referenced its constant, so `STRIDE_BYTES`
+/// and `FIELD_SUM` went on agreeing with EACH OTHER and this crate compiled
+/// perfectly while reading a stride the writer had stopped using. Two
+/// declarations that are only checked against themselves are not cross-checked
+/// at all.
+///
+/// What actually caught it was the version check in [`read_from`], which
+/// refused the file and printed a sentence naming both versions — the loud
+/// degrade `CLAUDE.md` §4 demands, doing exactly its job. But a refusal is the
+/// LAST line, not the first: it fires at runtime, on the operator's screen,
+/// after a release. This assertion fires at compile time, in CI, before one.
+///
+/// `api` already depends on `cli` — that arrow was added for `sweeprun` — so
+/// the pin costs one `const` and no new dependency. The layout stays
+/// independently declared, because importing `cli`'s READER would import its
+/// O(runs) duplicate-detection pass at open, which this crate deliberately does
+/// not pay. Independent decode, pinned constants.
+const _: () = assert!(STRIDE_BYTES == cli::results::STRIDE_BYTES);
+
+/// Bytes of a record that the fields occupy: everything before the seal.
+///
+/// Identical to version 1's WHOLE record, which is why every offset in
+/// [`Run::from_bytes`] is unchanged across the version bump — version 2 appends
+/// a seal, it does not move a field.
+const PAYLOAD_BYTES: usize = STRIDE_BYTES - SEAL_BYTES;
+
+/// Bytes of `blake3` kept as the per-record seal, matching `cli::results`.
+const SEAL_BYTES: usize = 8;
 
 /// Every field's width, added up in the writer's own order.
 ///
@@ -117,10 +151,13 @@ const _: () = assert!(STRIDE_BYTES as u64 == STRIDE);
 /// `min_hits` and `combinations` 8 each, `depth` 4, `halted` 1, `trades` 8,
 /// seven `i64` figures at 8, and five `i16` exit rungs at 2.
 ///
-/// If `cli` adds a field, its own `the_stride_is_exactly_what_the_writer_writes`
-/// fails first and `STRIDE` changes there; this constant then disagrees with
-/// [`STRIDE_BYTES`] and THIS crate stops compiling. Neither side can drift
-/// silently, which is the only property that makes the duplication acceptable.
+/// Checked against [`PAYLOAD_BYTES`], not [`STRIDE_BYTES`]: the seal is not a
+/// field and no offset below addresses it.
+///
+/// **This assertion proves the fields agree with each other. It does NOT prove
+/// they agree with the writer** — that is what the `cli::results::STRIDE_BYTES`
+/// pin above is for, and the absence of that pin is how version 2 shipped past
+/// a build that had every reason to look green.
 const FIELD_SUM: usize = 32
     + 8
     + 16
@@ -145,7 +182,23 @@ const FIELD_SUM: usize = 32
     + 8
     + (5 * 2);
 
-const _: () = assert!(FIELD_SUM == STRIDE_BYTES);
+const _: () = assert!(FIELD_SUM == PAYLOAD_BYTES);
+
+/// Eight bytes of `blake3` over the record's payload, matching
+/// `cli::results::seal_of` — same hasher, same 205 bytes, same truncation.
+///
+/// Recomputed here rather than imported because `cli`'s is private, and it is
+/// four lines. If the two ever disagree the seal check below fails on every
+/// record and the page says so loudly, which is a visible failure rather than a
+/// silent one.
+fn seal_of(raw: &[u8; STRIDE_BYTES]) -> [u8; SEAL_BYTES] {
+    let mut hasher = brutex_core::blake3::Hasher::new();
+    hasher.update(&raw[..PAYLOAD_BYTES]);
+    let full = hasher.finalize();
+    let mut out = [0_u8; SEAL_BYTES];
+    out.copy_from_slice(&full[..SEAL_BYTES]);
+    out
+}
 
 /// The most records one request will read.
 ///
@@ -229,6 +282,20 @@ pub struct Run {
     /// Chosen exit rungs, `-1` for "no rung": stop, target, TSL, TTP arm, TTP
     /// trail.
     pub exit_rungs: [i16; 5],
+    /// Whether the record's own `blake3` seal matches the bytes read back.
+    ///
+    /// **A false here does not mean the numbers above are wrong — it means they
+    /// cannot be trusted to be right**, which is a different claim and the only
+    /// honest one. Every byte pattern is a legal value of its type, so a record
+    /// damaged after it was written parses cleanly and renders as a run that
+    /// never happened. Version 1 had no way to tell the two apart.
+    ///
+    /// Reported per record rather than fatally, for the same reason
+    /// `partial_tail` is: one damaged record must not empty the page of the
+    /// good ones beside it. The page shows the row and marks it, which is the
+    /// loud degrade `CLAUDE.md` §4 requires — a silently dropped row would be
+    /// the fallback that hides a failure it bans.
+    pub sealed: bool,
 }
 
 impl Run {
@@ -311,6 +378,10 @@ impl Run {
             winner_mfe: mfe_winners,
             all_mae,
             exit_rungs,
+            // CONSTANT WORK PER RECORD, not a scan: `blake3` over a fixed 205
+            // bytes. The read is already O(take) records; this keeps the same
+            // order and adds a fixed factor, so §3 rule 4 is untouched.
+            sealed: seal_of(raw) == raw[PAYLOAD_BYTES..STRIDE_BYTES],
         }
     }
 
@@ -366,6 +437,7 @@ impl Run {
         let _ = write!(out, r#","combinations":{}"#, self.combinations);
         let _ = write!(out, r#","depth":{}"#, self.depth);
         let _ = write!(out, r#","halted":{}"#, self.halted);
+        let _ = write!(out, r#","sealed":{}"#, self.sealed);
         let _ = write!(out, r#","trades":{}"#, self.trades);
         let _ = write!(out, r#","pessimistic":{}"#, self.pessimistic);
         let _ = write!(out, r#","optimistic":{}"#, self.optimistic);
@@ -433,7 +505,16 @@ impl Ledger {
     /// The best COMPLETE run, by the figure selection ranks on.
     ///
     /// **Halted rows are excluded, and that is the whole point of the
-    /// function.** A halted ladder stopped short, so its `combinations` covers
+    /// function. UNSEALED rows are excluded for a stronger reason.** A halted
+    /// run is honest and incomplete; an unsealed one is bytes that parse and
+    /// may describe a run that never happened. Ranking is the one place a
+    /// damaged record does maximum harm — it does not add a bad row to a table
+    /// the operator can scan past, it names the ANSWER — and a corrupted
+    /// `pessimistic` is as likely to be enormous as tiny, so the damaged record
+    /// is disproportionately likely to win. It is excluded here and still shown
+    /// in the table, marked.
+    ///
+    /// A halted ladder stopped short, so its `combinations` covers
     /// less of the search while reading larger, and crowning it would propose a
     /// winner no other surface in this workspace agrees with. `cli`'s
     /// `best_complete_line` does exactly this and says `NO COMPLETE RUN` when
@@ -465,7 +546,7 @@ impl Ledger {
     pub fn best_complete(&self) -> Option<&Run> {
         self.runs
             .iter()
-            .filter(|run| !run.halted)
+            .filter(|run| !run.halted && run.sealed)
             .max_by_key(|run| (run.pessimistic, std::cmp::Reverse(run.index)))
     }
 
@@ -476,6 +557,22 @@ impl Ledger {
     #[must_use]
     pub fn halted_count(&self) -> usize {
         self.runs.iter().filter(|run| run.halted).count()
+    }
+
+    /// How many of the runs read failed their integrity seal.
+    ///
+    /// Its own number for the same reason `halted_count` is: the operator needs
+    /// to know that some rows are untrustworthy WITHOUT reading every row to
+    /// find out. Zero is the answer on every healthy ledger, which is what
+    /// makes a non-zero one worth a banner.
+    ///
+    /// Distinct from `halted_count` and never merged with it. A halted run is
+    /// one the ENGINE stopped short — the bytes are perfect and the run is
+    /// simply incomplete. An unsealed run is one the bytes cannot vouch for,
+    /// and it may be neither halted nor complete but noise that parses.
+    #[must_use]
+    pub fn unsealed_count(&self) -> usize {
+        self.runs.iter().filter(|run| !run.sealed).count()
     }
 
     /// The whole answer as JSON.
@@ -494,6 +591,7 @@ impl Ledger {
         let _ = write!(out, r#","partial_tail":{}"#, self.partial_tail);
         let _ = write!(out, r#","max_runs":{MAX_RUNS}"#);
         let _ = write!(out, r#","halted":{}"#, self.halted_count());
+        let _ = write!(out, r#","unsealed":{}"#, self.unsealed_count());
         match self.best_complete() {
             Some(run) => {
                 let _ = write!(out, r#","best_complete":{}"#, run.index);
@@ -795,7 +893,7 @@ fn respond(
                 axum::http::StatusCode::SERVICE_UNAVAILABLE,
                 json,
                 format!(
-                    r#"{{"path":"","total":0,"scanned":0,"hit_scan_cap":false,"partial_tail":false,"max_runs":{MAX_RUNS},"halted":0,"best_complete":null,"refusal":{},"runs":[]}}"#,
+                    r#"{{"path":"","total":0,"scanned":0,"hit_scan_cap":false,"partial_tail":false,"max_runs":{MAX_RUNS},"halted":0,"unsealed":0,"best_complete":null,"refusal":{},"runs":[]}}"#,
                     render::json_string(&why)
                 ),
             );
@@ -831,8 +929,8 @@ fn limit_asked(raw: &str) -> usize {
 )]
 mod tests {
     use super::{
-        DEFAULT_LIMIT, HEADER_BYTES, Ledger, MAX_RUNS, STRIDE_BYTES, limit_asked, path_in, read,
-        read_from, respond, text,
+        DEFAULT_LIMIT, HEADER_BYTES, Ledger, MAX_RUNS, PAYLOAD_BYTES, STRIDE_BYTES, VERSION,
+        limit_asked, path_in, read, read_from, respond, seal_of, text,
     };
     use std::io::{Cursor, Read, Seek, SeekFrom};
 
@@ -894,6 +992,23 @@ mod tests {
         for rung in [-1_i16, -1, 1, 0, 0] {
             put(&rung.to_le_bytes(), &mut at);
         }
+        // THE FIELDS MUST END EXACTLY WHERE THE SEAL BEGINS. Asserted rather
+        // than trusted: if a field above were the wrong width, the seal would
+        // be written over a field and every record would fail its own check
+        // for a reason that has nothing to do with corruption.
+        assert_eq!(at, PAYLOAD_BYTES, "every field is written before the seal");
+        let seal = seal_of(&out);
+        out[PAYLOAD_BYTES..STRIDE_BYTES].copy_from_slice(&seal);
+        out
+    }
+
+    /// [`record`], with one payload byte flipped AFTER the seal was computed.
+    ///
+    /// This is what damage looks like: the record still parses, every field is
+    /// still a legal value of its type, and only the seal knows.
+    fn damaged(n: u8, halted: bool, pessimistic: i64) -> [u8; STRIDE_BYTES] {
+        let mut out = record(n, halted, pessimistic);
+        out[0] ^= 0b1000_0000;
         out
     }
 
@@ -980,7 +1095,7 @@ mod tests {
 
     #[test]
     fn every_field_lands_where_the_writer_put_it() {
-        let ledger = over(file(1, &[record(7, false, 34_302)]), 10);
+        let ledger = over(file(VERSION, &[record(7, false, 34_302)]), 10);
         assert_eq!(ledger.refusal, None, "a good file refuses nothing");
         let run = ledger.runs.first().expect("one run");
         assert_eq!(run.index, 0);
@@ -1011,7 +1126,7 @@ mod tests {
 
     #[test]
     fn a_halted_record_reads_as_halted() {
-        let ledger = over(file(1, &[record(1, true, 10)]), 10);
+        let ledger = over(file(VERSION, &[record(1, true, 10)]), 10);
         assert!(ledger.runs.first().expect("one run").halted);
         assert_eq!(ledger.halted_count(), 1);
     }
@@ -1019,8 +1134,8 @@ mod tests {
     #[test]
     fn a_short_span_is_not_a_whole_span() {
         // `months_found` is seeded from `n`, so 81 is whole and 7 is not.
-        assert!(!over(file(1, &[record(7, false, 1)]), 10).runs[0].whole_span());
-        assert!(over(file(1, &[record(81, false, 1)]), 10).runs[0].whole_span());
+        assert!(!over(file(VERSION, &[record(7, false, 1)]), 10).runs[0].whole_span());
+        assert!(over(file(VERSION, &[record(81, false, 1)]), 10).runs[0].whole_span());
     }
 
     #[test]
@@ -1041,7 +1156,7 @@ mod tests {
     fn runs_arrive_newest_first() {
         let ledger = over(
             file(
-                1,
+                VERSION,
                 &[
                     record(1, false, 10),
                     record(2, false, 20),
@@ -1061,7 +1176,7 @@ mod tests {
     fn a_limit_takes_the_newest_and_says_it_stopped() {
         let ledger = over(
             file(
-                1,
+                VERSION,
                 &[
                     record(1, false, 10),
                     record(2, false, 20),
@@ -1088,7 +1203,7 @@ mod tests {
     fn the_best_complete_run_is_the_highest_worst_case_total() {
         let ledger = over(
             file(
-                1,
+                VERSION,
                 &[
                     record(1, false, 100),
                     record(2, false, 900), // best, and complete
@@ -1104,7 +1219,7 @@ mod tests {
     fn a_halted_run_is_never_crowned_however_large_its_total() {
         let ledger = over(
             file(
-                1,
+                VERSION,
                 &[
                     record(1, false, 100),
                     record(2, true, 9_000_000), // enormous, and HALTED
@@ -1120,7 +1235,10 @@ mod tests {
 
     #[test]
     fn no_complete_run_is_none_rather_than_a_fabricated_winner() {
-        let ledger = over(file(1, &[record(1, true, 10), record(2, true, 20)]), 10);
+        let ledger = over(
+            file(VERSION, &[record(1, true, 10), record(2, true, 20)]),
+            10,
+        );
         assert!(ledger.best_complete().is_none());
         assert_eq!(ledger.halted_count(), 2);
         assert!(ledger.to_json().contains(r#""best_complete":null"#));
@@ -1128,7 +1246,7 @@ mod tests {
 
     #[test]
     fn an_empty_ledger_has_no_best_and_no_refusal() {
-        let ledger = over(file(1, &[]), 10);
+        let ledger = over(file(VERSION, &[]), 10);
         assert_eq!(ledger.total, 0);
         assert!(ledger.runs.is_empty());
         assert!(ledger.best_complete().is_none());
@@ -1141,7 +1259,10 @@ mod tests {
     #[test]
     fn a_tie_breaks_toward_the_earlier_run() {
         // Two identical totals are the same answer; the one on disk longest wins.
-        let ledger = over(file(1, &[record(1, false, 500), record(2, false, 500)]), 10);
+        let ledger = over(
+            file(VERSION, &[record(1, false, 500), record(2, false, 500)]),
+            10,
+        );
         assert_eq!(ledger.best_complete().expect("a winner").index, 0);
     }
 
@@ -1178,11 +1299,120 @@ mod tests {
     }
 
     #[test]
+    fn a_record_this_build_wrote_carries_a_seal_that_checks_out() {
+        let ledger = over(file(VERSION, &[record(1, false, 10)]), 10);
+        assert!(ledger.runs[0].sealed, "an undamaged record must verify");
+        assert_eq!(ledger.unsealed_count(), 0);
+    }
+
+    #[test]
+    fn one_flipped_bit_is_caught_even_though_every_field_still_parses() {
+        let ledger = over(file(VERSION, &[damaged(1, false, 10)]), 10);
+        // THE POINT OF THE SEAL, IN ONE ASSERTION. The record read back
+        // perfectly: it is present, it is the right length, and every field
+        // holds a legal value of its type. Version 1 had no way to know it was
+        // not what the writer wrote.
+        assert_eq!(ledger.scanned, 1, "the record parses, damage and all");
+        assert_eq!(ledger.runs[0].pessimistic, 10, "the fields decode fine");
+        assert!(!ledger.runs[0].sealed, "and the seal is what knows better");
+        assert_eq!(ledger.unsealed_count(), 1);
+    }
+
+    #[test]
+    fn a_damaged_record_is_shown_and_marked_rather_than_dropped() {
+        let ledger = over(
+            file(VERSION, &[record(1, false, 10), damaged(2, false, 20)]),
+            10,
+        );
+        // NOT 1. Dropping the bad row would be the fallback that hides a
+        // failure §4 bans, and it would also make `total` disagree with the
+        // number of rows on the page for a reason nothing on the page states.
+        assert_eq!(ledger.runs.len(), 2, "both rows are served");
+        assert_eq!(ledger.total, 2);
+        assert_eq!(ledger.unsealed_count(), 1, "and one of them is marked");
+    }
+
+    #[test]
+    fn a_damaged_record_can_never_be_crowned_however_good_it_looks() {
+        // The damaged record has the HIGHER pessimistic, so it wins on every
+        // rule except the one that matters. Corruption is as likely to inflate
+        // a figure as to deflate it, which makes the damaged row
+        // disproportionately likely to top a ranking — the one place it does
+        // the most harm, because it is named as the answer.
+        let ledger = over(
+            file(VERSION, &[record(1, false, 10), damaged(2, false, 9_999)]),
+            10,
+        );
+        let best = ledger.best_complete().expect("the sound record wins");
+        assert_eq!(best.pessimistic, 10, "the sealed row, not the larger one");
+        assert!(best.sealed);
+    }
+
+    #[test]
+    fn a_ledger_of_nothing_but_damage_names_no_winner_at_all() {
+        // `None` rather than "the least bad of them". There is no complete,
+        // trustworthy run, and saying so is the whole contract.
+        let ledger = over(
+            file(VERSION, &[damaged(1, false, 10), damaged(2, false, 20)]),
+            10,
+        );
+        assert!(ledger.best_complete().is_none());
+        assert_eq!(ledger.unsealed_count(), 2);
+    }
+
+    #[test]
+    fn halted_and_unsealed_are_counted_apart_because_they_mean_apart() {
+        // A halted run is honest and incomplete. An unsealed one is bytes that
+        // cannot be vouched for. Merging the two counts would tell the operator
+        // "3 rows are odd" when the truth is "1 stopped early and 2 may be
+        // fiction", and only one of those is worth waking up for.
+        let ledger = over(
+            file(
+                VERSION,
+                &[
+                    record(1, true, 10),
+                    damaged(2, false, 20),
+                    damaged(3, false, 30),
+                ],
+            ),
+            10,
+        );
+        assert_eq!(ledger.halted_count(), 1);
+        assert_eq!(ledger.unsealed_count(), 2);
+    }
+
+    #[test]
+    fn the_seal_covers_the_payload_and_stops_short_of_itself() {
+        // A seal that covered itself could not be written: computing it would
+        // change the bytes it was computed over. Flipping a byte INSIDE the
+        // seal slot must therefore still be caught -- by mismatch, not by
+        // recursion -- while the payload is untouched.
+        let mut raw = record(1, false, 10);
+        assert_eq!(seal_of(&raw), raw[PAYLOAD_BYTES..STRIDE_BYTES]);
+        raw[PAYLOAD_BYTES] ^= 0b1000_0000;
+        assert_ne!(seal_of(&raw), raw[PAYLOAD_BYTES..STRIDE_BYTES]);
+        assert!(!over(file(VERSION, &[raw]), 10).runs[0].sealed);
+    }
+
+    #[test]
+    fn the_json_carries_the_seal_so_the_page_can_mark_the_row() {
+        // A flag the page cannot read is a flag that does not exist.
+        let json = over(
+            file(VERSION, &[record(1, false, 10), damaged(2, false, 20)]),
+            10,
+        )
+        .to_json();
+        assert!(json.contains(r#""unsealed":1"#), "{json}");
+        assert!(json.contains(r#""sealed":true"#), "{json}");
+        assert!(json.contains(r#""sealed":false"#), "{json}");
+    }
+
+    #[test]
     fn an_unknown_version_is_refused_rather_than_guessed_at() {
         let ledger = over(file(9, &[record(1, false, 10)]), 10);
         let why = ledger.refusal.expect("a sentence");
         assert!(why.contains("version 9"), "{why}");
-        assert!(why.contains("reads version 1"), "{why}");
+        assert!(why.contains(&format!("reads version {VERSION}")), "{why}");
         assert!(
             why.contains("land mid-record"),
             "the refusal must say WHY guessing is worse: {why}"
@@ -1192,7 +1422,7 @@ mod tests {
 
     #[test]
     fn a_ragged_tail_is_named_and_the_whole_records_are_still_served() {
-        let mut bytes = file(1, &[record(1, false, 10), record(2, false, 20)]);
+        let mut bytes = file(VERSION, &[record(1, false, 10), record(2, false, 20)]);
         bytes.extend_from_slice(&[0_u8; 30]); // an interrupted third append
         let ledger = over(bytes, 10);
         assert!(ledger.partial_tail, "the ragged tail is reported");
@@ -1203,7 +1433,7 @@ mod tests {
 
     #[test]
     fn a_length_that_cannot_be_taken_refuses_with_the_path() {
-        let ledger = over_failing(FailsAt::new(file(1, &[])).seek_fails_after(0), 10);
+        let ledger = over_failing(FailsAt::new(file(VERSION, &[])).seek_fails_after(0), 10);
         let why = ledger.refusal.expect("a sentence");
         assert!(why.contains("could not be measured"), "{why}");
         assert!(why.contains("/fixture/runs.bin"), "{why}");
@@ -1212,7 +1442,7 @@ mod tests {
     #[test]
     fn an_unreadable_header_refuses_with_the_path() {
         let ledger = over_failing(
-            FailsAt::new(file(1, &[record(1, false, 10)])).read_fails_after(0),
+            FailsAt::new(file(VERSION, &[record(1, false, 10)])).read_fails_after(0),
             10,
         );
         let why = ledger.refusal.expect("a sentence");
@@ -1225,7 +1455,7 @@ mod tests {
         // Read 1 is the header; read 2 is the newest record; read 3 fails.
         let ledger = over_failing(
             FailsAt::new(file(
-                1,
+                VERSION,
                 &[
                     record(1, false, 10),
                     record(2, false, 20),
@@ -1280,7 +1510,7 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("results")).expect("a temp root");
-        std::fs::write(path_in(&root), file(1, &[record(4, false, 44)])).expect("the ledger");
+        std::fs::write(path_in(&root), file(VERSION, &[record(4, false, 44)])).expect("the ledger");
         let ledger = read(&root, 10);
         assert_eq!(ledger.refusal, None);
         assert_eq!(ledger.total, 1);
@@ -1292,7 +1522,7 @@ mod tests {
 
     #[test]
     fn the_json_carries_every_field_as_a_number_not_a_string() {
-        let ledger = over(file(1, &[record(7, false, 34_302)]), 10);
+        let ledger = over(file(VERSION, &[record(7, false, 34_302)]), 10);
         let json = ledger.to_json();
         for fragment in [
             r#""index":0"#,
@@ -1344,7 +1574,11 @@ mod tests {
 
     #[test]
     fn several_runs_are_comma_separated_and_not_trailing() {
-        let json = over(file(1, &[record(1, false, 10), record(2, false, 20)]), 10).to_json();
+        let json = over(
+            file(VERSION, &[record(1, false, 10), record(2, false, 20)]),
+            10,
+        )
+        .to_json();
         assert!(json.contains("},{"), "two objects, one comma");
         assert!(!json.contains(",]"), "no trailing comma: {json}");
     }
@@ -1385,7 +1619,7 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("results")).expect("a temp root");
-        std::fs::write(path_in(&root), file(1, &[record(2, false, 22)])).expect("the ledger");
+        std::fs::write(path_in(&root), file(VERSION, &[record(2, false, 22)])).expect("the ledger");
         let (status, headers, body) = respond(Ok(root.clone()), "limit=1");
         assert_eq!(status, axum::http::StatusCode::OK);
         assert_eq!(headers[0].1, "application/json; charset=utf-8");
@@ -1415,12 +1649,20 @@ mod tests {
 
     #[test]
     fn the_stride_is_the_sum_of_the_fields_the_writer_writes() {
-        // The const assertion above already fails the BUILD if these disagree.
-        // This states the number in a third place so the intent survives a
-        // careless edit to either constant.
-        assert_eq!(super::STRIDE_BYTES, 205);
+        // The const assertions above already fail the BUILD if these disagree.
+        // This states the numbers in a third place so the intent survives a
+        // careless edit to any one constant.
+        assert_eq!(super::STRIDE_BYTES, 213, "205 of fields and 8 of seal");
         assert_eq!(super::FIELD_SUM, 205);
+        assert_eq!(PAYLOAD_BYTES, 205, "version 1's whole record");
+        assert_eq!(super::SEAL_BYTES, 8);
         assert_eq!(super::HEADER_BYTES, 16);
+        // AND THE ONE THAT WOULD HAVE CAUGHT VERSION 2 BEFORE IT SHIPPED.
+        // Everything above is this crate agreeing with itself, which it did
+        // throughout the incident: 205 and 205 stayed equal while the writer
+        // moved to 213. Only a line naming `cli`'s constant can fail when the
+        // WRITER changes, and that is the whole lesson.
+        assert_eq!(super::STRIDE_BYTES, cli::results::STRIDE_BYTES);
     }
 
     #[test]
@@ -1436,7 +1678,10 @@ mod tests {
         // Record 0 read from a two-record file must be record 0, not record 1
         // read at the wrong offset -- the failure a wrong stride produces
         // silently.
-        let ledger = over(file(1, &[record(1, false, 111), record(2, false, 222)]), 10);
+        let ledger = over(
+            file(VERSION, &[record(1, false, 111), record(2, false, 222)]),
+            10,
+        );
         let older = ledger.runs.iter().find(|r| r.index == 0).expect("record 0");
         assert_eq!(older.pessimistic, 111);
         assert_eq!(older.identity, "01".repeat(32));
@@ -1452,17 +1697,25 @@ mod tests {
         // `"runs":[,{…}]` — a document no parser accepts. The existing test
         // checked for a TRAILING comma and for `},{` between elements, and a
         // leading one is neither.
-        let one = over(file(1, &[record(1, false, 10)]), 10).to_json();
+        let one = over(file(VERSION, &[record(1, false, 10)]), 10).to_json();
         assert!(one.contains(r#""runs":[{"#), "no leading comma: {one}");
         assert!(!one.contains(r#""runs":[,"#), "{one}");
 
-        let many = over(file(1, &[record(1, false, 10), record(2, false, 20)]), 10).to_json();
+        let many = over(
+            file(VERSION, &[record(1, false, 10), record(2, false, 20)]),
+            10,
+        )
+        .to_json();
         assert!(many.contains(r#""runs":[{"#), "{many}");
         assert!(many.contains("},{"), "one separator between two");
         assert!(!many.contains(",]"), "and none at the end");
 
         // An empty ledger emits an empty array, not one holding a comma.
-        assert!(over(file(1, &[]), 10).to_json().contains(r#""runs":[]"#));
+        assert!(
+            over(file(VERSION, &[]), 10)
+                .to_json()
+                .contains(r#""runs":[]"#)
+        );
     }
 
     #[test]
@@ -1473,7 +1726,10 @@ mod tests {
         // fail. The reduce is `pub`, so it must not quietly depend on its
         // caller's ordering: the same runs in EITHER order must name the same
         // winner, and on a tie that winner is the LOWER index.
-        let newest_first = over(file(1, &[record(1, false, 500), record(2, false, 500)]), 10);
+        let newest_first = over(
+            file(VERSION, &[record(1, false, 500), record(2, false, 500)]),
+            10,
+        );
         assert_eq!(
             newest_first.best_complete().expect("a winner").index,
             0,
@@ -1492,7 +1748,7 @@ mod tests {
         // And a clear winner is found from either end.
         let mut mixed = over(
             file(
-                1,
+                VERSION,
                 &[
                     record(1, false, 100),
                     record(2, false, 900),
