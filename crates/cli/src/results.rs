@@ -49,9 +49,10 @@ pub type Refusal = String;
 /// `BRUTEXRS`, so a file that is not this one is refused before it is parsed.
 const MAGIC: [u8; 8] = *b"BRUTEXRS";
 
-/// Version one. A new field is a new version at its own stride, never a
+/// Version TWO: version one had no seal. A new field is a new version at its
+/// own stride, never a
 /// widened record — `CLAUDE.md` §4 and §3 rule 8 together.
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 /// Magic, version, and four bytes reserved so the header is a round sixteen.
 const HEADER: u64 = 16;
@@ -66,7 +67,13 @@ const _: () = assert!(HEADER_BYTES as u64 == HEADER);
 /// of unknown length, because a variable record has no stride and therefore no
 /// O(1) address.
 ///
-/// # 205, and it was 176 for about ten minutes
+/// # 213, and the last eight are the seal
+///
+/// Version 1 was 205 and carried no integrity check, so a record damaged after
+/// it was written parsed cleanly and rendered as a run that never happened.
+/// The eight added bytes are `blake3` over the other 205 -- see [`SEAL_BYTES`].
+///
+/// # It was 176 for about ten minutes
 ///
 /// This constant was declared before the fields were counted, and
 /// `the_stride_is_exactly_what_the_writer_writes` failed on its first run with
@@ -79,16 +86,46 @@ const _: () = assert!(HEADER_BYTES as u64 == HEADER);
 /// Not padded to a round number: §4 says a new field is a new file version at
 /// its own stride, so reserved space would be space for a change the format
 /// does not permit.
-pub const STRIDE: u64 = 205;
+pub const STRIDE: u64 = 213;
 
 /// [`STRIDE`] as a `usize`, for the record arrays.
 ///
 /// Declared rather than cast: `STRIDE as usize` is a narrowing on a 32-bit
 /// target and clippy is right to refuse it. Two constants that must agree, and
 /// a `const` assertion that they do -- which a cast could not give.
-pub const STRIDE_BYTES: usize = 205;
+pub const STRIDE_BYTES: usize = 213;
 
 const _: () = assert!(STRIDE_BYTES as u64 == STRIDE);
+
+/// Bytes of a record the seal covers: everything before the seal itself.
+///
+/// The seal cannot cover itself, so this is [`STRIDE_BYTES`] less [`SEAL_BYTES`]
+/// and it is also the stride version 1 used — the eight new bytes are the whole
+/// of the difference between the two versions.
+const PAYLOAD_BYTES: usize = STRIDE_BYTES - SEAL_BYTES;
+
+/// Bytes of `blake3` kept as the seal.
+///
+/// Eight and not thirty-two: the seal answers *were these bytes written
+/// together*, and a 64-bit digest gives a chance of about 1 in 1.8e19 that a
+/// corrupted record passes. A ledger holds thousands of records, not
+/// quintillions. Thirty-two bytes would spend 24 more per record to move a
+/// number that is already far below every other risk in the system.
+const SEAL_BYTES: usize = 8;
+
+/// Eight bytes of `blake3` over the record's payload.
+///
+/// Reads `raw[..PAYLOAD_BYTES]` and ignores whatever occupies the seal slot, so
+/// the same function serves the writer computing a seal and the reader checking
+/// one.
+fn seal_of(raw: &[u8; STRIDE_BYTES]) -> [u8; SEAL_BYTES] {
+    let mut hasher = brutex_core::blake3::Hasher::new();
+    hasher.update(&raw[..PAYLOAD_BYTES]);
+    let full = hasher.finalize();
+    let mut out = [0_u8; SEAL_BYTES];
+    out.copy_from_slice(&full[..SEAL_BYTES]);
+    out
+}
 
 /// One completed run, as it is stored.
 ///
@@ -199,7 +236,37 @@ impl Record {
         for rung in self.exit_rungs {
             put(&rung.to_le_bytes(), &mut at);
         }
+        debug_assert_eq!(at, PAYLOAD_BYTES, "every field is written before the seal");
+        let seal = seal_of(&out);
+        out[PAYLOAD_BYTES..STRIDE_BYTES].copy_from_slice(&seal);
         out
+    }
+
+    /// Does this record's seal match the bytes it covers?
+    ///
+    /// # What a seal catches that a stride check cannot
+    ///
+    /// `Results::open` refuses a ledger whose payload is not a whole number of
+    /// strides, which catches an interrupted write that stopped mid-record. It
+    /// cannot catch one that stopped exactly ON a boundary, nor a bit flipped
+    /// on disk years later, nor a byte written by something that is not this
+    /// program — every one of those still measures as a whole record, and every
+    /// byte pattern is a legal value of its type, so the parse succeeds and the
+    /// nonsense is rendered as data.
+    ///
+    /// The seal is what closes that: eight bytes of `blake3` over the 205 the
+    /// record actually carries. It is not a security claim — nothing here is
+    /// defending against a forger — it is a claim that these bytes are the ones
+    /// that were written together.
+    ///
+    /// # Cost
+    ///
+    /// **O(1).** One hash of a FIXED 205 bytes, per record read or written.
+    /// Not per bar and not per candidate, so it is not on the path §3 rule 4
+    /// governs.
+    #[must_use]
+    pub fn seal_matches(raw: &[u8; STRIDE_BYTES]) -> bool {
+        seal_of(raw) == raw[PAYLOAD_BYTES..STRIDE_BYTES]
     }
 
     /// The record back from its exact `STRIDE` bytes.
@@ -536,6 +603,31 @@ impl Results {
             .seek(SeekFrom::Start(at))
             .and_then(|_| self.file.read_exact(&mut raw))
             .map_err(|why| format!("record {index} could not be read: {why}"))?;
+        // THE SEAL IS CHECKED HERE, NOT AT OPEN, AND THAT IS THE POINT.
+        //
+        // Checking every record at open would make opening O(runs) in HASHING
+        // rather than only in the identity pass, and would refuse a whole ledger
+        // because one record in the middle went bad. Checking at read refuses
+        // exactly the record that is unreadable and leaves every other one
+        // available — which is what an operator needs when a disk has damaged
+        // one row out of thousands.
+        //
+        // `from_bytes` is infallible by construction: every byte pattern is a
+        // legal value of its type, so a damaged record PARSES and renders as
+        // data. The seal is the only thing standing between that and a number
+        // an operator would act on.
+        if !Record::seal_matches(&raw) {
+            return Err(format!(
+                "record {index} does not match its seal: the eight bytes written \
+                 with it do not describe the {PAYLOAD_BYTES} bytes now on disk. \
+                 The record was damaged after it was written -- an interrupted \
+                 write that stopped on a stride boundary, a bad sector, or \
+                 something that is not this program writing to this file. It is \
+                 NOT repaired and NOT skipped silently, because every byte \
+                 pattern here parses into a legal record and would render as a \
+                 run that never happened."
+            ));
+        }
         Ok(Record::from_bytes(&raw))
     }
 }
@@ -549,7 +641,10 @@ impl Results {
               warning"
 )]
 mod tests {
-    use super::{HEADER, HEADER_BYTES, Record, Results, STRIDE, field, read_field};
+    use super::{
+        HEADER, HEADER_BYTES, PAYLOAD_BYTES, Record, Results, SEAL_BYTES, STRIDE, STRIDE_BYTES,
+        field, read_field,
+    };
 
     fn root(tag: &str) -> std::path::PathBuf {
         let p = std::env::temp_dir().join(format!("brutex-results-{tag}"));
@@ -610,10 +705,21 @@ mod tests {
             + 8 + 8                // pessimistic, optimistic
             + 8 + 8                // worst_trade, max_drawdown
             + 8 + 8 + 8            // winner_mae, winner_mfe, all_mae
-            + 2 * 5; // exit_rungs
+            + 2 * 5                // exit_rungs
+            + 8; // the seal, which is version 2's whole difference from version 1
         assert_eq!(
             STRIDE, EXPECTED,
             "the declared stride must be the sum of the fields"
+        );
+        // The payload is the stride LESS the seal, and the seal cannot cover
+        // itself. Asserted rather than assumed because `seal_of` slices by this
+        // constant: were it wrong by one, every seal would be computed over a
+        // window that excluded a real field, and a change to that field would
+        // pass its own integrity check.
+        assert_eq!(
+            PAYLOAD_BYTES as u64 + SEAL_BYTES as u64,
+            STRIDE,
+            "the seal covers everything that is not the seal"
         );
         assert_eq!(
             record(1).to_bytes().len() as u64,
@@ -740,6 +846,7 @@ mod tests {
     /// only acceptable remainder is zero.
     #[test]
     fn a_part_record_from_an_interrupted_write_is_refused_and_counted() {
+        use std::io::Write as _;
         for orphan in [1_u64, 7, 100, STRIDE - 1] {
             let r = root(&format!("torn{orphan}"));
             {
@@ -749,7 +856,6 @@ mod tests {
             }
             // The interrupted write itself: bytes that are not a whole record.
             let path = Results::path(&r);
-            use std::io::Write as _;
             let mut f = std::fs::OpenOptions::new()
                 .append(true)
                 .open(&path)
@@ -789,6 +895,87 @@ mod tests {
         }
         let store = Results::open(&r).expect("a ledger with no orphan bytes reopens");
         assert_eq!(store.len().expect("measurable"), 3);
+    }
+
+    /// A WHOLE-STRIDE RECORD THAT WAS DAMAGED AFTER IT WAS WRITTEN IS REFUSED.
+    ///
+    /// # The case the stride check cannot reach
+    ///
+    /// `a_part_record_from_an_interrupted_write_is_refused_and_counted` catches
+    /// a write that stopped PARTWAY through a record, because the file then
+    /// measures as a fraction of a stride. It says nothing about a file that
+    /// measures perfectly: a write that stopped exactly on a boundary, a bit
+    /// flipped by a failing disk, or a byte put there by something that is not
+    /// this program. Each of those leaves a whole number of strides.
+    ///
+    /// Nothing else would notice. `from_bytes` is infallible by construction —
+    /// every byte pattern is a legal value of its type — so a damaged record
+    /// parses cleanly and renders as a run that never happened. That is the same
+    /// failure the 176/205 stride mistake would have caused, arriving by a
+    /// different route.
+    ///
+    /// # Every field is tried, not just the first
+    ///
+    /// A seal computed over too short a window would still catch damage to the
+    /// bytes it covers and miss everything past its end. Flipping a bit in the
+    /// FIRST byte, the LAST byte before the seal, and one in the middle is what
+    /// makes the window's width part of the assertion rather than an assumption.
+    #[test]
+    fn a_record_damaged_after_it_was_written_is_refused_and_not_parsed() {
+        for spot in [0_usize, PAYLOAD_BYTES / 2, PAYLOAD_BYTES - 1] {
+            let r = root(&format!("seal{spot}"));
+            {
+                let mut store = Results::open(&r).expect("opens");
+                store.append(&record(1)).expect("appends");
+                store.append(&record(2)).expect("appends");
+            }
+            // A single flipped bit inside record 1, the file length untouched.
+            let path = Results::path(&r);
+            let mut bytes = std::fs::read(&path).expect("the ledger reads");
+            let at = HEADER_BYTES + STRIDE_BYTES + spot;
+            *bytes.get_mut(at).expect(
+                "the fixture wrote two whole records, so this offset is inside record 1",
+            ) ^= 0b0000_0001;
+            std::fs::write(&path, &bytes).expect("the damaged ledger writes");
+
+            let mut store = Results::open(&r).expect("the LENGTH is still whole, so it opens");
+            assert_eq!(
+                store.len().expect("measurable"),
+                2,
+                "and it still measures as two whole records, which is precisely \
+                 why the length check cannot catch this"
+            );
+            store
+                .read(0)
+                .expect("the undamaged record beside it is still readable");
+            let why = store.read(1).expect_err("the damaged record is refused");
+            assert!(
+                why.contains("seal"),
+                "the refusal must say what failed, or an operator reads it as a \
+                 missing file: {why}"
+            );
+        }
+    }
+
+    /// The seal covers the payload and NOT itself.
+    ///
+    /// Without this row, a `seal_of` that hashed all `STRIDE_BYTES` — including
+    /// the eight it is about to overwrite — would pass every test above, because
+    /// writer and reader would agree with each other while agreeing about the
+    /// wrong window. They would also both be wrong in the same way forever.
+    #[test]
+    fn the_seal_is_computed_over_the_payload_and_never_over_itself() {
+        let mut raw = record(7).to_bytes();
+        assert!(Record::seal_matches(&raw), "as written, it matches");
+        // Damage only the seal slot: the payload is untouched, so a seal
+        // computed over the payload alone must now DISAGREE.
+        raw[PAYLOAD_BYTES] ^= 0b1000_0000;
+        assert!(
+            !Record::seal_matches(&raw),
+            "a changed seal over an unchanged payload must not still match"
+        );
+        // And the width is exactly the eight bytes past the payload.
+        assert_eq!(STRIDE_BYTES - PAYLOAD_BYTES, SEAL_BYTES);
     }
 
     #[test]
