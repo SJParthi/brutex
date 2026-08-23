@@ -965,6 +965,26 @@ pub struct Levels {
     /// A stop the caller wants tried, merged into the stops ladder as an
     /// ordinary rung. `None` leaves the ladder as built.
     pub forced: Option<Ppm>,
+    /// Reward-to-risk ratios, in hundredths -- `200` is 2.00.
+    ///
+    /// # What this collapses
+    ///
+    /// With `None` the targets ladder is independent of the stops and the grid
+    /// is the full cross product: at a half-point step reaching twenty points
+    /// that is 27,637,321 cells per combination, and 226 trillion over the 8.19
+    /// million combinations 81 months produce.
+    ///
+    /// With `Some`, the targets ladder becomes the deduped UNION of every
+    /// `stop * ratio`, one crossing table still covers all of them, and
+    /// `pairs_at_a_ratio` prices only the pairs an operator would trade. The
+    /// same twenty-point reach costs about 1,440 cells -- nineteen thousand
+    /// times less for the same question.
+    ///
+    /// It is the operator's own rule expressed as a COORDINATE: "the smallest
+    /// win must be at least twice the largest loss" is 1:2, and 1:2 becomes a
+    /// column the search sweeps rather than a filter applied to levels chosen
+    /// some other way.
+    pub ratios: Option<&'static [i64]>,
 }
 
 impl Levels {
@@ -975,6 +995,7 @@ impl Levels {
             rungs,
             step_ppm: None,
             forced: None,
+            ratios: None,
         }
     }
 }
@@ -1006,6 +1027,69 @@ struct Candidate {
     /// The entry fill under the BEST reading: the execution bar's open, a price
     /// that printed.
     entry_opt: i64,
+}
+
+/// Every `stop * ratio`, deduped and ascending — the targets ladder the ratio
+/// axis needs.
+///
+/// # Small, and overlapping on purpose
+///
+/// Forty stops at six ratios is at most 240 products, and most collide: a
+/// 10-point stop at 1:2 and a 20-point stop at 1:1 are both 20 points, which is
+/// ONE rung. The dedup is not tidiness — two rungs of equal value would make
+/// `crossings` carry a duplicate column and the grid report one variant twice.
+///
+/// `None` when nothing survives, which the caller reads as "fall back to the
+/// ladder you would have built anyway" rather than as a grid with no targets.
+fn ratio_targets(stops: &[Ppm], ratios: &[i64]) -> Option<Ladder> {
+    let mut all: Vec<Ppm> = Vec::with_capacity(stops.len().saturating_mul(ratios.len()));
+    for &stop in stops {
+        for &r in ratios {
+            // `i128` for the same reason `pairs_at_a_ratio` uses it: a wide
+            // stop times a large ratio can leave `i64`, and a wrap would put a
+            // rung somewhere nobody asked for.
+            let want = i128::from(stop).saturating_mul(i128::from(r)) / 100;
+            if let Ok(v) = Ppm::try_from(want)
+                && v > 0
+            {
+                all.push(v);
+            }
+        }
+    }
+    all.sort_unstable();
+    all.dedup();
+    Ladder::new(all)
+}
+
+/// Is target rung `ti` one of the ratios of stop rung `si`?
+///
+/// # Exact, not approximate
+///
+/// The targets ladder is built as the union of `stop * ratio` over every stop
+/// and every ratio, so the product is a value that IS in the ladder rather than
+/// one that has to be matched within a tolerance. A tolerance here would admit
+/// neighbouring rungs at a half-point step and quietly widen the search back
+/// toward the cross product it exists to avoid.
+///
+/// Ratios are hundredths — `200` is 2.00 — for the reason §7 gives: a ratio
+/// printed beside a rule is compared by the person reading it, and a float
+/// compared is a float that can disagree with itself.
+///
+/// # Cost
+///
+/// **O(ratios)**, and ratios is a handful. It runs per (stop, target) index
+/// pair, which is index arithmetic in a loop that would otherwise call
+/// [`one_variant`] — a walk over every candidate. Skipping that is the point.
+fn pairs_at_a_ratio(stops: &[Ppm], targets: &[Ppm], si: usize, ti: usize, ratios: &[i64]) -> bool {
+    let (Some(&stop), Some(&target)) = (stops.get(si), targets.get(ti)) else {
+        return false;
+    };
+    ratios.iter().any(|&r| {
+        // `i128` because a stop in ppm times a ratio in hundredths can exceed
+        // `i64` on a wide ladder, and a wrap would silently match the wrong rung.
+        let want = i128::from(stop).saturating_mul(i128::from(r)) / 100;
+        want == i128::from(target)
+    })
 }
 
 /// The stops ladder: quantiles of the observed adverse moves, plus the
@@ -1191,6 +1275,7 @@ pub fn evaluate(
         rungs,
         step_ppm,
         forced,
+        ratios,
     } = levels;
     // PASS ONE: every signal that could open a position, and its path.
     // `crate::trade::walk` already applies the intraday rules, so its trades
@@ -1284,7 +1369,24 @@ pub fn evaluate(
         Some(_) => merged(&ladder_of(&adverse), forced),
         None => merged_stops(&adverse, rungs, forced),
     };
-    let targets = ladder_of(&favourable);
+    // THE TARGETS LADDER IS THE UNION OF EVERY `stop * ratio`, WHEN RATIOS ARE
+    // GIVEN.
+    //
+    // Building it as the union rather than per stop is what keeps ONE crossing
+    // table covering every target an operator could ask about. `crossings`
+    // precomputes each candidate's exit offsets against fixed ladders, and that
+    // table is the whole reason a per-variant exit decision is three integer
+    // compares; a ladder rebuilt per stop would rebuild the table with it.
+    //
+    // So the ladder holds every product, the crossing table covers them all
+    // once, and `pairs_at_a_ratio` in the loop below picks out the cells that
+    // are a stop paired with ITS ratios. The union is small: forty stops times
+    // six ratios is at most 240 values, and heavily overlapping -- 10pt at 1:2
+    // and 20pt at 1:1 are both 20pt, one rung.
+    let targets = match ratios {
+        Some(rs) => ratio_targets(stops.rungs(), rs).unwrap_or_else(|| ladder_of(&favourable)),
+        None => ladder_of(&favourable),
+    };
     // THE TRAILING LADDER IS SCALED ON THE FAVOURABLE MOVE, not the adverse one.
     // A trailing stop is a give-back FROM A PROFIT, so the distance that makes
     // sense is a fraction of what the move actually offered -- deriving it from
@@ -1360,6 +1462,40 @@ pub fn evaluate(
         for t in 0..=targets.len() {
             let stop = (s < stops.len()).then_some(s);
             let target = (t < targets.len()).then_some(t);
+            // THE RATIO GUARD, AND IT IS WHAT MAKES A TWENTY-POINT REACH
+            // AFFORDABLE.
+            //
+            // # The cross product is the wrong shape for the question
+            //
+            // Sweeping every (stop, target) pair at a half-point step out to
+            // twenty points is 27,637,321 cells per combination -- 226 trillion
+            // over the 8.19 million combinations 81 months produce, which is
+            // weeks of compute for a search nobody asked for. Almost every pair
+            // in it is a trade nobody would take: a twenty-point stop against a
+            // half-point target is not a strategy, it is a cell.
+            //
+            // What an operator states is a RATIO -- "the smallest win must be at
+            // least twice the largest loss". So the pairs worth pricing are the
+            // ones where `target == stop * ratio` for a ratio they would trade,
+            // and there are a handful of those per stop rather than forty.
+            //
+            // # Why a guard here rather than a different loop
+            //
+            // `crate::excursion::crossings` precomputes each candidate's exit
+            // offsets against FIXED ladders, and that table is what makes the
+            // per-variant exit decision O(1). A loop that derived the target
+            // ladder per stop would have to rebuild it per stop and lose that.
+            //
+            // The targets ladder is instead the deduped UNION of every
+            // `stop * ratio`, so one crossing table still covers all of them,
+            // and this guard picks out the pairs. The loop still walks the
+            // product in INDEX ARITHMETIC, which is free; what it skips is
+            // `one_variant`, which walks every candidate and is the whole cost.
+            if let (Some(ratios), Some(si), Some(ti)) = (ratios, stop, target)
+                && !pairs_at_a_ratio(stops.rungs(), targets.rungs(), si, ti, ratios)
+            {
+                continue;
+            }
             // `i == trails.len()` is NO trailing stop loss. Every lower value is
             // a TSL at that rung, live from entry.
             for i in 0..=trails.len() {

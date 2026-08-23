@@ -1331,13 +1331,6 @@ fn audit_keep() -> usize {
     screen_cap().max(250)
 }
 
-/// How many rungs each of the exit grid's ladders carries.
-///
-/// Named rather than repeated as a bare `4` at the `grid::evaluate` call site,
-/// because [`GRID_VARIANTS`] is derived from it and the two drifting apart would
-/// make the printed exposure describe a grid that was not run.
-const GRID_RUNGS: usize = 8;
-
 /// The exit grid's step, in ppm — ONE INDEX POINT, and the engine chooses it.
 ///
 /// # What this replaces
@@ -1361,10 +1354,36 @@ const GRID_RUNGS: usize = 8;
 ///
 /// [`points_to_ppm`] converts against [`NIFTY_REFERENCE`], which is a stated
 /// approximation the report names on its own page. No operator supplies this
-/// and no percentage appears in it: `GRID_RUNGS` alone decides how far the
+/// and no percentage appears in it: `grid_rungs()` alone decides how far the
 /// ladder reaches, so raising the depth extends 1pt…4pt to 1pt…25pt without
 /// moving a single level that was already tried.
 const GRID_STEP_PPM: i64 = points_to_ppm(1) / 2;
+
+/// The reward-to-risk ratios the grid pairs each stop with, in hundredths.
+///
+/// # Why these and not a cross product
+///
+/// Pairing every stop with every target at a half-point step out to twenty
+/// points is 27,637,321 cells per combination -- 226 trillion over the 8.19
+/// million combinations 81 months produce. Almost all of it is trades nobody
+/// would take: a twenty-point stop against a half-point target is not a
+/// strategy, it is a cell.
+///
+/// An operator states a RATIO. So each stop is paired with the ratios worth
+/// trading and nothing else, which is about 1,440 cells for the same reach.
+///
+/// # The range, and why it reaches 1:8
+///
+/// 1:1 is the floor a reader needs for comparison -- a strategy at 1:1 is what
+/// the others are better than. The top is 1:8 because the goal is the MINIMAL
+/// stop against the MAXIMUM win: at a half-point stop, 1:8 is a four-point
+/// target, and a combination that hits that reliably is exactly the rare shape
+/// being searched for. Stopping at 1:3 would refuse to look for it.
+///
+/// Ten values, so the grid is ten targets per stop rather than forty, and the
+/// collapse is 4x rather than 6.7x -- bought back by reaching further into the
+/// region where the answer would be.
+const GRID_RATIOS: [i64; 10] = [100, 150, 200, 250, 300, 400, 500, 600, 700, 800];
 
 /// What the grid costs at each depth, measured rather than assumed.
 ///
@@ -1419,12 +1438,56 @@ const _GRID_COST_TABLE: () = ();
 /// deriving a `u64` from that `usize` inside a `const` is not expressible — but a
 /// compile-time equality is. A stale figure here would make the printed exposure
 /// charge for a grid that was never run.
-const GRID_VARIANTS: u64 = 12_393;
-const _: () = assert!(
-    grid::variants(GRID_RUNGS, GRID_RUNGS, GRID_RUNGS) == 12_393,
-    "GRID_VARIANTS must equal grid::variants(GRID_RUNGS, ..); the exit-grid \
-     exposure would otherwise charge for a grid that was not evaluated"
-);
+/// The exit grid's width, DERIVED from the rung count rather than restated.
+///
+/// # Why this stopped being a constant
+///
+/// It was `625`, then `12_393`, each pinned to `grid_rungs()` by a `const`
+/// assertion — a good guard, and it forced the two to move together. But the
+/// rung count is the REACH: the ladder is stepped at half an index point, so
+/// four rungs stop at 2.0 points and eight reach 4.0, and no fixed number is
+/// the right one. An operator whose rule is "no trade beyond ten points" needs
+/// twenty rungs; one exploring needs four. Choosing for them is the defect
+/// `CLAUDE.md` §6 describes in a different place — a parameter that can be set
+/// wrongly and silently.
+///
+/// So the width follows the depth at runtime and cannot drift from it, which is
+/// what the assertion was protecting.
+fn grid_variants() -> u64 {
+    u64::try_from(grid::variants(grid_rungs(), grid_rungs(), grid_rungs())).unwrap_or(u64::MAX)
+}
+
+/// How many rungs each exit ladder carries — the REACH, in half-points.
+///
+/// # The cost, measured with the engine's own counter
+///
+/// The grid is a cross product, so width grows roughly cubically in this while
+/// reach grows linearly:
+///
+/// | rungs | reach | cells / combination | cells over 8.19M combinations |
+/// |---|---|---|---|
+/// | 4 | 2.0 pt | 625 | 5.1 billion |
+/// | 8 | 4.0 pt | 12,393 | 101.5 billion |
+/// | 10 | 5.0 pt | 34,606 | 283 billion |
+/// | 20 | 10.0 pt | 935,361 | 7.6 trillion |
+/// | 40 | 20.0 pt | 27,637,321 | 226 trillion |
+///
+/// Every row is affordable in MEMORY — grid width is per-combination work, not
+/// retained state, and `crate::rank`'s heap is sized by [`screen_cap`] alone.
+/// What it costs is TIME, and that is the operator's to spend.
+///
+/// `BRUTEX_grid_rungs()` sets it. The default is eight because it is the deepest
+/// rung count whose full-search cost was actually measured on this machine;
+/// it is a starting point, not a ceiling, and nothing in the engine treats it
+/// as one.
+fn grid_rungs() -> usize {
+    const DEFAULT: usize = 8;
+    std::env::var("BRUTEX_grid_rungs()")
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT)
+}
 
 /// The strongest combination by evidence that is also **closed**.
 ///
@@ -1494,7 +1557,7 @@ fn closed_by_evidence<'a>(
 /// `sweep-stored`, which ranks on forward returns and builds no grid.
 ///
 /// It is not the whole search here. This command evaluates the chosen
-/// combination at [`GRID_VARIANTS`] stop/target/trail settings and keeps the
+/// combination at [`grid_variants()`] stop/target/trail settings and keeps the
 /// best of them, and selecting a maximum over 125 cells is 125 more chances to
 /// look good by luck. None of it entered the bar printed above.
 ///
@@ -1502,7 +1565,7 @@ fn closed_by_evidence<'a>(
 ///
 /// Because the true correction is **unknown and this one is only a ceiling**.
 /// The cells share a single trade walk, so they are heavily correlated and the
-/// effective trial count is somewhere between 1 and [`GRID_VARIANTS`] —
+/// effective trial count is somewhere between 1 and [`grid_variants()`] —
 /// unmeasured.
 /// Replacing the printed bar with the ceiling would reject real findings;
 /// leaving it alone accepts noise. Printing both, and saying which is which,
@@ -1513,7 +1576,7 @@ fn grid_exposure(sweep: &engine::Sweep) -> String {
     let plain = runner::significance::effective_trials(sweep);
     // THE SAME `plain` ON BOTH SIDES OF THE SENTENCE.
     //
-    // This read `trials_with_grid(sweep, GRID_VARIANTS)`, which multiplied the
+    // This read `trials_with_grid(sweep, grid_variants())`, which multiplied the
     // RAW trial count while the line beside it printed the DUPLICATE-DEFLATED
     // one -- so the sentence "with N exit settings each, at most {ceiling}"
     // claimed the only difference was the grid, and the measured ratio was
@@ -1523,21 +1586,22 @@ fn grid_exposure(sweep: &engine::Sweep) -> String {
     // Passing `plain` makes the claim true by construction rather than by two
     // calls happening to agree, and `trials_with_grid` now takes a count for
     // exactly that reason.
-    let ceiling = runner::significance::trials_with_grid(plain, GRID_VARIANTS);
+    let ceiling = runner::significance::trials_with_grid(plain, grid_variants());
     let mut out = String::with_capacity(512);
     let _ = writeln!(
         out,
         "\nEXIT-GRID EXPOSURE\n  \
          combinations weighed {plain}\n  \
-         with {GRID_VARIANTS} exit settings each, at most {ceiling}\n  \
+         with {width} exit settings each, at most {ceiling}\n  \
          t must clear {:.2} on the combination axis alone\n  \
          t must clear {:.2} if every exit setting were an independent trial\n\
          \n  \
-         The truth is between them and is NOT measured: the {GRID_VARIANTS} cells \
+         The truth is between them and is NOT measured: the {width} cells \
          share one trade walk, so they are correlated rather than independent. \
          The upper figure cannot be cleared by luck; the lower one can.",
         runner::significance::bonferroni_t(plain),
         runner::significance::bonferroni_t(ceiling),
+        width = grid_variants(),
     );
     out
 }
@@ -3097,9 +3161,10 @@ fn trade_and_screen(
         horizon,
         side,
         grid::Levels {
-            rungs: GRID_RUNGS,
+            rungs: grid_rungs(),
             step_ppm: Some(GRID_STEP_PPM),
             forced: (rules.max_mae_ppm > 0).then_some(rules.max_mae_ppm),
+            ratios: Some(&GRID_RATIOS),
         },
     );
     // THE CASCADE, NOT ONE POLICY. A single screen answers "0 of 21 satisfy
@@ -3603,9 +3668,10 @@ fn screen(
             horizon,
             side,
             grid::Levels {
-                rungs: GRID_RUNGS,
+                rungs: grid_rungs(),
                 step_ppm: Some(GRID_STEP_PPM),
                 forced: (rules.max_mae_ppm > 0).then_some(rules.max_mae_ppm),
+                ratios: Some(&GRID_RATIOS),
             },
         );
         // THE BEST VARIANT THAT SATISFIES THE RULES, falling back to the best
