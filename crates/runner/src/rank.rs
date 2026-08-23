@@ -74,12 +74,38 @@ pub struct Scored {
 /// unwrapping — is a panic on a NaN. `total_cmp` gives a genuine total order
 /// over every `f64` including NaN, so the heap needs no fallible arm and
 /// `CLAUDE.md` §3 rule 5's byte-for-byte reproducibility holds without one.
+///
+/// # A NON-FINITE `t` SORTS LAST, AND IT USED TO SORT FIRST
+///
+/// `total_cmp` follows IEEE 754 totalOrder, where a positive NaN ranks ABOVE
+/// every real number and above infinity — measured: `NAN.abs().total_cmp(&1e308)`
+/// is `Greater`, and a best-first sort of `[3, NaN, 100, 7]` returns
+/// `[NaN, 100, 7, 3]`. This ranks on the LARGEST |t| and takes the top, so a
+/// degenerate sample would have been selected as the best combination in the
+/// sweep, and the report would have named it without a word of complaint.
+///
+/// # Why it was not reachable, and why that is not a reason to leave it
+///
+/// `outcome::edge` computes `t` behind `if standard_error > 0.0`, and NaN fails
+/// that comparison, so a degenerate sample comes back as `t = 0`. The protection
+/// is real but it is INCIDENTAL: the guard is written to catch a zero spread,
+/// and it catches NaN only because every comparison against NaN is false. Spell
+/// the same intent as `!= 0.0` — which reads as equivalent — and a NaN goes
+/// straight through to the top of this ordering.
+///
+/// So the demotion is here, at the ordering that would act on it, rather than
+/// resting on the arithmetic upstream continuing to be written one particular
+/// way. A non-finite score is not a strong result; it is the absence of one.
 impl Ord for Scored {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.edge
-            .t
-            .abs()
-            .total_cmp(&other.edge.t.abs())
+        // `false < true`, so a finite score sorts above a non-finite one under
+        // this key, and the ordering is still total: two non-finite scores
+        // compare equal here and fall through to `total_cmp` and then the mask,
+        // which keeps §3 rule 5's byte-for-byte reproducibility.
+        let (mine, theirs) = (self.edge.t.abs(), other.edge.t.abs());
+        mine.is_finite()
+            .cmp(&theirs.is_finite())
+            .then_with(|| mine.total_cmp(&theirs))
             .then_with(|| self.mask.words().cmp(&other.mask.words()))
     }
 }
@@ -231,6 +257,51 @@ mod tests {
         let real = scored(5.0, 2);
         assert_ne!(nan.cmp(&real), core::cmp::Ordering::Equal);
         assert_eq!(nan.cmp(&nan), core::cmp::Ordering::Equal);
+    }
+
+    /// A NON-FINITE SCORE LOSES TO EVERY REAL ONE, INCLUDING A TINY ONE.
+    ///
+    /// # What the test above does not say
+    ///
+    /// It asserts a NaN is ORDERED rather than panicking, and that was the whole
+    /// question while the ordering was `total_cmp` alone. It is silent on the
+    /// DIRECTION, and the direction is what selects a combination: `total_cmp`
+    /// follows IEEE 754 totalOrder, so a positive NaN ranks above every real
+    /// number and above infinity. Measured directly:
+    /// `NAN.abs().total_cmp(&1e308)` is `Greater`, and a best-first sort of
+    /// `[3, NaN, 100, 7]` returns `[NaN, 100, 7, 3]`.
+    ///
+    /// This crate ranks on the LARGEST |t| and takes the top, so a degenerate
+    /// sample would have been chosen as the best combination in the sweep and
+    /// reported as the answer.
+    ///
+    /// # Infinity too, and it is the likelier of the two
+    ///
+    /// A NaN needs `0.0 / 0.0`. An infinity needs only a mean divided by a
+    /// standard error that underflowed, which is one degenerate window away on
+    /// any real series. Both are the absence of a result, not a strong one.
+    #[test]
+    fn a_non_finite_score_ranks_below_every_finite_one() {
+        let tiny = scored(f64::MIN_POSITIVE, 9);
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let degenerate = scored(bad, 1);
+            assert_eq!(
+                degenerate.cmp(&tiny),
+                core::cmp::Ordering::Less,
+                "{bad} must lose to the smallest real score, or a degenerate \
+                 sample is selected as the sweep's answer"
+            );
+            assert_eq!(
+                tiny.cmp(&degenerate),
+                core::cmp::Ordering::Greater,
+                "and the comparison must be antisymmetric"
+            );
+        }
+        // Still a TOTAL order: two non-finite scores are separated by the mask,
+        // so the sort stays deterministic across processes as §3 rule 5 needs.
+        let (a, b) = (scored(f64::NAN, 1), scored(f64::NAN, 2));
+        assert_ne!(a.cmp(&b), core::cmp::Ordering::Equal);
+        assert_eq!(a.cmp(&a), core::cmp::Ordering::Equal);
     }
 
     #[test]
