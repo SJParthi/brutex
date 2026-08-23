@@ -392,6 +392,12 @@ pub fn read_field(raw: &[u8; 16]) -> String {
 pub struct Results {
     file: File,
     seen: std::collections::HashSet<[u8; 32]>,
+    /// Byte offset this process has absorbed identities up to.
+    ///
+    /// `seen` is built once at open, so it knows nothing about a record ANOTHER
+    /// process appended afterwards. `append` re-scans from here under the file
+    /// lock before it decides a run is new -- see [`Results::append`].
+    scanned: u64,
 }
 
 impl Results {
@@ -516,7 +522,11 @@ impl Results {
             seen.insert(Record::from_bytes(&raw).identity);
             at = at.saturating_add(STRIDE);
         }
-        Ok(Self { file, seen })
+        Ok(Self {
+            file,
+            seen,
+            scanned: at,
+        })
     }
 
     /// Where the file lives: `<store>/results/runs.bin`.
@@ -563,6 +573,57 @@ impl Results {
     /// run has nothing to add, and overwriting would destroy the first one's
     /// timestamp for no gain.
     pub fn append(&mut self, record: &Record) -> Result<u64, Refusal> {
+        // AN EXCLUSIVE FILE LOCK, BECAUSE A PROCESS MUTEX GUARDS THE WRONG
+        // BOUNDARY.
+        //
+        // `cli`'s `LEDGER` mutex serialises the threads of ONE process, and its
+        // own comment says so: *"Two PROCESSES appending at once is a different
+        // problem and is not solved by this ... a second `range-all` should not
+        // be started while one is running."* That is an honest statement of a
+        // gap, but the thing enforcing it was a sentence in a source file, in a
+        // tree where two sessions and an HTTP server all reach the same store.
+        //
+        // # What two writers cost without this
+        //
+        // `append` seeks to the end and then writes. Between those two calls
+        // another process can do the same, so both compute the same offset and
+        // the second write lands ON TOP of the first: a whole, correctly sealed
+        // record that silently replaces another whole, correctly sealed record.
+        // The seal cannot see it -- both records are internally consistent --
+        // and the count still reads as one record, so the loss leaves no trace
+        // anywhere. That is a run vanishing, which is the one thing an
+        // append-only ledger exists to prevent.
+        //
+        // # And the duplicate check needs it too
+        //
+        // `seen` is built once at open, so it cannot know about a record another
+        // process appended since. Locking without re-scanning would fix the
+        // overwrite and leave two copies of one identity, which §3 rule 5 and
+        // `self.holds` both refuse in-process.
+        self.file
+            .lock()
+            .map_err(|why| format!("the results file could not be locked: {why}"))?;
+        let out = self.append_locked(record);
+        // Unlocked on both paths, including the refusals inside `append_locked`.
+        // Dropping the handle would also release it, but this type outlives one
+        // append by design -- a sweep opens once and records per rung.
+        let released = self
+            .file
+            .unlock()
+            .map_err(|why| format!("the results file could not be unlocked: {why}"));
+        match (out, released) {
+            (Ok(index), Ok(())) => Ok(index),
+            (Err(why), _) | (Ok(_), Err(why)) => Err(why),
+        }
+    }
+
+    /// [`Results::append`] with the file lock already held.
+    ///
+    /// Split out so the lock is released on every path this can leave by,
+    /// including the refusals — an early `return` inside the locked region would
+    /// otherwise strand the lock until the process exited.
+    fn append_locked(&mut self, record: &Record) -> Result<u64, Refusal> {
+        self.absorb_new_records()?;
         if self.holds(&record.identity) {
             return Err(format!(
                 "run {} is already recorded. Same inputs give same outputs \
@@ -582,7 +643,44 @@ impl Results {
             .flush()
             .map_err(|why| format!("the record could not be flushed: {why}"))?;
         self.seen.insert(record.identity);
+        self.scanned = at.saturating_add(STRIDE);
         Ok(at.saturating_sub(HEADER) / STRIDE)
+    }
+
+    /// Absorb identities written by anyone else since this handle last looked.
+    ///
+    /// # Cost
+    ///
+    /// **O(records appended by others)**, which is zero on the overwhelmingly
+    /// common path of one writer — the `while` does not execute and this is a
+    /// length check. It is never per bar and never per candidate.
+    ///
+    /// A part-record at the tail is left alone rather than refused here:
+    /// `Results::open` already refuses one, and a writer that finds a torn tail
+    /// mid-run should say so through the same message rather than a second one
+    /// worded differently.
+    fn absorb_new_records(&mut self) -> Result<(), Refusal> {
+        let len = self
+            .file
+            .metadata()
+            .map_err(|why| format!("the results file could not be measured: {why}"))?
+            .len();
+        while self.scanned.saturating_add(STRIDE) <= len {
+            let mut raw = [0_u8; STRIDE_BYTES];
+            let at = self.scanned;
+            self.file
+                .seek(SeekFrom::Start(at))
+                .and_then(|_| self.file.read_exact(&mut raw))
+                .map_err(|why| format!("record at byte {at} could not be read: {why}"))?;
+            // A record another process wrote is absorbed for its IDENTITY only.
+            // Its seal is not checked here: this is a duplicate test, and a
+            // damaged record is refused by `read` at the moment someone tries to
+            // use its numbers. Refusing an append because an unrelated row went
+            // bad would stop a run for a reason that has nothing to do with it.
+            self.seen.insert(Record::from_bytes(&raw).identity);
+            self.scanned = at.saturating_add(STRIDE);
+        }
+        Ok(())
     }
 
     /// Reads record `index`. **O(1)** — `HEADER + index · STRIDE`, one seek.
@@ -976,6 +1074,143 @@ mod tests {
         );
         // And the width is exactly the eight bytes past the payload.
         assert_eq!(STRIDE_BYTES - PAYLOAD_BYTES, SEAL_BYTES);
+    }
+
+    /// TWO HANDLES ON ONE LEDGER LOSE NOTHING AND DUPLICATE NOTHING.
+    ///
+    /// # The failure this closes
+    ///
+    /// `cli`'s `LEDGER` mutex serialises threads of one process and says so in
+    /// its own comment, ending *"a second `range-all` should not be started
+    /// while one is running"*. The enforcement of that was the sentence itself,
+    /// in a tree where two sessions and an HTTP server all reach one store.
+    ///
+    /// Without the file lock, `append`'s seek-then-write lets a second writer
+    /// compute the same offset and land ON TOP of the first record. Both records
+    /// are whole and both seals verify, so nothing downstream can tell that a
+    /// run was destroyed — the count reads as one, and the loss leaves no trace.
+    ///
+    /// # Why two handles rather than two processes
+    ///
+    /// Two `Results` values hold two independent descriptors, two independent
+    /// `seen` sets and two independent `scanned` watermarks, which is exactly
+    /// the state two processes have. Spawning a real process would test the
+    /// harness as much as the code, and could not run under `cargo test`'s own
+    /// working directory without a fixture binary.
+    ///
+    /// The interleaving is deliberate: `b` opens BEFORE `a` writes, so `b`'s
+    /// `seen` set is stale by construction. A version that only locked, without
+    /// `absorb_new_records`, passes the no-loss half of this test and fails the
+    /// no-duplicate half.
+    #[test]
+    fn a_second_writer_neither_overwrites_a_row_nor_duplicates_one() {
+        let r = root("twowriters");
+        let mut a = Results::open(&r).expect("the first handle opens");
+        let mut b = Results::open(&r).expect("the second opens on the same file");
+
+        a.append(&record(1)).expect("the first writer records");
+        // `b` was opened before that write, so its `seen` cannot contain it and
+        // its idea of the end of the file is one record short.
+        b.append(&record(2)).expect("the second writer records");
+
+        let mut check = Results::open(&r).expect("a fresh reader opens");
+        assert_eq!(
+            check.len().expect("measurable"),
+            2,
+            "both rows must survive: a lost row is the one failure an \
+             append-only ledger exists to prevent, and it leaves no trace"
+        );
+        let ids = [
+            check.read(0).expect("row 0 reads").identity,
+            check.read(1).expect("row 1 reads").identity,
+        ];
+        assert!(ids.contains(&[1; 32]), "the first writer's row survived");
+        assert!(ids.contains(&[2; 32]), "the second writer's row survived");
+
+        // And the stale handle must still refuse a row the OTHER handle wrote,
+        // which is what `absorb_new_records` is for.
+        let why = b
+            .append(&record(1))
+            .expect_err("a duplicate is refused even though another handle wrote it");
+        assert!(why.contains("already recorded"), "{why}");
+        assert_eq!(
+            check.len().expect("measurable"),
+            2,
+            "and the refusal appended nothing"
+        );
+    }
+
+    /// EIGHT WRITERS AT ONCE LOSE NOTHING.
+    ///
+    /// # Why the test above is not enough, discovered by mutating both halves
+    ///
+    /// `a_second_writer_neither_overwrites_a_row_nor_duplicates_one` uses two
+    /// handles but drives them in sequence, so it exercises the stale-`seen`
+    /// re-scan and nothing else. Measured: deleting `absorb_new_records` fails
+    /// it, and deleting the FILE LOCK does not. A lock with no test is a comment
+    /// with a keyword in it.
+    ///
+    /// This one runs the writers genuinely at the same time. Each thread holds
+    /// its own descriptor, its own `seen` and its own watermark — the state two
+    /// processes have — and every one appends a distinct identity. Without the
+    /// lock, two writers compute the same end offset between their seek and
+    /// their write, and the second lands on top of the first: two whole records,
+    /// two verifying seals, one run gone and no trace of it anywhere.
+    ///
+    /// # On flakiness
+    ///
+    /// A race that is not hit is not proof, and no thread test can promise the
+    /// interleaving. What it can promise is the direction: this cannot fail when
+    /// the lock is present, and it fails often when it is absent. Sixteen rounds
+    /// of eight writers is enough contention to make the window likely without
+    /// making the suite slow.
+    #[test]
+    fn eight_writers_at_once_all_survive() {
+        const WRITERS: u8 = 8;
+        const ROUNDS: u8 = 16;
+        let r = root("racers");
+        Results::open(&r).expect("the ledger exists before the writers start");
+
+        let threads: Vec<_> = (0..WRITERS)
+            .map(|w| {
+                let dir = r.clone();
+                std::thread::spawn(move || {
+                    let mut mine = Results::open(&dir).expect("each writer opens its own handle");
+                    for round in 0..ROUNDS {
+                        // A distinct identity per writer per round, so nothing
+                        // here is refused as a duplicate and every append MUST
+                        // land. `w` and `round` both vary so no two collide.
+                        let mut rec = record(1);
+                        rec.identity = [0; 32];
+                        rec.identity[0] = w;
+                        rec.identity[1] = round;
+                        mine.append(&rec).expect("every distinct run is recorded");
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().expect("no writer panicked");
+        }
+
+        let mut check = Results::open(&r).expect("reopens");
+        let want = u64::from(WRITERS) * u64::from(ROUNDS);
+        assert_eq!(
+            check.len().expect("measurable"),
+            want,
+            "every write must survive: an overwrite destroys a run and leaves \
+             the count looking correct"
+        );
+        // And each one is INTACT, not merely counted — an interleaved write
+        // would leave a record whose bytes came from two different writers, and
+        // only the seal can tell.
+        let mut ids = std::collections::HashSet::new();
+        for i in 0..want {
+            let rec = check
+                .read(i)
+                .expect("every row verifies its seal, so no write was interleaved");
+            assert!(ids.insert(rec.identity), "row {i} is a duplicate identity");
+        }
     }
 
     #[test]
