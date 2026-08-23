@@ -601,3 +601,371 @@ impl Fold {
         out
     }
 }
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "the two exceptions a test module takes here: a test that cannot \
+              panic cannot fail, and every index below is a constant offset \
+              into a fixture of known length"
+)]
+mod tests {
+    use super::{Block, Fold, HEADER_BYTES, Row, STRIDE_BYTES, Trades, hex, path_in};
+
+    fn root(tag: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "brutex-trades-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).expect("a temp root");
+        p
+    }
+
+    /// A row whose every field differs, so a mis-ordered read lands on the
+    /// wrong value rather than on a plausible one.
+    fn row(seq: u32, worst: i64) -> Row {
+        Row {
+            seq,
+            signal_bar: seq * 10,
+            entry_bar: seq * 10 + 1,
+            exit_bar: seq * 10 + 7,
+            best: worst + 500,
+            worst,
+            forced: seq % 2 == 1,
+        }
+    }
+
+    /* ==================== the layout ==================== */
+
+    #[test]
+    fn every_field_survives_the_round_trip() {
+        let before = row(3, -1_234);
+        let after = Row::from_bytes(&before.to_bytes());
+        assert_eq!(before, after);
+        assert_eq!(after.seq, 3);
+        assert_eq!(after.signal_bar, 30);
+        assert_eq!(after.entry_bar, 31);
+        assert_eq!(after.exit_bar, 37);
+        assert_eq!(after.best, -734);
+        assert_eq!(after.worst, -1_234);
+        assert!(after.forced);
+    }
+
+    #[test]
+    fn the_stride_is_the_sum_of_the_fields() {
+        // The const assertion already fails the BUILD if these disagree; this
+        // states the number a third time so intent survives a careless edit.
+        assert_eq!(super::STRIDE_BYTES, 40);
+        assert_eq!(super::FIELD_SUM, 40);
+        assert_eq!(super::HEADER_BYTES, 16);
+        assert_eq!(Row::to_bytes(&row(0, 0)).len(), STRIDE_BYTES);
+    }
+
+    #[test]
+    fn held_bars_is_entry_to_exit_and_never_underflows() {
+        assert_eq!(row(1, 0).held_bars(), 6);
+        // A malformed record with the exit BEFORE the entry saturates to zero
+        // rather than wrapping to four billion, which under `overflow-checks`
+        // would otherwise kill the process over one bad row.
+        let backwards = Row {
+            entry_bar: 90,
+            exit_bar: 10,
+            ..row(1, 0)
+        };
+        assert_eq!(backwards.held_bars(), 0);
+    }
+
+    #[test]
+    fn the_json_keeps_numbers_as_numbers() {
+        let json = row(2, -50).to_json();
+        for fragment in [
+            r#""seq":2"#,
+            r#""signal_bar":20"#,
+            r#""entry_bar":21"#,
+            r#""exit_bar":27"#,
+            r#""held_bars":6"#,
+            r#""best":450"#,
+            r#""worst":-50"#,
+            r#""forced":false"#,
+        ] {
+            assert!(json.contains(fragment), "missing {fragment} in {json}");
+        }
+    }
+
+    /* ==================== the file ==================== */
+
+    #[test]
+    fn a_new_file_gets_a_header_and_holds_nothing() {
+        let root = root("new");
+        let file = Trades::open(&root).expect("a new file");
+        assert_eq!(file.len().expect("a length"), 0);
+        assert!(file.is_empty().expect("emptiness"));
+        let raw = std::fs::read(path_in(&root)).expect("the bytes");
+        assert_eq!(raw.len(), HEADER_BYTES);
+        assert_eq!(&raw[..8], b"BRUTEXTR");
+        assert_eq!(&raw[8..12], &1_u32.to_le_bytes());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_block_is_written_contiguously_and_read_back_whole() {
+        let root = root("block");
+        let mut file = Trades::open(&root).expect("a file");
+        let rows: Vec<Row> = (0..5).map(|n| row(n, i64::from(n) * 100 - 200)).collect();
+        let block = file.append([7; 32], &rows).expect("an append");
+        assert_eq!(block, Block { first: 0, count: 5 });
+        assert_eq!(file.len().expect("a length"), 5);
+        assert!(!file.is_empty().expect("emptiness"));
+        assert_eq!(file.read_block(&[7; 32]).expect("the block"), rows);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_second_run_starts_where_the_first_ended() {
+        let root = root("two");
+        let mut file = Trades::open(&root).expect("a file");
+        let first: Vec<Row> = (0..3).map(|n| row(n, 10)).collect();
+        let second: Vec<Row> = (0..4).map(|n| row(n, -10)).collect();
+        assert_eq!(
+            file.append([1; 32], &first).expect("first"),
+            Block { first: 0, count: 3 }
+        );
+        assert_eq!(
+            file.append([2; 32], &second).expect("second"),
+            Block { first: 3, count: 4 }
+        );
+        // EACH BLOCK READS BACK ITS OWN. A wrong offset would return the other
+        // run's trades and every figure folded from them would be confident
+        // and wrong.
+        assert_eq!(file.read_block(&[1; 32]).expect("first back"), first);
+        assert_eq!(file.read_block(&[2; 32]).expect("second back"), second);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_duplicate_run_is_refused_rather_than_appended_twice() {
+        let root = root("dup");
+        let mut file = Trades::open(&root).expect("a file");
+        let rows = vec![row(0, 1)];
+        file.append([9; 32], &rows).expect("the first");
+        assert!(file.holds(&[9; 32]));
+        let why = file.append([9; 32], &rows).expect_err("a refusal");
+        assert!(why.contains("already recorded"), "{why}");
+        assert!(
+            why.contains(&hex(&[9; 32])),
+            "the refusal names the run: {why}"
+        );
+        assert_eq!(file.len().expect("a length"), 1, "nothing was appended");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_run_with_no_block_is_refused_and_named() {
+        let root = root("missing");
+        let mut file = Trades::open(&root).expect("a file");
+        assert!(!file.holds(&[4; 32]));
+        assert_eq!(file.block(&[4; 32]), None);
+        let why = file.read_block(&[4; 32]).expect_err("a refusal");
+        assert!(why.contains("no trades are recorded"), "{why}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_empty_block_is_a_legal_thing_to_record() {
+        // A COMBINATION THAT TOOK NO TRADES IS A RESULT. Recording zero rows
+        // says "this ran and traded nothing", which is a different fact from
+        // "this was never run" — and `read_block` must give back the empty
+        // list rather than the refusal for an unrecorded run.
+        let root = root("empty");
+        let mut file = Trades::open(&root).expect("a file");
+        assert_eq!(
+            file.append([5; 32], &[]).expect("an empty block"),
+            Block { first: 0, count: 0 }
+        );
+        assert!(file.holds(&[5; 32]));
+        assert_eq!(file.read_block(&[5; 32]).expect("the block"), vec![]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_foreign_file_is_refused_before_it_is_parsed() {
+        let root = root("foreign");
+        std::fs::create_dir_all(root.join("results")).expect("the dir");
+        std::fs::write(path_in(&root), b"BRUTEXRS\x01\x00\x00\x00\x00\x00\x00\x00")
+            .expect("a runs.bin header");
+        let why = Trades::open(&root).expect_err("a refusal");
+        assert!(why.contains("not a brutex trade file"), "{why}");
+        assert!(why.contains("BRUTEXTR"), "{why}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_unknown_version_is_refused_rather_than_guessed_at() {
+        let root = root("version");
+        std::fs::create_dir_all(root.join("results")).expect("the dir");
+        let mut header = b"BRUTEXTR".to_vec();
+        header.extend_from_slice(&9_u32.to_le_bytes());
+        header.extend_from_slice(&[0; 4]);
+        std::fs::write(path_in(&root), header).expect("a header");
+        let why = Trades::open(&root).expect_err("a refusal");
+        assert!(why.contains("version 9"), "{why}");
+        assert!(why.contains("writes version 1"), "{why}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_opened_names_the_reason() {
+        // `results` is a FILE, so `results/trades.bin` cannot be opened.
+        let root = root("blocked");
+        std::fs::write(root.join("results"), b"not a directory").expect("the blocker");
+        let why = Trades::open(&root).expect_err("a refusal");
+        assert!(
+            why.contains("could not be opened") || why.contains("could not be made"),
+            "{why}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_file_lives_beside_runs_bin() {
+        assert_eq!(
+            path_in(std::path::Path::new("/store")),
+            std::path::PathBuf::from("/store/results/trades.bin")
+        );
+    }
+
+    /* ==================== the fold ==================== */
+
+    #[test]
+    fn the_fold_counts_winners_losers_and_breakevens_apart() {
+        let rows = vec![row(0, 300), row(1, -100), row(2, 0), row(3, 50)];
+        let f = Fold::of(&rows);
+        assert_eq!(f.total, 4);
+        assert_eq!(f.winners, 2);
+        assert_eq!(f.losers, 1);
+        assert_eq!(
+            f.breakevens, 1,
+            "a flat trade is neither, and is counted so"
+        );
+        assert_eq!(f.gross_profit, 350);
+        assert_eq!(f.gross_loss, -100);
+        assert_eq!(f.largest_win, 300);
+        assert_eq!(f.largest_loss, -100);
+    }
+
+    #[test]
+    fn the_fold_reads_worst_and_never_best() {
+        // A trade whose BEST is positive and whose WORST is negative is a
+        // LOSER. Folding on `best` would call it a winner and produce a
+        // percent-profitable no other surface in this workspace agrees with.
+        let rows = vec![Row {
+            best: 900,
+            worst: -400,
+            ..row(0, 0)
+        }];
+        let f = Fold::of(&rows);
+        assert_eq!(f.winners, 0);
+        assert_eq!(f.losers, 1);
+        assert_eq!(f.gross_loss, -400);
+    }
+
+    #[test]
+    fn a_breakeven_breaks_both_streaks() {
+        // Win, win, FLAT, win — the longest winning streak is two, not three.
+        // Treating the flat as a continuation would make the streak a number
+        // about the tie-breaking rule rather than about the strategy.
+        let rows = vec![row(0, 10), row(1, 10), row(2, 0), row(3, 10)];
+        let f = Fold::of(&rows);
+        assert_eq!(f.longest_win_streak, 2);
+        assert_eq!(f.longest_loss_streak, 0);
+    }
+
+    #[test]
+    fn streaks_are_the_longest_run_and_not_the_last() {
+        // A long streak followed by a short one must keep the long one.
+        let rows = vec![row(0, -1), row(1, -1), row(2, -1), row(3, 1), row(4, -1)];
+        let f = Fold::of(&rows);
+        assert_eq!(f.longest_loss_streak, 3);
+        assert_eq!(f.longest_win_streak, 1);
+    }
+
+    #[test]
+    fn percent_profitable_and_profit_factor_are_basis_points() {
+        let rows = vec![row(0, 300), row(1, 300), row(2, -200), row(3, -100)];
+        let f = Fold::of(&rows);
+        assert_eq!(f.profitable_bps(), Some(5_000), "two of four is 50.00%");
+        // 600 profit over 300 loss is 2.000
+        assert_eq!(f.profit_factor_bps(), Some(20_000));
+    }
+
+    #[test]
+    fn a_run_that_never_lost_has_no_profit_factor() {
+        // NOT INFINITY AND NOT ZERO. There is no denominator, and printing a
+        // number would be inventing one.
+        let f = Fold::of(&[row(0, 100), row(1, 200)]);
+        assert_eq!(f.profit_factor_bps(), None);
+        assert_eq!(f.profitable_bps(), Some(10_000));
+    }
+
+    #[test]
+    fn an_empty_fold_answers_none_rather_than_dividing_by_zero() {
+        let f = Fold::of(&[]);
+        assert_eq!(f.total, 0);
+        assert_eq!(f.profitable_bps(), None);
+        assert_eq!(f.profit_factor_bps(), None);
+        assert_eq!(f.avg_bars(), None);
+    }
+
+    #[test]
+    fn average_bars_is_time_inside_a_trade() {
+        // Every fixture row is held 6 bars, so the average is 6 — and it is
+        // emphatically NOT `bars / trades`, which is the gap BETWEEN trades.
+        let f = Fold::of(&[row(0, 1), row(1, -1), row(2, 1)]);
+        assert_eq!(f.avg_bars(), Some(6));
+        assert_eq!(f.held_bars, 18);
+        assert_eq!(f.winner_bars, 12);
+        assert_eq!(f.loser_bars, 6);
+    }
+
+    #[test]
+    fn forced_exits_are_counted() {
+        // `row` marks odd sequences forced.
+        let f = Fold::of(&[row(0, 1), row(1, 1), row(2, 1), row(3, 1)]);
+        assert_eq!(f.forced, 2);
+    }
+
+    #[test]
+    fn the_fold_json_carries_every_figure_and_nulls_what_it_cannot_divide() {
+        let json = Fold::of(&[row(0, 100), row(1, -50)]).to_json();
+        for fragment in [
+            r#""total":2"#,
+            r#""winners":1"#,
+            r#""losers":1"#,
+            r#""breakevens":0"#,
+            r#""gross_profit":100"#,
+            r#""gross_loss":-50"#,
+            r#""largest_win":100"#,
+            r#""largest_loss":-50"#,
+            r#""longest_win_streak":1"#,
+            r#""longest_loss_streak":1"#,
+            r#""profitable_bps":5000"#,
+            r#""profit_factor_bps":20000"#,
+            r#""avg_bars":6"#,
+        ] {
+            assert!(json.contains(fragment), "missing {fragment} in {json}");
+        }
+        let empty = Fold::of(&[]).to_json();
+        assert!(empty.contains(r#""profitable_bps":null"#), "{empty}");
+        assert!(empty.contains(r#""profit_factor_bps":null"#), "{empty}");
+        assert!(empty.contains(r#""avg_bars":null"#), "{empty}");
+    }
+
+    #[test]
+    fn the_identity_renders_as_lowercase_hex() {
+        assert_eq!(hex(&[0xab; 32]), "ab".repeat(32));
+        assert_eq!(hex(&[0; 32]).len(), 64);
+    }
+}

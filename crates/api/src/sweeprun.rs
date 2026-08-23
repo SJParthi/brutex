@@ -494,3 +494,236 @@ pub async fn run_json(
     );
     (axum::http::StatusCode::OK, json_headers(), body)
 }
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "the exception every test module in this workspace takes: a test \
+              that cannot panic cannot fail"
+)]
+mod tests {
+    use super::{Asked, Progress, Refusal, asked_from, field, now_micros};
+
+    fn body(feed: &str, span: &str, support: &str) -> String {
+        format!(r#"{{"feed":"{feed}","underlying":"NIFTY",{span},"support_ppm":{support}}}"#)
+    }
+
+    const SPAN: &str = r#""from_year":2019,"from_month":12,"to_year":2026,"to_month":8"#;
+
+    /* ==================== the body parser ==================== */
+
+    #[test]
+    fn a_whole_body_parses_into_the_five_things_a_sweep_needs() {
+        let asked = asked_from(&body("zerodha", SPAN, "200000")).expect("a good body");
+        assert_eq!(
+            asked,
+            Asked {
+                feed: "zerodha".to_owned(),
+                underlying: "NIFTY".to_owned(),
+                from: (2019, 12),
+                to: (2026, 8),
+                support_ppm: 200_000,
+            }
+        );
+    }
+
+    #[test]
+    fn whitespace_between_the_key_and_its_value_is_tolerated() {
+        // A hand-written body, or one from a formatter, is not malformed.
+        let raw = r#"{ "feed" : "dhan" , "underlying" : "BANKNIFTY" ,
+            "from_year" : 2020 , "from_month" : 1 ,
+            "to_year" : 2020 , "to_month" : 3 , "support_ppm" : 50000 }"#;
+        let asked = asked_from(raw).expect("a spaced body");
+        assert_eq!(asked.feed, "dhan");
+        assert_eq!(asked.underlying, "BANKNIFTY");
+        assert_eq!(asked.from, (2020, 1));
+        assert_eq!(asked.support_ppm, 50_000);
+    }
+
+    #[test]
+    fn a_missing_feed_is_refused_because_it_names_the_run() {
+        let raw = format!(r#"{{"underlying":"NIFTY",{SPAN},"support_ppm":200000}}"#);
+        let why = asked_from(&raw).expect_err("a refusal");
+        assert!(matches!(why, Refusal::Malformed(_)));
+        assert!(why.why().contains("identity"), "{}", why.why());
+        assert_eq!(why.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn an_empty_feed_is_as_absent_as_a_missing_one() {
+        let why = asked_from(&body("", SPAN, "200000")).expect_err("a refusal");
+        assert!(matches!(why, Refusal::Malformed(_)));
+    }
+
+    #[test]
+    fn a_missing_underlying_is_refused() {
+        let raw = format!(r#"{{"feed":"zerodha",{SPAN},"support_ppm":200000}}"#);
+        let why = asked_from(&raw).expect_err("a refusal");
+        assert!(why.why().contains("underlying"), "{}", why.why());
+    }
+
+    #[test]
+    fn every_numeric_field_is_required_and_named_when_absent() {
+        for missing in [
+            "from_year",
+            "from_month",
+            "to_year",
+            "to_month",
+            "support_ppm",
+        ] {
+            let raw = body("zerodha", SPAN, "200000").replace(missing, "x_gone");
+            let why = asked_from(&raw).expect_err("a refusal");
+            assert!(
+                why.why().contains(missing),
+                "the refusal must name the field it wanted: {}",
+                why.why()
+            );
+        }
+    }
+
+    #[test]
+    fn a_number_that_is_not_a_number_is_refused_rather_than_defaulted() {
+        let why = asked_from(&body("zerodha", SPAN, "\"lots\"")).expect_err("a refusal");
+        assert!(matches!(why, Refusal::Malformed(_)));
+        assert!(why.why().contains("support_ppm"), "{}", why.why());
+    }
+
+    #[test]
+    fn a_month_outside_one_to_twelve_is_refused() {
+        for span in [
+            r#""from_year":2019,"from_month":0,"to_year":2026,"to_month":8"#,
+            r#""from_year":2019,"from_month":13,"to_year":2026,"to_month":8"#,
+            r#""from_year":2019,"from_month":1,"to_year":2026,"to_month":0"#,
+            r#""from_year":2019,"from_month":1,"to_year":2026,"to_month":99"#,
+        ] {
+            let why = asked_from(&body("zerodha", span, "200000")).expect_err("a refusal");
+            assert!(matches!(why, Refusal::Span(_)), "{span}");
+            assert!(why.why().contains("1..=12"), "{}", why.why());
+        }
+    }
+
+    #[test]
+    fn a_span_that_ends_before_it_starts_is_refused_rather_than_swept_as_nothing() {
+        let span = r#""from_year":2026,"from_month":8,"to_year":2019,"to_month":12"#;
+        let why = asked_from(&body("zerodha", span, "200000")).expect_err("a refusal");
+        assert!(matches!(why, Refusal::Span(_)));
+        assert!(why.why().contains("ends before it starts"), "{}", why.why());
+    }
+
+    #[test]
+    fn a_span_of_one_month_is_legal() {
+        // The boundary: `to` EQUAL to `from` is a one-month span, not a
+        // backwards one, and refusing it would refuse the cheapest useful run.
+        let span = r#""from_year":2026,"from_month":8,"to_year":2026,"to_month":8"#;
+        let asked = asked_from(&body("zerodha", span, "200000")).expect("one month");
+        assert_eq!(asked.from, asked.to);
+    }
+
+    #[test]
+    fn a_month_earlier_in_a_later_year_is_still_forward() {
+        // 2019-12 -> 2020-01 crosses a year with a SMALLER month, which a
+        // naive month-only comparison would call backwards.
+        let span = r#""from_year":2019,"from_month":12,"to_year":2020,"to_month":1"#;
+        assert!(asked_from(&body("zerodha", span, "200000")).is_ok());
+    }
+
+    #[test]
+    fn a_support_threshold_of_zero_is_refused_because_the_ladder_would_not_end() {
+        let why = asked_from(&body("zerodha", SPAN, "0")).expect_err("a refusal");
+        assert!(matches!(why, Refusal::Support(_)));
+        assert!(why.why().contains("extinction"), "{}", why.why());
+        assert_eq!(why.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn a_year_past_u16_is_refused_rather_than_truncated() {
+        let span = r#""from_year":99999999,"from_month":1,"to_year":99999999,"to_month":2"#;
+        let why = asked_from(&body("zerodha", span, "200000")).expect_err("a refusal");
+        assert!(matches!(why, Refusal::Span(_)));
+        assert!(why.why().contains("not a year"), "{}", why.why());
+    }
+
+    #[test]
+    fn a_busy_refusal_is_a_conflict_and_not_a_bad_request() {
+        // A second press is a CONFLICT with work already happening. Answering
+        // 400 would tell the operator to fix a body that is perfectly good.
+        let busy = Refusal::Busy("one is running".to_owned());
+        assert_eq!(busy.status(), axum::http::StatusCode::CONFLICT);
+        assert_eq!(busy.why(), "one is running");
+    }
+
+    #[test]
+    fn the_field_reader_handles_both_shapes_and_gives_up_cleanly() {
+        assert_eq!(field(r#"{"a":"text"}"#, "a").as_deref(), Some("text"));
+        assert_eq!(field(r#"{"a":42}"#, "a").as_deref(), Some("42"));
+        assert_eq!(field(r#"{"a":42,"b":1}"#, "a").as_deref(), Some("42"));
+        assert_eq!(field(r#"{"a":"x"}"#, "b"), None);
+        assert_eq!(field("", "a"), None);
+        // A key with no colon after it is not a field.
+        assert_eq!(field(r#"{"a" "x"}"#, "a"), None);
+        // An unterminated string is not a value.
+        assert_eq!(field(r#"{"a":"x"#, "a"), None);
+    }
+
+    /* ==================== progress ==================== */
+
+    #[test]
+    fn a_started_run_is_in_flight_until_it_is_finished() {
+        let mut p = Progress::started("zerodha", "NIFTY", (2019, 12), (2026, 8), 200_000, 42);
+        assert!(p.in_flight());
+        assert_eq!(p.started_micros, 42);
+        assert_eq!(p.finished_micros, None);
+        assert_eq!(p.report, None);
+        p.finished_micros = Some(99);
+        assert!(!p.in_flight());
+    }
+
+    #[test]
+    fn the_progress_json_carries_every_field_and_nulls_what_has_not_happened() {
+        let p = Progress::started("zerodha", "NIFTY", (2019, 12), (2026, 8), 200_000, 42);
+        let json = p.to_json();
+        for fragment in [
+            r#""feed":"zerodha""#,
+            r#""underlying":"NIFTY""#,
+            r#""from_year":2019"#,
+            r#""from_month":12"#,
+            r#""to_year":2026"#,
+            r#""to_month":8"#,
+            r#""support_ppm":200000"#,
+            r#""started_micros":42"#,
+            r#""in_flight":true"#,
+            r#""finished_micros":null"#,
+            r#""report":null"#,
+            r#""refusal":null"#,
+        ] {
+            assert!(json.contains(fragment), "missing {fragment} in {json}");
+        }
+    }
+
+    #[test]
+    fn a_finished_run_carries_its_report_and_its_stamp() {
+        let mut p = Progress::started("zerodha", "NIFTY", (2020, 1), (2020, 1), 50_000, 1);
+        p.finished_micros = Some(500);
+        p.report = Some("STORED_PROVENANCE\nrows".to_owned());
+        let json = p.to_json();
+        assert!(json.contains(r#""in_flight":false"#), "{json}");
+        assert!(json.contains(r#""finished_micros":500"#), "{json}");
+        assert!(json.contains("STORED_PROVENANCE"), "{json}");
+        // The report is JSON-escaped, so its newline does not break the body.
+        assert!(!json.contains("PROVENANCE\nrows"), "the newline is escaped");
+    }
+
+    #[test]
+    fn a_refusal_reaches_the_progress_json_as_a_sentence() {
+        let mut p = Progress::started("zerodha", "NIFTY", (2020, 1), (2020, 1), 50_000, 1);
+        p.refusal = Some("the store held no bars".to_owned());
+        assert!(p.to_json().contains("the store held no bars"));
+    }
+
+    #[test]
+    fn the_clock_is_after_the_epoch_and_does_not_panic() {
+        // Zero is the honest answer on a machine whose clock is before the
+        // epoch; anything else here would be a real timestamp.
+        assert!(now_micros() > 0);
+    }
+}
