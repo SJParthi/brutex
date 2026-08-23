@@ -92,6 +92,13 @@ It is not a backtest, and no result in it is evidence about any market.
 pub const USAGE: &str = "\
 usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
        cli auto     SESSIONS            let the search choose the threshold
+       cli auto-stored VENDOR UNDERLYING RUNG FROM_Y FROM_M TO_Y TO_M
+                                   the same search, over REAL stored bars. There
+                                   is no threshold argument: it bisects for the
+                                   deepest one this machine can finish on this
+                                   span, and prints what it settled on. Use it
+                                   BEFORE sweep-stored or range-all rather than
+                                   guessing a number and watching it refuse.
        cli audit    SESSIONS MIN_HITS   sweep, then trade the best combination
        cli sweep-stored VENDOR UNDERLYING RUNG YEAR MONTH MIN_HITS
                                    sweep REAL bars read from the store
@@ -182,6 +189,35 @@ fn verify_arm(out: &mut String, feed: &str, underlying: &str) -> u8 {
 /// ledger refused to open, which is the failure wearing a success's clothes that
 /// §4 bans. `FAILED` and not `MISUSED` because the arguments were fine; what
 /// could not be done was the work.
+/// The `auto-stored` arm, lifted out of [`run`] for the reason [`audit_range_arm`]
+/// gives.
+///
+/// Parses the four date parts and nothing else: there is no threshold argument,
+/// which is the whole point of the command.
+fn auto_stored_arm(
+    out: &mut String,
+    vendor: &str,
+    underlying: &str,
+    rung: &str,
+    dates: (&str, &str, &str, &str),
+) -> u8 {
+    let (from_y, from_m, to_y, to_m) = dates;
+    let parsed = (
+        from_y.parse::<u16>(),
+        from_m.parse::<u8>(),
+        to_y.parse::<u16>(),
+        to_m.parse::<u8>(),
+    );
+    let (Ok(fy), Ok(fm), Ok(ty), Ok(tm)) = parsed else {
+        out.push_str("refused: FROM_Y FROM_M TO_Y TO_M must all be whole numbers\n");
+        return MISUSED;
+    };
+    let text = auto_stored(vendor, underlying, rung, (fy, fm), (ty, tm));
+    let refused = text.starts_with("refused:");
+    out.push_str(&text);
+    if refused { MISUSED } else { OK }
+}
+
 fn results_arm(out: &mut String, filter: Option<(&str, &str)>) -> u8 {
     let (feed, underlying) = match filter {
         None => (None, None),
@@ -483,6 +519,7 @@ pub fn run(args: &[String], out: &mut String) -> u8 {
         }
         ["range-all", v, u, fy, fm, ty, tm, mh] => range_all_arm(out, v, u, (fy, fm), (ty, tm), mh),
         ["verify", feed, underlying] => verify_arm(out, feed, underlying),
+        ["auto-stored", v, u, r, fy, fm, ty, tm] => auto_stored_arm(out, v, u, r, (fy, fm, ty, tm)),
         ["results"] => results_arm(out, None),
         ["results", feed, underlying] => results_arm(out, Some((feed, underlying))),
         ["sweep-all", vendor, rung, min_hits] => sweep_all_arm(out, vendor, rung, min_hits),
@@ -1096,6 +1133,117 @@ fn auto_with(ev: Result<Evaluator, &'static str>, sessions: i64) -> String {
     out.push('\n');
     out.push_str(&runner::report::render_auto(&found, None));
     out
+}
+
+/// The threshold search, over REAL stored bars across a span of months.
+///
+/// # The gap this closes
+///
+/// `auto` searches for the deepest threshold a machine can finish, by bisection,
+/// and it is the only dynamic thing in the whole surface. It took a count of
+/// SYNTHETIC sessions. Every command that touched the store — `sweep-stored`,
+/// `audit-stored`, `screen`, `range-all` — took a threshold as an ARGUMENT, so
+/// on real data an operator had to guess a number, watch it refuse or grind, and
+/// guess again.
+///
+/// That is backwards. The right threshold is not a preference; it is a property
+/// of how much the machine can afford on THIS span, and the search already knows
+/// how to find it. Wiring it to the store is the whole of this function:
+/// `Sweeper::auto` takes `&[Candle]` and has never cared where the bars came
+/// from.
+///
+/// # Why a span and not a month
+///
+/// `sweep-stored` sweeps one month, and one month of a coarse rung is too few
+/// bars for a threshold to mean anything — 60-minute bars over June 2024 are
+/// about 150 rows. The search's answer is only useful over the span that will
+/// actually be swept, which is why this takes the same four date arguments
+/// `screen` does.
+///
+/// # What it refuses
+///
+/// The same things `sweep_stored` refuses and for the same reasons: an
+/// unstamped build before any bar is read, an unknown vendor, an unknown rung,
+/// a backwards span, and a store that does not hold the months asked for.
+pub fn auto_stored(
+    vendor_word: &str,
+    underlying: &str,
+    rung: &str,
+    from: (u16, u8),
+    to: (u16, u8),
+) -> String {
+    match auto_stored_inner(vendor_word, underlying, rung, from, to) {
+        Ok(text) => text,
+        Err(why) => format!("refused: {why}\n"),
+    }
+}
+
+/// [`auto_stored`]'s body, so every refusal is one `?` rather than a nest.
+fn auto_stored_inner(
+    vendor_word: &str,
+    underlying: &str,
+    rung: &str,
+    from: (u16, u8),
+    to: (u16, u8),
+) -> Result<String, stored::Refusal> {
+    // Before any bar is read, for the reason `sweep_stored_inner` gives: §3
+    // rule 3 forbids computation without a recordable identity, so a build that
+    // cannot be identified refuses first rather than sweeping and apologising.
+    commit_stamp().ok_or_else(|| {
+        "this build carries no commit stamp, so §3 rule 3's run identity cannot be \
+         recorded and the search will not run. Rebuild with \
+         `BRUTEX_COMMIT=$(git rev-parse HEAD) cargo build --release -p cli`"
+            .to_owned()
+    })?;
+    let vendor = parse_vendor(vendor_word)?;
+    let root = store_root()?;
+    let span = stored::load_span(&root, vendor, underlying, rung, from, to)?;
+
+    note(
+        &telemetry::Event::info("cli.auto", "threshold search over stored bars")
+            .with("feed", vendor.as_str())
+            .with("underlying", underlying)
+            .with("rung", rung)
+            .with("bars", u64::try_from(span.bars.len()).unwrap_or(u64::MAX))
+            .with("months_found", u64::from(span.found))
+            .with("months_asked", u64::from(span.asked)),
+    );
+
+    let mut ev = evaluator().map_err(str::to_owned)?;
+    // `min_hits(1)` is the search's FLOOR, not its answer: `Sweeper::auto`
+    // brackets from `swept - 1` downward and reports what it settled on. The
+    // ceiling is `SEARCH_CEILING` because the search's whole job is to find what
+    // fits under it.
+    let found = Sweeper::new(Ladder::with_min_hits(1).with_ceiling(SEARCH_CEILING))
+        .auto(&span.bars, &mut ev);
+
+    let mut out = String::from(STORED_PROVENANCE);
+    out.push('\n');
+    // The span, before the search, because "which threshold" is unanswerable
+    // without "over how many bars" -- and a span with a HOLE gives a threshold
+    // for a shorter sample than the operator asked for.
+    let _ = writeln!(
+        out,
+        "  SPAN  {underlying} {rung} {}-{:02}..{}-{:02}  {} bars over {} of {} months",
+        from.0,
+        from.1,
+        to.0,
+        to.1,
+        span.bars.len(),
+        span.found,
+        span.asked
+    );
+    if span.found < span.asked {
+        let _ = writeln!(
+            out,
+            "  A HOLE: {} month(s) were asked for and not found, so the threshold \
+             below is for a SHORTER sample than the span names.",
+            span.asked.saturating_sub(span.found)
+        );
+    }
+    out.push('\n');
+    out.push_str(&runner::report::render_auto(&found, None));
+    Ok(out)
 }
 
 /// Resamples the bootstrap takes.
@@ -4996,6 +5144,70 @@ mod tests {
     /// unreachable because no arm names it — which is the shape of the
     /// unreachability D-0169 was written to close. This drives `run` by its
     /// argv, so the arm itself is what is under test.
+    #[test]
+    fn the_threshold_search_is_reachable_on_stored_bars_and_discoverable() {
+        // THE GAP THIS CLOSES. `auto` bisects for the deepest threshold a
+        // machine can finish and is the only dynamic thing in the whole surface.
+        // It took a count of SYNTHETIC sessions. Every command that touched the
+        // store took the threshold as an ARGUMENT, so on real data an operator
+        // guessed a number, watched it refuse or grind, and guessed again. The
+        // self-tuning capability existed, was tested, and worked only on data
+        // that does not exist.
+        //
+        // Asserted: the arm is REACHED and parses, and it appears in the usage.
+        // NOT the threshold it chooses -- that is a property of which months are
+        // on the machine running the test.
+        let mut out = String::new();
+        let code = run(
+            &argv(&[
+                "auto-stored",
+                "zerodha",
+                "NIFTY",
+                "60min",
+                "2024",
+                "1",
+                "2024",
+                "1",
+            ]),
+            &mut out,
+        );
+        assert!(
+            !out.contains("not a command this build knows"),
+            "the arm must be reached, not fall through to the usage refusal: {out}"
+        );
+        assert!(
+            code == OK || code == MISUSED,
+            "it either searched or refused for a stated reason: {code}"
+        );
+
+        // A non-numeric date is a refusal, not a parse panic.
+        let mut bad = String::new();
+        assert_eq!(
+            run(
+                &argv(&[
+                    "auto-stored",
+                    "zerodha",
+                    "NIFTY",
+                    "60min",
+                    "not-a-year",
+                    "1",
+                    "2024",
+                    "1"
+                ]),
+                &mut bad
+            ),
+            MISUSED
+        );
+        assert!(bad.contains("whole numbers"), "{bad}");
+
+        assert!(
+            USAGE.contains("auto-stored"),
+            "a command an operator cannot discover does not exist for them -- \
+             and this one exists to stop them typing a threshold they should \
+             never have had to choose"
+        );
+    }
+
     #[test]
     fn the_stored_audit_is_reachable_from_argv_and_is_in_the_usage() {
         let mut out = String::new();

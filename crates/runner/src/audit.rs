@@ -103,9 +103,18 @@ pub fn render(
     let _ = writeln!(out, "AUDIT");
     let _ = writeln!(
         out,
-        "  INDEX SPOT run. Slippage IS in these figures -- two ticks a round\n  \
-         trip. There is no brokerage, STT, stamp or GST, because an INDEX is\n  \
-         not tradeable: no order is placed, so nothing charges for one.\n\n  \
+        "  INDEX SPOT run. There is no brokerage, STT, stamp or GST, because\n  \
+         an INDEX is not tradeable: no order is placed, so nothing charges\n  \
+         for one.\n\n  \
+         THE TWO BLOCKS BELOW PRICE FILLS DIFFERENTLY, AND THIS LINE USED TO\n  \
+         CLAIM THEY DID NOT. TRADES carries two ticks a round trip -- a buy a\n  \
+         tick above the bar's high and a sell a tick below its low. EXIT GRID\n  \
+         carries NO tick: it fills at the extremes the bar actually printed,\n  \
+         because on a one-minute series a price a tick outside the bar is one\n  \
+         nothing traded at, and naming it would be the invention §3 rule 1\n  \
+         forbids. So the grid's totals are a shade kinder than the trade\n  \
+         walk's on the same bars, and the difference is exactly two ticks per\n  \
+         round trip.\n\n  \
          THIS IS SCOPED TO AN INDEX AND TO NOTHING ELSE. A STOCK spot IS\n  \
          tradeable -- you buy real shares -- so brokerage, STT, stamp, the\n  \
          exchange charge and GST all apply there, and so do they on options.\n  \
@@ -1277,8 +1286,27 @@ mod tests {
         // The header records which of the two worlds a reader is in, because
         // the answer changes the moment options land.
         let out = super::render(None, None, None, None, None, 10);
-        assert!(out.contains("Slippage IS in these figures"));
         assert!(out.contains("no brokerage"));
+
+        // THE TWO BLOCKS PRICE FILLS DIFFERENTLY, AND THE HEADER MUST SAY SO.
+        //
+        // This asserted `"Slippage IS in these figures"` — a single claim over
+        // the whole report, true when both halves used `Anchor::AdverseExtreme`.
+        // The exit grid now fills at `PrintedExtreme`, the bar's own high and
+        // low with no tick added, because a price a tick outside a one-minute
+        // bar is one nothing traded at. `crate::trade::walk` still carries the
+        // tick. So one sentence covering both became false for one of them, and
+        // the test that would have caught it was asserting the sentence rather
+        // than the difference.
+        assert!(
+            out.contains("two ticks a round trip"),
+            "the trade walk's slippage must still be stated"
+        );
+        assert!(
+            out.contains("EXIT GRID\n         carries NO tick") || out.contains("carries NO tick"),
+            "and the grid's absence of one must be stated beside it, or a reader \
+             compares two totals believing they were priced the same way"
+        );
 
         // THE SCOPE IS THE POINT. "No brokerage" is true of an INDEX and false
         // of a STOCK -- a stock spot is tradeable, you buy real shares, and
