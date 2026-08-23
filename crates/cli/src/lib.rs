@@ -308,6 +308,7 @@ fn screen_arm(
                     // not type is a policy the engine invented.
                     min_win_rate_bp: 0,
                     min_assurance_bp: 0,
+                    min_weakest_bp: 0,
                     min_trades: 0,
                     top: n,
                 },
@@ -3808,6 +3809,36 @@ pub struct Rules {
     ///
     /// Zero drops the rule, the way `min_rr_bp` of zero does.
     pub min_assurance_bp: i64,
+    /// The share of periods that must close POSITIVE **at every grain**, in
+    /// basis points. `10_000` reads "every single one, at all six".
+    ///
+    /// # The requirement that was reported and never enforced
+    ///
+    /// The operator's rule is *"every month, every week, every day, every
+    /// quarter, every half and every year the same"*. The screen learned to
+    /// MEASURE that and then printed it beside rows it had already admitted --
+    /// so a combination positive in every year and negative in half its months
+    /// was still stamped PASS, with the evidence against it in the next table
+    /// down.
+    ///
+    /// Checked against the WEAKEST grain, not the mean. Averaging 10,000 and
+    /// 5,000 reports 9,166 and clears a 90% bar; the minimum reports 5,000 and
+    /// refuses, and refusing is the whole point.
+    ///
+    /// # Why it cannot live in `admits`
+    ///
+    /// [`Rules::admits`] takes a [`grid::Cell`], and a cell has no calendar --
+    /// consistency needs the trades themselves, bucketed, which is only
+    /// knowable once a variant has been CHOSEN. So the five cell rules gate the
+    /// variant and this one gates the row, after the fact. That ordering is
+    /// stated rather than hidden because it has a consequence: a combination
+    /// whose chosen variant is inconsistent is refused, even if some OTHER
+    /// variant of it would have been steady. Finding that variant would mean
+    /// re-walking every cell trade by trade, which is the cost this deliberately
+    /// does not pay.
+    ///
+    /// Zero drops the rule, the way every other rule here does.
+    pub min_weakest_bp: i64,
     /// How many combinations to report. Ten or twenty-five, the operator's call.
     pub top: usize,
 }
@@ -3881,6 +3912,7 @@ impl Rules {
         // operator never chose, silently disqualifying rows.
         min_win_rate_bp: 0,
         min_assurance_bp: 0,
+        min_weakest_bp: 0,
         min_trades: 0,
         top: 25,
     };
@@ -4113,6 +4145,21 @@ impl Tier {
             // the terms an operator wrote it in, and because a future tier may
             // legitimately want the two to differ.
             min_assurance_bp: self.min_win_rate_bp,
+            // THE SAME CLAIM, ACROSS THE CALENDAR.
+            //
+            // A tier saying "ninety-five of a hundred win" should also mean
+            // ninety-five of a hundred PERIODS closed positive, at every
+            // grain. The two are near enough the same statement at the finest
+            // grain -- a day holding one losing trade is a negative day -- so
+            // this is not a second, harsher policy smuggled in beside the
+            // first. It is the first one, asked of the calendar instead of the
+            // trade list, which is where an operator actually feels it.
+            //
+            // The coarser grains are where it bites: a combination can win 95%
+            // of its trades and still have a NEGATIVE quarter, because losses
+            // clustered. That combination fails here and passed everywhere
+            // else.
+            min_weakest_bp: self.min_win_rate_bp,
             min_trades: self.min_trades,
             top,
         }
@@ -4242,6 +4289,25 @@ struct Screened<'a> {
     /// measured zero on purpose: "not measured" and "positive in none of its
     /// periods" are opposite findings and §4 does not let them look alike.
     consistency: Option<Consistency>,
+    /// Whether the consistency rule held, once it could be measured.
+    ///
+    /// Separate from `admitted` because the two are decided at different
+    /// times: `admitted` comes from the five CELL rules during selection, and
+    /// this from the calendar afterwards. Kept so `why_refused` can name which
+    /// of the two refused the row.
+    steady: bool,
+}
+
+impl Screened<'_> {
+    /// Whether this row's chosen variant met the consistency rule.
+    ///
+    /// A row whose consistency could NOT be measured counts as steady, and that
+    /// is deliberate: an unmeasured row must not be refused for failing a rule
+    /// nothing checked. The consistency table says "not measured" for it in so
+    /// many words, so the gap is visible rather than dressed up as a verdict.
+    fn steady(&self) -> bool {
+        self.steady
+    }
 }
 
 /// The top combinations, priced in full and ranked with the PASSING ones first.
@@ -4538,37 +4604,42 @@ fn screen(
             cell,
             scored,
             consistency: None,
+            // Until measured, a row is steady: a rule that has not run yet
+            // cannot have been broken.
+            steady: true,
         });
     }
 
     // PASSERS FIRST, then by net. `Reverse` and not a negation, for the reason
     // `audit::grid` gives: `pessimistic` saturates at `i64::MIN` and negating
     // that panics under `overflow-checks`, killing the process over a sort.
+    //
+    // Sorted TWICE, and the second one is not redundant. `measure_top` only
+    // measures what this ordering put in the top `rules.top`, and the gate
+    // below can demote some of them -- so the final order has to be taken after
+    // the demotions, or a refused row sits above a passing one.
     rows.sort_by_key(|r| (!r.admitted, core::cmp::Reverse(r.cell.pessimistic)));
 
     measure_top(&mut rows, bars, column, horizon, rules);
 
-    let passed = rows.iter().filter(|r| r.admitted).count();
-    let mut out = String::from("TOP COMBINATIONS, SCREENED\n");
-    let _ = writeln!(
-        out,
-        "  RULES, all yours and all required together:\n    \
-         1. no single trade may run more than {} against entry (the WORST, not the mean)\n    \
-         2. the SMALLEST win must be at least {} times the LARGEST loss\n    \
-         3. report the top {}\n\n  \
-         {passed} of {} priced combinations satisfy every rule.{}\n",
-        ppm_as_percent(rules.max_mae_ppm),
-        hundredths_of(rules.min_rr_bp),
-        rules.top,
-        rows.len(),
-        if passed == 0 {
-            " NOTHING PASSED -- the rows below are shown so a reader can see what \
-             was tried and by how much each missed, which is a finding rather \
-             than an empty table."
-        } else {
-            ""
+    // THE CALENDAR GATE, AFTER THE CELL GATES.
+    //
+    // A row that was admitted on its five cell rules and is inconsistent across
+    // the calendar is refused HERE, because a cell has no calendar to check --
+    // see `Rules::min_weakest_bp`. An unmeasured row is left alone: refusing it
+    // would be refusing it for a rule that never ran.
+    for row in rows.iter_mut().take(rules.top) {
+        if let Some(ref c) = row.consistency {
+            row.steady = c.weakest_bp() >= rules.min_weakest_bp;
+            if !row.steady {
+                row.admitted = false;
+            }
         }
-    );
+    }
+    rows.sort_by_key(|r| (!r.admitted, core::cmp::Reverse(r.cell.pessimistic)));
+
+    let passed = rows.iter().filter(|r| r.admitted).count();
+    let mut out = rules_banner(rules, passed, rows.len());
     let _ = writeln!(
         out,
         "  {:<5}{:>8}{:>6}{:>10}{:>11}{:>6}{:>13}{:>13}{:>6}  conditions",
@@ -4603,7 +4674,7 @@ fn screen(
             if row.admitted {
                 "PASS"
             } else {
-                why_refused(&row.cell, rules)
+                why_refused(&row.cell, rules, row.steady())
             },
             row.names
         );
@@ -4611,6 +4682,64 @@ fn screen(
     let _ = writeln!(out);
 
     append_consistency(&mut out, &rows, rules.top);
+    out
+}
+
+/// The rules banner: every rule that is on, and `off` for every one that is not.
+///
+/// # Why it is its own function
+///
+/// It listed three rules while `admits` enforced five and the calendar gate
+/// a sixth, so a reader could not tell whether a row was refused by a rule
+/// they set or by one the engine applied without saying. Stating all six
+/// pushed [`screen`] past the hundred-line ceiling, and the split is the
+/// right cut anyway: this is the POLICY, and everything around it is the
+/// measurement the policy was applied to.
+fn rules_banner(rules: Rules, passed: usize, considered: usize) -> String {
+    let mut out = String::from(
+        "TOP COMBINATIONS, SCREENED
+",
+    );
+
+    let _ = writeln!(
+        out,
+        // EVERY RULE THAT IS ON, and `off` for every one that is not.
+        //
+        // This listed three while `admits` enforced four and then five, so a
+        // reader could not tell whether a row was refused by a rule they set or
+        // by one the engine applied without saying. A rule that filters and
+        // does not appear here is the silent policy §6 refuses to allow even in
+        // a parameter.
+        "  RULES, all yours and all required together:\n    \
+         1. no single trade may run more than {} against entry (the WORST, not the mean)\n    \
+         2. the SMALLEST win must be at least {} times the LARGEST loss\n    \
+         3. at least {} of trades must WIN\n    \
+         4. at least {} round trips, and the 95% LOWER BOUND on the win rate must \
+         still reach {}\n    \
+         5. at least {} of periods must close POSITIVE at EVERY grain -- year, \
+         half, quarter, month, week, day\n    \
+         6. report the top {}\n\n  \
+         {passed} of {} priced combinations satisfy every rule.{}\n",
+        ppm_as_percent(rules.max_mae_ppm),
+        hundredths_of(rules.min_rr_bp),
+        bp_as_percent(rules.min_win_rate_bp),
+        if rules.min_trades == 0 {
+            "no minimum".to_owned()
+        } else {
+            rules.min_trades.to_string()
+        },
+        bp_as_percent(rules.min_assurance_bp),
+        bp_as_percent(rules.min_weakest_bp),
+        rules.top,
+        considered,
+        if passed == 0 {
+            " NOTHING PASSED -- the rows below are shown so a reader can see what \
+             was tried and by how much each missed, which is a finding rather \
+             than an empty table."
+        } else {
+            ""
+        }
+    );
     out
 }
 
@@ -4775,14 +4904,50 @@ fn exit_label(cell: &grid::Cell) -> String {
     })
 }
 /// Which rule a variant broke, named rather than left to be inferred.
-fn why_refused(cell: &grid::Cell, rules: Rules) -> &'static str {
+fn why_refused(cell: &grid::Cell, rules: Rules, steady: bool) -> &'static str {
+    // EVERY RULE, NOT TWO OF THEM.
+    //
+    // This knew about `max_mae_ppm` and `min_rr_bp` and nothing else, so a row
+    // refused for its win rate, its trade count or its assurance printed `-` in
+    // the `rule` column -- the same glyph a PASSING row prints. `admitted` was
+    // false and the reason column said nothing was wrong, which is the failure
+    // wearing a success's clothes §4 bans, in a single character.
+    //
+    // Order matters: the first rule broken is the one named, and they are
+    // checked cheapest first. A row can break several and an operator only
+    // needs one to act on.
     if cell.worst_mae > rules.max_mae_ppm {
         "MAE"
     } else if cell.reward_to_risk_bp() < rules.min_rr_bp {
         "R:R"
+    } else if cell.win_rate_bp() < rules.min_win_rate_bp {
+        "win%"
+    } else if cell.trades < rules.min_trades {
+        "few"
+    } else if cell.assurance_bp() < rules.min_assurance_bp {
+        // The rate was observed but the sample does not SUPPORT it. Named
+        // separately from `win%` because the two are opposite findings: one says
+        // the strategy did not win often enough, the other that it did not win
+        // often enough TIMES for the rate to mean anything.
+        "conf"
+    } else if !steady {
+        "steady"
     } else {
         "-"
     }
+}
+
+/// Basis points as a percentage, or `off` when the rule is switched off.
+///
+/// `off` and not `0.00%`, because the two mean opposite things and every rule
+/// in [`Rules`] documents zero as DROPPING the rule. A banner reading "at least
+/// 0.00% of trades must win" states a rule that is not being applied, which is
+/// the same lie as omitting it.
+fn bp_as_percent(bp: i64) -> String {
+    if bp == 0 {
+        return "off".to_owned();
+    }
+    format!("{}.{:02}%", bp / 100, (bp % 100).abs())
 }
 
 /// An integer in hundredths with its decimal point. `200` is `2.00`.
@@ -7864,6 +8029,7 @@ mod tests {
             min_rr_bp: 0,
             min_win_rate_bp: 0,
             min_assurance_bp: 0,
+            min_weakest_bp: 0,
             min_trades: 0,
             top: 25,
         };
@@ -8155,5 +8321,111 @@ mod tests {
         };
         assert_eq!(c.share_bp(6), 0);
         assert_eq!(c.share_bp(usize::MAX), 0);
+    }
+
+    /// Every rule that can refuse a row is NAMED when it does.
+    ///
+    /// # The single character this fixes
+    ///
+    /// `why_refused` knew two rules of six. A row refused for its win rate, its
+    /// trade count, its confidence or its consistency printed `-` in the rule
+    /// column -- the identical glyph a PASSING row prints. `admitted` was false
+    /// and the reason said nothing was wrong.
+    #[test]
+    fn every_rule_that_refuses_a_row_says_which_one_it_was() {
+        let strict = crate::Rules {
+            max_mae_ppm: 1_000,
+            min_rr_bp: 200,
+            min_win_rate_bp: 9_000,
+            min_assurance_bp: 8_000,
+            min_weakest_bp: 9_000,
+            min_trades: 50,
+            top: 25,
+        };
+        // Each cell breaks exactly one rule, so the label is unambiguous.
+        let mut wide = perfect_cell(100);
+        wide.worst_mae = 5_000;
+        assert_eq!(crate::why_refused(&wide, strict, true), "MAE");
+
+        // `reward_to_risk_bp` is `min_win / worst_trade`, and returns i64::MAX
+        // when `worst_trade` is zero -- so a cell with no losing trade can never
+        // fail this rule, which is why both fields are set here.
+        let mut thin = perfect_cell(100);
+        thin.worst_trade = -1_000;
+        thin.min_win = 100;
+        thin.wins = 10;
+        assert_eq!(
+            crate::why_refused(&thin, strict, true),
+            "R:R",
+            "a poor reward-to-risk is named before the win rate it also fails"
+        );
+
+        let mut losing = perfect_cell(100);
+        losing.wins = 50;
+        assert_eq!(crate::why_refused(&losing, strict, true), "win%");
+
+        assert_eq!(
+            crate::why_refused(&perfect_cell(10), strict, true),
+            "few",
+            "ten trades is below the fifty this rule set demands"
+        );
+
+        // 60 perfect trades: rate 100% clears `win%`, count clears `few`, and
+        // the bound is 93.98% which clears 80% -- so only consistency is left.
+        assert_eq!(
+            crate::why_refused(&perfect_cell(60), strict, false),
+            "steady",
+            "an inconsistent row must say so rather than printing a dash"
+        );
+        assert_eq!(
+            crate::why_refused(&perfect_cell(60), strict, true),
+            "-",
+            "and a row that breaks nothing prints the dash"
+        );
+    }
+
+    /// Confidence and win rate are named SEPARATELY, because they are opposite
+    /// findings.
+    ///
+    /// One says the strategy did not win often enough. The other says it did
+    /// not win often enough TIMES for the rate to mean anything. Collapsing
+    /// them into one label would tell an operator to improve the wrong thing --
+    /// a 100%-winning combination refused for confidence needs MORE TRADES, and
+    /// no amount of tuning the exit will produce them.
+    #[test]
+    fn confidence_and_win_rate_are_named_separately() {
+        let rules = crate::Rules {
+            max_mae_ppm: i64::MAX,
+            min_rr_bp: 0,
+            min_win_rate_bp: 9_000,
+            min_assurance_bp: 9_000,
+            min_weakest_bp: 0,
+            min_trades: 0,
+            top: 25,
+        };
+        // 20 of 20: a rate of 100% clears the win-rate rule outright, and a
+        // bound of 83.88% fails the confidence one.
+        let tiny = perfect_cell(20);
+        assert!(tiny.win_rate_bp() >= rules.min_win_rate_bp);
+        assert!(tiny.assurance_bp() < rules.min_assurance_bp);
+        assert_eq!(
+            crate::why_refused(&tiny, rules, true),
+            "conf",
+            "a perfect but small record is refused for CONFIDENCE, not for \
+             winning too little"
+        );
+    }
+
+    /// A rule switched off reads `off`, never `0.00%`.
+    ///
+    /// Every rule in [`Rules`] documents zero as DROPPING the rule. A banner
+    /// reading "at least 0.00% of trades must win" states a rule that is not
+    /// being applied, which is the same lie as omitting it.
+    #[test]
+    fn a_rule_that_is_off_says_off_and_not_zero_percent() {
+        assert_eq!(crate::bp_as_percent(0), "off");
+        assert_eq!(crate::bp_as_percent(9_000), "90.00%");
+        assert_eq!(crate::bp_as_percent(9_550), "95.50%");
+        assert_eq!(crate::bp_as_percent(10_000), "100.00%");
     }
 }
