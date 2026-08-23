@@ -254,7 +254,7 @@ const fn retired(index: u16, name: &'static str, band: Option<Base>, duplicate_o
     reason = "COUNT is TABLE.len() in a const context, and the compile-time \
               assertion that the table has not outgrown the mask depends on it."
 )]
-pub const TABLE: [BitDef; 365] = [
+pub const TABLE: [BitDef; 370] = [
     // ---- 0–5. Moving averages. Shipped. ---------------------------------
     plain(0, "close_above_ema20"),
     plain(1, "close_below_ema20"),
@@ -1140,6 +1140,29 @@ pub const TABLE: [BitDef; 365] = [
     plain(362, "first_cross_day_open"),
     plain(363, "second_cross_day_open"),
     plain(364, "third_plus_cross_day_open"),
+    // ---- 365–369. Day of week. -----------------------------------------
+    //
+    // NSE trades Monday to Friday, so five bits and no more. They are `plain`
+    // rather than banded because a weekday is exact: a bar is on Tuesday or it
+    // is not, and there is no near-Tuesday.
+    //
+    // # Why these are worth five of the nineteen free positions
+    //
+    // Every other condition in this table describes what PRICE did. These
+    // describe WHEN, and the two compose: `close_above_vwap` on a Monday and the
+    // same condition on a Friday are different statements about the market, and
+    // until now the sweep could not tell them apart. Expiry sits on a Thursday
+    // for NIFTY, so Thursday and Friday carry a structural difference no price
+    // condition can express.
+    //
+    // The four session-phase bits at 44–47 already give the sweep WHEN WITHIN a
+    // day. These give it WHICH day, and the pair is what an operator means by
+    // "Monday morning behaves differently".
+    plain(365, "is_monday"),
+    plain(366, "is_tuesday"),
+    plain(367, "is_wednesday"),
+    plain(368, "is_thursday"),
+    plain(369, "is_friday"),
 ];
 
 /// Every level whose SIDE this table carries on both sides, and the two
@@ -1405,7 +1428,7 @@ pub const COUNT: usize = TABLE.len();
 
 /// The highest position that will ever be a hole: none. The next condition
 /// appends here, whatever has been retired below it.
-pub const NEXT_FREE: u16 = 365;
+pub const NEXT_FREE: u16 = 370;
 
 // THE TABLE CANNOT OUTGROW THE MASK, enforced at COMPILE time.
 //
@@ -1538,7 +1561,15 @@ pub const LIVE: ConditionMask =
         .with_bit(361)
         .with_bit(362)
         .with_bit(363)
-        .with_bit(364);
+        .with_bit(364)
+        // 365–369: the five weekday rows. Plain and live, like every other
+        // position in this literal that names a fact about the bar rather than a
+        // level it is near.
+        .with_bit(365)
+        .with_bit(366)
+        .with_bit(367)
+        .with_bit(368)
+        .with_bit(369);
 
 /// The row at `index`, or `None` when the index is past the table.
 #[must_use]
@@ -1729,9 +1760,9 @@ mod tests {
         assert_eq!(LIVE, folded, "the LIVE literal drifted from the table");
         assert_eq!(
             LIVE.popcount(),
-            323,
-            "365 positions, less three tombstones and less the 39 void \
-             forming-pivot rows"
+            328,
+            "370 positions, less three tombstones and less the 39 void \
+             forming-pivot rows. 323 + the five weekday bits."
         );
     }
 
@@ -1887,8 +1918,24 @@ mod tests {
 
     #[test]
     fn count_and_next_free_agree_with_the_table() {
-        assert_eq!(COUNT, 365);
+        // 370 = 365 + the five weekday rows. `NEXT_FREE` must equal `COUNT` or
+        // the next family would be appended over a live position, which §3
+        // rule 8 forbids absolutely: condition bits are never renumbered or
+        // reused.
+        assert_eq!(COUNT, 370);
         assert_eq!(usize::from(NEXT_FREE), COUNT);
+        // AND THE MASK STILL HOLDS THEM, at COMPILE time. 384 bits against 370
+        // positions leaves fourteen free; a family that pushed past 384 would
+        // re-key every run ever recorded, because `vocab_version` is one of the
+        // nine terms §3 rule 3 hashes.
+        //
+        // A `const` block and not a runtime assertion: both operands are
+        // constants, so a runtime check would only restate what the compiler
+        // already knew -- and clippy is right to call that a constant assertion.
+        // This way the BUILD fails if a family is ever appended past the mask.
+        const {
+            assert!(COUNT <= crate::mask::WORDS * 64);
+        }
     }
 
     /// **A row constructor carries the `band` and the `reason` it is handed,

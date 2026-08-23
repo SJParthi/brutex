@@ -18,7 +18,7 @@ repository keeps finding in audits.
 |---|---|---|
 `core` | **nothing** | `Instrument`, `Isin`, `Symbol`, `Price`, `Vendor`, the universe. The nouns. |
 `vocab` | **nothing** | The bit table, `ConditionMask`, `Tolerance`. The alphabet. |
-`indicators` | **`vocab` only** | Candle in, condition bits out. Eleven position sources, 323 positions. |
+`indicators` | **`vocab` only** | Candle in, condition bits out. Twelve position sources, 328 positions. |
 `engine` | **`vocab` only** | The Apriori ladder. Bit vectors in, frequent combinations out. |
 `greeks` | **nothing** | Black-Scholes, integer-safe. Already shared. |
 `costs` | **`core` only** | Brokerage, STT, stamp duty, GST, slippage. Paisa integers. |
@@ -109,8 +109,9 @@ is append-only rather than tidy.
 
 ### The width is checked by the compiler, not by review
 
-`ConditionMask` is `[u64; WORDS]`, currently 6 words = 384 bits, against 365
-allocated positions — 19 free. Adding conditions consumes headroom, and when it runs out:
+`ConditionMask` is `[u64; WORDS]`, currently 6 words = 384 bits, against 370
+allocated positions — 14 free. The five weekday rows (365–369) took five of the
+nineteen. Adding conditions consumes headroom, and when it runs out:
 
 ```rust
 const _: () = assert!(COUNT <= ConditionMask::BITS as usize, ...);
@@ -174,7 +175,7 @@ Per candle, the shared core does a fixed amount of work with no allocation:
 
 | Operation | Cost | Bounded by |
 |---|---|---|
-Condition lookup | O(1) | direct index into a fixed array of 365 |
+Condition lookup | O(1) | direct index into a fixed array of 370 |
 Mask evaluation | O(1) | 6 ANDs, 6 XORs, 5 ORs, 1 compare — branchless, no early exit, identical for a true and a false answer |
 One candle through every module | O(1) | a fixed set of fixed-size states, no allocation; `size_of::<Evaluator>()` is asserted at compile time |
 Duplicate rejection | O(1) | one `HashSet` probe on a `Hash + Eq` mask |

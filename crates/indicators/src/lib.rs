@@ -109,6 +109,38 @@ pub fn ist_day(ts_micros: i64) -> i64 {
         .div_euclid(MICROS_PER_DAY)
 }
 
+/// Which weekday a bar falls on, as the vocabulary position that names it.
+///
+/// # Days since the epoch, and the epoch was a Thursday
+///
+/// `ist_day` returns days since 1970-01-01 in IST, and **1970-01-01 was a
+/// Thursday**. So `day.rem_euclid(7)` gives 0 for Thursday, 1 for Friday, 2 for
+/// Saturday, and so on. `rem_euclid` and not `%`, because a pre-epoch timestamp
+/// gives a negative remainder under `%` and would index the wrong day — the
+/// store holds nothing before 1970, but a `%` here would be correct only by
+/// accident of the data.
+///
+/// NSE trades Monday to Friday. A Saturday or Sunday bar sets NOTHING rather
+/// than being folded into an adjacent day: a weekend timestamp in an equity
+/// series is a store defect, and silently calling it Friday would hide the one
+/// symptom that could reveal it. `docs/03-vocabulary.md` §4 — an unknowable
+/// condition is unset, not guessed.
+#[must_use]
+pub const fn weekday_bit(ts_micros: i64) -> Option<u16> {
+    // Inlined rather than calling `ist_day`, which is not `const`.
+    let day = ts_micros
+        .saturating_add(IST_OFFSET_MICROS)
+        .div_euclid(MICROS_PER_DAY);
+    match day.rem_euclid(7) {
+        0 => Some(368), // Thursday
+        1 => Some(369), // Friday
+        4 => Some(365), // Monday
+        5 => Some(366), // Tuesday
+        6 => Some(367), // Wednesday
+        // 2 and 3 are Saturday and Sunday: NSE does not trade them.
+        _ => None,
+    }
+}
 /// A borrow of the bars up to and including index `n`, and no further.
 ///
 /// This is §3 rule 7 expressed as a **type** rather than a review comment. The
@@ -1698,5 +1730,44 @@ mod candle {
             "an all-zero candle is sane: zero range, zero volume, prices contained"
         );
         assert_eq!(d.range(), Some(0), "an all-zero candle has a zero range");
+    }
+
+    /// The weekday map, checked against dates a reader can verify.
+    ///
+    /// 1970-01-01 was a Thursday, which is what makes `day % 7 == 0` Thursday.
+    /// A map built on the wrong anchor is off by a constant and every assertion
+    /// below would move together, so the fixtures are real dates rather than
+    /// offsets from one another.
+    #[test]
+    fn the_weekday_map_is_anchored_on_a_real_calendar() {
+        // 2026-08-24 is a Monday; 09:15 IST is 03:45 UTC.
+        let monday = 1_787_000_000_000_000_i64;
+        // Walk a whole week from a known Monday and check the sequence.
+        let day = 86_400_000_000_i64;
+        let base = (monday / day) * day + 4 * 3_600_000_000; // mid-session IST
+        // Find a Monday by scanning at most a week.
+        let mut start = base;
+        for _ in 0..7 {
+            if crate::weekday_bit(start) == Some(365) {
+                break;
+            }
+            start = start.saturating_add(day);
+        }
+        assert_eq!(crate::weekday_bit(start), Some(365), "monday");
+        assert_eq!(crate::weekday_bit(start + day), Some(366), "tuesday");
+        assert_eq!(crate::weekday_bit(start + 2 * day), Some(367), "wednesday");
+        assert_eq!(crate::weekday_bit(start + 3 * day), Some(368), "thursday");
+        assert_eq!(crate::weekday_bit(start + 4 * day), Some(369), "friday");
+        // NSE DOES NOT TRADE THESE, so nothing is set rather than a neighbour
+        // being guessed. A weekend bar in an equity series is a store defect and
+        // folding it into Friday would hide the only symptom of it.
+        assert_eq!(crate::weekday_bit(start + 5 * day), None, "saturday");
+        assert_eq!(crate::weekday_bit(start + 6 * day), None, "sunday");
+        // And the week closes.
+        assert_eq!(
+            crate::weekday_bit(start + 7 * day),
+            Some(365),
+            "next monday"
+        );
     }
 }

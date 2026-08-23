@@ -589,6 +589,26 @@ impl Evaluator {
         // `CLAUDE.md` §3 rule 4 means — it does not grow with bars, with
         // candidates, or with anything a caller supplies.
         mask = self.crossings_of(mask);
+        // ── WHICH DAY OF THE WEEK, and it composes with everything above ──────
+        //
+        // Every other condition in the vocabulary describes what PRICE did.
+        // These five describe WHEN, and the pair is what an operator means by
+        // "Monday morning behaves differently from Friday afternoon": bits 44–47
+        // already give the phase WITHIN a day, and 365–369 give which day.
+        //
+        // Expiry sits on a Thursday for NIFTY, so Thursday and Friday carry a
+        // structural difference no price condition can express. Until these bits
+        // existed the sweep could not tell one weekday from another at all.
+        //
+        // A weekend bar sets NOTHING rather than being folded into a neighbour:
+        // NSE does not trade Saturday or Sunday, so such a bar is a store defect
+        // and calling it Friday would hide the only symptom of it.
+        //
+        // Cost: one integer division and a five-arm match, per bar. O(1) in the
+        // sense §3 rule 4 means — it does not grow with bars or candidates.
+        if let Some(position) = crate::weekday_bit(bar.ts_micros) {
+            mask = vocab::table::set_exact(mask, position).unwrap_or(mask);
+        }
 
         // ── fold last: the day's extremes are an anchor and must exclude the bar ─
         if self.seeded {
@@ -986,6 +1006,15 @@ impl Evaluator {
         // named here too — `only_live_positions_are_ever_emitted` compares what `step` emits
         // against this list, and it caught their absence the moment they started firing.
         all.extend([276, 277, 278, 279]);
+        // THE FIVE WEEKDAY ROWS, claimed by the evaluator itself.
+        //
+        // They belong to no module because they are not derived from price:
+        // `weekday_bit` reads only the bar's timestamp, so there is no state to
+        // keep and no module to keep it in. Claiming them HERE is what makes
+        // `only_live_positions_are_ever_emitted` able to pass — that test
+        // refuses any bit no one declares, and it caught this the moment the
+        // family was wired in, which is exactly what it is for.
+        all.extend([365, 366, 367, 368, 369]);
         // 280–313 likewise: no module owns them, because they are derived from
         // the mask every module already produced. Taken from
         // `vocab::table::CROSSINGS` rather than written out, so the list here
@@ -1069,6 +1098,12 @@ mod tests {
     /// and a hand-maintained list cannot drift.
     #[test]
     fn the_position_set_is_the_union_of_the_modules() {
+        // FIVE THAT ARE NEITHER MEASURED NOR DERIVED. The weekday rows read only
+        // the bar's timestamp -- no price, no state, no module -- so they are
+        // counted on their own rather than folded into either group. A sum that
+        // hid them would let the next timestamp-only family land without this
+        // arithmetic moving.
+        const WEEKDAYS: usize = 5;
         let all = Evaluator::positions();
         // 323 = 238 measured by a module + 85 derived from the mask. NOT a
         // literal beside a different literal: the derived half is spelled from
@@ -1084,9 +1119,10 @@ mod tests {
         let derived = vocab::table::CROSSINGS.len().saturating_mul(5);
         assert_eq!(
             all.len(),
-            238_usize.saturating_add(derived),
-            "every live position is computable: 238 measured by a module, plus \
-             {derived} derived from the mask"
+            238_usize.saturating_add(derived).saturating_add(WEEKDAYS),
+            "every live position is computable: 238 measured by a module, \
+             {derived} derived from the mask, and {WEEKDAYS} read from the \
+             timestamp"
         );
         let mut sorted = all.clone();
         sorted.sort_unstable();

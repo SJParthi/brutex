@@ -106,12 +106,15 @@ mod tests {
         // numbers together rather than only the version -- the version alone
         // cannot tell you how close the next one is, and the answer is now
         // "very".
+        // 365 -> 370: the five weekday rows. Still an APPEND against a 384-bit
+        // mask, so `VOCAB_VERSION` holds at 3 and no run ever recorded is
+        // re-keyed. Fourteen positions remain.
         assert_eq!(VOCAB_VERSION, 3);
-        assert_eq!(table::COUNT, 365);
+        assert_eq!(table::COUNT, 370);
         assert_eq!(ConditionMask::BITS, 384);
         assert_eq!(
             ConditionMask::BITS as usize - table::COUNT,
-            19,
+            14,
             "free positions before the next family forces a widen, and a bump"
         );
     }
