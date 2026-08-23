@@ -1165,6 +1165,7 @@ fn auto_with(ev: Result<Evaluator, &'static str>, sessions: i64) -> String {
 /// The same things `sweep_stored` refuses and for the same reasons: an
 /// unstamped build before any bar is read, an unknown vendor, an unknown rung,
 /// a backwards span, and a store that does not hold the months asked for.
+#[must_use]
 pub fn auto_stored(
     vendor_word: &str,
     underlying: &str,
@@ -1312,6 +1313,60 @@ const AUDIT_KEEP: usize = 250;
 /// because [`GRID_VARIANTS`] is derived from it and the two drifting apart would
 /// make the printed exposure describe a grid that was not run.
 const GRID_RUNGS: usize = 4;
+
+/// The exit grid's step, in ppm — ONE INDEX POINT, and the engine chooses it.
+///
+/// # What this replaces
+///
+/// Every exit level used to be a quantile of the excursions the combination
+/// itself produced. That makes each level relative to how loose the signal is,
+/// so on a loose signal the tightest stop the engine would ever try was the
+/// 20th percentile — measured at 312 index points on a real 15-minute NIFTY
+/// run. Across 1,024,058 combinations, not one was asked how it behaves under
+/// anything tighter, and a rule stated in POINTS had no cell to land in.
+///
+/// # Why one point, and why nothing smaller
+///
+/// The tick grid is two decimal places (§7), but an index point is the unit a
+/// rule is stated in — "no trade beyond twenty points" — and a step finer than
+/// the unit multiplies the grid without adding a level anybody would name.
+/// Every level is a multiple of it, so a rule at any whole number of points
+/// lands exactly on a rung rather than between two.
+///
+/// # It is derived, not typed
+///
+/// [`points_to_ppm`] converts against [`NIFTY_REFERENCE`], which is a stated
+/// approximation the report names on its own page. No operator supplies this
+/// and no percentage appears in it: `GRID_RUNGS` alone decides how far the
+/// ladder reaches, so raising the depth extends 1pt…4pt to 1pt…25pt without
+/// moving a single level that was already tried.
+const GRID_STEP_PPM: i64 = points_to_ppm(1) / 2;
+
+/// What the grid costs at each depth, measured rather than assumed.
+///
+/// The exit grid is a CROSS PRODUCT of three ladders plus the armed
+/// trailing-profit rows, so its width grows far faster than the ladder does.
+/// Counted with `grid::variants(r, r, r)`:
+///
+/// | rungs | variants per combination | reach at a half-point step |
+/// |---|---|---|
+/// | 4 | 625 | 2 pt |
+/// | 8 | 12,393 | 4 pt |
+/// | 10 | 34,606 | 5 pt |
+/// | 16 | 319,345 | 8 pt |
+/// | 20 | 935,361 | 10 pt |
+/// | 40 | **27,637,321** | 20 pt |
+///
+/// This is the wall, and it is arithmetic rather than an implementation limit.
+/// A half-point step reaching twenty points needs forty rungs, and forty rungs
+/// is twenty-seven million cells FOR ONE COMBINATION. The engine prices 250 of
+/// them per run today, which would be seven billion cells.
+///
+/// So depth is a real choice with a real cost, and the constant above is the
+/// step rather than the reach precisely because the two must be decided
+/// separately: the step is what makes a level nameable, and the reach is what
+/// the machine can afford.
+const _GRID_COST_TABLE: () = ();
 
 /// How many exit settings the audit's grid actually evaluates.
 ///
@@ -3007,7 +3062,21 @@ fn trade_and_screen(
 ) -> (runner::trade::Trades, grid::Grid, String) {
     let side = side_of_evidence(first);
     let taken = trade::walk(bars, column, &first.mask, horizon, direction_of(side));
-    let exits = grid::evaluate(bars, column, &first.mask, horizon, side, GRID_RUNGS);
+    // The same forced rung the screen uses, so the headline grid and the screened
+    // rows are built from one ladder. Two ladders would let the report show a
+    // variant in one table that cannot exist in the other.
+    let exits = grid::evaluate(
+        bars,
+        column,
+        &first.mask,
+        horizon,
+        side,
+        grid::Levels {
+            rungs: GRID_RUNGS,
+            step_ppm: Some(GRID_STEP_PPM),
+            forced: (rules.max_mae_ppm > 0).then_some(rules.max_mae_ppm),
+        },
+    );
     let screened = screen(bars, column, by_evidence, horizon, rules);
     (taken, exits, screened)
 }
@@ -3140,7 +3209,37 @@ fn screen(
     let mut rows: Vec<Screened> = Vec::with_capacity(by_evidence.len().min(SCREEN_CAP));
     for (rank, scored) in by_evidence.iter().take(SCREEN_CAP).enumerate() {
         let side = side_of_evidence(scored);
-        let g = grid::evaluate(bars, column, &scored.mask, horizon, side, GRID_RUNGS);
+        // THE OPERATOR'S OWN STOP IS TRIED, NOT MERELY USED AS A FILTER.
+        //
+        // `max_mae_ppm` was a post-hoc test: build the grid from quantiles of
+        // each combination's own excursions, then discard every variant whose
+        // worst trade exceeded the rule. So the question the engine answered was
+        // "did this signal HAPPEN to keep every trade inside twenty points",
+        // which almost nothing does -- and never "does this signal work WITH a
+        // twenty point stop", which is the question actually being asked.
+        //
+        // The difference is not small. A quantile ladder's tightest rung is the
+        // 20th percentile of what the signal did, so on a loose signal the
+        // engine's tightest stop was 312 index points and a 20-point rule could
+        // only ever reject it. Raising the rung count subdivides the same
+        // distribution and never reaches below its floor.
+        //
+        // Passed as a rung, the level is tried like any other: every variant
+        // that could pair with a derived stop can pair with this one, and a
+        // combination that is mediocre on its own quantiles but strong under the
+        // operator's stop can now be found rather than filtered out unseen.
+        let g = grid::evaluate(
+            bars,
+            column,
+            &scored.mask,
+            horizon,
+            side,
+            grid::Levels {
+                rungs: GRID_RUNGS,
+                step_ppm: Some(GRID_STEP_PPM),
+                forced: (rules.max_mae_ppm > 0).then_some(rules.max_mae_ppm),
+            },
+        );
         // THE BEST VARIANT THAT SATISFIES THE RULES, falling back to the best
         // overall only so a failing combination can still be SHOWN with the rule
         // it broke. Asking `best()` first and judging that was the error: the

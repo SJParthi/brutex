@@ -128,6 +128,51 @@ impl Ladder {
         Some(Self { rungs })
     }
 
+    /// An ABSOLUTE ladder: `count` rungs at `step`, `2·step`, `3·step`, …
+    ///
+    /// # Why a quantile ladder cannot answer the question this one answers
+    ///
+    /// [`Self::from_excursions`] reads rungs out of the excursions a combination
+    /// itself produced, so every level is relative to that signal's own
+    /// behaviour. On a loose signal even the tightest rung is far: measured on a
+    /// real 15-minute NIFTY run, the tightest stop the engine would try was 312
+    /// index points, and no rung count reaches below a distribution's own floor.
+    ///
+    /// An operator asking *"which combinations survive a two point stop"* is
+    /// asking about an ABSOLUTE level. That question has no expression in a
+    /// relative ladder at any depth, and it is the question that matters when
+    /// the rule is "no trade may run more than N points against me" — a rule
+    /// about points, not about percentiles.
+    ///
+    /// # Stepped, so depth is the only knob
+    ///
+    /// One index point is the natural step, and everything coarser is a choice
+    /// nobody made. `count` alone decides how far the ladder reaches: 25 rungs
+    /// at a one-point step covers 1pt…25pt, which is the whole region a tight
+    /// rule lives in. Raising it extends the reach; it never changes the
+    /// spacing, so a level that was tried at one depth is tried at every deeper
+    /// one and results stay comparable across runs.
+    ///
+    /// # What it does not do
+    ///
+    /// It invents no price. A rung is a DISTANCE an order rests at, and whether
+    /// the market reached it is decided by the bars — exactly as with a derived
+    /// rung. What changes is which distances get asked about.
+    ///
+    /// Returns `None` when `step` or `count` is zero, or when the arithmetic
+    /// would leave the ladder empty; a caller must decide what to do without one
+    /// rather than receive a silent default.
+    #[must_use]
+    pub fn stepped(step: Ppm, count: usize) -> Option<Self> {
+        if step <= 0 || count == 0 {
+            return None;
+        }
+        let rungs: Vec<Ppm> = (1..=count)
+            .filter_map(|i| i64::try_from(i).ok()?.checked_mul(step))
+            .collect();
+        Self::new(rungs)
+    }
+
     /// A ladder placed at quantiles of the excursions actually observed.
     ///
     /// # No number is chosen by anybody
@@ -153,10 +198,51 @@ impl Ladder {
         observed.sort_unstable();
         let mut rungs: Vec<Ppm> = Vec::with_capacity(count);
         for i in 1..=count {
-            // The i-th of `count+1` quantiles, so the ladder spans the body of
-            // the distribution and never places a rung at its maximum — a rung
-            // no move can exceed is a rung nothing is ever measured against.
-            let at = observed.len().saturating_mul(i) / count.saturating_add(1);
+            // GEOMETRIC, NOT UNIFORM, AND THE TIGHT END IS THE WHOLE REASON.
+            //
+            // # What uniform spacing could never reach
+            //
+            // This placed rung `i` at quantile `i / (count + 1)` — with four
+            // rungs, the 20th, 40th, 60th and 80th percentiles. The tightest
+            // stop the engine would ever try was therefore "the 20th percentile
+            // of whatever this signal happens to do", and on a loose signal that
+            // is 312 index points. Measured on a real 15-minute NIFTY run: not
+            // one of 1,024,058 combinations was ever tested against a stop
+            // tighter than that, so a combination that works ONLY with a tight
+            // stop could not be found, however many of them the sweep produced.
+            //
+            // Raising `count` does not help. Uniform quantiles subdivide the
+            // whole distribution evenly, so the tightest rung moves from the
+            // 20th percentile to the 10th to the 5th — linearly, while the
+            // interesting region is the first fraction of a percent.
+            //
+            // # The spacing, and why it is derived rather than chosen
+            //
+            // Rung `i` sits at quantile `1 / 2^(count - i)`, so with four rungs
+            // the ladder reads 12.5%, 25%, 50%, 100% of the way through the
+            // sorted excursions — halving toward the tight end each step down.
+            // A fifth rung adds 6.25% rather than shifting everything; a tenth
+            // reaches 0.2%. Depth buys TIGHTNESS instead of buying resolution in
+            // the middle, which is where nothing was ever in doubt.
+            //
+            // Nothing here is a level: every rung is still a value the data
+            // actually produced, read out of the sorted array at a different
+            // place. §3 rule 1 is untouched — no price is invented, and an
+            // operator supplies nothing.
+            // `count - i + 1`, not `count - i`: at `count - i` the last rung
+            // divides by one and lands on the MAXIMUM observation, and a rung no
+            // move can exceed is a rung nothing is ever measured against -- the
+            // invariant this function has always stated and which the first
+            // version of this geometric spacing silently broke. No test caught
+            // it; one is added below.
+            let from_top = count.saturating_sub(i).saturating_add(1);
+            let divisor = 1_usize.checked_shl(u32::try_from(from_top).unwrap_or(u32::MAX));
+            let at = match divisor {
+                // `1 << from_top` overflows only past 64 rungs, and a ladder
+                // that deep is asking for the single tightest observation.
+                None | Some(0) => 0,
+                Some(d) => observed.len().saturating_sub(1) / d,
+            };
             let Some(&value) = observed.get(at.min(observed.len().saturating_sub(1))) else {
                 continue;
             };
@@ -1002,6 +1088,81 @@ mod tests {
 
     fn ladder(rungs: &[Ppm]) -> Ladder {
         Ladder::new(rungs.to_vec()).expect("an ascending ladder")
+    }
+
+    /// NO RUNG SITS ON THE MAXIMUM, AND DEPTH BUYS TIGHTNESS.
+    ///
+    /// # Two properties, and the first was stated for years without a test
+    ///
+    /// `from_excursions` has always documented that it "never places a rung at
+    /// its maximum — a rung no move can exceed is a rung nothing is ever
+    /// measured against". Nothing asserted it. When the spacing changed from
+    /// uniform to geometric the top rung landed exactly on the maximum, the
+    /// whole suite stayed green, and the defect was caught by reading the
+    /// arithmetic rather than by running it. A documented invariant with no test
+    /// is a comment.
+    ///
+    /// # The second property is what the geometric spacing exists for
+    ///
+    /// Uniform quantiles put the tightest rung at `1/(count+1)` of the
+    /// distribution — the 20th percentile at four rungs — and raising `count`
+    /// moves it linearly. So on a loose signal the engine could not test a tight
+    /// stop at any depth: measured on a real 15-minute NIFTY run, the tightest
+    /// stop ever tried was the 20th percentile, 312 index points, and no
+    /// combination of 1,024,058 was ever asked how it behaves under anything
+    /// tighter.
+    ///
+    /// Geometric halving makes each added rung reach half as far into the tight
+    /// tail, so depth buys the region where the answer actually lives.
+    #[test]
+    fn the_ladder_reaches_the_tight_tail_and_never_lands_on_the_maximum() {
+        // A hundred distinct excursions, so every quantile is a different value
+        // and a rung landing on the maximum is unambiguous.
+        let observed: Vec<Ppm> = (1..=100).map(|x| x * 10).collect();
+        let max = *observed.last().expect("non-empty");
+
+        for count in 1..=8_usize {
+            let ladder = Ladder::from_excursions(&mut observed.clone(), count)
+                .expect("a hundred distinct values yield a ladder");
+            let rungs = ladder.rungs();
+            assert!(
+                rungs.iter().all(|&r| r < max),
+                "count {count}: a rung at the maximum {max} can never be \
+                 exceeded, so nothing is ever measured against it -- got {rungs:?}"
+            );
+            assert!(
+                rungs.windows(2).all(|w| match w {
+                    [a, b] => a < b,
+                    _ => true,
+                }),
+                "count {count}: rungs must ascend strictly -- got {rungs:?}"
+            );
+        }
+
+        // DEPTH BUYS TIGHTNESS: the tightest rung must FALL as rungs are added,
+        // which is the whole difference from uniform spacing. Under uniform
+        // quantiles this holds too but linearly; here each step halves, and the
+        // assertion that matters is that it moves at all in the tight direction.
+        let tightest = |count: usize| -> Ppm {
+            Ladder::from_excursions(&mut observed.clone(), count)
+                .expect("a ladder")
+                .rungs()
+                .first()
+                .copied()
+                .expect("at least one rung")
+        };
+        assert!(
+            tightest(8) < tightest(4),
+            "eight rungs must reach tighter than four: got {} vs {}",
+            tightest(8),
+            tightest(4)
+        );
+        assert!(
+            tightest(4) < tightest(2),
+            "and four tighter than two: got {} vs {}",
+            tightest(4),
+            tightest(2)
+        );
     }
 
     #[test]

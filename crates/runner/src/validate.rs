@@ -353,6 +353,42 @@ const fn side_of(d: Direction) -> crate::excursion::Side {
         Direction::Short => crate::excursion::Side::Short,
     }
 }
+/// The whole-span threshold, restated for a fold that trains on `train` of
+/// `whole` bars.
+///
+/// # Why a ratio and not the count
+///
+/// `min_hits` is an absolute count, so it means a different SUPPORT on every
+/// window it is applied to. A fold exists to ask "would this have been chosen
+/// on data the run had not seen", and it can only answer that if it searches at
+/// the support the run searched at.
+///
+/// # Rounding, and the floor
+///
+/// Rounded UP: rounding down loosens the threshold, and a fold that searched a
+/// wider space than the run would flatter the out-of-sample figure rather than
+/// test it. Floored at one because zero means "every combination is frequent" —
+/// `Ladder::with_min_hits` raises it anyway, and relying on that would make the
+/// intent invisible here.
+///
+/// Saturating throughout: `train * min_hits` is two `u64`s multiplied and a long
+/// span at a high threshold can exceed the type. `u128` for the product and a
+/// saturating narrow, which is what `crate::grid::paisa_of` does with the same
+/// hazard.
+fn scale_min_hits(whole_min_hits: u64, train: usize, whole: usize) -> u64 {
+    if whole == 0 {
+        return whole_min_hits;
+    }
+    let train = u128::try_from(train).unwrap_or(u128::MAX);
+    let whole_len = u128::try_from(whole).unwrap_or(u128::MAX);
+    let numerator = u128::from(whole_min_hits).saturating_mul(train);
+    // Ceiling division: `(a + b - 1) / b`.
+    let scaled = numerator
+        .saturating_add(whole_len.saturating_sub(1))
+        .checked_div(whole_len)
+        .unwrap_or(0);
+    u64::try_from(scaled).unwrap_or(u64::MAX).max(1)
+}
 
 /// Run an anchored walk-forward over `bars`.
 ///
@@ -416,7 +452,47 @@ pub fn walk_forward(
         let Some(train) = bars.get(..train_end) else {
             continue;
         };
-        let swept = sweeper.run(train, &mut evaluator());
+        // THE THRESHOLD IS RESCALED TO THIS FOLD, AND UNTIL NOW IT WAS NOT.
+        //
+        // # What the unscaled version did, measured
+        //
+        // `min_hits` is an absolute COUNT derived from the whole span. A fold
+        // trains on a prefix, so handing it the caller's ladder unchanged asks
+        // each fold for the same number of hits out of fewer bars — a stricter
+        // support every time, and on the first fold an impossible one.
+        //
+        // On a real 15-minute run over 2019-12..2026-08 at `min_hits` 8,314,
+        // which is 22% of the full span:
+        //
+        // | fold | train bars | support that 8,314 demands | candidates |
+        // |---|---|---|---|
+        // | 0 | 6,928  | **120% — unsatisfiable** | 0 |
+        // | 1 | 13,856 | 60% | 0 |
+        // | 2 | 20,784 | 40% | 7 |
+        // | 3 | 27,712 | 30% | 35 |
+        // | 4 | 34,640 | 24% | 102 |
+        //
+        // Two folds could not have found anything whatever the data said, and
+        // the other three searched a space far narrower than the run they were
+        // meant to validate. The report then read "0 of 5 folds still positive
+        // out of sample" — which sounds like a verdict on the strategy and was
+        // partly a verdict on an arithmetic slip.
+        //
+        // Rescaling by the ratio of lengths keeps the SUPPORT constant, which is
+        // what makes a fold comparable to the run at all. Rounded up and floored
+        // at one so a short fold cannot land on zero, which
+        // `Ladder::with_min_hits` would raise anyway and which would silently
+        // mean "every combination is frequent".
+        let base = sweeper.ladder();
+        let scaled = scale_min_hits(base.min_hits(), train.len(), bars.len());
+        // `with_min_hits` is a CONSTRUCTOR, not a builder step, so the ceiling
+        // and the pair budget are carried across explicitly. Dropping either
+        // would give the folds a different memory bound from the run and turn a
+        // comparison into two unrelated searches.
+        let per_fold = engine::Ladder::with_min_hits(scaled)
+            .with_ceiling(base.ceiling())
+            .with_pair_budget(base.pair_budget());
+        let swept = crate::Sweeper::new(per_fold).run(train, &mut evaluator());
 
         // The closed set: exact duplicates removed losslessly, so the candidate
         // budget buys distinct hypotheses rather than aliases of one.
@@ -571,7 +647,7 @@ pub fn walk_forward(
                 &item.mask,
                 horizon,
                 side_of(direction),
-                DEFAULT_RUNGS,
+                crate::grid::Levels::derived(DEFAULT_RUNGS),
             );
             let Some(cell) = g.sharpest().or_else(|| g.best()) else {
                 continue;
@@ -1165,7 +1241,33 @@ mod tests {
             let train = bars
                 .get(..f.train_bars)
                 .expect("a fold's own training prefix is in range");
-            let swept = sweeper().run(train, &mut evaluator());
+            // THE REFERENCE SWEEP MUST BE RESCALED TOO, AND THE DIVISION OF
+            // LABOUR BETWEEN THIS TEST AND ITS NEIGHBOUR IS THE REASON.
+            //
+            // This built its reference with the caller's UNSCALED sweeper while
+            // `walk_forward` rescales per fold, so the two produced different
+            // candidate sets and the argmax over one was compared against the
+            // choice from the other. Measured on fold 1: 12,531 candidates and
+            // two different masks.
+            //
+            // Mirroring `scale_min_hits` here does not make the test circular.
+            // What this test asserts is SELECTION -- that the fold reports the
+            // best of the candidates it actually had, rather than the best of a
+            // prefix. That the candidate set is the right one is a separate
+            // property with its own test,
+            // `the_threshold_a_fold_searches_at_is_the_run_s_support_and_not_its_count`,
+            // which pins the arithmetic against fixed numbers and does not run
+            // the sweep at all. Neither test can pass by borrowing the other's
+            // answer.
+            let base = sweeper();
+            let ladder = base.ladder();
+            let scaled = super::scale_min_hits(ladder.min_hits(), train.len(), bars.len());
+            let swept = Sweeper::new(
+                engine::Ladder::with_min_hits(scaled)
+                    .with_ceiling(ladder.ceiling())
+                    .with_pair_budget(ladder.pair_budget()),
+            )
+            .run(train, &mut evaluator());
             let closed = crate::closed::closed(&swept.sweep);
             let column = Column::build(train, &mut evaluator());
 
@@ -1182,7 +1284,7 @@ mod tests {
                     &item.mask,
                     h(15),
                     crate::excursion::Side::Long,
-                    super::DEFAULT_RUNGS,
+                    crate::grid::Levels::derived(super::DEFAULT_RUNGS),
                 );
                 let Some(cell) = g.sharpest().or_else(|| g.best()) else {
                     continue;
@@ -1241,6 +1343,73 @@ mod tests {
     }
 
     #[test]
+    fn the_threshold_a_fold_searches_at_is_the_run_s_support_and_not_its_count() {
+        // THE DEFECT, IN ARITHMETIC RATHER THAN IN A FIXTURE.
+        //
+        // `min_hits` is an absolute COUNT taken from the whole span. A fold
+        // trains on a prefix, so the unscaled count asks for the same number of
+        // hits out of fewer bars -- a stricter support every time, and on the
+        // first fold an impossible one.
+        //
+        // Measured on a real 15-minute run over 2019-12..2026-08 at min_hits
+        // 8,314, which is 22% of 37,791 swept bars. `anchored_folds` gives five
+        // training prefixes and the unscaled count demanded, in order: 120%,
+        // 60%, 40%, 30% and 24% support. Two folds could not have found anything
+        // whatever the data said -- they reported 0 candidates -- and the report
+        // read "0 of 5 folds still positive out of sample", which sounds like a
+        // verdict on the strategy and was partly a verdict on this slip.
+        const WHOLE: usize = 37_791;
+        const MIN_HITS: u64 = 8_314;
+        // Compared in BASIS POINTS and not whole percent: 8,314 of 37,791 is
+        // 21.99%, which truncates to 21 and rounds to 22, so a percent
+        // comparison tests the rounding rather than the scaling. The first
+        // version of this assertion did exactly that and failed on the identity
+        // case -- the fold that IS the whole span.
+        let whole_bp = MIN_HITS.saturating_mul(10_000) / u64::try_from(WHOLE).expect("fits");
+        for train in [6_928_usize, 13_856, 20_784, 27_712, 37_791] {
+            let scaled = super::scale_min_hits(MIN_HITS, train, WHOLE);
+            let train_u = u64::try_from(train).expect("fits");
+            let got_bp = scaled.saturating_mul(10_000) / train_u;
+            assert!(
+                got_bp.abs_diff(whole_bp) <= 2,
+                "a fold of {train} bars must search at the run's own support \
+                 ({whole_bp} bp), not at {MIN_HITS} hits out of {train} bars; \
+                 got {got_bp} bp from a threshold of {scaled}"
+            );
+        }
+        // The identity case is exact, not merely close: a fold that IS the whole
+        // span must get the whole span's own threshold back unchanged.
+        assert_eq!(super::scale_min_hits(MIN_HITS, WHOLE, WHOLE), MIN_HITS);
+
+        // THE FIRST FOLD IS THE ONE THAT WAS UNSATISFIABLE, so it is asserted
+        // directly: the scaled threshold must fit inside the window it applies
+        // to, or the fold is empty by construction rather than by measurement.
+        let first = super::scale_min_hits(MIN_HITS, 6_928, WHOLE);
+        assert!(
+            first < 6_928,
+            "the threshold must be reachable within the fold's own bars; \
+             unscaled it was {MIN_HITS} out of 6,928, which is 120% support"
+        );
+
+        // ROUNDED UP, NOT DOWN. Rounding down loosens the threshold, and a fold
+        // that searched a WIDER space than the run would flatter the
+        // out-of-sample figure rather than test it.
+        assert_eq!(
+            super::scale_min_hits(10, 1, 3),
+            4,
+            "10/3 = 3.33 must round to 4, not 3"
+        );
+
+        // FLOORED AT ONE. Zero means every combination is frequent, which is the
+        // opposite of a threshold. `Ladder::with_min_hits` raises it anyway, and
+        // relying on that would put the intent somewhere a reader of this
+        // function cannot see it.
+        assert_eq!(super::scale_min_hits(1, 1, 1_000_000), 1);
+        // And a degenerate whole is passed through rather than dividing by zero.
+        assert_eq!(super::scale_min_hits(500, 10, 0), 500);
+    }
+
+    #[test]
     fn a_slice_too_short_to_split_returns_no_folds_rather_than_pretending() {
         let bars = crate::synthetic::sessions(1);
         let v = walk_forward(&bars, h(15), 0, Direction::Long, &sweeper(), evaluator);
@@ -1287,10 +1456,22 @@ mod tests {
         // have all been ranking truncated candidate sets and none of them could
         // say so, which is the exact blindness this counter exists to end.
         //
-        // MEASURED across `min_hits` at that ceiling on `sessions(12)`:
+        // MEASURED across `min_hits` at that ceiling on `sessions(12)`, BEFORE
+        // the per-fold threshold was rescaled:
         // 120 -> 2 folds halted, 600 -> 0, 1200 -> 0, 2400 -> 0, 4800 -> 0.
-        // 600 is the first support that clears it, so it is the control.
-        let roomy = Sweeper::new(Ladder::with_min_hits(600).with_ceiling(20_000));
+        //
+        // RE-MEASURED AFTER, and the control had to move: 600 -> 1 fold halted,
+        // 1200 -> 0, 2400 -> 0.
+        //
+        // The number moved because the fix works. Every fold used to be handed
+        // the whole span's absolute `min_hits`, so a fold training on a third of
+        // the bars searched at three times the support and found far less than
+        // it should have. Rescaling gives each fold the run's own support, the
+        // early folds search the space they were always meant to, and at 600
+        // one of them now produces enough candidates to breach a ceiling of
+        // 20,000. A control chosen under the old arithmetic is not a control
+        // under the new.
+        let roomy = Sweeper::new(Ladder::with_min_hits(1200).with_ceiling(20_000));
         let complete = walk_forward(&bars, h(15), 3, Direction::Long, &roomy, evaluator);
         assert_eq!(
             complete.halted_folds(),

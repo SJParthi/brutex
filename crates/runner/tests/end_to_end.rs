@@ -103,7 +103,14 @@ fn the_whole_pipeline_runs_and_every_stage_feeds_the_next() {
     );
 
     // ---- 4. trades -> the exit grid -------------------------------------
-    let exits = grid::evaluate(&bars, &column, &mask, horizon, Side::Long, 4);
+    let exits = grid::evaluate(
+        &bars,
+        &column,
+        &mask,
+        horizon,
+        Side::Long,
+        grid::Levels::derived(4),
+    );
     assert!(
         exits.baseline().is_some() || exits.cells.is_empty(),
         "a populated grid must carry the no-levels baseline row"

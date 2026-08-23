@@ -931,6 +931,54 @@ pub const fn variants(stops: usize, targets: usize, trails: usize) -> usize {
     stops.saturating_add(1).saturating_mul(per_stop)
 }
 
+/// How [`evaluate`] builds the exit grid's three ladders.
+///
+/// # Why a struct and not three arguments
+///
+/// The same reason [`Ladders`] and [`Variant`] are structs: two of these three
+/// are `Option<Ppm>` and the third is a `usize`, so a caller can swap the step
+/// and the forced stop without a compile error and get a grid stepped at the
+/// operator's rule with the rule merged in as a step. The mistake would produce
+/// a plausible-looking table.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Levels {
+    /// Rungs per ladder. With a step, this alone decides the REACH — `rungs`
+    /// times `step_ppm` — so raising it extends the ladder without moving a
+    /// level already tried.
+    ///
+    /// The grid is a cross product, so its width grows roughly cubically in
+    /// this. Counted with [`variants`]: 4 rungs is 625 cells, 20 is 935,361,
+    /// and 40 is 27,637,321 — for ONE combination.
+    pub rungs: usize,
+    /// The step for all three ladders, in ppm.
+    ///
+    /// `Some` makes every axis ABSOLUTE: rungs at `step`, `2·step`, `3·step`,
+    /// so a grid can express "two point stop, four point target". `None` keeps
+    /// the quantile ladders, which are relative to each signal's own excursions
+    /// and cannot express a point level at any depth — see
+    /// [`crate::excursion::Ladder::stepped`].
+    ///
+    /// It applies to all three because a stop in points paired with a target at
+    /// a percentile is a grid in which a reward-to-risk rule stated in points
+    /// has no cell to land in.
+    pub step_ppm: Option<Ppm>,
+    /// A stop the caller wants tried, merged into the stops ladder as an
+    /// ordinary rung. `None` leaves the ladder as built.
+    pub forced: Option<Ppm>,
+}
+
+impl Levels {
+    /// The quantile ladders, as every caller had before a step existed.
+    #[must_use]
+    pub const fn derived(rungs: usize) -> Self {
+        Self {
+            rungs,
+            step_ppm: None,
+            forced: None,
+        }
+    }
+}
+
 struct Candidate {
     signal: usize,
     entry: usize,
@@ -958,6 +1006,47 @@ struct Candidate {
     /// The entry fill under the BEST reading: the execution bar's open, a price
     /// that printed.
     entry_opt: i64,
+}
+
+/// The stops ladder: quantiles of the observed adverse moves, plus the
+/// operator's own level when one is given.
+///
+/// # Why this is not just `Ladder::new(derived ++ forced)`
+///
+/// [`crate::excursion::Ladder::new`] requires its rungs strictly ascending and
+/// distinct, and a forced level can land anywhere -- below every quantile, above
+/// them all, or exactly on one. Sorting and deduping is what makes any of those
+/// three a legal ladder rather than a refusal. The coincident case matters most:
+/// without the dedup the grid would carry two identical stop columns and report
+/// one variant as two.
+///
+/// A `forced` of `None` returns exactly what the quantile ladder returned
+/// before this existed, so a caller that does not ask for a level is not
+/// changed by the option existing.
+fn merged_stops(adverse: &[Ppm], rungs: usize, forced: Option<Ppm>) -> Ladder {
+    merged(
+        &Ladder::from_excursions(&mut adverse.to_vec(), rungs).unwrap_or_default(),
+        forced,
+    )
+}
+
+/// A ladder with the operator's own level folded in, sorted and deduped.
+///
+/// Split from [`merged_stops`] because the stepped path builds its base ladder a
+/// different way and must not re-derive the quantile one to reuse the merge.
+fn merged(derived: &Ladder, forced: Option<Ppm>) -> Ladder {
+    let derived = derived.clone();
+    let Some(level) = forced.filter(|&l| l > 0) else {
+        return derived;
+    };
+    let mut all: Vec<Ppm> = derived.rungs().to_vec();
+    all.push(level);
+    all.sort_unstable();
+    all.dedup();
+    // `new` refuses an empty or non-ascending set; the sort and dedup above have
+    // made both impossible, so the fallback is the derived ladder rather than a
+    // panic -- an operator's level must never cost them the rest of the grid.
+    Ladder::new(all).unwrap_or(derived)
 }
 
 /// Both entry fills for the execution bar at `index`, worst first.
@@ -1096,8 +1185,13 @@ pub fn evaluate(
     mask: &ConditionMask,
     horizon: Horizon,
     side: Side,
-    rungs: usize,
+    levels: Levels,
 ) -> Grid {
+    let Levels {
+        rungs,
+        step_ppm,
+        forced,
+    } = levels;
     // PASS ONE: every signal that could open a position, and its path.
     // `crate::trade::walk` already applies the intraday rules, so its trades
     // give the entry bars and the time-exit bars this grid narrows.
@@ -1140,14 +1234,63 @@ pub fn evaluate(
             side,
         ));
     }
-    let stops = Ladder::from_excursions(&mut adverse.clone(), rungs).unwrap_or_default();
-    let targets = Ladder::from_excursions(&mut favourable.clone(), rungs).unwrap_or_default();
+    // THE OPERATOR'S OWN STOP, MERGED IN BESIDE THE DERIVED ONES.
+    //
+    // # What the quantile ladder alone cannot answer
+    //
+    // `Ladder::from_excursions` places rungs at quantiles of the excursions
+    // THIS combination produced -- with four rungs, the 20th, 40th, 60th and
+    // 80th percentiles. Every one of them is relative, so the tightest stop the
+    // engine will ever try is "the 20th percentile of whatever this signal
+    // happens to do". On a loose signal that is 312 index points.
+    //
+    // An operator asking "which combinations survive a TWENTY point stop" is
+    // asking a different question, and the quantile ladder cannot express it at
+    // any rung count. Raising `rungs` subdivides the same distribution; it never
+    // reaches below the distribution's own floor.
+    //
+    // So `forced` is inserted into the stops ladder as an ordinary rung. Every
+    // variant that could pair with a derived stop can now pair with this one,
+    // the grid widens by exactly one stop value, and nothing else changes.
+    //
+    // `Ladder::new` requires ascending and distinct, so the merge sorts and
+    // dedups -- a forced level that coincides with a derived one is the same
+    // rung and must not appear twice, or the grid would hold two identical
+    // columns and a reader would see one variant reported as two.
+    // ALL THREE LADDERS ARE STEPPED IN POINTS WHEN A STEP IS GIVEN.
+    //
+    // # Why every axis and not just the stop
+    //
+    // A stop stepped at one point paired with a TARGET taken from the 25th
+    // percentile of the favourable move is a grid that can express "two point
+    // stop" and cannot express "two point stop, four point target". The reward
+    // side has to be as fine as the risk side or the reward-to-risk rule the
+    // operator actually states -- 1:2, in points -- has no cell to land in.
+    //
+    // The trailing ladder too: a give-back stepped in points is what "trail by
+    // three points" means, and a give-back at a quantile of the favourable move
+    // is what "trail by a quarter of whatever this signal usually offers"
+    // means. Only the first is a rule anyone states.
+    //
+    // `forced` still merges into the stops, so an operator's own level is tried
+    // whether the ladder underneath it is stepped or derived.
+    let ladder_of = |observed: &[Ppm]| match step_ppm {
+        Some(width) => Ladder::stepped(width, rungs).unwrap_or_else(|| {
+            Ladder::from_excursions(&mut observed.to_vec(), rungs).unwrap_or_default()
+        }),
+        None => Ladder::from_excursions(&mut observed.to_vec(), rungs).unwrap_or_default(),
+    };
+    let stops = match step_ppm {
+        Some(_) => merged(&ladder_of(&adverse), forced),
+        None => merged_stops(&adverse, rungs, forced),
+    };
+    let targets = ladder_of(&favourable);
     // THE TRAILING LADDER IS SCALED ON THE FAVOURABLE MOVE, not the adverse one.
     // A trailing stop is a give-back FROM A PROFIT, so the distance that makes
     // sense is a fraction of what the move actually offered -- deriving it from
     // the adverse excursion would size "how much of my gain will I return" by
     // "how much did it hurt on the way in", which are different quantities.
-    let trails = Ladder::from_excursions(&mut favourable.clone(), rungs).unwrap_or_default();
+    let trails = ladder_of(&favourable);
 
     // PASS THREE: each candidate's path measured ONCE against both ladders.
     //
@@ -2259,7 +2402,7 @@ fn peak(bars: &[Candle], from: usize, to: usize, entry: i64, side: Side, adverse
     reason = "the exception every test module in this workspace takes."
 )]
 mod tests {
-    use super::{Cell, Grid, evaluate};
+    use super::{Cell, Grid, Levels, evaluate};
 
     /// A VARIANT CANNOT WIN BY HAVING NO STOP, WHICH IS WHAT IT USED TO DO.
     ///
@@ -2434,7 +2577,7 @@ mod tests {
             &ConditionMask::default(),
             h(15),
             Side::Long,
-            4,
+            Levels::derived(4),
         );
         assert!(!g.cells.is_empty());
 
@@ -2501,7 +2644,7 @@ mod tests {
             &ConditionMask::default(),
             h(15),
             Side::Long,
-            4,
+            Levels::derived(4),
         );
         assert!(!g.cells.is_empty(), "the fixture must produce a grid");
 
@@ -2548,7 +2691,7 @@ mod tests {
             &ConditionMask::default(),
             h(15),
             Side::Long,
-            4,
+            Levels::derived(4),
         );
 
         let base = g.baseline().expect("a baseline row must exist");
@@ -2572,7 +2715,7 @@ mod tests {
             &ConditionMask::default(),
             h(60),
             Side::Long,
-            4,
+            Levels::derived(4),
         );
         let base = g.baseline().expect("a baseline");
         for c in &g.cells {
@@ -2605,7 +2748,7 @@ mod tests {
             &ConditionMask::default(),
             h(15),
             Side::Long,
-            4,
+            Levels::derived(4),
         );
         assert!(g.cells.len() > 1, "the grid must hold several variants");
 
@@ -2652,7 +2795,7 @@ mod tests {
             &ConditionMask::default(),
             h(15),
             Side::Long,
-            4,
+            Levels::derived(4),
         );
         for c in &g.cells {
             assert_eq!(
@@ -2678,7 +2821,14 @@ mod tests {
         // ahead -- if it did, the ambiguity would be resolved backwards.
         for side in [Side::Long, Side::Short] {
             let (bars, column) = swept();
-            let g = evaluate(&bars, &column, &ConditionMask::default(), h(15), side, 4);
+            let g = evaluate(
+                &bars,
+                &column,
+                &ConditionMask::default(),
+                h(15),
+                side,
+                Levels::derived(4),
+            );
             for c in &g.cells {
                 assert!(
                     c.pessimistic <= c.optimistic,
@@ -2701,7 +2851,7 @@ mod tests {
             &ConditionMask::default(),
             h(15),
             Side::Long,
-            4,
+            Levels::derived(4),
         );
         for c in g.cells.iter().filter(|c| c.ambiguous_bars == 0) {
             // SHARPER THAN THE EQUALITY IT REPLACES, NOT WEAKER.
@@ -2740,7 +2890,7 @@ mod tests {
             &ConditionMask::default(),
             h(15),
             Side::Long,
-            4,
+            Levels::derived(4),
         );
         for c in &g.cells {
             assert_eq!(
@@ -3012,7 +3162,7 @@ mod tests {
             &ConditionMask::default(),
             h(15),
             Side::Long,
-            4,
+            Levels::derived(4),
         );
         assert!(!g.stops.is_empty(), "trades happened, so a ladder exists");
         assert!(
@@ -3026,7 +3176,14 @@ mod tests {
         for bit in 0..8 {
             impossible = impossible.with_bit(bit);
         }
-        let empty = evaluate(&bars, &column, &impossible, h(15), Side::Long, 4);
+        let empty = evaluate(
+            &bars,
+            &column,
+            &impossible,
+            h(15),
+            Side::Long,
+            Levels::derived(4),
+        );
         assert!(empty.cells.is_empty() || empty.baseline().is_some());
     }
 
@@ -3068,7 +3225,14 @@ mod tests {
             .first()
             .copied()
             .expect("the fixture must produce at least one combination to grid");
-        let g = evaluate(&bars, &column, &item.mask, h(15), Side::Long, 4);
+        let g = evaluate(
+            &bars,
+            &column,
+            &item.mask,
+            h(15),
+            Side::Long,
+            Levels::derived(4),
+        );
         if !g.cells.is_empty() {
             assert_eq!(
                 g.cells.len(),
@@ -3098,7 +3262,7 @@ mod tests {
             &ConditionMask::default(),
             h(15),
             Side::Long,
-            4,
+            Levels::derived(4),
         );
 
         let (mut saw_stop, mut saw_tsl, mut saw_ttp, mut saw_target) = (false, false, false, false);
@@ -3146,7 +3310,7 @@ mod tests {
     reason = "the exception every test module in this workspace takes."
 )]
 mod arming_tests {
-    use super::{Cell, Variant, evaluate, one_variant, variants};
+    use super::{Cell, Levels, Variant, evaluate, one_variant, variants};
     use crate::excursion::{Ladder, Ladders, Side, crossings};
     use crate::outcome::Horizon;
     use indicators::Candle;
@@ -3355,7 +3519,7 @@ mod arming_tests {
             &ConditionMask::default(),
             Horizon::bars(15).expect("a non-zero horizon"),
             Side::Long,
-            4,
+            Levels::derived(4),
         );
         assert!(!g.cells.is_empty(), "the fixture must produce a grid");
         assert_eq!(
@@ -3418,7 +3582,7 @@ mod arming_tests {
             &ConditionMask::default(),
             Horizon::bars(15).expect("a non-zero horizon"),
             Side::Long,
-            4,
+            Levels::derived(4),
         );
         let bases: Vec<&Cell> = g
             .cells
@@ -3443,7 +3607,7 @@ mod arming_tests {
     reason = "the exception every test module in this workspace takes."
 )]
 mod rewalk_tests {
-    use super::evaluate;
+    use super::{Levels, evaluate};
     use crate::excursion::Side;
     use crate::outcome::Horizon;
     use indicators::column::Column;
@@ -3494,7 +3658,7 @@ mod rewalk_tests {
             &ConditionMask::default(),
             Horizon::bars(15).expect("a non-zero horizon"),
             Side::Long,
-            4,
+            Levels::derived(4),
         );
         let base = g.baseline().copied().expect("the baseline row exists");
         assert!(base.trades > 0, "the fixture must trade at all");

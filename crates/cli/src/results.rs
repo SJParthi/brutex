@@ -791,10 +791,10 @@ impl Results {
             .file
             .unlock()
             .map_err(|why| format!("the results file could not be unlocked: {why}"));
-        return match (out, released) {
+        match (out, released) {
             (Ok(record), Ok(())) => Ok(record),
             (Err(why), _) | (Ok(_), Err(why)) => Err(why),
-        };
+        }
     }
 
     /// [`Results::read`] with the shared lock already held.
