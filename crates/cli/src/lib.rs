@@ -294,6 +294,11 @@ fn screen_arm(
                 Rules {
                     max_mae_ppm: points_to_ppm(pts),
                     min_rr_bp: rr,
+                    // `screen` takes three numbers today, so the two new rules are
+                    // off rather than guessed. A win-rate floor an operator did
+                    // not type is a policy the engine invented.
+                    min_win_rate_bp: 0,
+                    min_trades: 0,
                     top: n,
                 },
             );
@@ -3077,7 +3082,15 @@ fn trade_and_screen(
             forced: (rules.max_mae_ppm > 0).then_some(rules.max_mae_ppm),
         },
     );
-    let screened = screen(bars, column, by_evidence, horizon, rules);
+    // THE CASCADE, NOT ONE POLICY. A single screen answers "0 of 21 satisfy
+    // every rule" and stops -- true, and nearly useless: it says the standard
+    // was not met without saying which standard WAS. The ladder walks from
+    // S+++ down and reports the strictest tier that yields anything, naming
+    // every tier above it as unmet.
+    //
+    // `rules.top` is carried through because how MANY rows to print is the
+    // operator's choice and not part of the policy being relaxed.
+    let screened = screen_cascade(bars, column, by_evidence, horizon, rules.top);
     (taken, exits, screened)
 }
 
@@ -3122,6 +3135,42 @@ pub struct Rules {
     /// ₹18.65 — a reward-to-risk of 0.41, wearing an exceptional win rate. Win
     /// rate alone cannot see that shape and this ratio is what catches it.
     pub min_rr_bp: i64,
+    /// The share of trades that must WIN, in basis points. `9_000` reads 90%.
+    ///
+    /// # The rule that had no home
+    ///
+    /// An operator's requirement is usually three numbers — "out of a hundred
+    /// trades, ninety win, and a loser never runs more than ten points" — and
+    /// until this field the middle one could not be stated. `max_mae_ppm` caps
+    /// the loss and `min_rr_bp` sets the reward-to-risk, but a combination can
+    /// satisfy both while winning a third of the time: 33 winners at 3R against
+    /// 67 losers at 1R is a reward-to-risk of 3.00 and a losing strategy.
+    ///
+    /// [`grid::Cell::win_rate_bp`] has always computed this and nothing ever
+    /// filtered on it. Basis points rather than a percentage because §7 keeps
+    /// floats out of anything compared, and because 90% and 90.5% are different
+    /// rules an operator may well want to distinguish.
+    ///
+    /// Zero drops the rule, the way `min_rr_bp` of zero does.
+    pub min_win_rate_bp: i64,
+    /// The fewest round trips a combination may report and still be believed.
+    ///
+    /// # Why a rule and not a footnote
+    ///
+    /// "Ninety of a hundred won" is a claim about a rate, and a rate over four
+    /// trades is not evidence of anything. Three of four is 75% and means
+    /// nothing; 900 of 1,000 is the same arithmetic and means a great deal. The
+    /// engine already refuses to SCORE a thin sample — the report prints `TOO
+    /// FEW OBSERVATIONS` — but the screen would still rank a four-trade
+    /// combination above a thousand-trade one if its ratios read better.
+    ///
+    /// Separate from the significance bar upstream on purpose: that asks
+    /// "could the best of N hypotheses look this good by luck", which is about
+    /// the SEARCH. This asks "is this particular row's sample big enough to
+    /// mean what it says", which is about the ROW.
+    ///
+    /// Zero drops the rule.
+    pub min_trades: u64,
     /// How many combinations to report. Ten or twenty-five, the operator's call.
     pub top: usize,
 }
@@ -3133,7 +3182,26 @@ impl Rules {
     /// that one trade in ten thousand ran through is a stop that did not hold.
     #[must_use]
     pub const fn admits(&self, cell: &grid::Cell) -> bool {
-        cell.worst_mae <= self.max_mae_ppm && cell.reward_to_risk_bp() >= self.min_rr_bp
+        // FOUR RULES, AND EACH ANSWERS A QUESTION THE OTHERS CANNOT.
+        //
+        // A combination can pass any three and fail the fourth, which is why
+        // none of them is redundant:
+        //
+        //   * `worst_mae` alone: a stop that held, on twelve trades.
+        //   * `reward_to_risk` alone: 33 winners at 3R against 67 losers at 1R
+        //     reads 3.00 and loses money.
+        //   * `win_rate` alone: this is the shape a real run already produced --
+        //     81.19% profitable, average win 7.57 against average loss 18.65,
+        //     a reward-to-risk of 0.41 wearing an exceptional win rate.
+        //   * `trades` alone: three of four is 75% and is not evidence.
+        //
+        // All of them, and a rule broken once is a disqualification rather than
+        // a lower rank: a stop that one trade in ten thousand ran through is a
+        // stop that did not hold.
+        cell.worst_mae <= self.max_mae_ppm
+            && cell.reward_to_risk_bp() >= self.min_rr_bp
+            && cell.win_rate_bp() >= self.min_win_rate_bp
+            && cell.trades >= self.min_trades
     }
 }
 
@@ -3158,8 +3226,156 @@ impl Rules {
     const BASELINE: Self = Self {
         max_mae_ppm: 2_000,
         min_rr_bp: 200,
+        // ZERO, not a number. The baseline exists so a command that takes no
+        // policy still prints a screen, and it states its three numbers on the
+        // page. A win-rate floor nobody typed would be a fourth number an
+        // operator never chose, silently disqualifying rows.
+        min_win_rate_bp: 0,
+        min_trades: 0,
         top: 25,
     };
+}
+
+/// One rung of the tier ladder: a name, and the policy it stands for.
+///
+/// # Why a ladder and not one rule
+///
+/// An operator states the standard they WANT — "a loser never runs more than
+/// ten points, a winner makes at least thirty, and ninety of a hundred win".
+/// Almost nothing satisfies that, and a screen that answers `0 of 21` has told
+/// them the standard is not met without telling them what IS.
+///
+/// The useful answer is the strictest tier that yields anything, and how far
+/// down the ladder it sat. That turns "nothing passed" into "nothing passed
+/// S+++ or S++; at S+ there are four, and here they are" — which is a finding
+/// rather than an empty table.
+///
+/// # These numbers are stated, not derived
+///
+/// Every threshold below is a TRADING POLICY, and §3 rule 1 does not let the
+/// engine invent one from the data. They descend in the three dimensions an
+/// operator actually names — how far a loser may run, how far a winner must go,
+/// and how often it must win — and the report prints the full ladder beside the
+/// result so a reader sees exactly which standard was met and which were not.
+#[derive(Clone, Copy, Debug)]
+pub struct Tier {
+    /// What to call it on the page.
+    pub name: &'static str,
+    /// The furthest a single trade may run against entry, in index points.
+    pub max_points: i64,
+    /// The smallest win that counts, in index points, expressed against
+    /// `max_points` as a reward-to-risk in hundredths.
+    pub min_rr_bp: i64,
+    /// The share of trades that must win, in basis points.
+    pub min_win_rate_bp: i64,
+    /// The fewest round trips for the rate above to mean anything.
+    pub min_trades: u64,
+}
+
+/// The ladder, strictest first.
+///
+/// Read the first row as the operator's own words: **max loss 10 points,
+/// minimum win 30 points — a 1:3 — and 90 of 100 winning, over at least 300
+/// trades.** Each row after it relaxes exactly one dimension at a time, so a
+/// reader can see WHICH requirement the market would not meet rather than only
+/// that some of them were not met together.
+///
+/// The last row is deliberately mild: a combination that cannot clear even that
+/// is not a near miss, and saying so is more useful than printing the least-bad
+/// row of a table nothing passed.
+const TIERS: [Tier; 8] = [
+    Tier {
+        name: "S+++",
+        max_points: 10,
+        min_rr_bp: 300,
+        min_win_rate_bp: 9_000,
+        min_trades: 300,
+    },
+    Tier {
+        name: "S++",
+        max_points: 10,
+        min_rr_bp: 300,
+        min_win_rate_bp: 8_000,
+        min_trades: 300,
+    },
+    Tier {
+        name: "S+",
+        max_points: 10,
+        min_rr_bp: 250,
+        min_win_rate_bp: 7_000,
+        min_trades: 300,
+    },
+    Tier {
+        name: "S",
+        max_points: 15,
+        min_rr_bp: 250,
+        min_win_rate_bp: 6_500,
+        min_trades: 300,
+    },
+    Tier {
+        name: "A+",
+        max_points: 15,
+        min_rr_bp: 200,
+        min_win_rate_bp: 6_000,
+        min_trades: 200,
+    },
+    Tier {
+        name: "A",
+        max_points: 20,
+        min_rr_bp: 200,
+        min_win_rate_bp: 5_500,
+        min_trades: 200,
+    },
+    Tier {
+        name: "B",
+        max_points: 30,
+        min_rr_bp: 150,
+        min_win_rate_bp: 5_000,
+        min_trades: 100,
+    },
+    Tier {
+        name: "C",
+        max_points: 50,
+        min_rr_bp: 100,
+        min_win_rate_bp: 4_000,
+        min_trades: 100,
+    },
+];
+
+impl Tier {
+    /// This tier as the rules the screen applies.
+    #[must_use]
+    pub const fn rules(&self, top: usize) -> Rules {
+        Rules {
+            max_mae_ppm: points_to_ppm(self.max_points),
+            min_rr_bp: self.min_rr_bp,
+            min_win_rate_bp: self.min_win_rate_bp,
+            min_trades: self.min_trades,
+            top,
+        }
+    }
+
+    /// The tier's policy in the operator's own units, for the page.
+    ///
+    /// The minimum win is DERIVED rather than stored: it is the reward-to-risk
+    /// applied to the loss cap, so the two can never disagree on the page the
+    /// way two stored numbers could.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        let min_win = self.max_points.saturating_mul(self.min_rr_bp) / 100;
+        format!(
+            // INTEGER DIVISION AND A REMAINDER, not a float. §7 keeps floats out
+            // of anything compared, and a ratio printed beside a rule an
+            // operator reads IS compared -- by them.
+            "loser <= {}pt, winner >= {}pt (1:{}.{:02}), win rate >= {}%, >= {} trades",
+            self.max_points,
+            min_win,
+            self.min_rr_bp / 100,
+            self.min_rr_bp % 100,
+            self.min_win_rate_bp / 100,
+            self.min_trades,
+        )
+    }
 }
 
 /// How many combinations the screener prices in full. Twenty-five is the number
@@ -3199,6 +3415,87 @@ struct Screened {
 /// with the rule it broke named. A failing combination is never hidden — a
 /// listing that dropped them would leave a reader unable to tell "nothing
 /// passed" from "nothing was tried".
+/// Walk [`TIERS`] from strictest to mildest and report the first that yields
+/// anything, naming every tier that did not.
+///
+/// # What this replaces
+///
+/// One screen against one policy answers `0 of 21 satisfy every rule` and
+/// stops. That is true and nearly useless: it says the operator's standard was
+/// not met without saying what standard WAS, so the next step is always to
+/// guess a looser number by hand and run again.
+///
+/// # Why the grid is built once and the tiers only re-filter
+///
+/// Every tier reads the same [`grid::Cell`] values — `worst_mae`,
+/// `reward_to_risk_bp`, `win_rate_bp`, `trades`. None of them changes what the
+/// grid CONTAINS, so eight tiers cost eight passes over cells already computed
+/// rather than eight sweeps. The one thing a tier does change is the forced
+/// stop merged into the ladder, and that is taken from the STRICTEST tier so
+/// the tightest level an operator might want is present in the grid every tier
+/// then reads.
+///
+/// # It never invents a tier
+///
+/// The ladder is a stated policy, printed in full beside the answer, in index
+/// points and whole percent. A reader sees which rung was met and which were
+/// not — so "nothing passed" becomes "nothing passed S+++ or S++; at S+ there
+/// are four, and here they are".
+fn screen_cascade(
+    bars: &[indicators::Candle],
+    column: &indicators::column::Column,
+    by_evidence: &[&runner::rank::Scored],
+    horizon: Horizon,
+    top: usize,
+) -> String {
+    let mut out = String::with_capacity(4_096);
+    let _ = writeln!(out, "TIER LADDER");
+    let _ = writeln!(
+        out,
+        "  Strictest first. The search stops at the first tier that yields \
+         anything, and every tier above it is reported as unmet -- which is a \
+         finding about the market, not an empty table."
+    );
+    for tier in &TIERS {
+        let _ = writeln!(out, "    {:<5} {}", tier.name, tier.describe());
+    }
+    let _ = writeln!(out);
+
+    for tier in &TIERS {
+        let rules = tier.rules(top);
+        let body = screen(bars, column, by_evidence, horizon, rules);
+        // `screen` prints "0 of N ... NOTHING PASSED" when the rules admit
+        // nothing. Read back off the rendered text rather than recomputing the
+        // predicate, so the cascade can never disagree with the table an
+        // operator is looking at.
+        if body.contains("NOTHING PASSED") {
+            let _ = writeln!(out, "  {:<5} UNMET", tier.name);
+            continue;
+        }
+        let _ = writeln!(out, "  {:<5} MET -- {}\n", tier.name, tier.describe());
+        out.push_str(&body);
+        return out;
+    }
+    let _ = writeln!(
+        out,
+        "\n  NO TIER MET, INCLUDING THE MILDEST. A combination that cannot clear \
+         `C` is not a near miss, and the TIGHTEST column in the table above is \
+         how far the closest one actually ran. This is a statement about these \
+         bars, not a failure of the search."
+    );
+    // The mildest tier's table, so a reader still sees what was tried.
+    if let Some(mildest) = TIERS.last() {
+        out.push_str(&screen(
+            bars,
+            column,
+            by_evidence,
+            horizon,
+            mildest.rules(top),
+        ));
+    }
+    out
+}
+
 fn screen(
     bars: &[indicators::Candle],
     column: &indicators::column::Column,
