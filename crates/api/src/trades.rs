@@ -471,10 +471,21 @@ impl Fold {
     /// with.
     #[must_use]
     pub fn of(rows: &[Row]) -> Self {
+        // `largest_win` and `largest_loss` START AT ZERO AND ARE NOT WRITTEN
+        // HERE, and the omission is deliberate rather than an oversight.
+        // `Self::default()` already zeroes them, so naming them was two lines
+        // that changed nothing — mutation testing found both by deleting them
+        // and watching every test still pass, which is exactly what an
+        // equivalent mutant is: not a hole in the suite, a line that does not
+        // do anything.
+        //
+        // Zero is also the RIGHT resting value, which is why the default is
+        // usable. A run with no winner has no largest win, and zero is what
+        // "no winner" folds to under `max`; the same holds for `min` and the
+        // losses. Seeding either with a sentinel would make an empty side
+        // report a number that no trade produced.
         let mut out = Self {
             total: rows.len() as u64,
-            largest_win: 0,
-            largest_loss: 0,
             ..Self::default()
         };
         let mut win_run = 0_u64;
@@ -967,5 +978,31 @@ mod tests {
     fn the_identity_renders_as_lowercase_hex() {
         assert_eq!(hex(&[0xab; 32]), "ab".repeat(32));
         assert_eq!(hex(&[0; 32]).len(), 64);
+    }
+
+    #[test]
+    fn an_absent_side_rests_at_zero_rather_than_at_a_sentinel() {
+        // MUTATION TESTING FOUND THE TWO LINES THIS REPLACES. `largest_win: 0`
+        // and `largest_loss: 0` were written beside `..Self::default()`, which
+        // already zeroes them, so deleting either changed nothing and every
+        // test still passed. The lines are gone; this asserts the behaviour
+        // they were pretending to establish.
+        //
+        // All losses: there is no largest WIN, and zero is the honest answer —
+        // a sentinel would report a number no trade produced.
+        let all_loss = Fold::of(&[row(0, -10), row(1, -20)]);
+        assert_eq!(all_loss.largest_win, 0);
+        assert_eq!(all_loss.largest_loss, -20);
+        assert_eq!(all_loss.gross_profit, 0);
+
+        // All wins: the mirror.
+        let all_win = Fold::of(&[row(0, 10), row(1, 20)]);
+        assert_eq!(all_win.largest_loss, 0);
+        assert_eq!(all_win.largest_win, 20);
+        assert_eq!(all_win.gross_loss, 0);
+
+        // Nothing at all: both rest at zero and neither is a sentinel.
+        let none = Fold::of(&[]);
+        assert_eq!((none.largest_win, none.largest_loss), (0, 0));
     }
 }
