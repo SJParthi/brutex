@@ -2044,8 +2044,31 @@ jobs:
           #
           # The COUNT is pinned at 3, so a fourth occurrence in that file still
           # fails. This is a bounded hole with a named reason, not an exemption.
+          # FOUR ENTRIES ADDED, AND ALL FOUR ARE THE HISTORICAL-REFERENCE CASE
+          # the paragraph above says this list exists for. Every one names the
+          # language of KITE'S OWN VENDOR SDK, in prose, while explaining why a
+          # particular refusal is classified the way it is -- the vendor
+          # documents `PermissionException` in that SDK rather than on the wire,
+          # which is the whole reason those two failures collapse onto one point
+          # on the status axis. None is a dependency, a tool, a build step or a
+          # file this workspace runs. `crates/pull` takes no such dependency and
+          # gate 1 would refuse the extension if it did.
+          #
+          # Deleting the sentences would make this gate green by removing TRUE
+          # provenance about an external system, which is the trade CLAUDE.md
+          # §3 rule 1 exists to refuse: the vendor's behaviour is a verified
+          # external fact and the reason it is recorded is that a reader
+          # otherwise cannot tell why two different failures are one event.
+          #
+          # THE COUNTS ARE CEILINGS, NOT EXACT. A file that drops below its
+          # number warns rather than fails, so a sentence removed later is
+          # noticed without blocking the branch.
           allow_word='
           crates/vocab/tests/workspace_is_rust.rs 3
+          crates/pull/src/kite.rs 2
+          crates/pull/src/refusal.rs 1
+          crates/pull/src/vendor.rs 1
+          docs/05-decisions.md 1
           '
 
           work=$(mktemp -d)
@@ -4243,17 +4266,55 @@ jobs:
           # to compute one. Not one is a price: no paisa figure enters this module at all,
           # which is what separates it from report.rs two lines up. The count was raised by
           # reading all 18 against that test, not by taking the number the gate printed.
+          # EIGHT ROWS ADDED OR RAISED, AND NOT ONE OF THEM IS A PRICE. §7's
+          # sentence has two halves and this rule enforces both: paisa is `i64`
+          # and never a float, AND "statistical values keep full precision".
+          # Every site below is the second half. They went undeclared because
+          # this gate sits behind gate 1e in the same job, so a failing
+          # `cargo build` skipped it -- for long enough that five files with no
+          # row at all accumulated.
+          #
+          #   pull/pricing.rs 22, pull/tenor.rs 5 -- an interest RATE and a
+          #     years-to-expiry, both dimensionless ratios feeding Black-Scholes.
+          #     `Rate::annual` and `Tenor::years` are what `greeks` takes; a
+          #     paisa `i64` cannot express 0.0675.
+          #   api/ingest.rs 1 -- `text.parse::<f64>()` on the `rate` PARAMETER,
+          #     the operator-supplied annual rate, refused by name through
+          #     `Refusal::UnreadableRate` when it will not parse or leaves
+          #     `MAX_PLAUSIBLE_RATE`. Not a price field.
+          #   api/server.rs 4 -- `millionths_to_decimal`, an `i64` count of
+          #     millionths rendered for display. The i64 is the value; the f64
+          #     is the rendering, exact to 2^53.
+          #   runner/grid.rs 4 -- a Wilson interval: the `Z = 1.959964`
+          #     constant and trade/win COUNTS cast for the arithmetic. A count
+          #     is exact in f64 far past any run this engine can hold.
+          #   store/format.rs 14 -- the greeks record. Volatility, delta, gamma,
+          #     theta, vega, rho are statistical values, and the file's own doc
+          #     says so before declaring them.
+          #   runner/significance.rs 18 -> 21 -- three more in the same
+          #     multiple-comparison arithmetic the eighteen already cover.
+          #   runner/outcome.rs 5 -> 8 -- the three Newey-West accumulators
+          #     added with the overlap correction. `cross_a`, `cross_b` and
+          #     `cross_c` are weighted cross-products of forward MOVES; the
+          #     moves are read as paisa `i64` from the store and the statistic
+          #     over them is a t-statistic, which §7 keeps at full precision.
           allow_float='
+          crates/api/src/ingest.rs 1
+          crates/api/src/server.rs 4
           crates/core/src/price.rs 4
           crates/greeks/src/bsm.rs 36
           crates/greeks/src/normal.rs 21
           crates/greeks/src/error.rs 17
           crates/greeks/src/solver.rs 13
           crates/greeks/src/moneyness.rs 6
-          crates/runner/src/significance.rs 18
+          crates/pull/src/pricing.rs 22
+          crates/pull/src/tenor.rs 5
+          crates/runner/src/grid.rs 4
+          crates/runner/src/significance.rs 21
           crates/runner/src/bootstrap.rs 29
-          crates/runner/src/outcome.rs 5
+          crates/runner/src/outcome.rs 8
           crates/runner/src/report.rs 3
+          crates/store/src/format.rs 14
           crates/lake/src/bar.rs 9
           crates/lake/src/reader.rs 3
           crates/telemetry/src/value.rs 5
@@ -4314,10 +4375,38 @@ jobs:
           # DECLARED RATHER THAN REWORDED: `with_capacity(0)` is the same non-reservation
           # and rule 3 matches it deliberately, so rewriting the line to dodge the grep
           # would be the mute button this gate exists to refuse.
+          # SIX SITES SURFACED WHEN THIS RULE STARTED RUNNING AGAIN, AND TWO OF
+          # THEM WERE FIXED RATHER THAN DECLARED. That order is the point: an
+          # allowlist entry is for a map whose size is genuinely unknowable when
+          # it is built, not for one nobody got around to reserving.
+          #
+          #   FIXED, not listed -- `api/server.rs::price_group` now reserves
+          #     `group.len()`, the same bound the `quotes` Vec on the line above
+          #     already used; and `cli/results.rs::open` reserves
+          #     `(len - HEADER) / stride`, which the file's own length gives
+          #     before the walk starts.
+          #
+          #   LISTED, because nothing is known yet to reserve from:
+          #   api/server.rs 1 -- the `calendars` cache, built empty inside a
+          #     `Mutex` at construction and filled lazily per vendor. The count
+          #     is not merely unknown, it is zero at that point.
+          #   api/trades.rs 2 -- `blocks`, on a file THIS CALL just created and
+          #     on the reopen path. A file with no blocks has no block count to
+          #     reserve, and the reopen learns it by reading.
+          #   pull/src/nse.rs 1 -- `seen`, deduplicating hrefs while scanning one
+          #     exchange page. The number of distinct links is what the scan is
+          #     for; reserving would need the answer first. Bounded by one HTTP
+          #     response, never by bars, months or instruments.
+          #
+          # This is the same shape `manifest.rs::genesis` is listed for, and its
+          # doc comment makes the same argument pointing at docs/06-limits.md §17.
           allow_unsized='
           crates/api/src/catalog.rs 1
           crates/pull/src/manifest.rs 1
           crates/api/src/autopilot.rs 1
+          crates/api/src/server.rs 1
+          crates/api/src/trades.rs 2
+          crates/pull/src/nse.rs 1
           '
 
           # ---- rule 4. docs/07 layer 12: bounded page, never O(universe). ---
@@ -5068,17 +5157,43 @@ jobs:
           #   api/assets.rs -- `decoded.contains(&0)` scans one decoded asset for
           #     a NUL. Bounded by the asset, which is bounded at the boundary,
           #     and it runs once per asset rather than per request.
+          # THREE ENTRIES ADDED, AND TWO OF THEM ARE THE RANGE CASE THIS RULE'S
+          # OWN PREAMBLE NAMES. An adversarial audit reported rule 7 as unable
+          # to tell `Range::contains` from `Vec::contains`, which is true and is
+          # the stated design -- the rule refuses the SPELLING and asks a person
+          # which of the three it is. These three were undeclared, so the rule
+          # was red on the tree while being invisible in CI behind gate 1e.
+          #
+          #   api/sweeprun.rs   -- `(1..=12).contains(&m)`, the month check in
+          #     `asked_from`. A `RangeInclusive` over two `u64` literals: two
+          #     comparisons, no allocation, no probe. O(1) by construction.
+          #   pull/calendar.rs  -- `(FIRST_DAY..=LAST_DAY).contains(&epoch_day)`
+          #     guarding `kind_of`. Both ends are `const`, so the range is fixed
+          #     at compile time. The line above it already says "O(1), no hash,
+          #     no allocation" and this is the declaration that makes the
+          #     sentence checkable rather than asserted.
+          #   api/calendar_of.rs -- `owed.contains(&bars)` in `agree`, and this
+          #     one IS a `Vec` scan. It is declared rather than removed because
+          #     it is bounded by the VENDOR COUNT and not by the data: `owed`
+          #     holds the distinct session lengths seen for ONE day across
+          #     `live`, which is `readings` filtered -- one entry per vendor
+          #     calendar. Two spot instruments and a handful of feeds. It does
+          #     not grow with bars, days, instruments or months, which is the
+          #     bound rule 6's entries are held to and the one that matters.
           allow_member='
           crates/api/src/assets.rs 1
+          crates/api/src/calendar_of.rs 1
           crates/api/src/constituents.rs 2
           crates/api/src/coverage.rs 1
           crates/api/src/merge.rs 1
           crates/api/src/server.rs 4
+          crates/api/src/sweeprun.rs 1
           crates/cli/src/lib.rs 2
           crates/core/src/vendor.rs 2
           crates/costs/src/day.rs 2
           crates/engine/src/lib.rs 1
           crates/greeks/src/solver.rs 1
+          crates/pull/src/calendar.rs 1
           crates/pull/src/fnowork.rs 1
           crates/pull/src/pricing.rs 2
           crates/runner/src/closed.rs 1

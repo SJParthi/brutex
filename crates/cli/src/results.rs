@@ -740,7 +740,18 @@ impl Results {
         // ONE PASS, ONCE, AT OPEN. Stated rather than hidden: this is O(runs)
         // and every other operation on this type is O(1). It is not on the
         // per-bar or per-candidate path §3 rule 4 governs.
-        let mut seen = std::collections::HashSet::new();
+        //
+        // AND IT IS PRE-SIZED, because the count is known before the loop runs.
+        // `docs/07-o1-architecture.md` law 2: growth is the ONLY source of O(n)
+        // in a hash table, so a set that rehashes while walking makes this
+        // open's cost depend on where `with_capacity` happened to round rather
+        // than on how many rows there are. Both arms of `stride_of` return a
+        // non-zero `const`, so the divide is defined; `saturating_sub` covers a
+        // file shorter than its own header, which the loop below already
+        // tolerates by never entering.
+        let records = len.saturating_sub(HEADER) / stride;
+        let mut seen =
+            std::collections::HashSet::with_capacity(usize::try_from(records).unwrap_or(0));
         let mut at = HEADER;
         while at + stride <= len {
             // A DAMAGED RECORD IS SKIPPED HERE, NOT REFUSED.

@@ -9621,7 +9621,14 @@ fn file_the_greeks(
 
 fn price_group(group: &[pull::rolling::Row], inputs: PriceInputs) -> pull::pricing::PricedAll {
     let mut quotes: Vec<pull::pricing::Quote> = Vec::with_capacity(group.len());
-    let mut sent: std::collections::HashMap<i64, f64> = std::collections::HashMap::new();
+    // PRE-SIZED FROM THE SAME BOUND THE LINE ABOVE USES. One entry per row at
+    // most -- the key is the row's timestamp -- so `group.len()` is the exact
+    // ceiling and `docs/07-o1-architecture.md` law 2 asks for it to be spent up
+    // front. Growth is the only source of O(n) in a hash table, and a map that
+    // rehashes inside the loop makes this function's cost depend on how the
+    // capacity happened to round.
+    let mut sent: std::collections::HashMap<i64, f64> =
+        std::collections::HashMap::with_capacity(group.len());
     let mut out = pull::pricing::PricedAll::default();
 
     for row in group {
