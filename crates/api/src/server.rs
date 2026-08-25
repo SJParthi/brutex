@@ -1831,6 +1831,11 @@ async fn feeds_json(
 /// that names five of six is what sent the operator to `…/1min/…` for a store
 /// holding `1day`. Passing them as one value also keeps `empty_bars_page`
 /// inside the workspace's argument ceiling — the lint and the design agree.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 struct BarsAddress<'a> {
     symbol: &'a str,
     segment: &'a str,
@@ -2896,6 +2901,11 @@ fn store_body(
 ///
 /// O(1) per entry, and the walk is the ask: a scrub of a vendor is a scrub of
 /// every month it claims. Nothing is sorted and nothing is read whole.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 async fn verify_json(
     axum::extract::State(site): axum::extract::State<Loaded>,
     uri: axum::http::Uri,
@@ -3267,6 +3277,11 @@ type SharedGovernor = std::sync::Arc<std::sync::Mutex<pull::rate::Governor>>;
 ///
 /// One lock, one index, one `Arc` clone. O(1), and the lock is released before
 /// the source is built.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 fn shared_governor(site: &Site, feed: pull::vendor::Feed) -> Option<SharedGovernor> {
     site.budgets
         .lock()
@@ -6733,6 +6748,11 @@ async fn read_credential(
 ///
 /// O(1). One file read, one identity discovery, one Parameter Store read, one
 /// client build — none of which grows with the store or the request.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 async fn credentialed_source(
     feed: pull::vendor::Feed,
     spec: &pull::vendor::HttpSpec,
@@ -7211,6 +7231,11 @@ fn recorded_fact(journal: &audit::Journal, record: &audit::Record) -> (&'static 
 /// A failure record that cannot be written does **not** overwrite the run's own
 /// "Recorded" line: the run landing and the detail landing are two facts, and
 /// collapsing them would let a partial write read as a clean one. See D-0073.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 fn recorded_with_failures(
     journal: &audit::Journal,
     record: &audit::Record,
@@ -7890,6 +7915,11 @@ where
 /// One request per contract-month still owed, each rate-governed. One census
 /// read for the whole run and one hash probe per contract-month. O(1) per
 /// contract; nothing here scans the store.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 async fn fno_land(
     wanted: &[pull::fno::Found],
     asked: &ingest::FnoRequest,
@@ -8267,6 +8297,11 @@ async fn fetch_chain_chunks(
 /// # Cost
 ///
 /// O(bars) on the first ask for a month, O(1) on every ask after it.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 type SpotBooks = std::collections::HashMap<store::path::YearMonth, Option<pull::pricing::SpotBook>>;
 
 /// Turns one month of stored bars into quotes the model can take.
@@ -8283,6 +8318,11 @@ type SpotBooks = std::collections::HashMap<store::path::YearMonth, Option<pull::
 ///
 /// O(bars): one calendar conversion, one hash probe for the spot, one tenor and
 /// one date build each, all O(1).
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 fn chain_quotes(
     bars: &[store::format::Bar],
     month_of: ChainMonth<'_>,
@@ -8386,6 +8426,11 @@ struct ChainMonth<'a> {
 /// One index-month read per MONTH, cached across contracts, then O(1) per row.
 /// One option-month read per contract-month. Both O(bars); the pricing itself
 /// is O(1) a row.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 fn price_chain_month(
     month_of: ChainMonth<'_>,
     books: &mut SpotBooks,
@@ -8503,6 +8548,11 @@ fn price_chain_month(
 /// formatting over the request and the day — no transport, no store and no
 /// clock read of its own — and leaving it in the walk made that function's
 /// length the thing a reader met first.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 fn fno_facts(asked: &ingest::FnoRequest, today: Day) -> Vec<(&'static str, String)> {
     let mut facts = vec![
         ("Underlying", asked.underlying.as_str().to_owned()),
@@ -9219,6 +9269,11 @@ async fn roll_one(
 ///
 /// O(1): at most five rows, and the reasons were already capped at
 /// `pull::pricing::REASONS_KEPT` when they were collected.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 fn greek_facts(priced: &PricedCount, no_rate: bool) -> Vec<(&'static str, String)> {
     let mut rows = Vec::new();
     if priced.ran() {
@@ -9289,6 +9344,11 @@ fn greek_facts(priced: &PricedCount, no_rate: bool) -> Vec<(&'static str, String
 /// # Cost
 ///
 /// O(1): one date build and one bounded render.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 fn name_the_contract(
     expiry_day: Day,
     strike: i64,
@@ -9384,6 +9444,11 @@ struct PriceInputs {
 /// One open and **O(bars)** reads. This is the honest cost of pricing Groww at
 /// all: its candles carry no volatility and no spot, so the only way to price
 /// them is to read what landed. `docs/06-limits.md` carries it.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 fn read_month_bars(
     site: &Site,
     wire: &Wire,
@@ -9443,6 +9508,11 @@ fn read_month_bars(
 /// **O(bars) once per month**, then O(1) per option row. With 252 contracts
 /// against 375 index bars that is 375 inserts rather than 94,500 comparisons —
 /// the trade `docs/07-o1-architecture.md` law 3 exists to make.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 fn spot_book_for(
     site: &Site,
     wire: &Wire,
@@ -9537,6 +9607,11 @@ where
 /// # Cost
 ///
 /// O(rows): one `price` each, which is O(1), plus one fixed-width encode.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 fn price_rolling_group(
     group: &[pull::rolling::Row],
     inputs: PriceInputs,
@@ -9603,6 +9678,11 @@ fn greek_records(done: &pull::pricing::PricedAll) -> Vec<store::format::Greek> {
 /// # Cost
 ///
 /// One path build, one open, one append. O(1) per call.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 fn file_the_greeks(
     records: &[store::format::Greek],
     contract: brutex_core::instrument::Contract,
@@ -10162,6 +10242,11 @@ fn land_rolling_group(
 ///
 /// One request per member of the product, each rate-governed. O(1) per
 /// request; nothing here scans the store.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 #[allow(
     clippy::too_many_arguments,
     reason = "each is a distinct fact about the one cross product being walked \
@@ -10429,6 +10514,11 @@ fn cadence_has_contracts_on(
 /// # Cost
 ///
 /// Four multiplications. O(1), and it allocates nothing.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 fn planned_rolling_requests(
     cadences: usize,
     rolling: pull::vendor::RollingSpec,
@@ -10551,6 +10641,11 @@ fn say_walk_finished(
 ///
 /// O(1) per request built and per row read. The request COUNT is fixed by the
 /// descriptor, never by an answer.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 async fn fno_roll(
     page: &FnoPage<'_>,
     mut facts: Vec<(&'static str, String)>,

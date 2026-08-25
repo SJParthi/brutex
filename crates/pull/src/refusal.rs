@@ -94,6 +94,11 @@
 //! request**, against a body the transport has already bounded, and a pull
 //! refusing often enough for this to matter has a larger problem than parsing.
 //! `docs/06-limits.md` is where that is registered rather than claimed away.
+//!
+//! **UNVERIFIED as a measurement.** The bound is argued from the
+//! shape of the code and no bench in this workspace times it.
+//! `CLAUDE.md` §3 rule 6: a structural argument is not a
+//! measurement, however sound it is.
 
 use core::fmt;
 
@@ -520,6 +525,11 @@ pub fn classify<'a>(names: Option<&ErrorNames>, status: u16, name: Option<&'a st
 /// assert_eq!(named_error_of(r#"{"status":"error"}"#, "error_type", None), None);
 /// assert_eq!(named_error_of(r#"{"error_type":7}"#, "error_type", None), None);
 /// ```
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 #[must_use]
 pub fn named_error_of(body: &str, field: &str, envelope: Option<&str>) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(body).ok()?;

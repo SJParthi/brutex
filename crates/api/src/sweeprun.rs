@@ -433,6 +433,11 @@ fn json_headers() -> JsonHeaders {
 /// per month. Holding the connection would exceed every proxy timeout in the
 /// path and give the operator a spinner with no way to ask what it was doing.
 /// The page polls [`run_json`] instead, which is one lock take.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 pub async fn run(
     axum::extract::State(site): axum::extract::State<crate::server::Loaded>,
     body: String,
@@ -548,6 +553,11 @@ pub async fn run(
 /// **O(1).** One lock take and one struct read. It never consults the store,
 /// so an operator refreshing this every second through an hour-long sweep
 /// costs the disk nothing.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 pub async fn run_json(
     axum::extract::State(site): axum::extract::State<crate::server::Loaded>,
 ) -> (axum::http::StatusCode, JsonHeaders, String) {

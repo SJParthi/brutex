@@ -41,6 +41,11 @@
 //! the vendor list, which is bounded by the number of feeds this build has
 //! (four), not by the number of legs. The pass loop holds one `Progress` and
 //! rewrites it in place; nothing accumulates per pass.
+//!
+//! **UNVERIFIED as a measurement.** The bound is argued from the
+//! shape of the code and no bench in this workspace times it.
+//! `CLAUDE.md` §3 rule 6: a structural argument is not a
+//! measurement, however sound it is.
 
 use crate::census;
 use crate::server::{Loaded, Site, percent_decode};
@@ -803,6 +808,11 @@ async fn run_chain(site: Loaded, nth: usize, legs: Vec<Leg>) -> bool {
 /// Per pass: one census read before, one after, and one spawn per vendor. The
 /// per-leg path adds a mutex take and a `String` clone for the status document
 /// — O(1) each, and no allocation that grows with how many passes came before.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 pub async fn conduct(site: Loaded, legs: Vec<Leg>) {
     // RELEASED ON EVERY EXIT, INCLUDING A PANIC. See `Finisher`.
     let _finisher = Finisher {

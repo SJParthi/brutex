@@ -220,6 +220,11 @@ pub fn path_in(root: &Path) -> PathBuf {
 /// this run" is a probe and a seek rather than a walk. **O(1) per lookup**;
 /// the map is built in one pass at open, the same pass and the same stated cost
 /// as `cli::results`' duplicate set.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Block {
     /// Index of this run's first record.
@@ -316,6 +321,11 @@ impl Trades {
     /// # Errors
     ///
     /// An unreadable file handle.
+    ///
+    /// **UNVERIFIED as a measurement.** The bound is argued from the
+    /// shape of the code and no bench in this workspace times it.
+    /// `CLAUDE.md` §3 rule 6: a structural argument is not a
+    /// measurement, however sound it is.
     pub fn len(&self) -> Result<u64, Refusal> {
         let len = self
             .file
@@ -335,12 +345,22 @@ impl Trades {
     }
 
     /// Whether this run's trades are already recorded. **O(1).**
+    ///
+    /// **UNVERIFIED as a measurement.** The bound is argued from the
+    /// shape of the code and no bench in this workspace times it.
+    /// `CLAUDE.md` §3 rule 6: a structural argument is not a
+    /// measurement, however sound it is.
     #[must_use]
     pub fn holds(&self, run: &[u8; 32]) -> bool {
         self.blocks.contains_key(run)
     }
 
     /// Where one run's trades are, if they are here. **O(1).**
+    ///
+    /// **UNVERIFIED as a measurement.** The bound is argued from the
+    /// shape of the code and no bench in this workspace times it.
+    /// `CLAUDE.md` §3 rule 6: a structural argument is not a
+    /// measurement, however sound it is.
     #[must_use]
     pub fn block(&self, run: &[u8; 32]) -> Option<Block> {
         self.blocks.get(run).copied()
@@ -396,6 +416,11 @@ impl Trades {
     /// # Errors
     ///
     /// A run with no block recorded, or an unreadable file.
+    ///
+    /// **UNVERIFIED as a measurement.** The bound is argued from the
+    /// shape of the code and no bench in this workspace times it.
+    /// `CLAUDE.md` §3 rule 6: a structural argument is not a
+    /// measurement, however sound it is.
     pub fn read_block(&mut self, run: &[u8; 32]) -> Result<Vec<Row>, Refusal> {
         let block = self
             .block(run)

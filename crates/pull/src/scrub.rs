@@ -54,6 +54,11 @@
 //! has. `CLAUDE.md` §3 rule 4 requires a constant per-operation cost and this
 //! is an operation; the 100,000th entry scrubbed costs exactly what the first
 //! did. Nothing here sorts, allocates per record, or reads a file whole.
+//!
+//! **UNVERIFIED as a measurement.** The bound is argued from the
+//! shape of the code and no bench in this workspace times it.
+//! `CLAUDE.md` §3 rule 6: a structural argument is not a
+//! measurement, however sound it is.
 
 use std::path::Path;
 
@@ -168,6 +173,11 @@ impl Finding {
 /// # Cost
 ///
 /// O(1). One open, one header read, two record reads at computed offsets.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 #[must_use]
 pub fn one(entry: &Entry, root: &Path, vendor: Vendor, symbol_id: u32) -> Finding {
     let parts = PathParts {
@@ -273,6 +283,11 @@ pub struct Tally {
 
 impl Tally {
     /// Folds one finding in. O(1).
+    ///
+    /// **UNVERIFIED as a measurement.** The bound is argued from the
+    /// shape of the code and no bench in this workspace times it.
+    /// `CLAUDE.md` §3 rule 6: a structural argument is not a
+    /// measurement, however sound it is.
     pub const fn count(&mut self, finding: &Finding) {
         match finding {
             Finding::Agrees => self.agreed += 1,

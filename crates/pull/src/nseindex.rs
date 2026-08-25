@@ -46,6 +46,11 @@
 //! through [`Mapping::get`] is a hash hit. That is the shape §3 rule 4 asks
 //! for: the per-operation cost on the hot path is constant, and the
 //! non-constant part happens once and is stated.
+//!
+//! **UNVERIFIED as a measurement.** The bound is argued from the
+//! shape of the code and no bench in this workspace times it.
+//! `CLAUDE.md` §3 rule 6: a structural argument is not a
+//! measurement, however sound it is.
 
 use std::collections::HashMap;
 
@@ -236,6 +241,11 @@ impl Catalogue {
 }
 
 /// One vendor master, joined to the exchange. Built once; read O(1).
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 #[derive(Clone, Debug, Default)]
 pub struct Mapping {
     resolved: HashMap<String, (String, Basis)>,
@@ -244,6 +254,11 @@ pub struct Mapping {
 
 impl Mapping {
     /// The NSE name for a symbol, and the evidence for it. O(1).
+    ///
+    /// **UNVERIFIED as a measurement.** The bound is argued from the
+    /// shape of the code and no bench in this workspace times it.
+    /// `CLAUDE.md` §3 rule 6: a structural argument is not a
+    /// measurement, however sound it is.
     #[must_use]
     pub fn get(&self, symbol: &str) -> Option<(&str, Basis)> {
         self.resolved

@@ -517,6 +517,11 @@ pub const MAX_INDEX_LINKS: usize = 10_000;
 /// Order is preserved: the set decides membership, the `Vec` decides sequence.
 /// A set alone would lose the exchange's own ordering, which `resolve::crawl`
 /// relies on for a reproducible snapshot.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 pub fn index_links(html: &str, category: Category) -> Result<Vec<IndexRef>, NseError> {
     // The prefix is the category's own path plus a separator, so a listing that
     // links a SIBLING category is not collected into this one.
@@ -1056,6 +1061,11 @@ mod tests {
     /// The ceiling is deliberately loose. This is a correctness assertion about
     /// the ALGORITHM, not a timing budget: a shared runner under load can stretch
     /// any wall clock, and 3× still separates linear from quadratic decisively.
+    ///
+    /// **UNVERIFIED as a measurement.** The bound is argued from the
+    /// shape of the code and no bench in this workspace times it.
+    /// `CLAUDE.md` §3 rule 6: a structural argument is not a
+    /// measurement, however sound it is.
     #[test]
     fn deduplicating_index_links_costs_one_probe_each_rather_than_a_scan() {
         fn listing(n: usize) -> String {

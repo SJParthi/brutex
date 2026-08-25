@@ -37,6 +37,16 @@
 //! A `HashSet` of stored minutes would have been the obvious shape and is
 //! strictly worse: it costs a hash per bar to answer a question the ordering
 //! already answers for free.
+//!
+//! **UNVERIFIED as a measurement.** The bound above is argued from the SHAPE of
+//! the walk — two cursors, each advancing at most once per step — and no bench
+//! in this workspace times it. `crates/pull/benches/ratio.rs` covers the
+//! manifest's census and entry lookup and nothing here. The argument is the
+//! stronger kind, because a merge that cannot revisit a position has no input
+//! that makes it quadratic, but `CLAUDE.md` §3 rule 6 does not let a structural
+//! argument be reported as a measured one. Closing it is a ratio row over
+//! `classify` at 1x/10x/100x the minute count, beside the rows that already
+//! exist for the manifest.
 
 use crate::calendar::{self, DayKind};
 
@@ -192,6 +202,9 @@ fn ist(ts_micros: i64) -> (i64, u16) {
 ///
 /// One step per expected minute and one per stored bar, each O(1). No set, no
 /// map, no per-minute allocation.
+///
+/// **UNVERIFIED as a measurement** — see the module's own Cost note. The bound
+/// is a property of the merge rather than a timing anyone took.
 ///
 /// # Panics
 ///
@@ -355,6 +368,12 @@ fn flush(ledger: &mut Ledger, run: &mut Option<Gap>) {
 /// One pass over the day's minutes, and one `expects` per peer per minute —
 /// each a bounded walk of at most [`crate::calendar::MAX_WINDOWS`]. O(1) per
 /// minute per peer, no allocation beyond the answer.
+///
+/// **UNVERIFIED as a measurement** — see the module's own Cost note. The per-peer
+/// factor is real and is stated rather than folded into the O(1): this is
+/// constant per minute PER PEER, so three feeds cost three walks. The bound on
+/// each walk is `MAX_WINDOWS`, a `const`, which is what makes the inner one
+/// constant rather than a search.
 #[must_use]
 pub fn provable_holes(
     day: i64,

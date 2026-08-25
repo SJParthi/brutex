@@ -34,6 +34,11 @@
 //! offsets, none of which grows with the size of the file or the store. Walking
 //! every entry is inherent: you cannot verify a store you do not look at. The
 //! per-operation bound `CLAUDE.md` §3 rule 4 fixes is the one this holds.
+//!
+//! **UNVERIFIED as a measurement.** The bound is argued from the
+//! shape of the code and no bench in this workspace times it.
+//! `CLAUDE.md` §3 rule 6: a structural argument is not a
+//! measurement, however sound it is.
 
 use std::path::Path;
 
@@ -129,6 +134,11 @@ impl Report {
 /// # Cost
 ///
 /// O(1) per entry. Nothing is sorted and nothing is read whole.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 #[must_use]
 pub fn vendor(root: &Path, census: &VendorCensus) -> Report {
     let mut report = Report {

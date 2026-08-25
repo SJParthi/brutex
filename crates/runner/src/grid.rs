@@ -407,6 +407,11 @@ impl Cell {
     /// statistical values at full precision. Only the final conversion to basis
     /// points is integral, and it FLOORS, so a reported bound is never better
     /// than the true one.
+    ///
+    /// **UNVERIFIED as a measurement.** The bound is argued from the
+    /// shape of the code and no bench in this workspace times it.
+    /// `CLAUDE.md` §3 rule 6: a structural argument is not a
+    /// measurement, however sound it is.
     // SCOPED TO THIS FUNCTION, and deliberately not to the module.
     //
     // `significance`, `bootstrap` and `outcome` each take this exception at

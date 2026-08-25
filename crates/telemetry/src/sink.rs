@@ -108,6 +108,11 @@
 //! stated in bytes so nobody has to guess, and what falls off the end is
 //! deleted rather than compressed — a compressor would be a dependency, and
 //! the events worth keeping forever are the ones the journal already has.
+//!
+//! **UNVERIFIED as a measurement.** The bound is argued from the
+//! shape of the code and no bench in this workspace times it.
+//! `CLAUDE.md` §3 rule 6: a structural argument is not a
+//! measurement, however sound it is.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write as _;
@@ -559,6 +564,11 @@ impl Inner {
     /// carrying it is held by
     /// `telemetry::bench::the_tail_is_flat_in_the_size_of_the_file_too` (C-T-01b),
     /// the same proof the `run` stamp beside it names.
+    ///
+    /// **UNVERIFIED as a measurement.** The bound is argued from the
+    /// shape of the code and no bench in this workspace times it.
+    /// `CLAUDE.md` §3 rule 6: a structural argument is not a
+    /// measurement, however sound it is.
     fn stamp(&mut self, now: i64) -> i64 {
         self.last_at = now.max(self.last_at);
         self.last_at
@@ -593,6 +603,11 @@ pub struct Sink {
     /// `telemetry::bench::the_tail_is_flat_in_the_size_of_the_file_too` (C-T-01b),
     /// and the split it buys by
     /// `telemetry::tail::a_log_holding_several_runs_splits_back_into_them` (T-22).
+    ///
+    /// **UNVERIFIED as a measurement.** The bound is argued from the
+    /// shape of the code and no bench in this workspace times it.
+    /// `CLAUDE.md` §3 rule 6: a structural argument is not a
+    /// measurement, however sound it is.
     run: AtomicU64,
 
     /// Set once a roll has failed, and never cleared.
@@ -939,6 +954,11 @@ impl Sink {
     ///
     /// Claiming zero is refused — zero is the absence of a run, so a caller
     /// asking for it is asking to hold nothing.
+    ///
+    /// **UNVERIFIED as a measurement.** The bound is argued from the
+    /// shape of the code and no bench in this workspace times it.
+    /// `CLAUDE.md` §3 rule 6: a structural argument is not a
+    /// measurement, however sound it is.
     pub fn claim_run(&self, run: u64) -> bool {
         run != 0
             && self
@@ -957,6 +977,11 @@ impl Sink {
     /// # Cost
     ///
     /// One `compare_exchange`. O(1).
+    ///
+    /// **UNVERIFIED as a measurement.** The bound is argued from the
+    /// shape of the code and no bench in this workspace times it.
+    /// `CLAUDE.md` §3 rule 6: a structural argument is not a
+    /// measurement, however sound it is.
     pub fn release_run(&self, run: u64) {
         let _lost_the_claim =
             self.run
@@ -990,6 +1015,11 @@ impl Sink {
     /// `telemetry::sink::a_filtered_event_never_evaluates_its_arguments`, which
     /// counts side effects rather than timing them: an argument that did not
     /// run cannot increment a counter.
+    ///
+    /// **UNVERIFIED as a measurement.** The bound is argued from the
+    /// shape of the code and no bench in this workspace times it.
+    /// `CLAUDE.md` §3 rule 6: a structural argument is not a
+    /// measurement, however sound it is.
     #[must_use]
     pub fn admits(&self, level: Level, target: &str) -> bool {
         if !level.at_least(self.fast_floor()) {
@@ -3061,6 +3091,11 @@ mod tests {
     /// timing: a counter incremented inside an argument expression can only
     /// move if that expression ran. Timing would measure this machine; a
     /// counter measures the semantics.
+    ///
+    /// **UNVERIFIED as a measurement.** The bound is argued from the
+    /// shape of the code and no bench in this workspace times it.
+    /// `CLAUDE.md` §3 rule 6: a structural argument is not a
+    /// measurement, however sound it is.
     #[test]
     fn a_filtered_event_never_evaluates_its_arguments() {
         let dir = scratch("emit-if");

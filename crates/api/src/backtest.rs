@@ -65,6 +65,11 @@
 //! prints it — the same contract [`crate::logs`] keeps, and for the same
 //! reason: "what I read" and "everything there is" are different answers and
 //! only one of them is true.
+//!
+//! **UNVERIFIED as a measurement.** The bound is argued from the
+//! shape of the code and no bench in this workspace times it.
+//! `CLAUDE.md` §3 rule 6: a structural argument is not a
+//! measurement, however sound it is.
 
 use std::fmt::Write as _;
 use std::fs::File;
@@ -734,6 +739,11 @@ pub struct Ledger {
     pub version: u32,
     /// Records the file holds, from its length. **O(1)** and independent of
     /// how many were read.
+    ///
+    /// **UNVERIFIED as a measurement.** The bound is argued from the
+    /// shape of the code and no bench in this workspace times it.
+    /// `CLAUDE.md` §3 rule 6: a structural argument is not a
+    /// measurement, however sound it is.
     pub total: u64,
     /// Records actually read into [`Self::runs`].
     pub scanned: u64,

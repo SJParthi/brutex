@@ -119,6 +119,11 @@ pub const REQUEST_TIMEOUT_SECS: u64 = 30;
 ///
 /// One build per process; one `Arc` clone per call thereafter. O(1) either way,
 /// and the constant drops from a TLS handshake to a pointer copy.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 fn pooled_client() -> Result<reqwest::Client, String> {
     static POOL: std::sync::OnceLock<Result<reqwest::Client, String>> = std::sync::OnceLock::new();
     POOL.get_or_init(|| {
@@ -521,6 +526,11 @@ impl HttpSource {
     /// One `admit` per attempt, and `admit` walks [`crate::rate::WINDOW_COUNT`]
     /// windows -- a constant three -- so this is O(1) per request and does not
     /// grow with how many requests came before it.
+    ///
+    /// **UNVERIFIED as a measurement.** The bound is argued from the
+    /// shape of the code and no bench in this workspace times it.
+    /// `CLAUDE.md` §3 rule 6: a structural argument is not a
+    /// measurement, however sound it is.
     async fn wait_for_permit(&self) {
         // THE CALLER ALREADY WITHDREW. Charging again here is two permits for
         // one request -- see `charged_by_caller` for what that measured and how
@@ -1546,6 +1556,11 @@ impl HttpSource {
     ///
     /// One request, one permit. O(1). Unchanged — the type carries a number the
     /// function had already computed.
+    ///
+    /// **UNVERIFIED as a measurement.** The bound is argued from the
+    /// shape of the code and no bench in this workspace times it.
+    /// `CLAUDE.md` §3 rule 6: a structural argument is not a
+    /// measurement, however sound it is.
     pub async fn post_json(
         &self,
         url: &str,

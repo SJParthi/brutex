@@ -45,6 +45,11 @@
 //! `O(1)` amortised per bar, with the execution cursor moving forward only.
 //! There is no binary search per signal and no scan. Run once per run, never per
 //! candidate.
+//!
+//! **UNVERIFIED as a measurement.** The bound is argued from the
+//! shape of the code and no bench in this workspace times it.
+//! `CLAUDE.md` §3 rule 6: a structural argument is not a
+//! measurement, however sound it is.
 
 use indicators::Candle;
 

@@ -349,6 +349,11 @@ fn months_between(from: (u16, u8), to: (u16, u8)) -> Result<Vec<(u16, u8)>, Refu
 /// per-operation cost: `CLAUDE.md` §3 rule 4 governs bar lookup, condition
 /// lookup, mask evaluation, duplicate rejection and result append, and this is
 /// none of them. Nothing here scans, sorts or searches.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 pub fn load_span(
     root: &Path,
     vendor: Vendor,

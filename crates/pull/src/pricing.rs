@@ -36,6 +36,20 @@
 //! `i64` paisa is exact in `f64` up to `2^53`, which is ninety trillion rupees.
 //! Nothing this market prints comes close, so the widening is lossless.
 //!
+//! # Every cost figure in this module is UNVERIFIED as a measurement
+//!
+//! The O(1) claims below are argued from the SHAPE of each function -- a
+//! field read, a range check, a closed-form Black-Scholes evaluation, a dated
+//! table lookup bounded by a `const`. None is a timing anyone took:
+//! `crates/pull/benches/ratio.rs` measures the manifest census and its entry
+//! lookup and reaches nothing here.
+//!
+//! The structural argument is the stronger kind where it applies -- a closed
+//! form has no input that makes it iterate -- but `CLAUDE.md` §3 rule 6 does
+//! not let a structural argument be reported as a measured one. Closing it is
+//! a ratio row over `price` at 1x/10x/100x the row count, beside the rows that
+//! already exist for the manifest.
+//!
 //! # The rate cannot be invented, and the type is what stops it
 //!
 //! BSM needs five inputs. Four are in hand — the strike from
@@ -57,6 +71,9 @@
 //! [`solve_iv`] is bounded by `greeks::solver::MAX_ITERATIONS`, a compile-time
 //! constant no input can raise — the returned `iterations` is the count that
 //! was actually spent, so the bound is observable rather than claimed.
+//!
+//! **UNVERIFIED as a measurement** -- see the module note above; the bound is
+//! a property of the closed form, not a timing anyone took.
 
 use std::collections::HashMap;
 
@@ -89,6 +106,9 @@ pub use costs::venue::SweptSlot;
 /// # Cost
 ///
 /// O(1) — see `costs::venue::swept_slot`.
+///
+/// **UNVERIFIED as a measurement** -- see the module note; the bound is a
+/// property of the shape, not a timing.
 #[must_use]
 pub fn slot_of(symbol: brutex_core::symbol::Symbol) -> Option<SweptSlot> {
     costs::venue::swept_slot(symbol).ok()
@@ -102,6 +122,9 @@ pub fn slot_of(symbol: brutex_core::symbol::Symbol) -> Option<SweptSlot> {
 /// # Cost
 ///
 /// O(1): three field reads and two range checks.
+///
+/// **UNVERIFIED as a measurement** -- see the module note; the bound is a
+/// property of the shape, not a timing.
 #[must_use]
 pub fn trade_day_of(day: crate::session::Day) -> Option<TradeDay> {
     TradeDay::new(day.year(), day.month(), day.day()).ok()
@@ -311,6 +334,9 @@ pub struct Quote {
 
 /// The underlying's level at every stamp of one month, probed in O(1).
 ///
+/// **UNVERIFIED as a measurement** -- see the module note; the bound is a
+/// property of the shape, not a timing.
+///
 /// # Why this exists
 ///
 /// Dhan sends the spot beside each option bar. **Groww sends nothing of the
@@ -323,8 +349,14 @@ pub struct Quote {
 ///
 /// Built once per instrument-month in **O(bars)**, one insert each. Probed in
 /// **O(1)**, one hash lookup. `docs/07-o1-architecture.md` law 3 is what makes
+///
+/// **UNVERIFIED as a measurement** -- see the module note; the bound is a
+/// property of the shape, not a timing.
 /// the build cost acceptable and the probe cost mandatory: paying O(bars) once
 /// to answer O(1) forever is the trade; paying O(bars) per option row is the
+///
+/// **UNVERIFIED as a measurement** -- see the module note; the bound is a
+/// property of the shape, not a timing.
 /// scan the law forbids, and with 252 contracts against 375 index bars that is
 /// the difference between 375 inserts and 94,500 comparisons.
 #[derive(Debug, Clone, Default)]
@@ -571,6 +603,9 @@ fn contract_of(quote: Quote, rate: Rate, basis: YearBasis) -> Result<Contract, P
 /// Bounded by `greeks::solver::MAX_ITERATIONS`, a compile-time constant. The
 /// returned `iterations` is what was actually spent, so the bound is observable
 /// rather than claimed. O(1) time, O(1) space, no allocation.
+///
+/// **UNVERIFIED as a measurement** -- see the module note; the bound is a
+/// property of the shape, not a timing.
 pub fn solve_iv(
     quote: Quote,
     rate: Rate,
@@ -598,6 +633,9 @@ pub fn solve_iv(
 /// # Cost
 ///
 /// Closed form. O(1) time, O(1) space, no allocation, no iteration at all.
+///
+/// **UNVERIFIED as a measurement** -- see the module note; the bound is a
+/// property of the shape, not a timing.
 pub fn greeks_at(
     quote: Quote,
     volatility: f64,
@@ -691,6 +729,9 @@ pub struct Priced {
 /// # Cost
 ///
 /// **O(1) time, O(1) space, no allocation.** One dated table lookup bounded by a
+///
+/// **UNVERIFIED as a measurement** -- see the module note; the bound is a
+/// property of the shape, not a timing.
 /// compile-time constant, one closed-form at-the-money rounding, one closed-form
 /// greeks evaluation, and — only when solving — an iteration count bounded by
 /// `greeks::solver::MAX_ITERATIONS` and returned so the bound is observable.
@@ -833,6 +874,9 @@ impl PricedAll {
 /// # Cost
 ///
 /// **O(rows)**, one [`price`] each, which is O(1). Space is the rows that
+///
+/// **UNVERIFIED as a measurement** -- see the module note; the bound is a
+/// property of the shape, not a timing.
 /// priced plus at most [`REASONS_KEPT`] strings. Nothing here scans the store.
 #[must_use]
 pub fn price_all(

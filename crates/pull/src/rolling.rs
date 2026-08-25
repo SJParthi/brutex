@@ -44,6 +44,11 @@
 //! The NUMBER of requests is the cross product and is bounded by the
 //! descriptor's own lists — 21 index offsets × 2 sides × 2 cadences × 3
 //! ordinals — never by anything a vendor answers.
+//!
+//! **UNVERIFIED as a measurement.** The bound is argued from the
+//! shape of the code and no bench in this workspace times it.
+//! `CLAUDE.md` §3 rule 6: a structural argument is not a
+//! measurement, however sound it is.
 
 use crate::vendor::{PriceScale, RollingSpec};
 use store::format::{Bar, OI_NULL, Overlay};
@@ -78,6 +83,11 @@ use store::format::{Bar, OI_NULL, Overlay};
 /// # Cost
 ///
 /// O(1). One slot lookup and one calendar step; nothing scans.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 pub fn expiry_of(
     underlying: &str,
     flag: &str,
@@ -291,6 +301,11 @@ pub const fn side_key(side: &str) -> &'static str {
 /// # Cost
 ///
 /// One allocation, proportional to the URL. O(1) in the request.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 #[must_use]
 pub fn url(spec: &RollingSpec, base_url: &str) -> String {
     let mut out = String::from(base_url);

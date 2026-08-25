@@ -233,6 +233,11 @@ impl Record {
 /// rather than collected, so they cost the scan they are worth and allocate
 /// nothing per member. The ceiling here is on what ends up in
 /// [`Record::fields`], which is the only thing [`Record::field`] walks.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 fn object(scan: &mut Scan<'_>) -> Result<Vec<(String, OwnedValue)>, LineFault> {
     scan.expect(b'{')?;
     // Exactly the writer's ceiling, once: a legal line never needs to grow

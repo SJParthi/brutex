@@ -1646,6 +1646,11 @@ pub struct Control {
     /// from zero. The second is what makes a round's all-or-nothing take atomic
     /// by construction rather than a loop that has to remember to give back
     /// what it already took.
+    ///
+    /// **UNVERIFIED as a measurement.** The bound is argued from the
+    /// shape of the code and no bench in this workspace times it.
+    /// `CLAUDE.md` §3 rule 6: a structural argument is not a
+    /// measurement, however sound it is.
     seats: AtomicU8,
     /// What to report. A lock, because it is a paragraph rather than a word,
     /// and it is written once per tick and read once per page.

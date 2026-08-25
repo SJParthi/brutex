@@ -82,6 +82,11 @@
 //! `.rodata`. The four irregular sessions and the five length-unmeasured days
 //! are fixed tables whose lengths are compile-time constants, so the walks over
 //! them are bounded and not scans that grow.
+//!
+//! **UNVERIFIED as a measurement.** The bound is argued from the
+//! shape of the code and no bench in this workspace times it.
+//! `CLAUDE.md` §3 rule 6: a structural argument is not a
+//! measurement, however sound it is.
 
 /// First day this calendar knows: **2019-12-02**, as days since the epoch.
 pub const FIRST_DAY: i64 = 18_232;
@@ -334,6 +339,11 @@ const _: () = assert!(TRADED.len() == DAYS.div_ceil(8));
 /// One compare, one subtract, one index, one shift — and, only for a day that
 /// traded, a walk of the four-element [`IRREGULAR`] table whose length is a
 /// compile-time constant. O(1), no hash, no allocation.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 #[must_use]
 pub fn kind_of(epoch_day: i64) -> DayKind {
     if !(FIRST_DAY..=LAST_DAY).contains(&epoch_day) {
@@ -754,6 +764,11 @@ mod tests {
 /// O(days) to build, once, and **O(1) to query**: one compare, one subtract and
 /// one index into a `Vec` whose length is the observed span. No hash, no
 /// search, no allocation per lookup.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Calendar {
     first: i64,
@@ -881,6 +896,11 @@ impl Calendar {
     }
 
     /// What `epoch_day` was — O(1).
+    ///
+    /// **UNVERIFIED as a measurement.** The bound is argued from the
+    /// shape of the code and no bench in this workspace times it.
+    /// `CLAUDE.md` §3 rule 6: a structural argument is not a
+    /// measurement, however sound it is.
     #[must_use]
     pub fn kind_of(&self, epoch_day: i64) -> DayKind {
         let Ok(at) = usize::try_from(epoch_day - self.first) else {

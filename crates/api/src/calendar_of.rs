@@ -72,6 +72,11 @@
 //! module is honest about sessions and silent about holes, and
 //! [`crate::calendar_of::derive`] must not be read as a completeness check until
 //! it is. `docs/06-limits.md` carries the same statement.
+//!
+//! **UNVERIFIED as a measurement.** The bound is argued from the
+//! shape of the code and no bench in this workspace times it.
+//! `CLAUDE.md` §3 rule 6: a structural argument is not a
+//! measurement, however sound it is.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -704,6 +709,11 @@ pub struct Disagreement {
 /// One pass over the union span, and for each day one lookup per reading —
 /// bounded by the instrument count, which is the two the engine sweeps plus
 /// whatever else the store holds. Not O(1) and not on a bar path.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 #[must_use]
 pub fn agree(readings: &[(String, Calendar)]) -> (Calendar, Vec<Disagreement>) {
     use pull::calendar::DayKind;

@@ -31,6 +31,11 @@
 //! [`pull::manifest::Manifest`] is the counter file the `/store` page reads
 //! instead of walking ~248,000 directory entries. Re-deriving any of them here
 //! would be a second definition of a rule that already has one. D-0038.
+//!
+//! **UNVERIFIED as a measurement.** The bound is argued from the
+//! shape of the code and no bench in this workspace times it.
+//! `CLAUDE.md` §3 rule 6: a structural argument is not a
+//! measurement, however sound it is.
 
 #![forbid(unsafe_code)]
 

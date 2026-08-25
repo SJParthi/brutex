@@ -400,6 +400,11 @@ pub enum Verdict {
 /// `pull::unit::a_governor_holds_no_allocation_and_no_history` (`P-34`) is the
 /// proof that this one is: ten thousand admitted requests leave the governor's
 /// `size_of` unchanged, and it owns no allocation.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Window {
     span: WindowSpan,
@@ -924,6 +929,11 @@ impl Pools {
 /// O(1) and neither allocates. `Relaxed` is correct because no other memory is
 /// ordered against this: it is a monotonic counter read for display, never a
 /// flag another thread branches on.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 static ABSORBED_MICROS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Add `micros` to what this process has absorbed.

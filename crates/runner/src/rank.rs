@@ -224,6 +224,9 @@ mod tests {
                 refused: 0,
                 mean_paisa: t,
                 t,
+                // The payoff split is not what this fixture is about, and
+                // spreading the default keeps a later field from breaking it.
+                ..Edge::default()
             },
         }
     }

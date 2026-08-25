@@ -147,6 +147,11 @@
 //! incremental path is still `record`, which is 128 bytes however large the
 //! census is. **A writer must produce bytes this module's own reader accepts**,
 //! and the round trip that proves it goes through [`Manifest::load`] unchanged.
+//!
+//! **UNVERIFIED as a measurement.** The bound is argued from the
+//! shape of the code and no bench in this workspace times it.
+//! `CLAUDE.md` §3 rule 6: a structural argument is not a
+//! measurement, however sound it is.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -358,6 +363,11 @@ const MAX_ENTRIES_LEN: usize = 2_097_152;
 /// census is [`MAX_ENTRIES`] on every load — 574 MB for a vendor holding three
 /// months. `docs/06-limits.md` §23 records that plainly rather than leaving an
 /// O(1) claim standing over an amortised bound. D-0040.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 pub const APPEND_HEADROOM_FACTOR: usize = 2;
 
 /// How many entries a loaded index reserves room for, given the committed entry
@@ -2242,6 +2252,11 @@ impl HeaderRead {
 /// first `n_valid` appends after a load cannot reallocate it either. At the
 /// measured 248,000-entry scale that is about 48 MB beside the index's 159 MB;
 /// at [`MAX_ENTRIES`] it is 201 MB beside 637 MB.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Manifest {
     header: ManifestHeader,
@@ -2556,6 +2571,11 @@ impl Manifest {
     ///
     /// This is the table's capacity, not its length: it is always at least
     /// [`Manifest::keys`] and normally larger.
+    ///
+    /// **UNVERIFIED as a measurement.** The bound is argued from the
+    /// shape of the code and no bench in this workspace times it.
+    /// `CLAUDE.md` §3 rule 6: a structural argument is not a
+    /// measurement, however sound it is.
     #[must_use]
     pub fn reserved(&self) -> usize {
         self.index.capacity()
@@ -2642,6 +2662,11 @@ impl Manifest {
     /// sorted. Walking every entry is inherent to the question — you cannot
     /// verify a store you do not look at — and `CLAUDE.md` §3 rule 4 bounds the
     /// PER-OPERATION cost, which here is one `Vec` step.
+    ///
+    /// **UNVERIFIED as a measurement.** The bound is argued from the
+    /// shape of the code and no bench in this workspace times it.
+    /// `CLAUDE.md` §3 rule 6: a structural argument is not a
+    /// measurement, however sound it is.
     #[must_use]
     pub fn all(&self) -> impl ExactSizeIterator<Item = Entry> + '_ {
         self.log.iter().map(|held| held.entry)
@@ -2704,6 +2729,11 @@ impl Manifest {
     ///
     /// Allocates two collections bounded by the key count, both reserved up
     /// front, and nothing per step beyond that.
+    ///
+    /// **UNVERIFIED as a measurement.** The bound is argued from the
+    /// shape of the code and no bench in this workspace times it.
+    /// `CLAUDE.md` §3 rule 6: a structural argument is not a
+    /// measurement, however sound it is.
     #[must_use]
     pub fn newest(&self) -> Vec<Entry> {
         let mut seen: HashSet<EntryKey> = HashSet::with_capacity(self.index.len());
@@ -2748,6 +2778,11 @@ impl Manifest {
     /// one `HashMap::get` on the same key type and differ only in which field
     /// of the `Copy` value they hand back, so a cost that had started to grow
     /// with the census would show on either one.
+    ///
+    /// **UNVERIFIED as a measurement.** The bound is argued from the
+    /// shape of the code and no bench in this workspace times it.
+    /// `CLAUDE.md` §3 rule 6: a structural argument is not a
+    /// measurement, however sound it is.
     #[must_use]
     pub fn closes(&self, key: &EntryKey) -> Option<Closes> {
         self.index.get(key).map(|held| held.closes)
@@ -2783,6 +2818,11 @@ impl Manifest {
     /// The order is a `HashMap`'s and therefore **not stable between runs**. A
     /// caller that renders these must sort them, or it will address a different
     /// row on every reload — see `api::census::held_series`.
+    ///
+    /// **UNVERIFIED as a measurement.** The bound is argued from the
+    /// shape of the code and no bench in this workspace times it.
+    /// `CLAUDE.md` §3 rule 6: a structural argument is not a
+    /// measurement, however sound it is.
     pub fn held_keys(&self) -> impl Iterator<Item = &EntryKey> {
         self.index.keys()
     }
@@ -2841,6 +2881,11 @@ impl Manifest {
     /// is already recorded for its key, [`ManifestError::RowTotalOverflow`], or
     /// whatever [`ManifestHeader::advance`] and [`ManifestHeader::commit`]
     /// refuse.
+    ///
+    /// **UNVERIFIED as a measurement.** The bound is argued from the
+    /// shape of the code and no bench in this workspace times it.
+    /// `CLAUDE.md` §3 rule 6: a structural argument is not a
+    /// measurement, however sound it is.
     pub fn record(&mut self, entry: Entry) -> Result<Append, ManifestError> {
         self.record_held(Held::unknown(entry))
     }

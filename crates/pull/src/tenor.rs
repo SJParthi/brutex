@@ -65,6 +65,11 @@
 //! constant no input can raise — and a fixed number of integer operations. The
 //! only float in the module is produced by [`Tenor::years`], once, at the
 //! boundary where the model demands one.
+//!
+//! **UNVERIFIED as a measurement.** The bound is argued from the
+//! shape of the code and no bench in this workspace times it.
+//! `CLAUDE.md` §3 rule 6: a structural argument is not a
+//! measurement, however sound it is.
 
 use brutex_core::instrument::Expiry;
 
@@ -221,6 +226,11 @@ impl Tenor {
     /// # Cost
     ///
     /// O(1) — see the module header for the exact bound.
+    ///
+    /// **UNVERIFIED as a measurement.** The bound is argued from the
+    /// shape of the code and no bench in this workspace times it.
+    /// `CLAUDE.md` §3 rule 6: a structural argument is not a
+    /// measurement, however sound it is.
     pub fn between(ts_micros: i64, expiry: Expiry) -> Result<Self, TenorError> {
         let at = IstMoment::from_epoch_secs(ts_micros.div_euclid(1_000_000))
             .map_err(|_| TenorError::StampOffCalendar { ts_micros })?;

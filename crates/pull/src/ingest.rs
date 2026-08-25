@@ -119,6 +119,11 @@
 //! A run that changed nothing installs nothing, so a re-run leaves the census
 //! byte for byte as it was. `CLAUDE.md` §3 rule 5 covers the counter as well as
 //! the bars.
+//!
+//! **UNVERIFIED as a measurement.** The bound is argued from the
+//! shape of the code and no bench in this workspace times it.
+//! `CLAUDE.md` §3 rule 6: a structural argument is not a
+//! measurement, however sound it is.
 
 use std::fs;
 use std::io::{ErrorKind, Write as _};
@@ -661,6 +666,11 @@ fn note_derived_shortfall(member: &Member, short: &Failure) {
 ///
 /// Two integers compared. O(1) per member, and it opens nothing: both counts
 /// were established while the member was being written.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 fn derived_shortfall(member: &Member, landed: &Landed) -> Option<Failure> {
     if landed.derived == landed.derived_expected {
         return None;
@@ -1007,6 +1017,11 @@ pub fn from_window(
 ///
 /// Per call: Θ(entries) for the read, plus O(offered) to fold them in. Per
 /// ENTRY offered it is now amortised, which is the property that was missing.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 fn record_all(store_root: &Path, vendor: Vendor, held: &[Held]) -> Option<String> {
     let census_path = crate::manifest::manifest_path(store_root, vendor);
     let lock = match CensusLock::take(&census_path) {
@@ -1090,6 +1105,11 @@ pub fn record_held(store_root: &Path, vendor: Vendor, held: &[Held]) -> Option<S
 /// # Cost
 ///
 /// Two opens and two appends per call, both O(1). Nothing scans.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 #[must_use]
 pub fn from_rows(
     bars: &[store::format::Bar],
@@ -2082,6 +2102,11 @@ fn write_and_count(
 /// # Cost
 ///
 /// One open and one append. O(1) per call.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 fn write_overlay(
     rows: &[store::format::Overlay],
     store_root: &Path,
@@ -2164,6 +2189,11 @@ pub struct GreekTarget<'a> {
 ///
 /// One `fnv1a` over the symbol, one open and one append. **O(1) per call**,
 /// O(rows) in the bytes written and nothing else.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 pub fn write_greeks(rows: &[store::format::Greek], into: GreekTarget<'_>) -> Result<(), String> {
     if rows.is_empty() {
         return Ok(());

@@ -40,6 +40,11 @@
 //! instrument-month, a contract path, or one of five named refusals. **Nothing
 //! is dropped silently** — a store with a malformed directory reports how many
 //! and why, which is what `CLAUDE.md` §4 asks of a degradation.
+//!
+//! **UNVERIFIED as a measurement.** The bound is argued from the
+//! shape of the code and no bench in this workspace times it.
+//! `CLAUDE.md` §3 rule 6: a structural argument is not a
+//! measurement, however sound it is.
 
 use crate::path::{FileKind, PathError, Timeframe, YearMonth};
 use brutex_core::vendor::Vendor;

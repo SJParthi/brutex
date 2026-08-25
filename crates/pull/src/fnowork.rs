@@ -393,6 +393,11 @@ impl Owed {
 ///
 /// **O(cells)**: one probe and a fixed number of integer comparisons each.
 /// Never O(store). Nothing here opens a file or lists a directory.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 #[must_use]
 pub fn owed<F>(cells: &[ContractCell], window: (Day, Day), held: F) -> Owed
 where
@@ -490,6 +495,11 @@ fn day_of(ts_micros: i64) -> Option<Day> {
 ///
 /// O(cells), one call to `held` each. Nothing here allocates beyond the missing
 /// cells it returns.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 #[must_use]
 pub fn gaps_by<F: Fn(&EntryKey) -> bool>(discovered: &[ContractCell], held: F) -> Work {
     let mut work = Work {

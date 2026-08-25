@@ -1295,6 +1295,7 @@ mod tests {
                 refused: 0,
                 mean_paisa: 1.0,
                 t: 0.4,
+                ..crate::outcome::Edge::default()
             },
         };
         let ranked = crate::rank::Ranked {
@@ -1361,6 +1362,7 @@ mod tests {
                 mean_paisa: 50.0,
                 // Enormous, and it must STILL not be called a finding.
                 t: 40.0,
+                ..crate::outcome::Edge::default()
             },
         };
         let ranked = crate::rank::Ranked {

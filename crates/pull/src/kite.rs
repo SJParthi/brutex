@@ -10,6 +10,11 @@
 //!
 //! <https://kite.trade/docs/connect/v3/exceptions/>, read 19 Aug 2026, plus
 //! one name that page does not carry — see [`KiteException::Permission`].
+//!
+//! **UNVERIFIED as a measurement.** The bound is argued from the
+//! shape of the code and no bench in this workspace times it.
+//! `CLAUDE.md` §3 rule 6: a structural argument is not a
+//! measurement, however sound it is.
 
 use crate::refusal::{Disposition, ErrorNames};
 use core::fmt;

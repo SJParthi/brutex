@@ -166,6 +166,11 @@ const _: () = assert!(CREDENTIAL_TIMEOUT_SECS < crate::http::REQUEST_TIMEOUT_SEC
 ///
 /// One build per process; one `Arc` clone per call thereafter. O(1) either way,
 /// and the constant drops from a TLS handshake to a pointer copy.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 fn pooled_client() -> Result<reqwest::Client, String> {
     static POOL: std::sync::OnceLock<Result<reqwest::Client, String>> = std::sync::OnceLock::new();
     POOL.get_or_init(|| {
