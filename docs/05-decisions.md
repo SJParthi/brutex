@@ -22074,3 +22074,64 @@ passed with the defect deliberately restored. The inversion needs a trail that
 can outrun a stop, which the plain quantile ladders never produce. It now runs
 the shape `crates/cli` actually passes — a step, a forced operator stop, real
 stop rungs and `ratios: true` — and fails at exactly -6,040 without the fix.
+
+### D-0293 — one field carried two conventions, and a bucket entered the next morning
+
+**Decision.** Two fixes to the execution path, and the operator's rule — *whatever
+timeframe generates the signal, entry fills on the next ONE-MINUTE bar* — is met
+on every rung for the first time.
+
+1. `indicators::column::Sourced` records what `Column::sources` indexes.
+   `Column::build` produces `Signal`; `Column::reproject` produces `Fill`.
+   `runner::trade::walk` reads it and adds one only to a signal bar.
+2. `runner::align::onto_execution` refuses a bucket whose close falls into the
+   NEXT trading day, counting it in `Alignment::unreachable`.
+
+**Why 1.** `align::onto_execution` returns the first execution bar stamped at or
+after the signal's close — the earliest bar a position can be OPENED on, which is
+the fill bar — and `reproject` stores that in `source`. But `source` also means
+*"the bar whose close carried the mask"* when `build` fills it, and nothing
+recorded which convention a given column was under. `walk` read every column
+under the first and added `+1` to a value that was already the fill.
+
+**MEASURED on 60 synthetic sessions: 100.00% of projected rows on all SEVEN
+aligned rungs entered exactly one execution bar late**, and with 4.8% of bars
+missing the lateness ran to 1,071 minutes — an overnight crossing. Only the
+1-minute rung was right, and only because it skips alignment entirely, so the
+eight rungs `range-all` compares were never measured under one execution rule.
+(Seven of eight, not the eight of nine an earlier audit reported: `EVERY_RUNG` is
+`[&str; 8]` and the "nine rungs" in the surrounding comments is stale prose.)
+
+**Why 2, and rule 1b could not have caught it.** A coarse bucket's close instant
+is past the last one-minute bar of its own day — 15:30 for a 15-minute bar
+stamped 15:15 — so the cursor ran off the session and stopped on the next
+session's 09:15. `walk` entered at 09:16 on a signal that closed the previous
+afternoon. Rule 1b compares `bars[signal]` with `bars[entry]`, and on a projected
+column `signal` is ALREADY an execution index, so it compares two adjacent
+one-minute bars of that next morning and passes. The guard is structurally unable
+to see the step it was written for.
+
+**MEASURED on `synthetic::sessions(40)`:** 31 of 384 trades (8.07%) at the
+15-minute rung entered **17.77 hours** after their signal closed; 11 of 79
+(13.92%) at 60-minute. Across 42 masks the crossing share ran 3.0%–8.4% at H=15
+and 13.3%–25.6% at H=60, rising with the rung.
+
+**The symmetry that settles it.** At 15-minute, H=15, the 15:00 bucket is 32
+swept and **0 eligible** — its entry lands six minutes past the square-off —
+while the 15:15 bucket is 31 swept and **31 eligible**. The engine refused a
+signal six minutes stale and accepted one seventeen and three-quarter hours
+stale, in the same loop, on the same rung.
+
+**A doc that was true when written and false after.** `align`'s module header
+said *"No bar is skipped for being in a different session, and none is required
+to be … duplicating [trade's rule] here would be a second spelling of one
+policy."* The reasoning was sound and the premise is false, and it is corrected
+rather than left as the next stale claim.
+
+**Both tests were proven to fail first**, and one of them had to be corrected
+before it could:
+`a_reprojected_column_enters_on_the_bar_it_was_told_to` first compared EVERY
+trade of the two walks and failed at two bars apart. That is rule 4 working —
+entering a bar earlier exits earlier and frees the next signal sooner, so the
+sequences legitimately diverge. It asserts the first trade, and that on a
+fill-sourced column the entry EQUALS the source.

@@ -309,7 +309,30 @@ pub fn walk(
         // The macro-free way of writing that is one `late` closure, but the
         // counter is on `out` and a closure would borrow it, so it is spelled
         // out at each site.
-        let Some(entry) = signal.checked_add(1) else {
+        //
+        // AND `step` IS 1 ONLY WHEN THE SOURCE IS A SIGNAL BAR.
+        //
+        // This added one unconditionally. On a REPROJECTED column that is wrong:
+        // `align::onto_execution` already returns the first execution bar
+        // stamped at or after the signal's close -- the earliest bar a position
+        // can be opened on, which is the fill bar -- and `Column::reproject`
+        // stores THAT in `sources`. Adding one to it skips a bar.
+        //
+        // MEASURED on 60 synthetic sessions: 100.00% of projected rows on all
+        // SEVEN aligned rungs entered exactly one execution bar late, and with
+        // 4.8% of bars missing the lateness ran out to 1,071 minutes -- an
+        // overnight crossing. The 1-minute rung was correct only because it
+        // skips alignment entirely, so the eight rungs `range-all` compares were
+        // never measured under one execution rule.
+        //
+        // `Column::sourced` is what makes the two conventions distinguishable;
+        // before it, one field carried both meanings and this line could not
+        // tell which one it had.
+        let step = match column.sourced() {
+            indicators::column::Sourced::Signal => 1,
+            indicators::column::Sourced::Fill => 0,
+        };
+        let Some(entry) = signal.checked_add(step) else {
             if blocked {
                 out.while_open = out.while_open.saturating_add(1);
             } else {
@@ -790,6 +813,93 @@ mod tests {
         let bars = crate::synthetic::sessions(8);
         let column = Column::build(&bars, &mut evaluator());
         (bars, column)
+    }
+
+    /// A REPROJECTED COLUMN ENTERS ON THE FILL BAR, NOT ONE AFTER IT.
+    ///
+    /// # The operator's rule, and where it was broken
+    ///
+    /// Whatever timeframe generates the signal, entry fills on the next ONE-MINUTE
+    /// bar. `align::onto_execution` returns exactly that bar — the first execution
+    /// bar stamped at or after the signal's close — and `Column::reproject` stores
+    /// it in `sources`. `walk` then added `+1` to it, because one field carried
+    /// two conventions and nothing recorded which.
+    ///
+    /// MEASURED before [`indicators::column::Sourced`] existed: 100.00% of
+    /// projected rows on all seven aligned rungs entered one execution bar late.
+    /// Only the 1-minute rung was right, and only because it skips alignment —
+    /// so the eight rungs `range-all` compares were never measured under one
+    /// execution rule.
+    ///
+    /// This asserts the two conventions produce entries exactly one bar apart on
+    /// the SAME sources, which is the whole of the defect and cannot be satisfied
+    /// by an off-by-one in either direction.
+    #[test]
+    fn a_reprojected_column_enters_on_the_bar_it_was_told_to() {
+        let (bars, signal_column) = swept();
+        // Reproject onto ITSELF: `onto[j] = source[j]`, so the fill bar and the
+        // signal bar are the same index and the ONLY difference between the two
+        // walks is the convention. A fixture that also moved the indices could
+        // not tell a convention error from an alignment one.
+        let onto: Vec<Option<usize>> = signal_column.sources().iter().map(|&s| Some(s)).collect();
+        let (fill_column, dropped) = signal_column
+            .reproject(&onto, bars.len())
+            .expect("the identity projection is the same length");
+        assert_eq!(
+            dropped, 0,
+            "nothing is unreachable in an identity projection"
+        );
+        assert_eq!(
+            fill_column.sourced(),
+            indicators::column::Sourced::Fill,
+            "reprojection records that its sources are fill bars"
+        );
+        assert_eq!(
+            signal_column.sourced(),
+            indicators::column::Sourced::Signal,
+            "and a built column records that its sources are signal bars"
+        );
+        assert_eq!(
+            fill_column.sources(),
+            signal_column.sources(),
+            "the identity projection moved no index, so any difference below is \
+             the convention and nothing else"
+        );
+
+        let mask = ConditionMask::default();
+        let from_signal = walk(&bars, &signal_column, &mask, h(15), Direction::Long);
+        let from_fill = walk(&bars, &fill_column, &mask, h(15), Direction::Long);
+
+        // THE FIRST TRADE, AND ONLY THE FIRST.
+        //
+        // The two sequences DIVERGE after it, and that is rule 4 working rather
+        // than a defect: entering a bar earlier exits a bar earlier, which frees
+        // the next eligible signal sooner, so the second trade is a different
+        // signal in the two walks. Measured on this fixture the second pair is
+        // already two bars apart. Comparing them all would assert that
+        // exclusivity does NOT depend on the entry bar, which is the opposite of
+        // what `grid` relies on.
+        let fill = from_fill.trades.first().expect("the fixture must trade");
+        let signal = from_signal
+            .trades
+            .first()
+            .expect("and so must the signal-sourced walk");
+        assert_eq!(
+            fill.signal_bar, signal.signal_bar,
+            "the same signal, or the two walks are not comparable at all"
+        );
+        assert_eq!(
+            fill.entry_bar.saturating_add(1),
+            signal.entry_bar,
+            "a fill-sourced column must enter ONE BAR EARLIER than a \
+             signal-sourced one on the same index — that bar is the operator's \
+             next-1-minute fill, and adding one skips it"
+        );
+        assert_eq!(
+            fill.entry_bar, fill.signal_bar,
+            "and on a fill-sourced column the entry IS the source: nothing is \
+             added to a bar that is already the fill"
+        );
     }
 
     #[test]

@@ -210,8 +210,47 @@ pub struct Column {
     ///
     /// Eight bytes per swept bar, which is the honest cost of that map.
     source: Vec<usize>,
+    sourced: Sourced,
     census: Census,
     first_swept: Option<usize>,
+}
+
+/// What [`Column::sources`] indexes — and it is TWO different things.
+///
+/// # The one field that carried two meanings
+///
+/// [`Column::build`] fills `source` with the bar whose CLOSE carried the mask, so
+/// a position opens on the bar AFTER it. [`Column::reproject`] overwrites the
+/// same field with the execution bar a position can actually be OPENED on —
+/// `align::onto_execution` returns the first execution bar stamped at or after
+/// the signal's close, which is already the fill bar.
+///
+/// Nothing recorded which convention a given `Column` was under, and
+/// `runner::trade::walk` read every column under the first: it added `+1` to a
+/// value that was already the fill bar. MEASURED on 60 synthetic sessions:
+/// **100.00% of projected rows on all seven aligned rungs entered exactly one
+/// execution bar late**, and on a series with 4.8% of bars missing the lateness
+/// ran out to 1,071 minutes — an overnight crossing. Only the 1-minute rung was
+/// right, and only because it skips alignment entirely.
+///
+/// The operator's rule is that a signal on any timeframe fills on the next
+/// ONE-MINUTE bar. On seven of the eight rungs it filled on the one after that,
+/// and the exit, the crossing anchor, the excursion window and every one of the
+/// exit grid's cells rode on the shifted bar.
+///
+/// So the meaning is a TYPE now. A caller that reads `sources()` without asking
+/// which convention it is under no longer compiles into a plausible answer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Sourced {
+    /// The bar whose CLOSE carried the mask. A position opens on the NEXT bar.
+    ///
+    /// The default, because it is what [`Column::build`] produces and a column
+    /// that has not been reprojected is under it.
+    #[default]
+    Signal,
+    /// The bar a position can be OPENED on. It IS the fill bar; adding one
+    /// skips a bar the operator's rule says to trade.
+    Fill,
 }
 
 impl Column {
@@ -273,6 +312,10 @@ impl Column {
         Self {
             bits,
             source,
+            // THE BAR WHOSE CLOSE CARRIED THE MASK. A position opens on the
+            // next one -- see `Sourced` for what happens when a reader
+            // assumes that of a REPROJECTED column.
+            sourced: Sourced::Signal,
             census,
             first_swept,
         }
@@ -289,6 +332,18 @@ impl Column {
     #[must_use]
     pub fn sources(&self) -> &[usize] {
         &self.source
+    }
+
+    /// Which convention [`Self::sources`] is under.
+    ///
+    /// A caller that pairs a source index with what happened AFTER it -- a
+    /// forward return, an entry, a trade -- MUST read this. `Sourced::Signal`
+    /// means the position opens on the next bar; `Sourced::Fill` means the index
+    /// IS the bar to open on, and adding one skips a bar the operator's rule
+    /// says to trade.
+    #[must_use]
+    pub const fn sourced(&self) -> Sourced {
+        self.sourced
     }
 
     /// Blank every row whose source bar is before `from`, keeping the shape.
@@ -410,6 +465,12 @@ impl Column {
             Self {
                 bits,
                 source,
+                // `onto` HOLDS FILL BARS, not signal bars: `align::onto_execution`
+                // returns the first execution bar stamped at or after the
+                // signal's close, which is the earliest bar a position can be
+                // opened on. Recording that is what stops `trade::walk` adding
+                // a second `+1` to a bar that already is the fill.
+                sourced: Sourced::Fill,
                 census,
                 first_swept,
             },
