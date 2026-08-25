@@ -15369,31 +15369,91 @@ mod tests {
         assert!(note.contains("bad=nope"), "{note}");
     }
 
+    /// A repeated subsystem is kept, spends budget, and the LAST clause wins.
+    ///
+    /// # What this replaced, and why it is a `CLAUDE.md` §4 breach on its own
+    ///
+    /// This was `zz_probe_duplicate_banner`: the same three scenarios, with six
+    /// `println!`s where the assertions are now and **not one assertion in the
+    /// body**. §4's table bans "a test that asserts nothing", and nothing in
+    /// `ci.yml` enforces that row — gate 18 is `--in-diff`, so it never revisits
+    /// a line it did not see change.
+    ///
+    /// It was worse than inert. It CALLED `log_level_from` three times and
+    /// `Sink::open` once, so every region it touched scored as covered while no
+    /// result was checked. Coverage bought by an assertion-free test is
+    /// indistinguishable from real coverage at the 93/94 floor, which is exactly
+    /// the failure wearing a success's clothes §4 exists to refuse.
+    ///
+    /// The three scenarios were worth keeping, so they are asserted rather than
+    /// deleted. Each expected value below is the value the probe actually
+    /// printed, read off a run rather than assumed.
+    ///
+    /// # The behaviour, stated
+    ///
+    /// Duplicates are NOT collapsed at parse time: `pull=debug,pull=trace`
+    /// yields two entries and spends two of the eight. The ceiling therefore
+    /// drops by ARRIVAL ORDER and not by name — eight `pull=debug` clauses
+    /// exhaust the budget and `api=trace`, a subsystem never named before, is
+    /// refused. Resolution is last-wins, so three clauses for one subsystem
+    /// resolve to the third.
     #[test]
-    fn zz_probe_duplicate_banner() {
+    fn a_repeated_subsystem_spends_budget_and_the_last_clause_wins() {
+        // A · TWO CLAUSES FOR ONE SUBSYSTEM ARE TWO ENTRIES, NOT ONE.
         let (config, note) = log_level_from(Some("pull=debug,pull=trace"));
-        println!("A targets={:?}", config.target_levels);
-        println!("A note={note}");
+        assert_eq!(
+            config.target_levels,
+            vec![
+                ("pull".to_owned(), telemetry::Level::Debug),
+                ("pull".to_owned(), telemetry::Level::Trace),
+            ],
+            "a repeat is retained in arrival order, not collapsed"
+        );
+        assert!(
+            note.contains("pull=debug pull=trace"),
+            "the note lists both clauses so the operator can see the repeat: {note}"
+        );
 
+        // B · SO A REPEAT CAN EXHAUST THE BUDGET AND STARVE A NEW SUBSYSTEM.
         let max = telemetry::MAX_TARGET_LEVELS;
         let mut clauses: Vec<String> = (0..max).map(|_| "pull=debug".to_owned()).collect();
         clauses.push("api=trace".to_owned());
         let (config, note) = log_level_from(Some(&clauses.join(",")));
-        println!(
-            "B len={} targets={:?}",
+        assert_eq!(
             config.target_levels.len(),
+            max,
+            "the ceiling is the ceiling"
+        );
+        assert!(
+            config
+                .target_levels
+                .iter()
+                .all(|(t, l)| t == "pull" && *l == telemetry::Level::Debug),
+            "all {max} slots went to one repeated subsystem: {:?}",
             config.target_levels
         );
-        println!("B note={note}");
+        assert!(
+            note.contains("DROPPED") && note.contains("api=trace"),
+            "the starved subsystem is NAMED, not silently absent -- §4 asks for \
+             the reason, and 'api=trace' is the reason: {note}"
+        );
 
+        // C · AND THE LIVE SINK RESOLVES A REPEAT TO ITS LAST CLAUSE.
         let (config, note) = log_level_from(Some("info,pull=debug,pull=trace,pull=warn"));
+        assert!(
+            note.contains("pull=debug pull=trace pull=warn"),
+            "all three are reported, so last-wins is visible rather than implied: {note}"
+        );
         let sink = telemetry::Sink::open(&telemetry::Config {
             dir: crate::scratch::path("zz-probe-dup"),
             ..config
         })
         .expect("opens");
-        println!("C live pull={:?}", sink.level_for("pull"));
-        println!("C note={note}");
+        assert_eq!(
+            sink.level_for("pull"),
+            telemetry::Level::Warn,
+            "the THIRD clause is in force, not the first and not the strictest"
+        );
     }
 
     /// The two arms that do not depend on the filesystem at all.
