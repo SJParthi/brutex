@@ -452,8 +452,13 @@ fn screen_arm(
                     // without them having asked.
                     lens: runner::rank::Lens::Detectability,
                     // `screen` is a single answer, not a walk, so it pays for
-                    // the full stack once.
-                    validate: true,
+                    // the full stack once -- BY DEFAULT. It hardcoded `true`,
+                    // and MEASURED that meant it returned nothing at all: on
+                    // NIFTY 60min over twelve months the sweep takes 14 seconds
+                    // and this command printed zero bytes after fifty minutes,
+                    // twice. `validate_from_env` lets an operator take the
+                    // candidates now, marked `UNVALIDATED` on their face.
+                    validate: validate_from_env(),
                 },
             );
             let refused = text.starts_with("refused: ");
@@ -4979,6 +4984,59 @@ fn screen_cap() -> usize {
         .unwrap_or(DEFAULT)
 }
 
+/// Whether an operator-facing command pays for the full validation stack.
+///
+/// # The default is ON, and it stays on
+///
+/// A search result nobody validated is a candidate, not a finding, and §4 refuses
+/// a fallback that hides a failure. So this defaults to `true` and an operator
+/// has to ask for less, in writing, with the answer carrying [`UNVALIDATED`] on
+/// its face.
+///
+/// # Why asking for less had to become possible
+///
+/// `cli screen` hardcoded `true` under the reasoning that it *"is a single
+/// answer, not a walk, so it pays for the full stack once"*. Sound, and MEASURED
+/// false: on NIFTY 60min over twelve months the SWEEP takes **14 seconds** and
+/// `screen` returned **nothing at all after fifty minutes**, twice, because the
+/// stack — 960 generated tiers plus walk-forward, PBO and the bootstrap — runs
+/// BEFORE anything is printed. A command that cannot finish gives the operator
+/// no answer at all, which is strictly worse than an answer marked provisional.
+///
+/// `elite` already draws this line: every step of its descent runs with
+/// `validate: false` and only the rung that lands is re-run with the stack. This
+/// gives the same choice to the command an operator reaches for first.
+fn validate_from_env() -> bool {
+    validates(std::env::var("BRUTEX_VALIDATE").ok().as_deref())
+}
+
+/// The rule itself, over the raw value, so it can be tested without touching the
+/// environment.
+///
+/// `crates/cli` is `#![forbid(unsafe_code)]` and `std::env::set_var` is unsafe,
+/// so a test cannot set the variable to check the reader. Splitting the DECISION
+/// from the LOOKUP is what makes the rule provable at all — and the reader above
+/// is then one line with nothing left to get wrong.
+///
+/// Only a literal `0` turns validation off. A malformed or unexpected value
+/// leaves it ON: a typo must never silently buy a weaker answer, which is the
+/// same argument §4 makes against a fallback that hides a failure.
+fn validates(raw: Option<&str>) -> bool {
+    // NOT a `const fn`: matching a `&str` in one needs `PartialEq` as a const
+    // trait, which is not stable. `trim` is the honest rule anyway -- an
+    // operator who exports the variable with a trailing space meant `0`.
+    raw.is_none_or(|value| value.trim() != "0")
+}
+
+/// What a report says when the validation stack did not run.
+///
+/// Shouted, and on its own line, for the reason `CLAUDE.md` §5 gives for the two
+/// provenance banners: a screen over unvalidated candidates is byte-identical in
+/// shape to one over validated findings, so the banner is the only thing
+/// separating them.
+const UNVALIDATED: &str = "!! NOT VALIDATED -- walk-forward, PBO and the bootstrap did NOT run.\n\
+   These are CANDIDATES, not findings. Unset BRUTEX_VALIDATE to price them in full.";
+
 /// One screened combination, priced in full and judged.
 struct Screened<'a> {
     /// The combination this row measured, kept so the chosen variant can be
@@ -5328,6 +5386,16 @@ fn screen_cascade(
                  tier ladder is not walked on a search step; it is priced once, \
                  on the page that is kept."
             );
+            // AND THE BANNER HERE TOO, BECAUSE "the page that is kept" IS A
+            // PROMISE ONLY A DESCENT KEEPS.
+            //
+            // Inside `elite` that sentence is true: the rung that lands is
+            // re-run with the full stack and THAT page is the one an operator
+            // reads. Reached from `screen` with `BRUTEX_VALIDATE=0` there is no
+            // later page at all, so the line alone reads as "a better answer is
+            // coming" when none is. The banner says what did not run, which is
+            // true either way.
+            let _ = writeln!(out, "{UNVALIDATED}");
             return out;
         }
         let _ = writeln!(
@@ -5341,6 +5409,21 @@ fn screen_cascade(
             "{YOUR_RULES_MET} — the rows below cleared the policy you stated, not \
              a relaxed one."
         );
+        // AND THE BANNER, ON THE ONE PAGE THAT MOST NEEDS IT.
+        //
+        // The unmet branch above already says the ladder was not walked, so a
+        // reader of THAT page knows it is partial. This branch had no marker at
+        // all — rows that cleared the operator's rules, returned without the
+        // walk-forward, the PBO or the bootstrap, and shaped exactly like rows
+        // that had passed all three.
+        //
+        // That is the failure wearing a success's clothes §4 bans, and it is the
+        // shape `CLAUDE.md` §5 already refuses for the two provenance banners:
+        // the page is byte-identical either way, so the banner is the only thing
+        // separating a candidate from a finding.
+        if !validate {
+            let _ = writeln!(out, "{UNVALIDATED}");
+        }
         out.push_str(&yours);
         return out;
     }
@@ -8295,10 +8378,11 @@ fn decay_block(
 )]
 mod tests {
     use super::{
-        COMMANDS, MIN_AUDIT_SESSIONS, MISUSED, OK, PROVENANCE, STORED_PROVENANCE, USAGE, Vendor,
-        audit_run, audit_run_within, audit_stored, auto, auto_with, direction_of, evaluator_from,
-        log_dir_from, nothing_to_trade, parse_min_hits, parse_sessions, parse_vendor, root_from,
-        run, sample_warning, side_of_evidence, sweep, sweep_stored, sweep_with,
+        COMMANDS, MIN_AUDIT_SESSIONS, MISUSED, OK, PROVENANCE, STORED_PROVENANCE, UNVALIDATED,
+        USAGE, Vendor, audit_run, audit_run_within, audit_stored, auto, auto_with, direction_of,
+        evaluator_from, log_dir_from, nothing_to_trade, parse_min_hits, parse_sessions,
+        parse_vendor, root_from, run, sample_warning, side_of_evidence, sweep, sweep_stored,
+        sweep_with, validates,
     };
     use super::{
         Consistency, Horizon, consistency_of, evaluator, grid, grid_step_ppm, ladder_for,
@@ -9147,6 +9231,63 @@ mod tests {
             !STORED_PROVENANCE.contains("not a backtest"),
             "the real banner must not carry the generated one's disclaimer"
         );
+    }
+
+    /// AN UNVALIDATED PAGE SAYS SO, AND THE SWITCH THAT MAKES ONE IS EXPLICIT.
+    ///
+    /// The same argument as the two provenance banners, one layer in. A screen
+    /// that skipped the walk-forward, the PBO and the bootstrap is byte-identical
+    /// in shape to one that ran all three, so the banner is the only thing
+    /// separating a CANDIDATE from a FINDING.
+    ///
+    /// The switch defaults ON and only a literal `0` turns it off: a typo must
+    /// not silently buy a weaker answer, which is why a malformed value is not
+    /// read as off.
+    #[test]
+    fn an_unvalidated_screen_cannot_be_mistaken_for_a_validated_one() {
+        assert!(
+            UNVALIDATED.contains("NOT VALIDATED"),
+            "the banner must say so in words a reader cannot skim past"
+        );
+        assert!(
+            UNVALIDATED.contains("CANDIDATES, not findings"),
+            "and it must say what the rows ARE, not only what did not run"
+        );
+        assert!(
+            UNVALIDATED.contains("BRUTEX_VALIDATE"),
+            "and name the switch that undoes it, or the reader is stuck"
+        );
+        for absent in ["REAL MARKET DATA", "GENERATED"] {
+            assert!(
+                !UNVALIDATED.contains(absent),
+                "the validation banner must not restate a PROVENANCE claim: it is \
+                 a different question about the same page"
+            );
+        }
+
+        // THE DEFAULT IS ON, AND ONLY `0` TURNS IT OFF.
+        //
+        // Asserted on `validates`, the same decision `validate_from_env` calls,
+        // rather than by re-deriving the rule here — so a change to one is a
+        // change to both. The lookup is not tested because it cannot be: this
+        // crate is `#![forbid(unsafe_code)]` and `std::env::set_var` is unsafe.
+        // Splitting the decision out is what made the rule provable at all.
+        for (raw, want, why) in [
+            (None, true, "absent means the full stack runs"),
+            (Some("0"), false, "a literal zero is the only way off"),
+            (Some(" 0 "), false, "and whitespace around it still counts"),
+            (Some("1"), true, "any other value leaves it on"),
+            (
+                Some("no"),
+                true,
+                "including one that LOOKS like an off switch",
+            ),
+            (Some("false"), true, "and one that reads like one"),
+            (Some(""), true, "and empty is not off"),
+            (Some("00"), true, "and a near-miss is not off either"),
+        ] {
+            assert_eq!(validates(raw), want, "{why}");
+        }
     }
 
     /// AND THE SEARCH ACTUALLY FINISHES, ON A COLUMN WITH BARS TO SWEEP.

@@ -22003,3 +22003,74 @@ after unattributable — and it is marked at the call site.
 
 Also untouched and separately owed: the double next-bar fill on the eight
 non-1-minute rungs, and the cross-session entry.
+
+### D-0292 — the repair broke a deferral, and the trail arm had the wrong basis
+
+**Decision.** Three changes to `grid.rs`, all measured against the commit that
+introduced or exposed each:
+
+1. `read_trip` orders the two ATTRIBUTIONS at the common entry before charging
+   the worse one to the worse entry.
+2. The trailing arm scales its give-back by `fills.anchor` — the entry open —
+   and bounds the fill by the exit bar, exactly as the level arm does.
+3. Two false MEASURED claims are removed from the `level_fill` and
+   `Cell::gapped` docs.
+
+**Why 1, and it is a regression D-0291 introduced.** `ended_by` deliberately
+leaves one corner unresolved — a trail whose distance exceeds the stop's fills
+BELOW the stop, and then the branch labelled pessimistic names the BETTER exit —
+and defers it in its own comment: *"`one_variant` orders the two realised figures
+after computing them, so `pessimistic` is the smaller by construction whichever
+branch produced it."*
+
+That deferral was sound while the two figures differed only by attribution. D-0291
+made the level arms charge the entry spread, so `ordered` was comparing `pess` at
+`entry_pess` against `opt` at `entry_opt` — and the spread MASKED the inversion.
+
+**MEASURED:** the swap fired **0 times in 17.9 million round trips**; 2.4% of
+53,915 cells reported a NEGATIVE `Cell::uncertainty`, worst -6,040 paisa; 2.6%
+understated `pessimistic` by 1,613,110 paisa in total. Against `e54edfc^`: zero
+negatives across 2.5 million cells. `uncertainty` is rendered as the `unknown`
+column and described as *"a MEASUREMENT ERROR, not an upside"* — a width cannot
+be less than nothing, and `depends_on_unknowable_ordering` is literally
+`uncertainty() != 0`, so those cells were counted as ambiguous while displaying
+an impossible number.
+
+**Why 2.** `excursion::BarMoves::of` computes the retreat as `ppm_of(retreat,
+entry)` — a fraction of the price `crossings` was handed, the entry bar's OPEN —
+and that ppm is what the rung is tested against. The arm filled at `ppm x PEAK`.
+Two bases for one distance, diverging by the fraction the peak had run.
+
+On the shipped fixture the 40,000 ppm rung fires at 40,000 ppm of the entry and
+would NOT fire at 38,095 ppm of the peak: the arm priced a fill for an order
+that, on its own basis, was never touched — at 100,800 against a printed low of
+101,000, two hundred paisa below anything that traded.
+
+**It was a TILT, not a haircut.** The same arithmetic under-books longs and
+over-books shorts by the same fraction. MEASURED on an exact mirror: the long
+books +800 where +1,000 is correct, the short +1,200. That biases the
+long-versus-short comparison `Grid::best` and `Grid::sharpest` rank on, in
+opposite directions.
+
+**Why 3, and §3 rule 6 is the whole reason.** `level_fill` claimed *"MEASURED:
+224 of 12,494, 1.8%"* and `Cell::gapped` repeated it. Instrumenting `level_fill`
+itself gives **55,050,412 calls on `synthetic::sessions(8)` with ZERO outside the
+bar** — the gap arm is structurally unreachable there, because consecutive bars
+open 3 paisa apart against a span of at least 120. The arm is correct, and was
+exercised on a hand-built gappy fixture where it fires on 245 of 252 level exits;
+what is missing is a SHIPPED test that can see it move, since the only one naming
+the field asserts `cell.gapped == 0`. The same doc carried *"140 of 12,130 trail
+fills above the printed high"*, also refuted: 0 of 12,636.
+
+**Two tests pinned the defect and are corrected, not deleted.**
+`a_trailing_fill_is_priced_off_the_pre_bar_peak_pessimistically` and
+`a_trail_fired_by_the_bar_that_raised_the_peak_opens_the_two_readings` asserted
+the peak basis. The first also passed `&[]` for `bars`, which now books a trip
+flat because the arm bounds its fill; it takes real bars.
+
+**The new test's FIRST fixture was vacuous, and that is worth recording.**
+`a_measurement_error_is_never_negative` was written over `Levels::derived(4)` and
+passed with the defect deliberately restored. The inversion needs a trail that
+can outrun a stop, which the plain quantile ladders never produce. It now runs
+the shape `crates/cli` actually passes — a step, a forced operator stop, real
+stop rungs and `ratios: true` — and fails at exactly -6,040 without the fix.

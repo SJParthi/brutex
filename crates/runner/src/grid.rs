@@ -235,8 +235,14 @@ pub struct Cell {
     ///
     /// `CLAUDE.md` §4 is why this is COUNTED rather than absorbed: a gap fill is
     /// not the price the ladder chose, and a cell whose money comes from gaps
-    /// has to say so rather than presenting it as the rung working. MEASURED at
-    /// 1.8% of level exits on `synthetic::sessions(8)`.
+    /// has to say so rather than presenting it as the rung working.
+    ///
+    /// **Zero on `synthetic::sessions(8)`, and this doc used to claim 1.8%.**
+    /// That figure was never measured; instrumenting [`level_fill`] over 55
+    /// million calls on that fixture fires the gap arm exactly zero times,
+    /// because consecutive bars open 3 paisa apart against a span of at least
+    /// 120. §3 rule 6. See [`level_fill`] for what the arm does on a fixture
+    /// that can reach it.
     pub gapped: u64,
     /// Mean adverse excursion of the trades that ENDED PROFITABLE, in basis
     /// points.
@@ -2107,51 +2113,66 @@ fn read_trip(
     // rung in `Crossings` is a ppm distance from the open, so that is the only
     // price a resting order can be reconstructed against; which fill the trip is
     // CHARGED to is the separate question these three readings exist to bracket.
+    //
+    // # The two ATTRIBUTIONS are ordered here, at the common entry
+    //
+    // `ended_by` deliberately does NOT resolve one corner — a trail whose
+    // distance exceeds the stop's plus the whole run so far fills BELOW the
+    // stop, and then the branch labelled pessimistic names the BETTER exit. Its
+    // comment defers that: *"`one_variant` orders the two realised figures after
+    // computing them, so `pessimistic` is the smaller by construction whichever
+    // branch produced it."*
+    //
+    // That deferral was sound while the two figures differed only by
+    // attribution. It stopped being sound the moment the level arms started
+    // charging the entry spread, because `ordered` compares `pess` at
+    // `entry_pess` against `opt` at `entry_opt` — and the spread MASKS the
+    // inversion it was there to catch. MEASURED after that change: the swap
+    // fired **0 times in 17.9 million round trips**, and 2.4% of cells reported
+    // a NEGATIVE `Cell::uncertainty`, which is documented as a measurement error
+    // and cannot be one. Against the parent commit: zero negatives in 2.5M
+    // cells. The regression was mine and this is where it is repaired.
+    //
+    // So the worse ATTRIBUTION is chosen first, both readings at the open, and
+    // only then is it charged to the worse entry. Still three `realised` calls
+    // and one branch — no loop, no allocation, §3 rule 4 untouched. On a time
+    // exit the two are identical and the else-branch keeps the old behaviour.
+    let at_open = EntryPrices {
+        charged: c.entry_opt,
+        anchor: c.entry_opt,
+    };
+    let a = realised(
+        bars, c.entry, pess_off, at_open, side, pess_by, pess_level, false,
+    );
+    let b = realised(
+        bars, c.entry, opt_off, at_open, side, opt_by, opt_level, false,
+    );
+    let (worse, best_fills, optimistic) = if b.paisa < a.paisa {
+        ((opt_off, opt_by, opt_level), b.paisa, a.paisa)
+    } else {
+        ((pess_off, pess_by, pess_level), a.paisa, b.paisa)
+    };
+    let (worse_off, worse_by, worse_level) = worse;
     Readings {
-        // The trailing `true`/`false` is the READING, and the three lines are
-        // the whole bracket: worst exit at worst entry, best at best, and worst
-        // exit at the BEST entry so the two causes stay separable.
+        // The worse attribution, now charged to the worse entry. `fill_cost` is
+        // then the entry spread of ONE attribution and `uncertainty` the
+        // attribution gap at ONE entry — both non-negative by construction
+        // rather than by hope.
         pess: realised(
             bars,
             c.entry,
-            pess_off,
+            worse_off,
             EntryPrices {
                 charged: c.entry_pess,
                 anchor: c.entry_opt,
             },
             side,
-            pess_by,
-            pess_level,
+            worse_by,
+            worse_level,
             true,
         ),
-        opt: realised(
-            bars,
-            c.entry,
-            opt_off,
-            EntryPrices {
-                charged: c.entry_opt,
-                anchor: c.entry_opt,
-            },
-            side,
-            opt_by,
-            opt_level,
-            false,
-        )
-        .paisa,
-        pess_best_fills: realised(
-            bars,
-            c.entry,
-            pess_off,
-            EntryPrices {
-                charged: c.entry_opt,
-                anchor: c.entry_opt,
-            },
-            side,
-            pess_by,
-            pess_level,
-            false,
-        )
-        .paisa,
+        opt: optimistic,
+        pess_best_fills: best_fills,
     }
 }
 
@@ -2638,34 +2659,68 @@ fn realised(
         // would price the exit against a high the position never saw, because
         // the peak only ever improves.
         //
-        // The distance is measured off the PEAK and not off entry, which is the
-        // whole difference between a trailing stop and a fixed one: give back
-        // `d` of what you made, rather than lose `d` of what you started with.
-        // THE DISTANCE COMES FROM THE ORDER, NOT FROM A LOOKUP. `Ended::Trail`
-        // carries both halves, because a cell can hold a TSL and a TTP at once
-        // and they trail by different distances -- pairing one order's anchor
-        // with the other's rung would price a fill nobody placed.
+        // The ANCHOR is the peak and the DISTANCE is a fraction of the entry
+        // open, which is the whole difference between a trailing stop and a
+        // fixed one: give back `d` of what you made, rather than lose `d` of
+        // what you started with. THE DISTANCE COMES FROM THE ORDER, NOT FROM A
+        // LOOKUP. `Ended::Trail` carries both halves, because a cell can hold a
+        // TSL and a TTP at once and they trail by different distances -- pairing
+        // one order's anchor with the other's rung would price a fill nobody
+        // placed.
+        //
+        // # TWO BASES FOR ONE DISTANCE, AND THIS ARM HAD THE WRONG ONE
+        //
+        // `excursion::BarMoves::of` computes the retreat as `ppm_of(retreat,
+        // entry)` -- a fraction of the price `crossings` was handed, which is
+        // the entry bar's OPEN. That ppm is what the rung is tested against, so
+        // the order fires when the give-back reaches `ppm x ENTRY`. This arm
+        // then filled it at `ppm x PEAK`, and the two diverge by exactly the
+        // fraction the peak ran from entry.
+        //
+        // On the shipped fixture the rung is 40,000 ppm: the bar's 4,000-paisa
+        // retreat is 40,000 ppm of the entry (100,000) and FIRES, and 38,095 ppm
+        // of the peak (105,000) and would not. The arm priced a fill for an
+        // order that, on its own basis, was never touched -- and the fill landed
+        // at 100,800 against a printed low of 101,000, 200 paisa below anything
+        // that traded.
+        //
+        // # It was a TILT, not a haircut
+        //
+        // The same arithmetic under-books longs and over-books shorts by the
+        // same fraction, because `paisa_of(ppm, peak) > paisa_of(ppm, entry)`
+        // when the peak has run. MEASURED on an exact mirror: the long books
+        // +800 where +1,000 is correct and the short books +1,200. That biases
+        // the long-versus-short comparison `Grid::best` and `Grid::sharpest`
+        // rank on, in opposite directions, so it cannot be waved through as
+        // conservative.
+        //
+        // `fills.anchor` is the entry open, and its own doc already says it is
+        // *"the only price a level can be reconstructed against"*. This arm was
+        // the one place in the match that never read it.
         (Ended::Trail { anchor, ppm, .. }, _) if anchor > 0 => {
-            let give_back = paisa_of(ppm, anchor);
-            let exit = match side {
+            let give_back = paisa_of(ppm, fills.anchor);
+            let resting = match side {
                 Side::Long => anchor.saturating_sub(give_back),
                 Side::Short => anchor.saturating_add(give_back),
             };
-            // NOT BOUNDED BY THE EXIT BAR, AND THAT IS A KNOWN GAP RATHER THAN
-            // AN OVERSIGHT. `anchor - give_back` can land outside the bar it
-            // fills on: MEASURED at 140 of 12,130 trail fills, 1.15%, sitting
-            // ABOVE the printed high. It is the same shape of defect the level
-            // arm above just closed and it wants the same treatment, but it is a
-            // separate change with its own before-and-after -- folding it in
-            // here would make one commit's measurement unattributable.
+            // AND BOUNDED BY THE EXIT BAR, exactly as the level arm above is.
+            // With the basis corrected a long's trail fill can no longer sit
+            // below the exit bar's low -- the crossing test IS `peak - low >=
+            // ceil(ppm x entry / 1e6) >= paisa_of(ppm, entry)`, the same
+            // flooring argument `level_fill` already makes for stops. What
+            // remains reachable is a genuine GAP, and that is counted.
+            let Some(bar) = bars.get(entry.saturating_add(offset)) else {
+                return Priced {
+                    paisa: 0,
+                    gapped: false,
+                };
+            };
+            let (exit, gapped) = level_fill(bar, resting);
             let paisa = match side {
                 Side::Long => exit.saturating_sub(fills.charged),
                 Side::Short => fills.charged.saturating_sub(exit),
             };
-            Priced {
-                paisa,
-                gapped: false,
-            }
+            Priced { paisa, gapped }
         }
         // Everything else -- a time exit, or a trailing exit whose peak was not
         // recorded -- is a MARKET ORDER on that bar, and a market order has two
@@ -3133,14 +3188,31 @@ fn level_price(level: Level, anchor: i64, side: Side) -> i64 {
 /// and that excursion is a running maximum — so the recorded bar is the bar
 /// whose own extreme cleared it. `ppm_of` and [`paisa_of`] both floor toward
 /// zero, so the reconstructed level sits at or INSIDE that extreme: for a long
-/// stop, `resting >= bar.low` always. MEASURED: 12,494 reconstructions across
-/// both sides and four rungs, ZERO on the unreachable side of the exit bar.
+/// stop, `resting >= bar.low` always. MEASURED by instrumenting this function:
+/// **55,050,412 calls** over `synthetic::sessions(8)`, both sides, across
+/// `derived(4)`, `derived(8)`, a stepped ladder and the shape `crates/cli`
+/// passes — ZERO on the unreachable side.
 ///
 /// What is not guaranteed is the other end. A bar that OPENED past the level was
 /// already through at its first print, and the first print is the open — worse
 /// than the level for a stop, better for a target, and a price that printed in
 /// both cases. `Candle::check` guarantees `low <= open <= high`, so the fallback
-/// cannot itself be an invention. MEASURED at 224 of 12,494, 1.8%.
+/// cannot itself be an invention.
+///
+/// # The gap arm is UNREACHABLE on that fixture, and this doc used to claim a
+/// rate for it
+///
+/// It read *"MEASURED at 224 of 12,494, 1.8%"*. That figure is **wrong** and no
+/// run produced it: on `synthetic::sessions(8)` the gap arm fires **zero** times
+/// in 55 million calls, because consecutive bars open 3 paisa apart against a
+/// span of at least 120 — a bar cannot open past a level it did not gap to.
+/// `CLAUDE.md` §3 rule 6 is why the number is removed rather than adjusted.
+///
+/// The arm itself is correct and was exercised deliberately: on a hand-built
+/// gappy fixture it fires on 245 of 252 level exits and prices at the exit bar's
+/// open exactly once per trip. What is missing is a SHIPPED test that can see it
+/// move — the only one naming the field asserts `cell.gapped == 0`, which passes
+/// whether the arm works or not.
 fn level_fill(bar: &Candle, resting: i64) -> (i64, bool) {
     if resting >= bar.low && resting <= bar.high {
         return (resting, false);
@@ -3607,6 +3679,93 @@ mod tests {
         }
     }
 
+    /// A MEASUREMENT ERROR CANNOT BE NEGATIVE, AND THIS ONCE WAS.
+    ///
+    /// `Cell::uncertainty` is `optimistic - pessimistic - fill_cost`, rendered
+    /// as the `unknown` column and described by `audit.rs` as *"a MEASUREMENT
+    /// ERROR, not an upside"*. A width cannot be less than nothing, and
+    /// `depends_on_unknowable_ordering` is literally `uncertainty() != 0`, so a
+    /// negative one is counted as ambiguity while displaying an impossible
+    /// number.
+    ///
+    /// # It went negative because a repair removed the thing that hid it
+    ///
+    /// `ended_by` defers one corner — a trail filling below the stop, where the
+    /// branch labelled pessimistic names the BETTER exit — to the `min`/`max` in
+    /// `ordered`. That worked while the two readings differed only by
+    /// attribution. Once the level arms began charging the entry spread, the two
+    /// figures were priced at DIFFERENT entries and the spread MASKED the
+    /// inversion: MEASURED, the swap fired **0 times in 17.9 million round
+    /// trips**, and 2.4% of cells reported a negative width. `read_trip` now
+    /// orders the two ATTRIBUTIONS at the common entry before charging one to
+    /// the worse entry, which restores the deferral `ended_by` relies on.
+    ///
+    /// Both halves are asserted: the width is non-negative, and it plus
+    /// `fill_cost` is exactly the bracket, so neither term can absorb the other.
+    /// # The shape matters, and `derived(4)` is the WRONG one
+    ///
+    /// Written first over `Levels::derived(4)` and `derived(8)`, this test
+    /// passed with the defect deliberately restored — so it proved nothing. The
+    /// inversion needs a TRAIL that can fill past a STOP, which the plain
+    /// quantile ladders do not produce. The shape below is the one
+    /// `crates/cli` actually passes: a step, a forced operator stop, real stop
+    /// rungs, and `ratios: true`. On that shape 2.4% of cells reported a
+    /// negative width.
+    ///
+    /// A fixture chosen for convenience rather than for the defect is how the
+    /// frontier's duplicate check went missing behind a test that asserted it,
+    /// twice in one session.
+    #[test]
+    fn a_measurement_error_is_never_negative() {
+        const STOPS: [super::Ppm; 4] = [8, 16, 32, 64];
+        for side in [Side::Long, Side::Short] {
+            let (bars, column) = swept();
+            for rungs in [
+                Levels {
+                    rungs: 4,
+                    step_ppm: Some(20),
+                    stops_ppm: &STOPS,
+                    forced: Some(30),
+                    ratios: true,
+                },
+                Levels::derived(4),
+            ] {
+                let g = evaluate(
+                    &bars,
+                    &column,
+                    &ConditionMask::default(),
+                    h(15),
+                    side,
+                    rungs,
+                );
+                for c in &g.cells {
+                    assert!(
+                        c.uncertainty() >= 0,
+                        "{side:?} variant {:?}/{:?}/{:?}: unknown is {} — a width \
+                         cannot be less than nothing, and `unknown` is rendered \
+                         as a measurement error",
+                        c.stop,
+                        c.target,
+                        c.tsl,
+                        c.uncertainty()
+                    );
+                    assert!(
+                        c.fill_cost >= 0,
+                        "{side:?}: fill cost {} is negative, and it is documented \
+                         non-negative on both legs",
+                        c.fill_cost
+                    );
+                    assert_eq!(
+                        c.uncertainty().saturating_add(c.fill_cost),
+                        c.bracket(),
+                        "{side:?}: the two causes must sum to the whole spread, \
+                         or one of them is absorbing the other"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn the_pessimistic_reading_never_beats_the_optimistic_one() {
         // The two differ only on bars where a stop and a target were both
@@ -3765,20 +3924,36 @@ mod tests {
             "the optimistic reading anchors it at the peak the bar itself made"
         );
 
-        // A TRAIL CARRIES ITS OWN ANCHOR, so `EntryPrices::anchor` is unread on
-        // this path and the two prices are the same entry. The level arms are
-        // the ones that reconstruct against the open.
+        // A TRAIL CARRIES ITS OWN ANCHOR — the PEAK — but its DISTANCE is a
+        // fraction of `EntryPrices::anchor`, the entry open, because that is the
+        // basis `excursion` measured the give-back in when it decided the order
+        // fired. This arm used to scale the ppm against the peak instead, and
+        // the two diverge by the fraction the peak had run.
         let at = super::EntryPrices {
             charged: 100_000,
             anchor: 100_000,
         };
-        let priced_pess = super::realised(&[], 0, 1, at, Side::Long, pess, None, true).paisa;
-        let priced_opt = super::realised(&[], 0, 1, at, Side::Long, opt, None, false).paisa;
+        // REAL BARS, NOT `&[]`. The arm now bounds its fill by the exit bar, so
+        // an empty slice books the trip FLAT. Bar 1 spans both resting prices,
+        // so neither is a gap and the arithmetic is what is under test.
+        let priced = [
+            candle(0, 100_000, 105_000, 100_000, 105_000),
+            candle(1, 104_000, 107_000, 100_500, 106_000),
+        ];
+        let priced_pess = super::realised(&priced, 0, 1, at, Side::Long, pess, None, true).paisa;
+        let priced_opt = super::realised(&priced, 0, 1, at, Side::Long, opt, None, false).paisa;
+        // 40,000 ppm OF THE ENTRY is 4,000 — not 4,200, which is 40,000 ppm of
+        // the peak. The old figures pinned the wrong basis: a fill for an order
+        // that, on the basis the rung was tested in, was never touched.
         assert_eq!(
-            priced_pess, 800,
-            "105,000 less 4,200, less the 100,000 entry"
+            priced_pess, 1_000,
+            "105,000 peak less 4,000 (40,000 ppm of the 100,000 ENTRY), less \
+             that entry"
         );
-        assert_eq!(priced_opt, 2_720, "107,000 less 4,280, less the same entry");
+        assert_eq!(
+            priced_opt, 3_000,
+            "107,000 peak less the same 4,000, less the same entry"
+        );
         assert!(
             priced_pess < priced_opt,
             "the pessimistic anchor must be the worse fill, or the two readings \
@@ -4030,18 +4205,25 @@ mod tests {
             trailed.fill_cost, 5_000,
             "in at the printed high, and charged"
         );
+        // THE GIVE-BACK IS 40,000 ppm OF THE ENTRY OPEN, WHICH IS 4,000 — not
+        // 4,200, which is the same ppm of the peak. These three figures pinned
+        // the peak basis, and it is the basis `excursion` never used: the rung
+        // fires when the retreat reaches `ppm x entry`, so pricing the fill at
+        // `ppm x peak` bought a fill for an order that was never touched. On
+        // this fixture the old arithmetic put the long's fill at 100,800 against
+        // a printed low of 101,000 — 200 paisa below anything that traded.
         assert_eq!(
             trailed.pessimistic,
-            800 - 5_000,
-            "priced off 105,000, the peak the order hung from, less that entry"
+            1_000 - 5_000,
+            "105,000 peak less 4,000 (40,000 ppm of the ENTRY), less that entry"
         );
         assert_eq!(
-            trailed.optimistic, 2_720,
-            "priced off 107,000, the peak that bar itself made"
+            trailed.optimistic, 3_000,
+            "107,000, the peak that bar itself made, less the same 4,000"
         );
         assert_eq!(
             trailed.uncertainty(),
-            1_920,
+            2_000,
             "the gap the two orderings genuinely carry -- zero before, because \
              both readings used the raised peak"
         );
