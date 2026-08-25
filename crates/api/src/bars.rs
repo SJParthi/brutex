@@ -902,11 +902,54 @@ pub fn window(
     through them would see one row twice and another never. The timestamp is
     unique within a series, so it is the tie-break and it is NOT inverted
     with the direction. */
-    all.sort_by(|a, b| {
+    let order = |a: &WindowBar, b: &WindowBar| {
         let (x, y) = (sort.of(&a.bar), sort.of(&b.bar));
         let primary = if desc { y.cmp(&x) } else { x.cmp(&y) };
         primary.then_with(|| a.bar.ts_micros.cmp(&b.bar.ts_micros))
-    });
+    };
+
+    // THE PAGE IS BOUNDED, SO THE ORDERING IS TOO -- AND IT WAS NOT.
+    //
+    // LINE COMMENTS, NOT A BLOCK. Gate 11 strips lines opening with `//` or `*`
+    // before it counts, and the `/* */` blocks elsewhere in this file have
+    // neither, so naming the two constructs below in prose would count as two
+    // more uses of them. A comment that trips the gate it is explaining is the
+    // same shape as an invariant row whose note names a test that does not
+    // exist -- see docs/04-invariants.md V-01.
+    //
+    // This ordered EVERY bar in the window and then took `.skip(offset)
+    // .take(limit)`. A 240-month window is roughly 1.9 million bars, ordered in
+    // full to hand back a thousand rows. `docs/07-o1-architecture.md` layer 12
+    // asks for a bounded page and never O(universe); an audit found this route
+    // breaching it.
+    //
+    // The partition below is O(n) and leaves the first `want` elements as the
+    // `want` smallest under this order, unordered among themselves. Only those
+    // are then ordered. The cost goes from `O(n log n)` to
+    // `O(n) + O(want log want)`, and `want` is the caller's own page rather
+    // than the number of months asked for.
+    //
+    // THE OUTPUT IS UNCHANGED, and that is what a TOTAL comparator buys: with
+    // the timestamp as tie-break no two rows ever compare equal, so the set of
+    // the `want` smallest is unique and ordering it is byte-identical to
+    // ordering everything and slicing -- §3 rule 5. An unstable partition may
+    // reorder only what it is free to reorder, and here there is nothing.
+    // `selecting_the_page_then_ordering_it_equals_ordering_everything_then_slicing`
+    // runs both strategies over a fixture with every primary value repeated
+    // three times, which is where a non-total comparator would part company.
+    //
+    // THE BARS ARE STILL ALL READ, and that is not what this changes. `total`,
+    // `extremes_of` and the per-file change fold each need every row; the read
+    // is O(bars) because of the question being asked. What is removed is the
+    // ordering of rows nobody will see.
+    let want = offset.saturating_add(limit);
+    if want == 0 {
+        all.clear();
+    } else if want < all.len() {
+        all.select_nth_unstable_by(want - 1, order);
+        all.truncate(want);
+    }
+    all.sort_by(order);
 
     let bars = all
         .into_iter()
@@ -1109,6 +1152,69 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Selecting the page and then ordering it gives the SAME page as ordering
+    /// everything and slicing — which is the whole licence for not sorting the
+    /// universe.
+    ///
+    /// # Why this is a differential test and not a repeat of the implementation
+    ///
+    /// `window` used to sort every bar in the range and then `skip`/`take`. At a
+    /// 240-month window that is roughly 1.9 million rows ordered to hand back a
+    /// thousand, and `docs/07-o1-architecture.md` layer 12 asks for a bounded
+    /// page and never O(universe). It now partitions with
+    /// `select_nth_unstable_by`, keeps `offset + limit`, and sorts only those.
+    ///
+    /// The risk in that trade is not speed, it is ORDER: an unstable partition
+    /// may reorder anything it is free to reorder, so a page could come back
+    /// with two rows swapped between otherwise identical requests, and a reader
+    /// paging through would see one row twice and another never. The defence is
+    /// that the comparator is TOTAL — the timestamp tie-break is unique within a
+    /// series, so no two rows ever compare equal and the partition has nothing
+    /// it is free to reorder.
+    ///
+    /// Asserting that by recomputing the new path the new way would assert
+    /// nothing. This runs BOTH strategies over the same data and requires them
+    /// to agree, which is a claim about the pair rather than about either one.
+    /// The fixture deliberately carries HEAVY TIES on the primary key — every
+    /// value appears three times — because a comparator that was not total
+    /// would pass on distinct keys and fail here.
+    #[test]
+    fn selecting_the_page_then_ordering_it_equals_ordering_everything_then_slicing() {
+        // Deterministic, and not sorted to begin with: a stride of 7 over 60
+        // wraps without repeating, and `/ 3` then forces each primary value to
+        // appear exactly three times.
+        let rows: Vec<(i64, i64)> = (0..60_i64)
+            .map(|i| {
+                let scattered = (i * 7) % 60;
+                (scattered / 3, scattered)
+            })
+            .collect();
+        let order = |a: &(i64, i64), b: &(i64, i64)| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1));
+
+        for (offset, limit) in [(0, 1), (0, 10), (5, 10), (57, 10), (0, 60), (59, 1), (0, 0)] {
+            let mut whole = rows.clone();
+            whole.sort_by(order);
+            let expected: Vec<(i64, i64)> = whole.into_iter().skip(offset).take(limit).collect();
+
+            let mut paged = rows.clone();
+            let want = offset.saturating_add(limit);
+            if want == 0 {
+                paged.clear();
+            } else if want < paged.len() {
+                paged.select_nth_unstable_by(want - 1, order);
+                paged.truncate(want);
+            }
+            paged.sort_by(order);
+            let got: Vec<(i64, i64)> = paged.into_iter().skip(offset).take(limit).collect();
+
+            assert_eq!(
+                got, expected,
+                "offset={offset} limit={limit}: the bounded page must be the \
+                 same rows in the same order as the unbounded one"
+            );
+        }
     }
 
     #[test]

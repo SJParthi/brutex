@@ -5119,10 +5119,33 @@ jobs:
           #   pull/ssm.rs -- `AWS_FAULTS`, a `const` table.
           #   pull/config.rs -- the credential file's own field list.
           #   pull/resolve.rs -- a canned-answer fixture's list.
+          # THREE ROWS ADDED, AND ALL THREE ARE BOUNDED BY A NUMBER IN THE TYPE
+          # OR IN A `const` -- which is exactly the bound this rule asks for, as
+          # against "bounded by the data". They surfaced when the rule started
+          # running again behind gate 1e.
+          #
+          #   cli/src/lib.rs -- `EVERY_RUNG.iter().find(..)`. `EVERY_RUNG` is
+          #     `[&str; 8]`, the eight timeframes this engine sweeps, and the
+          #     refusal three lines below prints all eight by name. Eight, fixed
+          #     at compile time, and a ninth would be a `docs/05-decisions.md`
+          #     entry rather than a longer scan.
+          #   cli/src/results.rs -- `read_field(raw: &[u8; 16])`. The bound is in
+          #     the SIGNATURE: sixteen bytes, looking for the NUL that ends a
+          #     fixed-width text field. It cannot see a seventeenth byte.
+          #   api/src/backtest.rs -- the same function, one crate over, reading
+          #     the same ledger's fields independently. Its parameter is a slice
+          #     rather than an array, so the bound is the caller's: every
+          #     production call site is `text(take(16, &mut at))`. Sixteen again.
+          #     The independent decode is deliberate -- see the `STRIDE_BYTES`
+          #     assertion in that file for why this crate does not import the
+          #     other's reader.
           allow_scan='
           crates/api/src/audit_json.rs 1
           crates/api/src/autopilot.rs 1
+          crates/api/src/backtest.rs 1
           crates/api/src/server.rs 7
+          crates/cli/src/lib.rs 1
+          crates/cli/src/results.rs 1
           crates/pull/src/config.rs 1
           crates/pull/src/fno.rs 1
           crates/pull/src/manifest.rs 1

@@ -4899,7 +4899,21 @@ pub(crate) async fn broker_run(
     // Sorted so a run is reproducible: `HashMap` order is not stable between
     // processes, and an unordered backfill resumes in a different place after
     // every restart.
-    targets.sort_unstable_by_key(|k| k.underlying);
+    //
+    // BY THE WHOLE KEY, AND IT USED TO BE BY `underlying` ALONE. That is a
+    // PARTIAL key: `InstrumentKey` is `{exchange, segment, underlying, kind}`,
+    // so two targets sharing an underlying compared EQUAL and an unstable sort
+    // left them in whatever order the `HashMap` iterator produced. The sentence
+    // directly above promised the reproducibility the key could not deliver --
+    // and a partial key under an unstable sort is the one combination where the
+    // promise is not merely weaker but false, because `sort_unstable` is
+    // explicitly free to reorder equal elements.
+    //
+    // `InstrumentKey` derives `Ord` over every field, so the total order costs
+    // nothing to ask for: the same NIFTY under two segments now lands in the
+    // same place on every process, which is what §3 rule 5 asks of a backfill
+    // that resumes.
+    targets.sort_unstable();
 
     // THE PULL ORDER, AND THIS IS WHERE IT BITES. `crate::ladder` carries the
     // rule and the operator's own words for it.
