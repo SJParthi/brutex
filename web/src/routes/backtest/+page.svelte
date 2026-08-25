@@ -260,6 +260,67 @@
      WHAT THE PAYLOAD SAYS
      ==================================================================== */
 
+  /**
+   * One ledger row, exactly the fields `api::backtest`'s `to_json` writes.
+   *
+   * MIRRORED FROM THE WRITER, not inferred from what this page happens to read.
+   * The payload arrives as JSON so every field is `any` until something says
+   * otherwise, and a shape written from the reader's side records what the page
+   * uses rather than what the server sends — the two drift apart silently, and
+   * the first symptom is a field that reads `undefined` on a row that has it.
+   *
+   * @typedef {object} Run
+   * @property {number} index
+   * @property {string} identity
+   * @property {number} finished_micros
+   * @property {string} feed
+   * @property {string} underlying
+   * @property {string} timeframe
+   * @property {number} from_year
+   * @property {number} from_month
+   * @property {number} to_year
+   * @property {number} to_month
+   * @property {number} months_asked
+   * @property {number} months_found
+   * @property {boolean} whole_span
+   * @property {number} bars
+   * @property {number} min_hits
+   * @property {number} combinations
+   * @property {number} depth
+   * @property {boolean} halted
+   * @property {boolean} sealed
+   * @property {number} trades
+   * @property {number} pessimistic
+   * @property {number} optimistic
+   * @property {number} worst_trade
+   * @property {number} max_drawdown
+   * @property {number} winner_mae
+   * @property {number} winner_mfe
+   * @property {number} all_mae
+   * @property {unknown} exit_rungs
+   * @property {string} mask_words
+   */
+
+  /**
+   * The whole `/backtest.json` body.
+   *
+   * @typedef {object} Ledger
+   * @property {string} path
+   * @property {number} version
+   * @property {boolean} has_mask
+   * @property {number} total
+   * @property {number} scanned
+   * @property {boolean} hit_scan_cap
+   * @property {boolean} partial_tail
+   * @property {number} max_runs
+   * @property {boolean} halted
+   * @property {number} unsealed
+   * @property {Run | null} best_complete
+   * @property {string | null} refusal
+   * @property {Run[]} runs
+   */
+
+  /** @type {Ledger | null | undefined} */
   const ledger = $derived(load.body);
   /** Every run the server returned, newest first — the server ordered them. */
   const allRuns = $derived(ledger?.runs ?? []);
@@ -1270,12 +1331,38 @@
      draws as an argument rather than reading state, so a chart cannot
      silently render one panel's data under another panel's heading. ---- */
 
-  /** The vertical extent a curve needs, symmetric so zero stays on a line. */
+  /**
+   * One plotted value. `v` is the only field the geometry reads.
+   *
+   * @typedef {{ v: number }} Point
+   */
+
+  /**
+   * One column: a value and the label under it.
+   *
+   * @typedef {{ v: number, label: string }} Bar
+   */
+
+  /**
+   * A histogram's own range, which is what its x positions are relative to.
+   *
+   * @typedef {{ lo: number, hi: number }} Hist
+   */
+
+  /**
+   * The vertical extent a curve needs, symmetric so zero stays on a line.
+   *
+   * @param {Point[]} points
+   */
   function curveScale(points) {
     return Math.max(1, ...points.map((p) => Math.abs(p.v)));
   }
 
-  /** The polyline through a cumulative series. */
+  /**
+   * The polyline through a cumulative series.
+   *
+   * @param {Point[]} points
+   */
   function linePath(points) {
     const scale = curveScale(points);
     const step = 1000 / Math.max(1, points.length - 1);
@@ -1284,18 +1371,30 @@
       .join(' ');
   }
 
-  /** The same polyline, closed to the zero line, for the area fill. */
+  /**
+   * The same polyline, closed to the zero line, for the area fill.
+   *
+   * @param {Point[]} points
+   */
   function areaPath(points) {
     const step = 1000 / Math.max(1, points.length - 1);
     return `${linePath(points)} L${((points.length - 1) * step).toFixed(1)} 130 L0 130 Z`;
   }
 
-  /** The tallest bar in a set, so a column chart shares one scale. */
+  /**
+   * The tallest bar in a set, so a column chart shares one scale.
+   *
+   * @param {Bar[]} bars
+   */
   function barScale(bars) {
     return Math.max(1, ...bars.map((b) => Math.abs(b.v)));
   }
 
-  /** At most seven x labels, evenly spaced, so the axis never crowds. */
+  /**
+   * At most seven x labels, evenly spaced, so the axis never crowds.
+   *
+   * @param {Bar[]} bars
+   */
   function barLabels(bars) {
     if (bars.length === 0) return [];
     if (bars.length <= 7) return bars.map((b) => b.label);
@@ -1304,16 +1403,29 @@
     return out;
   }
 
-  /** Where a basis-point value falls across the histogram's own range. */
+  /**
+   * Where a basis-point value falls across the histogram's own range.
+   *
+   * @param {Hist} h
+   * @param {number} bps
+   */
   function histX(h, bps) {
     const span = Math.max(1, h.hi - h.lo);
     return (((bps - h.lo) / span) * 1000).toFixed(1);
   }
 
-  /** Basis points as a signed percent, for the histogram's axis and legend. */
+  /**
+   * Basis points as a signed percent, for the histogram's axis and legend.
+   *
+   * @param {number} bps
+   */
   const pctOf = (bps) => `${bps >= 0 ? '+' : ''}${(bps / 100).toFixed(2)}%`;
 
-  /** A basis-point integer as a percent string, or the em dash. */
+  /**
+   * A basis-point integer as a percent string, or the em dash.
+   *
+   * @param {number | null | undefined} bps
+   */
   const pct = (bps) => (bps === null || bps === undefined ? '—' : `${bps >= 0 ? '+' : ''}${(bps / 100).toFixed(2)}%`);
 
   /** Rungs that carry a recorded run, so the switcher can mark them. */
