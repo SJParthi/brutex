@@ -1896,6 +1896,30 @@ mod tests {
              the bug that a token refresh can never fix"
         );
 
+        // KITE'S EDGE 503, from the run at 2026-08-25T07:15 IST — the one that
+        // came AFTER the token was refreshed, so the 403 was gone and this was
+        // what was left. An HTML error page from a load balancer, not a Kite
+        // API refusal: there is no `error_type` in it at all.
+        //
+        // This is the case that shows why the repair matters beyond one vendor.
+        // A 503 is the vendor's own side failing, IS worth re-asking, and the
+        // retry ladder handled it correctly — three attempts, then an honest
+        // stop. Under the old page-sniffing test it would have been reported as
+        // a dead credential and the feed skipped for the rest of the run,
+        // turning a transient outage into a halt only a token refresh appears
+        // to fix, which it cannot.
+        let kite_503 = format!(
+            "{HTTP_LIVE} the vendor refused with status 503: <html><body>\
+             <h1>503 Service Unavailable</h1> No server is available to handle \
+             this request. </body></html> — and its own side has now failed 3 \
+             time(s) on this chunk, out of 3 allowed."
+        );
+        assert!(
+            !credential_fault_in_page(&kite_503),
+            "a 503 is the vendor's own side and IS worth re-asking; calling it \
+             a dead token turns an outage into a halt"
+        );
+
         // THE CURE MUST NOT OVERSHOOT. A real dead token still halts.
         for real in [
             "the vendor refused with status 403 and named it: TokenException",
