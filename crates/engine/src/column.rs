@@ -93,12 +93,12 @@ impl Column {
     /// `engine::column::the_allocation_is_bits_by_stride_and_not_the_live_count`.
     ///
     /// THE FIRST FACTOR IS `BITS` AND NOT THE LIVE POSITION COUNT, deliberately. Only
-    /// **323** of the 384 are live, and sizing to those would be 49.4 MB -- 9.3 MB less.
+    /// **328** of the 384 are live, and sizing to those would be 50.1 MB -- 8.6 MB less.
     /// It is not done, because [`Self::bitmap`] addresses a bitmap as
     /// `position * stride`, and that multiply is the whole reason a lookup is O(1). To
     /// pack out the dead positions the type would have to carry a live-position map and
     /// pay an indirection per access, trading a constant-time address for a smaller
-    /// allocation on the hottest path in the sweep. The 9.3 MB is the price of the
+    /// allocation on the hottest path in the sweep. The 8.6 MB is the price of the
     /// multiply, and it is a price and not an oversight.
     ///
     /// **The price SHRINKS as the vocabulary fills, and these numbers moved.** They read
@@ -399,7 +399,7 @@ mod tests {
     /// states the byte figure it implies.
     ///
     /// Guards the claim in two directions at once. A change that sized the allocation to
-    /// the LIVE position count would shrink it to 238 strides and fail here, which is the
+    /// the LIVE position count would shrink it to 328 strides and fail here, which is the
     /// trade the doc block argues against; and a change to `WORDS` or to `BARS_PER_WORD`
     /// moves the figure, so the number in the prose cannot rot while the code moves. The
     /// arithmetic is written out rather than recomputed from the same expression the code
@@ -433,8 +433,19 @@ mod tests {
         // comparing a literal against arithmetic on the same literal. A test
         // that certifies its own stale constant is worse than no test: it makes
         // the figure look checked.
+        //
+        // AND THEN IT WENT STALE IN THE OTHER DIRECTION, which is the failure
+        // the paragraph above describes happening to the paragraph above. Once
+        // `live` was read from the table, the LITERAL it is compared against
+        // became the thing that could rot — and it did: the five weekday rows
+        // took the table to 328 while this still said 323, so `cargo test -p
+        // engine` failed against a vocabulary nobody had changed here. Reading
+        // one side from the source does not make the other side self-checking;
+        // it moves which side has to be maintained. `vocab::table::
+        // the_live_mask_is_the_table` is the row that owns this number, and it
+        // says 328 -- "323 + the five weekday bits".
         let live = usize::try_from(vocab::table::LIVE.popcount()).unwrap_or(0);
-        assert_eq!(live, 323, "the live count, read from the table");
+        assert_eq!(live, 328, "the live count, read from the table");
         assert!(
             live * stride * 8 < words * 8,
             "sizing to the live positions would be smaller -- that is why the doc \
@@ -442,11 +453,11 @@ mod tests {
         );
         assert_eq!(
             words * 8 - live * stride * 8,
-            9_324_216,
+            8_559_936,
             "the price of addressing a bitmap as position * stride. It was 22.3 MB \
-             at 238 live and is 9.3 MB at 323: the waste SHRINKS as the vocabulary \
+             at 238 live and is 8.6 MB at 328: the waste SHRINKS as the vocabulary \
              fills, because what is being paid for is the UNALLOCATED headroom, \
-             and there are now 19 free positions instead of 104"
+             and there are now 14 free positions instead of 104"
         );
     }
 
