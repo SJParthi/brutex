@@ -230,6 +230,14 @@ pub struct Cell {
     /// not claimed — the count is a bound, taken over the whole path rather than
     /// only up to the exit.
     pub ambiguous_bars: u64,
+    /// Round trips whose LEVEL exit the bar gapped clean through, so the fill
+    /// was the bar's open rather than the level the ladder asked for.
+    ///
+    /// `CLAUDE.md` §4 is why this is COUNTED rather than absorbed: a gap fill is
+    /// not the price the ladder chose, and a cell whose money comes from gaps
+    /// has to say so rather than presenting it as the rung working. MEASURED at
+    /// 1.8% of level exits on `synthetic::sessions(8)`.
+    pub gapped: u64,
     /// Mean adverse excursion of the trades that ENDED PROFITABLE, in basis
     /// points.
     ///
@@ -2065,7 +2073,11 @@ const fn direction_of(side: Side) -> costs::fill::Direction {
 struct Readings {
     /// Worst fills, worst ordering. What [`Grid::best`] and [`Grid::sharpest`]
     /// rank, and the only one of the three a reader is shown as a total.
-    pess: i64,
+    ///
+    /// Carries the gap flag because this is the book the fold counts from: a
+    /// level exit the bar opened past is counted once, here, rather than three
+    /// times across the readings.
+    pess: Priced,
     /// Best fills, best ordering.
     opt: i64,
     /// The pessimistic ORDERING at the optimistic FILLS — the same exit
@@ -2086,11 +2098,15 @@ fn read_trip(
     bars: &[Candle],
     c: &Candidate,
     side: Side,
-    pess: (usize, Ended, Option<Ppm>),
-    opt: (usize, Ended, Option<Ppm>),
+    pess: (usize, Ended, Option<Level>),
+    opt: (usize, Ended, Option<Level>),
 ) -> Readings {
     let (pess_off, pess_by, pess_level) = pess;
     let (opt_off, opt_by, opt_level) = opt;
+    // THE ANCHOR IS `entry_opt` ON ALL THREE, and only `charged` moves. Every
+    // rung in `Crossings` is a ppm distance from the open, so that is the only
+    // price a resting order can be reconstructed against; which fill the trip is
+    // CHARGED to is the separate question these three readings exist to bracket.
     Readings {
         // The trailing `true`/`false` is the READING, and the three lines are
         // the whole bracket: worst exit at worst entry, best at best, and worst
@@ -2099,7 +2115,10 @@ fn read_trip(
             bars,
             c.entry,
             pess_off,
-            c.entry_pess,
+            EntryPrices {
+                charged: c.entry_pess,
+                anchor: c.entry_opt,
+            },
             side,
             pess_by,
             pess_level,
@@ -2109,22 +2128,30 @@ fn read_trip(
             bars,
             c.entry,
             opt_off,
-            c.entry_opt,
+            EntryPrices {
+                charged: c.entry_opt,
+                anchor: c.entry_opt,
+            },
             side,
             opt_by,
             opt_level,
             false,
-        ),
+        )
+        .paisa,
         pess_best_fills: realised(
             bars,
             c.entry,
             pess_off,
-            c.entry_opt,
+            EntryPrices {
+                charged: c.entry_opt,
+                anchor: c.entry_opt,
+            },
             side,
             pess_by,
             pess_level,
             false,
-        ),
+        )
+        .paisa,
     }
 }
 
@@ -2277,7 +2304,7 @@ fn one_variant(
         // `the_pessimistic_reading_never_beats_the_optimistic_one` asserts it;
         // until now that assertion was satisfied by the two being EQUAL on the
         // fixture, which is not the same as being ordered.
-        let (pess, opt) = (pess.min(opt), pess.max(opt));
+        let (pess, opt) = ordered(&mut cell, pess, opt);
 
         tally_trade(&mut cell, pess, pess_off, &mut losing_streak);
 
@@ -2522,21 +2549,23 @@ fn mean_excursions(cell: &mut Cell, adverse_won: i64, gain_won: i64, adverse_all
               already assembled together in `read_trip` and destructured \
               immediately here, so the struct would exist for one call and one \
               unpack. The permutation hazard the bundle guards against is \
-              absent -- `offset` is the only bare `usize` and the other three \
-              have distinct types."
+              absent -- every argument now has a distinct type. It once said \
+              `offset` was the only bare `usize`, which was already false with \
+              `entry` on the line above it; the bare `i64` that made the pair \
+              genuinely confusable is gone too, into `EntryPrices`."
 )]
 fn realised(
     bars: &[Candle],
     entry: usize,
     offset: usize,
-    entry_price: i64,
+    fills: EntryPrices,
     side: Side,
     by: Ended,
-    level_ppm: Option<Ppm>,
+    level: Option<Level>,
     // Resolve an exit the bar does not price -- a square-off, or a trail with
     // no recorded peak -- against the position rather than for it.
     pessimistic: bool,
-) -> i64 {
+) -> Priced {
     // A LEVEL EXIT FILLS AT ITS LEVEL, NOT AT THE BAR'S CLOSE.
     //
     // This priced every exit at the close, which is right for a time exit and
@@ -2550,9 +2579,56 @@ fn realised(
     // the same BAR, so both computed the same close and agreed by construction
     // -- and the test asserting they agree passed without ever exercising the
     // disagreement it was written for.
-    match (by, level_ppm) {
-        (Ended::Stop, Some(ppm)) => -paisa_of(ppm, entry_price),
-        (Ended::Target, Some(ppm)) => paisa_of(ppm, entry_price),
+    // THE LEVEL IS A PRICE, AND THE MONEY IS `EXIT - ENTRY`.
+    //
+    // These were two arms with a hand-written `-` and `+`:
+    //
+    //     (Ended::Stop,   Some(ppm)) => -paisa_of(ppm, entry_price),
+    //     (Ended::Target, Some(ppm)) =>  paisa_of(ppm, entry_price),
+    //
+    // which booked a FIXED DISTANCE from whichever entry price the reading was
+    // handed. But the crossing that decided WHEN the order fired measured every
+    // rung from the entry bar's OPEN, while the pessimistic reading FILLS at the
+    // printed extreme -- so the position was credited the entry bar's own
+    // `high - open` (long) on every level exit, for free.
+    //
+    // # What that cost, measured on `synthetic::sessions(8)`
+    //
+    // A 455-trade 1:3 cell booked `+328,877` paisa where filling at the printed
+    // extreme against the same level gives `-661,913`. The SIGN was wrong.
+    //
+    // Worse, and this is why the arms had to go rather than be adjusted:
+    // `min_win` and `worst_trade` became pure functions of the two RUNGS, so
+    // `Cell::reward_to_risk_bp` -- the operator's *"smallest win at least three
+    // times the largest loss"* -- was data-independent. MEASURED: six different
+    // 1:3 cells across three bits, some profitable at `+778,377` and some
+    // losing at `-251,207`, ALL reported exactly `299`. A rule that returns the
+    // ladder's own ratio whatever the market did carries no information, and
+    // `Levels::ratios` sweeps precisely that coordinate.
+    //
+    // The sign now comes out of the two prices. There is nowhere left to write
+    // a `-` or a `+`, which is the point.
+    match (by, level) {
+        (Ended::Stop | Ended::Target, Some(level)) => {
+            let resting = level_price(level, fills.anchor, side);
+            let Some(bar) = bars.get(entry.saturating_add(offset)) else {
+                // The refusal the time arm below already takes: book the trip
+                // FLAT rather than invent an exit. Unreachable in production --
+                // `crossings` recorded this offset off a real bar -- and
+                // reachable from a test with an empty slice, which is what keeps
+                // the coverage floor honest rather than allowlisted.
+                return Priced {
+                    paisa: 0,
+                    gapped: false,
+                };
+            };
+            let (exit, gapped) = level_fill(bar, resting);
+            let paisa = match side {
+                Side::Long => exit.saturating_sub(fills.charged),
+                Side::Short => fills.charged.saturating_sub(exit),
+            };
+            Priced { paisa, gapped }
+        }
         // A TRAILING EXIT FILLS AT `peak - distance`, and this used to fall
         // back to the bar's close because the peak was not recorded.
         //
@@ -2575,9 +2651,20 @@ fn realised(
                 Side::Long => anchor.saturating_sub(give_back),
                 Side::Short => anchor.saturating_add(give_back),
             };
-            match side {
-                Side::Long => exit.saturating_sub(entry_price),
-                Side::Short => entry_price.saturating_sub(exit),
+            // NOT BOUNDED BY THE EXIT BAR, AND THAT IS A KNOWN GAP RATHER THAN
+            // AN OVERSIGHT. `anchor - give_back` can land outside the bar it
+            // fills on: MEASURED at 140 of 12,130 trail fills, 1.15%, sitting
+            // ABOVE the printed high. It is the same shape of defect the level
+            // arm above just closed and it wants the same treatment, but it is a
+            // separate change with its own before-and-after -- folding it in
+            // here would make one commit's measurement unattributable.
+            let paisa = match side {
+                Side::Long => exit.saturating_sub(fills.charged),
+                Side::Short => fills.charged.saturating_sub(exit),
+            };
+            Priced {
+                paisa,
+                gapped: false,
             }
         }
         // Everything else -- a time exit, or a trailing exit whose peak was not
@@ -2602,10 +2689,14 @@ fn realised(
         // count. Every one of them was priced at a single mid-range print.
         _ => {
             let exit = exit_fill(bars, entry.saturating_add(offset), side, pessimistic)
-                .unwrap_or(entry_price);
-            match side {
-                Side::Long => exit.saturating_sub(entry_price),
-                Side::Short => entry_price.saturating_sub(exit),
+                .unwrap_or(fills.charged);
+            let paisa = match side {
+                Side::Long => exit.saturating_sub(fills.charged),
+                Side::Short => fills.charged.saturating_sub(exit),
+            };
+            Priced {
+                paisa,
+                gapped: false,
             }
         }
     }
@@ -2911,10 +3002,22 @@ fn ended_by(f: Firing, chosen: usize, pessimistic: bool) -> Ended {
 }
 
 /// The level a given exit reason fills at, in parts per million from entry.
-const fn level_for(by: Ended, stop_ppm: Option<Ppm>, target_ppm: Option<Ppm>) -> Option<Ppm> {
+const fn level_for(by: Ended, stop_ppm: Option<Ppm>, target_ppm: Option<Ppm>) -> Option<Level> {
     match by {
-        Ended::Stop => stop_ppm,
-        Ended::Target => target_ppm,
+        Ended::Stop => match stop_ppm {
+            Some(ppm) => Some(Level {
+                kind: Resting::Stop,
+                ppm,
+            }),
+            None => None,
+        },
+        Ended::Target => match target_ppm {
+            Some(ppm) => Some(Level {
+                kind: Resting::Target,
+                ppm,
+            }),
+            None => None,
+        },
         // A TRAILING EXIT CARRIES ITS OWN DISTANCE AND IS NOT LOOKED UP HERE.
         //
         // It used to take a `trail_ppm` argument, which was unambiguous while a
@@ -2926,10 +3029,123 @@ const fn level_for(by: Ended, stop_ppm: Option<Ppm>, target_ppm: Option<Ppm>) ->
     }
 }
 
+/// One trip's two readings, ordered low-then-high, counting a gap once.
+///
+/// # The ordering stands, and it is not what was wrong
+///
+/// Before the level arms were repaired the two readings differed only by scaling
+/// ONE fixed ppm against two entry prices, so on a long TARGET exit the branch
+/// labelled pessimistic produced the LARGER number and this line EXCHANGED the
+/// two fields. MEASURED: `cell.pessimistic` came back equal to the sum over
+/// `entry_opt` and `cell.optimistic` to the sum over `entry_pess`.
+/// [`Cell::fill_cost`] was then identically ZERO on every level exit — 45% of
+/// trades on the shipped fixture — and [`Cell::uncertainty`] reported that
+/// absence as intra-bar ORDERING.
+///
+/// With the exit now a real price the pessimistic reading is charged at the
+/// worse entry against the same level, so it is genuinely the low end and the
+/// swap no longer fires on a level-only cell. It is KEPT because it is what
+/// makes `pessimistic <= optimistic` hold unconditionally, and three separate
+/// assertions depend on that.
+///
+/// The gap is counted here and nowhere else, off the pessimistic book, so a
+/// level the bar opened past is counted once per trip rather than once per
+/// reading.
+fn ordered(cell: &mut Cell, pess: Priced, opt: i64) -> (i64, i64) {
+    if pess.gapped {
+        cell.gapped = cell.gapped.saturating_add(1);
+    }
+    (pess.paisa.min(opt), pess.paisa.max(opt))
+}
+
 /// A parts-per-million distance as a paisa move against `price`.
 fn paisa_of(ppm: Ppm, price: i64) -> i64 {
     let scaled = i128::from(ppm).saturating_mul(i128::from(price)) / 1_000_000;
     i64::try_from(scaled).unwrap_or(i64::MAX)
+}
+
+/// The two entry prices one reading needs.
+///
+/// # Why a level cannot be scaled against the price that filled
+///
+/// Every rung inside [`crate::excursion::Crossings`] is a ppm distance from the
+/// price handed to `crossings`, and that price is the entry bar's OPEN — see the
+/// call sites in `evaluate` and `levelled`, and `excursion::ppm_of`. So the
+/// resting order sat at a distance from the OPEN, whichever reading is being
+/// booked. Re-scaling that same ppm against the printed extreme, which is what
+/// this module did, puts the order at a price nobody placed it at and credits
+/// the position the entry bar's own `high - open` for free.
+#[derive(Clone, Copy, Debug)]
+struct EntryPrices {
+    /// The fill this reading charges the round trip against: `entry_pess` on the
+    /// pessimistic book, `entry_opt` on the optimistic one.
+    charged: i64,
+    /// `Candidate::entry_opt`, on EVERY reading, because it is the only price a
+    /// level can be reconstructed against.
+    anchor: i64,
+}
+
+/// Which resting order a level belongs to.
+///
+/// A stop is a MARKET order on trigger and a target a LIMIT order; that is the
+/// whole of what a gap does differently to each, and it is why the two are named
+/// rather than carried as a sign.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Resting {
+    /// Sits against the position: below a long, above a short.
+    Stop,
+    /// Sits with the position: above a long, below a short.
+    Target,
+}
+
+/// One resting order: which kind, and how far from the crossing anchor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Level {
+    kind: Resting,
+    ppm: Ppm,
+}
+
+/// One reading's money, and whether the bar priced it or gapped past it.
+#[derive(Clone, Copy, Debug)]
+struct Priced {
+    paisa: i64,
+    gapped: bool,
+}
+
+/// Where the resting order sat, as a PRICE, against the crossing anchor.
+fn level_price(level: Level, anchor: i64, side: Side) -> i64 {
+    let distance = paisa_of(level.ppm, anchor);
+    match (level.kind, side) {
+        (Resting::Stop, Side::Long) | (Resting::Target, Side::Short) => {
+            anchor.saturating_sub(distance)
+        }
+        (Resting::Stop, Side::Short) | (Resting::Target, Side::Long) => {
+            anchor.saturating_add(distance)
+        }
+    }
+}
+
+/// The price the order actually filled at, and whether the bar gapped through it.
+///
+/// # Why the level is a floor and not a guarantee
+///
+/// `crossings` advances a cursor when the running excursion crosses the rung,
+/// and that excursion is a running maximum — so the recorded bar is the bar
+/// whose own extreme cleared it. `ppm_of` and [`paisa_of`] both floor toward
+/// zero, so the reconstructed level sits at or INSIDE that extreme: for a long
+/// stop, `resting >= bar.low` always. MEASURED: 12,494 reconstructions across
+/// both sides and four rungs, ZERO on the unreachable side of the exit bar.
+///
+/// What is not guaranteed is the other end. A bar that OPENED past the level was
+/// already through at its first print, and the first print is the open — worse
+/// than the level for a stop, better for a target, and a price that printed in
+/// both cases. `Candle::check` guarantees `low <= open <= high`, so the fallback
+/// cannot itself be an invention. MEASURED at 224 of 12,494, 1.8%.
+fn level_fill(bar: &Candle, resting: i64) -> (i64, bool) {
+    if resting >= bar.low && resting <= bar.high {
+        return (resting, false);
+    }
+    (bar.open, true)
 }
 
 /// The worst the path went against the position, in parts per million.
@@ -3549,8 +3765,15 @@ mod tests {
             "the optimistic reading anchors it at the peak the bar itself made"
         );
 
-        let priced_pess = super::realised(&[], 0, 1, 100_000, Side::Long, pess, None, true);
-        let priced_opt = super::realised(&[], 0, 1, 100_000, Side::Long, opt, None, false);
+        // A TRAIL CARRIES ITS OWN ANCHOR, so `EntryPrices::anchor` is unread on
+        // this path and the two prices are the same entry. The level arms are
+        // the ones that reconstruct against the open.
+        let at = super::EntryPrices {
+            charged: 100_000,
+            anchor: 100_000,
+        };
+        let priced_pess = super::realised(&[], 0, 1, at, Side::Long, pess, None, true).paisa;
+        let priced_opt = super::realised(&[], 0, 1, at, Side::Long, opt, None, false).paisa;
         assert_eq!(
             priced_pess, 800,
             "105,000 less 4,200, less the 100,000 entry"
@@ -3573,6 +3796,150 @@ mod tests {
     ///
     /// Extracted so the test that uses it stays inside the line budget without
     /// any of its assertions being dropped to fit.
+    /// Six bars: one trade that ends on its target, one that ends on its stop.
+    ///
+    /// Priced at 1,000,000 paisa so **one ppm is one paisa** and the fixture
+    /// reads without arithmetic. `spread_a` and `spread_b` are the entry bars'
+    /// own `high - open` — the quantity the defect handed to the position.
+    fn one_to_three_fixture(spread_a: i64, spread_b: i64) -> Vec<indicators::Candle> {
+        vec![
+            // Candidate 1 enters here. Its high is the pessimistic fill.
+            candle(0, 1_000_000, 1_000_000 + spread_a, 1_000_000, 1_000_100),
+            // Favourable 3,500 >= the 3,000 target rung, so `target_at(0) = 1`.
+            candle(1, 1_000_100, 1_003_500, 1_000_000, 1_003_000),
+            candle(2, 1_003_000, 1_003_000, 1_002_900, 1_003_000),
+            // Candidate 2 enters here; signal 3 clears candidate 1's exit.
+            candle(3, 1_000_000, 1_000_000 + spread_b, 1_000_000, 1_000_000),
+            // Adverse 1,500 >= the 1,000 stop rung, so `stop_at(0) = 1`.
+            candle(4, 1_000_000, 1_000_000, 998_500, 998_600),
+            candle(5, 998_600, 998_700, 998_500, 998_600),
+        ]
+    }
+
+    /// The 1:3 cell over one pair of entry spreads.
+    fn one_to_three_cell(spread_a: i64, spread_b: i64) -> super::Cell {
+        let bars = one_to_three_fixture(spread_a, spread_b);
+        let stops = crate::excursion::Ladder::new(vec![1_000]).expect("an ascending ladder");
+        let targets = crate::excursion::Ladder::new(vec![3_000]).expect("an ascending ladder");
+        let trails = crate::excursion::Ladder::new(vec![900_000]).expect("an ascending ladder");
+        let ladders = crate::excursion::Ladders {
+            stops: &stops,
+            targets: &targets,
+            trails: &trails,
+        };
+        let candidates: Vec<super::Candidate> = [(0_usize, 2_usize), (3, 5)]
+            .into_iter()
+            .map(|(entry, time_exit)| {
+                // Taken from `entry_fills` rather than written in, so the
+                // fixture cannot drift from what `evaluate` actually builds.
+                let (entry_pess, entry_opt) = super::entry_fills(&bars, entry, Side::Long);
+                super::Candidate {
+                    signal: entry,
+                    entry,
+                    time_exit,
+                    cross: crate::excursion::crossings(
+                        &bars,
+                        entry,
+                        time_exit,
+                        entry_opt,
+                        Side::Long,
+                        ladders,
+                    ),
+                    entry_pess,
+                    entry_opt,
+                }
+            })
+            .collect();
+        super::one_variant(
+            &bars,
+            &candidates,
+            (stops.rungs(), targets.rungs(), trails.rungs()),
+            super::Variant {
+                stop: Some(0),
+                target: Some(0),
+                tsl: None,
+                ttp: None,
+            },
+            Side::Long,
+            None,
+        )
+    }
+
+    /// A 1:3 stop:target cell must not report a 3:1 reward-to-risk.
+    ///
+    /// # The defect this exists to keep dead
+    ///
+    /// `realised` booked a level exit as a FIXED ppm distance from the entry
+    /// price — `-paisa_of(ppm, entry)` for a stop, `+paisa_of(ppm, entry)` for a
+    /// target. So `min_win` and `worst_trade` were pure functions of the two
+    /// RUNGS, and `Cell::reward_to_risk_bp` — the operator's *"smallest win at
+    /// least three times the largest loss"* — returned the ladder's own axis
+    /// whatever the bars did.
+    ///
+    /// MEASURED before the fix, on `synthetic::sessions(8)`: six different 1:3
+    /// cells across three condition bits, some profitable at `+778,377` paisa
+    /// and some losing at `-251,207`, ALL reported exactly `299`. And
+    /// `Levels::ratios` sweeps precisely that coordinate, so the rule the whole
+    /// search is pointed at carried no information about the market at all.
+    ///
+    /// The second assertion is the load-bearing one: no edit can make it pass
+    /// again without reintroducing a hand-written sign.
+    #[test]
+    fn a_one_to_three_cell_does_not_report_three() {
+        let a = one_to_three_cell(200, 600);
+        let b = one_to_three_cell(50, 900);
+
+        assert_eq!(
+            (a.trades, a.wins),
+            (2, 1),
+            "one winner and one loser, or the ratio is vacuous"
+        );
+        assert_eq!(a.targeted, 1, "the winner must have ended ON the target");
+        assert_eq!(a.stopped, 1, "the loser must have ended ON the stop");
+
+        // 1_003_000 target level, entered at 1_000_200; 999_000 stop level,
+        // entered at 1_000_600. Both fills are inside their bar's range.
+        assert_eq!(a.min_win, 2_800, "the target level less the WORSE entry");
+        assert_eq!(a.worst_trade, -1_600, "the stop level less the WORSE entry");
+        assert_eq!(
+            a.reward_to_risk_bp(),
+            175,
+            "2,800 over 1,600. The defect reported 300 -- the ladder's own axis"
+        );
+        assert!(
+            a.reward_to_risk_bp() < 300,
+            "a 1:3 ladder still reported its own ratio: {}",
+            a.reward_to_risk_bp()
+        );
+        assert_ne!(
+            a.reward_to_risk_bp(),
+            b.reward_to_risk_bp(),
+            "two different sets of bars under ONE ladder produced ONE ratio, so \
+             the number is a restatement of the axis and not a measurement of \
+             the data"
+        );
+    }
+
+    /// The entry spread is the whole fill cost of a level exit.
+    ///
+    /// Before the fix this was identically ZERO on the level path: the spread
+    /// reached `fill_cost` only through `paisa_of(ppm, entry_pess) -
+    /// paisa_of(ppm, entry_opt)`, which truncates to nothing at every rung the
+    /// engine ships. A column documented as *"the whole knowable spread"*, on
+    /// 45% of trades, that could not move.
+    #[test]
+    fn the_entry_spread_is_the_whole_fill_cost_of_a_level_exit() {
+        let cell = one_to_three_cell(200, 600);
+        assert_eq!(
+            cell.fill_cost, 800,
+            "200 on the target's entry bar and 600 on the stop's, and nothing else"
+        );
+        assert_eq!(
+            cell.gapped, 0,
+            "both levels sit inside their exit bar, so neither is a gap fill"
+        );
+    }
+
     fn trail_ambiguity_fixture() -> (
         Vec<indicators::Candle>,
         crate::excursion::Ladder,

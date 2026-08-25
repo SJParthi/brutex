@@ -2588,7 +2588,7 @@ exit report.
 **nothing ranks on it** — whether it or `edge_ratio` should decide the selection
 is still the open question in `docs/06-limits.md`, and answering it by quietly
 switching the key would be the defect this entry exists to remove, recreated one
-layer down. The seventeen-field width spec lives in three places because
+layer down. The nineteen-field width spec lives in three places because
 `writeln!` requires a literal format string; W-07 is what makes the third copy a
 specification rather than a duplicate.
 

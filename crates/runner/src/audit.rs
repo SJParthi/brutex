@@ -366,7 +366,7 @@ fn grid_header(out: &mut String, g: &Grid) {
 fn grid_columns(out: &mut String) {
     let _ = writeln!(
         out,
-        "  {:<15}{:>7}{:>6}{:>6}{:>6}{:>6}{:>7}{:>6}{:>14}{:>11}{:>12}{:>12}{:>9}{:>13}{:>11}{:>11}{:>9}{:>11}",
+        "  {:<15}{:>7}{:>6}{:>6}{:>6}{:>6}{:>7}{:>6}{:>14}{:>11}{:>6}{:>12}{:>12}{:>9}{:>13}{:>11}{:>11}{:>9}{:>11}",
         "exit",
         "trades",
         "won",
@@ -388,6 +388,12 @@ fn grid_columns(out: &mut String) {
         // KNOWS was given up, where `unknown` is money whose fate one-minute
         // bars cannot settle either way.
         "fill cost",
+        // A LEVEL EXIT THE BAR OPENED PAST, so the fill was the bar's open and
+        // not the level the ladder asked for. Counted rather than absorbed
+        // because §4 refuses a fallback that hides a failure: a cell whose money
+        // comes from gaps is not the rung working, and a reader who cannot tell
+        // the two apart is reading the ladder's intention as its result.
+        "gap",
         "worst trip",
         "drawdown",
         "ret/DD",
@@ -435,7 +441,7 @@ fn ret_dd(c: &Cell) -> String {
 fn grid_row(out: &mut String, c: &Cell, mark: &str) {
     let _ = writeln!(
         out,
-        "  {:<15}{:>7}{:>6}{:>6}{:>6}{:>6}{:>7}{:>6}{:>14}{:>11}{:>12}{:>12}{:>9}{:>13}{:>11}{:>11}{:>9}{:>11}{}",
+        "  {:<15}{:>7}{:>6}{:>6}{:>6}{:>6}{:>7}{:>6}{:>14}{:>11}{:>6}{:>12}{:>12}{:>9}{:>13}{:>11}{:>11}{:>9}{:>11}{}",
         exit_name(c),
         c.trades,
         c.wins,
@@ -446,6 +452,7 @@ fn grid_row(out: &mut String, c: &Cell, mark: &str) {
         c.timed_out,
         c.pessimistic,
         c.fill_cost,
+        c.gapped,
         c.worst_trade,
         c.max_drawdown,
         ret_dd(c),
@@ -1739,7 +1746,7 @@ mod tests {
         // The spec, first thing in the function: `clippy::items_after_statements`
         // and, more usefully, a reader who wants to know what the table claims
         // to be does not have to scroll past a fixture to find out.
-        const COLUMNS: [(&str, usize); 18] = [
+        const COLUMNS: [(&str, usize); 19] = [
             ("exit", 15),
             ("trades", 7),
             ("won", 6),
@@ -1750,6 +1757,10 @@ mod tests {
             ("time", 6),
             ("total", 14),
             ("fill cost", 11),
+            // BESIDE `fill cost` BECAUSE BOTH ARE FILL QUALITY, and deliberately
+            // NOT beside the five exit counters -- those sum to `trades` and a
+            // gap is a property OF a stop or target exit, not a sixth kind.
+            ("gap", 6),
             ("worst trip", 12),
             ("drawdown", 12),
             ("ret/DD", 9),

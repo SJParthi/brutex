@@ -21933,3 +21933,73 @@ reopened file actually receives.
 never called outside `#[cfg(test)]` — the same shape `CLAUDE.md` §3 rule 7
 records for `indicators::PastPrefix`. A guard that exists and is not wired in
 protects nothing.
+
+### D-0291 — a level exit is a PRICE, and the money is exit minus entry
+
+**Decision.** `grid::realised` prices a stop or target exit at the level the
+order rested at — reconstructed against the anchor `crossings` actually measured
+from, and bounded by the bar that filled it — and books `exit - entry`. The two
+arms carrying a hand-written sign are one arm carrying one subtraction.
+`Cell::gapped` counts the exits whose bar opened past the level, and the grid
+table renders it.
+
+**The defect.** Both level arms booked a FIXED ppm distance:
+
+```rust
+(Ended::Stop,   Some(ppm)) => -paisa_of(ppm, entry_price),
+(Ended::Target, Some(ppm)) =>  paisa_of(ppm, entry_price),
+```
+
+But every rung inside `Crossings` is a ppm distance from the entry bar's OPEN —
+`crossings` is handed `entry_opt`, and `excursion::ppm_of` scales from it — while
+the pessimistic reading FILLS at the printed extreme. Re-scaling that same ppm
+against the extreme puts the order at a price nobody placed it at and credits the
+position the entry bar's own `high - open` on every level exit, free.
+
+**Why this one outranks every other finding in the ledger.** `min_win` and
+`worst_trade` became pure functions of the two RUNGS, so
+`Cell::reward_to_risk_bp` — the operator's rule, *"the smallest win at least
+three times the largest loss"* — returned the ladder's own axis whatever the
+market did. MEASURED on `synthetic::sessions(8)`: **six different 1:3 cells
+across three condition bits, some profitable at +778,377 paisa and some losing
+at -251,207, ALL reported exactly 299.** And `Levels::ratios` sweeps precisely
+that coordinate. The rule the entire search is pointed at carried no information
+about the data at all, and a 1:3 stop:target cell satisfied it by arithmetic
+before a single bar was read.
+
+**Two more things it silenced.** `Cell::fill_cost`, documented as *"the whole
+knowable spread"*, was identically ZERO on the level path — the spread reached it
+only through `paisa_of(ppm, entry_pess) - paisa_of(ppm, entry_opt)`, which
+truncates to nothing at every rung the engine ships, on 45% of trades. And the
+`min`/`max` at the fold was EXCHANGING the two readings on every long target
+exit, so `Cell::uncertainty` reported that missing spread as intra-bar ORDERING.
+Both are correct for the first time; neither line changed.
+
+**Measured, before and after, by restoring the old arithmetic behind the new
+API** so only the calculation moved:
+
+| | before | after |
+|---|---|---|
+| `min_win` on a 1:3 cell | **3,000** — the target rung itself | **2,800** — the level less the real entry |
+| `Cell::fill_cost` | **0** | **800** — the two entry spreads |
+| `reward_to_risk_bp` | **300**, on any bars | **175**, and **155** on different bars |
+
+That last row is the point: one ladder over two fixtures now gives two answers.
+
+**Why the read is bounded and not just re-anchored.** A bar that opened past the
+level was already through at its first print, and the first print is the open —
+worse than the level for a stop, better for a target, and a price that PRINTED in
+both cases. `Candle::check` guarantees `low <= open <= high`, so the fallback is
+not itself an invention, which is what §3 rule 1 requires. MEASURED at 224 of
+12,494 reconstructions, 1.8%. It is COUNTED because §4 refuses a fallback that
+hides a failure: a cell whose money comes from gaps is not the rung working.
+
+**What this does NOT fix, and it is the same shape.** The trailing arm fills at
+`anchor - paisa_of(ppm, anchor)` with no reference to the exit bar at all:
+**140 of 12,130 long trail fills, 1.15%, sit ABOVE the printed high of the bar
+they filled on.** The fix is to route it through the same `level_fill`. It is
+deliberately a separate change — folding it in would make this one's before and
+after unattributable — and it is marked at the call site.
+
+Also untouched and separately owed: the double next-bar fill on the eight
+non-1-minute rungs, and the cross-session entry.
