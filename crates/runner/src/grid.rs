@@ -475,6 +475,23 @@ impl Cell {
         bp
     }
 
+    /// A cell of `trades` round trips at `win_rate_bp`, for a bound query.
+    ///
+    /// Wins are rounded UP, because a rate is a floor: an operator asking for
+    /// 80% of eleven trades means nine, not 8.8.
+    #[must_use]
+    fn at_rate(trades: u64, win_rate_bp: i64) -> Self {
+        let wins = trades
+            .saturating_mul(win_rate_bp.max(0).unsigned_abs())
+            .saturating_add(9_999)
+            / 10_000;
+        Self {
+            trades,
+            wins: wins.min(trades),
+            ..Self::default()
+        }
+    }
+
     /// Gross profit over gross loss, in hundredths. `250` reads 2.50.
     ///
     /// **The figure a strategy report is usually judged on.** Above 1.00 the
@@ -712,6 +729,57 @@ impl Cell {
     pub const fn depends_on_unknowable_ordering(&self) -> bool {
         self.uncertainty() != 0
     }
+}
+
+/// The fewest round trips at which `win_rate_bp` can still clear `assurance_bp`.
+///
+/// # Why a search DOWNWARD needs this, and what its absence cost
+///
+/// A support threshold decides how often a combination may fire, and a
+/// self-tuning search walks it downward looking for a rare setup. It has to stop
+/// somewhere, and the honest stopping point is **the sample below which the
+/// statistics can no longer support the claim being made** — not a cadence
+/// somebody typed.
+///
+/// `crates/cli` floored its descent at one trade a week, which over 121 months
+/// of one-minute bars is 561 ppm — about 526 round trips. An operator hunting a
+/// setup that fires FORTY times is asking for 42 ppm, so the entire 42–561 ppm
+/// band was never searched. The mask was never built, never counted, never
+/// ranked. That is not the prune discarding it; it is the threshold the prune
+/// was applied under, and it is the single largest reason a rare combination
+/// could not be found.
+///
+/// # What this computes
+///
+/// The Wilson lower bound rises with `n` at a fixed rate, so there is a smallest
+/// `n` at which a record of `win_rate_bp` still clears `assurance_bp`. Below it,
+/// **no combination can pass however good it is** — so descending further buys
+/// nothing, and stopping earlier discards reachable answers.
+///
+/// Measured on the shipped bound, 80% observed against a coin-flip floor: eleven
+/// trades. Against an 80% floor: about a hundred and twenty. The difference
+/// between those two is the difference between a search that can find a rare
+/// setup and one that cannot.
+///
+/// # Bounded, and it returns the cap rather than looping
+///
+/// `ceiling` bounds the search so a caller cannot hang on an unsatisfiable pair
+/// — an `assurance_bp` above the rate itself is never reachable at any `n`,
+/// because the lower bound is always under the observed rate. The cap is
+/// returned rather than an error: a caller asking "how few trades will do" wants
+/// a number, and "more than this many" is that number.
+#[must_use]
+pub fn trades_needed_for(win_rate_bp: i64, assurance_bp: i64, ceiling: u64) -> u64 {
+    if assurance_bp <= 0 {
+        // No bound to clear. One trade is a sample; zero is not.
+        return 1;
+    }
+    for trades in 1..=ceiling {
+        if Cell::at_rate(trades, win_rate_bp).assurance_bp() >= assurance_bp {
+            return trades;
+        }
+    }
+    ceiling
 }
 
 /// Every variant of one combination.

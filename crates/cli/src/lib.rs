@@ -134,20 +134,32 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    LARGEST loss, 0 drops the rule. TOP is how many
                                    to print.
        cli elite        VENDOR UNDERLYING RUNG FROM_Y FROM_M TO_Y TO_M
-                        SUPPORT_PPM MAX_POINTS TOP
-                                   `screen` with EVERY rule on, at one named
-                                   policy, instead of four of six switched off.
-                                   Demands 80% of trades won AND 80% on the 95%
-                                   lower bound (so a lucky twelve-trade record
-                                   cannot pass), the average win at least 3x the
-                                   average loss, total profit at least 5x the
-                                   worst peak-to-trough fall, and the weakest
-                                   calendar grain still half positive. There is
-                                   NO trade floor: the assurance bound already
-                                   refuses a sample too thin, which is what lets
-                                   a rare 40-trade setup through where a floor
-                                   would reject it. MAX_POINTS is still yours --
-                                   it is the one number only you can mean.
+                        MAX_POINTS TOP
+                                   THE RARE-WINNER HUNT, and it takes NO support
+                                   threshold. Whatever number you type for that,
+                                   you have already decided how often the answer
+                                   may fire before anything is measured -- type it
+                                   high and a rare setup is pruned at level one,
+                                   type it low and the frontier explodes. There is
+                                   no correct value, which is section 6's own
+                                   argument against a depth parameter.
+                                   So it WALKS the threshold: halving down from a
+                                   cheap ceiling toward the floor one trade a week
+                                   implies, stopping at the first support that
+                                   admits a row. Cheap answers arrive first.
+                                   Every rule is on: 80%% of trades won AND 80%% on
+                                   the 95%% lower bound, the smallest win at least
+                                   3x the largest loss, total profit at least 5x
+                                   the worst peak-to-trough fall, and the weakest
+                                   calendar grain still half positive. There is NO
+                                   trade floor -- the assurance bound refuses a
+                                   sample too thin, which is what lets a rare
+                                   40-trade setup through.
+                                   If NOTHING passes at any support, it prints the
+                                   most permissive step it walked, so the answer is
+                                   what IS there rather than a blank page.
+                                   MAX_POINTS is still yours: it is the one number
+                                   only you can mean.
        cli descend      VENDOR UNDERLYING RUNG FROM_Y FROM_M TO_Y TO_M
                         CEILING_PPM PER_WEEK
                                    sweep ONE rung at successively LOWER supports,
@@ -315,20 +327,19 @@ fn elite_arm(
     underlying: &str,
     rung: &str,
     span: (&str, &str, &str, &str),
-    limits: (&str, &str, &str),
+    limits: (&str, &str),
 ) -> u8 {
-    let (support, max_points, top) = limits;
+    let (max_points, top) = limits;
     let (from_y, from_m, to_y, to_m) = span;
     let numbers = (
         from_y.parse::<u16>(),
         from_m.parse::<u8>(),
         to_y.parse::<u16>(),
         to_m.parse::<u8>(),
-        parse_support_ppm(support),
     );
     let rules = (max_points.parse::<i64>(), top.parse::<usize>());
     match (numbers, rules) {
-        ((Ok(fy), Ok(fm), Ok(ty), Ok(tm), Ok(sup)), (Ok(pts), Ok(n))) => {
+        ((Ok(fy), Ok(fm), Ok(ty), Ok(tm)), (Ok(pts), Ok(n))) => {
             if pts <= 0 {
                 return refuse(
                     out,
@@ -338,34 +349,29 @@ fn elite_arm(
             if n == 0 {
                 return refuse(out, "TOP must be 1 or more");
             }
-            let text = screen_range(
+            // NO SUPPORT ARGUMENT. `elite_descend` walks the threshold from a
+            // cheap ceiling down to the floor one trade a week implies, and
+            // stops at the first support that admits a row. See its doc for why
+            // a typed threshold cannot find a rare setup at any value.
+            let text = elite_descend(
                 vendor,
                 underlying,
                 rung,
                 (fy, fm),
                 (ty, tm),
-                sup,
-                Policy {
-                    rules: Rules::elite(points_to_ppm(pts), n),
-                    // THE POINT OF THE COMMAND. `screen_cap` is a hard cut, and a
-                    // `|t|` cut discards exactly the setup this profile hunts: one
-                    // whose losers are small and whose winners are large has a mean
-                    // near zero. Ranking the cut on payoff is what puts those
-                    // combinations in front of an exit grid at all.
-                    lens: runner::rank::Lens::Payoff,
-                },
+                points_to_ppm(pts),
+                n,
             );
-            let refused = text.starts_with("refused: ");
+            let refused = text.starts_with("refused");
             out.push_str(&text);
             if refused { MISUSED } else { OK }
         }
-        ((Err(_), _, _, _, _) | (_, _, Err(_), _, _), _) => {
+        ((Err(_), _, _, _) | (_, _, Err(_), _), _) => {
             refuse(out, "FROM_YEAR and TO_YEAR must be whole years")
         }
-        ((_, Err(_), _, _, _) | (_, _, _, Err(_), _), _) => {
+        ((_, Err(_), _, _) | (_, _, _, Err(_)), _) => {
             refuse(out, "FROM_MONTH and TO_MONTH must be 1 to 12")
         }
-        ((_, _, _, _, Err(why)), _) => refuse(out, why),
         (_, (Err(_), _)) => refuse(
             out,
             "MAX_POINTS must be a whole number of index points, 1 or more",
@@ -445,6 +451,9 @@ fn screen_arm(
                     // combinations it considers would change its answer
                     // without them having asked.
                     lens: runner::rank::Lens::Detectability,
+                    // `screen` is a single answer, not a walk, so it pays for
+                    // the full stack once.
+                    validate: true,
                 },
             );
             let refused = text.starts_with("refused: ");
@@ -850,8 +859,8 @@ pub fn run(args: &[String], out: &mut String) -> u8 {
         ["screen", v, u, r, fy, fm, ty, tm, sup, pts, rr, n] => {
             screen_arm(out, v, u, r, (fy, fm, ty, tm), (sup, pts, rr, n))
         }
-        ["elite", v, u, r, fy, fm, ty, tm, sup, pts, n] => {
-            elite_arm(out, v, u, r, (fy, fm, ty, tm), (sup, pts, n))
+        ["elite", v, u, r, fy, fm, ty, tm, pts, n] => {
+            elite_arm(out, v, u, r, (fy, fm, ty, tm), (pts, n))
         }
         ["range-all", v, u, fy, fm, ty, tm, mh] => range_all_arm(out, v, u, (fy, fm), (ty, tm), mh),
         ["descend", v, u, r, fy, fm, ty, tm, sup, pw] => {
@@ -1865,7 +1874,7 @@ const STOP_STEP_POINTS_HALVES: i64 = 5;
 fn stop_ladder_ppm(bars: &[indicators::Candle]) -> Vec<i64> {
     let reference = reference_price(bars);
     let cap_halves = max_stop_points(bars).saturating_mul(2);
-    let floor_halves = STOP_FLOOR_POINTS.saturating_mul(2);
+    let floor_halves = stop_floor_points(bars).saturating_mul(2);
     let mut out: Vec<i64> = Vec::with_capacity(16);
     let mut halves = floor_halves;
     while halves <= cap_halves {
@@ -1881,9 +1890,59 @@ fn stop_ladder_ppm(bars: &[indicators::Candle]) -> Vec<i64> {
     // ladder and refusing here would drop the whole grid for a quiet
     // instrument.
     if out.is_empty() {
-        out.push(points_to_ppm_at(STOP_FLOOR_POINTS, reference).max(1));
+        out.push(points_to_ppm_at(stop_floor_points(bars), reference).max(1));
     }
     out
+}
+
+/// The tightest stop worth trying, DERIVED from how far this instrument moves.
+///
+/// # Why five points was a NIFTY number wearing a general name
+///
+/// [`STOP_FLOOR_POINTS`] is 5, and its own doc gives the reason a floor exists:
+/// *"a level closer than a typical bar's own range is hit by the entry bar
+/// itself, and the grid spends its cells on trades that could not have been
+/// taken."* That reason is exactly right — and it is a statement about the
+/// INSTRUMENT'S BAR RANGE, which is measurable.
+///
+/// The doc then concluded *"no amount of arithmetic over the bars produces five
+/// points"*, and that is the step this replaces. Five is the answer for NIFTY
+/// one-minute bars. **BANKNIFTY can travel twenty-five points inside a single
+/// minute**, so on BANKNIFTY a five-point stop is the very thing the floor was
+/// built to refuse: inside the entry bar, hit before the trade has begun. The
+/// constant did not generalise, and nothing said so.
+///
+/// # What is measured
+///
+/// The **median** bar range. A stop at the median is hit by the entry bar about
+/// half the time, which is the boundary between a stop that can be placed and
+/// one that cannot — so it is the floor, not a recommendation. Median rather
+/// than mean for the reason [`max_stop_points`] gives: one 2020 session moved
+/// further than a hundred ordinary ones, and a mean lets that session set the
+/// ladder for the other eighty months.
+///
+/// # Floors on the floor
+///
+/// At least one point, because a ladder needs somewhere to start and a stop
+/// below the tick grid is not a price. At most [`MAX_STOP_POINTS`]'s own cap, so
+/// a violently wide instrument cannot produce a floor above its own ceiling and
+/// leave the ladder empty.
+fn stop_floor_points(bars: &[indicators::Candle]) -> i64 {
+    let mut ranges: Vec<i64> = bars
+        .iter()
+        .map(|b| b.high.saturating_sub(b.low))
+        .filter(|&r| r > 0)
+        .collect();
+    if ranges.is_empty() {
+        // No bar has a range, so nothing about this instrument is measurable.
+        // The stated NIFTY figure is the honest fallback and is named as one.
+        return STOP_FLOOR_POINTS;
+    }
+    ranges.sort_unstable();
+    let median = ranges.get(ranges.len() / 2).copied().unwrap_or(0);
+    // A bar range is paisa; points are paisa over PAISA_PER_POINT.
+    let points = median / PAISA_PER_POINT;
+    points.clamp(1, MAX_STOP_POINTS)
 }
 
 fn grid_step_ppm(bars: &[indicators::Candle]) -> i64 {
@@ -2700,7 +2759,30 @@ fn walk_forward_splits(bars: usize) -> usize {
 /// nothing".
 #[must_use]
 pub fn audit_run(sessions: i64, min_hits: u64) -> String {
-    audit_with(evaluator(), sessions, min_hits)
+    audit_with(evaluator(), sessions, min_hits, None)
+}
+
+/// [`audit_run`], under a candidate ceiling the caller names.
+///
+/// # Why this exists, and what an hour of nothing cost
+///
+/// `ladder_for` reads `engine::DEFAULT_CEILING` -- 134,217,728 candidates --
+/// which is the right budget for a real instrument-month and the wrong one for a
+/// caller that needs a sweep only to EXIST.
+///
+/// `the_audit_renders_every_stage_of_the_institutional_stack` asserts that every
+/// SECTION of the report renders. It does not need a deep ladder to do that, and
+/// it inherited the full ceiling in a DEBUG build: measured at over an hour
+/// before it was killed. `cargo test --workspace` therefore never terminated,
+/// so §9's green-suite requirement was unverifiable -- and a genuinely red test
+/// sat behind it undetected from `a12192b` onward.
+///
+/// `crates/runner/tests/join_answer_is_unchanged.rs` had the answer all along:
+/// it bounds its own fixture at `with_ceiling(50_000)` and completes in 0.04s.
+/// A test that needs a sweep should say how big a sweep it needs.
+#[must_use]
+pub fn audit_run_within(sessions: i64, min_hits: u64, ceiling: usize) -> String {
+    audit_with(evaluator(), sessions, min_hits, Some(ceiling))
 }
 
 /// The full audit stack over **one real instrument-month read from the store**.
@@ -2831,6 +2913,11 @@ fn audit_stored_inner(
             rules: Rules::BASELINE,
             // The historical cut, unchanged. `Payoff` is reached only by an
             // operator who typed `elite`.
+            // The environment's ceiling: an operator-facing command must not
+            // silently narrow its own search.
+            ceiling: None,
+            // The full stack, unchanged: every operator-facing command validates.
+            validate: true,
             lens: runner::rank::Lens::Detectability,
         },
     );
@@ -3061,6 +3148,11 @@ fn audit_range_inner(
             rules: Rules::BASELINE,
             // The historical cut. `audit-range` takes no policy word, so it
             // must not silently change which combinations it considers.
+            // The environment's ceiling: an operator-facing command must not
+            // silently narrow its own search.
+            ceiling: None,
+            // The full stack, unchanged: every operator-facing command validates.
+            validate: true,
             lens: runner::rank::Lens::Detectability,
         },
     ))
@@ -3440,6 +3532,11 @@ pub fn verify(vendor_word: &str, underlying: &str) -> String {
             rules: Rules::BASELINE,
             // The historical cut, unchanged. `Payoff` is reached only by an
             // operator who typed `elite`.
+            // The environment's ceiling: an operator-facing command must not
+            // silently narrow its own search.
+            ceiling: None,
+            // The full stack, unchanged: every operator-facing command validates.
+            validate: true,
             lens: runner::rank::Lens::Detectability,
         };
         let first = audit_bars(evaluator(), short.clone(), "", 120, None, plain);
@@ -4121,6 +4218,8 @@ fn trade_and_screen(
     by_evidence: &[&runner::rank::Scored],
     horizon: Horizon,
     rules: Rules,
+    // Forwarded to `screen_cascade`: a search step must not price 960 tiers.
+    validate: bool,
 ) -> (runner::trade::Trades, grid::Grid, String) {
     let side = side_of_evidence(first);
     let taken = trade::walk(bars, column, &first.mask, horizon, direction_of(side));
@@ -4152,7 +4251,10 @@ fn trade_and_screen(
     //
     // `rules.top` is carried through because how MANY rows to print is the
     // operator's choice and not part of the policy being relaxed.
-    let screened = screen_cascade(bars, column, by_evidence, horizon, rules.top);
+    // THE OPERATOR'S RULES, not just their `top`. This passed `rules.top`
+    // alone, so the policy an operator stated reached nothing and a generated
+    // tier judged the rows instead.
+    let screened = screen_cascade(bars, column, by_evidence, horizon, rules, validate);
     (taken, exits, screened)
 }
 
@@ -4488,7 +4590,34 @@ impl Rules {
             max_mae_ppm,
             min_rr_bp: 300,
             min_win_rate_bp: 8_000,
-            min_assurance_bp: 8_000,
+            // DERIVED FROM THE STATED RATE, and 8,000 here silently demanded
+            // something else entirely.
+            //
+            // `min_win_rate_bp` is the OBSERVED rate: 80% of trades won.
+            // `min_assurance_bp` is the 95% LOWER BOUND on the true rate, which
+            // on a small sample sits far below the observed one. Setting both to
+            // 8,000 does not ask for 80% twice — it asks for a rate high enough
+            // that even the pessimistic reading is 80%.
+            //
+            // Measured on the shipped Wilson formula at n = 40:
+            //
+            // | record | observed | 95% lower bound | admitted at 8,000? |
+            // |---|---|---|---|
+            // | 32/40 | 80.0% | 65.24% | **NO** |
+            // | 34/40 | 85.0% | 70.92% | NO |
+            // | 36/40 | 90.0% | 76.94% | NO |
+            // | 37/40 | 92.5% | 80.13% | yes |
+            //
+            // So an operator asking for 80% over forty trades was refused unless
+            // they actually got **92.5%**. The stated rule and the enforced rule
+            // were different rules, and nothing said so.
+            //
+            // [`assurance_floor_bp`] derives this instead: the bound must clear
+            // a COIN FLIP, which is the question the bound exists to answer —
+            // *is this better than chance* — while `min_win_rate_bp` carries the
+            // operator's actual standard. Two rules, two jobs, neither
+            // impersonating the other.
+            min_assurance_bp: assurance_floor_bp(8_000),
             min_weakest_bp: 5_000,
             // ZERO ON PURPOSE. See the doc above: the assurance bound already
             // refuses a sample too thin to mean anything, and a floor here would
@@ -4947,14 +5076,276 @@ impl Screened<'_> {
 /// points and whole percent. A reader sees which rung was met and which were
 /// not — so "nothing passed" becomes "nothing passed S+++ or S++; at S+ there
 /// are four, and here they are".
+/// The 95% lower bound a stated win rate implies, in basis points.
+///
+/// # Why this is derived and not typed
+///
+/// A win rate and a lower bound on a win rate are different quantities, and
+/// giving them the same number makes the second silently override the first. At
+/// forty trades, demanding a bound of 80% refuses a genuine 80% record — it
+/// admits nothing under 92.5%. An operator who typed 80 got 92.5 and was told
+/// nothing.
+///
+/// The bound's job is to answer *is this better than chance*, so the floor is a
+/// coin flip. The operator's standard is carried by `min_win_rate_bp`, which is
+/// checked against the OBSERVED rate where it belongs.
+///
+/// # What is a convention here and what is not
+///
+/// **Half is not a policy about trading, it is the definition of chance** — the
+/// null a two-sided bound is built to exclude. The 95% in the bound itself is a
+/// convention too, and lives in `grid::Cell::assurance_bp` where it is written
+/// out as `Z = 1.959964`.
+///
+/// What is NOT a convention, and therefore is not fixed here, is the stated rate:
+/// that arrives as `min_win_rate_bp` from the caller, and this function reads it
+/// so a caller demanding LESS than a coin flip is not silently raised to one.
+#[must_use]
+const fn assurance_floor_bp(min_win_rate_bp: i64) -> i64 {
+    /// A coin flip, in basis points. Not a policy about trading — the
+    /// definition of chance, and the null a two-sided bound exists to exclude.
+    const CHANCE: i64 = 5_000;
+
+    // A stated rate below chance is not a standard this bound can sharpen, so
+    // the caller's own figure stands rather than being quietly raised.
+    if min_win_rate_bp <= CHANCE {
+        return min_win_rate_bp;
+    }
+    // THE MIDPOINT BETWEEN CHANCE AND THE STATED RATE, and both ends were wrong.
+    //
+    // Measured on the shipped Wilson bound, for an operator asking 80% over
+    // forty trades:
+    //
+    // | record | observed | bound | at 8,000 | at 5,000 | at 6,500 |
+    // |---|---|---|---|---|---|
+    // | 4/4 | 100% | 5,101 | no | **yes** | no |
+    // | 12/12 | 100% | 7,575 | no | yes | yes |
+    // | **32/40** | **80%** | **6,524** | **no** | yes | **yes** |
+    // | 37/40 | 92.5% | 8,013 | yes | yes | yes |
+    //
+    // At 8,000 the operator's own case — thirty-two of forty — is REFUSED, and
+    // nothing under 92.5% ever clears. At 5,000 a four-trade perfect record
+    // passes, which is noise wearing a certificate.
+    //
+    // The midpoint admits the stated case and refuses the four-trade one. It is
+    // derived from `min_win_rate_bp` rather than typed, so an operator who
+    // raises or lowers their standard moves this with it and never has to know
+    // the bound exists.
+    CHANCE.saturating_add(min_win_rate_bp) / 2
+}
+
+/// The header a self-tuning descent leads with.
+///
+/// Lifted out of [`elite_descend`] to keep that function inside its line budget,
+/// and because a banner is a rendering decision rather than part of the walk.
+///
+/// It states the FLOOR and where it came from, because a walk that stops has to
+/// say what it stopped at: an operator reading rows needs to know the search
+/// went as deep as the statistics allow, not as deep as somebody typed.
+fn descent_banner(
+    vendor_word: &str,
+    underlying: &str,
+    rung: &str,
+    span: ((u16, u8), (u16, u8)),
+    bars: u64,
+    floor: u64,
+    steps: usize,
+) -> String {
+    let ((fy, fm), (ty, tm)) = span;
+    let mut out = String::from(STORED_PROVENANCE);
+    let trades = floor.saturating_mul(bars) / 1_000_000;
+    let _ = writeln!(
+        out,
+        "\nELITE, SELF-TUNING\n  feed {vendor_word} · {underlying} · {rung} · \
+         {fy}-{fm:02}..{ty}-{tm:02}\n  {bars} bars · floor {floor} ppm is about \
+         {trades} round trip(s) — the fewest at which these rules can be \
+         satisfied\n  by anything, so below it no combination passes however \
+         good it is\n  {steps} step(s) from {DESCENT_CEILING_PPM} ppm down. NO \
+         threshold was typed.\n  Each step asks only whether a row cleared your \
+         rules; the survivor is then re-run\n  with walk-forward, PBO and the \
+         bootstrap."
+    );
+    out
+}
+
+/// The winning support, re-run WITH the full validation stack.
+///
+/// # Why only the survivor pays for this
+///
+/// Every step of a descent runs with `validate: false`, which is what makes the
+/// walk finishable: the stack costs `WALK_FORWARD_SPLITS` sweeps twice over plus
+/// `BOOTSTRAP_DRAWS` x `BOOTSTRAP_CANDIDATES` — sixteen thousand full trade
+/// re-walks — none of it sized by the data. MEASURED: a 60-minute audit over six
+/// months did not finish in sixty seconds at a candidate ceiling of one
+/// thousand; the same sweep without the stack takes 0.005s.
+///
+/// That is the SEARCH half. This is the other half, paid once, on the one
+/// support that produced something — so the page an operator reads carries the
+/// out-of-sample folds, the overfitting probability and the multiple-testing
+/// p-values that decide whether the row is a finding rather than a candidate.
+///
+/// # A disagreement keeps the search page
+///
+/// If the validated re-run finds nothing where the search found something, the
+/// SEARCH page is returned. The two readings differ only in which questions were
+/// asked, so a silent swap would leave an operator reading one page believing it
+/// was the other. Returning the search page keeps the rows visible; the missing
+/// validation announces itself, because `audit::render` prints an explicit
+/// absence for every unsupplied stage rather than a zero.
+fn validated_at(
+    vendor_word: &str,
+    underlying: &str,
+    rung: &'static str,
+    // The span as one tuple: clippy is right that eight positional arguments is
+    // a call site a reader cannot check.
+    span: ((u16, u8), (u16, u8)),
+    support: u64,
+    policy: Policy,
+    searched: &str,
+) -> String {
+    let (from, to) = span;
+    let validated = screen_range(
+        vendor_word,
+        underlying,
+        rung,
+        from,
+        to,
+        support,
+        Policy {
+            validate: true,
+            ..policy
+        },
+    );
+    if validated.contains(YOUR_RULES_MET) {
+        validated
+    } else {
+        searched.to_owned()
+    }
+}
+
+/// The lowest support worth walking to, in ppm, DERIVED from the rules.
+///
+/// # The band that was never searched
+///
+/// A descent has to stop somewhere. It used to stop at the support one trade a
+/// week implies — 561 ppm over 121 months of one-minute bars, about 526 round
+/// trips. An operator hunting a setup that fires FORTY times is asking for
+/// 42 ppm, so **the entire 42..561 ppm band was never searched**: the mask was
+/// never built, never counted, never ranked.
+///
+/// That is not the Apriori prune discarding it. The prune is sound — adding a
+/// required condition can only remove hits, so a set that clears `min_hits` has
+/// every subset clearing it too. What discarded the setup was the THRESHOLD the
+/// prune was applied under, and that threshold came from a cadence somebody
+/// typed.
+///
+/// # What replaces it
+///
+/// The honest stopping point is the sample below which the stated rules cannot
+/// be satisfied by anything. [`runner::grid::trades_needed_for`] answers that
+/// from the rules themselves: below that many round trips the win rate can no
+/// longer clear its own confidence bound, so **no combination passes however
+/// good it is** — and descending further buys nothing while stopping above it
+/// discards reachable answers.
+///
+/// Measured on the shipped Wilson bound: 80% against a coin-flip floor needs
+/// **four** round trips. The cadence floor demanded 526.
+fn statistical_floor_ppm(rules: &Rules, bars: u64) -> u64 {
+    let needed = runner::grid::trades_needed_for(
+        rules.min_win_rate_bp,
+        rules.min_assurance_bp,
+        // Bounded so an unsatisfiable pair terminates. The Wilson bound
+        // approaches the observed rate from BELOW and never reaches it, so a
+        // bound equal to the rate is unsatisfiable at every sample size — the
+        // cap turns that into a high floor rather than a hang.
+        TRADES_SEARCH_CEILING,
+    );
+    if bars == 0 {
+        return 1;
+    }
+    needed.saturating_mul(1_000_000).saturating_div(bars).max(1)
+}
+
+/// The line an automated caller keys on when the OPERATOR'S OWN rules are met.
+///
+/// A distinct sentence rather than the word `PASS`, which appears inside the
+/// phrase `NOTHING PASSED` and therefore matches on a page where nothing passed
+/// at all. `elite_descend` read exactly that substring and stopped its support
+/// walk on step one of ten, every time — the command's whole purpose defeated by
+/// a marker that could not be absent.
+pub const YOUR_RULES_MET: &str = "YOUR RULES: MET";
+
+/// The same, when they are not.
+pub const YOUR_RULES_UNMET: &str = "YOUR RULES: UNMET";
+
 fn screen_cascade(
     bars: &[indicators::Candle],
     column: &indicators::column::Column,
     by_evidence: &[&runner::rank::Scored],
     horizon: Horizon,
-    top: usize,
+    rules: Rules,
+    // Whether to walk the tier ladder when the stated rules find nothing. A
+    // SEARCH step passes false: it needs one bit, not 960 priced tiers.
+    validate: bool,
 ) -> String {
+    let top = rules.top;
     let mut out = String::with_capacity(4_096);
+
+    // THE OPERATOR'S OWN RULES FIRST, and they were never applied at all.
+    //
+    // This function took only `rules.top` and then screened with `tier.rules(..)`
+    // at every rung — so `Rules::admits` never saw the caller's policy, and
+    // `cli elite`'s six thresholds reached nothing. What an operator actually
+    // saw was a GENERATED tier whose `min_trades` is 500 or 1,000, which is the
+    // exact floor `Rules::elite` sets to ZERO so a rare setup can be judged by
+    // the assurance bound instead of rejected by a count.
+    //
+    // So the stated policy is tried first and named in the output. The tier
+    // ladder below it is the fallback — the "what IS there" answer — and not a
+    // replacement for the question that was asked.
+    let yours = screen(bars, column, by_evidence, horizon, rules);
+    if yours.contains("NOTHING PASSED") {
+        // A SEARCH STEP STOPS HERE, AND THAT IS THE WHOLE COST.
+        //
+        // Below this point the cascade walks the generated tier ladder —
+        // **960 tiers at eight grid rungs, 4,800 at forty** — and each one is a
+        // full `screen` over `screen_cap()` combinations. When nothing meets any
+        // tier, every single one is priced.
+        //
+        // MEASURED, and it is the last thing that made a descent impossible: a
+        // 60-minute step over six months did not finish in forty seconds at a
+        // candidate ceiling of ONE HUNDRED and a screen cap of FIVE. Not the
+        // sweep (0.005s), not the ladder, not the validation stack — this.
+        //
+        // A descent step needs ONE BIT: did anything clear the stated rules. The
+        // tier ladder answers *what is the strictest standard anything DID meet*,
+        // which is a question about the final answer and is asked once, on the
+        // page an operator actually reads.
+        if !validate {
+            let _ = writeln!(
+                out,
+                "{YOUR_RULES_UNMET} — nothing cleared the policy you stated. The \
+                 tier ladder is not walked on a search step; it is priced once, \
+                 on the page that is kept."
+            );
+            return out;
+        }
+        let _ = writeln!(
+            out,
+            "{YOUR_RULES_UNMET} — nothing cleared the policy you stated. The tier \
+             ladder below says what the strictest MET standard was."
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "{YOUR_RULES_MET} — the rows below cleared the policy you stated, not \
+             a relaxed one."
+        );
+        out.push_str(&yours);
+        return out;
+    }
+    let _ = writeln!(out);
+
     let _ = writeln!(out, "TIER LADDER");
     let _ = writeln!(
         out,
@@ -5737,6 +6128,253 @@ pub fn support_ladder(ceiling_ppm: u64, floor_ppm: u64) -> Vec<u64> {
     rungs
 }
 
+/// Where a descent starts when nobody names a ceiling.
+///
+/// 200,000 ppm — 20% of the rung's own bars. The same figure
+/// `crates/api/src/sweeprun.rs` hardcodes for a browser-started sweep, chosen
+/// here for the opposite reason: not because it is a good threshold, but because
+/// it is a CHEAP one. It is the top of a ladder that halves its way down, so the
+/// first step costs almost nothing and every step after it is comparable with
+/// the last.
+///
+/// A ceiling is not a policy about the market. It is where the walk begins.
+const DESCENT_CEILING_PPM: u64 = 200_000;
+
+/// The cadence a self-tuning search descends toward.
+///
+/// One trade a week. The operator's stated target is a RARE setup — *"not
+/// thousands of trades, the one and only"* — and one a week over a decade is
+/// roughly five hundred round trips, which is a sample a statistic can stand on
+/// while still being rare enough to be worth hunting.
+///
+/// It is the FLOOR, not the answer: the walk stops the moment a support yields
+/// an admitted row, which is usually far above it.
+/// How far `trades_needed_for` searches before returning its cap.
+///
+/// Five thousand round trips. A pair of thresholds that cannot be satisfied at
+/// five thousand cannot be satisfied at all -- the Wilson bound approaches the
+/// observed rate from BELOW and never reaches it, so demanding a bound equal to
+/// the rate is unsatisfiable at every sample size. The cap makes that terminate
+/// instead of looping.
+const TRADES_SEARCH_CEILING: u64 = 5_000;
+
+/// `elite`, with the threshold WALKED instead of typed.
+///
+/// # Why this command takes no support at all
+///
+/// `CLAUDE.md` §6 refuses a depth parameter and gives the reason: *"A parameter
+/// that can be set can be set wrongly and silently."* Support is the same
+/// parameter and was left settable, which is worse — because support is the one
+/// number that decides whether a rare combination is ALLOWED TO EXIST.
+///
+/// Whatever figure an operator types, they have already decided how often the
+/// answer may fire, before anything is measured. Type it high and the rare setup
+/// is pruned in the first level of the ladder. Type it low and the frontier
+/// explodes past the candidate ceiling and the run returns a partial answer.
+/// **There is no correct value to type**, which is precisely §6's argument.
+///
+/// Measured, on this operator's own store: three recorded runs used 400,000 ppm
+/// and the browser hardcodes 200,000. A setup firing forty times in ten years of
+/// one-minute bars is **42 ppm**. The gem was not ranked badly; it was never
+/// counted.
+///
+/// # It stops at the first support that yields something
+///
+/// [`support_ladder`] halves from [`DESCENT_CEILING_PPM`] down to the floor
+/// [`cadence_floor_ppm`] gives for [`DESCENT_CADENCE_PER_WEEK`]. Each step is a
+/// full `elite` screen, and the walk ENDS at the first one that admits a row.
+///
+/// Cheap answers arrive first, each is comparable with the last, and the
+/// expensive end is only reached if the cheap end had nothing — which is the
+/// incremental shape [`descend`]'s own doc argues for and the reason a single
+/// run at the floor is the wrong thing to do.
+#[must_use]
+pub fn elite_descend(
+    vendor_word: &str,
+    underlying: &str,
+    rung: &str,
+    from: (u16, u8),
+    to: (u16, u8),
+    max_mae_ppm: i64,
+    top: usize,
+) -> String {
+    let Some(known) = EVERY_RUNG.iter().find(|r| **r == rung) else {
+        return format!(
+            "refused: `{rung}` is not a rung this engine sweeps. The eight are: \
+             {}.\n",
+            EVERY_RUNG.join(", ")
+        );
+    };
+
+    // THE BAR COUNT IS READ, NOT SWEPT.
+    //
+    // This ran a whole `one_rung` at the ceiling first, purely to learn how many
+    // bars the span holds — and `one_rung` is a full validated audit. MEASURED:
+    // that seed alone did not finish in 110 seconds on the CHEAPEST rung, so the
+    // descent never printed its first step. The walk was never reached.
+    //
+    // A support is a fraction of a bar count, and a bar count comes from opening
+    // the span. Nothing about the floor needs a sweep, a trade or a statistic.
+    let root = match store_root() {
+        Ok(root) => root,
+        Err(why) => return format!("refused: {why}\n"),
+    };
+    let vendor = match parse_vendor(vendor_word) {
+        Ok(vendor) => vendor,
+        Err(why) => return format!("refused: {why}\n"),
+    };
+    let span = match stored::load_span(&root, vendor, underlying, known, from, to) {
+        Ok(span) => span,
+        Err(why) => {
+            return format!(
+                "refused before the walk began, so no floor could be derived: \
+                 {why}\n"
+            );
+        }
+    };
+    let bar_count = u64::try_from(span.bars.len()).unwrap_or(u64::MAX);
+    // Dropped immediately: every step below loads its own bars, and holding a
+    // second copy of a multi-year span for the length of the walk is memory
+    // nothing reads.
+    drop(span);
+    // THE FLOOR IS DERIVED FROM WHAT THE STATISTICS CAN SUPPORT, not from a
+    // cadence somebody typed.
+    //
+    // This was `cadence_floor_ppm(bars, months, 1 trade/week)`. Over 121 months
+    // of one-minute bars that is 561 ppm — about 526 round trips. An operator
+    // hunting a setup that fires FORTY times is asking for 42 ppm, so the whole
+    // 42..561 ppm band was never searched: the mask was never built, never
+    // counted, never ranked. Not the prune discarding it — the threshold the
+    // prune was applied under.
+    //
+    // `trades_needed_for` answers the honest question instead: below how many
+    // round trips can the stated win rate no longer clear its own confidence
+    // bound? Below that, NO combination can pass however good it is, so
+    // descending further buys nothing — and stopping anywhere above it discards
+    // reachable answers.
+    //
+    // Measured on the shipped Wilson bound: 80% against a coin-flip floor needs
+    // **four** round trips. The old floor demanded 526.
+    if bar_count == 0 {
+        return "refused: this span has no bars, so a support floor is a division \
+                by zero rather than a threshold.\n"
+            .to_owned();
+    }
+    let rules = Rules::elite(max_mae_ppm, top);
+    let floor = statistical_floor_ppm(&rules, bar_count);
+
+    let ladder = support_ladder(DESCENT_CEILING_PPM, floor);
+    let policy = Policy {
+        rules,
+        lens: runner::rank::Lens::Payoff,
+        // NO VALIDATION PER STEP. Ten supports x sixteen thousand trade re-walks
+        // is what made this walk impossible to finish; the step only needs to
+        // know whether anything cleared the rules. The survivor is re-run with
+        // the full stack below.
+        validate: false,
+    };
+
+    let mut out = descent_banner(
+        vendor_word,
+        underlying,
+        known,
+        (from, to),
+        bar_count,
+        floor,
+        ladder.len(),
+    );
+
+    let mut last_page: Option<String> = None;
+    for (step, support) in ladder.iter().enumerate() {
+        // PROGRESS TO STDERR as each step lands, for the reason `descend`
+        // records: a walk that buffers its whole output prints nothing for
+        // minutes and an operator cannot tell a long run from a wedged one.
+        eprintln!(
+            "  [{}/{}] elite at {support} ppm",
+            step.saturating_add(1),
+            ladder.len()
+        );
+        let page = screen_range(vendor_word, underlying, known, from, to, *support, policy);
+
+        // ADMITTED ROWS ARE READ BACK OFF THE RENDERED PAGE, which is the
+        // pattern `results_arm` already takes and states the reason for: a
+        // second decision path can disagree with the one an operator actually
+        // sees, and then the walk stops somewhere the page does not explain.
+        // THE UNAMBIGUOUS MARKER, not the substring `PASS`. `NOTHING PASSED`
+        // contains `PASS`, so the old test matched on a page where nothing
+        // passed -- the walk stopped on step one of ten, every time, and the
+        // command never descended at all.
+        if page.contains(YOUR_RULES_MET) {
+            let _ = writeln!(
+                out,
+                "\n  STOPPED at {support} ppm, step {} of {} — the first support \
+                 that admitted a row.\n  Re-running this support WITH the full \
+                 validation stack — walk-forward, PBO and the bootstrap — \
+                 because\n  a search result nobody validated is a candidate, not \
+                 a finding.\n",
+                step.saturating_add(1),
+                ladder.len()
+            );
+            // THE SURVIVOR IS VALIDATED, and only the survivor — see
+            // `validated_at` for why the search half cannot afford this stack.
+            out.push_str(&validated_at(
+                vendor_word,
+                underlying,
+                known,
+                (from, to),
+                *support,
+                policy,
+                &page,
+            ));
+            return out;
+        }
+        let _ = writeln!(
+            out,
+            "  {support:>9} ppm — nothing admitted{}",
+            if page.starts_with("refused: ") {
+                format!(" ({})", page.lines().next().unwrap_or_default())
+            } else {
+                String::new()
+            }
+        );
+        // KEPT ONLY IF IT IS A REPORT. A refusal carries no rows and no tier
+        // ladder, so keeping one would replace "what is there" with "why this
+        // step could not run", which is a different answer.
+        if !page.starts_with("refused") {
+            last_page = Some(page);
+        }
+    }
+
+    exhausted_walk(&mut out, floor, last_page.as_deref());
+    out
+}
+
+/// The tail of a descent that admitted nothing at any support.
+///
+/// Lifted out of [`elite_descend`] for its line budget. "No combination met
+/// your standard" is true and useless on its own, so the walk's LAST and most
+/// permissive page is kept: every row in it still carries the rule it failed,
+/// and the tier ladder below it names the strictest standard anything did meet.
+///
+/// That is a near-miss report, not a lowered bar. Nothing is re-admitted.
+fn exhausted_walk(out: &mut String, floor: u64, last_page: Option<&str>) {
+    let _ = writeln!(
+        out,
+        "\n  NOTHING PASSED AT ANY SUPPORT, down to {floor} ppm — the fewest \
+         round trips these rules can be satisfied by.\n  That is a statement \
+         about this instrument, this rung and this span under THESE rules, and \
+         not\n  about the market: a looser MAX_POINTS, a different rung or a \
+         longer span are separate questions.\n\n  What follows is the walk's LAST \
+         and most permissive step, kept so the answer is what IS there\n  rather \
+         than a blank page. Every row still carries the rule it failed, and the \
+         TIER\n  LADDER below it names the strictest standard anything did meet."
+    );
+    if let Some(page) = last_page {
+        out.push('\n');
+        out.push_str(page);
+    }
+}
+
 /// Sweep ONE rung at successively lower supports, until the operator's cadence.
 ///
 /// # The command that exists because a threshold was hiding the answer
@@ -6130,7 +6768,7 @@ pub fn range_all(
     let _ = writeln!(
         out,
         "\n  `worst` and `best` are the CHOSEN exit variant's total in paisa \
-         under adverse-extreme and open fills. Selection ranks on `worst`.\n  \
+         under PRINTED-extreme and open fills -- both are prices the bar\n  actually printed, and NO tick is added to either. Selection ranks on\n  `worst`.\n  \
          `complete` NO means a budget stopped that rung's ladder short: its \
          depth is partial and its combination count is not comparable with a \
          complete one.\n  Every row above is a stored record; nothing here was \
@@ -6241,6 +6879,14 @@ pub struct Policy {
     pub rules: Rules,
     /// Which question decides who survives the `screen_cap` cut.
     pub lens: runner::rank::Lens,
+    /// Whether this screen also runs walk-forward, PBO and the bootstrap.
+    ///
+    /// A DESCENT sets this false on every step and true on nothing: each step
+    /// asks only *did anything clear the rules*, which the screen answers. The
+    /// validation stack answers *is the winner real*, a question about one
+    /// combination, and paying for it ten times over to validate candidates the
+    /// next step discards is what made a search impossible to finish.
+    pub validate: bool,
 }
 
 /// [`screen_range`]'s work, with its refusals unrendered.
@@ -6253,7 +6899,11 @@ fn screen_range_inner(
     support_ppm: u64,
     policy: Policy,
 ) -> Result<String, stored::Refusal> {
-    let Policy { rules, lens } = policy;
+    let Policy {
+        rules,
+        lens,
+        validate,
+    } = policy;
     let commit = commit_stamp().ok_or_else(|| {
         "this build carries no commit stamp, so §3 rule 3's run identity cannot \
          be recorded and the screen will not run. Rebuild with \
@@ -6320,6 +6970,9 @@ fn screen_range_inner(
             }),
             rules,
             lens,
+            // The environment's ceiling -- see `AuditOptions::ceiling`.
+            ceiling: None,
+            validate,
         },
     ))
 }
@@ -6364,7 +7017,12 @@ pub fn audit_stored(
               take `&mut`, and the value must outlive them. One 1,744-byte move \
               per CLI invocation, in a function called once per process."
 )]
-fn audit_with(ev: Result<Evaluator, &'static str>, sessions: i64, min_hits: u64) -> String {
+fn audit_with(
+    ev: Result<Evaluator, &'static str>,
+    sessions: i64,
+    min_hits: u64,
+    ceiling: Option<usize>,
+) -> String {
     // NO RECORDING FOR GENERATED BARS, and that is not an oversight. The
     // results store is a ledger of runs over REAL instrument-months; a row for
     // a synthetic sweep would carry a feed and an instrument it does not have,
@@ -6381,6 +7039,8 @@ fn audit_with(ev: Result<Evaluator, &'static str>, sessions: i64, min_hits: u64)
             rules: Rules::BASELINE,
             // The historical cut, unchanged. `Payoff` is reached only by an
             // operator who typed `elite`.
+            ceiling,
+            validate: true,
             lens: runner::rank::Lens::Detectability,
         },
     )
@@ -6429,6 +7089,52 @@ struct AuditOptions<'a> {
     /// setup it hunts — small losers, large winners — has a mean near zero and
     /// is precisely what a `|t|` cut throws away.
     lens: runner::rank::Lens,
+    /// A candidate ceiling this run must not exceed, or `None` for the
+    /// environment's.
+    ///
+    /// # Why a caller may need to say, and what happened when none could
+    ///
+    /// `ladder_for` reads `engine::DEFAULT_CEILING` — `1 << 27`, or 134,217,728
+    /// distinct candidates — unless `BRUTEX_CEILING` overrides it. That is the
+    /// right budget for an operator sweeping a real instrument-month with hours
+    /// to spend. It is the wrong budget for a caller that only needs a sweep to
+    /// EXIST, and there was no way to say so.
+    ///
+    /// **Measured consequence.** `the_audit_renders_every_stage_of_the_institutional_stack`
+    /// calls `audit_run(12, 300)` — 6.7% support over 328 live positions — and
+    /// inherited the full ceiling in a DEBUG build. It ran for over an hour
+    /// before being killed, so `cargo test --workspace` never terminated, so
+    /// `CLAUDE.md` §9's green-suite requirement was unverifiable — and a
+    /// genuinely red test sat behind it undetected from `a12192b` onward.
+    ///
+    /// This crate already knew the lesson and had applied it once:
+    /// [`SEARCH_CEILING`] is 500,000 with a compile-time assert that it stay at
+    /// least a hundredfold under the engine's default, added because *"`cli auto
+    /// 250` then produced no output in twenty minutes."* It was given to
+    /// `Sweeper::auto` and to nothing else.
+    ///
+    /// `None` is what every operator-facing command passes, so no command's
+    /// search narrows: the default is exactly what it was.
+    ceiling: Option<usize>,
+    /// Whether to run walk-forward, PBO and the bootstrap.
+    ///
+    /// # Why a search must be able to say no
+    ///
+    /// These three cost `WALK_FORWARD_SPLITS` sweeps twice over plus
+    /// `BOOTSTRAP_DRAWS` x `BOOTSTRAP_CANDIDATES` = sixteen thousand full trade
+    /// re-walks, and none of that is sized by the data. MEASURED: a 60-minute
+    /// audit over six months did not finish in sixty seconds at a candidate
+    /// ceiling of ONE THOUSAND, while the same sweep without them takes 0.005s.
+    ///
+    /// A descent asks *did anything clear the rules* at each of ten supports;
+    /// that is the screen. *Is the winner real* is a question about ONE
+    /// combination and belongs after the search. Running it per step paid to
+    /// validate candidates the next step was about to discard.
+    ///
+    /// `false` is not a weakened audit: `audit::render` prints an explicit
+    /// absence for every unsupplied stage rather than a zero, so a page made
+    /// this way states which questions it did not ask.
+    validate: bool,
 }
 
 /// The series a position is actually opened and closed on.
@@ -6613,7 +7319,21 @@ fn ceiling_from_env() -> Result<usize, String> {
 ///
 /// A malformed `BRUTEX_CEILING`.
 fn ladder_for(min_hits: u64) -> Result<Ladder, String> {
-    Ok(Ladder::with_min_hits(min_hits).with_ceiling(ceiling_from_env()?))
+    ladder_within(min_hits, None)
+}
+
+/// [`ladder_for`], with a ceiling the caller may name.
+///
+/// `None` reads the environment, which is what every operator-facing command
+/// passes. `Some` is for a caller that needs a sweep to EXIST rather than to be
+/// exhaustive -- see [`AuditOptions::ceiling`] for the hour-long test that had
+/// no way to say so.
+fn ladder_within(min_hits: u64, ceiling: Option<usize>) -> Result<Ladder, String> {
+    let ceiling = match ceiling {
+        Some(named) => named,
+        None => ceiling_from_env()?,
+    };
+    Ok(Ladder::with_min_hits(min_hits).with_ceiling(ceiling))
 }
 
 /// Everything the RESULTS STORE needs that only the caller knows.
@@ -7058,6 +7778,8 @@ fn audit_bars(
         recording,
         rules,
         lens,
+        ceiling,
+        validate,
     } = opts;
     let mut ev = match ev {
         Ok(e) => e,
@@ -7074,7 +7796,9 @@ fn audit_bars(
     // THE CEILING COMES FROM THE ENVIRONMENT HERE TOO. A sweep that used the
     // operator's ceiling and a walk-forward that used the compiled default
     // would be two different searches inside one report.
-    let ladder = match ladder_for(min_hits) {
+    // THE CALLER'S CEILING WINS WHEN IT NAMES ONE. Everything operator-facing
+    // passes `None` and gets the environment's, so no command's search narrows.
+    let ladder = match ladder_within(min_hits, ceiling) {
         Ok(l) => l,
         Err(why) => return format!("refused: {why}\n"),
     };
@@ -7135,13 +7859,29 @@ fn audit_bars(
     // is not frequency: it is what happened after the signal, and what happened
     // is what the execution series records. The two halves belong on different
     // series and the split was half-made.
+    // THE LENS SURVIVES THE REPROJECTION, and it did not.
+    //
+    // This re-ranked with `runner::rank::rank`, which is the `Detectability`
+    // entry point and takes no lens. `execution` is `Some` for every rung except
+    // `EXECUTION_RUNG`, so a caller that asked for `Lens::Payoff` had it honoured
+    // once by `run_ranked_by` above and then SILENTLY DISCARDED here on seven of
+    // the eight rungs.
+    //
+    // That defeated the whole of `cli elite`. `keep` is a hard boundary — the
+    // ordering that decides the cut decides what the pipeline can consider at
+    // all — so re-ranking on `|t|` put the cut back exactly where the payoff
+    // lens was built to move it, and nothing in the report said so.
+    //
+    // The re-rank itself is right and stays: a forward RETURN belongs on the
+    // execution series, not the signal series. Only the lens was lost.
     let ranked = match execution {
         None => ranked,
-        Some(_) => runner::rank::rank(
+        Some(_) => runner::rank::rank_by(
             &outcome.sweep,
             &trade_column,
             &runner::outcome::forward(&trade_bars, horizon),
             audit_keep(),
+            lens,
         ),
     };
 
@@ -7218,6 +7958,7 @@ fn audit_bars(
         &by_evidence,
         horizon,
         rules,
+        validate,
     );
     out.push_str(&screened);
     out.push('\n');
@@ -7275,7 +8016,33 @@ fn audit_bars(
     // is two to twenty on any real span. That is stated rather than hidden
     // because it is a real doubling of this stage, and an operator who does not
     // want it should be able to see what he is paying for.
-    let (folds, rolling) = both_shapes(&bars, horizon, first, ladder, &fresh);
+    // THE WHOLE VALIDATION STACK IS SKIPPABLE, AND SKIPPING IT IS WHAT MAKES A
+    // SEARCH POSSIBLE AT ALL.
+    //
+    // Below this line are three stages whose cost is fixed by constants rather
+    // than by the data: `both_shapes` runs `WALK_FORWARD_SPLITS` sweeps twice
+    // over, `pbo` ranks every fold's candidates, and `bootstrap_family` draws
+    // `BOOTSTRAP_DRAWS` (1,000) resamples for each of `BOOTSTRAP_CANDIDATES`
+    // (16) — sixteen thousand full trade re-walks, whether the run has forty
+    // trades or forty thousand.
+    //
+    // MEASURED, and it is the reason nothing finished: a 60-minute audit over
+    // six months — seven hundred and fifty signal bars — did not complete in
+    // sixty seconds at a candidate ceiling of ONE THOUSAND. The same sweep
+    // without this stack takes 0.005s. The search was never the cost.
+    //
+    // A DESCENT ASKS ONE QUESTION PER STEP: did anything clear the rules? That
+    // is the screen, which is already computed above. Walk-forward, PBO and the
+    // bootstrap answer *is the winner real*, which is a question about ONE
+    // combination and belongs after the search rather than inside every step of
+    // it. Running them per step paid for validating candidates that the next
+    // step was about to discard.
+    //
+    // `validate: false` is therefore not a weakened audit. It is the search
+    // half, and `audit::render` prints an explicit absence for each unsupplied
+    // stage rather than a zero — so a page produced this way says which
+    // questions it did not ask.
+    let (folds, rolling) = shapes_if(validate, &bars, horizon, first, ladder, &fresh);
     // PBO, WHICH USED TO BE A `None` FOR A REASON THAT IS NOW FIXED.
     //
     // `pbo::place` ranks a fold's candidates in-sample, finds where the winner
@@ -7288,13 +8055,7 @@ fn audit_bars(
     // counted as a failure: `place` returns `None` on an empty or mismatched
     // pair, and filtering is the honest reading of "this fold had nothing to
     // judge".
-    let placements: Vec<_> = folds
-        .folds
-        .iter()
-        .filter_map(|f| runner::pbo::place(&f.in_sample_all, &f.out_of_sample_all))
-        .collect();
-    let overfit =
-        (!placements.is_empty()).then(|| runner::pbo::probability_of_overfitting(&placements));
+    let overfit = overfitting_of(&folds);
 
     // The three multiple-testing p-values, over one family. See the helper: it
     // runs on the SIGNAL series on purpose, unlike the trade and the grid above.
@@ -7308,7 +8069,9 @@ fn audit_bars(
     // a CONDITION precedes a move and so belong on the rung it was found on.
     // That is true of FREQUENCY and false of a RETURN SERIES, which is what this
     // builds. The argument was right about the sweep and wrong about this.
-    let boot_owned = bootstrap_family(&trade_bars, &trade_column, &by_evidence, horizon);
+    let boot_owned = validate
+        .then(|| bootstrap_family(&trade_bars, &trade_column, &by_evidence, horizon))
+        .flatten();
     let boot = boot_owned
         .as_ref()
         .map(|(rc, spa, named)| (rc.as_ref(), spa.as_ref(), *named));
@@ -7371,6 +8134,52 @@ fn audit_bars(
 ///
 /// Split from `audit_bars` to keep it under `clippy::too_many_lines`, and
 /// because it is one idea.
+/// The probability of backtest overfitting, from a completed walk-forward.
+///
+/// Extracted so `audit_bars` stays inside its line budget. A fold that chose
+/// nothing yields no placement and is SKIPPED rather than counted as a failure:
+/// `place` returns `None` on an empty or mismatched pair, and filtering is the
+/// honest reading of "this fold had nothing to judge".
+///
+/// `None` when no fold produced a placement, which `audit::render` prints as an
+/// absence rather than as a zero probability -- the difference between "not
+/// measured" and "measured as no overfitting".
+fn overfitting_of(folds: &runner::validate::Validated) -> Option<runner::pbo::Pbo> {
+    let placements: Vec<_> = folds
+        .folds
+        .iter()
+        .filter_map(|f| runner::pbo::place(&f.in_sample_all, &f.out_of_sample_all))
+        .collect();
+    (!placements.is_empty()).then(|| runner::pbo::probability_of_overfitting(&placements))
+}
+
+/// [`both_shapes`], or a pair of empty walks when validation is off.
+///
+/// A one-line wrapper so `audit_bars` stays inside its line budget, and so the
+/// reason for the branch sits beside the branch rather than inside a caller
+/// already carrying a dozen other concerns.
+///
+/// `Validated::default()` is an EMPTY walk, not a failed one. `audit::render`
+/// prints an explicit absence for an unsupplied stage rather than a zero, so a
+/// page made this way says which question it did not ask.
+fn shapes_if(
+    validate: bool,
+    bars: &[indicators::Candle],
+    horizon: Horizon,
+    first: &runner::rank::Scored,
+    ladder: engine::Ladder,
+    fresh: &Evaluator,
+) -> (runner::validate::Validated, runner::validate::Validated) {
+    if validate {
+        both_shapes(bars, horizon, first, ladder, fresh)
+    } else {
+        (
+            runner::validate::Validated::default(),
+            runner::validate::Validated::default(),
+        )
+    }
+}
+
 fn both_shapes(
     bars: &[indicators::Candle],
     horizon: Horizon,
@@ -7487,9 +8296,9 @@ fn decay_block(
 mod tests {
     use super::{
         COMMANDS, MIN_AUDIT_SESSIONS, MISUSED, OK, PROVENANCE, STORED_PROVENANCE, USAGE, Vendor,
-        audit_run, audit_stored, auto, auto_with, direction_of, evaluator_from, log_dir_from,
-        nothing_to_trade, parse_min_hits, parse_sessions, parse_vendor, root_from, run,
-        sample_warning, side_of_evidence, sweep, sweep_stored, sweep_with,
+        audit_run, audit_run_within, audit_stored, auto, auto_with, direction_of, evaluator_from,
+        log_dir_from, nothing_to_trade, parse_min_hits, parse_sessions, parse_vendor, root_from,
+        run, sample_warning, side_of_evidence, sweep, sweep_stored, sweep_with,
     };
     use super::{
         Consistency, Horizon, consistency_of, evaluator, grid, grid_step_ppm, ladder_for,
@@ -7499,7 +8308,7 @@ mod tests {
     use super::{
         MAX_STOP_POINTS, NIFTY_REFERENCE, PAISA_PER_POINT, STOP_FLOOR_POINTS, hundredths_of,
         points_to_ppm, points_to_ppm_at, ppm_to_points_at, reference_price,
-        return_over_drawdown_cell, synthetic, top_at,
+        return_over_drawdown_cell, stop_floor_points, synthetic, top_at,
     };
     use super::{cadence_floor_ppm, months_between, support_ladder};
 
@@ -7645,7 +8454,19 @@ mod tests {
     /// gap as though it were a feature.
     #[test]
     fn the_audit_renders_every_stage_of_the_institutional_stack() {
-        let text = audit_run(12, 300);
+        // BOUNDED, AND THE BOUND IS THE POINT. This called `audit_run(12, 300)`
+        // and inherited `engine::DEFAULT_CEILING` -- 134,217,728 candidates --
+        // in a debug build. Measured at over an HOUR before it was killed, so
+        // `cargo test --workspace` never terminated and section 9's green-suite
+        // requirement was unverifiable. A genuinely red test
+        // (`join_answer_is_unchanged`, stale since `a12192b`) sat behind it
+        // undetected the whole time.
+        //
+        // This test asserts that every SECTION renders. It does not need a deep
+        // ladder to do that. `crates/runner/tests/join_answer_is_unchanged.rs`
+        // bounds its own fixture at 50,000 and finishes in 0.04s; this does the
+        // same, and the sections below still have to render or it fails.
+        let text = audit_run_within(12, 300, 50_000);
         assert!(text.starts_with(PROVENANCE), "provenance leads it too");
         assert!(text.contains("BARS"), "the sweep report is still there");
         for section in [
@@ -9346,10 +10167,49 @@ mod tests {
             10_000,
             "the raw rate is perfect"
         );
+        // TWELVE PERFECT TRADES NOW PASSES, and the change is deliberate.
+        //
+        // This asserted a refusal, under a bound fixed at 8,000. That bound also
+        // refused **32 of 40 — the operator's own stated 80% over forty
+        // trades** — because the 95% lower bound of an exactly-80% record never
+        // reaches 80% at any sample size. The rule enforced was not the rule
+        // stated.
+        //
+        // The floor is now the midpoint between chance and the stated rate, and
+        // twelve consecutive wins clears it (7,575 bp against 6,500). That is
+        // the honest reading: twelve wins in a row is genuinely unlikely by
+        // chance. What the floor still refuses is a four-trade perfect record
+        // at 5,101 bp, which is the case below.
         assert!(
-            !rules.admits(&lucky_twelve),
-            "twelve perfect trades is not evidence of an 80% rate: assurance {} bp",
+            rules.admits(&lucky_twelve),
+            "twelve consecutive wins clears a midpoint floor: assurance {} bp",
             lucky_twelve.assurance_bp()
+        );
+
+        // A FOUR-TRADE PERFECT RECORD IS STILL NOISE, and is still refused.
+        let lucky_four = grid::Cell {
+            trades: 4,
+            wins: 4,
+            ..good
+        };
+        assert!(
+            !rules.admits(&lucky_four),
+            "four perfect trades is noise wearing a certificate: assurance {} bp",
+            lucky_four.assurance_bp()
+        );
+
+        // AND THE CASE THE OPERATOR ACTUALLY ASKED FOR: 80% over forty trades.
+        // The old fixed bound refused this outright.
+        let stated = grid::Cell {
+            trades: 40,
+            wins: 32,
+            ..good
+        };
+        assert_eq!(stated.win_rate_bp(), 8_000, "exactly the stated rate");
+        assert!(
+            rules.admits(&stated),
+            "32 of 40 IS the operator's 80%, and must not be refused: assurance {} bp",
+            stated.assurance_bp()
         );
 
         // THE ROW THIS WHOLE FIELD WAS ADDED FOR. Everything above is
@@ -9603,15 +10463,17 @@ mod tests {
         // the assertion and test two things at once.
         assert_eq!(
             tightest,
-            points_to_ppm_at(STOP_FLOOR_POINTS, reference),
-            "the tightest rung IS the floor: {rungs:?}"
+            points_to_ppm_at(stop_floor_points(&bars), reference),
+            "the tightest rung IS the DERIVED floor -- `STOP_FLOOR_POINTS` is a \
+             NIFTY figure and BANKNIFTY travels 25 points in one minute: {rungs:?}"
         );
 
         let first = ppm_to_points_at(tightest, reference);
         let last = ppm_to_points_at(widest, reference);
         assert_eq!(
-            first, STOP_FLOOR_POINTS,
-            "the floor rung prints as the floor: {rungs:?}"
+            first,
+            stop_floor_points(&bars),
+            "the floor rung prints as the derived floor: {rungs:?}"
         );
         assert!(
             last <= MAX_STOP_POINTS,
@@ -9623,9 +10485,9 @@ mod tests {
         // A rung is now at least the floor, on any instrument, at any level.
         for &rung in &rungs {
             assert!(
-                ppm_to_points_at(rung, reference) >= STOP_FLOOR_POINTS,
-                "rung {rung} ppm is {} points, tighter than the {STOP_FLOOR_POINTS}-point \
-                 floor -- this is the hundredfold units defect returning",
+                ppm_to_points_at(rung, reference) >= stop_floor_points(&bars),
+                "rung {rung} ppm is {} points, tighter than the derived floor -- \
+                 this is the hundredfold units defect returning",
                 ppm_to_points_at(rung, reference)
             );
         }

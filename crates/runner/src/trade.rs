@@ -23,25 +23,38 @@
 //!    you cannot trade at a price that has already printed. A signal on bar `N`
 //!    fills on bar `N + 1`.
 //! 3. **Two cases, both reported, neither chosen.** BEST is the next bar's open.
-//!    WORST is the adverse extreme of the next bar — the high if you are buying,
+//!    WORST is the PRINTED extreme of the next bar — the high if you are buying,
 //!    the low if you are selling. A single number would hide which of the two a
 //!    result depended on.
 //! 4. **One position at a time.** While a trade is open, no further signal opens
 //!    anything — not another long, and not a short. The next eligible signal is
 //!    the first one at or after the exit bar.
 //!
-//! # Both fills go through `crates/costs`
+//! # Both fills go through `crates/costs`, and NEITHER adds a tick
 //!
-//! [`costs::fill::worst_case_fills`] applies one tick of adverse movement to
-//! each leg, floors the sell, and refuses rather than saturates at the `i64`
-//! edge. It is the function `COSTS_VERIFIED` checks its worked examples
-//! against. Reimplementing "a tick against you" here would be a second copy of
-//! a rule that is already settled, and the two would drift.
+//! Both legs of both cases are [`costs::fill::fills_at`], differing only in the
+//! [`costs::fill::Anchor`]: `Open` for the best, `PrintedExtreme` for the worst.
+//! One code path, two scenarios — a best case computed by a different function
+//! would be comparing two models rather than two readings.
 //!
-//! The BEST case is the same function over [`costs::fill::Bar::flat`] bars built
-//! from the open, so best and worst differ only in the bar handed in — not in
-//! the fill rule. A best case computed by a different code path would be
-//! comparing two models rather than two scenarios.
+//! **The worst case used to be `AdverseExtreme`: the high PLUS one tick and the
+//! low MINUS one tick.** That tick is a claim about microstructure rather than a
+//! reading of the data, and `costs::fill::Anchor`'s own doc makes the objection
+//! in those terms — *"a fill invented one tick outside them is exactly the
+//! invention `CLAUDE.md` §3 rule 1 forbids"*. On a series whose finest
+//! resolution IS one minute, the four numbers of the bar are the whole of what
+//! is known, and a price one tick outside them is a price nobody traded at.
+//!
+//! It also ended a disagreement between the two halves of the pipeline.
+//! [`crate::grid`] has always priced its exit ladder at `PrintedExtreme`, so the
+//! same trades on the same bars cost two ticks per round trip MORE here than
+//! there — and the grid's number is the one selection ranks on. The two now read
+//! the same bars the same way.
+//!
+//! **What is lost is the slippage allowance, and it is not smuggled back as a
+//! smaller number: it is gone.** Every figure here is a fill at a price that
+//! printed, with no execution penalty modelled at all. That is a stated limit,
+//! not an invisible optimism, and `docs/06-limits.md` is where it belongs.
 //!
 //! # What is NOT here, and why it is not invented
 //!
@@ -50,13 +63,19 @@
 //! quantity. The sweep runs on **spot indices**, and a spot index is not
 //! tradeable: the contract that would actually be bought is a future or an
 //! option, and choosing which is a decision `CLAUDE.md` §3 rule 1 forbids this
-//! module from making up. The per-unit slippage IS applied, because that is a
-//! property of the bar and not of a contract.
+//! module from making up.
 //!
-//! So every figure here is **gross of charges and net of slippage**, and says so
-//! in its own name rather than in a footnote.
+//! Slippage is no longer applied either -- see above. So every figure here is
+//! **gross of charges AND gross of slippage**: a fill at a price the bar
+//! actually printed, and nothing modelled beyond that.
 //!
 //! # Measured: what the two rules cost the old numbers
+//!
+//! **These figures were taken while the worst case still added a tick per leg,
+//! and they are kept for what they proved rather than as a description of this
+//! code.** The `worst` column below is two ticks per round trip harsher than
+//! what this module now computes; the `signals`, `trades` and `blocked` columns
+//! are untouched by the fill model and still hold.
 //!
 //! `synthetic::sessions(8)`, the empty mask (which fires on every swept bar, so
 //! this is the extreme case), long, per horizon:
@@ -74,18 +93,23 @@
 //! t-statistic scales with the square root of `n`, so that alone overstates it
 //! by roughly **4x** — before any question of whether the edge is real.
 //!
-//! **Slippage alone flips the sign.** At H=5 and H=15 the best case is
-//! profitable and the worst case is a heavy loss; only at H=60, where there are
-//! 18 trades instead of 177, does the worst case stay positive. The mechanism is
-//! not subtle: each round trip pays two ticks, so ten times the trades pays ten
-//! times the spread. A model that reports one number cannot show this, and the
-//! one number it would have reported is the optimistic one.
+//! **Slippage alone flipped the sign, WHEN SLIPPAGE WAS MODELLED.** At H=5 and
+//! H=15 the best case was profitable and the worst case a heavy loss; only at
+//! H=60, with 18 trades instead of 177, did the worst case stay positive. The
+//! mechanism was not subtle: each round trip paid two ticks, so ten times the
+//! trades paid ten times the spread.
+//!
+//! **That sensitivity has not gone away -- the model of it has.** The tick is no
+//! longer charged, so these worst-case figures would now read far better on the
+//! same bars. What the table still proves is that a high-frequency variant is
+//! the one execution cost punishes hardest, and NOTHING in this module now
+//! charges it. `docs/06-limits.md` carries that as a stated limit.
 //!
 //! These are figures from a SYNTHETIC fixture and prove nothing about the
 //! market. They are here because they size the DEFECT, and that is a fact about
 //! this code rather than about NIFTY.
 
-use costs::fill::{Anchor, Bar as FillBar, Direction, fills_at, worst_case_fills};
+use costs::fill::{Anchor, Bar as FillBar, Direction, fills_at};
 use indicators::Candle;
 use indicators::column::Column;
 use vocab::ConditionMask;
@@ -115,13 +139,24 @@ pub struct Trade {
     /// charged the tick. `costs::fill::Anchor::Open` reads the open directly, so
     /// the best case is now the best case.
     pub best: i64,
-    /// Paisa per unit if both legs filled at the bar's adverse extreme, plus
-    /// one tick on each leg.
+    /// Paisa per unit if both legs filled at the bar's PRINTED extreme — the
+    /// high buying, the low selling, **with no tick added**.
     ///
     /// Never better than [`Self::best`], and the gap between them is the whole
     /// range of outcomes a real fill can land in. **Selection ranks on THIS
     /// one**, unchanged: a search ranked on the flattering reading picks
     /// whatever the flattering assumption helped most.
+    ///
+    /// **This used to carry one adverse tick on each leg** and its doc said so.
+    /// A tick outside the bar is a price nobody traded at, which on a one-minute
+    /// series is the invention §3 rule 1 forbids — `costs::fill::Anchor` makes
+    /// that objection in its own words. It also disagreed with
+    /// [`crate::grid`], which has always priced at the printed extreme, by two
+    /// ticks per round trip on the same bars.
+    ///
+    /// So this is now the worst price the bar ACTUALLY PRINTED, and no execution
+    /// penalty is modelled anywhere. That is a real loss of conservatism and it
+    /// is stated rather than hidden.
     pub worst: i64,
     /// True when the exit was the 15:10 square-off rather than the horizon.
     ///
@@ -457,8 +492,8 @@ fn round_trip(
     // `Bar` carries the open again and `Anchor::Open` reads it, so this is now
     // the open exactly, with zero slippage and none of the flat-bar staging.
     // The two readings therefore bracket a real fill properly: the best is the
-    // most favourable price that PRINTED, the worst is the adverse extreme plus
-    // a tick, and every achievable fill lies between them.
+    // most favourable price that PRINTED, the worst is the least favourable
+    // price that PRINTED, and every achievable fill lies between them.
 
     // WORST: the adverse extreme of each bar. `Bar::new` takes (open, high, low)
     // and refuses an inverted bar, a sub-tick high, or an open its own extremes
@@ -470,10 +505,43 @@ fn round_trip(
     // than a stand-in matters: the bracket check is now a genuine invariant, so
     // a candle whose open sits outside its own high-low is refused HERE, at the
     // fill, instead of silently pricing off extremes that never contained it.
+    // NO TICK. THE FOUR NUMBERS OF THE BAR ARE THE WHOLE OF WHAT IS KNOWN.
+    //
+    // This was `worst_case_fills`, which is `Anchor::AdverseExtreme`: a buy at
+    // the high PLUS one tick and a sell at the low MINUS one tick. That tick is
+    // a claim about microstructure, not a reading of the data — it names a price
+    // at which nothing traded in that minute. `costs::fill::Anchor`'s own doc
+    // makes the objection: *"a fill invented one tick outside them is exactly
+    // the invention `CLAUDE.md` §3 rule 1 forbids"*.
+    //
+    // On a series whose finest resolution IS one minute, the honest worst case
+    // is the worst price the bar actually PRINTED. That is
+    // `Anchor::PrintedExtreme`, and it is what `crate::grid` has always used to
+    // price the exit ladder.
+    //
+    // # This also ENDS a disagreement between the two halves of the pipeline
+    //
+    // The grid priced at `PrintedExtreme` and this walk priced at
+    // `AdverseExtreme`, so the same trades on the same bars cost two ticks per
+    // round trip more here than in the grid — and the GRID's number is the one
+    // selection ranks on. The two now read the same bars the same way, so a
+    // combination's totals mean the same thing wherever they are printed.
+    //
+    // What is LOST is the slippage allowance, and it is not smuggled back in as
+    // a smaller number: it is gone, and every figure downstream is now
+    // explicitly a fill at a price that printed, with no execution penalty
+    // modelled at all. `docs/06-limits.md` is where that belongs as a stated
+    // limit rather than as an invisible optimism.
     let entry_fill_bar = FillBar::new(paisa(e.open), paisa(e.high), paisa(e.low)).ok()?;
     let exit_fill_bar = FillBar::new(paisa(x.open), paisa(x.high), paisa(x.low)).ok()?;
     let best_fills = fills_at(entry_fill_bar, exit_fill_bar, direction, Anchor::Open).ok()?;
-    let worst_fills = worst_case_fills(entry_fill_bar, exit_fill_bar, direction).ok()?;
+    let worst_fills = fills_at(
+        entry_fill_bar,
+        exit_fill_bar,
+        direction,
+        Anchor::PrintedExtreme,
+    )
+    .ok()?;
 
     Some(Trade {
         signal_bar,
@@ -790,11 +858,7 @@ mod tests {
     }
 
     #[test]
-    fn the_best_case_is_the_open_exactly_and_the_worst_carries_two_ticks() {
-        // Five paisa, the tick grid `CLAUDE.md` section 7 fixes. Declared at the
-        // top of the function so `clippy::items_after_statements` is satisfied.
-        const TICK: i64 = 5;
-
+    fn the_best_case_is_the_open_and_the_worst_is_the_printed_extreme() {
         // WHY THIS EXISTS. `Trade::best` was pinned by ONE assertion --
         // `worst <= best` -- and by nothing else in the workspace. So when the
         // best case changed from "the open, one tick adverse on each leg" to
@@ -828,15 +892,19 @@ mod tests {
                 trade.entry_bar
             );
 
-            // WORST, long: buy the entry HIGH plus a tick, sell the exit LOW
-            // minus a tick. TICK is five paisa, so the round trip gives up ten.
+            // WORST, long: buy the entry HIGH, sell the exit LOW. NO TICK.
+            //
+            // This asserted `high + TICK` and `low - TICK` until the operator
+            // ruled that no figure may come from a price the bar did not print.
+            // A tick outside the bar is exactly that, and
+            // `costs::fill::Anchor` had already written the objection down:
+            // "a fill invented one tick outside them is exactly the invention
+            // CLAUDE.md section 3 rule 1 forbids".
             assert_eq!(
                 trade.worst,
-                x.low
-                    .saturating_sub(TICK)
-                    .saturating_sub(e.high.saturating_add(TICK)),
-                "the worst case must be the adverse extremes plus a tick each \
-                 way -- trade at {}",
+                x.low.saturating_sub(e.high),
+                "the worst case must be the PRINTED extremes, with no tick added \
+                 either way -- trade at {}",
                 trade.entry_bar
             );
 
