@@ -2848,7 +2848,17 @@
 
   .facet {
     display: grid;
-    grid-template-columns: 44px minmax(0, 1fr);
+    /* THE LABEL COLUMN HOLDS THE LONGEST LABEL, and 44px did not.
+       Measured in the browser at this font, size and letter-spacing:
+       UNIVERSE renders 72px and SEGMENT 69px, against a 44px track. `b` is
+       `overflow: visible` with no ellipsis, so the overflow did not clip — it
+       DREW, straight over the control beside it, which is why the pip read
+       "Everything · 882 listed" with the caption sitting on top of it.
+       Both labels are static in the markup directly below; there is no third.
+       Fixed and not `max-content` on purpose: each `.facet` is its own grid,
+       so a content-sized track would let the two rows disagree by the 3px
+       between them and the captions would stop lining up. */
+    grid-template-columns: 76px minmax(0, 1fr);
     gap: var(--s3);
     align-items: start;
     padding: 7px var(--s5);
