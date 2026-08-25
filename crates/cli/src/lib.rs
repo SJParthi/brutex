@@ -5032,6 +5032,22 @@ fn one_rung(
     let text = audit_range(vendor_word, underlying, rung, from, to, min_hits);
     let outcome = if let Some(why) = text.strip_prefix("refused: ") {
         Err(first_line(why.to_owned()))
+    } else if let Some(why) = not_recorded_reason(&text) {
+        // A ROW THAT DID NOT LAND IS A REFUSAL, NOT A LOOKUP.
+        //
+        // `latest_for` reads the newest row matching the KEY -- feed, underlying,
+        // rung, span, min_hits -- and the key does not carry the identity. So
+        // when this run's append failed, the read did not fail with it: it
+        // returned an EARLIER run's row, from a different commit and possibly a
+        // different ceiling, and the descent printed it under this run's banner
+        // with every column plausible. `record_run` named the reason loudly and
+        // the string it named it into was thrown away here.
+        //
+        // Refusing costs the rung its row and says why, which is what §4 asks
+        // for. The alternative -- matching `record.identity` in `latest_for` --
+        // is the stronger fix and needs the `RunId` computed twice or threaded
+        // through; this closes the silent substitution now and does not block it.
+        Err(first_line(format!("the result was not recorded: {why}")))
     } else {
         latest_for(vendor_word, underlying, rung, from, to, min_hits)
     };
@@ -6003,7 +6019,7 @@ fn record_run(
         Ok(store) => store,
         Err(why) => {
             return format!(
-                "RESULT NOT RECORDED: {why}\n  The figures below are correct; only the row is missing.\n\n"
+                "{NOT_RECORDED}: {why}\n  The figures below are correct; only the row is missing.\n\n"
             );
         }
     };
@@ -6016,9 +6032,48 @@ fn record_run(
             record.identity_hex(),
         ),
         Err(why) => format!(
-            "RESULT NOT RECORDED: {why}\n  The figures below are correct; only the row is missing.\n\n"
+            "{NOT_RECORDED}: {why}\n  The figures below are correct; only the row is missing.\n\n"
         ),
     }
+}
+
+/// The sentence [`record_run`] opens with when the row did not reach the ledger.
+///
+/// # Why this is a constant and not two string literals
+///
+/// It is written in one place and READ in another. `record_run` returns a
+/// report, not a `Result` -- the failure is named into a string, which is right
+/// for a reader and useless to a caller -- so `one_rung` has nothing to match on
+/// except the sentence. A caller matching a literal that the producer is free to
+/// reword is a check that passes for as long as nobody edits the message, which
+/// is not a check. Both sides name this constant, so a reword moves both or
+/// neither.
+///
+/// **What went wrong without it.** `one_rung` DISCARDS the long report on
+/// purpose -- nine of them is six thousand lines -- and read the row back out of
+/// the ledger instead. When the append failed, the read still succeeded: it
+/// returned the newest row that MATCHED THE KEY, which is an earlier run at a
+/// different commit, possibly a different binary and a different ceiling. The
+/// descent printed it under this run's banner, feed, instrument, rung, span and
+/// `min_hits`, and every column was plausible. That is the failure wearing a
+/// success's clothes `CLAUDE.md` §4 bans, and it was reachable the moment a
+/// ledger written by a newer build sat in the store -- `Results::append` refuses
+/// a version it does not write, while `read_at` reads older rows and widens
+/// them, so the two halves disagreed by design.
+pub(crate) const NOT_RECORDED: &str = "RESULT NOT RECORDED";
+
+/// The reason a report gives for a row that did not reach the ledger, if any.
+///
+/// `None` when the report carries no such sentence, which is the ordinary case
+/// and the only one in which a row read back by key is this run's row.
+fn not_recorded_reason(report: &str) -> Option<String> {
+    let at = report.find(NOT_RECORDED)?;
+    let rest = report[at + NOT_RECORDED.len()..].trim_start_matches([':', ' ']);
+    // ONE LINE. The sentence continues "The figures below are correct; only the
+    // row is missing", which is true of the long report and false of a descent
+    // row -- there are no figures below, because this is the cell that would
+    // have held them.
+    Some(rest.lines().next().unwrap_or(rest).trim().to_owned())
 }
 
 /// The sentence a walk-forward that could not measure anything needs.
@@ -8556,5 +8611,61 @@ mod tests {
         assert_eq!(crate::bp_as_percent(9_000), "90.00%");
         assert_eq!(crate::bp_as_percent(9_550), "95.50%");
         assert_eq!(crate::bp_as_percent(10_000), "100.00%");
+    }
+
+    /// A descent rung whose row did not land refuses, instead of printing an
+    /// older run's numbers under this run's banner.
+    ///
+    /// # The substitution this closes
+    ///
+    /// `one_rung` discards the long report and reads the row back out of the
+    /// ledger by KEY -- feed, underlying, rung, span, `min_hits` -- and the key
+    /// carries no identity. So an append that failed did not make the read fail
+    /// with it: `latest_for` returned the newest row matching that key, which is
+    /// an EARLIER run at a different commit. Nine plausible rows, each possibly
+    /// from a different binary.
+    ///
+    /// It was reachable rather than theoretical: `Results::append` refuses a
+    /// ledger version it does not write while `read_at` reads older rows and
+    /// widens them, so a store holding a v2 ledger under a v3 build failed every
+    /// append and satisfied every read.
+    ///
+    /// Both `record_run` failure paths open with [`crate::NOT_RECORDED`], and
+    /// both sides name that constant rather than repeating the sentence -- a
+    /// caller matching a literal the producer may reword is a check that lapses
+    /// silently the first time somebody edits the message.
+    #[test]
+    fn a_row_that_did_not_reach_the_ledger_is_read_as_a_refusal_and_not_a_lookup() {
+        // The two shapes `record_run` actually returns, built from the constant
+        // both sides share so a reword cannot pass this test by accident.
+        for why in ["the store is unwritable", "this ledger is version 2"] {
+            let report = format!(
+                "{}: {why}\n  The figures below are correct; only the row is missing.\n\n",
+                crate::NOT_RECORDED
+            );
+            let seen = crate::not_recorded_reason(&report).expect("the sentence is present");
+            assert_eq!(seen, why, "the reason is carried, not just the fact");
+            assert!(
+                !seen.contains("figures below"),
+                "one line only -- there are no figures below a descent row: {seen}"
+            );
+        }
+
+        // The marker mid-report is still a failure. `record_run`'s output is
+        // appended to a longer document, so it is not at position zero.
+        let embedded = format!("RUN\n  bars 1000\n{}: disk full\n", crate::NOT_RECORDED);
+        assert_eq!(
+            crate::not_recorded_reason(&embedded).as_deref(),
+            Some("disk full")
+        );
+
+        // AND THE ORDINARY CASE STAYS A LOOKUP. A recorded run must not be
+        // turned into a refusal -- that would trade a silent wrong answer for a
+        // loud wrong one.
+        assert_eq!(
+            crate::not_recorded_reason("RESULT RECORDED\n  row 7\n"),
+            None
+        );
+        assert_eq!(crate::not_recorded_reason(""), None);
     }
 }
