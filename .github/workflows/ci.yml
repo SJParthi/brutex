@@ -4706,15 +4706,55 @@ jobs:
           # nothing repeatable. CLI-only: `crates/cli/src/batch.rs` is the sole
           # caller, so it is never on a request path. docs/06-limits.md
           # section 86.
+          # EIGHT FILES ADDED. They surfaced when this rule started running
+          # again behind gate 1e, and ONE OF THEM WAS A REAL BREACH THAT WAS
+          # FIXED RATHER THAN LISTED -- which is what the rule is for.
+          #
+          #   api/bars.rs 2 -- FIXED, then declared. `GET /bars/window.json`
+          #     ordered EVERY bar in the range and then took `.skip().take()`:
+          #     roughly 1.9 million rows at a 240-month window to hand back a
+          #     thousand, which is layer 12's breach exactly. It now partitions
+          #     to `offset + limit` in O(n) and orders only that. Both remaining
+          #     constructs are bounded by the caller's PAGE. The order is
+          #     unchanged because the comparator is total, and
+          #     `selecting_the_page_then_ordering_it_equals_ordering_everything_then_slicing`
+          #     runs both strategies and requires them to agree.
+          #   api/server.rs 2 -> 4 -- one is the target list, ALSO FIXED here: it
+          #     ordered by `underlying` alone, a PARTIAL key over
+          #     `{exchange, segment, underlying, kind}`, so equal-comparing
+          #     targets kept HashMap order under an unstable sort while the
+          #     comment above promised reproducibility. Now the whole derived
+          #     `Ord`. The others order a REQUEST's own member list and one
+          #     symbol page's entries, both for byte-stability under §3 rule 5.
+          #   api/calendar_of.rs 3 -- `owed`, `seen_by`, `silent` inside `agree`,
+          #     all bounded by the VENDOR CALENDAR COUNT: one entry per feed for
+          #     one day. Not by bars, days or instruments.
+          #   api/indexmap.rs 1, api/pullrun.rs 1 -- one index's constituents,
+          #     and the legs of one pull group. Both are a page's worth.
+          #   cli/lib.rs 5 -- the support ladder's rungs and the report's rows.
+          #     The ladder is a compile-time list of eight; the rows are what is
+          #     printed, which is capped before it is ordered.
+          #   pull/nseindex.rs 1 -- the REFUSED entries of one exchange page,
+          #     ordered so the refusal list is byte-identical between runs.
+          #   runner/grid.rs 2 -- the exit grid's distinct values, bounded by the
+          #     rung x stop ladders, both compile-time.
           allow_sort='
           crates/runner/src/audit.rs 1
           crates/runner/src/bootstrap.rs 1
           crates/runner/src/pbo.rs 1
           crates/runner/src/excursion.rs 1
           crates/pull/src/folder.rs 1
+          crates/api/src/bars.rs 2
+          crates/api/src/calendar_of.rs 3
           crates/api/src/constituents.rs 2
           crates/api/src/coverage.rs 1
+          crates/api/src/indexmap.rs 1
+          crates/api/src/pullrun.rs 1
+          crates/api/src/server.rs 4
+          crates/cli/src/lib.rs 5
           crates/engine/src/lib.rs 2
+          crates/pull/src/nseindex.rs 1
+          crates/runner/src/grid.rs 2
           crates/runner/src/rank.rs 3
           crates/runner/src/significance.rs 1
           crates/indicators/src/evaluator.rs 1
