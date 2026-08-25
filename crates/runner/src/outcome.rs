@@ -493,6 +493,11 @@ pub fn forward(bars: &[Candle], horizon: Horizon) -> Forward {
 ///
 /// Const-callable and index-only: one bounds check and one `check`, no
 /// allocation and no scan.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 fn priced(bars: &[Candle], index: usize) -> Option<i64> {
     let bar = bars.get(index)?;
     bar.check().ok()?;
@@ -529,6 +534,18 @@ pub struct Edge {
     pub n: u64,
     /// Mean forward move in paisa.
     pub mean_paisa: f64,
+    /// Observations whose forward move was **strictly positive**.
+    ///
+    /// Zero is counted as neither a win nor a loss: a forward move of exactly
+    /// zero paid nothing and cost nothing, and charging it to either side would
+    /// move [`Self::payoff_bp`] by the number of flat bars rather than by
+    /// anything about the setup.
+    pub wins: u64,
+    /// Sum of the strictly positive forward moves, in paisa.
+    pub win_sum: f64,
+    /// Sum of the strictly negative forward moves, in paisa. **Negative or
+    /// zero.**
+    pub loss_sum: f64,
     /// Bars whose source index lay OUTSIDE the slice the `Forward` came from.
     ///
     /// Non-zero means the caller paired a `Column` with a `Forward` built from a
@@ -569,6 +586,148 @@ pub struct Edge {
     /// large number, because an undefined statistic must not read as a strong
     /// one.
     pub t: f64,
+}
+
+impl Edge {
+    /// The average winning move over the average losing move, in hundredths.
+    ///
+    /// `300` reads 3.00 — the mean win was three times the mean loss.
+    ///
+    /// # The statistic `|t|` cannot supply, on the side of the funnel that needs it
+    ///
+    /// `rank` keeps the top `keep` combinations by `|t|`, and everything below
+    /// the cut is discarded before any exit grid is built. `|t|` is a
+    /// DETECTABILITY statistic: it asks how reliably the mean differs from zero.
+    /// A setup whose losers are small and whose winners are large can have a
+    /// mean near zero — and so a low `|t|` — while being exactly the setup an
+    /// operator asking for *"minimal stop loss, massive profit"* is hunting.
+    ///
+    /// `crates/cli`'s own comment on the cap states the consequence and calls it
+    /// unrecoverable: such a combination *"is cut at 60, and never meets an exit
+    /// grid at all. No tier ladder, no rule and no report can recover that. They
+    /// all filter cells, and the cells were never computed."*
+    ///
+    /// This is the number that lets the cut see the shape. It costs three scalar
+    /// accumulators in the pass `edge` already makes — O(1) per observation, no
+    /// second walk, no path — which is precisely why it can sit on the hot side
+    /// of the funnel where MAE and MFE cannot.
+    ///
+    /// # What it is NOT
+    ///
+    /// It is not a reward-to-risk ratio and must not be read as one. There is no
+    /// stop here, no target, and no path: these are forward moves at a fixed
+    /// horizon, so this says nothing about what a stop WOULD have done. A real
+    /// answer to that is [`crate::grid::Cell::reward_to_risk_bp`], which needs
+    /// the trade walk. This says which combinations are worth asking.
+    ///
+    /// It is also not [`Self::t`]'s replacement. A combination can have a
+    /// magnificent payoff on four observations; that is what `n` and the
+    /// significance bar are for. Ranking on this ALONE would trade noise.
+    ///
+    /// # Refusals, and each is a different absence
+    ///
+    /// * **No losses at all** — every observation won, so there is nothing to
+    ///   divide by. [`i64::MAX`], the same answer
+    ///   [`crate::grid::Cell::return_over_drawdown`] gives for a variant that
+    ///   never gave anything back, and for the same reason: unbounded is a
+    ///   fact, not an error.
+    /// * **No wins at all** — zero. The setup has no upside to weigh.
+    /// * **Fewer than two observations** — zero. One move is not a distribution.
+    ///
+    /// **UNVERIFIED as a measurement.** The bound is argued from the
+    /// shape of the code and no bench in this workspace times it.
+    /// `CLAUDE.md` §3 rule 6: a structural argument is not a
+    /// measurement, however sound it is.
+    #[must_use]
+    pub fn payoff_bp(&self) -> i64 {
+        // Declared before the first statement, because clippy is right that an
+        // item appearing mid-function reads as though it came into scope there
+        // and it did not.
+        //
+        // An `f64` LITERAL safely inside `i64::MAX` (9.223e18), rather than
+        // `i64::MAX as f64`. That cast is itself lossy — 64 bits of integer into
+        // a 52-bit mantissa — so it rounds UP, past the range it is supposed to
+        // bound, and a comparison against it would admit a value the following
+        // cast cannot represent.
+        const UNBOUNDED: f64 = 9.0e18;
+
+        if self.n < 2 || self.wins == 0 {
+            return 0;
+        }
+        let losses = self.n.saturating_sub(self.wins);
+        // Losses are counted as observations that were strictly negative, so a
+        // sample of wins and flats has none — unbounded, and named rather than
+        // divided by zero.
+        if losses == 0 || self.loss_sum >= 0.0 {
+            return i64::MAX;
+        }
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "both counts are bounded by the column, which is bounded by \
+                      the bars a month holds."
+        )]
+        let (wins, losses) = (self.wins as f64, losses as f64);
+        let mean_win = self.win_sum / wins;
+        // `loss_sum` is negative, so this is the magnitude of the average loss.
+        let mean_loss = -(self.loss_sum / losses);
+        if !(mean_win.is_finite() && mean_loss.is_finite()) || mean_loss <= 0.0 {
+            return 0;
+        }
+        let ratio = mean_win / mean_loss * 100.0;
+        if !ratio.is_finite() || ratio >= UNBOUNDED {
+            return i64::MAX;
+        }
+        // Saturating rather than wrapping: a ratio past `i64` is unbounded in
+        // every sense that matters, and wrapping would print a negative payoff
+        // for the best setup in the run.
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "bounded by UNBOUNDED above and by zero below, so the cast \
+                      is in range on every path that reaches it."
+        )]
+        let clamped = ratio.max(0.0) as i64;
+        clamped
+    }
+}
+
+/// The two sides of a forward-return distribution, accumulated apart.
+///
+/// # Why this is a type and not three locals
+///
+/// It was three locals inside [`edge`], which pushed that function past the
+/// hundred-line limit this workspace lints on — and the limit was right: `edge`
+/// already carries a Welford pass, a Newey-West drain and a whole-slice
+/// agreement check, and a fourth concern threaded through the same scope is
+/// where a reader stops being able to hold it.
+///
+/// Keeping them together also makes the ZERO rule checkable in one place rather
+/// than at each `+=`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Sides {
+    /// Strictly positive observations.
+    wins: u64,
+    /// Sum of the strictly positive observations.
+    win_sum: f64,
+    /// Sum of the strictly negative observations. Negative or zero.
+    loss_sum: f64,
+}
+
+impl Sides {
+    /// Charges one forward move to the side it fell on.
+    ///
+    /// **Zero is neither.** A flat forward move paid nothing and cost nothing;
+    /// charging it to a side would move [`Edge::payoff_bp`] by the number of
+    /// flat bars rather than by anything about the setup. A NaN is also neither
+    /// — it fails both comparisons — which is the honest handling for a value
+    /// that is not a move at all.
+    fn observe(&mut self, x: f64) {
+        if x > 0.0 {
+            self.wins = self.wins.saturating_add(1);
+            self.win_sum += x;
+        } else if x < 0.0 {
+            self.loss_sum += x;
+        }
+    }
 }
 
 /// The Newey-West long-run sum of squares, from `edge`'s four accumulators.
@@ -636,6 +795,9 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
     let mut refused: u64 = 0;
     let mut mean = 0.0_f64;
     let mut m2 = 0.0_f64;
+    // The two sides of the distribution, kept apart -- see `Edge::payoff_bp`
+    // for why the funnel needs them and `|t|` cannot supply them.
+    let mut sides = Sides::default();
 
     // THE OVERLAP CORRECTION, AND WHY THE t BELOW IS MEANINGLESS WITHOUT IT.
     //
@@ -744,6 +906,26 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
         mean += delta / count;
         m2 += delta * (x - mean);
 
+        // THE TWO SIDES, KEPT APART. O(1) per observation, in the pass that was
+        // already running, and no path data — which is the whole reason this
+        // can sit on the funnel's hot side where MAE and MFE cannot.
+        //
+        // WHY IT EXISTS. `screen_cap` cuts the candidate list to the top
+        // `keep` by `|t|`, and `|t|` is a DETECTABILITY statistic: it asks how
+        // reliably the mean differs from zero. A setup whose losers are small
+        // and whose winners are large can have a mean near zero — so a low
+        // `|t|` — and be exactly the setup an operator asking for "minimal stop
+        // loss, massive profit" wants. `crates/cli`'s own comment states the
+        // consequence: such a combination "is cut at 60, and never meets an
+        // exit grid at all. No tier ladder, no rule and no report can recover
+        // that. They all filter cells, and the cells were never computed."
+        //
+        // Splitting the sum is what lets the cut see that shape. It is NOT a
+        // replacement for the exit grid — it has no stop, no target and no
+        // path, so it cannot say what a stop WOULD have done. It says which
+        // combinations are worth asking that question about.
+        sides.observe(x);
+
         // EVERY EARLIER HIT WHOSE WINDOW STILL TOUCHES THIS ONE.
         //
         // `sources` is strictly increasing, so the front of the queue is the
@@ -779,6 +961,13 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
             mismatched,
             refused,
             mean_paisa: mean,
+            // CARRIED, not zeroed. A single observation has no `t` -- there is
+            // no spread to divide by -- but it did move one way or the
+            // other, and `payoff_bp` refuses a one-sided sample on its own
+            // terms rather than being handed a zero that looks measured.
+            wins: sides.wins,
+            win_sum: sides.win_sum,
+            loss_sum: sides.loss_sum,
             t: 0.0,
         };
     }
@@ -816,6 +1005,9 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
         mismatched,
         refused,
         mean_paisa: mean,
+        wins: sides.wins,
+        win_sum: sides.win_sum,
+        loss_sum: sides.loss_sum,
         t,
     }
 }
@@ -826,7 +1018,7 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
     reason = "the exception every test module in this workspace takes."
 )]
 mod tests {
-    use super::{Edge, Horizon, LAST_FILL_MINUTE, edge, forward, long_run_sum_squares};
+    use super::{Edge, Horizon, LAST_FILL_MINUTE, Sides, edge, forward, long_run_sum_squares};
     use indicators::column::Column;
     use indicators::evaluator::{Evaluator, Widths};
     use indicators::pattern::Thresholds;
@@ -856,6 +1048,109 @@ mod tests {
 
     fn h(n: u32) -> Horizon {
         Horizon::bars(n).expect("a positive horizon")
+    }
+
+    /// An `Edge` with only the payoff fields set, for arithmetic tests.
+    fn sided(n: u64, wins: u64, win_sum: f64, loss_sum: f64) -> Edge {
+        Edge {
+            n,
+            wins,
+            win_sum,
+            loss_sum,
+            ..Edge::default()
+        }
+    }
+
+    /// The shape `|t|` cannot see, which is the whole reason this exists.
+    ///
+    /// `rank` keeps the top combinations by `|t|` and everything under the cut
+    /// is discarded before an exit grid is built. A setup whose losers are small
+    /// and whose winners are large can have a mean near zero — and so a `t` near
+    /// zero — while being exactly what an operator asking for "minimal stop
+    /// loss, massive profit" wants.
+    ///
+    /// This asserts the two are genuinely independent: the same mean, the same
+    /// `n`, and payoffs an order of magnitude apart.
+    #[test]
+    fn the_payoff_separates_what_the_mean_cannot() {
+        // Ten observations, mean exactly zero on both.
+        //
+        // A: nine losers of -10 and one winner of +90.  Mean 0.
+        //    mean win 90, mean loss 10  -> payoff 9.00
+        let sniper = sided(10, 1, 90.0, -90.0);
+        // B: one loser of -90 and nine winners of +10.  Mean 0.
+        //    mean win 10, mean loss 90  -> payoff 0.11
+        let grinder = sided(10, 9, 90.0, -90.0);
+
+        // Both fixtures leave `mean_paisa` at its default, so the point being
+        // made is that the two carry the SAME mean and `t` therefore cannot
+        // separate them. Compared with `total_cmp` rather than `==`, because §7
+        // keeps strict float equality out of anything compared.
+        assert_eq!(
+            sniper.mean_paisa.total_cmp(&grinder.mean_paisa),
+            core::cmp::Ordering::Equal,
+            "both fixtures carry the same mean, so `t` cannot separate them"
+        );
+        assert_eq!(sniper.payoff_bp(), 900, "nine to one");
+        assert_eq!(grinder.payoff_bp(), 11, "one to nine, truncated from 11.11");
+        assert!(
+            sniper.payoff_bp() > grinder.payoff_bp() * 50,
+            "the statistic must separate by an order of magnitude what the mean \
+             does not separate at all"
+        );
+    }
+
+    /// Every refusal is a different absence and none of them is a number.
+    #[test]
+    fn the_payoff_names_each_absence_rather_than_returning_a_figure() {
+        // One observation is not a distribution.
+        assert_eq!(sided(1, 1, 10.0, 0.0).payoff_bp(), 0, "n < 2");
+        // No upside at all.
+        assert_eq!(sided(10, 0, 0.0, -100.0).payoff_bp(), 0, "no wins");
+        // No downside at all -- unbounded, and named rather than divided by
+        // zero. The same answer `Cell::return_over_drawdown` gives a variant
+        // that never gave anything back, for the same reason.
+        assert_eq!(sided(10, 10, 100.0, 0.0).payoff_bp(), i64::MAX, "no losses");
+        // Wins and FLATS only: the losses count is non-zero but nothing was
+        // charged to that side, so there is still nothing to divide by.
+        assert_eq!(
+            sided(10, 4, 100.0, 0.0).payoff_bp(),
+            i64::MAX,
+            "wins and flats"
+        );
+        // A default `Edge` is not a magnificent setup.
+        assert_eq!(
+            Edge::default().payoff_bp(),
+            0,
+            "nothing measured is not a finding"
+        );
+    }
+
+    /// A flat forward move is charged to neither side.
+    ///
+    /// Charging zero to a side would move the ratio by the number of flat bars
+    /// rather than by anything about the setup, and on a coarse rung flat bars
+    /// are common.
+    #[test]
+    fn a_flat_move_is_neither_a_win_nor_a_loss() {
+        let mut sides = Sides::default();
+        for x in [5.0, 0.0, 0.0, -1.0, 0.0] {
+            sides.observe(x);
+        }
+        assert_eq!(sides.wins, 1, "one strictly positive move");
+        assert!(
+            (sides.win_sum - 5.0).abs() < f64::EPSILON,
+            "the flats added nothing to the winning side"
+        );
+        assert!(
+            (sides.loss_sum + 1.0).abs() < f64::EPSILON,
+            "the flats added nothing to the losing side"
+        );
+
+        // A NaN is not a move either, and must not become one.
+        let mut nan = Sides::default();
+        nan.observe(f64::NAN);
+        assert_eq!(nan, Sides::default(), "a NaN is charged to neither side");
     }
 
     #[test]
@@ -1469,6 +1764,11 @@ mod refusal_coverage {
     /// runs. This is the runnable form: it fails the moment a seventh variant
     /// appears, forcing whoever adds it to decide which side of the line it is
     /// on.
+    ///
+    /// **UNVERIFIED as a measurement.** The bound is argued from the
+    /// shape of the code and no bench in this workspace times it.
+    /// `CLAUDE.md` §3 rule 6: a structural argument is not a
+    /// measurement, however sound it is.
     #[test]
     fn the_stateful_refusals_are_not_covered_and_this_says_so() {
         // Every variant, split by whether one record alone can decide it.

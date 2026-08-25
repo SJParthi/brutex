@@ -154,7 +154,114 @@ pub struct Ranked {
 /// UNVERIFIED as a measured figure: no bench row covers this yet.
 #[must_use]
 pub fn rank(sweep: &Sweep, column: &Column, forward: &Forward, keep: usize) -> Ranked {
-    let mut heap: BinaryHeap<core::cmp::Reverse<Scored>> = BinaryHeap::with_capacity(keep);
+    walk::<Scored>(sweep, column, forward, keep)
+}
+
+/// Which question decides who survives the cut.
+///
+/// # Why the cut needs a choice at all
+///
+/// `keep` is a HARD boundary: everything under it is discarded before any exit
+/// grid is built, and `crates/cli`'s own comment on the cap says the loss cannot
+/// be recovered — *"No tier ladder, no rule and no report can recover that. They
+/// all filter cells, and the cells were never computed."* So the ordering that
+/// decides the cut decides what the whole downstream pipeline is even able to
+/// consider.
+///
+/// [`Self::Detectability`] asks *how reliably does this differ from zero*. That
+/// is the right question for "is there an effect here". It is the wrong question
+/// for "would this be profitable with a tight stop", because a setup whose
+/// losers are small and whose winners are large can have a mean near zero.
+///
+/// Neither lens is correct in general and neither replaces the other, which is
+/// why this is a parameter rather than a new default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lens {
+    /// Rank by `|t|` — the historical behaviour, unchanged and bit-identical.
+    Detectability,
+    /// Rank by [`crate::outcome::Edge::payoff_bp`], ties broken by `|t|`.
+    ///
+    /// The tie-break matters more than it looks. Payoff alone is magnificent on
+    /// four observations, and [`i64::MAX`] on any sample that never lost — so a
+    /// combination firing twice with two winners would otherwise outrank
+    /// everything. Falling through to `|t|` puts the better-evidenced of two
+    /// equal payoffs first, and the significance bar downstream still applies.
+    Payoff,
+}
+
+/// One combination, ordered by payoff first and evidence second.
+///
+/// A newtype rather than a flag on [`Scored`], so the historical ordering is
+/// literally the same code it always was and cannot drift while the new one is
+/// edited.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ByPayoff(Scored);
+
+impl Eq for ByPayoff {}
+
+impl PartialOrd for ByPayoff {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ByPayoff {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let (mine, theirs) = (self.0.edge.payoff_bp(), other.0.edge.payoff_bp());
+        // Then `|t|`, on the same finite-first total order `Scored` uses, so two
+        // equal payoffs are separated by evidence rather than by mask bytes --
+        // and the mask still breaks a true tie, which is what keeps §3 rule 5's
+        // byte-for-byte reproducibility.
+        mine.cmp(&theirs).then_with(|| self.0.cmp(&other.0))
+    }
+}
+
+/// What a heap of some ordering needs to hold and hand back a [`Scored`].
+trait Ranked1: Ord + Sized {
+    fn wrap(scored: Scored) -> Self;
+    fn unwrap(self) -> Scored;
+}
+
+impl Ranked1 for Scored {
+    fn wrap(scored: Scored) -> Self {
+        scored
+    }
+    fn unwrap(self) -> Scored {
+        self
+    }
+}
+
+impl Ranked1 for ByPayoff {
+    fn wrap(scored: Scored) -> Self {
+        Self(scored)
+    }
+    fn unwrap(self) -> Scored {
+        self.0
+    }
+}
+
+/// [`rank`], under a chosen [`Lens`].
+///
+/// The historical call is [`Lens::Detectability`] and produces byte-identical
+/// output to what it always did — the ordering is the same `impl Ord for
+/// Scored`, reached through a wrapper that adds nothing.
+#[must_use]
+pub fn rank_by(
+    sweep: &Sweep,
+    column: &Column,
+    forward: &Forward,
+    keep: usize,
+    lens: Lens,
+) -> Ranked {
+    match lens {
+        Lens::Detectability => walk::<Scored>(sweep, column, forward, keep),
+        Lens::Payoff => walk::<ByPayoff>(sweep, column, forward, keep),
+    }
+}
+
+/// One pass over the frequent set, keeping the best `keep` under `K`'s ordering.
+fn walk<K: Ranked1>(sweep: &Sweep, column: &Column, forward: &Forward, keep: usize) -> Ranked {
+    let mut heap: BinaryHeap<core::cmp::Reverse<K>> = BinaryHeap::with_capacity(keep);
     let mut considered: u64 = 0;
 
     for itemset in sweep.all_frequent() {
@@ -162,11 +269,11 @@ pub fn rank(sweep: &Sweep, column: &Column, forward: &Forward, keep: usize) -> R
         if keep == 0 {
             continue;
         }
-        let scored = Scored {
+        let scored = K::wrap(Scored {
             mask: itemset.mask,
             hits: itemset.hits,
             edge: edge(column, forward, &itemset.mask),
-        };
+        });
         if heap.len() < keep {
             heap.push(core::cmp::Reverse(scored));
             continue;
@@ -182,12 +289,15 @@ pub fn rank(sweep: &Sweep, column: &Column, forward: &Forward, keep: usize) -> R
         }
     }
 
-    let mut top: Vec<Scored> = heap.into_iter().map(|core::cmp::Reverse(s)| s).collect();
+    let mut top: Vec<K> = heap.into_iter().map(|core::cmp::Reverse(s)| s).collect();
     // Best first. `sort_unstable_by` with the same total order the heap used, so
     // the output is identical across processes -- a `HashSet`-derived order
     // would not be, and §3 rule 5 forbids that reaching the output.
     top.sort_unstable_by(|a, b| b.cmp(a));
-    Ranked { top, considered }
+    Ranked {
+        top: top.into_iter().map(Ranked1::unwrap).collect(),
+        considered,
+    }
 }
 
 #[cfg(test)]
@@ -229,6 +339,93 @@ mod tests {
                 ..Edge::default()
             },
         }
+    }
+
+    /// The two lenses keep DIFFERENT combinations, which is the point.
+    ///
+    /// A lens that reordered without changing who survives the cut would be
+    /// cosmetic. This asserts the sniper — small losers, large winners, mean
+    /// near zero — is the one `Detectability` discards and `Payoff` keeps.
+    #[test]
+    fn the_two_lenses_keep_different_combinations_at_the_cut() {
+        // The sniper: nine losers of -10 and one winner of +90. Mean 0, so its
+        // `t` is 0 and it sits at the BOTTOM of a detectability ranking.
+        let sniper = Scored {
+            mask: ConditionMask::default().with_bit(1),
+            hits: 10,
+            edge: Edge {
+                n: 10,
+                wins: 1,
+                win_sum: 90.0,
+                loss_sum: -90.0,
+                t: 0.0,
+                ..Edge::default()
+            },
+        };
+        // The grinder: a strong, reliable, small edge. High `t`, poor payoff.
+        let grinder = Scored {
+            mask: ConditionMask::default().with_bit(2),
+            hits: 10,
+            edge: Edge {
+                n: 10,
+                wins: 9,
+                win_sum: 90.0,
+                loss_sum: -90.0,
+                t: 9.0,
+                ..Edge::default()
+            },
+        };
+
+        assert!(
+            grinder > sniper,
+            "under Detectability the grinder wins -- t 9.0 against 0.0"
+        );
+        assert!(
+            super::ByPayoff(sniper) > super::ByPayoff(grinder),
+            "under Payoff the sniper wins -- 9.00 against 0.11"
+        );
+    }
+
+    /// Payoff ties fall through to evidence, not to mask bytes.
+    ///
+    /// Without this, a combination that fired twice and won twice reports
+    /// `i64::MAX` and outranks every real finding in the run.
+    #[test]
+    fn an_equal_payoff_is_broken_by_evidence() {
+        let thin = Scored {
+            mask: ConditionMask::default().with_bit(1),
+            hits: 2,
+            edge: Edge {
+                n: 2,
+                wins: 2,
+                win_sum: 20.0,
+                loss_sum: 0.0,
+                t: 0.5,
+                ..Edge::default()
+            },
+        };
+        let thick = Scored {
+            mask: ConditionMask::default().with_bit(2),
+            hits: 900,
+            edge: Edge {
+                n: 900,
+                wins: 900,
+                win_sum: 9_000.0,
+                loss_sum: 0.0,
+                t: 12.0,
+                ..Edge::default()
+            },
+        };
+        assert_eq!(
+            thin.edge.payoff_bp(),
+            thick.edge.payoff_bp(),
+            "both never lost, so both are unbounded and the payoffs tie"
+        );
+        assert!(
+            super::ByPayoff(thick) > super::ByPayoff(thin),
+            "a tie on payoff is settled by evidence, or two winning trades would \
+             outrank nine hundred"
+        );
     }
 
     #[test]

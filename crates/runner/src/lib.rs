@@ -236,11 +236,45 @@ impl Sweeper {
         horizon: crate::outcome::Horizon,
         keep: usize,
     ) -> RankedRun {
+        self.run_ranked_by(
+            bars,
+            evaluator,
+            horizon,
+            keep,
+            crate::rank::Lens::Detectability,
+        )
+    }
+
+    /// [`Self::run_ranked`], under a chosen [`crate::rank::Lens`].
+    ///
+    /// # Why the lens has to be chosen HERE and not downstream
+    ///
+    /// `keep` is a hard cut and this is where it falls. Everything the heap does
+    /// not admit is gone before the caller sees a single combination, so a
+    /// caller that wanted a different question answered cannot ask it
+    /// afterwards — it can only re-order what detectability already chose.
+    ///
+    /// That is the defect `crates/cli`'s cap comment describes and calls
+    /// unrecoverable: *"No tier ladder, no rule and no report can recover that.
+    /// They all filter cells, and the cells were never computed."* Passing the
+    /// lens down to the cut is what makes it recoverable.
+    ///
+    /// The cost is unchanged. Both lenses read the same [`crate::outcome::Edge`]
+    /// from the same single pass; [`crate::outcome::Edge::payoff_bp`] is
+    /// arithmetic on fields that pass already accumulated.
+    pub fn run_ranked_by(
+        &self,
+        bars: &[Candle],
+        evaluator: &mut Evaluator,
+        horizon: crate::outcome::Horizon,
+        keep: usize,
+        lens: crate::rank::Lens,
+    ) -> RankedRun {
         let (column, sweep) = self.fold_and_walk(bars, evaluator);
         // THE SAME SLICE THE COLUMN WAS BUILT FROM, and that is the whole point
         // of computing it here rather than leaving it to the caller.
         let forward = crate::outcome::forward(bars, horizon);
-        let ranked = crate::rank::rank(&sweep, &column, &forward, keep);
+        let ranked = crate::rank::rank_by(&sweep, &column, &forward, keep, lens);
         RankedRun {
             outcome: Self::outcome_of(&column, sweep),
             ranked,

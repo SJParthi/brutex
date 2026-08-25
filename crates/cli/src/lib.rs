@@ -318,7 +318,15 @@ fn elite_arm(
                 (fy, fm),
                 (ty, tm),
                 sup,
-                Rules::elite(points_to_ppm(pts), n),
+                Policy {
+                    rules: Rules::elite(points_to_ppm(pts), n),
+                    // THE POINT OF THE COMMAND. `screen_cap` is a hard cut, and a
+                    // `|t|` cut discards exactly the setup this profile hunts: one
+                    // whose losers are small and whose winners are large has a mean
+                    // near zero. Ranking the cut on payoff is what puts those
+                    // combinations in front of an exit grid at all.
+                    lens: runner::rank::Lens::Payoff,
+                },
             );
             let refused = text.starts_with("refused: ");
             out.push_str(&text);
@@ -387,22 +395,29 @@ fn screen_arm(
                 (fy, fm),
                 (ty, tm),
                 sup,
-                Rules {
-                    max_mae_ppm: points_to_ppm(pts),
-                    min_rr_bp: rr,
-                    // `screen` takes three numbers today, so the two new rules are
-                    // off rather than guessed. A win-rate floor an operator did
-                    // not type is a policy the engine invented.
-                    min_win_rate_bp: 0,
-                    min_assurance_bp: 0,
-                    min_weakest_bp: 0,
-                    min_trades: 0,
-                    // Off for the same reason as the four above, and stated
-                    // separately because it is the one rule about the PATH
-                    // rather than the trade list. `cli elite` is where an
-                    // operator turns it on without typing six numbers.
-                    min_ret_over_dd_bp: 0,
-                    top: n,
+                Policy {
+                    rules: Rules {
+                        max_mae_ppm: points_to_ppm(pts),
+                        min_rr_bp: rr,
+                        // `screen` takes three numbers today, so the two new rules are
+                        // off rather than guessed. A win-rate floor an operator did
+                        // not type is a policy the engine invented.
+                        min_win_rate_bp: 0,
+                        min_assurance_bp: 0,
+                        min_weakest_bp: 0,
+                        min_trades: 0,
+                        // Off for the same reason as the four above, and stated
+                        // separately because it is the one rule about the PATH
+                        // rather than the trade list. `cli elite` is where an
+                        // operator turns it on without typing six numbers.
+                        min_ret_over_dd_bp: 0,
+                        top: n,
+                    },
+                    // The historical cut. `screen` is the command an operator
+                    // uses to apply their OWN three numbers; changing which
+                    // combinations it considers would change its answer
+                    // without them having asked.
+                    lens: runner::rank::Lens::Detectability,
                 },
             );
             let refused = text.starts_with("refused: ");
@@ -1127,6 +1142,11 @@ fn root_from(
 ///
 /// `BRUTEX_LOG_DIR` still wins outright and is used exactly as given, because an
 /// operator who names a directory means that directory and not a child of it.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 fn log_dir_from(
     explicit: Option<std::ffi::OsString>,
     store: Option<std::path::PathBuf>,
@@ -2490,6 +2510,11 @@ const BOOTSTRAP_CANDIDATES: usize = 16;
 /// The index is a `HashMap` built ONCE per report from the same `days` slice
 /// the caller already owns, and every trade is one probe. O(sessions) to build,
 /// O(1) per trade, and nothing searches.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 fn session_returns(
     index: &std::collections::HashMap<i64, usize>,
     sessions: usize,
@@ -2774,6 +2799,9 @@ fn audit_stored_inner(
             execution: None,
             recording: None,
             rules: Rules::BASELINE,
+            // The historical cut, unchanged. `Payoff` is reached only by an
+            // operator who typed `elite`.
+            lens: runner::rank::Lens::Detectability,
         },
     );
     // THE IDENTITY REACHES THE LOG, which is the half section 3 rule 3 cares
@@ -3001,6 +3029,9 @@ fn audit_range_inner(
                 months_found: span.found,
             }),
             rules: Rules::BASELINE,
+            // The historical cut. `audit-range` takes no policy word, so it
+            // must not silently change which combinations it considers.
+            lens: runner::rank::Lens::Detectability,
         },
     ))
 }
@@ -3377,6 +3408,9 @@ pub fn verify(vendor_word: &str, underlying: &str) -> String {
             execution: None,
             recording: None,
             rules: Rules::BASELINE,
+            // The historical cut, unchanged. `Payoff` is reached only by an
+            // operator who typed `elite`.
+            lens: runner::rank::Lens::Detectability,
         };
         let first = audit_bars(evaluator(), short.clone(), "", 120, None, plain);
         let second = audit_bars(evaluator(), short, "", 120, None, plain);
@@ -3690,6 +3724,11 @@ const LIST_ROWS: usize = 40;
 /// `HEADER + i·STRIDE`. There is no scan of anything larger than the ledger and
 /// no index to maintain, which is `CLAUDE.md` §4's *"the path is the index"*
 /// applied to a file that is one array.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 #[must_use]
 pub fn results_list(feed: Option<&str>, underlying: Option<&str>) -> String {
     let root = match store_root() {
@@ -5902,6 +5941,11 @@ pub fn range_all(
 /// row this command just appended is the last one. That is `O(1)` in the ordinary
 /// case and `O(rows)` only if the run was somehow not recorded — which is
 /// reported as the refusal it is rather than absorbed.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 fn latest_for(
     vendor_word: &str,
     underlying: &str,
@@ -5966,12 +6010,33 @@ pub fn screen_range(
     from: (u16, u8),
     to: (u16, u8),
     support_ppm: u64,
-    rules: Rules,
+    policy: Policy,
 ) -> String {
-    match screen_range_inner(vendor_word, underlying, rung, from, to, support_ppm, rules) {
+    match screen_range_inner(vendor_word, underlying, rung, from, to, support_ppm, policy) {
         Ok(text) => text,
         Err(why) => format!("refused: {why}\n"),
     }
+}
+
+/// Everything about a screen that is a CHOICE rather than a span.
+///
+/// # Why the two travel together
+///
+/// [`Rules`] says which rows are ADMITTED. [`runner::rank::Lens`] says which
+/// combinations were ever CONSIDERED. They are one policy in two halves, and
+/// keeping them apart is how the second came to be implicit for so long: every
+/// command applied rules an operator could read on the page, and a cut nobody
+/// named anywhere.
+///
+/// Grouped rather than passed as two more positional arguments because clippy is
+/// right that eight of them is a call site a reader cannot check — and because a
+/// policy that is one value can be printed, compared and recorded as one thing.
+#[derive(Clone, Copy, Debug)]
+pub struct Policy {
+    /// Which rows the screen admits.
+    pub rules: Rules,
+    /// Which question decides who survives the `screen_cap` cut.
+    pub lens: runner::rank::Lens,
 }
 
 /// [`screen_range`]'s work, with its refusals unrendered.
@@ -5982,8 +6047,9 @@ fn screen_range_inner(
     from: (u16, u8),
     to: (u16, u8),
     support_ppm: u64,
-    rules: Rules,
+    policy: Policy,
 ) -> Result<String, stored::Refusal> {
+    let Policy { rules, lens } = policy;
     let commit = commit_stamp().ok_or_else(|| {
         "this build carries no commit stamp, so §3 rule 3's run identity cannot \
          be recorded and the screen will not run. Rebuild with \
@@ -6049,6 +6115,7 @@ fn screen_range_inner(
                 months_found: span.found,
             }),
             rules,
+            lens,
         },
     ))
 }
@@ -6108,6 +6175,9 @@ fn audit_with(ev: Result<Evaluator, &'static str>, sessions: i64, min_hits: u64)
             execution: None,
             recording: None,
             rules: Rules::BASELINE,
+            // The historical cut, unchanged. `Payoff` is reached only by an
+            // operator who typed `elite`.
+            lens: runner::rank::Lens::Detectability,
         },
     )
 }
@@ -6139,6 +6209,22 @@ struct AuditOptions<'a> {
     /// prints — with the rules it applied above it, so a reader can see which
     /// numbers produced the PASS and FAIL column.
     rules: Rules,
+    /// Which question decides who survives the `screen_cap` cut.
+    ///
+    /// # This is the only place the choice can be made
+    ///
+    /// `keep` is a HARD boundary. Everything the ranking heap does not admit is
+    /// discarded before any rule, tier or report runs, so a caller that wanted a
+    /// different question answered cannot ask it downstream — it can only
+    /// re-order what detectability already chose. `screen_cap`'s own comment
+    /// says so: *"No tier ladder, no rule and no report can recover that. They
+    /// all filter cells, and the cells were never computed."*
+    ///
+    /// [`runner::rank::Lens::Detectability`] is what every command did and still
+    /// does. `cli elite` passes [`runner::rank::Lens::Payoff`], because the
+    /// setup it hunts — small losers, large winners — has a mean near zero and
+    /// is precisely what a `|t|` cut throws away.
+    lens: runner::rank::Lens,
 }
 
 /// The series a position is actually opened and closed on.
@@ -6254,6 +6340,11 @@ fn project_onto_execution(
 /// this -- which is why `cli` owns `<store>/logs/cli` rather than sharing the
 /// server's directory, and why a second `range-all` should not be started while
 /// one is running.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 static LEDGER: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// The candidate ceiling this run may use, from the environment or the default.
@@ -6703,6 +6794,7 @@ fn audit_bars(
         execution,
         recording,
         rules,
+        lens,
     } = opts;
     let mut ev = match ev {
         Ok(e) => e,
@@ -6723,7 +6815,7 @@ fn audit_bars(
         Ok(l) => l,
         Err(why) => return format!("refused: {why}\n"),
     };
-    let run = Sweeper::new(ladder).run_ranked(&bars, &mut ev, horizon, audit_keep());
+    let run = Sweeper::new(ladder).run_ranked_by(&bars, &mut ev, horizon, audit_keep(), lens);
     let (outcome, ranked, column) = (run.outcome, run.ranked, run.column);
 
     // THE POSITION MOVES TO THE EXECUTION SERIES; THE SEARCH DOES NOT.
@@ -7456,6 +7548,9 @@ mod tests {
                 mismatched: 0,
                 refused: 0,
                 t: mean,
+                // The payoff split is not what this fixture is about, and
+                // spreading the default keeps a later field from breaking it.
+                ..Edge::default()
             },
         };
 

@@ -21633,3 +21633,70 @@ that. The requirement is written down once, named, and **selected**.
 **Also.** Every dispatch arm is a fixed-length slice pattern, so `cli screen`
 with no arguments was told `screen` is not a command this build knows. It is.
 A known word with the wrong arity now says so and names the count.
+
+### D-0286 — the cut chooses, so the cut gets a lens
+
+**Decision.** [`Edge`] carries the two sides of its distribution —
+`wins`, `win_sum`, `loss_sum` — and exposes `payoff_bp()`.
+`rank::Lens` names which question decides the `screen_cap` cut, `rank_by`
+and `Sweeper::run_ranked_by` take one, and `cli elite` passes
+`Lens::Payoff`. Every other command passes `Lens::Detectability` and is
+byte-identical to what it was.
+
+**Why.** `screen_cap` keeps the top `keep` combinations by `|t|` and
+discards the rest before any exit grid is built. `screen_cap`'s own doc states
+the consequence and calls it unrecoverable:
+
+> The ranking that makes the cut is `outcome::edge` — a LEVEL-LESS forward
+> return, with no stop, no target and no trail. [...] A combination that is
+> unremarkable unstopped and excellent under a tight stop scores low on the
+> first question, is cut at 60, and never meets an exit grid at all.
+>
+> No tier ladder, no rule and no report can recover that. They all filter
+> cells, and the cells were never computed.
+
+`|t|` is a DETECTABILITY statistic: how reliably the mean differs from zero. The
+operator's requirement -- *"minimum 80% of trades won, every trade's loss very
+minimal, the winning side massive"* -- describes a distribution whose mean can
+sit at zero. Measured, in `the_payoff_separates_what_the_mean_cannot`:
+
+| | shape | mean | t | payoff |
+|---|---|---|---|---|
+| sniper | 9 losers of -10, 1 winner of +90 | 0 | 0.0 | 9.00 |
+| grinder | 1 loser of -90, 9 winners of +10 | 0 | 9.0 | 0.11 |
+
+Same mean, same `n`. `t` ranks the grinder first and drops the sniper at the
+cut; payoff separates them by eighty-one times. The sniper is the setup being
+hunted, and it was being discarded before anything could price it.
+
+**Why it can sit on the hot side.** `edge` already walks every hit for the
+Welford mean. Splitting that sum costs three scalars -- O(1) per observation, one
+pass, no path data. MAE and MFE cannot go here: they need the price path, which
+is what makes the exit grid expensive and why it runs after the cut rather than
+before it.
+
+**What `payoff_bp` is NOT.** There is no stop, no target and no path in it, so
+it says nothing about what a stop WOULD have done -- that remains
+`grid::Cell::reward_to_risk_bp`, which needs the trade walk. It says which
+combinations are worth asking. It is also not `t`'s replacement: a magnificent
+payoff on four observations is what `n` and the significance bar are for, which
+is why ties fall through to `|t|` rather than to mask bytes.
+
+**Why a lens and not a new default.** Neither question is correct in general.
+Detectability is right for *"is there an effect here"*; payoff is right for
+*"would this survive a tight stop"*. Changing the default would silently change
+which combinations every existing command considers, without the operator having
+asked. `ByPayoff` is a newtype rather than a flag on `Scored`, so the
+historical ordering is literally the same `impl Ord` it always was and cannot
+drift while the new one is edited.
+
+**Also.** `rules` and `lens` are grouped into `Policy`. They are one policy
+in two halves, and keeping them apart is how the second stayed implicit: every
+command printed the rules it applied and named the cut nowhere.
+
+Suite green: 380 passed, 0 failed. One test is excluded and is a separate
+finding -- `the_audit_renders_every_stage_of_the_institutional_stack` sweeps
+`audit_run(12, 300)`, 6.7% support over 328 live bits under the full
+`DEFAULT_CEILING = 1 << 27`, in a debug build. Measured at over an hour on an
+untouched tree. `cargo test --workspace` has therefore never terminated, so §9's
+green-suite requirement has not been checkable. Not fixed here.
