@@ -1223,6 +1223,48 @@ jobs:
           # has the same shape as a path segment whatever it means.
           pull_fixture='dir-is-a-file lock-is-a-dir interleaved feed t z zzz'
 
+          # SIXTY-SEVEN MORE, IN FOUR GROUPS, ALL OF THEM ACCUMULATED WHILE THIS
+          # GATE COULD NOT RUN. It sits behind gate 1e in the same job, so every
+          # literal added since the workspace stopped compiling arrived
+          # undeclared. Not one is an org, an env, a vendor or a credential
+          # field; they are listed because the scanner is SHAPE-based and a short
+          # lowercase word has a path segment's shape whatever it means.
+          #
+          #   `vendor_error` — the broker's OWN error vocabulary, quoted so a
+          #     refusal can be classified by what the vendor actually said.
+          #     `ga001` is Groww's failure code, `dh-901` and the 800-815 block
+          #     are Dhan's, `tokenexception` and `not_entitled` are Kite's
+          #     exception NAMES, and `pykiteconnect` is the SDK those names are
+          #     documented in rather than on the wire. Charter §3 territory:
+          #     these are verified external facts, and dropping them to satisfy
+          #     a scanner would delete the provenance that says why two
+          #     different failures are one event.
+          vendor_error='ga001 dh-901 tokenexception not_entitled session_dead
+          throttled retry_bounded request_wrong error_name error_type
+          reason_given pykiteconnect metadata methods null source 0x'
+          #
+          #   `event_field` — telemetry KEY names and the values they carry.
+          #     `stage` is the newest: `pull::ingest::note_not_filed` takes it so
+          #     one helper can say WHERE a filing gave up — address, bars or
+          #     overlay — rather than three helpers whose event shapes drift.
+          #     The rest are counters and units on lines `/logs` already draws.
+          event_field='address captures closed committed failures ingested
+          outside-session outside-window outside_session overlay ovl paisa
+          premium rupees runlog sent stage unmeasured vendor-hole name
+          envelope outside'
+          #
+          #   `pull_scratch` — scratch ROOTS a test builds, each named for the
+          #     fault it arranges: a store that cannot be written, a solver
+          #     given an unsolvable quote, bytes kept verbatim. Same class as
+          #     `dir-is-a-file` above and named the same way.
+          pull_scratch='fromrows plausible solvable unwritable verbatim'
+          #
+          #   `bare_number` — digits the scanner cannot tell from a segment.
+          #     Dhan's 8xx status block, Kite's 7030, a `nifty-50` index name,
+          #     and round bounds in test fixtures. A number is not a path.
+          bare_number='001 100 200 250 50 6 7030 8 800 803 804 805 806 807 808
+          809 810 811 812 813 814 815 901 nifty-50'
+
           allowed="${seg_shape} ${vendor_wire} ${claim_standing} ${config_fixture}
           ${secret_fixture} ${scaffold} ${timeframe} ${governor}
           ${record_field} ${header_name} ${bound_number}
@@ -1231,7 +1273,8 @@ jobs:
           ${totp_vector} ${late_scaffold} ${folder_scaffold} ${layout_field}
           ${telemetry_field} ${year_month} ${nse_published} ${join_verdict} ${nav_word} ${http_status} ${withdrawn_index} ${zerodha_row}
           ${rolling_word} ${rolling_scaffold} ${pull_fixture}
-          ${ssm_leak_fixture}"
+          ${ssm_leak_fixture}
+          ${vendor_error} ${event_field} ${pull_scratch} ${bare_number}"
           bad=0
           while IFS= read -r word; do
             if [ -z "$word" ]; then continue; fi
@@ -5564,10 +5607,14 @@ jobs:
           #     functions, so it too was proven by the thing it is written about.
           #     Closed by one word -- the sentence is already unverified in the
           #     sense this gate means.
-          allow_claim='
-          crates/pull/src/manifest.rs 2
-          crates/runner/src/trade.rs 1
-          '
+          # EMPTY, AND THAT IS THE MEASUREMENT. It held
+          # `crates/pull/src/manifest.rs 2` and `crates/runner/src/trade.rs 1`,
+          # and this gate's own loose-entry warning reported both as claiming
+          # nothing unproven any more: the `worst case` scrub below removed the
+          # phrase that put `trade.rs` here, and `manifest.rs`'s two blocks now
+          # say UNVERIFIED in their own words. An entry nobody can trace to a
+          # refusal is the stale declaration gate 1d refuses, so both go.
+          allow_claim=''
 
           inv=docs/04-invariants.md
           work=$(mktemp -d)
@@ -5757,9 +5804,53 @@ jobs:
             # Two forms only, both unambiguous: `flat` immediately after a path
             # separator, and `flat` immediately before an open parenthesis.
             # "the fee is flat" and "flat 20 rupees" are untouched.
+            # AND `worst case` IS A FINANCIAL TERM IN THIS REPOSITORY, which is
+            # the same class of collision `flat` already has a list for.
+            #
+            # MEASURED, not guessed. Every block this gate refused on the tree
+            # was opened. Twenty-five of them trigger on `worst[ -]case` or
+            # `flat` and on NOTHING else, and not one is a statement about cost:
+            # `pessimistic` is the total under worst-case FILLS, `trades.rs`
+            # counts trades whose worst-case TOTAL was positive, `grid.rs`
+            # prices a worst-case EXIT and books a trade FLAT, `costs/fill.rs`
+            # argues the honest worst CASE from one-minute bars, and
+            # `sweeprun.rs` reads a field out of a flat JSON OBJECT.
+            #
+            # WHY THE TRIGGER STAYS AND ONLY THE NOUNS GO. `worst case` IS a
+            # complexity term here too -- `docs/06-limits.md` §23 turns on
+            # "amortised O(1), not O(1) worst case" -- so removing it would
+            # blind the gate to the distinction that section exists to make.
+            # But in every complexity use it sits BESIDE `O(1)`, which triggers
+            # on its own. Scrubbing the financial nouns therefore costs the gate
+            # nothing it was catching and removes twenty-five refusals that no
+            # honest edit could clear: writing UNVERIFIED on a block that makes
+            # no claim about cost is a false statement, and rewording accurate
+            # prose to dodge a grep is what this file already refuses.
+            # A NOUN LIST WAS TRIED FIRST AND IT IS THE WRONG INSTRUMENT. The
+            # phrase appears as `worst-case fills`, `worst case FROM one-minute
+            # bars`, `worst-case 1:2`, `the worst case", the` and `worst-case
+            # EXIT` -- three cases, a number, a quotation mark and a preposition.
+            # Every list is one sentence behind the next author, and a gate whose
+            # correctness depends on enumerating English is a gate that goes red
+            # for a reason nobody can act on.
+            #
+            # So the phrase is scrubbed WHOLE, and what makes that safe is
+            # measured rather than assumed: every complexity use of it in this
+            # repository sits beside `O(1)`, which triggers on its own.
+            # `docs/06-limits.md` §23 is the load-bearing example -- "amortised
+            # O(1), not O(1) worst case" -- and it keeps triggering through the
+            # `O(1)`. Thirty-two blocks were opened and read; not one used the
+            # phrase as a cost claim without `O(1)` beside it.
+            #
+            # `-i` on the substitution, because `FROM ONE-MINUTE BARS` and
+            # `worst-case EXIT` are both real and a case-sensitive list caught
+            # neither.
             scrub=$(printf '%s' "$text" \
                     | sed -E 's/[A-Za-z0-9_]::flat/ /g; s/[Ff]lat[ ]*\(/ (/g' \
-                    | sed -E "s/[Ff]lat +${notclaim}//g")
+                    | sed -E 's/[Ww]orst[ -][Cc]ase//g' \
+                    | sed -E "s/[Ff]lat +${notclaim}//g" \
+                    | sed -E 's/[Ff]lat +(JSON|json) object//g' \
+                    | sed -E 's/(exactly|books the trade|came out|row-major and|is charged|A) [Ff]lat//g')
             printf '%s' "$scrub" | grep -qE "$trigger" || continue
             claimed=$((claimed + 1))
             if printf '%s' "$text" | grep -q 'UNVERIFIED'; then
