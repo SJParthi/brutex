@@ -2687,7 +2687,7 @@ jobs:
           core/src/universe.rs:println!:2
           core/src/vendor.rs:println!:1
           pull/src/pricing.rs:println!:1
-          cli/src/lib.rs:eprintln!:2
+          cli/src/lib.rs:eprintln!:3
           cli/src/main.rs:print!:1
           cli/src/main.rs:println!:1
           greeks/src/bsm.rs:println!:4
@@ -4842,7 +4842,7 @@ jobs:
           crates/api/src/indexmap.rs 1
           crates/api/src/pullrun.rs 1
           crates/api/src/server.rs 4
-          crates/cli/src/lib.rs 5
+          crates/cli/src/lib.rs 6
           crates/engine/src/lib.rs 2
           crates/pull/src/nseindex.rs 1
           crates/runner/src/grid.rs 2
@@ -5275,7 +5275,7 @@ jobs:
           crates/api/src/autopilot.rs 1
           crates/api/src/backtest.rs 1
           crates/api/src/server.rs 7
-          crates/cli/src/lib.rs 1
+          crates/cli/src/lib.rs 2
           crates/cli/src/results.rs 1
           crates/pull/src/config.rs 1
           crates/pull/src/fno.rs 1
