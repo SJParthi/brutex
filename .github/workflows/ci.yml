@@ -5987,6 +5987,7 @@ jobs:
           indicators crates/indicators/benches/ratio.rs 5  C-I-01 C-I-02 C-I-03 C-I-04
           engine    crates/engine/benches/ratio.rs    4  C-E-01 C-E-02 C-E-03 C-E-04 C-E-05 C-E-06 C-E-07 C-E-08 C-E-09 C-E-10 C-E-11
           runner    crates/runner/benches/ratio.rs    3  C-R-01 C-R-02 C-R-03 C-R-04
+          cli       crates/cli/benches/ratio.rs       4  C-CLI-01 C-CLI-02 C-CLI-03 C-CLI-04
           '
 
           inv=docs/04-invariants.md

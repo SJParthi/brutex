@@ -2619,3 +2619,37 @@ reader honest about a file it does not own.
 | BT-10 | **A `limit` is clamped, never refused.** A bookmarked `?limit=99999` is an operator who wants everything; the honest answer is everything up to the ceiling plus the flag saying the ceiling was reached | `backtest::a_limit_is_clamped_at_both_ends_and_never_refused` | ✓ |
 | BT-11 | **An unresolvable store root answers 503 in the shape the page parses.** A configuration failure must not also be a parse failure on top of it | `backtest::an_unresolvable_store_root_answers_503_with_the_shape_the_page_parses` | ✓ |
 | BT-12 | **`/backtest` is NOT a registered route, and that is what keeps one path one application.** A registered route beats `Router::fallback` unconditionally, so a Rust page there would make a click render Svelte and a reload render Rust — the live `/audit` defect `web/vite.config.js` documents | the router block in `server.rs` registers `/backtest.json` alone; `web/svelte.config.js`'s `SERVER_RENDERED` set does not name `/backtest` | ✓ |
+
+---
+
+## C-CLI — `crates/cli` re-measures the bounds it states
+
+`crates/cli` was the **only** one of the thirteen workspace crates with no
+`benches/` directory. Gate 14 refused it in those terms — *"REFUSED crates/cli —
+20 cost claim(s), no row in the table"* — while every other crate shipped
+`benches/ratio.rs`.
+
+That hole was the worst one available. `CLAUDE.md` §5 makes `cli` the only entry
+point from which the sweep is reachable at all: `api` depends on `core`, `pull`,
+`store` and `telemetry`, not on `runner`, `engine` or `indicators`. So the binary
+an operator actually runs to produce a trading result carried **no measured bound
+of any kind**, and a regression to O(n) in the result store, in rung resolution
+or in the report render would have breached no bench and tripped no gate.
+
+The four rows are taken from the cost table `crates/cli/src/results.rs`'s own
+header prints, because a bound a module states in writing is exactly the bound
+gate 14 asks it to re-measure. Every row divides one per-unit cost by another
+per-unit cost of the **same** operation; the ceiling is 2.500x, the figure
+`crates/runner`'s bench uses and for the same reason.
+
+| # | Must hold | Proven by | |
+|---|---|---|---|
+| C-CLI-01 | **Reading record *i* does not depend on *i*.** The ledger header says the address is `HEADER + i·STRIDE`, "an add and a multiply". Measured as record 0 against record 1,023 of the same 1,024-record file — if the seek had become a walk, the last record would cost proportionally more than the first | `cli::bench::the_read_does_not_depend_on_which_record` | ✓ |
+| C-CLI-02 | **Counting does not depend on how many there are.** The header says `(file_len - HEADER) / STRIDE`, "no walk". Measured at 64 records against 1,024 — a sixteen-fold difference a count that walked could not hide inside the ceiling | `cli::bench::the_count_does_not_depend_on_how_many_there_are` | ✓ |
+| C-CLI-03 | **The duplicate check is a hash probe, not a walk.** Timed on an ALREADY OPEN ledger, so the one pass that builds the set is excluded by construction — the header is explicit that the build is the O(runs) part and the query is the part that must not scan. A hit against a MISS, because a set that had silently become a linear search shows its worst case on the miss, which must reach the end before it can answer | `cli::bench::the_duplicate_check_does_not_scan_the_ledger` | ✓ |
+| C-CLI-04 | **Encoding a record does not depend on the ledger it will join.** `to_bytes` writes one fixed-stride array from one struct; a `to_bytes` that consulted the store would stop being a pure function of the record it was called on | `cli::bench::the_encode_does_not_depend_on_the_ledger_it_joins` | ✓ |
+
+Measured on the operator's machine, 2026-08-25, `cargo bench -p cli`, exit 0:
+0.989x, 1.000x, 0.880x and 1.006x. **Not measured here:** whether any of those
+costs is *small*. These rows refuse a cost that GROWS; `docs/06-limits.md` is
+where absolute figures and the things nobody has timed are recorded.

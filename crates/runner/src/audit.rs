@@ -1775,7 +1775,7 @@ mod tests {
             // separator property this fixture exists to squeeze.
             fill_cost: 1_234_567_890,
             worst_trade: -87_654_321,
-            max_drawdown: -76_543_210,
+            max_drawdown: 76_543_210,
             winner_mae: 65_432,
             winner_mfe: 543_210,
             all_mae: 98_765,

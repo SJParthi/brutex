@@ -124,6 +124,21 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    200 demands the SMALLEST win be twice the
                                    LARGEST loss, 0 drops the rule. TOP is how many
                                    to print.
+       cli elite        VENDOR UNDERLYING RUNG FROM_Y FROM_M TO_Y TO_M
+                        SUPPORT_PPM MAX_POINTS TOP
+                                   `screen` with EVERY rule on, at one named
+                                   policy, instead of four of six switched off.
+                                   Demands 80% of trades won AND 80% on the 95%
+                                   lower bound (so a lucky twelve-trade record
+                                   cannot pass), the average win at least 3x the
+                                   average loss, total profit at least 5x the
+                                   worst peak-to-trough fall, and the weakest
+                                   calendar grain still half positive. There is
+                                   NO trade floor: the assurance bound already
+                                   refuses a sample too thin, which is what lets
+                                   a rare 40-trade setup through where a floor
+                                   would reject it. MAX_POINTS is still yours --
+                                   it is the one number only you can mean.
        cli descend      VENDOR UNDERLYING RUNG FROM_Y FROM_M TO_Y TO_M
                         CEILING_PPM PER_WEEK
                                    sweep ONE rung at successively LOWER supports,
@@ -252,6 +267,78 @@ fn results_arm(out: &mut String, filter: Option<(&str, &str)>) -> u8 {
 /// stated in points on a 25,000 index and applied unchanged to a 52,000 one
 /// would be a different rule. `NIFTY_REFERENCE` is a stated approximation and
 /// is named as one on the page.
+/// The `elite` arm — [`Rules::elite`] over a stored span.
+///
+/// # Why a command and not a flag
+///
+/// The operator's requirement is six numbers, and `screen` takes three. Typing
+/// the other three every run is how a policy drifts between runs and stops being
+/// comparable; leaving them off is how `screen` came to have four of its six
+/// rules switched to zero. A NAMED profile is neither: the numbers live in one
+/// documented place, the banner prints them, and two runs a month apart applied
+/// the same policy because they named the same one.
+///
+/// It takes the stop in POINTS, exactly as `screen` does, because that is the
+/// one number that is genuinely per-operator and per-instrument — a five-point
+/// stop is a different intention on NIFTY than on BANKNIFTY, and only the person
+/// running it knows which they mean.
+fn elite_arm(
+    out: &mut String,
+    vendor: &str,
+    underlying: &str,
+    rung: &str,
+    span: (&str, &str, &str, &str),
+    limits: (&str, &str, &str),
+) -> u8 {
+    let (support, max_points, top) = limits;
+    let (from_y, from_m, to_y, to_m) = span;
+    let numbers = (
+        from_y.parse::<u16>(),
+        from_m.parse::<u8>(),
+        to_y.parse::<u16>(),
+        to_m.parse::<u8>(),
+        parse_support_ppm(support),
+    );
+    let rules = (max_points.parse::<i64>(), top.parse::<usize>());
+    match (numbers, rules) {
+        ((Ok(fy), Ok(fm), Ok(ty), Ok(tm), Ok(sup)), (Ok(pts), Ok(n))) => {
+            if pts <= 0 {
+                return refuse(
+                    out,
+                    "MAX_POINTS must be a whole number of index points, 1 or more",
+                );
+            }
+            if n == 0 {
+                return refuse(out, "TOP must be 1 or more");
+            }
+            let text = screen_range(
+                vendor,
+                underlying,
+                rung,
+                (fy, fm),
+                (ty, tm),
+                sup,
+                Rules::elite(points_to_ppm(pts), n),
+            );
+            let refused = text.starts_with("refused: ");
+            out.push_str(&text);
+            if refused { MISUSED } else { OK }
+        }
+        ((Err(_), _, _, _, _) | (_, _, Err(_), _, _), _) => {
+            refuse(out, "FROM_YEAR and TO_YEAR must be whole years")
+        }
+        ((_, Err(_), _, _, _) | (_, _, _, Err(_), _), _) => {
+            refuse(out, "FROM_MONTH and TO_MONTH must be 1 to 12")
+        }
+        ((_, _, _, _, Err(why)), _) => refuse(out, why),
+        (_, (Err(_), _)) => refuse(
+            out,
+            "MAX_POINTS must be a whole number of index points, 1 or more",
+        ),
+        (_, (_, Err(_))) => refuse(out, "TOP must be a whole number, 1 or more"),
+    }
+}
+
 fn screen_arm(
     out: &mut String,
     vendor: &str,
@@ -310,6 +397,11 @@ fn screen_arm(
                     min_assurance_bp: 0,
                     min_weakest_bp: 0,
                     min_trades: 0,
+                    // Off for the same reason as the four above, and stated
+                    // separately because it is the one rule about the PATH
+                    // rather than the trade list. `cli elite` is where an
+                    // operator turns it on without typing six numbers.
+                    min_ret_over_dd_bp: 0,
                     top: n,
                 },
             );
@@ -372,27 +464,94 @@ const NIFTY_REFERENCE: i64 = 25_000;
 ///
 /// An empty slice, or one whose extremes are not positive, falls back to
 /// `NIFTY_REFERENCE` — the only remaining use of that constant, and it is
-/// reached exactly when there is no price to read.
+/// reached exactly when there is no price to read. It is scaled to PAISA on the
+/// way out, because the branch above it returns paisa and a function whose two
+/// arms disagree about the unit is the defect this whole block documents.
+///
+/// # THE UNIT IS PAISA, AND IT USED TO BE BOTH
+///
+/// `b.low` and `b.high` are paisa — `CLAUDE.md` §7 puts every price in this
+/// system on a paisa `i64`, and `docs/02-store-format.md` writes it into the
+/// record layout. The midpoint of two paisa is paisa. The fallback returned
+/// `NIFTY_REFERENCE` unscaled, which is 25,000 — an INDEX LEVEL, a hundred
+/// times smaller than the 2,500,000 paisa the same index is worth.
+///
+/// **One function, two branches, two units**, and the converters below trusted
+/// the wrong one. `points_to_ppm_at(20, 2_500_000)` returned 8 where the
+/// paragraph above states in writing that twenty points is 800 ppm, so the
+/// shipped stop ladder came out at 2..10 ppm — 0.05 to 0.25 index points,
+/// one to five NIFTY ticks — instead of 200..1000. Every stop the exit grid has
+/// ever priced was inside the entry bar's own range, which is exactly what
+/// [`STOP_FLOOR_POINTS`] exists to prevent.
+///
+/// The fallback is now scaled and the converters take paisa, so both arms and
+/// every caller agree. `a_rule_in_points_converts_at_the_documented_rate` fails
+/// the build if the rate ever drifts from the figure this doc names.
 fn reference_price(bars: &[indicators::Candle]) -> i64 {
     let lo = bars.iter().map(|b| b.low).filter(|&l| l > 0).min();
     let hi = bars.iter().map(|b| b.high).filter(|&h| h > 0).max();
     match (lo, hi) {
         (Some(l), Some(h)) if h >= l => l.saturating_add(h) / 2,
-        _ => NIFTY_REFERENCE,
+        _ => NIFTY_REFERENCE.saturating_mul(PAISA_PER_POINT),
     }
 }
 
+/// Paisa in one index point.
+///
+/// `CLAUDE.md` §7 puts the tick grid at two decimal places, so a one-point move
+/// on a quote is a hundred paisa — the same ratio
+/// [`brutex_core::price::PAISA_PER_RUPEE`] names for money, taken from there
+/// rather than written again so the two cannot drift apart.
+const PAISA_PER_POINT: i64 = brutex_core::price::PAISA_PER_RUPEE;
+
 /// Index points as parts per million against a price read off the bars.
+///
+/// `reference` is **paisa**, the unit [`reference_price`] returns and the unit
+/// every price in this workspace is in. The points are lifted to paisa before
+/// the ratio is taken, which is the step whose absence made this a hundredfold
+/// error.
 const fn points_to_ppm_at(points: i64, reference: i64) -> i64 {
     if reference <= 0 {
         return 0;
     }
-    points.saturating_mul(1_000_000) / reference
+    points
+        .saturating_mul(PAISA_PER_POINT)
+        .saturating_mul(1_000_000)
+        / reference
 }
 
 /// Parts per million back to index points, at a price read off the bars.
+///
+/// `reference` is **paisa**. The quotient is paisa, so it is brought back down
+/// to points — the inverse of [`points_to_ppm_at`], and it must stay the exact
+/// inverse or a ladder built in one unit is printed in another.
+///
+/// # ROUNDED TO NEAREST, AND FLOORING WAS WRONG BY A WHOLE POINT
+///
+/// Two truncating divisions sit between a ppm rung and the point it is printed
+/// as. A five-point rung at a reference of 2,512,500 paisa is 199 ppm exactly;
+/// flooring it back gives 499 paisa and then **4 points**. The `TIGHTEST`
+/// column is the one an operator reads to decide whether a stop is reachable,
+/// and it was understating every rung by up to a point — always in the
+/// direction that makes a stop look tighter than the engine can actually place.
+///
+/// Rounding to nearest makes `ppm_to_points_at(points_to_ppm_at(p, r), r) == p`
+/// hold on every rung of the shipped ladder, which
+/// `a_rule_in_points_converts_at_the_documented_rate` asserts.
 const fn ppm_to_points_at(ppm: i64, reference: i64) -> i64 {
-    ppm.saturating_mul(reference) / 1_000_000
+    if reference <= 0 {
+        return 0;
+    }
+    let paisa = ppm.saturating_mul(reference) / 1_000_000;
+    // Away from zero on a tie, and sign-aware so a negative excursion does not
+    // round the wrong way. Integer arithmetic only -- §7 keeps floats off any
+    // path whose output is compared.
+    let half = PAISA_PER_POINT / 2;
+    if paisa >= 0 {
+        (paisa + half) / PAISA_PER_POINT
+    } else {
+        (paisa - half) / PAISA_PER_POINT
+    }
 }
 
 /// Index points as parts per million against [`NIFTY_REFERENCE`].
@@ -649,6 +808,9 @@ pub fn run(args: &[String], out: &mut String) -> u8 {
         ["screen", v, u, r, fy, fm, ty, tm, sup, pts, rr, n] => {
             screen_arm(out, v, u, r, (fy, fm, ty, tm), (sup, pts, rr, n))
         }
+        ["elite", v, u, r, fy, fm, ty, tm, sup, pts, n] => {
+            elite_arm(out, v, u, r, (fy, fm, ty, tm), (sup, pts, n))
+        }
         ["range-all", v, u, fy, fm, ty, tm, mh] => range_all_arm(out, v, u, (fy, fm), (ty, tm), mh),
         ["descend", v, u, r, fy, fm, ty, tm, sup, pw] => {
             descend_arm(out, v, u, r, (fy, fm), (ty, tm), sup, pw)
@@ -666,12 +828,63 @@ pub fn run(args: &[String], out: &mut String) -> u8 {
             Err(why) => refuse(out, why),
         },
         [] => refuse(out, "no command given"),
-        [word, ..] => {
-            let owned = format!("`{word}` is not a command this build knows");
-            refuse(out, &owned)
-        }
+        [word, rest @ ..] => refuse(out, &unmatched(word, rest.len())),
     }
 }
+
+/// Why a word reached [`run`]'s last arm, said in the terms that were wrong.
+///
+/// # A KNOWN COMMAND WITH THE WRONG ARITY IS NOT AN UNKNOWN COMMAND
+///
+/// Every dispatch arm is a slice pattern of a FIXED length, so `cli screen` with
+/// no arguments matches none of them and falls through. The message there was
+/// *"`screen` is not a command this build knows"* — which is false, and sends a
+/// reader hunting for a typo or a stale binary instead of reading the argument
+/// list printed two lines below it in the same output.
+///
+/// `CLAUDE.md` §4 requires a refusal to name what was wrong. When the word is
+/// real, the thing that was wrong is the COUNT, so that is what it says.
+fn unmatched(word: &str, given: usize) -> String {
+    if COMMANDS.contains(&word) {
+        format!(
+            "`{word}` is a command, but not with {given} argument{}. Its argument \
+             list is in the usage below.",
+            if given == 1 { "" } else { "s" }
+        )
+    } else {
+        format!("`{word}` is not a command this build knows")
+    }
+}
+
+/// Every word [`run`]'s dispatch answers to.
+///
+/// # Why a list and not a parse of [`USAGE`]
+///
+/// The refusal above needs to tell a known command with the wrong arity apart
+/// from a typo, and the only other source for "is this a command" is the usage
+/// text. Parsing prose for that is the shape this workspace refuses elsewhere:
+/// the text wraps, its argument lists run onto continuation lines, and a
+/// reworded line would silently change which words the binary claims to know.
+///
+/// So it is written down, and `every_command_is_listed_in_both_places` asserts
+/// the list, the dispatch and the usage all name the same set. The duplication
+/// is real; the test is what makes it safe.
+const COMMANDS: [&str; 14] = [
+    "audit",
+    "audit-range",
+    "audit-stored",
+    "auto",
+    "auto-stored",
+    "descend",
+    "elite",
+    "range-all",
+    "results",
+    "screen",
+    "sweep",
+    "sweep-all",
+    "sweep-stored",
+    "verify",
+];
 
 /// Writes a named refusal and the usage, and returns [`MISUSED`].
 ///
@@ -1727,7 +1940,6 @@ const MAX_STOP_POINTS: i64 = 25;
 /// operator who says twenty-five means it — the derivation may narrow that
 /// promise, never widen it.
 fn max_stop_points(bars: &[indicators::Candle]) -> i64 {
-    let reference = reference_price(bars);
     let mut ranges: Vec<i64> = bars
         .iter()
         .map(|b| b.high.saturating_sub(b.low))
@@ -1738,8 +1950,18 @@ fn max_stop_points(bars: &[indicators::Candle]) -> i64 {
     }
     ranges.sort_unstable();
     let median = ranges.get(ranges.len() / 2).copied().unwrap_or(0);
-    // Paisa to points: the reference is in the same paisa units the bars are.
-    let in_points = ppm_to_points_at(points_to_ppm_at(median, reference), reference);
+    // A BAR RANGE IS ALREADY PAISA, SO NO REFERENCE IS INVOLVED.
+    //
+    // This read `ppm_to_points_at(points_to_ppm_at(median, reference), reference)`
+    // — a round trip through both converters against the same reference, which
+    // is the identity up to integer truncation. So `in_points` was the median
+    // bar range IN PAISA, and a NIFTY minute bar's few-hundred-paisa range
+    // clamped to `MAX_STOP_POINTS` on every real series. A function documented
+    // as derived from the data returned the constant it was meant to replace.
+    //
+    // `high - low` is a difference of two paisa prices, which is paisa. Points
+    // are paisa over [`PAISA_PER_POINT`], with nothing to convert against.
+    let in_points = median / PAISA_PER_POINT;
     in_points.clamp(1, MAX_STOP_POINTS)
 }
 
@@ -3403,7 +3625,7 @@ fn ledger_round_trip() -> Check {
         pessimistic: 2_459_160,
         optimistic: 3_649_640,
         worst_trade: -4_694,
-        max_drawdown: -29_163,
+        max_drawdown: 29_163,
         winner_mae: 300,
         winner_mfe: 700,
         all_mae: 500,
@@ -3839,6 +4061,30 @@ pub struct Rules {
     ///
     /// Zero drops the rule, the way every other rule here does.
     pub min_weakest_bp: i64,
+    /// Total profit as a multiple of the worst peak-to-trough fall, in
+    /// hundredths. `500` reads "made at least five times what it ever gave
+    /// back".
+    ///
+    /// # The measurement that gated nothing
+    ///
+    /// [`grid::Cell::max_drawdown`] is the largest fall of the running total and
+    /// has been on every record since the ledger landed.
+    /// [`grid::Cell::return_over_drawdown`] divides the total by it, correctly,
+    /// and its own doc admitted the gap in four words: **"Nothing ranks on this
+    /// yet."** It appeared in no selector — not `Rules::admits`, not
+    /// `Grid::best`, not `best_within`, not `sharpest`, not `validate`'s argmax.
+    ///
+    /// So the engine could name as winner a combination that made a hundred
+    /// after twice giving back eighty, over one that ground steadily to ninety.
+    /// Every other rule here is a property of the trade LIST and cannot see the
+    /// order trades arrived in; this is the only one about the PATH, which is
+    /// what an operator actually has to sit through.
+    ///
+    /// A variant that never gave anything back reports [`i64::MAX`] and clears
+    /// any floor, which is the honest answer rather than a division by zero.
+    ///
+    /// Zero drops the rule, the way [`Self::min_rr_bp`] of zero does.
+    pub min_ret_over_dd_bp: i64,
     /// How many combinations to report. Ten or twenty-five, the operator's call.
     pub top: usize,
 }
@@ -3877,11 +4123,31 @@ impl Rules {
         // It is NOT `const`-incompatible by accident -- `assurance_bp` takes a
         // square root, so this function loses `const`. That is the price of the
         // only statistic that can rank a sniper against a grinder honestly.
+        // AND A SIXTH, WHICH IS THE ONLY ONE ABOUT THE PATH.
+        //
+        // The five above are all properties of the TRADE LIST -- how far one
+        // trade ran against you, how the average win compares to the average
+        // loss, how many won, how many there were, how sure we are of the rate.
+        // Not one of them can see the ORDER the trades arrived in, and order is
+        // the whole of survivability: a variant that made a hundred after twice
+        // giving back eighty is indistinguishable from one that ground steadily
+        // to a hundred, on every rule above.
+        //
+        // `grid::Cell::max_drawdown` has measured that since the ledger landed
+        // and NOTHING ranked or gated on it -- `return_over_drawdown`'s own doc
+        // said so in words: "Nothing ranks on this yet". This is the rule that
+        // makes the measurement bite, and it is the operator's actual
+        // requirement: not "massive profit", but "massive profit at a drawdown
+        // I could sit through".
+        //
+        // Zero drops the rule, the way `min_rr_bp` of zero does, so no command
+        // gains a policy nobody typed.
         cell.worst_mae <= self.max_mae_ppm
             && cell.reward_to_risk_bp() >= self.min_rr_bp
             && cell.win_rate_bp() >= self.min_win_rate_bp
             && cell.trades >= self.min_trades
             && cell.assurance_bp() >= self.min_assurance_bp
+            && cell.return_over_drawdown() >= self.min_ret_over_dd_bp
     }
 }
 
@@ -3914,8 +4180,81 @@ impl Rules {
         min_assurance_bp: 0,
         min_weakest_bp: 0,
         min_trades: 0,
+        min_ret_over_dd_bp: 0,
         top: 25,
     };
+
+    /// Every rule on, at the operator's stated requirement.
+    ///
+    /// # Why this is a PROFILE and not a new default
+    ///
+    /// [`Self::BASELINE`] switches four of its six rules off, and its reasoning
+    /// is right: *a rule an operator did not type is a policy the engine
+    /// invented*. Turning them on globally would be exactly that. So the
+    /// requirement is written down once, given a name, and **selected** — the
+    /// operator types `elite` and gets these numbers, or types their own and
+    /// gets those. Nothing is invented and nothing is silently applied.
+    ///
+    /// # Where each number comes from
+    ///
+    /// The operator's requirement, in their own words, is *"if this combination
+    /// occurs then minimum 80 percent of trades won, every trade's loss is very
+    /// minimal, the winning side is massive, and even drawdown is less"*. That
+    /// is five separate claims, and this is each one as a number:
+    ///
+    /// | requirement | field | value | reads |
+    /// |---|---|---|---|
+    /// | 80% of trades win | `min_win_rate_bp` | `8_000` | 80.00% |
+    /// | ...and not by luck | `min_assurance_bp` | `8_000` | 80% even on the 95% lower bound |
+    /// | minimal loss per trade | `max_mae_ppm` | caller's | the stop, in ppm |
+    /// | massive winning side | `min_rr_bp` | `300` | **smallest** win ≥ 3× **largest** loss |
+    /// | drawdown is less | `min_ret_over_dd_bp` | `500` | made ≥ 5× the worst fall |
+    /// | every period the same | `min_weakest_bp` | `5_000` | the weakest grain still ≥ 50% positive |
+    ///
+    /// **`min_rr_bp` is harsher than it looks, and deliberately so.**
+    /// [`grid::Cell::reward_to_risk_bp`] is `min_win / -worst_trade` — the
+    /// SMALLEST winner over the LARGEST loser, not a ratio of averages. A single
+    /// bad trade sets the denominator, so `300` demands that the *weakest* win
+    /// still tripled the *worst* loss. Averages would let one catastrophic trade
+    /// hide behind many small wins, which is the shape this profile exists to
+    /// reject.
+    ///
+    /// **`min_assurance_bp` is what lets `min_trades` stay at zero**, and that
+    /// is the point of the profile rather than an oversight. The operator wants
+    /// *"not thousands of trades — the one and only"*: a rare setup that fires
+    /// forty times in ten years and does not lose. A `min_trades` floor rejects
+    /// that outright; the Wilson lower bound weighs it instead — 40 of 40 clears
+    /// 80%, 12 of 12 does not, and neither number had to be guessed.
+    ///
+    /// **`min_weakest_bp` is 5,000 and not 10,000** deliberately. Demanding
+    /// every single period at every one of six grains close positive is a rule
+    /// almost nothing survives, and a screen that admits nothing teaches an
+    /// operator nothing about why. Half is a real bar that still refuses a
+    /// combination carried by one good year. An operator who wants the stricter
+    /// reading sets it themselves.
+    ///
+    /// # This is a FILTER, not a promise
+    ///
+    /// Every row it admits still carries the whole-workspace caveats: figures
+    /// are per ONE unit of the index, gross of the statutory charge stack, and
+    /// selected out of a search whose multiplicity the screen does not correct
+    /// for. A row passing `elite` is a candidate to investigate, not a result.
+    #[must_use]
+    pub const fn elite(max_mae_ppm: i64, top: usize) -> Self {
+        Self {
+            max_mae_ppm,
+            min_rr_bp: 300,
+            min_win_rate_bp: 8_000,
+            min_assurance_bp: 8_000,
+            min_weakest_bp: 5_000,
+            // ZERO ON PURPOSE. See the doc above: the assurance bound already
+            // refuses a sample too thin to mean anything, and a floor here would
+            // refuse the rare high-conviction setup this profile exists to find.
+            min_trades: 0,
+            min_ret_over_dd_bp: 500,
+            top,
+        }
+    }
 }
 
 /// Win-rate rungs, in basis points, strictest first.
@@ -4161,6 +4500,20 @@ impl Tier {
             // else.
             min_weakest_bp: self.min_win_rate_bp,
             min_trades: self.min_trades,
+            // ZERO, AND THE TIER LADDER IS THE REASON.
+            //
+            // A tier is generated from four axes -- max points, reward-to-risk,
+            // win rate, trade floor -- and the ladder is already 960 tiers at
+            // eight grid rungs. A fifth axis multiplies that by however many
+            // drawdown rungs it carries, for a cascade whose job is to show an
+            // operator WHERE their requirement stops being satisfiable, not to
+            // enumerate every policy.
+            //
+            // Picking one value here instead would be worse: it would be a
+            // drawdown policy attached to every tier that nobody typed, which is
+            // the defect `BASELINE`'s own comment names. `cli elite` is where
+            // the rule is turned on, by an operator who asked for it.
+            min_ret_over_dd_bp: 0,
             top,
         }
     }
@@ -5328,6 +5681,53 @@ pub fn descend(
     out
 }
 
+/// A ledger row's return-over-drawdown, rendered for the `ret/DD` column.
+///
+/// # THIS COLUMN COULD NEVER PRODUCE A VALUE, AND THE TESTS WERE WHY
+///
+/// It was written inline as `if r.max_drawdown < 0 && r.pessimistic > 0`, then
+/// divided by `-r.max_drawdown`. [`grid::Cell::max_drawdown`] is a peak-to-trough
+/// FALL, documented "Always >= 0" and asserted non-negative in `grid`'s own
+/// invariants, and `record_run` copies that value straight into the record. So
+/// the guard was false for every real run and the column printed `-` on all
+/// eight rungs of every sweep — the one column that answers *what did this rung
+/// risk per unit of return*, which is the operator's stated question and the
+/// reason the exit grid exists.
+///
+/// Nothing caught it because **four fixtures in this crate wrote the drawdown
+/// negative**, so the suite covered a branch production could not reach. Those
+/// fixtures now carry the engine's sign.
+///
+/// # It delegates rather than re-deriving
+///
+/// The arithmetic lives on [`grid::Cell::return_over_drawdown`] and was copied
+/// here by hand, which is how the two came to disagree about a sign in the first
+/// place. A `Cell` is `Default`, so the two money fields are set on one and the
+/// real method answers. There is now exactly one implementation, and
+/// `the_ledger_ratio_is_the_cell_ratio` fails if this ever grows a second.
+fn return_over_drawdown_cell(pessimistic: i64, max_drawdown: i64) -> String {
+    let cell = grid::Cell {
+        pessimistic,
+        max_drawdown,
+        ..grid::Cell::default()
+    };
+    match cell.return_over_drawdown() {
+        // A variant that never gave anything back. Unbounded, so it is named
+        // rather than printed as a number no divisor produced.
+        i64::MAX => "inf".to_owned(),
+        // No profit to divide. `-` is the honest answer, not a zero.
+        0 => "-".to_owned(),
+        // HUNDREDTHS, RENDERED AS A DECIMAL, and the raw integer was a second
+        // way to misread this column. `return_over_drawdown` is `x100` by the
+        // same convention `win_rate_bp` and `profit_factor_bp` use, so a run
+        // that made 84.32 times its worst fall returned `8432` — which reads as
+        // eight thousand, not as eighty-four times. The `PF` column beside it
+        // has always gone through `hundredths_of`; this one now does too, so
+        // two ratios in one table are in one format.
+        ratio => hundredths_of(ratio),
+    }
+}
+
 /// Sweeps a span on EVERY rung and prints one table comparing them.
 ///
 /// # Why this is one command and not nine invocations
@@ -5464,11 +5864,22 @@ pub fn range_all(
                     r.trades,
                     r.pessimistic,
                     r.optimistic,
-                    if r.max_drawdown < 0 && r.pessimistic > 0 {
-                        (r.pessimistic.saturating_mul(100) / -r.max_drawdown).to_string()
-                    } else {
-                        "-".to_owned()
-                    },
+                    // A PEAK-TO-TROUGH FALL IS NON-NEGATIVE, AND THIS TESTED
+                    // THE OTHER SIGN.
+                    //
+                    // `grid::Cell::max_drawdown` is documented "Always >= 0"
+                    // and asserted so; `record_run` copies that value straight
+                    // in. So `r.max_drawdown < 0` was false for every real run
+                    // and this column printed "-" on all eight rungs, forever
+                    // -- the one column answering "what did this rung risk per
+                    // unit of return", structurally dead.
+                    //
+                    // It survived because FOUR test fixtures in this file wrote
+                    // the drawdown NEGATIVE, so the suite exercised a branch
+                    // production could not reach. They now carry the engine's
+                    // sign, which is what made this visible at all.
+                    //
+                    return_over_drawdown_cell(r.pessimistic, r.max_drawdown),
                 );
             }
         }
@@ -6706,15 +7117,20 @@ fn decay_block(
 )]
 mod tests {
     use super::{
+        COMMANDS, MIN_AUDIT_SESSIONS, MISUSED, OK, PROVENANCE, STORED_PROVENANCE, USAGE, Vendor,
+        audit_run, audit_stored, auto, auto_with, direction_of, evaluator_from, log_dir_from,
+        nothing_to_trade, parse_min_hits, parse_sessions, parse_vendor, root_from, run,
+        sample_warning, side_of_evidence, sweep, sweep_stored, sweep_with,
+    };
+    use super::{
         Consistency, Horizon, consistency_of, evaluator, grid, grid_step_ppm, ladder_for,
         stop_ladder_ppm,
     };
     use super::{Direction, Side};
     use super::{
-        MIN_AUDIT_SESSIONS, MISUSED, OK, PROVENANCE, STORED_PROVENANCE, USAGE, Vendor, audit_run,
-        audit_stored, auto, auto_with, direction_of, evaluator_from, log_dir_from,
-        nothing_to_trade, parse_min_hits, parse_sessions, parse_vendor, root_from, run,
-        sample_warning, side_of_evidence, sweep, sweep_stored, sweep_with,
+        MAX_STOP_POINTS, NIFTY_REFERENCE, PAISA_PER_POINT, STOP_FLOOR_POINTS, hundredths_of,
+        points_to_ppm, points_to_ppm_at, ppm_to_points_at, reference_price,
+        return_over_drawdown_cell, synthetic,
     };
     use super::{cadence_floor_ppm, months_between, support_ladder};
 
@@ -7696,7 +8112,7 @@ mod tests {
             pessimistic: -987_654_321,
             optimistic: 123_456_789,
             worst_trade: -87_654_321,
-            max_drawdown: -76_543_210,
+            max_drawdown: 76_543_210,
             winner_mae: 2_291,
             winner_mfe: 8_876,
             all_mae: 2_295,
@@ -7849,7 +8265,7 @@ mod tests {
             pessimistic: 9_000_000,
             optimistic: 9_000_000,
             worst_trade: 0,
-            max_drawdown: -1,
+            max_drawdown: 1,
             winner_mae: 0,
             winner_mfe: 0,
             all_mae: 0,
@@ -8142,7 +8558,7 @@ mod tests {
             pessimistic: 1_350_424,
             optimistic: 1_450_424,
             worst_trade: -18_400,
-            max_drawdown: -76_543,
+            max_drawdown: 76_543,
             winner_mae: 2_291,
             winner_mfe: 8_876,
             all_mae: 2_295,
@@ -8215,6 +8631,7 @@ mod tests {
             min_assurance_bp: 0,
             min_weakest_bp: 0,
             min_trades: 0,
+            min_ret_over_dd_bp: 0,
             top: 25,
         };
         assert!(
@@ -8254,6 +8671,433 @@ mod tests {
     ///
     /// If this assertion ever fails, either the arithmetic moved or the cadence
     /// did, and the descent's floor is no longer the operator's requirement.
+    /// [`COMMANDS`], the dispatch and [`USAGE`] name the same set of commands.
+    ///
+    /// The list exists so a wrong-arity refusal can tell a real command from a
+    /// typo, and a list that drifts from the dispatch would make that refusal
+    /// lie in the other direction. Every entry must appear in the usage as its
+    /// own `cli <word>` line, and every such line must be in the list.
+    #[test]
+    fn every_command_is_listed_in_both_places() {
+        for word in COMMANDS {
+            assert!(
+                USAGE.contains(&format!("cli {word} ")) || USAGE.contains(&format!("cli {word}\n")),
+                "`{word}` is in COMMANDS and has no usage line"
+            );
+        }
+
+        // And the other direction: every `cli <word>` the usage advertises must
+        // be a word the dispatch answers to.
+        for line in USAGE.lines() {
+            let mut words = line.split_whitespace();
+            if words.next() != Some("cli") {
+                continue;
+            }
+            if let Some(word) = words.next() {
+                assert!(
+                    COMMANDS.contains(&word),
+                    "the usage advertises `{word}` and COMMANDS does not list it"
+                );
+            }
+        }
+
+        assert!(
+            COMMANDS.windows(2).all(|w| w.first() < w.last()),
+            "kept sorted so a new command is added in one obvious place"
+        );
+    }
+
+    /// A known command with the wrong arity says so, instead of denying itself.
+    ///
+    /// Every dispatch arm is a fixed-length slice pattern, so `cli screen` with
+    /// no arguments fell through to the unknown-word arm and was told `screen`
+    /// is not a command this build knows. It is, and the reader was sent looking
+    /// for a typo or a stale binary.
+    #[test]
+    fn a_known_command_with_the_wrong_arity_is_not_called_unknown() {
+        for word in COMMANDS {
+            let mut out = String::new();
+            let code = run(&argv(&[word]), &mut out);
+
+            // `results` legitimately takes zero arguments, so it is the one
+            // command that must NOT refuse here.
+            if word == "results" {
+                continue;
+            }
+
+            assert_eq!(code, MISUSED, "`{word}` alone is a misuse");
+            assert!(
+                out.contains("is a command, but not with 0 arguments"),
+                "`{word}` alone must be named as a command with the wrong arity, got: {}",
+                out.lines().next().unwrap_or_default()
+            );
+            assert!(
+                !out.contains("is not a command this build knows"),
+                "`{word}` must not deny being a command"
+            );
+        }
+
+        // A genuine typo still gets the honest answer.
+        let mut out = String::new();
+        assert_eq!(run(&argv(&["scrreen"]), &mut out), MISUSED);
+        assert!(
+            out.contains("`scrreen` is not a command this build knows"),
+            "an unknown word is still unknown, got: {}",
+            out.lines().next().unwrap_or_default()
+        );
+
+        // Singular for one argument, so the message reads.
+        let mut one = String::new();
+        let _ = run(&argv(&["screen", "zerodha"]), &mut one);
+        assert!(
+            one.contains("not with 1 argument."),
+            "one argument is singular, got: {}",
+            one.lines().next().unwrap_or_default()
+        );
+    }
+
+    /// `elite` refuses every shape it exists to refuse, and admits the sniper.
+    ///
+    /// Each case below is a combination that passes some of the rules and fails
+    /// one. That is the whole design: five properties of the trade list plus one
+    /// of the equity path, and a row must clear all six.
+    #[test]
+    fn the_elite_profile_refuses_each_shape_it_exists_to_refuse() {
+        // 10 points at NIFTY 25,000 is 400 ppm.
+        let rules = crate::Rules::elite(points_to_ppm(10), 25);
+
+        // A cell that satisfies everything: 40 trades, all winners, tight
+        // excursion, big average win, and a fall it made back many times over.
+        let good = grid::Cell {
+            trades: 40,
+            wins: 40,
+            worst_mae: 300,
+            min_win: 1_500,
+            worst_trade: -500,
+            pessimistic: 1_000_000,
+            max_drawdown: 100_000,
+            ..grid::Cell::default()
+        };
+        assert!(
+            rules.admits(&good),
+            "a 40-of-40 record with a 10x return over drawdown is what this profile is FOR: \
+             win {} bp, assurance {} bp, rr {} bp, ret/dd {}",
+            good.win_rate_bp(),
+            good.assurance_bp(),
+            good.reward_to_risk_bp(),
+            good.return_over_drawdown()
+        );
+
+        // THE OPERATOR'S OWN COUNTEREXAMPLE, from `min_rr_bp`'s doc: 81% won,
+        // average win 7.57 against average loss 18.65. A superb win rate
+        // wearing a losing shape.
+        let high_rate_bad_rr = grid::Cell {
+            min_win: 757,
+            worst_trade: -1_865,
+            ..good
+        };
+        assert!(
+            !rules.admits(&high_rate_bad_rr),
+            "an 81%-win-rate strategy with a reward-to-risk of 0.41 must not pass"
+        );
+
+        // A LUCKY TINY SAMPLE. 12 of 12 is a 100% rate and a 75.75% lower
+        // bound, so the raw rate passes and the assurance bound refuses it.
+        let lucky_twelve = grid::Cell {
+            trades: 12,
+            wins: 12,
+            ..good
+        };
+        assert_eq!(
+            lucky_twelve.win_rate_bp(),
+            10_000,
+            "the raw rate is perfect"
+        );
+        assert!(
+            !rules.admits(&lucky_twelve),
+            "twelve perfect trades is not evidence of an 80% rate: assurance {} bp",
+            lucky_twelve.assurance_bp()
+        );
+
+        // THE ROW THIS WHOLE FIELD WAS ADDED FOR. Everything above is
+        // identical; it simply gave back most of what it made along the way.
+        let gave_it_back = grid::Cell {
+            max_drawdown: 900_000,
+            ..good
+        };
+        assert!(
+            !rules.admits(&gave_it_back),
+            "made 1,000,000 after a 900,000 fall -- a ret/DD of {} -- must not pass a 5x rule",
+            gave_it_back.return_over_drawdown()
+        );
+
+        // A stop that one trade ran through. Broken once is disqualification.
+        let stop_broke = grid::Cell {
+            worst_mae: 1_200,
+            ..good
+        };
+        assert!(
+            !rules.admits(&stop_broke),
+            "a trade that ran 1,200 ppm against a 400 ppm stop must not pass"
+        );
+
+        // NO TRADE FLOOR, and that is deliberate -- it is what admits a rare
+        // setup. The assurance bound is doing the work a floor would do badly.
+        assert_eq!(
+            rules.min_trades, 0,
+            "a floor would reject the rare high-conviction setup this profile hunts"
+        );
+    }
+
+    /// A drawdown rule of zero drops the rule, like every other rule here.
+    ///
+    /// The five older rules all treat zero as "not asked for", and a sixth that
+    /// silently applied itself would be the invented policy `BASELINE`'s comment
+    /// refuses.
+    #[test]
+    fn a_drawdown_rule_of_zero_admits_what_it_would_otherwise_refuse() {
+        let ruinous = grid::Cell {
+            trades: 40,
+            wins: 40,
+            worst_mae: 300,
+            min_win: 1_500,
+            worst_trade: -500,
+            pessimistic: 1_000_000,
+            // Gave back 99% of everything it made.
+            max_drawdown: 990_000,
+            ..grid::Cell::default()
+        };
+
+        let off = crate::Rules {
+            min_ret_over_dd_bp: 0,
+            ..crate::Rules::elite(points_to_ppm(10), 25)
+        };
+        assert!(off.admits(&ruinous), "zero drops the rule");
+
+        let on = crate::Rules::elite(points_to_ppm(10), 25);
+        assert!(!on.admits(&ruinous), "the profile turns it on");
+    }
+
+    /// A variant that never gave anything back clears any drawdown floor.
+    ///
+    /// `return_over_drawdown` answers `i64::MAX` there rather than dividing by
+    /// zero, and the gate must read that as "passes" and not as an overflow.
+    #[test]
+    fn a_variant_that_never_gave_anything_back_clears_the_drawdown_rule() {
+        let flawless = grid::Cell {
+            trades: 40,
+            wins: 40,
+            worst_mae: 300,
+            min_win: 1_500,
+            worst_trade: -500,
+            pessimistic: 1_000_000,
+            max_drawdown: 0,
+            ..grid::Cell::default()
+        };
+        assert_eq!(flawless.return_over_drawdown(), i64::MAX);
+        assert!(
+            crate::Rules::elite(points_to_ppm(10), 25).admits(&flawless),
+            "a variant with no drawdown at all must clear a drawdown floor"
+        );
+    }
+
+    /// The `ret/DD` column produces a VALUE on the sign the engine writes.
+    ///
+    /// The defect this pins printed `-` on every row of every sweep because its
+    /// guard tested `max_drawdown < 0` while `grid::Cell` only ever writes
+    /// `>= 0`. Four fixtures carrying the wrong sign kept the suite green over
+    /// it, so this asserts against the ENGINE's convention and names a figure.
+    #[test]
+    fn the_ledger_ratio_is_the_cell_ratio() {
+        // The row the operator pasted: ₹24,591.60 made against a ₹291.63 fall.
+        assert_eq!(
+            return_over_drawdown_cell(2_459_160, 29_163),
+            "84.32",
+            "a real row renders a number, not a dash -- and as a decimal, because \
+             the underlying figure is hundredths and 8432 reads as eight thousand"
+        );
+
+        // Never gave anything back -- unbounded, and named rather than divided.
+        assert_eq!(return_over_drawdown_cell(2_459_160, 0), "inf");
+        // No profit to divide.
+        assert_eq!(return_over_drawdown_cell(0, 29_163), "-");
+        assert_eq!(return_over_drawdown_cell(-5_000, 29_163), "-");
+
+        // THE REGRESSION ITSELF. A negative drawdown is not a value the engine
+        // can produce; if one ever reaches here the answer must not be a
+        // plausible-looking ratio computed from a sign nobody writes.
+        assert_eq!(
+            return_over_drawdown_cell(2_459_160, -29_163),
+            "inf",
+            "the impossible sign is handled by the one implementation, not a second one"
+        );
+
+        // ONE IMPLEMENTATION. This function must agree with the method it
+        // delegates to across the whole grid of sign combinations -- the hand
+        // copy is how the two came to disagree.
+        for &pess in &[-1_i64, 0, 1, 2_459_160] {
+            for &dd in &[-1_i64, 0, 1, 29_163] {
+                let cell = grid::Cell {
+                    pessimistic: pess,
+                    max_drawdown: dd,
+                    ..grid::Cell::default()
+                };
+                let want = match cell.return_over_drawdown() {
+                    i64::MAX => "inf".to_owned(),
+                    0 => "-".to_owned(),
+                    r => hundredths_of(r),
+                };
+                assert_eq!(
+                    return_over_drawdown_cell(pess, dd),
+                    want,
+                    "the ledger renderer and grid::Cell disagree at ({pess}, {dd})"
+                );
+            }
+        }
+    }
+
+    /// The rate `reference_price`'s own doc states in writing, pinned.
+    ///
+    /// # What this caught, and why a doc sentence is the oracle
+    ///
+    /// `reference_price` returns PAISA — `b.low` and `b.high` are paisa, per
+    /// `CLAUDE.md` §7 and `docs/02-store-format.md`. Its fallback returned
+    /// `NIFTY_REFERENCE` unscaled, an index LEVEL, so one function had two
+    /// units and `points_to_ppm_at` divided by whichever it got. Against the
+    /// paisa branch, twenty points came out as **8 ppm** where the doc two
+    /// screens up says 800.
+    ///
+    /// The shipped stop ladder was therefore 2..10 ppm — 0.05 to 0.25 index
+    /// points, one to five NIFTY ticks — rather than 200..1000. Every stop the
+    /// exit grid priced sat inside the entry bar's own range, which is the
+    /// failure [`STOP_FLOOR_POINTS`] was introduced to prevent, and the
+    /// operator's own `--max-mae` came through the CONSTANT path correctly at
+    /// 800 ppm and was merged into a ladder eighty times tighter than itself.
+    ///
+    /// Nothing failed, because no test named a figure. This one does, and it
+    /// takes the figure from the prose rather than from the code, so a
+    /// reintroduced unit error cannot agree with it.
+    #[test]
+    fn a_rule_in_points_converts_at_the_documented_rate() {
+        // NIFTY at 25,000 index is 2,500,000 paisa. `reference_price` returns
+        // that; `NIFTY_REFERENCE` names the index level it is scaled from.
+        let nifty_paisa = NIFTY_REFERENCE * PAISA_PER_POINT;
+        assert_eq!(nifty_paisa, 2_500_000, "the paisa value of the doc's level");
+
+        assert_eq!(
+            points_to_ppm_at(20, nifty_paisa),
+            800,
+            "reference_price's doc: a rule of twenty points against 25,000 is 800 ppm"
+        );
+        assert_eq!(
+            points_to_ppm_at(20, nifty_paisa),
+            points_to_ppm(20),
+            "the measured path and the constant path must agree at the constant's own level"
+        );
+
+        // BANKNIFTY at 52,000. The same doc: 800 ppm there is "FORTY-ONE
+        // points", so the operator's twenty points must NOT come out as 800.
+        //
+        // The exact quantity is 4,160 paisa = 41.6 points. The doc's
+        // "forty-one" is prose truncating 41.6, not a claim that the converter
+        // floors -- so the paisa is asserted exactly and the printed figure is
+        // allowed to be either side of the boundary. Asserting `== 41` here
+        // would pin the ROUNDING MODE to a sentence that was never about it.
+        let banknifty_paisa = 52_000 * PAISA_PER_POINT;
+        assert_eq!(
+            800 * banknifty_paisa / 1_000_000,
+            4_160,
+            "800 ppm on a 52,000 index is 4,160 paisa, i.e. 41.6 points"
+        );
+        assert_eq!(
+            ppm_to_points_at(800, banknifty_paisa),
+            42,
+            "41.6 points rounds to nearest, and the doc's 'forty-one' is 41.6 truncated"
+        );
+        assert!(
+            ppm_to_points_at(800, banknifty_paisa) > 2 * 20,
+            "the doc's actual point: a NIFTY-derived 800 ppm DOUBLES a twenty-point \
+             rule on BANKNIFTY"
+        );
+        assert!(
+            points_to_ppm_at(20, banknifty_paisa) < 800,
+            "twenty points on a higher index is FEWER ppm, not the NIFTY figure"
+        );
+
+        // The pair must be an exact inverse on the ladder's own rungs, or a
+        // ladder built in ppm prints as a different ladder in points.
+        for points in [STOP_FLOOR_POINTS, 10, 15, 20, MAX_STOP_POINTS] {
+            assert_eq!(
+                ppm_to_points_at(points_to_ppm_at(points, nifty_paisa), nifty_paisa),
+                points,
+                "round trip must be the identity at {points} points"
+            );
+        }
+
+        // A reference that is not a price refuses rather than dividing by it.
+        assert_eq!(points_to_ppm_at(20, 0), 0, "no price, no conversion");
+        assert_eq!(ppm_to_points_at(800, -1), 0, "no price, no conversion");
+    }
+
+    /// The shipped ladder lands where [`STOP_FLOOR_POINTS`] says it does.
+    ///
+    /// The units defect above was invisible at the ladder's own boundary
+    /// because `stop_ladder_ppm` returns ppm and nothing converted it back to
+    /// the points an operator speaks in. This asserts the FIRST rung is the
+    /// floor and the LAST is no wider than the cap, in points, through the same
+    /// converter the report prints with.
+    #[test]
+    fn the_stop_ladder_spans_the_points_its_constants_name() {
+        let bars = synthetic::sessions(8);
+        let reference = reference_price(&bars);
+        // `synthetic::BASE` is 2,500,000 — NIFTY at 25,000 index, in paisa. The
+        // fixture is itself evidence for the unit this whole block is about.
+        assert!(
+            reference > synthetic::BASE / 2,
+            "the reference is paisa off the bars, not an index level: {reference}"
+        );
+
+        let rungs = stop_ladder_ppm(&bars);
+        let tightest = *rungs.first().expect("a ladder is never empty");
+        let widest = *rungs.last().expect("a ladder is never empty");
+        assert!(
+            rungs.windows(2).all(|w| w.first() < w.last()),
+            "rungs ascend and are distinct: {rungs:?}"
+        );
+
+        // COMPARED IN PPM, which is the unit the ladder is built in. Going the
+        // other way and comparing points would fold the inverse's rounding into
+        // the assertion and test two things at once.
+        assert_eq!(
+            tightest,
+            points_to_ppm_at(STOP_FLOOR_POINTS, reference),
+            "the tightest rung IS the floor: {rungs:?}"
+        );
+
+        let first = ppm_to_points_at(tightest, reference);
+        let last = ppm_to_points_at(widest, reference);
+        assert_eq!(
+            first, STOP_FLOOR_POINTS,
+            "the floor rung prints as the floor: {rungs:?}"
+        );
+        assert!(
+            last <= MAX_STOP_POINTS,
+            "the widest rung never exceeds the cap: {last} > {MAX_STOP_POINTS}"
+        );
+
+        // THE DEFECT THIS PINS. Before the units fix every rung was 2..10 ppm,
+        // which is under a tenth of a point and inside the entry bar's range.
+        // A rung is now at least the floor, on any instrument, at any level.
+        for &rung in &rungs {
+            assert!(
+                ppm_to_points_at(rung, reference) >= STOP_FLOOR_POINTS,
+                "rung {rung} ppm is {} points, tighter than the {STOP_FLOOR_POINTS}-point \
+                 floor -- this is the hundredfold units defect returning",
+                ppm_to_points_at(rung, reference)
+            );
+        }
+    }
+
     #[test]
     fn the_support_a_real_run_used_prunes_the_cadence_it_was_hunting() {
         let floor = cadence_floor_ppm(96_280, 81, 1).expect("a real span has bars");
@@ -8524,6 +9368,7 @@ mod tests {
             min_assurance_bp: 8_000,
             min_weakest_bp: 9_000,
             min_trades: 50,
+            min_ret_over_dd_bp: 0,
             top: 25,
         };
         // Each cell breaks exactly one rule, so the label is unambiguous.
@@ -8585,6 +9430,7 @@ mod tests {
             min_assurance_bp: 9_000,
             min_weakest_bp: 0,
             min_trades: 0,
+            min_ret_over_dd_bp: 0,
             top: 25,
         };
         // 20 of 20: a rate of 100% clears the win-rate rule outright, and a

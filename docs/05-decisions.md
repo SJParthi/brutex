@@ -21561,3 +21561,75 @@ DH-905 itself is still open. What changed is that the next one identifies its ow
 missing field instead of being guessed at.
 
 Invariants A-50 and A-51 in `docs/04-invariants.md`.
+
+### D-0285 — a reference price in paisa, converted as though it were an index level
+
+**Decision.** `cli`'s point-to-ppm converters take a **paisa** reference, and
+`reference_price` returns paisa on both of its arms. `crates/cli` ships a
+`benches/ratio.rs` and has a row in gate 14's cover table. `Rules` carries a
+sixth field, `min_ret_over_dd_bp`, and a named `Rules::elite` profile turns
+every rule on at one stated policy behind a new `cli elite` command.
+
+**Why.** `reference_price` averaged `bar.low` and `bar.high`, which are
+paisa — §7 puts every price in this system on a paisa `i64`. Its fallback
+returned `NIFTY_REFERENCE` unscaled, which is 25,000: an **index level**, a
+hundred times smaller than the 2,500,000 paisa the same index is worth. One
+function, two branches, two units, and `points_to_ppm_at` divided by whichever
+it got.
+
+`points_to_ppm_at(20, 2_500_000)` returned **8** where `reference_price`'s own
+doc states in writing that twenty points is **800 ppm**. So the shipped stop
+ladder was **2..10 ppm — 0.05 to 0.25 index points, one to five NIFTY ticks** —
+instead of 200..1000. Every stop the 625-variant exit grid has ever priced sat
+inside the entry bar's own range, which is exactly the failure
+`STOP_FLOOR_POINTS = 5` was introduced to prevent. Meanwhile the operator's own
+`--max-mae` came through the CONSTANT path correctly at 800 ppm and was merged
+into a ladder whose other nine rungs were eighty times tighter than itself.
+
+`max_stop_points` round-tripped through **both** converters against the same
+reference, which is the identity up to truncation — so it returned the median bar
+range in paisa and clamped to `MAX_STOP_POINTS` on every real series. A function
+documented as derived from the data returned the constant it was meant to
+replace.
+
+**The fix already existed one function away.** `grid_step_ppm`'s header
+describes this same defect being removed from the *trailing* ladder: *"This was
+`points_to_ppm_at(1, reference_price(bars)) / 2` ... still asking the wrong
+question. The scale that needs no translation is the instrument's own
+movement."* It was never carried across to the stop ladder.
+
+**Also.** `ppm_to_points_at` floored through two truncating divisions, so a
+five-point rung printed as **4pt** in the `TIGHTEST` column — always in the
+direction that makes a stop look tighter than the engine can place. It rounds to
+nearest now.
+
+**Also.** `range-all`'s `ret/DD` column guarded on `max_drawdown < 0` while
+`grid::Cell::max_drawdown` is documented "Always >= 0" and asserted so, and
+`record_run` copies that value straight in. The guard was false for every real
+run and the column printed `-` on all eight rungs forever. **Four fixtures in
+`cli` wrote the drawdown negative**, so the suite covered a branch production
+could not reach. The fixtures now carry the engine's sign, the column delegates
+to `Cell::return_over_drawdown` rather than re-deriving it by hand, and it
+renders through `hundredths_of` like the `PF` column beside it — the raw
+integer read `8432` for a ratio of 84.32.
+
+**Also.** `crates/cli` was the only one of the thirteen workspace crates with no
+`benches/`, and §5 makes it the only entry point from which the sweep is
+reachable — so the binary an operator runs to produce a trading result carried no
+measured bound of any kind. Four rows now re-measure the cost table
+`results.rs`'s own header prints. Measured: 0.989x, 1.000x, 0.880x, 1.006x.
+
+**Also.** `Rules` had five rules, all properties of the trade LIST, and not one
+could see the order trades arrived in. `return_over_drawdown` measured that and
+its own doc admitted the gap in four words — *"Nothing ranks on this yet"*.
+`min_ret_over_dd_bp` is the rule that makes the measurement bite. Zero drops it,
+like every other rule here, so no existing command gains a policy nobody typed.
+
+**Why `elite` is a command and not new defaults.** `Rules::BASELINE` switches
+four of six rules off and its reasoning is right: *a rule an operator did not
+type is a policy the engine invented*. Turning them on globally would be exactly
+that. The requirement is written down once, named, and **selected**.
+
+**Also.** Every dispatch arm is a fixed-length slice pattern, so `cli screen`
+with no arguments was told `screen` is not a command this build knows. It is.
+A known word with the wrong arity now says so and names the count.

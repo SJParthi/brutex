@@ -118,3 +118,18 @@ rayon      = { workspace = true }
 
 [lints]
 workspace = true
+
+# ---------------------------------------------------------------------------
+# THIS IS NOT A DEPENDENCY. A [[bench]] target links this crate's own lib, its
+# dependencies and std. The [dependencies] table above is unchanged.
+#
+# It exists because gate 14 refused this crate in these words: "REFUSED
+# crates/cli -- 20 cost claim(s), no row in the table". `cli` was the only one
+# of the thirteen workspace crates with no benches/, and `CLAUDE.md` §5 makes it
+# the only entry point from which the sweep is reachable at all -- so the binary
+# an operator runs to produce a trading result had no measured bound of any kind.
+# ---------------------------------------------------------------------------
+[[bench]]
+name    = "ratio"
+harness = false
+test    = false

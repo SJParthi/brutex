@@ -1112,7 +1112,7 @@ mod tests {
             pessimistic: -987_654_321,
             optimistic: 123_456_789,
             worst_trade: -87_654_321,
-            max_drawdown: -76_543_210,
+            max_drawdown: 76_543_210,
             winner_mae: 2_291,
             winner_mfe: 8_876,
             all_mae: 2_295,
@@ -1196,7 +1196,13 @@ mod tests {
         assert_eq!(got.pessimistic, -987_654_321, "pessimistic");
         assert_eq!(got.optimistic, 123_456_789, "optimistic");
         assert_eq!(got.worst_trade, -87_654_321, "worst_trade");
-        assert_eq!(got.max_drawdown, -76_543_210, "max_drawdown");
+        // POSITIVE, because a peak-to-trough fall is. `grid::Cell::max_drawdown`
+        // is documented "Always >= 0" and asserted so, and `record_run` copies
+        // it straight in — so a negative value here was a shape the engine
+        // cannot produce. This fixture carrying the wrong sign is what kept
+        // `range_all`'s `ret/DD` column green while it printed `-` forever: its
+        // guard tested `< 0`, and only the fixtures ever satisfied it.
+        assert_eq!(got.max_drawdown, 76_543_210, "max_drawdown");
         assert_eq!(got.winner_mae, 2_291, "winner_mae");
         assert_eq!(got.winner_mfe, 8_876, "winner_mfe");
         assert_eq!(got.all_mae, 2_295, "all_mae");
