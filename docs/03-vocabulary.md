@@ -708,6 +708,11 @@ crossed twice yesterday and once today is on its first test today, not its third
 | 362 | `first_cross_day_open` | this bar is the session's first crossing of `day_open`, in either direction |
 | 363 | `second_cross_day_open` | this bar is the session's second crossing of `day_open`, in either direction |
 | 364 | `third_plus_cross_day_open` | this bar is the session's third or any later crossing of `day_open`, in either direction |
+| 365 | `is_monday` | this bar's IST session falls on a Monday |
+| 366 | `is_tuesday` | this bar's IST session falls on a Tuesday |
+| 367 | `is_wednesday` | this bar's IST session falls on a Wednesday |
+| 368 | `is_thursday` | this bar's IST session falls on a Thursday |
+| 369 | `is_friday` | this bar's IST session falls on a Friday |
 
 ---
 
@@ -715,23 +720,33 @@ crossed twice yesterday and once today is on its first test today, not its third
 
 | | |
 |---|---|
-| positions allocated | 365 (0–364) |
-| live | 323 |
+| positions allocated | 370 (0–369) |
+| live | 328 |
 | retired (duplicated a live position) | 3 — bits 6, 19, 25 |
 | **void** (definitionally constant) | **39** — bits 235–273, D-0080 |
 | declaring `Kind::Near`, needing a tolerance | 81 live, of 97 allocated |
 | mask type | `ConditionMask`, `[u64; 6]` |
 | mask width | 384 bits |
-| free positions | 19 |
+| free positions | 14 |
 
 The first five rows account for every allocated position exactly once:
-323 + 3 + 39 = 365. If a future append breaks that sum, this table is the stale
+328 + 3 + 39 = 370. If a future append breaks that sum, this table is the stale
 copy and the table in `crates/vocab/src/table.rs` is the truth.
 
-**Nineteen free, and that number is now the constraint.** The crossing family
-(D-0244) took the table 280 to 314 and its ordinals (D-0246) took it to 365, both
-against the same 384-bit mask — so neither widened it and `VOCAB_VERSION` holds
-at 3. The next family needing more than nineteen positions cannot be an append.
+**And it broke, exactly as that sentence anticipated.** The five weekday
+positions 365–369 were appended to `crates/vocab/src/table.rs` and to no row
+here, so this document described a 365-position table that had not existed for
+some time. `vocab::table::the_shipped_74_are_the_document_character_for_character`
+named the first missing one — *"position 365 (`is_monday`) appears in no row of
+docs/03-vocabulary.md — an undocumented condition is one nobody can audit"* —
+and five more tests in that file failed beside it. The test was right and the
+document was the stale copy; both are restated above.
+
+**Fourteen free, and that number is now the constraint.** The crossing family
+(D-0244) took the table 280 to 314, its ordinals (D-0246) took it to 365, and the
+weekday family took it to 370 — all three against the same 384-bit mask, so none
+widened it and `VOCAB_VERSION` holds at 3. The next family needing more than
+fourteen positions cannot be an append.
 It widens `ConditionMask::WORDS`, which IS a version bump, and re-keys every run
 ever recorded: the same sweep over the same bars produces a different identity,
 and nothing stored can be found by the identity a rerun computes.

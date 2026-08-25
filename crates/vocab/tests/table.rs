@@ -175,12 +175,12 @@ fn the_shipped_74_are_the_document_character_for_character() {
     }
 }
 
-/// **No gap and no repeat, 0..=364 exactly.** The array's own length cannot
+/// **No gap and no repeat, 0..=369 exactly.** The array's own length cannot
 /// prove this: a row that repeats an index or skips one leaves the length
 /// unchanged and quietly renumbers everything after it.
 #[test]
 fn the_table_is_a_contiguous_run_of_indices() {
-    assert_eq!(COUNT, 365);
+    assert_eq!(COUNT, 370);
     let seen: BTreeSet<u16> = TABLE.iter().map(|d| d.index).collect();
     assert_eq!(seen.len(), COUNT, "an index is repeated");
     for (position, def) in TABLE.iter().enumerate() {
@@ -193,8 +193,8 @@ fn the_table_is_a_contiguous_run_of_indices() {
         );
     }
     assert_eq!(seen.first().copied(), Some(0));
-    assert_eq!(seen.last().copied(), Some(364));
-    assert_eq!(usize::from(NEXT_FREE), COUNT, "the next append goes at 365");
+    assert_eq!(seen.last().copied(), Some(369));
+    assert_eq!(usize::from(NEXT_FREE), COUNT, "the next append goes at 370");
 }
 
 /// **No two live positions share a name.** Two rows with one name is two
@@ -214,8 +214,8 @@ fn no_two_live_positions_share_a_name() {
     }
     assert_eq!(
         by_name.len(),
-        323,
-        "365 positions, less three tombstones and less 39 void forming-pivot rows"
+        328,
+        "370 positions, less three tombstones and less 39 void forming-pivot rows"
     );
 }
 
@@ -317,7 +317,7 @@ fn no_live_row_occupies_a_retired_position() {
         );
     }
     let last = TABLE.last().expect("the table is not empty");
-    assert_eq!(last.index, 364);
+    assert_eq!(last.index, 369);
     assert_eq!(
         usize::from(NEXT_FREE),
         COUNT,
@@ -382,7 +382,7 @@ fn every_name_is_snake_case_ascii() {
 /// difference, and every name after the seam means the wrong thing.
 #[test]
 fn the_appended_groups_start_and_end_where_they_are_specified() {
-    let groups: [(u16, u16, &str); 18] = [
+    let groups: [(u16, u16, &str); 19] = [
         (74, 85, "_band"),
         (86, 105, "orb"),
         (106, 109, "near_fib_bull_"),
@@ -405,6 +405,10 @@ fn the_appended_groups_start_and_end_where_they_are_specified() {
         // nothing.
         (280, 313, "crossed_"),
         (314, 364, "_cross_"),
+        // D-0247: the weekday family. `is_` is the marker, and no earlier name
+        // carries it -- the group check is a substring test, so a marker that
+        // collided with an existing family would pass while proving nothing.
+        (365, 369, "is_"),
     ];
     let mut covered = 0;
     for (first, last, marker) in groups {
@@ -429,8 +433,8 @@ fn the_appended_groups_start_and_end_where_they_are_specified() {
             );
         }
     }
-    assert_eq!(covered, 291, "the appended range is 74..=364");
-    assert_eq!(COUNT - 74, 291);
+    assert_eq!(covered, 296, "the appended range is 74..=369");
+    assert_eq!(COUNT - 74, 296);
 }
 
 /// The eleven-rung Fibonacci ladders are eleven rungs, in one order, three
