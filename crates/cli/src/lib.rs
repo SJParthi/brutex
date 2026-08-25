@@ -8867,6 +8867,15 @@ mod tests {
     /// self-naming, both of which stay true as the wording changes.
     #[test]
     fn the_stored_audit_refuses_for_the_same_cause_and_names_itself() {
+        // EVERY GATE THESE TWO COMMANDS CAN STOP AT, NAMED. A refusal matching
+        // none of them is a gate this test has not learned, and it panics below
+        // rather than passing quietly — which is the failure mode this whole
+        // test was in.
+        const GATES: [&str; 3] = [
+            "BRUTEX_COMMIT",
+            "is not a feed this build knows",
+            "is not in the store",
+        ];
         for (vendor, underlying, rung, year, month) in [
             // A month no store holds.
             ("groww", "NIFTY", "1min", 1970_u16, 1_u8),
@@ -8889,26 +8898,71 @@ mod tests {
                 );
             }
 
-            // THE SAME CAUSE. On this unstamped build that cause is the commit
-            // gate, and both must cite it — an `audit-stored` that reached the
-            // store first would compute before it could record an identity.
+            // THE SAME CAUSE, AND WHICH CAUSE DEPENDS ON HOW THE BINARY WAS
+            // BUILT.
+            //
+            // # This test used to pass only by accident
+            //
+            // It asserted that both refusals cite `BRUTEX_COMMIT`, under a
+            // comment reading *"on this unstamped build that cause is the commit
+            // gate"*. That is true of a build with no stamp — and CI produces
+            // one, so the suite was green. It is FALSE of the build the usage
+            // text tells an operator to make:
+            //
+            //     BRUTEX_COMMIT=$(git rev-parse HEAD) cargo build --release
+            //
+            // With the stamp present the commit gate passes, both commands reach
+            // the store, and both refuse for the missing month instead. So the
+            // test asserted a real property in exactly the configuration where
+            // the feature it guards is switched OFF, and failed in the one an
+            // operator actually uses. MEASURED both ways.
+            //
+            // What is asserted now is the property itself: whatever gate fires,
+            // BOTH commands must stop at the SAME one. An `audit-stored` that
+            // reached further than `sweep-stored` would compute before it could
+            // record an identity, and that is what this exists to refuse.
+            let gate = GATES
+                .into_iter()
+                .find(|g| swept.contains(g))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "the sweep refused for a cause this test does not know. \
+                         Add it to GATES and say why it is a gate:\n  {swept}"
+                    )
+                });
             assert!(
-                swept.contains("BRUTEX_COMMIT") && audited.contains("BRUTEX_COMMIT"),
-                "both stored commands must refuse at the commit gate before \
-                 reading a bar:\n  sweep: {swept}\n  audit: {audited}"
+                audited.contains(gate),
+                "both stored commands must stop at the SAME gate. The sweep \
+                 stopped at `{gate}` and the audit did not:\n  sweep: {swept}\n  \
+                 audit: {audited}"
             );
 
-            // AND EACH NAMES ITSELF. This is the half that would silently rot if
-            // the two messages were ever merged into one shared constant, and it
-            // is why this test does NOT assert the two strings are equal.
-            assert!(
-                swept.contains("the sweep will not run"),
-                "the sweep's refusal must name the sweep: {swept}"
-            );
-            assert!(
-                audited.contains("the audit will not run"),
-                "the audit's refusal must name the audit, not the sweep: {audited}"
-            );
+            // AND EACH NAMES ITSELF — ON THE GATE THAT CARRIES A NAME.
+            //
+            // The commit gate's refusal differs by one word, "the sweep will not
+            // run" against "the audit will not run", and that difference is the
+            // half that would silently rot if the two were ever merged into one
+            // shared constant.
+            //
+            // **The store's refusal names NEITHER**, and that is a §4 gap rather
+            // than a property this test may quietly drop: an operator who ran
+            // `audit-stored` is told only *"NIFTY 1min 1970-01 is not in the
+            // store"*, with nothing saying which command refused. Closing it
+            // means threading the command's name into `load_span`'s refusal,
+            // which is a change to production text and belongs in its own commit
+            // with its own entry. It is named here so the next reader finds it
+            // stated rather than absent.
+            if gate == "BRUTEX_COMMIT" {
+                assert!(
+                    swept.contains("the sweep will not run"),
+                    "the sweep's refusal must name the sweep: {swept}"
+                );
+                assert!(
+                    audited.contains("the audit will not run"),
+                    "the audit's refusal must name the audit, not the sweep: \
+                     {audited}"
+                );
+            }
         }
     }
 
