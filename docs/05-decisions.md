@@ -21410,3 +21410,80 @@ const-eval failure had stopped compilation before clippy ever ran. It is now a
 property is unreachable rather than caught.
 
 Invariants BT-01a and BT-13 through BT-18 in `docs/04-invariants.md`.
+
+### D-0283 — a page is not a reason, and the classifier was reading pages
+
+**Every failing pull leg on a live server reported `HALTED · CREDENTIAL DEAD`,
+whatever had gone wrong.** Not intermittently. Always.
+
+`pullrun::run_chain` decided a credential death with
+`autopilot::classify(&html) == Trouble::Credential`, where `html` is the
+RENDERED RECEIPT PAGE. `classify`'s table contains the bare word `"credential"`,
+which is correct for the input it was designed for — a refusal's own sentence, a
+few dozen words somebody chose. It is catastrophic for a web page.
+
+`server::accepted_html` fills its headline from `server::halt_for`, and **both**
+sentences that function can return contain the word: `HTTP_LIVE` says *"The
+credential is read from AWS Parameter Store"*, `HTTP_UNAVAILABLE` says *"no
+credential has been read and no vendor is contacted"*. There is no third answer.
+So the test was `true` for every page the route has ever rendered.
+
+**Measured, on the operator's own log for 2026-08-25.** Dhan answered **HTTP 400
+`DH-905 Input_Exception` — "Missing required fields, bad values for parameters"**
+— a malformed request, with `pull.ssm credential read status 200` appearing
+fourteen times in the same run. The page said the credential was dead. The feed
+was then skipped on every later pass, because §8 says a dead token cannot change
+within a run, so a request-shaped bug was dressed as an auth failure and made
+unreachable: no token refresh could ever have fixed it, and the page was telling
+the operator to refresh a token.
+
+Zerodha in the same run answered **403 `TokenException`** and genuinely WAS dead.
+Two different faults, one label. That is the failure §4 bans — not a fallback
+that hides a failure, but a fallback that renames one.
+
+**This is the second time prose reached this classifier and lied to it.**
+`server.rs`'s own comment records the first: a draft sentence reading *"no
+credential was read"* turned a transport refusal into a permanent halt, and the
+repair was to REWORD THE SENTENCE — with a comment warning the next author that
+the text is "load-bearing input to a classifier, not prose". Rewording prose does
+not fix a classifier that reads prose. It moves the next occurrence, and the next
+occurrence was a constant nobody thought of as prose at all.
+
+**The repair.** `autopilot::credential_fault_in_page` matches only spellings a
+VENDOR produces for an auth refusal — `status 401`, `status 403`,
+`tokenexception`, `invalid_authentication`, `access token expired` — every one of
+which is meaningless in an explanatory paragraph. The bare word is deliberately
+absent, along with `parameter path` and `aws identity`: those three describe how
+a credential is OBTAINED, which is exactly what a page explaining the transport
+talks about.
+
+`classify` is unchanged and keeps the bare word. It is right for a reason. The
+defect was never its table; it was the input.
+
+**Pinned by `pullrun::the_headline_on_every_page_is_not_a_dead_token`**, which
+asserts BOTH halves: that `classify` still answers `Credential` for `HTTP_LIVE`
+— so a later reword cannot be mistaken for this fix — and that the page-safe
+test does not. It drives `halt_for` itself rather than the two constants, so a
+third sentence added later is covered by the test rather than by having been
+thought about. It also replays Dhan's actual DH-905 body inside the real
+headline, and checks the cure does not overshoot: a genuine 403 `TokenException`
+must still halt the feed, or the repair costs two hours of 401s against a token
+another system shares.
+
+**Not fixed here, and named rather than left implied.** Why Dhan answers DH-905
+at all is a separate defect and is still open. The request carries `securityId`,
+`exchangeSegment`, `instrument`, `fromDate`, `toDate`; which field the vendor
+finds missing or malformed is not determinable from this repository, and naming
+one from memory is the invention §3 rule 1 forbids. It needs either Dhan's live
+documentation or one observed request, and no live vendor request originates from
+this session. What changed today is that the failure now reports as itself
+instead of as a dead token — which is what makes it findable at all.
+
+Also observed and not repaired: `vendor.rs`'s comment above Dhan's
+`granularities` argues at length that `Minute1` was WITHDRAWN because one
+`bars_path` sent a minute request to the daily endpoint. The rung is declared
+directly beneath it, the alternate intraday endpoint exists, and a test asserts
+the rung is offered. The comment describes a state that was repaired after it was
+written. It is in `crates/pull`, which another session holds.
+
+Invariant A-49 in `docs/04-invariants.md`.

@@ -702,8 +702,19 @@ async fn run_chain(site: Loaded, nth: usize, legs: Vec<Leg>) -> bool {
             // dead Dhan token must not stop Groww — the same reason the seats
             // and the governors are per feed. `conduct` skips only the feed
             // this fires on.
-            let dead_credential =
-                crate::autopilot::classify(&html) == crate::autopilot::Trouble::Credential;
+            // ASKED OF A PAGE, SO IT USES THE PAGE-SAFE TEST. This was
+            // `classify(&html) == Trouble::Credential`, and `classify`'s table
+            // contains the bare word "credential" — which `accepted_html`'s own
+            // headline contains on EVERY page it renders, in both of the
+            // sentences `halt_for` can return. So this line answered "the token
+            // is dead" for every failing leg, whatever had gone wrong, and then
+            // skipped that feed for the rest of the run under §8's rule that a
+            // dead token cannot change mid-run.
+            //
+            // Dhan's HTTP 400 `DH-905` — a malformed request, credential read
+            // fine fourteen times in the same run — reported CREDENTIAL DEAD on
+            // 2026-08-25. See `autopilot::credential_fault_in_page`.
+            let dead_credential = crate::autopilot::credential_fault_in_page(&html);
 
             let why = if dead_credential {
                 format!(
@@ -1819,6 +1830,84 @@ mod tests {
             Trouble::Transport,
             "a 5xx is the vendor's own side and IS worth re-asking"
         );
+    }
+
+    /// **EVERY PAGE THIS ROUTE RENDERS CONTAINS THE WORD `credential`, AND THAT
+    /// USED TO BE THE WHOLE TEST.**
+    ///
+    /// The test above proves `classify` on a REASON. This route was asking it
+    /// about a PAGE, and the two are not the same input: `accepted_html` fills
+    /// its headline from `server::halt_for`, whose only two possible answers
+    /// both contain the word. So `classify(&html)` was `Credential` for every
+    /// failing leg, and the feed was skipped for the rest of the run.
+    ///
+    /// Measured on 2026-08-25: Dhan answered HTTP 400 `DH-905 Input_Exception`
+    /// with the credential read successfully fourteen times in the same run,
+    /// and the page said `HALTED · CREDENTIAL DEAD`.
+    ///
+    /// The first two assertions are the bug. The rest are the cure not
+    /// overshooting into the opposite defect — a page that shows a REAL dead
+    /// token must still halt, or this repair costs two hours of 401s.
+    #[test]
+    fn the_headline_on_every_page_is_not_a_dead_token() {
+        use crate::autopilot::{Trouble, classify, credential_fault_in_page};
+        use crate::server::{HTTP_LIVE, HTTP_UNAVAILABLE, halt_for};
+
+        for (name, prose) in [
+            ("HTTP_LIVE", HTTP_LIVE),
+            ("HTTP_UNAVAILABLE", HTTP_UNAVAILABLE),
+        ] {
+            // THE DEFECT, PINNED RATHER THAN DESCRIBED. `classify` still says
+            // Credential here and that is CORRECT for its own contract -- the
+            // fault was asking it at all. If this ever stops holding, the
+            // paragraph was reworded, which is the repair that already failed
+            // once and must not be mistaken for this one.
+            assert_eq!(
+                classify(prose),
+                Trouble::Credential,
+                "{name} contains the bare word, which is why a page may never reach `classify`"
+            );
+            assert!(
+                !credential_fault_in_page(prose),
+                "{name} is a paragraph about transport plumbing, not a dead token"
+            );
+        }
+
+        // AND THE SAME THING THROUGH THE FUNCTION THAT ACTUALLY CHOOSES IT, so
+        // a third sentence added to `halt_for` later is covered by this test
+        // rather than by having been thought about.
+        for broker in [crate::server::Broker::Live, crate::server::Broker::Refused] {
+            assert!(
+                !credential_fault_in_page(halt_for(broker)),
+                "no halt_for sentence may read as a dead token: {broker:?}"
+            );
+        }
+
+        // DHAN'S ACTUAL REFUSAL, from logs/events.ndjson on 2026-08-25, inside
+        // the headline it was actually rendered under.
+        let dhan = format!(
+            "{HTTP_LIVE} the vendor refused with status 400 and named it: the \
+             request as sent was rejected and will be rejected again unchanged. \
+             It said: {{\"errorType\":\"Input_Exception\",\"errorCode\":\"DH-905\"}}"
+        );
+        assert!(
+            !credential_fault_in_page(&dhan),
+            "a malformed request is not a dead token, and calling it one hides \
+             the bug that a token refresh can never fix"
+        );
+
+        // THE CURE MUST NOT OVERSHOOT. A real dead token still halts.
+        for real in [
+            "the vendor refused with status 403 and named it: TokenException",
+            "the vendor refused with status 401",
+            "Invalid_Authentication",
+            "access token expired",
+        ] {
+            assert!(
+                credential_fault_in_page(&format!("{HTTP_LIVE} {real}")),
+                "a genuine auth refusal must still halt this feed: {real}"
+            );
+        }
     }
 
     /// **THE STATUS DOCUMENT SAYS WHICH FEED HALTED, AND WHY.**

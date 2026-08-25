@@ -401,6 +401,59 @@ pub fn classify(reason: &str) -> Trouble {
     Trouble::Transport
 }
 
+/// Whether a RENDERED PAGE shows a dead credential.
+///
+/// # Why [`classify`] may never be asked this, and what it cost
+///
+/// `classify` takes a REASON — a refusal's own sentence, a few dozen words that
+/// somebody chose. Its table includes the bare word `"credential"`, which is
+/// exactly right for that input: a reason mentioning the credential is about
+/// the credential.
+///
+/// A PAGE is not a reason. `crate::server::accepted_html` fills its headline
+/// from `crate::server::halt_for`, and **both** of the sentences that function
+/// can return contain the word — `HTTP_LIVE` says *"The credential is read from
+/// AWS Parameter Store"*, `HTTP_UNAVAILABLE` says *"no credential has been read
+/// and no vendor is contacted"*. So `classify(&html)` answered
+/// [`Trouble::Credential`] for **every page that route ever rendered**,
+/// whatever had actually gone wrong.
+///
+/// Measured, on the operator's own log for 2026-08-25: Dhan answered **HTTP 400
+/// `DH-905 Input_Exception`** — a malformed request, with the credential read
+/// successfully fourteen times in the same run — and the page reported
+/// `HALTED · CREDENTIAL DEAD`. The feed was then skipped on every later pass,
+/// because §8 says a dead token cannot change within a run. A request-shaped
+/// bug was made invisible by being dressed as an auth failure, and no amount of
+/// refreshing a token could ever have fixed it.
+///
+/// This is the SECOND time prose reached this classifier and lied to it.
+/// `crate::server`'s own comment records the first: a draft sentence reading
+/// *"no credential was read"* turned a transport refusal into a permanent halt,
+/// and the repair was to reword the sentence. Rewording prose does not fix a
+/// classifier that reads prose — it only moves the next occurrence.
+///
+/// # What is matched instead
+///
+/// Only spellings a VENDOR produces for an auth failure, every one of which is
+/// meaningless in an explanatory paragraph. The bare word is deliberately
+/// absent, and adding it back reopens exactly this defect.
+#[must_use]
+pub fn credential_fault_in_page(html: &str) -> bool {
+    // NO BARE `"credential"`, AND NO `"parameter path"` OR `"aws identity"`
+    // EITHER. Those three describe how a credential is OBTAINED, which is what
+    // a page explaining the transport talks about. These five describe a vendor
+    // REFUSING one, which a page has no other reason to contain.
+    const VENDOR_SPELLINGS: [&str; 5] = [
+        "status 401",
+        "status 403",
+        "tokenexception",
+        "invalid_authentication",
+        "access token expired",
+    ];
+    let lower = html.to_ascii_lowercase();
+    VENDOR_SPELLINGS.iter().any(|m| lower.contains(m))
+}
+
 /// Whether a credential-shaped reason is about the TOKEN or about one
 /// instrument.
 ///
