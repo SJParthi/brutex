@@ -182,7 +182,25 @@ test('a symbol shorter than the bound is indexed to its own length', () => {
  */
 function cost(reps, op) {
   let best = Infinity;
-  for (let run = 0; run < 5; run += 1) {
+  // SIXTY TRIALS, NOT FIVE, AND THE NUMBER IS THE WORKSPACE'S OWN.
+  //
+  // `crates/*/benches/ratio.rs` takes a minimum over 60 trials and gate 8's
+  // comment states that budget outright. This took 5, which is the same
+  // technique at a twelfth of the sample, and it showed: the assertion below
+  // passes locally every time — measured 288, 306, 312 and 366 ms across four
+  // runs — and FAILED on a GitHub runner at 3.34× against a 3.0 ceiling, in a
+  // job that took 1,344 ms for the same work.
+  //
+  // A minimum converges on the uncontended floor as trials rise, so more of
+  // them is the fix that keeps the assertion intact. Raising the ceiling would
+  // have been the other option and is the wrong one: 3.0 is what separates a
+  // `Map.get` whose constant grew from a lookup that scales, and moving it to
+  // accommodate a noisy host discards exactly the distinction this test exists
+  // to draw.
+  //
+  // It costs almost nothing. The two censuses are built ONCE outside this
+  // function and dominate the wall clock; the probes themselves are nanoseconds.
+  for (let run = 0; run < 60; run += 1) {
     op();
     const t0 = process.hrtime.bigint();
     for (let i = 0; i < reps; i += 1) op();
