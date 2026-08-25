@@ -21836,3 +21836,48 @@ Verified against the running server: `mask_words` arrives as
 renders. svelte-check is unchanged at its 60-error baseline — this added none.
 
 Invariant A-52 in `docs/04-invariants.md`.
+
+### D-0289 — the search steps stopped paying for the answer
+
+**Decision.** `Policy` carries a `validate` flag. When it is false — every step
+of the `elite` descent except the one that lands — `screen_cascade` screens with
+the operator's rules alone and returns. The 960 generated tiers and the
+walk-forward, PBO and bootstrap stack run ONCE, on the rung that admits a row.
+`runner::grid` gains `Cell::at_rate` and `trades_needed_for` so the descent's
+statistical floor is derived from the win rate and assurance being asked for
+rather than carried as a constant.
+
+**Why.** `elite` did not finish a single step. The causes hid each other, and
+each was found only after the one in front of it was removed:
+
+| suspect | measured |
+|---|---|
+| the Apriori join | sound — a subset is never less frequent than its superset |
+| the sweep | 0.005 s |
+| the ladder at `CEILING = 100` | still did not finish |
+| the validation stack | ~16,000 re-walks, on every search step |
+| **the tier cascade** | **960 tiers, each a full screen** |
+
+The last one is the one that cost the hour. Four generated axes multiply to 960
+tiers, and every one was screened — `screen_cap` combinations × 625 exit
+variants × trades — to decide whether anything cleared the rules. **A yes/no
+question was paying for the whole answer.**
+
+**What it measured.** `cli`'s
+`the_audit_renders_every_stage_of_the_institutional_stack` went from **6,578 s
+to 37.79 s**, a 175× fall, with no change to the search.
+
+**Why that mattered beyond speed.** That test is why `cargo test --workspace`
+did not terminate on this tree, so `CLAUDE.md` §9's green-suite requirement was
+unverifiable — and a genuinely red test was sitting behind it.
+`join_answer_is_unchanged` had been failing at 221 against a pinned 219 since
+`a12192b` added the five weekday conditions. **A suite that cannot finish cannot
+report a failure**, which is the failure-wearing-a-success's-clothes that §4
+bans, arrived at by timeout rather than by a fallback.
+
+**What is NOT claimed.** The descent is not O(1) and this entry does not say it
+is. The remaining cost is `screen_cap × 625 variants × trades`, settable by
+`BRUTEX_SCREEN_CAP`, and it scales with the span: a four-step descent over six
+months of 60-minute bars is 17 s at cap 10 and 31 s at cap 40, while one step
+over 2020–2026 is still over 95 s. `docs/06-limits.md` is where that belongs,
+and it is stated here rather than left for a reader to discover.

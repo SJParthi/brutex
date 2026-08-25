@@ -5432,3 +5432,42 @@ refused the result — White's Reality Check p = 0.9920, Hansen's SPA p = 1.0000
 Romano-Wolf named zero. §4's warning that no full production sweep has been run
 applies, and so does the report's own note that at ten periods these tests
 misfire 21% of the time. Neither makes a p of 0.99 into evidence.
+
+## 91. The descent is 175x cheaper and still not constant-time — D-0289
+
+**What was removed.** Every search step of `cli elite` used to price 960
+generated tiers and the full walk-forward, PBO and bootstrap stack — roughly
+16,000 re-walks — merely to decide whether anything cleared the operator's
+rules. Both now run once, on the rung that lands, behind `Policy::validate`.
+Measured on `cli`'s `the_audit_renders_every_stage_of_the_institutional_stack`:
+**6,578 s to 37.79 s**, with no change to the search itself.
+
+**What remains, and it is NOT O(1).** A search step still costs
+`screen_cap x 625 exit variants x trades`, and the trade walk reads the 1-minute
+execution series, so the step scales with the SPAN as well as the cap:
+
+| span | rung | cap | measured |
+|---|---|---:|---|
+| 2024-01..2024-06 | 60min | 10 | 17 s, all 4 steps |
+| 2024-01..2024-06 | 60min | 40 | 31 s, all 4 steps |
+| 2024-01..2024-06 | 60min | 120 | 50 s, 3 of 4 steps |
+| 2020-01..2026-08 | 60min | 1 | **over 95 s for ONE step** |
+
+The cap column is close to linear, which is the exit grid. The last row is the
+one that matters: at `cap = 1` the grid is nearly out of the picture and a
+single step still does not finish, so on a 6.7-year span the cost is dominated
+by the span — 630,000 one-minute execution bars against 42,600 for six months —
+and not by the number of combinations screened. **Lowering `BRUTEX_SCREEN_CAP`
+does not buy back a long span.**
+
+**Why it is not a rule-4 breach.** `CLAUDE.md` §3 rule 4 binds the five
+per-operation costs — bar lookup, condition lookup, mask evaluation, duplicate
+rejection, result append — and each is still O(1); `crates/cli/benches/ratio.rs`
+measures four of them at 0.880x-1.006x. Walking every trade of every candidate
+is not one of the five, and no claim is made that it is.
+
+**The honest consequence.** A full 2020-2026 hunt across all eight rungs is a
+background job measured in hours, not an interactive command, and the finer
+rungs are worse: 1-minute signals over the same span are ~630,000 bars against
+~10,000 at 60-minute, so the column build alone is roughly 60x. That is stated
+here rather than discovered by a reader watching a terminal.
