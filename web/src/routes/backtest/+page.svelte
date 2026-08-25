@@ -3652,6 +3652,29 @@
     display: block;
     gap: 0;
     padding-bottom: 3rem;
+    /* THIS PAGE OWNS ITS SCROLL, BECAUSE THE SHELL DELIBERATELY DOES NOT.
+       `theme.css`'s `.main` is `overflow: hidden` by design — its comment
+       says a page whose root is `.split` or `.pane` "keeps the exact height
+       it had" — so every page is expected to provide its own scroller. This
+       one's root is neither, and it provided none.
+
+       Measured at 1440x900 before this line: `.main` had clientHeight 854
+       against scrollHeight 1102. **248px was clipped with no way to reach
+       it** — `overflow: hidden` scrolls under `scrollTop` from script but
+       gives a person no wheel, no scrollbar and no keyboard. What was past
+       the cut was the whole of "The ledger": every run this console has
+       recorded, present in the DOM and unreachable.
+
+       That is the same failure the `flex-shrink` comment above this block
+       records — "facts present in the DOM and invisible on screen" — caught
+       there for the summary strip and left standing for the section that
+       lists the runs. The strip was patched; the cause was not.
+
+       `min-height: 0` is load-bearing beside it: without it a flex child
+       floors at its content height, the box never becomes smaller than what
+       it holds, and `auto` has nothing to scroll. */
+    min-height: 0;
+    overflow-y: auto;
   }
   .bt-shell {
     border: 1px solid var(--n6);

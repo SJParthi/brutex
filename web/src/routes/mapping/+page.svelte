@@ -321,6 +321,27 @@
     padding: var(--s5) var(--s5) var(--s8);
     max-width: 1180px;
     margin: 0 auto;
+    /* THIS PAGE OWNS ITS SCROLL, BECAUSE THE SHELL DELIBERATELY DOES NOT.
+       `theme.css`'s `.main` is `overflow: hidden` by design — its comment
+       says a page whose root is `.split` or `.pane` "keeps the exact height
+       it had" — so every page must provide its own scroller. This root is
+       `.page`, which is neither, and it provided none.
+
+       Measured at 1440x900 before this line: `.main` had **4,325px clipped**
+       with no inner scroller anywhere beneath it. `overflow: hidden` still
+       moves under `scrollTop` from script, so the content was in the DOM and
+       reachable by code — and a person had no wheel, no scrollbar and no
+       keyboard. Nearly the whole page was unreachable.
+
+       `/backtest` had the identical defect at 248px and the identical cause;
+       these are the only two routes whose root is `.page`, and both were
+       broken. Every route rooted at `.pane` or `.mkt` measured 0.
+
+       `min-height: 0` is load-bearing beside it: without it a flex child
+       floors at its content height, so the box never becomes smaller than
+       what it holds and `auto` has nothing to scroll. */
+    min-height: 0;
+    overflow-y: auto;
   }
   .head {
     margin-bottom: var(--s5);
