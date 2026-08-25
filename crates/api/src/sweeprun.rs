@@ -300,8 +300,36 @@ pub fn asked_from(body: &str) -> Result<Asked, Refusal> {
             "months must be 1..=12; this asked for {from_month} and {to_month}."
         )));
     }
-    let from_key = from_year * 12 + from_month;
-    let to_key = to_year * 12 + to_month;
+    // BOUNDED BEFORE THE MULTIPLY, NOT AFTER IT. This read
+    // `let from_key = from_year * 12 + from_month;` with the `u16` bound below
+    // at the `Asked` construction, and the ordering was the whole defect: the
+    // multiply saw a `u64` straight off the wire. `overflow-checks = true` is
+    // set for `release` as well as `debug`, and `panic = "abort"` is set beside
+    // it, so `{"from_year":18446744073709551615}` did not return a refusal --
+    // it called `abort()` and took every other in-flight request on the process
+    // with it. Any year above `u64::MAX / 12` does it.
+    //
+    // It could not be caught by the suite, either: `cargo test` builds `dev`,
+    // which UNWINDS, so the panic died inside hyper's connection task and only
+    // that connection noticed. The abort exists only in the shipped binary, and
+    // `a_year_past_u16_is_refused_rather_than_truncated` uses 99,999,999 --
+    // eight orders of magnitude below the boundary, so it exercised the `u16`
+    // refusal and never the multiply.
+    //
+    // Bounding first makes the overflow unrepresentable rather than checked:
+    // `u16::MAX * 12 + 12` is 786,432, which no `u64` arithmetic can carry out
+    // of range. `asked_from` is written as one named refusal per malformed
+    // field, and this keeps that shape -- a `saturating_mul` would answer a
+    // malformed year with a silently clamped span, which is the fallback that
+    // hides a failure `CLAUDE.md` §4 bans.
+    let year = |y: u64, name: &str| -> Result<u16, Refusal> {
+        u16::try_from(y).map_err(|_| Refusal::Span(format!("`{name}` is not a year: {y}.")))
+    };
+    let from_y = year(from_year, "from_year")?;
+    let to_y = year(to_year, "to_year")?;
+
+    let from_key = u64::from(from_y) * 12 + from_month;
+    let to_key = u64::from(to_y) * 12 + to_month;
     if to_key < from_key {
         return Err(Refusal::Span(format!(
             "the span ends before it starts: {from_year}-{from_month:02} to \
@@ -317,18 +345,16 @@ pub fn asked_from(body: &str) -> Result<Asked, Refusal> {
     // exactly what §6 claims for `k` and is the reason to prefer absence over a
     // validated default.
 
-    // `u16`/`u8` by construction: the month is checked above and a year past
-    // u16 is not a year this store can file a month under.
-    let year = |y: u64, name: &str| -> Result<u16, Refusal> {
-        u16::try_from(y).map_err(|_| Refusal::Span(format!("`{name}` is not a year: {y}.")))
-    };
+    // `u8` by construction: the month is checked above. The year is already a
+    // `u16` -- it was bounded before the key multiply, which is what that
+    // ordering buys and why the bound does not appear here any more.
     let month = |m: u64| -> u8 { u8::try_from(m).unwrap_or(1) };
 
     Ok(Asked {
         feed,
         underlying,
-        from: (year(from_year, "from_year")?, month(from_month)),
-        to: (year(to_year, "to_year")?, month(to_month)),
+        from: (from_y, month(from_month)),
+        to: (to_y, month(to_month)),
     })
 }
 
@@ -732,6 +758,39 @@ mod tests {
         let why = asked_from(&body("zerodha", span)).expect_err("a refusal");
         assert!(matches!(why, Refusal::Span(_)));
         assert!(why.why().contains("not a year"), "{}", why.why());
+    }
+
+    /// A year at the top of `u64` is refused, and does not reach a multiply.
+    ///
+    /// # Why the test above did not already cover this
+    ///
+    /// It uses 99,999,999. `99_999_999 * 12` is 1.2e9 -- comfortably inside
+    /// `u64`, so it reached the `u16` bound and refused. The keys were computed
+    /// as `from_year * 12` on the raw `u64` BEFORE that bound, so the input that
+    /// mattered was one no test named: any year above `u64::MAX / 12`, which is
+    /// 1,537,228,672,809,129,301. `overflow-checks = true` holds in `release`
+    /// too, and `panic = "abort"` sits beside it, so the shipped binary answered
+    /// that body by aborting the process rather than by refusing the field.
+    ///
+    /// **And `cargo test` could not see it**, which is the reason to write the
+    /// case down rather than trust the profile. Tests build `dev`, which unwinds
+    /// rather than aborting, so the panic surfaced inside hyper's connection
+    /// task and killed one connection. The outage existed only in the profile no
+    /// test runs. This asserts the refusal, which is the same answer in both.
+    #[test]
+    fn a_year_at_the_top_of_u64_is_refused_before_it_reaches_the_key_multiply() {
+        for span in [
+            // `u64::MAX`, the value that overflowed `* 12` first.
+            r#""from_year":18446744073709551615,"from_month":1,"to_year":2026,"to_month":8"#,
+            // One past `u64::MAX / 12` -- the exact boundary, from the other side.
+            r#""from_year":1537228672809129302,"from_month":1,"to_year":2026,"to_month":8"#,
+            // The same on `to_year`, because both keys are multiplied.
+            r#""from_year":2019,"from_month":12,"to_year":18446744073709551615,"to_month":1"#,
+        ] {
+            let why = asked_from(&body("zerodha", span)).expect_err("a refusal");
+            assert!(matches!(why, Refusal::Span(_)), "{}", why.why());
+            assert!(why.why().contains("not a year"), "{}", why.why());
+        }
     }
 
     #[test]
