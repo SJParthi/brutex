@@ -49,9 +49,15 @@
 //!
 //! | Operation | Cost | How |
 //! |---|---|---|
-//! | count | **O(1)** | `(file_len - 16) / 205`, no walk |
-//! | read record *i* | **O(1)** | seek to `16 + i·205`, one read |
+//! | count | **O(1)** | `(file_len - 16) / stride`, no walk |
+//! | read record *i* | **O(1)** | seek to `16 + i·stride`, one read |
 //! | one request | **O(limit)** | bounded by [`MAX_RUNS`], and it says when it stopped |
+//!
+//! `stride` is [`stride_of`] the file's own version, read from its header
+//! before any address is computed. It is not a literal here because it is not a
+//! literal in the code: this reader knows two versions, and writing one of
+//! their strides into the table is how the previous two of these comments came
+//! to state a number the writer had stopped using.
 //!
 //! The request is bounded at both ends by construction, which is what makes it
 //! safe to expose: a query string cannot make this server read the disk without
@@ -74,16 +80,39 @@ use crate::render;
 /// separates "no runs yet" from "this is somebody else's file".
 const MAGIC: [u8; 8] = *b"BRUTEXRS";
 
-/// The one version this build reads.
+/// The newest version this build reads, and the layout every [`Run`] is
+/// widened INTO.
 ///
-/// A file at any other version is REFUSED, not parsed. `CLAUDE.md` §3 rule 8
-/// makes a new field a new file version at its own stride, so a version this
-/// build does not know has a stride this build does not know, and every address
-/// computed from [`STRIDE`] would land mid-record. It would still PARSE — every
-/// byte pattern is a legal value of its type — and produce a page of confident
-/// nonsense, which is the failure wearing a success's clothes `CLAUDE.md` §4
-/// bans.
-const VERSION: u32 = 2;
+/// A file at a version this build does not know is REFUSED, not parsed.
+/// `CLAUDE.md` §3 rule 8 makes a new field a new file version at its own
+/// stride, so an unknown version has a stride this build does not know, and
+/// every address computed from the wrong one would land mid-record. It would
+/// still PARSE — every byte pattern is a legal value of its type — and produce
+/// a page of confident nonsense, which is the failure wearing a success's
+/// clothes `CLAUDE.md` §4 bans.
+///
+/// **Two versions are known, not one, and that is a deliberate reversal.** This
+/// constant was 2 and the file refused everything else, which was correct while
+/// 2 was the newest. When `cli` went to 3 the refusal stopped protecting the
+/// operator and started blanking their page: the only ledger in existence is a
+/// version-2 file holding whole records that `cli results` reads perfectly. A
+/// reader that refuses data a writer in the same workspace still reads is not
+/// being careful, it is disagreeing with itself — and this module exists
+/// precisely so that two decoders of one file do not disagree.
+const VERSION: u32 = 3;
+
+/// The version before this one, which is READ and never written.
+///
+/// `CLAUDE.md` §3 rule 8 is append-only history: store format versions are
+/// never mutated in place. Refusing to READ one is a different act from
+/// refusing to MUTATE it, and `cli` drew that distinction first — see
+/// `cli::results`, whose own note says a version-2 record "simply predates the
+/// mask". This crate follows the writer's reasoning rather than contradicting
+/// it.
+///
+/// This crate never writes to the ledger at all, so there is no matching
+/// "never appended to" clause here: the whole file is read-only from `api`.
+const VERSION_V2: u32 = 2;
 
 /// Magic, version, and four reserved bytes.
 const HEADER: u64 = 16;
@@ -97,17 +126,56 @@ const HEADER_BYTES: usize = 16;
 
 const _: () = assert!(HEADER_BYTES as u64 == HEADER);
 
-/// Bytes per record: 205 of fields and 8 of seal.
+/// Bytes per record at [`VERSION`]: 253 of fields and 8 of seal.
 ///
-/// The number is `cli::results::STRIDE`, and it is now PINNED to it rather than
+/// The number is `cli::results::STRIDE`, and it is PINNED to it rather than
 /// merely copied from it — see the assertion below.
-const STRIDE: u64 = 213;
+const STRIDE: u64 = 261;
 
 /// [`STRIDE`] as a `usize`, for the record array. Same reason as
 /// [`HEADER_BYTES`].
-const STRIDE_BYTES: usize = 213;
+const STRIDE_BYTES: usize = 261;
 
 const _: () = assert!(STRIDE_BYTES as u64 == STRIDE);
+
+/// Bytes per record at [`VERSION_V2`].
+///
+/// **Frozen, and unpinnable — for once those are the same sentence.** Every
+/// other layout constant here is checked against `cli`'s, but `cli` keeps its
+/// version-2 constants private, so there is nothing to name. That is safe in
+/// the one direction that matters: a released format version is history, and
+/// §3 rule 8 forbids mutating it in place. 213 cannot become anything else
+/// without a version 2 that is not the version 2 already on disk.
+///
+/// The pin that DOES exist is the one that catches the real failure — if `cli`
+/// ships a version 4, [`STRIDE_BYTES`] stops equalling
+/// `cli::results::STRIDE_BYTES` and this crate fails to compile, which is
+/// exactly how the drift this constant was added during got caught.
+const STRIDE_V2: u64 = 213;
+
+/// [`STRIDE_V2`] as a `usize`, for the version-2 record array.
+const STRIDE_BYTES_V2: usize = 213;
+
+const _: () = assert!(STRIDE_BYTES_V2 as u64 == STRIDE_V2);
+
+/// The stride a given version addresses records at.
+///
+/// One function rather than an `if version ==` at each call site, for the
+/// reason `cli::results::stride_of` gives: two copies of a branch that decides
+/// how to interpret bytes on disk is how a reader comes to decode one version
+/// with the other's offsets, which parses cleanly and renders as a run that
+/// never happened.
+///
+/// An unknown version cannot reach here — [`read_from`] refuses it before any
+/// address is computed — so the fallback arm is the older format and never a
+/// guess.
+const fn stride_of(version: u32) -> u64 {
+    if version == VERSION {
+        STRIDE
+    } else {
+        STRIDE_V2
+    }
+}
 
 /// **The link to the writer, which until version 2 was a claim rather than a
 /// check — and the claim was false.**
@@ -135,10 +203,27 @@ const _: () = assert!(STRIDE_BYTES == cli::results::STRIDE_BYTES);
 
 /// Bytes of a record that the fields occupy: everything before the seal.
 ///
-/// Identical to version 1's WHOLE record, which is why every offset in
-/// [`Run::from_bytes`] is unchanged across the version bump — version 2 appends
-/// a seal, it does not move a field.
+/// 253, and version 2's is 205. Neither bump MOVED a field: version 2 appended
+/// a seal and version 3 appended the mask as the last field before it, which is
+/// why every offset in [`Run::from_bytes`] is unchanged across both and why
+/// [`widen_v2`] can be a copy rather than a re-layout.
 const PAYLOAD_BYTES: usize = STRIDE_BYTES - SEAL_BYTES;
+
+/// Version 2's payload: its stride less the same eight-byte seal.
+const PAYLOAD_BYTES_V2: usize = STRIDE_BYTES_V2 - SEAL_BYTES;
+
+/// **Version 2's payload is EXACTLY version 3's, up to the mask.**
+///
+/// This is the assumption [`widen_v2`] rests on, checked at compile time rather
+/// than trusted. The mask was APPENDED as the last field before the seal, so
+/// every version-2 offset is unchanged in version 3. Were a field ever inserted
+/// rather than appended, this fails the build instead of the reader silently
+/// decoding one field into another.
+///
+/// The same assertion stands in `cli::results`. Two independent decoders each
+/// proving the append separately is the point of the second declaration — a
+/// check that lives only beside the writer proves nothing about the reader.
+const _: () = assert!(PAYLOAD_BYTES_V2 + 8 * 6 == PAYLOAD_BYTES);
 
 /// Bytes of `blake3` kept as the per-record seal, matching `cli::results`.
 const SEAL_BYTES: usize = 8;
@@ -149,7 +234,13 @@ const SEAL_BYTES: usize = 8;
 /// `identity` 32, `finished_micros` 8, three 16-byte text fields, the span's
 /// `u16 + u8` twice, `months_asked` and `months_found` 4 each, `bars`,
 /// `min_hits` and `combinations` 8 each, `depth` 4, `halted` 1, `trades` 8,
-/// seven `i64` figures at 8, and five `i16` exit rungs at 2.
+/// seven `i64` figures at 8, five `i16` exit rungs at 2, and six `u64` mask
+/// words at 8.
+///
+/// The mask summand is LAST because the writer writes it last. Reading this
+/// sum in a different order from `cli::results::Record::to_bytes` would make
+/// the two impossible to diff by eye, which is the only way a human ever checks
+/// a second declaration of a layout.
 ///
 /// Checked against [`PAYLOAD_BYTES`], not [`STRIDE_BYTES`]: the seal is not a
 /// field and no offset below addresses it.
@@ -180,12 +271,13 @@ const FIELD_SUM: usize = 32
     + 8
     + 8
     + 8
-    + (5 * 2);
+    + (5 * 2)
+    + (6 * 8);
 
 const _: () = assert!(FIELD_SUM == PAYLOAD_BYTES);
 
 /// Eight bytes of `blake3` over the record's payload, matching
-/// `cli::results::seal_of` — same hasher, same 205 bytes, same truncation.
+/// `cli::results::seal_of` — same hasher, same 253 bytes, same truncation.
 ///
 /// Recomputed here rather than imported because `cli`'s is private, and it is
 /// four lines. If the two ever disagree the seal check below fails on every
@@ -200,13 +292,92 @@ fn seal_of(raw: &[u8; STRIDE_BYTES]) -> [u8; SEAL_BYTES] {
     out
 }
 
+/// Whether a version-2 record matches the seal written beside it.
+///
+/// **Separate from [`seal_of`] because the two hash different lengths**, and
+/// that is not a tidiness point: version 2's seal covers 205 bytes and version
+/// 3's covers 253. One function taking a length would be the dynamic schema
+/// `CLAUDE.md` §4 bans; two constants and two functions is the whole of it.
+fn seal_matches_v2(raw: &[u8; STRIDE_BYTES_V2]) -> bool {
+    let mut hasher = brutex_core::blake3::Hasher::new();
+    hasher.update(&raw[..PAYLOAD_BYTES_V2]);
+    let full = hasher.finalize();
+    full[..SEAL_BYTES] == raw[PAYLOAD_BYTES_V2..STRIDE_BYTES_V2]
+}
+
+/// A version-2 record laid out as version 3's bytes.
+///
+/// The payload is copied verbatim and the six mask words are left zero, which
+/// is legal ONLY because the mask was appended rather than inserted — the
+/// `PAYLOAD_BYTES_V2 + 8 * 6 == PAYLOAD_BYTES` assertion above is that proof,
+/// checked by the compiler rather than by this comment.
+///
+/// **The seal is deliberately NOT copied.** It covers 205 bytes and version 3's
+/// covers 253, so carrying it across would make every widened record fail its
+/// own check and the page would mark three healthy runs as damaged. The seal is
+/// verified against the ORIGINAL bytes by [`seal_matches_v2`], before this
+/// runs, and the result is carried separately — see [`read_from`].
+fn widen_v2(raw: &[u8; STRIDE_BYTES_V2]) -> [u8; STRIDE_BYTES] {
+    let mut wide = [0_u8; STRIDE_BYTES];
+    wide[..PAYLOAD_BYTES_V2].copy_from_slice(&raw[..PAYLOAD_BYTES_V2]);
+    wide
+}
+
+/// One record at a byte offset, widened to [`VERSION`]'s layout, and whether
+/// its seal held.
+///
+/// **One function for both versions, so the branch that decides how to
+/// interpret bytes on disk exists exactly once.** Two copies of it is how a
+/// reader comes to decode one version with the other's offsets — which parses
+/// cleanly, renders as a run that never happened, and is the failure this whole
+/// module is shaped to refuse.
+///
+/// The seal is RETURNED rather than acted on, because the caller and this
+/// function want different things from a bad one: a damaged record still
+/// occupies its stride and the records around it are still addressable, so
+/// [`read_from`] marks the row and keeps going rather than emptying the page.
+fn read_at<R: std::io::Read + std::io::Seek>(
+    src: &mut R,
+    at: u64,
+    version: u32,
+) -> std::io::Result<([u8; STRIDE_BYTES], bool)> {
+    if version == VERSION {
+        let mut raw = [0_u8; STRIDE_BYTES];
+        src.seek(SeekFrom::Start(at))?;
+        src.read_exact(&mut raw)?;
+        let sealed = seal_of(&raw) == raw[PAYLOAD_BYTES..STRIDE_BYTES];
+        return Ok((raw, sealed));
+    }
+    let mut raw = [0_u8; STRIDE_BYTES_V2];
+    src.seek(SeekFrom::Start(at))?;
+    src.read_exact(&mut raw)?;
+    // SEALED AGAINST ITS OWN LENGTH, AND ONLY THEN WIDENED. The other order
+    // hashes 253 bytes of which 48 are zeroes this crate invented, and every
+    // version-2 record in existence fails a check it was never given.
+    let sealed = seal_matches_v2(&raw);
+    Ok((widen_v2(&raw), sealed))
+}
+
 /// The most records one request will read.
 ///
-/// 20,000 × 205 bytes is 4.1 MB, which is deliberately the budget
-/// [`crate::logs::SCAN_BYTES`] gives one log request. A ledger past this is a
-/// state this repository has never reached — the file on disk holds zero
-/// records today — and the ceiling exists so that it never becomes an unbounded
-/// read without somebody choosing it.
+/// **A record count, and it is no longer a byte budget — it was, and saying so
+/// is the point.** The original rationale was that 20,000 × 205 bytes is
+/// 4.1 MB, deliberately matching the budget [`crate::logs::SCAN_BYTES`] gives
+/// one log request. That parity did not survive the stride: at [`STRIDE`] the
+/// same 20,000 records are 5,220,000 bytes, which OVERSHOOTS `SCAN_BYTES`
+/// (4 MiB, 4,194,304) by about a quarter.
+///
+/// The number is left where it is rather than quietly retuned to 16,069,
+/// because the ceiling is a promise about how many rows a page may ask for and
+/// moving it is a behaviour change that belongs in `docs/05-decisions.md`, not
+/// in a comment repair. What is fixed here is the CLAIM: the two limits are
+/// related in origin and no longer equal, and a reader who needs them equal now
+/// has to choose.
+///
+/// The ledger on disk holds three records today — the earlier text said zero,
+/// which stopped being true the first time a sweep was recorded — and the
+/// ceiling exists so that a query string can never make this server read the
+/// disk without a bound somebody chose.
 ///
 /// When it bites, the answer says `hit_scan_cap: true` and reports `total`
 /// separately from `scanned`, so the page can say "the newest 20,000 of
@@ -282,6 +453,29 @@ pub struct Run {
     /// Chosen exit rungs, `-1` for "no rung": stop, target, TSL, TTP arm, TTP
     /// trail.
     pub exit_rungs: [i16; 5],
+    /// The combination itself, as its six mask words — version 3's whole
+    /// difference from version 2.
+    ///
+    /// Before it, a record carried `identity` — a `blake3` over the nine terms
+    /// §3 rule 3 names — which identifies the RUN and cannot be turned back
+    /// into the conditions. The ledger could say what a combination was worth
+    /// and never which conditions made it.
+    ///
+    /// **Six zero words are ambiguous on their own, and [`Ledger::version`] is
+    /// how this crate refuses to pretend otherwise.** A version-2 record
+    /// widened by [`widen_v2`] has an all-zero mask because version 2 had no
+    /// mask; a version-3 record may have an all-zero mask because that run
+    /// genuinely recorded no combination. The bytes are identical and no amount
+    /// of looking at them separates the two. Rendering both as "no combination"
+    /// would be the fallback that hides a failure `CLAUDE.md` §4 bans, so the
+    /// version travels with the ledger and the page says "this ledger predates
+    /// the mask" for the one and "no combination was recorded" for the other.
+    ///
+    /// Not decoded to condition names here: that needs `vocab`, and `api` does
+    /// not depend on it. Adding the arrow to render a field would be a §5 crate
+    /// graph change made for a convenience, so the words are served raw and the
+    /// front end names them.
+    pub mask_words: [u64; 6],
     /// Whether the record's own `blake3` seal matches the bytes read back.
     ///
     /// **A false here does not mean the numbers above are wrong — it means they
@@ -306,6 +500,21 @@ impl Run {
     /// every field is fixed-width and every byte pattern is a legal value of
     /// its type. A record whose CONTENT is nonsensical is a separate question,
     /// and pretending the parse can fail is not how it gets answered.
+    ///
+    /// # Why `sealed` is a PARAMETER and not computed here
+    ///
+    /// It used to be computed, as `seal_of(raw) == raw[PAYLOAD_BYTES..]`, and
+    /// that was correct while one version existed. It cannot survive two: a
+    /// version-2 record arrives here already widened by [`widen_v2`], with its
+    /// seal slot zeroed and 48 bytes of mask this crate invented. Hashing those
+    /// 253 bytes answers a question nobody asked, and would answer it "damaged"
+    /// for every version-2 record in existence — three healthy runs marked as
+    /// corrupt on the operator's page.
+    ///
+    /// The seal must be checked against the bytes as they were WRITTEN, at the
+    /// length that version sealed. [`read_from`] does that before widening and
+    /// passes the verdict down. Same split, and for the same reason, as
+    /// `cli::results::read_at` returning its seal alongside its bytes.
     #[must_use]
     #[expect(
         clippy::indexing_slicing,
@@ -313,7 +522,7 @@ impl Run {
                   whose length is const-asserted against the field sum by \
                   FIELD_SUM, so no offset here can be out of bounds"
     )]
-    fn from_bytes(index: u64, raw: &[u8; STRIDE_BYTES]) -> Self {
+    fn from_bytes(index: u64, raw: &[u8; STRIDE_BYTES], sealed: bool) -> Self {
         let mut at = 0_usize;
         let take = |n: usize, at: &mut usize| {
             let slice = &raw[*at..*at + n];
@@ -351,6 +560,13 @@ impl Run {
         for slot in &mut exit_rungs {
             *slot = i16::from_le_bytes(take(2, &mut at).try_into().unwrap_or([0; 2]));
         }
+        // LAST, matching the writer. A version-2 record reaches here already
+        // widened, so these six words read the zeroes `widen_v2` left and not
+        // whatever followed the record on disk.
+        let mut mask_words = [0_u64; 6];
+        for slot in &mut mask_words {
+            *slot = u64::from_le_bytes(take(8, &mut at).try_into().unwrap_or([0; 8]));
+        }
         Self {
             index,
             identity,
@@ -378,10 +594,8 @@ impl Run {
             winner_mfe: mfe_winners,
             all_mae,
             exit_rungs,
-            // CONSTANT WORK PER RECORD, not a scan: `blake3` over a fixed 205
-            // bytes. The read is already O(take) records; this keeps the same
-            // order and adds a fixed factor, so §3 rule 4 is untouched.
-            sealed: seal_of(raw) == raw[PAYLOAD_BYTES..STRIDE_BYTES],
+            mask_words,
+            sealed,
         }
     }
 
@@ -453,6 +667,28 @@ impl Run {
             }
             let _ = write!(out, "{rung}");
         }
+        out.push(']');
+        // **STRINGS, AND THIS IS THE ONE PLACE THE "numbers stay numbers" RULE
+        // ABOVE MUST NOT APPLY.** A JSON number is an IEEE-754 double
+        // everywhere it is parsed, so it carries 53 bits exactly. A mask word
+        // is 64, and the vocabulary sets high bits — `1 << 63` alone is
+        // 9,223,372,036,854,775,808, which a browser reads back as
+        // 9,223,372,036,854,775,808 rounded to the nearest double and decodes
+        // into a DIFFERENT set of conditions. It would not throw; it would
+        // quietly name the wrong bits, which is the confident nonsense §4 bans.
+        //
+        // The rule this departs from is about counts that get COMPARED, where a
+        // forgotten parse silently compares strings. A mask is never compared
+        // as a magnitude — it is decoded — so the harm the rule prevents is not
+        // available here, and the harm it would cause is. Decimal, so
+        // `BigInt(w)` takes it as it stands.
+        out.push_str(r#","mask_words":["#);
+        for (n, word) in self.mask_words.iter().enumerate() {
+            if n > 0 {
+                out.push(',');
+            }
+            let _ = write!(out, r#""{word}""#);
+        }
         out.push_str("]}");
         out
     }
@@ -481,6 +717,21 @@ pub struct Ledger {
     /// when the read failed — "which file" is the first question a refusal
     /// raises.
     pub path: PathBuf,
+    /// The format version the file declared in its own header.
+    ///
+    /// **Carried because an all-zero mask means two different things and the
+    /// bytes cannot tell them apart.** A version-2 record predates
+    /// [`Run::mask_words`] entirely and is widened with six zero words; a
+    /// version-3 record may hold six zero words because that run recorded no
+    /// combination. Rendering both as "no combination" would be the fallback
+    /// that hides a failure `CLAUDE.md` §4 bans — one is an absent field, the
+    /// other is a present and empty one.
+    ///
+    /// Zero when the read was refused before the header could be believed, and
+    /// [`Self::refusal`] is what the page should show then. Zero is not a
+    /// format version this repository has ever written, so it cannot collide
+    /// with a real one.
+    pub version: u32,
     /// Records the file holds, from its length. **O(1)** and independent of
     /// how many were read.
     pub total: u64,
@@ -584,6 +835,16 @@ impl Ledger {
             out,
             r#""path":{}"#,
             render::json_string(&self.path.display().to_string())
+        );
+        let _ = write!(out, r#","version":{}"#, self.version);
+        // WHETHER THE MASK IS A FIELD OR AN ABSENCE, said once for the ledger
+        // rather than guessed per row. A version-2 file has no mask at all, so
+        // `mask_words` on every run below it is six zeroes this crate wrote and
+        // not six zeroes the sweep recorded.
+        let _ = write!(
+            out,
+            r#","has_mask":{}"#,
+            self.version >= VERSION && self.refusal.is_none()
         );
         let _ = write!(out, r#","total":{}"#, self.total);
         let _ = write!(out, r#","scanned":{}"#, self.scanned);
@@ -756,27 +1017,33 @@ fn read_from<R: std::io::Read + std::io::Seek>(path: PathBuf, src: &mut R, limit
             .and_then(|s| s.try_into().ok())
             .unwrap_or([0; 4]),
     );
-    if version != VERSION {
+    if version != VERSION && version != VERSION_V2 {
         return Ledger::refused(
             path.clone(),
             format!(
-                "{} is version {version} and this build reads version {VERSION}. \
-                 A new field is a new file version at its own stride, so this \
-                 file's records are not {STRIDE} bytes and every address \
-                 computed from that would land mid-record. Nothing was parsed.",
+                "{} is version {version}. This build reads versions {VERSION_V2} \
+                 and {VERSION}. A new field is a new file version at its own \
+                 stride, so this file's records are neither {STRIDE_V2} nor \
+                 {STRIDE} bytes and every address computed from either would \
+                 land mid-record. Nothing was parsed.",
                 path.display()
             ),
         );
     }
+    // EVERY ADDRESS BELOW COMES FROM THE FILE'S OWN VERSION, not from the
+    // newest one. Reading a version-2 file at version 3's stride is the exact
+    // failure the refusal above prevents for an UNKNOWN version, and it would
+    // be no less wrong for a known one.
+    let stride = stride_of(version);
 
     let body = len.saturating_sub(HEADER);
-    let total = body / STRIDE;
+    let total = body / stride;
     // A RAGGED TAIL IS REPORTED, NOT REPAIRED AND NOT FATAL. `cli` appends one
     // whole stride and flushes, so a partial tail means the writer was
     // interrupted — a full disk, a kill. The whole records before it are
     // perfectly good and are served; the bytes after them are named and left
     // alone, because this crate never writes to this file.
-    let partial_tail = body % STRIDE != 0;
+    let partial_tail = body % stride != 0;
 
     let want = u64::try_from(limit.min(MAX_RUNS)).unwrap_or(0);
     let take = want.min(total);
@@ -789,36 +1056,37 @@ fn read_from<R: std::io::Read + std::io::Seek>(path: PathBuf, src: &mut R, limit
     // have been taken, so the loop is O(take) and never touches the rest.
     for n in 0..take {
         let index = total.saturating_sub(1).saturating_sub(n);
-        let at = HEADER.saturating_add(index.saturating_mul(STRIDE));
-        let mut raw = [0_u8; STRIDE_BYTES];
-        if let Err(why) = src
-            .seek(SeekFrom::Start(at))
-            .and_then(|_| src.read_exact(&mut raw))
-        {
-            // PARTIAL, NOT NOTHING. The records already read are returned
-            // alongside the sentence saying where the read stopped. Throwing
-            // them away would turn one unreadable record into an empty page.
-            return Ledger {
-                path: path.clone(),
-                total,
-                scanned,
-                hit_scan_cap,
-                partial_tail,
-                runs,
-                refusal: Some(format!(
-                    "record {index} of {} could not be read at byte {at}: \
-                     {why}. The {scanned} newer records above it were read and \
-                     are shown.",
-                    path.display()
-                )),
-            };
-        }
-        runs.push(Run::from_bytes(index, &raw));
+        let at = HEADER.saturating_add(index.saturating_mul(stride));
+        let (raw, sealed) = match read_at(src, at, version) {
+            Ok(pair) => pair,
+            Err(why) => {
+                // PARTIAL, NOT NOTHING. The records already read are returned
+                // alongside the sentence saying where the read stopped. Throwing
+                // them away would turn one unreadable record into an empty page.
+                return Ledger {
+                    path: path.clone(),
+                    version,
+                    total,
+                    scanned,
+                    hit_scan_cap,
+                    partial_tail,
+                    runs,
+                    refusal: Some(format!(
+                        "record {index} of {} could not be read at byte {at}: \
+                         {why}. The {scanned} newer records above it were read \
+                         and are shown.",
+                        path.display()
+                    )),
+                };
+            }
+        };
+        runs.push(Run::from_bytes(index, &raw, sealed));
         scanned = scanned.saturating_add(1);
     }
 
     Ledger {
         path,
+        version,
         total,
         scanned,
         hit_scan_cap,
@@ -929,8 +1197,9 @@ fn limit_asked(raw: &str) -> usize {
 )]
 mod tests {
     use super::{
-        DEFAULT_LIMIT, HEADER_BYTES, Ledger, MAX_RUNS, PAYLOAD_BYTES, STRIDE_BYTES, VERSION,
-        limit_asked, path_in, read, read_from, respond, seal_of, text,
+        DEFAULT_LIMIT, HEADER_BYTES, Ledger, MAX_RUNS, PAYLOAD_BYTES, PAYLOAD_BYTES_V2,
+        STRIDE_BYTES, VERSION, VERSION_V2, limit_asked, path_in, read, read_from, respond, seal_of,
+        text,
     };
     use std::io::{Cursor, Read, Seek, SeekFrom};
 
@@ -945,6 +1214,16 @@ mod tests {
         out[..8].copy_from_slice(b"BRUTEXRS");
         out[8..12].copy_from_slice(&version.to_le_bytes());
         out
+    }
+
+    /// The six mask words [`record`] writes for a given seed.
+    ///
+    /// Named rather than inlined because three places need the SAME answer: the
+    /// writer helper, the round-trip assertion, and the JSON assertion. Two
+    /// copies of a literal that must agree is the defect this whole module is
+    /// about.
+    fn mask_of(n: u8) -> [u64; 6] {
+        [u64::from(n), 0, u64::from(n) << 32, 0, 1 << 63, 7]
     }
 
     /// One record's bytes. `n` seeds every numeric field so a mis-ordered read
@@ -992,6 +1271,14 @@ mod tests {
         for rung in [-1_i16, -1, 1, 0, 0] {
             put(&rung.to_le_bytes(), &mut at);
         }
+        // LAST, as the writer writes it. The fourth word sets BIT 63 on purpose:
+        // that is the value a JSON number cannot carry, so every test that round
+        // trips this record through `to_json` exercises the one case where
+        // emitting the mask as a number would silently decode to other
+        // conditions.
+        for word in mask_of(n) {
+            put(&word.to_le_bytes(), &mut at);
+        }
         // THE FIELDS MUST END EXACTLY WHERE THE SEAL BEGINS. Asserted rather
         // than trusted: if a field above were the wrong width, the seal would
         // be written over a field and every record would fail its own check
@@ -1015,6 +1302,36 @@ mod tests {
     /// A whole file: header plus the records given, in append order.
     fn file(version: u32, records: &[[u8; STRIDE_BYTES]]) -> Vec<u8> {
         let mut out = header(version).to_vec();
+        for rec in records {
+            out.extend_from_slice(rec);
+        }
+        out
+    }
+
+    /// One VERSION-2 record's bytes, as a version-2 writer laid them out.
+    ///
+    /// **Built by truncating [`record`], and the truncation is the assertion.**
+    /// Version 3 APPENDED the mask, so a version-2 record is byte-for-byte
+    /// version 3's payload up to the mask, resealed at its own shorter length.
+    /// Deriving it this way rather than re-listing 23 fields means a field that
+    /// ever MOVED — rather than being appended after — makes these fixtures
+    /// disagree with the reader instead of quietly agreeing with it.
+    fn record_v2(n: u8, halted: bool, pessimistic: i64) -> [u8; super::STRIDE_BYTES_V2] {
+        let wide = record(n, halted, pessimistic);
+        let mut out = [0_u8; super::STRIDE_BYTES_V2];
+        out[..PAYLOAD_BYTES_V2].copy_from_slice(&wide[..PAYLOAD_BYTES_V2]);
+        // SEALED OVER 205, which is what makes this a version-2 record and not
+        // a truncated version-3 one. The reader must hash the same length back.
+        let mut hasher = brutex_core::blake3::Hasher::new();
+        hasher.update(&out[..PAYLOAD_BYTES_V2]);
+        let full = hasher.finalize();
+        out[PAYLOAD_BYTES_V2..].copy_from_slice(&full[..super::SEAL_BYTES]);
+        out
+    }
+
+    /// A whole version-2 ledger file.
+    fn file_v2(records: &[[u8; super::STRIDE_BYTES_V2]]) -> Vec<u8> {
+        let mut out = header(VERSION_V2).to_vec();
         for rec in records {
             out.extend_from_slice(rec);
         }
@@ -1412,7 +1729,11 @@ mod tests {
         let ledger = over(file(9, &[record(1, false, 10)]), 10);
         let why = ledger.refusal.expect("a sentence");
         assert!(why.contains("version 9"), "{why}");
-        assert!(why.contains(&format!("reads version {VERSION}")), "{why}");
+        assert!(
+            why.contains(&format!("reads versions {VERSION_V2} and {VERSION}")),
+            "the refusal must name BOTH versions it knows, or an operator \
+             cannot tell whether their file is old or simply wrong: {why}"
+        );
         assert!(
             why.contains("land mid-record"),
             "the refusal must say WHY guessing is worse: {why}"
@@ -1652,17 +1973,205 @@ mod tests {
         // The const assertions above already fail the BUILD if these disagree.
         // This states the numbers in a third place so the intent survives a
         // careless edit to any one constant.
-        assert_eq!(super::STRIDE_BYTES, 213, "205 of fields and 8 of seal");
-        assert_eq!(super::FIELD_SUM, 205);
-        assert_eq!(PAYLOAD_BYTES, 205, "version 1's whole record");
+        assert_eq!(super::STRIDE_BYTES, 261, "253 of fields and 8 of seal");
+        assert_eq!(super::FIELD_SUM, 253);
+        assert_eq!(PAYLOAD_BYTES, 253);
         assert_eq!(super::SEAL_BYTES, 8);
         assert_eq!(super::HEADER_BYTES, 16);
-        // AND THE ONE THAT WOULD HAVE CAUGHT VERSION 2 BEFORE IT SHIPPED.
+        // VERSION 2, WHICH IS FROZEN AND MUST NEVER MOVE. It is history, and
+        // §3 rule 8 forbids mutating a released format in place. If a careless
+        // edit ever changes one of these, the three records on disk decode into
+        // nonsense with nothing else to catch it -- `cli` keeps its version-2
+        // constants private, so there is no writer-side pin available here.
+        assert_eq!(super::STRIDE_BYTES_V2, 213);
+        assert_eq!(PAYLOAD_BYTES_V2, 205, "version 1's whole record");
+        // AND THE ONE THAT WOULD HAVE CAUGHT BOTH DRIFTS BEFORE THEY SHIPPED.
         // Everything above is this crate agreeing with itself, which it did
-        // throughout the incident: 205 and 205 stayed equal while the writer
-        // moved to 213. Only a line naming `cli`'s constant can fail when the
-        // WRITER changes, and that is the whole lesson.
+        // throughout both incidents: 205 and 205 stayed equal while the writer
+        // moved to 213, then 213 and 213 stayed equal while it moved to 261.
+        // Only a line naming `cli`'s constant can fail when the WRITER changes,
+        // and that is the whole lesson -- twice.
         assert_eq!(super::STRIDE_BYTES, cli::results::STRIDE_BYTES);
+    }
+
+    /* ============ the version this build no longer writes ============ */
+
+    #[test]
+    fn a_version_2_ledger_is_read_rather_than_refused() {
+        // THE WHOLE POINT OF THE DUAL READ. The only ledger that exists on the
+        // operator's disk is a version-2 file, and `cli results` reads it. A
+        // page that refused it would have this crate and that one disagreeing
+        // about a file they both open, which is the failure this module exists
+        // to prevent.
+        let ledger = over(
+            file_v2(&[record_v2(1, false, 10), record_v2(2, false, 20)]),
+            10,
+        );
+        assert_eq!(ledger.refusal, None, "a known version is not a refusal");
+        assert_eq!(ledger.version, VERSION_V2);
+        assert_eq!(ledger.total, 2, "addressed at 213, not at 261");
+        assert_eq!(ledger.scanned, 2);
+        assert!(
+            !ledger.partial_tail,
+            "639 % 213 == 0 and 639 % 261 does not"
+        );
+    }
+
+    #[test]
+    fn a_version_2_record_keeps_its_seal_because_it_is_checked_at_its_own_length() {
+        // THE ORDERING BUG THIS PAIR OF FUNCTIONS EXISTS TO AVOID. Widening
+        // first and sealing after would hash 253 bytes of which 48 are zeroes
+        // this crate invented, and EVERY healthy version-2 record would be
+        // marked damaged on the page.
+        let ledger = over(file_v2(&[record_v2(1, false, 10)]), 10);
+        assert!(
+            ledger.runs[0].sealed,
+            "a healthy version-2 record must not read as damaged"
+        );
+        assert_eq!(ledger.unsealed_count(), 0);
+    }
+
+    #[test]
+    fn a_damaged_version_2_record_is_still_caught() {
+        // The seal must still DO something at version 2 — a check that passes
+        // everything is not a check. Flip a payload byte after sealing.
+        let mut rec = record_v2(1, false, 10);
+        rec[0] ^= 0b1000_0000;
+        let ledger = over(file_v2(&[rec]), 10);
+        assert!(!ledger.runs[0].sealed, "damage must still be visible");
+        assert_eq!(ledger.unsealed_count(), 1);
+    }
+
+    #[test]
+    fn a_version_2_run_reads_an_empty_mask_and_the_ledger_says_it_is_absent() {
+        // SIX ZERO WORDS MEAN TWO DIFFERENT THINGS and the bytes cannot tell
+        // them apart. `has_mask` is the only thing separating "this ledger
+        // predates the mask" from "this run recorded no combination", and
+        // rendering both the same way is the fallback §4 bans.
+        let old = over(file_v2(&[record_v2(1, false, 10)]), 10);
+        assert_eq!(old.runs[0].mask_words, [0; 6], "version 2 had no mask");
+        let json = old.to_json();
+        assert!(json.contains(r#""version":2"#), "{json}");
+        assert!(json.contains(r#""has_mask":false"#), "{json}");
+
+        let new = over(file(VERSION, &[record(1, false, 10)]), 10);
+        assert_eq!(new.runs[0].mask_words, mask_of(1), "version 3 carries it");
+        let json = new.to_json();
+        assert!(json.contains(r#""version":3"#), "{json}");
+        assert!(json.contains(r#""has_mask":true"#), "{json}");
+    }
+
+    #[test]
+    fn a_version_2_record_decodes_every_other_field_exactly_as_version_3_does() {
+        // The append is only safe if NOTHING before it moved. Read the same
+        // seed at both versions and require every field but the mask to match.
+        let old = over(file_v2(&[record_v2(7, true, 34_302)]), 10);
+        let new = over(file(VERSION, &[record(7, true, 34_302)]), 10);
+        let (a, b) = (&old.runs[0], &new.runs[0]);
+        assert_eq!(a.identity, b.identity);
+        assert_eq!(a.finished_micros, b.finished_micros);
+        assert_eq!(
+            (&a.feed, &a.underlying, &a.timeframe),
+            (&b.feed, &b.underlying, &b.timeframe)
+        );
+        assert_eq!(
+            (a.from_year, a.from_month, a.to_year, a.to_month),
+            (b.from_year, b.from_month, b.to_year, b.to_month)
+        );
+        assert_eq!(
+            (a.months_asked, a.months_found),
+            (b.months_asked, b.months_found)
+        );
+        assert_eq!(
+            (a.bars, a.min_hits, a.combinations, a.depth),
+            (b.bars, b.min_hits, b.combinations, b.depth)
+        );
+        assert_eq!((a.halted, a.trades), (b.halted, b.trades));
+        assert_eq!(
+            (a.pessimistic, a.optimistic, a.worst_trade),
+            (b.pessimistic, b.optimistic, b.worst_trade)
+        );
+        assert_eq!(
+            (a.max_drawdown, a.winner_mae, a.winner_mfe, a.all_mae),
+            (b.max_drawdown, b.winner_mae, b.winner_mfe, b.all_mae)
+        );
+        assert_eq!(a.exit_rungs, b.exit_rungs);
+        assert_ne!(a.mask_words, b.mask_words, "and ONLY the mask differs");
+    }
+
+    #[test]
+    fn a_ragged_version_2_tail_is_measured_against_213() {
+        // A tail is ragged relative to the FILE's stride. Measured against 261
+        // a whole version-2 file looks ragged and a ragged one can look whole.
+        let mut bytes = file_v2(&[record_v2(1, false, 10)]);
+        bytes.extend_from_slice(&[0_u8; 9]);
+        let ledger = over(bytes, 10);
+        assert_eq!(ledger.total, 1, "one whole record before the stray bytes");
+        assert!(ledger.partial_tail, "and the tail is named");
+    }
+
+    #[test]
+    fn a_record_seek_that_fails_keeps_what_was_read_at_either_version() {
+        // `read_at` seeks before it reads, at BOTH versions, and a seek can
+        // fail on its own — a closed handle, a device error. Each version has
+        // its own seek call, so one test per version or one of them is a path
+        // nothing has ever taken.
+        for bytes in [
+            file(VERSION, &[record(1, false, 10), record(2, false, 20)]),
+            file_v2(&[record_v2(1, false, 10), record_v2(2, false, 20)]),
+        ] {
+            // Seek 1 measures the length, seek 2 is the header's, seek 3 is
+            // the first record's — which is the one `read_at` owns.
+            let ledger = over_failing(FailsAt::new(bytes).seek_fails_after(2), 10);
+            let why = ledger.refusal.expect("a sentence naming where it stopped");
+            assert!(why.contains("could not be read at byte"), "{why}");
+            assert_eq!(
+                ledger.total, 2,
+                "the count came from the length, not the read"
+            );
+            assert!(
+                ledger.runs.is_empty(),
+                "the failure was on the first record"
+            );
+        }
+    }
+
+    #[test]
+    fn a_version_2_record_read_that_fails_keeps_the_records_above_it() {
+        // The version-2 arm has its OWN `read_exact`, on its own shorter array.
+        // Read 1 is the header's, read 2 the newest record's, read 3 the next.
+        let bytes = file_v2(&[record_v2(1, false, 10), record_v2(2, false, 20)]);
+        let ledger = over_failing(FailsAt::new(bytes).read_fails_after(2), 10);
+        let why = ledger.refusal.expect("a sentence");
+        assert!(why.contains("could not be read at byte"), "{why}");
+        assert_eq!(ledger.scanned, 1, "the newer record was kept");
+        assert_eq!(ledger.runs.len(), 1, "PARTIAL, not nothing");
+        assert!(ledger.runs[0].sealed, "and what was kept is still whole");
+    }
+
+    #[test]
+    fn the_mask_survives_json_as_a_string_because_a_number_would_round() {
+        // BIT 63 IS THE CASE THAT BREAKS. As a JSON number, 2^63 is parsed into
+        // an IEEE-754 double everywhere it lands; the bits that fall off name
+        // DIFFERENT conditions, and nothing throws. The fixture sets that bit
+        // on purpose — see `mask_of`.
+        let json = over(file(VERSION, &[record(3, false, 10)]), 10).to_json();
+        assert!(
+            json.contains(r#""mask_words":["3","0","12884901888","0","9223372036854775808","7"]"#),
+            "every word quoted, and 2^63 exact: {json}"
+        );
+        assert_eq!(mask_of(3)[4], 1 << 63, "the fixture must exercise bit 63");
+    }
+
+    #[test]
+    fn the_mask_is_exactly_what_version_3_appended_to_version_2() {
+        // The append is what makes `widen_v2` a copy rather than a re-layout,
+        // and it is the reason every version-2 offset still lands. Stated here
+        // as arithmetic so the intent survives an edit to either constant.
+        assert_eq!(PAYLOAD_BYTES - PAYLOAD_BYTES_V2, 48, "six u64 mask words");
+        assert_eq!(super::STRIDE_BYTES - super::STRIDE_BYTES_V2, 48);
+        assert_eq!(super::stride_of(VERSION), super::STRIDE);
+        assert_eq!(super::stride_of(VERSION_V2), super::STRIDE_V2);
     }
 
     #[test]

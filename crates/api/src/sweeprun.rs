@@ -716,7 +716,7 @@ mod tests {
         // not gone: the property is now that the failure is UNREACHABLE rather
         // than caught. Deleting the test with the variant would have left
         // nothing saying why the constant may never be zero.
-        assert!(SUPPORT_PPM > 0, "extinction needs a threshold above zero");
+        const { assert!(SUPPORT_PPM > 0, "extinction needs a threshold above zero") };
         // And a body that tries is simply a body with a field this route does
         // not read -- accepted, ignored, and swept at the real threshold.
         let raw = format!(r#"{{"feed":"zerodha","underlying":"NIFTY",{SPAN},"support_ppm":0}}"#);

@@ -21319,3 +21319,94 @@ number on the screen wearing the wrong name.
 **Left undone, deliberately.** `runner::audit.rs` still carries the same claim as
 a note on the mean row. Another session held that file open; it is one line and
 `docs/06-limits.md` §90 records that it is owed.
+
+### D-0282 — `api` reads version 3, and keeps reading version 2
+
+**The pin fired, and it fired for the reason it was added.** D-0206's
+`const _: () = assert!(STRIDE_BYTES == cli::results::STRIDE_BYTES)` in
+`crates/api/src/backtest.rs` failed the build as `assert!(213 == 261)` the
+moment `cli` shipped format version 3. That is the whole point of it: the
+previous drift, 205 to 213, shipped past a green build and was caught at runtime
+on the operator's screen after a release. This one was caught at compile time,
+in CI, before one. The gate worked.
+
+**What version 3 is.** `cli::results` appended `mask_words: [u64; 6]` — the
+combination itself — as the LAST field before the seal. Stride 213 to 261,
+payload 205 to 253. Before it a record carried `identity`, a `blake3` over the
+nine terms §3 rule 3 names, which identifies the RUN and cannot be turned back
+into the conditions; the ledger could say what a combination was worth and never
+which conditions made it.
+
+**Both versions are read, and the measured fact is why.** The only ledger that
+exists is `~/.brutex/store/results/runs.bin`: 655 bytes, version 2, `639 = 3 ×
+213` exactly, three whole records, no ragged tail — and `cli` refuses to APPEND
+to a version-2 file, so it stays version 2 until someone moves it aside. A
+version-3-only reader would have `/backtest.json` returning a refusal and zero
+runs for the same file `cli results` renders three rows from. Two decoders of
+one file disagreeing about whether it is readable is the exact failure
+`backtest.rs` exists to prevent; that it would have been a LOUD refusal rather
+than silent nonsense makes it a smaller failure, not a different one.
+
+Refusing to READ a released version is a different act from refusing to MUTATE
+it. §3 rule 8 forbids the second. D-0207 drew that distinction for `cli` and
+this entry follows the writer's reasoning rather than contradicting it.
+
+**The ordering that carries the correctness.** A version-2 record is sealed
+against its own 205 bytes and ONLY THEN widened. The other order hashes 253
+bytes of which 48 are zeroes the reader invented, and every healthy version-2
+record fails a check it was never given — three good runs marked damaged. This
+forced `Run::from_bytes` to take `sealed` as a parameter instead of computing
+it, mirroring `cli::results::read_at` returning its seal beside its bytes.
+
+**An absent mask is not an empty one.** A widened version-2 run carries six zero
+words because version 2 had no mask; a version-3 run may carry six zero words
+because it recorded no combination. The bytes are identical. `Ledger::version`
+now travels with the rows and the JSON carries `has_mask`, so the page can say
+"this ledger predates the mask" for one and "no combination was recorded" for
+the other. Emitting both the same way would be the fallback §4 bans.
+
+**`mask_words` reaches JSON as strings, and that departs from this module's own
+rule.** `Run::to_json`'s header says numbers stay numbers, because a count that
+leaves as `"1200"` makes every consumer parse it back. A JSON number is an
+IEEE-754 double wherever it lands — 53 bits — and a mask word is 64. `1 << 63`
+read back as a double decodes into a DIFFERENT set of conditions and nothing
+throws. The rule exists to stop counts being COMPARED as strings; a mask is
+never compared as a magnitude, only decoded, so the harm the rule prevents is
+unavailable here and the harm it would cause is not. Decimal strings, so
+`BigInt(w)` takes them as they stand. The test fixture sets bit 63 on purpose.
+
+**Not decoded to condition names, deliberately.** That needs `vocab`, and `api`
+does not depend on it. Adding the arrow to render one field would be a §5 crate
+graph change made for a convenience, so the words are served raw and the front
+end names them.
+
+**Two things this does not fix, stated rather than left.**
+
+`api`'s `VERSION_V2` and `STRIDE_V2` are NOT pinned to `cli`'s, because `cli`
+keeps its version-2 constants private. That is safe in the only direction that
+matters — a released version is frozen history and 213 cannot become anything
+else — and the pin that catches real drift, on `STRIDE_BYTES`, is the one that
+exists. A version pin would need a `cli` edit and is not made here.
+
+`MAX_RUNS` was documented as byte-parity with `logs::SCAN_BYTES`: 20,000 × 205 =
+4.1 MB against a 4 MiB budget. At stride 261 the same 20,000 records are
+5,220,000 bytes, which overshoots it by about a quarter. The constant is left at
+20,000 rather than quietly retuned to 16,069, because the ceiling is a promise
+about how many rows a page may ask for and moving it is a behaviour change that
+belongs in an entry of its own. What is corrected is the CLAIM. The same comment
+said the file on disk holds zero records; it holds three.
+
+**Also corrected, and each had drifted silently.** The module cost table stated
+`(file_len - 16) / 205` — two versions stale — and now names `stride_of` the
+file's own version rather than any literal. `PAYLOAD_BYTES`, `seal_of` and the
+`from_bytes` comment each stated 205. `docs/04-invariants.md` BT-01 said the sum
+is checked against `STRIDE_BYTES`; the code checks `PAYLOAD_BYTES`, and the seal
+is not a field.
+
+**Unrelated, found because the broken build was hiding it.** `sweeprun.rs:719`'s
+`assert!(SUPPORT_PPM > 0, ...)` tripped `clippy::assertions_on_constants`; the
+const-eval failure had stopped compilation before clippy ever ran. It is now a
+`const { assert!(..) }`, which is what the test's own comment asks for — the
+property is unreachable rather than caught.
+
+Invariants BT-01a and BT-13 through BT-18 in `docs/04-invariants.md`.
