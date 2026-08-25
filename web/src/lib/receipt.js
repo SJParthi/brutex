@@ -55,11 +55,14 @@ export const RECEIPT_SPOT = 'pull-spot';
 /**
  * `null` when this answer is a receipt, or the refusal to render in its place.
  *
- * @param html the body, verbatim.
- * @param status the HTTP status, for the sentence.
- * @param ctype the `content-type` header, or null.
- * @param marker the `x-brutex-receipt` header, or null.
- * @param hasVerdict whether the parsed document carries the badge element.
+ * @param {object} answer
+ * @param {string} answer.html the body, verbatim.
+ * @param {number} answer.status the HTTP status, for the sentence.
+ * @param {string | null} answer.ctype the `content-type` header, or null.
+ * @param {string | null} answer.marker the `x-brutex-receipt` header, or null.
+ * @param {boolean} answer.hasVerdict whether the parsed document carries the
+ *        badge element.
+ * @returns {ReturnType<typeof refusal> | null}
  */
 export function notAReceipt({ html, status, ctype, marker, hasVerdict }) {
   const mime = String(ctype ?? '');
@@ -88,7 +91,13 @@ export function notAReceipt({ html, status, ctype, marker, hasVerdict }) {
   return null;
 }
 
-/** The shape the page renders, with `good` false and the reason spelled out. */
+/**
+ * The shape the page renders, with `good` false and the reason spelled out.
+ *
+ * @param {number} status
+ * @param {string} html
+ * @param {string} reason
+ */
 function refusal(status, html, reason) {
   return {
     ok: false,

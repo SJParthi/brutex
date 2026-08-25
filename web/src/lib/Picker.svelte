@@ -130,7 +130,15 @@
   const open = $derived(openId === id);
 
   let q = $state('');
+  // TYPED BECAUSE `bind:this` WRITES A NODE INTO THEM. Inferred from `null`
+  // alone each is `null` and nothing else, so the binding below was an
+  // assignment error and every read of a property off them was a read off
+  // `never`. The `| null` half is not decoration: `menu` is inside `{#if open}`
+  // and genuinely absent while the picker is closed, which is exactly what the
+  // guard on the effect below tests.
+  /** @type {HTMLButtonElement | null} */
   let btn = $state(null);
+  /** @type {HTMLDivElement | null} */
   let menu = $state(null);
   /**
    * Which edge the panel hangs from.
@@ -238,10 +246,12 @@
           : `${selected.size} of ${rows.length} ${label}`)
   );
 
+  /** @param {unknown} next */
   function emit(next) {
     onchange?.(next);
   }
 
+  /** @param {string} key */
   function toggle(key) {
     // The refusal is here and not only on the input, because this is the door
     // every other path goes through as well.
@@ -289,6 +299,7 @@
   }
 
   /** Split a name around the matched letters so the narrowing is legible. */
+  /** @param {string} text @returns {[string, string, string]} */
   function parts(text) {
     const needle = q.trim().toUpperCase();
     const i = needle ? String(text).toUpperCase().indexOf(needle) : -1;
@@ -296,6 +307,7 @@
     return [String(text).slice(0, i), String(text).slice(i, i + needle.length), String(text).slice(i + needle.length)];
   }
 
+  /** @param {KeyboardEvent} e */
   function onKey(e) {
     if (e.key === 'Escape' && open) {
       openId = 0;
@@ -308,7 +320,15 @@
   onclick={(e) => {
     // Outside THIS picker, not outside pickers in general — a click on another
     // picker's button has to close this one, and that is the same click.
-    if (open && e.target.closest?.('.picker') !== btn?.closest?.('.picker')) openId = 0;
+    //
+    // `e.target` IS `EventTarget | null`, not an element. It is null for a
+    // synthetic event and it is a `Window` or a `Document` for a click that
+    // reaches neither — none of which carry `closest`. The optional call
+    // `closest?.()` covered the LAST of those three and neither of the first
+    // two: on a null target the whole expression threw before the `?.` was
+    // reached, and the picker stayed open with no handler left running.
+    const hit = e.target instanceof Element ? e.target.closest('.picker') : null;
+    if (open && hit !== btn?.closest('.picker')) openId = 0;
   }}
 />
 
