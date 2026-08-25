@@ -2426,7 +2426,16 @@
                 <span class="pill seal">{g.unsealedCount} unsealed</span>
               {/if}
             </div>
-            <div class="multiples">
+            <!-- SOLO IS NOT A CHART, AND THE BAR WOULD BE A TAUTOLOGY.
+                 `scale` is `max(|pessimistic|)` over the rungs present, so with
+                 ONE rung the scale IS that rung and the bar is always exactly
+                 100% tall — the same picture for ₹13,504 as for ₹1. A shape
+                 that cannot vary is not a measurement, and drawing it in a
+                 1375px band with a 92px tile in it spends 93% of the row on
+                 nothing while looking like a comparison that was made.
+                 The row still ranks, still opens, still carries its flags; it
+                 simply stops pretending to plot. -->
+            <div class="multiples" class:solo={g.present.length === 1}>
               {#each g.present as r (r.index)}
                 <button
                   class="mult"
@@ -4609,6 +4618,33 @@
   .mult:hover {
     transform: translateY(-3px);
     box-shadow: var(--e2);
+  }
+  /* ---- ONE RUNG: A ROW, NOT A PLOT ---------------------------------
+     See the comment on `.multiples.solo` in the markup for why the bar is
+     withdrawn rather than shrunk: at n=1 its height is fixed at 100% by
+     construction, so it is a picture that cannot carry a number.
+     The tile becomes a horizontal chip — rung, figure, flags — which is
+     everything the chart was actually telling the reader. */
+  .multiples.solo .mult {
+    flex: 0 1 auto;
+    flex-direction: row;
+    align-items: baseline;
+    gap: var(--s3, 0.5rem);
+    padding: 0.45rem 0.7rem;
+  }
+  .multiples.solo .mult-bars {
+    display: none;
+  }
+  .multiples.solo .mult-fig {
+    font-size: var(--fs-1, 1rem);
+  }
+  /* NO LIFT ON HOVER. The lift reads as "compare me with the one beside
+     me"; there is nothing beside it. The border still answers the cursor,
+     so the row is still visibly a control. */
+  .multiples.solo .mult:hover {
+    transform: none;
+    box-shadow: none;
+    border-color: var(--acc);
   }
   /* THE LEADER GLOWS. It is the rung that carries the edge for this span,
      and on a row of four bars the eye should land on it first. */
