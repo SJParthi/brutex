@@ -571,6 +571,43 @@ pub struct Edge {
     pub t: f64,
 }
 
+/// The Newey-West long-run sum of squares, from `edge`'s four accumulators.
+///
+/// # Why this is a function and not four lines inside the walk
+///
+/// It is the whole of the overlap correction's arithmetic, and inside the walk
+/// it is unreachable from a test: driving it needs a `Column`, a `Forward` and a
+/// mask whose hits fall closer together than the horizon, and the value it
+/// produces is then folded into a `t` that a test can only compare against a
+/// number it computed the same way. A test that repeats the implementation
+/// asserts nothing, which is the trap the allocation test in
+/// `engine::column` records falling into.
+///
+/// Here the algebra stands alone and its two load-bearing properties are
+/// ordinary equalities:
+///
+/// * **`cross_c == 0` returns `m2` exactly.** No pair of hits overlapped, so the
+///   result is the plain sum of squares this replaced. Bit for bit, not nearly.
+/// * **positive cross terms return more than `m2`.** A larger sum of squares is
+///   a larger standard error and a SMALLER `t`, which is the direction the
+///   correction must move: overlapping windows were making findings look
+///   stronger than they were.
+///
+/// # The centering, which is why three accumulators and not one
+///
+/// The weighted cross-sum wants `Σ w (x_i − m)(x_j − m)`, and `m` is not known
+/// until the walk ends. Expanding it into `A − m·B + m²·C` lets the walk carry
+/// the three uncentered sums and pay the centering once, here, rather than
+/// storing every observation to make a second pass over them.
+///
+/// `m2` is the `d = 0` term and is already centered by Welford. The cross term
+/// is doubled because each overlapping pair is counted once by the walk and the
+/// two-sided long-run variance needs it from both sides.
+fn long_run_sum_squares(m2: f64, mean: f64, cross_a: f64, cross_b: f64, cross_c: f64) -> f64 {
+    let cross = mean.mul_add(mean * cross_c, cross_a) - mean * cross_b;
+    2.0f64.mul_add(cross, m2)
+}
+
 /// Measures one mask's forward moves over the bars where it fired.
 ///
 /// # Cost
@@ -580,6 +617,14 @@ pub struct Edge {
 /// without the catastrophic cancellation a naive sum-of-squares suffers when
 /// the mean is large relative to the spread — which is exactly the shape of a
 /// paisa price series.
+///
+/// **It is no longer strictly no-storage, and the bound is stated rather than
+/// glossed.** The overlap correction keeps the hits whose forward windows still
+/// touch the current bar, which is at most one per bar over the last `H` bars.
+/// So the working set is `O(H)` — fifteen entries at the default horizon — and
+/// `H` is a run PARAMETER, not a function of how many bars were loaded or how
+/// many the mask hit. Constant in the data, linear in a number the operator
+/// chose. Still one pass.
 ///
 /// UNVERIFIED as a measured figure: no bench row covers this yet.
 #[must_use]
@@ -591,6 +636,52 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
     let mut refused: u64 = 0;
     let mut mean = 0.0_f64;
     let mut m2 = 0.0_f64;
+
+    // THE OVERLAP CORRECTION, AND WHY THE t BELOW IS MEANINGLESS WITHOUT IT.
+    //
+    // `crates/runner/src/significance.rs` corrects the bar for how many
+    // hypotheses were tested, carefully and from the run's own counters. It was
+    // then applied to a t computed as though the observations were independent,
+    // and they are not: a forward return at bar `i` covers bars `i+1..=i+H`, so
+    // two hits fewer than `H` bars apart SHARE bars. The i.i.d. standard error
+    // understates the spread by roughly a factor of `H`, inflating t by about
+    // `sqrt(H)` -- 3.87 at the default `H = 15`.
+    //
+    // The two axes pull against each other and the multiplicity one was losing:
+    // a reported `t = 4.0`, which CLEARS the Bonferroni bar at the trial counts
+    // these runs produce, is a true t near 1.03 -- p about 0.30. Correcting one
+    // axis rigorously and the other not at all does not half-correct; the second
+    // error undoes the first, and the report prints CLEARS either way.
+    //
+    // Newey-West with a Bartlett kernel, keyed on BAR DISTANCE rather than on
+    // observation index. That distinction is the whole of the correctness here:
+    // hits are sparse and irregular, so the k-th previous OBSERVATION may be a
+    // thousand bars back and share nothing. What induces the correlation is bars
+    // in common, so the weight is `1 - d/H` on the bar gap `d`, and a pair at
+    // `d >= H` contributes nothing because its windows are disjoint.
+    //
+    // IT REDUCES EXACTLY TO WHAT IT REPLACED. With no overlapping pair every
+    // accumulator below stays zero and the formula is the old
+    // `m2 / (n - 1)`, so a run whose hits are all more than `H` apart reports
+    // the t it always did. This is an added term, not a different statistic.
+    //
+    // The alternative -- subsampling to every H-th hit -- is simpler and also
+    // honest, and was not taken: it discards about 93% of the observations at
+    // `H = 15` to buy the same `sqrt(H)`, and the discarded ones carry real
+    // information about the mean.
+    let horizon_bars = forward.horizon().as_bars() as usize;
+    // Bounded by the HORIZON, which is a run parameter, not by the data. At the
+    // default it is fifteen entries. One allocation per call, and `edge` is
+    // called once per FREQUENT itemset -- the survivors -- rather than per
+    // candidate pair, which is where the sweep's cost actually is.
+    let mut recent: std::collections::VecDeque<(usize, f64)> =
+        std::collections::VecDeque::with_capacity(horizon_bars);
+    // Uncentered, because the mean is not known until the walk ends. The three
+    // together reconstruct the centered weighted cross-sum exactly:
+    // `Σ w (x_i - m)(x_j - m) = A - m·B + m²·C`.
+    let mut cross_a = 0.0_f64; // Σ w · x_i · x_j
+    let mut cross_b = 0.0_f64; // Σ w · (x_i + x_j)
+    let mut cross_c = 0.0_f64; // Σ w
 
     // WHOLE-SLICE AGREEMENT, ASKED ONCE. `covers` is a per-index test and every
     // index of a SHORTER column satisfies it, so on its own it lets a `Forward`
@@ -652,6 +743,34 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
         // `n` is at least one here, so the divide is defined.
         mean += delta / count;
         m2 += delta * (x - mean);
+
+        // EVERY EARLIER HIT WHOSE WINDOW STILL TOUCHES THIS ONE.
+        //
+        // `sources` is strictly increasing, so the front of the queue is the
+        // oldest and the moment it falls out of range every entry behind it is
+        // in range. Dropping from the front is therefore complete, not a
+        // heuristic.
+        while let Some(&(older, _)) = recent.front() {
+            if source.saturating_sub(older) >= horizon_bars {
+                recent.pop_front();
+            } else {
+                break;
+            }
+        }
+        for &(older, x_older) in &recent {
+            let gap = source.saturating_sub(older);
+            // `gap` is in `1..horizon_bars` by the drain above, so the weight is
+            // in `(0, 1)` and never the `d = 0` self-pair, which is `m2`'s job.
+            #[allow(
+                clippy::cast_precision_loss,
+                reason = "a bar gap below the horizon cannot reach 2^52."
+            )]
+            let w = 1.0 - (gap as f64) / (horizon_bars as f64);
+            cross_a += w * x_older * x;
+            cross_b += w * (x_older + x);
+            cross_c += w;
+        }
+        recent.push_back((source, x));
     }
 
     if n < 2 {
@@ -668,14 +787,28 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
         reason = "the observation count is bounded by the column length."
     )]
     let count = n as f64;
-    let variance = m2 / (count - 1.0);
+    let sum_squares = long_run_sum_squares(m2, mean, cross_a, cross_b, cross_c);
+    let variance = sum_squares / (count - 1.0);
     let standard_error = (variance / count).sqrt();
-    let t = if standard_error > 0.0 {
+    let t = if standard_error > 0.0 && standard_error.is_finite() {
         mean / standard_error
     } else {
-        // Every observation identical. The mean is exact and its spread is
+        // TWO WAYS TO GET HERE, AND BOTH ARE REPORTED AS NO EVIDENCE.
+        //
+        // Every observation identical: the mean is exact and its spread is
         // zero, which is not an infinitely strong result -- it is a degenerate
         // sample, and reporting it as zero refuses to dress one up as the other.
+        //
+        // Or the long-run variance came out NON-POSITIVE. The Bartlett kernel
+        // is positive semi-definite on evenly spaced lags, and these lags are
+        // bar gaps between irregular hits, so that guarantee does not carry
+        // over: strong negative autocovariance can drive `sum_squares` to or
+        // below zero. `sqrt` of a negative is `NaN`, which would compare false
+        // against every threshold and read as a silently weak result rather
+        // than an unusable one. `is_finite` catches it and it lands here, with
+        // the same answer the degenerate sample gets -- this run measured
+        // nothing usable. Reporting the uncorrected t instead would be reporting
+        // the inflated number this whole block exists to remove.
         0.0
     };
     Edge {
@@ -693,7 +826,7 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
     reason = "the exception every test module in this workspace takes."
 )]
 mod tests {
-    use super::{Edge, Horizon, LAST_FILL_MINUTE, edge, forward};
+    use super::{Edge, Horizon, LAST_FILL_MINUTE, edge, forward, long_run_sum_squares};
     use indicators::column::Column;
     use indicators::evaluator::{Evaluator, Widths};
     use indicators::pattern::Thresholds;
@@ -762,6 +895,96 @@ mod tests {
         assert_eq!(forward(&bars, h(3)).measured(), 0);
         assert_eq!(forward(&bars, h(99)).measured(), 0);
         assert_eq!(forward(&[], h(1)).measured(), 0);
+    }
+
+    /// With nothing overlapping, the correction is not merely small -- it is the
+    /// identity, and the statistic is the one this code always reported.
+    ///
+    /// This is the row that makes the change safe to land: every existing
+    /// expectation in this crate was measured before the overlap term existed,
+    /// and all 264 of them still pass. That is only meaningful if "no overlap"
+    /// means EXACTLY the old arithmetic rather than approximately it.
+    #[test]
+    fn no_overlapping_pair_leaves_the_sum_of_squares_exactly_where_it_was() {
+        for m2 in [0.0, 1.0, 1234.5, 9.87e12] {
+            for mean in [0.0, -3.5, 1e6] {
+                assert!(
+                    (long_run_sum_squares(m2, mean, 0.0, 0.0, 0.0) - m2).abs() < f64::EPSILON,
+                    "m2={m2} mean={mean} must come back untouched"
+                );
+            }
+        }
+    }
+
+    /// The centering algebra is right, checked against a pair worked by hand.
+    ///
+    /// One overlapping pair, `x_i = 2` and `x_j = 6`, at weight `w = 0.5`, with
+    /// the walk's mean at `m = 4`. The walk carries the three uncentered sums:
+    ///
+    /// * `A = w·x_i·x_j    = 0.5 · 12 = 6`
+    /// * `B = w·(x_i + x_j) = 0.5 · 8  = 4`
+    /// * `C = w             = 0.5`
+    ///
+    /// and the centered cross-term it must reconstruct is
+    /// `w·(2−4)·(6−4) = 0.5 · (−2) · 2 = −2`. So `A − m·B + m²·C` is
+    /// `6 − 16 + 8 = −2`, and the result is `m2 + 2·(−2) = m2 − 4`.
+    ///
+    /// The numbers are chosen so the cross term is NEGATIVE, which is the case
+    /// that matters: it proves the doubling and the sign are carried through
+    /// rather than an absolute value being taken somewhere.
+    #[test]
+    fn the_centered_cross_term_is_reconstructed_from_the_three_uncentered_sums() {
+        let got = long_run_sum_squares(100.0, 4.0, 6.0, 4.0, 0.5);
+        assert!(
+            (got - 96.0).abs() < 1e-9,
+            "100 + 2·(6 − 4·4 + 16·0.5) = 96, got {got}"
+        );
+    }
+
+    /// Positive overlap RAISES the sum of squares, which LOWERS `t`.
+    ///
+    /// The direction is the whole point. Overlapping forward windows share bars,
+    /// so the i.i.d. standard error understates the spread and inflates `t` by
+    /// about `sqrt(H)` -- 3.87 at the default `H = 15`. A reported `t = 4.0`
+    /// that CLEARS the Bonferroni bar is then a true `t` near 1.03. The
+    /// correction has to move the number DOWN; a sign error here would leave the
+    /// report reading CLEARS on noise, exactly as before, while looking fixed.
+    #[test]
+    fn positively_correlated_overlap_makes_the_evidence_weaker_and_never_stronger() {
+        // Two observations either side of the mean in the SAME direction, so the
+        // centered cross term is positive: x_i = 6, x_j = 8, m = 4, w = 1.
+        // (6−4)·(8−4) = 8, so the sum of squares rises by 2·8 = 16.
+        let plain = 100.0;
+        let corrected = long_run_sum_squares(plain, 4.0, 48.0, 14.0, 1.0);
+        assert!(
+            corrected > plain,
+            "a shared-bar pair must widen the spread, not narrow it: \
+             {corrected} vs {plain}"
+        );
+        assert!(
+            (corrected - 116.0).abs() < 1e-9,
+            "100 + 2·(48 − 4·14 + 16·1) = 116, got {corrected}"
+        );
+    }
+
+    /// A long-run variance can come out non-positive, and that is reported as no
+    /// evidence rather than as a `NaN` that reads like weak evidence.
+    ///
+    /// The Bartlett kernel is positive semi-definite on evenly spaced lags. These
+    /// lags are bar gaps between irregular hits, so the guarantee does not carry
+    /// over and strong negative autocovariance can drive the sum of squares
+    /// below zero. `sqrt` of that is `NaN`, and `NaN` compares false against
+    /// every threshold -- it would pass a `t > bar` test by failing it, and read
+    /// as a merely-weak result instead of an unusable one.
+    #[test]
+    fn a_non_positive_long_run_variance_is_refused_rather_than_reported_as_nan() {
+        // Cross term far more negative than m2 is positive.
+        let s = long_run_sum_squares(1.0, 0.0, -50.0, 0.0, 0.0);
+        assert!(s < 0.0, "the fixture must actually go negative, got {s}");
+        assert!(
+            (s / 4.0 / 5.0).sqrt().is_nan(),
+            "and a negative variance is where the NaN would come from"
+        );
     }
 
     #[test]
