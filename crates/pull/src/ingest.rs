@@ -587,6 +587,38 @@ fn note_not_landed(member: &Member, why: &str) {
     );
 }
 
+/// Records one instrument-level filing failure in the log, beside the receipt.
+///
+/// # The three that reached the receipt and never reached the log
+///
+/// `file_one` can give up at three points, and each pushed a `Failure` and
+/// returned without emitting anything: the address could not be resolved, the
+/// bar write failed, or the overlay write failed. All three reach the receipt,
+/// which is read by whoever is watching the run. None reached `/logs`, which is
+/// what gets handed to a diagnosis afterwards — so an operator arriving later
+/// saw a quiet file for a run that had failed. Gate 19 exists for exactly that
+/// gap, and named these three.
+///
+/// # Why `stage` is a parameter and not three helpers
+///
+/// The three differ only in WHERE they gave up, and that difference is the
+/// whole diagnostic value: an address that will not resolve is a listing
+/// problem, a bar write is a disk or a layout problem, and an overlay write is
+/// a sidecar whose bars did land. One field carries it, and one helper means
+/// the event shape cannot drift between the three.
+///
+/// At `error` rather than `warn`, for the reason [`note_derived_shortfall`]
+/// gives: the run REPORTS these as failures, so a line below the default floor
+/// would be the same silence in a different place.
+fn note_not_filed(instrument: &str, stage: &str, why: &str) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::error("pull.file", "not filed")
+            .with("instrument", telemetry::Value::Str(instrument))
+            .with("stage", telemetry::Value::Str(stage))
+            .with("why", telemetry::Value::Str(why)),
+    );
+}
+
 /// Records one derived-rung shortfall in the log, beside the receipt.
 ///
 /// # Why both surfaces and not one
@@ -1095,6 +1127,7 @@ pub fn from_rows(
     let (ym, timeframe, identity) = match addressed {
         Ok(three) => three,
         Err(why) => {
+            note_not_filed(instrument, "address", &why);
             done.failures.push(Failure {
                 instrument: instrument.to_owned(),
                 why,
@@ -1140,6 +1173,7 @@ pub fn from_rows(
             one
         }
         Err(why) => {
+            note_not_filed(instrument, "bars", &why);
             done.failures.push(Failure {
                 instrument: instrument.to_owned(),
                 why,
@@ -1171,6 +1205,7 @@ pub fn from_rows(
     // bars that are not there is worse than no sidecar: the next reader joins
     // on a stamp that has no bar.
     if let Err(why) = write_overlay(overlays, store_root, symbol_id, parts) {
+        note_not_filed(instrument, "overlay", &why);
         done.failures.push(Failure {
             instrument: instrument.to_owned(),
             why,
