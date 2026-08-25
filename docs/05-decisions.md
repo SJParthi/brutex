@@ -21773,3 +21773,66 @@ behind it.** The constant is corrected with its arithmetic stated; the hang is N
 fixed here and remains open.
 
 Suite green with that one test skipped: **413 passed, 0 failed**.
+
+### D-0288 — the ledger names the conditions, because a hash cannot be read backwards
+
+**`/backtest` said the winning combination could not be shown, and that stopped
+being true when the mask was stored.** The page's own header carried the gap as
+a NAMED one — *"the record holds the run's blake3 identity rather than the mask
+it was taken over, so 'which conditions won' cannot be answered from this
+file"* — which was the honest thing to write while it was the case. Format
+version 3 appends the mask (D-0282), so the answer is on disk and the page was
+still refusing to give it.
+
+**Three states, and collapsing any two of them is the failure §4 bans.** A
+version-2 ledger PREDATES the field. A version-3 run may genuinely have found no
+combination. A version-3 run with bits set names them. The first two are
+byte-identical — six zero words — which is why `has_mask` travels on the ledger
+and is read before the mask is. Verified on the operator's own ledger: version 2,
+`has_mask: false`, and the panel reads *"This ledger predates the condition
+mask… This is not a run that found no conditions: the field did not exist when
+it was recorded."*
+
+**A fourth state was found while building it, and it is the one this repository
+keeps rediscovering.** On a binary older than this page, `has_mask` is not
+`false` — it is ABSENT, and reading a missing field as an absent mask blames the
+data for a stale process. The page comes off disk and the route does not, so a
+rebuilt front end reaches the operator instantly while the server answering it
+does not; `fetchLedger`'s 404 arm was written for exactly this and cost a long
+session once. `has_mask === undefined` is now its own branch, saying the server
+is old rather than the ledger.
+
+**`/vocab.json`, and the `api → vocab` arrow it costs.** `/backtest.json` serves
+six raw `u64`s and no names. It cannot serve names: the decode needs the table,
+and putting it there repeats 370 rows of vocabulary on every run in every
+response. The table is static for the life of a `vocab_version`, so it is
+fetched once and every mask the page shows is decoded against it.
+
+The alternative was a copy of the table in JavaScript, and that is the option
+this workspace has a scar from — `server.rs` already says *"the two surfaces
+cannot drift into two vocabularies for one fact"*. A hand-kept copy is right the
+day it is written and silently wrong the first time a bit is appended. So the
+arrow is real, `CLAUDE.md` §5's graph is updated, `vocab`'s own dependency set is
+untouched, and `api` is not on gate 22's list — clause A is unaffected.
+
+`vocab_version` travels with the table for the same reason it is one of the nine
+terms in a run's identity (§3 rule 3): a page holding a cached table can tell it
+is stale rather than rendering confident nonsense.
+
+**Tombstones are served, not filtered.** A retired position keeps its index
+forever (§3 rule 8) and a mask recorded before the retirement still carries it.
+Dropping the row would make an old run's bit decode to nothing at all, which
+reads as "no condition" rather than "a condition this build no longer sets".
+`live` separates them and the row says which.
+
+**`mask_words` was typed `{string}` and is `string[]`.** Six decimal strings, not
+one — the words are strings because a JS number carries 53 bits and a mask word
+is 64, so `Number()` on `1 << 63` sets the wrong bits without throwing. The page
+decodes with `BigInt`. The type was wrong in the direction that would have
+compiled and rendered nothing.
+
+Verified against the running server: `mask_words` arrives as
+`["0","0","0","0","0","0"]`, `version: 2`, `has_mask: false`, and the v2 panel
+renders. svelte-check is unchanged at its 60-error baseline — this added none.
+
+Invariant A-52 in `docs/04-invariants.md`.

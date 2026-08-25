@@ -170,7 +170,7 @@ core          <-- costs
 core telemetry <-- store · lake
 vocab         <-- indicators · engine
 core costs greeks store telemetry <-- pull
-core pull store telemetry       <-- api
+core pull store telemetry cli vocab <-- api
 core costs engine indicators vocab         <-- runner
 core costs engine indicators runner store telemetry <-- cli
 ```
@@ -199,6 +199,19 @@ moved the front end to `web/` as an unrestricted directory. There is no
 `crates/web`, so the "depends on core ONLY" rule has nothing to bind and **CI
 gate 7 skips permanently**. §2's boundary is what governs the front end now: no
 crate may depend on its toolchain to build, test or run.
+
+**`api` names `vocab`, and it is the sixth arrow on that row.** `/backtest.json`
+serves a run's `mask_words` as six raw `u64`s and cannot serve NAMES: turning a
+bit into a name needs the table. Decoding in the ledger response would repeat 370
+rows of vocabulary on every run in every page, so `/vocab.json` serves the table
+once and the browser decodes every mask it is shown.
+
+The alternative was a hand-kept copy of the table in JavaScript, and that is the
+one this graph exists to refuse: two vocabularies for one fact, correct the day
+it is written and silently wrong the first time a bit is appended — a mask
+decoded against a stale table names the WRONG conditions and looks exactly like
+an answer. `api` is not on gate 22's list and `vocab`'s own dependency set is
+untouched, so clause A is unaffected. D-0288.
 
 **`cli` now exists, and closing that gap is what it is for.** Until D-0169 the
 only binary was `api`, whose dependency set is `core`, `pull`, `store` and

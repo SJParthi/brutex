@@ -37,13 +37,32 @@
    * which is the invention `CLAUDE.md` §3 rule 1 bans. What IS drawn is those
    * four scalars to one scale, which is a real comparison.
    *
-   * **No per-level ladder breakdown and no winning condition mask.** The record
-   * holds `depth` and `combinations` as two scalars and holds the run's blake3
-   * identity rather than the mask it was taken over. So "where did the frontier
-   * empty" and "which conditions won" cannot be answered from this file. Both
-   * are drawn as NAMED GAPS with the reason, because a missing drill-down that
-   * says why is information and a missing drill-down that is simply absent is a
-   * page that looks finished and is not.
+   * **No per-level ladder breakdown.** The record holds `depth` and
+   * `combinations` as two scalars, so "where did the frequent frontier empty"
+   * cannot be answered from this file. It is drawn as a NAMED GAP with the
+   * reason, because a missing drill-down that says why is information and a
+   * missing drill-down that is simply absent is a page that looks finished and
+   * is not.
+   *
+   * **The winning mask WAS that gap and is not any more.** This paragraph said
+   * "which conditions won" could not be answered either, because the record
+   * held only the run's blake3 identity — a hash over the mask and eight other
+   * terms, which cannot be turned back into conditions. Format version 3
+   * appends the mask itself, so the ledger became the thing it was always
+   * supposed to be: a permanent record of what was FOUND, not only of what it
+   * was worth.
+   *
+   * Three states, and they must not be collapsed into one. A version-2 ledger
+   * PREDATES the field; a version-3 run may genuinely have found no
+   * combination; and a version-3 run with bits set names them. The first two
+   * are byte-identical — six zero words — which is why `has_mask` travels on
+   * the ledger and is read here before the mask is.
+   *
+   * Names come from `/vocab.json`, fetched once. They are deliberately NOT in
+   * `/backtest.json`: decoding there would repeat 370 rows of vocabulary on
+   * every run in every response, and a hand-kept copy in this file would be two
+   * vocabularies for one fact — right the day it was written and silently wrong
+   * the first time a bit is appended.
    *
    * # O(1)
    *
@@ -88,6 +107,93 @@
 
   /** How many runs to ask for. The server clamps; this is what we request. */
   const LIMIT = 500;
+
+  /**
+   * The condition table, once, so a stored mask can be read as names.
+   *
+   * `/backtest.json` serves `mask_words` as six raw 64-bit words and no names:
+   * decoding them there would repeat 370 rows of vocabulary on every run in
+   * every response. The table is static for the life of a `vocab_version`, so
+   * it is fetched once here and every mask the page ever shows is decoded
+   * against it.
+   *
+   * NOT A HAND-KEPT COPY IN THIS FILE, deliberately. That would be two
+   * vocabularies for one fact — correct the day it was written and wrong the
+   * first time a bit is appended, and the failure is silent: a mask decoded
+   * against a stale table names the WRONG conditions and looks exactly like an
+   * answer.
+   *
+   * @type {{ phase: 'idle'|'ready'|'failed', version: number, bits: Map<number, {name: string, live: boolean}>, why: string }}
+   */
+  let vocab = $state({ phase: 'idle', version: 0, bits: new Map(), why: '' });
+
+  async function fetchVocab() {
+    try {
+      const response = await ask_('/vocab.json');
+      if (!response.ok) {
+        // NAMED, NOT SWALLOWED. Without the table the page can still show the
+        // raw words, and it must say WHY it is showing numbers instead of
+        // names rather than looking like a run with no conditions.
+        vocab = {
+          phase: 'failed',
+          version: 0,
+          bits: new Map(),
+          why:
+            `/vocab.json answered ${response.status}. Masks below are shown as raw ` +
+            `words because the condition table could not be read. A 404 means this ` +
+            `page is newer than the running binary — the page comes off disk and the ` +
+            `route does not.`
+        };
+        return;
+      }
+      const body = await response.json();
+      const bits = new Map();
+      for (const bit of body.bits ?? []) {
+        bits.set(bit.i, { name: bit.name, live: bit.live });
+      }
+      vocab = { phase: 'ready', version: body.vocab_version ?? 0, bits, why: '' };
+    } catch (why) {
+      vocab = {
+        phase: 'failed',
+        version: 0,
+        bits: new Map(),
+        why: `The condition table could not be fetched: ${why instanceof Error ? why.message : String(why)}`
+      };
+    }
+  }
+
+  /**
+   * The positions a mask has set, in ascending order.
+   *
+   * Six words of 64 bits, little-endian in word order: word 0 holds positions
+   * 0..63, word 1 holds 64..127, and so on. `BigInt` and not `Number` because a
+   * word is 64 bits and a JS number carries 53 — the words arrive as decimal
+   * STRINGS for exactly that reason, and parsing one with `Number()` would set
+   * the wrong bits without throwing.
+   *
+   * @param {string[]} words
+   * @returns {number[]}
+   */
+  function positionsIn(words) {
+    /** @type {number[]} */
+    const out = [];
+    (words ?? []).forEach((word, index) => {
+      let value;
+      try {
+        value = BigInt(word);
+      } catch {
+        // A WORD THAT WILL NOT PARSE IS SKIPPED AND THE REST ARE READ. One
+        // malformed word must not blank a combination that is otherwise
+        // perfectly legible.
+        return;
+      }
+      for (let bit = 0; bit < 64 && value !== 0n; bit += 1) {
+        if ((value & 1n) === 1n) out.push(index * 64 + bit);
+        value >>= 1n;
+      }
+    });
+    return out;
+  }
 
   async function fetchLedger() {
     load.phase = 'loading';
@@ -143,6 +249,10 @@
 
   $effect(() => {
     untrack(() => fetchLedger());
+    // ALONGSIDE, NOT AFTER. The table is static and the ledger is not, so
+    // neither waits for the other — and a failed table still leaves a readable
+    // page, which is why it is not awaited here.
+    untrack(() => fetchVocab());
   });
 
   /* ====================================================================
@@ -298,7 +408,7 @@
    * @property {number} winner_mfe
    * @property {number} all_mae
    * @property {unknown} exit_rungs
-   * @property {string} mask_words
+   * @property {string[]} mask_words
    */
 
   /**
@@ -3388,11 +3498,76 @@
                   numbers as scalars and not the per-level survivor counts.
                 </p>
 
-                <h5 class="tt-h5">The winning combination <span class="tt-own">not recorded</span></h5>
-                <p class="tt-note2">
-                  <b>Which market conditions actually fired cannot be named from this file.</b> The record stores the run's
-                  identity — a blake3 over the mask and eight other terms — not the mask itself.
-                </p>
+                {#if load.body?.has_mask === undefined}
+                  <!-- THE BINARY IS OLDER THAN THIS PAGE, WHICH IS A THIRD
+                       STATE AND NOT THE SAME AS A LEDGER WITHOUT A MASK.
+                       This page comes off disk and the route does not, so a
+                       rebuilt front end reaches the operator instantly while
+                       the server that answers it does not — the trap
+                       `fetchLedger`'s 404 arm was written for. Reporting a
+                       missing FIELD as an absent MASK would blame the data for
+                       a stale process. -->
+                  <h5 class="tt-h5">The winning combination <span class="tt-own">server too old</span></h5>
+                  <p class="tt-note2">
+                    <b>The running server does not send <code>has_mask</code>.</b> This page can read the winning
+                    combination, but the binary answering it predates the field — so whether this ledger holds a mask
+                    cannot be told from what arrived. Rebuild and restart the server; nothing is wrong with the data.
+                  </p>
+                {:else if !load.body.has_mask}
+                  <!-- A LEDGER THAT PREDATES THE MASK, AND SAYING SO IS THE
+                       WHOLE POINT OF `has_mask`. A version-2 record carries six
+                       zero words because version 2 had no mask; a version-3 run
+                       may carry six zero words because it found no combination.
+                       The bytes are identical. Rendering both as "no conditions"
+                       is the fallback CLAUDE.md §4 bans. -->
+                  <h5 class="tt-h5">The winning combination <span class="tt-own">not in this file</span></h5>
+                  <p class="tt-note2">
+                    <b>This ledger predates the condition mask.</b> It is format version
+                    <b>{load.body?.version ?? '?'}</b>, which stored the run's identity — a blake3 over the mask and
+                    eight other terms — and not the mask itself. This is <b>not</b> a run that found no conditions:
+                    the field did not exist when it was recorded. A run swept by this build records it.
+                  </p>
+                {:else}
+                  {@const positions = positionsIn(openRun.mask_words)}
+                  <h5 class="tt-h5">
+                    The winning combination
+                    <span class="tt-own">{positions.length} condition{positions.length === 1 ? '' : 's'}</span>
+                  </h5>
+                  {#if positions.length === 0}
+                    <p class="tt-note2">
+                      <b>This run recorded no combination.</b> The mask is empty and the ledger is new enough to mean
+                      it — the frequent frontier emptied before any combination survived, so there is nothing to name.
+                    </p>
+                  {:else}
+                    {#if vocab.phase === 'failed'}
+                      <p class="tt-note2"><b>Shown as raw positions.</b> {vocab.why}</p>
+                    {/if}
+                    <div class="tt-tblwrap">
+                      <table class="tt-tbl">
+                        <tbody>
+                          {#each positions as position (position)}
+                            {@const bit = vocab.bits.get(position)}
+                            <tr class:offrow={bit ? !bit.live : false}>
+                              <td>{bit ? bit.name : `position ${position} — not named by this vocabulary`}</td>
+                              <td class="n">
+                                {#if bit && !bit.live}
+                                  bit {position} — RETIRED, kept because the mask carries it
+                                {:else}
+                                  bit {position}
+                                {/if}
+                              </td>
+                            </tr>
+                          {/each}
+                        </tbody>
+                      </table>
+                    </div>
+                    <p class="tt-note2">
+                      Every bar this run counted as a hit satisfied <b>all {positions.length}</b> of these at once — a
+                      mask hits a bar iff <code>(bits &amp; mask) == mask</code>, so adding a condition can only remove
+                      hits, never add them.
+                    </p>
+                  {/if}
+                {/if}
                 <p class="tt-ident"><span class="tt-k">identity</span><code>{openRun.identity}</code></p>
               </div>
             {/if}

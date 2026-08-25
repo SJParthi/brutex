@@ -89,6 +89,7 @@ telemetry = { path = "../telemetry", version = "0.1.0" }
 # is not on it. The MEASURED graph in `CLAUDE.md` §5 does change, and is amended
 # in the same commit as this line. D-ENTRY-PENDING.
 cli = { path = "../cli", version = "0.1.0" }
+vocab = { path = "../vocab", version = "0.1.0" }
 
 axum   = { workspace = true }
 tokio  = { workspace = true }

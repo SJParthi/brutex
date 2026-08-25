@@ -11698,6 +11698,9 @@ pub fn router_serving(site: Loaded, assets: std::sync::Arc<assets::Assets>) -> a
         // one thing no route said. D-0120.
         .route("/universes.json", axum::routing::get(universe_reach_json))
         .route("/calendar.json", axum::routing::get(calendar_json))
+        // THE CONDITION TABLE, so a stored mask can be read as names. Static
+        // for the life of a `vocab::VOCAB_VERSION`, fetched once by the page.
+        .route("/vocab.json", axum::routing::get(vocab_json))
         .route("/indexmap.json", axum::routing::get(indexmap_json))
         // HOW FAR A FOLDER FEED REACHES — the files present, and nothing else.
         // Its own route rather than a field on `/feeds.json` because answering
@@ -18625,6 +18628,62 @@ mod tests {
         );
     }
 
+    /// **THE VOCABULARY REACHES THE BROWSER, WHICH IS THE ONLY WAY A STORED
+    /// MASK BECOMES A NAME.**
+    ///
+    /// `/backtest.json` serves six raw `u64`s and deliberately no names —
+    /// decoding them in the ledger response would repeat the table on every run
+    /// in every page. Served once here instead.
+    ///
+    /// Tombstones are INCLUDED. A retired position keeps its index forever
+    /// (§3 rule 8) and a mask recorded before the retirement still carries it;
+    /// dropping the row would make an old run's bit decode to nothing, which
+    /// reads as "no condition" rather than "one this build no longer sets".
+    #[tokio::test]
+    async fn the_vocabulary_is_served_whole_so_a_mask_can_be_read_as_names() {
+        let (status, headers, body) = vocab_json().await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(headers[0].1, "application/json; charset=utf-8");
+
+        // THE VERSION TRAVELS, so a page holding a cached table can tell that
+        // it is stale rather than decoding against the wrong vocabulary --
+        // which names the WRONG conditions and looks exactly like an answer.
+        assert!(
+            body.starts_with(&format!(
+                r#"{{"vocab_version":{},"count":{},"bits":["#,
+                vocab::VOCAB_VERSION,
+                vocab::table::COUNT
+            )),
+            "{}",
+            &body[..body.len().min(120)]
+        );
+        assert!(body.ends_with("]}"));
+
+        // EVERY POSITION IS PRESENT, tombstones included, and each carries its
+        // OWN index rather than its place in the array.
+        let rows = body.matches(r#"{"i":"#).count();
+        assert_eq!(
+            rows,
+            vocab::table::COUNT,
+            "a mask can carry any position, so every position must be nameable"
+        );
+        for index in [0_u16, 29, 109] {
+            let name = vocab::table::name(index).expect("a live row");
+            assert!(
+                body.contains(&format!(
+                    r#"{{"i":{index},"name":"{name}","live":{}}}"#,
+                    vocab::table::is_live(index)
+                )),
+                "position {index} must be nameable from the wire"
+            );
+        }
+        // AND `live` IS ACTUALLY DISCRIMINATING. A table that reported every
+        // row live would let a retired bit render as a condition the engine
+        // still sets -- and §4 bans an assertion that cannot fail.
+        assert!(body.contains(r#""live":false"#), "tombstones are marked");
+        assert!(body.contains(r#""live":true"#));
+    }
+
     /// **~30 s PER INSTRUMENT, AND IT USED TO BE 1.25 — the two constants that
     /// are one decision.**
     ///
@@ -22704,6 +22763,83 @@ async fn indexmap_json(
 /// One `stat` and one map probe on a hit; a re-derivation only after the
 /// vendor's manifest has been rewritten, which is what a pull does. See
 /// [`crate::calendar_of::cached`].
+/// The condition vocabulary, so a stored mask can be read as names.
+///
+/// # Why this route exists at all
+///
+/// `/backtest.json` serves `mask_words` as six raw `u64`s. It cannot serve
+/// NAMES: turning a bit into a name needs the table, and putting that decode in
+/// the ledger response would repeat 370 rows' worth of vocabulary on every run
+/// in every page. The table is static for the life of a
+/// `vocab::VOCAB_VERSION`, so it is fetched ONCE and the browser decodes every
+/// mask it is ever shown.
+///
+/// # Why not a second copy of the table in JavaScript
+///
+/// Because that is two vocabularies for one fact, and this file already carries
+/// the scar: *"the two surfaces cannot drift into two vocabularies for one
+/// fact"*. A hand-kept JS table would be correct on the day it was written and
+/// wrong the first time a bit was appended, and the failure is silent — a mask
+/// decoded against a stale table names the WRONG conditions and looks exactly
+/// like a correct answer.
+///
+/// `vocab_version` travels with it for the same reason it is one of the nine
+/// terms in a run's identity (§3 rule 3): a page holding a cached table can
+/// tell that it is stale rather than rendering confident nonsense.
+///
+/// # Tombstones are served, not filtered
+///
+/// A retired position keeps its index forever (§3 rule 8, append-only), and a
+/// mask recorded before the retirement still carries it. Dropping the row here
+/// would make an old run's bit decode to nothing at all, which reads as "no
+/// condition" rather than "a condition this build no longer sets". `live` is
+/// the flag that separates them and the page says which.
+async fn vocab_json() -> (
+    axum::http::StatusCode,
+    [(axum::http::HeaderName, &'static str); 1],
+    String,
+) {
+    // 370 rows of `{"i":N,"name":"...","live":B}` — about 20 KB, sent once.
+    let mut out = String::with_capacity(24 * 1024);
+    let _ = write!(
+        out,
+        r#"{{"vocab_version":{},"count":{},"bits":["#,
+        vocab::VOCAB_VERSION,
+        vocab::table::COUNT
+    );
+    for index in 0..vocab::table::COUNT {
+        let Ok(position) = u16::try_from(index) else {
+            break;
+        };
+        // NAMED FROM THE TABLE, NEVER FROM THE LOOP COUNTER. `BitDef::index` is
+        // written down in the row precisely so a mistyped one is a failing test
+        // rather than a silent renumbering; reading the row's own index here
+        // keeps that property true on the wire.
+        let Some(def) = vocab::table::definition(position) else {
+            break;
+        };
+        if index > 0 {
+            out.push(',');
+        }
+        let _ = write!(
+            out,
+            r#"{{"i":{},"name":{},"live":{}}}"#,
+            def.index,
+            render::json_string(def.name),
+            vocab::table::is_live(position)
+        );
+    }
+    out.push_str("]}");
+    (
+        axum::http::StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/json; charset=utf-8",
+        )],
+        out,
+    )
+}
+
 async fn calendar_json(
     axum::extract::State(site): axum::extract::State<Loaded>,
     uri: axum::http::Uri,
