@@ -18,7 +18,12 @@ import {
   monthVerdict
 } from '../src/lib/completeness.js';
 
-/** One decorated row, the way `deco` builds it, given the denominators. */
+/**
+ * One decorated row, the way `deco` builds it, given the denominators.
+ *
+ * @param {import('../src/lib/completeness.js').Row & { instrument?: string }} row
+ * @param {{ fullest: Map<string, number>, support: Map<string, number> }} d
+ */
 function deco(row, { fullest, support }) {
   const denom = fullest.get(denomKey(row.month, row.timeframe)) ?? row.rows;
   const sole = isSole(support, row);
@@ -31,9 +36,33 @@ function deco(row, { fullest, support }) {
   };
 }
 
+/**
+ * @param {(import('../src/lib/completeness.js').Row & { instrument?: string })[]} rows
+ */
 function decorate(rows) {
   const d = denominators(rows);
   return rows.map((r) => deco(r, d));
+}
+
+/**
+ * The one `find` result a test may use, and it is not the same as `find`.
+ *
+ * `Array.prototype.find` returns `T | undefined`, so every `assert.equal` on the
+ * result below reads a property off a possibly-absent object. When the row IS
+ * absent the test still fails — but with "cannot read property of undefined",
+ * which names the assertion's own bug rather than the fixture's. This turns the
+ * absence into its own failure, with the key that was missing in the message.
+ *
+ * @template T
+ * @param {T[]} rows
+ * @param {(row: T) => boolean} match
+ * @param {string} what
+ * @returns {T}
+ */
+function pick(rows, match, what) {
+  const found = rows.find(match);
+  assert.ok(found, `the fixture holds no ${what}`);
+  return found;
 }
 
 test('a month held at two rungs reads the same whichever row arrives first', () => {
@@ -72,7 +101,7 @@ test('a month whose only row is short is not full — it is not comparable', () 
     { instrument: 'NSE-INDEX-NIFTY', month: '2026-08', timeframe: '1min', rows: 1 }
   ];
   const decorated = decorate(rows);
-  const august = decorated.find((r) => r.month === '2026-08');
+  const august = pick(decorated, (r) => r.month === '2026-08', 'row for 2026-08');
 
   // THE DEFECT: denom = its own 1 row, short = 0, state = 'full', pct = 100%.
   assert.equal(august.sole, true);
@@ -80,14 +109,14 @@ test('a month whose only row is short is not full — it is not comparable', () 
   assert.equal(august.pct, null, 'and there is no ratio to print');
 
   const cards = rollUpMonths(decorated);
-  const augustCard = cards.find((m) => m.month === '2026-08');
+  const augustCard = pick(cards, (m) => m.month === '2026-08', 'card for 2026-08');
   assert.equal(augustCard.state, 'sole', 'not `full`');
   assert.equal(augustCard.pct, null, 'not 100.00%');
   assert.equal(augustCard.full, 0, 'and it is counted as complete nowhere');
   assert.equal(augustCard.unverified, 1);
 
   // THE CORROBORATED MONTH IS UNAFFECTED.
-  const july = cards.find((m) => m.month === '2026-07');
+  const july = pick(cards, (m) => m.month === '2026-07', 'card for 2026-07');
   assert.equal(july.state, 'full');
   assert.equal(july.pct, 1);
   assert.equal(july.full, 2);
@@ -112,10 +141,15 @@ test('two instruments in one month at one rung are still judged against each oth
     { instrument: 'NSE-INDEX-NIFTY', month: '2026-08', timeframe: '1min', rows: 8250 },
     { instrument: 'NSE-INDEX-BANKNIFTY', month: '2026-08', timeframe: '1min', rows: 1 }
   ]);
-  const short = decorated.find((r) => r.instrument === 'NSE-INDEX-BANKNIFTY');
+  const short = pick(decorated, (r) => r.instrument === 'NSE-INDEX-BANKNIFTY', 'BANKNIFTY row');
   assert.equal(short.sole, false);
   assert.equal(short.short, 8249);
-  assert.ok(short.pct < 0.001);
+  // `pct` IS `number | null` AND THE NULL IS THE OTHER TEST'S SUBJECT. A `<`
+  // against null coerces to 0 and passes, so the comparison alone would hold
+  // for the very state — a sole row with nothing to compare against — that this
+  // case exists to distinguish from a hole. The type is asserted first.
+  assert.equal(typeof short.pct, 'number', 'a corroborated row HAS a ratio');
+  assert.ok(Number(short.pct) < 0.001);
   const [card] = rollUpMonths(decorated);
   assert.equal(card.state, 'gap');
   assert.equal(card.unverified, 0);

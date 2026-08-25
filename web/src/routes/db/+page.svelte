@@ -5604,7 +5604,8 @@
   let moved = $state(new Map());
   const barsBefore = new Map();
   let barsSeeded = false;
-  let movedTimer = 0;
+  /** `setTimeout` returns a `Timeout` under node's types and a `number` in the browser; naming the return type takes whichever this build resolves to rather than asserting one of them. */
+  let movedTimer = /** @type {ReturnType<typeof setTimeout> | undefined} */ (undefined);
 
   /**
    * Drop every baseline the flash compares against, and the open drawer.

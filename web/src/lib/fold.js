@@ -21,17 +21,40 @@
  */
 
 /**
+ * One row of the shared store index: an instrument at a rung in a month.
+ *
+ * @typedef {object} Cell
+ * @property {string} instrument
+ * @property {string} timeframe
+ * @property {number} rows
+ */
+
+/**
+ * The request's own population. Either half may be absent, which means "all of
+ * them" — see `foldWindow`'s note on why that is not the same as an empty set.
+ *
+ * @typedef {object} Scope
+ * @property {Set<string>} [instruments]
+ * @property {Set<string>} [rungs]
+ */
+
+/**
  * Fold the named months of a `byMonth` index, optionally scoped.
  *
- * @param byMonth `Map<"YYYY-MM", { list: cell[] }>` — the shared store index.
- * @param months the month keys to walk. Only these are visited: the index is
- *        the index, so a one-month window costs one month.
- * @param scope `{ instruments?: Set<string>, rungs?: Set<string> }`. Either half
- *        may be absent, which means "all of them".
+ * @param {Map<string, { list: Cell[] }> | null | undefined} byMonth
+ *        keyed `"YYYY-MM"` — the shared store index.
+ * @param {Iterable<string> | null | undefined} months the month keys to walk.
+ *        Only these are visited: the index is the index, so a one-month window
+ *        costs one month.
+ * @param {Scope | null | undefined} scope either half may be absent, which
+ *        means "all of them".
+ * @returns {{ units: number, rows: number, byInstrument: Map<string, number>,
+ *             outside: number, scoped: boolean }}
  */
 export function foldWindow(byMonth, months, scope) {
   const wants = scope?.instruments instanceof Set ? scope.instruments : null;
   const rungs = scope?.rungs instanceof Set ? scope.rungs : null;
+  /** @type {Map<string, number>} */
   const byInstrument = new Map();
   let units = 0;
   let rows = 0;
@@ -55,6 +78,12 @@ export function foldWindow(byMonth, months, scope) {
 /**
  * The memo key for one fold. The SCOPE IS PART OF THE QUESTION: two scopes over
  * one window are two different answers and must never share a cached one.
+ *
+ * @param {number} reads the store's read counter, so a key made before a write
+ *        never matches one made after it.
+ * @param {Iterable<string> | null | undefined} months
+ * @param {Scope | null | undefined} scope
+ * @returns {string}
  */
 export function foldKey(reads, months, scope) {
   const wants = scope?.instruments instanceof Set ? [...scope.instruments].sort().join('|') : '*';

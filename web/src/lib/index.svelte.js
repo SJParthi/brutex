@@ -33,6 +33,15 @@ import { build, probe } from '$lib/prefix.js';
 // comparison was `undefined === 'dhan'` — false forever — and every instrument
 // picker on both pages rendered "0 shown of 0" behind a refusal that could not
 // be satisfied by any action the operator took.
+/**
+ * ANNOTATED, BECAUSE THE INITIAL VALUE IS NOT THE TYPE. `feed` and `error` start
+ * `null` and are later a `string` — inferred from the initialiser alone they are
+ * `null` and nothing else, so `catalogue.error = String(why)` in the failure arm
+ * was an error against a type the successful path never exercises. The states
+ * are three: not asked, asked and holding a name, asked and holding a reason.
+ *
+ * @type {{ rows: unknown[], ready: boolean, feed: string | null, error: string | null }}
+ */
 export const catalogue = $state({ rows: [], ready: false, feed: null, error: null });
 let byPrefix = new Map();
 // The feed whose answer is IN FLIGHT. Switching feed twice quickly can land the
@@ -40,6 +49,7 @@ let byPrefix = new Map();
 // last one ASKED, and the page answers confidently for the wrong broker.
 let inFlight = null;
 
+/** @param {string} feed */
 export async function loadCatalogue(feed) {
   inFlight = feed;
   try {
@@ -86,7 +96,11 @@ export async function loadCatalogue(feed) {
   }
 }
 
-/** One probe for 1..4 characters; a filter over one bucket beyond that. */
+/**
+ * One probe for 1..4 characters; a filter over one bucket beyond that.
+ *
+ * @param {string} typed
+ */
 export function search(typed) {
   return probe(byPrefix, catalogue.rows, typed);
 }

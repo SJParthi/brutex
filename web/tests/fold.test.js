@@ -9,7 +9,12 @@ import assert from 'node:assert/strict';
 
 import { foldWindow, foldKey } from '../src/lib/fold.js';
 
-/** The shared store's `byMonth` index, built the way `fold()` builds it. */
+/**
+ * The shared store's `byMonth` index, built the way `fold()` builds it.
+ *
+ * @param {(import('../src/lib/fold.js').Cell & { month: string })[]} cells
+ * @returns {Map<string, { list: import('../src/lib/fold.js').Cell[] }>}
+ */
 function index(cells) {
   const by = new Map();
   for (const cell of cells) {

@@ -136,8 +136,14 @@
     if (m) return valid(+m[1], +m[2], +m[3]);
     m = /^(\d{1,2})[ \-/.]+([A-Za-z]{3,})[ \-/.,]+(\d{4})$/.exec(s);
     if (m) {
-      const mo = MON.findIndex((x) => x.toLowerCase() === m[2].slice(0, 3).toLowerCase()) + 1;
-      return mo === 0 ? '' : valid(+m[3], mo, +m[1]);
+      // DESTRUCTURED, BECAUSE THE CLOSURE BELOW OUTLIVES THE NARROWING. `m` is
+      // a `let` that later regexes reassign, so `if (m)` narrows it here but not
+      // inside the arrow passed to `findIndex` — from in there `m` is still
+      // `RegExpExecArray | null` and `m[2]` is a read off a possible null. The
+      // three parts are pulled out while the narrowing holds.
+      const [, day, name, year] = m;
+      const mo = MON.findIndex((x) => x.toLowerCase() === name.slice(0, 3).toLowerCase()) + 1;
+      return mo === 0 ? '' : valid(+year, mo, +day);
     }
     m = /^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{4})$/.exec(s);
     if (m) return valid(+m[3], +m[2], +m[1]);
