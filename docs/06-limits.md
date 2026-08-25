@@ -3376,8 +3376,22 @@ The logging crate does not meet it. Measured 2026-08-11, `cargo llvm-cov -p
 telemetry --locked` after `cargo llvm-cov clean --workspace`:
 **99.24% lines (26 of 3,438 missed), 98.76% regions, 97.87% functions.**
 
-This section is the account of those 19 lines, because a number without one is
-the thing §3 rule 6 exists to prevent.
+**Re-measured 2026-08-25 against a `cargo llvm-cov --workspace` profile: 39
+lines.** The two figures are different QUESTIONS and were never going to agree,
+which is why the scope is now written beside each. A crate-scoped run and a
+workspace run compile the test module under different feature resolution and
+exercise different callers, so the uncovered SET differs — CI's gate 20 runs
+after the workspace coverage step and therefore reads the second.
+
+**And this section said three different numbers for one set.** The paragraph
+above measured 26, the sentence here read "those 19 lines", and the table below
+was headed "The 26 that remain" while listing 19. Nineteen was right for the
+table and for gate 20's declaration; 26 was the count BEFORE the six closures
+recorded immediately below. A section written to stop a number appearing without
+an account had three numbers and one account.
+
+This is the account of all 39, because a number without one is the thing §3
+rule 6 exists to prevent.
 
 ### What was closed on the way to writing this
 
@@ -3398,16 +3412,33 @@ Auditing them found six that were NOT unreachable, and they are now covered:
 * `HalfWay::sync` and `reopen` — two thirds of a `Target` double that only ever
   had `append` called on it.
 
-### The 26 that remain, and why each cannot run
+### The 39 that remain, and why each cannot run
+
+**Twenty-eight of the 39 are inside `#[cfg(test)]`**, counted against each
+file's own `#[cfg(test)]` line rather than estimated: `lib.rs` 278,
+`record.rs` 374, `clock.rs` 164, `level.rs` 110, `tail.rs` 599, `sink.rs` 1451.
+That split is the whole of the 19 → 39 difference. They fall into two shapes,
+both making the same argument the production rows below make:
+
+| Where | What | Why it cannot execute |
+|---|---|---|
+| `sink.rs` 1504, 1506–1507, 1824, 1861–1864, 2188, 2405, 2789 · `level.rs` 142 · `record.rs` 826 | format arguments inside assertion messages | An `assert!` evaluates its message ONLY when it fails. Making these run means making a passing test fail. |
+| `sink.rs` 1606–1616, 1700–1701, 3761–3763 · `lib.rs` 313 | methods on `Target` doubles a given test never calls | A double implements the whole trait; one test drives `append`, another `sync`. The unused arm of each double is dark in the run that does not need it. |
+
+`sink.rs` opens its `#[cfg(test)]` at 1451, so every sink row above 1451 is test
+code and 1309 is the only sink line on a production path.
+
+**The eleven on a production path.** The line numbers below are the ones the
+2026-08-25 workspace profile reports; where they differ from the 2026-08-11
+figures the file has simply grown above them, and the two that moved are noted
+in their own rows.
 
 | Where | What | Why it cannot execute |
 |---|---|---|
 | `lib.rs` 178, 187–191 | the concurrent-`install` arm | Needs two `install` calls to interleave inside a few instructions. `OnceLock` is per **process**, so a test cannot retry — it gets one attempt per binary. Already named in the source. |
-| `sink.rs` 1099, 1107 | `resume_seq`'s two `return 0` | `FileTarget::open` creates the file *before* `resume_seq` runs, so the `metadata` it guards cannot fail. |
-| `tail.rs` 378–380 | `file.metadata()` failing | The file is already **open**. `fstat` on a live descriptor does not fail; the reachable error is `File::open`, which is covered. |
+| `sink.rs` 1309 | `resume_seq`'s `return 0` | `FileTarget::open` creates the file *before* `resume_seq` runs, so the `metadata` it guards cannot fail on that path. **Was 1099, 1107 on 2026-08-11 and is one line now** — the file grew above it and one of the two returns is reached by the workspace profile's wider set of callers. |
+| `tail.rs` 401–403 | `file.metadata()` failing | The file is already **open**. `fstat` on a live descriptor does not fail; the reachable error is on the path that opened it, which IS tested. **Was 378–380** — the same three lines, moved down by growth above them. |
 | `clock.rs` 41 | `now_millis`'s pre-epoch arm | Needs a host clock set before 1970. `millis_of` is tested directly with `before_epoch = true`; what is dark is the routing. |
-| `level.rs` 142 · `sink.rs` 1566, 1783, 2167 | format arguments inside assertion messages | Evaluated only when the assertion **fails**. Covering them means shipping a failing test. |
-| `sink.rs` 1158, 1160–1161 | `panic!` inside a test helper | Same shape: it runs only when a fixture is already broken. |
 
 **Every one is a backstop or a diagnostic.** Making them execute would mean
 either deleting the backstop or committing a failing test, and both are worse

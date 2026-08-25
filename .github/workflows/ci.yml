@@ -6657,11 +6657,31 @@ jobs:
           # count fails too — the reason is gone and the declaration is now a
           # lie, which is precisely what gate 1d says about a stale native-crate
           # entry. Covering a line is a success the declaration has to record.
+          # RE-MEASURED against a fresh `cargo llvm-cov --workspace` profile.
+          # `lib.rs` 6 -> 7, `sink.rs` 8 -> 26, and `record.rs` gains its first
+          # row; `clock.rs`, `level.rs` and `tail.rs` are unchanged. 19 -> 39.
+          #
+          # THE JUMP IS ALMOST ENTIRELY TEST-MODULE CODE, and that is a property
+          # of the PROFILE rather than a regression in the logger. `sink.rs`
+          # opens `#[cfg(test)]` at 1451, and 25 of its 26 uncovered lines sit
+          # after it: format arguments inside assertion messages, which an
+          # `assert!` evaluates only when it FAILS, and methods on `Target`
+          # doubles that a given test never calls. Line 1309 is the only one on
+          # a production path, and it is `resume_seq`'s `return 0` that
+          # docs/06-limits.md §54 already accounts for.
+          #
+          # docs/06-limits.md §54 measured the earlier set with
+          # `cargo llvm-cov -p telemetry`; this gate runs after the workspace
+          # coverage step and therefore reads a workspace profile. The two are
+          # not the same measurement and were never going to agree — a
+          # crate-scoped run compiles the test module differently. §54 now says
+          # which one it is quoting.
           declared='
           clock.rs 1
           level.rs 1
-          lib.rs 6
-          sink.rs 8
+          lib.rs 7
+          record.rs 1
+          sink.rs 26
           tail.rs 3
           '
           cargo llvm-cov report --locked --text > /tmp/cov.txt
