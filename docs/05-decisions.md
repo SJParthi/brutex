@@ -21487,3 +21487,77 @@ the rung is offered. The comment describes a state that was repaired after it wa
 written. It is in `crates/pull`, which another session holds.
 
 Invariant A-49 in `docs/04-invariants.md`.
+
+### D-0284 — a run-level breaker, so the 5xx ladder can be long enough to matter
+
+**The 5xx budget was 1.25 seconds, and 1.25 seconds does not test anything.**
+`SERVER_ERROR_ATTEMPTS` was 3 on a `250 * n²` wait — attempts at 0 ms, 250 ms
+and 1,000 ms. Measured 2026-08-25 at 07:15 IST, on the run that came AFTER the
+Zerodha token was refreshed at 06:36: Kite answered an HTML 503 from its edge —
+*"No server is available to handle this request"*, no `error_type` anywhere, so
+not a Kite API refusal at all — on all three instruments, and the whole run was
+over in **4.5 seconds having stored nothing**, on a valid token, an 8-day window
+well inside the vendor's cap, and ~2 requests per second against a 3/second
+limit. Nothing about the request was wrong.
+
+**The old number was not careless, and that is the point.** Its own note does
+the arithmetic that forced it: this ladder is spent per INSTRUMENT, the equity
+universe holds ~785 of them, and *"a vendor having a bad hour would spend about
+three hours asleep discovering that, one instrument at a time, and the run would
+look hung rather than failing"*. Correct. A longer ladder alone is the three-hour
+sleep; a short one is a budget shorter than a page load. Neither is available
+without changing the shape.
+
+**`VENDOR_DOWN_INSTRUMENTS` removes the multiplication.** Three CONSECUTIVE
+instruments answering 5xx is not three unlucky symbols; it is the vendor being
+down, and the fourth will say so too. The run stops there, so an outage costs
+three ladders instead of 785 — which is what makes the ladder affordable at
+`1000 * n²` over 5 attempts: ~30 s per instrument, ~90 s to report an outage.
+**The two constants are one decision and neither is correct alone.**
+
+Consecutive, and reset by any other outcome: an instrument that fails for its
+own reason says nothing about the vendor's health, and a streak that merely
+decayed would eventually halt a healthy run on faults scattered across an
+afternoon.
+
+**Six was refused by the compiler, and the assertion was right.**
+`SERVER_ERROR_ATTEMPTS < THROTTLE_ATTEMPTS` holds because the outer loop is
+`for attempt in 1..=THROTTLE_ATTEMPTS`; a 5xx budget equal to it can never be
+spent, the loop exits first, and `Step::ServerDown` becomes an arm nothing
+reaches — which would silently stop reporting outages altogether. Five.
+
+**The breaker reads a MARKER, not prose, and that is D-0283's lesson applied
+before it could be repeated.** `broker_window` answers `Result<_, String>`, so
+the only thing the run loop receives is a sentence — and a run-level decision
+taken by searching a sentence is exactly what D-0283 was written about, one
+commit earlier the same day. `VENDOR_DOWN` is `\u{2}`, a control character no
+vendor sentence, instrument name or explanatory paragraph can forge, following
+`WIRE_REACHED`'s existing `\u{1}`. Both are stripped before the reason reaches
+an operator or the journal, and the strip ORDER is pinned by test: the wire
+prefix is applied outside `laddered`, so they arrive as `\u{1}\u{2}…` and
+testing for the second first finds nothing — a breaker that never trips looks
+exactly like a vendor that is never down.
+
+**What the page says when it trips**, because "reached 0 of 785" cannot
+distinguish an outage from 785 broken symbols and the instruments after the stop
+were never asked:
+
+> the vendor's own side answered a 5xx on 3 consecutive instruments, so the run
+> stopped after 3 of 785 rather than asking the rest to be told the same thing.
+> This is the VENDOR being down, not this request.
+
+**Also here: a refusal now records what was SENT.** Dhan answered `DH-905
+Input_Exception — "Missing required fields, bad values for parameters etc."` and
+the log held the URL, the status and the window. None of those is a field, so
+the one question the refusal asks — WHICH field — could not be answered from
+this repository, and naming one from memory is §3 rule 1's invention.
+`note_answer` now carries the resolved parameter pairs on a non-2xx only. **The
+credential cannot reach it**: the token travels in a header set at the call site,
+`pairs` is built from `spec.params` alone, and no `ParamValue` resolves to a
+secret — the same boundary the URL is already logged under. Refusals only,
+because one line per request is ~62,600 on a one-minute backfill.
+
+DH-905 itself is still open. What changed is that the next one identifies its own
+missing field instead of being guessed at.
+
+Invariants A-50 and A-51 in `docs/04-invariants.md`.

@@ -4942,6 +4942,10 @@ pub(crate) async fn broker_run(
         .year_month()
         .map_or_else(|_| String::new(), |m| m.to_string());
 
+    // THE RUN-LEVEL VIEW NO INSTRUMENT HAS. Each one meets the vendor alone and
+    // pays the whole 5xx ladder to learn what the previous one already found
+    // out. Counted here, three of them agreeing is the vendor being down.
+    let mut vendor_down_streak = 0u32;
     for (index, instrument) in targets.iter().enumerate() {
         // PAUSE BITES WITHIN A CELL, NOT WITHIN A MONTH. One relaxed load. A
         // month is five to thirty-seven minutes on this store, and an operator
@@ -4980,9 +4984,9 @@ pub(crate) async fn broker_run(
                 // got as far as a socket makes the whole run wire-touching:
                 // the question the status answers is whether the VENDOR was
                 // ever asked, and once it has been, it has been.
-                let reached_wire = why.starts_with(WIRE_REACHED);
+                let (reached_wire, vendor_down, why) = read_markers(&why);
                 out.touched_wire = out.touched_wire || reached_wire;
-                let why = why.trim_start_matches(WIRE_REACHED);
+                vendor_down_streak = breaker_next(vendor_down_streak, vendor_down);
                 let why = format!("{}: {why}", instrument.underlying);
                 // THE WHOLE REASON, WHERE IT IS NOT TRUNCATED.
                 //
@@ -4996,27 +5000,24 @@ pub(crate) async fn broker_run(
                 // The rolling log has no such stride, so the reason lands whole
                 // here and the journal keeps its constant-width record. Two
                 // surfaces, each doing what its format can actually do.
-                let emitted = telemetry::emit(
-                    &telemetry::Event::error("pull.spot", "instrument refused")
-                        .with(
-                            "instrument",
-                            telemetry::Value::Str(&instrument.underlying.to_string()),
-                        )
-                        .with("month", telemetry::Value::Str(&month))
-                        .with("feed", telemetry::Value::Str(asked.feed.wire()))
-                        .with("index", telemetry::Value::Uint(index as u64 + 1))
-                        .with("of", telemetry::Value::Uint(targets.len() as u64))
-                        .with("why", telemetry::Value::Str(&why)),
-                );
-                debug_assert!(
-                    emitted.is_written() || telemetry::global().is_none(),
-                    "a refusal that cannot be logged is the defect this event exists to remove"
+                note_instrument_refusal(
+                    &instrument.underlying.to_string(),
+                    &month,
+                    asked.feed.wire(),
+                    index.saturating_add(1),
+                    targets.len(),
+                    &why,
                 );
                 site.autopilot
                     .fail(&instrument.underlying.to_string(), &month, &why);
                 out.refused.push(why);
             }
             Ok(landed) => {
+                // ANY SUCCESS CLEARS THE BREAKER. The vendor answered, so
+                // whatever the previous instruments met was not an outage —
+                // and a streak that survived a success would eventually halt a
+                // healthy run on faults scattered across an afternoon.
+                vendor_down_streak = breaker_next(vendor_down_streak, false);
                 out.reached += 1;
                 out.origin.clone_from(&landed.origin);
                 let landed_one = land_one(&landed, site);
@@ -5029,6 +5030,15 @@ pub(crate) async fn broker_run(
                 }
                 out.total.absorb(landed_one);
             }
+        }
+        // THE BREAKER, AFTER BOTH ARMS SO EITHER CAN HAVE MOVED IT.
+        if breaker_trips(vendor_down_streak) {
+            out.stopped = Some(vendor_down_sentence(
+                vendor_down_streak,
+                index.saturating_add(1),
+                targets.len(),
+            ));
+            break;
         }
     }
     // NOTHING IS ON THE WIRE ANY MORE. Left set, a finished run would keep
@@ -5468,11 +5478,16 @@ where
             Step::ServerDown { answered } => {
                 return Err(pull::chain::Refusal {
                     status: why.status,
+                    // MARKED, SO THE RUN LOOP DOES NOT HAVE TO READ THIS
+                    // SENTENCE TO KNOW WHAT IT SAYS. The marker is stripped in
+                    // `broker_run` before the reason reaches an operator or the
+                    // journal, exactly as `WIRE_REACHED` is.
                     detail: format!(
-                        "{why} — and its own side has now failed {answered} \
-                         time(s) on this {what}, out of {SERVER_ERROR_ATTEMPTS} \
-                         allowed. The vendor is reachable and failing, which is \
-                         not a blip this walk can wait out."
+                        "{VENDOR_DOWN}{why} — and its own side has now failed \
+                         {answered} time(s) on this {what}, out of \
+                         {SERVER_ERROR_ATTEMPTS} allowed. The vendor is \
+                         reachable and failing, which is not a blip this walk \
+                         can wait out."
                     ),
                 });
             }
@@ -5926,16 +5941,43 @@ const THROTTLE_ATTEMPTS: u32 = 6;
 /// connection that never completed, because a broken backend usually stays
 /// broken for longer than a backoff ladder.
 ///
-/// The full [`THROTTLE_ATTEMPTS`] ladder on the quadratic wait is
-/// `250 + 1000 + 2250 + 4000 + 6250 ms` — 13.75 s spent per instrument before
-/// giving up. A one-minute backfill is ~785 instruments, so a vendor having a
-/// bad hour would spend about three hours asleep discovering that, one
-/// instrument at a time, and the run would look hung rather than failing.
+/// # Why this rose from three, and what had to exist first
 ///
-/// Three attempts cost at most `250 + 1000 ms`. That survives the blip this
-/// exists for and reports the outage in a length of time an operator will
-/// actually watch.
-const SERVER_ERROR_ATTEMPTS: u32 = 3;
+/// It was three, costing at most `250 + 1000 ms`, and the reasoning was the
+/// multiplication: the ladder is spent PER INSTRUMENT, ~785 of them in the
+/// equity universe, so *"a vendor having a bad hour would spend about three
+/// hours asleep discovering that, one instrument at a time, and the run would
+/// look hung rather than failing"*. That objection was correct and is why the
+/// number stayed small.
+///
+/// What it bought was a 5xx budget of **1.25 seconds**, which is not a test of
+/// transience — it is one attempt with two very short echoes. Measured
+/// 2026-08-25: Kite answered an HTML 503 from its edge and the whole run was
+/// over in 4.5 seconds having stored nothing, on a token that was perfectly
+/// good and a window that was perfectly legal.
+///
+/// [`VENDOR_DOWN_INSTRUMENTS`] is what removes the multiplication. Three
+/// consecutive instruments answering 5xx stops the run, so a vendor outage now
+/// costs three ladders instead of 785 — and the ladder itself can be long
+/// enough to outlast something worth outlasting. `1000 * n²` gives waits of
+/// `1 + 4 + 9 + 16 s`, so an instrument survives ~30 s of vendor trouble and a
+/// whole outage is reported in about a minute and a half.
+///
+/// **The two constants are one decision and must move together.** Raising this
+/// without the breaker is exactly the three-hour sleep the old note warns
+/// about; the breaker without this just fails faster.
+///
+/// # Five and not six, and the build said so
+///
+/// Six was tried and refused at COMPILE time by
+/// `the_retry_policy_answers_each_class_of_refusal`'s
+/// `assert!(SERVER_ERROR_ATTEMPTS < THROTTLE_ATTEMPTS)`. The outer loop is
+/// `for attempt in 1..=THROTTLE_ATTEMPTS`, so a 5xx budget equal to it can
+/// never be spent — the loop exits first and [`Step::ServerDown`] becomes an
+/// arm nothing reaches. The assertion is not a style rule; it is the difference
+/// between a longer ladder and a dead branch that silently stops reporting the
+/// outage at all.
+const SERVER_ERROR_ATTEMPTS: u32 = 5;
 
 /// The longest a single refused chunk may sleep, in milliseconds.
 ///
@@ -6110,8 +6152,13 @@ const fn server_ladder(attempt: u32, server_errors: u32) -> Step {
     }
     // So two timeouts before the first 502 do not push it straight to a
     // four-second wait.
+    //
+    // `1000` and not `250`: at 250 the whole six-attempt budget is 13.75 s and
+    // the first three are 1.25 s, which is shorter than a page load and does
+    // not outlast anything. See `SERVER_ERROR_ATTEMPTS` for why the run-level
+    // breaker is what makes this affordable.
     Step::Again {
-        wait_ms: 250 * server_errors as u64 * server_errors as u64,
+        wait_ms: 1_000 * server_errors as u64 * server_errors as u64,
         throttled: false,
     }
 }
@@ -6453,6 +6500,170 @@ async fn with_retry(
 /// A control character rather than a word, so it can never collide with
 /// anything a vendor or this build would legitimately write.
 const WIRE_REACHED: &str = "\u{1}";
+
+/// Out-of-band marker: this instrument failed because the VENDOR'S OWN SIDE is
+/// down, not because of anything about the request.
+///
+/// # Why a marker and not a phrase
+///
+/// `broker_window` answers `Result<_, String>`, so the only thing the run loop
+/// receives is prose — and a run-level decision taken by searching prose is the
+/// defect D-0283 was written about, where `classify(&html)` read the word
+/// *credential* out of a paragraph explaining the transport and halted every
+/// feed that ever failed. A control character cannot appear in a vendor's
+/// sentence, an operator's instrument name, or an explanatory paragraph, which
+/// is exactly why [`WIRE_REACHED`] is one. This is the same device for the same
+/// reason, and it is stripped in the same place.
+///
+/// # What reads it
+///
+/// [`broker_run`]'s instrument loop, to count CONSECUTIVE instruments lost to a
+/// 5xx. See [`VENDOR_DOWN_INSTRUMENTS`] for why a run-level count is what makes
+/// a longer per-instrument ladder affordable at all.
+const VENDOR_DOWN: &str = "\u{2}";
+
+/// Consecutive instruments lost to a vendor 5xx before the whole run stops.
+///
+/// # The arithmetic this exists to bound
+///
+/// The 5xx ladder is spent PER INSTRUMENT — an instrument abandons its window
+/// on its first failed chunk, so the cost is the ladder once per instrument,
+/// not once per chunk. `SERVER_ERROR_ATTEMPTS`' own note does the sum for the
+/// equity universe: at ~785 instruments, a vendor having a bad hour is
+/// discovered one instrument at a time, and *"the run would look hung rather
+/// than failing"*.
+///
+/// That is a real objection, and it is the reason the ladder was kept at 1.25
+/// seconds — which bought fast failure at the price of not surviving a blip
+/// shorter than a page load. Measured 2026-08-25: Kite answered an HTML 503
+/// from its edge, three instruments, three attempts each, and the whole run was
+/// over in 4.5 seconds with nothing stored.
+///
+/// **A run-level count makes both affordable.** Three consecutive instruments
+/// all answering 5xx is not three unlucky instruments; it is the vendor being
+/// down, and the fourth will say so too. Stopping there costs three ladders
+/// rather than 785, so the ladder itself can be long enough to actually outlast
+/// a blip. The two changes only make sense together — raising the ladder
+/// without this would be the three-hour sleep the old note warns about.
+///
+/// # Why CONSECUTIVE, and why three
+///
+/// Consecutive, because one instrument that 5xxes between successes is the
+/// vendor's problem with that symbol, not an outage — resetting on any success
+/// keeps a scattered fault out of the breaker entirely. Three, because two is
+/// inside the range a single unlucky pair can reach and the run is cheap to
+/// re-press; the count exists to bound an outage, not to catch it first.
+const VENDOR_DOWN_INSTRUMENTS: u32 = 3;
+
+/// The breaker's next streak, given this instrument's outcome.
+///
+/// A free function rather than two lines inside the loop, because a branch that
+/// only exists inside a `for` over a live vendor is a branch no test can reach
+/// without one. `CLAUDE.md` §4 bans a test that asserts nothing, and an
+/// unreachable branch is the same defect one level down.
+const fn breaker_next(streak: u32, vendor_down: bool) -> u32 {
+    if vendor_down {
+        streak.saturating_add(1)
+    } else {
+        // RESET, NOT DECREMENT. One instrument that fails for its own reason
+        // says nothing about the vendor's health, and a streak that merely
+        // decayed would eventually trip on faults scattered across an
+        // afternoon — halting a healthy run for a vendor that was never down.
+        0
+    }
+}
+
+/// Whether the run stops here.
+const fn breaker_trips(streak: u32) -> bool {
+    streak >= VENDOR_DOWN_INSTRUMENTS
+}
+
+/// Reads both out-of-band markers off a refusal and hands back the operator's
+/// half of it.
+///
+/// Returns `(reached_wire, vendor_down, why)`.
+///
+/// # The order is not arbitrary
+///
+/// [`laddered`] marks the refusal with [`VENDOR_DOWN`], and [`WIRE_REACHED`] is
+/// prepended OUTSIDE it, so they arrive as `\u{1}\u{2}…`. Testing for the
+/// second before the first is stripped finds nothing, and the breaker would
+/// then never fire — silently, because a breaker that never trips looks exactly
+/// like a vendor that is never down.
+/// `three_consecutive_vendor_failures_stop_the_run_and_a_success_clears_it`
+/// pins that order.
+///
+/// Both are control characters so that no vendor sentence, instrument name or
+/// explanatory paragraph can forge one — the D-0283 lesson, where a run-level
+/// decision made by searching prose read the word *credential* out of a
+/// paragraph about transport and halted every feed that ever failed.
+fn read_markers(why: &str) -> (bool, bool, &str) {
+    let reached_wire = why.starts_with(WIRE_REACHED);
+    let rest = why.trim_start_matches(WIRE_REACHED);
+    let vendor_down = rest.starts_with(VENDOR_DOWN);
+    (
+        reached_wire,
+        vendor_down,
+        rest.trim_start_matches(VENDOR_DOWN),
+    )
+}
+
+/// One refused instrument, on the surface that can hold the whole reason.
+///
+/// # THE WHOLE REASON, WHERE IT IS NOT TRUNCATED
+///
+/// The audit journal is a FIXED 256-byte stride, so a refusal longer than the
+/// record is cut off — and these are: the journal reports `note_bytes: 635`
+/// beside a note that stops mid-sentence, exactly where the vendor's own words
+/// begin. The operator is then told a request failed and not why.
+///
+/// The rolling log has no such stride, so the reason lands whole here and the
+/// journal keeps its constant-width record. Two surfaces, each doing what its
+/// format can actually do.
+///
+/// Lifted out of [`broker_run`]'s loop when the breaker took that function past
+/// `clippy::too_many_lines`. Nothing about it changed.
+fn note_instrument_refusal(
+    instrument: &str,
+    month: &str,
+    feed: &str,
+    index: usize,
+    of: usize,
+    why: &str,
+) {
+    let emitted = telemetry::emit(
+        &telemetry::Event::error("pull.spot", "instrument refused")
+            .with("instrument", telemetry::Value::Str(instrument))
+            .with("month", telemetry::Value::Str(month))
+            .with("feed", telemetry::Value::Str(feed))
+            .with("index", telemetry::Value::Uint(index as u64))
+            .with("of", telemetry::Value::Uint(of as u64))
+            .with("why", telemetry::Value::Str(why)),
+    );
+    debug_assert!(
+        emitted.is_written() || telemetry::global().is_none(),
+        "a refusal that cannot be logged is the defect this event exists to remove"
+    );
+}
+
+/// What the page says when the breaker stops a run.
+///
+/// Its own function because [`broker_run`] is at `clippy::too_many_lines` and
+/// because this sentence is the whole point of the breaker: an operator reading
+/// `reached 0 of 785` must be able to tell a vendor outage from 785 broken
+/// symbols, and only this line can say which. The instruments after `done` were
+/// NOT asked and are not failures — `CLAUDE.md` §4's loud degrade, naming the
+/// reason rather than leaving a short count to be misread.
+fn vendor_down_sentence(streak: u32, done: usize, total: usize) -> String {
+    format!(
+        "the vendor's own side answered a 5xx on {streak} consecutive \
+         instruments, so the run stopped after {done} of {total} rather than \
+         asking the rest to be told the same thing. This is the VENDOR being \
+         down, not this request: nothing about it was wrong and nothing needs \
+         changing. Press Pull again when it is back; the store keeps what \
+         already landed and the run resumes from there."
+    )
+}
 
 /// two parameters are fetched against the same signing instant.
 async fn read_credential(
@@ -18298,6 +18509,113 @@ mod tests {
         );
     }
 
+    /// **~30 s PER INSTRUMENT, AND IT USED TO BE 1.25 — the two constants that
+    /// are one decision.**
+    ///
+    /// The old figure was chosen because this ladder is spent per INSTRUMENT
+    /// and the equity universe has ~785 of them, so a long ladder meant a run
+    /// that *"would look hung rather than failing"*. What it bought was a 5xx
+    /// budget shorter than a page load: measured 2026-08-25, Kite answered an
+    /// HTML 503 from its edge and the whole run was over in 4.5 seconds having
+    /// stored nothing, on a good token and a legal window.
+    ///
+    /// [`VENDOR_DOWN_INSTRUMENTS`] removed the multiplication, so the ladder
+    /// can be long enough to outlast something. Asserting the sum HERE, beside
+    /// the breaker it depends on, is what stops one moving without the other.
+    #[test]
+    fn the_5xx_ladder_costs_thirty_seconds_because_the_breaker_bounds_it() {
+        let spent: u64 = (1..SERVER_ERROR_ATTEMPTS)
+            .map(|a| 1_000 * u64::from(a) * u64::from(a))
+            .sum();
+        assert_eq!(spent, 30_000, "a dead vendor costs ~30 s per instrument");
+        const {
+            assert!(
+                VENDOR_DOWN_INSTRUMENTS > 0,
+                "a breaker of zero would stop a healthy run on its first refusal"
+            );
+        }
+        // AND THE BREAKER IS CHEAPER THAN THE LADDER IT LICENSES. Three
+        // instruments at ~30 s is ~90 s to report an outage; without it the
+        // same ladder over the equity universe would be ~6.5 hours.
+        assert!(
+            u64::from(VENDOR_DOWN_INSTRUMENTS) * spent < 120_000,
+            "an outage must be reported in a length of time an operator watches"
+        );
+    }
+
+    /// **THE RUN-LEVEL BREAKER, WHICH IS WHAT MAKES THE LONGER LADDER
+    /// AFFORDABLE.**
+    ///
+    /// The 5xx ladder is spent per INSTRUMENT. At ~785 of them in the equity
+    /// universe, a long ladder means an outage is rediscovered 785 times and
+    /// the run "would look hung rather than failing" — which is why the ladder
+    /// was pinned at 1.25 s, and why that bought a 5xx budget shorter than a
+    /// page load. Measured 2026-08-25: Kite's edge answered an HTML 503, three
+    /// instruments, and the whole run was over in 4.5 s with a good token and a
+    /// legal window.
+    ///
+    /// This counts CONSECUTIVE instruments lost to the vendor's own side, so an
+    /// outage costs three ladders instead of 785 — and the ladder can then be
+    /// long enough to outlast something. The two are one decision.
+    #[test]
+    fn three_consecutive_vendor_failures_stop_the_run_and_a_success_clears_it() {
+        // COUNTS UP ONLY ON THE VENDOR'S OWN SIDE.
+        let mut streak = 0;
+        for expected in 1..=VENDOR_DOWN_INSTRUMENTS {
+            streak = breaker_next(streak, true);
+            assert_eq!(streak, expected);
+        }
+        assert!(
+            breaker_trips(streak),
+            "{VENDOR_DOWN_INSTRUMENTS} instruments all answering 5xx is the \
+             vendor being down, not that many broken symbols"
+        );
+
+        // AND ANY OTHER OUTCOME CLEARS IT, which is the half that keeps a
+        // healthy run alive. A scattered fault — one bad symbol between good
+        // ones — must never accumulate into a halt.
+        assert_eq!(breaker_next(streak, false), 0, "a success resets");
+        assert!(!breaker_trips(0));
+        let mut mixed = 0;
+        for down in [true, true, false, true, true] {
+            mixed = breaker_next(mixed, down);
+            assert!(
+                !breaker_trips(mixed),
+                "two down, a success, two down is not an outage: {mixed}"
+            );
+        }
+
+        // ONE SHORT DOES NOT TRIP, or the constant would be off by one and the
+        // run would stop a instrument earlier than it says it does.
+        assert!(!breaker_trips(VENDOR_DOWN_INSTRUMENTS - 1));
+
+        // THE MARKERS MUST NOT COLLIDE, and neither may appear in prose. Both
+        // are control characters for exactly that reason — a run-level decision
+        // taken by searching a sentence is the D-0283 defect, where the word
+        // `credential` inside a paragraph about transport halted every feed
+        // that ever failed.
+        assert_ne!(VENDOR_DOWN, WIRE_REACHED);
+        for marker in [VENDOR_DOWN, WIRE_REACHED] {
+            let ch = marker.chars().next().expect("a marker character");
+            assert!(
+                ch.is_control(),
+                "{marker:?} must be unwritable in a vendor's sentence"
+            );
+        }
+        // AND THEY STRIP IN THE ORDER THEY ARE APPLIED. `laddered` marks the
+        // refusal; the wire prefix is added outside it, so they arrive as
+        // `\u{1}\u{2}…` and reading the second before the first is off is how
+        // the breaker would silently never fire.
+        let both = format!("{WIRE_REACHED}{VENDOR_DOWN}503 Service Unavailable");
+        let after_wire = both.trim_start_matches(WIRE_REACHED);
+        assert!(after_wire.starts_with(VENDOR_DOWN));
+        assert_eq!(
+            after_wire.trim_start_matches(VENDOR_DOWN),
+            "503 Service Unavailable",
+            "the operator reads the vendor's words, never the markers"
+        );
+    }
+
     /// The retry POLICY, arm by arm, with no socket and no sleeping.
     ///
     /// This replaces a test that read this file as TEXT and asserted that
@@ -18391,7 +18709,7 @@ mod tests {
             assert_eq!(
                 step(Some(code), false, None, 1, 1),
                 Step::Again {
-                    wait_ms: 250,
+                    wait_ms: 1_000,
                     throttled: false
                 },
                 "status {code} is the vendor's own side failing, so it is re-asked"
@@ -18400,12 +18718,14 @@ mod tests {
         assert_eq!(
             step(Some(503), false, None, 2, 2),
             Step::Again {
-                wait_ms: 1_000,
+                wait_ms: 4_000,
                 throttled: false
             }
         );
-        // Stops at its OWN cap, so a bad hour at the vendor does not cost
-        // 13.75 s per instrument.
+        // Stops at its OWN cap, which is what keeps the ladder shorter than the
+        // 429 one -- a broken backend usually stays broken longer than a
+        // backoff, so it is re-asked fewer times than a connection that never
+        // completed.
         assert_eq!(
             step(
                 Some(503),
@@ -18418,10 +18738,8 @@ mod tests {
                 answered: SERVER_ERROR_ATTEMPTS
             }
         );
-        let spent: u64 = (1..SERVER_ERROR_ATTEMPTS)
-            .map(|a| 250 * u64::from(a) * u64::from(a))
-            .sum();
-        assert_eq!(spent, 1_250, "a dead vendor costs 1.25 s, not 13.75 s");
+        // What that ladder costs, and why it is affordable, is
+        // `the_5xx_ladder_costs_thirty_seconds_because_the_breaker_bounds_it`.
 
         // THE COUNTER IS THE 5xx COUNT, NOT THE ATTEMPT ORDINAL.
         //
@@ -18432,17 +18750,49 @@ mod tests {
         assert_eq!(
             step(Some(502), false, None, 3, 1),
             Step::Again {
-                wait_ms: 250,
+                wait_ms: 1_000,
                 throttled: false
             },
             "attempt 3 with one 5xx answer is the vendor's FIRST failure and \
              must be re-asked"
         );
-        // And the reported count is the one that was measured, so the message
-        // cannot claim three answers when there was one.
+        // The cap's two sides are
+        // `the_5xx_cap_is_read_from_the_constant_and_one_short_still_retries`.
+    }
+
+    /// **THE CAP IS THE CONSTANT, AND THE ASSERTION USED TO BE A LITERAL.**
+    ///
+    /// This read `step(.., 5, 3)` expecting `ServerDown { answered: 3 }`, which
+    /// was correct while the cap was three. Raising it silently turned the
+    /// assertion into *"a run one short of the cap stops"* — the opposite of
+    /// the policy — and it would have kept passing had the numbers happened to
+    /// line up. Written against `SERVER_ERROR_ATTEMPTS`, it moves with it.
+    ///
+    /// Both sides are needed: that the cap STOPS, and that one short of it does
+    /// NOT. Either alone is satisfied by a build that gets the boundary wrong.
+    #[test]
+    fn the_5xx_cap_is_read_from_the_constant_and_one_short_still_retries() {
         assert_eq!(
-            step(Some(502), false, None, 5, 3),
-            Step::ServerDown { answered: 3 }
+            step(
+                Some(502),
+                false,
+                None,
+                THROTTLE_ATTEMPTS - 1,
+                SERVER_ERROR_ATTEMPTS
+            ),
+            Step::ServerDown {
+                answered: SERVER_ERROR_ATTEMPTS
+            }
+        );
+        assert_eq!(
+            step(Some(502), false, None, 2, SERVER_ERROR_ATTEMPTS - 1),
+            Step::Again {
+                wait_ms: 1_000
+                    * u64::from(SERVER_ERROR_ATTEMPTS - 1)
+                    * u64::from(SERVER_ERROR_ATTEMPTS - 1),
+                throttled: false
+            },
+            "the last 5xx before the cap is still worth re-asking"
         );
 
         // The chunk's own ladder still bounds it: past THROTTLE_ATTEMPTS there

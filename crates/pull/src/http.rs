@@ -724,32 +724,70 @@ impl HttpSource {
 /// appears in no field here, for the reason `CLAUDE.md` section 8 keeps the
 /// parameter path out of every tracked file: this log is a file an operator
 /// will paste into an issue.
-fn note_answer(url: &str, status: u16, ok: bool, request: &BarRequest) {
-    let _dropped_when_filtered = telemetry::emit(
-        &telemetry::Event::new(
-            if ok {
-                telemetry::Level::Trace
-            } else {
-                telemetry::Level::Warn
-            },
-            "pull.http",
-            "vendor answered",
-        )
-        .with("url", telemetry::Value::Str(url))
+fn note_answer(
+    url: &str,
+    status: u16,
+    ok: bool,
+    request: &BarRequest,
+    sent: &[(&'static str, String)],
+) {
+    // BUILT BEFORE THE EVENT so it outlives the borrow, and EMPTY ON SUCCESS so
+    // the clean path spends nothing formatting a field it will not carry.
+    let sent_text = if ok {
+        String::new()
+    } else {
+        sent.iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    // BOUND, NOT INLINED. The event now outlives the expression that builds it,
+    // so a `&…to_string()` temporary would be freed while the event still holds
+    // the borrow.
+    let from = request.window.from().to_string();
+    let to = request.window.to().to_string();
+    let event = telemetry::Event::new(
+        if ok {
+            telemetry::Level::Trace
+        } else {
+            telemetry::Level::Warn
+        },
+        "pull.http",
+        "vendor answered",
+    )
+    .with("url", telemetry::Value::Str(url))
         .with("status", telemetry::Value::Uint(u64::from(status)))
         .with(
             "instrument_id",
             telemetry::Value::Str(&request.instrument_id),
         )
-        .with(
-            "from",
-            telemetry::Value::Str(&request.window.from().to_string()),
-        )
-        .with(
-            "to",
-            telemetry::Value::Str(&request.window.to().to_string()),
-        ),
-    );
+        .with("from", telemetry::Value::Str(&from))
+        .with("to", telemetry::Value::Str(&to))
+        // WHAT WAS ACTUALLY SENT, ON A REFUSAL ONLY.
+        //
+        // Dhan answered `DH-905 Input_Exception — "Missing required fields, bad
+        // values for parameters etc."` on 2026-08-25 and the log recorded the
+        // URL, the status and the window. None of those is a field, so the one
+        // question the refusal asks — WHICH field — could not be answered from
+        // this repository at all, and guessing at it is the invention §3 rule 1
+        // forbids. A vendor that says a parameter is wrong is only actionable
+        // beside the parameters.
+        //
+        // THE CREDENTIAL CANNOT REACH THIS. It travels in a header, set at the
+        // call site as `builder.header(name, value)`; `pairs` is built from
+        // `spec.params` alone and no `ParamValue` resolves to a secret. That is
+        // the same boundary the URL is logged under — §8 keeps the token out of
+        // a file an operator will paste into an issue.
+        //
+        // Refusals only, because one line per request is ~62,600 on a
+        // one-minute backfill and the clean path has nothing to diagnose.
+        ;
+    let event = if ok {
+        event
+    } else {
+        event.with("sent", telemetry::Value::Str(&sent_text))
+    };
+    let _dropped_when_filtered = telemetry::emit(&event);
 }
 
 /// Turns a vendor body into rows, using only what the descriptor declares.
@@ -1767,7 +1805,7 @@ impl HttpSource {
         })?;
 
         let status = answer.status().as_u16();
-        note_answer(&url, status, answer.status().is_success(), request);
+        note_answer(&url, status, answer.status().is_success(), request, &pairs);
 
         // THE FEEDBACK HALF, AND IT IS WHAT MAKES THE GOVERNOR ADAPTIVE RATHER
         // THAN A FIXED CEILING. A clean answer tightens every span back toward
