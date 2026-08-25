@@ -52,7 +52,7 @@ use std::path::{Path, PathBuf};
 pub type Refusal = String;
 
 /// `BRUTEXRS`, so a file that is not this one is refused before it is parsed.
-const MAGIC: [u8; 8] = *b"BRUTEXRS";
+pub(crate) const MAGIC: [u8; 8] = *b"BRUTEXRS";
 
 /// Version TWO: version one had no seal. A new field is a new version at its own
 /// stride, never a
@@ -85,7 +85,7 @@ const HEADER: u64 = 16;
 
 /// [`HEADER`] as a `usize`, for the header array. Same reason as
 /// [`STRIDE_BYTES`]: a cast would be a narrowing on a 32-bit target.
-const HEADER_BYTES: usize = 16;
+pub(crate) const HEADER_BYTES: usize = 16;
 
 const _: () = assert!(HEADER_BYTES as u64 == HEADER);
 

@@ -45,6 +45,7 @@
 /// `runner` and no `store`, so nothing in the workspace connected a pulled bar
 /// to a ranked result.
 pub mod batch;
+pub mod frontier;
 pub mod results;
 pub mod stability;
 pub mod stored;
@@ -112,6 +113,14 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    and the refusal surface. Exits non-zero on any
                                    failure. Nothing is pulled, nothing is written
                                    to the bar store.
+       cli top          [VENDOR UNDERLYING]
+                                   the ranked TOP COMBINATIONS of the best
+                                   complete recorded run, read back from the
+                                   store with their condition names, mean
+                                   forward move, t and payoff. This is the list
+                                   the ledger could not hold before: it stored
+                                   one combination per run and folded the rest
+                                   into two counters.
        cli results      [VENDOR UNDERLYING]
                                    list every recorded run, newest first, and
                                    name the best COMPLETE one
@@ -240,6 +249,24 @@ fn auto_stored_arm(
     let refused = text.starts_with("refused:");
     out.push_str(&text);
     if refused { MISUSED } else { OK }
+}
+
+/// The `top` arm, beside [`results_arm`] because it reads the same store.
+///
+/// Lifted out of [`run`] for the reason every other arm was: the dispatch is a
+/// command LIST, and an inline body makes the list harder to read as one.
+fn top_arm(out: &mut String, filter: Option<(&str, &str)>) -> u8 {
+    let (feed, underlying) = match filter {
+        None => (None, None),
+        Some((feed, underlying)) => (Some(feed), Some(underlying)),
+    };
+    let listing = top_list(feed, underlying);
+    // The refusal is read back off the rendered page for the reason
+    // `results_arm` gives: a second refusal path can disagree with the one an
+    // operator actually sees.
+    let refused = listing.contains("refused:");
+    out.push_str(&listing);
+    if refused { FAILED } else { OK }
 }
 
 fn results_arm(out: &mut String, filter: Option<(&str, &str)>) -> u8 {
@@ -832,6 +859,8 @@ pub fn run(args: &[String], out: &mut String) -> u8 {
         }
         ["verify", feed, underlying] => verify_arm(out, feed, underlying),
         ["auto-stored", v, u, r, fy, fm, ty, tm] => auto_stored_arm(out, v, u, r, (fy, fm, ty, tm)),
+        ["top"] => top_arm(out, None),
+        ["top", feed, underlying] => top_arm(out, Some((feed, underlying))),
         ["results"] => results_arm(out, None),
         ["results", feed, underlying] => results_arm(out, Some((feed, underlying))),
         ["sweep-all", vendor, rung, min_hits] => sweep_all_arm(out, vendor, rung, min_hits),
@@ -884,7 +913,7 @@ fn unmatched(word: &str, given: usize) -> String {
 /// So it is written down, and `every_command_is_listed_in_both_places` asserts
 /// the list, the dispatch and the usage all name the same set. The duplication
 /// is real; the test is what makes it safe.
-const COMMANDS: [&str; 14] = [
+const COMMANDS: [&str; 15] = [
     "audit",
     "audit-range",
     "audit-stored",
@@ -898,6 +927,7 @@ const COMMANDS: [&str; 14] = [
     "sweep",
     "sweep-all",
     "sweep-stored",
+    "top",
     "verify",
 ];
 
@@ -3635,8 +3665,24 @@ fn refusal_surface(vendor_word: &str, underlying: &str) -> Check {
 /// Uses a temporary directory rather than the operator's ledger: a verification
 /// that appended a fake row to the real history would corrupt the thing it
 /// exists to protect.
+///
+/// # The directory names this process, and it used to be a constant
+///
+/// It read `temp_dir().join("brutex-verify-ledger")`, one fixed path shared by
+/// every `cli verify` on the machine — and the very next line is
+/// `remove_dir_all`. Two verifications running at once is not exotic: it is one
+/// operator in two terminals, or a terminal beside the server's own. The second
+/// to start would delete the first's scratch mid-write, and the first would
+/// report a round-trip failure against a ledger the second had removed. A
+/// self-check that fails because another self-check is running teaches the
+/// operator the opposite of what it exists to say.
+///
+/// `process::id()` is what makes them disjoint, and it is the discriminator
+/// rather than a clock because two processes CAN start in the same microsecond
+/// and cannot share a pid. Gate 23 clause C refuses a fixed temporary path for
+/// exactly this reason.
 fn ledger_round_trip() -> Check {
-    let dir = std::env::temp_dir().join("brutex-verify-ledger");
+    let dir = std::env::temp_dir().join(format!("brutex-verify-ledger-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let want = crate::results::Record {
         identity: [0xAB; 32],
@@ -3698,6 +3744,164 @@ fn ledger_round_trip() -> Check {
 /// ledger, so whatever this drops is stated on the line below the table —
 /// `crate::report`'s rule for the exit grid, applied to the same problem.
 const LIST_ROWS: usize = 40;
+
+/// The ranked frontier of one recorded run, read back from the store.
+///
+/// # The question this answers, which nothing could answer before
+///
+/// *"Show me the top twenty-five combinations."* Until [`crate::frontier`]
+/// existed, the ledger held ONE combination per run and everything else the
+/// ladder found was folded into `depth` and `combinations` and dropped — so the
+/// answer could be printed once, on the run that produced it, and never again.
+///
+/// Which run: the **best complete** one matching the filter, chosen exactly as
+/// [`best_complete_line`] chooses it — highest `pessimistic` among rows that did
+/// not halt. A halted run's totals are not comparable with a complete one's, so
+/// ranking them together would be the defect `range-all`'s `complete` column
+/// exists to prevent.
+///
+/// # It reports the run it chose, and why
+///
+/// A frontier printed without saying which run it belongs to is a list of masks.
+/// The banner names the feed, the instrument, the rung, the span and the
+/// identity, so a reader can put the rows beside the ledger row they came from.
+#[must_use]
+pub fn top_list(feed: Option<&str>, underlying: Option<&str>) -> String {
+    match store_root() {
+        Ok(root) => top_at(&root, feed, underlying),
+        Err(why) => format!("refused: {why}\n"),
+    }
+}
+
+/// [`top_list`], against a root the caller names.
+///
+/// Split out so the rendering can be tested against a scratch store. The env
+/// lookup is the only part that cannot be, and it is one line above.
+#[must_use]
+pub fn top_at(root: &std::path::Path, feed: Option<&str>, underlying: Option<&str>) -> String {
+    let rows = match newest_complete(root, feed, underlying) {
+        Ok(Some(record)) => record,
+        Ok(None) => {
+            return "  NO COMPLETE RUN matches. Every matching row halted on a \
+                    budget, or nothing has been recorded yet — `cli results` \
+                    lists what is there.\n"
+                .to_owned();
+        }
+        Err(why) => return format!("refused: {why}\n"),
+    };
+
+    let mut store = match crate::frontier::Frontier::open(root) {
+        Ok(store) => store,
+        Err(why) => return format!("refused: {why}\n"),
+    };
+    let (found, damaged) = match store.of_run(&rows.identity) {
+        Ok(pair) => pair,
+        Err(why) => return format!("refused: {why}\n"),
+    };
+
+    let mut out = String::from(STORED_PROVENANCE);
+    out.push('\n');
+    let _ = writeln!(
+        out,
+        "\nTOP COMBINATIONS\n  feed {} · {} · {} · {}-{:02}..{}-{:02}\n  run {}",
+        crate::results::read_field(&rows.feed),
+        crate::results::read_field(&rows.underlying),
+        crate::results::read_field(&rows.timeframe),
+        rows.from_year,
+        rows.from_month,
+        rows.to_year,
+        rows.to_month,
+        rows.identity_hex()
+    );
+
+    if found.is_empty() {
+        let _ = writeln!(
+            out,
+            "\n  This run recorded NO frontier. Rows are written by runs made \
+             after `cli frontier` landed; an older run has a ledger row and no \
+             ranked list, which is a gap in the record rather than an empty \
+             result. Re-run it to fill one in."
+        );
+        return out;
+    }
+
+    let _ = writeln!(
+        out,
+        "\n  {:<5}{:>10}{:>9}{:>14}{:>10}{:>10}  conditions",
+        "rank", "hits", "n", "mean", "t", "payoff"
+    );
+    for row in &found {
+        let _ = writeln!(
+            out,
+            "  {:<5}{:>10}{:>9}{:>14}{:>10}{:>10}  {}",
+            row.rank,
+            row.hits,
+            row.n,
+            // MEAN IS PAISA AND IS SHOWN AS RUPEES, like every other money
+            // column in this binary. It is stored in thousandths of a paisa, so
+            // it comes back to whole paisa first.
+            rupees(row.mean_milli_paisa / 1_000),
+            hundredths_of(row.t_milli / 10),
+            if row.payoff_bp == i64::MAX {
+                "inf".to_owned()
+            } else {
+                hundredths_of(row.payoff_bp)
+            },
+            runner::report::names_from_words(row.mask_words).join(" · ")
+        );
+    }
+
+    let _ = writeln!(
+        out,
+        "\n  `mean` is the average forward move over the run's horizon, per ONE \
+         unit of the index, gross of the statutory charge stack.\n  `payoff` is \
+         the mean WIN over the mean LOSS, in hundredths -- 300 reads 3.00. It \
+         carries no stop, no target and no path,\n  so it does not say what a \
+         stop would have done: it says which combinations are worth asking. \
+         `cli elite` ranks the cut on it.\n  `inf` means the combination never \
+         lost on this span, which is a fact about the sample and not a promise."
+    );
+    if let Some(why) = damaged {
+        let _ = writeln!(
+            out,
+            "\n  PART OF THE FRONTIER COULD NOT BE READ, and the rows above are \
+             what survived: {why}"
+        );
+    }
+    out
+}
+
+/// The best COMPLETE recorded run matching the filter, newest wins a tie.
+fn newest_complete(
+    root: &std::path::Path,
+    feed: Option<&str>,
+    underlying: Option<&str>,
+) -> Result<Option<crate::results::Record>, crate::results::Refusal> {
+    let mut store = crate::results::Results::open(root)?;
+    let count = store.len()?;
+    let mut best: Option<crate::results::Record> = None;
+    for index in 0..count {
+        let record = store.read(index)?;
+        // HALTED ROWS ARE NOT CANDIDATES. A halted run's total covers less of
+        // the ladder than its combination count suggests, so ranking it against
+        // a complete one compares two different searches.
+        if record.halted != 0 {
+            continue;
+        }
+        if feed.is_some_and(|f| crate::results::read_field(&record.feed) != f) {
+            continue;
+        }
+        if underlying.is_some_and(|u| crate::results::read_field(&record.underlying) != u) {
+            continue;
+        }
+        // `>=` so a later run wins a tie: two runs with identical totals are
+        // the same answer, and the newer one is the one an operator just made.
+        if best.is_none_or(|b| record.pessimistic >= b.pessimistic) {
+            best = Some(record);
+        }
+    }
+    Ok(best)
+}
 
 /// Every recorded run, newest first, optionally narrowed to one feed and
 /// instrument.
@@ -6450,6 +6654,65 @@ struct Recording<'a> {
 ///
 /// A duplicate identity is reported as what it is — not an error but a fact:
 /// §3 rule 5 makes a rerun byte-identical, so the row is already correct.
+/// Writes this run's ranked frontier, and says so on the page.
+///
+/// # Why `top` and not everything that survived
+///
+/// `by_evidence` holds up to `audit_keep()` combinations — ten thousand by
+/// default, and an operator may raise it. Writing all of them per run would put
+/// hundreds of megabytes on disk for a question nobody asked: `rules.top` is the
+/// number the operator said they wanted to SEE, and the rest are already
+/// summarised by `combinations` and `depth` on the ledger row.
+///
+/// The bound is stated on the page rather than left implicit, because "the top
+/// twenty-five were kept" and "twenty-five survived" are different facts and a
+/// reader must not have to guess which one a count is.
+///
+/// # A failure here does not fail the run
+///
+/// The ledger row is the record that a run happened and is already written. If
+/// the frontier cannot be stored, the run still occurred and its numbers are
+/// still on the page — so this REPORTS the refusal beside the result rather than
+/// discarding a completed sweep over a detail file. `CLAUDE.md` §4 asks for the
+/// reason to be named beside the answer, and that is what this does.
+fn record_frontier(
+    root: &std::path::Path,
+    id: &runner::identity::RunId,
+    by_evidence: &[&runner::rank::Scored],
+    top: usize,
+) -> String {
+    let kept = by_evidence.len().min(top);
+    let rows: Vec<frontier::Row> = by_evidence
+        .iter()
+        .take(top)
+        .enumerate()
+        .filter_map(|(at, scored)| {
+            // A rank past `u16` is a `top` nobody typed -- the argument is
+            // parsed as a `usize` and an operator asking for 65,536 rows has
+            // asked for something this file does not carry. Dropped rather than
+            // truncated to a wrong rank, and the count below says how many
+            // landed.
+            u16::try_from(at.saturating_add(1))
+                .ok()
+                .map(|rank| frontier::Row::of(id.bytes(), rank, scored))
+        })
+        .collect();
+
+    let mut store = match frontier::Frontier::open(root) {
+        Ok(store) => store,
+        Err(why) => return format!("\n  the frontier was NOT recorded: {why}\n"),
+    };
+    match store.append_all(&rows) {
+        Ok(total) => format!(
+            "\n  frontier: {} of {} ranked combination(s) recorded, {total} row(s) \
+             in the file\n",
+            rows.len(),
+            kept
+        ),
+        Err(why) => format!("\n  the frontier was NOT recorded: {why}\n"),
+    }
+}
+
 fn record_run(
     into: Recording<'_>,
     id: &runner::identity::RunId,
@@ -7063,6 +7326,20 @@ fn audit_bars(
             min_hits,
             first.mask.words(),
         ));
+        // AND THE FRONTIER, which the ledger has no room for.
+        //
+        // `record_run` writes ONE row holding the ONE combination the exit grid
+        // chose, because a run has one identity and the ledger refuses a
+        // duplicate. Everything else the ladder found was folded into `depth`
+        // and `combinations` and dropped -- so "show me the top ten" could be
+        // answered on screen and nowhere else, and two runs a month apart could
+        // not be compared beyond their single winners.
+        //
+        // Written AFTER the ledger row on purpose. The ledger is the record that
+        // a run happened; the frontier is detail about it. A frontier row whose
+        // run has no ledger row is an orphan, and this ordering makes that
+        // unreachable rather than merely unlikely.
+        out.push_str(&record_frontier(into.root, run_id, &by_evidence, rules.top));
     }
     out.push_str(walk_forward_caveat(execution.is_some(), folds.decided()));
     out.push_str(&audit::render(
@@ -7222,7 +7499,7 @@ mod tests {
     use super::{
         MAX_STOP_POINTS, NIFTY_REFERENCE, PAISA_PER_POINT, STOP_FLOOR_POINTS, hundredths_of,
         points_to_ppm, points_to_ppm_at, ppm_to_points_at, reference_price,
-        return_over_drawdown_cell, synthetic,
+        return_over_drawdown_cell, synthetic, top_at,
     };
     use super::{cadence_floor_ppm, months_between, support_ladder};
 
@@ -8630,6 +8907,15 @@ mod tests {
         );
     }
 
+    /// Six mask words with a couple of low bits set, for a name to render from.
+    fn vocab_words_for_test() -> [u64; 6] {
+        let mut words = [0_u64; 6];
+        // Bits 0 and 1 -- two real, live positions, so `names_from_words`
+        // resolves them instead of returning an empty list.
+        words[0] = 0b11;
+        words
+    }
+
     /// A record with the money fields filled and the mask left to the caller.
     fn record_for_naming() -> crate::results::Record {
         crate::results::Record {
@@ -8766,6 +9052,150 @@ mod tests {
     ///
     /// If this assertion ever fails, either the arithmetic moved or the cadence
     /// did, and the descent's floor is no longer the operator's requirement.
+    /// `top` renders a stored frontier, best rank first, with its names.
+    ///
+    /// The whole point of [`crate::frontier`] is that this list survives the
+    /// process that produced it, so the test writes rows, closes nothing, and
+    /// reads them back through the same surface an operator uses.
+    #[test]
+    fn the_top_list_renders_a_stored_frontier_in_rank_order() {
+        let root = std::env::temp_dir().join(format!("brutex-top-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a temp root");
+
+        // A complete ledger row, so `newest_complete` has something to choose.
+        let mut ledger = crate::results::Results::open(&root).expect("a fresh ledger");
+        let mut record = record_for_naming();
+        record.identity = [11; 32];
+        record.halted = 0;
+        record.pessimistic = 5_000;
+        ledger.append(&record).expect("the row appends");
+
+        // Two frontier rows for that run, written out of rank order.
+        let mut store = crate::frontier::Frontier::open(&root).expect("a fresh frontier");
+        let mask = vocab_words_for_test();
+        store
+            .append_all(&[
+                crate::frontier::Row {
+                    identity: [11; 32],
+                    rank: 2,
+                    mask_words: mask,
+                    hits: 400,
+                    n: 380,
+                    mean_milli_paisa: 2_500,
+                    t_milli: 2_100,
+                    payoff_bp: 150,
+                    wins: 200,
+                },
+                crate::frontier::Row {
+                    identity: [11; 32],
+                    rank: 1,
+                    mask_words: mask,
+                    hits: 900,
+                    n: 880,
+                    mean_milli_paisa: 7_000,
+                    t_milli: 4_007,
+                    payoff_bp: i64::MAX,
+                    wins: 880,
+                },
+            ])
+            .expect("both rows append");
+
+        let page = top_at(&root, None, None);
+        assert!(page.starts_with(STORED_PROVENANCE), "provenance leads it");
+        assert!(page.contains("TOP COMBINATIONS"), "the section is named");
+
+        // RANK ORDER, not write order.
+        let first = page.find(" 1 ").or_else(|| page.find("  1  "));
+        let second = page.find(" 2 ").or_else(|| page.find("  2  "));
+        assert!(
+            matches!((first, second), (Some(a), Some(b)) if a < b),
+            "rank 1 must be printed before rank 2, whatever order they were \
+             written in:\n{page}"
+        );
+
+        // The unbounded payoff is NAMED rather than printed as a huge number.
+        assert!(
+            page.contains("inf"),
+            "a combination that never lost reads `inf`, not 92233720368547758.07:\n{page}"
+        );
+        assert!(
+            !page.contains("92233720368547758"),
+            "i64::MAX must never reach the page as a figure:\n{page}"
+        );
+
+        // The money column goes through `rupees`, like every other in this
+        // binary -- 7,000 thousandths of a paisa is 7 paisa is Rs 0.07.
+        assert!(
+            page.contains("0.07"),
+            "the mean is rendered as rupees:\n{page}"
+        );
+
+        // And the caveats an operator needs beside the numbers.
+        assert!(
+            page.contains("ONE \nunit") || page.contains("ONE unit"),
+            "the page states the denomination:\n{page}"
+        );
+        assert!(
+            page.contains("gross of the statutory charge stack"),
+            "the page states that charges are not deducted:\n{page}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A run that recorded no frontier says so, rather than printing nothing.
+    ///
+    /// Every run made before `crate::frontier` existed is in this state, so the
+    /// message has to distinguish "this run kept no list" from "this run found
+    /// nothing" — they are different facts and only one is about the market.
+    #[test]
+    fn a_run_with_no_frontier_says_so_rather_than_looking_empty() {
+        let root = std::env::temp_dir().join(format!("brutex-top-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a temp root");
+
+        let mut ledger = crate::results::Results::open(&root).expect("a fresh ledger");
+        let mut record = record_for_naming();
+        record.identity = [12; 32];
+        record.halted = 0;
+        ledger.append(&record).expect("the row appends");
+
+        let page = top_at(&root, None, None);
+        assert!(
+            page.contains("recorded NO frontier"),
+            "the gap in the RECORD is named, not reported as an empty result:\n{page}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A halted run is never the one `top` reports on.
+    ///
+    /// A halted run's total covers less of the ladder than its combination count
+    /// suggests, so ranking it against a complete one compares two different
+    /// searches — the same reason `range-all` prints a `complete` column.
+    #[test]
+    fn a_halted_run_is_not_the_run_top_reports_on() {
+        let root = std::env::temp_dir().join(format!("brutex-top-halt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a temp root");
+
+        let mut ledger = crate::results::Results::open(&root).expect("a fresh ledger");
+        let mut halted = record_for_naming();
+        halted.identity = [13; 32];
+        halted.halted = 1;
+        // Enormous, so only the halted flag can keep it out.
+        halted.pessimistic = 9_000_000;
+        ledger.append(&halted).expect("the halted row appends");
+
+        let page = top_at(&root, None, None);
+        assert!(
+            page.contains("NO COMPLETE RUN"),
+            "a halted run is not a candidate however large its total:\n{page}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// [`COMMANDS`], the dispatch and [`USAGE`] name the same set of commands.
     ///
     /// The list exists so a wrong-arity refusal can tell a real command from a
@@ -8814,9 +9244,17 @@ mod tests {
             let mut out = String::new();
             let code = run(&argv(&[word]), &mut out);
 
-            // `results` legitimately takes zero arguments, so it is the one
-            // command that must NOT refuse here.
-            if word == "results" {
+            // TWO COMMANDS LEGITIMATELY TAKE ZERO ARGUMENTS, and both READ the
+            // store rather than sweeping it: `results` lists every recorded run
+            // and `top` reports the best complete one's frontier. For both, no
+            // argument means NO FILTER, which is a request rather than a
+            // mistake.
+            //
+            // Listed rather than inferred: "takes zero arguments" is not
+            // something the dispatch can be asked, and a command that grows a
+            // required argument must fail HERE rather than silently leaving the
+            // exemption behind.
+            if matches!(word, "results" | "top") {
                 continue;
             }
 

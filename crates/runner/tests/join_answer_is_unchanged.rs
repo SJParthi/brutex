@@ -53,7 +53,29 @@ const TOTAL_SURVIVORS: usize = 3_689;
 /// |---|---:|---:|---:|
 /// | before D-0244 | 238 | 161 | 77 |
 /// | + 34 crossings (D-0244) | 272 | 182 | 90 |
-/// | + 51 ordinals (D-0249) | **323** | **219** | **104** |
+/// | + 51 ordinals (D-0249) | 323 | 219 | 104 |
+/// | + 5 weekdays (`a12192b`) | **328** | **221** | **107** |
+///
+/// # The last row was owed and unpaid, and the suite was red the whole time
+///
+/// `a12192b` added `is_monday`..`is_friday` and took the live count from 323 to
+/// 328 — `crates/engine/src/column.rs` asserts that figure directly. This
+/// constant was not moved with it, so this test failed from that commit onward
+/// and kept failing: **221 against a pinned 219**.
+///
+/// Nothing noticed, because `cargo test --workspace` does not terminate on this
+/// tree — `cli`'s `the_audit_renders_every_stage_of_the_institutional_stack`
+/// sweeps at 6.7% support under the full `engine::DEFAULT_CEILING` in a debug
+/// build, measured at over an hour. A suite that cannot finish cannot report a
+/// failure, so `CLAUDE.md` §9's green-suite requirement was unverifiable and a
+/// genuinely red test sat behind it.
+///
+/// **Three of the five weekdays fire on this fixture and two do not.** Eight
+/// synthetic sessions are eight consecutive days from a fixed epoch, so they do
+/// not cover a whole trading week — which is why the excluded count rose by two
+/// rather than by five. That is the fixture's calendar, not a defect in the
+/// conditions, and it is stated here so the next reader does not have to
+/// rediscover it.
 ///
 /// So **27 of the 85 new positions fire at least once** and 58 never do, which
 /// [`NEW_POSITIONS_THAT_FIRE`] states directly rather than leaving a reader to
@@ -66,7 +88,7 @@ const TOTAL_SURVIVORS: usize = 3_689;
 /// number of side changes in eight sessions, nowhere near 600 of 1,124 bars.
 ///
 /// A pinned figure that moves for a reason you can state is a gate working.
-const EXCLUDED_AT_K1: usize = 219;
+const EXCLUDED_AT_K1: usize = 221;
 
 /// How many of the 85 new positions have non-zero support on this fixture.
 ///
@@ -132,7 +154,10 @@ fn every_level_returns_the_survivors_the_pairwise_join_returned() {
     // CONSTANTS.
     //
     // `EXCLUDED_AT_K1` went 161 -> 182 -> 219 across two appends totalling 85
-    // positions, which forces 27 of them to have non-zero support. Deriving
+    // positions, which forces 27 of them to have non-zero support. (It later
+    // went 219 -> 221 for the five weekday conditions, which are a different
+    // family and do not move THIS count -- the filter below reads `CROSSINGS`
+    // and nothing else.) Deriving
     // that by subtracting one pinned number from another is exactly the kind of
     // reasoning a reader should not have to redo, so it is measured here
     // directly: a future change that makes a different number fire fails on

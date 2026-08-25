@@ -688,6 +688,79 @@ impl Edge {
         let clamped = ratio.max(0.0) as i64;
         clamped
     }
+
+    /// [`Self::mean_paisa`] in THOUSANDTHS, as an integer.
+    #[must_use]
+    pub fn mean_milli_paisa(&self) -> i64 {
+        milli(self.mean_paisa)
+    }
+
+    /// [`Self::t`] in THOUSANDTHS, as an integer.
+    ///
+    /// # Why this lives here and not where it is stored
+    ///
+    /// `crates/cli` denies `clippy::float_arithmetic` outright — `CLAUDE.md` §7
+    /// keeps floats off any path whose output is compared, and D-0061 made that
+    /// a lint rather than a convention. This module carries the documented
+    /// exemption because a t-statistic IS a float. So the crate that owns the
+    /// float owns the conversion, and the crate that stores integers never
+    /// touches one.
+    ///
+    /// That is the right seam anyway: a scale is a property of the statistic,
+    /// and putting it beside `t` means one definition rather than one per
+    /// consumer.
+    #[must_use]
+    pub fn t_milli(&self) -> i64 {
+        milli(self.t)
+    }
+}
+
+/// An `f64` as thousandths — rounded, saturating, and NaN as zero.
+///
+/// # Rounded, and truncating was wrong by a whole unit
+///
+/// `4.007 * 1000.0` is `4006.9999999999995` in binary floating point, so a bare
+/// cast truncates toward zero and a `t` of 4.007 is stored as 4006. The error is
+/// **systematically toward zero**, which is the direction that makes every
+/// finding look slightly weaker than it was — a bias, not noise.
+///
+/// It is the same defect `cli`'s `ppm_to_points_at` carried until D-0285: a
+/// scaled value floored through a cast, always in one direction.
+///
+/// # Saturating, and wrapping would invert the strongest finding
+///
+/// A value past the `i64` range is not one any run produced, and wrapping it
+/// would store a large NEGATIVE figure for the best result in the sweep. The
+/// bound is compared against an `f64` literal safely inside `i64::MAX` rather
+/// than against `i64::MAX as f64`, because that cast is itself lossy and rounds
+/// UP past the range it is meant to bound.
+///
+/// # NaN is zero
+///
+/// [`Edge::t`] documents itself as reporting zero where the statistic is
+/// undefined, *"because an undefined statistic must not read as a strong one"*.
+/// This holds that property across the conversion rather than storing a
+/// sentinel a reader would have to know about.
+fn milli(x: f64) -> i64 {
+    const CEILING: f64 = 9.0e18;
+
+    if x.is_nan() {
+        return 0;
+    }
+    let scaled = x * 1_000.0;
+    if scaled >= CEILING {
+        return i64::MAX;
+    }
+    if scaled <= -CEILING {
+        return i64::MIN;
+    }
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "bounded by CEILING on both sides immediately above, so the \
+                  cast is in range on every path that reaches it."
+    )]
+    let out = scaled.round() as i64;
+    out
 }
 
 /// The two sides of a forward-return distribution, accumulated apart.
@@ -1018,7 +1091,9 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
     reason = "the exception every test module in this workspace takes."
 )]
 mod tests {
-    use super::{Edge, Horizon, LAST_FILL_MINUTE, Sides, edge, forward, long_run_sum_squares};
+    use super::{
+        Edge, Horizon, LAST_FILL_MINUTE, Sides, edge, forward, long_run_sum_squares, milli,
+    };
     use indicators::column::Column;
     use indicators::evaluator::{Evaluator, Widths};
     use indicators::pattern::Thresholds;
@@ -1059,6 +1134,50 @@ mod tests {
             loss_sum,
             ..Edge::default()
         }
+    }
+
+    /// Scaling to thousandths rounds, saturates, and refuses a NaN.
+    ///
+    /// Each case is a defect this workspace has already had once somewhere else,
+    /// which is why each is pinned rather than argued.
+    #[test]
+    fn the_milli_scale_rounds_saturates_and_a_nan_is_not_a_finding() {
+        // ROUNDED. `4.007 * 1000.0` is 4006.9999999999995, so a bare cast
+        // truncates to 4006 -- systematically toward zero, which makes every
+        // finding read slightly weaker than it was. The same shape as the
+        // `ppm_to_points_at` floor D-0285 fixed in `cli`.
+        assert_eq!(milli(4.007), 4_007, "three decimals, exactly");
+        assert_eq!(
+            milli(-4.007),
+            -4_007,
+            "and the same on the other side of zero"
+        );
+        assert_eq!(milli(-1.5), -1_500, "negatives keep their sign");
+        assert_eq!(milli(0.0), 0);
+
+        // SATURATING. Wrapping would store a large NEGATIVE figure for the
+        // strongest finding in the sweep.
+        assert_eq!(milli(f64::INFINITY), i64::MAX, "saturates, never wraps");
+        assert_eq!(milli(f64::NEG_INFINITY), i64::MIN, "saturates, never wraps");
+        assert_eq!(milli(1.0e300), i64::MAX, "a value past the range saturates");
+        assert_eq!(milli(-1.0e300), i64::MIN, "and on the other side too");
+
+        // NaN IS ZERO, holding `Edge::t`'s own rule across the conversion: an
+        // undefined statistic must not read as a strong one.
+        assert_eq!(
+            milli(f64::NAN),
+            0,
+            "an undefined statistic is not a finding"
+        );
+
+        // And the two accessors are that scale, not a second one.
+        let edge = Edge {
+            mean_paisa: 2.5,
+            t: 4.007,
+            ..Edge::default()
+        };
+        assert_eq!(edge.mean_milli_paisa(), 2_500);
+        assert_eq!(edge.t_milli(), 4_007);
     }
 
     /// The shape `|t|` cannot see, which is the whole reason this exists.

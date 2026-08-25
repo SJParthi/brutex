@@ -21700,3 +21700,76 @@ finding -- `the_audit_renders_every_stage_of_the_institutional_stack` sweeps
 `DEFAULT_CEILING = 1 << 27`, in a debug build. Measured at over an hour on an
 untouched tree. `cargo test --workspace` has therefore never terminated, so §9's
 green-suite requirement has not been checkable. Not fixed here.
+
+### D-0287 — the ranked frontier is kept, and a run's rows are found in O(1)
+
+**Decision.** `crates/cli/src/frontier.rs` is a second append-only fixed-stride
+ledger — magic `BRUTEXFR`, version 1, 144-byte stride, eight-byte blake3 seal —
+holding the top `rules.top` ranked combinations of each recorded run, keyed by
+the run identity. `cli top` reads them back with their condition names.
+`Edge` gains `mean_milli_paisa()` and `t_milli()`.
+
+**Why.** The results ledger stores ONE `Record` per run, holding the one
+combination the exit grid chose; everything else the Apriori ladder found is
+folded into `depth` and `combinations` and dropped. `one_rung` says so in
+its own comment — *"The long report is DISCARDED on purpose."* So *"show me the
+top ten"* could be answered on screen and nowhere else, two runs a month apart
+could not be compared beyond their single winners, and a robust edge and one
+lucky mask looked identical because the distribution behind the winner was never
+written down.
+
+**Why a second file.** A run has one identity and the ledger refuses a duplicate,
+which is what keeps it idempotent. N combinations cannot be N rows there. They
+cannot be N columns either: a record whose width depends on how many survived has
+no stride, and no stride is no `O(1)` address.
+
+**A run's rows are CONTIGUOUS, and that is what makes the index exact.**
+`append_all` writes a whole frontier in one call under one lock, so the index is
+`identity -> {first, count}` — two integers — built in one pass at open. Find is
+`O(1)`; read is one seek and one `read_exact`. The shape was copied from
+`crates/api/src/trades.rs`, which does exactly this for the per-run trade file
+and has no caller anywhere: right design, dead code.
+
+It replaced a walk costing roughly five syscalls per row — a `metadata`, a
+`lock_shared`, a seek, a `read_exact` and an `unlock`, each — so a thousand
+recorded runs at twenty-five rows apiece was over a hundred thousand syscalls to
+answer one question about one run.
+
+**This is not the query planner §4 bans.** That rule refuses a component that
+CHOOSES a strategy at runtime — *"the path is the index. There is nothing to
+plan."* An identity-to-offset map plans nothing: there is one way to reach a row,
+and this is that way, precomputed.
+
+**READING MUST NEVER CREATE.** `Frontier::open` creates — `create_dir_all`,
+`create(true)`, and a fresh header on an empty file — which is right for a sweep
+about to append and wrong for anything that only reads. A `GET` on a store never
+swept would have created the file as a side effect of being asked a question.
+`open_read` is the read path, and `crates/api/src/backtest.rs` already had the
+pattern: a bare `File::open` and a `NotFound` arm saying *"This is not an
+error."*
+
+**Integers on disk, including the two that are floats in memory.**
+`Edge::mean_paisa` and `Edge::t` are stored as THOUSANDTHS, as `i64`. §7
+keeps floats off any path whose output is compared, and two frontiers are
+compared by definition. The scaling lives in `runner::outcome` because
+`crates/cli` denies `clippy::float_arithmetic` outright (D-0061) — the crate
+that owns the float owns the conversion.
+
+**It rounds, and truncating was wrong by a whole unit.** `4.007 * 1000.0` is
+`4006.9999999999995`, so a bare cast stored a `t` of 4.007 as 4006 —
+systematically toward zero, making every finding read slightly weaker than it
+was. The identical shape to the `ppm_to_points_at` floor D-0285 fixed.
+
+**Also: a genuinely red test, hidden by a suite that cannot finish.**
+`runner::tests::join_answer_is_unchanged` pinned `EXCLUDED_AT_K1 = 219`.
+`a12192b` added five weekday conditions and took the live vocabulary from 323 to
+328 without moving it, so the test has failed from that commit onward — 221
+against 219. Nothing noticed because `cargo test --workspace` does not terminate
+on this tree: `cli`'s `the_audit_renders_every_stage_of_the_institutional_stack`
+sweeps `audit_run(12, 300)` — 6.7% support over 328 live bits under the full
+`engine::DEFAULT_CEILING = 1 << 27` — in a debug build, measured at over an hour.
+**§9's green-suite requirement has therefore been unverifiable, and a real red sat
+behind it.** The constant is corrected with its arithmetic stated; the hang is NOT
+fixed here and remains open.
+
+Suite green with that one test skipped: **413 passed, 0 failed**.
