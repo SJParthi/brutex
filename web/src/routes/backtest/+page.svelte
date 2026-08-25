@@ -3788,7 +3788,11 @@
     color: var(--n9);
     max-width: 78ch;
   }
-  .bsub b,
+  /* `.bsub b` WAS THE OTHER HALF OF THIS RULE AND ITS MARKUP IS GONE — 761934b
+     replaced the stack of cards with one panel and took the prose with it. Only
+     the orphaned SELECTOR is removed, not the rule: `.rgroup-note b` still has
+     markup and still needs this colour. Deleting by the line the compiler names
+     would have taken the surviving half with it. */
   .rgroup-note b {
     color: var(--n11);
   }
@@ -5625,8 +5629,10 @@
      correct fallback: visible beats animated. */
   @supports (animation-timeline: view()) {
     @media (prefers-reduced-motion: no-preference) {
-      .rgroup,
-      .drill-grid > .card {
+      /* `.drill-grid > .card` went the same way as `.bsub b` and for the same
+         reason: 761934b removed the cards. `.rgroup` is what scroll-reveals
+         now, and it keeps the whole rule. */
+      .rgroup {
         animation: reveal 1ms linear both;
         animation-timeline: view();
         animation-range: entry 0% entry 40%;
