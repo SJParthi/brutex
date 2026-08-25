@@ -498,6 +498,37 @@ impl Frontier {
         if rows.is_empty() {
             return self.len();
         }
+        // THE DUPLICATE REFUSAL, AND IT IS THE ONE THIS FILE WAS WRITTEN
+        // WITHOUT.
+        //
+        // `crate::results::append_locked` refuses an identity it already holds.
+        // This file did not, and `crate::record_frontier` is called
+        // UNCONDITIONALLY -- including on the path where `record_run` has just
+        // refused the same identity as already recorded. So a rerun, the thing
+        // §3 rule 5 calls SAFE, wrote a SECOND block for one identity.
+        //
+        // What that costs is not a duplicate row, which would be harmless. The
+        // accounting below keeps the ORIGINAL `first` and moves `count` to the
+        // new row, so the block comes to span every row written BETWEEN the two
+        // appends -- and `of_run` returned that whole span. MEASURED on this
+        // type: three identities of three rows each, appended twice, gave every
+        // block `count = 12`, of which SIX rows belonged to another run, with
+        // `damaged` reporting false. A third pass gave 21, nine own and twelve
+        // foreign. `cli top` renders that mixture under one run's banner.
+        //
+        // The check is `holds`, which was already written, already documented
+        // O(1), and until now had no production call site at all.
+        for row in rows {
+            if self.holds(&row.identity) {
+                return Err(format!(
+                    "run {} already has a frontier block. Same inputs give same \
+                     outputs (§3 rule 5), so a second block adds nothing -- and \
+                     it would make the first one span every row written between \
+                     the two, which `of_run` would then return as that run's.",
+                    hex(&row.identity)
+                ));
+            }
+        }
         // AN EXCLUSIVE LOCK, for the reason `crate::results::append` gives at
         // length: two processes that both seek to the end compute the same
         // offset, and the second write lands ON TOP of the first. Both records
@@ -617,10 +648,21 @@ impl Frontier {
 
     /// Every row belonging to one run, best rank first.
     ///
-    /// **O(rows), and it is a walk.** This file carries no index and §4 bans
-    /// adding one — *"a query planner or ORM: the path is the index"*. The cost
-    /// is stated rather than hidden: the walk is bounded by the file, and the
-    /// file grows by `top` rows per recorded run.
+    /// **FINDING the block is O(1); READING it is O(count).** One hash probe
+    /// into the block index built in one pass at open, then one seek and one
+    /// `read_exact` of `count · STRIDE` bytes. §4 bans a query planner — *"the
+    /// path is the index"* — and this is not one: the offset IS the address.
+    ///
+    /// **This paragraph used to say the opposite** — *"O(rows), and it is a
+    /// walk. This file carries no index"* — which described the file before the
+    /// block index existed and contradicted the header table at the top of this
+    /// module. A doc that disagrees with the code beside it is the stale copy,
+    /// and a reader who believed this one would have paid for a walk that is
+    /// not there.
+    ///
+    /// The rows returned are filtered to `identity`. A block written before
+    /// `append_all` refused duplicates can span another run's rows, and §8 keeps
+    /// those files as they are.
     ///
     /// A DAMAGED row does not stop the walk. A frontier is a list, and one
     /// unreadable entry is a smaller list rather than no answer — the refusal is
@@ -678,7 +720,18 @@ impl Frontier {
                 continue;
             };
             if Row::seal_matches(&bytes) {
-                found.push(Row::from_bytes(&bytes));
+                // A ROW THAT IS NOT THIS RUN'S IS NOT THIS RUN'S, however
+                // correctly it is sealed. The seal proves the bytes are intact;
+                // it says nothing about WHOSE they are. A block written before
+                // the duplicate refusal above existed can still span foreign
+                // rows, and this file is append-only (§8) -- those files are on
+                // disk and are not rewritten. So the read filters too, and a
+                // stale span comes back as the run's OWN rows rather than as a
+                // mixture nothing marks.
+                let row = Row::from_bytes(&bytes);
+                if &row.identity == identity {
+                    found.push(row);
+                }
             } else if damaged.is_none() {
                 damaged = Some(format!(
                     "row {} of run {} does not match the seal written with it — \
@@ -1041,21 +1094,82 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A run recorded twice keeps one block covering both appends.
+    /// A run recorded twice is REFUSED, and the first block is left alone.
+    ///
+    /// # This test asserted the defect
+    ///
+    /// It read *"the block grows to cover both rather than forgetting the
+    /// first"* and expected `count: 2`. That growth is exactly the bug: the
+    /// accounting keeps the original `first` and moves `count` to the newest
+    /// row, so with anything written in between the block comes to span another
+    /// run's rows. Back to back there is nothing in between, which is why the
+    /// old shape passed and why
+    /// [`a_block_never_spans_another_runs_rows`] is its necessary companion.
     #[test]
-    fn a_run_appended_twice_keeps_one_block_over_both() {
+    fn a_run_appended_twice_is_refused_and_the_first_block_stands() {
         let dir = root("twice");
         let mut store = Frontier::open(&dir).expect("a fresh file opens");
         store.append_all(&[row(3, 1)]).expect("first append");
-        store.append_all(&[row(3, 2)]).expect("second append");
+
+        let again = store.append_all(&[row(3, 2)]);
+        let why = again.expect_err("a second block for one identity is refused");
+        assert!(
+            why.contains("already has a frontier block"),
+            "the refusal names what it refused: {why}"
+        );
+
         assert_eq!(
             store.block(&[3; 32]),
-            Some(super::Block { first: 0, count: 2 }),
-            "the block grows to cover both rather than forgetting the first"
+            Some(super::Block { first: 0, count: 1 }),
+            "the refusal changed nothing -- the first block still covers one row"
         );
         let (rows, damaged) = store.of_run(&[3; 32]).expect("a read");
         assert!(damaged.is_none());
-        assert_eq!(rows.len(), 2, "both appends come back");
+        assert_eq!(rows.len(), 1, "only the first append is there");
+        let kept = rows.first().expect("the one row just asserted");
+        assert_eq!(kept.rank, 1, "and it is the FIRST one, not the second");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A run's rows never come back with another run's mixed in.
+    ///
+    /// # The case the back-to-back test could not reach
+    ///
+    /// MEASURED on this type before the refusal existed: three identities of
+    /// three rows each, appended twice, gave every block `count = 12` of which
+    /// six rows belonged to another run, with `damaged` reporting FALSE. `cli
+    /// top` renders that mixture under one run's banner, which is §4's failure
+    /// wearing a success's clothes.
+    ///
+    /// Both halves of the fix are asserted here: the append is refused, and the
+    /// read filters by identity so a block written before the refusal existed
+    /// still comes back as its own run's rows. §8 keeps those files as they are,
+    /// so the read-side filter is not redundant with the write-side refusal.
+    #[test]
+    fn a_block_never_spans_another_runs_rows() {
+        let dir = root("interleaved");
+        let mut store = Frontier::open(&dir).expect("a fresh file opens");
+
+        store.append_all(&[row(1, 1), row(1, 2)]).expect("run one");
+        store.append_all(&[row(2, 1), row(2, 2)]).expect("run two");
+        // The rerun §3 rule 5 calls SAFE, with a foreign run now in between.
+        let again = store.append_all(&[row(1, 3)]);
+        assert!(
+            again.is_err(),
+            "the rerun is refused rather than widening run one's block over run two"
+        );
+
+        let (ones, damaged) = store.of_run(&[1; 32]).expect("a read");
+        assert!(damaged.is_none(), "nothing is damaged: {damaged:?}");
+        assert_eq!(ones.len(), 2, "run one has exactly its own two rows");
+        assert!(
+            ones.iter().all(|r| r.identity == [1; 32]),
+            "and every one of them is run one's"
+        );
+
+        let (twos, _) = store.of_run(&[2; 32]).expect("a read");
+        assert_eq!(twos.len(), 2, "run two is untouched");
+        assert!(twos.iter().all(|r| r.identity == [2; 32]));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1102,6 +1216,14 @@ mod tests {
     }
 
     /// A reopened file appends after what is already there.
+    ///
+    /// # The two runs differ, and that is the point of the test
+    ///
+    /// This wrote identity `1` both times, so once `append_all` began refusing a
+    /// second block for one identity it failed — on the refusal, not on the
+    /// append position it exists to check. A second run is what a reopened file
+    /// actually receives; reusing one identity was incidental, and the
+    /// duplicate case has two tests of its own.
     #[test]
     fn a_reopened_file_appends_after_what_is_already_there() {
         let dir = root("reopen");
@@ -1111,10 +1233,17 @@ mod tests {
         }
         let mut again = Frontier::open(&dir).expect("an existing file opens");
         assert_eq!(again.len().expect("a length"), 1, "the row is still there");
-        again.append_all(&[row(1, 2)]).expect("a second append");
+        again
+            .append_all(&[row(2, 2)])
+            .expect("a second run appends");
         assert_eq!(again.len().expect("a length"), 2);
         assert_eq!(again.read(0).expect("row 0").rank, 1);
         assert_eq!(again.read(1).expect("row 1").rank, 2);
+        assert_eq!(
+            again.block(&[2; 32]),
+            Some(super::Block { first: 1, count: 1 }),
+            "the reopened index places the new run AFTER what was already there"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

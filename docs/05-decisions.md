@@ -21881,3 +21881,55 @@ is. The remaining cost is `screen_cap × 625 variants × trades`, settable by
 months of 60-minute bars is 17 s at cap 10 and 31 s at cap 40, while one step
 over 2020–2026 is still over 95 s. `docs/06-limits.md` is where that belongs,
 and it is stated here rather than left for a reader to discover.
+
+### D-0290 — the frontier had no duplicate refusal, and a rerun mixed two runs' rows
+
+**Decision.** `frontier::Frontier::append_all` refuses an identity the file
+already holds, the way `results::append_locked` always has. `of_run` additionally
+filters the rows it reads by the identity it was asked for. Two tests replace one.
+
+**Why.** `record_frontier` is called UNCONDITIONALLY — including on the path
+where `record_run` has just refused the same identity as already recorded. With
+no duplicate check, a rerun wrote a SECOND block for one identity.
+
+A duplicate row would have been harmless. What was not harmless is the block
+accounting: it keeps the ORIGINAL `first` and moves `count` to the newest row, so
+the block comes to span **every row written between the two appends** — and
+`of_run` returned that whole span without ever comparing `row.identity`.
+
+**MEASURED on the real type**, by an adversarial agent driving `Frontier` from a
+scratch crate outside this tree: three identities of three rows each, appended
+twice, gave every block `count = 12`, of which **six rows belonged to another
+run**, with `damaged` reporting FALSE. A third pass gave 21 rows — nine its own,
+twelve foreign. `cli top` renders that mixture under one run's banner and one
+identity.
+
+**Which rules this broke, and it is not rule 4.** `CLAUDE.md` §3 rule 4 binds
+five operations and result append is not slower for this; the check was ABSENT,
+which is a correctness defect and not a complexity one. What it broke:
+- **§3 rule 5**, idempotence: the rerun the rule calls SAFE changed the answer
+  `cli top` gives.
+- **§3 rule 6**: the module header claims *"a run's rows are CONTIGUOUS, which is
+  what makes the index exact"*, and that is false the moment a run is recorded
+  twice.
+- **§4**, a fallback that hides a failure: the mixed list rendered with no marker
+  at all.
+
+**Why the read filters too, rather than the append alone.** §8 is append-only, so
+a file already carrying a widened block is not rewritten. The write-side refusal
+protects files from here on; the read-side filter is what makes the ones already
+on disk honest. Neither is redundant.
+
+**Why no test caught it.** `a_run_appended_twice_keeps_one_block_over_both`
+asserted the defect — *"the block grows to cover both"* — and passed, because
+back to back there is nothing in between to swallow. It is now
+`a_run_appended_twice_is_refused_and_the_first_block_stands`, and
+`a_block_never_spans_another_runs_rows` covers the interleaved case it could not
+reach. A third test, `a_reopened_file_appends_after_what_is_already_there`, wrote
+one identity twice only incidentally and now uses two runs, which is what a
+reopened file actually receives.
+
+**`holds` had zero production call sites.** It was written, documented O(1), and
+never called outside `#[cfg(test)]` — the same shape `CLAUDE.md` §3 rule 7
+records for `indicators::PastPrefix`. A guard that exists and is not wired in
+protects nothing.
