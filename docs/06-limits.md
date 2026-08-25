@@ -5456,9 +5456,26 @@ execution series, so the step scales with the SPAN as well as the cap:
 The cap column is close to linear, which is the exit grid. The last row is the
 one that matters: at `cap = 1` the grid is nearly out of the picture and a
 single step still does not finish, so on a 6.7-year span the cost is dominated
-by the span — 630,000 one-minute execution bars against 42,600 for six months —
-and not by the number of combinations screened. **Lowering `BRUTEX_SCREEN_CAP`
-does not buy back a long span.**
+by the SPAN and not by the number of combinations screened. **Lowering
+`BRUTEX_SCREEN_CAP` does not buy back a long span.**
+
+**WHICH part of the span, this entry does not know.** Two mechanisms both grow
+with it and only their sum was measured:
+
+1. the 1-minute execution series the trade walk reads — 630,000 bars over
+   2020-2026 against 42,600 over six months; and
+2. the FRONTIER itself, because support is a PPM of bars, so a fixed threshold
+   over more bars admits more frequent sets and the Apriori ladder climbs
+   further — twelve months at 60-minute already yields 607,475 combinations to
+   depth 16.
+
+The second is the one a reader would guess wrong. `grid.rs` already precomputes
+`excursion::crossings` against fixed ladders, so the per-variant exit decision
+is O(1) and the 625 variants are NOT 625 walks of the bars — which is why an
+optimisation aimed there would buy nothing. Separating the two costs needs a
+run instrumented to report frontier size and trade-walk time apart, and that
+has not been done. Naming the first alone, as an earlier draft of this entry
+did, was an attribution and not a measurement.
 
 **Why it is not a rule-4 breach.** `CLAUDE.md` §3 rule 4 binds the five
 per-operation costs — bar lookup, condition lookup, mask evaluation, duplicate
