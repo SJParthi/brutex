@@ -660,6 +660,15 @@ impl Frontier {
     /// and a reader who believed this one would have paid for a walk that is
     /// not there.
     ///
+    /// **UNVERIFIED as a measurement.** The `O(1)` half is argued from the
+    /// shape — one hash probe, then an address rather than a search — and no
+    /// bench times it. `crates/cli/benches/ratio.rs` measures `results`:
+    /// `C-CLI-01` a record read across a 1,024-record span, `C-CLI-02` a count,
+    /// `C-CLI-03` the duplicate probe, `C-CLI-04` an encode. None of the four
+    /// opens a frontier file. Closing it is a fifth row over `rows_for` at
+    /// 1×/10×/100× the BLOCK count, which is the axis the claim is about — the
+    /// row count is the `O(count)` half and is not in dispute.
+    ///
     /// The rows returned are filtered to `identity`. A block written before
     /// `append_all` refused duplicates can span another run's rows, and §8 keeps
     /// those files as they are.
