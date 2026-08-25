@@ -2617,13 +2617,34 @@ jobs:
           # caller a plausible index, which is what section 4 refuses. This line
           # predates the telemetry arrow and was undeclared; it is declared here
           # rather than left to be found again.
-          declared='api/src/constituents.rs:println!:2
+          # THREE MORE, ALL LANDED WHILE THIS GATE WAS UNREACHABLE behind gate
+          # 1e, and each says which kind it is:
+          #
+          #   api/src/calendar_of.rs println! 2 -- inside `#[cfg(test)]`, and
+          #     both print a MEASUREMENT the assertion beside them already
+          #     enforces: the second is `minute bars owed: {owed}` on the line
+          #     above `assert_eq!(owed, 623_546)`. The number is on the terminal
+          #     for a human reading a failure and in the assertion for the
+          #     build. Same case as `core/src/universe.rs` below. Neither ships.
+          #   pull/src/pricing.rs println! 1 -- also `#[cfg(test)]`, printing the
+          #     implied-volatility spread across the plausible rate band that the
+          #     assertions beneath it bound. Not on any production path.
+          #   cli/src/lib.rs eprintln! 1 -> 2 -- the new one is `[step/total]`
+          #     PROGRESS on a descent, and it is the one entry here that is not a
+          #     test. It cannot be an event instead, for the reason the two
+          #     `cli` diagnostics below already carry: the report is being built
+          #     into `out` and handed back as a String, and a run that is still
+          #     walking has nowhere to have written a log yet. stderr is what a
+          #     watching operator has; the report is what they get afterwards.
+          declared='api/src/calendar_of.rs:println!:2
+          api/src/constituents.rs:println!:2
           api/src/server.rs:println!:16
           api/src/server.rs:eprintln!:7
           api/src/server.rs:print!:1
           core/src/universe.rs:println!:2
           core/src/vendor.rs:println!:1
-          cli/src/lib.rs:eprintln!:1
+          pull/src/pricing.rs:println!:1
+          cli/src/lib.rs:eprintln!:2
           cli/src/main.rs:print!:1
           cli/src/main.rs:println!:1
           greeks/src/bsm.rs:println!:4
