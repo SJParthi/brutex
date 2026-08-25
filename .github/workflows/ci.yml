@@ -2894,10 +2894,31 @@ jobs:
           #   telemetry/src/lib.rs 1  `read_dir(temp_dir())` enumerates the
           #                           directory to find this crate's own sink
           #                           dirs. It creates no path.
+          # `api/src/logs.rs` IS GONE FROM THIS LIST, on this clause's own
+          # loose-entry warning: it no longer names a fixed temporary path, and
+          # an entry nobody can trace to a line makes the clause read stronger
+          # than it is.
+          #
+          # `cli` JOINS IT, AND ONE PRODUCTION SITE WAS FIXED RATHER THAN
+          # LISTED. `cli::verify::ledger_round_trip` used
+          # `temp_dir().join("brutex-verify-ledger")` — one path shared by every
+          # `cli verify` on the machine, with `remove_dir_all` on the very next
+          # line. Two verifications at once is one operator in two terminals:
+          # the second would delete the first's scratch mid-write and the first
+          # would report a round-trip failure against a ledger it never lost.
+          # It names `process::id()` now, which is the discriminator rather than
+          # a clock because two processes can start in the same microsecond and
+          # cannot share a pid.
+          #
+          # The five that remain are all inside `#[cfg(test)]`, same class as
+          # `pull/tests/unit.rs` above: a scratch root per case, named for the
+          # case. Under `cargo test` they run in one process on separate names,
+          # so nothing collides.
           allow_fixed='
-          api/src/logs.rs 1
           api/src/scratch.rs 1
           api/tests/binary.rs 1
+          cli/src/lib.rs 1
+          cli/src/results.rs 4
           pull/src/ssm.rs 1
           pull/tests/unit.rs 4
           telemetry/src/lib.rs 1
@@ -4357,11 +4378,15 @@ jobs:
           #     says so before declaring them.
           #   runner/significance.rs 18 -> 21 -- three more in the same
           #     multiple-comparison arithmetic the eighteen already cover.
-          #   runner/outcome.rs 5 -> 8 -- the three Newey-West accumulators
-          #     added with the overlap correction. `cross_a`, `cross_b` and
-          #     `cross_c` are weighted cross-products of forward MOVES; the
-          #     moves are read as paisa `i64` from the store and the statistic
-          #     over them is a t-statistic, which §7 keeps at full precision.
+          #   runner/outcome.rs 5 -> 8 -> 15 -- the three Newey-West
+          #     accumulators added with the overlap correction, then the payoff
+          #     terms. `cross_a`, `cross_b` and `cross_c` are weighted
+          #     cross-products of forward MOVES; `win_sum` and `loss_sum` are
+          #     those moves accumulated by side so `payoff_bp` can divide one by
+          #     the other. In every case the moves are read as paisa `i64` from
+          #     the store and only the STATISTIC over them is a float, which is
+          #     exactly the half of §7 that says statistical values keep full
+          #     precision. A ratio of two sums has no paisa representation.
           allow_float='
           crates/api/src/ingest.rs 1
           crates/api/src/server.rs 4
@@ -4376,7 +4401,7 @@ jobs:
           crates/runner/src/grid.rs 4
           crates/runner/src/significance.rs 21
           crates/runner/src/bootstrap.rs 29
-          crates/runner/src/outcome.rs 8
+          crates/runner/src/outcome.rs 15
           crates/runner/src/report.rs 3
           crates/store/src/format.rs 14
           crates/lake/src/bar.rs 9
@@ -5307,6 +5332,12 @@ jobs:
           #     calendar. Two spot instruments and a handful of feeds. It does
           #     not grow with bars, days, instruments or months, which is the
           #     bound rule 6's entries are held to and the one that matters.
+          #   cli/src/lib.rs 2 -> 3 -- the third is the HASH PROBE case this
+          #     rule's preamble names. `closed_by_evidence` collects the closed
+          #     set into a `HashSet` and then filters the ranked top through
+          #     `kept.contains(&scored.mask)`: one probe per candidate, and the
+          #     cost does not move when either side grows. The other two are a
+          #     `const` command table and a `(1..=3650)` range.
           allow_member='
           crates/api/src/assets.rs 1
           crates/api/src/calendar_of.rs 1
@@ -5315,7 +5346,7 @@ jobs:
           crates/api/src/merge.rs 1
           crates/api/src/server.rs 4
           crates/api/src/sweeprun.rs 1
-          crates/cli/src/lib.rs 2
+          crates/cli/src/lib.rs 3
           crates/core/src/vendor.rs 2
           crates/costs/src/day.rs 2
           crates/engine/src/lib.rs 1
