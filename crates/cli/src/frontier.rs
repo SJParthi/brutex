@@ -382,12 +382,22 @@ impl Frontier {
     }
 
     /// Where one run's rows sit, or `None` if it recorded none. **O(1).**
+    ///
+    /// **UNVERIFIED as a measurement.** The bound is argued from the
+    /// shape of the code and no bench in this workspace times it.
+    /// `CLAUDE.md` §3 rule 6: a structural argument is not a
+    /// measurement, however sound it is.
     #[must_use]
     pub fn block(&self, identity: &[u8; 32]) -> Option<Block> {
         self.blocks.get(identity).copied()
     }
 
     /// Whether this run recorded a frontier at all. **O(1).**
+    ///
+    /// **UNVERIFIED as a measurement.** The bound is argued from the
+    /// shape of the code and no bench in this workspace times it.
+    /// `CLAUDE.md` §3 rule 6: a structural argument is not a
+    /// measurement, however sound it is.
     #[must_use]
     pub fn holds(&self, identity: &[u8; 32]) -> bool {
         self.blocks.contains_key(identity)
@@ -438,6 +448,11 @@ impl Frontier {
     ///
     /// Refuses when the file cannot be measured, which is the only way a length
     /// can be unknown.
+    ///
+    /// **UNVERIFIED as a measurement.** The bound is argued from the
+    /// shape of the code and no bench in this workspace times it.
+    /// `CLAUDE.md` §3 rule 6: a structural argument is not a
+    /// measurement, however sound it is.
     pub fn len(&self) -> Result<u64, Refusal> {
         let len = self
             .file
@@ -474,6 +489,11 @@ impl Frontier {
     /// fails, the flush fails, or the unlock fails. A refusal from the unlock
     /// is returned even when the write succeeded: a lock this process still
     /// holds would block every later reader, and that is not a success.
+    ///
+    /// **UNVERIFIED as a measurement.** The bound is argued from the
+    /// shape of the code and no bench in this workspace times it.
+    /// `CLAUDE.md` §3 rule 6: a structural argument is not a
+    /// measurement, however sound it is.
     pub fn append_all(&mut self, rows: &[Row]) -> Result<u64, Refusal> {
         if rows.is_empty() {
             return self.len();
@@ -547,6 +567,11 @@ impl Frontier {
     /// Refuses when `index` is past the end -- naming the count -- when the
     /// shared lock, seek or read fails, or when the row does not match the seal
     /// written with it. A seal mismatch names the row and changes nothing.
+    ///
+    /// **UNVERIFIED as a measurement.** The bound is argued from the
+    /// shape of the code and no bench in this workspace times it.
+    /// `CLAUDE.md` §3 rule 6: a structural argument is not a
+    /// measurement, however sound it is.
     pub fn read(&mut self, index: u64) -> Result<Row, Refusal> {
         let count = self.len()?;
         if index >= count {
@@ -706,6 +731,11 @@ fn hex(identity: &[u8; 32]) -> String {
 /// row and `of_run` reports the damage when the block is read; refusing to open
 /// the whole file over one bad row would take a store with 999 good runs offline
 /// for the thousandth.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 fn index_of(
     file: &mut File,
     len: u64,
@@ -926,6 +956,11 @@ mod tests {
     /// map alone, and the file is not touched. The index must also survive a
     /// reopen, because the process that READS a frontier is rarely the one that
     /// wrote it.
+    ///
+    /// **UNVERIFIED as a measurement.** The bound is argued from the
+    /// shape of the code and no bench in this workspace times it.
+    /// `CLAUDE.md` §3 rule 6: a structural argument is not a
+    /// measurement, however sound it is.
     #[test]
     fn the_block_index_locates_a_run_without_reading_a_row() {
         let dir = root("blocks");

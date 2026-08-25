@@ -4401,7 +4401,7 @@ jobs:
           crates/runner/src/grid.rs 4
           crates/runner/src/significance.rs 21
           crates/runner/src/bootstrap.rs 29
-          crates/runner/src/outcome.rs 15
+          crates/runner/src/outcome.rs 17
           crates/runner/src/report.rs 3
           crates/store/src/format.rs 14
           crates/lake/src/bar.rs 9
@@ -4495,6 +4495,7 @@ jobs:
           crates/api/src/autopilot.rs 1
           crates/api/src/server.rs 1
           crates/api/src/trades.rs 2
+          crates/cli/src/frontier.rs 1
           crates/pull/src/nse.rs 1
           '
 
@@ -4836,6 +4837,7 @@ jobs:
           crates/api/src/bars.rs 2
           crates/api/src/calendar_of.rs 3
           crates/api/src/constituents.rs 2
+          crates/cli/src/frontier.rs 1
           crates/api/src/coverage.rs 1
           crates/api/src/indexmap.rs 1
           crates/api/src/pullrun.rs 1
