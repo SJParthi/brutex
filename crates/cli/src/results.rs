@@ -38,6 +38,11 @@
 //! same inputs give same outputs, so a second run of one identity has nothing
 //! new to say, and letting it overwrite would destroy the first run's timestamp
 //! for no gain.
+//!
+//! **UNVERIFIED as a measurement.** The bound is argued from the
+//! shape of the code and no bench in this workspace times it.
+//! `CLAUDE.md` §3 rule 6: a structural argument is not a
+//! measurement, however sound it is.
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
@@ -107,6 +112,11 @@ const _: () = assert!(HEADER_BYTES as u64 == HEADER);
 /// Not padded to a round number: §4 says a new field is a new file version at
 /// its own stride, so reserved space would be space for a change the format
 /// does not permit.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 pub const STRIDE: u64 = 261;
 
 /// [`STRIDE`] as a `usize`, for the record arrays.
@@ -332,6 +342,11 @@ pub struct Record {
     /// Six `u64` and not a variable list of positions, for the reason the
     /// header gives: a variable record has no stride and therefore no O(1)
     /// address.
+    ///
+    /// **UNVERIFIED as a measurement.** The bound is argued from the
+    /// shape of the code and no bench in this workspace times it.
+    /// `CLAUDE.md` §3 rule 6: a structural argument is not a
+    /// measurement, however sound it is.
     pub mask_words: [u64; 6],
 }
 
@@ -413,6 +428,11 @@ impl Record {
     /// **O(1).** One hash of a FIXED 205 bytes, per record read or written.
     /// Not per bar and not per candidate, so it is not on the path §3 rule 4
     /// governs.
+    ///
+    /// **UNVERIFIED as a measurement.** The bound is argued from the
+    /// shape of the code and no bench in this workspace times it.
+    /// `CLAUDE.md` §3 rule 6: a structural argument is not a
+    /// measurement, however sound it is.
     #[must_use]
     pub fn seal_matches(raw: &[u8; STRIDE_BYTES]) -> bool {
         seal_of(raw) == raw[PAYLOAD_BYTES..STRIDE_BYTES]
@@ -793,6 +813,11 @@ impl Results {
     /// # Errors
     ///
     /// An unreadable file handle.
+    ///
+    /// **UNVERIFIED as a measurement.** The bound is argued from the
+    /// shape of the code and no bench in this workspace times it.
+    /// `CLAUDE.md` §3 rule 6: a structural argument is not a
+    /// measurement, however sound it is.
     pub fn len(&self) -> Result<u64, Refusal> {
         let len = self
             .file
@@ -815,6 +840,11 @@ impl Results {
     }
 
     /// Whether this identity is already recorded. **O(1).**
+    ///
+    /// **UNVERIFIED as a measurement.** The bound is argued from the
+    /// shape of the code and no bench in this workspace times it.
+    /// `CLAUDE.md` §3 rule 6: a structural argument is not a
+    /// measurement, however sound it is.
     #[must_use]
     pub fn holds(&self, identity: &[u8; 32]) -> bool {
         self.seen.contains(identity)
@@ -828,6 +858,11 @@ impl Results {
     /// than overwriting: §3 rule 5 makes a rerun byte-identical, so the second
     /// run has nothing to add, and overwriting would destroy the first one's
     /// timestamp for no gain.
+    ///
+    /// **UNVERIFIED as a measurement.** The bound is argued from the
+    /// shape of the code and no bench in this workspace times it.
+    /// `CLAUDE.md` §3 rule 6: a structural argument is not a
+    /// measurement, however sound it is.
     pub fn append(&mut self, record: &Record) -> Result<u64, Refusal> {
         // AN EXCLUSIVE FILE LOCK, BECAUSE A PROCESS MUTEX GUARDS THE WRONG
         // BOUNDARY.
@@ -992,6 +1027,11 @@ impl Results {
     /// # Errors
     ///
     /// An index past the end, or an unreadable file.
+    ///
+    /// **UNVERIFIED as a measurement.** The bound is argued from the
+    /// shape of the code and no bench in this workspace times it.
+    /// `CLAUDE.md` §3 rule 6: a structural argument is not a
+    /// measurement, however sound it is.
     pub fn read(&mut self, index: u64) -> Result<Record, Refusal> {
         // A SHARED LOCK, BECAUSE THE SEAL WOULD OTHERWISE CRY WOLF.
         //
