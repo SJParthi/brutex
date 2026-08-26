@@ -270,8 +270,17 @@
      that outlives its subject is a request nobody is waiting for.
      ==================================================================== */
 
-  /** The span and threshold the Run control will send. */
-  let ask = $state({ from: '2019-12', to: '2026-08' });
+  /**
+   * The span the Run control will send.
+   *
+   * EMPTY UNTIL THE CENSUS SAYS OTHERWISE. This held `2019-12` and
+   * `2026-08` as literals; the store holds 2016-08 → 2026-08, so the
+   * default threw away 40 of 121 months and every run it produced then
+   * reported `81/81` with no hole. See the catalog block below. A span is
+   * two of the nine terms in a run's identity, so it is seeded from what
+   * is on disk or it is not seeded at all.
+   */
+  let ask = $state({ from: '', to: '' });
   /** @type {{ phase: 'idle'|'starting'|'running'|'done'|'failed', run: any, why: string }} */
   let sweep = $state({ phase: 'idle', run: null, why: '' });
   /** @type {ReturnType<typeof setTimeout> | null} */
@@ -364,8 +373,14 @@
     }
   }
 
-  /** Which instrument a new sweep runs over. Defaults to the newest run's. */
-  let sweepSymbol = $state('NIFTY');
+  /**
+   * Which instrument a new sweep runs over.
+   *
+   * EMPTY UNTIL THE CENSUS SAYS OTHERWISE, and this was `'NIFTY'`. The
+   * store also holds BANKNIFTY at the same 121 months and nine rungs, and
+   * a literal here made it unreachable from this page entirely.
+   */
+  let sweepSymbol = $state('');
 
   // A POLL MUST NOT OUTLIVE THE PAGE. Without this a navigation away leaves a
   // timer firing against a component that is gone.
@@ -469,6 +484,276 @@
     everyFeed || !activeFeed ? allRuns : allRuns.filter((r) => r.feed === activeFeed)
   );
   const hiddenByFeed = $derived(allRuns.length - runs.length);
+
+  /* ====================================================================
+     WHAT THE STORE ACTUALLY HOLDS — the sweep form's only source of truth
+     --------------------------------------------------------------------
+     THE FORM USED TO OPEN ON `NIFTY`, `2019-12` AND `2026-08`, ALL THREE
+     WRITTEN INTO THIS FILE. Measured against the census on 2026-08-26 the
+     store holds **121 months, 2016-08 → 2026-08**, at all nine rungs, for
+     NIFTY *and* BANKNIFTY. The hardcoded span asked for 81 of them.
+
+     So the default silently discarded **40 months — a third of the pulled
+     history** — and every run it produced then reported `81/81` and
+     `span holes: 0`. Both true, and together they read as complete
+     coverage of a window that was cut short by a literal. That is the
+     failure §4 bans wearing a success's clothes: a number that is correct
+     about the wrong question. BANKNIFTY was never reachable at all.
+
+     `loadRungs` below already carries the rule this block applies to the
+     form: *"Discovered, never declared. `store::path::Timeframe::KNOWN`
+     can gain a rung tomorrow; a list written here would be a list the
+     store contradicts."* The same is true of an instrument and of a span.
+
+     COST. One request per feed at load, folded in ONE pass into a map
+     keyed by instrument; every read after that is a map hit. That is
+     `docs/07-o1-architecture.md` layer 12 applied here — D-0042 moved
+     every ordering and filter into a build at load time for exactly this
+     reason. The fold is O(census rows) once, never per keystroke and
+     never per render.
+
+     WHAT THIS PAGE STILL DOES NOT DECIDE: which instruments are legal to
+     sweep. `CLAUDE.md` §1 names the engine surface and `costs::venue`
+     enforces it, but no endpoint enumerates the two symbols — only
+     `/universes.json` says how many there are. So the picker offers what
+     the STORE holds and the SERVER refuses what it will not sweep, with
+     its refusal printed verbatim. A list written here would be a fourth
+     copy of the surface and the first one to go stale.
+     ==================================================================== */
+
+  /**
+   * @typedef {{ name: string, months: number, from: string, to: string }} Rung
+   * @typedef {{ leaf: string, full: string, months: number, from: string, to: string, rungs: Rung[] }} Held
+   */
+
+  /** @type {{ phase: 'idle'|'loading'|'ready'|'failed', why: string, held: Held[] }} */
+  let catalog = $state({ phase: 'idle', why: '', held: [] });
+
+  /**
+   * The engine surface, IN THE SERVER'S OWN WORDS.
+   *
+   * The store holds three spot indices and the engine sweeps two of them —
+   * `CLAUDE.md` §1 makes INDIAVIX reference-only. This page must not be the
+   * fourth copy of that rule. `crates/api/src/coverage.rs` calls
+   * `SpotTarget::Swept` "the engine surface (`CLAUDE.md` §1, two
+   * `(exchange, symbol)` pairs)", so the server can enumerate it — but
+   * `/universes.json` publishes the swept target with `universe: null` and
+   * only a prose `note`, so the two symbols are NOT on the wire as data.
+   *
+   * What is on the wire is that sentence and a `matched` count, and those
+   * are shown verbatim. The page therefore states the surface without
+   * deciding it, and the run route stays the authority that refuses.
+   *
+   * The alternative was to read `/instruments.json` and treat
+   * `universes: ["index","fno"]` as "swept" — it selects exactly NIFTY and
+   * BANKNIFTY today. It is also a DIFFERENT FACT that happens to coincide:
+   * F&O membership is not the engine surface, and a rule that is right by
+   * coincidence is the invention §3 rule 1 forbids.
+   *
+   * @type {{ label: string, note: string, matched: number } | null}
+   */
+  let sweptSurface = $state(null);
+
+  /** Has the operator edited the span themselves? Then never overwrite it. */
+  let spanTouched = $state(false);
+  /** Has the operator picked an instrument themselves? Same rule. */
+  let symbolTouched = $state(false);
+
+  /**
+   * Fold the census into one entry per instrument, with its rungs and its
+   * real month bounds.
+   *
+   * `YYYY-MM` compares correctly as a string, so the bounds need no date
+   * parsing — which is also why a malformed month cannot throw here.
+   *
+   * @param {string} feed
+   */
+  async function loadCatalog(feed) {
+    if (!feed) {
+      catalog = { phase: 'idle', why: '', held: [] };
+      return;
+    }
+    catalog = { phase: 'loading', why: '', held: [] };
+    try {
+      const response = await ask_(`/store.json?feed=${encodeURIComponent(feed)}`, {
+        cache: 'no-store',
+        ms: 30_000
+      });
+      if (!response.ok) {
+        catalog = {
+          phase: 'failed',
+          why:
+            `/store.json answered ${response.status}, so this form cannot say what the store ` +
+            `holds. The span and the instrument are two of the nine terms in a run's identity, ` +
+            `so neither is defaulted — naming a run after a guess is the invention §3 rule 1 forbids.`,
+          held: []
+        };
+        return;
+      }
+      const rows = await response.json();
+      /** @type {Map<string, { leaf: string, full: string, months: Set<string>, from: string, to: string, rungs: Map<string, Rung> }>} */
+      const byLeaf = new Map();
+      for (const row of rows ?? []) {
+        const full = String(row.instrument ?? '');
+        // The census names an instrument `NSE-INDEX-NIFTY`; the ledger and
+        // the run route both name it `NIFTY`. Matching on the LAST segment
+        // is what joins them without this page holding an exchange or a
+        // segment literal — the same join `loadRungs` already makes.
+        const leaf = full.split('-').pop() ?? '';
+        const month = String(row.month ?? '');
+        const rung = String(row.timeframe ?? '');
+        if (!leaf || !month || !rung) continue;
+        let held = byLeaf.get(leaf);
+        if (!held) {
+          held = { leaf, full, months: new Set(), from: month, to: month, rungs: new Map() };
+          byLeaf.set(leaf, held);
+        }
+        held.months.add(month);
+        if (month < held.from) held.from = month;
+        if (month > held.to) held.to = month;
+        let r = held.rungs.get(rung);
+        if (!r) {
+          r = { name: rung, months: 0, from: month, to: month };
+          held.rungs.set(rung, r);
+        }
+        r.months += 1;
+        if (month < r.from) r.from = month;
+        if (month > r.to) r.to = month;
+      }
+      // The surface, best effort and never blocking the catalog: a form that
+      // cannot say which two are swept is worse than one that cannot say it
+      // YET, and neither is a reason to withhold the span.
+      untrack(() => loadSurface(feed));
+      const held = [...byLeaf.values()]
+        .map((h) => ({
+          leaf: h.leaf,
+          full: h.full,
+          months: h.months.size,
+          from: h.from,
+          to: h.to,
+          rungs: [...h.rungs.values()].sort((a, b) => byRung(a.name, b.name))
+        }))
+        // Widest history first — the instrument with the most to sweep is
+        // the one an operator most likely wants, and it is a FACT about the
+        // store rather than an opinion written here.
+        .sort((a, b) => b.months - a.months || a.leaf.localeCompare(b.leaf));
+      catalog = { phase: 'ready', why: '', held };
+    } catch (error) {
+      catalog = {
+        phase: 'failed',
+        why:
+          `The census could not be read: ${error instanceof Error ? error.message : String(error)}. ` +
+          `Nothing is defaulted in its absence.`,
+        held: []
+      };
+    }
+  }
+
+  /**
+   * Read the swept target off `/universes.json` and keep its own words.
+   *
+   * @param {string} feed
+   */
+  async function loadSurface(feed) {
+    try {
+      const response = await ask_(`/universes.json?feed=${encodeURIComponent(feed)}`, {
+        cache: 'no-store',
+        ms: 15_000
+      });
+      if (!response.ok) {
+        sweptSurface = null;
+        return;
+      }
+      const body = await response.json();
+      const target = (body?.targets ?? []).find((t) => t?.target === 'swept');
+      sweptSurface = target
+        ? {
+            label: String(target.label ?? 'Swept'),
+            note: String(target.note ?? ''),
+            matched: Number(target.matched ?? 0)
+          }
+        : null;
+    } catch {
+      // An absent surface costs the SENTENCE and nothing else. The span, the
+      // rungs and the run all still work, and the route still refuses what it
+      // will not sweep.
+      sweptSurface = null;
+    }
+  }
+
+  /** The entry for whatever instrument is selected, or null. O(1) per read. */
+  const heldNow = $derived(catalog.held.find((h) => h.leaf === sweepSymbol) ?? null);
+
+  /** Re-read the census whenever the feed changes. One request per feed. */
+  $effect(() => {
+    const feed = activeFeed;
+    untrack(() => loadCatalog(feed));
+  });
+
+  /**
+   * Seed the form from the store, ONCE, and never over the operator.
+   *
+   * A default that keeps reasserting itself is a control the operator does
+   * not own. `spanTouched` and `symbolTouched` latch on the first edit and
+   * this effect then leaves both alone for the rest of the session.
+   */
+  $effect(() => {
+    if (catalog.phase !== 'ready' || catalog.held.length === 0) return;
+    untrack(() => {
+      if (!symbolTouched && !catalog.held.some((h) => h.leaf === sweepSymbol)) {
+        // THE NEWEST RUN'S INSTRUMENT FIRST, when the store still holds it.
+        // That is what the operator was last looking at, and it beats any
+        // ordering this page could invent. Only when the ledger is empty --
+        // or names something no longer on disk -- does the widest history
+        // win, and that is a fact about the store rather than a preference.
+        const last = allRuns[0]?.underlying ?? '';
+        const seen = catalog.held.find((h) => h.leaf === last);
+        sweepSymbol = seen ? seen.leaf : catalog.held[0].leaf;
+      }
+      const held = catalog.held.find((h) => h.leaf === sweepSymbol);
+      if (held && !spanTouched) {
+        ask.from = held.from;
+        ask.to = held.to;
+      }
+    });
+  });
+
+  /**
+   * The exact `cli` line that would fill an empty ledger with the span this
+   * form is showing. Built, never written — see the empty-state comment.
+   */
+  const sweepCommand = $derived.by(() => {
+    const from = months(ask.from);
+    const to = months(ask.to);
+    if (!activeFeed || !heldNow || !from || !to) return '';
+    return `cli range-all ${activeFeed} ${heldNow.leaf} ${from.year} ${from.month} ${to.year} ${to.month} 500`;
+  });
+
+  /** Put the span back to everything the store holds for this instrument. */
+  function useWholeSpan() {
+    if (!heldNow) return;
+    ask.from = heldNow.from;
+    ask.to = heldNow.to;
+    spanTouched = false;
+  }
+
+  /**
+   * Months the asked-for span covers, inclusive, or null when either end is
+   * malformed. Arithmetic on year·12 + month — no calendar, no library.
+   */
+  const askedMonths = $derived.by(() => {
+    const from = months(ask.from);
+    const to = months(ask.to);
+    if (!from || !to) return null;
+    const n = (to.year * 12 + to.month - (from.year * 12 + from.month)) + 1;
+    return n > 0 ? n : null;
+  });
+
+  /** Is the asked-for span narrower than what the store holds? A FACT. */
+  const spanShortfall = $derived.by(() => {
+    if (!heldNow || askedMonths === null) return 0;
+    return heldNow.months - askedMonths;
+  });
 
   /* ---- the summary ---------------------------------------------------- */
 
@@ -2100,17 +2385,55 @@
   <div class="bt-shell">
   <section class="runbar">
     <span class="runbar-k">New sweep</span>
+    <!-- A PICKER, NOT A FREE-TEXT BOX. The set of instruments is a fact the
+         census already states; typing one lets an operator name something the
+         store does not hold and learn about it from a refusal a minute later.
+         While the census is loading the control says so rather than offering
+         an empty list that looks like "none". -->
     <label class="runf">
       <span>instrument</span>
-      <input class="find sm" bind:value={sweepSymbol} aria-label="Instrument" />
+      {#if catalog.phase === 'ready' && catalog.held.length > 0}
+        <select
+          class="find sm"
+          bind:value={sweepSymbol}
+          onchange={() => {
+            symbolTouched = true;
+            spanTouched = false;
+          }}
+          aria-label="Instrument"
+        >
+          {#each catalog.held as h (h.leaf)}
+            <option value={h.leaf}>{h.leaf}</option>
+          {/each}
+        </select>
+      {:else}
+        <input
+          class="find sm"
+          value={catalog.phase === 'loading' ? 'reading census…' : '—'}
+          disabled
+          aria-label="Instrument"
+        />
+      {/if}
     </label>
     <label class="runf">
       <span>from</span>
-      <input class="find sm" bind:value={ask.from} placeholder="YYYY-MM" aria-label="First month" />
+      <input
+        class="find sm"
+        bind:value={ask.from}
+        oninput={() => (spanTouched = true)}
+        placeholder={heldNow ? heldNow.from : 'YYYY-MM'}
+        aria-label="First month"
+      />
     </label>
     <label class="runf">
       <span>to</span>
-      <input class="find sm" bind:value={ask.to} placeholder="YYYY-MM" aria-label="Last month" />
+      <input
+        class="find sm"
+        bind:value={ask.to}
+        oninput={() => (spanTouched = true)}
+        placeholder={heldNow ? heldNow.to : 'YYYY-MM'}
+        aria-label="Last month"
+      />
     </label>
     <!-- THE SUPPORT CONTROL IS GONE, AND ITS ABSENCE IS THE FEATURE.
 
@@ -2137,13 +2460,28 @@
         !activeFeed ||
         blocked !== null}
     >
-      {#if sweep.phase === 'starting'}Starting…{:else if sweep.phase === 'running'}Sweeping…{:else}Run all nine rungs{/if}
+      <!-- "RUN ALL NINE RUNGS" WAS A COUNT WRITTEN INTO A BUTTON. Nine is
+           what this store happens to hold today; `Timeframe::KNOWN` can gain
+           one tomorrow and the label would then be wrong on a control that
+           starts work. It counts what the census reported for the chosen
+           instrument, and says nothing about a number it does not have. -->
+      {#if sweep.phase === 'starting'}Starting…{:else if sweep.phase === 'running'}Sweeping…{:else if heldNow}Run
+        all {exact(heldNow.rungs.length)}
+        {heldNow.rungs.length === 1 ? 'rung' : 'rungs'}{:else}Run every rung{/if}
     </button>
     <span class="runbar-n">
       {#if blocked}
         this ledger cannot take a result — see the note above the table
       {:else if !activeFeed}
         choose a feed first — a run is stamped with the feed its bars came from
+      {:else if catalog.phase === 'loading'}
+        reading what <b>{activeFeed}</b> holds — the span and the rungs come from the census, not from
+        this page
+      {:else if catalog.phase === 'failed'}
+        {catalog.why}
+      {:else if catalog.held.length === 0}
+        <b>{activeFeed}</b> has no bars on disk, so there is nothing to sweep. Pull a month first —
+        this page never defaults a span it cannot read.
       {:else}
         <!-- STATED, NOT SETTABLE. The threshold is no longer a control, so it
              has to be readable somewhere or it becomes the hidden default that
@@ -2154,6 +2492,75 @@
       {/if}
     </span>
   </section>
+
+  <!-- ================================================================
+       WHAT THE STORE HOLDS FOR THIS INSTRUMENT.
+       The rungs, each with its OWN month count and bounds, because a rung
+       is not obliged to cover the same span as its neighbour — INDIAVIX
+       carries 121 months at `1day` and 119 at every intraday rung, and a
+       row that averaged them would hide the two missing months.
+       ================================================================ -->
+  {#if catalog.phase === 'ready' && heldNow}
+    <section class="coverbar">
+      <div class="coverbar-head">
+        <span class="coverbar-k">On disk</span>
+        <b>{heldNow.leaf}</b>
+        <span class="dim sm">{heldNow.full}</span>
+        <span class="dim sm">{heldNow.from} → {heldNow.to}</span>
+        <span class="pill">{exact(heldNow.months)} months</span>
+        <span class="pill">{exact(heldNow.rungs.length)} rungs</span>
+        {#if spanShortfall > 0}
+          <span class="pill warn">
+            asking for {exact(askedMonths ?? 0)} — {exact(spanShortfall)} fewer than the store holds
+          </span>
+          <button class="linky" onclick={useWholeSpan}>Use the whole span</button>
+        {:else if askedMonths !== null && spanShortfall < 0}
+          <span class="pill warn">
+            asking for {exact(askedMonths)} months — more than the {exact(heldNow.months)} on disk
+          </span>
+        {/if}
+      </div>
+      <ul class="rungs">
+        {#each heldNow.rungs as r (r.name)}
+          <li class="rungchip" class:short={r.months < heldNow.months}>
+            <span class="rungchip-n">{r.name}</span>
+            <span class="rungchip-m">{exact(r.months)}</span>
+            {#if r.months < heldNow.months}
+              <span class="rungchip-w" title="{r.from} → {r.to}">
+                −{exact(heldNow.months - r.months)}
+              </span>
+            {/if}
+          </li>
+        {/each}
+      </ul>
+      <p class="coverbar-note">
+        Every figure in this bar is folded from <code>/store.json</code>, the same census
+        <code>/db</code> reads — one row per instrument, month and rung. Nothing here is a default
+        written into the page.
+        {#if heldNow.rungs.some((r) => r.months < heldNow.months)}
+          A rung marked <b>−n</b> holds fewer months than the instrument does, so a sweep at that
+          rung is a <b>shorter sample</b>, not a corrected one.
+        {/if}
+        <b>Spot indices only</b> for now — futures, options and single stocks may be stored and are
+        never swept.
+      </p>
+      <!-- THE SURFACE, IN THE SERVER'S WORDS AND NOT THIS PAGE'S. The store
+           holds more spot indices than the engine sweeps, and which two are
+           swept is `CLAUDE.md` §1 — enforced by `costs::venue`, stated by
+           `/universes.json`. Printing the server's own sentence means the page
+           can say it without holding a copy that goes stale. -->
+      {#if sweptSurface && sweptSurface.note}
+        <p class="coverbar-note surface">
+          <span class="pill acc">{sweptSurface.label} · {exact(sweptSurface.matched)}</span>
+          {sweptSurface.note}. The store holds
+          <b>{exact(catalog.held.length)}</b>
+          {catalog.held.length === 1 ? 'spot index' : 'spot indices'}, so a run started on one that
+          is not swept is refused by the route and the refusal is printed above — this page does not
+          decide the surface and does not keep its own list of it.
+        </p>
+      {/if}
+    </section>
+  {/if}
 
   {#if blocked}
     <!-- ==============================================================
@@ -2391,7 +2798,23 @@
             <code>cli</code> when a sweep completes, not by this server, so the way to fill it is
             to run one:
           </p>
-          <pre class="cmd">cli range-all zerodha NIFTY 2019 12 2026 8 500</pre>
+          <!-- THE EXAMPLE WAS `cli range-all zerodha NIFTY 2019 12 2026 8 500`,
+               and every argument in it was a literal. A copyable command that
+               names a feed the operator is not on, an instrument the store may
+               not hold and a span 40 months short of what is on disk is worse
+               than no example: it looks authoritative and it is a guess. It is
+               built from the census now, and when the census cannot be read the
+               page says that rather than printing a command it cannot stand
+               behind. -->
+          {#if activeFeed && heldNow && askedMonths !== null}
+            <pre class="cmd">{sweepCommand}</pre>
+          {:else}
+            <p class="inline-note">
+              The command that fills this ledger names a feed, an instrument and a span. This page
+              cannot print one until the census says what is on disk — see the note in the sweep bar
+              above.
+            </p>
+          {/if}
           <p>
             Every run that finishes appends one record here and appears on this page on the next
             read. <b>This is not an error</b> — an empty ledger and an unreadable one are different
@@ -4063,6 +4486,88 @@
   .runbar-n b {
     color: var(--n11);
   }
+
+  /* ---------------- what the store holds ----------------
+     A strip, not a card: it is a CONDITION of the sweep above it, so it
+     shares the shell's hairline rather than floating away from the form
+     it describes. */
+  .coverbar {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    padding: 0.85rem 1rem 0.9rem;
+  }
+  .coverbar-head {
+    display: flex;
+    align-items: baseline;
+    gap: 0.55rem;
+    flex-wrap: wrap;
+  }
+  .coverbar-k {
+    font-size: var(--fs-micro);
+    text-transform: uppercase;
+    letter-spacing: 0.09em;
+    color: var(--n8);
+  }
+  .coverbar-head b {
+    font-size: var(--fs-sm);
+    color: var(--n12);
+  }
+  /* The rung strip. Nine chips read as one measurement when they share a
+     baseline and a width; as nine boxes they read as nine things. */
+  .rungs {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    gap: 0.35rem;
+    flex-wrap: wrap;
+  }
+  .rungchip {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.35rem;
+    padding: 0.22rem 0.5rem;
+    border: 1px solid var(--n6);
+    border-radius: 6px;
+    background: var(--n3);
+  }
+  /* A rung holding fewer months than its instrument is a SHORTER SAMPLE.
+     It takes the warn rail rather than a flash, for the same reason
+     `complete: NO` does: the row is not comparable, and that stays true
+     for as long as it is on screen. */
+  .rungchip.short {
+    border-color: var(--warn);
+    background: var(--warn-soft, transparent);
+  }
+  .rungchip-n {
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    font-weight: var(--w-semi);
+    color: var(--acc);
+  }
+  .rungchip-m {
+    font-family: var(--num);
+    font-size: var(--fs-micro);
+    font-variant-numeric: tabular-nums;
+    color: var(--n11);
+  }
+  .rungchip-w {
+    font-family: var(--num);
+    font-size: var(--fs-micro);
+    font-variant-numeric: tabular-nums;
+    color: var(--warn);
+  }
+  .coverbar-note {
+    margin: 0;
+    font-size: var(--fs-micro);
+    color: var(--n9);
+    max-width: 92ch;
+  }
+  .coverbar-note b {
+    color: var(--n11);
+  }
+
   .runf {
     display: flex;
     flex-direction: column;
