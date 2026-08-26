@@ -1002,7 +1002,38 @@
    * be neither halted nor complete but noise that happens to be the right
    * length.
    */
-  const completeRuns = $derived(runs.filter((r) => !r.halted && trustworthy(r)));
+  /**
+   * Is this run on a timeframe the engine actually sweeps?
+   *
+   * `1day` IS NOT A SIGNAL TIMEFRAME. It is on disk to feed
+   * `indicators::daily` — the pivot ladder, the central pivot range and
+   * **yesterday's high and low**, vocabulary bits 13–18 — so a daily bar
+   * DEFINES the previous session's OHLC for the intraday rungs rather than
+   * being swept itself. `cli::EVERY_RUNG` is the eight `*min` rungs and
+   * `cli::descend` refuses anything else by name.
+   *
+   * The ledger can still HOLD such a run, because `cli::sweep_stored`
+   * takes a rung string and this store has one recorded: NIFTY at `1day`,
+   * 593,599 combinations, **0 trades, ₹0.00**. The page was crowning it
+   * `BEST COMPLETE RUN` — the single most prominent thing on the surface,
+   * naming a zero on a timeframe the engine does not sweep as the answer.
+   *
+   * The row is NOT hidden. §4 bans the fallback that hides a fact, and a
+   * recorded run is a fact. It is excluded from RANKING and from the rung
+   * comparison, exactly as a halted row is, and it says why where it
+   * appears.
+   *
+   * Same `min`-suffix test the catalog uses — a rule about the shape of a
+   * rung rather than a second copy of a private const.
+   *
+   * @param {any} r
+   */
+  const swept = (r) => /min$/.test(String(r?.timeframe ?? ''));
+
+  /** Recorded runs on a timeframe the engine never sweeps. */
+  const offSurfaceRuns = $derived(runs.filter((r) => !swept(r)));
+
+  const completeRuns = $derived(runs.filter((r) => !r.halted && trustworthy(r) && swept(r)));
   const haltedRuns = $derived(runs.filter((r) => r.halted));
   const unsealedRuns = $derived(runs.filter((r) => !trustworthy(r)));
   const holedRuns = $derived(runs.filter((r) => !r.whole_span));
@@ -1107,6 +1138,12 @@
     /** @type {Map<string, any>} */
     const byKey = new Map();
     for (const run of runs) {
+      // "WHICH RUNG CARRIES THE EDGE" IS A QUESTION ABOUT SIGNAL RUNGS.
+      // A `1day` record has no place in that comparison: the engine does
+      // not sweep it, so ranking it against the eight it does sweep would
+      // answer a question nobody asked with a row nobody can act on. It
+      // stays in the ledger below, where it is listed and labelled.
+      if (!swept(run)) continue;
       const key = groupKey(run);
       let g = byKey.get(key);
       if (!g) {
@@ -3180,6 +3217,21 @@
           {holedRuns.length === 0 ? 'every span was whole' : 'a shorter sample, not a corrected one'}
         </span>
       </div>
+      <!-- A COUNT THAT ONLY EXISTS WHEN IT IS NOT ZERO. Every other cell in
+           this strip is a permanent axis of the ledger; a run on a
+           non-signal timeframe is an anomaly, and a permanent `0` beside the
+           others would imply it is a dimension anyone should expect to
+           populate. It appears when the ledger holds one and says what it
+           means, and is absent otherwise. -->
+      {#if offSurfaceRuns.length > 0}
+        <div class="fact warn">
+          <span class="k">Not swept</span>
+          <span class="v">{exact(offSurfaceRuns.length)}</span>
+          <span class="n">
+            on a timeframe the engine never sweeps — listed, never ranked
+          </span>
+        </div>
+      {/if}
     </section>
 
     {#if ledger.partial_tail}
@@ -3542,6 +3594,19 @@
                       <span class="pill seal">NO · seal failed</span>
                     {:else if r.halted}
                       <span class="pill warn">NO · depth {r.depth} partial</span>
+                    {:else if !swept(r)}
+                      <!-- NOT A SIGNAL TIMEFRAME, so `complete` is the wrong
+                           question about it. `1day` feeds
+                           `indicators::daily` — the previous session's OHLC
+                           for the intraday rungs — and the engine sweeps the
+                           eight `*min` rungs only. The row stays, because a
+                           recorded run is a fact and §4 bans hiding one; it
+                           is simply never ranked and never compared. -->
+                      <span
+                        class="pill warn"
+                        title="{r.timeframe} is not a signal timeframe. It is held to define the previous session's OHLC for the intraday rungs (indicators::daily, vocabulary bits 13–18) and cli::EVERY_RUNG sweeps the eight *min rungs only. This row is listed but never ranked."
+                        >not swept · {r.timeframe}</span
+                      >
                     {:else}
                       <span class="pill good">yes · depth {r.depth}</span>
                     {/if}
