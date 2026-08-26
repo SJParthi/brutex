@@ -5037,6 +5037,54 @@ fn validates(raw: Option<&str>) -> bool {
 const UNVALIDATED: &str = "!! NOT VALIDATED -- walk-forward, PBO and the bootstrap did NOT run.\n\
    These are CANDIDATES, not findings. Unset BRUTEX_VALIDATE to price them in full.";
 
+/// Everything outside the `Ladder` that changes what this run records.
+///
+/// # Why it exists
+///
+/// `Params::of(ladder)` covers what the SWEEP did — the threshold and the two
+/// budgets — and nothing about what was done with its output. Four choices decide
+/// that, and none of them reaches a `Ladder`:
+///
+/// | choice | what it moves |
+/// |---|---|
+/// | `MAX_POINTS`, as `rules.max_mae_ppm` | which variants the operator's stop admits |
+/// | the ranking [`runner::rank::Lens`] | which combination is TRADED |
+/// | `BRUTEX_GRID_RUNGS`, via [`grid_rungs`] | how wide the exit grid is |
+/// | `BRUTEX_SCREEN_CAP`, via [`screen_cap`] | how many combinations are priced at all |
+///
+/// Change any one and the recorded `Record` changes. Before this the `RunId` did
+/// not, so two runs with different answers collided — and the ledger, which
+/// refuses a duplicate identity, handed back whichever landed first. That is the
+/// same defect `Params::pair_budget`'s own doc records having been, one layer out.
+///
+/// `validate` is folded in too: an unvalidated screen and a validated one over
+/// the same bars are different computations, and the report says so on its face.
+///
+/// # The ORDER is the contract
+///
+/// `with_policy` hashes the slice in order and folds its length first, so adding
+/// a knob re-keys every run — which is honest: those runs were computed by a
+/// build that could not turn it. Append, never insert.
+fn policy_of(
+    bars: &[indicators::Candle],
+    rules: Rules,
+    lens: runner::rank::Lens,
+    validate: bool,
+) -> [u64; 5] {
+    [
+        // Negative is not expected and is not silently folded to zero: the cast
+        // is saturating so a negative rule still differs from an absent one.
+        u64::try_from(rules.max_mae_ppm).unwrap_or(u64::MAX),
+        match lens {
+            runner::rank::Lens::Detectability => 0,
+            runner::rank::Lens::Payoff => 1,
+        },
+        grid_rungs(bars) as u64,
+        screen_cap() as u64,
+        u64::from(validate),
+    ]
+}
+
 /// One screened combination, priced in full and judged.
 struct Screened<'a> {
     /// The combination this row measured, kept so the chosen variant can be
@@ -7027,7 +7075,7 @@ fn screen_range_inner(
         direction: RunDirection::Undirected,
         instrument: &span.key,
         timeframe: span.timeframe,
-        params: Params::of(ladder),
+        params: Params::of(ladder).with_policy(&policy_of(&span.bars, rules, lens, validate)),
         data_digest: data_digest(&span.bars),
         commit,
         feed: span.vendor.as_str(),
@@ -8381,8 +8429,8 @@ mod tests {
         COMMANDS, MIN_AUDIT_SESSIONS, MISUSED, OK, PROVENANCE, STORED_PROVENANCE, UNVALIDATED,
         USAGE, Vendor, audit_run, audit_run_within, audit_stored, auto, auto_with, direction_of,
         evaluator_from, log_dir_from, nothing_to_trade, parse_min_hits, parse_sessions,
-        parse_vendor, root_from, run, sample_warning, side_of_evidence, sweep, sweep_stored,
-        sweep_with, validates,
+        parse_vendor, policy_of, root_from, run, sample_warning, side_of_evidence, sweep,
+        sweep_stored, sweep_with, validates,
     };
     use super::{
         Consistency, Horizon, consistency_of, evaluator, grid, grid_step_ppm, ladder_for,
@@ -9230,6 +9278,60 @@ mod tests {
         assert!(
             !STORED_PROVENANCE.contains("not a backtest"),
             "the real banner must not carry the generated one's disclaimer"
+        );
+    }
+
+    /// EVERY KNOB THAT MOVES THE ANSWER MOVES THE IDENTITY.
+    ///
+    /// # Two runs with different answers shared one name
+    ///
+    /// `Params::of(ladder)` records the threshold and the two budgets — what the
+    /// SWEEP did — and nothing about what was done with its output.
+    /// `MAX_POINTS`, the ranking lens, the grid width and the screen cap each
+    /// change which combination is TRADED and what P&L is recorded, and none of
+    /// them reaches a `Ladder`. So two runs that computed different answers
+    /// hashed to the same `RunId`, and the results ledger — which refuses a
+    /// duplicate identity — handed back whichever landed first.
+    ///
+    /// This asserts on [`policy_of`], the list `screen_range_inner` folds in, so
+    /// a knob added to the run and forgotten here is a knob this test cannot see.
+    /// The ORDER is the contract: `with_policy` hashes the slice in order, so a
+    /// new choice is APPENDED and never inserted.
+    #[test]
+    fn every_knob_that_moves_the_answer_moves_the_identity() {
+        let bars = runner::synthetic::sessions(2);
+        let base = crate::Rules::elite(points_to_ppm(10), 25);
+        let lens = runner::rank::Lens::Detectability;
+        let start = policy_of(&bars, base, lens, true);
+
+        // ONE KNOB AT A TIME, each against the same baseline.
+        let mut wider = base;
+        wider.max_mae_ppm = base.max_mae_ppm.saturating_add(1);
+        assert_ne!(
+            policy_of(&bars, wider, lens, true),
+            start,
+            "MAX_POINTS decides which variants the operator's stop admits"
+        );
+        assert_ne!(
+            policy_of(&bars, base, runner::rank::Lens::Payoff, true),
+            start,
+            "the lens decides which combination is TRADED"
+        );
+        assert_ne!(
+            policy_of(&bars, base, lens, false),
+            start,
+            "an unvalidated screen is a different computation from a validated one"
+        );
+
+        // AND THE SLICE IS THE WHOLE CONTRACT. A knob appended without being
+        // hashed would leave this length unchanged, and `with_policy` folds the
+        // length first precisely so adding one re-keys.
+        assert_eq!(
+            start.len(),
+            5,
+            "five choices are folded in. If this moved, `policy_of`'s doc table \
+             and the append-never-insert rule both need reading before the number \
+             is changed"
         );
     }
 

@@ -22135,3 +22135,49 @@ trade of the two walks and failed at two bars apart. That is rule 4 working —
 entering a bar earlier exits earlier and frees the next signal sooner, so the
 sequences legitimately diverge. It asserts the first trade, and that on a
 fill-sourced column the entry EQUALS the source.
+
+### D-0294 — four knobs moved the answer and not the identity
+
+**Decision.** `Params` gains `policy`, a digest of every choice outside the
+`Ladder` that changes what a run records. `Params::with_policy(&[u64])` folds the
+caller's list; `crates/cli`'s `policy_of` supplies five values in a fixed order.
+
+**Why.** The three existing fields are read off the `Ladder`, so they cover what
+the SWEEP did and nothing about what was done with its output. Four choices
+decide that, and none reaches a `Ladder`:
+
+| knob | what it moves |
+|---|---|
+| `MAX_POINTS`, as `rules.max_mae_ppm` | which variants the operator's stop admits |
+| the ranking `Lens` | which combination is TRADED |
+| `BRUTEX_GRID_RUNGS` | how wide the exit grid is |
+| `BRUTEX_SCREEN_CAP` | how many combinations are priced at all |
+
+Change any one and the recorded `Record` changes; the `RunId` did not. The
+results ledger refuses a duplicate identity, so two runs with **different
+answers** collided and it returned whichever landed first.
+
+`validate` is the fifth: an unvalidated screen and a validated one over the same
+bars are different computations, and the report says so on its face.
+
+**This is the same defect `pair_budget` was, one layer out.** That field's own doc
+records it: *"An identity two different results can share is not an identity."*
+Both were found by an adversarial audit rather than by a test, and for the same
+reason — nothing compared two runs that differed only in a knob.
+
+**Why a digest and not four fields.** The set will grow. A fifth knob is then a
+change to what the CALLER folds in, not a new stride here.
+
+**Why the hashing is in `runner`.** `crates/cli` does not depend on `blake3` and
+must not start: §5 draws the arrows, and the `Run` literal in
+`screen_range_inner` already carries a note refusing *"the dependency arrow §5
+does not draw"*. The caller passes numbers; `with_policy` folds them.
+
+**The slice length is hashed first**, so a caller that appends a knob defaulting
+to zero still re-keys. That is the honest answer: those runs were computed by a
+build that could not have turned it. Append, never insert.
+
+**Proven both ways.** `every_knob_that_moves_the_answer_moves_the_identity`
+asserts on `policy_of` itself, so a knob added to the run and forgotten there is
+one the test cannot see — and it pins the length at five with the reason.
+Zeroing the term in the preimage fails the roll-call at `policy`.

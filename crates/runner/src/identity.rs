@@ -157,6 +157,32 @@ pub struct Params {
     /// Found by an adversarial audit, not by a test: nothing here compared two
     /// runs that differed only in a budget.
     pub pair_budget: u64,
+    /// Every OTHER choice that changes the recorded answer, as one digest.
+    ///
+    /// # The same defect as `pair_budget`, one layer out
+    ///
+    /// The three fields above are read off the `Ladder`, so they cover what the
+    /// SWEEP did. They cover nothing about what was done with its output — and
+    /// four knobs decide that:
+    ///
+    /// | knob | what it moves |
+    /// |---|---|
+    /// | `MAX_POINTS` | which variants the operator's stop admits |
+    /// | the ranking `Lens` | which combination is TRADED |
+    /// | `BRUTEX_GRID_RUNGS` | how wide the exit grid is |
+    /// | `BRUTEX_SCREEN_CAP` | how many combinations are priced at all |
+    ///
+    /// Change any of them and the recorded `Record` changes. Without this field
+    /// the `RunId` does not, so two runs with **different answers** collide — and
+    /// the ledger, which refuses a duplicate identity, then hands back whichever
+    /// landed first. That is the property §3 rule 3 exists for, and it is exactly
+    /// what `pair_budget`'s own doc above records having been missing before.
+    ///
+    /// A digest rather than four fields because the set will grow: a fifth knob
+    /// is a change to what the CALLER folds in, not a new stride here.
+    /// [`Params::of`] leaves it zero, which is honest for a caller that has no
+    /// such knobs — `sweep` and `auto` genuinely have none.
+    pub policy: u64,
 }
 
 impl Params {
@@ -171,7 +197,46 @@ impl Params {
             min_hits: ladder.min_hits(),
             ceiling: u64::try_from(ladder.ceiling()).unwrap_or(u64::MAX),
             pair_budget: ladder.pair_budget(),
+            // ZERO, and that is a claim rather than a placeholder: this caller
+            // has read a `Ladder` and nothing else, so it knows of no choice
+            // beyond the three above. A caller that HAS one must say so with
+            // `with_policy`, and the compiler cannot make it — which is why the
+            // field is documented as the thing to fold into rather than left to
+            // be discovered.
+            policy: 0,
         }
+    }
+
+    /// Folds the operator-facing choices into the identity.
+    ///
+    /// `choices` is the caller's own list of everything outside the `Ladder`
+    /// that changed the answer, in a FIXED ORDER the caller commits to. What
+    /// each slot means is opaque here on purpose: `runner` does not know what
+    /// `cli` lets an operator turn, and a field per knob would put this struct's
+    /// stride at the mercy of a command-line flag.
+    ///
+    /// # Why the hashing is here and not at the call site
+    ///
+    /// `crates/cli` does not depend on `blake3` and must not start: `CLAUDE.md`
+    /// §5 draws the arrows, and the `Run` literal in `screen_range_inner` already
+    /// carries a note refusing a named path *"the dependency arrow §5 does not
+    /// draw"*. So the caller passes numbers and this folds them.
+    ///
+    /// The length is folded first, so `[1]` and `[1, 0]` differ — a caller that
+    /// adds a knob defaulting to zero still re-keys, which is the honest answer:
+    /// its runs were computed by a build that could not have turned it.
+    #[must_use]
+    pub fn with_policy(mut self, choices: &[u64]) -> Self {
+        let mut hasher = Hasher::new();
+        hasher.update(&(choices.len() as u64).to_le_bytes());
+        for choice in choices {
+            hasher.update(&choice.to_le_bytes());
+        }
+        let digest = hasher.finalize();
+        let mut head = [0_u8; 8];
+        head.copy_from_slice(digest.get(..8).unwrap_or(&[0; 8]));
+        self.policy = u64::from_le_bytes(head);
+        self
     }
 }
 
@@ -383,12 +448,15 @@ pub fn identity(run: &Run<'_>) -> RunId {
     // 4. timeframe
     term(&mut hasher, tag::TIMEFRAME, run.timeframe.as_bytes());
 
-    // 5. params — both knobs, fixed width.
-    let mut params = [0_u8; 24];
+    // 5. params — every knob, fixed width. FOUR now: `policy` carries the
+    //    operator-facing choices the ladder knows nothing about, and its absence
+    //    let two runs with different answers share one identity.
+    let mut params = [0_u8; 32];
     for (slot, value) in params.chunks_exact_mut(8).zip([
         run.params.min_hits,
         run.params.ceiling,
         run.params.pair_budget,
+        run.params.policy,
     ]) {
         slot.copy_from_slice(&value.to_le_bytes());
     }
@@ -663,6 +731,26 @@ mod tests {
         let mut r = run_over(&k, d, m);
         r.params = Params::of(Ladder::with_min_hits(600).with_pair_budget(7));
         assert_ne!(base, identity(&r), "pair_budget");
+        // AND THE SAME DEFECT ONE LAYER OUT. The three fields above are read off
+        // the LADDER, so they cover what the sweep did and nothing about what was
+        // done with its output. `MAX_POINTS`, the ranking lens, the grid width
+        // and the screen cap each change which combination is TRADED and what
+        // P&L is recorded, and none of them reaches a `Ladder`. Two runs with
+        // different answers therefore hashed identically, and the ledger --
+        // which refuses a duplicate identity -- handed back whichever landed
+        // first.
+        let mut r = run_over(&k, d, m);
+        r.params = Params::of(Ladder::with_min_hits(600)).with_policy(&[7]);
+        assert_ne!(base, identity(&r), "policy");
+        // AND IT IS THE VALUE THAT SEPARATES THEM, not merely its presence.
+        let mut other = run_over(&k, d, m);
+        other.params = Params::of(Ladder::with_min_hits(600)).with_policy(&[8]);
+        assert_ne!(
+            identity(&r),
+            identity(&other),
+            "two different policies must give two different identities, or the \
+             digest is being folded in without being read"
+        );
 
         // 6. data_digest
         assert_ne!(base, identity(&run_over(&k, [0_u8; 32], m)), "data_digest");
