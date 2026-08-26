@@ -22304,3 +22304,68 @@ table, and which of those two an operator wants is not a choice this code may
 make for them. `api::backtest`'s `VERSION` is also still a hand-kept copy of
 `cli::results::VERSION` with no `const` assertion pinning it — `STRIDE_BYTES`
 has one and this does not, because `cli::results::VERSION` is not `pub`.
+
+### D-0297 — an unstamped build swept nine rungs to discover it could not record
+
+**Decision.** `POST /backtest/run` refuses immediately, with **503**, when the
+binary carries no commit stamp. The check runs before the slot is claimed.
+`/backtest.json` serves `commit_stamped` beside `appendable`, so the page can
+pre-empt it. `run` is split into `run` and `run_with(site, body, stamp)`.
+
+**Why.** §3 rule 3 puts `commit` in every run's identity, and
+`cli::commit_stamp` resolves `option_env!("BRUTEX_COMMIT")` at **compile time**
+— a runtime read would stamp a result with a commit whose source never produced
+it. `None` is refused rather than filled in. All correct.
+
+**What was wrong is where the gate sits.** It is inside `audit_range`, so a
+browser sweep claimed the slot, spawned its thread, loaded nine spans and
+refused nine times for a fact decided when the binary was compiled.
+
+**Measured, by running the command this route calls:**
+
+```
+$ cargo run --release -q -p cli -- range-all zerodha NIFTY 2026 8 2026 8 200000
+refused: every one of the 8 rungs refused. Nothing was read and no row was
+recorded.
+  first reason: this build carries no commit stamp, so §3 rule 3's run identity
+  cannot be recorded and the audit will not run.
+```
+
+**This is the state a default server runs in.** `.claude/launch.json` starts the
+application with `cargo run --release -p api -- serve` and **sets no
+environment**, so the shipped run configuration produces a binary that refuses
+every sweep the browser can start. Nothing in the workspace said so; §2 forbids
+a `build.rs` that invokes an external process, so `git rev-parse` cannot be
+automated here and the stamp is deliberately an explicit act by whoever builds.
+
+**503 and not 400.** The body is perfect and nothing is in flight. This SERVER
+cannot record a run in the state it was built in, and 503 is the code that says
+the fix is on this side. `Busy` keeps 409.
+
+**Before the slot.** An unstamped build refuses every run it could ever start,
+so claiming the slot first would answer 409 `Busy` to a second press while the
+first was busy failing for a reason no wait can fix.
+
+**Why `run_with` takes the stamp.** `cargo test` is an unstamped build —
+`crates/runner`'s own doc records that this is why `run_ranked` once shipped
+with zero coverage. A handler reading `commit_stamp()` directly takes the
+unstamped arm in every test forever, which does not merely leave the stamped arm
+uncovered: it makes `Busy` **unreachable**, because a press that never claims
+the slot cannot make the next press a conflict, and `crate::emitted` proves that
+site by driving exactly that sequence. The same shape as `root_from` beside
+`store_root`.
+
+**Two facts on the wire, not one flag.** `appendable` is about the FILE,
+`commit_stamped` about the BINARY. A ledger can be perfectly appendable and
+every sweep still refuse. The fixes differ — one is a `mv`, the other a rebuild
+and a restart — and an operator told only "you cannot record" would not know
+which to apply.
+
+**Three refusal bodies collapsed into `refused`.** The shape is a contract with
+the page, which reads `accepted` and `refusal` and nothing else. Three copies of
+a contract drift one at a time.
+
+**Emit-site accounting moved with it.** `ROWS` 20 → 21 and `lib_emit_sites`
+37 → 38, driven in `crate::emitted` rather than added to the unreachable list:
+an unstamped build is exactly what `cargo test` is, so the row costs nothing to
+reach.

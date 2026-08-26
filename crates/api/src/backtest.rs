@@ -882,6 +882,22 @@ impl Ledger {
             r#","appendable":{}"#,
             self.version == VERSION && self.refusal.is_none()
         );
+        // THE SECOND THING A RUN NEEDS, AND IT IS A FACT ABOUT THE BINARY.
+        //
+        // `appendable` is about the FILE. This is about the BUILD: §3 rule 3
+        // puts `commit` in every run's identity, `cli::commit_stamp` resolves
+        // `option_env!("BRUTEX_COMMIT")` at COMPILE time, and `cli` refuses
+        // every recorded run when it is `None`. A ledger can be perfectly
+        // appendable and every sweep still refuse.
+        //
+        // Two facts and not one derived flag, because the fixes are different
+        // and an operator told only "you cannot record" would not know which to
+        // apply — one is `mv`, the other is a rebuild and a restart.
+        let _ = write!(
+            out,
+            r#","commit_stamped":{}"#,
+            cli::commit_stamp().is_some()
+        );
         // WHETHER THE MASK IS A FIELD OR AN ABSENCE, said once for the ledger
         // rather than guessed per row. A version-2 file has no mask at all, so
         // `mask_words` on every run below it is six zeroes this crate wrote and
@@ -2141,6 +2157,31 @@ mod tests {
             broken.to_json().contains(r#""appendable":false"#),
             "{}",
             broken.to_json()
+        );
+    }
+
+    #[test]
+    fn the_payload_says_whether_this_build_may_record_at_all() {
+        // TWO FACTS, NOT ONE FLAG. `appendable` is about the FILE; this is about
+        // the BINARY. §3 rule 3 puts `commit` in every run's identity and
+        // `cli::commit_stamp` resolves it at COMPILE time, so a perfectly
+        // appendable ledger and a sweep that refuses every rung is an ordinary
+        // combination -- and the two fixes are different, one a `mv` and one a
+        // rebuild.
+        let current = over(file(VERSION, &[record(1, false, 10)]), 10);
+        let json = current.to_json();
+        assert!(json.contains(r#""appendable":true"#), "{json}");
+
+        // `cargo test` IS AN UNSTAMPED BUILD, which is what makes this arm the
+        // one the suite can see -- `crates/runner`'s own doc records that this
+        // is why `run_ranked` once shipped with zero coverage. The assertion is
+        // written against `commit_stamp` rather than against a literal so a
+        // stamped test run does not fail it.
+        let expected = format!(r#""commit_stamped":{}"#, cli::commit_stamp().is_some());
+        assert!(
+            json.contains(&expected),
+            "the payload must agree with the binary it was built from: \
+             wanted {expected} in {json}"
         );
     }
 

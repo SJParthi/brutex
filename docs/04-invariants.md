@@ -2705,3 +2705,27 @@ of `cli::results::VERSION`. `STRIDE_BYTES` has a `const` assertion tying it to
 `cli`'s (BT-01a, added after that constant drifted twice); this one has none,
 because `cli::results::VERSION` is not `pub`. If `cli` bumps to version 4,
 `appendable` reports against a stale 3 until someone notices.
+
+## A run that cannot be stamped is refused before the slot — D-0297
+
+`cli` already refuses to record a run from an unstamped build, correctly: §3
+rule 3 puts `commit` in every run's identity and `option_env!` resolves at
+compile time, so it cannot be filled in later. These rows are about the gate
+sitting one layer too deep — inside `audit_range`, past the slot, past nine span
+loads.
+
+| ID | Invariant | Proof | ✓ |
+|---|---|---|---|
+| SW-11 | **An unstamped build refuses before a single bar is read, and the sentence names the variable.** Measured by running the command this route calls: `cli range-all zerodha NIFTY 2026 8 2026 8 200000` refused all eight rungs on exactly this cause, and the answer never depended on one bar it read. The refusal says outright that nothing was swept, which is the difference between it and the nine-rung refusal it replaces | `api::sweeprun::an_unstamped_build_refuses_before_a_single_bar_is_read` | ✓ |
+| SW-12 | **It answers 503, never 400 and never 409.** The body is perfect and nothing is in flight; the fix is a rebuild and a restart on the server's side, which is what 503 says. A 400 would send the operator to correct a request that is already correct | `api::sweeprun::an_unstamped_build_is_503_and_never_a_bad_request` | ✓ |
+| SW-13 | **An empty stamp is still a stamp.** `option_env!` yields `Some("")` for `BRUTEX_COMMIT=`, which is a build somebody stamped with nothing. Refusing it here would be this route inventing a rule `cli` does not have — `cli::commit_stamp` is the authority and it tests presence | `api::sweeprun::a_stamped_build_does_not_refuse` | ✓ |
+| SW-14 | **The check runs BEFORE the slot is claimed.** An unstamped build refuses every run it could ever start, so claiming first would answer 409 `Busy` to a second press while the first was busy failing for a reason no wait can fix | `api::emitted` drives the busy row through `run_with(.., Some(stamp))` and the unstamped row through `run_with(.., None)`; both are in the census | ✓ |
+| SW-15 | **`commit_stamped` and `appendable` are two facts, not one flag.** A ledger can be perfectly appendable and every sweep still refuse. The fixes differ — a `mv` against a rebuild and a restart — so an operator told only "you cannot record" would not know which to apply | `api::backtest::the_payload_says_whether_this_build_may_record_at_all` | ✓ |
+| SW-16 | **Every refusal variant carries a sentence.** `why` matches all four; a variant added without an arm does not compile, and one added without a sentence returns an empty string here | `api::sweeprun::every_refusal_variant_carries_its_sentence` | ✓ |
+
+**The state a default server runs in.** `.claude/launch.json` starts the
+application with `cargo run --release -p api -- serve` and sets no environment,
+so the shipped run configuration builds a binary that refuses every sweep the
+browser can start. §2 forbids a `build.rs` that invokes an external process, so
+`git rev-parse` cannot be automated here — the stamp is an explicit act by
+whoever builds, and this is what makes its absence visible instead of costly.

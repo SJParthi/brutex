@@ -199,7 +199,10 @@ struct Case {
 ///
 /// Pinned so that a row deleted rather than fixed fails here instead of quietly
 /// lowering the proportion that is proven.
-const ROWS: usize = 20;
+///
+/// Twenty-one since D-0297 added the commit gate's refusal — the arm every
+/// server built without `BRUTEX_COMMIT` takes on every press.
+const ROWS: usize = 21;
 
 /// How many distinct production emit sites those rows cover.
 ///
@@ -719,13 +722,22 @@ fn cases() -> Vec<Case> {
             drive: {
                 let site = std::sync::Arc::clone(&site);
                 Box::new(move || {
-                    let (status, _headers, body) = block_on(crate::sweeprun::run(
-                        axum::extract::State(std::sync::Arc::clone(&site)),
+                    // A STAMP IS PASSED, BECAUSE `cargo test` HAS NONE.
+                    //
+                    // The commit gate sits before the slot -- an unstamped build
+                    // refuses every run it could start, so letting it claim the
+                    // slot would answer 409 to a second press while the first was
+                    // busy failing for a reason no wait can fix. Under `cargo
+                    // test` that gate fires every time, and a press that never
+                    // claims the slot cannot make the next press a conflict. This
+                    // row would then be proving nothing.
+                    let (status, _headers, body) = crate::sweeprun::run_with(
+                        &site,
                         "{\"feed\":\"zerodha\",\"underlying\":\"NIFTY\",\"from_year\":2024,\
                          \"from_month\":1,\"to_year\":2024,\"to_month\":1,\
-                         \"support_ppm\":47000}"
-                            .to_owned(),
-                    ));
+                         \"support_ppm\":47000}",
+                        Some("0000000000000000000000000000000000000000"),
+                    );
                     assert_eq!(
                         status,
                         axum::http::StatusCode::CONFLICT,
@@ -735,6 +747,36 @@ fn cases() -> Vec<Case> {
                 })
             },
             mine: Box::new(|record| says(record, "why", "already running")),
+        });
+
+        // THE COMMIT GATE'S OWN EVENT. Driven with NO stamp, which is also what
+        // every real `cargo run -p api -- serve` carries unless the operator
+        // exports `BRUTEX_COMMIT` -- so this is the arm a mis-built server takes
+        // on every press, and it must leave a record saying why.
+        cases.push(Case {
+            site: "sweeprun.rs api.sweep a sweep was refused because this build carries no commit stamp",
+            target: "api.sweep",
+            message: "a sweep was refused because this build carries no commit stamp",
+            level: telemetry::Level::Warn,
+            drive: {
+                let site = std::sync::Arc::clone(&site);
+                Box::new(move || {
+                    let (status, _headers, body) = crate::sweeprun::run_with(
+                        &site,
+                        "{\"feed\":\"zerodha\",\"underlying\":\"NIFTY\",\"from_year\":2024,\
+                         \"from_month\":1,\"to_year\":2024,\"to_month\":1}",
+                        None,
+                    );
+                    assert_eq!(
+                        status,
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                        "the fix is on the server's side, which 503 says and 400 \
+                         does not: {body}"
+                    );
+                    assert!(body.contains("\"accepted\":false"), "{body}");
+                })
+            },
+            mine: Box::new(|record| says(record, "why", "BRUTEX_COMMIT")),
         });
     }
     cases
@@ -1218,13 +1260,17 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     /// `pull.fno discovery refused`, the three named before it and the two
     /// named here, which are the sites no test in this binary can drive.
     const UNREACHABLE: usize = 6;
-    // COUNTED FROM THE SOURCE, not declared. A thirty-EIGHTH emit added
+    // COUNTED FROM THE SOURCE, not declared. A thirty-NINTH emit added
     // anywhere under `crates/api/src` fails this test until somebody decides
     // which of the three columns it belongs in, which is the whole point of
     // the accounting.
+    //
+    // 37 -> 38 at D-0297: the commit gate's refusal, driven in the table above
+    // rather than added to the unreachable list, because an unstamped build is
+    // exactly what `cargo test` is and the row costs nothing to reach.
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 37,
+        lib_sites, 38,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"

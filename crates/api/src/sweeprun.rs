@@ -153,6 +153,12 @@ pub enum Refusal {
     Span(String),
     /// A run is already in flight in this process.
     Busy(String),
+    /// This binary carries no commit stamp, so no run may be recorded.
+    ///
+    /// Not the caller's fault and not a bad body — the SERVER cannot do the
+    /// work in the state it was built in, which is what 503 says and 400 does
+    /// not.
+    Unstamped(String),
     //
     // THERE WAS A `Support` VARIANT HERE AND IT IS GONE. It refused a
     // threshold of zero, which makes every combination frequent so the
@@ -171,22 +177,71 @@ impl Refusal {
     #[must_use]
     pub fn why(&self) -> &str {
         match *self {
-            Self::Malformed(ref s) | Self::Span(ref s) | Self::Busy(ref s) => s,
+            Self::Malformed(ref s)
+            | Self::Span(ref s)
+            | Self::Busy(ref s)
+            | Self::Unstamped(ref s) => s,
         }
     }
 
     /// The status this refusal answers with.
     ///
-    /// `Busy` is 409 and the rest are 400: a second press is a CONFLICT with
-    /// work already happening, not a malformed request, and answering it 400
-    /// would tell the operator to fix a body that is perfectly good.
+    /// `Busy` is 409, `Unstamped` is 503 and the rest are 400. A second press
+    /// is a CONFLICT with work already happening, not a malformed request, and
+    /// answering it 400 would tell the operator to fix a body that is perfectly
+    /// good. An unstamped build is neither: the body is fine and nothing is in
+    /// flight — this SERVER cannot record a run in the state it was built in,
+    /// and 503 is the code that says the fix is on this side.
     #[must_use]
     pub const fn status(&self) -> axum::http::StatusCode {
         match *self {
             Self::Busy(_) => axum::http::StatusCode::CONFLICT,
+            Self::Unstamped(_) => axum::http::StatusCode::SERVICE_UNAVAILABLE,
             _ => axum::http::StatusCode::BAD_REQUEST,
         }
     }
+}
+
+/// The refusal an unstamped build owes the operator, before any bar is read.
+///
+/// # The cost of finding out late
+///
+/// `CLAUDE.md` §3 rule 3 puts `commit` in every run's identity, and
+/// `cli::commit_stamp` resolves `option_env!("BRUTEX_COMMIT")` **at compile
+/// time** — a runtime read would stamp a result with a commit whose source
+/// never produced it. `None` means the build was not stamped, and `cli` refuses
+/// every recorded run on that basis. Correctly.
+///
+/// What it does not do is refuse EARLY. The gate sits inside `audit_range`, so
+/// a browser sweep claimed the slot, spawned its thread, loaded nine spans and
+/// refused nine times — once per rung — for a fact that was decided when the
+/// binary was compiled. Measured: `cli audit-range` over 121 months of daily
+/// bars refused on exactly this, and the answer never depended on a single bar
+/// it read.
+///
+/// This is the same shape as D-0296's ledger check, one layer further out: a
+/// condition knowable before the work, answered before the work.
+///
+/// # Why it takes the stamp rather than reading it
+///
+/// `cargo test` is an unstamped build — `crates/runner`'s own doc records that
+/// this is why `run_ranked` shipped with zero coverage. A guard that called
+/// `commit_stamp()` directly would therefore have one arm the suite can never
+/// reach, which is the 100% floor §9 sets. Taking the value makes both arms
+/// ordinary.
+fn stamp_refusal(stamp: Option<&str>) -> Option<Refusal> {
+    if stamp.is_some() {
+        return None;
+    }
+    Some(Refusal::Unstamped(
+        "this server was built without BRUTEX_COMMIT, so no sweep it runs can \
+         be recorded: CLAUDE.md §3 rule 3 makes the commit part of every run's \
+         identity, and it is read at COMPILE time so it cannot be filled in \
+         now. Nothing was swept, because the answer did not depend on any bar. \
+         Rebuild and restart the server with \
+         `BRUTEX_COMMIT=$(git rev-parse HEAD) cargo run --release -p api -- serve`."
+            .to_owned(),
+    ))
 }
 
 /// What one `POST /backtest/run` body asked for.
@@ -482,7 +537,45 @@ pub async fn run(
     axum::extract::State(site): axum::extract::State<crate::server::Loaded>,
     body: String,
 ) -> (axum::http::StatusCode, JsonHeaders, String) {
-    let asked = match asked_from(&body) {
+    run_with(&site, &body, cli::commit_stamp())
+}
+
+/// One refusal, as the answer this route gives.
+///
+/// Three call sites wrote this `format!` identically. Collapsed because the
+/// body shape is a CONTRACT with the page — it reads `accepted` and `refusal`
+/// and nothing else — and three copies of a contract drift one at a time.
+fn refused(why: &Refusal) -> (axum::http::StatusCode, JsonHeaders, String) {
+    (
+        why.status(),
+        json_headers(),
+        format!(
+            r#"{{"accepted":false,"refusal":{}}}"#,
+            crate::render::json_string(why.why())
+        ),
+    )
+}
+
+/// [`run`], with the build's commit stamp passed in.
+///
+/// # Why the split exists, and it is not stylistic
+///
+/// `cargo test` is an UNSTAMPED build — `crates/runner`'s own doc records that
+/// this is why `run_ranked` once shipped with zero coverage — so a handler that
+/// read `cli::commit_stamp()` directly would take the unstamped arm in every
+/// test, forever. That does not merely leave the stamped arm uncovered: it
+/// makes the `Busy` refusal **unreachable**, because a press that never claims
+/// the slot cannot make the next press a conflict, and `crate::emitted` proves
+/// that emit site by driving exactly that sequence.
+///
+/// The same shape as `root_from` beside `store_root`, and for the same reason:
+/// the decision is testable without the process it depends on.
+pub(crate) fn run_with(
+    site: &crate::server::Loaded,
+    body: &str,
+    stamp: Option<&str>,
+) -> (axum::http::StatusCode, JsonHeaders, String) {
+    let asked = match asked_from(body) {
         Ok(asked) => asked,
         Err(why) => {
             let _ = telemetry::emit_if!(
@@ -491,16 +584,24 @@ pub async fn run(
                 "a sweep was refused before it started",
                 "why" => telemetry::Value::Str(why.why()),
             );
-            return (
-                why.status(),
-                json_headers(),
-                format!(
-                    r#"{{"accepted":false,"refusal":{}}}"#,
-                    crate::render::json_string(why.why())
-                ),
-            );
+            return refused(&why);
         }
     };
+
+    // BEFORE THE SLOT, BECAUSE A REFUSAL THAT CANNOT CHANGE MUST NOT OCCUPY IT.
+    //
+    // An unstamped build refuses every run it could ever start, so claiming the
+    // slot first would make this route answer 409 `Busy` to a second press
+    // while the first was busy failing for a reason no wait can fix.
+    if let Some(why) = stamp_refusal(stamp) {
+        let _ = telemetry::emit_if!(
+            telemetry::Level::Warn,
+            "api.sweep",
+            "a sweep was refused because this build carries no commit stamp",
+            "why" => telemetry::Value::Str(why.why()),
+        );
+        return refused(&why);
+    }
 
     // THE SLOT IS CLAIMED UNDER THE LOCK AND THE WORK STARTS OUTSIDE IT.
     // Holding a std mutex across an await is the deadlock this pattern exists
@@ -521,14 +622,7 @@ pub async fn run(
                 "a second sweep was refused while one was in flight",
                 "why" => telemetry::Value::Str(&why),
             );
-            return (
-                Refusal::Busy(String::new()).status(),
-                json_headers(),
-                format!(
-                    r#"{{"accepted":false,"refusal":{}}}"#,
-                    crate::render::json_string(&why)
-                ),
-            );
+            return refused(&Refusal::Busy(why));
         }
         *held = Some(Progress::started(
             &asked.feed,
@@ -559,7 +653,7 @@ pub async fn run(
     // A BLOCKING THREAD, NOT A WORKER. `cli::range_all` is CPU-bound over
     // millions of bars; on a worker it would hold that thread for the whole
     // sweep and every other request sharing it would wait.
-    let held_site = std::sync::Arc::clone(&site);
+    let held_site = std::sync::Arc::clone(site);
     let started = now_micros();
     tokio::task::spawn_blocking(move || {
         let finished = conduct(&asked, started);
@@ -621,7 +715,9 @@ pub async fn run_json(
               that cannot panic cannot fail"
 )]
 mod tests {
-    use super::{Asked, Progress, Refusal, SUPPORT_PPM, asked_from, field, now_micros, settle};
+    use super::{
+        Asked, Progress, Refusal, SUPPORT_PPM, asked_from, field, now_micros, settle, stamp_refusal,
+    };
 
     fn body(feed: &str, span: &str) -> String {
         format!(r#"{{"feed":"{feed}","underlying":"NIFTY",{span}}}"#)
@@ -1077,5 +1173,75 @@ mod tests {
             "this is the field the page reads to decide it failed: {json}"
         );
         assert!(json.contains(r#""in_flight":false"#), "{json}");
+    }
+
+    /* ==================== the commit gate ==================== */
+
+    #[test]
+    fn an_unstamped_build_refuses_before_a_single_bar_is_read() {
+        // MEASURED, by running the command this route calls: `cli audit-range`
+        // over 121 months of daily bars refused with exactly this cause, and the
+        // answer never depended on one bar it read. The gate lives inside
+        // `audit_range`, so a browser sweep claimed the slot, spawned a thread,
+        // loaded nine spans and refused nine times for a fact decided when the
+        // binary was compiled.
+        let why = stamp_refusal(None).expect("an unstamped build must refuse");
+
+        assert!(
+            why.why().contains("BRUTEX_COMMIT"),
+            "the operator cannot act on a refusal that does not name the \
+             variable: {}",
+            why.why()
+        );
+        assert!(
+            why.why().contains("Nothing was swept"),
+            "saying nothing ran is the difference between this and the nine-rung \
+             refusal it replaces: {}",
+            why.why()
+        );
+    }
+
+    #[test]
+    fn a_stamped_build_does_not_refuse() {
+        assert!(stamp_refusal(Some("3b8f5af")).is_none());
+        // AND AN EMPTY STAMP IS STILL A STAMP. `option_env!` yields `Some("")`
+        // for `BRUTEX_COMMIT=`, which is a build someone stamped with nothing.
+        // Refusing it here would be this route inventing a rule `cli` does not
+        // have — `cli::commit_stamp` is the authority and it tests presence.
+        assert!(stamp_refusal(Some("")).is_none());
+    }
+
+    #[test]
+    fn an_unstamped_build_is_503_and_never_a_bad_request() {
+        // 400 WOULD BLAME THE BODY, WHICH IS PERFECT. The fix is on the server's
+        // side -- a rebuild and a restart -- and 503 is the code that says so.
+        let why = stamp_refusal(None).expect("refuses");
+        assert_eq!(
+            why.status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "{}",
+            why.why()
+        );
+        assert_ne!(why.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert_ne!(
+            why.status(),
+            axum::http::StatusCode::CONFLICT,
+            "a second press is not what is wrong"
+        );
+    }
+
+    #[test]
+    fn every_refusal_variant_carries_its_sentence() {
+        // `why` matches on all four; a variant added without an arm would not
+        // compile, and one added to the arm without a sentence would return an
+        // empty string here.
+        for why in [
+            Refusal::Malformed("m".to_owned()),
+            Refusal::Span("s".to_owned()),
+            Refusal::Busy("b".to_owned()),
+            Refusal::Unstamped("u".to_owned()),
+        ] {
+            assert!(!why.why().is_empty(), "{why:?} has no sentence");
+        }
     }
 }
