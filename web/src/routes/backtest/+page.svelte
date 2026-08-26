@@ -619,12 +619,21 @@
   let pickedRungs = $state(new Set());
 
   /**
-   * Toggle one key in a chosen set, and never allow the empty set.
+   * Toggle one key in a chosen set.
    *
-   * A SWEEP OVER NOTHING IS NOT A SWEEP, so the last selected chip does not
-   * turn itself off. That is a refusal the control can make structurally
-   * rather than a validation message it has to raise afterwards — the same
-   * argument §6 makes for a depth parameter that cannot be set wrongly.
+   * THE EMPTY SET IS REACHABLE ON PURPOSE, and this function used to refuse
+   * it — the last selected chip would not turn itself off, on the argument
+   * that a control can refuse structurally rather than by validation.
+   *
+   * That argument was wrong HERE, and the menus made it obvious: `Picker`
+   * ships a **Clear all**, so the same rule turned a labelled control into
+   * one that silently did nothing. A control whose label and behaviour
+   * disagree is the failure §4 bans, and it is worse than the state it was
+   * protecting against — an empty selection is a legal thing to want on the
+   * way to picking something else, and it is visible.
+   *
+   * The refusal moved to the Run control, which is where the operator is
+   * looking when it matters and which can say why.
    *
    * @param {Set<string>} set
    * @param {string} key
@@ -632,12 +641,8 @@
    */
   function toggled(set, key) {
     const next = new Set(set);
-    if (next.has(key)) {
-      if (next.size === 1) return next;
-      next.delete(key);
-    } else {
-      next.add(key);
-    }
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
     return next;
   }
 
@@ -2625,10 +2630,13 @@
           }))}
           selected={pickedSymbols}
           onchange={(next) => {
-            // NEVER THE EMPTY SET. Unticking the last instrument would leave
-            // the form with nothing to sweep and the span with nothing to be
-            // derived from, so the previous choice stands.
-            if (next.size === 0) return;
+            // THE EMPTY SET IS ACCEPTED, AND THE FIRST VERSION REFUSED IT HERE.
+            // `if (next.size === 0) return;` made "Clear all" a control that
+            // silently did nothing while its label said otherwise -- which is
+            // the fallback-that-hides-a-failure §4 bans, and worse than the
+            // state it was avoiding. An empty selection is a legal thing to
+            // want on the way to picking something else. The Run control is
+            // what refuses it, in words, where the operator is looking.
             pickedSymbols = next;
             symbolTouched = true;
             spanTouched = false;
@@ -2662,12 +2670,21 @@
           }))}
           selected={pickedRungs}
           onchange={(next) => {
-            if (next.size === 0) return;
             pickedRungs = next;
           }}
         />
       {:else}
-        <span class="runf-wait">{catalog.phase === 'loading' ? 'reading census…' : '—'}</span>
+        <!-- WHICH TIMEFRAMES EXIST IS A PROPERTY OF THE INSTRUMENT, so with
+             none chosen there is no list to offer. It says that rather than
+             rendering an empty menu, which would read as "this instrument
+             holds nothing". -->
+        <span class="runf-wait">
+          {catalog.phase === 'loading'
+            ? 'reading census…'
+            : pickedSymbols.size === 0
+              ? 'pick an instrument'
+              : '—'}
+        </span>
       {/if}
     </div>
     <!-- TWO MONTH MENUS, NOT TWO TEXT BOXES. `2016-08` typed into a bare input
@@ -2744,7 +2761,9 @@
       disabled={sweep.phase === 'starting' ||
         sweep.phase === 'running' ||
         !activeFeed ||
-        blocked !== null}
+        blocked !== null ||
+        pickedSymbols.size === 0 ||
+        pickedRungs.size === 0}
     >
       <!-- "RUN ALL NINE RUNGS" NAMED A COUNT AND A UNIT, and both were wrong.
            Nine was what the store held; the ENGINE sweeps eight, because
@@ -2765,6 +2784,15 @@
         this page
       {:else if catalog.phase === 'failed'}
         {catalog.why}
+      {:else if pickedSymbols.size === 0}
+        <!-- THE REFUSAL THE MENUS USED TO MAKE SILENTLY. `Clear all` is a real
+             control and it now really clears; this is where that state is
+             named, beside the button it disables. -->
+        <b class="warnish">No instrument selected.</b> Pick at least one — a brute force needs
+        something to run over.
+      {:else if pickedRungs.size === 0}
+        <b class="warnish">No timeframe selected.</b> Pick at least one — every one of them was
+        cleared.
       {:else if catalog.held.length === 0}
         <b>{activeFeed}</b> has no bars on disk, so there is nothing to sweep. Pull a month first —
         this page never defaults a span it cannot read.
