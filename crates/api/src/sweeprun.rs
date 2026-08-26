@@ -40,14 +40,54 @@
 
 use std::fmt::Write as _;
 
-/// What one browser-started sweep is doing.
+/// Which of the two commands a slot is holding.
+///
+/// # Why the page has to be told, rather than inferring it
+///
+/// Both commands write the same [`Progress`] into the same slot, because both
+/// append to the same append-only ledger and two of them finishing together can
+/// interleave two records — the refusal the slot exists to give is the same
+/// refusal for both. But they answer DIFFERENT QUESTIONS, and a page that
+/// rendered the descent's walk under the sweep's heading would be labelling a
+/// hunt for a rare setup as a nine-rung comparison.
+///
+/// `support_ppm` cannot carry it either: a sweep fixes that number and a descent
+/// WALKS it, so the field means "the threshold" in one case and "where the walk
+/// began" in the other. Encoding the difference in a magic value of a numeric
+/// field is the shape `CLAUDE.md` §4 bans.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    /// `cli range-all` — every rung at one fixed support.
+    Sweep,
+    /// `cli elite` with the threshold walked — one rung, support descended.
+    Descent,
+}
+
+impl Kind {
+    /// The word this kind travels to the page as.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Sweep => "sweep",
+            Self::Descent => "descent",
+        }
+    }
+}
+
+/// What one browser-started sweep or descent is doing.
 ///
 /// Held in `Site::sweep` behind a mutex. `finished == None` is the one reading
 /// of "in flight", exactly as [`crate::pullrun::Progress`] uses it, and a
 /// finished run is LEFT in the slot rather than cleared so the page can read
 /// its summary after it ends.
+///
+/// **One slot serves both commands**, because both append to the same
+/// append-only ledger — see [`Kind`] for what that costs the page and how it is
+/// paid.
 #[derive(Clone, Debug)]
 pub struct Progress {
+    /// Which command produced this run.
+    pub kind: Kind,
     /// The feed word the sweep was asked for.
     pub feed: String,
     /// The instrument.
@@ -80,6 +120,12 @@ impl Progress {
         now_micros: i64,
     ) -> Self {
         Self {
+            // THE DEFAULT IS THE COMMAND THAT EXISTED FIRST, and a descent
+            // overrides it through `of_kind`. Eight call sites build a
+            // `Progress` and seven of them mean a sweep; widening the signature
+            // for the eighth would edit seven correct lines to say what they
+            // already say.
+            kind: Kind::Sweep,
             feed: feed.to_owned(),
             underlying: underlying.to_owned(),
             from,
@@ -90,6 +136,13 @@ impl Progress {
             report: None,
             refusal: None,
         }
+    }
+
+    /// The same run, marked as the command that actually produced it.
+    #[must_use]
+    pub const fn of_kind(mut self, kind: Kind) -> Self {
+        self.kind = kind;
+        self
     }
 
     /// Whether this run is still going.
@@ -103,7 +156,11 @@ impl Progress {
     pub fn to_json(&self) -> String {
         let mut out = String::with_capacity(512);
         out.push('{');
-        let _ = write!(out, r#""feed":{}"#, crate::render::json_string(&self.feed));
+        // FIRST, because it decides how every field after it should be read —
+        // `support_ppm` is a fixed threshold on a sweep and the ceiling a walk
+        // STARTED from on a descent.
+        let _ = write!(out, r#""kind":"{}""#, self.kind.word());
+        let _ = write!(out, r#","feed":{}"#, crate::render::json_string(&self.feed));
         let _ = write!(
             out,
             r#","underlying":{}"#,
@@ -255,6 +312,42 @@ pub struct Asked {
     pub from: (u16, u8),
     /// Last month of the span.
     pub to: (u16, u8),
+}
+
+/// What one `POST /backtest/descend` body asked for.
+///
+/// # Three fields the sweep does not take, and why each is a FACT and not a knob
+///
+/// `SUPPORT_PPM`'s doc argues that the operator asks for an instrument and a
+/// span because those are facts about what they want to study, while a support
+/// percentage is a knob on the machine. These three pass that test:
+///
+/// * **`rung`** — a descent walks ONE rung's threshold. Which timeframe you are
+///   hunting on is the question, not a setting.
+/// * **`max_points`** — the widest adverse excursion the operator will accept,
+///   stated the way a stop is spoken. It is their risk, not the machine's.
+/// * **`top`** — how many rows to be shown. A display bound.
+///
+/// **The support is still absent, and that is the whole point of the command.**
+/// `cli::elite_descend` derives its floor from what the statistics can support
+/// and walks down to it, so the number §6 refuses to let anyone type is the one
+/// number this route also never accepts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AskedDescent {
+    /// The feed's directory word.
+    pub feed: String,
+    /// The instrument.
+    pub underlying: String,
+    /// The single rung whose threshold is walked.
+    pub rung: String,
+    /// First month of the span.
+    pub from: (u16, u8),
+    /// Last month of the span.
+    pub to: (u16, u8),
+    /// The stop ceiling, in whole index points.
+    pub max_points: i64,
+    /// How many rows the listing shows.
+    pub top: usize,
 }
 
 /// The support threshold, in parts per million of a rung's own bars.
@@ -413,6 +506,91 @@ pub fn asked_from(body: &str) -> Result<Asked, Refusal> {
     })
 }
 
+/// The eight rungs a descent may walk.
+///
+/// Held here rather than read from `cli`, because `cli::EVERY_RUNG` is private
+/// and making it public to save eight strings would widen that crate's surface
+/// for one caller. `cli::elite_descend_in_points` validates the rung again and
+/// refuses by name, so this list being stale would produce a refusal naming the
+/// eight it accepts — a wrong sentence, never a wrong sweep. The test below
+/// pins it against a refusal from `cli` itself.
+const EVERY_RUNG: [&str; 8] = [
+    "1min", "2min", "3min", "5min", "10min", "15min", "60min", "1day",
+];
+
+/// The descent request body, or the first thing wrong with it.
+///
+/// # Errors
+///
+/// Everything [`asked_from`] refuses, plus a rung that is not one of the eight,
+/// a stop ceiling below one point, and a listing bound of zero.
+pub fn descent_from(body: &str) -> Result<AskedDescent, Refusal> {
+    // THE SPAN AND FEED RULES ARE NOT RESTATED, THEY ARE REUSED. Two parsers
+    // for one span is two places for a month bound to drift, and the overflow
+    // this one already survives -- `{"from_year":18446744073709551615}` calling
+    // `abort()` in a release build -- is exactly the kind that comes back when
+    // a second copy is written from memory.
+    let asked = asked_from(body)?;
+
+    let rung = field(body, "rung")
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            Refusal::Malformed(format!(
+                "a descent walks ONE rung's threshold, so `rung` is required. \
+                 The eight are: {}.",
+                EVERY_RUNG.join(", ")
+            ))
+        })?;
+    if !EVERY_RUNG.contains(&rung.as_str()) {
+        return Err(Refusal::Malformed(format!(
+            "`{rung}` is not a rung this engine sweeps. The eight are: {}.",
+            EVERY_RUNG.join(", ")
+        )));
+    }
+
+    // A CEILING IS A DISTANCE, SO IT IS PARSED AS ONE AND REFUSED AT ZERO.
+    // `cli` converts it against the midpoint of the span's own bars; this side
+    // never sees a ppm, which is the whole reason that entry point exists.
+    let max_points = field(body, "max_points")
+        .and_then(|text| text.parse::<i64>().ok())
+        .ok_or_else(|| {
+            Refusal::Malformed(
+                "`max_points` must be a whole number of index points — the \
+                 widest adverse excursion this run may accept."
+                    .to_owned(),
+            )
+        })?;
+    if max_points <= 0 {
+        return Err(Refusal::Malformed(format!(
+            "`max_points` is {max_points}. A ceiling of zero admits no trade \
+             and a negative one is not a distance."
+        )));
+    }
+
+    let top = field(body, "top")
+        .and_then(|text| text.parse::<usize>().ok())
+        .ok_or_else(|| {
+            Refusal::Malformed("`top` must be a whole number of rows to list.".to_owned())
+        })?;
+    if top == 0 {
+        return Err(Refusal::Malformed(
+            "`top` is 0. A listing of no rows is not a shorter answer, it is \
+             no answer."
+                .to_owned(),
+        ));
+    }
+
+    Ok(AskedDescent {
+        feed: asked.feed,
+        underlying: asked.underlying,
+        rung,
+        from: asked.from,
+        to: asked.to,
+        max_points,
+        top,
+    })
+}
+
 /// The word every `cli` refusal opens with.
 ///
 /// `cli`'s own argv layer decides an exit code with `starts_with("refused: ")`.
@@ -482,6 +660,43 @@ pub fn conduct(asked: &Asked, now_micros: i64) -> Progress {
         asked.from,
         asked.to,
         SUPPORT_PPM,
+    );
+    settle(&mut progress, text, now_micros);
+    progress
+}
+
+/// Runs one descent and records what it produced.
+///
+/// **Blocking on purpose**, exactly as [`conduct`] is, and for the same reason:
+/// this is CPU-bound over the same bars, and more of them — a descent is a full
+/// screen per rung of the support ladder, not one.
+///
+/// `support_ppm` on the returned [`Progress`] is the CEILING the walk began
+/// from, not a threshold the run held. [`Kind::Descent`] is what tells the page
+/// to read it that way.
+#[must_use]
+pub fn conduct_descent(asked: &AskedDescent, now_micros: i64) -> Progress {
+    let mut progress = Progress::started(
+        &asked.feed,
+        &asked.underlying,
+        asked.from,
+        asked.to,
+        SUPPORT_PPM,
+        now_micros,
+    )
+    .of_kind(Kind::Descent);
+    // POINTS, NEVER PPM. `cli::elite_descend_in_points` converts against the
+    // midpoint of the span's own bars; a ppm computed on this side would be a
+    // second answer to a question only the bars can settle, and its own doc
+    // records what that has already cost.
+    let text = cli::elite_descend_in_points(
+        &asked.feed,
+        &asked.underlying,
+        &asked.rung,
+        asked.from,
+        asked.to,
+        asked.max_points,
+        asked.top,
     );
     settle(&mut progress, text, now_micros);
     progress
@@ -682,6 +897,131 @@ pub(crate) fn run_with(
     )
 }
 
+/// `POST /backtest/descend` — walk one rung's support down, and answer at once.
+///
+/// # The command the console could not reach
+///
+/// `cli::elite_descend`'s own doc states the case this closes: *"A run launched
+/// at 20,000 ppm cannot report a once-a-week setup no matter how long it runs
+/// — the setup was pruned in the first level of the ladder, and the report says
+/// nothing about it because nothing counted it."* [`run`] launches at
+/// `SUPPORT_PPM`, which is **200,000** — ten times that figure. So the one
+/// control the browser had could not, by construction, find the rare setup this
+/// engine exists to hunt, and the command that can had **no HTTP route at all**.
+///
+/// # Additive, and deliberately so
+///
+/// [`run`] keeps the nine-rung comparison at one fixed support, which is the
+/// right shape for asking *"which timeframe carries the edge"* — nine rungs are
+/// only comparable on equal terms. This asks the other question, on one rung,
+/// with the threshold walked instead of fixed. Neither replaces the other and
+/// no recorded run changes meaning.
+///
+/// # It shares the slot, because it shares the ledger
+///
+/// A descent appends to the same append-only file, so two of them — or one of
+/// each — finishing together can interleave two records. The slot, the busy
+/// refusal and the commit gate are the same for both, and that is not a
+/// convenience: it is the reason the slot exists.
+pub async fn descend(
+    axum::extract::State(site): axum::extract::State<crate::server::Loaded>,
+    body: String,
+) -> (axum::http::StatusCode, JsonHeaders, String) {
+    descend_with(&site, &body, cli::commit_stamp())
+}
+
+/// [`descend`], with the build's commit stamp passed in.
+///
+/// Split for the reason [`run_with`] gives, and it applies identically here:
+/// `cargo test` is an unstamped build, so a handler reading the stamp itself
+/// would take one arm forever and make the other unreachable.
+pub(crate) fn descend_with(
+    site: &crate::server::Loaded,
+    body: &str,
+    stamp: Option<&str>,
+) -> (axum::http::StatusCode, JsonHeaders, String) {
+    let asked = match descent_from(body) {
+        Ok(asked) => asked,
+        Err(why) => {
+            let _ = telemetry::emit_if!(
+                telemetry::Level::Warn,
+                "api.sweep",
+                "a descent was refused before it started",
+                "why" => telemetry::Value::Str(why.why()),
+            );
+            return refused(&why);
+        }
+    };
+
+    if let Some(why) = stamp_refusal(stamp) {
+        return refused(&why);
+    }
+
+    {
+        let mut held = match site.sweep.lock() {
+            Ok(held) => held,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if held.as_ref().is_some_and(Progress::in_flight) {
+            let why = "a sweep or descent is already running in this process. \
+                       Both append to the same append-only ledger, and two of \
+                       them finishing together can interleave two records, so \
+                       the second press is refused rather than queued."
+                .to_owned();
+            return refused(&Refusal::Busy(why));
+        }
+        *held = Some(
+            Progress::started(
+                &asked.feed,
+                &asked.underlying,
+                asked.from,
+                asked.to,
+                SUPPORT_PPM,
+                now_micros(),
+            )
+            .of_kind(Kind::Descent),
+        );
+    }
+
+    let _ = telemetry::emit_if!(
+        telemetry::Level::Info,
+        "api.sweep",
+        "a descent was accepted from the browser",
+        "feed" => telemetry::Value::Str(&asked.feed),
+        "underlying" => telemetry::Value::Str(&asked.underlying),
+        "rung" => telemetry::Value::Str(&asked.rung),
+        "max_points" => telemetry::Value::Int(asked.max_points),
+    );
+
+    let held_site = std::sync::Arc::clone(site);
+    let started = now_micros();
+    tokio::task::spawn_blocking(move || {
+        let finished = conduct_descent(&asked, started);
+        let mut slot = match held_site.sweep.lock() {
+            Ok(slot) => slot,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let elapsed = now_micros().saturating_sub(started);
+        let _ = telemetry::emit_if!(
+            telemetry::Level::Info,
+            "api.sweep",
+            "a descent finished and its record is in the ledger",
+            "feed" => telemetry::Value::Str(&finished.feed),
+            "underlying" => telemetry::Value::Str(&finished.underlying),
+            "elapsed_micros" => telemetry::Value::Uint(elapsed.max(0).unsigned_abs()),
+        );
+        let mut done = finished;
+        done.finished_micros = Some(now_micros());
+        *slot = Some(done);
+    });
+
+    (
+        axum::http::StatusCode::ACCEPTED,
+        json_headers(),
+        r#"{"accepted":true,"refusal":null}"#.to_owned(),
+    )
+}
+
 /// `GET /backtest/run.json` — what the sweep is doing, for the page to poll.
 ///
 /// **O(1).** One lock take and one struct read. It never consults the store,
@@ -716,7 +1056,8 @@ pub async fn run_json(
 )]
 mod tests {
     use super::{
-        Asked, Progress, Refusal, SUPPORT_PPM, asked_from, field, now_micros, settle, stamp_refusal,
+        Asked, AskedDescent, EVERY_RUNG, Kind, Progress, Refusal, SUPPORT_PPM, asked_from,
+        descent_from, field, now_micros, settle, stamp_refusal,
     };
 
     fn body(feed: &str, span: &str) -> String {
@@ -1228,6 +1569,138 @@ mod tests {
             axum::http::StatusCode::CONFLICT,
             "a second press is not what is wrong"
         );
+    }
+
+    /* ==================== the descent ==================== */
+
+    fn descent_body(extra: &str) -> String {
+        format!(r#"{{"feed":"zerodha","underlying":"NIFTY",{SPAN},{extra}}}"#)
+    }
+
+    #[test]
+    fn a_whole_descent_body_parses_into_the_seven_things_it_needs() {
+        let asked = descent_from(&descent_body(r#""rung":"15min","max_points":20,"top":25"#))
+            .expect("a good body");
+
+        assert_eq!(
+            asked,
+            AskedDescent {
+                feed: "zerodha".to_owned(),
+                underlying: "NIFTY".to_owned(),
+                rung: "15min".to_owned(),
+                from: (2019, 12),
+                to: (2026, 8),
+                max_points: 20,
+                top: 25,
+            }
+        );
+    }
+
+    #[test]
+    fn the_descent_reuses_the_sweeps_span_rules_rather_than_restating_them() {
+        // TWO PARSERS FOR ONE SPAN IS TWO PLACES FOR A BOUND TO DRIFT. The year
+        // that once called `abort()` in a release build must be refused here for
+        // free, because this parser delegates rather than re-deriving.
+        let body = r#"{"feed":"zerodha","underlying":"NIFTY","from_year":18446744073709551615,
+                       "from_month":1,"to_year":2026,"to_month":8,
+                       "rung":"1day","max_points":20,"top":25}"#;
+        assert!(
+            descent_from(body).is_err(),
+            "the span bound must still bite"
+        );
+
+        // And a backwards span, which is the sweep's other span refusal.
+        let backwards = r#"{"feed":"zerodha","underlying":"NIFTY","from_year":2026,
+                            "from_month":8,"to_year":2019,"to_month":12,
+                            "rung":"1day","max_points":20,"top":25}"#;
+        assert!(descent_from(backwards).is_err());
+    }
+
+    #[test]
+    fn a_descent_without_a_rung_is_refused_and_names_the_eight() {
+        let why = descent_from(&descent_body(r#""max_points":20,"top":25"#))
+            .expect_err("a descent walks ONE rung, so it must be told which");
+
+        assert!(why.why().contains("rung"), "{}", why.why());
+        for rung in ["1min", "15min", "1day"] {
+            assert!(
+                why.why().contains(rung),
+                "the operator cannot pick from a list they are not shown: {}",
+                why.why()
+            );
+        }
+    }
+
+    #[test]
+    fn a_rung_this_engine_does_not_sweep_is_refused_by_name() {
+        let why = descent_from(&descent_body(r#""rung":"4h","max_points":20,"top":25"#))
+            .expect_err("4h is not one of the eight");
+        assert!(why.why().contains("4h"), "{}", why.why());
+        assert_eq!(why.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn a_stop_ceiling_of_zero_or_less_is_refused_rather_than_swept_with() {
+        for points in ["0", "-20"] {
+            let why = descent_from(&descent_body(&format!(
+                r#""rung":"1day","max_points":{points},"top":25"#
+            )))
+            .expect_err("a ceiling of zero admits no trade");
+            assert!(why.why().contains("max_points"), "{}", why.why());
+        }
+        // AND A MISSING ONE IS NOT ZERO. Defaulting it would pick the
+        // operator's risk for them, silently.
+        assert!(descent_from(&descent_body(r#""rung":"1day","top":25"#)).is_err());
+    }
+
+    #[test]
+    fn a_listing_bound_of_zero_is_refused() {
+        let why = descent_from(&descent_body(r#""rung":"1day","max_points":20,"top":0"#))
+            .expect_err("zero rows is no answer");
+        assert!(why.why().contains("top"), "{}", why.why());
+        assert!(descent_from(&descent_body(r#""rung":"1day","max_points":20"#)).is_err());
+    }
+
+    #[test]
+    fn the_rung_list_here_agrees_with_the_one_cli_refuses_by() {
+        // THIS LIST IS A COPY AND COPIES DRIFT. `cli` holds the authority and
+        // its refusal names the eight it accepts, so asking it about a rung it
+        // cannot sweep gives the real list to compare against -- and it refuses
+        // BEFORE opening any span, so this costs no bars.
+        let refusal = cli::elite_descend_in_points(
+            "zerodha",
+            "NIFTY",
+            "no-such-rung",
+            (2026, 8),
+            (2026, 8),
+            20,
+            25,
+        );
+        for rung in EVERY_RUNG {
+            assert!(
+                refusal.contains(rung),
+                "`{rung}` is offered here and `cli` does not list it: {refusal}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_descent_and_a_sweep_are_told_apart_on_the_wire() {
+        // `support_ppm` MEANS DIFFERENT THINGS IN THE TWO, so the page cannot
+        // read it correctly without being told which it is looking at.
+        let sweep = Progress::started("zerodha", "NIFTY", (2019, 12), (2026, 8), SUPPORT_PPM, 1);
+        assert_eq!(sweep.kind, Kind::Sweep, "the default is the older command");
+        assert!(sweep.to_json().contains(r#""kind":"sweep""#));
+
+        let descent = sweep.clone().of_kind(Kind::Descent);
+        assert_eq!(descent.kind, Kind::Descent);
+        assert!(descent.to_json().contains(r#""kind":"descent""#));
+        assert_ne!(Kind::Sweep.word(), Kind::Descent.word());
+
+        // AND NOTHING ELSE MOVED. `of_kind` changes one field.
+        assert_eq!(descent.feed, sweep.feed);
+        assert_eq!(descent.support_ppm, sweep.support_ppm);
+        assert_eq!(descent.started_micros, sweep.started_micros);
     }
 
     #[test]

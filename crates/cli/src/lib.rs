@@ -6319,6 +6319,13 @@ const TRADES_SEARCH_CEILING: u64 = 5_000;
 /// expensive end is only reached if the cheap end had nothing — which is the
 /// incremental shape [`descend`]'s own doc argues for and the reason a single
 /// run at the floor is the wrong thing to do.
+///
+/// # Callers outside this crate should take [`elite_descend_in_points`]
+///
+/// This function takes `max_mae_ppm`, and parts per million of WHAT is the
+/// question a caller cannot answer without opening the span. See that function
+/// for the conversion and for why getting it wrong has already cost this
+/// workspace a shipped stop ladder that was a hundred times too tight.
 #[must_use]
 pub fn elite_descend(
     vendor_word: &str,
@@ -6478,6 +6485,105 @@ pub fn elite_descend(
 
     exhausted_walk(&mut out, floor, last_page.as_deref());
     out
+}
+
+/// [`elite_descend`], with the stop ceiling stated in INDEX POINTS.
+///
+/// # The entry point a caller outside this crate should take
+///
+/// `elite_descend` takes `max_mae_ppm`, and *parts per million of what* is a
+/// question nobody can answer without opening the span. An operator states a
+/// stop the way a stop is spoken — *"twenty points"* — and the conversion is a
+/// fact about the bars, not about the request.
+///
+/// # Why this is not one line in the caller
+///
+/// Because the obvious one line is wrong, and it has already been wrong here.
+/// [`points_to_ppm`] converts against `NIFTY_REFERENCE`, a stated
+/// approximation, and [`reference_price`]'s own doc records what that costs:
+/// *"800 ppm on a 52,000 index is FORTY-ONE points"* — so a NIFTY constant
+/// applied to BANKNIFTY does not approximate the operator's rule, **it doubles
+/// it**, and understates it in the other direction on a 2020 low. The same
+/// family of unit slip once shipped a stop ladder at 2..10 ppm where the
+/// documentation said 200..1000: every stop the exit grid priced sat inside the
+/// entry bar's own range.
+///
+/// So the reference is READ OFF THE BARS THAT WILL BE SWEPT — the midpoint of
+/// the loaded span's range, in paisa — and a caller in another crate cannot get
+/// it wrong because it never sees a ppm at all.
+///
+/// # Cost
+///
+/// One extra span load, and it is deliberate. `elite_descend` opens the span
+/// again for its own bar count; sharing one load means threading the bars
+/// through a signature that four other callers already use, which is a change
+/// to their contract for the benefit of this one. A span load is bounded by the
+/// months asked for and happens once per RUN, never per bar — `CLAUDE.md` §3
+/// rule 4 bounds per-operation cost, and this is not an operation on the sweep
+/// path.
+///
+/// # Errors
+///
+/// Returns the same `refused: …` text every other command in this module
+/// returns, so a caller tests one prefix. The store root, the feed word, the
+/// rung and the span are all validated here before anything is swept.
+#[must_use]
+pub fn elite_descend_in_points(
+    vendor_word: &str,
+    underlying: &str,
+    rung: &str,
+    from: (u16, u8),
+    to: (u16, u8),
+    max_points: i64,
+    top: usize,
+) -> String {
+    if max_points <= 0 {
+        return "refused: the stop ceiling must be a whole number of index \
+                points, 1 or more. A ceiling of zero admits no trade and a \
+                negative one is not a distance.\n"
+            .to_owned();
+    }
+    if top == 0 {
+        return "refused: TOP must be 1 or more — a listing of zero rows is not \
+                a shorter answer, it is no answer.\n"
+            .to_owned();
+    }
+    let root = match store_root() {
+        Ok(root) => root,
+        Err(why) => return format!("refused: {why}\n"),
+    };
+    let vendor = match parse_vendor(vendor_word) {
+        Ok(vendor) => vendor,
+        Err(why) => return format!("refused: {why}\n"),
+    };
+    // THE REFERENCE IS READ FROM THE BARS THIS RUN WILL SWEEP, not from a
+    // constant and not from a different rung. A span that refuses here refuses
+    // before any threshold is derived, which is the honest order: a floor
+    // computed from bars nobody could load is arithmetic on an assumption.
+    let span = match stored::load_span(&root, vendor, underlying, rung, from, to) {
+        Ok(span) => span,
+        Err(why) => {
+            return format!(
+                "refused before the ceiling could be converted, so no descent \
+                 began: {why}\n"
+            );
+        }
+    };
+    let reference = reference_price(&span.bars);
+    // Dropped before the walk: `elite_descend` loads its own, and holding a
+    // second copy of a multi-year span for the length of a descent is memory
+    // nothing reads. Same reasoning `elite_descend` states for its own seed.
+    drop(span);
+    let max_mae_ppm = points_to_ppm_at(max_points, reference);
+    if max_mae_ppm <= 0 {
+        return format!(
+            "refused: {max_points} point(s) against a reference of {reference} \
+             paisa converts to {max_mae_ppm} ppm, which admits nothing. This is \
+             the unit slip `reference_price` documents, caught rather than \
+             swept with.\n"
+        );
+    }
+    elite_descend(vendor_word, underlying, rung, from, to, max_mae_ppm, top)
 }
 
 /// The tail of a descent that admitted nothing at any support.

@@ -11814,6 +11814,16 @@ pub fn router_serving(site: Loaded, assets: std::sync::Arc<assets::Assets>) -> a
         // check — neither of which is a person deciding to sweep seven years
         // of bars. See `crate::sweeprun`.
         .route("/backtest/run", axum::routing::post(crate::sweeprun::run))
+        // THE COMMAND THE CONSOLE COULD NOT REACH UNTIL D-0299. `/backtest/run`
+        // sweeps every rung at a FIXED 200,000 ppm; `cli::elite_descend`'s own
+        // doc records that a run launched at a twentieth of that "cannot report
+        // a once-a-week setup no matter how long it runs". This walks the
+        // threshold down instead of fixing it, on one rung. Both share the slot
+        // because both append to the same ledger.
+        .route(
+            "/backtest/descend",
+            axum::routing::post(crate::sweeprun::descend),
+        )
         .route(
             "/backtest/run.json",
             axum::routing::get(crate::sweeprun::run_json),

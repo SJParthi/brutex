@@ -202,7 +202,7 @@ struct Case {
 ///
 /// Twenty-one since D-0297 added the commit gate's refusal — the arm every
 /// server built without `BRUTEX_COMMIT` takes on every press.
-const ROWS: usize = 21;
+const ROWS: usize = 22;
 
 /// How many distinct production emit sites those rows cover.
 ///
@@ -778,6 +778,37 @@ fn cases() -> Vec<Case> {
             },
             mine: Box::new(|record| says(record, "why", "BRUTEX_COMMIT")),
         });
+
+        // THE DESCENT'S REFUSAL, driven for the same reason the sweep's is: it
+        // returns before anything is spawned and touches no store, no ledger
+        // and no bar file. A body with no `rung` is the shortest way in -- a
+        // descent walks ONE rung's threshold, so the field is required and the
+        // refusal names the eight it accepts.
+        cases.push(Case {
+            site: "sweeprun.rs api.sweep a descent was refused before it started",
+            target: "api.sweep",
+            message: "a descent was refused before it started",
+            level: telemetry::Level::Warn,
+            drive: {
+                let site = std::sync::Arc::clone(&site);
+                Box::new(move || {
+                    let (status, _headers, body) = crate::sweeprun::descend_with(
+                        &site,
+                        "{\"feed\":\"zerodha\",\"underlying\":\"NIFTY\",\"from_year\":2024,\
+                         \"from_month\":1,\"to_year\":2024,\"to_month\":1,\
+                         \"max_points\":20,\"top\":25}",
+                        Some("0000000000000000000000000000000000000000"),
+                    );
+                    assert_eq!(
+                        status,
+                        axum::http::StatusCode::BAD_REQUEST,
+                        "a missing rung is a malformed body, not a conflict: {body}"
+                    );
+                    assert!(body.contains("\"accepted\":false"), "{body}");
+                })
+            },
+            mine: Box::new(|record| says(record, "why", "rung")),
+        });
     }
     cases
 }
@@ -1256,10 +1287,23 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     /// is what said so: `lib_sites` went 33 to 37 while every column stood
     /// still.
     ///
+    /// AND TWO MORE AGAIN, added with `/backtest/descend` (D-0299):
+    /// `a descent was accepted from the browser` and `a descent finished and
+    /// its record is in the ledger`. Same shape and same reason as the sweep's
+    /// pair directly above — the first is emitted after the blocking thread is
+    /// spawned and the second from inside it, so driving either puts a real
+    /// support WALK over stored bars on this suite's critical path. A descent is
+    /// a full screen per rung of the support ladder, so it is the more expensive
+    /// of the two, not the less.
+    ///
+    /// **The descent's refusal is NOT here**, for the same reason the sweep's is
+    /// not: it returns before anything is spawned and touches no store, no
+    /// ledger and no bar file, so it is proven in the table above.
+    ///
     /// The rows of the table above, every one of them struck through — plus
-    /// `pull.fno discovery refused`, the three named before it and the two
+    /// `pull.fno discovery refused`, the three named before it and the four
     /// named here, which are the sites no test in this binary can drive.
-    const UNREACHABLE: usize = 6;
+    const UNREACHABLE: usize = 8;
     // COUNTED FROM THE SOURCE, not declared. A thirty-NINTH emit added
     // anywhere under `crates/api/src` fails this test until somebody decides
     // which of the three columns it belongs in, which is the whole point of
@@ -1270,7 +1314,7 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // exactly what `cargo test` is and the row costs nothing to reach.
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 38,
+        lib_sites, 41,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"

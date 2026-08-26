@@ -22433,3 +22433,76 @@ Recorded in `docs/06-limits.md` §92 rather than half-done here.
 **What this does NOT change.** No bench was added, no ceiling moved, no code
 touched. Every figure quoted is from a run, not from a document — which is the
 rule the first pass broke and the reason there were three.
+
+### D-0299 — the browser could cause one of fourteen commands
+
+**Decision.** `POST /backtest/descend` drives `cli::elite_descend` on one rung,
+sharing `/backtest/run`'s slot, commit gate and busy refusal. `cli` gains
+`elite_descend_in_points`, which converts a stop ceiling stated in INDEX POINTS
+against the midpoint of the span's own bars. `Progress` gains `Kind`, so the
+page can tell a walk from a sweep.
+
+**Why.** Measured on the argv table against the router: `cli` exposes fourteen
+commands — `audit`, `audit-range`, `auto`, `auto-stored`, `descend`, `elite`,
+`range-all`, `results`, `screen`, `sweep`, `sweep-all`, `sweep-stored`, `top`,
+`verify` — and the browser could CAUSE exactly one of them, `range-all`, through
+`/backtest/run`. A console that can start one command in fourteen is not a
+console over this engine.
+
+**Which one to add first was not a preference.** `/backtest/run` sweeps at
+`SUPPORT_PPM = 200_000`. `cli::elite_descend`'s own doc: *"A run launched at
+20,000 ppm cannot report a once-a-week setup no matter how long it runs — the
+setup was pruned in the first level of the ladder, and the report says nothing
+about it because nothing counted it."* The browser's only control launches at
+**ten times** the figure that doc calls already too high, so it could not, by
+construction, find the rare setup the engine exists to hunt. The command that
+can had no route.
+
+**Additive, never a replacement.** `run` keeps the nine-rung comparison at one
+fixed support — nine rungs are only comparable on equal terms, which is the
+whole reason that constant is a constant. `descend` asks the other question on
+one rung. No recorded run changes meaning and no run identity moves.
+
+**`elite_descend_in_points`, and why the obvious one-liner was refused.** The
+route needed a `max_mae_ppm` and *parts per million of what* cannot be answered
+without opening the span. `cli::points_to_ppm` converts against
+`NIFTY_REFERENCE`, and `reference_price`'s own doc records the cost: *"800 ppm
+on a 52,000 index is FORTY-ONE points"* — a NIFTY constant applied to BANKNIFTY
+does not approximate the operator's rule, it **doubles** it. The same family of
+slip once shipped a stop ladder at 2..10 ppm where the documentation said
+200..1000, putting every priced stop inside the entry bar's own range. So the
+new entry point reads the reference off the bars that will be swept, and
+`api` never sees a ppm at all.
+
+**One extra span load, deliberately.** `elite_descend` opens the span again for
+its own bar count. Sharing one load means threading bars through a signature
+four other callers already use. A span load is bounded by the months asked for
+and happens once per RUN, never per bar — §3 rule 4 bounds per-OPERATION cost
+and this is not on the sweep path.
+
+**Three fields the sweep does not take, and each is a fact rather than a knob.**
+`rung` — which timeframe you are hunting on is the question. `max_points` — the
+operator's own risk, stated the way a stop is spoken. `top` — a display bound.
+**The support is still absent**, which is the point: the descent derives its
+floor from what the statistics can support and walks down to it, so the one
+number §6 refuses to let anyone type is the one number this route also never
+accepts.
+
+**`Kind` rather than a magic value.** Both commands write one `Progress` into
+one slot, because both append to one ledger and the busy refusal is the same
+refusal. But `support_ppm` is a fixed threshold on a sweep and the ceiling a
+walk BEGAN from on a descent, so encoding the difference in that number would be
+§4's hidden fallback. `Kind::Sweep` is the default and `of_kind` overrides it,
+which leaves seven correct call sites untouched.
+
+**Emit-site accounting.** `lib_emit_sites` 38 → 41, `ROWS` 21 → 22,
+`UNREACHABLE` 6 → 8. The descent's refusal is DRIVEN — it returns before
+anything is spawned and touches no store — while its `accepted` and `finished`
+pair join the sweep's, for the reason already recorded there: driving them puts
+a real walk over stored bars on the suite's critical path, and a descent is a
+full screen per rung of the ladder, so it is the more expensive of the two.
+
+**Still not reachable from the browser**, and named rather than left to be
+discovered: `audit`, `audit-range`, `auto`, `auto-stored`, `screen`, `sweep`,
+`sweep-all`, `sweep-stored`, `top`. Nine of fourteen. `results` and `verify` are
+readable through `/backtest.json` and `/verify.json` but cannot be caused.

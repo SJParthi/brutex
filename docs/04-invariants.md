@@ -2732,3 +2732,23 @@ so the shipped run configuration builds a binary that refuses every sweep the
 browser can start. §2 forbids a `build.rs` that invokes an external process, so
 `git rev-parse` cannot be automated here — the stamp is an explicit act by
 whoever builds, and this is what makes its absence visible instead of costly.
+
+## The descent is reachable from the console, and shares the sweep's guards — D-0299
+
+`cli` exposes fourteen commands and the browser could cause exactly one of them.
+These rows are about the second, and about the conversion that made it safe to
+add.
+
+| ID | Invariant | Proof | ✓ |
+|---|---|---|---|
+| SW-17 | **A descent walks ONE rung and says which eight it accepts when told none.** A descent's whole shape is one rung's threshold walked, so the field is required rather than defaulted — a default would pick the timeframe the operator is hunting on, silently | `api::sweeprun::a_descent_without_a_rung_is_refused_and_names_the_eight`; `a_rung_this_engine_does_not_sweep_is_refused_by_name` | ✓ |
+| SW-18 | **The rung list this route offers is the list `cli` accepts.** It is a copy, and copies drift; `cli` holds the authority and its refusal names the eight, so the test asks `cli` about a rung it cannot sweep and compares. That refusal comes before any span is opened, so the check costs no bars | `api::sweeprun::the_rung_list_here_agrees_with_the_one_cli_refuses_by` | ✓ |
+| SW-19 | **The stop ceiling crosses the wire in POINTS and is converted against the span's own bars.** `api` never computes or sees a ppm. `cli::points_to_ppm` converts against `NIFTY_REFERENCE`, and `reference_price`'s doc records that 800 ppm is twenty points on NIFTY and **forty-one on BANKNIFTY** — the same family of slip that once shipped a stop ladder at 2..10 ppm against a documented 200..1000, putting every priced stop inside the entry bar's own range. `elite_descend_in_points` reads the midpoint of the loaded span and converts there | `api::sweeprun::a_stop_ceiling_of_zero_or_less_is_refused_rather_than_swept_with`; `cli::elite_descend_in_points`'s own refusal when the conversion yields nothing | ✓ |
+| SW-20 | **A descent and a sweep are told apart on the wire.** `support_ppm` is a fixed threshold on one and the ceiling a walk BEGAN from on the other, so a page reading it without knowing which would mislabel a hunt for a rare setup as a nine-rung comparison. `Kind` carries it; `Kind::Sweep` is the default so seven existing call sites are untouched | `api::sweeprun::a_descent_and_a_sweep_are_told_apart_on_the_wire` | ✓ |
+| SW-21 | **The descent reuses the sweep's span rules rather than restating them.** Two parsers for one span is two places for a bound to drift — and the bound that matters here is the one that called `abort()` in a release build on `{"from_year":18446744073709551615}`. `descent_from` delegates to `asked_from`, so it inherits that refusal for free | `api::sweeprun::the_descent_reuses_the_sweeps_span_rules_rather_than_restating_them` | ✓ |
+| SW-22 | **One slot, one ledger, one busy refusal.** A descent appends to the same append-only file as a sweep, so two finishing together can interleave two records. Both take the same slot, the same commit gate and the same 409 | `api::emitted` drives the descent's refusal; the busy path is shared code with SW-14's row | ✓ |
+
+**Nine of fourteen are still terminal-only**, named here rather than left to be
+found: `audit`, `audit-range`, `auto`, `auto-stored`, `screen`, `sweep`,
+`sweep-all`, `sweep-stored`, `top`. `results` and `verify` are READABLE through
+`/backtest.json` and `/verify.json` and cannot be caused.
