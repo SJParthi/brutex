@@ -5488,3 +5488,51 @@ background job measured in hours, not an interactive command, and the finer
 rungs are worse: 1-minute signals over the same span are ~630,000 bars against
 ~10,000 at 60-minute, so the column build alone is roughly 60x. That is stated
 here rather than discovered by a reader watching a terminal.
+
+## 92. Gate 13 does not guard the three JavaScript binding crates, and cannot from where it stands — D-0298
+
+`wasm-bindgen`, `js-sys` and `web-sys` are **in `Cargo.lock`** and are **not on
+gate 13's banned list**. Seven entries: the five-strong `wasm-bindgen` family,
+plus one each for `js-sys` and `web-sys`.
+
+**Nothing builds them.** Measured 2026-08-26:
+
+```
+$ cargo tree --workspace -i wasm-bindgen
+warning: nothing to print.
+```
+
+They reach the lock only through target-gated paths — `lake → parquet → chrono
+→ iana-time-zone`, and `api → pull → reqwest` — and resolve for no target this
+workspace compiles. `CLAUDE.md` §2's *"no vendored binding to another language"*
+holds for everything that is built.
+
+### Why they are not simply added to the banned list
+
+The lock layer greps `Cargo.lock` for the family, so banning them would find
+those seven and require `allow_lock='Cargo.lock 7'` **on the same day**. That is
+precisely the *"allowlisted into silence"* failure gate 13's own next bullet
+names, and it would not guard the real risk either: a crate newly reaching
+`js-sys` **on the host** does not change a lock count that already reads one.
+A ban here would buy a green tick and no protection.
+
+### What would guard it, and what that costs
+
+The honest check is over the BUILD GRAPH, not the lock file:
+`cargo tree --workspace -i wasm-bindgen` must print nothing. That cannot run
+where gate 13 lives — the `language-purity` job installs **no toolchain**, on
+purpose, and its own header calls it *"no toolchain, no cache, seconds"*.
+
+Gaining the check means moving gate 13 into a toolchain job or adding a
+fourteenth. Either is a real decision about CI shape and cost, not a tidy-up, so
+it is **recorded here and not taken**. Until it is, this class is unguarded by
+name and the guarantee rests on the measurement above rather than on a gate.
+
+### What was actually wrong, and is now fixed
+
+The gate justified the omission with a crate that does not exist: *"wasm32 is a
+COMPILATION TARGET of this workspace — crates/web, gate 7."* `crates/web` was
+removed by D-0052/D-0053, `CLAUDE.md` §5 records that gate 7 skips permanently,
+and no manifest targets wasm32. Three crate manifests — `core`, `telemetry` and
+`vocab` — repeated the same deleted claim in their own comments. All four are
+corrected, and each keeps the false sentence quoted beside the correction.

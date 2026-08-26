@@ -1678,10 +1678,45 @@ jobs:
           #
           # DELIBERATELY ABSENT, so the holes are written down rather than
           # discovered later:
-          #   * `wasmtime` and every other WebAssembly runtime. wasm32 is a
-          #     COMPILATION TARGET of this workspace — crates/web, gate 7 — not
-          #     a foreign language. Banning the runtime for the target we ship
-          #     to would be nonsense.
+          #   * `wasmtime` and every other WebAssembly runtime, AND the three
+          #     JavaScript binding crates `wasm-bindgen`, `js-sys`, `web-sys`.
+          #
+          #     THIS ENTRY USED TO GIVE A REASON THAT IS NO LONGER TRUE, and it
+          #     is corrected rather than quietly reworded. It read: "wasm32 is a
+          #     COMPILATION TARGET of this workspace -- crates/web, gate 7 --
+          #     not a foreign language. Banning the runtime for the target we
+          #     ship to would be nonsense."
+          #
+          #     `crates/web` DOES NOT EXIST. D-0052 and D-0053 moved the front
+          #     end to `web/` as an unrestricted directory, CLAUDE.md section 5
+          #     says so outright and adds that GATE 7 SKIPS PERMANENTLY, and no
+          #     manifest in this workspace names a wasm32 target. "The target we
+          #     ship to" named nothing at all. D-0298.
+          #
+          #     What is true, measured 2026-08-26: the three binding crates ARE
+          #     in `Cargo.lock` -- seven entries across the `wasm-bindgen`
+          #     family plus `js-sys` and `web-sys` -- and NONE is in the build
+          #     graph. They arrive only through target-gated paths,
+          #     `lake -> parquet -> chrono -> iana-time-zone` and
+          #     `api -> pull -> reqwest`. The proof is one command:
+          #
+          #       cargo tree --workspace -i wasm-bindgen   # "nothing to print"
+          #
+          #     SO THIS CLASS IS UNGUARDED BY NAME, DELIBERATELY, and here is
+          #     why banning it would be worse than not: the lock layer greps
+          #     `Cargo.lock` for the family, would find those seven, and would
+          #     need `allow_lock='Cargo.lock 7'` on the same day. That is the
+          #     "allowlisted into silence" failure the next bullet names, and it
+          #     would not even guard the real risk -- a crate newly reaching
+          #     `js-sys` on the host does not change a lock count that already
+          #     reads one.
+          #
+          #     The check that WOULD guard it is `cargo tree -i` over the host
+          #     graph, and it cannot live here: this job installs no toolchain
+          #     on purpose -- "no toolchain, no cache, seconds". Moving gate 13
+          #     into a toolchain job to gain it is a real option and a decision,
+          #     not a tidy-up, so it is recorded in `docs/06-limits.md` instead
+          #     of taken here.
           #   * `cpp`, `inline-c`, `tcl`. The family rule below also matches
           #     `<name>-*` and `<name>_*`, and `cpp_demangle` is a pure-Rust
           #     symbol demangler that arrives transitively behind `addr2line`.

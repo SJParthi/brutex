@@ -22369,3 +22369,67 @@ a contract drift one at a time.
 37 → 38, driven in `crate::emitted` rather than added to the unreachable list:
 an unstamped build is exactly what `cargo test` is, so the row costs nothing to
 reach.
+
+### D-0298 — four claims about the O(1) guarantee that were true when written
+
+**Decision.** Six corrections, no code change. `C-03` now names the bench that
+closed its own admitted gap. `C-V-05`, `C-I-05` and `C-I-06` are declared for
+the first time. Gate 13's justification for omitting the WebAssembly class, and
+three crate manifests repeating the same claim, are corrected against the tree.
+`docs/06-limits.md` §92 records what is still unguarded.
+
+**Why.** An operator asked three times whether the O(1) guarantee holds. Passes
+one and two both answered too shallowly, and the third found why: **gate 8 only
+runs the benches that exist**, so a passing gate says nothing about a claim
+nobody benched. Reconciling the ids the bench PRINTS against the ids
+`docs/04-invariants.md` DECLARES is the check nothing performs.
+
+Measured 2026-08-26, `cargo bench --workspace --locked`, exit 0: **231 verdict
+rows** — 174 ratio, 57 marginal-and-floor — plus 18 rows printed as `(context)`
+and carrying no verdict by design. **72 distinct ids measured against 77
+declared.** Every one of the eight differences resolved:
+
+| ids | resolution |
+|---|---|
+| `C-18` `C-22` `C-23` `C-24` `C-25` | retired by D-0045, renumbered onto the ids the bench prints |
+| `C-04` | superseded and measured as `C-E-11`, 0.633×–0.811× |
+| `C-02` | measured as `C-E-02`, with the row's own caveat that it is false of `Column::support` |
+| `C-03` | **the row was stale, not the bench** — see below |
+| `C-I-05` `C-I-06` `C-V-05` | the opposite case: measured, passing, declared nowhere |
+
+**`C-03` had already been closed and said otherwise.** Its row read *"the
+seen-set size is not varied independently … does NOT isolate a probe's own
+cost"*. `engine::bench::duplicate_rejection_costs_the_same_however_much_is_seen`
+quotes **that exact sentence** in its own doc as the reason it exists, and
+varies the seen set and nothing else — 1,000 / 10,000 / 100,000 masks, one
+`contains` each, hit and miss. Measured today: HIT 1.105× and 1.111×, MISS
+0.998× and 1.106×. The gap was filled and the document was never told. This is
+`CLAUDE.md` §10's caveat in a third form: not "the file wins", not "the gated
+document wins", but **the thing that RUNS wins**.
+
+**`C-I-05` named its own absence and nothing acted on it.** Its doc carries the
+heading *"JUDGED HERE, PINNED NOWHERE ELSE"* and states that its verdict feeds
+gate 8's exit status while `docs/04-invariants.md` lists `C-I-01`…`C-I-04` and
+no fifth, and that it reports outside the helper gate 14 counts — so deleting
+the assertion would delete the measurement with every static check still green.
+
+**Gate 13 justified a hole with a deleted crate.** *"wasm32 is a COMPILATION
+TARGET of this workspace — crates/web, gate 7."* There is no `crates/web`
+(D-0052, D-0053), §5 records that gate 7 skips permanently, and no manifest
+targets wasm32. `crates/core`, `crates/telemetry` and `crates/vocab` each
+repeated the claim. All four corrected, each keeping the false sentence quoted
+beside the correction so the drift is legible rather than erased.
+
+**The three binding crates are NOT added to the banned list, and that is the
+decision.** They are in the lock (seven entries) and in no build graph —
+`cargo tree --workspace -i wasm-bindgen` prints *"nothing to print"*. Banning
+them would require `allow_lock='Cargo.lock 7'` immediately, which is the
+"allowlisted into silence" failure gate 13's own comment names, and would not
+guard the real risk: a crate newly reaching `js-sys` on the host does not move a
+count that already reads one. The check that would guard it is over the build
+graph and needs a toolchain the `language-purity` job deliberately lacks.
+Recorded in `docs/06-limits.md` §92 rather than half-done here.
+
+**What this does NOT change.** No bench was added, no ceiling moved, no code
+touched. Every figure quoted is from a run, not from a document — which is the
+rule the first pass broke and the reason there were three.

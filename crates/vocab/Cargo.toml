@@ -17,8 +17,15 @@ description  = "The condition bit table and the 384-bit mask. Bit index is ident
 #
 # The consequence worth stating is the one §5 cares about: with no arrow at
 # all this crate cannot participate in a cycle, and it compiles anywhere
-# `core` does -- including `wasm32-unknown-unknown`, where the browser will
-# eventually need the same bit names the sweep used.
+# `core` does.
+#
+# A CLAUSE PREDICTING A wasm32 BROWSER BUILD HAS BEEN REMOVED. It read:
+# "-- including `wasm32-unknown-unknown`, where the browser will eventually
+# need the same bit names the sweep used." Nothing in this workspace targets
+# wasm32, and the browser does not need those names through a wasm build: it
+# reads them from `/vocab.json`, which CLAUDE.md section 5 records as the whole
+# reason `api` depends on `vocab` at all -- one vocabulary served once, rather
+# than a second copy that goes stale the first time a bit is appended. D-0298.
 #
 # Adding a line below requires an entry in docs/05-decisions.md naming what it
 # replaces.

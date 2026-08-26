@@ -14,9 +14,16 @@ description  = "The structured event stream: one NDJSON line per event, rotated,
 # meant to depend on this crate. A logger that sits at the bottom of the graph
 # can be taken by `core`, by `store`, by `pull`, by `api` and by a future
 # `engine` without any of them acquiring a transitive graph they did not ask
-# for -- and `crates/web` compiles to wasm32 with `core` as its only arrow, so
-# a dependency added here would be one forced on a target that has no
-# filesystem.
+# for.
+#
+# A CLAUSE NAMING A DELETED CRATE HAS BEEN REMOVED FROM HERE. It read: "and
+# `crates/web` compiles to wasm32 with `core` as its only arrow, so a
+# dependency added here would be one forced on a target that has no
+# filesystem." There is no `crates/web` -- D-0052 and D-0053 moved the front
+# end to `web/`, CLAUDE.md section 5 records that gate 7 skips permanently, and
+# nothing in this workspace targets wasm32. The reason above stands on its own
+# without it: a crate five others depend on must not drag a graph behind it.
+# D-0298.
 #
 # It is also why serde/serde_json are absent even though the workspace already
 # pins them and `crates/pull` already takes serde_json. See the "Why the JSON
