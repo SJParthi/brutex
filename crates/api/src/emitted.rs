@@ -202,7 +202,7 @@ struct Case {
 ///
 /// Twenty-one since D-0297 added the commit gate's refusal — the arm every
 /// server built without `BRUTEX_COMMIT` takes on every press.
-const ROWS: usize = 22;
+const ROWS: usize = 23;
 
 /// How many distinct production emit sites those rows cover.
 ///
@@ -809,6 +809,38 @@ fn cases() -> Vec<Case> {
             },
             mine: Box::new(|record| says(record, "why", "rung")),
         });
+
+        // THE DISPATCHER'S REFUSAL. Driven with a GENERATED-bar command, which
+        // is the arm worth pinning: `sweep`, `audit` and `auto` exist and are
+        // deliberately not served here, and the refusal must say WHY rather
+        // than treat them as typos. A rule nobody can read is a gap.
+        cases.push(Case {
+            site: "sweeprun.rs api.sweep an engine command was refused before it started",
+            target: "api.sweep",
+            message: "an engine command was refused before it started",
+            level: telemetry::Level::Warn,
+            drive: {
+                let site = std::sync::Arc::clone(&site);
+                Box::new(move || {
+                    let (status, _headers, body) = crate::sweeprun::command_with(
+                        &site,
+                        "{\"command\":\"sweep\",\"feed\":\"zerodha\",\"underlying\":\"NIFTY\",\
+                         \"from_year\":2024,\"from_month\":1,\"to_year\":2024,\"to_month\":1}",
+                        Some("0000000000000000000000000000000000000000"),
+                    );
+                    assert_eq!(
+                        status,
+                        axum::http::StatusCode::BAD_REQUEST,
+                        "a generated-bar command is refused with a reason: {body}"
+                    );
+                    assert!(
+                        body.contains("GENERATED"),
+                        "the reason must be given: {body}"
+                    );
+                })
+            },
+            mine: Box::new(|record| says(record, "why", "GENERATED")),
+        });
     }
     cases
 }
@@ -1300,10 +1332,23 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     /// not: it returns before anything is spawned and touches no store, no
     /// ledger and no bar file, so it is proven in the table above.
     ///
+    /// AND TWO MORE AGAIN, added with `/engine/command` (D-0300):
+    /// `an engine command was accepted from the browser` and `an engine command
+    /// finished`. Third instance of one shape: the first is emitted after the
+    /// blocking thread is spawned and the second from inside it, so driving
+    /// either runs one of five real commands over stored bars — `audit-range`
+    /// among them, which is a full validated audit with walk-forward, PBO and
+    /// the bootstrap behind it.
+    ///
+    /// **The dispatcher's refusal is NOT here**, and it is the one worth
+    /// driving: it is what tells an operator asking for `sweep`, `audit` or
+    /// `auto` that those run over GENERATED bars and are deliberately not
+    /// served, rather than that they were mistyped.
+    ///
     /// The rows of the table above, every one of them struck through — plus
-    /// `pull.fno discovery refused`, the three named before it and the four
+    /// `pull.fno discovery refused`, the three named before it and the six
     /// named here, which are the sites no test in this binary can drive.
-    const UNREACHABLE: usize = 8;
+    const UNREACHABLE: usize = 10;
     // COUNTED FROM THE SOURCE, not declared. A thirty-NINTH emit added
     // anywhere under `crates/api/src` fails this test until somebody decides
     // which of the three columns it belongs in, which is the whole point of
@@ -1314,7 +1359,7 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // exactly what `cargo test` is and the row costs nothing to reach.
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 41,
+        lib_sites, 44,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"

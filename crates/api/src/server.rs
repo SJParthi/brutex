@@ -11824,6 +11824,20 @@ pub fn router_serving(site: Loaded, assets: std::sync::Arc<assets::Assets>) -> a
             "/backtest/descend",
             axum::routing::post(crate::sweeprun::descend),
         )
+        // EVERY OTHER STORED-DATA COMMAND, on one route. Five commands share
+        // the refusal sequence, the commit gate and the ONE slot that
+        // serialises writers to the append-only ledger; five handlers would be
+        // five copies of that discipline. `crate::sweeprun::Command` records
+        // why `sweep`, `audit` and `auto` are deliberately not among them.
+        .route(
+            "/engine/command",
+            axum::routing::post(crate::sweeprun::command),
+        )
+        // A READ, so no slot and no commit gate: it records nothing.
+        .route(
+            "/engine/top.json",
+            axum::routing::get(crate::sweeprun::top_json),
+        )
         .route(
             "/backtest/run.json",
             axum::routing::get(crate::sweeprun::run_json),

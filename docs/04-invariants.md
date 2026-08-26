@@ -2752,3 +2752,20 @@ add.
 found: `audit`, `audit-range`, `auto`, `auto-stored`, `screen`, `sweep`,
 `sweep-all`, `sweep-stored`, `top`. `results` and `verify` are READABLE through
 `/backtest.json` and `/verify.json` and cannot be caused.
+
+## Every engine command the browser may cause, and the three it may not — D-0300
+
+Fourteen command names. Seven causable, three readable, three refused by name
+with the reason. These rows are about the closed dispatch and the one rule that
+keeps a generated figure off a console that reads the store.
+
+| ID | Invariant | Proof | ✓ |
+|---|---|---|---|
+| SW-23 | **The dispatch is CLOSED and an unknown word is refused listing what is accepted.** A fixed enum parsed from a fixed word list, not a generic run-anything surface | `api::sweeprun::an_unknown_command_is_refused_and_lists_what_is_accepted`; `every_stored_command_parses_into_its_own_shape` | ✓ |
+| SW-24 | **`sweep`, `audit` and `auto` are refused with the PROVENANCE reason, never as typos.** They run over generated bars; §5 makes the banner the only thing separating a real sweep from an invented one, and a synthetic-data command on a store-reading console invites a generated figure being read as a measured one. The refusal names the rule and the stored equivalents, because an operator who typed `sweep` typed it correctly | `api::sweeprun::a_generated_bar_command_is_refused_with_the_reason_not_as_a_typo`; driven end to end in `api::emitted` | ✓ |
+| SW-25 | **`sweep-stored` refuses a span longer than the one month it walks.** `cli::sweep_stored` takes a year and a month, not a range. Sweeping the opening month of a long request and recording it under that request's identity is a shorter answer wearing the request's name — so it refuses and points at `audit-range` | `api::sweeprun::sweep_stored_refuses_a_span_longer_than_the_one_month_it_walks` | ✓ |
+| SW-26 | **A batch has no instrument and no span, and says so in values a page cannot mistake.** `sweep-all` reports `ALL` rather than an empty string — a blank reads as a field that failed to load — and a window of `(0,1)..(0,1)`, a year no real month can take | `api::sweeprun::every_stored_command_parses_into_its_own_shape` | ✓ |
+| SW-27 | **A screen without a support, or with a zero ceiling or listing bound, is refused.** Support zero makes every combination frequent so the frontier never empties; a ceiling of zero admits no trade; zero rows is no answer | `api::sweeprun::a_screen_without_a_support_or_a_ceiling_is_refused` | ✓ |
+| SW-28 | **Every command that needs a rung or a hit floor is refused without one, and `auto-stored` needs no floor** — searching for the threshold is the whole reason it exists, so demanding one would be asking the operator to answer the question they came to ask | `api::sweeprun::a_command_needing_a_rung_is_refused_without_one`; `a_command_needing_a_hit_floor_is_refused_without_one` | ✓ |
+| SW-29 | **`/engine/top.json` takes no slot and no commit gate**, because it records nothing — §3 rule 3's identity requirement does not bind on a read, so an unstamped build can serve it honestly. `feed` and `underlying` filter together, matching `cli top`; a one-sided case invented here would make the page disagree with the terminal about one file | `api::sweeprun::top_json`'s refusal arm; the shape is `cli::top_list`'s own signature | ✓ |
+| SW-30 | **All three kinds share one slot, one ledger and one busy refusal.** A sweep, a descent and a command all append to the same append-only file, so two finishing together can interleave two records | `api::sweeprun::a_command_run_is_marked_as_one_on_the_wire` for the wire; the busy path is shared code with SW-14 and SW-22 | ✓ |

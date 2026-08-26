@@ -6586,6 +6586,87 @@ pub fn elite_descend_in_points(
     elite_descend(vendor_word, underlying, rung, from, to, max_mae_ppm, top)
 }
 
+/// [`screen_range`] with the stop ceiling in POINTS and the policy built here.
+///
+/// # Why a caller outside this crate cannot build the policy itself
+///
+/// [`Policy`] carries a [`Rules`], a `runner::rank::Lens` and a `validate`
+/// flag. `Rules::elite` is private, the lens is a `runner` type `api` does not
+/// depend on, and the ceiling is a ppm — which is the unit
+/// [`elite_descend_in_points`] exists to keep out of other crates. Exposing
+/// three types to let a caller assemble one struct would widen this crate's
+/// surface to hand out a shape only this crate knows how to fill.
+///
+/// So the caller states the span, the support and its own risk in points, and
+/// this builds the policy the same way the `screen` argv arm does — one
+/// construction, one place to correct.
+///
+/// # Errors
+///
+/// The same `refused: …` text every other command here returns.
+#[must_use]
+pub fn screen_range_in_points(
+    vendor_word: &str,
+    underlying: &str,
+    rung: &str,
+    // ONE SPAN, ONE ARGUMENT. The two halves are never meaningful apart and the
+    // pair is how `range_all_arm` and `descend`'s own dispatch already carry
+    // them; splitting them here would also put this function one over the
+    // workspace's argument bound, which is the lint noticing the same thing.
+    span: ((u16, u8), (u16, u8)),
+    support_ppm: u64,
+    max_points: i64,
+    top: usize,
+) -> String {
+    let (from, to) = span;
+    if support_ppm == 0 {
+        return "refused: a support of zero makes every combination frequent, \
+                so the frequent frontier never empties and the walk has no \
+                end.\n"
+            .to_owned();
+    }
+    if max_points <= 0 || top == 0 {
+        return "refused: the stop ceiling must be 1 index point or more and \
+                TOP must be 1 row or more.\n"
+            .to_owned();
+    }
+    let root = match store_root() {
+        Ok(root) => root,
+        Err(why) => return format!("refused: {why}\n"),
+    };
+    let vendor = match parse_vendor(vendor_word) {
+        Ok(vendor) => vendor,
+        Err(why) => return format!("refused: {why}\n"),
+    };
+    // SAME CONVERSION AS THE DESCENT, AND FOR THE SAME REASON. See
+    // `elite_descend_in_points`: a points ceiling converted against a constant
+    // is doubled on BANKNIFTY and halved on a 2020 low.
+    let span = match stored::load_span(&root, vendor, underlying, rung, from, to) {
+        Ok(span) => span,
+        Err(why) => {
+            return format!(
+                "refused before the ceiling could be converted, so nothing was \
+                 screened: {why}\n"
+            );
+        }
+    };
+    let reference = reference_price(&span.bars);
+    drop(span);
+    let max_mae_ppm = points_to_ppm_at(max_points, reference);
+    if max_mae_ppm <= 0 {
+        return format!(
+            "refused: {max_points} point(s) against a reference of {reference} \
+             paisa converts to {max_mae_ppm} ppm, which admits nothing.\n"
+        );
+    }
+    let policy = Policy {
+        rules: Rules::elite(max_mae_ppm, top),
+        lens: runner::rank::Lens::Payoff,
+        validate: validate_from_env(),
+    };
+    screen_range(vendor_word, underlying, rung, from, to, support_ppm, policy)
+}
+
 /// The tail of a descent that admitted nothing at any support.
 ///
 /// Lifted out of [`elite_descend`] for its line budget. "No combination met

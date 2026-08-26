@@ -22506,3 +22506,68 @@ full screen per rung of the ladder, so it is the more expensive of the two.
 discovered: `audit`, `audit-range`, `auto`, `auto-stored`, `screen`, `sweep`,
 `sweep-all`, `sweep-stored`, `top`. Nine of fourteen. `results` and `verify` are
 readable through `/backtest.json` and `/verify.json` but cannot be caused.
+
+### D-0300 — the remaining nine commands, and the three that stay out
+
+**Decision.** `POST /engine/command` serves five stored-data commands —
+`audit-range`, `screen`, `auto-stored`, `sweep-stored`, `sweep-all` — behind one
+closed enum. `GET /engine/top.json` serves the ranked frontier as a read.
+`cli::screen_range_in_points` is new. **`sweep`, `audit` and `auto` are refused
+by name, with the reason.**
+
+**Why one route and not five.** Every command does the same four things: refuse
+a malformed body, refuse an unstamped build, take the ONE slot that serialises
+writers to the append-only ledger, and hand `cli` a validated call. Five
+handlers would be five copies of that sequence, and slot discipline is exactly
+what gets forgotten in the fifth copy. The dispatch is CLOSED — a fixed enum
+parsed from a fixed word list — so it is not a generic "run anything" surface;
+an unknown word is refused by name and lists what is accepted.
+
+**Why three commands stay terminal-only, and it is not an omission.** `sweep`,
+`audit` and `auto` run over **generated** bars. §5 makes the provenance banner
+*"the only thing separating"* a real sweep from an invented one, and
+`the_generated_and_stored_banners_make_opposite_claims` fails the build if the
+two ever converge. A synthetic-data command on a console whose every other
+surface reads the store is an invitation to read a generated figure as a
+measured one — §4's failure wearing a success's clothes, arriving through the
+front door. They are refused with **that sentence**, not as unknown words: an
+operator who types `sweep` typed it correctly and deserves to know why it is not
+offered, not to be told they misspelled it.
+
+**`screen_range_in_points`, for the reason D-0299 gives.** `screen_range` takes
+a `Policy` carrying a `Rules`, a `runner::rank::Lens` and a validate flag.
+`Rules::elite` is private and the lens is a `runner` type `api` does not depend
+on, so exposing three types to let a caller assemble one struct would widen this
+crate's surface to hand out a shape only it knows how to fill. The caller states
+its risk in POINTS and the conversion happens against the span's own midpoint —
+the same rule, one more place.
+
+**`sweep-stored` refuses a span longer than the month it walks.**
+`cli::sweep_stored` takes a year and a month, not a range. Sweeping the opening
+month of an eighty-month request and recording it under that request's identity
+is a shorter answer wearing the request's name. It refuses and points at
+`audit-range`.
+
+**`sweep-all` has no instrument**, so `underlying()` answers `ALL` rather than an
+empty string — a blank on a page reads as a field that failed to load — and its
+window is `(0,1)..(0,1)`, a year no month can take, so the page cannot render a
+batch as a span.
+
+**`/engine/top.json` takes no slot and no commit gate.** It records nothing, so
+§3 rule 3's identity requirement does not bind and an unstamped build can serve
+it honestly. `feed` and `underlying` filter TOGETHER — `cli top` takes both or
+neither, and inventing a one-sided case here would make the page disagree with
+the terminal about the same file.
+
+**Emit census** 41 → 44, `ROWS` 22 → 23, `UNREACHABLE` 8 → 10. The dispatcher's
+refusal is driven — and driven with a generated-bar command, because that arm is
+the rule itself. Its `accepted`/`finished` pair join the sweep's and the
+descent's, third instance of one shape: driving them runs a real command over
+stored bars, `audit-range` among them, which is a full validated audit.
+
+**Where this leaves the console.** Fourteen command names. Seven causable from
+the browser — `range-all`, `elite`/`descend`, `audit-range`, `screen`,
+`auto-stored`, `sweep-stored`, `sweep-all`. Three readable — `results` via
+`/backtest.json`, `verify` via `/verify.json`, `top` via `/engine/top.json`.
+Three deliberately absent with the reason recorded above. Nothing is
+unreachable by oversight any more.

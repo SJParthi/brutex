@@ -61,6 +61,8 @@ pub enum Kind {
     Sweep,
     /// `cli elite` with the threshold walked — one rung, support descended.
     Descent,
+    /// One of the five stored-data commands `/engine/command` serves.
+    Command,
 }
 
 impl Kind {
@@ -70,6 +72,7 @@ impl Kind {
         match self {
             Self::Sweep => "sweep",
             Self::Descent => "descent",
+            Self::Command => "command",
         }
     }
 }
@@ -1048,6 +1051,529 @@ pub async fn run_json(
     (axum::http::StatusCode::OK, json_headers(), body)
 }
 
+/* ==================================================================
+EVERY OTHER COMMAND THE ENGINE HAS, AND WHY THEY SHARE ONE ROUTE
+================================================================== */
+
+/// One engine command the browser may start, with its arguments already
+/// checked.
+///
+/// # Why a dispatcher and not seven routes
+///
+/// Every variant below does the same four things: refuse a malformed body,
+/// refuse an unstamped build, take the ONE slot that serialises writers to the
+/// append-only ledger, and hand `cli` a validated call. Seven handlers would be
+/// seven copies of that sequence, and the slot discipline is exactly the kind of
+/// thing that gets forgotten in the seventh copy. `CLAUDE.md` §4's ban on a
+/// silent fallback applies to a route that forgets the busy check as much as to
+/// one that swallows an error.
+///
+/// The dispatch is CLOSED — a fixed enum, parsed from a `command` word against
+/// a fixed list — so it is not a generic "run anything" surface. An unknown
+/// word is refused by name and lists what is accepted.
+///
+/// # THE THREE COMMANDS DELIBERATELY ABSENT
+///
+/// `sweep`, `audit` and `auto` run over **generated** bars. `CLAUDE.md` §5 makes
+/// the provenance banner *"the only thing separating"* a real sweep from an
+/// invented one, and
+/// `the_generated_and_stored_banners_make_opposite_claims` fails the build if
+/// the two ever converge. Putting a synthetic-data command on a console whose
+/// every other surface reads the store is an invitation to read a generated
+/// figure as a measured one — the failure wearing a success's clothes §4 bans,
+/// arriving through the front door. They stay terminal-only, where the operator
+/// typed the word and knows what they asked for. D-0300.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Command {
+    /// One rung, full validated audit — walk-forward, PBO and the bootstrap.
+    AuditRange {
+        /// Feed word, instrument and rung.
+        span: AskedRung,
+        /// Absolute hit floor for this rung.
+        min_hits: u64,
+    },
+    /// The elite rules applied at ONE fixed support.
+    Screen {
+        /// Feed word, instrument and rung.
+        span: AskedRung,
+        /// The threshold, in parts per million of the rung's own bars.
+        support_ppm: u64,
+        /// The operator's stop ceiling, in whole index points.
+        max_points: i64,
+        /// How many rows to list.
+        top: usize,
+    },
+    /// The threshold search over stored bars.
+    AutoStored {
+        /// Feed word, instrument and rung.
+        span: AskedRung,
+    },
+    /// One stored month's raw ladder walk.
+    SweepStored {
+        /// Feed word, instrument and rung.
+        span: AskedRung,
+        /// Absolute hit floor.
+        min_hits: u64,
+    },
+    /// Every stored month for one feed and rung, in one batch.
+    SweepAll {
+        /// The feed's directory word.
+        feed: String,
+        /// The rung.
+        rung: String,
+        /// Absolute hit floor.
+        min_hits: u64,
+    },
+}
+
+/// A feed, an instrument, a rung and a span — what four of the five need.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AskedRung {
+    /// The feed's directory word.
+    pub feed: String,
+    /// The instrument.
+    pub underlying: String,
+    /// The rung.
+    pub rung: String,
+    /// First month.
+    pub from: (u16, u8),
+    /// Last month.
+    pub to: (u16, u8),
+}
+
+impl Command {
+    /// The word this command was asked for by, for the page and the log.
+    #[must_use]
+    pub const fn word(&self) -> &'static str {
+        match *self {
+            Self::AuditRange { .. } => "audit-range",
+            Self::Screen { .. } => "screen",
+            Self::AutoStored { .. } => "auto-stored",
+            Self::SweepStored { .. } => "sweep-stored",
+            Self::SweepAll { .. } => "sweep-all",
+        }
+    }
+
+    /// The instrument this command reports against.
+    ///
+    /// `sweep-all` walks every instrument the feed holds at one rung, so it has
+    /// none — and `ALL` is written rather than an empty string, because a blank
+    /// on the page reads as a field that failed to load.
+    #[must_use]
+    pub fn underlying(&self) -> &str {
+        match *self {
+            Self::AuditRange { ref span, .. }
+            | Self::Screen { ref span, .. }
+            | Self::AutoStored { ref span }
+            | Self::SweepStored { ref span, .. } => &span.underlying,
+            Self::SweepAll { .. } => "ALL",
+        }
+    }
+
+    /// The feed word.
+    #[must_use]
+    pub fn feed(&self) -> &str {
+        match *self {
+            Self::AuditRange { ref span, .. }
+            | Self::Screen { ref span, .. }
+            | Self::AutoStored { ref span }
+            | Self::SweepStored { ref span, .. } => &span.feed,
+            Self::SweepAll { ref feed, .. } => feed,
+        }
+    }
+
+    /// The span, or the whole store for a batch.
+    #[must_use]
+    pub fn window(&self) -> ((u16, u8), (u16, u8)) {
+        match *self {
+            Self::AuditRange { ref span, .. }
+            | Self::Screen { ref span, .. }
+            | Self::AutoStored { ref span }
+            | Self::SweepStored { ref span, .. } => (span.from, span.to),
+            // A batch is not a span, and (0,1)..(0,1) is a value no real month
+            // can take -- year zero -- so the page cannot render it as one.
+            Self::SweepAll { .. } => ((0, 1), (0, 1)),
+        }
+    }
+}
+
+/// A whole number field, or the refusal naming it.
+fn whole<T: std::str::FromStr>(body: &str, name: &str, what: &str) -> Result<T, Refusal> {
+    field(body, name)
+        .and_then(|text| text.parse::<T>().ok())
+        .ok_or_else(|| Refusal::Malformed(format!("`{name}` must be {what}.")))
+}
+
+/// The feed, instrument, rung and span every span-taking command needs.
+fn rung_from(body: &str) -> Result<AskedRung, Refusal> {
+    // DELEGATES FOR THE FEED AND THE SPAN, exactly as `descent_from` does. One
+    // month bound, one place.
+    let asked = asked_from(body)?;
+    let rung = field(body, "rung")
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            Refusal::Malformed(format!(
+                "`rung` is required. The eight are: {}.",
+                EVERY_RUNG.join(", ")
+            ))
+        })?;
+    if !EVERY_RUNG.contains(&rung.as_str()) {
+        return Err(Refusal::Malformed(format!(
+            "`{rung}` is not a rung this engine sweeps. The eight are: {}.",
+            EVERY_RUNG.join(", ")
+        )));
+    }
+    Ok(AskedRung {
+        feed: asked.feed,
+        underlying: asked.underlying,
+        rung,
+        from: asked.from,
+        to: asked.to,
+    })
+}
+
+/// Every command word this route accepts, in the order the refusal lists them.
+const EVERY_COMMAND: [&str; 5] = [
+    "audit-range",
+    "screen",
+    "auto-stored",
+    "sweep-stored",
+    "sweep-all",
+];
+
+/// The command request body, or the first thing wrong with it.
+///
+/// # Errors
+///
+/// An unknown or missing `command`, anything [`rung_from`] refuses, and any
+/// numeric field a command needs that is absent or not a whole number. A
+/// generated-bar command is refused with the reason rather than as an unknown
+/// word — an operator who asks for `sweep` deserves to be told WHY it is not
+/// here, not merely that it is not.
+pub fn command_from(body: &str) -> Result<Command, Refusal> {
+    let word = field(body, "command")
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            Refusal::Malformed(format!(
+                "`command` is required. This route accepts: {}.",
+                EVERY_COMMAND.join(", ")
+            ))
+        })?;
+
+    // NAMED, NOT LUMPED WITH A TYPO. These three exist and are deliberately not
+    // here; saying so is the difference between a rule and a gap.
+    if matches!(word.as_str(), "sweep" | "audit" | "auto") {
+        return Err(Refusal::Malformed(format!(
+            "`{word}` runs over GENERATED bars, and this console reads the \
+             store on every other surface. CLAUDE.md §5 makes the provenance \
+             banner the only thing separating a real sweep from an invented \
+             one, so a synthetic-data command is not offered here. Run it from \
+             a terminal, where you typed the word. The stored equivalents are: \
+             {}.",
+            EVERY_COMMAND.join(", ")
+        )));
+    }
+
+    match word.as_str() {
+        "audit-range" => Ok(Command::AuditRange {
+            span: rung_from(body)?,
+            min_hits: whole(body, "min_hits", "a whole number of bars a mask must hit")?,
+        }),
+        "screen" => {
+            let support_ppm: u64 = whole(
+                body,
+                "support_ppm",
+                "a whole number of parts per million of this rung's own bars",
+            )?;
+            if support_ppm == 0 {
+                return Err(Refusal::Malformed(
+                    "`support_ppm` is 0. Every combination is then frequent, \
+                     the frontier never empties and the walk has no end."
+                        .to_owned(),
+                ));
+            }
+            let max_points: i64 = whole(body, "max_points", "a whole number of index points")?;
+            let top: usize = whole(body, "top", "a whole number of rows to list")?;
+            if max_points <= 0 || top == 0 {
+                return Err(Refusal::Malformed(
+                    "`max_points` must be 1 index point or more and `top` must \
+                     be 1 row or more."
+                        .to_owned(),
+                ));
+            }
+            Ok(Command::Screen {
+                span: rung_from(body)?,
+                support_ppm,
+                max_points,
+                top,
+            })
+        }
+        "auto-stored" => Ok(Command::AutoStored {
+            span: rung_from(body)?,
+        }),
+        "sweep-stored" => Ok(Command::SweepStored {
+            span: rung_from(body)?,
+            min_hits: whole(body, "min_hits", "a whole number of bars a mask must hit")?,
+        }),
+        "sweep-all" => {
+            let asked = asked_from(body)?;
+            let rung = field(body, "rung")
+                .filter(|s| EVERY_RUNG.contains(&s.as_str()))
+                .ok_or_else(|| {
+                    Refusal::Malformed(format!(
+                        "`rung` is required and must be one of: {}.",
+                        EVERY_RUNG.join(", ")
+                    ))
+                })?;
+            Ok(Command::SweepAll {
+                feed: asked.feed,
+                rung,
+                min_hits: whole(body, "min_hits", "a whole number of bars a mask must hit")?,
+            })
+        }
+        other => Err(Refusal::Malformed(format!(
+            "`{other}` is not a command this route runs. It accepts: {}.",
+            EVERY_COMMAND.join(", ")
+        ))),
+    }
+}
+
+/// Runs one command and records what it produced.
+///
+/// **Blocking on purpose**, exactly as [`conduct`] and [`conduct_descent`] are.
+/// Every arm here reads stored bars and several walk a ladder over them.
+#[must_use]
+pub fn conduct_command(asked: &Command, now_micros: i64) -> Progress {
+    let (from, to) = asked.window();
+    let mut progress = Progress::started(
+        asked.feed(),
+        asked.underlying(),
+        from,
+        to,
+        SUPPORT_PPM,
+        now_micros,
+    )
+    .of_kind(Kind::Command);
+    let text = match *asked {
+        Command::AuditRange { ref span, min_hits } => cli::audit_range(
+            &span.feed,
+            &span.underlying,
+            &span.rung,
+            span.from,
+            span.to,
+            min_hits,
+        ),
+        // POINTS, NEVER PPM, for the reason `elite_descend_in_points` records.
+        Command::Screen {
+            ref span,
+            support_ppm,
+            max_points,
+            top,
+        } => cli::screen_range_in_points(
+            &span.feed,
+            &span.underlying,
+            &span.rung,
+            (span.from, span.to),
+            support_ppm,
+            max_points,
+            top,
+        ),
+        Command::AutoStored { ref span } => {
+            cli::auto_stored(&span.feed, &span.underlying, &span.rung, span.from, span.to)
+        }
+        // ONE MONTH, AND IT IS THE SPAN'S FIRST. `cli::sweep_stored` takes a
+        // year and a month rather than a range, so a request naming a longer
+        // span would silently sweep only its opening month. The `to` is
+        // therefore required to equal the `from` rather than ignored.
+        Command::SweepStored { ref span, min_hits } => {
+            if span.from == span.to {
+                cli::sweep_stored(
+                    &span.feed,
+                    &span.underlying,
+                    &span.rung,
+                    span.from.0,
+                    span.from.1,
+                    min_hits,
+                )
+            } else {
+                format!(
+                    "refused: `sweep-stored` walks ONE month, and this asked for \
+                     {}-{:02}..{}-{:02}. Ignoring the rest would sweep a shorter \
+                     span than the request names and record it under the \
+                     request's identity. Ask for one month, or use `audit-range` \
+                     for a span.\n",
+                    span.from.0, span.from.1, span.to.0, span.to.1
+                )
+            }
+        }
+        Command::SweepAll {
+            ref feed,
+            ref rung,
+            min_hits,
+        } => cli::batch::sweep_all(feed, rung, min_hits),
+    };
+    settle(&mut progress, text, now_micros);
+    progress
+}
+
+/// `POST /engine/command` — start any stored-data engine command.
+///
+/// See [`Command`] for why one route serves five, and for the three that are
+/// deliberately not among them.
+pub async fn command(
+    axum::extract::State(site): axum::extract::State<crate::server::Loaded>,
+    body: String,
+) -> (axum::http::StatusCode, JsonHeaders, String) {
+    command_with(&site, &body, cli::commit_stamp())
+}
+
+/// [`command`], with the build's commit stamp passed in.
+///
+/// Split for the reason [`run_with`] gives: `cargo test` is an unstamped build.
+pub(crate) fn command_with(
+    site: &crate::server::Loaded,
+    body: &str,
+    stamp: Option<&str>,
+) -> (axum::http::StatusCode, JsonHeaders, String) {
+    let asked = match command_from(body) {
+        Ok(asked) => asked,
+        Err(why) => {
+            let _ = telemetry::emit_if!(
+                telemetry::Level::Warn,
+                "api.sweep",
+                "an engine command was refused before it started",
+                "why" => telemetry::Value::Str(why.why()),
+            );
+            return refused(&why);
+        }
+    };
+
+    if let Some(why) = stamp_refusal(stamp) {
+        return refused(&why);
+    }
+
+    {
+        let mut held = match site.sweep.lock() {
+            Ok(held) => held,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if held.as_ref().is_some_and(Progress::in_flight) {
+            return refused(&Refusal::Busy(
+                "a sweep, descent or command is already running in this \
+                 process. All of them append to the same append-only ledger, \
+                 and two finishing together can interleave two records, so the \
+                 second press is refused rather than queued."
+                    .to_owned(),
+            ));
+        }
+        let (from, to) = asked.window();
+        *held = Some(
+            Progress::started(
+                asked.feed(),
+                asked.underlying(),
+                from,
+                to,
+                SUPPORT_PPM,
+                now_micros(),
+            )
+            .of_kind(Kind::Command),
+        );
+    }
+
+    let _ = telemetry::emit_if!(
+        telemetry::Level::Info,
+        "api.sweep",
+        "an engine command was accepted from the browser",
+        "command" => telemetry::Value::Str(asked.word()),
+        "feed" => telemetry::Value::Str(asked.feed()),
+        "underlying" => telemetry::Value::Str(asked.underlying()),
+    );
+
+    let held_site = std::sync::Arc::clone(site);
+    let started = now_micros();
+    tokio::task::spawn_blocking(move || {
+        let finished = conduct_command(&asked, started);
+        let mut slot = match held_site.sweep.lock() {
+            Ok(slot) => slot,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let elapsed = now_micros().saturating_sub(started);
+        let _ = telemetry::emit_if!(
+            telemetry::Level::Info,
+            "api.sweep",
+            "an engine command finished",
+            "command" => telemetry::Value::Str(asked.word()),
+            "elapsed_micros" => telemetry::Value::Uint(elapsed.max(0).unsigned_abs()),
+        );
+        let mut done = finished;
+        done.finished_micros = Some(now_micros());
+        *slot = Some(done);
+    });
+
+    (
+        axum::http::StatusCode::ACCEPTED,
+        json_headers(),
+        r#"{"accepted":true,"refusal":null}"#.to_owned(),
+    )
+}
+
+/// `GET /engine/top.json` — the ranked frontier, as `cli top` prints it.
+///
+/// **A READ, so it takes no slot and no commit gate.** It records nothing, so
+/// §3 rule 3's identity requirement does not bind and an unstamped build can
+/// serve it honestly. `feed` and `underlying` are optional and filter together:
+/// `cli top` takes both or neither, and this keeps that shape rather than
+/// inventing a third case the CLI has no answer for.
+pub async fn top_json(uri: axum::http::Uri) -> (axum::http::StatusCode, JsonHeaders, String) {
+    let query = uri.query().unwrap_or_default();
+    let param = |name: &str| -> Option<String> {
+        query.split('&').find_map(|pair| {
+            pair.split_once('=')
+                .filter(|(key, _)| *key == name)
+                .map(|(_, value)| value.to_owned())
+        })
+    };
+    let feed = param("feed");
+    let underlying = param("underlying");
+    let text = match (feed.as_deref(), underlying.as_deref()) {
+        (Some(f), Some(u)) => cli::top_list(Some(f), Some(u)),
+        (None, None) => cli::top_list(None, None),
+        _ => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                json_headers(),
+                format!(
+                    r#"{{"report":null,"refusal":{}}}"#,
+                    crate::render::json_string(
+                        "`feed` and `underlying` filter together: give both or \
+                         neither. `cli top` has no answer for one alone, and \
+                         inventing one here would make this page disagree with \
+                         the terminal about the same file."
+                    )
+                ),
+            );
+        }
+    };
+    let refused_it = text.starts_with(REFUSED);
+    let body = if refused_it {
+        format!(
+            r#"{{"report":null,"refusal":{}}}"#,
+            crate::render::json_string(&text)
+        )
+    } else {
+        format!(
+            r#"{{"report":{},"refusal":null}}"#,
+            crate::render::json_string(&text)
+        )
+    };
+    let status = if refused_it {
+        axum::http::StatusCode::BAD_REQUEST
+    } else {
+        axum::http::StatusCode::OK
+    };
+    (status, json_headers(), body)
+}
+
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
@@ -1056,8 +1582,9 @@ pub async fn run_json(
 )]
 mod tests {
     use super::{
-        Asked, AskedDescent, EVERY_RUNG, Kind, Progress, Refusal, SUPPORT_PPM, asked_from,
-        descent_from, field, now_micros, settle, stamp_refusal,
+        Asked, AskedDescent, EVERY_COMMAND, EVERY_RUNG, Kind, Progress, Refusal, SUPPORT_PPM,
+        asked_from, command_from, conduct_command, descent_from, field, now_micros, settle,
+        stamp_refusal,
     };
 
     fn body(feed: &str, span: &str) -> String {
@@ -1701,6 +2228,146 @@ mod tests {
         assert_eq!(descent.feed, sweep.feed);
         assert_eq!(descent.support_ppm, sweep.support_ppm);
         assert_eq!(descent.started_micros, sweep.started_micros);
+    }
+
+    /* ==================== the command dispatcher ==================== */
+
+    fn command_body(extra: &str) -> String {
+        format!(r#"{{"feed":"zerodha","underlying":"NIFTY",{SPAN},{extra}}}"#)
+    }
+
+    #[test]
+    fn every_stored_command_parses_into_its_own_shape() {
+        let audit = command_from(&command_body(
+            r#""command":"audit-range","rung":"1day","min_hits":500"#,
+        ))
+        .expect("audit-range");
+        assert_eq!(audit.word(), "audit-range");
+        assert_eq!(audit.feed(), "zerodha");
+        assert_eq!(audit.underlying(), "NIFTY");
+
+        let screen = command_from(&command_body(
+            r#""command":"screen","rung":"15min","support_ppm":50000,"max_points":20,"top":25"#,
+        ))
+        .expect("screen");
+        assert_eq!(screen.word(), "screen");
+
+        let auto = command_from(&command_body(r#""command":"auto-stored","rung":"1min""#))
+            .expect("auto-stored");
+        assert_eq!(auto.word(), "auto-stored");
+
+        let batch = command_from(&command_body(
+            r#""command":"sweep-all","rung":"1day","min_hits":500"#,
+        ))
+        .expect("sweep-all");
+        assert_eq!(batch.word(), "sweep-all");
+        // A BATCH HAS NO ONE INSTRUMENT, and a blank would read as a field that
+        // failed to load rather than as a fact.
+        assert_eq!(batch.underlying(), "ALL");
+        assert_eq!(batch.window(), ((0, 1), (0, 1)), "year zero is no month");
+    }
+
+    #[test]
+    fn a_generated_bar_command_is_refused_with_the_reason_not_as_a_typo() {
+        // `sweep`, `audit` and `auto` EXIST. Refusing them as unknown words
+        // would tell an operator they mistyped a command they typed correctly.
+        for word in ["sweep", "audit", "auto"] {
+            let why = command_from(&command_body(&format!(r#""command":"{word}""#)))
+                .expect_err("a generated-bar command is not served here");
+            assert!(
+                why.why().contains("GENERATED"),
+                "the reason must be the provenance rule, not a spelling \
+                 complaint: {}",
+                why.why()
+            );
+            assert!(
+                why.why().contains("audit-range"),
+                "and it must name the stored equivalents: {}",
+                why.why()
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_command_is_refused_and_lists_what_is_accepted() {
+        let why = command_from(&command_body(r#""command":"conquer""#)).expect_err("not a command");
+        assert!(why.why().contains("conquer"), "{}", why.why());
+        for word in EVERY_COMMAND {
+            assert!(why.why().contains(word), "{} omits {word}", why.why());
+        }
+        assert!(
+            command_from(&command_body(r#""rung":"1day""#)).is_err(),
+            "no command word"
+        );
+    }
+
+    #[test]
+    fn sweep_stored_refuses_a_span_longer_than_the_one_month_it_walks() {
+        // `cli::sweep_stored` takes a YEAR and a MONTH, not a range. Sweeping
+        // the opening month and recording it under a request that named eighty
+        // would be a shorter answer wearing the request's identity.
+        let asked = command_from(&command_body(
+            r#""command":"sweep-stored","rung":"1day","min_hits":500"#,
+        ))
+        .expect("parses");
+        let progress = conduct_command(&asked, 1);
+        let why = progress.refusal.expect("a multi-month ask must refuse");
+        assert!(why.contains("ONE month"), "{why}");
+        assert!(progress.report.is_none(), "a refusal is not a report");
+    }
+
+    #[test]
+    fn a_screen_without_a_support_or_a_ceiling_is_refused() {
+        for extra in [
+            r#""command":"screen","rung":"1day","max_points":20,"top":25"#,
+            r#""command":"screen","rung":"1day","support_ppm":0,"max_points":20,"top":25"#,
+            r#""command":"screen","rung":"1day","support_ppm":50000,"max_points":0,"top":25"#,
+            r#""command":"screen","rung":"1day","support_ppm":50000,"max_points":20,"top":0"#,
+        ] {
+            assert!(
+                command_from(&command_body(extra)).is_err(),
+                "accepted a screen it cannot run: {extra}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_command_needing_a_rung_is_refused_without_one() {
+        for word in ["audit-range", "auto-stored", "sweep-stored", "sweep-all"] {
+            let why = command_from(&command_body(&format!(
+                r#""command":"{word}","min_hits":500"#
+            )))
+            .expect_err("{word} needs a rung");
+            assert!(why.why().contains("rung"), "{}", why.why());
+        }
+    }
+
+    #[test]
+    fn a_command_needing_a_hit_floor_is_refused_without_one() {
+        for word in ["audit-range", "sweep-stored", "sweep-all"] {
+            let why = command_from(&command_body(&format!(
+                r#""command":"{word}","rung":"1day""#
+            )))
+            .expect_err("needs min_hits");
+            assert!(why.why().contains("min_hits"), "{}", why.why());
+        }
+        // AND `auto-stored` NEEDS NONE — it searches for the threshold, which
+        // is the whole reason it exists.
+        assert!(command_from(&command_body(r#""command":"auto-stored","rung":"1day""#)).is_ok());
+    }
+
+    #[test]
+    fn a_command_run_is_marked_as_one_on_the_wire() {
+        let asked = command_from(&command_body(
+            r#""command":"audit-range","rung":"1day","min_hits":500"#,
+        ))
+        .expect("parses");
+        let (from, to) = asked.window();
+        let progress =
+            Progress::started(asked.feed(), asked.underlying(), from, to, SUPPORT_PPM, 1)
+                .of_kind(Kind::Command);
+        assert!(progress.to_json().contains(r#""kind":"command""#));
+        assert_eq!(Kind::Command.word(), "command");
     }
 
     #[test]
