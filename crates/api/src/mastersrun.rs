@@ -47,6 +47,140 @@ fn json_headers() -> JsonHeaders {
     )]
 }
 
+/// Writes one event per step of one source's ladder, and one for its outcome.
+///
+/// # What this closes, and it was a hole in this module's own subject
+///
+/// `/masters/refresh` emitted **one** event carrying three counts —
+/// `landed`, `skipped`, `asked` — and nothing else. Three things followed from
+/// that, and all three are the shapes this module exists to refuse:
+///
+/// 1. **Which file failed never reached the log.** `landed=3 skipped=1` does
+///    not say whether the missing one was the exchange's index list or the
+///    master for the feed holding every bar in the store.
+/// 2. **The level never moved.** A refresh where all four refused emitted
+///    `Level::Info` reading *"the instrument masters were refreshed"* — a
+///    success-shaped line over a total failure, which is `CLAUDE.md` §4's
+///    failure wearing a success's clothes, written by the module that spends
+///    most of its comments refusing it.
+/// 3. **The attempt ledger was not durable.** It reached the HTTP response and
+///    nowhere else, so closing the tab destroyed the only record of what the
+///    host actually said. An operator asking *"why did this fail an hour ago"*
+///    had nothing to search.
+///
+/// # Cost, because logging in a loop is a fair thing to ask about
+///
+/// Bounded by the source table and nothing else: at most `ATTEMPTS_PER_URL`
+/// per URL plus two primes, per source, plus one outcome event. On the happy
+/// path that is **two events per source** — one body, one outcome. Only a host
+/// that is actually failing produces more, which is exactly when they are
+/// wanted.
+///
+/// **Gate 17 is not in tension with this.** It silences `vocab engine
+/// indicators runner`, which hold the loops over bars and candidates. This is
+/// `api`, and the granularity is one event per network round trip — a unit
+/// already costing milliseconds, beside which an event costs nothing.
+pub(crate) fn record(source: &Source, landed: &Result<Landed, String>, tried: &Fetched) {
+    for step in &tried.attempts {
+        let (level, what, status, detail) = match step.got {
+            masters::Got::Primed => (
+                telemetry::Level::Debug,
+                "a session was established before asking",
+                telemetry::Value::Null,
+                String::new(),
+            ),
+            masters::Got::PrimeRefused { ref detail } => (
+                // WARN AND NOT ERROR. The prime is unverified (see
+                // `Source::prime`), the real request still goes out, and the
+                // host's own answer to it is the fact worth escalating.
+                telemetry::Level::Warn,
+                "the priming request refused, and the real request went out anyway",
+                telemetry::Value::Null,
+                detail.clone(),
+            ),
+            masters::Got::Body { bytes } => (
+                telemetry::Level::Info,
+                "a body came back",
+                telemetry::Value::Null,
+                format!("{bytes} bytes"),
+            ),
+            masters::Got::Refused {
+                status,
+                ref detail,
+                verdict,
+            } => (
+                match verdict {
+                    // ASKING AGAIN IS NOT YET A PROBLEM, and logging every
+                    // transient blip at Error is how a log stops being read.
+                    masters::Verdict::Again | masters::Verdict::Reprime => telemetry::Level::Warn,
+                    // SETTLED IS THE ONE THAT ENDS A URL. Nothing further is
+                    // tried there, so this is the line an operator needs.
+                    masters::Verdict::Never => telemetry::Level::Error,
+                },
+                match verdict {
+                    masters::Verdict::Again => "refused, and will be asked again",
+                    masters::Verdict::Reprime => "refused on a session, re-priming",
+                    masters::Verdict::Never => "refused settled, and will not be asked again",
+                },
+                // A STATUS OF `null` IS NOT A STATUS OF ZERO. Nothing answered
+                // is a different fact from a host answering, and `Value::Null`
+                // is the type's own way of saying "known, and known to be
+                // nothing" — see its doc comment.
+                status.map_or(telemetry::Value::Null, |code| {
+                    telemetry::Value::Uint(u64::from(code))
+                }),
+                detail.clone(),
+            ),
+        };
+        let _ = telemetry::emit_if!(
+            level,
+            "api.masters.attempt",
+            what,
+            "file" => telemetry::Value::Str(source.file),
+            "url" => telemetry::Value::Str(&step.url),
+            "attempt" => telemetry::Value::Uint(u64::from(step.number)),
+            "waited_ms" => telemetry::Value::Uint(step.waited_ms),
+            "status" => status,
+            "detail" => telemetry::Value::Str(&detail),
+        );
+    }
+
+    let (level, what, extra) = match *landed {
+        Ok(Landed::Written { bytes, changed }) => (
+            telemetry::Level::Info,
+            if changed {
+                "the master was replaced with new bytes"
+            } else {
+                "the master was refetched and had not changed"
+            },
+            format!("{bytes} bytes"),
+        ),
+        // A SKIPPED SOURCE IS NOT AN ERROR AND IS NOT A SUCCESS. A public
+        // transport declining the credentialed dump is the guard working.
+        Err(ref why) => (
+            telemetry::Level::Warn,
+            "this transport may not carry this master, so it was not asked for",
+            why.clone(),
+        ),
+        Ok(Landed::Refused(ref why)) => (
+            telemetry::Level::Error,
+            "the master could not be refreshed and the old bytes still stand",
+            why.clone(),
+        ),
+    };
+    let _ = telemetry::emit_if!(
+        level,
+        "api.masters.source",
+        what,
+        "file" => telemetry::Value::Str(source.file),
+        "url" => telemetry::Value::Str(source.url),
+        "needs_token" => telemetry::Value::Bool(source.needs_token),
+        "attempts" => telemetry::Value::Uint(tried.attempts.len() as u64),
+        "waited_ms" => telemetry::Value::Uint(tried.waited_ms()),
+        "detail" => telemetry::Value::Str(&extra),
+    );
+}
+
 /// Every step the ladder took, as the page reads it.
 ///
 /// # Why the page gets the whole ledger and not a summary
@@ -318,24 +452,51 @@ pub async fn refresh(
             }
         }
     }
+    // EVERY SOURCE'S OWN STORY, DURABLY. The summary below is three counts,
+    // and three counts cannot say which file failed or what the host said.
+    for (source, outcome, tried) in &landed {
+        record(source, outcome, tried);
+    }
+
+    let written = landed
+        .iter()
+        .filter(|(_, l, _)| matches!(*l, Ok(ref inner) if inner.is_written()))
+        .count();
     let _ = telemetry::emit_if!(
-        telemetry::Level::Info,
+        // THE LEVEL FOLLOWS THE OUTCOME, and it used to be `Info` always. A
+        // refresh where every source refused wrote `Info: the ... masters were
+        // refreshed` with `landed=0` beside it — a line that reads as success,
+        // over a total failure, in the module whose whole subject is that a
+        // stale master is invisible. §4.
+        if written == landed.len() {
+            telemetry::Level::Info
+        } else if written == 0 {
+            telemetry::Level::Error
+        } else {
+            telemetry::Level::Warn
+        },
         "api.masters",
-        "the public instrument masters were refreshed from the browser",
+        // "PUBLIC" WAS TRUE FOR ONE COMMIT. This route runs the credentialed
+        // leg too, and a message naming only the free half would have an
+        // operator searching the log for a Zerodha refresh that is right there
+        // under a sentence saying it was not one.
+        "the instrument masters were refreshed from the browser",
         // THREE COUNTS, BECAUSE TWO WOULD HIDE THE THIRD. "landed of asked"
         // reads as complete on a call that skipped the master that matters,
         // which is the defect this route shipped with. `skipped` is the number
         // that makes the other two readable.
-        "landed" => telemetry::Value::Uint(
-            landed
-                .iter()
-                .filter(|(_, l, _)| matches!(*l, Ok(ref inner) if inner.is_written()))
-                .count() as u64
-        ),
+        "landed" => telemetry::Value::Uint(written as u64),
         "skipped" => telemetry::Value::Uint(
             landed.iter().filter(|(_, l, _)| l.is_err()).count() as u64
         ),
         "asked" => telemetry::Value::Uint(landed.len() as u64),
+        // AND WHAT THE WHOLE CALL SPENT WAITING, which is the number that
+        // separates "the hosts were fine" from "the hosts were sick and it
+        // recovered" — two refreshes that land identically and cost minutes
+        // apart.
+        "waited_ms" => telemetry::Value::Uint(
+            landed.iter().map(|(_, _, t)| t.waited_ms()).sum::<u64>()
+        ),
     );
 
     let rows: Vec<String> = landed
@@ -532,11 +693,13 @@ fn page_html() -> String {
          bar store or spends a bar quota — this is <b>not</b> the ingest pull.</p>\
          <div class=\"bar\">\
          <button id=\"go\" class=\"go\">Refresh all four</button>\
+         <button id=\"verify\" class=\"go alt\">Cross&#8209;verify against NSE</button>\
          <span id=\"say\" class=\"say\">Reads what is on disk on load. Nothing is fetched \
-         until you press the button.</span></div>\
+         until you press a button.</span></div>\
          <table><thead><tr><th>File</th><th>Published at</th><th>Cost &amp; shape</th>\
          <th>On disk</th><th>Last refresh</th></tr></thead><tbody>{rows}</tbody></table>\
          <div id=\"ledger\"></div>\
+         <div id=\"xverify\" class=\"att\"></div>\
          <p class=\"foot\">A refresh writes new bytes to disk and does <b>not</b> reload the \
          parsed universe: <code>Site::load</code> parses the masters once, at startup. When a \
          file changes under a running server this page says a restart is required, because \
@@ -560,6 +723,11 @@ h1{max-width:1180px;margin:0 auto;padding:2rem 1.25rem .3rem;font-size:1.6rem;le
 flex-wrap:wrap;border:1px solid #e4e9f3;border-radius:12px}\
 .go{font:inherit;font-weight:600;padding:.5rem 1.1rem;border:0;border-radius:8px;background:#1b57ff;color:#fff;cursor:pointer}\
 .go[disabled]{opacity:.5;cursor:progress}\
+.go.alt{background:transparent;color:#1b57ff;border:1px solid #1b57ff}\
+@media(prefers-color-scheme:dark){.go.alt{color:#7ea2ff;border-color:#7ea2ff}}\
+table.xv{width:100%;margin:.5rem 0 0;border:0}\
+table.xv td,table.xv th{border-bottom:1px solid #e4e9f3;padding:.4rem .5rem}\
+table.xv td:nth-child(n+2):nth-child(-n+5){font-variant-numeric:tabular-nums;text-align:right}\
 .say{color:#5a6478;font-size:.85rem}\
 table{max-width:1180px;margin:0 auto;width:calc(100% - 2.5rem);border-collapse:collapse;\
 border:1px solid #e4e9f3;border-radius:12px;overflow:hidden;font-size:.88rem}\
@@ -663,6 +831,53 @@ async function refresh() {
 }
 
 document.getElementById('go').addEventListener('click', refresh);
+
+// ---- the cross-verification, which is what the four files are FOR ----
+//
+// `/indexmap.json?feed=X` joins the exchange's own index catalogue against
+// one feed's index symbols and reports every row, including the ones it
+// could not resolve — those are the symbols whose bars are being filed under
+// a name no exchange confirms. It had no page and no nav entry, so the only
+// way to see it was to type the URL.
+async function verify() {
+  const box = document.getElementById('xverify');
+  box.innerHTML = '<div class="sub">joining…</div>';
+  const feeds = ['dhan', 'groww', 'zerodha'];
+  const parts = [];
+  for (const feed of feeds) {
+    try {
+      const r = await fetch(`/indexmap.json?feed=${feed}`);
+      const d = await r.json();
+      if (d.error) {
+        parts.push(`<tr><td><b>${feed}</b></td><td colspan="5" class="bad">${d.error}</td></tr>`);
+        continue;
+      }
+      const refused = d.refused || 0;
+      const names = (d.rows || [])
+        .filter(x => x.nse === null || x.nse === undefined)
+        .map(x => x.symbol);
+      parts.push(
+        `<tr><td><b>${feed}</b></td>`
+        + `<td>${d.published}</td><td>${d.listed}</td>`
+        + `<td class="ok">${d.resolved}</td>`
+        + `<td class="${refused ? 'bad' : 'ok'}">${refused}</td>`
+        + `<td class="sub">${names.slice(0, 12).join(', ')}`
+        + `${names.length > 12 ? ` … and ${names.length - 12} more` : ''}</td></tr>`
+      );
+    } catch (e) {
+      parts.push(`<tr><td><b>${feed}</b></td><td colspan="5" class="bad">${e}</td></tr>`);
+    }
+  }
+  box.innerHTML =
+    '<h3>Cross&#8209;verification — every feed’s index symbols against NSE’s own catalogue</h3>'
+    + '<table class="xv"><thead><tr><th>Feed</th><th>NSE publishes</th><th>Feed lists</th>'
+    + '<th>Resolved</th><th>Unconfirmed</th><th>Which ones</th></tr></thead><tbody>'
+    + parts.join('') + '</tbody></table>'
+    + '<div class="sub">An unconfirmed symbol is one whose bars are filed under a name '
+    + 'no exchange confirms. It is never filtered out.</div>';
+}
+
+document.getElementById('verify').addEventListener('click', verify);
 status();
 "#;
 
@@ -1190,6 +1405,64 @@ mod tests {
             json.contains(r#""modified_unix_millis":null"#),
             "and the three absent ones must carry null rather than a zero \
              that reads as 1970: {json}"
+        );
+    }
+
+    #[test]
+    fn the_page_cross_verifies_every_feed_against_the_exchange() {
+        // THE MAPPING IS WHAT THE FOUR FILES ARE FOR. Downloading three vendor
+        // masters and NSE's catalogue and never joining them leaves an operator
+        // with four files and no answer. `/indexmap.json` did that join and had
+        // no page and no nav entry — reachable only by typing the URL.
+        let html = super::page_html();
+
+        assert!(html.contains(r#"id="verify""#), "there is a control");
+        assert!(html.contains(r#"id="xverify""#), "and somewhere to render");
+        for feed in ["dhan", "groww", "zerodha"] {
+            assert!(
+                html.contains(feed),
+                "{feed} is not cross-verified by the page"
+            );
+        }
+        assert!(
+            html.contains("/indexmap.json?feed="),
+            "the join endpoint is not called"
+        );
+    }
+
+    #[test]
+    fn an_unconfirmed_symbol_is_never_filtered_out_of_the_view() {
+        // A SYMBOL THE EXCHANGE DOES NOT CONFIRM IS THE ONE AN OPERATOR MOST
+        // NEEDS. `indexmap::json`'s own comment says it omits no row; a page
+        // that showed only the counts would undo that at the last step.
+        let html = super::page_html();
+        assert!(
+            html.contains("Unconfirmed"),
+            "the count has a column of its own"
+        );
+        assert!(
+            html.contains("Which ones"),
+            "and the names are shown, not just tallied"
+        );
+        assert!(
+            html.contains("no exchange confirms"),
+            "and the page says what an unconfirmed symbol means"
+        );
+    }
+
+    #[test]
+    fn the_cross_verification_is_also_bound_to_a_press() {
+        // SAME RULE AS THE REFRESH. This one reads only local files, but the
+        // page must not acquire a habit of doing work nobody asked for.
+        let html = super::page_html();
+        assert!(
+            html.contains("addEventListener('click', verify)"),
+            "bound to a press"
+        );
+        assert_eq!(
+            html.matches("verify();").count(),
+            0,
+            "and never invoked on load"
         );
     }
 }

@@ -23410,3 +23410,75 @@ same shape: **a check that exists, is correct, and was not run.** `cargo deny`
 was run and the suite was not; the ledger was written and then the tree moved
 under it; the routes were built and never reached from a page. None was a design
 error. Each was found by running the thing rather than by reading about it.
+
+### D-0314 — the module about invisible staleness was itself logging almost nothing
+
+`/masters/refresh` wrote **one** event: `Info`, three counts — `landed`,
+`skipped`, `asked`. Everything else it knew reached the HTTP response and
+stopped there.
+
+Three consequences, and each is a shape this module spends its comments
+refusing:
+
+1. **Which file failed never reached the log.** `landed=3 skipped=1` does not
+   say whether the missing one was the exchange's index catalogue or the master
+   for the feed holding every bar in the store.
+2. **The level never moved.** A refresh where all four sources refused emitted
+   `Level::Info` reading *"the … masters were refreshed from the browser"*, with
+   `landed=0` beside it. A success-shaped line over a total failure — §4's
+   failure wearing a success's clothes, written by the module whose entire
+   subject is that a stale master is invisible.
+3. **The attempt ledger was not durable.** D-0311 built a record of every step
+   and put it in the response body only. Closing the tab destroyed it. An
+   operator asking *"why did this fail an hour ago"* had nothing to search,
+   which is the exact question a retry ladder exists to answer.
+
+#### What is written now
+
+`record` emits one event per network round trip and one per source's outcome.
+The **level follows the outcome** at both granularities:
+
+| Step | Level | Because |
+|---|---|---|
+| a session was primed | `Debug` | it worked and nobody needs to see it |
+| a prime refused | `Warn` | the real request still goes out; its answer is the fact that matters |
+| a body came back | `Info` | the thing that was asked for |
+| refused, will ask again | `Warn` | not yet a problem, and a log full of Errors is a log nobody reads |
+| refused, settled | `Error` | nothing further is tried at that URL — this is the midnight line |
+| the master was replaced | `Info` | — |
+| skipped by transport | `Warn` | the guard working, not a failure |
+| could not be refreshed | `Error` | the old bytes still stand |
+
+The summary event's level is now `Info` / `Warn` / `Error` by how many landed,
+and it gained `waited_ms` — the number separating *the hosts were fine* from
+*the hosts were sick and it recovered*, two refreshes that land identically and
+cost minutes apart. Its message lost the word "public", which was true for one
+commit: this route runs the credentialed leg too, and an operator searching for
+a Zerodha refresh would have found it under a sentence saying it was not one.
+
+#### Cost, because logging inside a loop is a fair thing to ask about
+
+Bounded by the source table: at most `ATTEMPTS_PER_URL` per URL plus two primes
+per source, plus one outcome event each. **On the happy path that is two events
+per source** — one body, one outcome. Only a host that is actually failing
+produces more, which is precisely when they are wanted.
+
+Gate 17 is not in tension with this. It silences `vocab engine indicators
+runner` because those hold the loops over bars and candidates, and its own rule
+is *"the innermost loop calls nothing at all"*. This is `api`, and the
+granularity is one event per network round trip — a unit already costing
+milliseconds.
+
+#### And the join finally has somewhere to be seen
+
+`/indexmap.json` joins the exchange's index catalogue against one feed's index
+symbols and reports every row **including the unresolved ones** — its own
+comment says *"a symbol the exchange does not confirm is the one an operator
+most needs to see, so it is not filtered out"*. It had no page and no nav entry,
+so the only way to read it was to type the URL with a `?feed=` parameter.
+
+The masters page cross-verifies all three feeds against NSE in one press, and
+shows the unconfirmed names rather than only counting them. That is what the
+four files are *for*: downloading three vendor masters and the exchange's
+catalogue and never joining them leaves an operator with four files and no
+answer.

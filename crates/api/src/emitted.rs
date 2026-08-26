@@ -202,7 +202,7 @@ struct Case {
 ///
 /// Twenty-one since D-0297 added the commit gate's refusal — the arm every
 /// server built without `BRUTEX_COMMIT` takes on every press.
-const ROWS: usize = 23;
+const ROWS: usize = 25;
 
 /// How many distinct production emit sites those rows cover.
 ///
@@ -842,6 +842,72 @@ fn cases() -> Vec<Case> {
             mine: Box::new(|record| says(record, "why", "GENERATED")),
         });
     }
+    // crates/api/src/mastersrun.rs — one event per network round trip, and one
+    // per source's outcome. Driven with a CONSTRUCTED ledger and no socket:
+    // `record` takes the three values a refresh already has, so proving it
+    // needs neither a host nor somebody else's uptime.
+    //
+    // The refusal arm is the one driven, deliberately. A landing writes an
+    // `Info` line nobody reads; a settled refusal at `Error` is the line an
+    // operator goes looking for at midnight, and it is the one that used to
+    // not exist at all.
+    {
+        cases.push(Case {
+            site: "mastersrun.rs api.masters.attempt refused settled",
+            target: "api.masters.attempt",
+            message: "refused settled, and will not be asked again",
+            level: telemetry::Level::Error,
+            drive: Box::new(|| {
+                let source = &pull::masters::SOURCES[0];
+                let tried = pull::masters::Fetched {
+                    body: None,
+                    attempts: vec![pull::masters::Attempt {
+                        url: source.url.to_owned(),
+                        number: 1,
+                        waited_ms: 0,
+                        got: pull::masters::Got::Refused {
+                            status: Some(404),
+                            detail: "the census fixture's refusal".to_owned(),
+                            verdict: pull::masters::Verdict::Never,
+                        },
+                    }],
+                };
+                crate::mastersrun::record(
+                    source,
+                    &Ok(pull::masters::Landed::Refused(
+                        "the census fixture's refusal".to_owned(),
+                    )),
+                    &tried,
+                );
+            }),
+            mine: Box::new(|record| {
+                counts(record, "status", 404) && says(record, "file", "dhan_scrip.csv")
+            }),
+        });
+    }
+
+    {
+        cases.push(Case {
+            site: "mastersrun.rs api.masters.source could not be refreshed",
+            target: "api.masters.source",
+            message: "the master could not be refreshed and the old bytes still stand",
+            level: telemetry::Level::Error,
+            drive: Box::new(|| {
+                let source = &pull::masters::SOURCES[0];
+                crate::mastersrun::record(
+                    source,
+                    &Ok(pull::masters::Landed::Refused(
+                        "the census fixture's refusal".to_owned(),
+                    )),
+                    &pull::masters::Fetched::default(),
+                );
+            }),
+            mine: Box::new(|record| {
+                says(record, "file", "dhan_scrip.csv") && counts(record, "attempts", 0)
+            }),
+        });
+    }
+
     cases
 }
 
@@ -1372,7 +1438,7 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // exactly what `cargo test` is and the row costs nothing to reach.
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 45,
+        lib_sites, 47,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"
