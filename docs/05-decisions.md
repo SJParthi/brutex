@@ -22626,3 +22626,75 @@ defect its own doc records. A store where nobody has run `cli` is unaffected.
 **Not changed.** The two sinks still own separate directories. Merging the
 WRITERS would reintroduce the interleaving the split exists to prevent; this
 changes only what the reader walks.
+
+### D-0302 — the class of defect, closed by a gate instead of by looking
+
+**Decision.** `crates/core/tests/cost_invariants.rs` reconciles every cost row
+in `docs/04-invariants.md` against every id the ratio benches print, in **both
+directions**, with the crate list and the bench list **discovered by walking the
+tree at runtime** and the exceptions **derived rather than listed**.
+
+**Why.** Seven defects were found and fixed in one session — D-0295 through
+D-0301 — and every one was the same shape: **a written claim that no longer
+matched the code.** A page testing one field of a contract carrying three. A
+gate sitting deeper than the fact it checked. A reader walking one directory
+while its own doc said two. Twice, a cost row describing a gap the bench beside
+it had already closed.
+
+Fixing seven instances does not close a class. Each fix answered *"is this one
+right now"* and none answered *"can this go wrong again"* — which is why an
+operator watching the fixes land had **less** confidence with each one, not
+more: every round proved the search kept finding things and none proved the
+search was finished.
+
+**D-0102 already named the rule that closes it**: *where a document states
+something the code also knows, a test reads the document and compares.*
+`crates/core/tests/graph.rs` is that rule applied to the crate graph, and it
+exists because a dependency table was wrong about four members of eleven. **It
+was never applied to the cost rows.** D-0298 is what that cost: five ids
+declared with no bench, three benched with no declaration, found by hand.
+
+**Both directions, because only one of them was broken and the other is worse.**
+A row claiming a bound with no bench is a promise nothing keeps — and gate 8
+cannot see it, because gate 8 runs the benches that EXIST. An id measured with
+no row is worse: `C-I-05`'s own doc carried the heading *"JUDGED HERE, PINNED
+NOWHERE ELSE"* and observed that deleting its assertion would delete the
+measurement with every static check still green.
+
+**Everything is discovered, and that is the operator's requirement met
+literally.** `graph.rs` names every manifest by hand because `include_str!`
+takes a literal. A test does not have to — it runs, so it can walk.
+`std::fs::read_dir` over `crates/` finds every `benches/ratio.rs`, and the
+document is read at runtime. **A crate added tomorrow is covered without editing
+this file**, which matters because a hand-written list is precisely the kind of
+written claim this whole entry is about.
+
+**The exceptions are derived, not allowlisted.** Four rows have no bench of their
+own and are correct: `C-02` and `C-04` superseded, `C-03` closed under a new id,
+and `C-E-02b` a STRUCTURAL claim no ratio can prove. Naming those four in the
+test would be the very thing it refuses — a hand-kept statement that rots the
+day a row is renumbered. The rule is reachability instead: **a row is proven if a
+bench prints its id, or if it names another cost id that is proven**, taken to a
+fixed point. Every such row already names its replacement, because *"superseded
+by"* has to say by what — and `C-02` reaches a bench in two hops, through
+`C-E-02b` to `C-E-09`, which is why the closure is taken and not a single step.
+
+**Proven to bite, not merely to pass.** A gate that has never failed is a gate
+nobody has tested. Three mutations were run against the real tree and reverted:
+a fabricated row `C-Z-99` with no bench (**failed, naming it**), a bench id
+renamed to `C-V-99` so its measurement lost its row (**failed, naming it**), and
+a crate's bench file removed — which **cargo itself refuses**, because the
+manifest declares the target, a stronger guarantee than this test's own.
+
+**A walk that finds nothing passes every assertion**, which is the shape §4 bans
+and which this repository has already been bitten by — gate 8 once *"tested for
+a benches directory at the repository root, found none, and exited zero"*.
+`the_reconciliation_is_reading_something` fails if either parser stops matching.
+
+**What this does NOT check.** The figures. A row claiming 1.117× against a bench
+measuring 1.687× passes here, because a number lives in a run and this is a
+static read. Gate 8 fails on a real breach; duplicating its job against
+transcribed prose would be a second answer that can disagree with the first.
+
+**It needs no CI change.** It is a `cargo test`, so `cargo test --workspace`
+already runs it — the gate the workspace test job is.

@@ -2783,3 +2783,28 @@ of them.
 | LG-03 | **The caller's `limit` bounds the union.** Each half honours it already, so an untruncated merge returns up to twice what was asked for | `api::logs::the_limit_bounds_the_union_and_not_each_half` | ✓ |
 | LG-04 | **A store where nobody ran `cli` is an empty half, never an error, and never claims older events exist.** `tail` renders a missing directory as no records and `walked` initialises `reached_oldest` true — checked rather than assumed, because that field was once `false` on ordinary full pages | `api::logs::a_store_where_nobody_ran_cli_is_an_empty_half_and_not_an_error` | ✓ |
 | LG-05 | **Completeness flags merge in the direction that cannot over-promise.** `hit_scan_cap` and `partial_tail` OR; `reached_oldest` ANDs; `missing` sums, and a half answering `None` contributes nothing rather than a zero that would read as "none lost" | `api::logs::both_halves`, and LG-04 for the absent-half direction | ✓ |
+
+## A cost claim and its measurement cannot drift apart — D-0302
+
+Seven defects in one session shared one shape: a written claim that no longer
+matched the code. These rows close that class for the cost invariants, in both
+directions, with everything discovered at runtime.
+
+| ID | Invariant | Proof | ✓ |
+|---|---|---|---|
+| RC-01 | **Every id a bench prints is declared as a row.** A measurement nobody wrote down is a number with no claim attached — `C-I-05`'s own doc read *"JUDGED HERE, PINNED NOWHERE ELSE"* and observed that deleting its assertion would delete the measurement with every static check still green | `core::cost_invariants::every_measured_cost_invariant_is_declared` | ✓ |
+| RC-02 | **Every declared row reaches a bench**, directly or by naming another cost id that does, taken to a fixed point. A row claiming a bound with no measurement is a promise nothing keeps, and gate 8 cannot see it because gate 8 runs the benches that EXIST. `C-02` reaches one in two hops via `C-E-02b` to `C-E-09`, which is why the closure is taken rather than a single step | `core::cost_invariants::every_declared_cost_invariant_reaches_a_bench` | ✓ |
+| RC-03 | **No exception is listed.** The four rows without their own bench pass by naming the id that measures them, which each already does because *"superseded by"* has to say by what. A hand-kept allowlist is the same rotting claim this section exists to refuse | the absence of an allowlist in that file, and RC-02 passing without one | ✓ |
+| RC-04 | **The crate list and the bench list are walked, never written down.** `read_dir` over `crates/` finds every `benches/ratio.rs` at runtime, so a crate added tomorrow is covered without editing the test — and a crate carrying a manifest and no bench fails | `core::cost_invariants::every_crate_carries_a_ratio_bench` | ✓ |
+| RC-05 | **A walk that finds nothing fails rather than passing vacuously.** Both checks above are satisfied by an empty document and an empty bench set — the shape §4 bans, and one this repository has been bitten by: gate 8 once *"tested for a benches directory at the repository root, found none, and exited zero"* | `core::cost_invariants::the_reconciliation_is_reading_something` | ✓ |
+| RC-06 | **The five operations `CLAUDE.md` §3 rule 4 names are all still mentioned.** A document that stopped naming one would leave that rule with nothing behind it and no ratio would notice | `core::cost_invariants::the_document_declares_the_five_operations_rule_4_names` | ✓ |
+
+**Measured to bite, not merely to pass.** Three mutations were run against the
+real tree and reverted: a fabricated row with no bench (failed, naming it), a
+bench id renamed so its measurement lost its row (failed, naming it), and a
+crate's bench file removed — which **cargo itself refuses**, because the
+manifest declares the target.
+
+**Not checked here:** the figures. A row claiming 1.117× against a bench
+measuring 1.687× passes, because a number lives in a run and this is a static
+read. Gate 8 is what fails on a breach.
