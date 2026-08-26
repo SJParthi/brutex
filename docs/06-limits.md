@@ -5585,3 +5585,52 @@ That the derived figure is right for any particular machine. It is *scaled* by
 one machine property and *calibrated* against one machine, which is strictly
 better than a constant that does neither — and strictly worse than reading the
 number it stands in for.
+
+## 94. `REFERENCE_CORES` is a measured property of one machine and no test can check it — D-0307
+
+`cli::derived_ceiling` scales `engine::DEFAULT_CEILING` by
+`std::thread::available_parallelism()` against a reference. **The reference must
+be in the unit the measurement answers in, and it was not.**
+
+### The measurement, taken on the reference machine
+
+```
+$ sysctl -n machdep.cpu.brand_string   Apple M4 Pro
+$ sysctl -n hw.logicalcpu              14
+$ sysctl -n hw.perflevel0.physicalcpu  10   (performance)
+$ sysctl -n hw.perflevel1.physicalcpu   4   (efficiency)
+$ sysctl -n hw.memsize                 51539607552   (48 GB)
+```
+
+`available_parallelism()` answers **14** here, verified by running it.
+
+### What the error was worth
+
+`range_all`'s comment says *"A MACHINE WITH TEN PERFORMANCE CORES"*, and 10 is
+what `REFERENCE_CORES` first held. Dividing by 10 and multiplying by 14 inflates
+the ceiling 1.4×: **187,904,808 candidates where the calibration says
+134,217,728**. At the ~146 bytes per candidate `ceiling_from_env` quotes that is
+**27 GB of 48**, against a calibration of 19.6 GB and
+`engine::DEFAULT_CEILING`'s own note that `2^28` — 39.2 GB — *"swaps on a 48 GB
+machine"*. The code written to keep the machine off swap was pushing it toward
+swap.
+
+### Why no test covers it
+
+The number is a property of hardware **not present at test time**. A test would
+either hardcode 14 — two copies of one guess agreeing — or read the machine it
+runs on, which is a different machine answering a different number. So it is
+handled as §3 rule 1 handles a vendor fact: **recorded with its source**, which
+is this section.
+
+`the_ceiling_is_derived_from_this_machine_and_not_from_an_assumed_one` bounds the
+consequence at 2 GB per core. **That guard did not catch this**: the old value
+implied 1.96 GB per core, inside the cap. Stated rather than left to be
+discovered.
+
+### What follows for another machine
+
+Anyone running this on hardware whose `available_parallelism()` differs
+materially from 14 should check the implied bytes — candidates × 146 — against
+their own RAM, and set `BRUTEX_CEILING` if the proxy is wrong for them. §93
+records why cores are a proxy and where the proxy fails.

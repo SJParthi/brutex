@@ -22938,3 +22938,57 @@ truth is that nothing was allowed to run.
 knob, reading through this same function — so a run on a four-core machine and
 one on a twenty-core machine are now different identities, which they are:
 different amounts of the combination space were explored.
+
+### D-0307 — a right number in the wrong unit, caught by reading the machine
+
+**Decision.** `cli::derived_ceiling`'s `REFERENCE_CORES` is **14**, not 10, and
+`docs/06-limits.md` §94 records the measurement it comes from and the fact that
+no test can check it.
+
+**Why.** D-0306 scaled `engine::DEFAULT_CEILING` by
+`std::thread::available_parallelism()` against a reference taken from
+`range_all`'s comment: *"A MACHINE WITH TEN PERFORMANCE CORES"*. **Ten is the
+performance-core count. `available_parallelism()` is not that number.**
+
+Measured on the reference machine itself:
+
+```
+machdep.cpu.brand_string   Apple M4 Pro
+hw.logicalcpu              14
+hw.perflevel0.physicalcpu  10   (performance)
+hw.perflevel1.physicalcpu   4   (efficiency)
+hw.memsize                 48 GB
+available_parallelism()    14   (verified by running it)
+```
+
+Dividing a ceiling calibrated for that machine by 10 and multiplying it back by
+14 inflates it **1.4×**: `187,904,808` candidates where the calibration says
+`134,217,728`. At the ~146 bytes per candidate `ceiling_from_env`'s own refusal
+quotes, that is **27 GB of 48** — against a calibration of 19.6 GB and
+`DEFAULT_CEILING`'s own note that `2^28`, 39.2 GB, *"swaps on a 48 GB machine"*.
+**The code written to keep the machine off swap was pushing it toward swap.**
+
+Not a wrong number — a right number in the wrong unit, which is the class
+`reference_price` already records for paisa against index points.
+
+**No test can verify the corrected value, and that is stated rather than
+implied.** It is a property of hardware not present at test time. A test would
+either hardcode 14 — two copies of one guess agreeing — or read the machine it
+runs on, which is a different machine. So it is handled as §3 rule 1 handles a
+vendor fact: recorded with its source, which is §94.
+
+**The guard that exists does not cover it, and the entry says so.**
+`the_ceiling_is_derived_from_this_machine_and_not_from_an_assumed_one` bounds
+bytes per core at 2 GB. The old value implied **1.96 GB** — inside the cap. It
+passed. Claiming that test as the protection would be the false assurance this
+sequence of entries exists to remove.
+
+**On using ten rather than fourteen, which is a different question.** Ten is the
+right number for THREAD POOL SIZE — eight rungs fan out through `rayon` and the
+four efficiency cores are materially slower, so an item landing on one straggles
+at the `collect` barrier. It is the wrong number for the CEILING DIVISOR, which
+must be in the unit of the thing it divides. **No pool cap is added here**: the
+sweep fans out eight items, macOS schedules default-QoS CPU-bound threads onto
+performance cores first, and there are ten of those — so the eight already land
+where they should. A cap would need performance-core detection, which is
+`sysctl`, which is the dependency §93 costs out. Recorded rather than taken.

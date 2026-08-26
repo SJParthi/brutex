@@ -151,6 +151,14 @@ pub mod ingest;
 /// Kite Connect v3's `error_type` vocabulary -- ONE VENDOR'S ROW in `refusal`.
 pub mod kite;
 pub mod manifest;
+/// Where an instrument master comes from, and what it takes to replace one.
+///
+/// `core::vendor::master_file` has always named where each feed's master is
+/// READ from and nothing has ever fetched one, so a stale master was invisible:
+/// the parse succeeded and every symbol renamed since resolved to the old row.
+/// Describes the four sources and lands the bytes; the transport is the
+/// caller's [`chain::Discovery`], the same seam `nse` draws.
+pub mod masters;
 /// The exchange's own index directory and the constituent files it links to.
 ///
 /// Read-only decoders over bytes somebody else fetched — no socket here, the
