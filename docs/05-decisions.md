@@ -23055,3 +23055,58 @@ the half with no network in it.
 master set behind a swap inside `Site`, which every route shares by `Arc`, and
 that is a change to how the whole site is held rather than an addition beside
 it.
+
+### D-0309 — two unverified claims in a route that had already shipped
+
+**Decision.** `reqwest` gains the `gzip` feature. NSE's index list is **removed**
+from `masters::SOURCES` and documented as operator-supplied. `masters::land`
+refuses a body whose first byte opens JSON or markup.
+
+**Why.** The operator asked whether the refresh route had been confirmed. It had
+not, and checking found two ways it would have failed against the real hosts —
+neither of which any test would have caught.
+
+**One: Zerodha's dump could not be decoded.** Its own doc says the endpoint
+*"returns a gzipped CSV dump"*, and `Vendor::master_file`'s comment says the
+same: *"A GZIPPED CSV ON THE WIRE, and a plain one once it is on disk."*
+Measured: `reqwest` was configured `default-features = false` with
+`["rustls-tls-webpki-roots-no-provider", "json"]`, and **nothing in the
+workspace handled gzip at all** — no feature, no `flate2`, no decoder. `.text()`
+over gzip bytes is a lossy conversion that can still clear a length check, so
+the failure mode was garbage on disk rather than an error.
+
+`cargo deny check` passes with the feature added — advisories, bans, licenses,
+sources all ok. The transitive additions are `flate2` on the `miniz_oxide`
+backend, which is pure Rust: §2's ban on C reaching this tree holds. The feature
+is transparent to every other caller — `reqwest` advertises the encoding and
+decodes it, so a vendor that does not gzip is unaffected.
+
+**Two: the NSE source pointed at JSON.** `SOURCES` named
+`https://www.nseindia.com/api/equity-master` for `nse_indices.csv`. That
+endpoint answers a JSON map of category to index names.
+`api::indexmap::Published::read` parses `index_name,category` **CSV rows** — its
+own test writes exactly that shape.
+
+**The guard did not catch it and would not have.** `land` tested the byte floor
+and whether the first line contained a comma. JSON is full of commas, so
+`{"Broad Market Indices":["NIFTY 50",…]}` cleared both, landed cleanly over the
+operator's catalogue, and would have failed at the parse — one layer away from
+the cause, with a file on disk that looks like a master.
+
+So `land` now refuses a body opening `{`, `[` or `<` before the comma test runs,
+and a test constructs a JSON body that provably passes the other two checks to
+prove the new one is what stops it.
+
+**And the source is removed rather than corrected.** No public NSE URL is known
+to serve the `index_name,category` shape this engine reads. §3 rule 1 is
+explicit — *if you are unsure, write `UNVERIFIED` and stop* — and shipping a
+guess is exactly how the wrong bytes got here. `NSE_INDICES_IS_OPERATOR_SUPPLIED`
+carries the reason, and a test pins that the file is not fetched from an
+unverified endpoint.
+
+**What this says about the two commits before it.** D-0308 shipped a route whose
+credentialed leg could not decode its payload and whose exchange leg fetched the
+wrong document. Both were written from documentation and neither was checked
+against the thing it would actually receive. The defect class is the one this
+session keeps finding — a written claim that does not match reality — and the
+author of the last three entries about it produced two more.

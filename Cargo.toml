@@ -101,7 +101,12 @@ tracing  = "0.1"
 tokio    = { version = "1", features = ["rt-multi-thread", "macros", "fs", "signal"] }
 axum     = "0.8"
 rustls-graviola = "0.4"
-reqwest  = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots-no-provider", "json"] }
+# `gzip` IS FOR ONE ENDPOINT AND IT IS NOT OPTIONAL FOR IT. Zerodha's
+# instrument dump is documented as "a gzipped CSV dump"; without transparent
+# decoding `.text()` yields lossy garbage that can still clear a length check.
+# Transparent to every other caller: reqwest advertises the encoding and decodes
+# it, so a vendor that does not gzip is unaffected. D-0309.
+reqwest  = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots-no-provider", "json", "gzip"] }
 serde    = { version = "1", features = ["derive"] }
 serde_json = "1"
 clap     = { version = "4", features = ["derive"] }

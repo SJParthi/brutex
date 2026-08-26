@@ -17,7 +17,7 @@
 //! # Two kinds of source, and the difference is not cosmetic
 //!
 //! Dhan and Groww publish their masters as **plain CDN files with no
-//! authentication**. NSE publishes its index list the same way. Zerodha's dump
+//! authentication**. Zerodha's dump
 //! is behind the same token every bar request spends:
 //!
 //! ```text
@@ -26,8 +26,8 @@
 //!   -H "Authorization: token api_key:access_token"
 //! ```
 //!
-//! So a refresh of "the masters" is not one operation. Three of the four cost
-//! nothing and can run unattended; the fourth spends a shared credential and is
+//! So a refresh of "the masters" is not one operation. Two of the three cost
+//! nothing and can run unattended; the third spends a shared credential and is
 //! an act an operator takes deliberately. [`Source::needs_token`] is that
 //! distinction, carried in the data rather than in a comment, so a caller
 //! cannot run the whole set unattended without noticing.
@@ -76,7 +76,7 @@ pub struct Source {
     pub url: &'static str,
     /// Whether fetching it spends the shared vendor credential.
     ///
-    /// **The whole reason this field exists**: three of the four sources are
+    /// **The whole reason this field exists**: two of the three sources are
     /// public CDN files that cost nothing, and one is behind the same token
     /// every bar request spends. A caller that refreshes the set unattended
     /// must be able to tell them apart without reading a comment.
@@ -96,7 +96,7 @@ pub const NSE_INDICES_FILE: &str = "nse_indices.csv";
 /// named by its own filename."* `TrueData` and `Gdfl` are therefore absent by
 /// the same rule that gives them a filename which `master_paths` looks for and
 /// will not find.
-pub const SOURCES: [Source; 4] = [
+pub const SOURCES: [Source; 3] = [
     Source {
         vendor: Some(Vendor::Dhan),
         file: "dhan_scrip.csv",
@@ -115,13 +115,30 @@ pub const SOURCES: [Source; 4] = [
         url: "https://api.kite.trade/instruments",
         needs_token: true,
     },
-    Source {
-        vendor: None,
-        file: NSE_INDICES_FILE,
-        url: "https://www.nseindia.com/api/equity-master",
-        needs_token: false,
-    },
 ];
+
+/// Why NSE's index list is NOT in [`SOURCES`], written down rather than
+/// silently absent.
+///
+/// It was, for one commit, pointed at
+/// `https://www.nseindia.com/api/equity-master`. That endpoint answers **JSON**
+/// — a map of category to index names. `api::indexmap::Published::read` wants
+/// `index_name,category` CSV rows, and its own test writes exactly that shape.
+///
+/// **The guard below would not have caught it.** JSON contains commas, so a
+/// body of `{"Broad Market Indices":["NIFTY 50",…]}` clears both
+/// [`MIN_BODY_BYTES`] and the first-line comma test, lands cleanly over the
+/// operator's catalogue, and fails at the parse — one layer away from where the
+/// cause is. That is why [`land`] now refuses a body whose first byte opens a
+/// JSON object or an HTML tag.
+///
+/// No public NSE URL is known to serve the `index_name,category` shape this
+/// engine reads, so the file stays **operator-supplied**. Guessing one and
+/// shipping it is how the wrong bytes got here in the first place, and
+/// `CLAUDE.md` §3 rule 1 is explicit: if you are unsure, write `UNVERIFIED` and
+/// stop. D-0309.
+pub const NSE_INDICES_IS_OPERATOR_SUPPLIED: &str = "nse_indices.csv is not fetched: no public NSE endpoint is known to serve \
+     the `index_name,category` rows this engine reads. Supply it by hand.";
 
 /// Which kind of transport a fetch is going out on.
 ///
@@ -312,6 +329,31 @@ pub fn land(dir: &Path, source: &Source, body: &str) -> Landed {
             body.len()
         ));
     }
+    // A CSV DOES NOT OPEN WITH `{` OR `<`, AND THE COMMA TEST ALONE MISSES
+    // BOTH.
+    //
+    // MEASURED, on this module's own first version: it pointed NSE's index list
+    // at `https://www.nseindia.com/api/equity-master`, which answers **JSON**.
+    // `{"Broad Market Indices":["NIFTY 50",…]}` contains commas, so it cleared
+    // the byte floor AND the comma test, landed cleanly over the operator's
+    // catalogue, and would have failed at `indexmap::Published::read` — one
+    // layer away from the cause, with a file on disk that looks like a master.
+    //
+    // The first non-space byte is the cheapest thing that separates them, and it
+    // costs one comparison rather than a parse.
+    let opener = body.trim_start().as_bytes().first().copied();
+    if opener == Some(b'{') || opener == Some(b'[') || opener == Some(b'<') {
+        return Landed::Refused(format!(
+            "`{}` answered {} bytes opening with `{}`, which is JSON or markup \
+             and not the CSV a master is. A body like this passes a comma test \
+             — JSON is full of commas — so it is refused on its first byte \
+             instead.",
+            source.url,
+            body.len(),
+            char::from(opener.unwrap_or(b'?'))
+        ));
+    }
+
     // A MASTER IS A CSV AND A CSV HAS A HEADER ROW. An HTML error page long
     // enough to clear the byte floor still fails this, and the check costs one
     // comparison on the first line rather than a parse of the whole file.
@@ -497,8 +539,57 @@ mod tests {
         let Landed::Refused(why) = land(&dir, &SOURCES[0], &html) else {
             panic!("a long HTML page is not a CSV");
         };
-        assert!(why.contains("no comma"), "{why}");
+        assert!(why.contains("JSON or markup"), "{why}");
         assert!(!path_of(&dir, &SOURCES[0]).exists(), "nothing was written");
+    }
+
+    #[test]
+    fn a_json_body_is_refused_even_though_json_is_full_of_commas() {
+        // THE DEFECT THIS GUARD EXISTS FOR, and it shipped for one commit.
+        // NSE's index list was pointed at an endpoint answering JSON. The
+        // engine reads `index_name,category` CSV rows -- and JSON contains
+        // commas, so the body cleared the byte floor AND the comma test, landed
+        // cleanly over the operator's catalogue, and would have failed at the
+        // parse one layer away from the cause.
+        let dir = scratch("json-body");
+        let mut json = String::from(r#"{"Broad Market Indices":["NIFTY 50","NIFTY NEXT 50""#);
+        while json.len() <= MIN_BODY_BYTES {
+            json.push_str(r#","NIFTY 100""#);
+        }
+        json.push_str("]}");
+
+        // IT PASSES THE TWO CHECKS THAT WERE THERE BEFORE, which is the point.
+        assert!(
+            json.len() > MIN_BODY_BYTES,
+            "long enough to clear the floor"
+        );
+        assert!(
+            json.lines().next().unwrap_or_default().contains(','),
+            "and full of commas, so the comma test cannot catch it"
+        );
+
+        let Landed::Refused(why) = land(&dir, &SOURCES[0], &json) else {
+            panic!("JSON is not the CSV a master is");
+        };
+        assert!(why.contains("JSON or markup"), "{why}");
+        assert!(!path_of(&dir, &SOURCES[0]).exists(), "nothing was written");
+    }
+
+    #[test]
+    fn the_nse_index_list_is_not_fetched_and_says_why() {
+        // §3 rule 1: if you are unsure, write UNVERIFIED and stop. No public
+        // NSE endpoint is known to serve the `index_name,category` rows
+        // `api::indexmap::Published::read` parses, so the file is
+        // operator-supplied rather than guessed at -- which is exactly what
+        // shipping a guess cost, one commit ago.
+        assert!(
+            !SOURCES.iter().any(|s| s.file == NSE_INDICES_FILE),
+            "the index list must not be fetched from an unverified endpoint"
+        );
+        assert!(
+            super::NSE_INDICES_IS_OPERATOR_SUPPLIED.contains(NSE_INDICES_FILE),
+            "the reason must name the file an operator has to supply"
+        );
     }
 
     #[test]
