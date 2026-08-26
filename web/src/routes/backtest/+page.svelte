@@ -717,7 +717,28 @@
           monthList: [...h.months].sort(),
           from: h.from,
           to: h.to,
-          rungs: [...h.rungs.values()].sort((a, b) => byRung(a.name, b.name))
+          // INTRADAY ONLY, AND THE TEST IS THE SHAPE OF THE NAME.
+          //
+          // `1day` is on disk and is NOT a signal timeframe. It is there to
+          // feed `indicators::daily` -- "the pivot ladder, the central pivot
+          // range, and yesterday's high and low", bits 13-18 -- so a daily
+          // bar DEFINES the previous session's OHLC for the intraday rungs
+          // rather than being swept itself. `cli::EVERY_RUNG` is the eight
+          // `*min` rungs and `cli::descend` refuses anything else by name;
+          // `range_all`'s own banner reads "ALL EIGHT INTRADAY RUNGS".
+          //
+          // Matching on the `min` SUFFIX rather than listing the eight is
+          // what keeps this from being a second copy of that const: a rung
+          // the store gains tomorrow is swept if it is intraday and skipped
+          // if it is not, with nothing here to update. The store's whole
+          // rung set is kept beside it, because "what is on disk" is still
+          // a fact this page states.
+          rungs: [...h.rungs.values()]
+            .filter((r) => /min$/.test(r.name))
+            .sort((a, b) => byRung(a.name, b.name)),
+          daily: [...h.rungs.values()]
+            .filter((r) => !/min$/.test(r.name))
+            .sort((a, b) => byRung(a.name, b.name))
         }))
         // Widest history first — the instrument with the most to sweep is
         // the one an operator most likely wants, and it is a FACT about the
@@ -1421,7 +1442,14 @@
         if (leaf !== run.underlying) continue;
         months.set(row.timeframe, (months.get(row.timeframe) ?? 0) + 1);
       }
+      // INTRADAY ONLY HERE TOO. This switcher offers the timeframes a run's
+      // chart can be redrawn at, and `1day` is not one of them: it is on disk
+      // to define the previous session's OHLC for `indicators::daily`, not to
+      // be looked at or swept. Same `min`-suffix test the catalog uses, for
+      // the same reason -- a rule about the SHAPE of a rung rather than a
+      // second copy of `cli::EVERY_RUNG`.
       storeRungs = [...months.entries()]
+        .filter(([name]) => /min$/.test(name))
         .map(([name, count]) => ({ name, months: count }))
         .sort((a, b) => byRung(a.name, b.name));
     } catch {
@@ -2878,6 +2906,20 @@
         From the census on disk — <b>spot indices only</b>.
         {#if heldNow.rungs.some((r) => r.months < heldNow.months)}
           A rung marked <b>−n</b> is a <b>shorter sample</b>, not a corrected one.
+        {/if}
+        <!-- THE DAILY BAR IS NAMED ONCE, AS WHAT IT IS FOR. It is offered
+             nowhere as something to sweep -- not in the menu, not in the
+             strip, not in the default selection -- but it IS on disk, and a
+             month count that silently excluded it would put this bar in
+             disagreement with `/db` for no stated reason. One clause, no
+             control. -->
+        {#if heldNow.daily.length > 0}
+          <span
+            title="indicators::daily builds the pivot ladder, the central pivot range and yesterday's high and low from it — vocabulary bits 13–18. cli::EVERY_RUNG is the eight intraday rungs and nothing else."
+          >
+            Also held: <b>{heldNow.daily.map((r) => r.name).join(', ')}</b>, read only to define the
+            <b>previous session's OHLC</b> for the timeframes above — never swept.
+          </span>
         {/if}
       </p>
       <!-- THE SURFACE, IN THE SERVER'S WORDS AND NOT THIS PAGE'S. The store
@@ -4638,14 +4680,33 @@
      18.4px, so the largest text on a page about one number was a row of
      zeroes. `--fs-lg` puts the title back above the counters, which now
      sit at the data scale where they belong. */
+  /* THE HEADER HAD NO GROUND OF ITS OWN. Title, one grey line and a ghost
+     button, floating on the page colour above a panel that carried all the
+     weight -- so the eye started at the panel and the page had no top. It
+     takes the accent rail every section heading here already uses, and the
+     standfirst sits on the rail rather than under a title that is not
+     connected to anything. */
   .head {
-    padding-bottom: 0.15rem;
-    margin-bottom: 0.7rem;
+    position: relative;
+    padding: 0.1rem 0 0.3rem 0.85rem;
+    margin-bottom: 0.9rem;
+    align-items: center;
+  }
+  .head::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0.2em;
+    bottom: 0.35em;
+    width: 3px;
+    border-radius: 2px;
+    background: linear-gradient(to bottom, var(--acc), transparent);
   }
   h1 {
-    font-size: var(--fs-lg);
+    font-size: var(--fs-xl);
     font-weight: var(--w-bold);
-    letter-spacing: -0.02em;
+    letter-spacing: -0.03em;
+    line-height: 1.05;
   }
 
   /* ---------------- panels ---------------- */
@@ -4674,8 +4735,19 @@
     border-left: 3px solid var(--down);
     background: var(--down-soft);
   }
+  /* AN EMPTY LEDGER IS THE FIRST THING A NEW OPERATOR SEES, and it was a
+     grey box of prose in the same weight as everything else -- the page's
+     largest block, saying the least. It gets a ground of its own and a
+     heading that reads as a state rather than as another paragraph. The
+     `info` rail stays: this is a fact, not a fault, and the colour is what
+     says which. */
   .panel.bt-note {
     border-left: 3px solid var(--info);
+    background: linear-gradient(135deg, var(--acc-soft) 0%, transparent 46%), var(--n3);
+  }
+  .panel.bt-note h2 {
+    font-size: var(--fs-md);
+    letter-spacing: -0.01em;
   }
   .wait {
     display: flex;
@@ -5726,6 +5798,29 @@
   .bt-strip {
     box-shadow: var(--e1);
   }
+  /* FOUR CELLS OF IDENTICAL GREY TEXT read as a paragraph broken into
+     columns rather than as four separate readings. Each takes a hairline of
+     its own meaning at the top -- neutral for a count, green for the
+     comparable ones, amber where a defect counter is non-zero -- so the
+     strip can be scanned rather than read. The rail is 2px and sits above
+     the label, which is the least ink that can carry a state. */
+  .fact::before {
+    content: '';
+    position: absolute;
+    inset: 0 0 auto 0;
+    height: 2px;
+    background: var(--n6);
+    transition: background 0.2s ease;
+  }
+  .fact.good::before {
+    background: var(--up);
+  }
+  .fact.warn::before {
+    background: var(--warn);
+  }
+  .fact.nil::before {
+    background: var(--n6);
+  }
   .fact {
     position: relative;
     transition:
@@ -5925,7 +6020,14 @@
     background: linear-gradient(120deg, var(--acc-soft) 0%, var(--n3) 38%);
     box-shadow: var(--e1);
   }
+  /* THE ONE CONTROL ON THIS PAGE THAT STARTS WORK, and it was the same size
+     as the two menus beside it. It keeps their height -- the row has one
+     baseline and that is worth more than a tall button -- and takes weight
+     instead: a wider block, tighter tracking, and a glow that says pressable
+     without moving anything. */
   .btn.run {
+    padding-inline: 1.1rem;
+    letter-spacing: -0.01em;
     box-shadow: 0 4px 18px -8px var(--acc);
     transition:
       filter 0.16s ease,
