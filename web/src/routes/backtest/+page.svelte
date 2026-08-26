@@ -80,7 +80,7 @@
    * `<n><unit>` into seconds. A hardcoded list would be a list the store can
    * contradict.
    */
-  import { untrack } from 'svelte';
+  import { untrack, tick } from 'svelte';
   import { feeds } from '$lib/feeds.svelte.js';
   /* RENAMED ON IMPORT. This page's Run control owns a state object called
      `ask` — what the operator is asking the sweep for — and the fetch helper
@@ -1285,9 +1285,96 @@
   let openIndex = $state(null);
   const openRun = $derived(runs.find((r) => r.index === openIndex) ?? null);
 
-  /** @param {any} run */
-  function toggle(run) {
-    openIndex = openIndex === run.index ? null : run.index;
+  /**
+   * Open or close a run's drill-down, AND GO TO IT WHEN IT OPENS.
+   *
+   * MEASURED, WHICH IS THE ONLY REASON THIS IS NOT STILL A ONE-LINER.
+   * `Drill in` on the answer card sits at y=517 in a 954px viewport. The
+   * panel it opens starts at y=1011 -- **57px below the fold** -- and the
+   * page did not scroll. So the only thing that changed on screen was the
+   * button's own label flipping to `Close`, while **3,221px** of content --
+   * a live candlestick chart off the store's own bars, the rung switcher,
+   * the whole tester -- appeared entirely off-screen and the page silently
+   * became four times longer.
+   *
+   * That is a fact present in the DOM and invisible on screen, which is
+   * the failure `CLAUDE.md` §4 bans and the third time it has been found
+   * on this page. A control that reports success by changing its own
+   * caption and nothing else is indistinguishable from one that did
+   * nothing.
+   *
+   * `await tick()` AND NOT `requestAnimationFrame`, measured. The first
+   * version used a frame and did not scroll at all -- `.page.scrollTop`
+   * stayed 0 with the panel still 1,011px down. Svelte flushes on a
+   * microtask, a frame fires after that, and the panel was there by then;
+   * what was NOT settled was its layout, so the scroll resolved against a
+   * node with no height yet. `tick` is the framework's own answer to
+   * "the DOM now matches the state".
+   *
+   * The container is scrolled EXPLICITLY rather than through
+   * `scrollIntoView`. `theme.css` makes `body` and `.main` `overflow:
+   * hidden` and this page owns its own scroller, so the ancestor walk
+   * `scrollIntoView` does has three candidates and picked none of them.
+   * Naming `.page` removes the guess.
+   *
+   * @param {any} run
+   */
+  async function toggle(run) {
+    const opening = openIndex !== run.index;
+    openIndex = opening ? run.index : null;
+    if (!opening) return;
+    await tick();
+    const page = document.querySelector('.page');
+    if (!page) return;
+
+    /* THE PANEL EXISTS BEFORE IT HAS A SIZE, and that is what defeated the
+       two previous attempts. Traced: `.drill` is in the DOM by 657ms, and
+       `.page.scrollTop` never left 0 with either `requestAnimationFrame`
+       or `await tick()`. Both fire while the panel is still EMPTY — its
+       chart is waiting on `/bars/window.json` — so the scroll target was a
+       collapsed node at the bottom of a page that had not grown yet, and
+       the browser clamped the request to the scrollHeight of the moment.
+
+       So the wait is on HEIGHT, not on a tick or a frame. Bounded at ~1.2s
+       and it scrolls to whatever it has when the deadline passes: a slow
+       fetch must not mean the page never moves, and arriving at a partly
+       drawn panel still tells the reader where the click went. */
+    const deadline = 1200;
+    const started = performance.now();
+    /** @returns {Promise<void>} */
+    const settle = () =>
+      new Promise((done) => {
+        const look = () => {
+          const panel = document.querySelector('.drill');
+          const tall = panel !== null && panel.getBoundingClientRect().height > 200;
+          if (tall || performance.now() - started > deadline) done();
+          else requestAnimationFrame(look);
+        };
+        look();
+      });
+    await settle();
+
+    const panel = document.querySelector('.drill');
+    if (!panel) return;
+    const delta = panel.getBoundingClientRect().top - page.getBoundingClientRect().top;
+    /* ASSIGNED, NOT `scrollTo({behavior:'smooth'})`, AND THIS IS THE THIRD
+       AND ACTUAL CAUSE. Measured on this container:
+
+         page.scrollTo({top: 600, behavior: 'smooth'})  ->  scrollTop 0
+         page.scrollTo({top: 600, behavior: 'auto'})    ->  scrollTop 600
+
+       Smooth is a silent no-op here, so the version that asked for it did
+       nothing at all and reported no error — the same shape as the dead
+       `Clear all`, and found the same way, by measuring instead of reading
+       the code and believing it.
+
+       A plain assignment always moves. The animation moves to CSS
+       (`scroll-behavior` on `.page`, behind a reduced-motion guard), where
+       a browser that will not animate simply jumps and the reader still
+       arrives. Motion is the part that may be dropped; the navigation is
+       not. `- 8` keeps the panel's top edge off the rim of the scrollport
+       so it reads as arriving rather than as clipped. */
+    page.scrollTop = page.scrollTop + delta - 8;
   }
 
   /* ====================================================================
@@ -7579,6 +7666,19 @@
   }
   /* The two full-width rows: the panel's own name above the fields, and
      what the press will do below them. */
+  /* THERE IS DELIBERATELY NO `scroll-behavior: smooth` ON `.page`.
+
+     It was added here to give the drill-down's arrival scroll its
+     animation back after `scrollTo({behavior:'smooth'})` turned out to be
+     a no-op on this container -- and it reintroduced the identical bug by
+     the other door, because CSS `scroll-behavior` makes even a direct
+     `scrollTop` ASSIGNMENT animate. Measured: `scrollTop` stayed 0 with
+     this rule present and moves to the panel without it.
+
+     Smooth scrolling on this scroller does not work in this build. An
+     instant arrival is not as pretty and it is the one that always
+     happens, which is the property that matters for navigation. */
+
   .runbar-k,
   .runbar-n {
     grid-column: 1 / -1;
