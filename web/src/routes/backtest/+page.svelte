@@ -2871,159 +2871,33 @@
           <b class="warnish">The rest of the selection is not sent yet</b> — the run route takes one
           instrument and no timeframe list.
         {/if}
+        <!-- THE SPAN GUARD MOVED HERE WHEN THE COVERAGE SECTION WENT.
+             It is the one thing in that section an operator acts on, and it
+             exists because a hardcoded `2019-12` once cost 40 of 121 months
+             while the run still reported `81/81` with no hole. Losing it with
+             the section would have re-opened exactly that hole -- so it sits
+             in the line that already says what the press will do, which is
+             where it is read. -->
+        {#if spanShortfall > 0 && askedMonths !== null && heldNow}
+          <b class="warnish">
+            Asking for {exact(askedMonths)} of {exact(heldNow.months)} months
+          </b>
+          — {exact(spanShortfall)} on disk will not be swept.
+          <button class="linky" onclick={useWholeSpan}>Use the whole span</button>
+        {:else if askedMonths !== null && spanShortfall < 0 && heldNow}
+          <b class="warnish">
+            Asking for {exact(askedMonths)} months, more than the {exact(heldNow.months)} on disk
+          </b>
+          — the months that do not exist are simply absent from the sample.
+        {/if}
+        {#if heldNow && rungsDiffer}
+          <b class="warnish">Not every timeframe holds the same history</b> — the short ones are a
+          shorter sample, not a corrected one.
+        {/if}
       {/if}
     </span>
   </section>
 
-  <!-- ================================================================
-       WHAT THE STORE HOLDS FOR THIS INSTRUMENT.
-       The rungs, each with its OWN month count and bounds, because a rung
-       is not obliged to cover the same span as its neighbour — INDIAVIX
-       carries 121 months at `1day` and 119 at every intraday rung, and a
-       row that averaged them would hide the two missing months.
-       ================================================================ -->
-  {#if catalog.phase === 'ready' && heldNow}
-    <section class="coverbar">
-      <!-- ================================================================
-           THIS SECTION SAYS WHAT THE FORM ABOVE IT DOES NOT, AND NOTHING ELSE.
-
-           Measured before this rewrite: `.coverbar` was **284px** -- the
-           tallest section on the page, taller than the answer (252px) and the
-           ledger (160px) -- and it opened by repeating the instrument, the
-           span and the timeframe count, all three of which are read straight
-           off the three menus one row above.
-
-           Then it drew eight gauges whose counts were **121, 121, 121, 121,
-           121, 121, 121, 121**: eight bars, every one at 100%. This file
-           already has the argument against that, written for the solo rung
-           tile -- "a shape that cannot vary is not a measurement", spending a
-           band "on nothing while looking like a comparison that was made".
-           Eight identical bars is the same failure with more ink.
-
-           So the header is gone and the gauges are conditional. What is left
-           is an EXCEPTIONS panel: it speaks when a timeframe holds less than
-           its instrument, or when the asked span is narrower than the disk,
-           and it says one quiet line when neither is true. A panel that is
-           silent when there is nothing wrong is how a reader learns that its
-           speaking means something.
-           ================================================================ -->
-      {#if spanShortfall !== 0 && askedMonths !== null}
-        <p class="coverbar-alert">
-          {#if spanShortfall > 0}
-            <b class="warnish">Asking for {exact(askedMonths)} of {exact(heldNow.months)} months.</b>
-            {exact(spanShortfall)} on disk will not be swept.
-            <button class="linky" onclick={useWholeSpan}>Use the whole span</button>
-          {:else}
-            <b class="warnish">
-              Asking for {exact(askedMonths)} months — more than the {exact(heldNow.months)} on disk.
-            </b>
-            The months that do not exist are simply absent from the sample.
-          {/if}
-        </p>
-      {/if}
-      <!-- THE TIMEFRAMES, AS A MEASUREMENT RATHER THAN A LIST OF WORDS.
-           Every rung the run will cover, each with its own coverage gauge
-           against the instrument's month count. The gauge is the fact: a rung
-           that is short shows a short bar, and the eye reads nine bars faster
-           than it reads nine numbers. There is no rung PICKER because
-           `sweeprun::Asked` carries `feed`, `underlying`, `from` and `to` and
-           no rung field -- the run sweeps every one of them, so a control
-           offering a choice would be a control the route cannot honour. -->
-      <!-- THE TIMEFRAMES ARE THE CONTROL, not a caption above one. They were a
-           read-only strip that said what the run would cover; picking which
-           ones to run needed a control that did not exist. Each chip is now a
-           toggle, and it keeps its coverage gauge -- so the same element
-           answers "what does the store hold here" and "is it in this run".
-
-           The last selected chip will not turn itself off: a brute force over
-           no timeframe is not a run, and refusing it in the control's SHAPE
-           beats raising a validation message after the press. -->
-      <!-- THE MENU ABOVE OWNS THE CHOICE; THIS OWNS THE PICTURE. Both edit the
-           same set, which is why this is not the same fact twice: a dropdown
-           states a count and this states the SHAPE -- how much of the
-           instrument's history each timeframe actually holds, side by side.
-           Clicking still toggles, because a control you can already see is
-           faster than one you have to open. -->
-      {#if rungsDiffer}
-        <div class="rungs-head">
-          <span class="coverbar-k">Coverage by timeframe</span>
-          <span class="dim sm">not every timeframe holds the same history</span>
-        </div>
-      {/if}
-      <ul class="rungs" class:flat={!rungsDiffer}>
-        {#each heldNow.rungs as r, i (heldNow.leaf + r.name)}
-          <li>
-            <button
-              type="button"
-              class="rungchip"
-              class:short={rungsDiffer && r.months < sweepMonths}
-              class:on={pickedRungs.has(r.name)}
-              style="--i:{i}"
-              aria-pressed={pickedRungs.has(r.name)}
-              title="{r.name} — {exact(r.months)} months on disk, {monthLabel(r.from)} to {monthLabel(
-                r.to
-              )}"
-              onclick={() => (pickedRungs = toggled(pickedRungs, r.name))}
-            >
-              <span class="rungchip-top">
-                <span class="rungchip-n">{r.name}</span>
-                <span class="rungchip-m">{exact(r.months)}</span>
-                {#if rungsDiffer && r.months < sweepMonths}
-                  <span class="rungchip-w">−{exact(sweepMonths - r.months)}</span>
-                {/if}
-              </span>
-              <!-- THE GAUGE IS DRAWN ONLY WHERE IT CAN VARY. With every
-                   timeframe on the same month count the bars are eight copies
-                   of 100%, which is a picture of nothing. The chip keeps its
-                   count and its toggle; it loses the decoration. -->
-              {#if rungsDiffer}
-                <span class="rungchip-track">
-                  <span
-                    class="rungchip-fill"
-                    style="width:{Math.max(2, Math.round((r.months / Math.max(1, heldNow.months)) * 100))}%"
-                  ></span>
-                </span>
-              {/if}
-            </button>
-          </li>
-        {/each}
-      </ul>
-      <!-- TWO SHORT LINES, NOT NINETY WORDS OF GREY.
-           This bar carried three dense paragraphs at 12px, and a wall of small
-           prose above a form is not read -- it is skipped, which makes the
-           facts in it worth nothing. Every sentence that survived is one an
-           operator acts on; the provenance behind each moved to `title`, where
-           the reader who wants it will look and the reader who does not is not
-           charged for it. -->
-      <!-- ONE LINE, AND EVERY INTERNAL BEHIND IT IN `title`.
-
-           This was two paragraphs: one naming `/store.json` and the daily
-           bar's role, one reprinting `/universes.json`'s swept sentence with
-           a pill. Both are true and neither is something an operator DOES
-           anything about — they are the page explaining its own plumbing at
-           the size and position of a finding.
-
-           A reader who wants to know why `1day` is absent, or which indices
-           the engine sweeps, hovers. A reader who does not is no longer
-           charged 60px and four lines of grey for it. Nothing has left the
-           page; it has stopped being shouted. -->
-      <p
-        class="coverbar-note"
-        title="Folded from /store.json — the census /db reads, one row per instrument, month and rung. Nothing here is a default written into the page; futures, options and single stocks may be stored and are never swept.{heldNow.daily
-          .length > 0
-          ? ` Also on disk: ${heldNow.daily.map((r) => r.name).join(', ')} — read only to define the previous session's OHLC for the intraday timeframes (indicators::daily, vocabulary bits 13–18) and never swept.`
-          : ''}{sweptSurface?.note ? ` ${sweptSurface.note}.` : ''}"
-      >
-        <!-- JOINED IN SCRIPT, NOT IN THE TEMPLATE. Three `{#if}` fragments
-             separated by a middot rendered as `only· 1day` -- the separator
-             sat against the previous clause because Svelte collapses the
-             newline between a text run and a block open. Building the parts
-             as an array and joining them puts the spacing in one place where
-             it cannot drift per branch. -->
-        {coverNote}
-      </p>
-    </section>
-  {/if}
 
   {#if blocked}
     <!-- ==============================================================
@@ -5023,156 +4897,24 @@
      A strip, not a card: it is a CONDITION of the sweep above it, so it
      shares the shell's hairline rather than floating away from the form
      it describes. */
-  .coverbar {
-    display: flex;
-    flex-direction: column;
-    gap: 0.6rem;
-    padding: 0.85rem 1rem 0.9rem;
-  }
-  .coverbar-k {
-    font-size: var(--fs-micro);
-    text-transform: uppercase;
-    letter-spacing: 0.09em;
-    color: var(--n8);
-  }
   /* The rung strip. Nine chips read as one measurement when they share a
      baseline and a width; as nine boxes they read as nine things. */
-  .rungs {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    display: flex;
-    gap: 0.35rem;
-    flex-wrap: wrap;
-  }
-  .rungs-head {
-    display: flex;
-    align-items: baseline;
-    gap: 0.6rem;
-    flex-wrap: wrap;
-  }
   /* THE INSTRUMENT CHIP RULES ARE GONE WITH THEIR MARKUP. A row of chips put
      the choice on the page rather than in a control, which is not the shape
      the rest of this console uses and grows wider with every instrument the
      store gains. `$lib/Picker.svelte` is the console's own multi-select
      dropdown and it does this job everywhere else. `.rungs li` survives --
      the coverage strip still uses it. */
-  .rungs li {
-    list-style: none;
-  }
-  .rungchip {
-    display: flex;
-    flex-direction: column;
-    gap: 0.28rem;
-    min-width: 5.6rem;
-    padding: 0.35rem 0.55rem 0.4rem;
-    border: 1px solid var(--n6);
-    border-radius: 7px;
-    background: var(--n3);
-    /* A RUNG ARRIVING IS A FACT ARRIVING. The strip is rebuilt whenever the
-       instrument changes -- the key carries the leaf -- so this replays on a
-       switch, which is exactly when the numbers under it changed. Staggered
-       by index so the strip reads left to right the way it is read. */
-    animation: rungin 0.34s cubic-bezier(0.22, 0.7, 0.3, 1) both;
-    animation-delay: calc(var(--i, 0) * 34ms);
-    transition:
-      border-color 0.15s ease,
-      transform 0.15s ease;
-  }
-  .rungchip:hover {
-    border-color: var(--acc);
-    transform: translateY(-1px);
-  }
   /* A CHIP IS A TOGGLE NOW, so it must look pressable and read its own state.
      Unselected recedes rather than disappearing -- the rung is still ON DISK
      and its coverage is still a fact, it is simply not in this run. */
-  .rungchip {
-    cursor: pointer;
-    text-align: left;
-    font: inherit;
-    color: inherit;
-    opacity: 0.55;
-  }
-  .rungchip.on {
-    opacity: 1;
-    border-color: var(--acc);
-    background: var(--acc-soft);
-  }
-  .rungchip:focus-visible {
-    outline: 2px solid var(--focus, var(--acc));
-    outline-offset: 1px;
-  }
-  @keyframes rungin {
-    from {
-      opacity: 0;
-      transform: translateY(4px);
-    }
-    to {
-      opacity: 1;
-      transform: none;
-    }
-  }
-  .rungchip-top {
-    display: flex;
-    align-items: baseline;
-    gap: 0.35rem;
-  }
   /* The gauge. Months this rung holds against months the instrument holds --
      the same question the ledger's coverage column answers per run, asked
      here per rung before the run exists. */
-  .rungchip-track {
-    display: block;
-    height: 3px;
-    border-radius: 2px;
-    background: var(--n0);
-    overflow: hidden;
-  }
-  .rungchip-fill {
-    display: block;
-    height: 100%;
-    border-radius: 2px;
-    background: linear-gradient(to right, var(--up), var(--acc));
-    /* GROWS TO ITS WIDTH, because the width IS the fact. Same reasoning as
-       `.cover-fill`, and the same keyframe. */
-    animation: fill 0.5s cubic-bezier(0.22, 0.7, 0.3, 1) both;
-    animation-delay: calc(var(--i, 0) * 34ms + 60ms);
-    transform-origin: left;
-  }
-  .rungchip.short .rungchip-fill {
-    background: linear-gradient(to right, var(--warn), var(--down));
-  }
   /* A rung holding fewer months than its instrument is a SHORTER SAMPLE.
      It takes the warn rail rather than a flash, for the same reason
      `complete: NO` does: the row is not comparable, and that stays true
      for as long as it is on screen. */
-  .rungchip.short {
-    border-color: var(--warn);
-    background: var(--warn-soft, transparent);
-  }
-  .rungchip-n {
-    font-family: var(--mono);
-    font-size: var(--fs-micro);
-    font-weight: var(--w-semi);
-    color: var(--acc);
-  }
-  .rungchip-m {
-    font-family: var(--num);
-    font-size: var(--fs-micro);
-    font-variant-numeric: tabular-nums;
-    color: var(--n11);
-  }
-  .rungchip-w {
-    font-family: var(--num);
-    font-size: var(--fs-micro);
-    font-variant-numeric: tabular-nums;
-    color: var(--warn);
-  }
-  .coverbar-note {
-    margin: 0;
-    font-size: var(--fs-micro);
-    color: var(--n9);
-    max-width: 92ch;
-  }
   /* THE THREE CONTROLS IN THIS ROW WERE THREE DIFFERENT HEIGHTS AND TWO
      DIFFERENT FONT SIZES. Measured: the instrument `select.find.sm` at 29px
      and 12.48px, each span menu's `.pbtn` at 48px and 16px, the Run button
@@ -5207,18 +4949,21 @@
     color: var(--n8);
     padding: 0.3rem 0;
   }
-  /* MOTION IS OFF WHEN IT IS ASKED TO BE. The strip still arrives and the
-     gauges still show their width -- only the travel is removed, so nothing
-     the animation was carrying is lost with it. */
-  @media (prefers-reduced-motion: reduce) {
-    .rungchip,
-    .rungchip-fill {
-      animation: none;
-    }
-    .rungchip:hover {
-      transform: none;
-    }
-  }
+  /* THE COVERAGE SECTION IS GONE, AND SO IS EVERYTHING THAT DRESSED IT.
+     `.coverbar*`, `.rungs-head`, `.rungs li`, every `.rungchip*` rule, the
+     `rungin` keyframe and this reduced-motion guard over them: all removed
+     with the markup they styled.
+
+     `.rungs` SURVIVES and is not this one -- the drill-down's rung switcher
+     uses the same class name with its own complete rule further down, so
+     only the `<ul>` variant went.
+
+     One of these was the trap this repository has already been bitten by:
+     the compiler named `.rungchip-w` as unused, and that selector was the
+     SECOND half of `.rungchip-m, .rungchip-w { ... }`. Deleting by the line
+     it reported would have left `.rungchip-m,` dangling and taken the next
+     rule with it. Every removal here was checked for a preceding line
+     ending in a comma first. */
 
   .runf {
     display: flex;
@@ -7873,35 +7618,8 @@
   }
 
   /* ---- the coverage bar ---- */
-  .coverbar {
-    padding: 1.15rem 1.35rem 1.25rem;
-    gap: 0.8rem;
-  }
-  .coverbar-k {
-    font-size: var(--fs-mini);
-  }
-  .coverbar-note {
-    font-size: var(--fs-mini);
-    line-height: 1.55;
-  }
   /* A 3px gauge is a hairline, not a measurement. Six reads as a bar and
      leaves the chip's numbers room above it. */
-  .rungchip {
-    min-width: 6.4rem;
-    padding: 0.5rem 0.7rem 0.55rem;
-    gap: 0.4rem;
-  }
-  .rungchip-n {
-    font-size: var(--fs-xs);
-  }
-  .rungchip-m,
-  .rungchip-w {
-    font-size: var(--fs-mini);
-  }
-  .rungchip-track {
-    height: 6px;
-    border-radius: 3px;
-  }
 
   /* ---- the summary strip ---- */
   .bt-strip .fact {
