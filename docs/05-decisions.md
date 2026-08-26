@@ -22571,3 +22571,58 @@ the browser — `range-all`, `elite`/`descend`, `audit-range`, `screen`,
 `/backtest.json`, `verify` via `/verify.json`, `top` via `/engine/top.json`.
 Three deliberately absent with the reason recorded above. Nothing is
 unreachable by oversight any more.
+
+### D-0301 — half the audit trail was on disk and off the dashboard
+
+**Decision.** `/logs` and `/logs.json` walk **both** halves — the server's
+directory and the `cli/` beside it — and merge them newest-first on the clock.
+`cli`'s startup banner, which said the page could not see its events, now says
+it can.
+
+**Why.** `telemetry::Config` takes a DIRECTORY and `sink::BASENAME` is a
+constant, so two live processes appending to one directory interleave lines in
+one file — a corrupted record of the one thing that exists to say what happened.
+`cli` therefore owns `<store>/logs/cli` and the server owns `<store>/logs`. That
+split is correct and is unchanged.
+
+**What was missing is the READER.** `/logs` walked the server's directory alone,
+so every event a terminal-run sweep wrote — every span loaded, every derived
+threshold, every month found or missing — sat on disk and never appeared on the
+page that exists to show it.
+
+**It was known, printed on every run, and never closed.** `cli`'s banner said
+so in these words: *"The /logs page reads whatever directory `api` resolved,
+which is NOT this one."* Its own doc names the fix in the same breath — *"until
+it walks `logs/` and `logs/cli/` the page shows the server's half"* — and that
+sentence has been sitting there, correct and unacted on, printed above every
+command an operator ran. A log written where nothing reads it satisfies the
+letter of "it is logged" and fails the rule.
+
+**Merged on TIME, never on sequence.** Each sink numbers its own events from its
+own run, so `seq` is unique within a directory and meaningless across two.
+Ordering the union by it would interleave a terminal event from this morning
+with a server event from last week wherever the two counters happened to
+collide. `at_unix_millis` is the one field both sets measure against the same
+clock; `seq` descending is the tie-break, so events sharing a millisecond keep a
+stable order rather than one the sort chose — §3 rule 5 applies to a page's row
+order as much as to a total.
+
+**The limit bounds the UNION.** Each half already honoured it, so without a
+truncation on the merged set the page returned up to twice what was asked for.
+
+**Every completeness flag is merged in the direction that cannot over-promise.**
+`hit_scan_cap` and `partial_tail` are OR — either half stopping short caps the
+answer. `reached_oldest` is AND — only both reaching their oldest means the
+oldest was reached. `missing` is summed, and a half that answers `None` (under a
+filter, where a sequence hole carries no information) contributes nothing rather
+than a zero, because zero reads as *"none lost"*.
+
+**An absent `cli/` is an empty half, not an error.** `telemetry::tail` is
+documented never to fail and to render a missing directory as no records, and
+`walked` initialises `reached_oldest` to `true` — checked rather than assumed,
+because that same field was once `false` on ordinary full pages, which is the
+defect its own doc records. A store where nobody has run `cli` is unaffected.
+
+**Not changed.** The two sinks still own separate directories. Merging the
+WRITERS would reintroduce the interleaving the split exists to prevent; this
+changes only what the reader walks.

@@ -195,8 +195,106 @@ pub async fn logs_json(
 /// handler is then the one thing left untested here — resolving the directory
 /// — and that is a single `?` on `telemetry::global()`.
 fn json_over(dir: &std::path::Path, asked: &Asked, health: Option<&telemetry::Health>) -> String {
-    let tail = telemetry::tail(dir, telemetry::DEFAULT_KEEP_FILES, &asked.query);
+    let tail = both_halves(dir, &asked.query);
     json_of(&tail, asked, health)
+}
+
+/// The subdirectory `cli` appends to, beside the server's own.
+///
+/// `crates/cli`'s `log_dir` resolves `<store>/logs/cli` and its banner has said
+/// so on every run: *"The /logs page reads whatever directory `api` resolved,
+/// which is NOT this one."* Its doc names the fix in the same breath — *"until
+/// it walks `logs/` and `logs/cli/` the page shows the server's half"* — and
+/// this is that walk.
+const CLI_SUBDIR: &str = "cli";
+
+/// Both halves of the log, merged newest-first.
+///
+/// # The half of the audit trail the dashboard could not see
+///
+/// `telemetry::Config` takes a DIRECTORY and `sink::BASENAME` is a constant, so
+/// two live processes appending to one directory would interleave lines in one
+/// file — a corrupted record of the one thing that exists to say what happened.
+/// `cli` therefore owns `<store>/logs/cli` and the server owns `<store>/logs`.
+/// That split is correct and is not changed here.
+///
+/// What was missing is the READER. `/logs` walked the server's directory alone,
+/// so every event a terminal-run sweep wrote — every span loaded, every derived
+/// threshold, every month found or missing — was on disk and invisible on the
+/// page that exists to show it. `CLAUDE.md`'s own requirement is that if it
+/// runs, it must be auditable; a log written where nothing reads it meets the
+/// letter and not the rule.
+///
+/// # Merged on TIME, never on sequence
+///
+/// Each sink numbers its own events from its own run, so `seq` is unique within
+/// a directory and meaningless across two. Ordering the union by `seq` would
+/// interleave a `cli` event from this morning with a server event from last
+/// week wherever the counters happened to collide. `at_unix_millis` is the one
+/// field both sets measure against the same clock.
+///
+/// The tie-break is `seq` descending, so two events stamped in the same
+/// millisecond keep a stable order rather than one the sort chose — §3 rule 5
+/// applies to a page's row order as much as to a total.
+///
+/// # `missing` is SUMMED, and that is the honest reading
+///
+/// Each half computes its own count of events its own sequence says are gone.
+/// Those are two independent facts about two independent files, and their sum
+/// is "events this page cannot show you that the sinks say existed". `None`
+/// from a half means the question is unanswerable there — under a filter, or
+/// with no directory — and a half that cannot answer contributes nothing rather
+/// than a zero, because zero would read as "none lost".
+fn both_halves(dir: &std::path::Path, query: &telemetry::Query) -> telemetry::Tail {
+    let served = telemetry::tail(dir, telemetry::DEFAULT_KEEP_FILES, query);
+    let cli_dir = dir.join(CLI_SUBDIR);
+    // AN ABSENT DIRECTORY IS AN EMPTY ANSWER, not an error: `telemetry::tail`
+    // is documented never to fail and to render a missing directory as no
+    // records. A store where nobody has run `cli` simply has no second half.
+    let ran = telemetry::tail(&cli_dir, telemetry::DEFAULT_KEEP_FILES, query);
+
+    let mut records = served.records;
+    records.extend(ran.records);
+    records.sort_by(|left, right| {
+        right
+            .at_unix_millis
+            .cmp(&left.at_unix_millis)
+            .then_with(|| right.seq.cmp(&left.seq))
+    });
+    // THE LIMIT APPLIES TO THE UNION. Each half already honoured it, so without
+    // this the page would return up to twice what was asked for -- and the
+    // caller's `limit` is what bounds the response, not a suggestion.
+    records.truncate(query.limit);
+
+    telemetry::Tail {
+        records,
+        bytes_read: served.bytes_read.saturating_add(ran.bytes_read),
+        files_read: served.files_read.saturating_add(ran.files_read),
+        malformed: served.malformed.saturating_add(ran.malformed),
+        // EITHER HALF HITTING ITS CAP CAPS THE ANSWER. A page that said `false`
+        // because the server's half fitted, while the `cli` half stopped short,
+        // would promise completeness it does not have.
+        hit_scan_cap: served.hit_scan_cap || ran.hit_scan_cap,
+        // AND ONLY BOTH REACHING THE OLDEST MEANS THE OLDEST WAS REACHED.
+        // `walked` initialises this `true` and clears it when it finds an older
+        // file still holding bytes, so a directory that does not exist -- a
+        // store where nobody has run `cli` -- answers `true` and cannot drag
+        // the merged answer down. Checked rather than assumed: the same field
+        // was once `false` on ordinary full pages, which is the defect its own
+        // doc records.
+        reached_oldest: served.reached_oldest && ran.reached_oldest,
+        partial_tail: served.partial_tail || ran.partial_tail,
+        errors: {
+            let mut errors = served.errors;
+            errors.extend(ran.errors);
+            errors
+        },
+        missing: match (served.missing, ran.missing) {
+            (Some(left), Some(right)) => Some(left.saturating_add(right)),
+            (Some(only), None) | (None, Some(only)) => Some(only),
+            (None, None) => None,
+        },
+    }
 }
 
 /// [`json_over`] over a walk a caller already has.
@@ -938,6 +1036,129 @@ mod tests {
     }
 
     /// A level floor keeps the quieter events out of the answer.
+    #[test]
+    fn the_page_shows_the_cli_half_and_not_only_the_servers() {
+        // THE REPRODUCED CASE, printed by `cli` on every single run:
+        //   "events -> <store>/logs/cli
+        //    The /logs page reads whatever directory `api` resolved, which is
+        //    NOT this one."
+        //
+        // Every event a terminal-run sweep wrote -- every span loaded, every
+        // derived threshold, every month found or missing -- was on disk and
+        // invisible on the page that exists to show it.
+        let (dir, served) = sink_in("both-halves");
+        let cli_dir = dir.join(super::CLI_SUBDIR);
+        std::fs::create_dir_all(&cli_dir).expect("the cli half");
+        let ran = telemetry::Sink::open(
+            &telemetry::Config::new(&cli_dir).with_min_level(telemetry::Level::Trace),
+        )
+        .expect("opens");
+
+        let _ = served.emit(&telemetry::Event::info("api.serve", "the server said this"));
+        let _ = ran.emit(&telemetry::Event::info(
+            "cli.sweep",
+            "the terminal said this",
+        ));
+
+        let json = json_over(&dir, &asked("limit=10"), None);
+        assert!(
+            json.contains("the server said this"),
+            "the server's half must not be lost to the merge: {json}"
+        );
+        assert!(
+            json.contains("the terminal said this"),
+            "this is the whole point of the walk: {json}"
+        );
+    }
+
+    #[test]
+    fn a_store_where_nobody_ran_cli_is_an_empty_half_and_not_an_error() {
+        // `telemetry::tail` is documented never to fail and to render a missing
+        // directory as no records. The merge must not turn that into a failure,
+        // and must not report older events existing because a directory that
+        // was never created could not reach its own oldest file.
+        let (dir, served) = sink_in("no-cli-half");
+        assert!(!dir.join(super::CLI_SUBDIR).exists(), "no cli half here");
+        let _ = served.emit(&telemetry::Event::info("api.serve", "alone"));
+
+        let json = json_over(&dir, &asked("limit=10"), None);
+        assert!(json.contains("alone"), "{json}");
+        assert!(
+            !json.contains(r#""reached_oldest":false"#),
+            "an absent half must not claim older events exist: {json}"
+        );
+    }
+
+    #[test]
+    fn the_merged_answer_is_newest_first_across_both_halves() {
+        // MERGED ON TIME, NEVER ON SEQUENCE. Each sink numbers its own events
+        // from its own run, so `seq` is unique within a directory and
+        // meaningless across two -- ordering the union by it would interleave a
+        // terminal event from this morning with a server event from last week
+        // wherever the two counters happened to collide.
+        let (dir, served) = sink_in("merge-order");
+        let cli_dir = dir.join(super::CLI_SUBDIR);
+        std::fs::create_dir_all(&cli_dir).expect("the cli half");
+        let ran = telemetry::Sink::open(
+            &telemetry::Config::new(&cli_dir).with_min_level(telemetry::Level::Trace),
+        )
+        .expect("opens");
+
+        // Interleaved in time, alternating sinks, so a merge that ordered by
+        // anything but the clock would show them grouped by source.
+        let _ = served.emit(&telemetry::Event::info("api.serve", "first"));
+        let _ = ran.emit(&telemetry::Event::info("cli.sweep", "second"));
+        let _ = served.emit(&telemetry::Event::info("api.serve", "third"));
+
+        let tail = super::both_halves(&dir, &asked("limit=10").query);
+        let messages: Vec<&str> = tail
+            .records
+            .iter()
+            .map(|record| record.message.as_str())
+            .collect();
+        assert_eq!(messages.len(), 3, "every event, once: {messages:?}");
+
+        // NEWEST FIRST, which is the order every other reader in this module
+        // promises. Timestamps are milliseconds and three emits can share one,
+        // so the assertion is on the ORDERING RELATION rather than on an exact
+        // sequence -- a tie broken by `seq` is still deterministic, and pinning
+        // a permutation that depends on clock granularity is a flaky test.
+        // `windows(2)` yields pairs and the lint denies indexing even where the
+        // length is guaranteed, so the pair is destructured rather than indexed
+        // -- which is also the spelling that cannot go wrong if the width ever
+        // changes.
+        for pair in tail.records.windows(2) {
+            if let [newer, older] = pair {
+                assert!(
+                    newer.at_unix_millis >= older.at_unix_millis,
+                    "out of order: {messages:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_limit_bounds_the_union_and_not_each_half() {
+        // Each half already honours the limit, so without a truncation on the
+        // merged set the page returns up to TWICE what was asked for -- and a
+        // caller's `limit` bounds the response, it is not a suggestion.
+        let (dir, served) = sink_in("merge-limit");
+        let cli_dir = dir.join(super::CLI_SUBDIR);
+        std::fs::create_dir_all(&cli_dir).expect("the cli half");
+        let ran = telemetry::Sink::open(
+            &telemetry::Config::new(&cli_dir).with_min_level(telemetry::Level::Trace),
+        )
+        .expect("opens");
+        for index in 0..6 {
+            let _ = served.emit(&telemetry::Event::info("api.serve", "server line"));
+            let _ = ran.emit(&telemetry::Event::info("cli.sweep", "cli line"));
+            let _ = index;
+        }
+
+        let tail = super::both_halves(&dir, &asked("limit=4").query);
+        assert_eq!(tail.records.len(), 4, "the union is what the limit bounds");
+    }
+
     #[test]
     fn the_level_filter_is_applied_to_what_is_returned() {
         let (dir, sink) = sink_in("levels");

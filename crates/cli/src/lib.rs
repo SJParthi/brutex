@@ -1276,9 +1276,9 @@ pub fn install_log() -> String {
         // worked, and unable to find the file.
         Ok(_installed) => format!(
             "events -> {shown}\n  \
-             The /logs page reads whatever directory `api` resolved, which is \
-             NOT this one unless BRUTEX_LOG_DIR is set for both. Set it for \
-             both, or read this file directly."
+             The /logs page walks BOTH halves -- the server's directory and \
+             this `cli/` beside it -- and merges them newest-first on the \
+             clock, so these events appear there. D-0301."
         ),
     }
 }

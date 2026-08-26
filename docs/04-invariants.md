@@ -2769,3 +2769,17 @@ keeps a generated figure off a console that reads the store.
 | SW-28 | **Every command that needs a rung or a hit floor is refused without one, and `auto-stored` needs no floor** — searching for the threshold is the whole reason it exists, so demanding one would be asking the operator to answer the question they came to ask | `api::sweeprun::a_command_needing_a_rung_is_refused_without_one`; `a_command_needing_a_hit_floor_is_refused_without_one` | ✓ |
 | SW-29 | **`/engine/top.json` takes no slot and no commit gate**, because it records nothing — §3 rule 3's identity requirement does not bind on a read, so an unstamped build can serve it honestly. `feed` and `underlying` filter together, matching `cli top`; a one-sided case invented here would make the page disagree with the terminal about one file | `api::sweeprun::top_json`'s refusal arm; the shape is `cli::top_list`'s own signature | ✓ |
 | SW-30 | **All three kinds share one slot, one ledger and one busy refusal.** A sweep, a descent and a command all append to the same append-only file, so two finishing together can interleave two records | `api::sweeprun::a_command_run_is_marked_as_one_on_the_wire` for the wire; the busy path is shared code with SW-14 and SW-22 | ✓ |
+
+## The dashboard shows both halves of the log — D-0301
+
+`cli` and `api` own separate log directories so two live writers cannot
+interleave lines in one file. These rows are about the reader, which walked one
+of them.
+
+| ID | Invariant | Proof | ✓ |
+|---|---|---|---|
+| LG-01 | **`/logs` shows the CLI half as well as the server's.** Every event a terminal-run sweep wrote was on disk and invisible on the page that exists to show it — and `cli`'s banner printed that fact above every command an operator ran | `api::logs::the_page_shows_the_cli_half_and_not_only_the_servers` | ✓ |
+| LG-02 | **The union is ordered on the CLOCK, not on sequence.** Each sink numbers from its own run, so `seq` is meaningless across two directories; ordering by it would interleave a terminal event from this morning with a server event from last week wherever the counters collided | `api::logs::the_merged_answer_is_newest_first_across_both_halves` | ✓ |
+| LG-03 | **The caller's `limit` bounds the union.** Each half honours it already, so an untruncated merge returns up to twice what was asked for | `api::logs::the_limit_bounds_the_union_and_not_each_half` | ✓ |
+| LG-04 | **A store where nobody ran `cli` is an empty half, never an error, and never claims older events exist.** `tail` renders a missing directory as no records and `walked` initialises `reached_oldest` true — checked rather than assumed, because that field was once `false` on ordinary full pages | `api::logs::a_store_where_nobody_ran_cli_is_an_empty_half_and_not_an_error` | ✓ |
+| LG-05 | **Completeness flags merge in the direction that cannot over-promise.** `hit_scan_cap` and `partial_tail` OR; `reached_oldest` ANDs; `missing` sums, and a half answering `None` contributes nothing rather than a zero that would read as "none lost" | `api::logs::both_halves`, and LG-04 for the absent-half direction | ✓ |
