@@ -2163,9 +2163,30 @@
     });
   }
 
-  /** @param {any} r */
+  /**
+   * A run's span, in the product's month format.
+   *
+   * THIS IS WHERE `2016-08 → 2026-08` WAS COMING FROM, and it feeds SEVEN
+   * call sites: the answer card, the ledger's Span column, the rung group
+   * header, the drill-down heading, two chart captions and the detail
+   * table. Fixing the sweep form's own controls left every one of them
+   * still rendering the store's key rather than the product's month, so
+   * the page showed `Aug 2016` in the form and `2016-08` in the answer
+   * directly beneath it.
+   *
+   * `monthLabel` returns its input UNCHANGED when it does not parse, so a
+   * malformed year or month still renders as the value it actually is --
+   * which is the behaviour `$lib/dates.js` documents and the reason this
+   * needs no guard of its own.
+   *
+   * Nothing sorts on this string. The `Span` column is `nosort` precisely
+   * because ordering it as text was already known to be wrong, so changing
+   * what it reads cannot change what it ranks.
+   *
+   * @param {any} r
+   */
   const span = (r) =>
-    `${r.from_year}-${String(r.from_month).padStart(2, '0')} → ${r.to_year}-${String(r.to_month).padStart(2, '0')}`;
+    `${monthLabel(`${r.from_year}-${String(r.from_month).padStart(2, '0')}`)} → ${monthLabel(`${r.to_year}-${String(r.to_month).padStart(2, '0')}`)}`;
 
   /** Coverage as a whole percent, for the bar's width only — never displayed alone. */
   const coverPct = (r) =>
@@ -3041,7 +3062,10 @@
             <div class="rgroup-head">
               <b>{g.underlying}</b>
               <span class="dim">{g.feed}</span>
-              <span class="dim">{g.from} → {g.to}</span>
+              <!-- THE GROUP HEADER BUILDS ITS SPAN SEPARATELY from `span(r)`,
+                   so fixing that helper left this one line still printing the
+                   store's key. Same month, same product, same format. -->
+              <span class="dim">{monthLabel(g.from)} → {monthLabel(g.to)}</span>
               <span class="dim">
                 {g.perMille < 0 ? 'support ratio unknown — no bars' : `support ≥ ${(g.perMille / 10).toFixed(1)}% of bars`}
               </span>
@@ -7258,6 +7282,18 @@
     --tv-red: #f23645;
     --tv-blue: #2962ff;
     --tv-teal: #26a69a;
+    /* FOUR SURFACES THAT WERE WRITTEN AS LITERALS INSIDE THE RULES and so
+       never flipped with the theme. This block's own banner says "nothing
+       here declares a colour literal"; these are why that was not true.
+       Measured on the light theme: `.tt-segbtn.on` put `--tv-text` --
+       near-black ink -- on `#2f3241`, a contrast ratio of **1.47:1**, and it
+       was the only failure below 3:1 on the whole page. The row hover was
+       the same defect one interaction away: `#1c2030` under the same ink,
+       invisible until a pointer landed on it, which is why a static sweep
+       does not find it. */
+    --tv-seg-on: #2f3241;
+    --tv-row-hover: #1c2030;
+    --tv-ghost: #434651;
 
     /* TradingView's own stack. `Trebuchet MS` is the one that gives their
        numerals their particular width; without it the tables read wider. */
@@ -7280,6 +7316,12 @@
     --tv-muted: var(--n8);
     --tv-green: #089981;
     --tv-red: #d1263a;
+    /* A RAISED CHIP AND A HOVER ON A WHITE PANEL are a light step UP, not a
+       dark one. `--n4` is the console's own panel-interior/hover surface, so
+       the tester borrows the same one every other page uses. */
+    --tv-seg-on: var(--n4);
+    --tv-row-hover: var(--n4);
+    --tv-ghost: var(--n7);
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme='light']) .tester {
@@ -7292,6 +7334,9 @@
       --tv-muted: #787b86;
       --tv-green: #089981;
       --tv-red: #f23645;
+      --tv-seg-on: #2f3241;
+      --tv-row-hover: #1c2030;
+      --tv-ghost: #434651;
     }
   }
 
@@ -7421,7 +7466,7 @@
     padding: 0.32rem 0.85rem;
   }
   .tester .tt-segbtn.on {
-    background: #2f3241;
+    background: var(--tv-seg-on);
     color: var(--tv-text);
     box-shadow: none;
   }
@@ -7456,7 +7501,7 @@
     color: var(--tv-text);
   }
   .tester .tt-tbl tbody tr:hover {
-    background: #1c2030;
+    background: var(--tv-row-hover);
   }
   .tester .tt-tbl td .tp {
     font-size: 12px;
@@ -7482,7 +7527,7 @@
     color: var(--tv-green);
   }
   .tester .tt-chip.warn {
-    color: #f0b429;
+    color: var(--warn);
   }
   .tester .tt-ctl,
   .tester .tt-view {
@@ -7544,7 +7589,7 @@
   }
   .tester .tt-plfill.ghost,
   .tester .tt-bfill.hold {
-    background: #434651;
+    background: var(--tv-ghost);
   }
   .tester .tt-donutmid b {
     font-size: 22px;
