@@ -910,6 +910,63 @@
     return n > 0 ? n : null;
   });
 
+  /**
+   * Do the timeframes disagree about how much history they hold?
+   *
+   * WHEN THEY DO NOT, THE GAUGES ARE EIGHT COPIES OF 100% and the strip is
+   * a comparison with nothing to compare — the same objection this file
+   * already raises against drawing a bar for a solo rung. This is what
+   * decides whether the picture is worth its space.
+   */
+  const rungsDiffer = $derived.by(() => {
+    const rungs = heldNow?.rungs ?? [];
+    if (rungs.length < 2) return false;
+    const first = rungs[0].months;
+    return rungs.some((r) => r.months !== first);
+  });
+
+  /**
+   * Months a sweep can actually see — the widest INTRADAY coverage.
+   *
+   * `heldNow.months` counts every month the instrument holds at any rung,
+   * and `1day` reaches further than the intraday ones on this store:
+   * INDIAVIX is 121 daily and 119 at every `*min` rung. Comparing a
+   * timeframe against 121 then puts `−2` on all eight of them, which is
+   * both noise and slightly wrong — the two extra months exist only as
+   * daily bars, and no sweep will ever read them.
+   *
+   * This is the number a run is measured against.
+   */
+  const sweepMonths = $derived(
+    (heldNow?.rungs ?? []).reduce((most, r) => (r.months > most ? r.months : most), 0)
+  );
+
+  /**
+   * The one line under the timeframe chips: what is on disk, in a sentence.
+   *
+   * Assembled here rather than as three `{#if}` fragments in the template.
+   * Interleaving text runs and block opens around a `·` separator rendered
+   * `only· 1day` — Svelte collapses the newline between them, so the
+   * separator sat against the previous clause. An array and a `join` put
+   * the spacing in ONE place, where it cannot drift per branch.
+   */
+  const coverNote = $derived.by(() => {
+    if (!heldNow) return '';
+    const parts = [
+      `${exact(sweepMonths)} months on the intraday timeframes`,
+      'spot indices only'
+    ];
+    if (heldNow.daily.length > 0) {
+      parts.push(
+        `${heldNow.daily.map((r) => r.name).join(', ')} held for the previous session's OHLC, never swept`
+      );
+    }
+    if (sweptSurface) {
+      parts.push(`${exact(sweptSurface.matched)} of ${exact(catalog.held.length)} are swept`);
+    }
+    return parts.join(' · ');
+  });
+
   /** Is the asked-for span narrower than what the store holds? A FACT. */
   const spanShortfall = $derived.by(() => {
     if (!heldNow || askedMonths === null) return 0;
@@ -2827,37 +2884,43 @@
        ================================================================ -->
   {#if catalog.phase === 'ready' && heldNow}
     <section class="coverbar">
-      <div class="coverbar-head">
-        <!-- THE INSTRUMENT AS A DISPLAY ELEMENT, the way `/db` leads with it.
-             `/db` sets its symbol in `--mono` at `--fs-xl` weight 800 and it
-             is the anchor the whole page hangs off; this page had the same
-             name at `--fs-md` in the running sans, indistinguishable from the
-             labels around it. Same treatment, same token, same reason. -->
-        <span class="coverbar-k">On disk</span>
-        <b class="sym">{heldNow.leaf}</b>
-        <span class="dim sm">{heldNow.full}</span>
-        <!-- THE PRODUCT'S MONTH, HERE TOO. This line read `2016-08 → 2026-08`
-             while the form two rows above it read `Aug 2016`, which is the
-             same split this page was just fixed for -- reintroduced by the
-             section that was added to fix it. -->
-        <span class="dim sm">{monthLabel(heldNow.from)} → {monthLabel(heldNow.to)}</span>
-        <span class="pill">{exact(heldNow.months)} months</span>
-        <!-- NO `n rungs` PILL. The strip directly beneath is that count, named
-             and measured; a pill saying `9 rungs` above nine labelled rungs is
-             the same fact twice, and the second copy reads as a different one
-             the reader then has to reconcile. -->
+      <!-- ================================================================
+           THIS SECTION SAYS WHAT THE FORM ABOVE IT DOES NOT, AND NOTHING ELSE.
 
-        {#if spanShortfall > 0}
-          <span class="pill warn">
-            asking for {exact(askedMonths ?? 0)} — {exact(spanShortfall)} fewer than the store holds
-          </span>
-          <button class="linky" onclick={useWholeSpan}>Use the whole span</button>
-        {:else if askedMonths !== null && spanShortfall < 0}
-          <span class="pill warn">
-            asking for {exact(askedMonths)} months — more than the {exact(heldNow.months)} on disk
-          </span>
-        {/if}
-      </div>
+           Measured before this rewrite: `.coverbar` was **284px** -- the
+           tallest section on the page, taller than the answer (252px) and the
+           ledger (160px) -- and it opened by repeating the instrument, the
+           span and the timeframe count, all three of which are read straight
+           off the three menus one row above.
+
+           Then it drew eight gauges whose counts were **121, 121, 121, 121,
+           121, 121, 121, 121**: eight bars, every one at 100%. This file
+           already has the argument against that, written for the solo rung
+           tile -- "a shape that cannot vary is not a measurement", spending a
+           band "on nothing while looking like a comparison that was made".
+           Eight identical bars is the same failure with more ink.
+
+           So the header is gone and the gauges are conditional. What is left
+           is an EXCEPTIONS panel: it speaks when a timeframe holds less than
+           its instrument, or when the asked span is narrower than the disk,
+           and it says one quiet line when neither is true. A panel that is
+           silent when there is nothing wrong is how a reader learns that its
+           speaking means something.
+           ================================================================ -->
+      {#if spanShortfall !== 0 && askedMonths !== null}
+        <p class="coverbar-alert">
+          {#if spanShortfall > 0}
+            <b class="warnish">Asking for {exact(askedMonths)} of {exact(heldNow.months)} months.</b>
+            {exact(spanShortfall)} on disk will not be swept.
+            <button class="linky" onclick={useWholeSpan}>Use the whole span</button>
+          {:else}
+            <b class="warnish">
+              Asking for {exact(askedMonths)} months — more than the {exact(heldNow.months)} on disk.
+            </b>
+            The months that do not exist are simply absent from the sample.
+          {/if}
+        </p>
+      {/if}
       <!-- THE TIMEFRAMES, AS A MEASUREMENT RATHER THAN A LIST OF WORDS.
            Every rung the run will cover, each with its own coverage gauge
            against the instrument's month count. The gauge is the fact: a rung
@@ -2881,25 +2944,19 @@
            instrument's history each timeframe actually holds, side by side.
            Clicking still toggles, because a control you can already see is
            faster than one you have to open. -->
-      <div class="rungs-head">
-        <span class="coverbar-k">Coverage by timeframe</span>
-        <span class="dim sm">
-          {exact(pickedRungs.size)} of {exact(heldNow.rungs.length)} in this run — execution is
-          always one-minute, whichever are picked
-        </span>
-        <button
-          class="linky"
-          onclick={() => (pickedRungs = new Set(heldNow.rungs.map((r) => r.name)))}
-          disabled={pickedRungs.size === heldNow.rungs.length}>Select all</button
-        >
-      </div>
-      <ul class="rungs">
+      {#if rungsDiffer}
+        <div class="rungs-head">
+          <span class="coverbar-k">Coverage by timeframe</span>
+          <span class="dim sm">not every timeframe holds the same history</span>
+        </div>
+      {/if}
+      <ul class="rungs" class:flat={!rungsDiffer}>
         {#each heldNow.rungs as r, i (heldNow.leaf + r.name)}
           <li>
             <button
               type="button"
               class="rungchip"
-              class:short={r.months < heldNow.months}
+              class:short={rungsDiffer && r.months < sweepMonths}
               class:on={pickedRungs.has(r.name)}
               style="--i:{i}"
               aria-pressed={pickedRungs.has(r.name)}
@@ -2911,16 +2968,22 @@
               <span class="rungchip-top">
                 <span class="rungchip-n">{r.name}</span>
                 <span class="rungchip-m">{exact(r.months)}</span>
-                {#if r.months < heldNow.months}
-                  <span class="rungchip-w">−{exact(heldNow.months - r.months)}</span>
+                {#if rungsDiffer && r.months < sweepMonths}
+                  <span class="rungchip-w">−{exact(sweepMonths - r.months)}</span>
                 {/if}
               </span>
-              <span class="rungchip-track">
-                <span
-                  class="rungchip-fill"
-                  style="width:{Math.max(2, Math.round((r.months / Math.max(1, heldNow.months)) * 100))}%"
-                ></span>
-              </span>
+              <!-- THE GAUGE IS DRAWN ONLY WHERE IT CAN VARY. With every
+                   timeframe on the same month count the bars are eight copies
+                   of 100%, which is a picture of nothing. The chip keeps its
+                   count and its toggle; it loses the decoration. -->
+              {#if rungsDiffer}
+                <span class="rungchip-track">
+                  <span
+                    class="rungchip-fill"
+                    style="width:{Math.max(2, Math.round((r.months / Math.max(1, heldNow.months)) * 100))}%"
+                  ></span>
+                </span>
+              {/if}
             </button>
           </li>
         {/each}
@@ -2932,45 +2995,33 @@
            operator acts on; the provenance behind each moved to `title`, where
            the reader who wants it will look and the reader who does not is not
            charged for it. -->
+      <!-- ONE LINE, AND EVERY INTERNAL BEHIND IT IN `title`.
+
+           This was two paragraphs: one naming `/store.json` and the daily
+           bar's role, one reprinting `/universes.json`'s swept sentence with
+           a pill. Both are true and neither is something an operator DOES
+           anything about — they are the page explaining its own plumbing at
+           the size and position of a finding.
+
+           A reader who wants to know why `1day` is absent, or which indices
+           the engine sweeps, hovers. A reader who does not is no longer
+           charged 60px and four lines of grey for it. Nothing has left the
+           page; it has stopped being shouted. -->
       <p
         class="coverbar-note"
-        title="Folded from /store.json — the census /db reads, one row per instrument, month and rung. Nothing in this bar is a default written into the page. Futures, options and single stocks may be stored and are never swept."
+        title="Folded from /store.json — the census /db reads, one row per instrument, month and rung. Nothing here is a default written into the page; futures, options and single stocks may be stored and are never swept.{heldNow.daily
+          .length > 0
+          ? ` Also on disk: ${heldNow.daily.map((r) => r.name).join(', ')} — read only to define the previous session's OHLC for the intraday timeframes (indicators::daily, vocabulary bits 13–18) and never swept.`
+          : ''}{sweptSurface?.note ? ` ${sweptSurface.note}.` : ''}"
       >
-        From the census on disk — <b>spot indices only</b>.
-        {#if heldNow.rungs.some((r) => r.months < heldNow.months)}
-          A rung marked <b>−n</b> is a <b>shorter sample</b>, not a corrected one.
-        {/if}
-        <!-- THE DAILY BAR IS NAMED ONCE, AS WHAT IT IS FOR. It is offered
-             nowhere as something to sweep -- not in the menu, not in the
-             strip, not in the default selection -- but it IS on disk, and a
-             month count that silently excluded it would put this bar in
-             disagreement with `/db` for no stated reason. One clause, no
-             control. -->
-        {#if heldNow.daily.length > 0}
-          <span
-            title="indicators::daily builds the pivot ladder, the central pivot range and yesterday's high and low from it — vocabulary bits 13–18. cli::EVERY_RUNG is the eight intraday rungs and nothing else."
-          >
-            Also held: <b>{heldNow.daily.map((r) => r.name).join(', ')}</b>, read only to define the
-            <b>previous session's OHLC</b> for the timeframes above — never swept.
-          </span>
-        {/if}
+        <!-- JOINED IN SCRIPT, NOT IN THE TEMPLATE. Three `{#if}` fragments
+             separated by a middot rendered as `only· 1day` -- the separator
+             sat against the previous clause because Svelte collapses the
+             newline between a text run and a block open. Building the parts
+             as an array and joining them puts the spacing in one place where
+             it cannot drift per branch. -->
+        {coverNote}
       </p>
-      <!-- THE SURFACE, IN THE SERVER'S WORDS AND NOT THIS PAGE'S. The store
-           holds more spot indices than the engine sweeps, and which two are
-           swept is `CLAUDE.md` §1 — enforced by `costs::venue`, stated by
-           `/universes.json`. Printing the server's own sentence means the page
-           can say it without holding a copy that goes stale. -->
-      {#if sweptSurface && sweptSurface.note}
-        <p
-          class="coverbar-note surface"
-          title="{sweptSurface.note}. Stated by /universes.json, enforced by costs::venue, and CLAUDE.md §1 is where it is decided. This page holds no list of its own — a run on an instrument outside the surface is refused by the route, and the refusal is printed above."
-        >
-          <span class="pill acc">
-            {sweptSurface.label} · {exact(sweptSurface.matched)} of {exact(catalog.held.length)}
-          </span>
-          {sweptSurface.note} — anything else here is refused by the route.
-        </p>
-      {/if}
     </section>
   {/if}
 
@@ -4978,21 +5029,11 @@
     gap: 0.6rem;
     padding: 0.85rem 1rem 0.9rem;
   }
-  .coverbar-head {
-    display: flex;
-    align-items: baseline;
-    gap: 0.55rem;
-    flex-wrap: wrap;
-  }
   .coverbar-k {
     font-size: var(--fs-micro);
     text-transform: uppercase;
     letter-spacing: 0.09em;
     color: var(--n8);
-  }
-  .coverbar-head b {
-    font-size: var(--fs-sm);
-    color: var(--n12);
   }
   /* The rung strip. Nine chips read as one measurement when they share a
      baseline and a width; as nine boxes they read as nine things. */
@@ -5131,9 +5172,6 @@
     font-size: var(--fs-micro);
     color: var(--n9);
     max-width: 92ch;
-  }
-  .coverbar-note b {
-    color: var(--n11);
   }
   /* THE THREE CONTROLS IN THIS ROW WERE THREE DIFFERENT HEIGHTS AND TWO
      DIFFERENT FONT SIZES. Measured: the instrument `select.find.sm` at 29px
@@ -7841,15 +7879,6 @@
   }
   .coverbar-k {
     font-size: var(--fs-mini);
-  }
-  /* Measured off `/db`'s `.sym`: mono, `--fs-xl`, weight 800, -0.03em. */
-  .coverbar-head b.sym {
-    font-family: var(--mono);
-    font-size: var(--fs-xl);
-    font-weight: var(--w-heavy);
-    letter-spacing: -0.03em;
-    color: var(--n12);
-    line-height: 1.1;
   }
   .coverbar-note {
     font-size: var(--fs-mini);
