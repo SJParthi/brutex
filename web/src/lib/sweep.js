@@ -75,3 +75,50 @@ export function sweepOutcome(run) {
 	if (run.refusal) return { phase: 'failed', run, why: run.refusal };
 	return { phase: 'done', run, why: '' };
 }
+
+/**
+ * Whether a sweep started now could record anything, answered BEFORE it starts.
+ *
+ * # The hours this exists to save
+ *
+ * `cli::results::Results::append` refuses outright when the ledger FILE's
+ * version is not the version the build writes — `CLAUDE.md` §3 rule 8, *"store
+ * format versions are never mutated in place"*. The refusal is correct: a
+ * 261-byte record appended to a file addressed every 213 bytes corrupts every
+ * record after it, and it still parses.
+ *
+ * What was missing is that nothing said so in advance. Measured on the
+ * operator's own store — `runs.bin` at version 2 against a build writing 3 —
+ * pressing Run swept nine rungs over 121 months of one-minute bars, refused the
+ * append on every one, turned each into a rung refusal, and refused the whole
+ * command. Hours of CPU for a sentence that was knowable from sixteen header
+ * bytes read at page load.
+ *
+ * # `appendable` is the SERVER's answer, not a comparison made here
+ *
+ * `version` was already on the wire and this page could have compared it to a
+ * `3` of its own. That is the hand-kept second copy `CLAUDE.md` §5 refuses for
+ * the condition vocabulary, and for the same reason: correct the day it is
+ * written, silently wrong the first time the format moves. The rule lives in
+ * `api::backtest` beside the constant it depends on.
+ *
+ * Only an explicit `false` blocks. An absent field is not evidence of a
+ * problem, and painting a red banner over a payload that never made the claim
+ * would be an alarm nobody can act on.
+ *
+ * A ledger the reader already REFUSED returns `null`: that has its own banner
+ * on the page, and two banners for one fault read as two faults.
+ *
+ * @param {{version?: number, writes_version?: number, appendable?: boolean,
+ *          refusal?: string | null, path?: string | null} | null | undefined} ledger
+ * @returns {{version: number | null, writes: number | null, path: string | null} | null}
+ *   The two versions and the file, or `null` when a sweep can record normally.
+ */
+export function ledgerBlock(ledger) {
+	if (!ledger || ledger.appendable !== false || ledger.refusal) return null;
+	return {
+		version: ledger.version ?? null,
+		writes: ledger.writes_version ?? null,
+		path: ledger.path ?? null
+	};
+}

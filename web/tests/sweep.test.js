@@ -8,7 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { sweepOutcome } from '../src/lib/sweep.js';
+import { sweepOutcome, ledgerBlock } from '../src/lib/sweep.js';
 
 /** The sentence `cli::range_all` returns when nothing was read. */
 const REFUSAL =
@@ -91,4 +91,62 @@ test('an empty refusal string is not a refusal', () => {
 	// no reason in it, which is worse than the green one it replaced.
 	const state = sweepOutcome({ in_flight: false, report: REPORT, refusal: '' });
 	assert.equal(state.phase, 'done');
+});
+
+// ---- the pre-flight check on the ledger ------------------------------------
+
+test('a ledger the build cannot append to blocks the run, and names both versions', () => {
+	// THE REPRODUCED CASE, from the operator's own store: runs.bin at version 2
+	// against a build writing 3. Nine rungs swept 121 months and recorded
+	// nothing, because `Results::append` refuses on the mismatch.
+	const block = ledgerBlock({
+		version: 2,
+		writes_version: 3,
+		appendable: false,
+		refusal: null,
+		path: '/Users/x/.brutex/store/results/runs.bin'
+	});
+
+	assert.ok(block, 'this is the whole point: it must be knowable before Run');
+	assert.equal(block.version, 2);
+	assert.equal(block.writes, 3, 'the banner names both numbers, not just the mismatch');
+	assert.match(block.path, /runs\.bin$/, 'the operator has to know which file to move');
+});
+
+test('a current ledger does not block', () => {
+	assert.equal(ledgerBlock({ version: 3, writes_version: 3, appendable: true }), null);
+});
+
+test('an absent appendable field makes no claim in either direction', () => {
+	// A payload that never said whether it could be appended to is not evidence
+	// that it cannot. Painting a red banner over it would be an alarm the
+	// operator has no way to act on, and no way to clear.
+	assert.equal(ledgerBlock({ version: 3 }), null);
+	assert.equal(ledgerBlock({}), null);
+	assert.equal(ledgerBlock(null), null);
+	assert.equal(ledgerBlock(undefined), null);
+});
+
+test('a ledger that was already refused gets one banner, not two', () => {
+	// `api::backtest` reports `appendable:false` for an unreadable ledger too,
+	// which is correct -- but the page already renders `refusal` on its own.
+	// Two banners for one fault read as two faults.
+	const block = ledgerBlock({
+		version: 0,
+		writes_version: 3,
+		appendable: false,
+		refusal: 'the header is shorter than its magic'
+	});
+	assert.equal(block, null);
+});
+
+test('a blocked ledger still reports what it can when fields are missing', () => {
+	// The banner must render rather than throw when the server sent the
+	// decision but not the detail -- `null` is a state the page can word
+	// around, `undefined.toString()` is a blank screen.
+	const block = ledgerBlock({ appendable: false });
+	assert.ok(block);
+	assert.equal(block.version, null);
+	assert.equal(block.writes, null);
+	assert.equal(block.path, null);
 });

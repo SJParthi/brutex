@@ -847,6 +847,41 @@ impl Ledger {
             render::json_string(&self.path.display().to_string())
         );
         let _ = write!(out, r#","version":{}"#, self.version);
+        // WHETHER A SWEEP CAN RECORD ANYTHING AT ALL, ANSWERED BEFORE ONE IS
+        // STARTED RATHER THAN AFTER IT HAS RUN FOR HOURS.
+        //
+        // # The cost of not saying it
+        //
+        // `cli::results::Results::append` refuses outright when the FILE's
+        // version is not the version this build writes — §3 rule 8, *"store
+        // format versions are never mutated in place"*: a 261-byte record
+        // appended to a file addressed every 213 bytes corrupts every record
+        // after it, and it still parses. The refusal is right.
+        //
+        // What was missing is that nothing said so in advance. Measured on the
+        // operator's own store: `runs.bin` carries version 2 and this build
+        // writes 3, so pressing Run sweeps nine rungs over 121 months of
+        // one-minute bars, refuses the append on every one of them, turns each
+        // into a rung refusal through `not_recorded_reason`, and refuses the
+        // whole command — after the work. Hours of CPU for a sentence that was
+        // knowable from sixteen header bytes read at page load.
+        //
+        // # Why the SERVER decides it and not the page
+        //
+        // `version` was already on the wire and the browser could compare it to
+        // a 3 of its own. That is the hand-kept second copy §5 refuses for the
+        // vocabulary, for the same reason: correct the day it is written and
+        // silently wrong the first time the format moves. The rule lives beside
+        // the constant it depends on, and the page renders the answer.
+        //
+        // `writes_version` travels too, so the banner can NAME both numbers
+        // rather than saying only that they disagree.
+        let _ = write!(out, r#","writes_version":{VERSION}"#);
+        let _ = write!(
+            out,
+            r#","appendable":{}"#,
+            self.version == VERSION && self.refusal.is_none()
+        );
         // WHETHER THE MASK IS A FIELD OR AN ABSENCE, said once for the ledger
         // rather than guessed per row. A version-2 file has no mask at all, so
         // `mask_words` on every run below it is six zeroes this crate wrote and
@@ -2069,6 +2104,44 @@ mod tests {
         let json = new.to_json();
         assert!(json.contains(r#""version":3"#), "{json}");
         assert!(json.contains(r#""has_mask":true"#), "{json}");
+    }
+
+    #[test]
+    fn an_older_ledger_says_a_sweep_cannot_record_before_one_is_started() {
+        // THE COST THIS CLOSES, MEASURED ON THE OPERATOR'S OWN STORE.
+        //
+        // `runs.bin` carries version 2 and this build writes 3.
+        // `cli::results::Results::append` refuses on that mismatch, so a sweep
+        // ran nine rungs over 121 months, refused every append, turned each into
+        // a rung refusal, and refused the whole command -- AFTER the work. The
+        // answer was in sixteen header bytes the whole time.
+        let old = over(file_v2(&[record_v2(1, false, 10)]), 10);
+        let json = old.to_json();
+        assert!(json.contains(r#""appendable":false"#), "{json}");
+        assert!(
+            json.contains(r#""writes_version":3"#),
+            "the banner names BOTH numbers, so it must carry both: {json}"
+        );
+
+        let current = over(file(VERSION, &[record(1, false, 10)]), 10);
+        let json = current.to_json();
+        assert!(json.contains(r#""appendable":true"#), "{json}");
+    }
+
+    #[test]
+    fn a_refused_ledger_is_never_appendable_however_its_version_reads() {
+        // A LEDGER THAT COULD NOT BE READ CANNOT BE PROMISED AS WRITABLE.
+        // `refusal` is set for a damaged header, an unknown version and a file
+        // that would not open; reporting `appendable: true` over any of those
+        // would send the operator to start a sweep against a file the reader
+        // has already given up on.
+        let broken = over(vec![0_u8; 4], 10);
+        assert!(broken.refusal.is_some(), "a stub file is a refusal");
+        assert!(
+            broken.to_json().contains(r#""appendable":false"#),
+            "{}",
+            broken.to_json()
+        );
     }
 
     #[test]

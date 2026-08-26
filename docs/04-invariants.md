@@ -2684,3 +2684,24 @@ was unknowable from this page.
 ppm *"cannot report a once-a-week setup no matter how long it runs"*; this route
 launches at ten times that, and neither descent is reachable from any HTTP
 route. See `docs/05-decisions.md` D-0295's closing paragraph.
+
+## A run that cannot be recorded is refused before it is started — D-0296
+
+`Results::append` refuses on a ledger version it does not write, and that
+refusal is correct. These rows are about WHEN the operator learns it. Measured
+on the operator's own store: a version-2 `runs.bin` against a build writing
+version 3 cost nine rungs over 121 months of one-minute bars and recorded
+nothing, for an answer that sat in sixteen header bytes the whole time.
+
+| ID | Invariant | Proof | ✓ |
+|---|---|---|---|
+| SW-07 | **`/backtest.json` says whether a sweep could record, and names both versions.** `appendable` is the SERVER's answer — `self.version == VERSION && self.refusal.is_none()` — not a comparison the browser makes against a `3` of its own, which is the hand-kept second copy §5 refuses for the vocabulary and would go silently wrong the first time the format moved. `writes_version` travels so the banner can name both numbers rather than only that they disagree | `api::backtest::an_older_ledger_says_a_sweep_cannot_record_before_one_is_started` | ✓ |
+| SW-08 | **A ledger the reader refused is never reported appendable.** `refusal` is set for a damaged header, an unknown version and a file that would not open. Answering `appendable: true` over any of those would send the operator to start a sweep against a file the reader has already given up on | `api::backtest::a_refused_ledger_is_never_appendable_however_its_version_reads` | ✓ |
+| SW-09 | **Only an explicit `false` blocks the control, and a blocked ledger renders whatever it has.** An absent field is not evidence of a fault — a red banner over a payload that never made the claim is an alarm nobody can act on and nobody can clear. A blocked ledger missing its detail fields still renders: `null` is a state the page words around, `undefined` is a blank screen | `web/tests/sweep.test.js` · *an absent appendable field makes no claim in either direction* · *a blocked ledger still reports what it can when fields are missing* | ✓ |
+| SW-10 | **One fault draws one banner.** `api::backtest` reports `appendable: false` for an unreadable ledger too, which is right, but the page already renders `refusal` on its own. `ledgerBlock` returns `null` in that case | `web/tests/sweep.test.js` · *a ledger that was already refused gets one banner, not two* | ✓ |
+
+**Not pinned, and worth knowing.** `api::backtest::VERSION` is a hand-kept copy
+of `cli::results::VERSION`. `STRIDE_BYTES` has a `const` assertion tying it to
+`cli`'s (BT-01a, added after that constant drifted twice); this one has none,
+because `cli::results::VERSION` is not `pub`. If `cli` bumps to version 4,
+`appendable` reports against a stale 3 until someone notices.

@@ -22248,3 +22248,59 @@ reachable from `cli` and from no HTTP route. The page's own empty-ledger panel
 tells the operator to run `cli range-all zerodha NIFTY 2019 12 2026 8 500` — a
 support **400× lower than its own button uses**. That is a routing decision, not
 a defect in this file, and it is not taken here.
+
+### D-0296 — the sweep learned it could not record after it had already run
+
+**Decision.** `/backtest.json` serves two new fields beside `version`:
+`writes_version`, the version this build appends, and `appendable`, whether a
+sweep started now could record anything at all. `/backtest` reads `appendable`,
+refuses to enable Run when it is `false`, and says which file to move.
+
+**Why.** `cli::results::Results::append` refuses outright when the FILE's
+version is not the version the build writes. That refusal is correct and §3 rule
+8 is why: *"store format versions are never mutated in place"*. A 261-byte
+version-3 record appended to a file addressed every 213 bytes would put every
+record after it at the wrong offset — and it would still PARSE, because every
+byte pattern there is a legal record.
+
+**What was missing is that nothing said so in advance.** Measured on the
+operator's own store: `~/.brutex/store/results/runs.bin` carries version 2 in
+its header (`xxd -s 8 -l 4` → `02 00 00 00`) and this build writes 3. The chain
+that followed was:
+
+| step | what happened |
+|---|---|
+| 1 | Run is pressed; nine rungs sweep in parallel over 121 months of 1-minute bars |
+| 2 | each rung's `record_run` append is refused on the version mismatch |
+| 3 | `one_rung` turns a result that was not recorded into a rung REFUSAL — correctly, so a stale row is never substituted |
+| 4 | all nine refuse, so `range_all` refuses the whole command |
+| 5 | hours of CPU, nothing in the ledger — and before D-0295, a green *"Sweep finished"* |
+
+Every one of those steps is right on its own. The defect is only that the answer
+arrived after the work, when it was knowable from **sixteen header bytes** read
+at page load.
+
+**Why the server decides it.** `version` was already on the wire and the browser
+could have compared it against a `3` of its own. That is the hand-kept second
+copy §5 refuses for the condition vocabulary, and for the same reason: correct
+the day it is written, silently wrong the first time the format moves. The rule
+lives beside the constant it depends on and the page renders the answer.
+`writes_version` travels too so the banner can NAME both numbers rather than
+only reporting that they disagree.
+
+**A refused ledger is never appendable.** `appendable` is
+`self.version == VERSION && self.refusal.is_none()`. Promising a writable file
+over a ledger the reader has already given up on would send the operator to
+start a sweep against it. The page renders ONE banner, not two: `ledgerBlock`
+returns `null` when `refusal` is set, because the page already draws that.
+
+**Only an explicit `false` blocks.** An absent field is not evidence of a
+problem. A red banner over a payload that never made the claim is an alarm
+nobody can act on and nobody can clear.
+
+**Not done here.** Nothing moves the operator's file. The runs already recorded
+stay readable in whatever the file is renamed to, but they leave the `/backtest`
+table, and which of those two an operator wants is not a choice this code may
+make for them. `api::backtest`'s `VERSION` is also still a hand-kept copy of
+`cli::results::VERSION` with no `const` assertion pinning it — `STRIDE_BYTES`
+has one and this does not, because `cli::results::VERSION` is not `pub`.
