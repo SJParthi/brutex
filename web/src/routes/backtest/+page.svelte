@@ -1628,14 +1628,22 @@
         if (leaf !== run.underlying) continue;
         months.set(row.timeframe, (months.get(row.timeframe) ?? 0) + 1);
       }
-      // INTRADAY ONLY HERE TOO. This switcher offers the timeframes a run's
-      // chart can be redrawn at, and `1day` is not one of them: it is on disk
-      // to define the previous session's OHLC for `indicators::daily`, not to
-      // be looked at or swept. Same `min`-suffix test the catalog uses, for
-      // the same reason -- a rule about the SHAPE of a rung rather than a
-      // second copy of `cli::EVERY_RUNG`.
+      // INTRADAY, PLUS THE RUN'S OWN RUNG WHATEVER IT IS.
+      //
+      // The `min` filter alone was a REGRESSION and it was measured: on a
+      // `1day` run the chart draws 903 daily bars and the switcher offered
+      // eight intraday rungs with **none of them active**. The reader was
+      // shown eight buttons, none matching what was on screen, and any
+      // click navigated away from the run's own rung with no way back.
+      //
+      // Which rungs may be SWEPT and which a chart may DISPLAY are two
+      // different questions, and the filter answered the second with the
+      // first. A run that exists was swept at some rung; refusing to draw
+      // that rung does not un-record it, it just hides which bars are on
+      // screen. So: every intraday rung, and always the open run's own.
+      const own = String(run.timeframe ?? '');
       storeRungs = [...months.entries()]
-        .filter(([name]) => /min$/.test(name))
+        .filter(([name]) => /min$/.test(name) || name === own)
         .map(([name, count]) => ({ name, months: count }))
         .sort((a, b) => byRung(a.name, b.name));
     } catch {
@@ -3916,8 +3924,25 @@
               </button>
 
               <div class="tt-meta">
+                <!-- THE LEDGER ROW AND THIS BAR MUST NOT DISAGREE ABOUT ONE
+                     RECORD. The row says `not swept · 1day` and this said
+                     `complete · depth 15` about the same run -- two surfaces,
+                     one fact, opposite readings, and this is the one an
+                     operator is looking at when they drill in.
+
+                     `complete` is a true statement about the LADDER: it ran
+                     to extinction. It is the wrong headline for a rung the
+                     engine never sweeps, because it invites the row to be
+                     compared with rungs that were. The depth survives beside
+                     it; only the crown word goes. -->
                 {#if openRun.halted}
                   <span class="tt-chip warn">halted · depth {openRun.depth} partial</span>
+                {:else if !swept(openRun)}
+                  <span
+                    class="tt-chip warn"
+                    title="{openRun.timeframe} is not a signal timeframe — it is held to define the previous session's OHLC for the intraday rungs (indicators::daily, vocabulary bits 13–18). The ladder did run to extinction at depth {openRun.depth}; this run is listed and never ranked."
+                    >not swept · depth {openRun.depth}</span
+                  >
                 {:else}
                   <span class="tt-chip good">complete · depth {openRun.depth}</span>
                 {/if}
@@ -3952,11 +3977,24 @@
                        fraction is drawn with the half that exists. -->
                   <div class="tt-q">
                     <span class="tt-k">Profitable trades</span>
-                    <span class="tt-qv big">
-                      <Lock why="No win count is recorded. A net total cannot be split into winners and losers after the fact." />
-                      <em class="tt-frac"><Lock small why="The numerator — how many of these trades won — is not recorded." />/{exact(openRun.trades)}</em>
-                    </span>
-                    <span class="tt-note">of {exact(openRun.trades)} closed</span>
+                    <!-- A FRACTION OVER ZERO IS NOT UNKNOWN, IT IS MEANINGLESS.
+                         With no trades this rendered a padlock, a slash and a
+                         zero -- `/0` -- which reads as a broken value rather
+                         than as an absent one. The padlock is the right mark
+                         for "the numerator was never recorded"; it is the
+                         wrong mark for "there is no set to take a fraction
+                         of". Those are different facts and they now render
+                         differently. -->
+                    {#if openRun.trades === 0}
+                      <span class="tt-qv big dim">none</span>
+                      <span class="tt-note">no trade was opened, so there is nothing to divide</span>
+                    {:else}
+                      <span class="tt-qv big">
+                        <Lock why="No win count is recorded. A net total cannot be split into winners and losers after the fact." />
+                        <em class="tt-frac"><Lock small why="The numerator — how many of these trades won — is not recorded." />/{exact(openRun.trades)}</em>
+                      </span>
+                      <span class="tt-note">of {exact(openRun.trades)} closed</span>
+                    {/if}
                   </div>
                   <div class="tt-q">
                     <span class="tt-k">Profit factor</span>
@@ -4258,7 +4296,7 @@
                           >{e.k}</span
                         >
                         <span class="tt-plbar"><span class="tt-plfill {e.t}" style="width:{(Math.abs(e.v) / excursionTop) * 100}%"></span></span>
-                        <span class="tt-plval" title="{group(e.v)} ppm">{ppmPct(e.v)}</span>
+                        <span class="tt-plval" title="{group(e.v)} ppm">{openRun.trades === 0 ? "none" : ppmPct(e.v)}</span>
                       </div>
                     {/each}
                   </div>
@@ -4385,9 +4423,9 @@
                         <tr><td>Average bars in trades</td><td class="n"><Lock small why="bars ÷ trades is the average gap BETWEEN trades, a different quantity. Not shown rather than shown wrong." /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         <tr><td>Average bars in winners</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         <tr><td>Average bars in losers</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
-                        <tr class="own"><td title="MAE — maximum adverse excursion, winners only">How far a winner fell before it paid <span class="tt-own">brutex</span></td><td class="n">{ppmPct(openRun.winner_mae)}</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
-                        <tr class="own"><td title="MFE — maximum favourable excursion, winners only">How far a winner rose at its best <span class="tt-own">brutex</span></td><td class="n">{ppmPct(openRun.winner_mfe)}</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
-                        <tr class="own"><td title="MAE — maximum adverse excursion, every trade">How far any trade fell <span class="tt-own">brutex</span></td><td class="n">{ppmPct(openRun.all_mae)}</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
+                        <tr class="own"><td title="MAE — maximum adverse excursion, winners only">How far a winner fell before it paid <span class="tt-own">brutex</span></td><td class="n">{openRun.trades === 0 ? "none" : ppmPct(openRun.winner_mae)}</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
+                        <tr class="own"><td title="MFE — maximum favourable excursion, winners only">How far a winner rose at its best <span class="tt-own">brutex</span></td><td class="n">{openRun.trades === 0 ? "none" : ppmPct(openRun.winner_mfe)}</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
+                        <tr class="own"><td title="MAE — maximum adverse excursion, every trade">How far any trade fell <span class="tt-own">brutex</span></td><td class="n">{openRun.trades === 0 ? "none" : ppmPct(openRun.all_mae)}</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         <tr class="own"><td>Signal bars swept <span class="tt-own">brutex</span></td><td class="n">{exact(openRun.bars)}</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                       </tbody>
                     </table>
