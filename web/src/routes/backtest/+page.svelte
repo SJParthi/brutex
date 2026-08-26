@@ -88,6 +88,7 @@
   import { ask as ask_ } from '$lib/ask.js';
   import { rupee, group, exact } from '$lib/money.js';
   import * as prefix from '$lib/prefix.js';
+  import { sweepOutcome } from '$lib/sweep.js';
   /* THE FEED'S OWN MASTER, ALREADY ON HAND. `+layout.svelte` calls
      `loadCatalogue(feeds.active)` on every feed change, so resolving a
      symbol's exchange and segment for a bar-file path costs this page NO
@@ -290,19 +291,25 @@
       const response = await ask_(`/backtest/run.json`, { cache: 'no-store' });
       if (!response.ok) return;
       const body = await response.json();
-      const run = body.running;
-      if (!run) {
-        sweep = { phase: 'idle', run: null, why: '' };
-        return;
-      }
-      if (run.in_flight) {
-        sweep = { phase: 'running', run, why: '' };
+      // ENDED IS NOT FINISHED, AND THIS TESTED ONLY THAT IT HAD ENDED.
+      //
+      // The branch was `if (run.in_flight) … else done`, which is two readings
+      // of a payload that carries three. `cli::range_all` refuses the WHOLE
+      // command when every rung refused, and such a run is not in flight —
+      // exactly like one that swept. The green "Sweep finished" printed over a
+      // ledger that gained no row. `sweepOutcome` is total over the payload and
+      // is proved in `web/tests/sweep.test.js`; see its module comment. It also
+      // absorbs the `no run at all` case this function used to answer inline.
+      const next = sweepOutcome(body.running);
+      sweep = next;
+      if (next.phase === 'running') {
         pollAt = setTimeout(pollSweep, 2000);
         return;
       }
       // FINISHED: the ledger now has one more record, so the table is stale.
-      sweep = { phase: 'done', run, why: '' };
-      fetchLedger();
+      // A REFUSAL DOES NOT RE-READ IT — nothing was appended, and re-reading
+      // would redraw the same table under a red note as though it had changed.
+      if (next.phase === 'done') fetchLedger();
     } catch (error) {
       sweep = {
         phase: 'failed',
@@ -2151,8 +2158,31 @@
       <b>Sweep finished</b> — {sweep.run.underlying} on {sweep.run.feed}, and the ledger below has
       been re-read.
     </p>
+    <!-- THE NINE-RUNG TABLE, WHICH THE SERVER HAS ALWAYS SENT AND THIS PAGE
+         HAS NEVER SHOWN.
+
+         `/backtest/run.json` carries `report` — the exact text `cli range-all`
+         prints, banner included — and nothing read it. That was not merely a
+         wasted payload: `range_all` prints `REFUSED: why` on the row of any
+         rung that refused while OTHERS succeeded, and that is a partial run
+         with no whole-command refusal to catch it. The ledger gains rows, the
+         green note above is true, and which rungs never ran was unknowable
+         from this page. It is knowable here. -->
+    {#if sweep.run.report}
+      <pre class="runlog">{sweep.run.report}</pre>
+    {/if}
   {:else if sweep.phase === 'failed'}
-    <p class="inline-note bad runstate"><b>The sweep was refused.</b> {sweep.why}</p>
+    <p class="inline-note bad runstate">
+      <b>The sweep was refused.</b>
+      {#if !sweep.run}{sweep.why}{/if}
+    </p>
+    <!-- A SERVER REFUSAL IS MULTI-LINE AND NAMES THE FIRST CAUSE ON ITS OWN
+         LINE, so it goes in the block that preserves newlines rather than
+         being collapsed into the sentence above. A refusal raised HERE — a
+         malformed month, a 409, a dead fetch — is one line and stays inline. -->
+    {#if sweep.run}
+      <pre class="runlog bad">{sweep.why}</pre>
+    {/if}
   {/if}
 
   {#if load.phase === 'loading'}
@@ -3822,6 +3852,34 @@
     color: var(--n11);
     overflow-x: auto;
     user-select: all;
+  }
+
+  /* The nine-rung table `cli` prints, and the refusal it prints instead.
+     COLUMN-ALIGNED TEXT, so it must not wrap and must not widen the page:
+     `range_all` lays its table out in fixed-width columns and a wrap turns
+     one row into two that no longer line up under their headings. It scrolls
+     inside its own box instead, which is the only way wide content stays
+     readable without the body scrolling sideways with it. */
+  .runlog {
+    margin: 0 0 0.8rem;
+    padding: 0.7rem 0.85rem;
+    background: var(--n0);
+    border: 1px solid var(--n6);
+    border-radius: 6px;
+    font-size: 0.74rem;
+    line-height: 1.5;
+    color: var(--n11);
+    overflow-x: auto;
+    white-space: pre;
+    max-height: 28rem;
+    overflow-y: auto;
+  }
+  .runlog.bad {
+    border-color: var(--down);
+    background: var(--down-soft);
+    /* A refusal is prose in fixed width, not a table, so it wraps rather than
+       running off the edge — the sentence is the payload here. */
+    white-space: pre-wrap;
   }
 
   .spin {

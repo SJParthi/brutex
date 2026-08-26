@@ -2654,3 +2654,33 @@ Measured on the operator's machine, 2026-08-25, `cargo bench -p cli`, exit 0:
 0.989x, 1.000x, 0.880x and 1.006x. **Not measured here:** whether any of those
 costs is *small*. These rows refuse a cost that GROWS; `docs/06-limits.md` is
 where absolute figures and the things nobody has timed are recorded.
+
+## A sweep that refused is not a sweep that finished — D-0295
+
+`/backtest`'s Run control is the one place this console causes work rather than
+reporting on it. Everything below is about the answer it gives when that work
+does not happen. The shape is D-0129's — a value that was measured, discarded at
+the last step, and replaced by a default that reads as success — and these are
+the tenth and eleventh of that family, on a route that did not exist when D-0129
+was written.
+
+| ID | Invariant | Proof | ✓ |
+|---|---|---|---|
+| SW-01 | **Exactly one of `report` and `refusal` is set on any ended run.** `conduct` assigned `cli`'s answer to `report` for EVERY outcome and left `refusal` at `None` always, so a `range_all` that refused all nine rungs — an unknown feed word, a span the store holds no month of — reached the wire as `"refusal":null` with `"in_flight":false`. `settle` files the text by whether it opens with `refused`; the WORD and not the word with its colon, because `descend` opens one *"refused at the ceiling"* and a report opens with `STORED_PROVENANCE` and so cannot collide | `api::sweeprun::exactly_one_outcome_field_is_set_whatever_cli_returned` (five shapes including the empty string and both refusal spellings); `a_refused_sweep_is_a_refusal_and_never_a_report`; `a_real_report_is_a_report_and_never_a_refusal` | ✓ |
+| SW-02 | **A refusal reaches the page as a refusal and a null report.** The field is what the browser reads to decide it failed, so the JSON is asserted directly rather than through the struct | `api::sweeprun::a_refusal_reaches_the_page_as_a_refusal_and_a_null_report` | ✓ |
+| SW-03 | **A settled run is out of flight whichever way it ended.** `in_flight` is the page's only test of doneness, so a settle that left the stamp unset would poll for ever against a finished sweep — the same silent wedge in the opposite direction | `api::sweeprun::a_settled_run_is_no_longer_in_flight_whichever_way_it_ended` | ✓ |
+| SW-04 | **A run that refused every rung is `failed`, not `done`.** `pollSweep` was `if (run.in_flight) … else done` — two readings of a payload carrying three — so a run that read no bar printed **"Sweep finished"** in green and re-read a ledger that had gained no row. `sweepOutcome` is total over the payload and the caller has no fall-through branch left to guess in | `web/tests/sweep.test.js` · *a run that refused every rung is failed, not finished* · *every payload the route can send lands in exactly one phase* | ✓ |
+| SW-05 | **`in_flight` is read BEFORE `refusal`, and the order is load-bearing.** The slot keeps a finished run until the next replaces it, so a payload can carry a fresh `in_flight: true` beside a stale refusal. Reading the refusal first would report a new run as failed before it had done anything | `web/tests/sweep.test.js` · *a run still going is running, whatever else the slot holds* | ✓ |
+| SW-06 | **An empty refusal string is not a refusal.** `json_string("")` is a legal payload, and painting a red block with no reason in it is worse than the green one it replaced | `web/tests/sweep.test.js` · *an empty refusal string is not a refusal* | ✓ |
+
+**`report` was on the wire from the first commit of this route and nothing read
+it.** Rendering it is not cosmetic: `range_all` prints `REFUSED: why` on the row
+of any rung that refused while OTHERS succeeded — a partial run, with rows in
+the ledger and no whole-command refusal to catch it — and which rungs never ran
+was unknowable from this page.
+
+**Not proved here, and not fixed here.** The run sweeps at `SUPPORT_PPM =
+200_000`. `cli::elite_descend`'s own doc records that a run launched at 20,000
+ppm *"cannot report a once-a-week setup no matter how long it runs"*; this route
+launches at ten times that, and neither descent is reachable from any HTTP
+route. See `docs/05-decisions.md` D-0295's closing paragraph.

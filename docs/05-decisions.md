@@ -22181,3 +22181,70 @@ build that could not have turned it. Append, never insert.
 asserts on `policy_of` itself, so a knob added to the run and forgotten there is
 one the test cannot see — and it pins the length at five with the reason.
 Zeroing the term in the preimage fails the roll-call at `policy`.
+
+### D-0295 — the one control this console owns reported a refusal as a success
+
+**Decision.** `api::sweeprun::conduct` no longer files `cli`'s answer under
+`report` unconditionally. `settle` files it under `refusal` when it opens with
+the word `refused` and under `report` otherwise, so **exactly one of the two is
+set on any ended run**. `/backtest`'s poll reads which one through
+`web/src/lib/sweep.js`'s `sweepOutcome`, and the page renders both.
+
+**Why.** `cli::range_all` refuses the WHOLE command when every one of the nine
+rungs refused — an unknown feed word, a span the store holds no month of, a
+backwards range — and returns that sentence in place of a table. `conduct`
+assigned it to `report` and left `refusal` at `None` for every outcome, so the
+run reached `/backtest/run.json` as `"refusal":null` with `"in_flight":false`.
+
+`pollSweep` tested `in_flight` and nothing else. Two readings of a payload that
+carries three, and the second one was `done`:
+
+```js
+if (run.in_flight) { ...poll again... }
+sweep = { phase: 'done', run, why: '' };   // <-- everything else
+```
+
+So a run that read no bar at all printed **"Sweep finished — NIFTY on zerodha,
+and the ledger below has been re-read"** in green, re-read a ledger that had
+gained no row, and said nothing about why. That is §4's *fallback that hides a
+failure* — degrade loudly and name the reason, or refuse, never both silently —
+sitting on the one control `/backtest` owns. D-0129 catalogued nine of this
+shape across the startup path and two pages; this is the tenth, on a route that
+did not exist when that sweep was run.
+
+**Why the word and not the word with its colon.** `cli`'s argv layer decides an
+exit code with `starts_with("refused: ")`. `descend` opens a refusal *"refused
+at the ceiling"*, so the colon is not universal. The looser test cannot produce
+a false positive here: a report opens with `STORED_PROVENANCE`, never with this
+word.
+
+**`report` was already on the wire and nothing read it.** That was not merely a
+wasted payload. `range_all` prints `REFUSED: why` on the row of any rung that
+refused while OTHERS succeeded — a partial run, with rows in the ledger and no
+whole-command refusal to catch it — and which rungs never ran was unknowable
+from this page. The table is rendered now, in a block that scrolls rather than
+wraps, because its columns are fixed-width and a wrap turns one row into two
+that no longer line up.
+
+**Why a `$lib` module rather than three lines in the component.** A `.svelte`
+file is not importable by `node --test`. D-0129 settled that the way to prove a
+page's arithmetic in this repository is to move it to `web/src/lib` and test it
+there; SS-07 through SS-10 are the precedent and this follows it.
+
+**`in_flight` is tested BEFORE `refusal`, and the order is load-bearing.** The
+slot keeps a finished run until the next one replaces it, so a payload can carry
+a fresh `in_flight: true` beside a stale refusal. Reading the refusal first
+would report a new run as failed before it had done anything.
+
+**A refusal does not re-read the ledger.** Nothing was appended, and re-reading
+would redraw the same table under a red note as though it had changed.
+
+**What this does NOT fix, and it is the larger finding.** The run still sweeps
+at `SUPPORT_PPM = 200_000` — 20% of each rung's own bars. `cli`'s own
+`elite_descend` doc records that a run launched at 20,000 ppm *"cannot report a
+once-a-week setup no matter how long it runs"*, and this route launches at ten
+times that. `/backtest` has no descent: `elite_descend` and `descend` are
+reachable from `cli` and from no HTTP route. The page's own empty-ledger panel
+tells the operator to run `cli range-all zerodha NIFTY 2019 12 2026 8 500` — a
+support **400× lower than its own button uses**. That is a routing decision, not
+a defect in this file, and it is not taken here.

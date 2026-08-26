@@ -358,6 +358,46 @@ pub fn asked_from(body: &str) -> Result<Asked, Refusal> {
     })
 }
 
+/// The word every `cli` refusal opens with.
+///
+/// `cli`'s own argv layer decides an exit code with `starts_with("refused: ")`.
+/// The WORD is matched here and not the word with its colon, because
+/// `range_all` is not the only shape a refusal takes — `descend` opens one
+/// `"refused at the ceiling"` — and a looser test cannot produce a false
+/// positive here: a report opens with `STORED_PROVENANCE`, whose first line is
+/// the provenance banner, and never with this word.
+const REFUSED: &str = "refused";
+
+/// Files `cli`'s answer under the field that describes it, and ends the run.
+///
+/// # The bug this exists to make impossible
+///
+/// [`conduct`] assigned `cli`'s answer to `report` for EVERY outcome and left
+/// `refusal` at [`None`] always. `range_all` refuses the whole command when
+/// every rung refused — an unknown feed word, a span the store holds no month
+/// of, a backwards range — and returns that sentence in place of a table. So a
+/// refused sweep reached `/backtest/run.json` as `"refusal":null` with
+/// `"in_flight":false`, and `in_flight` is the only thing the page tests. It
+/// printed **"Sweep finished"** in green over a ledger that gained no row.
+///
+/// That is `CLAUDE.md` §4's failure wearing a success's clothes, sitting on the
+/// one control an operator presses. The two fields are mutually exclusive now:
+/// exactly one of them is [`Some`], and WHICH one is the outcome.
+///
+/// # Why it is split out of [`conduct`]
+///
+/// `conduct` sweeps millions of bars, so a test that drove it would be a sweep
+/// rather than a test — and neither outcome could be provoked without a store
+/// shaped to provoke it. This takes the text and is total over both shapes.
+fn settle(progress: &mut Progress, text: String, finished_micros: i64) {
+    if text.starts_with(REFUSED) {
+        progress.refusal = Some(text);
+    } else {
+        progress.report = Some(text);
+    }
+    progress.finished_micros = Some(finished_micros);
+}
+
 /// Runs the sweep and records what it produced.
 ///
 /// **Blocking on purpose, and the caller must place it accordingly.**
@@ -365,11 +405,12 @@ pub fn asked_from(body: &str) -> Result<Asked, Refusal> {
 /// a tokio worker would hold that thread for the whole sweep and starve every
 /// other request on it. The handler puts this on a blocking thread.
 ///
-/// The report `cli` returns is kept whole. It is the same text `cli range-all`
-/// prints in a terminal, including the `STORED_PROVENANCE` banner that says
-/// the bars were REAL — `CLAUDE.md` §5 makes that banner the only thing
-/// separating a real sweep from a generated one, so it travels with the report
-/// rather than being stripped for the page.
+/// The text `cli` returns is kept whole, whichever field [`settle`] files it
+/// under. It is the same text `cli range-all` prints in a terminal, including
+/// the `STORED_PROVENANCE` banner that says the bars were REAL — `CLAUDE.md`
+/// §5 makes that banner the only thing separating a real sweep from a
+/// generated one, so it travels with the report rather than being stripped for
+/// the page.
 #[must_use]
 pub fn conduct(asked: &Asked, now_micros: i64) -> Progress {
     let mut progress = Progress::started(
@@ -380,15 +421,14 @@ pub fn conduct(asked: &Asked, now_micros: i64) -> Progress {
         SUPPORT_PPM,
         now_micros,
     );
-    let report = cli::range_all(
+    let text = cli::range_all(
         &asked.feed,
         &asked.underlying,
         asked.from,
         asked.to,
         SUPPORT_PPM,
     );
-    progress.report = Some(report);
-    progress.finished_micros = Some(now_micros);
+    settle(&mut progress, text, now_micros);
     progress
 }
 
@@ -581,7 +621,7 @@ pub async fn run_json(
               that cannot panic cannot fail"
 )]
 mod tests {
-    use super::{Asked, Progress, Refusal, SUPPORT_PPM, asked_from, field, now_micros};
+    use super::{Asked, Progress, Refusal, SUPPORT_PPM, asked_from, field, now_micros, settle};
 
     fn body(feed: &str, span: &str) -> String {
         format!(r#"{{"feed":"{feed}","underlying":"NIFTY",{span}}}"#)
@@ -947,5 +987,95 @@ mod tests {
         );
         // Two reads are ordered, which a constant could not be.
         assert!(now_micros() >= now);
+    }
+
+    /* ==================== the outcome fields ==================== */
+
+    /// The refusal `cli::range_all` returns when nothing was read.
+    ///
+    /// Taken in SHAPE from that function's own `format!` rather than invented:
+    /// it opens with the word, names the rung count, and says outright that no
+    /// row was recorded.
+    const REFUSAL: &str = "refused: every one of the 9 rungs refused. Nothing was \
+                           read and no row was recorded.\n  first reason: \
+                           `nosuchfeed` is not a feed this engine reads.\n";
+
+    /// A report opens with the provenance banner, which is what makes it one.
+    const REPORT: &str = "THESE BARS ARE REAL MARKET DATA, READ FROM THE STORE\n\
+                          feed zerodha · NIFTY · ALL EIGHT INTRADAY RUNGS\n";
+
+    fn settled(text: &str) -> Progress {
+        let mut progress =
+            Progress::started("zerodha", "NIFTY", (2019, 12), (2026, 8), SUPPORT_PPM, 1);
+        settle(&mut progress, text.to_owned(), 2);
+        progress
+    }
+
+    #[test]
+    fn a_refused_sweep_is_a_refusal_and_never_a_report() {
+        let progress = settled(REFUSAL);
+        assert_eq!(progress.refusal.as_deref(), Some(REFUSAL));
+        assert!(
+            progress.report.is_none(),
+            "a refusal filed as a report is the green `Sweep finished` over an \
+             empty ledger that this split exists to prevent: {:?}",
+            progress.report
+        );
+    }
+
+    #[test]
+    fn a_real_report_is_a_report_and_never_a_refusal() {
+        let progress = settled(REPORT);
+        assert_eq!(progress.report.as_deref(), Some(REPORT));
+        assert!(
+            progress.refusal.is_none(),
+            "a completed sweep marked refused would send the operator hunting a \
+             fault that is not there: {:?}",
+            progress.refusal
+        );
+    }
+
+    #[test]
+    fn exactly_one_outcome_field_is_set_whatever_cli_returned() {
+        // THE INVARIANT IS `EXACTLY ONE`, WHICH IS TWO FAILURES AND NOT ONE.
+        // Both set is a contradiction the page would resolve arbitrarily;
+        // neither set is the original bug in its other direction, because the
+        // page falls through to `done` when it finds no refusal.
+        for text in [
+            REFUSAL,
+            REPORT,
+            "",
+            "refused",
+            "refused at the ceiling, so no floor could be derived\n",
+        ] {
+            let progress = settled(text);
+            assert_eq!(
+                usize::from(progress.report.is_some()) + usize::from(progress.refusal.is_some()),
+                1,
+                "both or neither were set for {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_settled_run_is_no_longer_in_flight_whichever_way_it_ended() {
+        // `in_flight` is the page's ONLY test of doneness, so a settle that
+        // left the stamp unset would poll for ever against a finished sweep.
+        assert!(!settled(REPORT).in_flight());
+        assert!(!settled(REFUSAL).in_flight());
+    }
+
+    #[test]
+    fn a_refusal_reaches_the_page_as_a_refusal_and_a_null_report() {
+        let json = settled(REFUSAL).to_json();
+        assert!(
+            json.contains(r#""report":null"#),
+            "a refusal must not also arrive as a report: {json}"
+        );
+        assert!(
+            json.contains(r#""refusal":"refused: every one of the 9 rungs"#),
+            "this is the field the page reads to decide it failed: {json}"
+        );
+        assert!(json.contains(r#""in_flight":false"#), "{json}");
     }
 }
