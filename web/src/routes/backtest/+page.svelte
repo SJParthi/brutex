@@ -2828,8 +2828,13 @@
   {#if catalog.phase === 'ready' && heldNow}
     <section class="coverbar">
       <div class="coverbar-head">
+        <!-- THE INSTRUMENT AS A DISPLAY ELEMENT, the way `/db` leads with it.
+             `/db` sets its symbol in `--mono` at `--fs-xl` weight 800 and it
+             is the anchor the whole page hangs off; this page had the same
+             name at `--fs-md` in the running sans, indistinguishable from the
+             labels around it. Same treatment, same token, same reason. -->
         <span class="coverbar-k">On disk</span>
-        <b>{heldNow.leaf}</b>
+        <b class="sym">{heldNow.leaf}</b>
         <span class="dim sm">{heldNow.full}</span>
         <!-- THE PRODUCT'S MONTH, HERE TOO. This line read `2016-08 → 2026-08`
              while the form two rows above it read `Aug 2016`, which is the
@@ -5142,18 +5147,21 @@
      component; the OVERRIDE lives here because the mismatch is a property of
      this row rather than of `Picker`, which is right as it is where it came
      from. */
-  .runf :global(.pbtn) {
-    font-size: var(--fs-mini);
-    font-weight: var(--w-mid);
-    border-radius: 6px;
-    padding: 5px 28px 5px 8px;
-    background-position: calc(100% - 14px) 55%, calc(100% - 9px) 55%;
-  }
-  /* Same height as the fields it sits beside, so the row has ONE baseline. */
-  .runbar .btn.run {
-    padding-block: 5px;
-    align-self: flex-end;
-  }
+  /* THE `.pbtn` OVERRIDE THAT WAS HERE IS DELETED, AND IT WAS THE WHOLE
+     PROBLEM. It read:
+
+       font-size: var(--fs-mini); padding: 5px 28px 5px 8px; border-radius: 6px
+
+     written to make `Picker` match a small `select.find.sm` in the same
+     row -- a select that has since been replaced by another `Picker`, so
+     the override outlived the only thing it was matching. It shrank a
+     48px/16px control to 31px/12.5px, which is why this page read as a
+     cramped utility strip beside `/db`'s query panel built from the same
+     component.
+
+     Sizing DOWN to the smallest thing in a row is the wrong direction:
+     the row should have been built at the component's own size. Nothing
+     replaces this rule -- native `Picker` is the console's size. */
   /* The span menus stand in for two text inputs, so the placeholder that
      replaces them while the census loads must hold the same line. */
   .runf-wait {
@@ -7759,39 +7767,71 @@
      a phone.
      ================================================================== */
 
-  /* ---- the sweep bar: the one place on this page you act ---- */
+  /* ---- the sweep bar: MEASURED OFF `/db`, not invented here ----------
+     This bar was a cramped flex ROW while `/db`'s query panel -- the same
+     job, the same component, the same console -- is a GRID of labelled
+     fields. Measured on `/db` at 1440px:
+
+       .strip   grid · 3 × 228px · gap 16px 12px · padding 16px
+       .field   flex column · gap 4px
+       .lab     12px / 600 / 1.2px tracking / uppercase / --n8
+       .pbtn    48px tall · 16px / 600 · radius 9px
+
+     And this page had a `:global(.pbtn)` override shrinking that same
+     button to 38px and 13.5px, written to make it match a small `select`
+     that is no longer even in the markup. The override is gone: `Picker`
+     at its native size IS the console's size, and every other page uses
+     it that way. Fighting a design system is what made this page look
+     unlike the product it is part of.
+
+     `auto-fit` rather than a fixed three, because this bar has five cells
+     and `/db` has seven -- the column COUNT is a consequence of the
+     width, and only the track floor is a decision. */
   .runbar {
-    padding: 1.15rem 1.35rem;
-    gap: 1rem;
-    row-gap: 0.85rem;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+    align-items: end;
+    gap: 16px 12px;
+    padding: 16px;
   }
-  .runf > span,
-  .runf-wait {
-    font-size: var(--fs-mini);
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    color: var(--n8);
-  }
-  /* Controls that read as controls: 38px is a comfortable target and it
-     is the height the Run button already wanted to be. */
-  .runf :global(.pbtn) {
-    font-size: var(--fs-xs);
-    padding: 9px 30px 9px 11px;
-    border-radius: 7px;
-    background-position: calc(100% - 15px) 55%, calc(100% - 10px) 55%;
-  }
-  .runbar .btn.run {
-    padding: 9px 1.35rem;
-    font-size: var(--fs-sm);
-    font-weight: var(--w-semi);
-    border-radius: 7px;
+  /* The two full-width rows: the panel's own name above the fields, and
+     what the press will do below them. */
+  .runbar-k,
+  .runbar-n {
+    grid-column: 1 / -1;
   }
   .runbar-k {
-    font-size: var(--fs-mini);
+    font-size: var(--fs-micro);
+    font-weight: var(--w-semi);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--n8);
+    padding: 0;
   }
   .runbar-n {
     font-size: var(--fs-xs);
-    line-height: 1.5;
+    line-height: 1.55;
+    padding: 0;
+  }
+  .runf {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .runf > span,
+  .runf-wait {
+    font-size: var(--fs-micro);
+    font-weight: var(--w-semi);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--n8);
+  }
+  .runbar .btn.run {
+    height: 48px;
+    padding-inline: 1.4rem;
+    font-size: var(--fs-sm);
+    font-weight: var(--w-semi);
+    border-radius: 9px;
   }
 
   /* ---- the coverage bar ---- */
@@ -7802,8 +7842,14 @@
   .coverbar-k {
     font-size: var(--fs-mini);
   }
-  .coverbar-head b {
-    font-size: var(--fs-md);
+  /* Measured off `/db`'s `.sym`: mono, `--fs-xl`, weight 800, -0.03em. */
+  .coverbar-head b.sym {
+    font-family: var(--mono);
+    font-size: var(--fs-xl);
+    font-weight: var(--w-heavy);
+    letter-spacing: -0.03em;
+    color: var(--n12);
+    line-height: 1.1;
   }
   .coverbar-note {
     font-size: var(--fs-mini);
