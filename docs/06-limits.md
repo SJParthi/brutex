@@ -5536,3 +5536,52 @@ removed by D-0052/D-0053, `CLAUDE.md` §5 records that gate 7 skips permanently,
 and no manifest targets wasm32. Three crate manifests — `core`, `telemetry` and
 `vocab` — repeated the same deleted claim in their own comments. All four are
 corrected, and each keeps the false sentence quoted beside the correction.
+
+## 93. The ladder ceiling is derived from CORES, which is a proxy for the memory it should be derived from — D-0306
+
+`engine::DEFAULT_CEILING` is `2^27`, and that crate's own table sizes it against
+**"a 48 GB machine"**. That is a static fact about somebody else's hardware
+deciding how far the ladder may walk before it halts and reports
+`complete = NO` — and a combination past the halt is not ranked badly, it is
+never built.
+
+`cli::derived_ceiling` now scales it by
+`std::thread::available_parallelism()`, so the bound moves with the machine
+instead of with an assumption. **The quantity that belongs there is usable RAM,
+and it is not what is read.**
+
+### Why memory is not read
+
+`cli` cannot read it:
+
+* `std` exposes no memory API at all.
+* `/proc/meminfo` does not exist on macOS, which is the operator's platform.
+* `sysctl` is a **process**, and spawning one to size a sweep is a dependency on
+  the host's userland wearing a different hat.
+
+Reading it properly needs a crate. That is a `docs/05-decisions.md` matter in
+this workspace rather than a detail: gate 13 walks every manifest and every lock
+entry, `cargo deny` gates licences and advisories, and §5's arrows are pinned by
+gates 9, 9b and 22. None of those forbids a memory crate in `cli` — `cli` is on
+no gate-22 list — so the cost is a decision and an audit, not a refusal.
+
+### What the proxy is worth, stated rather than glossed
+
+Machines scale memory with cores **loosely and not exactly**. A 4-core server
+with 128 GB gets a ceiling a quarter of the reference; a 24-core laptop with
+32 GB gets one more than twice it, and that second case is the direction that
+can swap. The derivation is calibrated at the reference machine — ten
+performance cores, recorded in `range_all`'s own comment — so a ten-core machine
+gets exactly the shipped constant and the behaviour is unchanged where it was
+measured.
+
+**`BRUTEX_CEILING` still wins outright**, and on a machine whose core count and
+memory disagree that is the correct instrument. The refusal message names the
+derived figure and points here.
+
+### What is NOT claimed
+
+That the derived figure is right for any particular machine. It is *scaled* by
+one machine property and *calibrated* against one machine, which is strictly
+better than a constant that does neither — and strictly worse than reading the
+number it stands in for.

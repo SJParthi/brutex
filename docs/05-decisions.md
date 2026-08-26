@@ -22884,3 +22884,57 @@ binary running in parallel — the reason `root_from` exists beside `store_root`
 What is assertable without touching the environment is that the ceiling reaches
 the slice **as the value the ladder uses**: a knob hashed as a constant would
 pass every `assert_ne` in the roll-call and fail that one.
+
+### D-0306 — the ladder's depth is a fact about this machine now, not about a 48 GB one
+
+**Decision.** `cli::ceiling_from_env` returns `derived_ceiling()` when
+`BRUTEX_CEILING` is unset, and that scales `engine::DEFAULT_CEILING` by
+`std::thread::available_parallelism()` against the ten-core machine the constant
+was calibrated on. `BRUTEX_CEILING` still wins outright.
+
+**Why.** The ceiling decides how far the ladder walks before it **halts** —
+`range_all`'s own column reports `complete = NO` and a depth that is *"as far as
+the ladder got, not as far as it goes"*. A combination past that point is not
+ranked badly; it is never built. And `engine`'s own table sizes the constant
+against *"a 48 GB machine"*, so every run anywhere was bounded by an assumption
+about hardware the operator may not have: on half that machine it invites the
+swap it was chosen to avoid, and on four times it, it stops the search well
+short of what could have been explored.
+
+**A constant scaled by nothing is the same defect D-0303 removed one layer up.**
+That entry deleted `SUPPORT_PPM` because *"a constant has the same defect a
+settable parameter has, one step earlier: it was set wrongly once, by whoever
+wrote it, and then nobody could see it at all."* The ceiling is the second such
+constant on the discovery path, and after the support floor it is the binding
+one.
+
+**The reference is the machine the constant was measured on, and it is written
+down.** `range_all`'s own comment: *"NINE RUNGS AT ONCE, ON A MACHINE WITH TEN
+PERFORMANCE CORES … 0.20 GB resident per rung at 20% support, so nine at once is
+under 2 GB of 48."* Ten is the divisor, so a ten-core machine gets exactly the
+shipped constant — **behaviour is unchanged where it was calibrated** — and
+scales from there.
+
+**Cores are a PROXY for memory and this does not pretend otherwise.** The
+quantity that belongs here is usable RAM, and `cli` cannot read it: `std`
+exposes no memory API, `/proc/meminfo` does not exist on macOS, and `sysctl` is
+a process. Reading it needs a crate, which is a decision and an audit rather
+than a detail — `docs/06-limits.md` §93 records exactly what that would cost and
+what the proxy is worth, including the case it gets wrong (a many-core machine
+with little memory, which is the direction that can swap).
+
+**An unanswering machine keeps the reference rather than guessing downward.** An
+unknown machine is not a small one, and halving the ladder on a failed query
+would narrow the search silently — which is the whole family of defect this
+sequence of entries exists to remove.
+
+**Per-core first, saturating, floored.** `2^27 / 10` is about 13.4 million and
+would need `2^38` cores to leave `usize`; it saturates anyway, because a bound
+that wraps is not a bound. The floor is one core's allowance, because a ceiling
+of zero halts before the first candidate and would report extinction where the
+truth is that nothing was allowed to run.
+
+**And it reaches the run identity.** D-0305 folded the ceiling in as the sixth
+knob, reading through this same function — so a run on a four-core machine and
+one on a twenty-core machine are now different identities, which they are:
+different amounts of the combination space were explored.

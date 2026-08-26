@@ -7690,18 +7690,75 @@ static LEDGER: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// A malformed value REFUSES rather than falling back to the default: an
 /// operator who set the variable meant to change the ceiling, and quietly using
 /// the old one is the §4 fallback that hides a failure.
+/// The ceiling this machine can afford, derived rather than assumed.
+///
+/// # The assumption this replaces
+///
+/// `engine::DEFAULT_CEILING` is `2^27`, and that crate's own table sizes it
+/// against **"a 48 GB machine"** — a static fact about somebody else's
+/// hardware, deciding how far the ladder is allowed to walk before it halts and
+/// reports `complete = NO`. On half that machine it invites the swap it was
+/// chosen to avoid; on four times it, it stops the sweep well short of what the
+/// operator could have explored, and the combination past the halt is not
+/// ranked badly — it is never built.
+///
+/// # Why parallelism and not memory, stated rather than glossed
+///
+/// The quantity that belongs here is usable RAM, and **`cli` cannot read it**.
+/// `std` exposes no memory API; `/proc/meminfo` does not exist on macOS, which
+/// is the operator's platform; and `sysctl` is a process this would have to
+/// spawn. Reading it properly needs a dependency, and a dependency in this
+/// workspace is a `docs/05-decisions.md` matter rather than a detail — see
+/// `docs/06-limits.md` §93 for what that would cost.
+///
+/// [`std::thread::available_parallelism`] is in `std`, answers on every
+/// platform, and is a **proxy**: machines scale memory with cores, loosely and
+/// not exactly. So this is honest about being a scaling and not a measurement —
+/// it is calibrated at the reference machine and moves with the one it runs on,
+/// which is strictly better than a constant that moves with neither.
+///
+/// # The reference is the machine the constant was measured on
+///
+/// `crates/cli`'s own `range_all` records it: *"NINE RUNGS AT ONCE, ON A MACHINE
+/// WITH TEN PERFORMANCE CORES … 0.20 GB resident per rung at 20% support, so
+/// nine at once is under 2 GB of 48."* Ten is therefore the divisor, and a
+/// ten-core machine gets exactly `DEFAULT_CEILING` — the shipped behaviour is
+/// unchanged where it was calibrated, and scales from there.
+///
+/// A machine that will not answer keeps the reference rather than guessing
+/// downward: an unknown machine is not a small one, and halving the ladder on a
+/// failed query would be a silent narrowing of the search. D-0306.
+fn derived_ceiling() -> usize {
+    /// Cores on the machine `engine::DEFAULT_CEILING` was sized against.
+    const REFERENCE_CORES: usize = 10;
+
+    let cores =
+        std::thread::available_parallelism().map_or(REFERENCE_CORES, std::num::NonZero::get);
+    // PER-CORE FIRST, so the multiply cannot overflow on a machine with many:
+    // `DEFAULT_CEILING` is `2^27` and `2^27 / 10` is about 13.4 million, which
+    // needs 2^38 cores to leave `usize` on a 64-bit target. Saturating anyway,
+    // because a bound that wraps is not a bound.
+    (engine::DEFAULT_CEILING / REFERENCE_CORES)
+        .saturating_mul(cores)
+        // NEVER ZERO AND NEVER BELOW THE FLOOR A SINGLE CORE EARNS. A ceiling of
+        // zero halts before the first candidate, which would report extinction
+        // where the truth is that nothing was allowed to run.
+        .max(engine::DEFAULT_CEILING / REFERENCE_CORES)
+}
+
 fn ceiling_from_env() -> Result<usize, String> {
     match std::env::var_os("BRUTEX_CEILING") {
-        None => Ok(engine::DEFAULT_CEILING),
+        None => Ok(derived_ceiling()),
         Some(raw) => {
             let text = raw.to_string_lossy().into_owned();
             match text.trim().parse::<usize>() {
                 Ok(0) | Err(_) => Err(format!(
                     "BRUTEX_CEILING is `{text}`, which is not a candidate count \
                      of 1 or more. It is roughly the bytes you can spare divided \
-                     by 146; the default is {} for a 48 GB machine. Unset it to \
-                     use that.",
-                    engine::DEFAULT_CEILING
+                     by 146. Unset it and this machine derives {} from its own \
+                     core count, which is a proxy for memory and not a \
+                     measurement of it -- see docs/06-limits.md §93.",
+                    derived_ceiling()
                 )),
                 Ok(n) => Ok(n),
             }
@@ -9565,6 +9622,44 @@ mod tests {
     /// a knob added to the run and forgotten here is a knob this test cannot see.
     /// The ORDER is the contract: `with_policy` hashes the slice in order, so a
     /// new choice is APPENDED and never inserted.
+    #[test]
+    fn the_ceiling_is_derived_from_this_machine_and_not_from_an_assumed_one() {
+        // `engine::DEFAULT_CEILING` is sized in that crate's own table against
+        // "a 48 GB machine" -- a static fact about somebody else's hardware
+        // deciding how far this ladder may walk before it halts. The derivation
+        // scales it by the parallelism of the machine actually running.
+        let derived = crate::derived_ceiling();
+
+        assert!(
+            derived > 0,
+            "a ceiling of zero halts before the first candidate"
+        );
+
+        // NEVER BELOW WHAT ONE CORE EARNS. A machine that will not answer keeps
+        // the reference rather than guessing downward -- an unknown machine is
+        // not a small one, and halving the ladder on a failed query would
+        // narrow the search silently.
+        let per_core = engine::DEFAULT_CEILING / 10;
+        assert!(
+            derived >= per_core,
+            "derived {derived} is below the single-core floor {per_core}"
+        );
+
+        // AND IT IS A FUNCTION OF THE MACHINE, not a constant wearing a
+        // function's clothes. On the ten-core machine the constant was
+        // calibrated against the two are equal by construction; anywhere else
+        // they differ, and asserting equality either way would pin the test to
+        // one machine. What holds everywhere is that the derivation is the
+        // per-core allowance times the cores this machine reports.
+        let cores = std::thread::available_parallelism().map_or(10, std::num::NonZero::get);
+        assert_eq!(
+            derived,
+            per_core.saturating_mul(cores).max(per_core),
+            "the ceiling must be the per-core allowance scaled by THIS machine's \
+             {cores} core(s)"
+        );
+    }
+
     #[test]
     fn every_knob_that_moves_the_answer_moves_the_identity() {
         let bars = runner::synthetic::sessions(2);
