@@ -2569,33 +2569,79 @@
          single choice the only representable one; picking two meant two
          visits. Chips show every instrument the store holds at once, and a
          single choice is a set of one -- so there is no mode to switch. -->
-    <fieldset class="runf pickset">
-      <legend>instruments</legend>
+    <!-- BOTH CHOICES ARE MENUS, and both are MULTI. `$lib/Picker.svelte` is
+         already the console's multi-select dropdown -- checkboxes, a filter, a
+         Select all, and a row that can be drawn dead with its reason on it --
+         and `/ingest` uses it for exactly this shape of choice. A row of chips
+         put the choice on the page instead of in a control, which is a
+         different thing from the rest of this console and gets wider with
+         every instrument the store gains.
+
+         Each row carries its own coverage in `detail`, so the menu answers
+         "what does the store hold for this one" without being opened twice. -->
+    <div class="runf">
+      <span>instruments</span>
       {#if catalog.phase === 'ready' && catalog.held.length > 0}
-        <div class="chiprow">
-          {#each catalog.held as h, i (h.leaf)}
-            <button
-              type="button"
-              class="pchip"
-              class:on={pickedSymbols.has(h.leaf)}
-              style="--i:{i}"
-              aria-pressed={pickedSymbols.has(h.leaf)}
-              title="{h.full} · {exact(h.months)} months on disk, {monthLabel(h.from)} to {monthLabel(h.to)}"
-              onclick={() => {
-                pickedSymbols = toggled(pickedSymbols, h.leaf);
-                symbolTouched = true;
-                spanTouched = false;
-              }}
-            >
-              {h.leaf}
-              <span class="pchip-n">{exact(h.months)}</span>
-            </button>
-          {/each}
-        </div>
+        <Picker
+          filter={catalog.held.length > 8}
+          label="instruments"
+          summary={pickedSymbols.size === 1
+            ? ([...pickedSymbols][0] ?? '—')
+            : `${exact(pickedSymbols.size)} of ${exact(catalog.held.length)}`}
+          title="Every spot index this feed holds on disk. Pick one or several; the run route takes one at a time today."
+          rows={catalog.held.map((h) => ({
+            key: h.leaf,
+            name: h.leaf,
+            detail: `${exact(h.months)} months · ${monthLabel(h.from)} – ${monthLabel(h.to)}`,
+            title: h.full
+          }))}
+          selected={pickedSymbols}
+          onchange={(next) => {
+            // NEVER THE EMPTY SET. Unticking the last instrument would leave
+            // the form with nothing to sweep and the span with nothing to be
+            // derived from, so the previous choice stands.
+            if (next.size === 0) return;
+            pickedSymbols = next;
+            symbolTouched = true;
+            spanTouched = false;
+          }}
+        />
       {:else}
         <span class="runf-wait">{catalog.phase === 'loading' ? 'reading census…' : '—'}</span>
       {/if}
-    </fieldset>
+    </div>
+    <div class="runf">
+      <span>timeframes</span>
+      {#if heldNow}
+        <Picker
+          label="timeframes"
+          summary={pickedRungs.size === heldNow.rungs.length
+            ? `all ${exact(heldNow.rungs.length)}`
+            : `${exact(pickedRungs.size)} of ${exact(heldNow.rungs.length)}`}
+          title="Every timeframe this instrument holds on disk. Execution is always one-minute, whichever are picked."
+          rows={heldNow.rungs.map((r) => ({
+            key: r.name,
+            name: r.name,
+            detail:
+              r.months < heldNow.months
+                ? `${exact(r.months)} months · ${exact(heldNow.months - r.months)} short`
+                : `${exact(r.months)} months`,
+            why:
+              r.months < heldNow.months
+                ? 'fewer months on disk than the instrument holds, so a sweep here is a shorter sample rather than a corrected one.'
+                : undefined,
+            title: `${monthLabel(r.from)} – ${monthLabel(r.to)}`
+          }))}
+          selected={pickedRungs}
+          onchange={(next) => {
+            if (next.size === 0) return;
+            pickedRungs = next;
+          }}
+        />
+      {:else}
+        <span class="runf-wait">{catalog.phase === 'loading' ? 'reading census…' : '—'}</span>
+      {/if}
+    </div>
     <!-- TWO MONTH MENUS, NOT TWO TEXT BOXES. `2016-08` typed into a bare input
          is the one date format this console does not otherwise use, and it let
          an operator name a month the store does not hold. These offer the
@@ -2768,11 +2814,17 @@
            The last selected chip will not turn itself off: a brute force over
            no timeframe is not a run, and refusing it in the control's SHAPE
            beats raising a validation message after the press. -->
+      <!-- THE MENU ABOVE OWNS THE CHOICE; THIS OWNS THE PICTURE. Both edit the
+           same set, which is why this is not the same fact twice: a dropdown
+           states a count and this states the SHAPE -- how much of the
+           instrument's history each timeframe actually holds, side by side.
+           Clicking still toggles, because a control you can already see is
+           faster than one you have to open. -->
       <div class="rungs-head">
-        <span class="coverbar-k">Timeframes to sweep</span>
+        <span class="coverbar-k">Coverage by timeframe</span>
         <span class="dim sm">
-          {exact(pickedRungs.size)} of {exact(heldNow.rungs.length)} — execution is always
-          one-minute, whichever you pick
+          {exact(pickedRungs.size)} of {exact(heldNow.rungs.length)} in this run — execution is
+          always one-minute, whichever are picked
         </span>
         <button
           class="linky"
@@ -4853,69 +4905,12 @@
     gap: 0.6rem;
     flex-wrap: wrap;
   }
-  /* ---- the instrument chips ---- */
-  .pickset {
-    border: 0;
-    margin: 0;
-    padding: 0;
-    min-width: 0;
-  }
-  .pickset legend {
-    padding: 0;
-    font-size: var(--fs-micro);
-    color: var(--n8);
-    text-transform: lowercase;
-  }
-  .chiprow {
-    display: flex;
-    gap: 0.3rem;
-    flex-wrap: wrap;
-    margin-top: 0.2rem;
-  }
-  .pchip {
-    display: inline-flex;
-    align-items: baseline;
-    gap: 0.32rem;
-    font-family: var(--mono);
-    font-size: var(--fs-mini);
-    font-weight: var(--w-mid);
-    padding: 5px 9px;
-    border-radius: 6px;
-    border: 1px solid var(--n6);
-    background: var(--n3);
-    color: var(--n9);
-    cursor: pointer;
-    animation: rungin 0.3s cubic-bezier(0.22, 0.7, 0.3, 1) both;
-    animation-delay: calc(var(--i, 0) * 40ms);
-    transition:
-      background 0.15s ease,
-      border-color 0.15s ease,
-      color 0.15s ease,
-      transform 0.15s cubic-bezier(0.22, 0.7, 0.3, 1);
-  }
-  .pchip:hover {
-    border-color: var(--acc);
-    transform: translateY(-1px);
-  }
-  /* SELECTED IS A FILLED CHIP, NOT A TICK. The state has to be readable at a
-     glance across a row, and a mark small enough to sit inside a chip is not.
-     Colour AND weight AND the border all move together, so the state does not
-     rest on hue alone. */
-  .pchip.on {
-    background: var(--acc-soft);
-    border-color: var(--acc);
-    color: var(--acc);
-    font-weight: var(--w-semi);
-  }
-  .pchip:focus-visible {
-    outline: 2px solid var(--focus, var(--acc));
-    outline-offset: 1px;
-  }
-  .pchip-n {
-    font-size: var(--fs-micro);
-    font-variant-numeric: tabular-nums;
-    opacity: 0.72;
-  }
+  /* THE INSTRUMENT CHIP RULES ARE GONE WITH THEIR MARKUP. A row of chips put
+     the choice on the page rather than in a control, which is not the shape
+     the rest of this console uses and grows wider with every instrument the
+     store gains. `$lib/Picker.svelte` is the console's own multi-select
+     dropdown and it does this job everywhere else. `.rungs li` survives --
+     the coverage strip still uses it. */
   .rungs li {
     list-style: none;
   }
