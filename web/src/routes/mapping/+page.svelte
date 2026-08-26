@@ -68,6 +68,83 @@
   /** @type {{ phase: 'loading'|'ready'|'failed', body: any, why: string }} */
   let load = $state({ phase: 'loading', body: null, why: '' });
 
+  /* ====================================================================
+     THE MASTERS THIS JOIN READS FROM
+
+     This page has always been able to say the join did not run, and never
+     able to do anything about it. Its own refusal hint said the exchange
+     list "is operator data and is not tracked" -- which was true until
+     `pull::masters` made all four files fetchable, and is now a sentence
+     telling an operator to go and find a file the server can download.
+
+     `POST /masters/refresh` is that download. It is on this page rather
+     than its own because this is where the absence is DISCOVERED: an
+     operator reading "the join did not run" is one keystroke from the
+     control that fixes it, instead of somewhere else entirely.
+
+     NOTHING RUNS ON LOAD. `refreshMasters` is bound to a press, because
+     three of these four requests leave this machine and one of them
+     spends the shared vendor credential.
+     ==================================================================== */
+
+  /** @type {{ phase: 'idle'|'running'|'done', rows: any[], why: string, restart: boolean }} */
+  let masters = $state({ phase: 'idle', rows: [], why: '', restart: false });
+
+  /** @type {any[]} */
+  let onDisk = $state([]);
+
+  async function readMasters() {
+    try {
+      const response = await ask('/masters/status.json');
+      if (!response.ok) return;
+      const body = await response.json();
+      onDisk = body.masters ?? [];
+    } catch {
+      // A STATUS READ THAT FAILS IS NOT THIS PAGE'S SUBJECT. The join's own
+      // refusal already says what is missing; a second red banner about the
+      // same absence would be noise, and inventing a state for it would be
+      // worse than saying nothing.
+      onDisk = [];
+    }
+  }
+
+  async function refreshMasters() {
+    if (masters.phase === 'running') return;
+    masters = { phase: 'running', rows: [], why: '', restart: false };
+    try {
+      // A MINUTE AND A HALF, NOT THE DEFAULT FIFTEEN SECONDS. A refused
+      // source is retried on a backoff -- 500 ms doubling to a 32 s cap,
+      // five attempts per URL -- so a sick host legitimately takes longer
+      // than any other request this console makes. Timing out at 15 s would
+      // report a working ladder as a wedged server.
+      const response = await ask('/masters/refresh', { method: 'POST', ms: 90_000 });
+      const body = await response.json();
+      masters = {
+        phase: 'done',
+        rows: body.landed ?? [],
+        why: body.refusal ?? '',
+        restart: Boolean(body.restart_required)
+      };
+      await readMasters();
+      // AND THE JOIN AGAIN, because the whole point of the refresh is that
+      // the answer above it changes. Leaving the stale refusal on screen
+      // beside four green rows is the contradiction this page exists to
+      // avoid drawing.
+      await fetchJoin(feeds.active);
+    } catch (error) {
+      masters = {
+        phase: 'done',
+        rows: [],
+        why: error instanceof Error ? error.message : 'The refresh threw a value that is not an Error.',
+        restart: false
+      };
+    }
+  }
+
+  $effect(() => {
+    readMasters();
+  });
+
   /** @param {string|null} feed */
   async function fetchJoin(feed) {
     if (!feed) return;
@@ -214,9 +291,10 @@
       <span class="rlabel">The join did not run</span>
       <p>{load.why}</p>
       <p class="rhint">
-        The exchange list is operator data and is not tracked: it lives beside the vendor masters as
-        <code>nse_indices.csv</code>, one <code>index_name,category</code> row per published index.
-        Nothing is guessed when it is missing and nothing is served from a stale copy.
+        The exchange list lives beside the vendor masters as <code>nse_indices.csv</code>, one
+        <code>index_name,category</code> row per published index. Nothing is guessed when it is
+        missing and nothing is served from a stale copy — but it no longer has to be found by hand.
+        Press <b>Refresh the masters</b> below.
       </p>
     </div>
   {:else}
@@ -314,6 +392,94 @@
       </p>
     {/if}
   {/if}
+
+  <!-- THE FOUR FILES THIS JOIN READS FROM, and the control that fetches them.
+       Placed under the refusal and above the census so it sits where the
+       absence is discovered, on both paths: an operator whose join failed
+       reads the reason and then the fix, and one whose join worked can still
+       see how old the answer's inputs are. -->
+  <section class="masters">
+    <div class="mhead">
+      <div>
+        <h2>The four files this join reads</h2>
+        <p class="msub">
+          Three vendor masters and the exchange's own index list. Fetching them touches no bar and
+          spends no bar quota — this is not the ingest pull. One of the four spends the shared
+          vendor credential; it is marked.
+        </p>
+      </div>
+      <button class="mgo" onclick={refreshMasters} disabled={masters.phase === 'running'}>
+        {masters.phase === 'running' ? 'Asking four hosts…' : 'Refresh the masters'}
+      </button>
+    </div>
+
+    {#if onDisk.length}
+      <div class="mrows">
+        {#each onDisk as file (file.file)}
+          {@const done = masters.rows.find((r) => r.file === file.file)}
+          <div class="mrow">
+            <div class="mname">
+              <code>{file.file}</code>
+              {#if file.needs_token}<span class="tok">shared token</span>{/if}
+            </div>
+            <div class="mstate">
+              {#if file.present}
+                <span class="ok">on disk</span>
+                <span class="dim">{file.bytes.toLocaleString()} bytes</span>
+                {#if file.modified_unix_millis}
+                  <span class="dim">{new Date(file.modified_unix_millis).toLocaleString()}</span>
+                {/if}
+              {:else}
+                <span class="no">absent</span>
+              {/if}
+            </div>
+            <div class="mout">
+              {#if masters.phase === 'running'}
+                <span class="dim">asking…</span>
+              {:else if done?.written}
+                <span class="ok">{done.changed ? 'updated' : 'unchanged'}</span>
+                <span class="dim">{done.bytes.toLocaleString()} bytes</span>
+              {:else if done?.skipped}
+                <span class="skip">skipped</span><span class="dim">{done.refusal}</span>
+              {:else if done}
+                <span class="no">refused</span><span class="dim">{done.refusal}</span>
+              {:else}
+                <span class="dim">—</span>
+              {/if}
+            </div>
+          </div>
+
+          <!-- EVERY STEP, NOT A SUMMARY. Which URL, which attempt, what was
+               waited and what the host said. "It failed" is not something an
+               operator can act on, and five 503s and one 404 call for
+               opposite responses while rendering identically without this. -->
+          {#if done?.attempts?.length > 1 || (done && !done.written && done.attempts?.length)}
+            <ol class="ladder">
+              {#each done.attempts as step, i (i)}
+                <li>
+                  <span class="lnum">#{step.number}</span>
+                  <span class="lgot {step.got}">{step.got.replace(/_/g, ' ')}</span>
+                  {#if step.status}<span class="lst">{step.status}</span>{/if}
+                  {#if step.waited_ms}<span class="dim">after {step.waited_ms} ms</span>{/if}
+                  {#if step.detail}<span class="dim">{step.detail}</span>{/if}
+                </li>
+              {/each}
+            </ol>
+          {/if}
+        {/each}
+      </div>
+    {/if}
+
+    {#if masters.why}
+      <p class="mwhy">{masters.why}</p>
+    {/if}
+    {#if masters.restart}
+      <p class="mrestart">
+        New bytes are on disk. The masters are parsed <b>once, at startup</b>, so every other page is
+        still answering from the boot parse until the server is restarted.
+      </p>
+    {/if}
+  </section>
 </section>
 
 <style>
@@ -596,5 +762,156 @@
     color: var(--n9);
     margin: var(--s3) 0 0;
     max-width: 80ch;
+  }
+
+  /* ---- the masters this join reads from ---------------------------- */
+  .masters {
+    margin-top: var(--s8);
+    border: 1px solid var(--n6);
+    border-radius: var(--r2);
+    background: var(--n2);
+    padding: var(--s4);
+  }
+  .mhead {
+    display: flex;
+    gap: var(--s4);
+    align-items: flex-start;
+    justify-content: space-between;
+    flex-wrap: wrap;
+  }
+  .masters h2 {
+    margin: 0;
+    font-size: 1rem;
+    letter-spacing: -0.01em;
+  }
+  .msub {
+    margin: var(--s2) 0 0;
+    color: var(--n8);
+    font-size: 0.82rem;
+    max-width: 62ch;
+  }
+  .mgo {
+    font: inherit;
+    font-weight: 600;
+    font-size: 0.85rem;
+    padding: var(--s2) var(--s4);
+    border-radius: var(--r1);
+    border: 1px solid var(--acc);
+    background: transparent;
+    color: var(--acc);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .mgo:hover:not(:disabled) {
+    background: var(--n3);
+  }
+  .mgo:disabled {
+    opacity: 0.55;
+    cursor: progress;
+  }
+  .mrows {
+    margin-top: var(--s4);
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    background: var(--n6);
+    border: 1px solid var(--n6);
+    border-radius: var(--r1);
+    overflow: hidden;
+  }
+  .mrow {
+    background: var(--n3);
+    padding: var(--s3) var(--s4);
+    display: grid;
+    grid-template-columns: minmax(180px, 1.2fr) minmax(150px, 1fr) minmax(150px, 1.4fr);
+    gap: var(--s4);
+    align-items: baseline;
+    font-size: 0.82rem;
+  }
+  .mname code {
+    font-family: var(--mono);
+    font-size: 0.8rem;
+  }
+  .tok {
+    display: inline-block;
+    margin-left: var(--s2);
+    font-size: 0.66rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--warn);
+  }
+  .mstate,
+  .mout {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .ok {
+    color: var(--up);
+    font-weight: 600;
+  }
+  .no {
+    color: var(--down);
+    font-weight: 600;
+  }
+  .skip {
+    color: var(--warn);
+    font-weight: 600;
+  }
+  .dim {
+    color: var(--n8);
+    font-size: 0.76rem;
+  }
+  /* THE LADDER. One line per network round trip -- which URL, which try,
+     what was waited, what the host said. Monospace because the reader is
+     comparing statuses down a column. */
+  .ladder {
+    background: var(--n2);
+    margin: 0;
+    padding: var(--s2) var(--s4) var(--s3) var(--s8);
+    list-style: decimal;
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    color: var(--n8);
+  }
+  .ladder li {
+    padding: 1px 0;
+  }
+  .lnum {
+    color: var(--n9);
+  }
+  .lgot {
+    margin: 0 var(--s2);
+    font-weight: 500;
+  }
+  .lgot.body,
+  .lgot.primed {
+    color: var(--up);
+  }
+  .lgot.refused_retrying,
+  .lgot.refused_repriming,
+  .lgot.prime_refused {
+    color: var(--warn);
+  }
+  .lgot.refused_settled {
+    color: var(--down);
+  }
+  .lst {
+    color: var(--down);
+    margin-right: var(--s2);
+  }
+  .mwhy {
+    margin: var(--s3) 0 0;
+    color: var(--down);
+    font-size: 0.82rem;
+  }
+  .mrestart {
+    margin: var(--s3) 0 0;
+    padding: var(--s3) var(--s4);
+    border-left: 3px solid var(--warn);
+    background: var(--n3);
+    border-radius: var(--r1);
+    color: var(--n9);
+    font-size: 0.82rem;
   }
 </style>
