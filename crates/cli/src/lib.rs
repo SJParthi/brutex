@@ -723,7 +723,7 @@ fn range_all_arm(
         parse_support_ppm(support_ppm),
     ) {
         (Ok(fy), Ok(fm), Ok(ty), Ok(tm), Ok(h)) => {
-            let text = range_all(vendor, underlying, (fy, fm), (ty, tm), h);
+            let text = range_all(vendor, underlying, (fy, fm), (ty, tm), Some(h));
             let refused = text.starts_with("refused: ");
             out.push_str(&text);
             if refused { MISUSED } else { OK }
@@ -5356,6 +5356,38 @@ fn validated_at(
 ///
 /// Measured on the shipped Wilson bound: 80% against a coin-flip floor needs
 /// **four** round trips. The cadence floor demanded 526.
+/// The lowest support at which a result on `bars` could still be believed.
+///
+/// # A number nobody typed and nobody baked in
+///
+/// `CLAUDE.md` §6 refuses a depth parameter because *"a parameter that can be
+/// set can be set wrongly and silently"*. A CONSTANT has the same defect one
+/// step earlier: it was set wrongly, once, by whoever wrote it, and then nobody
+/// could see it at all. 200,000 ppm is such a constant, and `elite_descend`'s
+/// doc records that a tenth of it *"cannot report a once-a-week setup no matter
+/// how long it runs — the setup was pruned in the first level of the ladder,
+/// and the report says nothing about it because nothing counted it"*.
+///
+/// So this is neither typed nor baked: it is DERIVED, per rung, per span, from
+/// the only question the data can answer on its own — **below how many round
+/// trips can the stated win rate no longer clear its own confidence bound?**
+/// Under that count no combination can pass however good it looks, so
+/// descending further buys nothing; above it, reachable answers are being
+/// discarded before they are counted.
+///
+/// # Why the stop ceiling and the listing bound do not enter
+///
+/// [`statistical_floor_ppm`] reads `min_win_rate_bp` and `min_assurance_bp` and
+/// nothing else, so `max_mae_ppm` and `top` cannot move the answer. They are
+/// passed as `1` rather than plumbed through, and that is not laziness — a
+/// caller made to supply a risk ceiling to learn a STATISTICAL floor would
+/// reasonably believe the two were related, and would set it carefully for no
+/// effect.
+#[must_use]
+pub fn statistical_support_floor(bars: u64) -> u64 {
+    statistical_floor_ppm(&Rules::elite(1, 1), bars)
+}
+
 fn statistical_floor_ppm(rules: &Rules, bars: u64) -> u64 {
     let needed = runner::grid::trades_needed_for(
         rules.min_win_rate_bp,
@@ -6112,7 +6144,7 @@ fn one_rung(
     rung: &'static str,
     from: (u16, u8),
     to: (u16, u8),
-    support_ppm: u64,
+    support_ppm: Option<u64>,
 ) -> RungRow {
     let first_line = |why: String| why.lines().next().unwrap_or(&why).to_owned();
     let root = match store_root() {
@@ -6142,7 +6174,25 @@ fn one_rung(
             };
         }
     };
-    let min_hits = min_hits_for(bars, support_ppm);
+    // DERIVED FROM THIS RUNG'S OWN BARS WHEN NOBODY NAMES A SUPPORT.
+    //
+    // `None` is not a default hiding in an `Option`; it is the ABSENCE of a
+    // typed threshold, which `CLAUDE.md` §6 asks for and which a CONSTANT does
+    // not give. A fixed percentage is still somebody's guess baked into the
+    // binary, and `elite_descend`'s own doc records that a guess a TENTH of
+    // 200,000 ppm *"cannot report a once-a-week setup no matter how long it
+    // runs"*.
+    //
+    // `statistical_support_floor` asks the only question the data alone can
+    // answer: below how many round trips can the stated win rate no longer
+    // clear its own confidence bound? Under that, NO combination can pass
+    // however good it looks — and stopping anywhere above it discards reachable
+    // answers. D-0303.
+    let min_hits = min_hits_for(
+        bars,
+        support_ppm
+            .unwrap_or_else(|| statistical_support_floor(u64::try_from(bars).unwrap_or(u64::MAX))),
+    );
 
     // The long report is DISCARDED on purpose: nine of them is six thousand
     // lines. The row is read back from the store, which is the point of having
@@ -6762,7 +6812,7 @@ pub fn descend(
     // nobody knows until the span is opened. Guessing it from the rung's name
     // would be arithmetic on an assumption -- §3 rule 1's `UNVERIFIED` -- so the
     // ceiling runs first and its `bars` is what the floor is derived from.
-    let first = one_rung(vendor_word, underlying, known, from, to, ceiling_ppm);
+    let first = one_rung(vendor_word, underlying, known, from, to, Some(ceiling_ppm));
     let Ok(ref seed) = first.outcome else {
         let why = first
             .outcome
@@ -6823,7 +6873,7 @@ pub fn descend(
             // run that §3 rule 5 says produces identical bytes -- pure waste.
             first.outcome.clone()
         } else {
-            one_rung(vendor_word, underlying, known, from, to, support).outcome
+            one_rung(vendor_word, underlying, known, from, to, Some(support)).outcome
         };
         let line = match row {
             Err(why) => format!(
@@ -6952,18 +7002,27 @@ pub fn range_all(
     underlying: &str,
     from: (u16, u8),
     to: (u16, u8),
-    support_ppm: u64,
+    support_ppm: Option<u64>,
 ) -> String {
     let mut out = String::from(STORED_PROVENANCE);
     let _ = writeln!(
         out,
-        "feed {vendor_word} · {underlying} · ALL EIGHT INTRADAY RUNGS · {}-{:02}..{}-{:02} · support {}.{}%",
+        "feed {vendor_word} · {underlying} · ALL EIGHT INTRADAY RUNGS · {}-{:02}..{}-{:02} · support {}",
         from.0,
         from.1,
         to.0,
         to.1,
-        support_ppm / 10_000,
-        (support_ppm / 1_000) % 10
+        // THE BANNER SAYS WHICH KIND OF NUMBER IT IS, because the two are not
+        // interchangeable and a reader comparing two reports has to know. A
+        // fixed percentage is one question asked of every rung; a derived floor
+        // is a DIFFERENT question asked of each -- "the lowest support at which
+        // a result here could still be believed" -- so the same figure printed
+        // without its provenance would invite comparing runs that measured
+        // different things.
+        support_ppm.map_or_else(
+            || "DERIVED per rung from its own bars".to_owned(),
+            |ppm| format!("{}.{}% (fixed)", ppm / 10_000, (ppm / 1_000) % 10),
+        )
     );
     let _ = writeln!(
         out,

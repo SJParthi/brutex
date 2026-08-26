@@ -22698,3 +22698,79 @@ transcribed prose would be a second answer that can disagree with the first.
 
 **It needs no CI change.** It is a `cargo test`, so `cargo test --workspace`
 already runs it — the gate the workspace test job is.
+
+### D-0303 — the constant decided what the engine was allowed to find
+
+**Decision.** `SUPPORT_PPM` is deleted. `cli::one_rung` and `cli::range_all`
+take `Option<u64>`; `None` makes each rung derive its own floor from its own
+bars through the new `cli::statistical_support_floor`. `/backtest/run` passes
+`None`. `Progress::support_ppm` becomes `Option<u64>` and a sweep carries
+`None`.
+
+**Why.** §6 refuses a settable depth because *"a parameter that can be set can
+be set wrongly and silently."* **A constant has the same defect one step
+earlier**: it was set wrongly once, by whoever wrote it, and then nobody could
+see it at all. The constant's own doc argued that a *"constant printed beside
+its result is a stated condition of the run"* — true, and it does not make the
+value right. It made it visible and unchallengeable.
+
+**What it cost, in the engine's own words.** `cli::elite_descend`: *"A run
+launched at 20,000 ppm cannot report a once-a-week setup no matter how long it
+runs — the setup was pruned in the first level of the ladder, and the report
+says nothing about it because nothing counted it."* `/backtest/run` launched at
+**200,000** — ten times the figure that sentence already calls too high. The one
+control the browser had could not, by construction, find the rare combination
+the engine exists to hunt.
+
+**What replaces it is neither typed nor baked.** `statistical_support_floor`
+asks the only question the data alone can answer: **below how many round trips
+can the stated win rate no longer clear its own confidence bound?** Under that
+count no combination can pass however good it looks, so descending further buys
+nothing; above it, reachable answers are discarded before they are counted.
+
+| | round trips demanded |
+|---|---|
+| the deleted constant, 1min rung | **4,324** hits |
+| the retired cadence floor | 526 |
+| the shipped Wilson bound at 80% | **4** |
+
+**No minimum was invented to replace it.** The floor is not a trade count
+somebody chose; it is the point below which a number stops meaning anything.
+That is the nearest honest thing to "no minimum" — and `runner::report`'s
+`MIN_OBSERVATIONS = 30` is untouched because it gates a *verdict across two
+distributions*, not what the sweep may find.
+
+**Why the stop ceiling and the listing bound do not enter the floor.**
+`statistical_floor_ppm` reads `min_win_rate_bp` and `min_assurance_bp` and
+nothing else, so `max_points` and `top` cannot move it. They are passed as `1`
+rather than plumbed through: a caller made to supply a risk ceiling in order to
+learn a STATISTICAL floor would reasonably believe the two were related and
+would set it carefully for no effect.
+
+**`Option`, not a magic zero.** There is no single number to report because
+there is no single number — nine rungs derive nine floors. `support_ppm` reaches
+the wire as `null` on a derived run and the banner prints `DERIVED per rung from
+its own bars` rather than a percentage. A figure printed without its provenance
+would invite comparing two runs that measured different things.
+
+**Still a ratio, so the rungs stay comparable.** Held as one absolute count, a
+1min rung and a 1day rung would clear the same hits from twenty times different
+bar counts and the daily rung would find nothing for a reason that has nothing
+to do with the market. Nine rungs now share a *statistical standard* rather than
+an arbitrary percentage, which is a stronger basis for comparison, not a weaker
+one.
+
+**`top` was never the constraint and is reachable.** `top` is a display bound on
+a listing, taken per request by `screen` and `elite`, and `cli top`'s ranked
+frontier is served by `/engine/top.json` (D-0300). Nothing in the discovery path
+truncates to ten or twenty-five — the support floor was what pruned, and it is
+gone.
+
+**What is NOT dynamic yet**, named rather than left to be found: `NIFTY_REFERENCE`
+(25,000, wrong for BANKNIFTY — mitigated on the new routes by
+`*_in_points`, which reads the span's own midpoint, and still live on the argv
+`elite` arm), the exit grid's `STOP_FLOOR_POINTS` / `STOP_STEP_POINTS_HALVES` /
+`MAX_STOP_POINTS` ladder in index points, `WALK_FORWARD_SPLITS`,
+`BOOTSTRAP_DRAWS`, `BOOTSTRAP_ALPHA_PPM`, `MIN_AUDIT_SESSIONS`, and
+`engine::DEFAULT_CEILING` / `DEFAULT_PAIR_BUDGET`, which HALT a ladder and so
+bound what a run explores.

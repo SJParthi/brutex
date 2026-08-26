@@ -100,7 +100,7 @@ pub struct Progress {
     /// Last month of the span.
     pub to: (u16, u8),
     /// Support threshold, in parts per million of bars.
-    pub support_ppm: u64,
+    pub support_ppm: Option<u64>,
     /// When the run was accepted, microseconds since the epoch.
     pub started_micros: i64,
     /// When it ended, or [`None`] while it is still going.
@@ -119,7 +119,7 @@ impl Progress {
         underlying: &str,
         from: (u16, u8),
         to: (u16, u8),
-        support_ppm: u64,
+        support_ppm: Option<u64>,
         now_micros: i64,
     ) -> Self {
         Self {
@@ -173,7 +173,12 @@ impl Progress {
         let _ = write!(out, r#","from_month":{}"#, self.from.1);
         let _ = write!(out, r#","to_year":{}"#, self.to.0);
         let _ = write!(out, r#","to_month":{}"#, self.to.1);
-        let _ = write!(out, r#","support_ppm":{}"#, self.support_ppm);
+        match self.support_ppm {
+            Some(ppm) => {
+                let _ = write!(out, r#","support_ppm":{ppm}"#);
+            }
+            None => out.push_str(r#","support_ppm":null"#),
+        }
         let _ = write!(out, r#","started_micros":{}"#, self.started_micros);
         let _ = write!(out, r#","in_flight":{}"#, self.in_flight());
         match self.finished_micros {
@@ -353,9 +358,39 @@ pub struct AskedDescent {
     pub top: usize,
 }
 
-/// The support threshold, in parts per million of a rung's own bars.
-///
-/// # It is not a request field, and that is the whole point
+/* ==================================================================
+   THERE IS NO SUPPORT CONSTANT HERE, AND ITS ABSENCE IS THE FEATURE
+   ==================================================================
+
+   A `const SUPPORT_PPM: u64 = 200_000` stood at this line and the argument for
+   it is kept below, because every sentence of it was right about the PARAMETER
+   and wrong about the CONSTANT.
+
+   §6 refuses a settable depth because "a parameter that can be set can be set
+   wrongly and silently". A constant has the same defect one step earlier: it
+   was set wrongly ONCE, by whoever wrote it, and then nobody could see it at
+   all. `cli::elite_descend`'s doc records what this one cost -- a run launched
+   at a TENTH of 200,000 ppm "cannot report a once-a-week setup no matter how
+   long it runs -- the setup was pruned in the first level of the ladder, and
+   the report says nothing about it because nothing counted it". The browser's
+   only control launched at ten times that.
+
+   The threshold is now neither typed nor baked. `cli::range_all` takes an
+   `Option<u64>` and this route passes `None`, so each rung derives its own
+   floor from its own bars through `cli::statistical_support_floor`: the lowest
+   support at which the stated win rate could still clear its own confidence
+   bound. On the shipped Wilson bound that is FOUR round trips, against the
+   4,324 hits 20% demanded on the 1-minute rung.
+
+   `Progress::support_ppm` is an `Option` for the same reason, and a sweep
+   carries `None` rather than a magic zero: there is no single number to report
+   because there is no single number. Nine rungs derive nine floors. D-0303.
+
+   ---- the original argument, kept because it still holds for a PARAMETER ----
+
+   The support threshold, in parts per million of a rung's own bars.
+
+   # It is not a request field, and that is the whole point
 ///
 /// `CLAUDE.md` §6 refuses a depth parameter in these words: *"A parameter that
 /// can be set can be set wrongly and silently."* It gives the history — a flag
@@ -394,7 +429,7 @@ pub struct AskedDescent {
 /// The value the ladder ran at is written into [`Progress`] and rendered on the
 /// page. A constant nobody can see is the hidden default §6 objects to; a
 /// constant printed beside its result is a stated condition of the run.
-const SUPPORT_PPM: u64 = 200_000;
+*/
 
 /// One field out of a flat JSON object, as text.
 ///
@@ -654,16 +689,10 @@ pub fn conduct(asked: &Asked, now_micros: i64) -> Progress {
         &asked.underlying,
         asked.from,
         asked.to,
-        SUPPORT_PPM,
+        None,
         now_micros,
     );
-    let text = cli::range_all(
-        &asked.feed,
-        &asked.underlying,
-        asked.from,
-        asked.to,
-        SUPPORT_PPM,
-    );
+    let text = cli::range_all(&asked.feed, &asked.underlying, asked.from, asked.to, None);
     settle(&mut progress, text, now_micros);
     progress
 }
@@ -684,7 +713,7 @@ pub fn conduct_descent(asked: &AskedDescent, now_micros: i64) -> Progress {
         &asked.underlying,
         asked.from,
         asked.to,
-        SUPPORT_PPM,
+        None,
         now_micros,
     )
     .of_kind(Kind::Descent);
@@ -847,7 +876,7 @@ pub(crate) fn run_with(
             &asked.underlying,
             asked.from,
             asked.to,
-            SUPPORT_PPM,
+            None,
             now_micros(),
         ));
     }
@@ -865,7 +894,10 @@ pub(crate) fn run_with(
         "from_month" => telemetry::Value::Uint(u64::from(asked.from.1)),
         "to_year" => telemetry::Value::Uint(u64::from(asked.to.0)),
         "to_month" => telemetry::Value::Uint(u64::from(asked.to.1)),
-        "support_ppm" => telemetry::Value::Uint(SUPPORT_PPM),
+        // DERIVED PER RUNG, so there is no one number to log. Logging a
+        // constant here would put a figure in the audit trail that no rung
+        // actually used -- D-0303.
+        "support" => telemetry::Value::Str("derived per rung from its own bars"),
     );
 
     // A BLOCKING THREAD, NOT A WORKER. `cli::range_all` is CPU-bound over
@@ -979,7 +1011,7 @@ pub(crate) fn descend_with(
                 &asked.underlying,
                 asked.from,
                 asked.to,
-                SUPPORT_PPM,
+                None,
                 now_micros(),
             )
             .of_kind(Kind::Descent),
@@ -1345,15 +1377,9 @@ pub fn command_from(body: &str) -> Result<Command, Refusal> {
 #[must_use]
 pub fn conduct_command(asked: &Command, now_micros: i64) -> Progress {
     let (from, to) = asked.window();
-    let mut progress = Progress::started(
-        asked.feed(),
-        asked.underlying(),
-        from,
-        to,
-        SUPPORT_PPM,
-        now_micros,
-    )
-    .of_kind(Kind::Command);
+    let mut progress =
+        Progress::started(asked.feed(), asked.underlying(), from, to, None, now_micros)
+            .of_kind(Kind::Command);
     let text = match *asked {
         Command::AuditRange { ref span, min_hits } => cli::audit_range(
             &span.feed,
@@ -1473,7 +1499,7 @@ pub(crate) fn command_with(
                 asked.underlying(),
                 from,
                 to,
-                SUPPORT_PPM,
+                None,
                 now_micros(),
             )
             .of_kind(Kind::Command),
@@ -1582,9 +1608,8 @@ pub async fn top_json(uri: axum::http::Uri) -> (axum::http::StatusCode, JsonHead
 )]
 mod tests {
     use super::{
-        Asked, AskedDescent, EVERY_COMMAND, EVERY_RUNG, Kind, Progress, Refusal, SUPPORT_PPM,
-        asked_from, command_from, conduct_command, descent_from, field, now_micros, settle,
-        stamp_refusal,
+        Asked, AskedDescent, EVERY_COMMAND, EVERY_RUNG, Kind, Progress, Refusal, asked_from,
+        command_from, conduct_command, descent_from, field, now_micros, settle, stamp_refusal,
     };
 
     fn body(feed: &str, span: &str) -> String {
@@ -1620,10 +1645,10 @@ mod tests {
         assert_eq!(asked.underlying, "BANKNIFTY");
         assert_eq!(asked.from, (2020, 1));
         assert_eq!(asked.to, (2020, 3));
-        // The body above still carries a spaced `"support_ppm" : 50000`, and
-        // it is read past like any other field this route does not want. The
-        // run is swept at `SUPPORT_PPM` regardless.
-        assert_ne!(SUPPORT_PPM, 50_000);
+        // The body above still carries a spaced `"support_ppm" : 50000`, and it
+        // is read past like any other field this route does not want. A sweep
+        // takes no support from a request AND no longer holds one of its own:
+        // it is derived per rung from that rung's bars. D-0303.
     }
 
     #[test]
@@ -1690,21 +1715,46 @@ mod tests {
     }
 
     #[test]
-    fn the_threshold_is_a_percentage_so_every_rung_gets_its_own_count() {
-        // The constant is a RATIO, and that is what keeps nine rungs
-        // comparable. Held as an absolute count instead, a 1min rung and a
-        // 1day rung would be asked to clear the same number of hits from
-        // twenty times different bar counts, and the daily rung would find
-        // nothing for a reason that has nothing to do with the market.
+    fn the_threshold_is_derived_and_admits_what_the_constant_pruned() {
+        // THE CONSTANT WAS 200,000 PPM -- 20% of every rung's bars -- and
+        // `cli::elite_descend`'s own doc records that a figure a TENTH of that
+        // "cannot report a once-a-week setup no matter how long it runs".
         //
-        // These are this store's own bar counts for the recorded span.
-        let hits = |bars: u64| bars * SUPPORT_PPM / 1_000_000;
-        assert_eq!(hits(21_620), 4_324, "1min");
-        assert_eq!(hits(11_643), 2_328, "15min");
-        assert_eq!(hits(1_671), 334, "1day");
-        // Three rungs, three thresholds, one ratio, and nobody typed any of
-        // the three.
-        assert_ne!(hits(21_620), hits(1_671));
+        // The floor is derived now: the lowest support at which the stated win
+        // rate could still clear its own confidence bound. These are this
+        // store's own bar counts for the recorded span.
+        let old_constant_hits = |bars: u64| bars * 200_000 / 1_000_000;
+        let derived_hits = |bars: u64| bars * cli::statistical_support_floor(bars) / 1_000_000;
+
+        for (bars, rung) in [(21_620_u64, "1min"), (11_643, "15min"), (1_671, "1day")] {
+            let old = old_constant_hits(bars);
+            let now = derived_hits(bars);
+            assert!(
+                now < old,
+                "{rung}: the derived floor must admit rarer combinations than \
+                 the constant did -- {now} hits against {old}"
+            );
+            // A HANDFUL OF ROUND TRIPS, NOT THOUSANDS. The shipped Wilson bound
+            // needs four for an 80% rate; the constant demanded 4,324 on the
+            // 1min rung, which is every setup an operator would call rare,
+            // pruned before it was ever counted.
+            assert!(
+                now < 100,
+                "{rung}: a floor of {now} hits is still a cadence nobody calls \
+                 rare"
+            );
+        }
+
+        // AND IT IS STILL A RATIO PER RUNG, which is what keeps the rungs
+        // comparable at all: held as one absolute count, a 1min rung and a 1day
+        // rung would clear the same number of hits from twenty times different
+        // bar counts, and the daily rung would find nothing for a reason that
+        // has nothing to do with the market.
+        assert_ne!(
+            cli::statistical_support_floor(21_620),
+            cli::statistical_support_floor(1_671),
+            "a floor derived from bar count cannot be equal across a 13x spread"
+        );
     }
 
     #[test]
@@ -1756,7 +1806,18 @@ mod tests {
         // not gone: the property is now that the failure is UNREACHABLE rather
         // than caught. Deleting the test with the variant would have left
         // nothing saying why the constant may never be zero.
-        const { assert!(SUPPORT_PPM > 0, "extinction needs a threshold above zero") };
+        // The property is unchanged and its subject moved: it used to be that
+        // the CONSTANT could never be zero, and it is now that the DERIVED
+        // floor never is. `statistical_support_floor` ends in `.max(1)` for
+        // exactly this reason, and a bar count of zero -- a span the store
+        // could not fill -- must not become a threshold of zero either.
+        for bars in [0_u64, 1, 1_671, 21_620, 1_444_200] {
+            assert!(
+                cli::statistical_support_floor(bars) > 0,
+                "extinction needs a threshold above zero, and {bars} bars gave \
+                 none"
+            );
+        }
         // And a body that tries is simply a body with a field this route does
         // not read -- accepted, ignored, and swept at the real threshold.
         let raw = format!(r#"{{"feed":"zerodha","underlying":"NIFTY",{SPAN},"support_ppm":0}}"#);
@@ -1833,7 +1894,7 @@ mod tests {
 
     #[test]
     fn a_started_run_is_in_flight_until_it_is_finished() {
-        let mut p = Progress::started("zerodha", "NIFTY", (2019, 12), (2026, 8), 200_000, 42);
+        let mut p = Progress::started("zerodha", "NIFTY", (2019, 12), (2026, 8), Some(200_000), 42);
         assert!(p.in_flight());
         assert_eq!(p.started_micros, 42);
         assert_eq!(p.finished_micros, None);
@@ -1844,7 +1905,7 @@ mod tests {
 
     #[test]
     fn the_progress_json_carries_every_field_and_nulls_what_has_not_happened() {
-        let p = Progress::started("zerodha", "NIFTY", (2019, 12), (2026, 8), 200_000, 42);
+        let p = Progress::started("zerodha", "NIFTY", (2019, 12), (2026, 8), Some(200_000), 42);
         let json = p.to_json();
         for fragment in [
             r#""feed":"zerodha""#,
@@ -1866,7 +1927,7 @@ mod tests {
 
     #[test]
     fn a_finished_run_carries_its_report_and_its_stamp() {
-        let mut p = Progress::started("zerodha", "NIFTY", (2020, 1), (2020, 1), 50_000, 1);
+        let mut p = Progress::started("zerodha", "NIFTY", (2020, 1), (2020, 1), Some(50_000), 1);
         p.finished_micros = Some(500);
         p.report = Some("STORED_PROVENANCE\nrows".to_owned());
         let json = p.to_json();
@@ -1879,7 +1940,7 @@ mod tests {
 
     #[test]
     fn a_refusal_reaches_the_progress_json_as_a_sentence() {
-        let mut p = Progress::started("zerodha", "NIFTY", (2020, 1), (2020, 1), 50_000, 1);
+        let mut p = Progress::started("zerodha", "NIFTY", (2020, 1), (2020, 1), Some(50_000), 1);
         p.refusal = Some("the store held no bars".to_owned());
         assert!(p.to_json().contains("the store held no bars"));
     }
@@ -1969,8 +2030,7 @@ mod tests {
                           feed zerodha · NIFTY · ALL EIGHT INTRADAY RUNGS\n";
 
     fn settled(text: &str) -> Progress {
-        let mut progress =
-            Progress::started("zerodha", "NIFTY", (2019, 12), (2026, 8), SUPPORT_PPM, 1);
+        let mut progress = Progress::started("zerodha", "NIFTY", (2019, 12), (2026, 8), None, 1);
         settle(&mut progress, text.to_owned(), 2);
         progress
     }
@@ -2215,7 +2275,7 @@ mod tests {
     fn a_descent_and_a_sweep_are_told_apart_on_the_wire() {
         // `support_ppm` MEANS DIFFERENT THINGS IN THE TWO, so the page cannot
         // read it correctly without being told which it is looking at.
-        let sweep = Progress::started("zerodha", "NIFTY", (2019, 12), (2026, 8), SUPPORT_PPM, 1);
+        let sweep = Progress::started("zerodha", "NIFTY", (2019, 12), (2026, 8), None, 1);
         assert_eq!(sweep.kind, Kind::Sweep, "the default is the older command");
         assert!(sweep.to_json().contains(r#""kind":"sweep""#));
 
@@ -2363,9 +2423,8 @@ mod tests {
         ))
         .expect("parses");
         let (from, to) = asked.window();
-        let progress =
-            Progress::started(asked.feed(), asked.underlying(), from, to, SUPPORT_PPM, 1)
-                .of_kind(Kind::Command);
+        let progress = Progress::started(asked.feed(), asked.underlying(), from, to, None, 1)
+            .of_kind(Kind::Command);
         assert!(progress.to_json().contains(r#""kind":"command""#));
         assert_eq!(Kind::Command.word(), "command");
     }

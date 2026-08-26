@@ -2808,3 +2808,29 @@ manifest declares the target.
 **Not checked here:** the figures. A row claiming 1.117× against a bench
 measuring 1.687× passes, because a number lives in a run and this is a static
 read. Gate 8 is what fails on a breach.
+
+## The support floor is derived from the data, never typed and never baked — D-0303
+
+`SUPPORT_PPM = 200_000` decided what the engine was allowed to find, and the
+engine's own doc records that a tenth of it already prunes a once-a-week setup.
+These rows are about its replacement.
+
+| ID | Invariant | Proof | ✓ |
+|---|---|---|---|
+| SF-01 | **The derived floor admits what the constant pruned.** On this store's own bar counts the constant demanded 4,324 hits on the 1min rung, 2,328 on 15min and 334 on 1day; the derived floor is under a hundred on every one of them. A cadence in the thousands is not one an operator calls rare | `api::sweeprun::the_threshold_is_derived_and_admits_what_the_constant_pruned` | ✓ |
+| SF-02 | **It is still a RATIO per rung, so the rungs stay comparable.** Held as one absolute count, a 1min and a 1day rung would clear the same hits from twenty-times-different bar counts and the daily rung would find nothing for a reason with nothing to do with the market. Nine rungs share a *statistical standard* now rather than an arbitrary percentage | same test's final assertion — the floor differs across a 13× bar spread | ✓ |
+| SF-03 | **The floor is never zero, at any bar count including zero.** The property is unchanged and its subject moved: it used to be that the constant could never be zero, and it is now that the derivation never is. A span the store could not fill must not become a threshold of zero | `api::sweeprun::a_support_threshold_of_zero_cannot_be_asked_for_at_all` | ✓ |
+| SF-04 | **`None` is the absence of a threshold, not a magic zero.** `support_ppm` reaches the wire as `null` on a derived run and the banner prints `DERIVED per rung from its own bars`. There is no single number to report because nine rungs derive nine floors, and a figure printed without its provenance invites comparing two runs that measured different things | `Progress::to_json`'s `None` arm; `cli::range_all`'s banner | ✓ |
+| SF-05 | **The stop ceiling and the listing bound cannot move the floor.** `statistical_floor_ppm` reads the win rate and the assurance and nothing else, so a caller made to supply a risk ceiling in order to learn a statistical floor would set it carefully for no effect | `cli::statistical_support_floor` passes `1` for both, with the reason | ✓ |
+
+**No minimum was invented to replace it.** The floor is not a trade count
+somebody chose; it is the point below which a number stops meaning anything —
+four round trips on the shipped Wilson bound at an 80% rate, against the 526 the
+retired cadence floor demanded.
+
+**Still static and named rather than left to be found:** `NIFTY_REFERENCE`
+(25,000, wrong for BANKNIFTY — mitigated on the browser routes by the
+`*_in_points` entry points, live on the argv `elite` arm), the exit grid's
+point ladder, `WALK_FORWARD_SPLITS`, `BOOTSTRAP_DRAWS`, `BOOTSTRAP_ALPHA_PPM`,
+`MIN_AUDIT_SESSIONS`, and `engine::DEFAULT_CEILING` / `DEFAULT_PAIR_BUDGET`,
+which halt a ladder and so bound what a run explores.
