@@ -88,7 +88,7 @@
   import { ask as ask_ } from '$lib/ask.js';
   import { rupee, group, exact } from '$lib/money.js';
   import * as prefix from '$lib/prefix.js';
-  import { sweepOutcome } from '$lib/sweep.js';
+  import { sweepOutcome, ledgerBlock } from '$lib/sweep.js';
   /* THE FEED'S OWN MASTER, ALREADY ON HAND. `+layout.svelte` calls
      `loadCatalogue(feeds.active)` on every feed change, so resolving a
      symbol's exchange and segment for a bar-file path costs this page NO
@@ -443,6 +443,14 @@
   const allRuns = $derived(ledger?.runs ?? []);
   /** The server's own refusal sentence, when it had one. */
   const refusal = $derived(ledger?.refusal ?? null);
+  /**
+   * The two versions, when this ledger cannot take a new run — else `null`.
+   *
+   * READ BEFORE THE BUTTON IS PRESSED, which is the whole value of it. The
+   * append refuses on a version mismatch and the sweep only finds out after it
+   * has run; this is the same fact, sixteen header bytes deep, at page load.
+   */
+  const blocked = $derived(ledgerBlock(ledger));
 
   /* ---- the feed rung -------------------------------------------------
      THE TOP BAR'S PICKER IS LIVE ON THIS PAGE, and this is what makes it
@@ -2118,15 +2126,23 @@
          per rung from that rung's own bars, so nine rungs get nine different
          thresholds without anyone typing one. It is printed beside the result
          rather than hidden -- see the note at the end of this bar. -->
+    <!-- DISABLED WHEN THE LEDGER CANNOT TAKE THE RESULT. A sweep that cannot
+         record is nine rungs of real work thrown away, and the refusal arrives
+         AFTER it. `blocked` is the server's own answer -- see `ledgerBlock`. -->
     <button
       class="btn run"
       onclick={startSweep}
-      disabled={sweep.phase === 'starting' || sweep.phase === 'running' || !activeFeed}
+      disabled={sweep.phase === 'starting' ||
+        sweep.phase === 'running' ||
+        !activeFeed ||
+        blocked !== null}
     >
       {#if sweep.phase === 'starting'}Starting…{:else if sweep.phase === 'running'}Sweeping…{:else}Run all nine rungs{/if}
     </button>
     <span class="runbar-n">
-      {#if !activeFeed}
+      {#if blocked}
+        this ledger cannot take a result — see the note above the table
+      {:else if !activeFeed}
         choose a feed first — a run is stamped with the feed its bars came from
       {:else}
         <!-- STATED, NOT SETTABLE. The threshold is no longer a control, so it
@@ -2138,6 +2154,40 @@
       {/if}
     </span>
   </section>
+
+  {#if blocked}
+    <!-- ==============================================================
+         THE LEDGER CANNOT TAKE A RESULT — said BEFORE the work, not after
+         ==============================================================
+         `Results::append` refuses when the file's version is not the one this
+         build writes, and CLAUDE.md section 3 rule 8 is why: a 261-byte record
+         appended to a file addressed every 213 bytes corrupts every record
+         after it, and it still parses.
+
+         Measured on this operator's store: version 2 against a build writing
+         3. Pressing Run swept nine rungs over 121 months, refused every
+         append, and refused the whole command -- after the work. Nothing was
+         wrong with the engine and nothing was wrong with the refusal; the only
+         defect was that it arrived hours late. -->
+    <div class="panel bt-note blocked">
+      <h2>This ledger cannot record a new run</h2>
+      <p>
+        The results file is <b>version {blocked.version ?? 'unknown'}</b> and this build writes
+        <b>version {blocked.writes ?? 'a newer one'}</b>. A run appended at the wrong stride would
+        corrupt every record after it <em>and still parse</em>, so the engine refuses instead — which
+        is correct, but it refuses <b>after</b> the sweep has run.
+      </p>
+      <p>
+        Run is disabled for that reason. Move the old file aside and the next sweep starts a fresh
+        ledger. <b>Nothing is deleted</b> — the runs already recorded stay readable in the moved
+        file, they simply leave this table.
+      </p>
+      {#if blocked.path}
+        <pre class="cmd">mv {blocked.path} {blocked.path}.v{blocked.version ?? 'old'}</pre>
+        <p class="path"><span class="bt-lab">file</span> <code>{blocked.path}</code></p>
+      {/if}
+    </div>
+  {/if}
 
   {#if sweep.phase === 'running'}
     <!-- INDETERMINATE, AND SAYING SO. A sweep is 43 ms to hours depending on
@@ -2283,7 +2333,7 @@
           {/if}
         </span>
       </div>
-      <div class="fact" class:warn={haltedRuns.length > 0}>
+      <div class="fact" class:warn={haltedRuns.length > 0} class:nil={haltedRuns.length === 0}>
         <span class="k">Halted</span>
         <span class="v">{exact(haltedRuns.length)}</span>
         <span class="n">
@@ -2292,7 +2342,7 @@
             : 'excluded from ranking — depth is partial'}
         </span>
       </div>
-      <div class="fact" class:warn={holedRuns.length > 0}>
+      <div class="fact" class:warn={holedRuns.length > 0} class:nil={holedRuns.length === 0}>
         <span class="k">Span holes</span>
         <span class="v">{exact(holedRuns.length)}</span>
         <span class="n">
@@ -3782,15 +3832,25 @@
     flex: 0 0 400px;
   }
 
-  /* The page's own heading loses its standfirst paragraph and shrinks:
-     TradingView's tester has no page header at all, and every line of
-     chrome above the data is a line of data that did not fit. */
+  /* The page's own heading loses its standfirst paragraph: TradingView's
+     tester has no page header at all, and every line of chrome above the
+     data is a line of data that did not fit.
+
+     IT ALSO SHRANK THE TITLE TO 1.15rem, AND THAT IS THE HALF THAT WENT
+     WRONG. Dropping the standfirst buys space; dropping the title's RANK
+     buys nothing and costs the page its top note. Measured before this
+     change, the four summary counters rendered at 24px and the title at
+     18.4px, so the largest text on a page about one number was a row of
+     zeroes. `--fs-lg` puts the title back above the counters, which now
+     sit at the data scale where they belong. */
   .head {
     padding-bottom: 0.15rem;
     margin-bottom: 0.7rem;
   }
   h1 {
-    font-size: 1.15rem;
+    font-size: var(--fs-lg);
+    font-weight: var(--w-bold);
+    letter-spacing: -0.02em;
   }
 
   /* ---------------- panels ---------------- */
@@ -3833,7 +3893,7 @@
     word-break: break-all;
   }
   .bt-lab {
-    font-size: 0.66rem;
+    font-size: var(--fs-micro);
     text-transform: uppercase;
     letter-spacing: 0.09em;
     color: var(--n8);
@@ -3866,7 +3926,7 @@
     background: var(--n0);
     border: 1px solid var(--n6);
     border-radius: 6px;
-    font-size: 0.74rem;
+    font-size: var(--fs-mini);
     line-height: 1.5;
     color: var(--n11);
     overflow-x: auto;
@@ -3915,19 +3975,21 @@
     gap: 0.2rem;
   }
   .fact .k {
-    font-size: 0.66rem;
+    font-size: var(--fs-micro);
     text-transform: uppercase;
     letter-spacing: 0.09em;
     color: var(--n8);
   }
   .fact .v {
-    font-size: 1.5rem;
+    font-family: var(--num);
+    font-size: var(--fs-data-lg);
+    font-weight: var(--w-semi);
     font-variant-numeric: tabular-nums;
     color: var(--n12);
     line-height: 1.1;
   }
   .fact .n {
-    font-size: 0.75rem;
+    font-size: var(--fs-micro);
     color: var(--n9);
   }
   .fact.good .v {
@@ -3935,6 +3997,17 @@
   }
   .fact.warn .v {
     color: var(--warn);
+  }
+  /* A ZERO THAT MEANS "NOTHING WENT WRONG" MUST NOT SHOUT LIKE A COUNT.
+     `halted` and `span holes` are DEFECT counters -- the good reading is 0 --
+     and a 0 was rendering at full ink in the same size and weight as the run
+     count beside it. Four cells of equal loudness is the state this whole
+     page was in: if everything is emphasised, nothing is. The quiet case
+     recedes here so that the loud case (>0, which takes `.warn` above) is
+     the one thing in the strip that catches an eye. */
+  .fact.nil .v {
+    color: var(--n8);
+    font-weight: var(--w-reg);
   }
 
   .inline-note {
@@ -3976,7 +4049,7 @@
     border-radius: 10px;
   }
   .runbar-k {
-    font-size: 0.66rem;
+    font-size: var(--fs-micro);
     text-transform: uppercase;
     letter-spacing: 0.09em;
     color: var(--n8);
@@ -3996,7 +4069,7 @@
     gap: 0.2rem;
   }
   .runf > span {
-    font-size: 0.64rem;
+    font-size: var(--fs-micro);
     text-transform: uppercase;
     letter-spacing: 0.07em;
     color: var(--n8);
@@ -4042,14 +4115,21 @@
     flex-direction: column;
     gap: 0.75rem;
   }
+  /* A SECTION HEADING AT 1rem IS THE BODY SIZE, and it was doing the job of
+     dividing the page into "the answer", "which rung", "the ledger" while
+     weighing exactly as much as the prose under it. The accent rail below
+     was carrying the whole division on its own. `--fs-md` is one step up
+     the prose scale -- still under the title, clearly over the copy. */
   .bh {
     margin: 0;
-    font-size: 1rem;
+    font-size: var(--fs-md);
+    font-weight: var(--w-bold);
+    letter-spacing: -0.01em;
     color: var(--n12);
   }
   .bsub {
     margin: 0;
-    font-size: 0.82rem;
+    font-size: var(--fs-mini);
     color: var(--n9);
     max-width: 78ch;
   }
@@ -4102,7 +4182,7 @@
     box-shadow: var(--e2);
   }
   .crown-mark {
-    font-size: 0.62rem;
+    font-size: var(--fs-micro);
     text-transform: uppercase;
     letter-spacing: 0.12em;
     color: var(--acc);
@@ -4123,42 +4203,65 @@
     flex-wrap: wrap;
   }
   .crown-id b {
-    font-size: 1.1rem;
+    font-size: var(--fs-md);
+    letter-spacing: -0.01em;
     color: var(--n12);
   }
+  /* THE LEAD FIGURE GETS ITS OWN COLUMN, not a slot in a flat row of four.
+     `worst-case total` is the number this page is ranked on and the other
+     three are context for it; laid out side by side at one gap they read as
+     four equal readings and the eye picks the one that happens to be first.
+     A divider and a wider gap after the lead say which is which without
+     needing a label to explain it. */
   .crown-figs {
     display: flex;
     gap: 1.5rem;
     flex-wrap: wrap;
+    align-items: flex-end;
   }
   .fig {
     display: flex;
     flex-direction: column;
     gap: 0.1rem;
   }
+  .fig.lead {
+    padding-right: 1.5rem;
+    border-right: 1px solid var(--n6);
+  }
   .fig .k {
-    font-size: 0.64rem;
+    font-size: var(--fs-micro);
     text-transform: uppercase;
     letter-spacing: 0.08em;
     color: var(--n8);
   }
   .fig .v {
-    font-size: 1rem;
+    font-family: var(--num);
+    font-size: var(--fs-data);
     font-variant-numeric: tabular-nums;
     color: var(--n11);
   }
+  /* 1.35rem WAS 21.6px AT WEIGHT 400, AND THE SUMMARY COUNTERS ABOVE IT WERE
+     24px. The single number this entire page exists to produce was rendering
+     SMALLER than a row of zeroes, in the same weight as the labels beside it.
+     `--fs-data-xl` is the display step of the data scale -- the step the
+     token was defined for -- and it is the only thing on the page that uses
+     it, which is what makes it read as the answer. */
   .fig.lead .v {
-    font-size: 1.35rem;
+    font-size: var(--fs-data-xl);
+    font-weight: var(--w-bold);
+    letter-spacing: -0.02em;
+    line-height: 1.05;
   }
   .fig .v.up {
     color: var(--up);
   }
   .fig .v.ghost {
     color: var(--n9);
+    font-weight: var(--w-reg);
   }
   .crown-note {
     margin: 0;
-    font-size: 0.78rem;
+    font-size: var(--fs-mini);
     color: var(--n9);
     max-width: 70ch;
   }
@@ -4261,17 +4364,17 @@
     background: var(--down);
   }
   .mult-rung {
-    font-size: 0.72rem;
+    font-size: var(--fs-mini);
     color: var(--n11);
     font-variant-numeric: tabular-nums;
   }
   .mult-fig {
-    font-size: 0.66rem;
+    font-size: var(--fs-micro);
     color: var(--n9);
     font-variant-numeric: tabular-nums;
   }
   .mult-flag {
-    font-size: 0.58rem;
+    font-size: var(--fs-micro);
     text-transform: uppercase;
     letter-spacing: 0.08em;
     color: var(--warn);
@@ -4414,7 +4517,7 @@
     text-align: left;
     padding: 0.5rem 0.6rem;
     border-bottom: 1px solid var(--n6);
-    font-size: 0.66rem;
+    font-size: var(--fs-micro);
     text-transform: uppercase;
     letter-spacing: 0.08em;
     color: var(--n8);
@@ -4518,11 +4621,15 @@
   .dim {
     color: var(--n9);
   }
+  /* `.sm` IS NOT DECORATION -- it carries the feed name, the span, the
+     coverage count and the finish timestamp in every ledger row. At 0.7rem
+     it rendered at 11.2px, under the 12px floor `theme.css` raised twice
+     for exactly this reason, and it was the smallest real TEXT on the page. */
   .sm {
-    font-size: 0.7rem;
+    font-size: var(--fs-micro);
   }
   .rung {
-    font-size: 0.72rem;
+    font-size: var(--fs-mini);
     padding: 0.1rem 0.4rem;
     border-radius: 4px;
     background: var(--n4);
@@ -4550,7 +4657,7 @@
 
   .pill {
     display: inline-block;
-    font-size: 0.64rem;
+    font-size: var(--fs-micro);
     padding: 0.12rem 0.42rem;
     border-radius: 4px;
     background: var(--n4);
@@ -4963,7 +5070,7 @@
   }
   .cnote.faint {
     color: var(--n8);
-    font-size: 0.72rem;
+    font-size: var(--fs-mini);
   }
 
   .paired {
@@ -4978,7 +5085,7 @@
     align-items: center;
   }
   .plab {
-    font-size: 0.66rem;
+    font-size: var(--fs-micro);
     color: var(--n8);
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -5027,7 +5134,7 @@
     align-items: center;
   }
   .elab {
-    font-size: 0.66rem;
+    font-size: var(--fs-micro);
     color: var(--n8);
   }
   .ebar {
@@ -5060,7 +5167,7 @@
     }
   }
   .eval {
-    font-size: 0.74rem;
+    font-size: var(--fs-mini);
     color: var(--n10);
     font-variant-numeric: tabular-nums;
   }
@@ -5142,7 +5249,7 @@
     flex-wrap: wrap;
   }
   .chart-facts {
-    font-size: 0.74rem;
+    font-size: var(--fs-mini);
     color: var(--n8);
     font-variant-numeric: tabular-nums;
   }
@@ -5204,7 +5311,7 @@
     flex-wrap: wrap;
   }
   .rep-sub {
-    font-size: 0.74rem;
+    font-size: var(--fs-mini);
     color: var(--n8);
   }
 
@@ -5226,7 +5333,7 @@
     gap: 0.15rem;
   }
   .ks-k {
-    font-size: 0.63rem;
+    font-size: var(--fs-micro);
     text-transform: uppercase;
     letter-spacing: 0.09em;
     color: var(--n8);
@@ -5262,7 +5369,7 @@
     align-items: center;
   }
   .blab {
-    font-size: 0.68rem;
+    font-size: var(--fs-micro);
     color: var(--n8);
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -5313,11 +5420,22 @@
      claim went with them, because a comment that keeps asserting a guarantee
      the page no longer delivers is the exact failure that gate is for. If the
      documented gaps are wanted back they are a surface to rebuild, not a
-     sentence to restore. */
-  .cover {
-    border-top: 1px solid var(--n5);
-    padding-top: 0.75rem;
-  }
+     sentence to restore.
+
+     THE TWO PROPERTIES ARE NOW GONE TOO, AND LEAVING THEM WAS NOT HARMLESS.
+     They were `border-top: 1px solid var(--n5)` and `padding-top: 0.75rem`,
+     written for a `<details>` heading and left behind when its markup went.
+     `.cover` was then REUSED for the coverage gauge in the ledger row, and
+     this rule sits after the two that size it. Measured: `box-sizing` is
+     `border-box`, so 12px of padding plus a 1px border pushed the declared
+     `height: 6px` out to 13px and collapsed the CONTENT box to zero --
+     `.cover-fill { height: 100% }` computed to `0px`.
+
+     Every row on this page reads 81/81 and every gauge drew nothing. That is
+     a fact present in the DOM and invisible on screen, which is the failure
+     `CLAUDE.md` §4 bans and the one the `flex-shrink` comment at the top of
+     this block already records catching once. An orphaned selector is dead
+     code until its class name is reused; after that it is a silent defect. */
   .covtbl-wrap {
     overflow-x: auto;
     margin: 0.7rem 0;
@@ -5418,7 +5536,7 @@
     margin-left: auto;
   }
   .tt-chip {
-    font-size: 0.68rem;
+    font-size: var(--fs-micro);
     padding: 0.15rem 0.45rem;
     border-radius: 4px;
     background: var(--n4);
@@ -5503,7 +5621,7 @@
     border: 0;
     padding: 0;
     font: inherit;
-    font-size: 0.72rem;
+    font-size: var(--fs-mini);
     color: var(--n8);
     cursor: pointer;
   }
@@ -5533,7 +5651,7 @@
     color: var(--n12);
   }
   .tt-default {
-    font-size: 0.68rem;
+    font-size: var(--fs-micro);
     color: var(--n8);
   }
 
@@ -5632,7 +5750,7 @@
     border-radius: 5px;
     padding: 0.26rem 0.62rem;
     font: inherit;
-    font-size: 0.73rem;
+    font-size: var(--fs-mini);
     color: var(--n9);
     cursor: pointer;
     white-space: nowrap;
@@ -5663,7 +5781,7 @@
     flex-wrap: wrap;
   }
   .tt-unit {
-    font-size: 0.6rem;
+    font-size: var(--fs-micro);
     font-style: normal;
     letter-spacing: 0.08em;
     color: var(--n8);
@@ -5965,7 +6083,7 @@
   }
   .cf-note {
     margin: 0.5rem 0 0;
-    font-size: 0.73rem;
+    font-size: var(--fs-mini);
     color: var(--n8);
     max-width: 96ch;
   }
@@ -5999,7 +6117,7 @@
     flex-direction: column;
     justify-content: space-between;
     padding: 0.35rem 0;
-    font-size: 0.64rem;
+    font-size: var(--fs-micro);
     color: var(--n8);
     font-variant-numeric: tabular-nums;
   }
@@ -6026,7 +6144,7 @@
     justify-content: center;
     margin: 0.5rem 0 0;
     padding: 0;
-    font-size: 0.71rem;
+    font-size: var(--fs-mini);
     color: var(--n9);
   }
   .cf-legend li {
@@ -6091,7 +6209,7 @@
     line-height: 1.1;
   }
   .tt-donutmid span {
-    font-size: 0.63rem;
+    font-size: var(--fs-micro);
     color: var(--n8);
   }
   .tt-donutleg {
@@ -6205,7 +6323,7 @@
     margin-top: 0.5rem;
   }
   .tt-cmpgrp {
-    font-size: 0.73rem;
+    font-size: var(--fs-mini);
     color: var(--n11);
     margin-top: 0.35rem;
   }
@@ -6219,7 +6337,7 @@
     align-items: center;
   }
   .tt-cmplab {
-    font-size: 0.72rem;
+    font-size: var(--fs-mini);
     color: var(--n8);
   }
   .tt-cmpbar {
@@ -6254,7 +6372,7 @@
     display: flex;
     justify-content: space-between;
     padding: 0.32rem 0.6rem 0;
-    font-size: 0.65rem;
+    font-size: var(--fs-micro);
     color: var(--n8);
     font-variant-numeric: tabular-nums;
   }
@@ -6698,7 +6816,7 @@
      Tester should name where it came from rather than look like one they
      missed. */
   .tt-own {
-    font-size: 0.6rem;
+    font-size: var(--fs-micro);
     text-transform: uppercase;
     letter-spacing: 0.09em;
     padding: 0.1rem 0.35rem;
@@ -6738,7 +6856,7 @@
     min-width: 0;
   }
   .tt-k {
-    font-size: 0.72rem;
+    font-size: var(--fs-mini);
     color: var(--n8);
   }
   .tt-v {
@@ -6850,7 +6968,7 @@
   }
   .tt-blab,
   .tt-pllab {
-    font-size: 0.72rem;
+    font-size: var(--fs-mini);
     color: var(--n8);
   }
   .tt-bbar,
@@ -6946,7 +7064,7 @@
     text-align: left;
     background: var(--n2);
     color: var(--n8);
-    font-size: 0.68rem;
+    font-size: var(--fs-micro);
     font-weight: 600;
     padding: 0.5rem 0.75rem;
     border-bottom: 1px solid var(--n6);
@@ -7037,7 +7155,7 @@
     flex-wrap: wrap;
   }
   .tt-ident code {
-    font-size: 0.74rem;
+    font-size: var(--fs-mini);
     color: var(--n10);
     word-break: break-all;
   }
@@ -7082,7 +7200,7 @@
     letter-spacing: -0.01em;
   }
   .term-feed {
-    font-size: 0.72rem;
+    font-size: var(--fs-mini);
     color: var(--n8);
     text-transform: uppercase;
     letter-spacing: 0.08em;
@@ -7103,7 +7221,7 @@
     border-radius: 5px;
     padding: 0.26rem 0.5rem;
     font: inherit;
-    font-size: 0.73rem;
+    font-size: var(--fs-mini);
     font-variant-numeric: tabular-nums;
     color: var(--n9);
     cursor: pointer;
@@ -7149,7 +7267,7 @@
     min-height: 2.1rem;
   }
   .lg-t {
-    font-size: 0.72rem;
+    font-size: var(--fs-mini);
     color: var(--n8);
   }
   .lg {
@@ -7158,7 +7276,7 @@
   }
   .lg i {
     font-style: normal;
-    font-size: 0.66rem;
+    font-size: var(--fs-micro);
     letter-spacing: 0.09em;
     color: var(--n8);
     margin-right: 0.28rem;
@@ -7205,7 +7323,7 @@
     flex-wrap: wrap;
   }
   .fnote {
-    font-size: 0.72rem;
+    font-size: var(--fs-mini);
     color: var(--n8);
   }
   .ranges {
@@ -7221,7 +7339,7 @@
     border-radius: 5px;
     padding: 0.24rem 0.52rem;
     font: inherit;
-    font-size: 0.72rem;
+    font-size: var(--fs-mini);
     color: var(--n9);
     cursor: pointer;
     transition:
