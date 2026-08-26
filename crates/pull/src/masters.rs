@@ -174,6 +174,83 @@ pub fn may_fetch(source: &Source, via: Transport) -> Result<(), String> {
     }
 }
 
+/// A transport that sends no credential, for the hosts that issued none.
+///
+/// # Why this exists rather than reusing `HttpSource`
+///
+/// [`Transport`] explains the hazard; this is the other half of the fix.
+/// `HttpSource` is built around one vendor's [`crate::vendor::HttpSpec`] — its
+/// auth header, its date format, its response shape — and its `Discovery::get`
+/// attaches that header to any URL. There is no configuration of it that means
+/// *"a plain GET to somebody else's CDN"*, and constructing one with an empty
+/// credential to fake that would be a credential-shaped hole waiting for the
+/// next person who fills it in.
+///
+/// So this is deliberately the smallest thing that can be a transport: a client
+/// with a timeout, no auth header, no governor, no retry ladder. **No governor
+/// is not an oversight** — a rate budget is per FEED and spends against a
+/// vendor's quota, and none of these hosts issues one. A once-a-day CDN file is
+/// not a quota to protect.
+///
+/// # Redirects are refused, exactly as the vendor transport refuses them
+///
+/// `pooled_client` sets `redirect::Policy::none()`, and this matches it. A
+/// master fetched through a redirect is a master fetched from a host the source
+/// table does not name — which is the same class of defect [`may_fetch`]
+/// refuses, arriving by a different door.
+#[derive(Clone, Debug)]
+pub struct PublicFetch {
+    client: reqwest::Client,
+}
+
+impl PublicFetch {
+    /// A transport for public files.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the client builder said.
+    pub fn new() -> Result<Self, String> {
+        crate::ensure_tls_provider();
+        reqwest::Client::builder()
+            // A MINUTE, because these are whole-file downloads and the
+            // largest is 19 MB. The vendor transport's own timeout bounds a
+            // bar window, which is a different size of answer.
+            .timeout(core::time::Duration::from_mins(1))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map(|client| Self { client })
+            .map_err(|why| format!("a public transport could not be built — {why}"))
+    }
+}
+
+impl crate::chain::Discovery for PublicFetch {
+    async fn get(&self, url: &str) -> Result<String, crate::chain::Refusal> {
+        use crate::chain::Refusal;
+
+        let answer = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .map_err(|why| Refusal::transport(format!("{url} — {why}")))?;
+        let status = answer.status();
+        if !status.is_success() {
+            // THE HOST'S OWN STATUS, NOT A PARAPHRASE, for the reason
+            // `HttpSource` states: a 404 and a 503 mean different things to an
+            // operator — one is a URL that moved and one is a host to try again
+            // — and collapsing them turns a permanent break into a retry.
+            return Err(Refusal::answered(
+                status.as_u16(),
+                format!("{url} answered {status}"),
+            ));
+        }
+        answer
+            .text()
+            .await
+            .map_err(|why| Refusal::transport(format!("{url} body — {why}")))
+    }
+}
+
 /// What happened to one master.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Landed {

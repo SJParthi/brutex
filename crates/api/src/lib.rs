@@ -61,6 +61,14 @@ pub mod ingest;
 pub mod ladder;
 pub mod logs;
 pub mod master;
+/// Refreshing the instrument masters from the browser, and saying when they
+/// are stale.
+///
+/// Separate from `/pull/*` on purpose: that moves BARS and spends the vendor's
+/// quota per instrument-month; this moves four files, three of them free public
+/// CDN downloads. `Site::load` parses the masters once at startup with no reload
+/// path, so this also answers whether a restart is required. D-0308.
+pub mod mastersrun;
 pub mod merge;
 pub mod pullrun;
 pub mod render;

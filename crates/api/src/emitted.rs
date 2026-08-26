@@ -1345,10 +1345,23 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     /// `auto` that those run over GENERATED bars and are deliberately not
     /// served, rather than that they were mistyped.
     ///
+    /// AND ONE MORE, added with `/masters/refresh` (D-0308):
+    /// `api.masters the public instrument masters were refreshed from the
+    /// browser`. It is emitted after the fetch, and the fetch is three real
+    /// HTTPS requests to three third-party CDNs — driving it would put the
+    /// suite's result at the mercy of somebody else's uptime, which is a
+    /// different kind of test from the one this table is.
+    ///
+    /// **Its refusal arms are not here and are not driven either**, because
+    /// they are not `emit` sites: `masters_dir` failing and `PublicFetch::new`
+    /// failing both return before any event is written. `crate::mastersrun`'s
+    /// own tests cover the landing and the transport pairing against a
+    /// recording transport, which is the half that has no network in it.
+    ///
     /// The rows of the table above, every one of them struck through — plus
-    /// `pull.fno discovery refused`, the three named before it and the six
+    /// `pull.fno discovery refused`, the three named before it and the seven
     /// named here, which are the sites no test in this binary can drive.
-    const UNREACHABLE: usize = 10;
+    const UNREACHABLE: usize = 11;
     // COUNTED FROM THE SOURCE, not declared. A thirty-NINTH emit added
     // anywhere under `crates/api/src` fails this test until somebody decides
     // which of the three columns it belongs in, which is the whole point of
@@ -1359,7 +1372,7 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // exactly what `cargo test` is and the row costs nothing to reach.
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 44,
+        lib_sites, 45,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"

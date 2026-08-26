@@ -22992,3 +22992,66 @@ sweep fans out eight items, macOS schedules default-QoS CPU-bound threads onto
 performance cores first, and there are ten of those — so the eight already land
 where they should. A cap would need performance-core detection, which is
 `sysctl`, which is the dependency §93 costs out. Recorded rather than taken.
+
+### D-0308 — the masters are fetchable from the browser, and staleness is now sayable
+
+**Decision.** `POST /masters/refresh` downloads the three public masters and
+lands them. `GET /masters/status.json` answers what is on disk and whether it is
+newer than this process's parse. `Site` gains `parsed_at`. The route lives in a
+new module, `crates/api/src/mastersrun.rs`.
+
+**Why.** `core::vendor::master_file` has always named where each feed's master
+is READ from and nothing ever fetched one. The masters arrived by hand, so a
+stale master was invisible: the parse succeeded, the universe resolved, and
+every symbol renamed or delisted since resolved to whatever the old row said.
+
+**Separate from `/pull/*`, and the separation is the design.** That surface
+moves BARS — it spends the vendor's quota per instrument-month, runs for minutes
+to hours, and is the thing an operator watches. This moves four files, three of
+them free public CDN downloads. Folding them into one control would make a free,
+fast, safe-to-repeat operation look like the expensive one and be avoided for
+the same reasons.
+
+**Zerodha's is not fetched here.** Its dump carries the same token every bar
+request spends, and §8 puts that credential's lifecycle outside this
+repository's discretion. `pull::masters::Transport` refuses the pairing rather
+than trusting a comment — see D-0307's neighbour commit for the leak that guard
+exists to prevent.
+
+**Any refusal makes the whole call a refusal, answering 502.** Three of four
+landing is not a success with a footnote: the universe is MERGED from all of
+them, so a feed left on yesterday's master is a feed whose symbols disagree with
+the others, and a green answer would hide exactly that.
+
+**It answers when it is done, not when it is accepted.** Three files and
+seconds — there is no progress to poll and no slot to claim, and a `202` here
+would invent a state machine for work that finishes before the response would
+have. That is the opposite call from `/backtest/run`, and for the opposite
+reason.
+
+**`Site::parsed_at`, and what it does NOT do.** The masters are parsed once, at
+startup, and there is no reload path. A master refreshed while the server runs
+is new bytes on disk behind an old universe in memory, and every page keeps
+answering from the boot parse with nothing saying so — §4's silent-success
+shape, arriving as a page that looks exactly like a correct one.
+`status_json` compares each master's mtime against `parsed_at` and reports
+`restart_required`. **It is not a cache key and nothing invalidates on it.**
+While there is no reload path the honest answer is to TELL the operator, not to
+pretend.
+
+**A new module, deliberately.** Another session holds ~495 uncommitted lines in
+`crates/api/src/sweeprun.rs` and `crates/cli/src/lib.rs`. Putting these routes
+in a file neither of us shares is what let this land at all; `server.rs` and
+`lib.rs` take one addition each and carry no other session's work.
+
+**Emit census** 44 → 45, `UNREACHABLE` 10 → 11. The refresh event fires after
+three real HTTPS requests to third-party CDNs, so driving it would put the
+suite's result at the mercy of somebody else's uptime. Its refusal arms write no
+event at all — both return before any emit — and `mastersrun`'s own tests cover
+the landing and the transport pairing against a recording transport, which is
+the half with no network in it.
+
+**Still open, named rather than left to be found.** Hot-reload. It needs the
+master set behind a swap inside `Site`, which every route shares by `Arc`, and
+that is a change to how the whole site is held rather than an addition beside
+it.

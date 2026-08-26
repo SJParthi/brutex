@@ -3370,6 +3370,21 @@ pub struct Site {
     pub sweep: std::sync::Mutex<Option<crate::sweeprun::Progress>>,
     /// The instrument universe, merged from both masters.
     pub read: Read,
+    /// When this process parsed the masters into [`Self::read`].
+    ///
+    /// # Why a site carries a timestamp at all
+    ///
+    /// The masters are parsed **once**, here, and there is no reload path. So a
+    /// master refreshed while the server runs is new bytes on disk behind an
+    /// old universe in memory, and every page keeps answering from the boot
+    /// parse with nothing saying so — `CLAUDE.md` §4's silent-success shape,
+    /// arriving as a page that looks exactly like a correct one.
+    ///
+    /// `crate::mastersrun::status_json` compares each master's mtime against
+    /// this to answer *"is a restart required"*. It is not a cache key and
+    /// nothing invalidates on it: the honest answer while there is no reload
+    /// path is to TELL the operator, not to pretend. D-0308.
+    pub parsed_at: std::time::SystemTime,
     /// One manifest census per vendor, in [`Vendor::ALL`] order.
     pub censuses: Vec<census::VendorCensus>,
     /// The coverage grid's instrument axis — every series the censuses hold,
@@ -3511,6 +3526,10 @@ impl Site {
             // NO SWEEP UNTIL SOMEBODY PRESSES RUN, for the reason above it.
             sweep: std::sync::Mutex::new(None),
             read,
+            // STAMPED AT THE PARSE, not at the first request that asks. The
+            // question is when THIS universe was read, and a lazily taken
+            // stamp would answer a different one.
+            parsed_at: std::time::SystemTime::now(),
             censuses,
             series,
             entries,
