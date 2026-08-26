@@ -1323,6 +1323,24 @@
   const openRun = $derived(runs.find((r) => r.index === openIndex) ?? null);
 
   /**
+   * Did the open run never open a trade?
+   *
+   * ZERO BY ABSENCE IS NOT ZERO BY MEASUREMENT, and the drill-down renders
+   * the two identically in a dozen places. This store's one run swept 903
+   * bars and fired nothing, so every strategy-derived figure computes to
+   * `0` — and `+0.00%` on a line labelled `Total return` says the strategy
+   * broke even. It did not participate.
+   *
+   * The worst of them was `Strategy outperformance -33.09%`, an active
+   * claim that the sweep LOST to buy and hold by a third. Nothing lost to
+   * anything; one side never entered.
+   *
+   * Buy-and-hold is exempt wherever it appears: it is a property of the
+   * bars on disk and stays true whether or not a trade was ever opened.
+   */
+  const noTrades = $derived(openRun !== null && openRun.trades === 0);
+
+  /**
    * Open or close a run's drill-down, AND GO TO IT WHEN IT OPENS.
    *
    * MEASURED, WHICH IS THE ONLY REASON THIS IS NOT STILL A ONE-LINER.
@@ -4131,8 +4149,8 @@
                   </div>
                 {:else if paTab === 'periodical'}
                   <div class="tt-quad">
-                    <div class="tt-q"><span class="tt-k">Annualized return (CAGR)</span><span class="tt-qv" class:up={(cagrBps ?? 0) >= 0} class:down={(cagrBps ?? 0) < 0}>{cagrBps === null ? '—' : pct(cagrBps)}</span></div>
-                    <div class="tt-q"><span class="tt-k">Total return</span><span class="tt-qv" class:up={(strategyBps ?? 0) >= 0} class:down={(strategyBps ?? 0) < 0}>{pct(strategyBps)}</span></div>
+                    <div class="tt-q"><span class="tt-k">Annualized return (CAGR)</span><span class="tt-qv" class:up={(cagrBps ?? 0) >= 0} class:down={(cagrBps ?? 0) < 0}>{noTrades ? 'none' : cagrBps === null ? '—' : pct(cagrBps)}</span></div>
+                    <div class="tt-q"><span class="tt-k">Total return</span><span class="tt-qv" class:up={!noTrades && (strategyBps ?? 0) >= 0} class:down={!noTrades && (strategyBps ?? 0) < 0}>{noTrades ? "none" : pct(strategyBps)}</span></div>
                     <div class="tt-q"><span class="tt-k">Sharpe ratio</span><span class="tt-qv"><Lock why="crates/runner computes significance, but no ratio reaches the record." /></span></div>
                     <div class="tt-q"><span class="tt-k">Sortino ratio</span><span class="tt-qv"><Lock why="Same — not written to the ledger." /></span></div>
                   </div>
@@ -4168,17 +4186,29 @@
                   </p>
                 {:else if paTab === 'benchmarking'}
                   <div class="tt-quad">
-                    <div class="tt-q"><span class="tt-k">Strategy return</span><span class="tt-qv" class:up={(strategyBps ?? 0) >= 0} class:down={(strategyBps ?? 0) < 0}>{pct(strategyBps)}</span></div>
+                    <div class="tt-q"><span class="tt-k">Strategy return</span><span class="tt-qv" class:up={!noTrades && (strategyBps ?? 0) >= 0} class:down={!noTrades && (strategyBps ?? 0) < 0}>{noTrades ? "none" : pct(strategyBps)}</span></div>
                     <div class="tt-q"><span class="tt-k">Buy and hold return</span><span class="tt-qv" class:up={(buyHold?.bps ?? 0) >= 0} class:down={(buyHold?.bps ?? 0) < 0}>{buyHold ? pct(buyHold.bps) : '—'}</span></div>
                     <div class="tt-q">
                       <span class="tt-k">Strategy outperformance</span>
                       <span class="tt-qv" class:up={outperformance?.beat} class:down={outperformance && !outperformance.beat}>
-                        {outperformance && buyHold && strategyBps !== null ? pct(strategyBps - buyHold.bps) : '—'}
+                        {noTrades ? 'none — the sweep never entered' : outperformance && buyHold && strategyBps !== null ? pct(strategyBps - buyHold.bps) : '—'}
                       </span>
                     </div>
                     <div class="tt-q"><span class="tt-k">Correlation</span><span class="tt-qv"><Lock why="Needs a strategy return series to correlate against the benchmark's." /></span></div>
                   </div>
-                  {#if outperformance}
+                  <!-- A COMPARISON NEEDS TWO PARTICIPANTS. With no trades this
+                       read "The sweep falls short of buy and hold by ₹6,021.60
+                       ... 0 trades across 3.6 years to end up behind holding
+                       the index" — a verdict on a contest one side never
+                       entered. Losing and not playing are different outcomes
+                       and this sentence reported them as the same one. -->
+                  {#if noTrades}
+                    <p class="tt-note2">
+                      <b>No comparison is possible.</b> The sweep opened no position, so it neither
+                      beat nor lost to holding the index — it was not in the market. Buy and hold's
+                      own return above is still true: it is a property of the bars, not of this run.
+                    </p>
+                  {:else if outperformance}
                     <p class="tt-note2" class:badnote={!outperformance.beat}>
                       {#if outperformance.beat}
                         The sweep <b>beats buy and hold by {money(outperformance.edge)}</b> under worst-case fills.
