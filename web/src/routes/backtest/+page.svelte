@@ -86,6 +86,17 @@
      `ask` — what the operator is asking the sweep for — and the fetch helper
      is a different thing entirely. One name for one value. */
   import { ask as ask_ } from '$lib/ask.js';
+  /* THE PRODUCT'S OWN MONTH, AND THE PRODUCT'S OWN MENU.
+     This page drew its span as two bare `YYYY-MM` text boxes while `/db` used
+     `$lib/DayField.svelte` and `/ingest` used `$lib/Picker.svelte`, so the one
+     console showed three different date controls and `2016-08` in a form beside
+     `Aug 2016` everywhere else. `DayField`'s own header records why that is a
+     defect rather than an inconsistency, and `monthLabel` is what every other
+     surface here already renders a store month with. A span is MONTH-granular,
+     so `Picker` in single-choice mode is the control `/ingest` already proved,
+     and `DayField` -- which is day-granular -- is not. */
+  import Picker from '$lib/Picker.svelte';
+  import { monthLabel } from '$lib/dates.js';
   import { rupee, group, exact } from '$lib/money.js';
   import * as prefix from '$lib/prefix.js';
   import { sweepOutcome, ledgerBlock } from '$lib/sweep.js';
@@ -629,6 +640,10 @@
           leaf: h.leaf,
           full: h.full,
           months: h.months.size,
+          // THE MONTHS THEMSELVES, so the span control can offer what EXISTS
+          // rather than accept anything that parses. `YYYY-MM` sorts correctly
+          // as a string, so this needs no comparator and no date object.
+          monthList: [...h.months].sort(),
           from: h.from,
           to: h.to,
           rungs: [...h.rungs.values()].sort((a, b) => byRung(a.name, b.name))
@@ -699,8 +714,17 @@
    */
   $effect(() => {
     if (catalog.phase !== 'ready' || catalog.held.length === 0) return;
+    /* READ TRACKED, WRITE UNTRACKED — and the first version read BOTH inside
+       `untrack`, which made this effect depend on the catalog alone. Switching
+       instrument then changed the rungs and left the span from the PREVIOUS
+       instrument sitting in the form: picking INDIAVIX after narrowing
+       BANKNIFTY to Jun 2024 kept Jun 2024, on a different instrument, with the
+       shortfall banner still counting against the old one. Naming the two
+       dependencies here is what makes a switch re-seed. */
+    const symbol = sweepSymbol;
+    const touched = spanTouched;
     untrack(() => {
-      if (!symbolTouched && !catalog.held.some((h) => h.leaf === sweepSymbol)) {
+      if (!symbolTouched && !catalog.held.some((h) => h.leaf === symbol)) {
         // THE NEWEST RUN'S INSTRUMENT FIRST, when the store still holds it.
         // That is what the operator was last looking at, and it beats any
         // ordering this page could invent. Only when the ledger is empty --
@@ -711,7 +735,7 @@
         sweepSymbol = seen ? seen.leaf : catalog.held[0].leaf;
       }
       const held = catalog.held.find((h) => h.leaf === sweepSymbol);
-      if (held && !spanTouched) {
+      if (held && !touched) {
         ask.from = held.from;
         ask.to = held.to;
       }
@@ -728,6 +752,39 @@
     if (!activeFeed || !heldNow || !from || !to) return '';
     return `cli range-all ${activeFeed} ${heldNow.leaf} ${from.year} ${from.month} ${to.year} ${to.month} 500`;
   });
+
+  /**
+   * The span menus' rows — every month this instrument actually holds.
+   *
+   * A MONTH THE STORE DOES NOT HOLD IS NOT OFFERED, and one that would
+   * invert the span is offered DEAD with the reason on it rather than
+   * omitted. That is `Picker`'s own rule — "a row drawn dead in its own
+   * place says *this exists and you cannot have it*; the same row omitted
+   * says *this does not exist*" — and here the second sentence would be a
+   * lie, because the month is on disk and it is only this end of the span
+   * that cannot take it.
+   *
+   * @param {'from'|'to'} end
+   */
+  function monthRows(end) {
+    if (!heldNow) return [];
+    const other = end === 'from' ? ask.to : ask.from;
+    return heldNow.monthList.map((m) => {
+      const inverts =
+        other !== '' && (end === 'from' ? m > other : m < other);
+      return {
+        key: m,
+        name: monthLabel(m) ?? m,
+        detail: m,
+        disabled: inverts,
+        why: inverts
+          ? end === 'from'
+            ? `later than the last month of the span, ${monthLabel(other) ?? other}.`
+            : `earlier than the first month of the span, ${monthLabel(other) ?? other}.`
+          : undefined
+      };
+    });
+  }
 
   /** Put the span back to everything the store holds for this instrument. */
   function useWholeSpan() {
@@ -2415,26 +2472,57 @@
         />
       {/if}
     </label>
-    <label class="runf">
+    <!-- TWO MONTH MENUS, NOT TWO TEXT BOXES. `2016-08` typed into a bare input
+         is the one date format this console does not otherwise use, and it let
+         an operator name a month the store does not hold. These offer the
+         months on disk, labelled the way `$lib/dates.js` labels every other
+         month in the product. -->
+    <div class="runf">
       <span>from</span>
-      <input
-        class="find sm"
-        bind:value={ask.from}
-        oninput={() => (spanTouched = true)}
-        placeholder={heldNow ? heldNow.from : 'YYYY-MM'}
-        aria-label="First month"
-      />
-    </label>
-    <label class="runf">
+      {#if heldNow}
+        <Picker
+          single
+          filter
+          label="month"
+          summary={monthLabel(ask.from) ?? 'First month'}
+          title="The first month of the span. Only months this instrument actually holds are offered."
+          rows={monthRows('from')}
+          selected={new Set(ask.from ? [ask.from] : [])}
+          onchange={(next) => {
+            const [m] = [...next];
+            if (m) {
+              ask.from = m;
+              spanTouched = true;
+            }
+          }}
+        />
+      {:else}
+        <span class="runf-wait">{catalog.phase === 'loading' ? 'reading…' : '—'}</span>
+      {/if}
+    </div>
+    <div class="runf">
       <span>to</span>
-      <input
-        class="find sm"
-        bind:value={ask.to}
-        oninput={() => (spanTouched = true)}
-        placeholder={heldNow ? heldNow.to : 'YYYY-MM'}
-        aria-label="Last month"
-      />
-    </label>
+      {#if heldNow}
+        <Picker
+          single
+          filter
+          label="month"
+          summary={monthLabel(ask.to) ?? 'Last month'}
+          title="The last month of the span. Only months this instrument actually holds are offered."
+          rows={monthRows('to')}
+          selected={new Set(ask.to ? [ask.to] : [])}
+          onchange={(next) => {
+            const [m] = [...next];
+            if (m) {
+              ask.to = m;
+              spanTouched = true;
+            }
+          }}
+        />
+      {:else}
+        <span class="runf-wait">{catalog.phase === 'loading' ? 'reading…' : '—'}</span>
+      {/if}
+    </div>
     <!-- THE SUPPORT CONTROL IS GONE, AND ITS ABSENCE IS THE FEATURE.
 
          An instrument and a span are facts about what the operator wants to
@@ -2520,16 +2608,41 @@
           </span>
         {/if}
       </div>
+      <!-- THE TIMEFRAMES, AS A MEASUREMENT RATHER THAN A LIST OF WORDS.
+           Every rung the run will cover, each with its own coverage gauge
+           against the instrument's month count. The gauge is the fact: a rung
+           that is short shows a short bar, and the eye reads nine bars faster
+           than it reads nine numbers. There is no rung PICKER because
+           `sweeprun::Asked` carries `feed`, `underlying`, `from` and `to` and
+           no rung field -- the run sweeps every one of them, so a control
+           offering a choice would be a control the route cannot honour. -->
+      <div class="rungs-head">
+        <span class="coverbar-k">Timeframes this run covers</span>
+        <span class="dim sm">
+          signal rungs — execution is always one-minute, on every one of them
+        </span>
+      </div>
       <ul class="rungs">
-        {#each heldNow.rungs as r (r.name)}
-          <li class="rungchip" class:short={r.months < heldNow.months}>
-            <span class="rungchip-n">{r.name}</span>
-            <span class="rungchip-m">{exact(r.months)}</span>
-            {#if r.months < heldNow.months}
-              <span class="rungchip-w" title="{r.from} → {r.to}">
-                −{exact(heldNow.months - r.months)}
-              </span>
-            {/if}
+        {#each heldNow.rungs as r, i (heldNow.leaf + r.name)}
+          <li
+            class="rungchip"
+            class:short={r.months < heldNow.months}
+            style="--i:{i}"
+            title="{r.name} — {exact(r.months)} months on disk, {r.from} → {r.to}"
+          >
+            <span class="rungchip-top">
+              <span class="rungchip-n">{r.name}</span>
+              <span class="rungchip-m">{exact(r.months)}</span>
+              {#if r.months < heldNow.months}
+                <span class="rungchip-w">−{exact(heldNow.months - r.months)}</span>
+              {/if}
+            </span>
+            <span class="rungchip-track">
+              <span
+                class="rungchip-fill"
+                style="width:{Math.max(2, Math.round((r.months / Math.max(1, heldNow.months)) * 100))}%"
+              ></span>
+            </span>
           </li>
         {/each}
       </ul>
@@ -4523,14 +4636,73 @@
     gap: 0.35rem;
     flex-wrap: wrap;
   }
+  .rungs-head {
+    display: flex;
+    align-items: baseline;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+  }
   .rungchip {
-    display: inline-flex;
+    display: flex;
+    flex-direction: column;
+    gap: 0.28rem;
+    min-width: 5.6rem;
+    padding: 0.35rem 0.55rem 0.4rem;
+    border: 1px solid var(--n6);
+    border-radius: 7px;
+    background: var(--n3);
+    /* A RUNG ARRIVING IS A FACT ARRIVING. The strip is rebuilt whenever the
+       instrument changes -- the key carries the leaf -- so this replays on a
+       switch, which is exactly when the numbers under it changed. Staggered
+       by index so the strip reads left to right the way it is read. */
+    animation: rungin 0.34s cubic-bezier(0.22, 0.7, 0.3, 1) both;
+    animation-delay: calc(var(--i, 0) * 34ms);
+    transition:
+      border-color 0.15s ease,
+      transform 0.15s ease;
+  }
+  .rungchip:hover {
+    border-color: var(--acc);
+    transform: translateY(-1px);
+  }
+  @keyframes rungin {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  .rungchip-top {
+    display: flex;
     align-items: baseline;
     gap: 0.35rem;
-    padding: 0.22rem 0.5rem;
-    border: 1px solid var(--n6);
-    border-radius: 6px;
-    background: var(--n3);
+  }
+  /* The gauge. Months this rung holds against months the instrument holds --
+     the same question the ledger's coverage column answers per run, asked
+     here per rung before the run exists. */
+  .rungchip-track {
+    display: block;
+    height: 3px;
+    border-radius: 2px;
+    background: var(--n0);
+    overflow: hidden;
+  }
+  .rungchip-fill {
+    display: block;
+    height: 100%;
+    border-radius: 2px;
+    background: linear-gradient(to right, var(--up), var(--acc));
+    /* GROWS TO ITS WIDTH, because the width IS the fact. Same reasoning as
+       `.cover-fill`, and the same keyframe. */
+    animation: fill 0.5s cubic-bezier(0.22, 0.7, 0.3, 1) both;
+    animation-delay: calc(var(--i, 0) * 34ms + 60ms);
+    transform-origin: left;
+  }
+  .rungchip.short .rungchip-fill {
+    background: linear-gradient(to right, var(--warn), var(--down));
   }
   /* A rung holding fewer months than its instrument is a SHORTER SAMPLE.
      It takes the warn rail rather than a flash, for the same reason
@@ -4566,6 +4738,25 @@
   }
   .coverbar-note b {
     color: var(--n11);
+  }
+  /* The span menus stand in for two text inputs, so the placeholder that
+     replaces them while the census loads must hold the same line. */
+  .runf-wait {
+    font-size: var(--fs-micro);
+    color: var(--n8);
+    padding: 0.3rem 0;
+  }
+  /* MOTION IS OFF WHEN IT IS ASKED TO BE. The strip still arrives and the
+     gauges still show their width -- only the travel is removed, so nothing
+     the animation was carrying is lost with it. */
+  @media (prefers-reduced-motion: reduce) {
+    .rungchip,
+    .rungchip-fill {
+      animation: none;
+    }
+    .rungchip:hover {
+      transform: none;
+    }
   }
 
   .runf {
