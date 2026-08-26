@@ -2060,6 +2060,7 @@ const _: () = assert!(
 #[must_use]
 pub fn tracked_series(site: &Site, timeframe: Timeframe) -> Vec<Series> {
     let mut out: Vec<Series> = site
+        .universe()
         .read
         .merged
         .by_key
@@ -2685,7 +2686,7 @@ fn probe_store_halts(site: &Loaded, feeds: &mut [FeedState]) -> String {
 /// # The lie this type makes unrepresentable
 ///
 /// With the masters absent, `tracked_series` derives its work list from
-/// `site.read.merged.by_key`, which is empty; `next_window` then answers `None`
+/// `site.universe().read.merged.by_key`, which is empty; `next_window` then answers `None`
 /// for every feed because it has no series to accumulate a window from; `survey`
 /// chooses nothing; and the no-work branch below published
 ///
@@ -2754,7 +2755,7 @@ impl Settled {
             // THE READ'S OWN WORDS, NOT A GUESS AT WHY. `Read::notes` already
             // holds `"groww: UNAVAILABLE — <path>: No such file or directory"`,
             // which names the file and the directory an operator has to fix.
-            // The autopilot touched `site.read` at exactly one line before this
+            // The autopilot touched `site.universe().read` at exactly one line before this
             // — inside `tracked_series` — and never asked it anything.
             Self::NoUniverse => {
                 let why = read
@@ -2917,7 +2918,7 @@ async fn round(
                 report.stalls.clone_from(&state.stalls);
             }
         }
-        // BUILT BEFORE THE LOCK IS TAKEN, and built from `site.read`, which the
+        // BUILT BEFORE THE LOCK IS TAKEN, and built from `site.universe().read`, which the
         // publish closure must not borrow.
         let detail = match retrying {
             Some(saying) => saying,
@@ -2925,7 +2926,7 @@ async fn round(
                 "every feed is halted. The reasons are below and nothing further is \
                  attempted until they are dealt with.{probed}"
             ),
-            None => settled.say(&site.read, &note, &probed),
+            None => settled.say(&site.universe().read, &note, &probed),
         };
         site.autopilot.publish(move |status| {
             // AN EMPTY UNIVERSE IS HALTED, NOT IDLE. `idle` beside a countdown
@@ -6188,14 +6189,14 @@ mod tests {
         // AND THE SENTENCES. The evidence travels into the claim, and the
         // claim is absent where the evidence is.
         let site = empty_site("settled-say");
-        let complete = Settled::over(&one).say(&site.read, "", "");
+        let complete = Settled::over(&one).say(&site.universe().read, "", "");
         assert!(complete.contains("The store is complete"), "{complete}");
         assert!(
             complete.contains("1 tracked instrument(s)"),
             "the count that justifies it travels with it: {complete}"
         );
 
-        let empty = Settled::over(&[]).say(&site.read, "", "");
+        let empty = Settled::over(&[]).say(&site.universe().read, "", "");
         assert!(
             !empty.contains("The store is complete"),
             "an empty universe is never complete: {empty}"

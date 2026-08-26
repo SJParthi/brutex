@@ -872,7 +872,7 @@ pub fn instruments_html_from(
 async fn home(
     axum::extract::State(site): axum::extract::State<Loaded>,
 ) -> axum::response::Html<String> {
-    axum::response::Html(dashboard_html(&site.read))
+    axum::response::Html(dashboard_html(&site.universe().read))
 }
 
 /// The dashboard, from a universe already loaded.
@@ -940,7 +940,12 @@ async fn page(
     let u = param(raw, "u");
     let page = page_number(raw);
     axum::response::Html(instruments_html_from(
-        &site.read, &typed, &sort, all, &u, page,
+        &site.universe().read,
+        &typed,
+        &sort,
+        all,
+        &u,
+        page,
     ))
 }
 
@@ -1006,7 +1011,13 @@ async fn instruments_json(
     //
     // O(n log n) once per request over a bounded ~800, replacing an unbounded
     // amount of human scanning.
-    let mut listing: Vec<_> = site
+    //
+    // ONE GUARD FOR THE WHOLE STATEMENT. The rows below BORROW from the parsed
+    // universe, so the read guard has to outlive them — a temporary taken
+    // inline is dropped at the semicolon with the borrows still live, which is
+    // the compiler catching the reload's one real hazard rather than a nuisance.
+    let held = site.universe();
+    let mut listing: Vec<_> = held
         .read
         .merged
         .by_key
@@ -1095,11 +1106,11 @@ async fn instruments_json(
     // below are only measurements when the master decoded and the counter
     // loaded, and until now nothing said which of those held.
     let census = censuses.iter().find(|c| c.vendor == feed);
-    let (master, master_note) = site.read.master(feed);
+    let (master, master_note) = site.universe().read.master(feed);
     let mut headers = census_headers(census);
     headers.insert(
         axum::http::HeaderName::from_static(UNIVERSE_STATUS_HEADER),
-        note_header(site.read.status()),
+        note_header(site.universe().read.status()),
     );
     headers.insert(
         axum::http::HeaderName::from_static(MASTER_STATE_HEADER),
@@ -1243,9 +1254,13 @@ fn no_such_feed_json(asked: &str) -> String {
 fn reach_text(target: ingest::SpotTarget, feed: pull::vendor::Feed, site: &Site) -> String {
     /// How many unresolved names the receipt spells before it counts the rest.
     const SHOWN: usize = 5;
+    // BOUND BEFORE THE BORROW, because `Coverage::of` answers a reference into
+    // the parsed universe and a guard taken inside the closure dies at the end
+    // of the `and_then`.
+    let held = site.universe();
     let Some(covered) = feed
         .store_vendor()
-        .and_then(|vendor| site.read.coverage.of(vendor, target))
+        .and_then(|vendor| held.read.coverage.of(vendor, target))
     else {
         return format!(
             "{} publishes no instrument master — a folder of CSVs is its own listing — \
@@ -1337,7 +1352,7 @@ async fn universe_reach_json(
     (
         axum::http::StatusCode::OK,
         [(axum::http::header::CONTENT_TYPE, json)],
-        site.read.coverage.json(feed),
+        site.universe().read.coverage.json(feed),
     )
 }
 
@@ -3101,7 +3116,7 @@ async fn store_json(
 async fn health(
     axum::extract::State(site): axum::extract::State<Loaded>,
 ) -> (axum::http::StatusCode, String) {
-    let (body, clean) = report_from(&site.read);
+    let (body, clean) = report_from(&site.universe().read);
     let code = if clean {
         axum::http::StatusCode::OK
     } else {
@@ -3368,23 +3383,28 @@ pub struct Site {
     /// writes them, and refusing one because the other is running would be a
     /// constraint neither of them has.
     pub sweep: std::sync::Mutex<Option<crate::sweeprun::Progress>>,
-    /// The instrument universe, merged from both masters.
-    pub read: Read,
-    /// When this process parsed the masters into [`Self::read`].
+    /// Everything the instrument masters produce, behind one lock so a refresh
+    /// can replace it without a restart.
     ///
-    /// # Why a site carries a timestamp at all
+    /// # Why this became a lock, and what it cost before
     ///
-    /// The masters are parsed **once**, here, and there is no reload path. So a
-    /// master refreshed while the server runs is new bytes on disk behind an
-    /// old universe in memory, and every page keeps answering from the boot
-    /// parse with nothing saying so — `CLAUDE.md` §4's silent-success shape,
-    /// arriving as a page that looks exactly like a correct one.
+    /// The masters were parsed **once**, here, with no reload path — so a
+    /// refresh while the server ran was new bytes on disk behind an old
+    /// universe in memory, and every page kept answering from the boot parse.
+    /// D-0308 made that *sayable* (`restart_required`) rather than fixable,
+    /// which was the honest thing to ship and was not the answer: an operator
+    /// who presses Refresh and is told to restart the server has been handed
+    /// the failure back.
     ///
-    /// `crate::mastersrun::status_json` compares each master's mtime against
-    /// this to answer *"is a restart required"*. It is not a cache key and
-    /// nothing invalidates on it: the honest answer while there is no reload
-    /// path is to TELL the operator, not to pretend. D-0308.
-    pub parsed_at: std::time::SystemTime,
+    /// `RwLock` and not `Mutex` because the read side is every request on every
+    /// page and the write side is one operator pressing a button. Readers do
+    /// not contend with each other.
+    ///
+    /// **Only the masters-derived state is in here.** `run`, `sweep`, `budgets`
+    /// and `calendars` stay outside, so reloading the universe cannot cancel a
+    /// pull in progress or reset a rate budget the vendor is still counting
+    /// against. See [`Parsed`]. D-0316.
+    pub parsed: std::sync::RwLock<Parsed>,
     /// One manifest census per vendor, in [`Vendor::ALL`] order.
     pub censuses: Vec<census::VendorCensus>,
     /// The coverage grid's instrument axis — every series the censuses hold,
@@ -3413,23 +3433,6 @@ pub struct Site {
     /// [`Site::load`], which only the served process calls — and left
     /// [`Broker::Refused`] everywhere else.
     pub broker: Broker,
-    /// How many instruments each spot target covers **in the merged
-    /// universe**, in [`ingest::SpotTarget::ALL`] order.
-    ///
-    /// Counted once, here, rather than folded over the universe per request:
-    /// the form shows a real number and the page still costs O(rows shown).
-    /// Sized from the enum, not from a literal. It was `[usize; 3]` and D-0105
-    /// appended four targets; a hand-written length is a second place the
-    /// target count lives, and the shorter of the two silently drops the tail.
-    ///
-    /// **FEED-AGNOSTIC, AND THAT IS NOT THE NUMBER FOR A BUTTON.** This is what
-    /// NSE and the two masters between them name — the union. A pull runs
-    /// against ONE feed, and a feed can only fetch what its own master gives it
-    /// an id for: `indices` is 35 here and Groww lists 24 of them. Anything
-    /// that knows which feed was chosen must read [`Self::coverage`] instead;
-    /// this stays because "how big is this set" is a real question and the
-    /// legacy `/pull` form is rendered before a feed is picked. D-0120.
-    pub targets: [usize; ingest::SpotTarget::ALL.len()],
     /// Where the manifests were read from, named on the page so an absence is
     /// actionable rather than mysterious.
     pub store_root: PathBuf,
@@ -3464,30 +3467,96 @@ pub struct Site {
 }
 
 impl Site {
-    /// Assembles the derived counts once, from parts a caller already holds.
-    #[must_use]
-    pub fn new(read: Read, censuses: Vec<census::VendorCensus>, store_root: PathBuf) -> Self {
-        let mut targets = [0usize; ingest::SpotTarget::ALL.len()];
-        for (key, entry) in &read.merged.by_key {
-            for (slot, target) in ingest::SpotTarget::ALL.into_iter().enumerate() {
-                // THE TARGET'S OWN PREDICATE, not a second copy of it.
-                //
-                // This was `match target { Swept => key.is_sweepable(), _ =>
-                // entry.universe.contains(target.universe()) }` — a CATCH-ALL,
-                // and the one site the compiler could not have pointed at when
-                // D-0105 appended four variants. It happened to be right for
-                // them, which is the problem: a `_` arm decides for every
-                // variant that will ever exist, including the ones whose
-                // membership is not a single bit test. `SpotTarget::names` is
-                // what `broker_run` filters the run by, so counting with
-                // anything else is how a form comes to show a number no run
-                // will match — the exact defect `names` was added to remove.
-                let counted = target.names(key, entry.universe);
-                if counted && let Some(n) = targets.get_mut(slot) {
-                    *n += 1;
-                }
+    /// The parsed universe, for reading.
+    ///
+    /// # Poison is ignored, deliberately
+    ///
+    /// A panic while holding the write lock would poison it, and the data
+    /// behind it is a parse of files on disk — it cannot be left half-written
+    /// by a panic the way a counter can. Refusing every request afterwards
+    /// would turn one panicking request into a dead server, so the guard is
+    /// taken regardless. This is the same call `budgets` and `run` already
+    /// make, for the same reason.
+    pub fn universe(&self) -> std::sync::RwLockReadGuard<'_, Parsed> {
+        self.parsed
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Re-reads the masters from disk and swaps the result in.
+    ///
+    /// # What this closes
+    ///
+    /// The masters were parsed once, at startup, with no reload path — so
+    /// pressing Refresh gave an operator new bytes on disk and the same
+    /// universe in memory. D-0308 made that sayable and not fixable, and being
+    /// told to restart the server is the failure handed back rather than
+    /// solved. This is the fix.
+    ///
+    /// # It swaps or it does not, and never leaves half
+    ///
+    /// The new universe is parsed **before** the lock is taken, so the write
+    /// section is one move. A parse that yields nothing readable does not
+    /// replace a working universe with an empty one: `Read::status` is
+    /// consulted first, and a `Unavailable` verdict is returned as an error
+    /// with the old universe untouched. Losing a good parse to a bad refresh
+    /// would be strictly worse than the staleness this replaces.
+    ///
+    /// # Cost
+    ///
+    /// One parse of the masters — the same work `Site::load` does at startup,
+    /// on the operator's press rather than on a request. Readers are blocked
+    /// only for the swap itself, which is a move of three fields.
+    ///
+    /// # Errors
+    ///
+    /// The verdict, when the fresh parse reads no vendor at all.
+    pub fn reparse(&self, masters: &Path) -> Result<String, String> {
+        let read = universe(masters);
+        // A PARSE THAT READ NOTHING MUST NOT REPLACE ONE THAT DID. Swapping an
+        // empty universe in would take a working page to a blank one because a
+        // download failed — the refresh actively destroying what it was pressed
+        // to improve, which is worse than the staleness it replaces.
+        //
+        // The read guard is scoped so it is released before the write guard is
+        // taken: holding both across the same statement is the deadlock this
+        // shape invites.
+        let fresh = read.merged.by_key.len();
+        {
+            let held = self.universe();
+            if fresh == 0 && !held.read.merged.by_key.is_empty() {
+                return Err(format!(
+                    "the masters on disk parsed into an EMPTY universe, so the {} \
+                     instrument(s) this process already holds were kept rather than \
+                     replaced with nothing: {}",
+                    held.read.merged.by_key.len(),
+                    read.notes.join(" · ")
+                ));
             }
         }
+        let targets = count_targets(&read);
+        let summary = read.notes.join(" · ");
+        let mut held = self
+            .parsed
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *held = Parsed {
+            read,
+            at: std::time::SystemTime::now(),
+            targets,
+        };
+        Ok(summary)
+    }
+
+    /// A site over one parse of the masters and one read of the censuses.
+    ///
+    /// Everything derived from the masters goes behind [`Site::parsed`] so
+    /// [`Site::reparse`] can replace it without a restart; everything derived
+    /// from the store stays outside, because a masters refresh does not touch
+    /// the store.
+    #[must_use]
+    pub fn new(read: Read, censuses: Vec<census::VendorCensus>, store_root: PathBuf) -> Self {
+        let targets = count_targets(&read);
         // THE GRID'S AXIS IS READ OFF THE CENSUSES, NOT OUT OF THE MASTER.
         //
         // It used to be `grid_instruments(read.merged.by_key.keys())` — the
@@ -3525,11 +3594,14 @@ impl Site {
             run: std::sync::Mutex::new(None),
             // NO SWEEP UNTIL SOMEBODY PRESSES RUN, for the reason above it.
             sweep: std::sync::Mutex::new(None),
-            read,
-            // STAMPED AT THE PARSE, not at the first request that asks. The
-            // question is when THIS universe was read, and a lazily taken
-            // stamp would answer a different one.
-            parsed_at: std::time::SystemTime::now(),
+            parsed: std::sync::RwLock::new(Parsed {
+                read,
+                // STAMPED AT THE PARSE, not at the first request that asks. The
+                // question is when THIS universe was read, and a lazily taken
+                // stamp would answer a different one.
+                at: std::time::SystemTime::now(),
+                targets,
+            }),
             censuses,
             series,
             entries,
@@ -3538,7 +3610,6 @@ impl Site {
             // on, so a test constructing a `Site` any other way cannot reach a
             // broker by omission.
             broker: Broker::Refused,
-            targets,
             store_root,
             // NOT STARTED HERE, AND PAUSED UNLESS ASKED. This is the controls
             // and the status only; the task that acts on them is spawned by
@@ -3669,6 +3740,66 @@ pub(crate) fn journal_trouble(log: &audit::Log) -> String {
 /// The shared, immutable site every handler renders from.
 pub type Loaded = std::sync::Arc<Site>;
 
+/// Everything on a [`Site`] that comes from the instrument masters, swapped as
+/// one unit.
+///
+/// # Why these three and not the whole site
+///
+/// A masters refresh must not disturb a running pull. `Site` also carries
+/// `run`, `sweep`, `budgets` and `calendars` — live state that belongs to
+/// whatever is happening right now — so replacing the whole site would cancel a
+/// pull in progress and reset a rate budget the vendor is still counting
+/// against. These three are exactly the fields `Site::new` derives from the
+/// parse and nothing else does:
+///
+/// * [`Self::read`] — the merged universe;
+/// * [`Self::targets`] — the per-target counts, computed FROM `read`, which is
+///   why it moves with it. Left behind, a reload would show new instruments
+///   under old counts;
+/// * [`Self::at`] — when this parse happened, which is what makes staleness
+///   answerable at all.
+///
+/// `series` and `entries` are NOT here: they come from the store's censuses,
+/// which a masters refresh does not touch. `folders` is a filesystem walk.
+#[derive(Debug)]
+pub struct Parsed {
+    /// The instrument universe, merged from every master present.
+    pub read: Read,
+    /// When this process parsed the masters into [`Self::read`].
+    pub at: std::time::SystemTime,
+    /// How many instruments each spot target names, counted from [`Self::read`].
+    pub targets: [usize; ingest::SpotTarget::ALL.len()],
+}
+
+/// How many instruments each spot target names.
+///
+/// Split out of `Site::new` because [`Site::reparse`] needs the identical
+/// arithmetic: a reload that recomputed this differently would put a form's
+/// count out of step with the run it launches, which is the defect
+/// `SpotTarget::names` exists to prevent.
+fn count_targets(read: &Read) -> [usize; ingest::SpotTarget::ALL.len()] {
+    let mut targets = [0usize; ingest::SpotTarget::ALL.len()];
+    for (key, entry) in &read.merged.by_key {
+        for (slot, target) in ingest::SpotTarget::ALL.into_iter().enumerate() {
+            // THE TARGET'S OWN PREDICATE, not a second copy of it.
+            //
+            // This was `match target { Swept => key.is_sweepable(), _ =>
+            // entry.universe.contains(target.universe()) }` — a CATCH-ALL, and
+            // the one site the compiler could not have pointed at when D-0105
+            // appended four variants. It happened to be right for them, which
+            // is the problem: a `_` arm decides for every variant that will
+            // ever exist. `SpotTarget::names` is what `broker_run` filters the
+            // run by, so counting with anything else is how a form comes to
+            // show a number no run will match.
+            let counted = target.names(key, entry.universe);
+            if counted && let Some(n) = targets.get_mut(slot) {
+                *n += 1;
+            }
+        }
+    }
+    targets
+}
+
 /// Answers with `f`'s page when the clock names a day, and with a named
 /// refusal when it does not.
 ///
@@ -3754,7 +3885,7 @@ pub fn pull_html(site: &Site, today: Day) -> String {
     let targets: Vec<(ingest::SpotTarget, usize)> = ingest::SpotTarget::ALL
         .into_iter()
         .enumerate()
-        .map(|(i, t)| (t, site.targets.get(i).copied().unwrap_or(0)))
+        .map(|(i, t)| (t, site.universe().targets.get(i).copied().unwrap_or(0)))
         .collect();
     let journal = site.journal();
     let log = journal.look();
@@ -3808,7 +3939,7 @@ pub fn pull_html(site: &Site, today: Day) -> String {
         // told a served process — which sets `Broker::Live`, reads the token and
         // reaches Dhan — that no vendor is contacted from it.
         halt: Some(halt_for(site.broker)),
-        notes: &site.read.notes_view,
+        notes: &site.universe().read.notes_view,
         folders: &site.folders,
     })
 }
@@ -4032,7 +4163,7 @@ async fn spot_answer(
                 .into_iter()
                 .position(|t| t == asked.target)
                 .unwrap_or(0);
-            let in_universe = site.targets.get(slot).copied().unwrap_or(0);
+            let in_universe = site.universe().targets.get(slot).copied().unwrap_or(0);
             let mut facts = vec![
                 ("Target", asked.target.label().to_owned()),
                 (
@@ -4894,6 +5025,7 @@ pub(crate) async fn broker_run(
     // continues. Over ~11,200 requests a run that dies on the first network
     // blip is a run that never finishes, and a single `?` here would be that.
     let mut targets: Vec<brutex_core::instrument::InstrumentKey> = site
+        .universe()
         .read
         .merged
         .by_key
@@ -6980,6 +7112,7 @@ async fn broker_window(
     // an NTM cash equity — `catalog::tracked` admits exactly those two — so the
     // else-arm is Equity rather than a third refusal path that cannot be hit.
     let listing = site
+        .universe()
         .read
         .merged
         .by_key
@@ -6989,6 +7122,7 @@ async fn broker_window(
             pull::vendor::Listing::Index
         });
     let Some(instrument_id) = site
+        .universe()
         .read
         .merged
         .by_key
@@ -10006,7 +10140,8 @@ fn rolling_security_id(
         underlying: asked.underlying,
         kind: brutex_core::instrument::Kind::Index,
     };
-    site.read
+    site.universe()
+        .read
         .merged
         .by_key
         .get(&key)
@@ -11394,7 +11529,7 @@ pub fn store_html(
     // them as raw strings copied a note whose length grows with the instrument
     // set, once per request; the prepared line is what the page draws and is
     // bounded. D-0130.
-    notes.extend_from(&site.read.notes_view);
+    notes.extend_from(&site.universe().read.notes_view);
     (
         axum::http::StatusCode::OK,
         render::store_page(&render::StoreView {
@@ -12866,8 +13001,8 @@ async fn run_in_over(
                 // D-0026 applied this to `report` and not to `serve`; this is
                 // the other half of it. The word is `Read::status`'s own, so
                 // the banner, `/health` and the exit code cannot disagree.
-                let universe = site.read.status();
-                let clean = announce_universe(&site.read);
+                let universe = site.universe().read.status();
+                let clean = announce_universe(&site.universe().read);
                 // THE BANNER NAMES THE STATE IT IS IN, NOT THE ONE IT WOULD BE
                 // IN IF THE OPERATOR HAD OPTED IN.
                 //
@@ -16132,7 +16267,7 @@ mod tests {
         // proves them without gaining a row. The two numbers that are NOT one
         // are the ones a mutant would have to move.
         assert_eq!(
-            built.targets,
+            built.universe().targets,
             [1, 2, 1, 1, 1, 1, 1, 2, 3],
             "one swept, two index series, one Total Market constituent, \
              RELIANCE once in each of the 500, 200, 100 and 50, TWO F&O \
@@ -16344,7 +16479,7 @@ mod tests {
         let site = site("nomasters", &empty);
         assert_eq!(site.series.len(), 2, "the engine surface, exactly");
         assert_eq!(
-            site.targets,
+            site.universe().targets,
             [0; ingest::SpotTarget::ALL.len()],
             "and no target has members — all seven, sized off the enum so an \
              eighth cannot be forgotten here"
@@ -18361,6 +18496,7 @@ mod tests {
 
         let shipped = json.matches(r#""symbol":"#).count();
         let tracked = site
+            .universe()
             .read
             .merged
             .by_key
@@ -18374,7 +18510,7 @@ mod tests {
              master, which is what shipped 2,780 rows behind a page saying 785"
         );
         assert!(
-            shipped <= site.read.merged.by_key.len(),
+            shipped <= site.universe().read.merged.by_key.len(),
             "and it cannot exceed the master it is drawn from"
         );
 
@@ -20741,7 +20877,7 @@ mod tests {
         );
         let site = Site::serving(&dir, &store_root("emit-refused"));
         assert_eq!(
-            site.read.merged.by_key.len(),
+            site.universe().read.merged.by_key.len(),
             1,
             "the premise: the loop under test runs exactly once"
         );
@@ -20868,7 +21004,7 @@ mod tests {
         let empty = masters("emit-run", None, None);
         let site = Site::serving(&empty, &store_root("emit-run"));
         assert!(
-            site.read.merged.by_key.is_empty(),
+            site.universe().read.merged.by_key.is_empty(),
             "the premise: no instrument, so nothing is asked of any vendor"
         );
         let asked = ingest::parse_spot(
@@ -22410,25 +22546,53 @@ pub async fn universe_resolve(
 
     // THE MASTER IS THE ONE ALREADY READ, not one fetched here. See this
     // function's own documentation on why a broker request is a separate act.
-    let master: Vec<pull::universe::VendorInstrument<'_>> = site
-        .read
-        .merged
-        .by_key
+    // COPIED OUT, AND THE GUARD RELEASED BEFORE THE CRAWL.
+    //
+    // This function awaits ~150 HTTP requests further down, and a
+    // `RwLockReadGuard` held across an `.await` makes the whole future `!Send`
+    // — axum refuses the handler at compile time, which is the compiler
+    // catching a real hazard rather than a nuisance: a reader held for the
+    // length of a network crawl would block the operator's next masters
+    // refresh for minutes.
+    //
+    // The inner scope is what guarantees the release. Owning three short
+    // strings per instrument costs one allocation each over a bounded set and
+    // is the price of not holding a lock across the network.
+    let owned: Vec<(String, String, String)> = {
+        let held = site.universe();
+        held.read
+            .merged
+            .by_key
+            .iter()
+            .filter_map(|(key, entry)| {
+                entry
+                    .ids
+                    .get(vendor as usize)
+                    .and_then(Option::as_ref)
+                    .map(|id| {
+                        (
+                            id.as_str().to_owned(),
+                            key.underlying.as_str().to_owned(),
+                            // THE ISIN IS OPTIONAL AND ITS ABSENCE IS A REAL
+                            // STATE, not a gap to paper over: an index has
+                            // none, and `Verdict::VendorHasNoIsin` is the
+                            // bucket that exists to say so without blaming the
+                            // vendor.
+                            entry
+                                .isin
+                                .as_ref()
+                                .map_or_else(String::new, |(_, isin)| isin.as_str().to_owned()),
+                        )
+                    })
+            })
+            .collect()
+    };
+    let master: Vec<pull::universe::VendorInstrument<'_>> = owned
         .iter()
-        .filter_map(|(key, entry)| {
-            entry
-                .ids
-                .get(vendor as usize)
-                .and_then(Option::as_ref)
-                .map(|id| pull::universe::VendorInstrument {
-                    vendor_id: id.as_str(),
-                    trading_symbol: key.underlying.as_str(),
-                    // THE ISIN IS OPTIONAL AND ITS ABSENCE IS A REAL STATE, not
-                    // a gap to paper over: an index has none, and
-                    // `Verdict::VendorHasNoIsin` is the bucket that exists to
-                    // say so without blaming the vendor.
-                    isin: entry.isin.as_ref().map_or("", |(_, isin)| isin.as_str()),
-                })
+        .map(|(id, symbol, isin)| pull::universe::VendorInstrument {
+            vendor_id: id,
+            trading_symbol: symbol,
+            isin,
         })
         .collect();
 
@@ -22589,8 +22753,15 @@ mod universe_route_tests {
             .1;
         let body = &body[..body.find("\n}\n").expect("it has an end")];
 
+        // THE UNIVERSE ALREADY IN MEMORY, whatever shape the access takes.
+        // This used to pin an exact indentation — `.read\n        .merged` —
+        // which broke the moment the guard was bound in an inner scope, and
+        // the property it checks had not changed at all. `site.universe()` is
+        // the whole signal: the handler reads the parsed site rather than
+        // opening a socket to a vendor, and the forbidden list below is what
+        // proves the second half.
         assert!(
-            body.contains("site.read.merged.by_key") || body.contains(".read\n        .merged"),
+            body.contains("site.universe()"),
             "the master is the one already in memory"
         );
         for forbidden in [
@@ -22789,7 +22960,10 @@ async fn indexmap_json(
             );
         }
     };
-    let symbols: Vec<&str> = site
+    // BOUND, for the reason above: these are borrowed `&str`s into the
+    // universe, not owned copies of it.
+    let held = site.universe();
+    let symbols: Vec<&str> = held
         .read
         .merged
         .by_key

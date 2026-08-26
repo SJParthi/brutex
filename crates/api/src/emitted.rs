@@ -202,7 +202,7 @@ struct Case {
 ///
 /// Twenty-one since D-0297 added the commit gate's refusal — the arm every
 /// server built without `BRUTEX_COMMIT` takes on every press.
-const ROWS: usize = 25;
+const ROWS: usize = 26;
 
 /// How many distinct production emit sites those rows cover.
 ///
@@ -908,6 +908,40 @@ fn cases() -> Vec<Case> {
         });
     }
 
+    // crates/api/src/mastersrun.rs — the reload that makes a refresh mean
+    // something. Before it, four files landed and every page kept answering
+    // from the boot parse.
+    //
+    // Driven over an empty directory against a site whose universe is ALSO
+    // empty: `Site::reparse` declines only when swapping in nothing would LOSE
+    // instruments, so with nothing to lose this reaches the success arm and
+    // opens no socket.
+    {
+        let dir = fixture("emit-reload");
+        cases.push(Case {
+            site: "mastersrun.rs api.masters.reload",
+            target: "api.masters.reload",
+            message: "the universe was re-parsed and every page now answers from it",
+            level: telemetry::Level::Info,
+            drive: {
+                let dir = dir.clone();
+                Box::new(move || {
+                    let site = crate::server::Site::new(
+                        crate::server::universe(&dir),
+                        Vec::new(),
+                        crate::scratch::path("emit-reload-store"),
+                    );
+                    let loaded: crate::server::Loaded = std::sync::Arc::new(site);
+                    assert!(
+                        crate::mastersrun::reload(&loaded, &dir).is_ok(),
+                        "an empty universe replacing an empty one loses nothing"
+                    );
+                })
+            },
+            mine: Box::new(|record| record.field("detail").is_some()),
+        });
+    }
+
     cases
 }
 
@@ -1438,7 +1472,7 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // exactly what `cargo test` is and the row costs nothing to reach.
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 47,
+        lib_sites, 48,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"

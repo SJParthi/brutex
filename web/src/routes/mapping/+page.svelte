@@ -87,8 +87,8 @@
      spends the shared vendor credential.
      ==================================================================== */
 
-  /** @type {{ phase: 'idle'|'running'|'done', rows: any[], why: string, restart: boolean }} */
-  let masters = $state({ phase: 'idle', rows: [], why: '', restart: false });
+  /** @type {{ phase: 'idle'|'running'|'done', rows: any[], why: string, restart: boolean, universe: string }} */
+  let masters = $state({ phase: 'idle', rows: [], why: '', restart: false, universe: '' });
 
   /** @type {any[]} */
   let onDisk = $state([]);
@@ -110,7 +110,7 @@
 
   async function refreshMasters() {
     if (masters.phase === 'running') return;
-    masters = { phase: 'running', rows: [], why: '', restart: false };
+    masters = { phase: 'running', rows: [], why: '', restart: false, universe: '' };
     try {
       // A MINUTE AND A HALF, NOT THE DEFAULT FIFTEEN SECONDS. A refused
       // source is retried on a backoff -- 500 ms doubling to a 32 s cap,
@@ -122,8 +122,14 @@
       masters = {
         phase: 'done',
         rows: body.landed ?? [],
-        why: body.refusal ?? '',
-        restart: Boolean(body.restart_required)
+        // A REFUSAL, OR A RELOAD THAT DID NOT HAPPEN. The second is its own
+        // failure and used to be invisible: the files can all land and the
+        // universe still fail to re-parse, and a page reporting only the
+        // downloads would show four green rows over a server still answering
+        // from the boot parse.
+        why: body.refusal ?? (body.reloaded === false ? body.universe : ''),
+        restart: Boolean(body.restart_required),
+        universe: body.reloaded ? (body.universe ?? '') : ''
       };
       await readMasters();
       // AND THE JOIN AGAIN, because the whole point of the refresh is that
@@ -136,7 +142,8 @@
         phase: 'done',
         rows: [],
         why: error instanceof Error ? error.message : 'The refresh threw a value that is not an Error.',
-        restart: false
+        restart: false,
+        universe: ''
       };
     }
   }
@@ -475,9 +482,18 @@
     {/if}
     {#if masters.restart}
       <p class="mrestart">
-        New bytes are on disk. The masters are parsed <b>once, at startup</b>, so every other page is
+        New bytes are on disk and this build could not re-read them in place, so every other page is
         still answering from the boot parse until the server is restarted.
       </p>
+    {:else if masters.universe}
+      <!-- WHAT THE RE-PARSE ACTUALLY READ, per feed. "Reloaded" alone is a
+           claim; `2929 kept, 133802 declined` is the same claim with its
+           working shown -- and it is where `dhan: UNAVAILABLE` appears the
+           moment a master lands that the reader cannot parse. -->
+      <p class="mreload">
+        <b>Re-read in place — no restart needed.</b> Every page now answers from these files.
+      </p>
+      <p class="mnotes">{masters.universe}</p>
     {/if}
   </section>
 </section>
@@ -913,5 +929,25 @@
     border-radius: var(--r1);
     color: var(--n9);
     font-size: 0.82rem;
+  }
+  .mreload {
+    margin: var(--s3) 0 0;
+    padding: var(--s3) var(--s4);
+    border-left: 3px solid var(--up);
+    background: var(--n3);
+    border-radius: var(--r1);
+    color: var(--n9);
+    font-size: 0.82rem;
+  }
+  /* WHAT EACH FEED ACTUALLY PARSED. Monospace because the reader is
+     comparing counts, and this is where `dhan: UNAVAILABLE` shows up
+     the moment a master lands that the reader cannot read. */
+  .mnotes {
+    margin: var(--s2) 0 0;
+    color: var(--n8);
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    line-height: 1.5;
+    word-break: break-word;
   }
 </style>

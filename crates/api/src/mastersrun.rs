@@ -299,6 +299,86 @@ async fn refresh_with<D: Discovery, P: masters::Pause>(
     out
 }
 
+/// Replaces the credentialed rows with what the shared token could fetch.
+///
+/// # Why the credentialed leg is a second pass and not a branch in the first
+///
+/// `may_fetch` refuses to hand a public transport a credentialed source, so the
+/// public pass leaves Zerodha's row `skipped` rather than absent. This pass
+/// fills that row in. Keeping the two apart is what makes the guard checkable:
+/// one transport, one rule, one place it is enforced.
+///
+/// # It runs the same ladder
+///
+/// Zerodha's dump is the one master that costs a shared token, and it was also
+/// the one leg with no retry at all — a single `503` from `api.kite.trade` left
+/// the feed holding every bar in the store on yesterday's file. Nothing about
+/// spending a credential makes a transient failure less transient.
+async fn credentialed_leg<P: masters::Pause>(
+    landed: &mut [(&'static Source, Result<Landed, String>, Fetched)],
+    clock: &P,
+    dir: &Path,
+) {
+    let credentialed = credentialed_zerodha().await;
+    for (source, outcome, tried) in landed.iter_mut() {
+        if !source.needs_token {
+            continue;
+        }
+        match credentialed {
+            Ok(ref wire) => {
+                let (got, steps) = obtain(wire, clock, dir, source).await;
+                *outcome = Ok(got);
+                *tried = steps;
+            }
+            // A CREDENTIAL THAT COULD NOT BE READ IS NOT A LADDER FAILURE.
+            // Nothing was asked, so the ledger stays empty and the reason is
+            // the one the credential read gave.
+            Err(ref why) => {
+                *outcome = Ok(Landed::Refused(why.clone()));
+                *tried = Fetched::default();
+            }
+        }
+    }
+}
+
+/// Re-parses the masters into the live site, and says so in the log.
+///
+/// # This is what makes a refresh mean anything
+///
+/// Without it the four files are new bytes on disk behind an old universe in
+/// memory, and every page keeps answering from the boot parse. `restart_required`
+/// was hardcoded `true` here for two commits — honest, and still the failure
+/// handed back to the operator rather than solved.
+///
+/// # It runs even when a source refused
+///
+/// The others may have landed, and a universe two files newer is strictly
+/// better than one four files older. `Site::reparse` is what refuses to swap in
+/// an EMPTY universe over a working one; this does not second-guess it.
+///
+/// # Errors
+///
+/// Whatever `Site::reparse` refused with, already an operator-readable sentence.
+pub(crate) fn reload(site: &crate::server::Loaded, dir: &Path) -> Result<String, String> {
+    let reloaded = site.reparse(dir);
+    let _ = telemetry::emit_if!(
+        if reloaded.is_ok() {
+            telemetry::Level::Info
+        } else {
+            telemetry::Level::Error
+        },
+        "api.masters.reload",
+        match reloaded {
+            Ok(_) => "the universe was re-parsed and every page now answers from it",
+            Err(_) => "the universe could NOT be re-parsed, so the previous one still stands",
+        },
+        "detail" => telemetry::Value::Str(match reloaded {
+            Ok(ref notes) | Err(ref notes) => notes,
+        }),
+    );
+    reloaded
+}
+
 /// Runs the ladder for one source and lands whatever it brought back.
 ///
 /// # Why landing is here rather than inside `pull::masters::fetch`
@@ -385,10 +465,12 @@ async fn credentialed_zerodha() -> Result<pull::http::HttpSource, String> {
 /// poll and no slot to claim. A route that returned `202` here would invent a
 /// state machine for work that finishes before the response would have.
 pub async fn refresh(
-    // THE SITE IS NOT READ, and that is the point: this route writes files
-    // and never touches the parsed universe. `status_json` is the one that
-    // needs `parsed_at`.
-    axum::extract::State(_site): axum::extract::State<crate::server::Loaded>,
+    // THE SITE IS READ **AND WRITTEN** NOW, which reverses this parameter's
+    // former comment. It used to say *"this route writes files and never
+    // touches the parsed universe"*, and that was the whole defect: an
+    // operator pressed Refresh, four files landed, and every page kept
+    // answering from the boot parse. `Site::reparse` is what closes it.
+    axum::extract::State(site): axum::extract::State<crate::server::Loaded>,
 ) -> (axum::http::StatusCode, JsonHeaders, String) {
     let Ok(dir) = crate::server::masters_dir() else {
         return (
@@ -426,32 +508,8 @@ pub async fn refresh(
     // A failure here is ONE SOURCE'S refusal, not the call's: the three public
     // masters that already landed must not be undone because an AWS identity is
     // missing. `complete` below is what turns it into a non-200.
-    let credentialed = credentialed_zerodha().await;
-    for (source, outcome, tried) in &mut landed {
-        if !source.needs_token {
-            continue;
-        }
-        match credentialed {
-            // THE SAME LADDER, over the credentialed transport. Zerodha's dump
-            // is the one master that costs a shared token, and it was also the
-            // one leg with no retry at all: a single 503 from `api.kite.trade`
-            // left the feed holding every bar in the store on yesterday's file.
-            // Nothing about spending a credential makes a transient failure
-            // less transient.
-            Ok(ref wire) => {
-                let (got, steps) = obtain(wire, &clock, &dir, source).await;
-                *outcome = Ok(got);
-                *tried = steps;
-            }
-            // A CREDENTIAL THAT COULD NOT BE READ IS NOT A LADDER FAILURE.
-            // Nothing was asked, so the ledger stays empty and the reason is
-            // the one the credential read gave.
-            Err(ref why) => {
-                *outcome = Ok(Landed::Refused(why.clone()));
-                *tried = Fetched::default();
-            }
-        }
-    }
+    credentialed_leg(&mut landed, &clock, &dir).await;
+
     // EVERY SOURCE'S OWN STORY, DURABLY. The summary below is three counts,
     // and three counts cannot say which file failed or what the host said.
     for (source, outcome, tried) in &landed {
@@ -526,7 +584,9 @@ pub async fn refresh(
         .map(|source| crate::render::json_string(source.file))
         .collect();
 
-    let status = if attempted_landed && complete {
+    let reloaded = reload(&site, &dir);
+
+    let status = if attempted_landed && complete && reloaded.is_ok() {
         axum::http::StatusCode::OK
     } else {
         axum::http::StatusCode::BAD_GATEWAY
@@ -535,9 +595,13 @@ pub async fn refresh(
         status,
         json_headers(),
         format!(
-            r#"{{"landed":[{}],"attempted_landed":{attempted_landed},"complete":{complete},"missing":[{}],"restart_required":true}}"#,
+            r#"{{"landed":[{}],"attempted_landed":{attempted_landed},"complete":{complete},"missing":[{}],"reloaded":{},"universe":{},"restart_required":false}}"#,
             rows.join(","),
-            missing.join(",")
+            missing.join(","),
+            reloaded.is_ok(),
+            crate::render::json_string(match reloaded {
+                Ok(ref notes) | Err(ref notes) => notes,
+            }),
         ),
     )
 }
@@ -559,7 +623,7 @@ pub async fn status_json(
             r#"{"masters":[],"refusal":"neither BRUTEX_MASTERS nor HOME is set, so the masters directory cannot be found"}"#.to_owned(),
         );
     };
-    let parsed_at = site.parsed_at;
+    let parsed_at = site.universe().at;
 
     let body = status_rows(&dir, parsed_at);
     (axum::http::StatusCode::OK, json_headers(), body)
@@ -942,9 +1006,23 @@ mod tests {
     }
 
     fn a_master() -> String {
-        let mut body = String::from("symbol,name,isin\n");
+        a_master_for(brutex_core::vendor::Vendor::Dhan)
+    }
+
+    /// A body that IS that vendor's master, header and all.
+    ///
+    /// It used to be a fixed `"symbol,name,isin"` — three column names no
+    /// vendor publishes. Every landing test passed on it because `land` only
+    /// checked for a comma; the column guard made it fail, correctly. Built
+    /// from `required_columns` so it cannot drift from what the reader wants.
+    fn a_master_for(vendor: brutex_core::vendor::Vendor) -> String {
+        let columns = masters::required_columns(vendor);
+        let row = vec!["X"; columns.len()].join(",");
+        let mut body = columns.join(",");
+        body.push('\n');
         while body.len() <= masters::MIN_BODY_BYTES {
-            body.push_str("NIFTY,NIFTY 50,INE000000000\n");
+            body.push_str(&row);
+            body.push('\n');
         }
         body
     }
@@ -971,7 +1049,14 @@ mod tests {
                 // The prime is a homepage; anything non-empty will do, and the
                 // ladder never looks at its body.
                 None => "<html></html>".to_owned(),
-                Some(_) => self.body.clone(),
+                // EACH FEED'S OWN HEADER. One body for all three stopped
+                // working when `land` began checking columns, and that is the
+                // guard doing its job: three vendors publish three different
+                // headers, and a fixture that served one to all of them was
+                // proving the landing accepts a file the reader cannot parse.
+                Some(source) => source
+                    .vendor
+                    .map_or_else(|| self.body.clone(), a_master_for),
             })
         }
     }

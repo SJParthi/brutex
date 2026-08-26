@@ -157,6 +157,71 @@ impl Source {
     }
 }
 
+/// Every column the reader will look for in one vendor's master, in order.
+///
+/// # Why this reads `master_columns` instead of listing names here
+///
+/// `core::vendor::MasterColumns` is where each feed's header is declared and
+/// `api::master::Columns::locate` is what fails on a missing one. A second list
+/// in this module would be a copy that must agree with it forever — correct the
+/// day it is written and silently wrong the first time a vendor renames a
+/// field, which is the shape `CLAUDE.md` §5 refuses about the vocabulary table.
+///
+/// An empty declared name means the vendor publishes no such column, and is
+/// skipped for the reason `locate`'s own `maybe` helper exists: looking for a
+/// column named `""` refuses a file that is entirely correct.
+#[must_use]
+pub fn required_columns(vendor: Vendor) -> Vec<&'static str> {
+    let c = vendor.master_columns();
+    let mut out = vec![
+        c.vendor_id,
+        c.exchange,
+        c.segment,
+        c.underlying,
+        c.trading_symbol,
+        c.instrument_type,
+        c.listing_class,
+        c.isin,
+        c.expiry,
+        c.strike,
+    ];
+    if let Some(side) = c.option_side {
+        out.push(side);
+    }
+    out.retain(|name| !name.is_empty());
+    out
+}
+
+/// Which declared columns a header does NOT carry.
+///
+/// # The failure this exists for, which every other guard let through
+///
+/// `land`'s four checks describe the SHAPE of a master — long enough, not JSON
+/// or HTML, first line has a comma, converts if it must. A vendor publishing
+/// **a different, equally well-formed CSV at a neighbouring URL** satisfies all
+/// four. That is not hypothetical: Dhan publishes a compact master and a
+/// detailed one under the same documentation heading, this table pointed at the
+/// compact one, and 26 MB of perfectly valid CSV landed and parsed to nothing.
+/// `/health` said `dhan: UNAVAILABLE — no column "SECURITY_ID"` and every page
+/// reading that feed's universe showed an empty list.
+///
+/// The parse already knew. It knew one layer downstream, after the write, at
+/// the next startup — so the operator learned it from an empty page rather than
+/// from the refresh that caused it. This moves that knowledge to the boundary.
+///
+/// Case-sensitive and whitespace-trimmed, matching `Columns::locate` exactly:
+/// a guard that is more lenient than the reader would pass a file the reader
+/// then refuses, which is worse than no guard at all.
+#[must_use]
+pub fn missing_columns(header: &str, vendor: Vendor) -> Vec<&'static str> {
+    let present: std::collections::HashSet<&str> =
+        header.trim_end().split(',').map(str::trim).collect();
+    required_columns(vendor)
+        .into_iter()
+        .filter(|name| !present.contains(name))
+        .collect()
+}
+
 /// NSE's own index list — the reference every feed is checked against.
 pub const NSE_INDICES_FILE: &str = "nse_indices.csv";
 
@@ -193,7 +258,27 @@ pub const SOURCES: [Source; 4] = [
         shape: Shape::Csv,
         vendor: Some(Vendor::Dhan),
         file: "dhan_scrip.csv",
-        url: "https://images.dhan.co/api-data/api-scrip-master.csv",
+        // THE **DETAILED** MASTER, AND THE COMPACT ONE IS A DIFFERENT FILE.
+        //
+        // This pointed at `api-scrip-master.csv` for two commits and the whole
+        // Dhan universe came back EMPTY: `/health` said `dhan: UNAVAILABLE —
+        // no column "SECURITY_ID"`, `/instruments.json?feed=dhan` answered
+        // `[]`, and every page that reads the merged universe showed nothing
+        // for that feed. The download succeeded, every guard passed, 26 MB
+        // landed — and it was the wrong document.
+        //
+        // `Dhan Docs/19-instruments.md` publishes both under one heading, and
+        // the difference is not cosmetic: the compact file is `SEM_*`-prefixed
+        // and carries no `ISIN`, while `crate::master`'s Dhan reader keys on
+        // `SECURITY_ID` and joins on `ISIN` — the column D-0125 made the join
+        // key at both ends. The compact master cannot satisfy either.
+        //
+        // **A guard that checks shape and not CONTENT cannot catch this**, and
+        // none of the four here could: it is a well-formed CSV of the right
+        // size with a comma in its first line. The parse is what noticed, one
+        // layer downstream, which is why `/health` is a route and not a
+        // reassurance. D-0315.
+        url: "https://images.dhan.co/api-data/api-scrip-master-detailed.csv",
         mirrors: &[],
         prime: None,
         needs_token: false,
@@ -795,6 +880,25 @@ pub fn land(dir: &Path, source: &Source, body: &str) -> Landed {
         ));
     }
 
+    // AND THE COLUMNS THE READER WILL ACTUALLY LOOK FOR. Everything above
+    // describes the shape of a master; this is the first check that asks
+    // whether it is THIS master. See `missing_columns` for the 26 MB of
+    // perfectly valid CSV that made it necessary.
+    if let Some(vendor) = source.vendor {
+        let missing = missing_columns(first, vendor);
+        if !missing.is_empty() {
+            return Landed::Refused(format!(
+                "`{}` answered a CSV that is not {vendor:?}'s master: the reader needs \
+                 {} column(s) the header does not carry — {}. The old file is untouched. \
+                 First line: {}",
+                source.url,
+                missing.len(),
+                missing.join(", "),
+                first.chars().take(120).collect::<String>()
+            ));
+        }
+    }
+
     let target = path_of(dir, source);
     let changed = std::fs::read_to_string(&target).map_or(true, |held| held != body);
     if let Err(why) = std::fs::create_dir_all(dir) {
@@ -1217,10 +1321,49 @@ mod tests {
         dir
     }
 
+    /// A body that is a master for `SOURCES[0]`'s vendor, header included.
+    ///
+    /// It used to be `"symbol,name,isin"` — three invented column names that no
+    /// vendor publishes. Every landing test passed on it, because `land` only
+    /// checked that the first line held a comma. The column guard made that
+    /// fixture fail, correctly: a test whose input the reader could never parse
+    /// was proving that `land` accepts a file the engine cannot use, which is
+    /// the exact defect it was supposed to be guarding.
+    ///
+    /// Built from `required_columns` rather than typed out, for the reason the
+    /// guard reads `master_columns` rather than a second list.
     fn a_master() -> String {
-        let mut body = String::from("symbol,name,isin\n");
+        a_master_for(&SOURCES[0])
+    }
+
+    /// The same, for whichever source a test is landing into.
+    ///
+    /// Three feeds publish three different headers, so one fixture cannot serve
+    /// all of them now that the columns are checked — and a fixture that did
+    /// would be proving the guard is not looking.
+    fn a_master_for(source: &Source) -> String {
+        let Some(vendor) = source.vendor else {
+            return an_index_csv();
+        };
+        let columns = super::required_columns(vendor);
+        let row = vec!["X"; columns.len()].join(",");
+        let mut body = columns.join(",");
+        body.push('\n');
         while body.len() <= MIN_BODY_BYTES {
-            body.push_str("NIFTY,NIFTY 50,INE000000000\n");
+            body.push_str(&row);
+            body.push('\n');
+        }
+        body
+    }
+
+    /// The exchange catalogue's own shape, for the one source with no vendor.
+    fn an_index_csv() -> String {
+        use std::fmt::Write as _;
+        let mut body = String::from("index_name,category\n");
+        let mut n = 0;
+        while body.len() <= MIN_BODY_BYTES {
+            let _ = writeln!(body, "NIFTY TEST {n},Broad Market Indices");
+            n += 1;
         }
         body
     }
@@ -1472,7 +1615,7 @@ mod tests {
         // like a change and teach an operator to ignore the field.
         let dir = scratch("unchanged");
         let source = &SOURCES[1];
-        let body = a_master();
+        let body = a_master_for(source);
 
         let Landed::Written { changed, bytes } = land(&dir, source, &body) else {
             panic!("the first write lands");
@@ -1500,7 +1643,7 @@ mod tests {
         // failed is a master-sized file nothing will ever parse.
         let dir = scratch("no-partial");
         let source = &SOURCES[2];
-        assert!(land(&dir, source, &a_master()).is_written());
+        assert!(land(&dir, source, &a_master_for(source)).is_written());
 
         let leftovers: Vec<String> = std::fs::read_dir(&dir)
             .expect("readable")
@@ -2255,5 +2398,141 @@ mod tests {
             "a category whose value is not a list contributes nothing: {csv}"
         );
         assert_eq!(csv.lines().count(), 3, "header plus two names: {csv}");
+    }
+
+    #[test]
+    fn the_compact_dhan_master_is_refused_because_the_reader_cannot_read_it() {
+        // THE REAL HEADER THAT SHIPPED, copied from the 26 MB file that landed
+        // from `api-scrip-master.csv` and parsed to an empty universe. It is a
+        // well-formed CSV of the right size whose first line carries commas, so
+        // every other guard in `land` passes it.
+        let compact = "SEM_EXM_EXCH_ID,SEM_SEGMENT,SEM_SMST_SECURITY_ID,SEM_INSTRUMENT_NAME,\
+                       SEM_EXPIRY_CODE,SEM_TRADING_SYMBOL,SEM_LOT_UNITS,SEM_CUSTOM_SYMBOL,\
+                       SEM_EXPIRY_DATE,SEM_STRIKE_PRICE,SEM_OPTION_TYPE,SEM_TICK_SIZE,\
+                       SEM_EXPIRY_FLAG,SEM_EXCH_INSTRUMENT_TYPE,SEM_SERIES,SM_SYMBOL_NAME";
+
+        let missing = super::missing_columns(compact, Vendor::Dhan);
+        assert!(
+            missing.contains(&"SECURITY_ID"),
+            "the column `/health` named is the one the guard must miss: {missing:?}"
+        );
+        assert!(
+            missing.contains(&"ISIN"),
+            "and the join key D-0125 made authoritative at both ends: {missing:?}"
+        );
+    }
+
+    #[test]
+    fn a_master_carrying_every_declared_column_is_not_refused() {
+        // THE OTHER DIRECTION, and it is the one that matters more: a guard
+        // that refused a correct file would be worse than none, because it
+        // would block the refresh that fixes everything else.
+        for vendor in [Vendor::Dhan, Vendor::Groww, Vendor::Zerodha] {
+            let header = super::required_columns(vendor).join(",");
+            assert!(
+                super::missing_columns(&header, vendor).is_empty(),
+                "{vendor:?} refuses a header built from its own declaration"
+            );
+            // AND WITH THE WHITESPACE A REAL FILE CARRIES. `Columns::locate`
+            // trims each name, so a guard that did not would refuse a file the
+            // reader accepts -- stricter than the thing it guards, which is its
+            // own kind of wrong.
+            let spaced = super::required_columns(vendor)
+                .iter()
+                .map(|n| format!(" {n} "))
+                .collect::<Vec<_>>()
+                .join(",");
+            assert!(
+                super::missing_columns(&spaced, vendor).is_empty(),
+                "{vendor:?} refuses its own columns with padding"
+            );
+        }
+    }
+
+    #[test]
+    fn the_guard_reads_the_vendors_own_declaration_and_never_a_second_list() {
+        // ONE SOURCE OF TRUTH. If this module listed column names itself, the
+        // list would be correct today and wrong the first time a vendor renamed
+        // a field -- and the symptom would be a refusal on a good file.
+        for vendor in [Vendor::Dhan, Vendor::Groww, Vendor::Zerodha] {
+            let declared = vendor.master_columns();
+            let required = super::required_columns(vendor);
+            assert!(required.contains(&declared.vendor_id), "{vendor:?}");
+            assert!(
+                !required.iter().any(|n| n.is_empty()),
+                "{vendor:?} carries an empty name, which is an ABSENT column and \
+                 not a column named \"\" -- looking for it refuses a correct file"
+            );
+        }
+
+        // ZERODHA PUBLISHES NO `ISIN` AND NO LISTING CLASS, declared as `""`,
+        // and `required_columns` drops both. Without that the guard would
+        // refuse Zerodha's real master -- 8.9 MB of correct file -- for lacking
+        // a column the vendor has never published. Asserted rather than
+        // remembered, because it is the case that makes the skip load-bearing.
+        let zerodha = Vendor::Zerodha.master_columns();
+        assert_eq!(zerodha.isin, "", "the premise of the row below");
+        assert!(
+            !super::required_columns(Vendor::Zerodha).contains(&""),
+            "an absent column must not become a required one"
+        );
+        assert!(
+            super::missing_columns(
+                "instrument_token,exchange_token,tradingsymbol,name,last_price,expiry,\
+                 strike,tick_size,lot_size,instrument_type,segment,exchange",
+                Vendor::Zerodha
+            )
+            .is_empty(),
+            "Zerodha's real published header must pass"
+        );
+    }
+
+    #[test]
+    fn a_wrong_but_well_formed_master_leaves_the_good_one_on_disk() {
+        // THE PROPERTY THAT MAKES THIS SAFE TO PRESS. A refresh that fetched
+        // the wrong document must not destroy the working master, or one bad
+        // URL costs an operator the file they had.
+        let dir = scratch("wrong-shape");
+        let source = &SOURCES[0];
+        let good = {
+            let mut body = super::required_columns(Vendor::Dhan).join(",");
+            body.push('\n');
+            while body.len() <= MIN_BODY_BYTES {
+                body.push_str("NSE,E,INE002A01018,EQUITY,RELIANCE,RELIANCE,ES,EQ,,,,1333\n");
+            }
+            body
+        };
+        assert!(
+            land(&dir, source, &good).is_written(),
+            "the right shape lands"
+        );
+
+        let mut wrong = String::from("SEM_EXM_EXCH_ID,SEM_SEGMENT,SEM_SMST_SECURITY_ID\n");
+        while wrong.len() <= MIN_BODY_BYTES {
+            wrong.push_str("NSE,E,1333\n");
+        }
+        let landed = land(&dir, source, &wrong);
+        let Landed::Refused(ref why) = landed else {
+            unreachable!("a master the reader cannot read must not be written")
+        };
+        assert!(why.contains("SECURITY_ID"), "names a missing column: {why}");
+        assert!(why.contains("old file is untouched"), "{why}");
+
+        let held = std::fs::read_to_string(path_of(&dir, source)).expect("still readable");
+        assert_eq!(held, good, "the good master survived the bad refresh");
+    }
+
+    #[test]
+    fn the_index_list_has_no_vendor_and_is_not_column_checked() {
+        // THE EXCHANGE'S CATALOGUE CARRIES NO `Vendor`, because it is not a
+        // feed's master -- it is what the feeds are checked AGAINST. Its shape
+        // is produced by `nse_index_csv`, which already refuses four ways, so
+        // there is no vendor declaration to check it against and none is
+        // invented.
+        let source = SOURCES
+            .iter()
+            .find(|s| s.file == NSE_INDICES_FILE)
+            .expect("the index source");
+        assert_eq!(source.vendor, None);
     }
 }
