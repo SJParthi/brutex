@@ -5070,7 +5070,7 @@ fn policy_of(
     rules: Rules,
     lens: runner::rank::Lens,
     validate: bool,
-) -> [u64; 5] {
+) -> [u64; 6] {
     [
         // Negative is not expected and is not silently folded to zero: the cast
         // is saturating so a negative rule still differs from an absent one.
@@ -5082,6 +5082,28 @@ fn policy_of(
         grid_rungs(bars) as u64,
         screen_cap() as u64,
         u64::from(validate),
+        // THE SIXTH, AND IT MOVES MORE THAN THE OTHER FIVE.
+        //
+        // `BRUTEX_CEILING` decides how far the ladder is allowed to WALK before
+        // it halts. D-0294 folded four knobs in on the principle that "an
+        // identity two different results can share is not an identity", and
+        // missed this one -- which is the knob that decides whether a run
+        // explored the combination space at all.
+        //
+        // Two runs at different ceilings are not two views of one answer: one
+        // is exhaustive and one stopped early with `complete = NO` and a depth
+        // that is "as far as the ladder got, not as far as it goes". Under one
+        // identity the results ledger refuses the second as a duplicate, so the
+        // halted run is dropped for the exhaustive one or the exhaustive one is
+        // answered with the halted one's row -- and both readings are wrong.
+        //
+        // Read through the same `ceiling_from_env` the ladder is built with, so
+        // a malformed value cannot key one thing and sweep another. Its refusal
+        // is not raised here: this function has no error channel and the ladder
+        // construction that does refuses first, before any bar is read.
+        // `u64::MAX` marks that unreadable case distinctly rather than folding
+        // it to the default's key. D-0305.
+        ceiling_from_env().map_or(u64::MAX, |ceiling| ceiling as u64),
     ]
 }
 
@@ -9574,10 +9596,32 @@ mod tests {
         // length first precisely so adding one re-keys.
         assert_eq!(
             start.len(),
-            5,
-            "five choices are folded in. If this moved, `policy_of`'s doc table \
+            6,
+            "six choices are folded in. If this moved, `policy_of`'s doc table \
              and the append-never-insert rule both need reading before the number \
              is changed"
+        );
+
+        // THE SIXTH IS THE ONE D-0294 MISSED, and it is the knob that decides
+        // whether the ladder explored the space at all.
+        //
+        // `BRUTEX_CEILING` is process-wide, so a test cannot set it without
+        // changing it under every other test in this binary running in
+        // parallel -- the same reason `root_from` exists beside `store_root`.
+        // What IS assertable without touching the environment is that the
+        // ceiling reaches the slice at all: fold the same inputs and require
+        // the last term to be the ceiling the ladder would actually be built
+        // with. A knob hashed as a constant would pass every `assert_ne` above
+        // and fail here.
+        let expected = crate::ceiling_from_env().map_or(u64::MAX, |ceiling| ceiling as u64);
+        assert_eq!(
+            start[5], expected,
+            "the ceiling must reach the identity as the value the ladder uses, \
+             not as a constant standing in for it"
+        );
+        assert_ne!(
+            start[5], 0,
+            "a ceiling folded in as zero is a knob hashed as an absence"
         );
     }
 

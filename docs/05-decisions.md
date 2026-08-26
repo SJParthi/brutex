@@ -22832,3 +22832,55 @@ invents:
 
 **What is fixed here** is the arithmetic and the silence: the factor was wrong
 by two, and nothing said that no caller sets the ceiling.
+
+### D-0305 — a sixth knob, and a correction to D-0304
+
+**Decision.** `policy_of` folds a sixth value into the run identity: the ladder
+ceiling, read through the same `ceiling_from_env` the ladder is built with.
+
+**D-0304 IS WRONG ON ONE POINT AND THIS CORRECTS IT.** It said *"nothing in
+production can move it — `Ladder::with_ceiling` is called from runner's tests,
+runner's bench and nowhere else."* That is false. `cli::ladder_within` calls
+`with_ceiling(ceiling_from_env()?)` and **every** `Ladder::with_min_hits` site in
+that crate goes through it, by its own doc: *"so the ceiling cannot be set on one
+command and forgotten on another."* `BRUTEX_CEILING` sets it. The grep behind
+D-0304 searched `with_ceiling(` and read the hits as tests without following
+`ladder_within`, which is the same mistake as trusting a document — reading a
+name instead of the path.
+
+What survives from D-0304 is the rest: the arithmetic really was wrong by two,
+the pair budget really cannot fire at the defaults, and the DEFAULT really is
+sized against *"a 48 GB machine"* — so a run on any other machine walks a ladder
+bounded by an assumption about somebody else's hardware unless the operator
+knows to set the variable.
+
+**The defect this entry fixes is worse than the one it corrects.** D-0294 folded
+four knobs into the identity on the principle that *"an identity two different
+results can share is not an identity"*, and listed `BRUTEX_GRID_RUNGS` and
+`BRUTEX_SCREEN_CAP` among them. It missed `BRUTEX_CEILING` — **the knob that
+decides whether the run explored the combination space at all.**
+
+Two runs at different ceilings are not two views of one answer. One is
+exhaustive; the other stopped early, reports `complete = NO`, and carries a
+depth that `range_all`'s own column calls *"as far as the ladder got, not as far
+as it goes"*. Under one identity the results ledger refuses the second as a
+duplicate — so a halted run is dropped in favour of an exhaustive one, or an
+exhaustive question is answered with a halted run's row. **Both readings are
+wrong and neither is visible.**
+
+**Appended, never inserted**, per D-0294's own rule: `with_policy` folds the
+slice length first, so this re-keys every prior run — honest, because those runs
+were computed by a build that could not turn this knob.
+
+**`u64::MAX` for an unreadable value, not the default's key.** `policy_of` has
+no error channel; the ladder construction that does refuses first, before any bar
+is read, so this arm is unreachable in a run that proceeds. Folding a malformed
+`BRUTEX_CEILING` to the same key as an absent one would make two different
+process states one identity, which is the defect being fixed.
+
+**Why the test asserts the value and not a difference.** `BRUTEX_CEILING` is
+process-wide, so setting it in a test changes it under every other test in the
+binary running in parallel — the reason `root_from` exists beside `store_root`.
+What is assertable without touching the environment is that the ceiling reaches
+the slice **as the value the ladder uses**: a knob hashed as a constant would
+pass every `assert_ne` in the roll-call and fail that one.
