@@ -6772,7 +6772,7 @@ async fn read_credential(
 /// shape of the code and no bench in this workspace times it.
 /// `CLAUDE.md` §3 rule 6: a structural argument is not a
 /// measurement, however sound it is.
-async fn credentialed_source(
+pub(crate) async fn credentialed_source(
     feed: pull::vendor::Feed,
     spec: &pull::vendor::HttpSpec,
 ) -> Result<(pull::http::HttpSource, brutex_core::vendor::Vendor), String> {
@@ -11856,6 +11856,19 @@ pub fn router_serving(site: Loaded, assets: std::sync::Arc<assets::Assets>) -> a
         .route(
             "/engine/top.json",
             axum::routing::get(crate::sweeprun::top_json),
+        )
+        // THE MASTERS, SEPARATE FROM THE BARS. `/pull/*` spends the vendor's
+        // quota per instrument-month; this moves four files, three of them free
+        // public CDN downloads. `Site::load` parses them once at startup with
+        // no reload path, so the status route answers whether a restart is
+        // required rather than pretending one is not. D-0308.
+        .route(
+            "/masters/refresh",
+            axum::routing::post(crate::mastersrun::refresh),
+        )
+        .route(
+            "/masters/status.json",
+            axum::routing::get(crate::mastersrun::status_json),
         )
         .route(
             "/backtest/run.json",
