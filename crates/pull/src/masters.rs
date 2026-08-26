@@ -123,6 +123,57 @@ pub const SOURCES: [Source; 4] = [
     },
 ];
 
+/// Which kind of transport a fetch is going out on.
+///
+/// # A credential must never travel to a host that did not issue it
+///
+/// `HttpSource`'s `Discovery::get` attaches the vendor's auth header to
+/// **every** URL it is handed — `let (name, value) = self.header();` then
+/// `builder.header(name, value)`. That is right for the vendor's own endpoints
+/// and catastrophic anywhere else: fetching Dhan's public CDN through a
+/// Zerodha-configured source sends the Zerodha token to `images.dhan.co`.
+///
+/// The masters are the one place in this workspace where public URLs and a
+/// credentialed URL sit in one list and get iterated together, so the mistake is
+/// one `for` loop away. [`may_fetch`] makes the pairing a checked fact rather
+/// than a convention.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Transport {
+    /// Sends no credential. The only kind a third-party host may be given.
+    Public,
+    /// Carries the vendor's auth header on every request it makes.
+    Credentialed,
+}
+
+/// Whether this source may be fetched over this transport.
+///
+/// # Errors
+///
+/// A sentence naming the host, in both directions:
+///
+/// * a public source over a credentialed transport — **a credential leak**, and
+///   the reason this function exists;
+/// * a credentialed source over a public one — a guaranteed `401`, refused here
+///   with the cause rather than at the vendor with a status.
+pub fn may_fetch(source: &Source, via: Transport) -> Result<(), String> {
+    match (source.needs_token, via) {
+        (false, Transport::Credentialed) => Err(format!(
+            "`{}` is a public file and this transport attaches a vendor \
+             credential to every request. Sending it would hand that credential \
+             to a host that did not issue it. Fetch public sources over \
+             Transport::Public.",
+            source.url
+        )),
+        (true, Transport::Public) => Err(format!(
+            "`{}` is behind the vendor's token and this transport sends none, \
+             so the vendor would answer 401. Fetch it over \
+             Transport::Credentialed.",
+            source.url
+        )),
+        (false, Transport::Public) | (true, Transport::Credentialed) => Ok(()),
+    }
+}
+
 /// What happened to one master.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Landed {
@@ -232,13 +283,11 @@ pub fn land(dir: &Path, source: &Source, body: &str) -> Landed {
 }
 
 /// The sources a caller may fetch without spending the shared credential.
-#[must_use]
 pub fn free_sources() -> impl Iterator<Item = &'static Source> {
     SOURCES.iter().filter(|source| !source.needs_token)
 }
 
 /// The sources that spend it.
-#[must_use]
 pub fn token_sources() -> impl Iterator<Item = &'static Source> {
     SOURCES.iter().filter(|source| source.needs_token)
 }
@@ -246,15 +295,14 @@ pub fn token_sources() -> impl Iterator<Item = &'static Source> {
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
-    clippy::unwrap_used,
     clippy::panic,
     reason = "the same exception every test module in this workspace takes: a \
               test that cannot panic cannot fail."
 )]
 mod tests {
     use super::{
-        Landed, MIN_BODY_BYTES, NSE_INDICES_FILE, SOURCES, Source, free_sources, land, path_of,
-        token_sources,
+        Landed, MIN_BODY_BYTES, NSE_INDICES_FILE, SOURCES, Transport, free_sources, land,
+        may_fetch, path_of, token_sources,
     };
     use brutex_core::vendor::Vendor;
 
@@ -423,11 +471,60 @@ mod tests {
     }
 
     #[test]
+    fn a_credential_never_travels_to_a_host_that_did_not_issue_it() {
+        // THE DEFECT THIS MAKES UNREPRESENTABLE. `HttpSource::get` attaches the
+        // vendor's auth header to EVERY url it is handed. The masters are the
+        // one list in this workspace where public urls and a credentialed url
+        // are iterated together, so handing Dhan's CDN to a Zerodha-configured
+        // source -- one `for` loop away -- would put the Zerodha token on
+        // images.dhan.co.
+        for source in SOURCES.iter().filter(|s| !s.needs_token) {
+            let why = may_fetch(source, Transport::Credentialed)
+                .expect_err("a public url must refuse a credentialed transport");
+            assert!(why.contains("did not issue it"), "{why}");
+            assert!(why.contains(source.url), "the host must be named: {why}");
+            may_fetch(source, Transport::Public).expect("public over public is the pairing");
+        }
+    }
+
+    #[test]
+    fn a_credentialed_source_over_a_public_transport_is_refused_with_the_cause() {
+        // The other direction is not a leak, it is a guaranteed 401 -- and
+        // refusing here names the cause, where the vendor would only give a
+        // status an operator has to interpret.
+        for source in SOURCES.iter().filter(|s| s.needs_token) {
+            let why = may_fetch(source, Transport::Public)
+                .expect_err("a token url must refuse a transport that sends none");
+            assert!(why.contains("401"), "{why}");
+            may_fetch(source, Transport::Credentialed).expect("the correct pairing");
+        }
+    }
+
+    #[test]
+    fn every_source_has_exactly_one_transport_that_may_carry_it() {
+        // NO SOURCE IS FETCHABLE BOTH WAYS, and none is fetchable neither way.
+        // A source that accepted both would let the loop pick either; a source
+        // that accepted neither could never be refreshed at all.
+        for source in SOURCES {
+            let ok: Vec<Transport> = [Transport::Public, Transport::Credentialed]
+                .into_iter()
+                .filter(|via| may_fetch(&source, *via).is_ok())
+                .collect();
+            assert_eq!(
+                ok.len(),
+                1,
+                "{} may be fetched over {ok:?}, and exactly one is correct",
+                source.file
+            );
+        }
+    }
+
+    #[test]
     fn two_sources_do_not_share_a_temporary_file() {
         // NAMED FOR THE TARGET. One shared `.partial` would let two concurrent
         // refreshes hand each other's bytes to the rename, and each master
         // would be internally valid and belong to the other feed.
-        let dir = scratch("distinct-temporaries");
+        // No directory needed: the invariant is about NAMES, not files.
         let mut names = std::collections::BTreeSet::new();
         for source in SOURCES {
             assert!(
@@ -437,6 +534,5 @@ mod tests {
             );
         }
         assert_eq!(names.len(), SOURCES.len());
-        let _unused = dir;
     }
 }
