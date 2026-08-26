@@ -1341,6 +1341,17 @@
   const noTrades = $derived(openRun !== null && openRun.trades === 0);
 
   /**
+   * Are the seventeen padlocked metrics expanded?
+   *
+   * Closed by default. The table is a TradingView-parity list and 68% of
+   * its cells are locks; folding them puts the seven rows this engine
+   * actually records where they can be read. The line that replaces them
+   * states the count and the reason, so the fold hides nothing it does
+   * not name.
+   */
+  let showAllMetrics = $state(false);
+
+  /**
    * Open or close a run's drill-down, AND GO TO IT WHEN IT OPENS.
    *
    * MEASURED, WHICH IS THE ONLY REASON THIS IS NOT STILL A ONE-LINER.
@@ -4441,18 +4452,23 @@
                       </thead>
                       <tbody>
                         <tr><td>Total trades</td><td class="n">{exact(openRun.trades)}</td><td class="n"><Lock small why="Direction is one of the nine terms inside the run's identity hash, not a field beside it." /></td><td class="n"><Lock small why="Direction is one of the nine terms inside the run's identity hash, not a field beside it." /></td></tr>
+                        {#if showAllMetrics}
                         <tr><td>Total open trades</td><td class="n"><Lock small why="The sweep closes every position at the span's end; open positions are not recorded." /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         <tr><td>Total winners</td><td class="n"><Lock small why="No win count is recorded." /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         <tr><td>Total losers</td><td class="n"><Lock small why="No loss count is recorded." /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         <tr><td>Percent profitable</td><td class="n"><Lock small why="Cannot be inferred from a net total." /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
+                        {/if}
                         <tr><td>Average PnL</td><td class="n"><span class="tv">{perTrade ? money(perTrade.worst) : "—"}</span><span class="tp">{perTrade && bench.open > 0 ? `${((perTrade.worst / bench.open) * 100).toFixed(2)}%` : ""}</span></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
+                        {#if showAllMetrics}
                         <tr><td>Average profit</td><td class="n"><Lock small why="Needs gross profit and a winner count." /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         <tr><td>Average loss</td><td class="n"><Lock small why="Needs gross loss and a loser count." /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         <tr><td>Average profit / average loss</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         <tr><td>Largest profit</td><td class="n"><Lock small why="Only the worst single trade is kept." /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         <tr><td>Largest profit %</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         <tr><td>Largest profit as % of gross profit</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
+                        {/if}
                         <tr><td>Largest loss</td><td class="n down"><span class="tv">{money(openRun.worst_trade)}</span><span class="tp">{bench.open > 0 ? `${((openRun.worst_trade / bench.open) * 100).toFixed(2)}%` : ""}</span></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
+                        {#if showAllMetrics}
                         <tr><td>Largest loss %</td><td class="n"><Lock small why="Needs the entry price of that trade." /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         <tr><td>Largest loss as % of gross loss</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         <tr><td>Outliers</td><td class="n"><Lock small why="Needs a per-trade list." /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
@@ -4460,10 +4476,41 @@
                         <tr><td>Average bars in trades</td><td class="n"><Lock small why="bars ÷ trades is the average gap BETWEEN trades, a different quantity. Not shown rather than shown wrong." /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         <tr><td>Average bars in winners</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         <tr><td>Average bars in losers</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
+                        {/if}
                         <tr class="own"><td title="MAE — maximum adverse excursion, winners only">How far a winner fell before it paid <span class="tt-own">brutex</span></td><td class="n">{openRun.trades === 0 ? "none" : ppmPct(openRun.winner_mae)}</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         <tr class="own"><td title="MFE — maximum favourable excursion, winners only">How far a winner rose at its best <span class="tt-own">brutex</span></td><td class="n">{openRun.trades === 0 ? "none" : ppmPct(openRun.winner_mfe)}</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         <tr class="own"><td title="MAE — maximum adverse excursion, every trade">How far any trade fell <span class="tt-own">brutex</span></td><td class="n">{openRun.trades === 0 ? "none" : ppmPct(openRun.all_mae)}</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         <tr class="own"><td>Signal bars swept <span class="tt-own">brutex</span></td><td class="n">{exact(openRun.bars)}</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
+                        <!-- SEVENTEEN ROWS OF PADLOCK, BEHIND ONE LINE.
+                             Measured: this table was 24 rows and 96 cells with
+                             **65 of them locked -- 68%** -- 1,406px of panel to
+                             deliver seven real values. Every lock is honest and
+                             carries its own reason, and seventeen of them in a
+                             row is still a wall that hides the seven.
+
+                             They are NOT deleted. §4 bans hiding a fact and
+                             "this metric needs a trade list the sweep does not
+                             keep" IS one -- it is the difference between this
+                             tool and the one it is modelled on. It is one
+                             click away instead of unavoidable, and the line
+                             says how many and why, so nothing is a surprise
+                             behind it. -->
+                        <tr class="tt-more">
+                          <td colspan="4">
+                            <button
+                              class="linky"
+                              aria-expanded={showAllMetrics}
+                              onclick={() => (showAllMetrics = !showAllMetrics)}
+                            >
+                              {showAllMetrics ? 'Hide' : 'Show'} the 17 metrics that need a per-trade
+                              list
+                            </button>
+                            <span class="dim sm">
+                              — the sweep records counts and net totals, never the trades
+                              themselves.
+                            </span>
+                          </td>
+                        </tr>
                       </tbody>
                     </table>
                   </div>
@@ -5176,6 +5223,54 @@
     color: var(--n8);
     padding: 0.3rem 0;
   }
+  /* ==================================================================
+     MOTION — WHERE A FACT MOVED, AND NOWHERE ELSE
+     ------------------------------------------------------------------
+     The page's standing rule is that motion carries meaning. These three
+     are the moments something actually changed:
+
+       · the drill-down panel arriving — a run was opened
+       · a tester tab's body swapping — the content under it changed
+       · the folded metrics unfolding — seventeen rows appeared
+
+     Deliberately NOT animated, and each for a stated reason: numbers do
+     not count up (a figure in motion reads as data still arriving, and
+     every figure here is final the moment it is drawn); nothing has a
+     hover that moves the layout; and no section re-plays its entrance on
+     a re-render, because a page that moves when nothing happened teaches
+     the reader to ignore movement.
+     ================================================================== */
+  /* NO `.drill` ANIMATION HERE — one already exists further down as
+     `drillopen`, and a second would have been a duplicate that lost the
+     cascade anyway. Checked before adding rather than after. */
+  /* The tab bodies are keyed, so this replays on every switch — which is
+     exactly when what is under them became different. Shorter than the
+     panel's own arrival: a swap inside a panel that is already open is a
+     smaller event than the panel opening. */
+  .tester .tt-sec {
+    animation: secin 0.22s ease-out backwards;
+  }
+  @keyframes secin {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+  .tt-more td {
+    padding-top: 0.7rem;
+  }
+  .tt-more button {
+    font-size: var(--fs-mini);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .drill,
+    .tester .tt-sec {
+      animation: none;
+    }
+  }
+
   /* THE COVERAGE SECTION IS GONE, AND SO IS EVERYTHING THAT DRESSED IT.
      `.coverbar*`, `.rungs-head`, `.rungs li`, every `.rungchip*` rule, the
      `rungin` keyframe and this reduced-motion guard over them: all removed
@@ -7203,8 +7298,16 @@
      It is the largest thing on the page and it arrives under a row the
      operator just clicked, so it grows from that direction: down, and
      from slightly behind. */
+  /* `backwards`, NOT `both` — the same fill-mode trap already fixed once on
+     this page. `both` keeps the last keyframe applied after the animation
+     ends, and `transform: none` there RESOLVES to `matrix(1,0,0,1,0,0)`.
+     An identity matrix is still a transform: it leaves `.drill` a
+     containing block and a stacking context permanently, which is exactly
+     what trapped `Picker`'s menu inside `.runbar`. Nothing needs to escape
+     this panel today; it is corrected because the next thing added inside
+     it should not have to discover this. */
   .drill {
-    animation: drillopen 0.42s cubic-bezier(0.22, 0.75, 0.3, 1) both;
+    animation: drillopen 0.42s cubic-bezier(0.22, 0.75, 0.3, 1) backwards;
     transform-origin: top center;
   }
   @keyframes drillopen {
@@ -7948,9 +8051,14 @@
   .tester .tt-v.down {
     color: var(--tv-red);
   }
-  /* The unit suffix: ~10px, uppercase, muted, tight against the number. */
+  /* THE UNIT SUFFIX WAS 10px, which is the size TradingView sets it at
+     and two below the floor `theme.css` raised twice. `POINTS` is a WORD
+     a reader parses, not a glyph, and it sits directly beside the largest
+     number in the panel -- the one place a unit must not be guessed at.
+     The tester keeps TradingView's scale everywhere it is legible; this
+     is the one step of it that was not. */
   .tester .tt-unit {
-    font-size: 10px;
+    font-size: var(--fs-micro);
     color: var(--tv-muted);
     letter-spacing: 0.02em;
     margin-left: 0.1rem;
