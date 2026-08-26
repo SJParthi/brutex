@@ -2594,9 +2594,17 @@
         <span class="coverbar-k">On disk</span>
         <b>{heldNow.leaf}</b>
         <span class="dim sm">{heldNow.full}</span>
-        <span class="dim sm">{heldNow.from} → {heldNow.to}</span>
+        <!-- THE PRODUCT'S MONTH, HERE TOO. This line read `2016-08 → 2026-08`
+             while the form two rows above it read `Aug 2016`, which is the
+             same split this page was just fixed for -- reintroduced by the
+             section that was added to fix it. -->
+        <span class="dim sm">{monthLabel(heldNow.from)} → {monthLabel(heldNow.to)}</span>
         <span class="pill">{exact(heldNow.months)} months</span>
-        <span class="pill">{exact(heldNow.rungs.length)} rungs</span>
+        <!-- NO `n rungs` PILL. The strip directly beneath is that count, named
+             and measured; a pill saying `9 rungs` above nine labelled rungs is
+             the same fact twice, and the second copy reads as a different one
+             the reader then has to reconcile. -->
+
         {#if spanShortfall > 0}
           <span class="pill warn">
             asking for {exact(askedMonths ?? 0)} — {exact(spanShortfall)} fewer than the store holds
@@ -2646,16 +2654,21 @@
           </li>
         {/each}
       </ul>
-      <p class="coverbar-note">
-        Every figure in this bar is folded from <code>/store.json</code>, the same census
-        <code>/db</code> reads — one row per instrument, month and rung. Nothing here is a default
-        written into the page.
+      <!-- TWO SHORT LINES, NOT NINETY WORDS OF GREY.
+           This bar carried three dense paragraphs at 12px, and a wall of small
+           prose above a form is not read -- it is skipped, which makes the
+           facts in it worth nothing. Every sentence that survived is one an
+           operator acts on; the provenance behind each moved to `title`, where
+           the reader who wants it will look and the reader who does not is not
+           charged for it. -->
+      <p
+        class="coverbar-note"
+        title="Folded from /store.json — the census /db reads, one row per instrument, month and rung. Nothing in this bar is a default written into the page. Futures, options and single stocks may be stored and are never swept."
+      >
+        From the census on disk — <b>spot indices only</b>.
         {#if heldNow.rungs.some((r) => r.months < heldNow.months)}
-          A rung marked <b>−n</b> holds fewer months than the instrument does, so a sweep at that
-          rung is a <b>shorter sample</b>, not a corrected one.
+          A rung marked <b>−n</b> is a <b>shorter sample</b>, not a corrected one.
         {/if}
-        <b>Spot indices only</b> for now — futures, options and single stocks may be stored and are
-        never swept.
       </p>
       <!-- THE SURFACE, IN THE SERVER'S WORDS AND NOT THIS PAGE'S. The store
            holds more spot indices than the engine sweeps, and which two are
@@ -2663,13 +2676,14 @@
            `/universes.json`. Printing the server's own sentence means the page
            can say it without holding a copy that goes stale. -->
       {#if sweptSurface && sweptSurface.note}
-        <p class="coverbar-note surface">
-          <span class="pill acc">{sweptSurface.label} · {exact(sweptSurface.matched)}</span>
-          {sweptSurface.note}. The store holds
-          <b>{exact(catalog.held.length)}</b>
-          {catalog.held.length === 1 ? 'spot index' : 'spot indices'}, so a run started on one that
-          is not swept is refused by the route and the refusal is printed above — this page does not
-          decide the surface and does not keep its own list of it.
+        <p
+          class="coverbar-note surface"
+          title="{sweptSurface.note}. Stated by /universes.json, enforced by costs::venue, and CLAUDE.md §1 is where it is decided. This page holds no list of its own — a run on an instrument outside the surface is refused by the route, and the refusal is printed above."
+        >
+          <span class="pill acc">
+            {sweptSurface.label} · {exact(sweptSurface.matched)} of {exact(catalog.held.length)}
+          </span>
+          {sweptSurface.note} — anything else here is refused by the route.
         </p>
       {/if}
     </section>
@@ -4292,12 +4306,30 @@
     min-height: 0;
     overflow-y: auto;
   }
+  /* NO `overflow: hidden`, AND THE RADIUS IS KEPT ANOTHER WAY.
+
+     The shell clipped to its own rounded corners, which is the obvious way
+     to get them and the reason the span menus were cut off at the panel
+     edge: `$lib/Picker.svelte` positions its menu absolutely, and an
+     ancestor that clips clips it too. A menu that is trimmed to the box it
+     opens out of is unusable past the first few rows.
+
+     The corners come from the first and last sections instead, which is
+     where the rounding is actually visible -- the sections between them are
+     square either way. */
   .bt-shell {
     border: 1px solid var(--n6);
     border-radius: 10px;
-    overflow: hidden;
     background: var(--n3);
     box-shadow: var(--e1);
+  }
+  .bt-shell > *:first-child {
+    border-top-left-radius: 9px;
+    border-top-right-radius: 9px;
+  }
+  .bt-shell > *:last-child {
+    border-bottom-left-radius: 9px;
+    border-bottom-right-radius: 9px;
   }
   /* Every direct section of the shell: a hairline below, no border of
      its own, no radius, no shadow, no gap. */
@@ -4738,6 +4770,30 @@
   }
   .coverbar-note b {
     color: var(--n11);
+  }
+  /* THE THREE CONTROLS IN THIS ROW WERE THREE DIFFERENT HEIGHTS AND TWO
+     DIFFERENT FONT SIZES. Measured: the instrument `select.find.sm` at 29px
+     and 12.48px, each span menu's `.pbtn` at 48px and 16px, the Run button
+     at 35px -- bottom-aligned, so their tops staggered across 44px and the
+     row read as three unrelated widgets that happened to be adjacent.
+
+     `Picker` is sized for `/ingest`'s header, where it is the biggest thing
+     on the line. Here it sits beside a small select, so it takes the small
+     control's metrics. `:global` because the button belongs to the child
+     component; the OVERRIDE lives here because the mismatch is a property of
+     this row rather than of `Picker`, which is right as it is where it came
+     from. */
+  .runf :global(.pbtn) {
+    font-size: var(--fs-mini);
+    font-weight: var(--w-mid);
+    border-radius: 6px;
+    padding: 5px 28px 5px 8px;
+    background-position: calc(100% - 14px) 55%, calc(100% - 9px) 55%;
+  }
+  /* Same height as the fields it sits beside, so the row has ONE baseline. */
+  .runbar .btn.run {
+    padding-block: 5px;
+    align-self: flex-end;
   }
   /* The span menus stand in for two text inputs, so the placeholder that
      replaces them while the census loads must hold the same line. */
@@ -5680,11 +5736,31 @@
     box-shadow: 0 2px 10px -4px var(--acc);
   }
 
-  /* ---- the page arrives in reading order --------------------------- */
+  /* ---- the page arrives in reading order ---------------------------
+
+     `backwards` AND NOT `both`, AND THE DIFFERENCE IS A RENDERING BUG.
+
+     With `both` the final keyframe stays applied after the animation ends,
+     and `transform: none` in a keyframe RESOLVES to `matrix(1,0,0,1,0,0)`.
+     An identity matrix is still a transform: it makes the element a
+     containing block and a STACKING CONTEXT, permanently. Measured on
+     `.runbar` after the animation finished: `matrix(1, 0, 0, 1, 0, 0)`.
+
+     Every element in this selector list is a section of the shell, so all
+     three became stacking contexts in DOM order -- and `$lib/Picker.svelte`
+     hangs its menu on `position: absolute; z-index: 40`. Trapped inside
+     `.runbar`'s context, a z-index of 40 cannot lift the menu over
+     `.bt-strip` or `.block`, which paint later. Opening either span menu
+     drew the summary strip THROUGH it.
+
+     `backwards` holds the `from` state through the delay, which is all the
+     fill was ever needed for: the `to` state is the element's own resting
+     style, so there is nothing to hold afterwards. When the animation ends
+     the transform is genuinely `none` and no context is left behind. */
   .runbar,
   .bt-strip,
   .block {
-    animation: pagein 0.45s cubic-bezier(0.22, 0.7, 0.3, 1) both;
+    animation: pagein 0.45s cubic-bezier(0.22, 0.7, 0.3, 1) backwards;
   }
   .runbar {
     animation-delay: 0.02s;
