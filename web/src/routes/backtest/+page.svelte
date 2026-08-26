@@ -2758,9 +2758,16 @@
     {:else if refusal}
       {refusal}
     {:else}
-      {exact(runs.length)} runs shown, {exact(completeRuns.length)} complete, {exact(
+      <!-- "1 runs shown" IS WHAT A SCREEN READER WAS SAYING, and it is the
+           one sentence on this page nobody sighted ever proofreads. The
+           count is announced on every ledger read; a page holding exactly
+           one run announced it ungrammatically every time. The not-swept
+           total is announced too, because a reader who cannot see the strip
+           has no other route to it. -->
+      {exact(runs.length)}
+      {runs.length === 1 ? 'run' : 'runs'} shown, {exact(completeRuns.length)} complete, {exact(
         haltedRuns.length
-      )} halted.
+      )} halted{#if offSurfaceRuns.length > 0}, {exact(offSurfaceRuns.length)} on a timeframe the engine never sweeps{/if}.
       {best ? `Best complete run: ${best.underlying} at the ${best.timeframe} rung.` : 'No complete run to rank.'}
     {/if}
   </p>
@@ -6830,7 +6837,6 @@
   .tt-info {
     background: none;
     border: 0;
-    padding: 0;
     margin-left: 0.3rem;
     line-height: 0;
     color: var(--n8);
@@ -6875,11 +6881,21 @@
     display: flex;
     gap: 0.2rem;
   }
+  /* 24x24 EXACTLY, and it was landing just under. `0.28rem` of padding
+     around a 14px icon measures 23.x and rounds to 24 in a readout while
+     failing the 24x24 floor a pointer target needs. Stating the box
+     removes the arithmetic: `Chart settings`, `Snapshot` and `Expand` are
+     the three, and none of them should be a near-miss. */
   .tt-iconbtn {
     background: transparent;
     border: 0;
     border-radius: 5px;
     padding: 0.28rem;
+    min-width: 24px;
+    min-height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     color: var(--n8);
     cursor: pointer;
     line-height: 0;
@@ -7434,10 +7450,24 @@
   .tt-plotrow.off {
     color: var(--n8);
   }
+  /* CLICK TARGETS, MEASURED. `.tt-info` was **13x13** and `.tt-eye`
+     **14x14** — both under the 24x24 floor a pointer target needs, and
+     these are the two controls that reveal WHY a row is locked and WHICH
+     plot is drawn. A control that explains the page should not be the
+     hardest thing on it to hit.
+
+     The icon keeps its size; the TARGET grows around it with padding and a
+     negative margin, so nothing in the layout moves. `-webkit-tap-highlight`
+     is untouched: this is about the hit box, not about how it flashes. */
+  .tt-info,
+  .tt-eye {
+    padding: 6px;
+    margin: -6px;
+    border-radius: 4px;
+  }
   .tt-eye {
     background: none;
     border: 0;
-    padding: 0;
     line-height: 0;
     color: var(--acc);
     cursor: pointer;
