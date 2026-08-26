@@ -23110,3 +23110,303 @@ wrong document. Both were written from documentation and neither was checked
 against the thing it would actually receive. The defect class is the one this
 session keeps finding — a written claim that does not match reality — and the
 author of the last three entries about it produced two more.
+
+### D-0310 — the exchange's index list is fetched and converted, not waited for
+
+`SOURCES` shipped with three vendor masters and no NSE row. The first version of
+the module pointed the fourth row at `https://www.nseindia.com/api/equity-master`
+and D-0309 removed it, on the reasoning that the endpoint answers **JSON** while
+`api::indexmap::Published::read` parses `index_name,category` rows — a URL
+pointed at the wrong shape, which is exactly the defect D-0309 was written
+about.
+
+**Removing it was the wrong repair, and this entry reverses it.** The endpoint
+carries precisely the two fields the catalogue wants; what differed was the
+container. `{category: [names]}` → `name,category` is a total mapping, and a
+mapping that is total and checkable is a conversion rather than a guess. What
+D-0309 actually established is that a *silent* mismatch is intolerable, not that
+the source is unusable.
+
+`Shape` carries the distinction in the data. `nse_index_csv` performs the
+conversion and refuses rather than emits in four ways — not JSON, not an object,
+no rows at all, or a name or category carrying a comma or newline. That last one
+matters more than it looks: `Published::read` splits on commas and does not
+unquote, so quoting a field would deliver its quotes as part of the name.
+Refusing is the only alternative to corrupting.
+
+`land` converts **before** its guards rather than after, and the order is
+load-bearing. The byte floor, the `{`/`[`/`<` opener check and the first-line
+comma check all describe the CSV the engine reads. Run against the JSON the host
+answers, the opener check would refuse every correct response NSE will ever
+give — a guard rejecting the thing it was written to admit.
+
+#### What is still UNVERIFIED, and is marked so
+
+`www.nseindia.com` is **unreachable from the environment this was built in**;
+`crates/pull/src/calendar.rs` records it in those words — *"the documentation
+fetch timed out and the browser refused the host"*. So the endpoint's real
+response has never been seen from here, the reported requirement that its API be
+reached with a browser agent and a session cookie has not been confirmed from
+here, and neither claim is written down as though it had been. §3 rule 1 asks
+for `UNVERIFIED` and a stop; what is stopped is the *claim*, not the code — the
+handling is written to be correct whether or not the requirement is real, and a
+prime that fails is a row in the ledger rather than a silence. See D-0311.
+
+### D-0311 — a downloader that gives up on the first refusal is a coin toss
+
+`refresh_with` asked each URL **once**. One `503` from a CDN having a bad second,
+one reset socket, one DNS blip, and that master did not refresh — and the answer
+an operator got was a single sentence with no way to tell a host that is down
+from a URL that is wrong.
+
+That is the whole difference between *"it is wired"* and *"it works"*, and it is
+the request this entry answers: whatever the approach, the file has to actually
+arrive.
+
+#### What was added, and why each piece is not optional
+
+**A classifier, because a status is a decision.** `verdict_of` turns the number
+the host answered into `Again`, `Reprime` or `Never`. Retrying everything asks a
+dead credential five times; retrying nothing gives up on every blip. `501` and
+`505` sit *inside* the otherwise-retryable `5xx` range and are named ahead of it,
+because they are statements about what a host can ever do.
+
+**`Reprime` is the third arm and it exists for one shape.** A host gating on a
+session answers `401`/`403` to a first request and answers the *same request*
+once a session exists. By status alone that is permanent; by request it is not,
+because the second request is not the same request. So the ladder refreshes the
+session and asks exactly once more — bounded, because a host that refuses twice
+with a fresh session between them is refusing.
+
+**A bounded, deterministic backoff.** 500 ms doubling to a 32 s cap, five
+attempts per URL. No jitter: §3 rule 5 is idempotence, and jitter would make the
+schedule un-assertable — a test could show that a wait happened but never that
+it was the documented one. Jitter earns its keep against a herd; this is one
+operator refreshing four files in sequence.
+
+**Waiting is a port.** `Pause` is a trait, `Clock` is the real one, and the tests
+supply a fake that records what it was asked to wait and returns immediately.
+Without that seam the schedule would be checkable only by spending it, so nobody
+would check it.
+
+**An attempt ledger, reaching the page.** Every step — which URL, which attempt,
+what was waited, what came back, and what was decided — is a row in
+`/masters/refresh`'s answer. "It failed" is not something an operator can act
+on; *five 503s at the primary* and *one 404* call for opposite responses and
+render identically without this.
+
+**Mirrors, as a mechanism with an empty table.** `Source::mirrors` is `&[]` for
+all four, because §3 rule 1 forbids inventing a vendor fact and a mirror is
+exactly that kind of fact. The mechanism ships so that adding one later is a data
+change rather than a code change on the day a CDN fails.
+
+#### Two things the ladder is not allowed to do
+
+**It does not prime the credentialed source.** A prime is an extra address the
+shared token would travel to, which walks straight around what `may_fetch`
+exists to prevent. `the_credentialed_source_declares_no_prime` pins it.
+
+**It does not follow a redirect while carrying a credential.** `PublicFetch` now
+follows up to five, and `http::HttpSource` still follows none. The paragraph
+that used to justify refusing them here said it was matching `pooled_client` —
+which imported a rule from where it earns its keep to where it does not.
+`pooled_client` declines redirects **because it carries a credential**. This
+client carries none by construction, and what refusing bought here was a CDN
+moving a file behind a `301` reading as a permanent failure on a file one hop
+away.
+
+#### The cookie jar is thirty hand-written lines, and that is deliberate
+
+`reqwest`'s `cookies` feature pulls `cookie_store` → `cookie` → `time`, and
+**`cargo deny check` refused it**: `time 0.3.45` carries a RUSTSEC
+stack-exhaustion advisory, and §9 makes a green `cargo deny` part of done.
+
+An intermediate version of this entry said `time` had been *pinned* to `0.3.47`
+"regardless, because the advisory is real either way". It was pinned, briefly,
+and then the sentence stopped being true: dropping the feature removed `cookie`,
+`cookie_store` and `time` from the graph entirely, cargo re-resolved, and
+`Cargo.lock` came back byte-identical to where it started. **The only manifest
+change this entry leaves is one word — `"time"` added to `tokio`'s feature
+list**, which is what `Clock` needs to sleep.
+
+That is the third claim in this session's work that stopped matching the tree
+between being written and being committed, and all three were caught the same
+way: by running the check rather than by re-reading the sentence.
+
+**A second argument was made for the hand-written jar and it does not hold.**
+`cookie`'s `build.rs` runs `rustc` through `version_check`, and §2 forbids *"any
+`build.rs` that invokes an external process"* without exception — so the feature
+was called a §2 breach, on the precedent that the same clause removed `ring`.
+
+The reading of §2 is right. **The application was selective, and checking it is
+what showed that**: `serde`, `libc`, `proc-macro2`, `quote`, `httparse`, `ahash`
+and `generic-array` all probe `rustc` from their own build scripts, and all
+seven are in this tree and compiled today. A rule that would remove `serde` is
+not a rule this workspace is holding; invoking it against one crate and not the
+others is picking an argument to fit a conclusion, which is the shape this
+repository spends most of its comments refusing.
+
+`ring` is a different case and the precedent does not transfer: it was removed
+for **vendoring 135 C and assembler files and compiling them**, which is §2's
+"vendored binding to another language" — a build script probing `rustc --version`
+is not that. (`ring` remains in `Cargo.lock` as an optional dependency of
+`rustls-webpki`; `cargo tree -i ring --target all` prints nothing, so it is
+locked and not built. That claim was checked rather than assumed.)
+
+`docs/06-limits.md` §96 records the gap so the next reader finds the measurement
+rather than the rule.
+
+The jar is keyed **by host**, which is the security property rather than a
+nicety: a session set by the exchange is presented to the exchange and to
+nothing else. It orders fields through a `BTreeMap` so the same session produces
+a byte-identical request line on every run.
+
+#### A body ceiling, because `text()` has none
+
+`Response::text` reads to the end with no bound. A redirect landing on something
+enormous, a proxy looping, a host streaming without a `Content-Length` — any of
+them grew the process until the allocator refused, and what the operator saw was
+a kill rather than a refusal. The declared length is checked first where there is
+one, and the body is then read chunk by chunk against a 256 MiB ceiling, because
+a declaration is optional and optionally true. The decoded bytes go through
+`String::from_utf8` and not `from_utf8_lossy`: a master with a replacement
+character where a symbol used to be parses cleanly and resolves the wrong
+instrument.
+
+#### One defect the tests found in the ladder itself
+
+`backoff_ms` was written with `checked_shl` and the guard `Some(ms) if ms <=
+MAX_BACKOFF_MS`. **`u64::checked_shl` bounds the shift AMOUNT and says nothing
+about the result**: `500u64.checked_shl(63)` is `Some(0)`, because the shift is
+legal and every set bit has fallen off the top. The guard then accepted `0` as a
+valid backoff — five attempts with no wait between them, hammering a host that
+had just said *not now*, under a comment claiming the opposite. `checked_pow`
+and `checked_mul` bound the value rather than the operation.
+
+#### What remains unmeasured, honestly
+
+`PublicFetch::get` is the socket, and no test here enters it — this repository
+issues no live vendor request. Every decision it makes has been lifted out into
+something that is covered: the classifier, the schedule, the URL walk, the
+prime, the cookie parse, the landing. What is left uncovered is the call itself
+and the four `format!`s around it. `docs/06-limits.md` §95 records it.
+
+### D-0312 — the masters routes were shipped with no way to reach them
+
+D-0308 added `POST /masters/refresh` and `GET /masters/status.json`, and added
+them to no page and no nav. The only person who could refresh a master was one
+who had read `server.rs`'s route table.
+
+That is a defect this repository has already made once and already written down.
+`crate::render::nav`'s own comment, beside the `/logs` row, says it in these
+words: *"`crate::logs` existed before this line did, which made it a page only
+somebody who had read the route table could find — and the operator reaching for
+it is by definition the one who has just had a run fail."* The same sentence
+describes `/masters` exactly: the operator reaching for it is the one who has
+just watched a symbol resolve to a name the exchange does not confirm.
+
+`GET /masters` is that page, and `("/masters", "Masters", true)` is that nav row.
+
+#### It renders in the browser, and that is a decision rather than a habit
+
+A refresh is four network round trips and a refused source is retried on a
+backoff, so it can take a minute. A server-rendered form post would leave the
+operator on a blank tab for all of it and then replace the page with the answer.
+Fetching from the page keeps the four rows visible while they fill in, and gives
+each row somewhere to put its own attempt ledger — which is the half D-0311
+built and had nowhere to show.
+
+The ledger is rendered from the JSON the route already answers rather than
+rendered a second time on the server. Two renderings of one fact that must agree
+forever is the shape `crate::indexmap`'s header refuses, for the reason
+`CLAUDE.md` §5 gives about the vocabulary table: correct the day it is written
+and silently wrong afterwards.
+
+#### What the page must not do, and is pinned not to do
+
+**It fetches nothing on load.** The operator's standing rule is that opening a
+page never spends a vendor request. `status()` runs at load and stats four
+files; `refresh()` is bound to a click and to nothing else, and
+`the_page_fetches_nothing_until_the_button_is_pressed` asserts both halves —
+that the listener exists and that `refresh();` appears nowhere.
+
+**It does not present the free sources and the credentialed one identically.**
+`needs_token` exists to carry that distinction and it now reaches the operator:
+pressing a button that spends a shared credential should not look like pressing
+one that fetches a public CDN file.
+
+**It says a restart is required.** `Site::load` parses the masters once at
+startup and there is no reload path, so new bytes on disk change nothing any
+other page answers. Saying nothing there would be §4's failure wearing a
+success's clothes, and the row and the post-refresh line both say it.
+
+#### One field added while wiring it
+
+`status.json` reported `present` and not *when*. "Present" is not the question a
+stale master raises — a master present and eleven months old parses cleanly and
+resolves every renamed symbol to the old row, which is the entire defect this
+module exists for. `modified_unix_millis` is that field, `null` where there is
+no file rather than a zero that renders as 1970.
+
+### D-0313 — the dependency pin was red for a commit, and nobody ran the suite
+
+`crates/vocab/tests/workspace_is_rust.rs` pins the **whole dependency set** — a
+count and an FNV-1a fingerprint over the sorted package names — precisely so a
+native dependency cannot arrive quietly. Its own message says what to do when it
+goes red: *"Do not update the number without doing the scan; that is how `ring`
+got in."*
+
+`bae4148` added `gzip` to `reqwest`'s feature list, so a vendor serving a
+compressed instrument master would not land as lossy garbage. That was the right
+change. `cargo deny check` was run. **The workspace suite was not**, so ten
+packages entered the lockfile, the pin stayed at 182, and the commit went in with
+this gate failing.
+
+It was found by running `cargo test --workspace` while working on something else
+entirely.
+
+#### The scan the gate demands, run
+
+`adler2`, `async-compression`, `compression-codecs`, `compression-core`,
+`crc32fast`, `flate2`, `futures-sink`, `miniz_oxide`, `simd-adler32`,
+`tokio-util` — ten, matching the delta exactly, which is itself the check that
+nothing else came with them.
+
+**Zero** files matching `.c` `.h` `.S` `.asm` `.cc` `.cpp` `.js` across all ten,
+so `DECLARED` gains nothing. `flate2` is here on its `rust_backend` and
+`miniz_oxide` *is* that backend — a pure-Rust DEFLATE, which is the only reason
+this feature was takeable. Nothing links `zlib`.
+
+One carries a `build.rs`: `crc32fast`, which runs `$RUSTC --version` to decide
+whether the stable ARM CRC32 intrinsics exist. That is the same probe `serde`,
+`libc`, `proc-macro2`, `quote`, `httparse`, `ahash` and `generic-array` already
+run in this tree — see `docs/06-limits.md` §96, which measures the set rather
+than treating this one as an exception.
+
+Pin moved to `192` / `0x354E_E31C_8B93_4AEA`.
+
+#### Two stale claims in the same file, corrected while there
+
+Reading the file to move the pin turned up two sentences that had outlived their
+subject:
+
+* `DECLARED`'s `ring` row still read *"THE OPEN §2 BREACH … `nm` on the release
+  binary returns 72 ring_core symbols, so this is linked, not dormant."* True
+  when written; false since `reqwest` moved to
+  `rustls-tls-webpki-roots-no-provider` and `rustls-graviola` replaced it —
+  **the change recorded twenty lines below it in the same file**. It also
+  contradicted the `compiled_on_this_target: false` in its own struct literal.
+  Re-measured: `cargo tree -i ring --target all` prints nothing. The row stays,
+  because `ring` remains an optional dependency of `rustls-webpki` and the row
+  is what will name it if that feature is ever turned on.
+* The `Declared` doc comment said the walk covered *"all 182 dependency source
+  trees"*, a number that moves every time the pin does. The count now lives only
+  in the assertion, because a number written twice goes stale in one place first.
+
+#### What this says about the process rather than the code
+
+Three entries in this session's work — D-0311, D-0312 and this one — are the
+same shape: **a check that exists, is correct, and was not run.** `cargo deny`
+was run and the suite was not; the ledger was written and then the tree moved
+under it; the routes were built and never reached from a page. None was a design
+error. Each was found by running the thing rather than by reading about it.

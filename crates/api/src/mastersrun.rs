@@ -35,7 +35,7 @@
 use std::path::Path;
 
 use pull::chain::Discovery;
-use pull::masters::{self, Landed, Source, Transport};
+use pull::masters::{self, Fetched, Landed, Source, Transport};
 
 /// The JSON content type every route here answers with.
 type JsonHeaders = [(axum::http::HeaderName, &'static str); 1];
@@ -47,13 +47,63 @@ fn json_headers() -> JsonHeaders {
     )]
 }
 
+/// Every step the ladder took, as the page reads it.
+///
+/// # Why the page gets the whole ledger and not a summary
+///
+/// "It failed" is not something an operator can act on. *Which URL, how many
+/// times, and what the host actually said* are the three questions, and a
+/// refresh that answers a single sentence has thrown all three away. The array
+/// is bounded by the source table — at most `ATTEMPTS_PER_URL` per URL plus two
+/// primes — so it cannot grow with anything the network does.
+fn attempts_json(tried: &Fetched) -> String {
+    let rows: Vec<String> = tried
+        .attempts
+        .iter()
+        .map(|step| {
+            let (got, status, detail) = match &step.got {
+                masters::Got::Primed => ("primed", "null".to_owned(), "null".to_owned()),
+                masters::Got::PrimeRefused { detail } => (
+                    "prime_refused",
+                    "null".to_owned(),
+                    crate::render::json_string(detail),
+                ),
+                masters::Got::Body { bytes } => ("body", bytes.to_string(), "null".to_owned()),
+                masters::Got::Refused {
+                    status,
+                    detail,
+                    verdict,
+                } => (
+                    match verdict {
+                        masters::Verdict::Again => "refused_retrying",
+                        masters::Verdict::Reprime => "refused_repriming",
+                        masters::Verdict::Never => "refused_settled",
+                    },
+                    status.map_or_else(|| "null".to_owned(), |code| code.to_string()),
+                    crate::render::json_string(detail),
+                ),
+            };
+            format!(
+                r#"{{"url":{},"number":{},"waited_ms":{},"got":{},"status":{status},"detail":{detail}}}"#,
+                crate::render::json_string(&step.url),
+                step.number,
+                step.waited_ms,
+                crate::render::json_string(got),
+            )
+        })
+        .collect();
+    format!("[{}]", rows.join(","))
+}
+
 /// One source's outcome, as the page reads it.
-fn outcome_json(source: &Source, landed: &Result<Landed, String>) -> String {
+fn outcome_json(source: &Source, landed: &Result<Landed, String>, tried: &Fetched) -> String {
     let head = format!(
-        r#"{{"file":{},"url":{},"needs_token":{}"#,
+        r#"{{"file":{},"url":{},"needs_token":{},"attempts":{},"waited_ms":{}"#,
         crate::render::json_string(source.file),
         crate::render::json_string(source.url),
-        source.needs_token
+        source.needs_token,
+        attempts_json(tried),
+        tried.waited_ms(),
     );
     match *landed {
         Ok(Landed::Written { bytes, changed }) => format!(
@@ -81,11 +131,12 @@ fn outcome_json(source: &Source, landed: &Result<Landed, String>) -> String {
 /// source handed to a credentialed transport would put the vendor's token on a
 /// host that never issued it — see `pull::masters::Transport` — and a check that
 /// ran after the request would be a check that ran after the leak.
-async fn refresh_with<D: Discovery>(
+async fn refresh_with<D: Discovery, P: masters::Pause>(
     from: &D,
+    clock: &P,
     dir: &Path,
     via: Transport,
-) -> Vec<(&'static Source, Result<Landed, String>)> {
+) -> Vec<(&'static Source, Result<Landed, String>, Fetched)> {
     let mut out = Vec::new();
     for source in &masters::SOURCES {
         // A SKIPPED SOURCE IS A ROW, NOT AN ABSENCE, and the first version of
@@ -101,16 +152,44 @@ async fn refresh_with<D: Discovery>(
         // usually hides: not a refusal reported as a report, but a source
         // reported by not being reported at all.
         if let Err(why) = masters::may_fetch(source, via) {
-            out.push((source, Err(why)));
+            // A SKIPPED SOURCE HAS AN EMPTY LEDGER because nothing was asked.
+            // That is a different fact from "asked and got nothing", and the
+            // page can tell them apart by the array being empty rather than by
+            // reading the sentence.
+            out.push((source, Err(why), Fetched::default()));
         } else {
-            let landed = match from.get(source.url).await {
-                Ok(body) => masters::land(dir, source, &body),
-                Err(refusal) => Landed::Refused(format!("{refusal}")),
-            };
-            out.push((source, Ok(landed)));
+            let (landed, tried) = obtain(from, clock, dir, source).await;
+            out.push((source, Ok(landed), tried));
         }
     }
     out
+}
+
+/// Runs the ladder for one source and lands whatever it brought back.
+///
+/// # Why landing is here rather than inside `pull::masters::fetch`
+///
+/// `fetch` opens no file and `land` opens no socket, and keeping that line
+/// sharp is what lets each be tested against a fake of the other. This is the
+/// one function that has both, and it holds no policy of its own.
+async fn obtain<D: Discovery, P: masters::Pause>(
+    from: &D,
+    clock: &P,
+    dir: &Path,
+    source: &Source,
+) -> (Landed, Fetched) {
+    let tried = masters::fetch(from, clock, source).await;
+    let landed = match tried.body {
+        Some(ref body) => masters::land(dir, source, body),
+        // THE LAST WORD THE HOST SAID, not a summary of the ladder. The full
+        // ledger travels beside this in `attempts`, so the sentence is free to
+        // be the single most useful line rather than a digest of every step.
+        None => Landed::Refused(tried.last_refusal().map_or_else(
+            || format!("`{}` — no URL was reachable", source.url),
+            |why| format!("`{}` — {why}", source.file),
+        )),
+    };
+    (landed, tried)
 }
 
 /// The transport Zerodha's dump requires, or why it cannot be built.
@@ -198,7 +277,8 @@ pub async fn refresh(
         }
     };
 
-    let mut landed = refresh_with(&from, &dir, Transport::Public).await;
+    let clock = masters::Clock;
+    let mut landed = refresh_with(&from, &clock, &dir, Transport::Public).await;
 
     // AND THE CREDENTIALED ONE, because three of four is not the masters.
     //
@@ -213,18 +293,30 @@ pub async fn refresh(
     // masters that already landed must not be undone because an AWS identity is
     // missing. `complete` below is what turns it into a non-200.
     let credentialed = credentialed_zerodha().await;
-    for (index, (source, outcome)) in landed.iter_mut().enumerate() {
-        let _ = index;
+    for (source, outcome, tried) in &mut landed {
         if !source.needs_token {
             continue;
         }
-        *outcome = match credentialed {
-            Ok(ref source_and_wire) => match source_and_wire.get(source.url).await {
-                Ok(body) => Ok(masters::land(&dir, source, &body)),
-                Err(refusal) => Ok(Landed::Refused(format!("{refusal}"))),
-            },
-            Err(ref why) => Ok(Landed::Refused(why.clone())),
-        };
+        match credentialed {
+            // THE SAME LADDER, over the credentialed transport. Zerodha's dump
+            // is the one master that costs a shared token, and it was also the
+            // one leg with no retry at all: a single 503 from `api.kite.trade`
+            // left the feed holding every bar in the store on yesterday's file.
+            // Nothing about spending a credential makes a transient failure
+            // less transient.
+            Ok(ref wire) => {
+                let (got, steps) = obtain(wire, &clock, &dir, source).await;
+                *outcome = Ok(got);
+                *tried = steps;
+            }
+            // A CREDENTIAL THAT COULD NOT BE READ IS NOT A LADDER FAILURE.
+            // Nothing was asked, so the ledger stays empty and the reason is
+            // the one the credential read gave.
+            Err(ref why) => {
+                *outcome = Ok(Landed::Refused(why.clone()));
+                *tried = Fetched::default();
+            }
+        }
     }
     let _ = telemetry::emit_if!(
         telemetry::Level::Info,
@@ -237,18 +329,18 @@ pub async fn refresh(
         "landed" => telemetry::Value::Uint(
             landed
                 .iter()
-                .filter(|(_, l)| matches!(*l, Ok(ref inner) if inner.is_written()))
+                .filter(|(_, l, _)| matches!(*l, Ok(ref inner) if inner.is_written()))
                 .count() as u64
         ),
         "skipped" => telemetry::Value::Uint(
-            landed.iter().filter(|(_, l)| l.is_err()).count() as u64
+            landed.iter().filter(|(_, l, _)| l.is_err()).count() as u64
         ),
         "asked" => telemetry::Value::Uint(landed.len() as u64),
     );
 
     let rows: Vec<String> = landed
         .iter()
-        .map(|(source, l)| outcome_json(source, l))
+        .map(|(source, l, tried)| outcome_json(source, l, tried))
         .collect();
     // ANY REFUSAL MAKES THE WHOLE CALL A REFUSAL. Three of four landing is not
     // a success with a footnote: the universe is merged from all of them, so a
@@ -256,8 +348,8 @@ pub async fn refresh(
     // others, and a green answer would hide that.
     let attempted_landed = landed
         .iter()
-        .filter(|(_, l)| l.is_ok())
-        .all(|(_, l)| matches!(*l, Ok(ref inner) if inner.is_written()));
+        .filter(|(_, l, _)| l.is_ok())
+        .all(|(_, l, _)| matches!(*l, Ok(ref inner) if inner.is_written()));
 
     // AND `complete` IS THE FIELD THAT CANNOT LIE. `attempted_landed` answers
     // "did everything this call tried succeed", which is TRUE on a call that
@@ -308,10 +400,21 @@ pub async fn status_json(
     };
     let parsed_at = site.parsed_at;
 
+    let body = status_rows(&dir, parsed_at);
+    (axum::http::StatusCode::OK, json_headers(), body)
+}
+
+/// The status answer over a directory and a parse time a caller names.
+///
+/// Split out for the reason every other split in this module has: the two
+/// inputs it depends on are a directory and a clock reading, and behind a
+/// handler both are the process's, so nothing could assert what an absent file
+/// or an old file actually renders as.
+fn status_rows(dir: &Path, parsed_at: std::time::SystemTime) -> String {
     let rows: Vec<String> = masters::SOURCES
         .iter()
         .map(|source| {
-            let path = masters::path_of(&dir, source);
+            let path = masters::path_of(dir, source);
             let held = std::fs::metadata(&path).ok();
             let bytes = held.as_ref().map_or(0, std::fs::Metadata::len);
             // NEWER THAN THE PARSE MEANS THE PROCESS IS ANSWERING FROM OLD
@@ -321,8 +424,22 @@ pub async fn status_json(
                 .as_ref()
                 .and_then(|m| m.modified().ok())
                 .is_some_and(|at| at > parsed_at);
+            // WHEN, AND NOT ONLY WHETHER. "Present" says a file exists;
+            // "present, written eleven months ago" is the answer an operator
+            // acts on, and it is the whole reason this module exists — a stale
+            // master parses cleanly and resolves every renamed symbol to the
+            // old row. `null` where there is no file or the platform has no
+            // mtime, never a zero that reads as 1970.
+            let modified = held
+                .as_ref()
+                .and_then(|m| m.modified().ok())
+                .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or_else(
+                    || "null".to_owned(),
+                    |since| since.as_millis().to_string(),
+                );
             format!(
-                r#"{{"file":{},"present":{},"bytes":{bytes},"newer_than_parse":{newer},"needs_token":{}}}"#,
+                r#"{{"file":{},"present":{},"bytes":{bytes},"modified_unix_millis":{modified},"newer_than_parse":{newer},"needs_token":{}}}"#,
                 crate::render::json_string(source.file),
                 held.is_some(),
                 source.needs_token
@@ -333,15 +450,221 @@ pub async fn status_json(
     let any_newer = rows
         .iter()
         .any(|row| row.contains(r#""newer_than_parse":true"#));
-    (
-        axum::http::StatusCode::OK,
-        json_headers(),
-        format!(
-            r#"{{"masters":[{}],"restart_required":{any_newer}}}"#,
-            rows.join(",")
-        ),
+    format!(
+        r#"{{"masters":[{}],"restart_required":{any_newer}}}"#,
+        rows.join(",")
     )
 }
+
+/// `GET /masters` — the page an operator refreshes the masters from.
+///
+/// # Why a page at all, when two JSON routes already existed
+///
+/// Because a route nobody can reach is a route nobody uses. D-0308 shipped
+/// `POST /masters/refresh` and `GET /masters/status.json` and added them to no
+/// nav and no page, so the only person who could refresh a master was one who
+/// had read `server.rs`'s route table — and `crate::logs`' own comment already
+/// names that exact failure: *"a page only somebody who had read the route
+/// table could find"*.
+///
+/// # It renders in the browser rather than on the server, and that is the point
+///
+/// A refresh is four network round trips and can take a minute. A server-side
+/// form post would leave the operator on a blank tab until every one of them
+/// finished, and would then replace the page with the answer. Fetching from the
+/// page keeps the source table visible while it fills in, and lets each row
+/// carry its own attempt ledger — which is the half `POST /masters/refresh` was
+/// built to hand over and had nowhere to put.
+pub async fn page() -> axum::response::Html<String> {
+    axum::response::Html(page_html())
+}
+
+/// The page body, split out so a test can read it without a server.
+fn page_html() -> String {
+    let mut rows = String::new();
+    for source in &masters::SOURCES {
+        let cost = if source.needs_token {
+            "<span class=\"tag tok\">spends the shared token</span>"
+        } else {
+            "<span class=\"tag pub\">public</span>"
+        };
+        let shape = match source.shape {
+            masters::Shape::Csv => "CSV, landed as received",
+            masters::Shape::NseIndexJson => "JSON, converted to index_name,category",
+        };
+        let owner = source.vendor.map_or(
+            "NSE — the reference the feeds are checked against",
+            |v| match v {
+                brutex_core::vendor::Vendor::Dhan => "Dhan",
+                brutex_core::vendor::Vendor::Groww => "Groww",
+                brutex_core::vendor::Vendor::Zerodha => "Zerodha",
+                _ => "another feed",
+            },
+        );
+        let _ = std::fmt::Write::write_fmt(
+            &mut rows,
+            format_args!(
+                "<tr data-file=\"{file}\"><td><b>{file}</b><div class=\"sub\">{owner}</div></td>\
+                 <td class=\"url\">{url}{prime}</td>\
+                 <td>{cost}<div class=\"sub\">{shape}</div></td>\
+                 <td class=\"disk\">—</td>\
+                 <td class=\"out\">not asked yet</td></tr>",
+                file = crate::render::escape(source.file),
+                owner = crate::render::escape(owner),
+                url = crate::render::escape(source.url),
+                prime = source.prime.map_or_else(String::new, |p| format!(
+                    "<div class=\"sub\">session primed at {}</div>",
+                    crate::render::escape(p)
+                )),
+                cost = cost,
+                shape = shape,
+            ),
+        );
+    }
+
+    format!(
+        "<!doctype html><meta charset=\"utf-8\">\
+         <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
+         <title>brutex · masters</title><style>{STYLE}</style>\
+         <h1>Instrument masters</h1>\
+         <p class=\"lead\">Four files. Three vendor masters and the exchange's own index \
+         list, which is what the vendors are checked against. Nothing here touches the \
+         bar store or spends a bar quota — this is <b>not</b> the ingest pull.</p>\
+         <div class=\"bar\">\
+         <button id=\"go\" class=\"go\">Refresh all four</button>\
+         <span id=\"say\" class=\"say\">Reads what is on disk on load. Nothing is fetched \
+         until you press the button.</span></div>\
+         <table><thead><tr><th>File</th><th>Published at</th><th>Cost &amp; shape</th>\
+         <th>On disk</th><th>Last refresh</th></tr></thead><tbody>{rows}</tbody></table>\
+         <div id=\"ledger\"></div>\
+         <p class=\"foot\">A refresh writes new bytes to disk and does <b>not</b> reload the \
+         parsed universe: <code>Site::load</code> parses the masters once, at startup. When a \
+         file changes under a running server this page says a restart is required, because \
+         saying nothing would leave every other page answering from the boot parse with \
+         nothing to indicate it.</p>\
+         <script>{SCRIPT}</script>"
+    )
+}
+
+/// The page's stylesheet.
+///
+/// Its own rather than `render::STYLE`, following `crate::logs`: that constant
+/// styles the marketing-shaped pages and this is a control surface.
+const STYLE: &str = "\
+body{background:#f5f7fb;color:#0a0f1e;font:15px/1.55 ui-sans-serif,-apple-system,system-ui,sans-serif;margin:0;padding:0 0 4rem}\
+@media(prefers-color-scheme:dark){body{background:#060911;color:#e9efff}table,.bar,.att{background:#0e1524}thead th{background:#0e1524}}\
+h1{max-width:1180px;margin:0 auto;padding:2rem 1.25rem .3rem;font-size:1.6rem;letter-spacing:-.5px}\
+.lead,.foot{max-width:1180px;margin:0 auto;padding:.2rem 1.25rem;color:#5a6478;font-size:.9rem}\
+.foot{padding-top:1.4rem}\
+.bar{max-width:1180px;margin:1rem auto;padding:.9rem 1.25rem;display:flex;gap:1rem;align-items:center;\
+flex-wrap:wrap;border:1px solid #e4e9f3;border-radius:12px}\
+.go{font:inherit;font-weight:600;padding:.5rem 1.1rem;border:0;border-radius:8px;background:#1b57ff;color:#fff;cursor:pointer}\
+.go[disabled]{opacity:.5;cursor:progress}\
+.say{color:#5a6478;font-size:.85rem}\
+table{max-width:1180px;margin:0 auto;width:calc(100% - 2.5rem);border-collapse:collapse;\
+border:1px solid #e4e9f3;border-radius:12px;overflow:hidden;font-size:.88rem}\
+th,td{text-align:left;padding:.6rem .8rem;border-bottom:1px solid #e4e9f3;vertical-align:top}\
+thead th{font-size:.68rem;letter-spacing:.09em;text-transform:uppercase;color:#5a6478}\
+.sub{color:#5a6478;font-size:.76rem;margin-top:.15rem}\
+.url{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.78rem;word-break:break-all}\
+.tag{display:inline-block;padding:.1rem .45rem;border-radius:999px;font-size:.7rem;letter-spacing:.04em}\
+.tag.pub{background:#e7f0ff;color:#1b57ff}.tag.tok{background:#fff0e0;color:#a35200}\
+.ok{color:#0a7d3f;font-weight:600}.bad{color:#c02626;font-weight:600}.skip{color:#a35200;font-weight:600}\
+.att{max-width:1180px;margin:1.2rem auto;padding:.9rem 1.25rem;border:1px solid #e4e9f3;border-radius:12px;font-size:.82rem}\
+.att h3{margin:.2rem 0 .6rem;font-size:.95rem}\
+.att ol{margin:0;padding-left:1.3rem}.att li{margin:.2rem 0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.76rem}\
+code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.85em}";
+
+/// The page's script.
+///
+/// # Why the ledger is rendered here and not on the server
+///
+/// The server already emits it as JSON, and rendering it twice — once as HTML
+/// for this page and once as JSON for anything else — is two renderings of one
+/// fact that must agree forever. `crate::indexmap`'s own header refuses that
+/// shape for the same reason. This reads the JSON the route already answers.
+const SCRIPT: &str = r#"
+const say = (t) => { document.getElementById('say').textContent = t; };
+const cell = (file, klass) => document.querySelector(`tr[data-file="${file}"] .${klass}`);
+
+const when = (ms) => ms ? new Date(ms).toLocaleString() : '—';
+
+async function status() {
+  try {
+    const r = await fetch('/masters/status.json');
+    const d = await r.json();
+    for (const m of (d.masters || [])) {
+      const c = cell(m.file, 'disk');
+      if (!c) continue;
+      if (!m.present) { c.innerHTML = '<span class="bad">absent</span>'; continue; }
+      const stale = m.newer_than_parse
+        ? '<div class="sub bad">newer than this server’s parse — restart required</div>'
+        : '';
+      c.innerHTML = `<span class="ok">present</span><div class="sub">${m.bytes} bytes</div>`
+        + `<div class="sub">${when(m.modified_unix_millis)}</div>${stale}`;
+    }
+  } catch (e) { say('Could not read what is on disk: ' + e); }
+}
+
+function ledger(rows) {
+  const box = document.getElementById('ledger');
+  box.innerHTML = '';
+  for (const m of rows) {
+    if (!m.attempts || !m.attempts.length) continue;
+    const el = document.createElement('div');
+    el.className = 'att';
+    const steps = m.attempts.map(a => {
+      const status = a.status === null ? 'no answer' : a.status;
+      const waited = a.waited_ms ? ` after waiting ${a.waited_ms} ms` : '';
+      const why = a.detail ? ` — ${a.detail}` : '';
+      return `<li>#${a.number} ${a.got} (${status})${waited}${why}</li>`;
+    }).join('');
+    el.innerHTML = `<h3>${m.file} — ${m.attempts.length} step(s), `
+      + `${m.waited_ms} ms waited</h3><ol>${steps}</ol>`;
+    box.appendChild(el);
+  }
+}
+
+async function refresh() {
+  const go = document.getElementById('go');
+  go.disabled = true;
+  say('Asking four hosts. A refused source is retried on a backoff, so this can take a minute.');
+  for (const m of document.querySelectorAll('.out')) m.textContent = 'asking…';
+  try {
+    const r = await fetch('/masters/refresh', { method: 'POST' });
+    const d = await r.json();
+    if (d.refusal) { say('Refused before anything was asked: ' + d.refusal); go.disabled = false; return; }
+    const rows = d.landed || [];
+    for (const m of rows) {
+      const c = cell(m.file, 'out');
+      if (!c) continue;
+      if (m.written) {
+        c.innerHTML = `<span class="ok">${m.changed ? 'updated' : 'unchanged'}</span>`
+          + `<div class="sub">${m.bytes} bytes</div>`;
+      } else if (m.skipped) {
+        c.innerHTML = `<span class="skip">skipped</span><div class="sub">${m.refusal || ''}</div>`;
+      } else {
+        c.innerHTML = `<span class="bad">refused</span><div class="sub">${m.refusal || ''}</div>`;
+      }
+    }
+    ledger(rows);
+    const missing = d.missing || [];
+    say(missing.length
+      ? `${missing.length} master(s) still missing: ${missing.join(', ')}.`
+      : (d.restart_required
+          ? 'All four are on disk. Restart the server so the new masters are parsed.'
+          : 'All four are on disk.'));
+    await status();
+  } catch (e) {
+    say('The refresh call itself failed: ' + e);
+  } finally {
+    go.disabled = false;
+  }
+}
+
+document.getElementById('go').addEventListener('click', refresh);
+status();
+"#;
 
 #[cfg(test)]
 #[expect(
@@ -350,7 +673,7 @@ pub async fn status_json(
               test that cannot panic cannot fail."
 )]
 mod tests {
-    use super::{outcome_json, refresh_with};
+    use super::{obtain, outcome_json, refresh_with};
     use pull::chain::{Discovery, Refusal};
     use pull::masters::{self, Landed, Transport};
 
@@ -363,6 +686,18 @@ mod tests {
             .build()
             .expect("a current-thread runtime")
             .block_on(future)
+    }
+
+    /// A clock that does not wait.
+    ///
+    /// The retry ladder's own schedule is asserted where the ladder lives —
+    /// `pull::masters`. These tests are about which SOURCES were asked and what
+    /// reached the page, and paying seven and a half seconds of real backoff per
+    /// refused source to learn that would make them tests nobody runs.
+    struct NoWait;
+
+    impl masters::Pause for NoWait {
+        async fn pause(&self, _ms: u64) {}
     }
 
     fn scratch(name: &str) -> std::path::PathBuf {
@@ -392,8 +727,28 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(url.to_owned());
-            Ok(self.body.clone())
+            // THE SHAPE EACH HOST ACTUALLY ANSWERS WITH. A fake that hands a
+            // CSV to the JSON endpoint is not a lenient fake, it is a test of a
+            // situation that cannot occur — and it would have to be made to
+            // pass by weakening `nse_index_csv`, which is the guard standing
+            // between a malformed answer and a wrong catalogue.
+            Ok(match masters::SOURCES.iter().find(|s| s.url == url) {
+                Some(source) if source.shape == masters::Shape::NseIndexJson => an_index_document(),
+                // The prime is a homepage; anything non-empty will do, and the
+                // ladder never looks at its body.
+                None => "<html></html>".to_owned(),
+                Some(_) => self.body.clone(),
+            })
         }
+    }
+
+    /// An NSE index document large enough to clear the byte floor once it is
+    /// converted to `index_name,category` rows.
+    fn an_index_document() -> String {
+        let names: Vec<String> = (0..80)
+            .map(|n| format!("\"NIFTY TEST INDEX {n}\""))
+            .collect();
+        format!("{{\"Broad Market Indices\":[{}]}}", names.join(","))
     }
 
     #[test]
@@ -408,7 +763,7 @@ mod tests {
             seen: std::sync::Mutex::new(Vec::new()),
         };
 
-        let landed = block_on(refresh_with(&from, &dir, Transport::Public));
+        let landed = block_on(refresh_with(&from, &NoWait, &dir, Transport::Public));
 
         let asked = from
             .seen
@@ -422,16 +777,35 @@ mod tests {
                 source.url
             );
         }
-        assert_eq!(
-            asked.len(),
-            masters::SOURCES.iter().filter(|s| !s.needs_token).count(),
-            "every public source is asked for exactly once: {asked:?}"
-        );
+        // EVERY ADDRESS ASKED BELONGS TO A PUBLIC SOURCE — its URL, one of its
+        // mirrors, or its prime. Counting instead of checking membership was
+        // the earlier version of this assertion, and it broke the moment a
+        // source declared a prime: four requests for three sources looked like
+        // a leak and was a session being established. The count was never the
+        // property worth holding; **whose host was contacted** is.
+        let allowed: Vec<&str> = masters::SOURCES
+            .iter()
+            .filter(|s| !s.needs_token)
+            .flat_map(|s| s.every_url().chain(s.prime))
+            .collect();
+        for url in &asked {
+            assert!(
+                allowed.contains(&url.as_str()),
+                "a public refresh contacted {url}, which no public source names"
+            );
+        }
+        for source in masters::SOURCES.iter().filter(|s| !s.needs_token) {
+            assert!(
+                asked.contains(&source.url.to_owned()),
+                "{} was never asked for at all",
+                source.file
+            );
+        }
         assert!(
             landed
                 .iter()
-                .filter(|(_, l)| l.is_ok())
-                .all(|(_, l)| matches!(*l, Ok(ref inner) if inner.is_written())),
+                .filter(|(_, l, _)| l.is_ok())
+                .all(|(_, l, _)| matches!(*l, Ok(ref inner) if inner.is_written())),
             "every source this transport carried must have landed"
         );
     }
@@ -450,7 +824,7 @@ mod tests {
             seen: std::sync::Mutex::new(Vec::new()),
         };
 
-        let landed = block_on(refresh_with(&from, &dir, Transport::Public));
+        let landed = block_on(refresh_with(&from, &NoWait, &dir, Transport::Public));
 
         assert_eq!(
             landed.len(),
@@ -460,8 +834,8 @@ mod tests {
 
         let skipped: Vec<&str> = landed
             .iter()
-            .filter(|(_, l)| l.is_err())
-            .map(|(source, _)| source.file)
+            .filter(|(_, l, _)| l.is_err())
+            .map(|(source, _, _)| source.file)
             .collect();
         assert_eq!(
             skipped,
@@ -480,8 +854,8 @@ mod tests {
         // and failed", because only one of them is fixed by trying again.
         let row = landed
             .iter()
-            .find(|(source, _)| source.needs_token)
-            .map(|(source, l)| outcome_json(source, l))
+            .find(|(source, _, _)| source.needs_token)
+            .map(|(source, l, tried)| outcome_json(source, l, tried))
             .expect("the skipped row");
         assert!(row.contains(r#""skipped":true"#), "{row}");
         assert!(row.contains(r#""written":false"#), "{row}");
@@ -499,7 +873,7 @@ mod tests {
             }
         }
         let dir = scratch("dead-host");
-        let landed = block_on(refresh_with(&Dead, &dir, Transport::Public));
+        let landed = block_on(refresh_with(&Dead, &NoWait, &dir, Transport::Public));
 
         // EVERY source is a row; the ones this transport carried are the ones
         // that were attempted, and all of them failed against a dead host.
@@ -509,14 +883,14 @@ mod tests {
             "every source is a row"
         );
         assert_eq!(
-            landed.iter().filter(|(_, l)| l.is_ok()).count(),
+            landed.iter().filter(|(_, l, _)| l.is_ok()).count(),
             masters::SOURCES.iter().filter(|s| !s.needs_token).count(),
             "every public source is still attempted"
         );
         assert!(
             !landed
                 .iter()
-                .any(|(_, l)| matches!(*l, Ok(ref inner) if inner.is_written())),
+                .any(|(_, l, _)| matches!(*l, Ok(ref inner) if inner.is_written())),
             "none of them landed"
         );
     }
@@ -527,6 +901,7 @@ mod tests {
         let json = outcome_json(
             source,
             &Ok(Landed::Refused("the host answered 503".to_owned())),
+            &masters::Fetched::default(),
         );
         assert!(json.contains(r#""written":false"#), "{json}");
         assert!(json.contains("503"), "{json}");
@@ -538,9 +913,283 @@ mod tests {
                 bytes: 4_096,
                 changed: false,
             }),
+            &masters::Fetched::default(),
         );
         assert!(written.contains(r#""written":true"#), "{written}");
         assert!(written.contains(r#""changed":false"#), "{written}");
         assert!(written.contains(r#""refusal":null"#), "{written}");
+    }
+
+    #[test]
+    fn the_attempt_ledger_reaches_the_page_with_every_step_named() {
+        // WHICH URL, HOW MANY TIMES, WHAT THE HOST SAID. An operator reading
+        // `"refusal": "..."` alone cannot tell one 503 from five, and the
+        // difference decides whether they retry or go looking at the host.
+        struct Sick;
+        impl Discovery for Sick {
+            async fn get(&self, url: &str) -> Result<String, Refusal> {
+                Err(Refusal::answered(503, format!("{url} answered 503")))
+            }
+        }
+
+        let dir = scratch("ledger");
+        let landed = block_on(refresh_with(&Sick, &NoWait, &dir, Transport::Public));
+
+        let (_, outcome, tried) = landed
+            .iter()
+            .find(|(source, _, _)| source.file == "dhan_scrip.csv")
+            .expect("Dhan is a public source");
+
+        assert_eq!(
+            tried.attempts.len(),
+            masters::ATTEMPTS_PER_URL as usize,
+            "a 503 is retried to the documented ceiling"
+        );
+
+        let json = outcome_json(&masters::SOURCES[0], outcome, tried);
+        assert!(json.contains(r#""refused_retrying""#), "{json}");
+        assert!(json.contains(r#""status":503"#), "{json}");
+        assert!(json.contains(r#""number":5"#), "{json}");
+        assert!(json.contains(r#""waited_ms":4000"#), "the schedule: {json}");
+        assert!(json.contains(r#""written":false"#), "{json}");
+    }
+
+    #[test]
+    fn a_settled_refusal_reaches_the_page_labelled_as_settled() {
+        // THE LABEL IS THE ACTIONABLE HALF. `refused_settled` tells an operator
+        // the URL is wrong; `refused_retrying` tells them the host is sick.
+        // Both render as a red row, and only one of them is worth waiting out.
+        struct Gone;
+        impl Discovery for Gone {
+            async fn get(&self, url: &str) -> Result<String, Refusal> {
+                Err(Refusal::answered(404, format!("{url} answered 404")))
+            }
+        }
+
+        let dir = scratch("settled");
+        let landed = block_on(refresh_with(&Gone, &NoWait, &dir, Transport::Public));
+        let (source, outcome, tried) = landed.first().expect("four sources were walked");
+
+        assert_eq!(tried.attempts.len(), 1, "asked once and believed");
+        let json = outcome_json(source, outcome, tried);
+        assert!(json.contains(r#""refused_settled""#), "{json}");
+        assert!(
+            json.contains(r#""waited_ms":0"#),
+            "nothing was waited: {json}"
+        );
+    }
+
+    #[test]
+    fn a_skipped_source_carries_an_empty_ledger_rather_than_a_missing_one() {
+        // "NOT ASKED" AND "ASKED AND GOT NOTHING" ARE DIFFERENT FACTS, and a
+        // page that cannot tell them apart will show an operator a red row for
+        // a file that a second, credentialed call lands correctly.
+        let dir = scratch("skipped-ledger");
+        let from = Recording {
+            body: a_master(),
+            seen: std::sync::Mutex::new(Vec::new()),
+        };
+        let landed = block_on(refresh_with(&from, &NoWait, &dir, Transport::Public));
+
+        let (source, outcome, tried) = landed
+            .iter()
+            .find(|(source, _, _)| source.needs_token)
+            .expect("Zerodha needs a token and is skipped by a public transport");
+
+        assert!(tried.attempts.is_empty(), "nothing was asked: {tried:?}");
+        let json = outcome_json(source, outcome, tried);
+        assert!(json.contains(r#""skipped":true"#), "{json}");
+        assert!(json.contains(r#""attempts":[]"#), "{json}");
+    }
+
+    #[test]
+    fn a_transient_refusal_on_the_index_source_still_reaches_the_prime() {
+        // THE PRIME IS A ROW IN THE SAME LEDGER, so an operator can see that a
+        // session was established -- or that establishing one is what failed,
+        // which is a different problem with a different fix.
+        let dir = scratch("prime-row");
+        let from = Recording {
+            body: a_master(),
+            seen: std::sync::Mutex::new(Vec::new()),
+        };
+        let landed = block_on(refresh_with(&from, &NoWait, &dir, Transport::Public));
+
+        let (source, outcome, tried) = landed
+            .iter()
+            .find(|(source, _, _)| source.file == masters::NSE_INDICES_FILE)
+            .expect("the index list is a source");
+
+        assert!(
+            tried
+                .attempts
+                .iter()
+                .any(|a| matches!(a.got, masters::Got::Primed)),
+            "the prime is recorded: {tried:?}"
+        );
+        let json = outcome_json(source, outcome, tried);
+        assert!(json.contains(r#""primed""#), "{json}");
+        assert!(json.contains(r#""written":true"#), "and it landed: {json}");
+    }
+
+    #[test]
+    fn obtain_names_the_file_when_no_url_answered_at_all() {
+        // THE `None`-BODY ARM. A ladder that exhausted every URL must still
+        // produce a sentence an operator can read, and `last_refusal` is what
+        // supplies it -- the host's own words rather than a digest.
+        struct Dead;
+        impl Discovery for Dead {
+            async fn get(&self, _url: &str) -> Result<String, Refusal> {
+                Err(Refusal::transport("no route to host".to_owned()))
+            }
+        }
+
+        let dir = scratch("no-answer");
+        let (landed, tried) = block_on(obtain(&Dead, &NoWait, &dir, &masters::SOURCES[0]));
+
+        // AN ASSERTION AND THEN AN `if let`, rather than a `match` with an
+        // `unreachable!` arm. That arm would be a region no run can enter, and
+        // this workspace holds a 100% coverage floor — see `docs/06-limits.md`.
+        assert!(
+            matches!(landed, Landed::Refused(_)),
+            "nothing answered, so nothing can be written: {landed:?}"
+        );
+        if let Landed::Refused(ref why) = landed {
+            assert!(why.contains("dhan_scrip.csv"), "names the file: {why}");
+            assert!(why.contains("no route to host"), "and the cause: {why}");
+        }
+        assert_eq!(tried.attempts.len(), masters::ATTEMPTS_PER_URL as usize);
+    }
+
+    #[test]
+    fn the_page_carries_a_row_for_every_source_and_names_what_each_costs() {
+        // A CONTROL SURFACE THAT LISTS THREE OF FOUR MASTERS IS THE DEFECT THIS
+        // MODULE ALREADY SHIPPED ONCE, moved from the JSON to the page. The
+        // count is asserted against `SOURCES` rather than against `4`, so a
+        // fifth master cannot be added and silently left off the page.
+        let html = super::page_html();
+
+        for source in masters::SOURCES {
+            assert!(
+                html.contains(source.file),
+                "{} has no row on the page",
+                source.file
+            );
+            assert!(
+                html.contains(source.url),
+                "{} does not say where it comes from",
+                source.file
+            );
+        }
+        assert_eq!(
+            html.matches("<tr data-file=").count(),
+            masters::SOURCES.len(),
+            "one row per source, no more and no fewer"
+        );
+    }
+
+    #[test]
+    fn the_page_separates_the_free_sources_from_the_one_that_spends_a_token() {
+        // THE DISTINCTION `needs_token` EXISTS TO CARRY, reaching the operator.
+        // Pressing a button that spends a shared credential should not look
+        // identical to pressing one that fetches a public CDN file.
+        let html = super::page_html();
+        assert_eq!(
+            html.matches("spends the shared token").count(),
+            masters::SOURCES.iter().filter(|s| s.needs_token).count()
+        );
+        assert_eq!(
+            html.matches(r#"class="tag pub""#).count(),
+            masters::SOURCES.iter().filter(|s| !s.needs_token).count()
+        );
+    }
+
+    #[test]
+    fn the_page_says_a_prime_happens_where_one_does() {
+        // AN UNEXPLAINED EXTRA REQUEST IN THE LEDGER READS AS A BUG. Naming the
+        // priming URL on the row is what makes the row above it make sense.
+        let html = super::page_html();
+        for source in masters::SOURCES {
+            if let Some(prime) = source.prime {
+                assert!(
+                    html.contains(prime),
+                    "{} is primed and the page does not say so",
+                    source.file
+                );
+            }
+        }
+        assert_eq!(
+            html.matches("session primed at").count(),
+            masters::SOURCES
+                .iter()
+                .filter(|s| s.prime.is_some())
+                .count()
+        );
+    }
+
+    #[test]
+    fn the_page_fetches_nothing_until_the_button_is_pressed() {
+        // THE OPERATOR'S STANDING RULE: opening a page must not spend a vendor
+        // request. The load path reads `status.json`, which stats four files
+        // and opens no socket; `refresh` is bound to a click and to nothing
+        // else.
+        let html = super::page_html();
+        assert!(
+            html.contains("addEventListener('click', refresh)"),
+            "the refresh is bound to a press"
+        );
+        assert_eq!(
+            html.matches("refresh();").count(),
+            0,
+            "declared, never invoked on load — `function refresh()` does not match"
+        );
+        assert!(
+            html.contains("status();"),
+            "only the disk read runs on load"
+        );
+    }
+
+    #[test]
+    fn the_page_says_a_restart_is_required_rather_than_pretending_otherwise() {
+        // `Site::load` PARSES ONCE AT STARTUP. A page that refreshed the bytes
+        // and said nothing would leave every other page answering from the boot
+        // parse, which is the failure wearing a success's clothes §4 bans.
+        let html = super::page_html();
+        assert!(html.contains("restart is required"), "on the row");
+        assert!(html.contains("Restart the server"), "and after a refresh");
+    }
+
+    #[test]
+    fn the_page_is_reachable_from_the_navigation() {
+        // D-0308 SHIPPED TWO ROUTES AND NO WAY TO REACH EITHER. `crate::logs`
+        // records the identical defect in its own words, one page earlier, so
+        // this one is pinned rather than remembered.
+        let nav = crate::render::dashboard_page("ok", &[], &crate::render::Notes::build(&[]));
+        assert!(
+            nav.contains("href=\"/masters\""),
+            "the masters page is not in the nav"
+        );
+    }
+
+    #[test]
+    fn the_status_answer_carries_when_each_master_was_written() {
+        // "PRESENT" IS NOT THE QUESTION. A master present and eleven months old
+        // parses cleanly and resolves every renamed symbol to the old row,
+        // which is the whole defect this module exists for -- so the age is a
+        // field and not something an operator infers.
+        let dir = scratch("status-mtime");
+        let source = &masters::SOURCES[0];
+        std::fs::write(masters::path_of(&dir, source), a_master()).expect("a master on disk");
+
+        let json = super::status_rows(&dir, std::time::SystemTime::UNIX_EPOCH);
+        assert!(json.contains(r#""modified_unix_millis":"#), "{json}");
+        assert!(
+            !json.contains(r#""modified_unix_millis":null,"newer_than_parse":true"#),
+            "a file that exists must carry a time: {json}"
+        );
+        assert!(
+            json.contains(r#""modified_unix_millis":null"#),
+            "and the three absent ones must carry null rather than a zero \
+             that reads as 1970: {json}"
+        );
     }
 }

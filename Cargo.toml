@@ -98,7 +98,7 @@ blake3   = "1"
 crc32c   = "0.6"
 rayon    = "1"
 tracing  = "0.1"
-tokio    = { version = "1", features = ["rt-multi-thread", "macros", "fs", "signal"] }
+tokio    = { version = "1", features = ["rt-multi-thread", "macros", "fs", "signal", "time"] }
 axum     = "0.8"
 rustls-graviola = "0.4"
 # `gzip` IS FOR ONE ENDPOINT AND IT IS NOT OPTIONAL FOR IT. Zerodha's

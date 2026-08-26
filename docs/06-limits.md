@@ -5634,3 +5634,81 @@ Anyone running this on hardware whose `available_parallelism()` differs
 materially from 14 should check the implied bytes — candidates × 146 — against
 their own RAM, and set `BRUTEX_CEILING` if the proxy is wrong for them. §93
 records why cores are a proxy and where the proxy fails.
+
+### §95 — the masters transport's socket call is uncovered, and cannot be covered here
+
+`crates/pull/src/masters.rs` measures **91.83 % regions / 91.21 % lines**, and
+every uncovered line is inside `impl Discovery for PublicFetch::get` — the
+`send()`, the `Set-Cookie` read, the status check, the two ceiling checks, the
+chunk loop and the UTF-8 decode, plus the `format!`s around them.
+
+**Why it is uncovered.** Entering it means opening a socket to a real host. This
+repository issues no live vendor request from a development session, by a
+standing operator rule; and a test that reached a CDN would be a test whose
+result depends on that CDN's day.
+
+**What was done about it instead.** Every *decision* the function makes has been
+lifted into something a test does enter:
+
+| Decision | Where it is now | Covered by |
+|---|---|---|
+| is this status worth re-asking | `verdict_of` | `every_status_lands_in_the_verdict_its_row_names` |
+| how long to wait | `backoff_ms` | `the_backoff_schedule_is_the_one_documented` |
+| which URL next, how many times | `fetch` | eight ladder tests |
+| what a prime is worth | `fetch` / `prime_now` | four prime tests |
+| what a `Set-Cookie` means | `remember_pairs` | five jar tests |
+| what may be written | `land` | eleven landing tests |
+
+What is left is the call, and the shape of the call is the one thing a fake
+transport can never prove anyway.
+
+**What this therefore does NOT establish**, and no sentence elsewhere should
+imply otherwise: that the four URLs answer, that `www.nseindia.com` accepts this
+client's user agent, or that its API needs the session cookie `Source::prime`
+supplies. The first request from the operator's own machine is the measurement.
+See D-0310 and D-0311.
+
+### §96 — §2's build-script ban is held against this repository and not against its dependencies
+
+`CLAUDE.md` §2 forbids *"any `build.rs` that invokes an external process"* and
+lists it under **"forbidden without exception"**. Two gates enforce it — gate 2
+greps every tracked `build.rs` for `Command::new` and `std::process`, and gate 13
+layer 3 refuses a tracked build script existing at all. **Both read
+`git ls-files`.** Neither has ever looked at a dependency.
+
+**Measured, 2026-08-26**, by walking every package in `Cargo.lock` and grepping
+its vendored build script:
+
+| Package | Spawns |
+|---|---|
+| `serde` `serde_core` | `Command::new` `std::process` |
+| `libc` | `Command::new` `std::process` |
+| `proc-macro2` `quote` | `Command::new` `std::process` |
+| `httparse` | `Command::new` `std::process` |
+| `zmij` `wasm-bindgen-shared` | `Command::new` `std::process` |
+| `crc32fast` `getrandom` `zerocopy` | `Command::new` |
+| `ahash` `generic-array` | `version_check` (which runs `rustc`) |
+
+Almost all of these are the same thing: a probe that runs `rustc --version` to
+decide which language features to enable. `serde` and `libc` are not removable
+from this workspace, so **the ban as written cannot be held at the dependency
+level**, and the sentence in §2 is stronger than the tree.
+
+**Why this is recorded rather than fixed.** A gate banning dependency build
+scripts would fail on `serde`. A gate with an allowlist of the fourteen would
+pass everything on the list forever and say nothing about the fifteenth. Neither
+is worth the ceremony, and inventing a narrower rule here would be `CLAUDE.md`'s
+own warning about a gate that widens the law to match the tree, run in reverse.
+
+**What IS held.** No build script in this repository exists at all (gate 13
+layer 3), so nothing here shells out. No dependency vendors C or assembly and
+compiles it — the case §2's `ring` paragraph is actually about, and the reason
+`graviola` replaced it. Gate 1's extension allowlist refuses a vendored foreign
+source tree in the tracked tree, and `cargo deny`'s `[bans]` list refuses the
+named binding libraries.
+
+**What is not held**: the literal sentence, against dependencies. A reader
+finding a `build.rs` that runs `rustc` in `~/.cargo/registry` has found
+something true and something this workspace already contains fourteen of. See
+D-0311, where that rule was invoked against one crate before it was measured
+against the rest.

@@ -41,9 +41,12 @@ use std::collections::BTreeSet;
 /// Every dependency known to ship non-Rust source, with what it ships and
 /// whether it reaches the shipped binary.
 ///
-/// Produced by walking all 182 dependency source trees in
-/// `~/.cargo/registry/src` on 2026-08-10 and counting files by extension.
-/// **This is a measurement, not a guess.**
+/// Produced by walking every dependency source tree in
+/// `~/.cargo/registry/src` and counting files by extension — 182 of them on
+/// 2026-08-10, and 192 on 2026-08-26 after the `gzip` feature. **This is a
+/// measurement, not a guess.** The count lives in the assertion below rather
+/// than in this sentence, because a number written twice goes stale in one
+/// place first.
 struct Declared {
     name: &'static str,
     ships: &'static str,
@@ -57,8 +60,19 @@ const DECLARED: &[Declared] = &[
         name: "ring",
         ships: "17 .c, 28 .h, 73 .S, 17 .asm, plus build.rs",
         compiled_on_this_target: false,
-        why: "reqwest -> rustls -> ring. THE OPEN §2 BREACH. Measured: `nm` on the \
-              release binary returns 72 ring_core symbols, so this is linked, not dormant.",
+        why: "NO LONGER REACHED, AND THIS ROW USED TO SAY THE OPPOSITE. It read \
+              `THE OPEN §2 BREACH. Measured: nm on the release binary returns 72 \
+              ring_core symbols, so this is linked, not dormant` — which was true \
+              when written and stopped being true the moment `reqwest` moved to \
+              `rustls-tls-webpki-roots-no-provider` and `rustls-graviola` took \
+              over, the change the 189 -> 176 note below records. The sentence \
+              outlived it and directly contradicted the `compiled_on_this_target: \
+              false` beside it. Re-measured 2026-08-26: `cargo tree -i ring \
+              --target all` prints nothing, so it is resolved and not built. It \
+              stays in Cargo.lock as an OPTIONAL dependency of `rustls-webpki`, \
+              which is why it is still declared here rather than deleted — the \
+              day something turns that feature on, this row is what says what \
+              arrived.",
     },
     Declared {
         name: "cc",
@@ -264,14 +278,50 @@ fn the_dependency_set_has_not_moved_without_review() {
     //     hits. `rayon` and `either` carry no build script at all.
     //
     // So §2 holds without an exception, and the pin moves. D-0232.
+    //
+    // 182 -> 192 BY `gzip`, AND THIS PIN WAS RED FOR A COMMIT BEFORE ANYBODY
+    // NOTICED. `bae4148` added the `gzip` feature to `reqwest` so a vendor
+    // serving a compressed instrument master would not land as garbage, ran
+    // `cargo deny check`, and never ran the workspace suite — so the count
+    // moved to 192 and the pin stayed at 182 and the commit went in red. That
+    // is worth writing down beside the number rather than quietly corrected:
+    // this test is the only thing standing between a feature flag and a C
+    // dependency, and it can only work if the suite is actually run.
+    //
+    // Ten packages arrived and no others: `adler2`, `async-compression`,
+    // `compression-codecs`, `compression-core`, `crc32fast`, `flate2`,
+    // `futures-sink`, `miniz_oxide`, `simd-adler32`, `tokio-util`. The count
+    // moved by exactly ten, which is itself the check that nothing else came
+    // with them.
+    //
+    // THE SCAN, because this test's own message demands it. Measured over the
+    // vendored sources of all ten:
+    //   * **zero** files matching .c .h .S .asm .cc .cpp .js across every one
+    //     of them -- so none is added to DECLARED, which records crates that
+    //     ship non-Rust source. `flate2` is here on its `rust_backend`, and
+    //     `miniz_oxide` is that backend: a pure-Rust DEFLATE, which is the
+    //     whole reason this feature could be taken at all. Nothing links
+    //     `zlib`.
+    //   * exactly one carries a `build.rs` -- `crc32fast` -- and it runs
+    //     `$RUSTC --version` to decide whether the stable ARM CRC32 intrinsics
+    //     exist. That is the same feature-probe `serde`, `libc`, `proc-macro2`,
+    //     `quote`, `httparse`, `ahash` and `generic-array` already perform in
+    //     this tree; `docs/06-limits.md` §96 measures the set and records that
+    //     §2's dependency-level build-script ban is not held by the workspace
+    //     and is not holdable. It is not a new exception, and it is not being
+    //     treated as one.
+    //
+    // The cookie feature that would have arrived alongside it was NOT taken --
+    // `cargo deny` refused the `time 0.3.45` it dragged in -- so `cookie`,
+    // `cookie_store` and `time` are absent from this count. D-0311.
     assert_eq!(
         names.len(),
-        182,
+        192,
         "the dependency count changed. Run the registry scan for non-Rust source \
          before re-pinning: any new crate may ship C, and DECLARED is the record."
     );
     assert_eq!(
-        h, 0x1673_752A_DC06_321D,
+        h, 0x354E_E31C_8B93_4AEA,
         "the dependency SET changed — a package was added, removed or renamed. \
          Scan the new set for .c/.cc/.h/.S/.asm and build.rs, update DECLARED if \
          anything ships non-Rust source, then re-pin this fingerprint. Do not \

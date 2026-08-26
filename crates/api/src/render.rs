@@ -861,6 +861,12 @@ fn nav(current: &str) -> String {
     for (href, label, built) in [
         ("/dashboard", "Dashboard", true),
         ("/instruments", "Instruments", true),
+        // THE MASTERS EVERY OTHER PAGE READS FROM. `/instruments` answers out
+        // of a parse of these four files, so an operator seeing a symbol
+        // resolve wrongly needs to reach the thing that would fix it — and
+        // D-0308 shipped the refresh routes with no way to reach them, which
+        // is the defect the `/logs` line below already records once. D-0312.
+        ("/masters", "Masters", true),
         ("/pull", "Ingest", true),
         ("/audit", "Audit", true),
         ("/store", "Store", true),

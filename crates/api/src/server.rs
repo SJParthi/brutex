@@ -11862,6 +11862,10 @@ pub fn router_serving(site: Loaded, assets: std::sync::Arc<assets::Assets>) -> a
         // public CDN downloads. `Site::load` parses them once at startup with
         // no reload path, so the status route answers whether a restart is
         // required rather than pretending one is not. D-0308.
+        // AND THE PAGE THAT REACHES THEM. D-0308 shipped the two routes below
+        // and no way to reach either: refreshing a master required having read
+        // this table. D-0312.
+        .route("/masters", axum::routing::get(crate::mastersrun::page))
         .route(
             "/masters/refresh",
             axum::routing::post(crate::mastersrun::refresh),
