@@ -22774,3 +22774,61 @@ gone.
 `BOOTSTRAP_DRAWS`, `BOOTSTRAP_ALPHA_PPM`, `MIN_AUDIT_SESSIONS`, and
 `engine::DEFAULT_CEILING` / `DEFAULT_PAIR_BUDGET`, which HALT a ladder and so
 bound what a run explores.
+
+### D-0304 — the wall that stops the deep drill-down, and who may move it
+
+**Decision.** `DEFAULT_PAIR_BUDGET`'s arithmetic is corrected — it cited
+`DEFAULT_CEILING` as `2^26` and `256x` where the constant is `2^27` and the
+factor is `128x`. The larger finding beside it is recorded rather than acted on,
+because acting on it needs a dependency this workspace's §5 forbids.
+
+**The wall.** After D-0303 removed the support floor, the next thing that stops
+a rare combination from being enumerated is `engine::DEFAULT_CEILING = 2^27`.
+When a ladder reaches it the walk **halts**, and `range_all`'s own column reports
+`complete = NO` with the note that the run's *"depth is as far as the ladder
+got, not as far as it goes"*. A combination past that point is not ranked badly;
+it is never built.
+
+**Nothing in production can move it.** `Ladder::with_ceiling` exists and is
+called from `runner`'s tests, `runner`'s bench and nowhere else — measured
+across the whole tree. Every real run therefore uses the constant, and this
+file's own table sizes that constant against **"a 48 GB machine"**: a static
+assumption about hardware, deciding how far the sweep may walk on a machine that
+may have half that or four times it.
+
+**And the budget beside it can never fire.** The file states it plainly — the
+prefix join makes duplicates a measured zero, so `seen` grows one entry per
+pair, the ceiling is 128× smaller, and *"every default-configured halt reports
+`Breach::Candidates` — a MEMORY reason — including runs that spent their whole
+time in the join."* `engine::the_pair_budget_refuses_where_the_ceiling_cannot`
+has to call `with_pair_budget(1)` to reach the budget at all. **A time problem
+is reported as a memory one on every default run**, which is a §4 concern: the
+reason named is not the reason that fired.
+
+**Measured, and it is the opposite of what the ceiling assumes.** The audit
+quoted in the same doc ran the whole threshold range with a counting allocator
+and a watchdog: *"Peak heap never exceeded 1.59 GB — 3.3% of that machine —
+while every run below 11% support was killed at 1,500 seconds. Memory was never
+the binding constraint. Time was, and nothing counted it."*
+
+**Why the derivation is not made here.** A ceiling derived from the machine
+needs the machine's memory, and `engine` may depend on `vocab` alone — CI gate
+22 clause A pins that and ships no allowlist. `runner` cannot read it either
+without a new dependency. So a dynamic ceiling is a **decision about the crate
+graph**, not a tidy-up, and the file already says as much about the correction
+generally: *"UNVERIFIED whether the right correction is a larger ceiling, a
+smaller budget, or dropping one of the two as redundant now that pairs and
+distinct candidates are the same quantity. That is a `docs/05-decisions.md`
+choice about engine behaviour and is deliberately not made here."*
+
+**The three shapes a fix could take**, so the next entry chooses rather than
+invents:
+
+| option | what it costs |
+|---|---|
+| thread a ceiling from `cli`, derived there | `cli` may read what it likes; the ladder gains a caller-supplied bound and `BRUTEX_SCREEN_CAP` already sets a sibling |
+| drop one of the two budgets | pairs and distinct candidates are one quantity now, so one of them is redundant — but which one survives changes what a halt MEANS |
+| raise the ceiling and let the pair budget bind | makes the reported breach reason true, and makes time the stated limit it actually is |
+
+**What is fixed here** is the arithmetic and the silence: the factor was wrong
+by two, and nothing said that no caller sets the ceiling.

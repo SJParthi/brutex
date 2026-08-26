@@ -474,10 +474,22 @@ pub const DEFAULT_CEILING: usize = 1 << 27;
 /// pair contributes exactly one distinct candidate — so `seen` grows one entry
 /// per pair walked. [`Ladder::exhausted`] tests `admitted + seen.len() >=
 /// ceiling` in the same loop that counts pairs, and [`DEFAULT_CEILING`] is
-/// `2^26` against this `2^34`. The ceiling is **256x smaller**, so it trips
-/// 256 pairs-worth of work before this budget is approached, and every
+/// `2^27` against this `2^34`. The ceiling is **128x smaller**, so it trips
+/// 128 pairs-worth of work before this budget is approached, and every
 /// default-configured halt reports [`Breach::Candidates`] — a MEMORY reason —
 /// including runs that spent their whole time in the join.
+///
+/// **THIS PARAGRAPH SAID `2^26` AND `256x` AND THE CONSTANT IS `2^27`.** The
+/// conclusion is unchanged — the ceiling still trips first and this budget
+/// still cannot fire at the defaults — but the factor was wrong by two, and an
+/// arithmetic argument whose inputs do not match the constants it names is the
+/// same class of defect D-0302 built a gate for. Corrected by D-0304, which
+/// also records what nothing here says: **no production caller sets the
+/// ceiling at all.** `Ladder::with_ceiling` is called from tests and benches
+/// only, so every real run halts at a `DEFAULT_CEILING` sized in this file's
+/// own table against *"a 48 GB machine"* — a static assumption about hardware
+/// that the operator's machine may not share, deciding how far the ladder is
+/// allowed to walk before it stops enumerating combinations.
 ///
 /// `engine::the_pair_budget_refuses_where_the_ceiling_cannot` proves the budget
 /// works; note that it must call `with_pair_budget(1)` to reach it. Nothing
