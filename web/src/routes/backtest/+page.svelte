@@ -7736,6 +7736,127 @@
     grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 1.1rem 1.5rem;
   }
+
+  /* ==================================================================
+     SCALE — THE PAGE WAS BUILT SMALL AND STAYED SMALL
+     ------------------------------------------------------------------
+     Measured before this block, at 1440px: the three controls in the
+     sweep bar were **31–32px tall carrying 12.5px text**, the rung gauges
+     were **3px**, every section padded to **13.6px**, and the four
+     summary numbers sat at 24px. Nothing was WRONG -- every one of those
+     had passed a contrast and a floor check -- and the whole thing still
+     read as a dense utility strip rather than as the console's main
+     surface.
+
+     Density was the goal and it was taken too far. The earlier note in
+     this file argued that "every line of chrome above the data is a line
+     of data that did not fit"; that is true when there IS data below,
+     and this page's own data lives in a panel further down. The bar an
+     operator ACTS in was paying for space the page had already saved.
+
+     This block sits before the responsive overrides deliberately, so a
+     narrow viewport still wins -- the scale goes up on a desktop, not on
+     a phone.
+     ================================================================== */
+
+  /* ---- the sweep bar: the one place on this page you act ---- */
+  .runbar {
+    padding: 1.15rem 1.35rem;
+    gap: 1rem;
+    row-gap: 0.85rem;
+  }
+  .runf > span,
+  .runf-wait {
+    font-size: var(--fs-mini);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--n8);
+  }
+  /* Controls that read as controls: 38px is a comfortable target and it
+     is the height the Run button already wanted to be. */
+  .runf :global(.pbtn) {
+    font-size: var(--fs-xs);
+    padding: 9px 30px 9px 11px;
+    border-radius: 7px;
+    background-position: calc(100% - 15px) 55%, calc(100% - 10px) 55%;
+  }
+  .runbar .btn.run {
+    padding: 9px 1.35rem;
+    font-size: var(--fs-sm);
+    font-weight: var(--w-semi);
+    border-radius: 7px;
+  }
+  .runbar-k {
+    font-size: var(--fs-mini);
+  }
+  .runbar-n {
+    font-size: var(--fs-xs);
+    line-height: 1.5;
+  }
+
+  /* ---- the coverage bar ---- */
+  .coverbar {
+    padding: 1.15rem 1.35rem 1.25rem;
+    gap: 0.8rem;
+  }
+  .coverbar-k {
+    font-size: var(--fs-mini);
+  }
+  .coverbar-head b {
+    font-size: var(--fs-md);
+  }
+  .coverbar-note {
+    font-size: var(--fs-mini);
+    line-height: 1.55;
+  }
+  /* A 3px gauge is a hairline, not a measurement. Six reads as a bar and
+     leaves the chip's numbers room above it. */
+  .rungchip {
+    min-width: 6.4rem;
+    padding: 0.5rem 0.7rem 0.55rem;
+    gap: 0.4rem;
+  }
+  .rungchip-n {
+    font-size: var(--fs-xs);
+  }
+  .rungchip-m,
+  .rungchip-w {
+    font-size: var(--fs-mini);
+  }
+  .rungchip-track {
+    height: 6px;
+    border-radius: 3px;
+  }
+
+  /* ---- the summary strip ---- */
+  .bt-strip .fact {
+    padding: 1.15rem 1.35rem;
+    gap: 0.3rem;
+  }
+  .fact .k {
+    font-size: var(--fs-mini);
+  }
+  /* THE COUNTERS GO TO THE DISPLAY STEP. They dropped to `--fs-data-lg`
+     when the answer figure was raised above them, which fixed the
+     inversion by shrinking the wrong half -- the answer is 34px and lives
+     in its own accented card, so it does not need these kept small to
+     stay ahead of them. */
+  .fact .v {
+    font-size: var(--fs-data-xl);
+    line-height: 1.05;
+  }
+  .fact .n {
+    font-size: var(--fs-mini);
+  }
+
+  /* ---- section headings and the page title ---- */
+  .bh {
+    font-size: var(--fs-lg);
+  }
+  .block {
+    gap: 0.9rem;
+  }
+
   @media (max-width: 860px) {
     .tester .tt-quad,
     .tester .tt-stats {
