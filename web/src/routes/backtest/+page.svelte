@@ -361,7 +361,16 @@
           from_year: from.year,
           from_month: from.month,
           to_year: to.year,
-          to_month: to.month
+          to_month: to.month,
+          // SENT AHEAD OF BEING HONOURED, DELIBERATELY. `sweeprun::Asked`
+          // parses `feed`, `underlying`, `from_*` and `to_*` and ignores
+          // anything else, so these two are inert on today's server — and
+          // the page says so under the button rather than letting the
+          // operator believe a selection travelled that did not. The moment
+          // the route reads them, it reads them from a client that has been
+          // sending them all along.
+          underlyings: [...pickedSymbols],
+          rungs: [...pickedRungs]
         })
       });
       const body = await response.json().catch(() => ({}));
@@ -390,8 +399,14 @@
    * EMPTY UNTIL THE CENSUS SAYS OTHERWISE, and this was `'NIFTY'`. The
    * store also holds BANKNIFTY at the same 121 months and nine rungs, and
    * a literal here made it unreachable from this page entirely.
+   *
+   * IT IS DERIVED NOW, NOT SET. The chips own the choice; this is the one
+   * instrument the run route can take today, read off the front of that
+   * set. Keeping it as its own `$state` beside the set would be two
+   * sources for one fact, and the first to drift would be the one the
+   * request is built from.
    */
-  let sweepSymbol = $state('');
+  const sweepSymbol = $derived([...pickedSymbols][0] ?? '');
 
   // A POLL MUST NOT OUTLIVE THE PAGE. Without this a navigation away leaves a
   // timer firing against a component that is gone.
@@ -570,6 +585,62 @@
   /** Has the operator picked an instrument themselves? Same rule. */
   let symbolTouched = $state(false);
 
+  /* ====================================================================
+     WHAT THE BRUTE FORCE WILL ACTUALLY RUN OVER
+     --------------------------------------------------------------------
+     Instruments and rungs are both SETS, chosen by the operator. A single
+     choice is a set of one, so one control shape covers both and there is
+     no mode to switch between.
+
+     `sweepSymbol` above stays as the ONE instrument the run route can take
+     today — `sweeprun::Asked` carries `feed`, `underlying`, `from` and `to`
+     and nothing plural — and it is derived from this set rather than being
+     a second source of truth.
+
+     TWO THINGS THIS PAGE CANNOT DERIVE, AND BOTH ARE SERVER GAPS:
+
+     * **Which rungs the engine sweeps.** `cli::EVERY_RUNG` is EIGHT --
+       1min…60min -- and `1day` is not among them: `cli::descend` refuses it
+       in as many words, and `range_all`'s own banner reads "ALL EIGHT
+       INTRADAY RUNGS". The store holds nine. That const is private to
+       `crates/cli` and no endpoint publishes it, so a page that wanted to
+       grey out `1day` would have to keep a second copy of the list --
+       which is the two-vocabularies failure `CLAUDE.md` §5 exists to
+       refuse. Until it is on the wire, `1day` is offered, and selecting it
+       is answered by the route rather than pre-empted here.
+
+     * **Which instruments it sweeps.** Same shape, same reason, already
+       recorded on `sweptSurface` above.
+     ==================================================================== */
+
+  /** @type {Set<string>} instruments the run will cover. */
+  let pickedSymbols = $state(new Set());
+  /** @type {Set<string>} rungs the run will cover. */
+  let pickedRungs = $state(new Set());
+
+  /**
+   * Toggle one key in a chosen set, and never allow the empty set.
+   *
+   * A SWEEP OVER NOTHING IS NOT A SWEEP, so the last selected chip does not
+   * turn itself off. That is a refusal the control can make structurally
+   * rather than a validation message it has to raise afterwards — the same
+   * argument §6 makes for a depth parameter that cannot be set wrongly.
+   *
+   * @param {Set<string>} set
+   * @param {string} key
+   * @returns {Set<string>} a NEW set, because `$state` tracks identity
+   */
+  function toggled(set, key) {
+    const next = new Set(set);
+    if (next.has(key)) {
+      if (next.size === 1) return next;
+      next.delete(key);
+    } else {
+      next.add(key);
+    }
+    return next;
+  }
+
   /**
    * Fold the census into one entry per instrument, with its rungs and its
    * real month bounds.
@@ -732,12 +803,19 @@
         // win, and that is a fact about the store rather than a preference.
         const last = allRuns[0]?.underlying ?? '';
         const seen = catalog.held.find((h) => h.leaf === last);
-        sweepSymbol = seen ? seen.leaf : catalog.held[0].leaf;
+        pickedSymbols = new Set([seen ? seen.leaf : catalog.held[0].leaf]);
       }
-      const held = catalog.held.find((h) => h.leaf === sweepSymbol);
+      const held = catalog.held.find((h) => h.leaf === ([...pickedSymbols][0] ?? ''));
       if (held && !touched) {
         ask.from = held.from;
         ask.to = held.to;
+      }
+      // EVERY RUNG THE INSTRUMENT HOLDS, until the operator says otherwise.
+      // The run route sweeps them all today, so an empty or stale selection
+      // would show fewer than the run covers -- which is the one direction
+      // this control must never be wrong in.
+      if (held && pickedRungs.size === 0) {
+        pickedRungs = new Set(held.rungs.map((r) => r.name));
       }
     });
   });
@@ -1895,6 +1973,25 @@
    */
   const pct = (bps) => (bps === null || bps === undefined ? '—' : `${bps >= 0 ? '+' : ''}${(bps / 100).toFixed(2)}%`);
 
+  /**
+   * An excursion in parts per million, as the percent a reader can act on.
+   *
+   * THE PAGE PRINTED `-4,200 ppm` IN FOUR PLACES AND EXPLAINED IT IN NONE.
+   * Parts-per-million is the unit the record stores because it is an integer
+   * and §7 bans floats for money; it is not a unit anybody reads a drawdown
+   * in. `-4,200 ppm` is `-0.42%`, and the second form is the one that says
+   * whether the number matters.
+   *
+   * The raw figure is not thrown away -- it goes in the `title` at every
+   * call site, so nothing that was on the page has left it.
+   *
+   * @param {number | null | undefined} ppm
+   */
+  const ppmPct = (ppm) =>
+    ppm === null || ppm === undefined
+      ? '—'
+      : `${ppm >= 0 ? '+' : ''}${(ppm / 10_000).toFixed(2)}%`;
+
   /** Rungs that carry a recorded run, so the switcher can mark them. */
   const sweptRungs = $derived(
     new Set(runs.filter((r) => r.underlying === openRun?.underlying).map((r) => r.timeframe))
@@ -2468,31 +2565,37 @@
          store does not hold and learn about it from a refusal a minute later.
          While the census is loading the control says so rather than offering
          an empty list that looks like "none". -->
-    <label class="runf">
-      <span>instrument</span>
+    <!-- INSTRUMENTS ARE A SET, SO THE CONTROL IS A SET. A `<select>` made a
+         single choice the only representable one; picking two meant two
+         visits. Chips show every instrument the store holds at once, and a
+         single choice is a set of one -- so there is no mode to switch. -->
+    <fieldset class="runf pickset">
+      <legend>instruments</legend>
       {#if catalog.phase === 'ready' && catalog.held.length > 0}
-        <select
-          class="find sm"
-          bind:value={sweepSymbol}
-          onchange={() => {
-            symbolTouched = true;
-            spanTouched = false;
-          }}
-          aria-label="Instrument"
-        >
-          {#each catalog.held as h (h.leaf)}
-            <option value={h.leaf}>{h.leaf}</option>
+        <div class="chiprow">
+          {#each catalog.held as h, i (h.leaf)}
+            <button
+              type="button"
+              class="pchip"
+              class:on={pickedSymbols.has(h.leaf)}
+              style="--i:{i}"
+              aria-pressed={pickedSymbols.has(h.leaf)}
+              title="{h.full} · {exact(h.months)} months on disk, {monthLabel(h.from)} to {monthLabel(h.to)}"
+              onclick={() => {
+                pickedSymbols = toggled(pickedSymbols, h.leaf);
+                symbolTouched = true;
+                spanTouched = false;
+              }}
+            >
+              {h.leaf}
+              <span class="pchip-n">{exact(h.months)}</span>
+            </button>
           {/each}
-        </select>
+        </div>
       {:else}
-        <input
-          class="find sm"
-          value={catalog.phase === 'loading' ? 'reading census…' : '—'}
-          disabled
-          aria-label="Instrument"
-        />
+        <span class="runf-wait">{catalog.phase === 'loading' ? 'reading census…' : '—'}</span>
       {/if}
-    </label>
+    </fieldset>
     <!-- TWO MONTH MENUS, NOT TWO TEXT BOXES. `2016-08` typed into a bare input
          is the one date format this console does not otherwise use, and it let
          an operator name a month the store does not hold. These offer the
@@ -2569,14 +2672,14 @@
         !activeFeed ||
         blocked !== null}
     >
-      <!-- "RUN ALL NINE RUNGS" WAS A COUNT WRITTEN INTO A BUTTON. Nine is
-           what this store happens to hold today; `Timeframe::KNOWN` can gain
-           one tomorrow and the label would then be wrong on a control that
-           starts work. It counts what the census reported for the chosen
-           instrument, and says nothing about a number it does not have. -->
-      {#if sweep.phase === 'starting'}Starting…{:else if sweep.phase === 'running'}Sweeping…{:else if heldNow}Run
-        all {exact(heldNow.rungs.length)}
-        {heldNow.rungs.length === 1 ? 'rung' : 'rungs'}{:else}Run every rung{/if}
+      <!-- "RUN ALL NINE RUNGS" NAMED A COUNT AND A UNIT, and both were wrong.
+           Nine was what the store held; the ENGINE sweeps eight, because
+           `cli::EVERY_RUNG` has no `1day` in it. And the control does not run
+           rungs, it runs a brute force -- over whatever is selected above.
+           The label says the ACTION now, and the count lives beside the
+           chips where it can be checked against them. -->
+      {#if sweep.phase === 'starting'}Starting…{:else if sweep.phase === 'running'}Sweeping…{:else}Run
+        brute force{/if}
     </button>
     <span class="runbar-n">
       {#if blocked}
@@ -2592,12 +2695,23 @@
         <b>{activeFeed}</b> has no bars on disk, so there is nothing to sweep. Pull a month first —
         this page never defaults a span it cannot read.
       {:else}
-        <!-- STATED, NOT SETTABLE. The threshold is no longer a control, so it
-             has to be readable somewhere or it becomes the hidden default that
-             removing the control was supposed to avoid. It reads as a
-             condition of the run, which is what it is. -->
-        on <b>{activeFeed}</b> · every rung the store holds · support
-        <b>20%</b> of each rung's own bars
+        <!-- WHAT THE PRESS WILL ACTUALLY DO, not what the controls express.
+             The selection above is real and the route is not there yet:
+             `sweeprun::Asked` carries ONE `underlying` and no rung field at
+             all, so a press sweeps the first selected instrument over every
+             intraday rung whatever the chips say.
+
+             Saying so is the whole point. A control that quietly does
+             something other than what it shows is the failure §4 bans, and
+             the fix while the gap exists is a sentence, not a disabled
+             control -- the selection still travels in the request, so the
+             day the route reads it nothing here has to change. -->
+        this press sweeps <b>{sweepSymbol || '—'}</b> on <b>{activeFeed}</b>, every intraday
+        timeframe, a pattern needing <b>20%</b> of that timeframe's own bars.
+        {#if pickedSymbols.size > 1 || (heldNow && pickedRungs.size < heldNow.rungs.length)}
+          <b class="warnish">The rest of the selection is not sent yet</b> — the run route takes one
+          instrument and no timeframe list.
+        {/if}
       {/if}
     </span>
   </section>
@@ -2645,33 +2759,56 @@
            `sweeprun::Asked` carries `feed`, `underlying`, `from` and `to` and
            no rung field -- the run sweeps every one of them, so a control
            offering a choice would be a control the route cannot honour. -->
+      <!-- THE TIMEFRAMES ARE THE CONTROL, not a caption above one. They were a
+           read-only strip that said what the run would cover; picking which
+           ones to run needed a control that did not exist. Each chip is now a
+           toggle, and it keeps its coverage gauge -- so the same element
+           answers "what does the store hold here" and "is it in this run".
+
+           The last selected chip will not turn itself off: a brute force over
+           no timeframe is not a run, and refusing it in the control's SHAPE
+           beats raising a validation message after the press. -->
       <div class="rungs-head">
-        <span class="coverbar-k">Timeframes this run covers</span>
+        <span class="coverbar-k">Timeframes to sweep</span>
         <span class="dim sm">
-          signal rungs — execution is always one-minute, on every one of them
+          {exact(pickedRungs.size)} of {exact(heldNow.rungs.length)} — execution is always
+          one-minute, whichever you pick
         </span>
+        <button
+          class="linky"
+          onclick={() => (pickedRungs = new Set(heldNow.rungs.map((r) => r.name)))}
+          disabled={pickedRungs.size === heldNow.rungs.length}>Select all</button
+        >
       </div>
       <ul class="rungs">
         {#each heldNow.rungs as r, i (heldNow.leaf + r.name)}
-          <li
-            class="rungchip"
-            class:short={r.months < heldNow.months}
-            style="--i:{i}"
-            title="{r.name} — {exact(r.months)} months on disk, {r.from} → {r.to}"
-          >
-            <span class="rungchip-top">
-              <span class="rungchip-n">{r.name}</span>
-              <span class="rungchip-m">{exact(r.months)}</span>
-              {#if r.months < heldNow.months}
-                <span class="rungchip-w">−{exact(heldNow.months - r.months)}</span>
-              {/if}
-            </span>
-            <span class="rungchip-track">
-              <span
-                class="rungchip-fill"
-                style="width:{Math.max(2, Math.round((r.months / Math.max(1, heldNow.months)) * 100))}%"
-              ></span>
-            </span>
+          <li>
+            <button
+              type="button"
+              class="rungchip"
+              class:short={r.months < heldNow.months}
+              class:on={pickedRungs.has(r.name)}
+              style="--i:{i}"
+              aria-pressed={pickedRungs.has(r.name)}
+              title="{r.name} — {exact(r.months)} months on disk, {monthLabel(r.from)} to {monthLabel(
+                r.to
+              )}"
+              onclick={() => (pickedRungs = toggled(pickedRungs, r.name))}
+            >
+              <span class="rungchip-top">
+                <span class="rungchip-n">{r.name}</span>
+                <span class="rungchip-m">{exact(r.months)}</span>
+                {#if r.months < heldNow.months}
+                  <span class="rungchip-w">−{exact(heldNow.months - r.months)}</span>
+                {/if}
+              </span>
+              <span class="rungchip-track">
+                <span
+                  class="rungchip-fill"
+                  style="width:{Math.max(2, Math.round((r.months / Math.max(1, heldNow.months)) * 100))}%"
+                ></span>
+              </span>
+            </button>
           </li>
         {/each}
       </ul>
@@ -3067,7 +3204,12 @@
                    store's key. Same month, same product, same format. -->
               <span class="dim">{monthLabel(g.from)} → {monthLabel(g.to)}</span>
               <span class="dim">
-                {g.perMille < 0 ? 'support ratio unknown — no bars' : `support ≥ ${(g.perMille / 10).toFixed(1)}% of bars`}
+                <!-- "support ≥ 20.0% of bars" is the engine's word for it. What
+                     it MEANS is how often a pattern had to show up before the
+                     sweep would keep it, and that is what the reader needs. -->
+                {g.perMille < 0
+                  ? 'how often a pattern had to appear — unknown, no bars were read'
+                  : `a pattern had to appear on ${(g.perMille / 10).toFixed(1)}% of bars to be kept`}
               </span>
               <span class="pill">
                 {g.present.length}
@@ -3899,11 +4041,20 @@
                     per trade and this sweep folds into three aggregates.
                   </p>
                   <div class="tt-pl">
-                    {#each [{ k: "Winners' adverse (MAE)", v: openRun.winner_mae, t: 'warnbar' }, { k: "Winners' favourable (MFE)", v: openRun.winner_mfe, t: '' }, { k: 'All trades, adverse', v: openRun.all_mae, t: 'downbar' }] as e (e.k)}
+                    <!-- SAY WHAT THE NUMBER IS, NOT WHAT THE TEXTBOOK CALLS IT.
+                         These read "Winners' adverse (MAE)" and "Winners'
+                         favourable (MFE)" -- two acronyms an operator has to
+                         already know to get anything from the row. The plain
+                         sentence is what the field measures; the acronym and
+                         the stored parts-per-million both survive in `title`
+                         for the reader who wants them. -->
+                    {#each [{ k: 'How far a winner fell before it paid', a: 'MAE — maximum adverse excursion, winners only', v: openRun.winner_mae, t: 'warnbar' }, { k: 'How far a winner rose at its best', a: 'MFE — maximum favourable excursion, winners only', v: openRun.winner_mfe, t: '' }, { k: 'How far any trade fell, winners and losers', a: 'MAE — maximum adverse excursion, every trade', v: openRun.all_mae, t: 'downbar' }] as e (e.k)}
                       <div class="tt-plrow">
-                        <span class="tt-pllab">{e.k}</span>
+                        <span class="tt-pllab" title="{e.a}. Stored as {group(e.v)} parts per million of the entry price."
+                          >{e.k}</span
+                        >
                         <span class="tt-plbar"><span class="tt-plfill {e.t}" style="width:{(Math.abs(e.v) / excursionTop) * 100}%"></span></span>
-                        <span class="tt-plval">{group(e.v)} ppm</span>
+                        <span class="tt-plval" title="{group(e.v)} ppm">{ppmPct(e.v)}</span>
                       </div>
                     {/each}
                   </div>
@@ -4030,9 +4181,9 @@
                         <tr><td>Average bars in trades</td><td class="n"><Lock small why="bars ÷ trades is the average gap BETWEEN trades, a different quantity. Not shown rather than shown wrong." /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         <tr><td>Average bars in winners</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         <tr><td>Average bars in losers</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
-                        <tr class="own"><td>Winners' adverse excursion <span class="tt-own">brutex</span></td><td class="n">{group(openRun.winner_mae)} ppm</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
-                        <tr class="own"><td>Winners' favourable excursion <span class="tt-own">brutex</span></td><td class="n">{group(openRun.winner_mfe)} ppm</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
-                        <tr class="own"><td>All trades' adverse excursion <span class="tt-own">brutex</span></td><td class="n">{group(openRun.all_mae)} ppm</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
+                        <tr class="own"><td title="MAE — maximum adverse excursion, winners only">How far a winner fell before it paid <span class="tt-own">brutex</span></td><td class="n">{ppmPct(openRun.winner_mae)}</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
+                        <tr class="own"><td title="MFE — maximum favourable excursion, winners only">How far a winner rose at its best <span class="tt-own">brutex</span></td><td class="n">{ppmPct(openRun.winner_mfe)}</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
+                        <tr class="own"><td title="MAE — maximum adverse excursion, every trade">How far any trade fell <span class="tt-own">brutex</span></td><td class="n">{ppmPct(openRun.all_mae)}</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         <tr class="own"><td>Signal bars swept <span class="tt-own">brutex</span></td><td class="n">{exact(openRun.bars)}</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                       </tbody>
                     </table>
@@ -4132,7 +4283,7 @@
                       <tr><td>Span asked</td><td class="n">{span(openRun)} · {exact(openRun.months_asked)} months</td></tr>
                       <tr class:warnrow={!openRun.whole_span}><td>Span found</td><td class="n">{exact(openRun.months_found)} months{openRun.whole_span ? '' : ' — a SHORTER sample, not a corrected one'}</td></tr>
                       <tr><td>Signal bars swept</td><td class="n">{exact(openRun.bars)}</td></tr>
-                      <tr><td>Support threshold</td><td class="n">{exact(openRun.min_hits)} hits · {(supportPerMille(openRun) / 10).toFixed(1)}% of bars</td></tr>
+                      <tr><td title="The support threshold. A combination had to hit at least this many bars to survive the ladder.">How often a pattern had to appear</td><td class="n">{exact(openRun.min_hits)} times · {(supportPerMille(openRun) / 10).toFixed(1)}% of bars</td></tr>
                       <tr><td>Combinations enumerated</td><td class="n">{exact(openRun.combinations)}</td></tr>
                       <tr class:warnrow={openRun.halted}><td>Ladder depth</td><td class="n">{openRun.depth}{openRun.halted ? ' — PARTIAL, a budget stopped the walk' : ' — ran to extinction'}</td></tr>
                       <tr><td>Recorded</td><td class="n">{when(openRun.finished_micros)}</td></tr>
@@ -4655,6 +4806,10 @@
   .runbar-n b {
     color: var(--n11);
   }
+  /* The one phrase in this bar that is a WARNING rather than a statement. */
+  .warnish {
+    color: var(--warn);
+  }
 
   /* ---------------- what the store holds ----------------
      A strip, not a card: it is a CONDITION of the sweep above it, so it
@@ -4698,6 +4853,72 @@
     gap: 0.6rem;
     flex-wrap: wrap;
   }
+  /* ---- the instrument chips ---- */
+  .pickset {
+    border: 0;
+    margin: 0;
+    padding: 0;
+    min-width: 0;
+  }
+  .pickset legend {
+    padding: 0;
+    font-size: var(--fs-micro);
+    color: var(--n8);
+    text-transform: lowercase;
+  }
+  .chiprow {
+    display: flex;
+    gap: 0.3rem;
+    flex-wrap: wrap;
+    margin-top: 0.2rem;
+  }
+  .pchip {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.32rem;
+    font-family: var(--mono);
+    font-size: var(--fs-mini);
+    font-weight: var(--w-mid);
+    padding: 5px 9px;
+    border-radius: 6px;
+    border: 1px solid var(--n6);
+    background: var(--n3);
+    color: var(--n9);
+    cursor: pointer;
+    animation: rungin 0.3s cubic-bezier(0.22, 0.7, 0.3, 1) both;
+    animation-delay: calc(var(--i, 0) * 40ms);
+    transition:
+      background 0.15s ease,
+      border-color 0.15s ease,
+      color 0.15s ease,
+      transform 0.15s cubic-bezier(0.22, 0.7, 0.3, 1);
+  }
+  .pchip:hover {
+    border-color: var(--acc);
+    transform: translateY(-1px);
+  }
+  /* SELECTED IS A FILLED CHIP, NOT A TICK. The state has to be readable at a
+     glance across a row, and a mark small enough to sit inside a chip is not.
+     Colour AND weight AND the border all move together, so the state does not
+     rest on hue alone. */
+  .pchip.on {
+    background: var(--acc-soft);
+    border-color: var(--acc);
+    color: var(--acc);
+    font-weight: var(--w-semi);
+  }
+  .pchip:focus-visible {
+    outline: 2px solid var(--focus, var(--acc));
+    outline-offset: 1px;
+  }
+  .pchip-n {
+    font-size: var(--fs-micro);
+    font-variant-numeric: tabular-nums;
+    opacity: 0.72;
+  }
+  .rungs li {
+    list-style: none;
+  }
   .rungchip {
     display: flex;
     flex-direction: column;
@@ -4720,6 +4941,25 @@
   .rungchip:hover {
     border-color: var(--acc);
     transform: translateY(-1px);
+  }
+  /* A CHIP IS A TOGGLE NOW, so it must look pressable and read its own state.
+     Unselected recedes rather than disappearing -- the rung is still ON DISK
+     and its coverage is still a fact, it is simply not in this run. */
+  .rungchip {
+    cursor: pointer;
+    text-align: left;
+    font: inherit;
+    color: inherit;
+    opacity: 0.55;
+  }
+  .rungchip.on {
+    opacity: 1;
+    border-color: var(--acc);
+    background: var(--acc-soft);
+  }
+  .rungchip:focus-visible {
+    outline: 2px solid var(--focus, var(--acc));
+    outline-offset: 1px;
   }
   @keyframes rungin {
     from {
