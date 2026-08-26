@@ -854,7 +854,7 @@ fn clamp(note: &str) -> String {
 /// page and a reload renders another, and nothing tells the operator which they
 /// are looking at. Every server-rendered page keeps its own path, this one
 /// included; only the collision is removed. D-0064.
-fn nav(current: &str) -> String {
+pub(crate) fn nav(current: &str) -> String {
     let mut out = String::with_capacity(512);
     out.push_str("<nav class=\"top\"><div class=\"inner\">");
     out.push_str("<a class=\"logo\" href=\"/dashboard\">brutex</a><div class=\"links\">");

@@ -687,6 +687,7 @@ fn page_html() -> String {
         "<!doctype html><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
          <title>brutex · masters</title><style>{STYLE}</style>\
+         {nav}\
          <h1>Instrument masters</h1>\
          <p class=\"lead\">Four files. Three vendor masters and the exchange's own index \
          list, which is what the vendors are checked against. Nothing here touches the \
@@ -705,7 +706,15 @@ fn page_html() -> String {
          file changes under a running server this page says a restart is required, because \
          saying nothing would leave every other page answering from the boot parse with \
          nothing to indicate it.</p>\
-         <script>{SCRIPT}</script>"
+         <script>{SCRIPT}</script>",
+        // THE REAL NAV, NOT A SECOND COPY OF IT. This page was self-contained
+        // following `crate::logs`, and inherited its defect with it: a page
+        // that is IN the nav and does not RENDER one, so an operator who
+        // follows the link has no way back and no indication of where they
+        // are. Rendering `render::nav` rather than hand-writing a link bar
+        // keeps one list of pages — a second would be correct the day it was
+        // written and wrong the first time a page is added.
+        nav = crate::render::nav("/masters"),
     )
 }
 
@@ -715,6 +724,16 @@ fn page_html() -> String {
 /// styles the marketing-shaped pages and this is a control surface.
 const STYLE: &str = "\
 body{background:#f5f7fb;color:#0a0f1e;font:15px/1.55 ui-sans-serif,-apple-system,system-ui,sans-serif;margin:0;padding:0 0 4rem}\
+nav.top{position:sticky;top:0;z-index:10;background:#fff;border-bottom:1px solid #e4e9f3}\
+nav.top .inner{max-width:1180px;margin:0 auto;padding:0 1.25rem;display:flex;align-items:center;gap:22px;height:56px}\
+nav.top .logo{font-weight:800;font-size:16px;letter-spacing:-.6px;text-decoration:none;color:inherit}\
+nav.top .links{display:flex;gap:4px;flex-wrap:wrap}\
+nav.top .lnk{padding:7px 13px;border-radius:9px;font-size:13.5px;font-weight:600;text-decoration:none;color:#5a6478}\
+nav.top a.lnk:hover{color:#0a0f1e;background:#eef2fb}\
+nav.top .lnk.on{color:#fff;background:#1b57ff}\
+nav.top .lnk.off{opacity:.38;cursor:not-allowed}\
+@media(prefers-color-scheme:dark){nav.top{background:#0e1524;border-bottom-color:#1b2436}\
+nav.top a.lnk:hover{color:#e9efff;background:#16203a}}\
 @media(prefers-color-scheme:dark){body{background:#060911;color:#e9efff}table,.bar,.att{background:#0e1524}thead th{background:#0e1524}}\
 h1{max-width:1180px;margin:0 auto;padding:2rem 1.25rem .3rem;font-size:1.6rem;letter-spacing:-.5px}\
 .lead,.foot{max-width:1180px;margin:0 auto;padding:.2rem 1.25rem;color:#5a6478;font-size:.9rem}\
@@ -1464,5 +1483,38 @@ mod tests {
             0,
             "and never invoked on load"
         );
+    }
+
+    #[test]
+    fn the_page_renders_the_nav_it_appears_in() {
+        // BEING IN THE NAV AND RENDERING ONE ARE DIFFERENT THINGS, and this
+        // page had the first without the second — inherited from `crate::logs`,
+        // which is self-contained for the same reason and has the same defect.
+        // An operator who follows the link lands somewhere with no way back and
+        // no indication of where they are.
+        let html = super::page_html();
+
+        assert!(html.contains("<nav class=\"top\">"), "there is a nav bar");
+        assert!(
+            html.contains(r#"class="lnk on" href="/masters""#),
+            "and it marks this page as the current one: {html:.0}"
+        );
+        // EVERY OTHER BUILT PAGE IS REACHABLE FROM HERE. Asserted against the
+        // shared `render::nav` rather than a list written here, because a
+        // second list would be right the day it was written and wrong the
+        // first time a page is added.
+        for href in [
+            "/dashboard",
+            "/instruments",
+            "/pull",
+            "/audit",
+            "/store",
+            "/logs",
+        ] {
+            assert!(
+                html.contains(&format!("href=\"{href}\"")),
+                "{href} is not reachable from the masters page"
+            );
+        }
     }
 }
