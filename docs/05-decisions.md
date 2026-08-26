@@ -23482,3 +23482,119 @@ shows the unconfirmed names rather than only counting them. That is what the
 four files are *for*: downloading three vendor masters and the exchange's
 catalogue and never joining them leaves an operator with four files and no
 answer.
+
+### D-0315 — 26 MB of perfectly valid CSV, and the wrong document
+
+`SOURCES` pointed Dhan at `https://images.dhan.co/api-data/api-scrip-master.csv`.
+The refresh worked: five guards passed, 26 MB landed, the ledger said
+`updated`, the log said `info`, and the page went green.
+
+`/health` said `dhan: UNAVAILABLE — no column "SECURITY_ID"`.
+`/instruments.json?feed=dhan` answered `[]`. Every page reading that feed's
+universe showed nothing.
+
+**Dhan publishes two masters under one documentation heading** —
+`Dhan Docs/19-instruments.md` lists **Compact** and **Detailed** four lines
+apart. The compact file is `SEM_*`-prefixed and carries no `ISIN`;
+`api::master`'s reader keys on `SECURITY_ID` and joins on `ISIN`, the column
+D-0125 made authoritative at both ends. The compact master cannot satisfy
+either. The URL is now the detailed one, cited rather than recalled.
+
+#### Why five guards let it through, and what the sixth checks
+
+`land`'s checks describe **the shape of a master**: long enough, not JSON or
+HTML, first line carries a comma, converts if it must. A vendor publishing a
+*different, equally well-formed CSV at a neighbouring URL* satisfies every one.
+
+`missing_columns` asks the different question — **is this THAT master** — and it
+asks it against `core::vendor::master_columns`, which is the same declaration
+`api::master::Columns::locate` fails on. Not a second list: a copy here would be
+right the day it was written and would start refusing good files the first time
+a vendor renamed a field.
+
+The parse already knew. It knew one layer downstream, after the write, at the
+next startup — so the operator learned it from an empty page instead of from the
+refresh that caused it. This moves that knowledge to the boundary, and the old
+master is left on disk when it fires.
+
+#### The empty-name skip is load-bearing, not tidiness
+
+**Zerodha publishes no ISIN**, and no listing class. `MasterColumns` describes
+that by leaving the name `""`, and `locate`'s own `maybe` helper skips it for the
+stated reason that looking for a column named `""` refuses a file that is
+entirely correct. `required_columns` had to inherit that exactly: without the
+`retain`, this guard would refuse Zerodha's real 8.9 MB master for lacking a
+column the vendor has never published — a guard stricter than the reader it
+guards, which is worse than no guard. Asserted against the real published header.
+
+#### The fixture was fake, and the guard is what exposed it
+
+`a_master()` produced `"symbol,name,isin"` — three column names no vendor
+publishes. Every landing test passed on it, because `land` only checked for a
+comma. It now builds from `required_columns`, per source, because three feeds
+publish three different headers. A fixture that served one to all three was
+proving that `land` accepts a file the engine cannot use, which is precisely the
+defect it existed to catch.
+
+### D-0316 — being told to restart is the failure handed back
+
+`Site::load` parsed the masters **once**, at startup, and there was no reload
+path. D-0308 made that *sayable* — `restart_required`, the mtime compared
+against `parsed_at` — and said in its own words that the honest thing while
+there is no reload path is to TELL the operator rather than pretend.
+
+That was right to ship and was never the answer. An operator who presses
+Refresh, watches four files land, and is then told to restart the server has
+been handed the failure back with a label on it. Worse in practice: they restart
+*first* and refresh *after*, and the universe is stale again nine seconds later —
+which is exactly the sequence that happened on this machine.
+
+#### What moved, and what deliberately did not
+
+`Site::parsed` is a `std::sync::RwLock<Parsed>` holding the three fields
+`Site::new` derives from the parse:
+
+| Field | Why it is in the lock |
+|---|---|
+| `read` | the merged universe — the thing being replaced |
+| `targets` | computed FROM `read`; left outside, a reload would show new instruments under old counts |
+| `at` | when this parse happened, which is what makes staleness answerable |
+
+**Everything else stays out.** `run`, `sweep`, `budgets` and `calendars` are live
+state belonging to whatever is happening right now — a whole-`Site` swap would
+cancel a pull in progress and reset a rate budget the vendor is still counting
+against. `series` and `entries` come from the store's censuses, which a masters
+refresh does not touch.
+
+`RwLock` rather than `Mutex` because the read side is every request on every page
+and the write side is one operator pressing a button; readers do not contend.
+
+#### It refuses to make things worse
+
+`reparse` parses **before** taking the write lock, and declines the swap when the
+fresh parse is empty and the held one is not. Losing a good universe to a failed
+download is strictly worse than the staleness this replaces — the refresh
+actively destroying what it was pressed to improve. The read guard is scoped so
+it is released before the write guard is taken; holding both is the deadlock this
+shape invites.
+
+#### The compiler found the one real hazard
+
+`universe_resolve` awaits a crawl of ~150 index constituent files. A
+`RwLockReadGuard` held across an `.await` makes the future `!Send`, and axum
+refused the handler at compile time. That is not a nuisance: a reader held for
+the length of a network crawl would block the operator's next refresh for
+minutes. The fix copies three short owned strings per instrument inside a scope
+that ends before the crawl — the price of not holding a lock across the network.
+
+Six other sites needed the guard bound to a local because they borrow from it.
+Every one is a place where the old code borrowed from a field that could not
+change; the borrow checker naming them is the reload's own audit.
+
+#### What the page says now
+
+`restart_required` is `false`, and the response carries `reloaded` and the
+per-feed parse notes. So `dhan: UNAVAILABLE — no column "SECURITY_ID"` appears
+**on the page that caused it**, in the same press, rather than in `/health` after
+a restart nobody knew to perform. D-0315 is the defect that makes that worth
+having.
