@@ -105,9 +105,26 @@
 //! No broker master was opened for any value here. Both carry an ISIN column
 //! and neither was consulted: taking a missing identifier from a vendor would
 //! have reintroduced, inside the data, the exact vendor hop this removes from
-//! the join. Wiring `api::constituents` to [`nse_isin`] is deliberately NOT
-//! part of that change — `crates/api` was held by another session — so the join
-//! still hops until it lands.
+//! the join.
+//!
+//! **The last sentence of this paragraph used to say the wiring was not done.**
+//! It read *"Wiring `api::constituents` to `nse_isin` is deliberately NOT part
+//! of that change — `crates/api` was held by another session — so the join
+//! still hops until it lands."* That was true when written and stopped being
+//! true when D-0125 landed: `api::constituents::nse_identity_of` calls
+//! [`nse_isin`] directly and that module's own header now opens **"THE KEY IS
+//! NSE'S OWN ISIN, AT BOTH ENDS. THERE IS NO SYMBOL STEP."** A note saying the
+//! join still hops, sitting above the table the join reads, is the worst
+//! possible place for a stale claim — it tells a reader auditing the identity
+//! chain that the weak link is still there.
+//!
+//! Verified against the operator's own masters, 2026-08-27: `RELIANCE` resolves
+//! to `INE002A01018` here, and that is the ISIN in Dhan's master beside
+//! security id `2885` and in Groww's beside `RELIANCE`. **Zerodha publishes no
+//! ISIN column at all**, which is why it cannot be ISIN-joined and why
+//! `pull::universe::Verdict::VendorHasNoIsin` exists as a bucket separate from
+//! `Lacks` — reporting it as a lack would blame a vendor for a cell the
+//! exchange never asked it to fill.
 
 use crate::instrument::{InstrumentKey, Kind};
 use crate::isin::Isin;
