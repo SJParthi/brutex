@@ -1210,3 +1210,88 @@ fn walk_ext(dir: &Path, ext: &str, into: &mut Vec<String>) {
         }
     }
 }
+
+/// **A batch spanning two months lands in two files, and neither is lost.**
+///
+/// This is the whole of D-0320. `ingest::one` used to refuse such a batch, so
+/// `session::split_window` clamped every fetch to a month end and the day pass
+/// issued 81 requests where Zerodha's documented 2,000-day cap needs 2 — 94
+/// minutes against 2.3, measured on the operator's own run at the vendor's
+/// 3-per-second ceiling.
+///
+/// The bars must reach the RIGHT files. A splitter that filed July's bars under
+/// August would be worse than the refusal it replaced: the requests would be
+/// saved and the store would be wrong, invisibly, until a backtest read the
+/// wrong window.
+#[test]
+fn a_batch_spanning_two_months_lands_in_both_and_the_bars_go_to_the_right_one() {
+    let scratch = Scratch::new("spanning-months");
+    let store_root = scratch.store();
+
+    // ONE BAR IN JULY, ONE IN AUGUST. Epoch seconds, which is what this
+    // vendor answers; these are
+    // 2025-07-31 10:00 and 2025-08-01 10:00 IST, both inside the session.
+    let (url, _seen) = broker(
+        r#"{"open":[100.0,200.0],"high":[110.0,210.0],"low":[90.0,190.0],
+            "close":[105.0,205.0],"volume":[1000,2000],
+            "timestamp":[1753936200,1754022600]}"#,
+    );
+    let raw = fetch(&url);
+    assert_eq!(raw.rows.len(), 2, "the broker sent both bars");
+
+    let request = BarRequest {
+        window: Window::new(
+            Day::new(2025, 7, 31).expect("a real day"),
+            Day::new(2025, 8, 1).expect("a real day"),
+        )
+        .expect("forwards"),
+        ..request()
+    };
+    let done = pull::ingest::from_window(&raw, "NIFTY", &url, &store_root, plan(&request));
+
+    assert_eq!(
+        done.failures.len(),
+        0,
+        "no member failed: {:?}",
+        done.failures
+    );
+    assert_eq!(done.bars_stored, 2, "both bars are on disk");
+
+    // AND IN TWO DIFFERENT FILES, each holding its own month.
+    let months: Vec<String> = walk_bin_files(&store_root)
+        .into_iter()
+        .filter_map(|p| {
+            p.file_stem()
+                .and_then(|s| s.to_str())
+                .map(std::borrow::ToOwned::to_owned)
+        })
+        .collect();
+    assert!(
+        months.iter().any(|m| m == "2025-07"),
+        "July's bar has its own file: {months:?}"
+    );
+    assert!(
+        months.iter().any(|m| m == "2025-08"),
+        "August's bar has its own file: {months:?}"
+    );
+}
+
+/// Every `.bin` under a store root, in no particular order.
+fn walk_bin_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "bin") {
+                out.push(path);
+            }
+        }
+    }
+    out
+}

@@ -18242,15 +18242,18 @@ mod tests {
             // Asserted as "every chunk is inside one month AND the chunks
             // tile" rather than a literal count, because a count is a fact
             // about the calendar and this is a claim about the invariant.
+            // A CHUNK MAY NOW SPAN MONTHS, and what must hold instead is that it
+            // never exceeds the cap the vendor published. `ingest::months_in`
+            // writes one file per month out of it — D-0320 — so the store no
+            // longer refuses the batch and the clamp that cost forty requests
+            // out of every forty-one is gone.
+            // A CHUNK MAY NOW SPAN MONTHS. `ingest::months_in` writes one file
+            // per month out of it — D-0320 — so the store no longer refuses the
+            // batch, and the clamp that cost forty requests out of every
+            // forty-one is gone. The width against the vendor's cap is
+            // asserted above and is what still binds.
             let mut months = std::collections::BTreeSet::new();
             for chunk in &chunks {
-                assert_eq!(
-                    (chunk.from().year(), chunk.from().month()),
-                    (chunk.to().year(), chunk.to().month()),
-                    "{} produced a chunk spanning two months, which the store \
-                     refuses and which throws the whole fetch away",
-                    feed.display()
-                );
                 months.insert((chunk.from().year(), chunk.from().month()));
             }
             let mut want = window.from().days_from_epoch();
@@ -18304,11 +18307,26 @@ mod tests {
     /// for both feeds, including the one where the answer is "no difference",
     /// because a test that only looked at Groww would let a Dhan regression
     /// through.
+    /// **Each rung is split by the cap its own vendor published, and by nothing
+    /// else.**
+    ///
+    /// This used to assert the opposite — *"the month is the ONLY bound at the
+    /// day rung"* — because `ingest::one` refused a batch spanning two months
+    /// and `split_window` clamped to a month end to prevent it. D-0320 removed
+    /// that coupling: `ingest::months_in` writes one file per month out of a
+    /// batch covering many, so the fetch is free to fill the vendor's cap.
+    ///
+    /// The clamp cost forty requests out of every forty-one at Zerodha's day
+    /// rung. What survives is the case it still serves: a rung the vendor
+    /// published NO cap for has no number to chunk by, and the month is the
+    /// only bound left.
     #[test]
-    fn a_daily_window_is_split_by_the_month_and_not_by_the_one_minute_cap() {
+    fn each_rung_is_split_by_the_cap_its_own_vendor_published() {
+        /// The window touches this many months; a capped rung must beat it.
+        const WINDOW_MONTHS: usize = 80;
         use pull::vendor::Granularity;
 
-        // 2020-01-01 to 2026-08-07 inclusive: 2,411 days across 80 months.
+        // 2,411 days, touching 80 months.
         let window = pull::session::Window::new(
             pull::session::Day::new(2020, 1, 1).expect("2020-01-01"),
             pull::session::Day::new(2026, 8, 7).expect("2026-08-07"),
@@ -18322,43 +18340,34 @@ mod tests {
                 .len()
         };
 
-        for (feed, minute_chunks) in [
-            (pull::vendor::Feed::Groww, 126_usize),
-            (pull::vendor::Feed::Dhan, 80),
+        for (feed, minute_cap, minute_chunks, daily_cap, daily_chunks) in [
+            // Groww publishes both: 30 days at minute, 180 at day.
+            (
+                pull::vendor::Feed::Groww,
+                Some(30_u32),
+                81_usize,
+                Some(180_u32),
+                14_usize,
+            ),
+            // Dhan publishes a minute cap and NO day cap — so its day rung is
+            // still one request per month, which is the branch the clamp is
+            // kept for.
+            (pull::vendor::Feed::Dhan, Some(90), 27, None, 80),
         ] {
             let pull::vendor::Transport::Http(spec) = feed.descriptor().transport else {
-                panic!("{} is a broker", feed.display());
-            };
-
-            // THE DAY-RUNG CAP, PER FEED, AND ONE OF THEM WAS READ SINCE.
-            //
-            // This asserted `None` for BOTH brokers on the reasoning that no
-            // day-level figure existed anywhere. The comment it carried said
-            // "if one is ever read live and written down, this line is what has
-            // to change with it" — and that is what happened, from the vendor's
-            // own page rather than from a live call.
-            //
-            // `Groww Docs/11-backtesting.md`, "Backtesting Data Limits", puts
-            // `1 day` in the row capped at 180 days. Dhan's historical-data
-            // page publishes no day-level figure at all, so its `None` is still
-            // the recorded fact and not a hole.
-            //
-            // NEITHER NUMBER CHANGES A SINGLE REQUEST, and that is worth saying
-            // rather than leaving for a reader to wonder about: the month bound
-            // is tighter than 180 days at every month of the calendar, so the
-            // daily chunk count below is 80 either way. What the row buys is
-            // that "this vendor published no daily cap" stops being asserted
-            // about a vendor that published one.
-            let expected_daily_cap = match feed {
-                pull::vendor::Feed::Groww => Some(180),
-                _ => None,
+                panic!("{} declares no HTTP transport", feed.display());
             };
             assert_eq!(
+                spec.window_cap_days(Granularity::Minute1),
+                minute_cap,
+                "{}'s minute cap must be what its own documentation prints",
+                feed.display()
+            );
+            assert_eq!(
                 spec.window_cap_days(Granularity::Day1),
-                expected_daily_cap,
-                "{}'s day-rung cap must be what its own documentation prints \
-                 and nothing else — an invented number here would send a \
-                 window no vendor agreed to",
+                daily_cap,
+                "{}'s day cap must be what its own documentation prints — an \
+                 invented number here would send a window no vendor agreed to",
                 feed.display()
             );
 
@@ -18377,70 +18386,32 @@ mod tests {
             );
             assert_eq!(
                 daily.len(),
-                80,
-                "{} at the day rung is ONE request per month and no more",
+                daily_chunks,
+                "{} at the day rung is {daily_chunks} requests per instrument",
                 feed.display()
             );
-            assert_eq!(months(&daily), 80, "the window touches 80 months");
-            assert_eq!(
-                daily.len(),
-                months(&daily),
-                "{}: the month is the ONLY bound at the day rung — a chunk \
-                 count above the month count means a cap is still cutting",
-                feed.display()
-            );
-            // THE SAVING, WHERE THERE IS ONE — and no claim of one where there
-            // is not. Groww's 30-day cap is narrower than a 31-day month, so
-            // the day rung is STRICTLY cheaper; Dhan's 90 is wider than any
-            // month, so the month was already the only bound and the two counts
-            // are exactly equal. Asserting `<=` for both would have let a
-            // regression that reintroduced the minute cap at the day rung pass
-            // on Groww.
-            if minute_chunks > 80 {
+
+            // AND THE MONTH IS NO LONGER A BOUND WHERE A CAP EXISTS. A chunk
+            // count equal to the month count would mean the clamp is still
+            // cutting and the saving never landed.
+            // AND THE MONTH IS NO LONGER A BOUND WHERE A CAP EXISTS. The window
+            // touches 80 months; a capped rung must issue far fewer requests than
+            // that, or the clamp is still cutting and the saving never landed.
+            if daily_cap.is_some() {
                 assert!(
-                    daily.len() < minute.len(),
-                    "{}: its cap cuts inside a month at one minute, so the day \
-                     rung must issue strictly fewer requests — {} against {}",
-                    feed.display(),
-                    daily.len(),
-                    minute.len()
+                    daily.len() < WINDOW_MONTHS,
+                    "{}: the day rung is still being cut at month ends",
+                    feed.display()
                 );
             } else {
                 assert_eq!(
                     daily.len(),
-                    minute.len(),
-                    "{}: its cap is wider than any month, so the month binds at \
-                     both rungs and the day rung saves nothing",
+                    WINDOW_MONTHS,
+                    "{}: with no cap the month is the only bound left",
                     feed.display()
                 );
+                assert_eq!(daily.len(), months(&daily), "one chunk per month");
             }
-
-            // AND THE MONTH BOUND IS REALLY STILL THERE. An absent cap read as
-            // "send the window whole" would be ONE chunk of 2,411 days here,
-            // which `fetch::land` refuses at the write boundary — 699 members
-            // failed that way on a real 37-day pull.
-            let mut want = window.from().days_from_epoch();
-            for chunk in &daily {
-                assert_eq!(
-                    (chunk.from().year(), chunk.from().month()),
-                    (chunk.to().year(), chunk.to().month()),
-                    "{}: a daily chunk spans two months, which the store refuses",
-                    feed.display()
-                );
-                assert_eq!(
-                    chunk.from().days_from_epoch(),
-                    want,
-                    "{}: the daily chunks leave a gap or an overlap",
-                    feed.display()
-                );
-                want = chunk.to().days_from_epoch() + 1;
-            }
-            assert_eq!(
-                want,
-                window.to().days_from_epoch() + 1,
-                "{}: the daily chunks stop short of the window",
-                feed.display()
-            );
         }
     }
 

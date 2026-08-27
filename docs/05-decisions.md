@@ -23826,3 +23826,95 @@ retry that cannot succeed reads exactly like a retry that has not succeeded
 yet**, and the only way to tell them apart is to compute what the gate is
 waiting for and check whether it can arrive. That is what finding this took, and
 it is what should have been done the first time the 409 appeared.
+
+### D-0320 — forty requests out of every forty-one, spent on a coupling
+
+The operator asked why the day pass was slow. Measured on their own run, not
+estimated:
+
+| | |
+|---|---|
+| Per instrument | **30 s** |
+| Local disk — 81 month files, fsynced | **242 ms** (0.8%), benchmarked |
+| Audit journal | `84,973,384 µs ÷ 243 members` = **0.35 s each** |
+| Zerodha's ceiling | 3 req/s = **0.33 s per request** |
+
+0.35 against 0.33. The pull was running **exactly at the rate limit with no
+slack**. The vendor was not slow and the disk was not slow — it was issuing far
+more requests than it needed.
+
+#### The coupling
+
+`session::split_window` ended every chunk at the earlier of the vendor's day cap
+and **the month's last day**, and its comment gives the honest reason:
+
+> *The store addresses ONE MONTH PER FILE, and `fetch::land` refuses a batch
+> that spans two … Measured on a real 37-day, 774-instrument pull: 699 MEMBERS
+> FAILED — every instrument whose window crossed July into August.*
+
+That fix was correct for the bug it was written against. What it also did was
+bind the **fetch** to the **store's write boundary**.
+
+Zerodha's documented caps, from the operator's own `Zerodha Docs/13-historical.md`
+Appendix A — sourced to Zerodha staff `rakeshr`, kite.trade/forum/discussion/7756:
+
+| interval | max days per request |
+|---|---|
+| `minute` | 60 |
+| `day` | **2000** |
+
+Over the operator's 2,460-day window:
+
+| rung | requests needed | requests issued | waste |
+|---|---|---|---|
+| `day` | **2** | 81 | **40×** |
+| `minute` | **41** | 81 | 2× |
+
+210 instruments × 81 = **17,010 requests where 420 would do**. At 3/s that is 94
+minutes instead of 2.3.
+
+#### The split moved to where the months are already known
+
+`ingest::months_in` partitions a **decoded** batch into one contiguous run per
+month, and `one` writes each run to its own file — the same `write_and_count`
+and the same `derive_all`, once per month instead of once per batch.
+
+**Decoded, never raw.** A raw row's timestamp means nothing until
+`fetch::land` has dispatched on the vendor's `TimestampEncoding`. Partitioning
+before that would be a second implementation of the conversion, and the two
+disagreeing files bars under the wrong month — saving the requests and
+corrupting the store, invisibly, until a backtest reads the wrong window.
+
+**A run, not a group.** The batch is already sorted, so a month's bars are
+contiguous: one pass, no map, no allocation per bar.
+
+Two counters follow the batch rather than the file: `committed` sums across
+months because it is a count of bars and not a flag, and `derived` subtracts the
+number of months written rather than the constant `1` it was when a batch was
+one month — with `derived_expected` multiplied to match. Left alone, an
+eighty-month batch would report eighty times the derived rungs it expected and
+every run would read as wrong.
+
+#### What still holds, and what stopped being true
+
+`split_window` keeps the month clamp for a rung the vendor published **no** cap
+for: there is no number to chunk by, and one unbounded request for a seven-year
+window is the shape that cannot usefully be retried.
+
+`no_chunk_ever_spans_two_months` was deleted, because it asserted exactly the
+property this removes. `a_chunk_fills_the_cap_and_the_chunks_tile_the_window`
+replaces it and keeps the two that still matter — no chunk wider than the cap,
+and the chunks tile the window with no gap and no overlap.
+
+`emit_sites::drive_member_not_landed` fed a two-month batch to reach the
+"member not landed" event. That is now a success. It drives `identify` instead —
+a member whose name is not a legal symbol cannot be filed, whatever its bars
+look like — which is a better driver anyway.
+
+#### The proof that matters
+
+`a_batch_spanning_two_months_lands_in_both_and_the_bars_go_to_the_right_one`
+feeds one July bar and one August bar in a single response and asserts both
+`2025-07.bin` and `2025-08.bin` exist with no member failed. A splitter that
+filed July under August would be **worse than the refusal it replaced**: the
+requests saved and the store silently wrong.

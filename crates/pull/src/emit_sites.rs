@@ -754,7 +754,16 @@ fn drive_member_landed(scratch: &Scratch) {
 
 /// A member whose bars would need two files.
 fn drive_member_not_landed(scratch: &Scratch) {
-    let archive = scratch.archive(&[(INSTRUMENT, SPANNING)]);
+    // A NAME NO `Symbol` CAN HOLD, because the refusal this used to drive is
+    // gone. It fed a two-month batch and asserted the store refused it — and
+    // `ingest::months_in` now writes one file per month out of exactly that,
+    // which is the whole point of D-0320. `identify` is the remaining per-member
+    // failure and it is a better driver anyway: a member that cannot be named
+    // is a member that cannot be filed, whatever its bars look like.
+    //
+    // `SYMBOL_CAPACITY` is 24, so twenty-five characters cannot be a symbol.
+    let unnameable = "A".repeat(25);
+    let archive = scratch.archive(&[(unnameable.as_str(), SPANNING)]);
     let store = scratch.store();
     let request = request_over(crossing());
     let done = crate::ingest::from_dir(&archive, &store, plan_over(&request))
@@ -762,7 +771,7 @@ fn drive_member_not_landed(scratch: &Scratch) {
     assert_eq!(
         done.failures.len(),
         1,
-        "the store addresses one month per file, and this member wants two"
+        "a member whose name is not a legal symbol cannot be filed"
     );
     assert_eq!(
         done.bars_stored, 0,

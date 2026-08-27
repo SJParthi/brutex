@@ -1551,11 +1551,16 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
     // the empty input already returned above — but the type does not say so,
     // and the arm that says "this cannot happen" is a `Landed` with nothing in
     // it rather than a panic.
-    let (Some(first), Some(last)) = (landed.bars.first(), landed.bars.last()) else {
+    if landed.bars.is_empty() {
         return Ok(nothing_landed(landed.census, folded, outside_session));
-    };
-    // THE MONTH, AND THE REFUSAL IF THE BARS CROSS ONE. See `month_of`.
-    let ym = month_of(first, last)?;
+    }
+    // ONE RUN PER MONTH, RATHER THAN A REFUSAL IF THE BARS CROSS ONE.
+    //
+    // This was `month_of(first, last)?` — a batch spanning two months was an
+    // error, so `session::split_window` clamped every fetch to a month end and
+    // the day pass issued 81 requests where the vendor's 2,000-day cap needs 2.
+    // See `months_in` for the measurement.
+    let by_month = months_in(&landed.bars)?;
     // THE MEMBER'S IDENTITY, PARSED BEFORE ANY FILE IS OPENED. See `identify`.
     let Identity {
         symbol,
@@ -1564,76 +1569,92 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
         symbol_id,
     } = identify(&member.instrument, exchange, segment)?;
 
-    // THE PATH IS RENDERED FROM THE VALUES THE KEY IS BUILT FROM, not from the
+    // ONE WRITE PER MONTH, in one pass over a batch that may now span many.
+    //
+    // The path is rendered from the values the key is built from, not from the
     // plan's strings a second time. `exchange.as_str()` is the parsed
     // `Exchange` speaking, so the directory a bar lands in and the code the
     // census records cannot disagree — there is only one value.
-    // See `write_and_count` for why the path refusal below is a backstop.
-    let parts = PathParts {
-        vendor,
-        exchange: exchange.as_str(),
-        segment: segment.as_str(),
-        symbol: symbol.as_str(),
-        contract: plan.contract,
-        timeframe,
-        month: ym,
-        file: FileKind::Bars,
-    };
-    let (pulled, committed) = write_and_count(
-        &landed.bars,
-        store_root,
-        symbol_id,
-        parts,
-        EntryKey {
-            contract: plan.contract,
-            exchange,
-            segment,
-            symbol,
-            timeframe,
-            month: ym,
-        },
-    )
-    .map_err(|why| format!("{}: {why}", member.instrument))?;
-    let mut entries = vec![pulled];
-
-    // THE SEVEN THAT WERE NEVER PULLED. Split into its own function only to
-    // stay under clippy's 100-line ceiling for `one`; the argument for it is
-    // there.
-    // NO `if timeframe == MINUTE_1` GATE. Whatever rung was pulled, everything
-    // derivable FROM it is derived — the rule decides, not a condition here. A
-    // daily pull derives nothing because nothing coarser is a whole multiple of
-    // it that is not itself the day; a one-second pull would derive the whole
-    // ladder the day `Timeframe::KNOWN` gains a second. Neither case needs a
-    // line changed. See `derived_from`.
-    derive_all(
-        &landed.bars,
-        &member.instrument,
-        store_root,
-        symbol_id,
-        timeframe,
-        DeriveInto {
-            // THE CONTRACT THE BARS WERE FILED UNDER, which is what
-            // `derive_all` reads its option/future line off. This was a
-            // hardcoded `None` carrying a note that the contract path was not
-            // reachable from here yet. It is now, and leaving the note in place
-            // would have filed an option's derived rungs in the underlying's
-            // own directory.
-            contract: plan.contract,
+    let mut entries = Vec::new();
+    let mut committed = 0usize;
+    let mut months_written = 0usize;
+    for (ym, slice) in &by_month {
+        let parts = PathParts {
             vendor,
-            exchange,
-            segment,
-            symbol,
-            month: ym,
-        },
-        &mut entries,
-    );
+            exchange: exchange.as_str(),
+            segment: segment.as_str(),
+            symbol: symbol.as_str(),
+            contract: plan.contract,
+            timeframe,
+            month: *ym,
+            file: FileKind::Bars,
+        };
+        let (pulled, wrote) = write_and_count(
+            slice,
+            store_root,
+            symbol_id,
+            parts,
+            EntryKey {
+                contract: plan.contract,
+                exchange,
+                segment,
+                symbol,
+                timeframe,
+                month: *ym,
+            },
+        )
+        .map_err(|why| format!("{}: {why}", member.instrument))?;
+        entries.push(pulled);
+        months_written = months_written.saturating_add(1);
+        // SUMMED ACROSS MONTHS, because it is a COUNT of bars written and not
+        // a flag. `Ingested::bars_stored` reads it, and a batch of eighty
+        // months reporting one month's figure would under-report the run by
+        // seventy-nine — a number an operator checks against the vendor's.
+        committed = committed.saturating_add(wrote);
 
-    let derived = entries.len().saturating_sub(1);
+        // NO `if timeframe == MINUTE_1` GATE. Whatever rung was pulled,
+        // everything derivable FROM it is derived — the rule decides, not a
+        // condition here. A daily pull derives nothing because nothing coarser
+        // is a whole multiple of it that is not itself the day. See
+        // `derived_from`.
+        //
+        // Per month, because `DeriveInto::month` names one file and the
+        // derived rungs of January must not land in February's.
+        derive_all(
+            slice,
+            &member.instrument,
+            store_root,
+            symbol_id,
+            timeframe,
+            DeriveInto {
+                // THE CONTRACT THE BARS WERE FILED UNDER, which is what
+                // `derive_all` reads its option/future line off. Leaving this
+                // `None` would file an option's derived rungs in the
+                // underlying's own directory.
+                contract: plan.contract,
+                vendor,
+                exchange,
+                segment,
+                symbol,
+                month: *ym,
+            },
+            &mut entries,
+        );
+    }
+
+    // PER MONTH ON BOTH SIDES. `entries` now holds one bars entry per month
+    // plus that month's derived rungs, so the subtrahend is the number of
+    // months written rather than the constant 1 it was when a batch was one
+    // month — and the expectation is multiplied to match. Left as they were, an
+    // eighty-month batch would report eighty times the derived rungs it
+    // expected and every run would read as wrong.
+    let derived = entries.len().saturating_sub(months_written);
     // THE RULE, NOT A LIST. `derived_count_in` is what `derive_rungs` walks, so
     // a rung added to `Timeframe::KNOWN` moves both sides at once and this
     // expectation cannot go stale against it. It already knows the one case
     // where zero is correct: an option contract folds into no rung.
-    let derived_expected = derived_count_in(plan.contract, timeframe);
+    let derived_expected =
+        derived_count_in(plan.contract, timeframe).saturating_mul(months_written);
     Ok(Landed {
         bars: landed.bars.len(),
         // WRITTEN, AS DISTINCT FROM OFFERED. See `Ingested::bars_stored`.
@@ -1658,6 +1679,67 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
 ///
 /// A timestamp that is not a moment on this calendar, or a batch that spans two
 /// months, naming both.
+/// Splits a sorted batch into one contiguous run per calendar month.
+///
+/// # Why this exists, and what it is worth
+///
+/// The store addresses **one month per file**, so a write is per month. The
+/// FETCH does not have to be, and coupling the two cost forty requests out of
+/// every forty-one.
+///
+/// `session::split_window` ended every chunk at the earlier of the vendor's day
+/// cap and the month's last day, because [`one`] refused a batch spanning two
+/// months. Zerodha's documented cap is **2,000 days for `day` and 60 for
+/// `minute`** (`Zerodha Docs/13-historical.md`, Appendix A). Over the
+/// operator's 2,460-day window that is **2 requests** at day level and **41** at
+/// minute level — and the month rule forced **81** at both.
+///
+/// Measured on the operator's own run: 0.35 s per instrument-month against a
+/// 3-requests-per-second ceiling, 30 s per instrument, ~94 minutes for a day
+/// pass that needs ~2.3. The local cost of splitting instead is 242 ms per
+/// instrument, benchmarked over 81 fsynced month files.
+///
+/// # It splits DECODED bars, never raw rows
+///
+/// A raw row's timestamp is meaningless until [`crate::fetch::land`] has
+/// dispatched on the vendor's [`crate::fetch::TimestampEncoding`]. Partitioning
+/// before that would mean a second implementation of the conversion, and the
+/// two disagreeing files bars under the wrong month — which is worse than the
+/// requests it saves, and invisible until a backtest reads the wrong window.
+///
+/// # A run, not a group
+///
+/// The batch is already sorted by timestamp — `land` asserts it — so a month's
+/// bars are contiguous and this is one pass with no map and no allocation per
+/// bar. `CLAUDE.md` §3 rule 4.
+///
+/// # Errors
+///
+/// A timestamp that is not a moment on the IST calendar, from [`month_of`].
+fn months_in(
+    bars: &[store::format::Bar],
+) -> Result<Vec<(store::path::YearMonth, &[store::format::Bar])>, String> {
+    let mut out: Vec<(store::path::YearMonth, &[store::format::Bar])> = Vec::new();
+    let mut start = 0usize;
+    while start < bars.len() {
+        let Some(first) = bars.get(start) else { break };
+        let ym = month_of(first, first)?;
+        let mut end = start;
+        while let Some(bar) = bars.get(end) {
+            if month_of(bar, bar)? != ym {
+                break;
+            }
+            end = end.saturating_add(1);
+        }
+        let Some(slice) = bars.get(start..end) else {
+            break;
+        };
+        out.push((ym, slice));
+        start = end;
+    }
+    Ok(out)
+}
+
 fn month_of(
     first: &store::format::Bar,
     last: &store::format::Bar,

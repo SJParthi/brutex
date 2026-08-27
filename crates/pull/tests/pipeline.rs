@@ -1269,8 +1269,18 @@ fn a_row_that_cannot_be_landed_refuses_only_its_own_member() {
 
 /// Bars that cross a month boundary are refused by name rather than filed into
 /// whichever month came first.
+/// **A member whose bars cross a month boundary lands in both months.**
+///
+/// This asserted the opposite until D-0320 — the refusal named both months and
+/// the whole batch was thrown away. That refusal is why `session::split_window`
+/// clamped every fetch to a month end, and the clamp turned the operator's
+/// 2,460-day window into 81 requests where Zerodha's documented 2,000-day cap
+/// needs 2: 94 minutes against 2.3 at the vendor's 3-per-second ceiling.
+///
+/// `ingest::months_in` splits the DECODED batch and `one` writes a file per
+/// month, so the caller no longer has to make the split a fetch decision.
 #[test]
-fn a_member_whose_bars_cross_a_month_boundary_is_refused_by_name() {
+fn a_member_whose_bars_cross_a_month_boundary_lands_in_both_months() {
     let scratch = Scratch::new("SPAN");
     let across = "20221031,09:15:01,38445.65,0,0\n20221101,09:15:01,38446.00,0,0\n";
     let dir = folder_of(&scratch, &[("NIFTY", across)]);
@@ -1287,23 +1297,47 @@ fn a_member_whose_bars_cross_a_month_boundary_is_refused_by_name() {
     let done = pull::ingest::from_dir(
         &dir,
         &store_of(&scratch),
-        plan_over(&request, "NSE", PriceScale::Paisa),
+        plan_over(&request, "NSE", PriceScale::Rupees),
     )
     .expect("the folder is readable");
 
-    assert_eq!(
-        done.rows_read, 2,
-        "both rows survived the window and the fold"
+    assert!(
+        done.failures.is_empty(),
+        "a two-month batch is no longer a refusal — {:?}",
+        done.failures
     );
-    assert_eq!(done.bars_stored, 0, "and neither was filed");
-    assert_eq!(done.failures.len(), 1);
-    let why = &done.failures[0].why;
+    assert_eq!(done.bars_stored, 2, "one bar in October, one in November");
+
+    // AND EACH BAR IS IN ITS OWN MONTH'S FILE. A splitter that filed October
+    // under November would save the request and corrupt the store — which is
+    // strictly worse than the refusal this replaced, because it is invisible
+    // until a backtest reads the wrong window.
     let october = YearMonth::new(2022, 10).expect("October 2022").to_string();
     let november = YearMonth::new(2022, 11).expect("November 2022").to_string();
+    let mut found: Vec<String> = Vec::new();
+    let mut stack = vec![store_of(&scratch)];
+    while let Some(at) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&at) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "bin")
+                && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+            {
+                found.push(stem.to_owned());
+            }
+        }
+    }
     assert!(
-        why.contains(&october) && why.contains(&november),
-        "the refusal names BOTH months, because splitting is a decision about \
-         paths and it is the caller's to make — {why}"
+        found.contains(&october),
+        "October has its own file — {found:?}"
+    );
+    assert!(
+        found.contains(&november),
+        "November has its own file — {found:?}"
     );
 }
 

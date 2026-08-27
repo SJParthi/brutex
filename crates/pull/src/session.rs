@@ -1223,9 +1223,13 @@ pub fn split_window(window: Window, cap_days: Option<u32>) -> Result<Vec<Window>
         let month_end = Day::from_days(start)?.end_of_month().days_from_epoch();
         let capped = match cap_days {
             Some(cap) => start.saturating_add(cap - 1),
+            // A VENDOR THAT PUBLISHES NO CAP IS STILL ASKED A MONTH AT A TIME.
+            // There is no number to chunk by, and one unbounded request for a
+            // seven-year window is the one shape that cannot be retried
+            // usefully when it fails.
             None => month_end,
         };
-        let end = capped.min(last).min(month_end);
+        let end = capped.min(last);
         chunks.push(Window::new(Day::from_days(start)?, Day::from_days(end)?)?);
         // `end + 1` cannot overflow past `last`'s guard: `end <= last` and
         // `last` is a real day, so the successor is at most one past a value
@@ -1387,39 +1391,50 @@ mod month_boundary {
     /// answered and the store threw away. This is the regression test for a
     /// measured failure: 37 days, 774 instruments, 699 members failed with
     /// "bars span 2026-07 to 2026-08".
+    /// **A chunk fills the vendor's cap, and the store splits it afterwards.**
+    ///
+    /// This used to assert that no chunk ever spanned two months, because
+    /// `ingest::one` refused a batch that did. That refusal is gone —
+    /// `ingest::months_in` writes one file per month out of a batch that may
+    /// cover many — and the clamp it forced was expensive: Zerodha publishes
+    /// **2,000 days per request at `day` level** (`Zerodha Docs/13-historical.md`
+    /// Appendix A), and clamping to a month turned the operator's 2,460-day
+    /// window into **81 requests where 2 suffice**. Measured against the
+    /// 3-requests-per-second ceiling: 94 minutes rather than 2.3.
+    ///
+    /// What must still hold is what the vendor and the operator actually said:
+    /// no chunk wider than the cap, and the chunks tile the window exactly.
     #[test]
-    fn no_chunk_ever_spans_two_months() {
+    fn a_chunk_fills_the_cap_and_the_chunks_tile_the_window() {
         let cases = [
             (day(2026, 7, 1), day(2026, 8, 6)),
             (day(2024, 1, 1), day(2024, 12, 31)),
             (day(2024, 2, 1), day(2024, 3, 1)),
             (day(2020, 1, 1), day(2026, 8, 6)),
         ];
-        // `None` IS IN THIS LIST, and it is the case the month clamp exists
-        // for on its own. A rung the vendor published no cap for has nothing
-        // else holding its chunks inside a file, so if the month were the
-        // vendor's rule rather than the store's, this row would produce a
-        // seven-year chunk and every assertion below would fail.
-        for cap in [Some(30_u32), Some(90), Some(1), Some(365), None] {
+        // `None` IS IN THIS LIST, and it is the one case the month clamp still
+        // serves: a rung the vendor published no cap for has no number to chunk
+        // by, and one unbounded request for a seven-year window is the shape
+        // that cannot be usefully retried when it fails.
+        for cap in [Some(30_u32), Some(90), Some(1), Some(365), Some(2000), None] {
             for (from, to) in cases {
                 let window = Window::new(from, to).expect("from precedes to");
                 let chunks = split_window(window, cap).expect("a splittable window");
                 let mut seen = Vec::new();
                 for c in &chunks {
-                    assert_eq!(
-                        (c.from().year(), c.from().month()),
-                        (c.to().year(), c.to().month()),
-                        "cap {cap:?}: chunk {:?}..{:?} spans two months -- the store \
-                         refuses this batch and the whole fetch is wasted",
-                        c.from(),
-                        c.to(),
-                    );
                     assert!(
                         cap.is_none_or(|cap| {
                             c.to().days_from_epoch() - c.from().days_from_epoch() < cap
                         }),
                         "cap {cap:?}: chunk is wider than the vendor allows",
                     );
+                    if cap.is_none() {
+                        assert_eq!(
+                            (c.from().year(), c.from().month()),
+                            (c.to().year(), c.to().month()),
+                            "with no cap the month is the only bound left",
+                        );
+                    }
                     seen.push((c.from().days_from_epoch(), c.to().days_from_epoch()));
                 }
                 // AND NOTHING IS LOST. The chunks must tile the window exactly:
@@ -1433,10 +1448,37 @@ mod month_boundary {
                 assert_eq!(
                     want,
                     to.days_from_epoch() + 1,
-                    "cap {cap:?}: the chunks stop short of the window",
+                    "cap {cap:?}: the chunks do not reach the end of the window",
                 );
             }
         }
+    }
+
+    /// **The saving, in the numbers the operator's own run produced.**
+    ///
+    /// 2,460 days at Zerodha's documented caps. Asserted rather than described,
+    /// because the whole point of the change is the request count and a
+    /// sentence about it cannot fail.
+    #[test]
+    fn the_documented_caps_turn_a_seven_year_window_into_a_handful_of_requests() {
+        let window = Window::new(day(2019, 12, 2), day(2026, 8, 26)).expect("a real window");
+
+        // `day` — 2,000 days per request.
+        let daily = split_window(window, Some(2000)).expect("splittable");
+        assert_eq!(daily.len(), 2, "2,460 days at 2,000 per request");
+
+        // `minute` — 60 days per request.
+        let minute = split_window(window, Some(60)).expect("splittable");
+        assert_eq!(minute.len(), 41, "2,460 days at 60 per request");
+
+        // AND WHAT THE MONTH CLAMP COST, kept as the comparison: one chunk per
+        // month over the same window, at both rungs, is what this replaced.
+        let by_month = split_window(window, None).expect("splittable");
+        assert_eq!(by_month.len(), 81, "the old behaviour, for both rungs");
+        assert!(
+            by_month.len() / daily.len() >= 40,
+            "the day pass issued at least forty times the requests it needed"
+        );
     }
 }
 
