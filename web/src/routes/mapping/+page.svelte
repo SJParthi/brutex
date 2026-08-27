@@ -152,6 +152,63 @@
     readMasters();
   });
 
+  /* ====================================================================
+     THE CONSTITUENTS, WHICH ARE NOT THE CATALOGUE
+
+     `nse_indices.csv` is the CATALOGUE -- which indices exist, and 123 of
+     them do. Each of those also publishes its own constituents file, and
+     NSE lists about 148 across four categories. `pull::nse` decodes them,
+     `pull::resolve::crawl` walks them, `POST /universe/resolve` serves the
+     result -- and nothing in this console had ever called it, so the whole
+     chain was built, tested and unreachable.
+
+     THE FILENAMES CANNOT BE COMPOSED. `ind_niftybanklist.csv` is
+     word-joined and `ind_niftytotalmarket_list.csv` is
+     underscore-separated; `pull::nse` says so in its own words and refuses
+     to guess. They are discovered from the exchange's directory page,
+     which is why this is a crawl and not 148 known URLs.
+
+     IT IS EXPENSIVE AND IT IS BOUND TO A PRESS. ~148 requests to
+     nseindia.com. Nothing here runs on load, and the timeout is minutes
+     rather than seconds because the work legitimately takes them.
+     ==================================================================== */
+
+  /** @type {{ phase: 'idle'|'running'|'done', body: any, why: string }} */
+  let crawl = $state({ phase: 'idle', body: null, why: '' });
+
+  async function resolveUniverse() {
+    if (crawl.phase === 'running') return;
+    const feed = feeds.active;
+    if (!feed) return;
+    crawl = { phase: 'running', body: null, why: '' };
+    try {
+      // FIVE MINUTES. A crawl of ~148 documents over one polite connection
+      // is minutes of real work, and the console's default 15 s would
+      // report it as a wedged server every single time.
+      const response = await ask('/universe/resolve', {
+        method: 'POST',
+        ms: 300_000,
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: `feed=${encodeURIComponent(feed)}`
+      });
+      const body = await response.json();
+      crawl = {
+        phase: 'done',
+        body,
+        // `ok:false` CARRIES ITS OWN REASON and the status may still be 200:
+        // the route answers a refusal as a document rather than as an HTTP
+        // error, so reading the status alone would call a refusal a success.
+        why: body?.ok === false ? (body.why ?? 'the crawl refused and gave no reason') : ''
+      };
+    } catch (error) {
+      crawl = {
+        phase: 'done',
+        body: null,
+        why: error instanceof Error ? error.message : 'The crawl threw a value that is not an Error.'
+      };
+    }
+  }
+
   /** @param {string|null} feed */
   async function fetchJoin(feed) {
     if (!feed) return;
@@ -494,6 +551,87 @@
         <b>Re-read in place — no restart needed.</b> Every page now answers from these files.
       </p>
       <p class="mnotes">{masters.universe}</p>
+    {/if}
+  </section>
+
+  <!-- THE CONSTITUENTS. A separate section from the masters above because it
+       is a separate act with a separate cost: the masters are four files and
+       seconds, this is ~148 documents from one exchange and minutes. Folding
+       them into one button would make the cheap operation look expensive and
+       be avoided for the wrong reason. -->
+  <section class="masters">
+    <div class="mhead">
+      <div>
+        <h2>The index constituents — 148 files, not one</h2>
+        <p class="msub">
+          The catalogue above says <em>which</em> indices exist. This walks the exchange's own
+          directory and reads what is <em>in</em> each of them, then checks every published name
+          against this feed's master. ~148 requests to nseindia.com, so it takes minutes and runs
+          only when you press it.
+        </p>
+      </div>
+      <button class="mgo" onclick={resolveUniverse} disabled={crawl.phase === 'running'}>
+        {crawl.phase === 'running' ? 'Crawling the exchange…' : 'Crawl the constituents'}
+      </button>
+    </div>
+
+    {#if crawl.phase === 'running'}
+      <p class="msub">
+        Reading the directory, then one file per index. Nothing is written — the snapshot is
+        returned and shown, and publishing it is a separate act.
+      </p>
+    {:else if crawl.body?.ok}
+      <div class="census">
+        <div class="cell">
+          <span class="n">{crawl.body.published}</span><span class="k">Published names</span>
+          <span class="s">Constituents the exchange lists across every index read.</span>
+        </div>
+        <div class="cell">
+          <span class="n">{crawl.body.indices}</span><span class="k">Indices read</span>
+          <span class="s">Constituent files walked in this pass.</span>
+        </div>
+        <div class="cell" class:r={crawl.body.failed > 0}>
+          <span class="n">{crawl.body.failed}</span><span class="k">Indices that failed</span>
+          <span class="s">Named below. Never dropped from the count.</span>
+        </div>
+        <div class="cell" class:p={crawl.body.publishable} class:r={!crawl.body.publishable}>
+          <span class="n">{crawl.body.publishable ? 'yes' : 'no'}</span
+          ><span class="k">Publishable</span>
+          <span class="s">Whether this pass is whole enough to be a snapshot.</span>
+        </div>
+      </div>
+
+      {#if crawl.body.buckets}
+        <!-- EVERY BUCKET, INCLUDING THE EMPTY ONES. A bucket shown only when
+             non-zero teaches an operator that the absent ones do not exist,
+             and the sum is what makes a join defect findable at all. -->
+        <div class="mrows">
+          {#each Object.entries(crawl.body.buckets) as [name, total] (name)}
+            <div class="mrow bucket">
+              <div class="mname">{name.replace(/_/g, ' ')}</div>
+              <div class="mstate"><span class={total ? 'ok' : 'dim'}>{total}</span></div>
+              <div class="mout"></div>
+            </div>
+          {/each}
+        </div>
+      {/if}
+
+      {#if crawl.body.failures?.length}
+        <ol class="ladder">
+          {#each crawl.body.failures as failure, i (i)}
+            <li><span class="lst">{failure.at}</span><span class="dim">{failure.why}</span></li>
+          {/each}
+        </ol>
+      {/if}
+
+      <p class="mnotes">
+        digest {crawl.body.digest} · key {crawl.body.key} · identity {crawl.body.identity} · day
+        {crawl.body.day}
+      </p>
+    {/if}
+
+    {#if crawl.why}
+      <p class="mwhy">{crawl.why}</p>
     {/if}
   </section>
 </section>
@@ -950,4 +1088,10 @@
     line-height: 1.5;
     word-break: break-word;
   }
+  .mrow.bucket {
+    grid-template-columns: minmax(180px, 1fr) 80px;
+    font-family: var(--mono);
+    font-size: 0.76rem;
+  }
+  .mrow.bucket .mstate { text-align: right; }
 </style>
