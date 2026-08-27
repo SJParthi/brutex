@@ -23660,3 +23660,95 @@ Whether that is sufficient for `nseindia.com` is **UNVERIFIED**: no request from
 this session goes to a vendor, so the next live crawl is the measurement. The
 change is made on the evidence that the sibling transport needed it against the
 same host, not on a claim about what the filter checks.
+
+### D-0318 — an empty calendar reported 204 complete instruments as SHORT
+
+The operator's Ingest page showed **204 of 210 instruments SHORT**, `0 of 420
+settled`, every daily series reading `1,674 / 1,758`. It looked like a broken
+pull. The pull was fine and every one of those instruments was complete.
+
+#### The arithmetic, which is exact
+
+```
+1,758  expected by the page
+1,674  stored for ABB (measured: (2,747,952 − 81×32,768) ÷ 56)
+───────
+   84  "missing"
+```
+
+And `crates/pull/src/calendar.rs`, from its own header:
+
+```
+1,755  weekdays in the window
+-  92  days no instrument traded  (13.7/yr, the NSE norm)
++   8  weekend days all three DID trade
+= 1,671  exactly the count on disk
+```
+
+`1,755 − 1,671 = 84`. **The shortfall is the public holidays, to the bar.**
+
+#### The chain, and it is four hops long
+
+`web/`'s `isSession` is honest about its own limits:
+
+```js
+if (holidaysKnownFor(isoDay)) return calendar.owed.has(isoDay);
+const w = weekdayOf(isoDay);
+return w !== 0 && w !== 6;          // no calendar → count weekdays
+```
+
+So: `/calendar.json` answered `{"sessions":0,"days":[]}` → `holidaysKnownFor`
+false everywhere → the fallback counted all 92 holidays as sessions → expected
+1,758 → **SHORT on everything complete**.
+
+#### Why the calendar was empty
+
+`calendar_json` read `site.entries`, and `Site::entries` is filled once in
+`Site::load` and never again (D-0039). **The server booted before the pull
+landed anything**, so the list was empty for the life of the process: no names
+to walk, no months to read, no calendar.
+
+**This exact defect is already documented in this file.** `broker_run`'s ladder
+gate hit it and its comment says so:
+
+> *"This read `site.censuses`, which is filled once in `Site::load` and never
+> again — D-0039 … So a day pass written by THIS process was invisible to the
+> gate … The documented workaround was to restart the server, which is a
+> workaround for a bug."*
+
+It was fixed there by taking a fresh census. `calendar_json` was left on the
+stale field — the same bug, on the route that *reports* rather than the one that
+*gates*, and therefore louder: the gate merely refused, this printed a wrong
+number against 204 rows.
+
+Both the names and the months now come from `census::read_all`, collected once
+before the loop. Fixing only the names would have been worse than not fixing it:
+names from disk and months from the boot snapshot resolves every name to zero
+months, and the calendar stays empty with the cause moved.
+
+#### What this did NOT break, checked rather than assumed
+
+The ladder gate that 409s the 1-minute leg reads
+
+```rust
+pub fn probing(census: &Manifest) -> impl Fn(&EntryKey) -> bool + '_ {
+    |k| census.entry(k).is_some()
+}
+```
+
+— **presence, not counts.** The phantom shortfall never reached it, so the
+minute leg was never blocked by this and will open when the day pass has covered
+every instrument-month. The 409 is the ladder working, and `pull::fold`'s own
+table is why: *"Daily is one bar where minute is 375. Each stage is a rehearsal
+for the next … so a broken credential surfaces against two instruments rather
+than against eleven thousand half-written files."*
+
+#### The rule this is the third instance of
+
+Every defect in this session's work has been **a value read once and believed
+forever**: the masters parsed at boot (D-0316), the census read at boot for the
+gate, and now the entries read at boot for the calendar. `Site` is full of
+fields whose doc says "read once at startup", and each is correct until
+something writes to disk while the process runs. There is no gate on that class.
+`docs/06-limits.md` should carry it as a standing hazard rather than three
+separate corrections.

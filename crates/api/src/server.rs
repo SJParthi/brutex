@@ -23144,17 +23144,53 @@ async fn calendar_json(
     // differently. See `calendar_of::agree` for why that is a union.
     let symbol = param(query, "symbol");
     if symbol.is_empty() {
-        let mut names: Vec<String> = site
-            .entries
+        // A FRESH CENSUS, NOT `site.entries`.
+        //
+        // `entries` is filled once in `Site::load` and never again — D-0039 —
+        // so a server started before its first pull holds an EMPTY list for
+        // life. This route then names no instruments, walks no months, and
+        // answers `{"sessions":0,"days":[]}`.
+        //
+        // That is not a quiet failure; it is a loud wrong answer three hops
+        // downstream. `web/`'s `isSession` uses the measured calendar where it
+        // has one and falls back to a bare weekday rule where it does not — so
+        // an empty calendar makes the page count all 92 public holidays in this
+        // window as sessions, expect 1,758 daily bars instead of the 1,671 that
+        // exist, and print **SHORT against 204 of 210 complete instruments**.
+        // The operator reads a broken pull; the pull is fine.
+        //
+        // `crates/pull/src/calendar.rs` was written for exactly this: *"stored
+        // series as SHORT when every one of them was complete. An operator
+        // cannot tell a real hole from a public holiday, so every alarm is
+        // noise and a true gap hides among them."* It could not do that job
+        // through a list captured before the store had anything in it.
+        //
+        // `broker_run`'s ladder gate hit the identical defect and its comment
+        // says so — *"The documented workaround was to restart the server,
+        // which is a workaround for a bug."* It was fixed there by taking a
+        // fresh census; this is the same fix, on the route that reports rather
+        // than the one that gates. D-0318.
+        let fresh = census::read_all(&site.store_root);
+        let mut names: Vec<String> = fresh
             .iter()
+            .flat_map(|c| census::held_entries(std::slice::from_ref(c)))
             .map(|(series, _)| series.symbol.as_str().to_owned())
             .collect();
         names.sort_unstable();
         names.dedup();
         let mut readings: Vec<(String, pull::calendar::Calendar)> = Vec::new();
+        // THE SAME FRESH READING, WALKED ONCE. Filtering `site.entries` here
+        // would have re-introduced the staleness two lines after fixing it —
+        // the names would come from disk and the months from the boot snapshot,
+        // so every name would resolve to zero months and the calendar would
+        // still be empty. Collected before the loop because `read_all` walks
+        // the manifests and doing it per symbol would be one walk per name.
+        let held: Vec<(census::Series, store::path::YearMonth)> = fresh
+            .iter()
+            .flat_map(|c| census::held_entries(std::slice::from_ref(c)))
+            .collect();
         for name in names {
-            let months: Vec<store::path::YearMonth> = site
-                .entries
+            let months: Vec<store::path::YearMonth> = held
                 .iter()
                 .filter(|(series, _)| series.symbol.as_str() == name)
                 .map(|(_, month)| *month)
