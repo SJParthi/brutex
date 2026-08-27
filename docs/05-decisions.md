@@ -23752,3 +23752,77 @@ fields whose doc says "read once at startup", and each is correct until
 something writes to disk while the process runs. There is no gate on that class.
 `docs/06-limits.md` should carry it as a standing hazard rather than three
 separate corrections.
+
+### D-0319 — the minute rung was deadlocked, not waiting
+
+The operator's `/pull/run.json` read, pass after pass:
+
+```
+running: true   passes: 2   retries: 0   skipped: 0
+doing: "1 day"
+lastError: "1 minute answered HTTP 409 … the leg is owed and will be asked
+            for again."
+```
+
+I read that as the ladder working and told the operator to let it finish. **It
+could not finish.** The gate could never open, and the minute pass would have
+409'd for ever.
+
+#### What the gate asked, and why nothing could answer it
+
+```rust
+if let Some(first) = precedes(rung) {          // MINUTE_1 → DAY_1
+    let missing = wanted.iter()
+        .filter(|w| !held(&key(w.exchange, w.segment, first, w.symbol, w.month)))
+        .count();
+    if missing > 0 { return Gate::RungFirst { … }; }
+}
+```
+
+Every month of every instrument in the window must hold a day entry. Measured on
+the operator's store, all 210 F&O underlyings present:
+
+| Instrument | First month held | Months short of 81 |
+|---|---|---|
+| `VMM` | — | 60 |
+| `SWIGGY` | 2024-11 | 59 |
+| `HYUNDAI` | 2024-10 | 58 |
+| `IREDA` | 2023-11 | 47 |
+| `JIOFIN` | 2023-08 | 44 |
+| `MANKIND` | 2023-05 | 41 |
+
+**28 of 210 instruments, 751 instrument-months.** Every one runs contiguously
+from its first month to the window's end. They are not gaps — those companies
+were not listed in December 2019.
+
+The chain closes on itself: a month before listing returns zero bars → an empty
+answer writes no manifest entry, by design and by test
+(`an_empty_answer_stores_nothing_and_writes_no_census`) → `held` is false → the
+count never reaches zero. The store cannot distinguish *not fetched yet* from
+*never existed*, and the gate demanded the one thing that distinction is needed
+for.
+
+#### The fix, and the half of the rule it keeps
+
+An instrument's owed span now begins at its **earliest held month**. Months
+before that are its listing gap: the vendor has nothing there and neither rung
+ever will.
+
+**A hole INSIDE the span still refuses.** This narrows the question rather than
+weakening it — excusing an interior gap would let the minute pass run over a day
+pass that genuinely failed, which is the whole reason the gate exists. An
+instrument holding nothing at all keeps every month owed, because that is a day
+pass which has not run.
+
+All three cases are asserted in
+`a_month_before_the_instrument_listed_does_not_hold_the_minute_rung_shut`.
+
+#### What this says about the reasoning, not the code
+
+The 409 was *shaped* like patience — "the leg is owed and will be asked for
+again" — and I repeated that shape back as advice twice. The message is accurate
+about intent and says nothing about whether the condition is reachable. **A
+retry that cannot succeed reads exactly like a retry that has not succeeded
+yet**, and the only way to tell them apart is to compute what the gate is
+waiting for and check whether it can arrive. That is what finding this took, and
+it is what should have been done the first time the 409 appeared.

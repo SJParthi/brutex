@@ -22763,14 +22763,6 @@ mod universe_route_tests {
         );
     }
 
-    /// **IT CONTACTS NO BROKER**, and the argument is that its master comes
-    /// from memory rather than from a socket.
-    ///
-    /// Fetching a vendor's instrument master is a credentialed request against
-    /// a token another system shares. This route answers "of the names the
-    /// exchange publishes, which can this feed name?" off the rows already
-    /// read from disk — so it spends no quota and needs no credential.
-
     /// **The boot-snapshot class, refused by name.**
     ///
     /// `Site::entries` is filled once in `Site::load` and never again (D-0039).
@@ -22808,6 +22800,14 @@ mod universe_route_tests {
              for what that cost the last three times: {reads:#?}"
         );
     }
+
+    /// **IT CONTACTS NO BROKER**, and the argument is that its master comes
+    /// from memory rather than from a socket.
+    ///
+    /// Fetching a vendor's instrument master is a credentialed request against
+    /// a token another system shares. This route answers "of the names the
+    /// exchange publishes, which can this feed name?" off the rows already
+    /// read from disk — so it spends no quota and needs no credential.
     #[test]
     fn the_resolve_route_reads_its_master_from_memory_and_never_from_a_vendor() {
         let me = include_str!("server.rs");

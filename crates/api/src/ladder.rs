@@ -514,8 +514,49 @@ where
     }
 
     if let Some(first) = precedes(rung) {
+        // A MONTH BEFORE THE INSTRUMENT EXISTED IS NOT A MONTH ANYONE OWES.
+        //
+        // This counted every month in the window and refused on any absence,
+        // which deadlocks the moment the universe holds a company younger than
+        // the window. Measured on the operator's own run: 28 of 210 F&O
+        // underlyings are post-2019 listings — SWIGGY from 2024-11, HYUNDAI
+        // from 2024-10, IREDA from 2023-11, JIOFIN from 2023-08 — and between
+        // them they account for **751 instrument-months that can never be
+        // fetched**, because the companies were not listed. The vendor answers
+        // those months with zero bars, an empty answer writes no manifest entry
+        // by design (`an_empty_answer_stores_nothing_and_writes_no_census`), so
+        // `held` is false for ever and the minute rung answered 409 on every
+        // pass with the day pass complete beneath it.
+        //
+        // **The prefix is excused; an interior hole is not.** An instrument's
+        // owed span starts at its earliest held month. Months before that are
+        // its listing gap — the vendor has nothing and neither rung ever will.
+        // A month missing INSIDE the span is a real hole and still refuses, so
+        // this narrows the question rather than weakening it.
+        //
+        // An instrument holding nothing at all keeps every month owed, which is
+        // the case where the day pass genuinely has not run.
+        let mut earliest: std::collections::HashMap<(Exchange, Segment, Symbol), YearMonth> =
+            std::collections::HashMap::new();
+        for w in wanted {
+            if held(&key(w.exchange, w.segment, first, w.symbol, w.month)) {
+                earliest
+                    .entry((w.exchange, w.segment, w.symbol))
+                    .and_modify(|at| {
+                        if w.month < *at {
+                            *at = w.month;
+                        }
+                    })
+                    .or_insert(w.month);
+            }
+        }
         let missing = wanted
             .iter()
+            .filter(|w| {
+                earliest
+                    .get(&(w.exchange, w.segment, w.symbol))
+                    .is_none_or(|at| w.month >= *at)
+            })
             .filter(|w| !held(&key(w.exchange, w.segment, first, w.symbol, w.month)))
             .count();
         if missing > 0 {
@@ -673,6 +714,75 @@ mod tests {
             ),
             Gate::Open,
             "nothing precedes the cheap pass, so an empty store cannot block it"
+        );
+    }
+
+    /// **The deadlock a young listing caused, and the hole it must still catch.**
+    ///
+    /// Measured on the operator's own run: 28 of 210 F&O underlyings listed
+    /// after the window opened — SWIGGY 2024-11, HYUNDAI 2024-10, IREDA
+    /// 2023-11 — and between them **751 instrument-months can never be
+    /// fetched**, because the companies did not exist. The vendor answers those
+    /// months with zero bars, an empty answer writes no manifest entry by
+    /// design (`an_empty_answer_stores_nothing_and_writes_no_census`), so
+    /// `held` is false for ever. The minute rung answered 409 on every pass
+    /// with a complete day pass beneath it, and would have done so for ever.
+    #[test]
+    fn a_month_before_the_instrument_listed_does_not_hold_the_minute_rung_shut() {
+        let at = |y, m| YearMonth::new(y, m).expect("a real month");
+        let spans = [at(2024, 9), at(2024, 10), at(2024, 11)];
+        let wanted: Vec<Wanted> = spans
+            .iter()
+            .map(|month| Wanted {
+                leg: Leg::Spot,
+                symbol: sym("SWIGGY"),
+                exchange: Exchange::Nse,
+                segment: Segment::Cash,
+                month: *month,
+            })
+            .collect();
+
+        // THE LISTING SHAPE: nothing before 2024-11, everything from it.
+        let listed_in_november =
+            |k: &EntryKey| k.timeframe == Timeframe::DAY_1 && k.month >= at(2024, 11);
+        assert_eq!(
+            gate(
+                listed_in_november,
+                Feed::Zerodha,
+                Timeframe::MINUTE_1,
+                &wanted
+            ),
+            Gate::Open,
+            "the months before the IPO are not months anybody owes"
+        );
+
+        // AND AN INTERIOR HOLE STILL REFUSES. Narrowing the question must not
+        // weaken it: a month missing INSIDE the held span is a real gap, and
+        // excusing it would let the minute rung run over a day pass that had
+        // actually failed.
+        let hole_in_the_middle =
+            |k: &EntryKey| k.timeframe == Timeframe::DAY_1 && k.month != at(2024, 10);
+        assert!(
+            matches!(
+                gate(
+                    hole_in_the_middle,
+                    Feed::Zerodha,
+                    Timeframe::MINUTE_1,
+                    &wanted
+                ),
+                Gate::RungFirst { .. }
+            ),
+            "a gap inside the held span is a real hole and still shuts the rung"
+        );
+
+        // AND AN INSTRUMENT HOLDING NOTHING AT ALL keeps every month owed —
+        // the case where the day pass genuinely has not run.
+        assert!(
+            matches!(
+                gate(|_| false, Feed::Zerodha, Timeframe::MINUTE_1, &wanted),
+                Gate::RungFirst { .. }
+            ),
+            "nothing held is not a listing gap, it is a pass that has not run"
         );
     }
 
