@@ -11453,8 +11453,16 @@ pub fn store_html(
     let filter = store_filter(query);
     let held_only = param(query, "show") != "gaps";
 
+    // READ FRESH, for the reason D-0318 gives about `calendar_json`: `entries`
+    // is filled once in `Site::load` and never again, so a page rendered by a
+    // process that booted before its first pull shows an empty store for ever
+    // — with bars on disk and a manifest counting them. `/store.json` already
+    // reads per request and answers 15,857 rows where this page answered none,
+    // which is two surfaces disagreeing about the same question.
+    let entries = census::held_entries(&census::read_all(&site.store_root));
+
     let (rows, total, last_page) = if held_only {
-        let kept = census::filtered(&site.entries, &filter);
+        let kept = census::filtered(&entries, &filter);
         let total = kept.len();
         let last = total.saturating_sub(1) / PAGE_ROWS;
         let page = page.min(last);
@@ -11546,7 +11554,7 @@ pub fn store_html(
             total,
             notes: &notes,
             filter: Some(&filter),
-            held: site.entries.len(),
+            held: entries.len(),
             held_only,
         }),
     )
@@ -22762,6 +22770,44 @@ mod universe_route_tests {
     /// a token another system shares. This route answers "of the names the
     /// exchange publishes, which can this feed name?" off the rows already
     /// read from disk — so it spends no quota and needs no credential.
+
+    /// **The boot-snapshot class, refused by name.**
+    ///
+    /// `Site::entries` is filled once in `Site::load` and never again (D-0039).
+    /// Every handler that reads it answers from the moment the process started,
+    /// so a server booted before its first pull reports an empty store for ever
+    /// — with bars on disk and a manifest counting them.
+    ///
+    /// That has now cost three separate defects: the ladder gate refusing a
+    /// minute pass whose day pass had landed (fixed by passing a fresh census),
+    /// `/calendar.json` answering `{"sessions":0}` and making the Ingest page
+    /// print SHORT against 204 complete instruments (D-0318), and `/store`
+    /// rendering an empty page beside a `/store.json` answering 15,857 rows.
+    ///
+    /// A comment cannot hold this. The field is `pub`, it is the obvious thing
+    /// to reach for, and it is correct right up until something writes to disk
+    /// while the process runs. So the rule is mechanical: **no request-serving
+    /// code reads it.** `Site::new` fills it and nothing else touches it.
+    #[test]
+    fn no_handler_answers_a_request_from_the_boot_entries_snapshot() {
+        let me = include_str!("server.rs");
+        // ASSEMBLED, NEVER WRITTEN WHOLE. A literal needle appears in this
+        // file — this line — and the scan then finds itself and fails on a
+        // green tree. Joining it at run time is what keeps the check about the
+        // handlers rather than about its own source.
+        let field = ["entries"].concat();
+        let needles = [format!("site.{field}"), format!("self.{field}")];
+        let reads: Vec<&str> = me
+            .lines()
+            .filter(|line| needles.iter().any(|n| line.contains(n.as_str())))
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect();
+        assert!(
+            reads.is_empty(),
+            "a handler reads the boot snapshot rather than the store — see D-0318 \
+             for what that cost the last three times: {reads:#?}"
+        );
+    }
     #[test]
     fn the_resolve_route_reads_its_master_from_memory_and_never_from_a_vendor() {
         let me = include_str!("server.rs");
@@ -23185,16 +23231,24 @@ async fn calendar_json(
         // so every name would resolve to zero months and the calendar would
         // still be empty. Collected before the loop because `read_all` walks
         // the manifests and doing it per symbol would be one walk per name.
-        let held: Vec<(census::Series, store::path::YearMonth)> = fresh
+        // GROUPED ONCE, PROBED PER NAME. Filtering the whole list per symbol is
+        // 205 names × 15,857 rows on this operator's store — 3.2 million string
+        // compares to answer a question a map answers in one probe each. One
+        // pass to build, O(1) per name after it: `CLAUDE.md` §3 rule 4.
+        let mut by_symbol: std::collections::HashMap<String, Vec<store::path::YearMonth>> =
+            std::collections::HashMap::new();
+        for (series, month) in fresh
             .iter()
             .flat_map(|c| census::held_entries(std::slice::from_ref(c)))
-            .collect();
+        {
+            by_symbol
+                .entry(series.symbol.as_str().to_owned())
+                .or_default()
+                .push(month);
+        }
         for name in names {
-            let months: Vec<store::path::YearMonth> = held
-                .iter()
-                .filter(|(series, _)| series.symbol.as_str() == name)
-                .map(|(_, month)| *month)
-                .collect();
+            let months: Vec<store::path::YearMonth> =
+                by_symbol.get(&name).cloned().unwrap_or_default();
             let calendar = crate::calendar_of::cached(
                 &site.calendars,
                 &site.store_root,
@@ -23228,11 +23282,16 @@ async fn calendar_json(
     // `Series` carries no vendor — the censuses are already per feed — so the
     // symbol is the whole filter here and the feed is carried by `store_root`
     // plus the path the derivation builds.
-    let months: Vec<store::path::YearMonth> = site
-        .entries
+    // THE SAME FRESH READ ON THIS BRANCH TOO, and it is a separate one: fixing
+    // only the branch above would leave `/calendar.json?symbol=NIFTY` answering
+    // from the boot snapshot while `/calendar.json` answered from disk. Two
+    // routes on one handler disagreeing about what the store holds is worse
+    // than both being stale, because only one of them is ever checked.
+    let months: Vec<store::path::YearMonth> = census::read_all(&site.store_root)
         .iter()
+        .flat_map(|c| census::held_entries(std::slice::from_ref(c)))
         .filter(|(series, _)| series.symbol.as_str() == symbol)
-        .map(|(_, month)| *month)
+        .map(|(_, month)| month)
         .collect();
 
     let calendar = crate::calendar_of::cached(
