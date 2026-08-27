@@ -22658,7 +22658,7 @@ pub async fn universe_resolve(
 fn universe_snapshot_json(snap: &pull::resolve::Snapshot, verdict: &Result<(), String>) -> String {
     use core::fmt::Write as _;
     let mut out = format!(
-        r#"{{"ok":true,"day":{},"feed":{},"key":{},"identity":{},"published":{},"indices":{},"failed":{},"sound":{},"digest":{},"publishable":{},"#,
+        r#"{{"ok":true,"day":{},"feed":{},"key":{},"identity":{},"published":{},"indices":{},"failed":{},"unlinked":{},"sound":{},"digest":{},"publishable":{},"#,
         render::json_string(&snap.day.to_string()),
         render::json_string(&snap.feed),
         render::json_string(snap.key.word()),
@@ -22666,6 +22666,11 @@ fn universe_snapshot_json(snap: &pull::resolve::Snapshot, verdict: &Result<(), S
         snap.published(),
         snap.resolutions.len(),
         snap.failures.len(),
+        // SEPARATE FROM `failed`, and the first real pass is why. Sixteen of
+        // seventeen refusals were derived indices that publish no basket, and
+        // counted as failures they buried the one that mattered — a constituent
+        // CSV served as a bot-check. See `pull::resolve::Snapshot::unlinked`.
+        snap.unlinked.len(),
         snap.is_sound(),
         render::json_string(&hex32(snap.digest())),
         verdict.is_ok(),
@@ -22693,6 +22698,19 @@ fn universe_snapshot_json(snap: &pull::resolve::Snapshot, verdict: &Result<(), S
             if n > 0 { "," } else { "" },
             render::json_string(&failure.at),
             render::json_string(&failure.why)
+        );
+    }
+    // AND THE ONES WITH NOTHING TO READ, under their own key. Bounded by the
+    // same reasoning and a wider cap: these are the ROUTINE list, so a reader
+    // checking whether an index they expect a basket from has quietly stopped
+    // publishing one needs more than the first eight.
+    let _ = out.write_str(r#"],"unlinked_at":["#);
+    for (n, none) in snap.unlinked.iter().take(60).enumerate() {
+        let _ = write!(
+            out,
+            "{}{}",
+            if n > 0 { "," } else { "" },
+            render::json_string(&none.at)
         );
     }
     let _ = out.write_str("]}");
@@ -22825,6 +22843,14 @@ mod universe_route_tests {
                 at: "a-listing".to_owned(),
                 why: "503".to_owned(),
             }],
+            // ONE OF EACH, so the wire is asserted to keep them APART. A pass
+            // carrying only failures would pass a serialiser that had merged
+            // the two lists back together, which is precisely the defect the
+            // separation exists to prevent.
+            unlinked: vec![pull::resolve::IndexFailure {
+                at: "a-derived-index".to_owned(),
+                why: "publishes no constituent file".to_owned(),
+            }],
         };
         let verdict = snap.admits_publication(None);
         assert!(verdict.is_err(), "a pass with a failure is not publishable");
@@ -22839,6 +22865,16 @@ mod universe_route_tests {
         assert!(json.contains(r#""publishable":false"#), "{json}");
         assert!(json.contains("a-listing"), "it names what failed: {json}");
         assert!(json.contains(r#""identity":true"#), "{json}");
+        // THE TWO COUNTS ARE SEPARATE ON THE WIRE, and the page reads them as
+        // separate cells. Merged, sixteen derived indices would sit under
+        // "failed" and bury the one real failure — measured on the first live
+        // crawl, which is where this distinction came from.
+        assert!(json.contains(r#""failed":1"#), "{json}");
+        assert!(json.contains(r#""unlinked":1"#), "{json}");
+        assert!(
+            json.contains("a-derived-index"),
+            "an index with no basket is NAMED, not merely counted: {json}"
+        );
     }
 
     #[test]

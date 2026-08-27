@@ -87,6 +87,27 @@ pub struct Snapshot {
     pub resolutions: Vec<IndexResolution>,
     /// Every index that did not, in crawl order.
     pub failures: Vec<IndexFailure>,
+    /// Every index that publishes no constituent file at all, in crawl order.
+    ///
+    /// # Why this is not a failure, and not silence either
+    ///
+    /// Measured on the first real pass: **16 of 17 refusals were this**, and
+    /// every one named a DERIVED index — `nifty-50-tr-2x-leverage`,
+    /// `nifty-50-pr-1x-inverse`, `nifty-50-usd`, `nifty-50-futures-tr`,
+    /// `nifty-50-arbitrage`, `nifty-equity-savings`. An index computed FROM
+    /// another has no basket, so the exchange publishes no file, and the crawl
+    /// observed exactly that.
+    ///
+    /// Counted as failures, they buried the one line that mattered:
+    /// `ind_niftyhousing_list.csv` being served a bot-check instead of a CSV.
+    /// Dropped silently, an index whose link genuinely MOVED would vanish with
+    /// them. So they are kept, named, and separate.
+    ///
+    /// **`is_complete` deliberately ignores this list.** A pass is complete
+    /// when nothing it could read failed to read; an index with nothing to read
+    /// has not made it incomplete. Folding them in would refuse publication of
+    /// every pass forever, which is the same as never publishing.
+    pub unlinked: Vec<IndexFailure>,
 }
 
 impl Snapshot {
@@ -260,6 +281,8 @@ pub async fn crawl<S: DocumentSource>(
 ) -> Snapshot {
     let mut resolutions = Vec::new();
     let mut failures = Vec::new();
+    // AN INDEX WITH NO BASKET, KEPT APART FROM A FAILED ONE. See `note_unlinked`.
+    let mut unlinked = Vec::new();
 
     for category in Category::ALL {
         let listing_url = format!("{host}{}", category.path());
@@ -319,6 +342,35 @@ pub async fn crawl<S: DocumentSource>(
             // READ, NEVER COMPOSED. See `nse::constituent_link`.
             let csv_url = match nse::constituent_link(&page, &link.path) {
                 Ok(url) => url,
+                // AN INDEX WITH NO BASKET IS NOT A FAILED CRAWL.
+                //
+                // Measured on the operator's first real pass: 16 of 17
+                // refusals were this one, and every one names a DERIVED index
+                // — `nifty-50-tr-2x-leverage`, `nifty-50-pr-1x-inverse`,
+                // `nifty-50-usd`, `nifty-50-futures-tr`, `nifty-50-arbitrage`,
+                // `nifty-equity-savings`,
+                // `nifty50-short-duration-debt-dynamic-p-e`. Those are computed
+                // FROM another index rather than composed of stocks, so the
+                // exchange publishes no constituent file because there is
+                // nothing to publish.
+                //
+                // Reported at `Error` beside a genuine failure, forty of these
+                // bury the one that matters — and the one that mattered in that
+                // pass was `ind_niftyhousing_list.csv` being served a bot-check.
+                // That is `CLAUDE.md` §4 in reverse: not a failure hidden as a
+                // success, but a non-failure shouted until the real one is
+                // invisible.
+                //
+                // **This does NOT claim the page is derived.** The crawl cannot
+                // tell a derived index from a basket index whose link moved,
+                // and saying otherwise would be the invention §3 rule 1 bans.
+                // It claims exactly what it observed — the page carries no link
+                // — and puts it in its own bucket at `Warn` so the `Error`
+                // lines stay worth reading.
+                Err(nse::NseError::NoConstituentLink { page }) => {
+                    unlinked.push(note_unlinked(page_url, &page));
+                    continue;
+                }
                 Err(why) => {
                     let refusal = note_refused(page_url, why.to_string());
                     failures.push(refusal);
@@ -351,6 +403,7 @@ pub async fn crawl<S: DocumentSource>(
         key,
         resolutions,
         failures,
+        unlinked,
     }
 }
 
@@ -380,6 +433,41 @@ pub async fn crawl<S: DocumentSource>(
 ///
 /// One event per refusal, and a pass refuses at most once per document it
 /// fetched. Nothing here is per-bar and nothing scans. `CLAUDE.md` §3 rule 4.
+/// Records an index page that publishes no constituent file.
+///
+/// # Why `Warn` and not `Error`
+///
+/// [`note_refused`]'s own comment argues for `Error` over `Warn` because a
+/// refusal filtered out by the default floor is a quiet failure with more
+/// steps. That reasoning is right about a FAILURE and this is not one: an index
+/// computed from another index has no basket, so the exchange publishes no
+/// file, and the crawl observed exactly that. Levelled the same, the derived
+/// indices outnumber real failures roughly sixteen to one and the reader stops
+/// reading `pull.resolve` errors — which costs the one line that mattered.
+///
+/// `Warn` is still above the floor and still in the page's failure list, under
+/// its own heading. Nothing is hidden; it is separated.
+fn note_unlinked(at: String, page: &str) -> IndexFailure {
+    let why = format!(
+        "{page} publishes no constituent file. That is expected for an index \
+         DERIVED from another — leverage, inverse, futures, USD, dividend-point, \
+         arbitrage and debt-hybrid indices have no basket of their own — and \
+         unexpected for a basket index whose link has moved. This pass cannot \
+         tell those apart from the page alone and does not guess: nothing is \
+         composed from the index's name."
+    );
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::new(
+            telemetry::Level::Warn,
+            "pull.resolve",
+            "index publishes no constituent file",
+        )
+        .with("at", telemetry::Value::Str(&at))
+        .with("why", telemetry::Value::Str(&why)),
+    );
+    IndexFailure { at, why }
+}
+
 fn note_refused(at: String, why: String) -> IndexFailure {
     let _dropped_when_filtered = telemetry::emit(
         &telemetry::Event::error("pull.resolve", "index refused")
@@ -422,6 +510,23 @@ pub struct HttpDocuments {
     client: reqwest::Client,
 }
 
+/// The headers a browser sends, which this exchange checks for.
+///
+/// Two documents are fetched on this path and both are text the exchange serves
+/// as text: an HTML index page and a constituents CSV. `Accept` names both
+/// rather than `*/*`, which is the shape a script sends and a filter looks for.
+fn browser_headers() -> reqwest::header::HeaderMap {
+    use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, HeaderMap, HeaderValue};
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        ACCEPT,
+        HeaderValue::from_static("text/html, text/csv, text/plain, */*"),
+    );
+    headers.insert(ACCEPT_LANGUAGE, HeaderValue::from_static("en-US,en;q=0.9"));
+    headers
+}
+
 impl HttpDocuments {
     /// Builds the client.
     ///
@@ -433,6 +538,23 @@ impl HttpDocuments {
     pub fn new() -> Result<Self, String> {
         crate::ensure_tls_provider();
         let client = reqwest::Client::builder()
+            // A USER AGENT, BECAUSE THIS HOST FILTERS ON ONE.
+            //
+            // Measured on the operator's first live crawl: of ~148 documents,
+            // `ind_niftyhousing_list.csv` came back as something that is not a
+            // CSV, and `NseError::NotCsv`'s own wording names the cause —
+            // *"a CSV reader handed a bot-check or an error page"*. This client
+            // presented no agent at all, which is the request shape a filter
+            // exists to catch. `masters::PublicFetch` was given the same
+            // treatment for the same host family and its fetches now land.
+            //
+            // It names this program honestly rather than impersonating a
+            // browser build: the requirement is that the field is present and
+            // browser-shaped, not that it lies about what is calling.
+            .user_agent("Mozilla/5.0 (compatible; brutex/1.0; +index-constituent-crawl)")
+            // AND WHAT A BROWSER SAYS IT ACCEPTS. A filter that checks the
+            // agent usually checks these too, and `*/*` is what a script sends.
+            .default_headers(browser_headers())
             .timeout(core::time::Duration::from_secs(DOCUMENT_TIMEOUT_SECS))
             .redirect(reqwest::redirect::Policy::none())
             .build()
@@ -756,8 +878,41 @@ mod tests {
             "<a href=\"/somewhere/else\">not the file</a>",
         );
         let snap = crawl(&no_link, HOST, day(), "groww", JoinKey::Isin, &master()).await;
-        assert_eq!(snap.failures.len(), 1);
-        assert!(snap.failures[0].why.contains("ind_niftybanklist"));
+
+        // NOT A FAILURE, AND NOT A SILENCE. It used to land in `failures` and
+        // therefore made the pass incomplete and unpublishable — which, against
+        // the real exchange, is EVERY pass forever: sixteen of seventeen
+        // refusals on the first live crawl were derived indices that publish no
+        // basket. Kept in its own list, named, and out of the completeness rule.
+        assert!(
+            snap.failures.is_empty(),
+            "an index with nothing to read has not failed: {:?}",
+            snap.failures
+        );
+        assert_eq!(snap.unlinked.len(), 1, "and it is not dropped either");
+        assert!(
+            snap.unlinked[0]
+                .why
+                .contains("publishes no constituent file"),
+            "{:?}",
+            snap.unlinked[0]
+        );
+        // AND IT SAYS WHICH WAY IT COULD GO. The crawl cannot tell a derived
+        // index from a basket index whose link moved, and must not pretend to.
+        assert!(
+            snap.unlinked[0].why.contains("DERIVED"),
+            "{:?}",
+            snap.unlinked[0]
+        );
+        assert!(
+            snap.unlinked[0].why.contains("link has moved"),
+            "{:?}",
+            snap.unlinked[0]
+        );
+        assert!(
+            snap.is_complete(),
+            "a pass that read everything readable is complete"
+        );
     }
 
     #[tokio::test]

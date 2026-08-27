@@ -23598,3 +23598,65 @@ per-feed parse notes. So `dhan: UNAVAILABLE — no column "SECURITY_ID"` appears
 **on the page that caused it**, in the same press, rather than in `/health` after
 a restart nobody knew to perform. D-0315 is the defect that makes that worth
 having.
+
+### D-0317 — sixteen non-failures buried the one failure
+
+The operator pressed *Crawl the constituents* and the log answered **17
+`pull.resolve` events, every one at `Error`, every one reading "index refused"**.
+
+Sixteen of them named a **derived** index:
+
+```
+nifty-50-tr-2x-leverage      nifty-50-pr-1x-inverse
+nifty-50-usd                 nifty-50-futures-tr / -pr
+nifty-50-dividend-points     nifty-50-arbitrage
+nifty-equity-savings         nifty50-short-duration-debt-dynamic-p-e / -p-b
+nifty-shariah25              nifty100-esg / -esg-sector-leaders
+```
+
+An index computed FROM another index **has no basket**. NSE publishes no
+constituent file for a 2× leverage series or an inverse or a USD-denominated
+one because there is nothing to publish. `NoConstituentLink` is the right
+observation; reporting it at `Error` as a refusal is not.
+
+The seventeenth was the one that mattered:
+
+```
+ind_niftyhousing_list.csv — this route serves a CSV and the body is not one.
+Nothing was read: a CSV reader handed a bot-check or an error page finds no
+rows and reports an index with no members, which is indistinguishable from
+one that lost them all.
+```
+
+**Sixteen to one.** A reader who opens `pull.resolve` errors and sees a wall of
+leverage indices stops opening `pull.resolve` errors, and the bot-check goes
+unnoticed. That is `CLAUDE.md` §4 running backwards: not a failure wearing a
+success's clothes, but a non-failure shouted until the real one is invisible.
+
+#### What changed
+
+`Snapshot::unlinked` is a second list beside `failures`, at `Warn` rather than
+`Error`, on its own wire key and in its own cell on the page.
+
+**It is not dropped, and the reason is that the crawl cannot tell which it is.**
+A basket index whose constituent link has *moved* produces exactly the same
+observation as a derived index that never had one. Silently discarding the class
+would take that with it. So the message states both readings and says plainly
+that this pass cannot distinguish them — the honest shape §3 rule 1 asks for.
+
+**`is_complete` deliberately ignores the new list.** A pass is complete when
+nothing it *could* read failed to read. Folding these in would make every pass
+against the real exchange incomplete and therefore unpublishable, for ever —
+which is the same as never publishing, arrived at by accident.
+
+#### And the bot-check has a cause
+
+`HttpDocuments` presented **no user agent at all** — the request shape a filter
+exists to catch. `masters::PublicFetch` had been given a browser agent and
+browser `Accept` headers for the same host family and its fetches now land;
+this client had been left behind. Both now send the same shape.
+
+Whether that is sufficient for `nseindia.com` is **UNVERIFIED**: no request from
+this session goes to a vendor, so the next live crawl is the measurement. The
+change is made on the evidence that the sibling transport needed it against the
+same host, not on a claim about what the filter checks.

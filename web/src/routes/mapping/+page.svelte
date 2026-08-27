@@ -594,6 +594,20 @@
           <span class="n">{crawl.body.failed}</span><span class="k">Indices that failed</span>
           <span class="s">Named below. Never dropped from the count.</span>
         </div>
+        <!-- KEPT APART FROM `failed`. On the first live pass, 16 of 17 refusals
+             were derived indices — leverage, inverse, futures, USD — which
+             publish no basket because they have none. Counted as failures they
+             buried the one that mattered: a constituent CSV served as a
+             bot-check. Shown, not hidden: an index whose link genuinely MOVED
+             lands here too, and the crawl cannot tell them apart. -->
+        <div class="cell">
+          <span class="n">{crawl.body.unlinked ?? 0}</span
+          ><span class="k">Publish no basket</span>
+          <span class="s">
+            Expected for a derived index. Unexpected for a basket index whose link moved — and this
+            pass cannot tell those apart.
+          </span>
+        </div>
         <div class="cell" class:p={crawl.body.publishable} class:r={!crawl.body.publishable}>
           <span class="n">{crawl.body.publishable ? 'yes' : 'no'}</span
           ><span class="k">Publishable</span>
@@ -617,11 +631,25 @@
       {/if}
 
       {#if crawl.body.failures?.length}
+        <p class="mwhy">Failed — these could be read and were not:</p>
         <ol class="ladder">
           {#each crawl.body.failures as failure, i (i)}
             <li><span class="lst">{failure.at}</span><span class="dim">{failure.why}</span></li>
           {/each}
         </ol>
+      {/if}
+
+      {#if crawl.body.unlinked_at?.length}
+        <details class="none">
+          <summary>
+            {crawl.body.unlinked_at.length} index page(s) publish no constituent file
+          </summary>
+          <ol class="ladder">
+            {#each crawl.body.unlinked_at as at, i (i)}
+              <li><span class="dim">{at}</span></li>
+            {/each}
+          </ol>
+        </details>
       {/if}
 
       <p class="mnotes">
@@ -1094,4 +1122,17 @@
     font-size: 0.76rem;
   }
   .mrow.bucket .mstate { text-align: right; }
+  /* THE ROUTINE LIST, COLLAPSED BY DEFAULT. It is the long one and the
+     boring one; the failures above it are neither. Open, never hidden:
+     a basket index whose link moved lands in here too. */
+  .none {
+    margin-top: var(--s3);
+    font-size: 0.8rem;
+  }
+  .none summary {
+    cursor: pointer;
+    color: var(--n8);
+    padding: var(--s2) 0;
+  }
+  .none summary:hover { color: var(--n9); }
 </style>
