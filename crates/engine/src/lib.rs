@@ -169,12 +169,28 @@ impl Hasher for MaskHasher {
     fn write(&mut self, bytes: &[u8]) {
         let mut words = bytes.chunks_exact(8);
         for word in &mut words {
-            // `chunks_exact(8)` yields exactly eight bytes, so the conversion
-            // cannot fail. `unwrap_or` rather than a panic because a hasher that
-            // can abort the process is a worse failure than a weaker hash.
-            let value = u64::from_le_bytes((*word).try_into().unwrap_or([0; 8]));
-            self.write_u64(value);
+            // `copy_from_slice` AND NOT `try_into().unwrap_or(..)`.
+            //
+            // The conversion cannot fail — `chunks_exact(8)` yields exactly
+            // eight bytes — so the `Err` arm of a `Result` here is a line no
+            // input can reach, and `CLAUDE.md` §9 asks for 100% coverage on a
+            // touched crate. `copy_from_slice` into a fixed buffer expresses the
+            // same thing with no arm to leave uncovered.
+            let mut buf = [0_u8; 8];
+            buf.copy_from_slice(word);
+            self.write_u64(u64::from_le_bytes(buf));
         }
+        // THE TAIL, WHICH THIS CRATE'S OWN KEYS NEVER REACH.
+        //
+        // Every key hashed here is a `ConditionMask`, so `write` sees 8 bytes of
+        // length prefix and 48 of body — both multiples of eight, and the
+        // remainder is always empty. Measured: `cargo llvm-cov` put this loop at
+        // **zero executions** while the loop above ran 2.09 million times.
+        //
+        // It is kept and it is TESTED DIRECTLY rather than deleted, because a
+        // `Hasher` that silently dropped a trailing partial word would be wrong
+        // for any other key, and the next caller would have no way to know.
+        // `the_hasher_consumes_a_tail_no_mask_can_produce` reaches it.
         for &byte in words.remainder() {
             self.write_u64(u64::from(byte));
         }
@@ -1753,6 +1769,141 @@ mod tests {
             68_265,
             "C(370,2) distinct pair masks must give that many distinct digests"
         );
+    }
+
+    /// THE WITNESS THAT REPLACED THE `seen` SET — and it did not exist.
+    ///
+    /// The comment where `emitted` is declared says the duplicate witness "moves
+    /// from a data structure to `the_join_emits_exactly_one_candidate_per_pair`,
+    /// which sweeps real levels and checks `generated` against the block
+    /// arithmetic directly". An adversarial pass grepped for that name and found
+    /// **one hit: the comment claiming it.** A defence was deleted and its stated
+    /// replacement was fiction — exactly the unsourced claim `CLAUDE.md` §3
+    /// rule 6 forbids. This is that test, written.
+    ///
+    /// The arithmetic: `without_highest` groups the frontier into blocks by
+    /// prefix, and every unordered pair inside a block yields exactly one
+    /// candidate. So `generated` must equal `Σ C(n_b, 2)` — no more, because no
+    /// pair repeats, and no less, because none is skipped.
+    #[test]
+    fn the_join_emits_exactly_one_candidate_per_pair() {
+        let b = bars(&[&[0, 1, 2, 3], &[0, 1, 2, 3], &[4, 5, 6], &[4, 5, 6]]);
+        let column = Column::transpose(&b);
+        let one = |bits: &[u32]| Itemset {
+            mask: bits
+                .iter()
+                .fold(ConditionMask::default(), |m, &x| m.with_bit(x)),
+            hits: 2,
+        };
+
+        // TWO BLOCKS OF KNOWN SIZE. `without_highest` strips the top bit, so
+        // {0,1} {0,2} {0,3} all key on {0} — a block of three — and {4,5} {4,6}
+        // key on {4} — a block of two.
+        let prev = Frontier {
+            k: 2,
+            frequent: vec![
+                one(&[0, 1]),
+                one(&[0, 2]),
+                one(&[0, 3]),
+                one(&[4, 5]),
+                one(&[4, 6]),
+            ],
+            generated: 0,
+            duplicates: 0,
+            excluded: 0,
+            pruned: 0,
+            infrequent: 0,
+        };
+
+        let (level, halted, _, pairs) =
+            Ladder::with_min_hits(1).next_level(&column, &prev, 3, 0, 0);
+        assert!(halted.is_none(), "the fixture must not breach a budget");
+
+        // The block arithmetic, written as the formula rather than as its
+        // answer: a block of `n` members contributes C(n,2) pairs, and this
+        // frontier has blocks of three and two. C(3,2) + C(2,2) = 3 + 1 = 4.
+        let pairs_in = |n: u64| n.saturating_mul(n.saturating_sub(1)) / 2;
+        let expected = pairs_in(3) + pairs_in(2);
+        assert_eq!(
+            level.generated, expected,
+            "one candidate per pair, and the block arithmetic says four"
+        );
+        assert_eq!(
+            pairs, expected,
+            "and every pair walked produced one -- `generated` and `pairs` are \
+             ONE quantity under a prefix join, which is the property the deleted \
+             set used to be needed to confirm"
+        );
+        assert_eq!(
+            level.duplicates, 0,
+            "no pair repeats a candidate another pair already made"
+        );
+        assert!(
+            level.reconciles(),
+            "and the level accounts for every candidate it generated"
+        );
+    }
+
+    /// A tail no `ConditionMask` can produce, reached on purpose.
+    ///
+    /// `MaskHasher::write` has a remainder loop for input that is not a multiple
+    /// of eight bytes. `cargo llvm-cov` measured it at **zero executions** while
+    /// the word loop above it ran 2.09 million times, because every key in this
+    /// crate is a `[u64; 6]` and arrives as 8 bytes then 48.
+    ///
+    /// Deleting it would make the hasher silently wrong for any future key with
+    /// a ragged length. Reaching it from a test is the alternative, and it is
+    /// what keeps `CLAUDE.md` §9's coverage floor honest without pretending the
+    /// production path needs it.
+    #[test]
+    fn the_hasher_consumes_a_tail_no_mask_can_produce() {
+        let digest = |bytes: &[u8]| -> u64 {
+            let mut hasher = MaskHash.build_hasher();
+            hasher.write(bytes);
+            hasher.finish()
+        };
+
+        // PURE REMAINDER: three bytes, no whole word at all.
+        assert_ne!(
+            digest(&[1, 2, 3]),
+            digest(&[1, 2, 4]),
+            "a trailing partial word must reach the accumulator, or two \
+             different keys hash alike"
+        );
+        // A WHOLE WORD PLUS A TAIL, which is the case a deleted remainder loop
+        // would silently truncate to just the word.
+        assert_ne!(
+            digest(&[7; 9]),
+            digest(&[7; 8]),
+            "the ninth byte must change the digest"
+        );
+    }
+
+    /// `fold_halves` must XOR the halves, not OR them.
+    ///
+    /// `cargo mutants` replaced the `^` with `|` and **every test still passed**
+    /// — a surviving mutant on a line added the same day, which `CLAUDE.md` §9
+    /// blocks a build on. The collision test could not catch it because OR is
+    /// also a mixing function; it is simply a worse one, and worse does not show
+    /// up at 370 keys.
+    ///
+    /// This kills it directly. The two operations differ exactly where both
+    /// halves carry the same bit: XOR clears it, OR keeps it.
+    #[test]
+    fn the_fold_xors_the_halves_and_does_not_or_them() {
+        // High half 1, low half 1. XOR gives 0; OR would give 1.
+        let both = (1_u128 << 64) | 1;
+        assert_eq!(
+            fold_halves(both),
+            0,
+            "a bit set in BOTH halves must cancel -- under OR this is 1, and \
+             that mutant survived the collision test"
+        );
+        // And where only one half carries the bit, both agree -- so the case
+        // above is the only one that separates them, and it is the one asserted.
+        assert_eq!(fold_halves(1_u128 << 64), 1, "high half alone");
+        assert_eq!(fold_halves(1_u128), 1, "low half alone");
+        assert_eq!(fold_halves(0), 0, "neither");
     }
 
     /// There is always a lane, whatever the machine says.
