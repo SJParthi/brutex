@@ -61,13 +61,45 @@ use std::fmt::Write as _;
 /// `prefers-reduced-motion` disables every animation in one rule, and
 /// `prefers-color-scheme` supplies the dark palette, so both are honoured
 /// without a preference toggle to store.
+///
+/// # The status colours are measured, and the dark block had been forgotten
+///
+/// This is a SECOND design system: the browser console under `web/` has its
+/// own tokens in `theme.css`, and these pages share none of them. So the
+/// contrast sweep that fixed that one left these untouched, and the two had
+/// drifted apart without anyone comparing them.
+///
+/// Measured on the rendered page, against `--panel`, `--bg`, and each colour's
+/// own 8% tint (which `logs.rs` paints behind a faulted row):
+///
+/// * `--bad` `#dc2626` read 4.14:1 on its own tint in light — 36 instances on
+///   one `/audit` screen — and is now `#d01f1f` (4.73 tint / 5.39 panel).
+/// * `--ok` `#059669` read 3.77:1 on `--panel` in light; now `#047857` (5.48).
+///
+/// AND THE DARK BLOCK NEVER OVERRODE ANY OF THE THREE. It redefines `--bg`,
+/// `--panel`, `--ink`, `--dim`, `--line`, `--acc` and `--acc2` and stops, so
+/// dark rendered the LIGHT status colours on a near-black ground: `--bad`
+/// measured 3.78 on `--panel` and 3.64 on its own tint. Darkening them for
+/// light alone would have made dark worse, so both now carry their own value —
+/// `--bad:#ef4444` (4.85 / 4.54) and `--ok:#10b981` (7.19 / 6.46). `--warn`
+/// `#d97706` clears in both (5.72 dark, and light is unchanged) and is left as
+/// it is rather than moved for symmetry.
+///
+/// `nav.top .lnk.off` carried `opacity:.38`, which composited `--dim` down to
+/// `#c0c4cb` — 1.74:1. The same trap `.utab .n` had in `theme.css`: an
+/// opacity-composited colour is invisible to a scan that reads `color` alone.
+/// It is a `<span>` rather than a control, so the disabled exemption in WCAG
+/// 1.4.3 does not cover it, and the doc below says these entries exist so that
+/// "the shape of the system is visible" — which .38 opacity contradicted. The
+/// weight drop and the `·` marker already in the next rule carry the meaning.
 const STYLE: &str = "\
 *{box-sizing:border-box;margin:0;padding:0}\
 :root{--bg:#f5f7fb;--panel:#fff;--ink:#0a0f1e;--dim:#5a6478;--line:#e4e9f3;\
---acc:#4f46e5;--acc2:#0ea5e9;--ok:#059669;--warn:#d97706;--bad:#dc2626;\
+--acc:#4f46e5;--acc2:#0ea5e9;--ok:#047857;--warn:#d97706;--bad:#d01f1f;\
 --sh:0 1px 2px rgba(16,24,40,.05),0 10px 30px rgba(16,24,40,.07)}\
 @media(prefers-color-scheme:dark){:root{--bg:#060911;--panel:#0e1524;--ink:#e9efff;--dim:#8f9db6;\
---line:#1b2540;--acc:#818cf8;--acc2:#38bdf8;--sh:0 1px 2px rgba(0,0,0,.5),0 12px 36px rgba(0,0,0,.55)}}\
+--line:#1b2540;--acc:#818cf8;--acc2:#38bdf8;--ok:#10b981;--bad:#ef4444;\
+--sh:0 1px 2px rgba(0,0,0,.5),0 12px 36px rgba(0,0,0,.55)}}\
 body{background:var(--bg);color:var(--ink);\
 font:15px/1.55 ui-sans-serif,-apple-system,Segoe UI,Inter,system-ui,sans-serif;\
 -webkit-font-smoothing:antialiased;padding:0 0 64px}\
@@ -199,7 +231,7 @@ nav.top .lnk{padding:7px 13px;border-radius:9px;font-size:13.5px;font-weight:650
 text-decoration:none;color:var(--dim);transition:all .18s}\
 nav.top a.lnk:hover{color:var(--ink);background:color-mix(in srgb,var(--acc) 9%,transparent)}\
 nav.top .lnk.on{color:#fff;background:linear-gradient(135deg,var(--acc),var(--acc2))}\
-nav.top .lnk.off{opacity:.38;cursor:not-allowed}\
+nav.top .lnk.off{color:var(--dim);font-weight:500;cursor:not-allowed}\
 nav.top .lnk.off:after{content:' ·';font-size:10px}\
 .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:13px;\
 max-width:1180px;margin:0 auto 18px;padding:0 20px}\
