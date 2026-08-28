@@ -9955,10 +9955,30 @@ mod tests {
         // none of them is a gate this test has not learned, and it panics below
         // rather than passing quietly — which is the failure mode this whole
         // test was in.
+        // MATCHED ON THE CAUSE, NOT ON A SENTENCE, and one of these has already
+        // drifted once.
+        //
+        // `"is not in the store"` was the third entry, and it stopped matching
+        // when `stored::load`'s refusal was rewritten to name the LOCK case
+        // separately -- the old wording said "is not in the store … Pull that
+        // instrument-month first" for all seven `open_existing` failure modes
+        // including `Locked`, which told an operator to pull a month they
+        // already had while a writer held it. The replacement opens with
+        // "could not be read from the store" and then names which cause it was.
+        //
+        // The rewrite was right and this list was not updated with it, so the
+        // test went red and STAYED red: it lives in the `cli` suite, which
+        // contains an end-to-end sweep slow enough that the suite is rarely run
+        // to completion, and nothing else covers this. A gate list that names
+        // exact prose is a second copy of a message, and CLAUDE.md S5 is about
+        // exactly that shape -- two copies of one fact, correct the day they are
+        // written. Kept as prose because the refusals carry no error type to
+        // match on, but the entries are now the SHORTEST stable substring of
+        // each cause rather than a fragment of one phrasing of it.
         const GATES: [&str; 3] = [
             "BRUTEX_COMMIT",
             "is not a feed this build knows",
-            "is not in the store",
+            "could not be read from the store",
         ];
         for (vendor, underlying, rung, year, month) in [
             // A month no store holds.
