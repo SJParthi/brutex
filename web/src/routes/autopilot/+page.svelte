@@ -935,8 +935,22 @@
      ====================================================================== */
 
   const counted = $derived(census.kind === 'ok');
+  /* THREE CAUSES, NOT TWO. This split `broken` from everything else, so every
+     other kind fell into "reading /store.json…" — including the state where no
+     feed is chosen, in which `syncStore` returns before it reads and NOTHING
+     IS IN FLIGHT. Both headline gauges then reported a read that was not
+     happening, indefinitely, with no press or wait that could resolve it.
+
+     The refusal to print a zero was always right — an unread month and an
+     empty month are different facts, and this page says so at length. The
+     CAUSE was the part that lied, which is the same defect one layer along: a
+     reason an operator cannot act on because it is not the reason. */
   const notCounted = $derived(
-    census.kind === 'broken' ? `/store.json could not be read — ${census.why}` : 'reading /store.json…'
+    census.kind === 'broken'
+      ? `/store.json could not be read — ${census.why}`
+      : !feeds.active
+        ? 'no feed is chosen, so no census has been asked for — choose one in the top bar'
+        : 'reading /store.json…'
   );
 
   /** Is the census answering the same question the target asks? */

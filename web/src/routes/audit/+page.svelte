@@ -350,7 +350,26 @@
   }
 
   async function refresh() {
-    if (!feeds.active) return;
+    if (!feeds.active) {
+      /* NO FEED CLEARS, RATHER THAN FREEZING WHAT WAS THERE. This was a bare
+         `return`, so on clearing the feed `payload` and `samples` both kept
+         the previous feed's values while the poll went on ticking and the
+         button went on reading "Live · 2s".
+
+         Two lies came out of that. `{#if !feeds.active}` renders a "No feed is
+         selected" card, and `{#if payload}` renders independently below it —
+         so the page asserted no feed and drew the previous feed's whole audit
+         underneath, down to "Every figure here is <feed>'s". And `pulse` is
+         computed from the last two `samples`: with those frozen mid-growth it
+         reported RUNNING — "the store gained N bars in the last <frozen
+         duration> — measured, not timed" — for a feed nobody had selected.
+
+         Clearing both is what makes the no-feed card the whole truth. */
+      payload = null;
+      samples = [];
+      load.state = 'idle';
+      return;
+    }
     load.state = payload ? 'refreshing' : 'first';
     try {
       const got = await read(0);

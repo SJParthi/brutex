@@ -87,11 +87,19 @@
      spends the shared vendor credential.
      ==================================================================== */
 
-  /** @type {{ phase: 'idle'|'running'|'done', rows: any[], why: string, restart: boolean, universe: string }} */
-  let masters = $state({ phase: 'idle', rows: [], why: '', restart: false, universe: '' });
+  /** @type {{ phase: 'idle'|'running'|'done', rows: any[], why: string, universe: string }} */
+  let masters = $state({ phase: 'idle', rows: [], why: '', universe: '' });
 
   /** @type {any[]} */
   let onDisk = $state([]);
+  /**
+   * WHETHER A MASTER ON DISK IS NEWER THAN THE PARSE THE SERVER IS ANSWERING
+   * FROM. Fed by `readMasters` off `GET /masters/status.json`, which is the
+   * only route that computes it -- see the note there. Separate from
+   * `masters.restart` because that object describes ONE refresh press, while
+   * this is a standing fact about the server and is true on arrival.
+   */
+  let restartNeeded = $state(false);
 
   async function readMasters() {
     try {
@@ -99,6 +107,19 @@
       if (!response.ok) return;
       const body = await response.json();
       onDisk = body.masters ?? [];
+      /* THE RESTART FLAG COMES FROM HERE, AND IT WAS BEING THROWN AWAY.
+         Two routes carry a `restart_required` and only one of them means
+         anything. `POST /masters/refresh` writes the literal `false`
+         (`mastersrun.rs:598`) -- it does not compute it -- and that dead value
+         was the one feeding the banner, so `{#if masters.restart}` could never
+         be true no matter how stale the parse got. `GET /masters/status.json`
+         computes it honestly as `any_newer`, off each row's
+         `newer_than_parse`, and this function read `body.masters` and dropped
+         the rest of the object on the floor.
+         The Rust-rendered `/masters` page has always read the truthful one, so
+         the two front ends disagreed about whether a stale master was visible.
+         They now agree. */
+      restartNeeded = Boolean(body.restart_required);
     } catch {
       // A STATUS READ THAT FAILS IS NOT THIS PAGE'S SUBJECT. The join's own
       // refusal already says what is missing; a second red banner about the
@@ -110,7 +131,7 @@
 
   async function refreshMasters() {
     if (masters.phase === 'running') return;
-    masters = { phase: 'running', rows: [], why: '', restart: false, universe: '' };
+    masters = { phase: 'running', rows: [], why: '', universe: '' };
     try {
       // A MINUTE AND A HALF, NOT THE DEFAULT FIFTEEN SECONDS. A refused
       // source is retried on a backoff -- 500 ms doubling to a 32 s cap,
@@ -119,6 +140,30 @@
       // report a working ladder as a wedged server.
       const response = await ask('/masters/refresh', { method: 'POST', ms: 90_000 });
       const body = await response.json();
+      /* THE 502 AND THE THREE FIELDS THAT EXPLAIN IT WERE ALL BEING IGNORED.
+         `mastersrun.rs:592` answers 502 whenever
+         `!(attempted_landed && complete && reloaded.is_ok())`, and ships
+         `attempted_landed`, `complete` and `missing[]` to say which of the
+         three failed. This read none of them and had no `.ok` check at all.
+
+         The gap it left: when `reloaded` is true but `complete` is false, the
+         `why` below computes to `''` and the page rendered `phase: 'done'`
+         with NO error text -- a partial refresh presented as a finished one.
+         `missing[]` names exactly which master the engine wants and does not
+         have, which is the one thing an operator can act on, and it had no
+         path to the screen.
+
+         `why` is only widened here; the refusal and reload branches below are
+         unchanged and still take precedence, because a stated refusal is more
+         specific than "some of these did not land". */
+      const missing = Array.isArray(body.missing) ? body.missing : [];
+      const shortfall = !response.ok
+        ? body.attempted_landed === false
+          ? 'The refresh did not finish: at least one master could not be downloaded.'
+          : body.complete === false
+            ? `The refresh landed what it could and the set is still incomplete${missing.length ? `. Missing: ${missing.join(', ')}` : '.'}`
+            : `/masters/refresh answered ${response.status}.`
+        : '';
       masters = {
         phase: 'done',
         rows: body.landed ?? [],
@@ -127,8 +172,11 @@
         // universe still fail to re-parse, and a page reporting only the
         // downloads would show four green rows over a server still answering
         // from the boot parse.
-        why: body.refusal ?? (body.reloaded === false ? body.universe : ''),
-        restart: Boolean(body.restart_required),
+        // `?? shortfall` LAST, so a stated refusal or a failed reload still
+        // wins: both are more specific than "some of these did not land", and
+        // `shortfall` is empty on a 2xx. It only fills the case that used to
+        // render blank.
+        why: body.refusal ?? (body.reloaded === false ? body.universe : shortfall),
         universe: body.reloaded ? (body.universe ?? '') : ''
       };
       await readMasters();
@@ -142,7 +190,6 @@
         phase: 'done',
         rows: [],
         why: error instanceof Error ? error.message : 'The refresh threw a value that is not an Error.',
-        restart: false,
         universe: ''
       };
     }
@@ -195,10 +242,24 @@
       crawl = {
         phase: 'done',
         body,
-        // `ok:false` CARRIES ITS OWN REASON and the status may still be 200:
-        // the route answers a refusal as a document rather than as an HTTP
-        // error, so reading the status alone would call a refusal a success.
-        why: body?.ok === false ? (body.why ?? 'the crawl refused and gave no reason') : ''
+        /* `ok:false` CARRIES ITS OWN REASON and the status may still be 200:
+           the route answers a refusal as a document rather than as an HTTP
+           error, so reading the status alone would call a refusal a success.
+
+           BUT `ok` IS NEVER FALSE ON THIS PATH, so gating on it discarded the
+           only reason the route ever sends. `server.rs:23613` writes
+           `"ok":true` unconditionally on the success path and sets
+           `publishable` from `verdict.is_ok()`; `:23621` then writes `"why"`
+           ONLY when the verdict is an error — which is to say exactly when
+           `publishable` is false. The two are the same condition, and the
+           reader was watching the wrong one.
+
+           What that looked like: a non-publishable crawl rendered a red "no"
+           in the table with its reason sitting in the response body and
+           nowhere on the screen, and `{#if crawl.why}` below never fired.
+           `body.why` is now taken whenever the server sends one; the old
+           sentence stays as the fallback for a genuine `ok:false`. */
+        why: (body?.why ?? '') || (body?.ok === false ? 'the crawl refused and gave no reason' : '')
       };
     } catch (error) {
       crawl = {
@@ -562,7 +623,7 @@
     {#if masters.why}
       <p class="mwhy">{masters.why}</p>
     {/if}
-    {#if masters.restart}
+    {#if restartNeeded}
       <p class="mrestart">
         New bytes are on disk and this build could not re-read them in place, so every other page is
         still answering from the boot parse until the server is restarted.
