@@ -24974,6 +24974,24 @@ fn spot_months_by_identity(
             .or_default()
             .push(*month);
     }
+    // ONE ENTRY PER MONTH, NOT ONE PER RUNG.
+    //
+    // `held_entries` yields `(Series, YearMonth)` and `Series` carries the
+    // TIMEFRAME, so a month held at nine rungs arrives nine times. This map
+    // drops the timeframe — deliberately, because `derive` probes the daily and
+    // minute rungs itself — so without this the same month is handed to it
+    // nine times and probed nine times.
+    //
+    // MEASURED on the operator's store during a live repull: **4,446**
+    // `api.bars read refused` warnings from one page, against a store holding
+    // 61 months. Every one was a real file probe that opened nothing, and every
+    // one wrote a `Warn` line. Sorting first is what makes `dedup` correct —
+    // it only removes ADJACENT equals — and it also fixes the order, which the
+    // `HashMap` walk does not give.
+    for months in by_series.values_mut() {
+        months.sort_unstable();
+        months.dedup();
+    }
     by_series
 }
 
@@ -25070,7 +25088,27 @@ async fn calendar_json(
         // `NSE/CASH/360ONE` finds nothing while the data sits one directory
         // over"*. Same defect, opposite side, and the write side was the half
         // that got repaired.
-        let by_series = spot_months_by_identity(&census::held_entries(&fresh));
+        // THIS FEED'S CENSUS, NOT EVERY FEED'S.
+        //
+        // `held_entries` flattens `Vec<VendorCensus>` and `Series` carries NO
+        // vendor — the type's own doc says so — so months from all three feeds
+        // were merged and then probed against the ONE feed being derived. The
+        // floors differ by years: Zerodha reaches 2015, Groww 2020, Dhan a
+        // rolling five. So Dhan's derivation opened months back to 2015 and
+        // every one of them refused, loudly, into the rolling log.
+        //
+        // MEASURED during a live repull: the newest refusal named
+        // `dhan/NSE/INDEX/NIFTY/1min/2019-12.bin`, a month Dhan's own floor puts
+        // outside its history — and which no feed had asked it for.
+        //
+        // `VendorCensus::vendor` is right there; filtering by it is one
+        // comparison per census, of which there are five.
+        let mine: Vec<census::VendorCensus> = fresh
+            .iter()
+            .filter(|census| census.vendor == feed)
+            .cloned()
+            .collect();
+        let by_series = spot_months_by_identity(&census::held_entries(&mine));
         // SORTED SO THE ANSWER IS REPRODUCIBLE. A `HashMap`'s iteration order
         // varies per process, and `agree` ships the names it derived from —
         // an unsorted walk would reorder `from` between two identical requests.
@@ -25127,8 +25165,13 @@ async fn calendar_json(
         brutex_core::instrument::Segment,
     )> = None;
     let mut months: Vec<store::path::YearMonth> = Vec::new();
+    // THIS FEED'S CENSUS ONLY — the same filter the exchange branch takes, and
+    // for the same measured reason: `Series` carries no vendor, so without it
+    // Zerodha's months (back to 2015) are probed against Dhan's store (a
+    // rolling five years) and every one refuses into the log.
     for (series, month) in census::read_all(&site.store_root)
         .iter()
+        .filter(|census| census.vendor == feed)
         .flat_map(|c| census::held_entries(std::slice::from_ref(c)))
     {
         if series.contract.is_some() || series.symbol.as_str() != symbol {
@@ -25154,6 +25197,12 @@ async fn calendar_json(
     // months opens no file, so nothing here reaches a path; naming the case
     // explicitly is what stops a literal creeping back in, because the code
     // this replaces passed `"NSE"`/`"INDEX"` on every call, held or not.
+    // ONE ENTRY PER MONTH, NOT ONE PER RUNG — the same dedup
+    // `spot_months_by_identity` does, for the same reason: a month held at nine
+    // rungs arrives nine times and would be probed nine times.
+    months.sort_unstable();
+    months.dedup();
+
     let (exchange, segment) = held.unwrap_or((
         brutex_core::instrument::Exchange::Nse,
         brutex_core::instrument::Segment::Index,

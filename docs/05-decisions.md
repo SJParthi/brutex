@@ -26351,3 +26351,43 @@ placing a new item between a `#[derive]` and the struct it belongs to, or
 between a doc comment and its item. The compiler caught each. The lesson is the
 one already written for `param_or` — an item inserted into another item's
 preamble silently reassigns that preamble.
+
+### D-0359
+
+**One `/calendar.json` page probed 4,446 months that could not exist — measured
+live, during the operator's own repull.**
+
+Two independent multipliers, and the second was introduced by D-0335.
+
+**Months from EVERY feed were probed against ONE feed's store.**
+`census::held_entries` flattens `Vec<VendorCensus>` and `census::Series` carries
+**no vendor** — its own doc says so. So the months of all three feeds were merged
+and then handed to whichever feed was being derived. The floors differ by years:
+Zerodha reaches 2019-12, Groww 2020-01, Dhan a rolling five to 2021-08. Dhan's
+derivation therefore opened months back to 2019 and every one refused.
+
+The newest refusal in the operator's log named
+`dhan/NSE/INDEX/NIFTY/1min/2019-12.bin` — a month Dhan's own history floor puts
+outside its range, and which nothing had ever asked it for.
+`VendorCensus::vendor` is right there; filtering on it is one comparison per
+census, of which there are five.
+
+**And every month was probed once per RUNG.** `held_entries` yields
+`(Series, YearMonth)` and `Series` carries the TIMEFRAME. The identity map drops
+it deliberately — `derive` probes the daily and minute rungs itself — so a month
+held at nine rungs arrived nine times and was probed nine times. That half is
+mine: D-0335 replaced a symbol-keyed map with an identity-keyed one and did not
+dedupe what the old shape had also failed to dedupe.
+
+**Measured: 4,446 `api.bars read refused` warnings from one page**, against a
+store holding 61 months for that feed. Each was a real file probe that opened
+nothing and wrote a `Warn` line, so the rolling log filled with a fault that was
+never a fault — the noise that hides a true refusal among it.
+
+Sorting before `dedup` is not cosmetic: `dedup` removes only ADJACENT equals, and
+a `HashMap` walk has no order to rely on.
+
+**What this does not change:** the refusals were harmless to the DATA. A month
+that does not exist reads as absent and `derive` records it in
+`Report::unreadable`, exactly as designed. This is a cost and a noise defect, not
+a correctness one, and the calendars it produced were right throughout.
