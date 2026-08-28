@@ -2542,8 +2542,31 @@ pub struct RollingSpec {
     /// come back empty — spending a per-second budget on nothing and leaving a
     /// chain that looks swept.
     pub stock_offsets: &'static [&'static str],
-    /// The two sides, in the vendor's own spelling.
-    pub sides: &'static [&'static str],
+    /// The two sides: the vendor's spelling for the REQUEST, paired with the
+    /// key its ANSWER carries that side under.
+    ///
+    /// # Why a pair and not a word
+    ///
+    /// The response key used to be derived, in `rolling::side_key`, like this:
+    ///
+    /// ```text
+    /// if side.len() == 4 { "ce" } else { "pe" }
+    /// ```
+    ///
+    /// It is right for `CALL`/`PUT` by coincidence of length and wrong for
+    /// every other spelling a vendor might use: `"CE"` is two characters and
+    /// would have read the **put** array, `"C"` likewise, `"Call"` is right
+    /// again only because it is four. The side names the file an option's bars
+    /// are written to, so reading the wrong array files one side's prices under
+    /// the other's contract — and §8's append-only rule means that directory
+    /// cannot be renamed afterwards.
+    ///
+    /// The request word and the answer key are two independent vendor facts and
+    /// neither is derivable from the other, so both live here. This type's own
+    /// doc promises a third vendor "edits no driver"; a response key stated in
+    /// a `const fn` no row can reach was the one place that promise did not
+    /// hold. D-0346.
+    pub sides: &'static [(&'static str, &'static str)],
     /// The expiry cadences this vendor serves, in its own spelling — Dhan
     /// `WEEK` and `MONTH`.
     ///
@@ -4152,7 +4175,10 @@ const DHAN_ROLLING: RollingSpec = RollingSpec {
     // distinguishes the two and an earlier version of this row did not, which
     // would have sent fourteen empty asks per expiry per side on every stock.
     stock_offsets: &["ATM-3", "ATM-2", "ATM-1", "ATM", "ATM+1", "ATM+2", "ATM+3"],
-    sides: &["CALL", "PUT"],
+    // THE REQUEST WORD AND THE ANSWER KEY, TOGETHER. Dhan is asked for `CALL`
+    // and answers under `ce`; asked for `PUT` and answers under `pe`. Neither
+    // is derivable from the other, so both are stated. `docs/14-expired-options-data.md`.
+    sides: &[("CALL", "ce"), ("PUT", "pe")],
     // BOTH CADENCES. An index carries weeklies AND monthlies, and a driver
     // that walked one would report a whole month while holding half of it.
     expiry_flags: &["WEEK", "MONTH"],
@@ -6593,7 +6619,13 @@ mod tests {
              contradiction rather than hiding it"
         );
         assert_eq!(spec.years_back, 5, "the vendor documents five years");
-        assert_eq!(spec.sides, &["CALL", "PUT"], "the annexure's two sides");
+        assert_eq!(
+            spec.sides,
+            &[("CALL", "ce"), ("PUT", "pe")],
+            "the annexure’s two sides, each with the key its answer carries — \
+             the response key is a vendor fact and lives in the row, not in a \
+             length test in the driver (D-0346)"
+        );
 
         // TWO WIDTHS, NOT ONE, AND THE DIFFERENCE IS THE VENDOR'S OWN.
         //

@@ -209,6 +209,14 @@ pub enum RollingError {
         /// Which key was looked for — `ce` or `pe`.
         key: &'static str,
     },
+    /// The side asked for is not one this feed's row names.
+    ///
+    /// Distinct from [`Self::NoSide`], and the distinction is the whole of
+    /// D-0346: `NoSide` means the vendor answered without that side in it,
+    /// which is ordinary. This means the CALLER named a side the descriptor
+    /// does not carry, so there is no key to look for — and the derivation this
+    /// replaces answered `"pe"` for every such input rather than saying so.
+    UnknownSide,
     /// A field was absent or not an array.
     NotAnArray {
         /// Which field.
@@ -243,6 +251,13 @@ impl core::fmt::Display for RollingError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::NotJson => f.write_str("the rolling answer is not JSON"),
+            Self::UnknownSide => write!(
+                f,
+                "that is not a side this feed's descriptor names, so there is no \
+                 response key to read it under. Refused rather than guessed: the \
+                 side decides which contract's file these bars are written to, \
+                 and the store is append-only"
+            ),
             Self::NoSide { key } => write!(
                 f,
                 "the rolling answer carries no `{key}` object, so the side that \
@@ -283,9 +298,14 @@ impl core::fmt::Display for RollingError {
 /// The request says `CALL`; the answer says `ce`. Mapping it here rather than
 /// at the call site keeps the vendor's two spellings of one idea in one place.
 #[must_use]
-pub const fn side_key(side: &str) -> &'static str {
-    // `match` on bytes because `str` equality is not `const`.
-    if side.len() == 4 { "ce" } else { "pe" }
+pub fn side_key(spec: &crate::vendor::RollingSpec, side: &str) -> Option<&'static str> {
+    // TWO COMPARISONS AGAINST A FIXED TABLE, so this is constant work — the
+    // same bound the length test had, and now against the vendor's own row
+    // rather than a coincidence of spelling.
+    spec.sides
+        .iter()
+        .find(|(word, _)| *word == side)
+        .map(|(_, key)| *key)
 }
 
 /// The endpoint one rolling request is posted to.
@@ -418,12 +438,23 @@ pub struct Row {
 /// # Cost
 ///
 /// One pass, indexed. No search, and the only allocation is the answer itself.
-pub fn read(body: &str, side: &str, scale: PriceScale) -> Result<Vec<Row>, RollingError> {
+pub fn read(
+    body: &str,
+    spec: &crate::vendor::RollingSpec,
+    side: &str,
+    scale: PriceScale,
+) -> Result<Vec<Row>, RollingError> {
     let root: serde_json::Value = serde_json::from_str(body).map_err(|_| RollingError::NotJson)?;
     // THE ENVELOPE IS OPTIONAL, exactly as `fno::names` treats it, and for the
     // same reason: one reader for a vendor that wraps and one that does not.
     let held = root.get("data").unwrap_or(&root);
-    let key = side_key(side);
+    // A SIDE THE ROW DOES NOT NAME IS REFUSED, NEVER GUESSED. The old
+    // derivation answered `"pe"` for anything that was not four characters
+    // long, so an unrecognised spelling silently read the PUT array — and the
+    // side names the file these bars are written to.
+    let Some(key) = side_key(spec, side) else {
+        return Err(RollingError::UnknownSide);
+    };
     let one = held.get(key).ok_or(RollingError::NoSide { key })?;
     // A NULL SIDE IS AN EMPTY ANSWER, NOT A MALFORMED ONE.
     //
@@ -746,12 +777,14 @@ mod tests {
         let body = r#"{"data":{"ce":{"timestamp":[1756698300],"open":[354],"high":[354],
             "low":[354],"close":[354],"volume":[1]},"pe":null}}"#;
 
-        let put = read(body, "PUT", PriceScale::Rupees).expect("a null side is an empty answer");
+        let put =
+            read(body, &spec(), "PUT", PriceScale::Rupees).expect("a null side is an empty answer");
         assert!(put.is_empty(), "no rows, and no error");
 
         // AND THE OTHER SIDE OF THE SAME BODY STILL READS. A null on one side
         // must not cost the side that answered.
-        let call = read(body, "CALL", PriceScale::Rupees).expect("the answered side reads");
+        let call =
+            read(body, &spec(), "CALL", PriceScale::Rupees).expect("the answered side reads");
         assert_eq!(call.len(), 1);
     }
 
@@ -766,7 +799,7 @@ mod tests {
             "close":[],"volume":[]}}}"#;
 
         assert_eq!(
-            read(body, "PUT", PriceScale::Rupees),
+            read(body, &spec(), "PUT", PriceScale::Rupees),
             Err(RollingError::NoSide { key: "pe" })
         );
     }
@@ -819,7 +852,7 @@ mod tests {
             "close":[10.2,11.2],
             "volume":[100,200,300]
         }}}"#;
-        let got = read(ragged, "CALL", PriceScale::Rupees);
+        let got = read(ragged, &spec(), "CALL", PriceScale::Rupees);
         assert_eq!(
             got,
             Err(RollingError::Ragged {
@@ -854,7 +887,7 @@ mod tests {
             "open":[24650.05],"high":[24650.05],"low":[24650.05],"close":[24650.05],
             "volume":[7]
         }}}"#;
-        let rows = read(one, "CALL", PriceScale::Rupees).expect("it reads");
+        let rows = read(one, &spec(), "CALL", PriceScale::Rupees).expect("it reads");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].bar.close, 2_465_005, "exactly, not 2_465_004");
         assert_eq!(rows[0].bar.ts_micros, 1_700_000_000_000_000);
@@ -875,7 +908,7 @@ mod tests {
             "open":[100.0],"high":[100.0],"low":[100.0],"close":[100.0],
             "volume":[1]
         }}}"#;
-        let rows = read(bare, "CALL", PriceScale::Rupees).expect("it reads");
+        let rows = read(bare, &spec(), "CALL", PriceScale::Rupees).expect("it reads");
         assert_eq!(rows[0].bar.open_interest, OI_NULL, "absent OI is null");
         assert!(rows[0].bar.oi().is_none());
         assert_eq!(rows[0].overlay.spot, OI_NULL);
@@ -897,7 +930,7 @@ mod tests {
             "open":[100.0],"high":[100.0],"low":[100.0],"close":[100.0],
             "volume":[1],"oi":[4200],"iv":[0.125],"spot":[24650.05]
         }}}"#;
-        let rows = read(full, "CALL", PriceScale::Rupees).expect("it reads");
+        let rows = read(full, &spec(), "CALL", PriceScale::Rupees).expect("it reads");
         let row = rows[0];
         assert_eq!(row.bar.open_interest, 4200);
         assert_eq!(
@@ -920,19 +953,43 @@ mod tests {
             "ce":{"timestamp":[1],"open":[1.0],"high":[1.0],"low":[1.0],"close":[1.0],"volume":[1]},
             "pe":{"timestamp":[1],"open":[2.0],"high":[2.0],"low":[2.0],"close":[2.0],"volume":[2]}
         }}"#;
-        let call = read(both, "CALL", PriceScale::Rupees).expect("ce reads");
-        let put = read(both, "PUT", PriceScale::Rupees).expect("pe reads");
+        let call = read(both, &spec(), "CALL", PriceScale::Rupees).expect("ce reads");
+        let put = read(both, &spec(), "PUT", PriceScale::Rupees).expect("pe reads");
         assert_eq!(call[0].bar.close, 100, "the call came from ce");
         assert_eq!(put[0].bar.close, 200, "the put came from pe");
-        assert_eq!(side_key("CALL"), "ce");
-        assert_eq!(side_key("PUT"), "pe");
+        assert_eq!(side_key(&spec(), "CALL"), Some("ce"));
+        assert_eq!(side_key(&spec(), "PUT"), Some("pe"));
+
+        // **A SPELLING THE ROW DOES NOT NAME IS REFUSED, NOT GUESSED**, and
+        // this is the whole of D-0346. The key used to be derived as
+        // `if side.len() == 4 { "ce" } else { "pe" }`, which is right for
+        // `CALL`/`PUT` by a coincidence of length and wrong for everything
+        // else: `"CE"` is two characters and would have read the PUT array.
+        // The side names the file an option's bars are written to, and §8 means
+        // that directory cannot be renamed afterwards.
+        for wrong in ["CE", "PE", "C", "P", "Call", "call", ""] {
+            assert_eq!(
+                side_key(&spec(), wrong),
+                None,
+                "{wrong:?} is not a side this row names, so there is no key — \
+                 the length test answered `pe` for four of these"
+            );
+        }
+        assert!(
+            matches!(
+                read(both, &spec(), "CE", PriceScale::Rupees),
+                Err(RollingError::UnknownSide)
+            ),
+            "and `read` refuses it by name rather than returning the other \
+             side's prices"
+        );
 
         // AND AN ABSENT SIDE IS NAMED, not read as an empty answer. A month
         // that returned no puts and a month whose puts were not asked for are
         // different facts.
         let only_ce = r#"{"data":{"ce":{"timestamp":[],"open":[],"high":[],"low":[],"close":[],"volume":[]}}}"#;
         assert_eq!(
-            read(only_ce, "PUT", PriceScale::Rupees),
+            read(only_ce, &spec(), "PUT", PriceScale::Rupees),
             Err(RollingError::NoSide { key: "pe" })
         );
     }

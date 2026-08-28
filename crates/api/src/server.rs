@@ -10597,7 +10597,7 @@ async fn fetch_rolling(
     })
     .await
     .map_err(|why| format!("{label}: {why}"))?;
-    pull::rolling::read(&answer, option_type, wire.spec.prices)
+    pull::rolling::read(&answer, rolling, option_type, wire.spec.prices)
         .map_err(|why| format!("{label}: {why}"))
 }
 
@@ -10925,7 +10925,13 @@ async fn roll_every(
         for code in rolling.expiry_codes {
             say_group_starting(asked, flag, code, stored, failed, declined);
             for strike in offsets {
-                for side in rolling.sides {
+                // THE REQUEST WORD, AND THE ANSWER KEY TRAVELS WITH IT.
+                // `sides` is a pair since D-0346: the word this vendor is ASKED
+                // with, and the key its answer carries that side under. The
+                // second half is `rolling::read`'s to use — the driver names
+                // only the first, so a vendor that spells its request `CE` and
+                // its answer `call` needs no edit here.
+                for &(side, _answer_key) in rolling.sides {
                     for chunk in &chunks {
                         // THE BOUNDARY FALLS INSIDE A WINDOW, SO IT IS TESTED
                         // PER CHUNK. Before the budget is charged and before a

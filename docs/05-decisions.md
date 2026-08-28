@@ -25800,3 +25800,52 @@ session silently drops the morning and admits the previous evening.
 'not sent' is a lie in the data"*, and the rung doc appears twice. Pre-existing
 in HEAD, left alone: repairing it means reconstructing which half belongs where,
 and guessing would be worse than naming it.
+
+### D-0346
+
+**The option side was decided by counting the letters in a string, and the side
+names the file bars are written to.**
+
+`rolling::side_key` read:
+
+```text
+if side.len() == 4 { "ce" } else { "pe" }
+```
+
+It is right for `CALL` and `PUT` by a coincidence of length and wrong for every
+other spelling a vendor might use. `"CE"` is two characters, so it would have
+read the **put** array; `"C"` likewise; `"Call"` is right again only because it
+happens to be four.
+
+That is not a cosmetic mismatch. The side goes into
+`Contract::of(Kind::Option { .. })`, which names the directory an option's bars
+are filed under — so reading the wrong array writes one side's prices into the
+other side's contract, and §8's append-only rule means the directory cannot be
+renamed afterwards.
+
+**The same question was answered a second time, differently.**
+`server.rs`'s `name_the_contract` decided the same thing by equality —
+`if option_type == "CALL" { Call } else { Put }` — with no refusal arm, so
+anything not exactly `CALL` became a Put there too. Two decoders for one vendor
+string, agreeing only by coincidence on the single shipped row, and they had to
+move together for ever.
+
+**The request word and the answer key are two independent vendor facts and
+neither is derivable from the other**, so `RollingSpec::sides` now carries both:
+`&[("CALL", "ce"), ("PUT", "pe")]`. `side_key` is a lookup against that row —
+two comparisons against a fixed table, the same constant work the length test
+had — and a spelling the row does not name is **refused by name** through the
+new `RollingError::UnknownSide` rather than silently resolving to the put.
+
+`UnknownSide` is deliberately distinct from `NoSide`. `NoSide` means the vendor
+answered without that side in it, which is ordinary and expected — the vendor's
+own example carries `"pe": null`. `UnknownSide` means the CALLER named a side
+this feed does not have, so there is no key to look for at all.
+
+The driver destructures the pair and uses only the request word, so a vendor
+that spells its request `CE` and its answer `call` needs no edit in
+`server.rs` — which is what `RollingSpec`'s own doc has always promised: *"a
+third vendor edits no driver."* A response key stated in a `const fn` no row
+could reach was the one place that promise did not hold.
+
+Mutants on `side_key`: 4 tested, 4 caught.
