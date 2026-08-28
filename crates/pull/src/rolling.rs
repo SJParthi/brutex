@@ -501,24 +501,31 @@ pub fn read(
         return Ok(Vec::new());
     }
 
-    let stamps = array(one, "timestamp")?;
-    let open = same_length(one, "open", stamps.len())?;
-    let high = same_length(one, "high", stamps.len())?;
-    let low = same_length(one, "low", stamps.len())?;
-    let close = same_length(one, "close", stamps.len())?;
-    let volume = same_length(one, "volume", stamps.len())?;
+    // EVERY NAME FROM THE ROW, NOT FROM THIS FUNCTION'S BODY.
+    //
+    // All ten were spelled here, so a second vendor answering the same SHAPE
+    // under different names — `ts` for `timestamp`, `openInterest` for `oi` —
+    // would have needed an edit in this reader rather than a row in
+    // `crate::vendor`. `RollingSpec`'s own doc promises the opposite. D-0358.
+    let f = spec.fields;
+    let stamps = array(one, f.timestamp)?;
+    let open = same_length(one, f.open, stamps.len())?;
+    let high = same_length(one, f.high, stamps.len())?;
+    let low = same_length(one, f.low, stamps.len())?;
+    let close = same_length(one, f.close, stamps.len())?;
+    let volume = same_length(one, f.volume, stamps.len())?;
     // OI, IV AND SPOT ARE OPTIONAL AND THE OTHERS ARE NOT. The vendor's own
     // schema marks every field `Required: No`, and measurement is what decides
     // which are really there: a contract with no open interest is ordinary,
     // while a bar with no close is not a bar. An absent optional array reads as
     // "the vendor stated none", which is what the null sentinels are for.
-    let oi = optional(one, "oi", stamps.len())?;
-    let iv = optional(one, "iv", stamps.len())?;
-    let spot = optional(one, "spot", stamps.len())?;
+    let oi = optional(one, f.open_interest, stamps.len())?;
+    let iv = optional(one, f.implied_volatility, stamps.len())?;
+    let spot = optional(one, f.spot, stamps.len())?;
     // OPTIONAL AT THE PARSE, REQUIRED AT THE FILE. Absent here is a fact about
     // the answer and reads as `None`; it becomes a refusal one layer up, where
     // the contract is named and the absence actually bites.
-    let strike = optional(one, "strike", stamps.len())?;
+    let strike = optional(one, f.strike, stamps.len())?;
 
     let mut rows = Vec::with_capacity(stamps.len());
     for at in 0..stamps.len() {

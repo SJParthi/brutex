@@ -2501,6 +2501,54 @@ pub enum ExpiryCadence {
     Monthly,
 }
 
+/// What one rolling answer calls each of its ten arrays.
+///
+/// # Why this is not [`FieldNames`]
+///
+/// They describe DIFFERENT ENDPOINTS, and their names genuinely differ: Dhan's
+/// bars route spells open interest `open_interest`, and its rolling route
+/// spells it `oi`. Reusing `HttpSpec::fields` here would put the bars route's
+/// spelling on the rolling wire and read an array that is not there.
+///
+/// It also carries three arrays a bar has no column for — `iv`, `spot` and
+/// `strike` — which land in `store::format::Overlay` and in the contract's own
+/// name. `FieldNames` has nowhere to put them.
+///
+/// # Why a row and not literals in the reader
+///
+/// `rolling::read` spelled all ten in its own body, so a second vendor
+/// answering the same SHAPE under different names — `ts` for `timestamp`, `oi`
+/// spelled `openInterest` — would have needed an edit in the reader rather than
+/// a row here. This type's own doc promises the opposite: *"a third vendor
+/// arriving with a third shape adds a variant here and a row there, and edits
+/// no driver."* D-0358.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RollingFields {
+    /// The epoch-second stamps. The array every other one is length-checked
+    /// against, because it is the one a bar cannot be built without.
+    pub timestamp: &'static str,
+    /// Open prices.
+    pub open: &'static str,
+    /// Highs.
+    pub high: &'static str,
+    /// Lows.
+    pub low: &'static str,
+    /// Closes.
+    pub close: &'static str,
+    /// Volumes.
+    pub volume: &'static str,
+    /// Open interest. OPTIONAL in the answer — a contract with none is
+    /// ordinary — so an absent array reads as "the vendor stated none".
+    pub open_interest: &'static str,
+    /// Implied volatility, into the overlay sidecar.
+    pub implied_volatility: &'static str,
+    /// The UNDERLYING's price at that stamp, into the overlay sidecar.
+    pub spot: &'static str,
+    /// The strike, which names the contract's own file. Optional at the parse
+    /// and required at the file — see `rolling::read`.
+    pub strike: &'static str,
+}
+
 /// ADDRESSING AN EXPIRED CONTRACT BY ITS DISTANCE FROM THE MONEY.
 ///
 /// # Why this exists beside [`FnoDiscovery`] rather than instead of it
@@ -2529,6 +2577,7 @@ pub enum ExpiryCadence {
 /// one feed and another is a ROW IN A TABLE, never an `if vendor ==`. A third
 /// vendor arriving with a third shape adds a variant here and a row there, and
 /// edits no driver.
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RollingSpec {
     /// The path this vendor answers rolling-option requests on.
@@ -2582,6 +2631,8 @@ pub struct RollingSpec {
     /// a `const fn` no row can reach was the one place that promise did not
     /// hold. D-0346.
     pub sides: &'static [(&'static str, &'static str)],
+    /// What this vendor calls each array in a rolling answer.
+    pub fields: &'static RollingFields,
     /// The expiry cadences this vendor serves, in its own spelling — Dhan
     /// `WEEK` and `MONTH`.
     ///
@@ -4176,6 +4227,30 @@ const GDFL_FLOOR: GranularityFloor = GranularityFloor {
 ///
 /// The offsets are the documented set — ATM and up to ten either side — written
 /// out rather than generated, because the width is the VENDOR'S and a range
+/// THE ROLLING ANSWER'S OWN NAMES, WHICH ARE NOT THE BARS ROUTE'S.
+///
+/// `open_interest` here is `oi` — the bars route spells the same quantity
+/// `open_interest`, and `HttpSpec::fields` records THAT one. Two endpoints, two
+/// spellings, and reusing either for the other reads an array that is not in
+/// the answer. `docs/14-expired-options-data.md`.
+///
+/// A `const` referenced by the row rather than inlined into it, because
+/// `RollingSpec` sits in `FnoAccess::ByStrikeOffset` and ten inline pointers
+/// made that enum's variants 80 bytes apart — the imbalance clippy refuses. A
+/// `&'static` is one pointer and the row reads the same.
+const DHAN_ROLLING_FIELDS: RollingFields = RollingFields {
+    timestamp: "timestamp",
+    open: "open",
+    high: "high",
+    low: "low",
+    close: "close",
+    volume: "volume",
+    open_interest: "oi",
+    implied_volatility: "iv",
+    spot: "spot",
+    strike: "strike",
+};
+
 /// this build invented would be an ask answered with nothing.
 const DHAN_ROLLING: RollingSpec = RollingSpec {
     path: &[
@@ -4207,6 +4282,7 @@ const DHAN_ROLLING: RollingSpec = RollingSpec {
     // and answers under `ce`; asked for `PUT` and answers under `pe`. Neither
     // is derivable from the other, so both are stated. `docs/14-expired-options-data.md`.
     sides: &[("CALL", "ce"), ("PUT", "pe")],
+    fields: &DHAN_ROLLING_FIELDS,
     // BOTH CADENCES. An index carries weeklies AND monthlies, and a driver
     // that walked one would report a whole month while holding half of it.
     expiry_flags: &[

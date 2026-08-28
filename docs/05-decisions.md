@@ -26316,3 +26316,38 @@ which asserts all three arms because each is a different one: a first write
 reports every bar, a partial overlap reports **only the suffix** — the assertion
 the old code failed — and a total re-offer reports **zero**, which is the number
 that makes a re-run distinguishable from a first run.
+
+### D-0358
+
+**The rolling reader spelled all ten of its array names in its own body, where
+no vendor row could reach them.**
+
+`rolling::read` asked for `"timestamp"`, `"open"`, `"high"`, `"low"`,
+`"close"`, `"volume"`, `"oi"`, `"iv"`, `"spot"` and `"strike"` as literals. A
+second vendor answering the same SHAPE under different names — `ts` for
+`timestamp`, `openInterest` for `oi` — would have needed an edit in the reader
+rather than a row in `crate::vendor`, which is the opposite of what
+`RollingSpec`'s own doc promises: *"a third vendor arriving with a third shape
+adds a variant here and a row there, and edits no driver."*
+
+**`RollingFields` is its own type and NOT a reuse of `FieldNames`, and that
+distinction is the load-bearing part.** They describe **different endpoints**
+whose names genuinely differ: Dhan's bars route spells open interest
+`open_interest`, and its rolling route spells it `oi`. An audit read
+`FieldNames.open_interest: None` beside the reader's `"oi"` and called it a
+contradiction — it is not. Reusing either spelling for the other endpoint would
+read an array that is not in the answer. `RollingFields` also carries three
+arrays a bar has no column for at all: `iv` and `spot` land in
+`store::format::Overlay`, and `strike` names the contract's own file.
+
+**The row is a `const` the spec REFERENCES rather than an inline literal.**
+`RollingSpec` lives inside `FnoAccess::ByStrikeOffset`, and ten inline pointers
+made that enum's variants eighty bytes apart — the imbalance clippy refuses on
+this workspace's settings. A `&'static RollingFields` is one pointer, the row
+reads the same, and the enum stays balanced.
+
+Three insertion mistakes were made getting here and all three were the same one:
+placing a new item between a `#[derive]` and the struct it belongs to, or
+between a doc comment and its item. The compiler caught each. The lesson is the
+one already written for `param_or` — an item inserted into another item's
+preamble silently reassigns that preamble.
