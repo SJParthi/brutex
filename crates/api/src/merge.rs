@@ -233,7 +233,16 @@ pub fn merge(sources: &[Source]) -> Merged {
     // Pass 1. Every (identity, ISIN) pair anybody asserted. A row can never
     // confirm ITSELF: it asserts its raw key, and the candidate it offers is
     // by construction a different symbol.
-    let mut asserted: HashSet<(InstrumentKey, Isin)> = HashSet::new();
+    //
+    // PRE-SIZED for the same reason `by_key` below is, and from the same
+    // bound. This set was built with `HashSet::new()` while its sibling thirty
+    // lines down carried a comment explaining that growth costs roughly
+    // eighteen rehashes at 200,000 rows — the law was written down and then
+    // applied to one of the two structures in this function. No kept listing
+    // can assert more than one (identity, ISIN) pair, so the total number of
+    // kept listings is an exact upper bound and the set never grows.
+    let capacity: usize = sources.iter().map(|s| s.kept.len()).sum();
+    let mut asserted: HashSet<(InstrumentKey, Isin)> = HashSet::with_capacity(capacity);
     // And every ISIN each vendor KEPT, which is what a decline is checked
     // against. `BTreeMap` rather than `HashMap` so the conflict lines come out
     // in a stable order and two runs produce byte-identical output.
@@ -266,7 +275,6 @@ pub fn merge(sources: &[Source]) -> Merged {
     // common case, and the point of merging. That is bounded waste (one entry
     // per duplicate, freed when the map is dropped) traded for a bound that
     // holds in the worst case rather than on average.
-    let capacity = sources.iter().map(|s| s.kept.len()).sum();
     let mut out = Merged {
         by_key: HashMap::with_capacity(capacity),
         ..Merged::default()

@@ -37,16 +37,16 @@ arrives from outside.
 | 1 | Identity | Fixed width, never variable | `Symbol` 24 B, `Isin` 12 B, `InstrumentKey` is `Copy` with a structural hash | ✓ |
 | 2 | Hashing | No cryptographic hash on a trusted path | FNV-1a, not SipHash. `core` may declare no dependency (gate 9), so the hash is four `const` lines rather than a crate | ◐ |
 | 3 | Maps | **Pre-sized, never grow** | `HashMap::with_capacity(bound)` — zero rehash, so O(1) **worst case** rather than average | ✓ |
-| 4 | Membership | No search of any kind | Open-addressed table built at compile time. **Never `binary_search`** | ✓ |
+| 4 | Membership | No search of any kind | Open-addressed table built at compile time. **Never `binary_search`**. Applied to the universe tables AND, since D-0036, to the three vendor series tables `board_of` probes | ✓ |
 | 5 | Address | Arithmetic, never lookup | `base + header + i·stride`. The path is the index | ✓ |
 | 6 | Hot data | 16 bytes per bar, not 56 | Bit plane separate from bar plane. 8 × `u128` per 128-byte cache line, zero straddle | ✓ |
 | 7 | Residency | Load once, never re-read | Pin the bit plane. 7.75 GB of 48 GB — it never exceeds RAM at this scale | ○ |
 | 8 | Evaluation | One instruction | `(bits & mask) == mask` on a `u128`, no branch | ✓ |
-| 9 | Allocation | **Zero in the hot loop** | Preallocated frontier. No `format!`, no `String`, no `push` | ○ |
+| 9 | Allocation | **Zero in the hot loop** | Preallocated frontier. No `format!`, no `String`, no `push`. The sweep's frontier does not exist yet; the instruments search no longer allocates per row (D-0036) | ○ |
 | 10 | Parallelism | Work-stealing, never static | 10 P-cores. A static split stalls waiting on the 4 efficiency cores | ○ |
 | 11 | Blocks | Whole records only | `BLOCK_LEN` is a whole multiple of the stride, so straddling is **unrepresentable** rather than handled | ✓ |
-| 12 | Rendering | Bounded page, never the set | A fixed row cap with paging. Never O(universe) | ✓ |
-| 13 | Counting | Counters, never scans | A manifest per vendor. One read, not a walk of every file | ○ |
+| 12 | Rendering | Bounded page, never the set | A fixed row cap with paging. The sort is precomputed at load, so no request sorts — but the filter still walks the order, so a request is O(universe) and **not** bounded. See `docs/06-limits.md` §13 | ◐ |
+| 13 | Counting | Counters, never scans | A manifest per vendor. One read, not a walk of every file. `MemberIndex::len` is a counter since D-0035; the per-vendor manifest is not built | ◐ |
 
 ---
 
@@ -75,6 +75,11 @@ Measured on an Apple M4 Pro, 48 GB, macOS 26.5.2, rustc 1.97.1.
 | Checksum per block | **~7,050 ns** table, from 15,622 ns bitwise | The hardware instruction reaches 381.9 ns; see `docs/06-limits.md` |
 | GPU vs all 14 cores | **66 ms vs 142 ms — 2.1×** | Compute-bound: 1,219 GB/s effective, 5.3× measured DRAM bandwidth |
 | Bar read past RAM | ~100 ns → **61,566 ns** | 616×. Physics. Layer 7 exists because of it |
+
+**Not O(1), and corrected rather than claimed:** layer 12 carried a ✓ while
+every request sorted the whole filtered universe — the *render* was bounded and
+the *request* was not. D-0036 removed the sort; the residual filter walk is
+recorded in `docs/06-limits.md` §13 and the grade is now ◐.
 
 **Not O(1), and never claimed to be:** the sweep. Apriori over the vocabulary is
 combinatorial — each *step* is 0.2 ns, the number of steps is not constant.

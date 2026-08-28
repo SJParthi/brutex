@@ -136,6 +136,10 @@ fn universe_of(n: usize) -> Read {
         Vec::new(),
         false,
         0,
+        // No unreadable rows and no non-routine declines: this harness
+        // measures render cost on a CLEAN universe, so neither gate fires.
+        0,
+        0,
     )
 }
 

@@ -34,6 +34,7 @@ use crate::instrument::{Exchange, Expiry, InstrumentKey, Kind, Segment};
 use crate::isin::Isin;
 use crate::price::Paisa;
 use crate::symbol::Symbol;
+use crate::universe::MemberIndex;
 
 /// Which vendor a row came from.
 ///
@@ -168,21 +169,35 @@ impl MasterRow<'_> {
     /// treats it as a refusal.
     #[must_use]
     pub const fn over_wide(&self) -> Option<(&'static str, usize)> {
-        // Written out rather than iterated because a `[( &str, &str ); 10]`
-        // array would be built on every row -- ten pointer pairs written to the
-        // stack to answer a question that is ten comparisons. Order follows the
-        // struct.
+        // DESTRUCTURED WITHOUT `..`, so this is a COMPILE ERROR the day an
+        // eleventh field is added to `MasterRow`. Reading the fields through
+        // `self.` compiled perfectly well while skipping one, and a field that
+        // skips this gate is a field with no width bound at all -- which is
+        // precisely the defect D-0033 exists for.
+        let Self {
+            exchange,
+            segment,
+            underlying,
+            trading_symbol,
+            instrument_type,
+            listing_class,
+            isin,
+            expiry,
+            strike_rupees,
+            option_side,
+        } = *self;
+        // Order follows the struct.
         let checks: [(&'static str, usize); 10] = [
-            ("exchange", self.exchange.len()),
-            ("segment", self.segment.len()),
-            ("underlying", self.underlying.len()),
-            ("trading_symbol", self.trading_symbol.len()),
-            ("instrument_type", self.instrument_type.len()),
-            ("listing_class", self.listing_class.len()),
-            ("isin", self.isin.len()),
-            ("expiry", self.expiry.len()),
-            ("strike_rupees", self.strike_rupees.len()),
-            ("option_side", self.option_side.len()),
+            ("exchange", exchange.len()),
+            ("segment", segment.len()),
+            ("underlying", underlying.len()),
+            ("trading_symbol", trading_symbol.len()),
+            ("instrument_type", instrument_type.len()),
+            ("listing_class", listing_class.len()),
+            ("isin", isin.len()),
+            ("expiry", expiry.len()),
+            ("strike_rupees", strike_rupees.len()),
+            ("option_side", option_side.len()),
         ];
         let mut i = 0;
         while i < checks.len() {
@@ -317,7 +332,28 @@ impl Vendor {
 #[non_exhaustive]
 pub enum Skip {
     /// Not an exchange this engine stores. `docs/05-decisions.md` D-0017.
+    ///
+    /// Raised only for an exchange code this engine **recognises and does not
+    /// store** -- today that is `BSE`. A code it cannot parse at all gets
+    /// [`Skip::UnrecognisedExchange`], for the same reason a bond and an
+    /// unknown series code are different reasons.
     ForeignExchange,
+    /// An exchange code this engine has never seen.
+    ///
+    /// # Why this is not `ForeignExchange`
+    ///
+    /// It was, and that made a mapping bug indistinguishable from a routine
+    /// refusal -- the exact defect [`Vendor::segment_of`] raises a loud error
+    /// for, one gate earlier. `Exchange::parse` returns `Err` for a code it
+    /// does not know, and the gate discarded that `Err` with a `matches!`, so
+    /// `NSE` drifting to `NSE_EQ` (a rename, a padded column, a shifted field)
+    /// declined **every row of both masters** as "foreign exchange" and the
+    /// process reported `ok` and exited zero.
+    ///
+    /// "A venue we do not store" and "a code we cannot read" are different
+    /// facts. This one is not routine: it degrades the run, so it reaches the
+    /// exit code rather than printing a routine skip.
+    UnrecognisedExchange,
     /// An exchange test instrument, not a real listing.
     TestInstrument,
     /// A segment this engine does not store, such as commodity.
@@ -417,6 +453,7 @@ impl Skip {
     pub const fn reason(self) -> &'static str {
         match self {
             Self::ForeignExchange => "foreign exchange",
+            Self::UnrecognisedExchange => "unrecognised exchange",
             Self::TestInstrument => "exchange test instrument",
             Self::ForeignSegment => "segment not stored",
             Self::LiveContract => "live derivative contract",
@@ -435,7 +472,10 @@ impl Skip {
     /// reach an exit code, or the two are the same fact to a monitor.
     #[must_use]
     pub const fn is_routine(self) -> bool {
-        !matches!(self, Self::UnrecognisedListingClass)
+        !matches!(
+            self,
+            Self::UnrecognisedListingClass | Self::UnrecognisedExchange
+        )
     }
 
     /// Whether this decline judges the **paper** rather than the venue.
@@ -601,8 +641,9 @@ enum EquityVerdict {
 /// still declines; every one of them is `ES` in Dhan's paper-class column; and
 /// they are ordinary listed companies.
 ///
-/// Sorted, because `board_of` binary-searches it and an unsorted array makes
-/// `binary_search` return garbage in silence.
+/// Kept sorted. `board_of` no longer binary-searches it -- it probes
+/// [`EQUITY_BOARD_INDEX`] instead -- but the order is what makes the
+/// disjointness check readable and a new code obvious in a diff.
 pub const EQUITY_BOARD_SERIES: [&str; 6] = ["BE", "BZ", "E1", "EQ", "IT", "SZ"];
 
 /// The NSE series codes that are the SME board.
@@ -629,7 +670,8 @@ pub const SME_BOARD_SERIES: [&str; 2] = ["SM", "ST"];
 /// outcome — [`Skip::UnrecognisedListingClass`]. The list is data, so a new
 /// NSE debt series is a one-line append and nothing else moves.
 ///
-/// Sorted, for `board_of`'s binary search.
+/// Kept sorted, for the same reason [`EQUITY_BOARD_SERIES`] is: readability
+/// and a legible diff. The lookup itself goes through [`NON_EQUITY_INDEX`].
 pub const NON_EQUITY_SERIES: [&str; 120] = [
     "AK", "AL", "AM", "AN", "AZ", "BA", "BC", "BR", "BS", "BU", "BV", "BW", "BX", "D1", "GB", "GS",
     "IV", "MF", "N0", "N1", "N2", "N3", "N4", "N5", "N6", "N7", "N8", "N9", "NA", "NB", "NC", "ND",
@@ -662,15 +704,43 @@ pub const NON_EQUITY_SERIES: [&str; 120] = [
 /// An unrecognised code is a decline, not an error, for the reason
 /// [`Skip::UnrecognisedListingClass`] gives — but it is its own decline, and
 /// never confused with a bond.
+/// The equity board series, as an open-addressed table.
+///
+/// 6 members in 16 slots. See [`board_of`] for why these exist.
+static EQUITY_BOARD_INDEX: MemberIndex<16> = MemberIndex::build(&EQUITY_BOARD_SERIES);
+
+/// The SME board series, as an open-addressed table. 2 members in 8 slots.
+static SME_BOARD_INDEX: MemberIndex<8> = MemberIndex::build(&SME_BOARD_SERIES);
+
+/// The measured non-equity series, as an open-addressed table.
+///
+/// 120 members in 256 slots — the table `board_of` used to `binary_search`
+/// last, and therefore the one the common case paid in full.
+static NON_EQUITY_INDEX: MemberIndex<256> = MemberIndex::build(&NON_EQUITY_SERIES);
+
 fn board_of(series: &str) -> EquityVerdict {
     // Dhan pads this column, e.g. `"   ES   "`. Trimming Groww's already-tight
     // values costs nothing and cannot change a verdict.
     let series = series.trim();
-    if EQUITY_BOARD_SERIES.binary_search(&series).is_ok() {
+    // HASH, MASK, PROBE -- three times, not three binary searches.
+    //
+    // This was `EQUITY_BOARD_SERIES.binary_search(..)` and two more like it.
+    // `docs/07-o1-architecture.md` layer 4 says "never `binary_search`", and
+    // `universe.rs` carries the whole argument for why -- it replaced exactly
+    // this pattern with exactly this table: "`binary_search` over 750 entries
+    // is ~10 comparisons -- O(log n) wearing an O(1) label". The replacement
+    // was built, proved and then not applied to the hotter of the two paths.
+    //
+    // The ordering made the common case the worst case as well: of the 12,617
+    // rows that reach this gate, 7,137 are non-equity, and the 120-entry table
+    // they match was searched LAST -- so the majority of rows paid all three
+    // searches. Each is now a bounded probe, and the order no longer decides
+    // the cost.
+    if EQUITY_BOARD_INDEX.contains(series) {
         EquityVerdict::MainBoard
-    } else if SME_BOARD_SERIES.binary_search(&series).is_ok() {
+    } else if SME_BOARD_INDEX.contains(series) {
         EquityVerdict::Sme
-    } else if NON_EQUITY_SERIES.binary_search(&series).is_ok() {
+    } else if NON_EQUITY_INDEX.contains(series) {
         EquityVerdict::NotEquity
     } else {
         EquityVerdict::Unrecognised
@@ -784,10 +854,18 @@ pub fn decode_master_row(vendor: Vendor, row: MasterRow<'_>) -> Result<Decoded, 
         }))
     };
 
-    // Only NSE is stored. D-0017. An unparseable exchange is a decline: a
-    // master legitimately lists venues we do not store.
-    if !matches!(Exchange::parse(row.exchange), Ok(Exchange::Nse)) {
-        return declined(Skip::ForeignExchange);
+    // Only NSE is stored. D-0017.
+    //
+    // The `Err` arm is separated from the `Ok(other)` arm on purpose. This was
+    // `!matches!(Exchange::parse(..), Ok(Exchange::Nse))`, which threw the
+    // `Err` away and filed an UNREADABLE code under the routine "foreign
+    // exchange" decline. A master legitimately lists venues we do not store --
+    // that is `Ok(Bse)` and it is routine. A code that does not parse is the
+    // vendor having changed something under us, and it is not.
+    match Exchange::parse(row.exchange) {
+        Ok(Exchange::Nse) => {}
+        Ok(_) => return declined(Skip::ForeignExchange),
+        Err(_) => return declined(Skip::UnrecognisedExchange),
     }
     let exchange = Exchange::Nse;
 
@@ -959,9 +1037,26 @@ fn parse_expiry(text: &str) -> Result<Expiry, InstrumentError> {
     if y.len() != 4 || m.len() != 2 || d.len() != 2 {
         return Err(InstrumentError::Malformed);
     }
-    let year: u16 = y.parse().map_err(|_| InstrumentError::Malformed)?;
-    let month: u8 = m.parse().map_err(|_| InstrumentError::Malformed)?;
-    let day: u8 = d.parse().map_err(|_| InstrumentError::Malformed)?;
+    // WIDTH IS NOT SHAPE. `u8::from_str` accepts a leading sign, so `"+8"` is
+    // two bytes wide and parses as 8 -- `2026-+8-+4` decoded as August 4th
+    // through a function whose doc says "exactly `YYYY-MM-DD` with numeric
+    // parts". A vendor changing its date format must be a loud failure, and
+    // a sign is a different format.
+    if !text.bytes().all(|b| b.is_ascii_digit() || b == b'-') {
+        return Err(InstrumentError::Malformed);
+    }
+    // COMPUTED, NOT PARSED. Every byte is now known to be an ASCII digit and
+    // the widths are fixed, so `from_str` cannot fail here: four digits reach
+    // at most 9999 and `u16::MAX` is 65535; two reach at most 99 and `u8::MAX`
+    // is 255. Keeping `.map_err(..)` would leave three error arms no input can
+    // enter -- unreachable code behind a `?`, which is either an untestable
+    // branch or a fallback that hides nothing. Folding the digits makes the
+    // question not arise, and is law 4: arithmetic beats lookup.
+    let year = y
+        .bytes()
+        .fold(0u16, |acc, b| acc * 10 + u16::from(b - b'0'));
+    let month = m.bytes().fold(0u8, |acc, b| acc * 10 + (b - b'0'));
+    let day = d.bytes().fold(0u8, |acc, b| acc * 10 + (b - b'0'));
     Expiry::new(year, month, day)
 }
 
@@ -1094,18 +1189,56 @@ mod tests {
 
     #[test]
     fn bse_and_unknown_exchanges_are_skipped_not_stored() {
-        // D-0017 -- NSE only.
+        // D-0017 -- NSE only. BSE is a venue this engine RECOGNISES and does
+        // not store, so it is the routine decline.
         assert_eq!(
             groww(row("BSE", "CASH", "SENSEX", "IDX", "", ""))
                 .expect("ok")
                 .skip(),
             Some(Skip::ForeignExchange)
         );
+        assert!(Skip::ForeignExchange.is_routine());
+
+        // `MCX` is a code `Exchange::parse` cannot read at all. This test used
+        // to assert it was ALSO `ForeignExchange` -- it encoded the defect
+        // rather than catching it, which is why the defect survived a suite at
+        // 100% coverage. The two are now different reasons, and only one of
+        // them is routine.
         assert_eq!(
             groww(row("MCX", "COMMODITY", "GOLD", "FUT", "2026-08-05", ""))
                 .expect("ok")
                 .skip(),
-            Some(Skip::ForeignExchange)
+            Some(Skip::UnrecognisedExchange)
+        );
+    }
+
+    #[test]
+    fn an_unreadable_exchange_degrades_the_run_and_a_foreign_one_does_not() {
+        // The failure this separation exists to stop: `NSE` drifting to
+        // `NSE_EQ` -- a rename, a padded column, a field shifted by one --
+        // declined EVERY row of BOTH masters as "foreign exchange", which is
+        // routine, so the process printed `ok` and exited zero on a universe
+        // of nothing. `Vendor::segment_of` raises a loud error for exactly
+        // this shape one gate later; the exchange gate was the one left quiet.
+        for unreadable in ["NSE_EQ", "nse", " NSE", "NSE ", "", "N", "NSEX"] {
+            let d = groww(row(unreadable, "CASH", "RELIANCE", "EQ", "", ""))
+                .expect("a decline, not an error");
+            assert_eq!(
+                d.skip(),
+                Some(Skip::UnrecognisedExchange),
+                "{unreadable:?} is not a venue, it is unreadable"
+            );
+            assert!(
+                !Skip::UnrecognisedExchange.is_routine(),
+                "{unreadable:?} must reach the exit code"
+            );
+        }
+
+        // And the two reasons never render as one string, so a report cannot
+        // merge them back together.
+        assert_ne!(
+            Skip::UnrecognisedExchange.reason(),
+            Skip::ForeignExchange.reason()
         );
     }
 
@@ -1135,6 +1268,28 @@ mod tests {
         assert!(groww(row("NSE", "FNO", "NIFTY", "CE", "not-a-date", "1")).is_err());
         assert!(groww(row("NSE", "FNO", "NIFTY", "CE", "2026-08-04", "abc")).is_err());
         assert!(groww(row("NSE", "FNO", "NIF TY", "FUT", "2026-08-04", "")).is_err());
+    }
+
+    #[test]
+    fn a_signed_date_component_is_refused_rather_than_read_as_a_number() {
+        // WIDTH IS NOT SHAPE. `u8::from_str` accepts a leading sign, so `"+8"`
+        // is two bytes wide and parses as 8 -- the width check passed it and
+        // `2026-+8-+4` decoded as August 4th, through a function documented as
+        // "exactly YYYY-MM-DD with numeric parts".
+        for bad in [
+            "2026-+8-04",
+            "2026-08-+4",
+            "2026-+8-+4",
+            "+026-08-04",
+            "2026--8-04",
+        ] {
+            assert!(
+                groww(row("NSE", "FNO", "NIFTY", "FUT", bad, "")).is_err(),
+                "{bad} is not a date this engine reads"
+            );
+        }
+        // And the real shape still decodes untouched.
+        assert!(groww(row("NSE", "FNO", "NIFTY", "FUT", "2026-08-04", "")).is_ok());
     }
 
     #[test]
@@ -1633,6 +1788,45 @@ mod tests {
     }
 
     #[test]
+    fn every_series_code_survives_the_open_addressed_table_it_moved_into() {
+        // I-41. `board_of` probes three `MemberIndex` tables instead of
+        // binary-searching three arrays. A collision that silently dropped a
+        // member would not fail to compile and would not look wrong -- it would
+        // reclassify a measured bond as `Unrecognised`, which is a LOUD decline
+        // that degrades the run, so an entire real master would start reporting
+        // an alphabet change that never happened.
+        //
+        // So every code in every array is asserted to reach its own verdict
+        // through the real entry point.
+        for code in EQUITY_BOARD_SERIES {
+            assert_eq!(board_of(code), EquityVerdict::MainBoard, "{code}");
+        }
+        for code in SME_BOARD_SERIES {
+            assert_eq!(board_of(code), EquityVerdict::Sme, "{code}");
+        }
+        for code in NON_EQUITY_SERIES {
+            assert_eq!(board_of(code), EquityVerdict::NotEquity, "{code}");
+        }
+
+        // The counts match the arrays, so nothing was overwritten on the way in.
+        assert_eq!(EQUITY_BOARD_INDEX.len(), EQUITY_BOARD_SERIES.len());
+        assert_eq!(SME_BOARD_INDEX.len(), SME_BOARD_SERIES.len());
+        assert_eq!(NON_EQUITY_INDEX.len(), NON_EQUITY_SERIES.len());
+
+        // And a code in none of them is still its own reason, never a bond.
+        for absent in ["ZZ9", "QQ", "", "  ", "eq", "N", "XX"] {
+            assert_eq!(
+                board_of(absent),
+                EquityVerdict::Unrecognised,
+                "{absent:?} is unseen, not non-equity"
+            );
+        }
+
+        // Trimming still happens before the probe -- Dhan pads this column.
+        assert_eq!(board_of("   EQ   "), EquityVerdict::MainBoard);
+    }
+
+    #[test]
     fn the_measured_series_tables_are_sorted_disjoint_and_complete() {
         // `board_of` binary-searches all three, and binary_search on an
         // unsorted array returns garbage in silence.
@@ -1906,6 +2100,7 @@ mod tests {
     fn every_skip_reason_is_distinct_and_says_what_it_declined() {
         let all = [
             Skip::ForeignExchange,
+            Skip::UnrecognisedExchange,
             Skip::TestInstrument,
             Skip::ForeignSegment,
             Skip::LiveContract,

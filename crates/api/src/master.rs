@@ -61,6 +61,19 @@ pub struct Loaded {
     /// listing" says nothing at all. See
     /// [`brutex_core::vendor::Skip::UnrecognisedListingClass`].
     pub unrecognised: BTreeMap<String, usize>,
+    /// Declines that are **not** a routine business outcome.
+    ///
+    /// [`brutex_core::vendor::Skip::is_routine`] existed and was consulted by
+    /// nothing but its own tests, so the distinction it draws -- "a venue we
+    /// do not store" against "a code we cannot read" -- reached no status and
+    /// no exit code. A vendor renaming `NSE` declined every row of both
+    /// masters and the process printed `ok`.
+    ///
+    /// Counted here so [`crate::server::Read::is_clean`] can refuse to call
+    /// that run clean. Kept as a plain count beside the per-code
+    /// [`Loaded::unrecognised`] map, because the count is what a monitor reads
+    /// and the code is what a human needs.
+    pub non_routine: usize,
 }
 
 impl Loaded {
@@ -124,12 +137,16 @@ impl Columns {
     /// for every row, which the decoder would report as thousands of routine
     /// skips rather than as the mapping bug it is.
     fn locate(header: &str, vendor: Vendor) -> Result<Self, String> {
-        let idx: HashMap<&str, usize> = header
-            .trim_end()
-            .split(',')
-            .enumerate()
-            .map(|(i, name)| (name.trim(), i))
-            .collect();
+        // PRE-SIZED from the comma count, which is known before the map is
+        // built. `collect` starts a `HashMap` at capacity 0 and doubles, so
+        // every header paid a run of rehashes to hold a number of columns the
+        // header itself had already stated. `docs/07-o1-architecture.md`
+        // layer 3, and the same reservation `merge::merge` makes.
+        let columns = header.bytes().filter(|b| *b == b',').count() + 1;
+        let mut idx: HashMap<&str, usize> = HashMap::with_capacity(columns);
+        for (i, name) in header.trim_end().split(',').enumerate() {
+            idx.insert(name.trim(), i);
+        }
         let need = |n: &str| -> Result<usize, String> {
             idx.get(n)
                 .copied()
@@ -227,10 +244,39 @@ pub fn load(path: &std::path::Path, vendor: Vendor) -> Result<Loaded, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut lines = text.lines();
     let header = lines.next().ok_or_else(|| "file is empty".to_owned())?;
+    // THE HEADER IS A ROW, AND IT WAS THE ONE ROW WITH NO BOUND.
+    //
+    // `MAX_ROW_BYTES` is checked inside the loop below, which iterates what is
+    // left AFTER `lines.next()` has already taken the header -- so every data
+    // row was guarded and the header was not. That is the D-0033 shape exactly:
+    // a scan with nothing bounding its length, sitting immediately above the
+    // guard that exists to bound it.
+    //
+    // It is reachable: a vendor endpoint serving an HTML error page instead of
+    // a CSV arrives as one enormous first line. `Columns::locate` then splits
+    // it and hashes every field, inside the very function whose premise is
+    // that "one `metadata` call is the difference between a named refusal and
+    // a dead process".
+    if header.len() > MAX_ROW_BYTES {
+        return Err(format!(
+            "{}: header row is {} bytes; this reader splits at most {MAX_ROW_BYTES}",
+            path.display(),
+            header.len()
+        ));
+    }
     let cols = Columns::locate(header, vendor)?;
 
     let widest = cols.widest();
     let mut out = Loaded::default();
+    // ONE field vector for the whole file, cleared and refilled per row.
+    //
+    // `line.split(',').collect()` starts at capacity 0 and doubles, because
+    // `Split`'s `size_hint` is `(0, None)` -- five allocations and four
+    // memcpys for a 33-column Dhan row, about a million malloc/free pairs
+    // across 200,461 rows. The column count is fixed by the header, so the
+    // capacity is known before the loop starts. `docs/07-o1-architecture.md`
+    // law 2, and layer 9's rule against allocating inside a loop.
+    let mut f: Vec<&str> = Vec::with_capacity(widest + 1);
     for (n, line) in lines.enumerate() {
         if line.is_empty() {
             continue;
@@ -248,7 +294,8 @@ pub fn load(path: &std::path::Path, vendor: Vendor) -> Result<Loaded, String> {
             ));
             continue;
         }
-        let f: Vec<&str> = line.split(',').collect();
+        f.clear();
+        f.extend(line.split(','));
         // A ROW TOO SHORT TO HOLD THE COLUMNS IS AN ERROR, NOT A DEFAULT.
         //
         // Defaulting a missing field to `""` put the empty string into the
@@ -291,14 +338,30 @@ pub fn load(path: &std::path::Path, vendor: Vendor) -> Result<Loaded, String> {
             // variant added later under whatever label it happens to name.
             Ok(Decoded::Skipped(d)) => {
                 *out.skipped.entry(d.reason.reason()).or_insert(0) += 1;
+                // Every non-routine decline, whatever its variant. Asking the
+                // `Skip` itself means a variant added later is counted here
+                // the moment it declares itself non-routine, rather than
+                // needing this site to be remembered.
+                if !d.reason.is_routine() {
+                    out.non_routine += 1;
+                }
                 if let Some(isin) = d.isin {
                     out.declined.push((isin, d.reason));
                 }
                 // The COUNT says an alphabet moved; the CODE says which one.
                 if d.reason == Skip::UnrecognisedListingClass {
-                    *out.unrecognised
-                        .entry(row.listing_class.trim().to_owned())
-                        .or_insert(0) += 1;
+                    // `entry(k.to_owned())` allocates the key on EVERY row,
+                    // including the overwhelming majority where the code has
+                    // been seen before -- and the scenario this counter exists
+                    // to detect (a whole series renamed) is exactly the one
+                    // where every equity row lands here. Look first, allocate
+                    // only when the code is genuinely new.
+                    let code = row.listing_class.trim();
+                    if let Some(n) = out.unrecognised.get_mut(code) {
+                        *n += 1;
+                    } else {
+                        out.unrecognised.insert(code.to_owned(), 1);
+                    }
                 }
             }
             Err(e) => out.errors.push((n + 2, e.to_string())),
@@ -606,6 +669,41 @@ mod tests {
             !err.contains("this reader holds at most"),
             "the size arm fired at the bound itself: {err}"
         );
+    }
+
+    #[test]
+    fn the_header_row_is_bounded_too_and_is_refused_before_it_is_split() {
+        // THE ONE ROW THAT HAD NO BOUND. `MAX_ROW_BYTES` is checked inside the
+        // loop over what is left AFTER `lines.next()` took the header, so every
+        // data row was guarded and the header was not -- the D-0033 shape, one
+        // line above the guard that exists to prevent it.
+        //
+        // A vendor endpoint serving an HTML error page instead of a CSV arrives
+        // as exactly this: one enormous first line, split and hashed field by
+        // field inside the function whose premise is a named refusal rather
+        // than a dead process.
+        let wide = "a,".repeat(MAX_ROW_BYTES);
+        let body = format!("{wide}\nNSE,CASH,,RELIANCE,EQ,EQ,INE002A01018,,\n");
+        let err = load(&tmp("wideheader", &body), Vendor::Groww)
+            .expect_err("an unbounded header must be refused, not split");
+        assert!(
+            err.contains("header row is") && err.contains(&MAX_ROW_BYTES.to_string()),
+            "the refusal names the bound: {err}"
+        );
+
+        // And a header of ordinary width is still read exactly as before, so
+        // the bound refuses the absurd without touching the real file.
+        let ok = load(
+            &tmp(
+                "okheader",
+                "exchange,segment,underlying_symbol,trading_symbol,instrument_type,\
+                 series,isin,expiry_date,strike_price\n\
+                 NSE,CASH,,RELIANCE,EQ,EQ,INE002A01018,,\n",
+            ),
+            Vendor::Groww,
+        )
+        .expect("an ordinary header still loads");
+        assert_eq!(ok.kept.len(), 1);
     }
 
     #[test]

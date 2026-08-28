@@ -600,6 +600,41 @@ fn an_overflowing_block_is_refused_not_wrapped() {
 }
 
 #[test]
+fn a_block_checksum_binds_the_bytes_and_not_the_position() {
+    // PINNED, BECAUSE IT IS A PROPERTY AND NOT AN ACCIDENT. `block::seal` uses
+    // the block index only to compute the covered length and to name an error;
+    // the number it returns is `crc32c(bytes)` and nothing else. So two blocks
+    // holding identical bytes seal to an identical checksum, and a block
+    // transposed from another position -- or copied out of a DIFFERENT
+    // instrument's file -- verifies clean.
+    //
+    // S-06 is about a flipped bit, and a flipped bit IS detected. Transposition
+    // is a different threat and this format does not defend against it. Giving
+    // it one means seeding the checksum with the block index, which changes the
+    // bytes on disk: a new format version, never an edit to this one
+    // (CLAUDE.md section 3.8). Recorded in docs/06-limits.md section 14, and
+    // asserted here so the day someone changes it is a deliberate day.
+    let v2 = Layout::V2;
+    let records = 2 * 73;
+    let block_bytes = vec![9u8; 73 * 56];
+    let a = block::seal(v2, records, 0, &block_bytes).expect("block 0 is whole");
+    let b = block::seal(v2, records, 1, &block_bytes).expect("block 1 is whole");
+    assert_eq!(
+        a, b,
+        "the checksum is a pure function of the bytes -- position is not bound in",
+    );
+
+    // And it does still bind the BYTES: one flipped bit anywhere changes it.
+    let mut flipped = block_bytes.clone();
+    flipped[0] ^= 1;
+    assert_ne!(
+        block::seal(v2, records, 0, &flipped).expect("still whole"),
+        a,
+        "a flipped bit must change the checksum -- S-06",
+    );
+}
+
+#[test]
 fn capacity_and_ragged_tail_agree_with_the_bytes() {
     let v2 = Layout::V2;
     assert_eq!(v2.capacity_for(0), 0);
@@ -608,6 +643,38 @@ fn capacity_and_ragged_tail_agree_with_the_bytes() {
     assert_eq!(v2.capacity_for(HEADER_LEN + 55), 0);
     assert_eq!(v2.capacity_for(HEADER_LEN + 56), 1);
     assert_eq!(v2.capacity_for(HEADER_LEN + 56 * 100), 100);
+
+    // AND THE RAGGED TAIL, which this test is named for and never asked
+    // about -- `ragged_tail_bytes` was exercised only in fault.rs. A name that
+    // overstates its body is how docs/04-invariants.md acquires an unearned ✓,
+    // because that file maps rows to tests BY NAME.
+    assert_eq!(v2.ragged_tail_bytes(0), 0);
+    assert_eq!(
+        v2.ragged_tail_bytes(HEADER_LEN - 1),
+        HEADER_LEN - 1,
+        "a file shorter than its header is all tail"
+    );
+    assert_eq!(v2.ragged_tail_bytes(HEADER_LEN), 0);
+    assert_eq!(v2.ragged_tail_bytes(HEADER_LEN + 55), 55);
+    assert_eq!(v2.ragged_tail_bytes(HEADER_LEN + 56), 0);
+    assert_eq!(v2.ragged_tail_bytes(HEADER_LEN + 57), 1);
+    assert_eq!(v2.ragged_tail_bytes(HEADER_LEN + 56 * 100 + 13), 13);
+
+    // The two agree: capacity counts the whole records, the tail is what is
+    // left over, and together they account for every byte past the header.
+    for len in [
+        HEADER_LEN,
+        HEADER_LEN + 1,
+        HEADER_LEN + 55,
+        HEADER_LEN + 56,
+        HEADER_LEN + 4_242,
+    ] {
+        assert_eq!(
+            v2.capacity_for(len) * 56 + v2.ragged_tail_bytes(len),
+            len - HEADER_LEN,
+            "capacity and tail must account for every byte at {len}"
+        );
+    }
 }
 
 #[test]
@@ -713,6 +780,35 @@ fn a_slot_round_trips_every_field_at_its_documented_offset() {
         i64::from_le_bytes(b[40..48].try_into().unwrap()),
         header.last_ts_micros
     );
+    // OFFSETS 12, 48 AND 52 WERE NEVER ASSERTED. `flags`, `symbol_id` and
+    // `timeframe_secs` are all named in docs/02-store-format.md and none of
+    // them was pinned to a byte position -- and `symbol_id` and
+    // `timeframe_secs` are adjacent `u32`s, so SWAPPING them in both `image`
+    // and the offset constants changes the bytes on disk while
+    // `decode(commit().bytes) == header` still holds. Every test passed.
+    // Those two fields DID move between v1 and v2 (docs/02 records them at 40
+    // and 44), so this is not hypothetical, and CLAUDE.md section 3.8 forbids
+    // mutating a format in place.
+    assert_eq!(
+        u32::from_le_bytes(b[12..16].try_into().unwrap()),
+        header.flags,
+        "flags at offset 12"
+    );
+    assert_eq!(
+        u32::from_le_bytes(b[48..52].try_into().unwrap()),
+        header.symbol_id,
+        "symbol_id at offset 48"
+    );
+    assert_eq!(
+        u32::from_le_bytes(b[52..56].try_into().unwrap()),
+        header.timeframe_secs,
+        "timeframe_secs at offset 52"
+    );
+    // The two are distinguishable: a swap would make these equal and pass.
+    assert_ne!(
+        header.symbol_id, header.timeframe_secs,
+        "the fixture must tell the two adjacent u32s apart"
+    );
     assert_eq!(&b[60..64], &[0, 0, 0, 0], "reserved stays zero");
 
     // Idempotent: the same header always produces the same 64 bytes.
@@ -780,7 +876,10 @@ fn a_slot_shorter_than_a_slot_is_refused() {
     // Longer is fine: only the first slot's worth is read.
     let mut long = vec![0u8; 200];
     long[..SLOT_LEN].copy_from_slice(&genesis_slot());
-    assert!(Header::decode(&long).is_ok());
+    // Was `assert!(..).is_ok()`, which holds for a decoder that read the WRONG
+    // window and happened to return a different-but-valid header. Pin it to
+    // the genesis slot's own answer instead.
+    assert_eq!(Header::decode(&long), Header::decode(&genesis_slot()));
 }
 
 #[test]
@@ -1167,6 +1266,29 @@ fn a_case_variant_is_refused_not_a_second_prefix() {
         .to_string(),
         "bars/groww/NSE/INDEX/NIFTY/1min/2024-06.bin",
     );
+}
+
+#[test]
+fn every_byte_class_the_allowlist_admits_is_actually_accepted() {
+    // THE ACCEPTING SIDE OF THE ALLOWLIST, which nothing exercised. The byte
+    // filter admits `A-Z a-z 0-9 - _ &`, and every segment any store test ever
+    // built was purely alphabetic -- "NIFTY", "RELIANCE", "A".repeat(n). So
+    // deleting `| b'&'` or `| b'0'..=b'9'` from that pattern left the entire
+    // suite green, while `&` is load-bearing for a real NSE symbol: `M&M` is
+    // an F&O underlying and a NIFTY Total Market constituent. The api crate
+    // tests it; the path type never did.
+    for accepted in [
+        "M&M",        // ampersand -- a real listed company
+        "BAJAJ-AUTO", // hyphen -- a real listed company
+        "NIFTY50",    // digits
+        "L_T",        // underscore
+        "M&M-FIN2",   // every admitted class at once
+    ] {
+        assert!(
+            StorePath::new(parts(Vendor::Groww, accepted)).is_ok(),
+            "symbol {accepted:?} uses only admitted bytes and must be accepted",
+        );
+    }
 }
 
 #[test]

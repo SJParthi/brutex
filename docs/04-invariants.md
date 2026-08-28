@@ -16,7 +16,7 @@ reachable (the crate does not exist).
 | S-01 | `size_of::<Bar>() == 56` and `align_of::<Bar>() == 8` | `const _: () = assert!(…)` — a compile error, not a test | ✓ |
 | S-02 | `read(i)` returns the bytes `write(i, b)` wrote, for every *i* | `store::proptest::roundtrip` | — |
 | S-03 | A reader never observes a record beyond `n_valid` | `store::fault::commit_counter_publishes_last` | ✓ |
-| S-04 | A crash between data write and counter publish loses the tail and corrupts nothing | `store::fault::kill_between_write_and_commit` | ✓ |
+| S-04 | A reader offered a header that outruns the file falls back to the last supported commit, and a lost extent is detected by the block checksum. **This is narrower than "survives a crash"**: the crate issues no I/O, so the crash is a parameter and no barrier is ever taken — see `docs/06-limits.md` §15 | `store::fault::kill_between_write_and_commit` | ✓ |
 | S-05 | A full disk during append returns `Err`, never a signal | `store::fault::enospc_returns_error` | — |
 | S-06 | A flipped bit in any block is detected on the next read of that block | `store::fault::bitflip_detected` | ✓ |
 | S-07 | A file whose length does not divide by the stride truncates to the last whole record and logs | `store::fault::ragged_tail_truncates_loudly` | ✓ |
@@ -28,6 +28,10 @@ reachable (the crate does not exist).
 | S-13 | The header slot's covered domain is exactly bytes `0..56 ‖ 60..64`; filling the four-byte hole is a different number and is refused as such | `store::unit::the_covered_domain_is_the_slot_minus_its_checksum` | ✓ |
 | S-14 | Splitting the checksum input at any point gives the answer for the whole | `store::unit::splitting_the_input_anywhere_gives_the_same_checksum` | ✓ |
 | S-15 | The lookup table is the polynomial: lane 0 is one folded byte, and lane *k* is lane *k−1* advanced by one zero byte | `store::crc::the_table_is_the_polynomial_lane_by_lane` | ✓ |
+| S-16 | A commit found in the wrong slot refuses the read **even when another slot still decodes**; a readable neighbour never excuses it | `store::fault::a_misplaced_slot_is_refused_even_when_the_other_slot_still_reads` | ✓ |
+| S-17 | The block checksum binds the bytes and **not** the position, so transposition is undetected — pinned so that changing it is deliberate | `store::unit::a_block_checksum_binds_the_bytes_and_not_the_position` | ✓ |
+| S-18 | When two slots produce two different specific refusals, the one that identifies the **file** is reported, not the one that came first in slot order | `store::fault::two_competing_refusals_report_the_one_that_identifies_the_file` | ✓ |
+| S-19 | The header's documented byte offsets are pinned for **every** field, including the two adjacent `u32`s that a swap would otherwise hide | `store::unit::the_record_is_exactly_the_documented_shape` | ✓ |
 
 ## Vocabulary and indicators
 
@@ -133,13 +137,13 @@ runs today.
 
 | # | Must hold | Proven by | |
 |---|---|---|---|
-| I-16 | The three measured series tables are sorted, mutually disjoint and non-empty, so `binary_search` cannot return garbage and no code can get two verdicts | `core::vendor::the_measured_series_tables_are_sorted_disjoint_and_complete` | ✓ |
-| I-17 | A cash-equity row whose series this engine has never seen gets its **own** reason, never the one a debenture gets | `core::vendor::an_unrecognised_series_is_its_own_loud_reason_never_a_bond` | ✓ |
-| I-18 | The unrecognised **code itself** reaches the operator, not only a count of it | `api::master::an_unrecognised_series_is_recorded_under_the_code_itself` | ✓ |
-| I-19 | A fund plan is declined from **both** vendors, and a genuine ETF on the equity board is still kept | `core::vendor::a_mutual_fund_plan_is_declined_from_both_vendors_on_one_series_alphabet` | ✓ |
-| I-20 | The surveillance and partly-paid equity series are kept as equity, from both vendors, and never labelled debt | `core::vendor::the_surveillance_and_partly_paid_equity_series_are_kept_not_called_debt` | ✓ |
-| I-21 | A declined row carries its ISIN as evidence, and an unparseable one is neither an error nor a silent substitute | `core::vendor::a_declined_row_carries_its_isin_as_evidence_for_the_cross_check` | ✓ |
-| I-22 | One vendor keeping an ISIN another declined is a named disagreement, and the instrument is not dropped | `api::merge::one_vendor_keeping_what_another_declined_is_a_named_disagreement` | ✓ |
+| I-31 | The three measured series tables are sorted, mutually disjoint and non-empty, so no code can get two verdicts. (The sortedness protected a `binary_search` until D-0036 replaced it with a probe; the disjointness is what still decides correctness) | `core::vendor::the_measured_series_tables_are_sorted_disjoint_and_complete` | ✓ |
+| I-32 | A cash-equity row whose series this engine has never seen gets its **own** reason, never the one a debenture gets | `core::vendor::an_unrecognised_series_is_its_own_loud_reason_never_a_bond` | ✓ |
+| I-33 | The unrecognised **code itself** reaches the operator, not only a count of it | `api::master::an_unrecognised_series_is_recorded_under_the_code_itself` | ✓ |
+| I-34 | A fund plan is declined from **both** vendors, and a genuine ETF on the equity board is still kept | `core::vendor::a_mutual_fund_plan_is_declined_from_both_vendors_on_one_series_alphabet` | ✓ |
+| I-35 | The surveillance and partly-paid equity series are kept as equity, from both vendors, and never labelled debt | `core::vendor::the_surveillance_and_partly_paid_equity_series_are_kept_not_called_debt` | ✓ |
+| I-36 | A declined row carries its ISIN as evidence, and an unparseable one is neither an error nor a silent substitute | `core::vendor::a_declined_row_carries_its_isin_as_evidence_for_the_cross_check` | ✓ |
+| I-37 | One vendor keeping an ISIN another declined is a named disagreement, and the instrument is not dropped | `api::merge::one_vendor_keeping_what_another_declined_is_a_named_disagreement` | ✓ |
 | I-23 | A decline about the venue is never mistaken for a disagreement about the paper | `api::merge::a_decline_about_the_venue_is_not_a_disagreement_about_the_paper` | ✓ |
 | I-24 | A row with fewer fields than its columns need is unreadable and names the shortfall; it is never a routine decline | `api::master::a_row_with_too_few_fields_is_unreadable_and_names_the_shortfall` | ✓ |
 | I-25 | Every distinct parse failure reaches the operator with its count and the first line that hit it | `api::master::unreadable_rows_are_grouped_by_reason_with_the_first_line_that_hit_it` | ✓ |
@@ -148,6 +152,14 @@ runs today.
 | I-28 | An ISIN conflict refuses the universe rather than logging it and continuing | `api::server::an_isin_conflict_reaches_the_report_and_the_page` | ✓ |
 | I-29 | An unrecognised listing class degrades the run, while a routine bond does not | `api::server::an_unrecognised_listing_class_names_the_code_and_degrades_the_run` | ✓ |
 | I-30 | A universe member only one vendor named is counted separately from one two vendors confirmed, and named | `api::merge::the_census_separates_what_two_vendors_confirmed_from_what_one_asserted` | ✓ |
+| I-38 | An exchange code that cannot be parsed is its **own** reason and is not routine; a venue this engine merely does not store still is | `core::vendor::an_unreadable_exchange_degrades_the_run_and_a_foreign_one_does_not` | ✓ |
+| I-39 | A row nobody could read degrades the run, so an unreadable master cannot report `ok` | `api::server::a_row_nobody_could_read_degrades_the_run_rather_than_only_printing` | ✓ |
+| I-40 | A decline that is not routine reaches the status, while a routine one leaves it clean | `api::server::an_exchange_code_nobody_can_read_degrades_the_run_and_bse_does_not` | ✓ |
+| I-41 | Every measured series code reaches its own verdict through the open-addressed tables that replaced the three `binary_search`es; a collision cannot silently reclassify a bond | `core::vendor::every_series_code_survives_the_open_addressed_table_it_moved_into` | ✓ |
+| I-42 | Every sort column has a **precomputed, total** order taken once at load, and descending is that order reversed — so no request sorts and reloads are byte-identical | `api::server::every_column_has_a_precomputed_total_order_and_descending_is_its_reverse` | ✓ |
+| I-43 | The header row is bounded before it is split, like every other row | `api::master::the_header_row_is_bounded_too_and_is_refused_before_it_is_split` | ✓ |
+| I-44 | A date component of the right **width** but the wrong **shape** is refused; `2026-+8-+4` is not August | `core::vendor::a_signed_date_component_is_refused_rather_than_read_as_a_number` | ✓ |
+| I-45 | A segment using every byte class the path allowlist admits — `&`, digits, `-`, `_` — is **accepted**, so `M&M` and `BAJAJ-AUTO` keep working | `store::unit::every_byte_class_the_allowlist_admits_is_actually_accepted` | ✓ |
 
 ## The instrument universes
 
@@ -162,6 +174,7 @@ while `CLAUDE.md` §9 was violated.
 | U-03 | The list lengths are the measured ones, and no exchange test instrument is ever a member | `core::universe::the_counts_are_the_measured_ones` | ✓ |
 | U-04 | No SME ticker is in either universe — the claim `Skip::SmeBoard` declines 1,117 real shares on | `core::universe::no_measured_sme_ticker_belongs_to_either_universe` | ✓ |
 | U-05 | An index is its own universe and a live derivative is in none | `core::universe::an_index_is_its_own_universe_and_a_live_derivative_is_in_none` | ✓ |
+| U-06 | `len()` is a field read, and the field equals the slots actually filled — checked against a real walk, not against its own input | `core::universe::the_len_field_equals_the_slots_actually_filled` | ✓ |
 
 ## Cross-cutting
 

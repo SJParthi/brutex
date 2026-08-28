@@ -498,3 +498,138 @@ the widest expansion the mutant reaches 264 and overflows. That is what
 and it is the reason the count above is five and not six. The lesson is that
 "equivalent modulo the result" and "equivalent" are different claims, and only
 the second one is a floor.
+
+---
+
+## 12 · The bar plane is sized against RAM, and never against disk
+
+`docs/07-o1-architecture.md` layer 7 budgets the **bit plane** at 7.75 GB of
+48 GB and concludes it "never exceeds RAM at this scale". Nothing in this
+repository sizes the **bar plane** against storage.
+
+That is the bound that binds first. The measurement host reports **119.55 GB
+free of a 500.28 GB volume**, not 500 — so the usable figure is under a quarter
+of the disk the machine advertises, and no invariant, decision or limit
+currently mentions it.
+
+**UNMEASURED**, and deliberately labelled so rather than estimated: there is no
+bar reader in `crates/store` yet and no ingest in the workspace at all, so
+bytes-per-instrument-year has never been taken on real data. The arithmetic the
+format permits is not the same claim as a measurement, and this file does not
+carry arithmetic dressed as one.
+
+What must exist before the first pull writes anything:
+
+- a measured bytes-per-instrument-year figure at the v2 stride, taken from real
+  bars rather than computed from the record size;
+- a refusal at the ingest boundary when the projected write exceeds measured
+  free space, named as such — `CLAUDE.md` §4 bans a fallback that hides a
+  failure, and running a volume to zero is the condition under which a writable
+  mapping raises `SIGBUS`, which is why §4 bans that too;
+- an invariant row here and a test beside it.
+
+Until those exist, "the engine fits on this machine" is a claim about memory
+only, and this section is what stops it being read as a claim about disk.
+
+---
+
+## 13 · A page request is O(universe), and the sort is the only part removed
+
+`docs/07-o1-architecture.md` layer 12 graded the instruments page ✓ —
+*"bounded page, never the set"* — while `instruments_html_from` collected the
+whole filtered universe into a `Vec` and `sort_unstable_by_key`-ed it on **every
+request**. The row cap bounded what was rendered; nothing bounded what was
+looked at.
+
+D-0036 removed the sort. Every order the page offers is taken once at load by
+`server::Orders::of`, and a request walks the precomputed order instead. That
+deletes the O(universe · log universe) term and the sort's allocation.
+
+**What remains is O(universe), and is not being called anything else.** The
+walk still visits every key, because the universe filter and the search cannot
+be answered from an order:
+
+| Part of a request | Cost | Bounded? |
+|---|---|---|
+| Choosing the order | O(1) — six precomputed slices | yes |
+| Universe / tracked filter | O(universe) | no |
+| Substring search | O(universe), one buffer, no allocation per row | no |
+| Paging and render | O(rows on the page), capped at `PAGE_ROWS` | yes |
+
+Making the filter bounded needs a precomputed order **per filter combination**
+— 6 columns × 4 universe pills × 2 tracked states — and a substring search
+cannot be precomputed at all without an index this repository does not have. At
+the measured 2,700 instruments the walk is not the cost that matters; at
+90,000 it would be. The honest grade is ◐, and layer 12 now carries it.
+
+**UNMEASURED:** the page has not been benched across universe sizes. C-11
+measures the *dashboard*, whose counts come from `Summary` and are genuinely
+O(1); there is no equivalent for the instruments page, so the constant is
+unknown even though the growth is.
+
+---
+
+## 14 · A block checksum binds the bytes, never the position
+
+`block::seal` uses the block index only to compute the covered length and to
+name an error. The number it returns is `crc32c(bytes)`, so two blocks holding
+identical bytes seal to an identical checksum:
+
+```
+seal(v2, n, 0, &b) == seal(v2, n, 1, &b)
+```
+
+**What this does and does not defend.** S-06 is about a flipped bit, and a
+flipped bit is detected — proven by a 896-bit flip walk. **Transposition is a
+different threat and this format does not defend against it.** A block moved
+from another position in the same file, duplicated, or copied out of a
+*different instrument's* file verifies clean.
+
+Binding the position means seeding the checksum with the block index, which
+changes the bytes on disk — a **new format version**, never an edit to this one
+(`CLAUDE.md` §3.8: store format versions are never mutated in place). Until a
+version does that, the property is pinned by
+`store::unit::a_block_checksum_binds_the_bytes_and_not_the_position` so that
+changing it is a deliberate act rather than a silent one.
+
+A 32-bit CRC is also not a signature: it detects accident, not intent. Nothing
+in this repository claims otherwise.
+
+---
+
+## 15 · This store has never written a byte to a disk
+
+`crates/store` performs **no I/O at all** — no `std::fs`, no `File`, no
+`fsync`, no mapping. Verified by grep across the whole crate, and stated in its
+own module docs (`header.rs`: *"This crate performs no I/O and cannot issue the
+barrier itself"*) and in its fault tests (*"No test here kills a real process or
+cuts real power"*).
+
+That is a deliberate boundary and it is the right one — but until now **this
+file did not mention it**, and this file is the one whose job is to record what
+a green build does not prove. It contained zero occurrences of "durability",
+"fsync" or "no I/O".
+
+| Invariant | What the test actually proves | What the words could be read to claim |
+|---|---|---|
+| S-03 | The published counter is one a completed commit issued, at every one of the 65 torn prefixes — and the commit becomes durable at **byte 60**, not 64, because the reserved tail is zero in every commit | that a concurrent *reader* observes this. There is no concurrency test of any kind |
+| S-04 | A reader offered a header that outruns the file falls back to the previous generation, and a lost extent is caught by the block checksum | that a real crash was survived. The crash is a **function parameter** (`file_len`), no barrier is issued, and no byte reaches a device |
+
+S-05 (ENOSPC) and S-10 (the advisory lock) are correctly marked `—` because
+they need I/O. S-04's ✓ is narrower than its sentence, and the row is reworded
+rather than deleted.
+
+**Concurrency is untested, entirely.** No `thread`, `spawn`, `Mutex`, `Arc<` or
+atomic appears in any test file. `header.rs` says a caller *"may hand it a
+`MAP_SHARED` mapping that a writer is concurrently `pwrite`-ing"*; that claim is
+supported by single-threaded prefix mixtures and by `decode`'s single-copy
+discipline, never by two threads.
+
+**There is no property-based, randomised or fuzz testing.** No `proptest`,
+`quickcheck`, `arbitrary` or `fuzz` appears in any manifest. One test is
+deterministically pseudo-random — the CRC differential against a bit-by-bit
+reference — and it randomises only the checksum's input bytes. Input classes
+therefore untested include arbitrary 64-byte slots into `Header::decode`,
+arbitrary region lengths between the five that are tried, and the whole
+2^32-scale middle of the `u64` range for the geometry arithmetic.
+

@@ -14,6 +14,7 @@
 //! sees decides the run on its own.
 
 use crate::{master, merge, render};
+use brutex_core::instrument::InstrumentKey;
 use brutex_core::universe::Universe;
 use brutex_core::vendor::Vendor;
 use std::fmt::Write as _;
@@ -157,6 +158,11 @@ pub struct Read {
     /// numbers that could not have changed. `crates/api/benches/ratio.rs` is
     /// what measures it, and C-11 is what it proves.
     pub summary: Summary,
+    /// Every sort order the instruments page offers, taken once at load.
+    ///
+    /// See [`Orders`]. Sorting per request cost O(universe · log universe) for
+    /// an order that cannot change.
+    pub orders: Orders,
     /// Everything an operator has to be told: per-vendor tallies, every
     /// decline reason, every unreadable row's reason, and every disagreement.
     pub notes: Vec<String>,
@@ -166,6 +172,17 @@ pub struct Read {
     /// vendors disagree" and "there was only one vendor" are different facts
     /// that must not collapse into one status.
     pub unavailable: bool,
+    /// How many rows could not be read at all, across every vendor.
+    ///
+    /// The rows were always collected and always printed -- and never reached
+    /// [`Read::is_clean`], so a master that was 100% unreadable reported `ok`
+    /// and exited zero. `CLAUDE.md` section 4: degrade loudly and name the
+    /// reason, or refuse. Printing a number nobody gates on is neither.
+    pub unreadable: usize,
+    /// How many rows were declined for a reason that is not routine.
+    ///
+    /// See [`crate::master::Loaded::non_routine`].
+    pub non_routine: usize,
     /// How many rows were declined under a listing class nobody recognises.
     ///
     /// Not a merge disagreement — it is one vendor's file using a code this
@@ -191,6 +208,102 @@ pub struct Summary {
     /// Tracked instruments both vendors named, which is the cross-checked
     /// identity figure on the dashboard.
     pub confirmed_by_both: usize,
+}
+
+/// Every sort order the instruments page offers, computed once at load.
+///
+/// # Why the request must not sort
+///
+/// Each request used to `collect` the whole filtered universe into a `Vec` and
+/// then `sort_unstable_by_key` it, so answering one page cost
+/// **O(universe · log universe)** for an order that cannot have changed --
+/// `Read` is built once and never mutated. `docs/07-o1-architecture.md` layer
+/// 12 grades the page "bounded page, never the set"; the *render* was bounded
+/// and the *request* was not.
+///
+/// This is the same defect, and the same repair, as [`Summary`]: those counts
+/// were folded out of `by_key` on every request until it was measured at
+/// **97.18x** from 900 to 90,000 instruments. Sorting is the other half of it.
+///
+/// Six orders are held, one per column the page offers, each carrying the entry
+/// beside its key.
+///
+/// Holding the pair rather than the key alone costs six copies of a `Copy`
+/// entry — bounded, and taken once. Holding keys alone would have been smaller
+/// and would have needed a `by_key` lookup per row walked, whose failure arm is
+/// **unreachable**: the orders are built from that map and a `Read` is never
+/// mutated. An unreachable arm is either an untestable branch or a fallback
+/// that hides a failure, and `CLAUDE.md` §4 has an opinion about the second.
+/// Carrying the entry makes the question not arise.
+///
+/// Descending is the same order walked backwards, so one ordering rule per
+/// column serves both directions and they cannot disagree about how ties break.
+#[derive(Debug)]
+pub struct Orders {
+    symbol: Vec<(InstrumentKey, merge::Entry)>,
+    isin: Vec<(InstrumentKey, merge::Entry)>,
+    universe: Vec<(InstrumentKey, merge::Entry)>,
+    kind: Vec<(InstrumentKey, merge::Entry)>,
+    vendors: Vec<(InstrumentKey, merge::Entry)>,
+    default: Vec<(InstrumentKey, merge::Entry)>,
+}
+
+impl Orders {
+    /// Sorts the key set once per column.
+    ///
+    /// Every arm ends in the key itself, so each order is TOTAL: two rows with
+    /// equal ISINs still have one fixed position, and the page is
+    /// byte-identical between reloads. A `HashMap`'s iteration order is not,
+    /// which is why this cannot be left to insertion.
+    fn of(merged: &merge::Merged) -> Self {
+        // PRE-SIZED from a bound known before the loop: one pair per key.
+        let take = || -> Vec<(InstrumentKey, merge::Entry)> {
+            let mut v = Vec::with_capacity(merged.by_key.len());
+            v.extend(merged.by_key.iter().map(|(k, e)| (*k, *e)));
+            v
+        };
+
+        let mut symbol = take();
+        symbol.sort_unstable_by_key(|(k, _)| (k.underlying, *k));
+        let mut isin = take();
+        isin.sort_unstable_by_key(|(k, e)| (e.isin.map(|(_, i)| i), *k));
+        let mut universe = take();
+        universe.sort_unstable_by_key(|(k, e)| (e.universe.bits(), *k));
+        let mut kind = take();
+        kind.sort_unstable_by_key(|(k, _)| (k.kind, *k));
+        let mut vendors = take();
+        vendors.sort_unstable_by_key(|(k, e)| (e.vendors, *k));
+        // Swept instruments lead the default order. An operator who clicked a
+        // column asked for that column, so the pin applies here only.
+        let mut default = take();
+        default.sort_unstable_by_key(|(k, _)| (!k.is_sweepable(), *k));
+
+        Self {
+            symbol,
+            isin,
+            universe,
+            kind,
+            vendors,
+            default,
+        }
+    }
+
+    /// The precomputed order for one column.
+    ///
+    /// An unrecognised column is NOT an error -- a stale bookmark should still
+    /// render -- so it falls to the default order, exactly as the per-request
+    /// `match` it replaced did.
+    #[must_use]
+    fn for_column(&self, column: &str) -> &[(InstrumentKey, merge::Entry)] {
+        match column {
+            "symbol" => &self.symbol,
+            "isin" => &self.isin,
+            "universe" => &self.universe,
+            "kind" => &self.kind,
+            "vendors" => &self.vendors,
+            _ => &self.default,
+        }
+    }
 }
 
 impl Summary {
@@ -247,13 +360,19 @@ impl Read {
         notes: Vec<String>,
         unavailable: bool,
         unrecognised: usize,
+        unreadable: usize,
+        non_routine: usize,
     ) -> Self {
         let summary = Summary::of(&merged);
+        let orders = Orders::of(&merged);
         Self {
             merged,
             summary,
+            orders,
             notes,
             unavailable,
+            unreadable,
+            non_routine,
             unrecognised,
         }
     }
@@ -267,6 +386,13 @@ impl Read {
     pub fn is_clean(&self) -> bool {
         !self.unavailable
             && self.unrecognised == 0
+            // A row nobody could read is an instrument that silently vanished.
+            && self.unreadable == 0
+            // And a decline that is not routine is the vendor having changed
+            // something under us -- a renamed exchange code declines every row
+            // in the file, which is indistinguishable from an empty universe
+            // unless it is counted here.
+            && self.non_routine == 0
             && self.merged.verdict() == merge::Verdict::Clean
     }
 
@@ -290,9 +416,17 @@ pub fn universe(dir: &Path) -> Read {
     let mut sources = Vec::new();
     let mut unavailable = false;
     let mut unrecognised = 0;
+    let mut unreadable = 0;
+    let mut non_routine = 0;
     for (vendor, path) in master_paths(dir) {
         match master::load(&path, vendor) {
             Ok(l) => {
+                // GATED, not merely printed. Both of these reach `is_clean`,
+                // so a file nobody could read and a decline that is not
+                // routine now change the status and the exit code instead of
+                // scrolling past in a note.
+                unreadable += l.errors.len();
+                non_routine += l.non_routine;
                 let mut note = format!(
                     "{}: {} kept, {} declined, {} unreadable",
                     vendor.as_str(),
@@ -359,7 +493,14 @@ pub fn universe(dir: &Path) -> Read {
             alone.join(", ")
         ));
     }
-    Read::new(merged, notes, unavailable, unrecognised)
+    Read::new(
+        merged,
+        notes,
+        unavailable,
+        unrecognised,
+        unreadable,
+        non_routine,
+    )
 }
 
 /// Liveness plus the decode tallies, so a machine can check what a human sees.
@@ -564,47 +705,66 @@ pub fn instruments_html_from(
         _ => true,
     };
 
-    let mut keys: Vec<_> = read
-        .merged
-        .by_key
-        .iter()
-        .filter(|(_, e)| tracked(e.universe) && selected(e.universe))
-        .filter(|(k, _)| needle.is_empty() || k.to_string().to_uppercase().contains(&needle))
-        .map(|(k, e)| (*k, *e))
-        .collect();
-    let matched = keys.len();
-    // Swept instruments first, then a stable order. Sorting by the key itself
-    // rather than by insertion makes the page byte-identical between reloads,
-    // which a HashMap iteration order would not.
-    // SORT ORDER IS PART OF THE URL, so a sorted page is linkable and a reload
-    // shows the same thing. Swept instruments lead every order except when the
-    // operator asked for a specific column — an implicit pin would silently
-    // contradict the column they clicked.
-    //
-    // Every arm ends in the key itself, so the order is TOTAL: two rows with
-    // equal ISINs still have one fixed order, and the page is byte-identical
-    // between reloads. A HashMap's iteration order is not, which is why this
-    // cannot be left to insertion.
-    // A leading `-` means descending. Sorting the key list ascending and then
-    // reversing keeps ONE ordering rule per column instead of two, so ascending
-    // and descending can never disagree about how ties break.
+    // A leading `-` means descending. The precomputed order is ascending, so
+    // descending walks the same slice backwards -- ONE ordering rule per
+    // column, so the two directions cannot disagree about how ties break.
     let (column, descending) = match sort.strip_prefix('-') {
         Some(base) => (base, true),
         None => (sort, false),
     };
-    match column {
-        "symbol" => keys.sort_unstable_by_key(|(k, _)| (k.underlying, *k)),
-        "isin" => keys.sort_unstable_by_key(|(k, e)| (e.isin.map(|(_, i)| i), *k)),
-        "universe" => keys.sort_unstable_by_key(|(k, e)| (e.universe.bits(), *k)),
-        "kind" => keys.sort_unstable_by_key(|(k, _)| (k.kind, *k)),
-        "vendors" => keys.sort_unstable_by_key(|(k, e)| (e.vendors, *k)),
-        // "key", "" and anything unrecognised: the default order. An unknown
-        // column is NOT an error -- a stale bookmark should still render.
-        _ => keys.sort_unstable_by_key(|(k, _)| (!k.is_sweepable(), *k)),
+
+    // THE ORDER IS ALREADY SORTED. It was taken once, at load, by `Orders::of`.
+    //
+    // This used to `collect` the whole filtered universe and then sort it, on
+    // every request, for an order that cannot change -- see [`Orders`]. What is
+    // left here is the filter, which must look at each candidate because a
+    // substring search cannot be answered from an order.
+    let order = read.orders.for_column(column);
+    // ONE buffer for the whole request, reused for every row.
+    let mut haystack = String::with_capacity(64);
+    let mut keys: Vec<(InstrumentKey, merge::Entry)> = Vec::with_capacity(PAGE_ROWS);
+    for (k, e) in order {
+        if !(tracked(e.universe) && selected(e.universe)) {
+            continue;
+        }
+        {
+            // ONE buffer for the whole request, reused for every row.
+            //
+            // This was `k.to_string().to_uppercase().contains(&needle)`, which
+            // allocated TWO `String`s for every instrument tested -- roughly
+            // 5,400 allocations for one search across 2,700 instruments -- and
+            // the second could never change a byte. Every component of the
+            // rendering is uppercase ASCII by construction: `Symbol`
+            // uppercases at its boundary and admits nothing else, the exchange
+            // and the option side are enum strings, and expiry and strike are
+            // digits. `a_rendered_key_is_already_uppercase` proves it rather
+            // than asserting it in prose.
+            //
+            // Rendering into one reused buffer makes this one allocation per
+            // REQUEST instead of two per row. `docs/07-o1-architecture.md`
+            // layer 9.
+            if !needle.is_empty() {
+                haystack.clear();
+                let _ = write!(haystack, "{k}");
+                if !haystack.contains(&needle) {
+                    continue;
+                }
+            }
+        }
+        keys.push((*k, *e));
     }
+    // SORT ORDER IS PART OF THE URL, so a sorted page is linkable and a reload
+    // shows the same thing. Swept instruments lead the default order; an
+    // operator who clicked a column asked for that column, so the pin does not
+    // apply there.
+    //
+    // The walk above visited the keys IN ORDER, so `keys` is already sorted and
+    // reversing it is the descending order -- exactly what sorting-then-
+    // reversing produced, without the sort.
     if descending {
         keys.reverse();
     }
+    let matched = keys.len();
 
     // PAGING, so nothing is unreachable.
     //
@@ -1104,6 +1264,124 @@ mod tests {
         let (text, _) = report(&dir);
         assert!(text.contains("not an equity listing 1"), "{text}");
         assert!(text.contains("SME board 1"), "{text}");
+    }
+
+    #[test]
+    fn every_column_has_a_precomputed_total_order_and_descending_is_its_reverse() {
+        // The page used to sort the whole filtered universe on EVERY request,
+        // for an order that cannot change -- `Read` is built once and never
+        // mutated. `Orders::of` takes each order at load instead. This proves
+        // the six orders exist, that each is total (no two keys tie, so the
+        // page is byte-identical between reloads), and that walking one
+        // backwards is exactly the descending page.
+        let dir = agreeing("orders");
+        let read = universe(&dir);
+
+        for column in ["symbol", "isin", "universe", "kind", "vendors", "key"] {
+            let order = read.orders.for_column(column);
+            assert_eq!(
+                order.len(),
+                read.merged.by_key.len(),
+                "{column}: every key must appear exactly once"
+            );
+            let unique: std::collections::HashSet<_> = order.iter().map(|(k, _)| k).collect();
+            assert_eq!(unique.len(), order.len(), "{column}: a key appears twice");
+        }
+
+        // An unrecognised column falls to the default order rather than
+        // erroring -- a stale bookmark must still render.
+        assert_eq!(
+            read.orders.for_column("nonsense"),
+            read.orders.for_column("key"),
+            "an unknown column is the default order, not an error"
+        );
+
+        // Descending is the same order reversed, so the two directions cannot
+        // disagree about how ties break.
+        let asc = instruments_html_from(&read, "", "symbol", false, "", 0);
+        let desc = instruments_html_from(&read, "", "-symbol", false, "", 0);
+        assert_ne!(asc, desc, "the two directions must differ");
+        let symbol_order = read.orders.for_column("symbol");
+        let last_asc = symbol_order.last().map(|(k, _)| *k).expect("non-empty");
+        assert!(
+            desc.contains(&render::escape(&last_asc.to_string())),
+            "the descending page opens on the ascending order's last key"
+        );
+    }
+
+    #[test]
+    fn a_row_nobody_could_read_degrades_the_run_rather_than_only_printing() {
+        // The unreadable rows were collected, formatted and printed -- and
+        // `is_clean` never looked at them. A master that was 100% unreadable
+        // reported `ok` and exited zero, which is the one outcome a monitor
+        // cannot distinguish from a healthy run. Both vendors are present and
+        // agree here, so the ONLY thing that can degrade this run is the
+        // unreadable row: `NIFTY 100` carries a space, which is not a legal
+        // `Symbol`.
+        let dir = masters(
+            "unreadable_gated",
+            Some(&format!(
+                "{GROWW_HEAD}NSE,CASH,,RELIANCE,EQ,EQ,INE002A01018,,\n\
+                 NSE,CASH,,NIFTY 100,IDX,,NIFTY,,\n"
+            )),
+            Some(&format!(
+                "{DHAN_HEAD}NSE,E,INE002A01018,EQUITY,RELIANCE,RELIANCE INDUSTRIES,ES,EQ,,,\n"
+            )),
+        );
+        let (text, clean) = report(&dir);
+        assert!(!clean, "an unreadable row is not a clean read: {text}");
+        assert!(text.contains("DEGRADED"), "{text}");
+        assert!(
+            text.contains("1 unreadable"),
+            "and it still says how many: {text}"
+        );
+    }
+
+    #[test]
+    fn an_exchange_code_nobody_can_read_degrades_the_run_and_bse_does_not() {
+        // `NSE` drifting to `NSE_EQ` -- a rename, a padded column, a field
+        // shifted by one -- declined EVERY groww row as the routine "foreign
+        // exchange" and the report said `ok`. That is the same shape as the
+        // segment defect the decoder already raises a loud error for.
+        let dir = masters(
+            "unreadable_exchange",
+            Some(&format!(
+                "{GROWW_HEAD}NSE_EQ,CASH,,RELIANCE,EQ,EQ,INE002A01018,,\n"
+            )),
+            Some(&format!(
+                "{DHAN_HEAD}NSE,E,INE002A01018,EQUITY,RELIANCE,RELIANCE INDUSTRIES,ES,EQ,,,\n"
+            )),
+        );
+        let (text, clean) = report(&dir);
+        assert!(!clean, "an unreadable exchange code is not routine: {text}");
+        assert!(
+            text.contains("unrecognised exchange"),
+            "named, not lumped in: {text}"
+        );
+        assert!(
+            !text.contains("foreign exchange"),
+            "and never filed under the routine reason: {text}"
+        );
+
+        // BSE is a venue this engine RECOGNISES and does not store. That is
+        // ordinary business and must NOT degrade anything -- otherwise the fix
+        // above would make every real master permanently dirty.
+        let ok_dir = masters(
+            "foreign_exchange_is_routine",
+            Some(&format!(
+                "{GROWW_HEAD}BSE,CASH,,SENSEX,IDX,,SENSEX,,\n\
+                 NSE,CASH,,RELIANCE,EQ,EQ,INE002A01018,,\n"
+            )),
+            Some(&format!(
+                "{DHAN_HEAD}NSE,E,INE002A01018,EQUITY,RELIANCE,RELIANCE INDUSTRIES,ES,EQ,,,\n"
+            )),
+        );
+        let (ok_text, ok_clean) = report(&ok_dir);
+        assert!(ok_text.contains("foreign exchange"), "{ok_text}");
+        assert!(
+            ok_clean,
+            "a BSE row is routine and must stay clean: {ok_text}"
+        );
     }
 
     #[test]
