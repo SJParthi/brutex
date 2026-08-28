@@ -94,6 +94,39 @@ impl Verdict {
     }
 }
 
+/// A value in hundredths, rendered with exactly one minus sign.
+///
+/// # The arithmetic that looked right and was not
+///
+/// Both ratio arms rendered `got / 100` and `(got % 100).abs()` separately.
+/// Rust truncates integer division TOWARD ZERO, so `-50 / 100` is `0` and not
+/// `-1`, and the `.abs()` on the remainder then removed the only surviving
+/// evidence of the sign: `-50` printed as **`0.50`** — a negative ratio shown as
+/// a positive one, in the sentence an operator reads to decide whether to trade.
+///
+/// The regression test that was written for exactly this picked `-250`, whose
+/// quotient is `-2` and carries the sign, so it passed while every value in
+/// `(-100, 0)` stayed wrong. A test on one side of a boundary is not a test of
+/// the boundary.
+///
+/// Splitting the sign off FIRST and formatting the magnitude removes the class
+/// rather than the instance. `unsigned_abs` because `i64::MIN` has no positive
+/// counterpart and `abs` would panic on it.
+struct Hundredths(i64);
+
+impl fmt::Display for Hundredths {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let magnitude = self.0.unsigned_abs();
+        write!(
+            f,
+            "{}{}.{:02}",
+            if self.0 < 0 { "-" } else { "" },
+            magnitude / 100,
+            magnitude % 100
+        )
+    }
+}
+
 impl fmt::Display for Verdict {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -103,21 +136,19 @@ impl fmt::Display for Verdict {
             Self::TooFewTrades { took, needs } => {
                 write!(f, "took {took} trades, needs {needs}")
             }
-            Self::WinRateShort { got, needs } => write!(
-                f,
-                "win rate {}.{:02}%, needs {}.{:02}%",
-                got / 100,
-                (got % 100).abs(),
-                needs / 100,
-                (needs % 100).abs()
-            ),
+            Self::WinRateShort { got, needs } => {
+                write!(
+                    f,
+                    "win rate {}%, needs {}%",
+                    Hundredths(*got),
+                    Hundredths(*needs)
+                )
+            }
             Self::RewardToRiskShort { got, needs } => write!(
                 f,
-                "smallest win over largest loss {}.{:02}, needs {}.{:02}",
-                got / 100,
-                (got % 100).abs(),
-                needs / 100,
-                (needs % 100).abs()
+                "smallest win over largest loss {}, needs {}",
+                Hundredths(*got),
+                Hundredths(*needs)
             ),
             Self::FloorShort { got, needs } => {
                 write!(f, "guaranteed floor {got} paisa, needs {needs}")
@@ -453,11 +484,17 @@ mod tests {
         );
     }
 
-    /// A NEGATIVE remainder must not render as a second minus sign.
+    /// A negative value renders with exactly one minus sign — ON BOTH SIDES OF
+    /// THE MINUS-ONE BOUNDARY.
     ///
-    /// `-250 / 100` is `-2` and `-250 % 100` is `-50` in Rust, so the naive
-    /// format string produces `-2.-50`. The `abs` on the fractional half is
-    /// what stops it, and this is the case that proves it.
+    /// This test used to check `-250` only. That value's quotient is `-2` and
+    /// carries the sign, so it passed against an implementation that formatted
+    /// quotient and remainder separately — while every value in `(-100, 0)` was
+    /// wrong, because `-50 / 100` truncates toward zero to `0` and the `.abs()`
+    /// on the remainder removed the last trace of the sign. `-50` printed as
+    /// `0.50`.
+    ///
+    /// One-sided fixtures are how a boundary bug survives its own test.
     #[test]
     fn a_negative_ratio_renders_with_one_minus_sign() {
         assert_eq!(
@@ -466,7 +503,38 @@ mod tests {
                 needs: 125
             }
             .to_string(),
-            "smallest win over largest loss -2.50, needs 1.25"
+            "smallest win over largest loss -2.50, needs 1.25",
+            "below minus one, where the quotient carries the sign"
+        );
+        assert_eq!(
+            Verdict::RewardToRiskShort {
+                got: -50,
+                needs: 125
+            }
+            .to_string(),
+            "smallest win over largest loss -0.50, needs 1.25",
+            "ABOVE minus one, where the quotient is zero and only the sign bit \
+             distinguishes a loss from a gain"
+        );
+        assert_eq!(
+            Verdict::WinRateShort {
+                got: -1,
+                needs: 5_000
+            }
+            .to_string(),
+            "win rate -0.01%, needs 50.00%",
+            "and one hundredth under zero, the smallest negative there is"
+        );
+        // `i64::MIN` has no positive counterpart, so `abs` would panic on it and
+        // `unsigned_abs` is what makes this a formatter rather than a crash.
+        assert!(
+            Verdict::FloorShort {
+                got: i64::MIN,
+                needs: 1
+            }
+            .to_string()
+            .contains("-9223372036854775808"),
+            "the floor arm prints paisa whole, and must survive i64::MIN"
         );
     }
 }

@@ -1080,9 +1080,23 @@ impl Grid {
     /// arrangement of it.
     ///
     /// Ties break on `pessimistic`, then `merit`, so where two variants floor
-    /// identically the one that actually made more money wins — and a
-    /// constrained search agrees with [`Self::best`] wherever the bound does not
-    /// bind.
+    /// identically the one that actually made more money wins.
+    ///
+    /// # It does NOT agree with [`Self::best`] where the bound fails to bind
+    ///
+    /// This sentence used to end *"and a constrained search agrees with
+    /// `Self::best` wherever the bound does not bind"*, copied from
+    /// [`Self::best_within`] — where it IS true, because that selector uses
+    /// `best`'s own key. This one does not: `best` maximises
+    /// `(pessimistic, merit)` and this maximises `(guaranteed_floor, …)`, so the
+    /// two disagree whenever the highest-floor cell is not the highest-total
+    /// cell, bound or no bound.
+    ///
+    /// The crate's own `nothing_clearing_is_none_and_the_floor_outranks_the_total`
+    /// is the counter-example: two cells that BOTH clear `(50, 5_000, 125)`, one
+    /// making 40,000 paisa at a 26,000 floor and one making 90,000 at 14,400 —
+    /// and this returns the 40,000. That disagreement is the feature. Claiming
+    /// otherwise described a selector this is not.
     ///
     /// `min_trades` is required for the reason [`Self::by_reward_to_risk`]
     /// gives: without it a two-trade cell that never lost clears every bound and

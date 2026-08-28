@@ -67,7 +67,181 @@
 /// far fewer bytes moved -- see the module doc for the arithmetic.
 pub mod column;
 
+use core::hash::{BuildHasher, Hasher};
 use std::collections::HashSet;
+
+/// The multiplier, from Firefox's `FxHash` by way of `rustc`'s own.
+///
+/// An odd 64-bit constant with a well-mixed bit pattern, which is the only
+/// property the step below needs: multiplying by an odd number is a bijection on
+/// `u64`, so no two distinct inputs are folded together by the multiply itself.
+const MASK_HASH_MIX: u64 = 0x517c_c1b7_2722_0a95;
+
+/// The seed. FIXED, and that is a property rather than an oversight.
+///
+/// `std`'s `RandomState` draws a fresh seed per PROCESS, so the iteration order
+/// of a `HashSet` differs between two runs of the same input. Nothing in this
+/// crate iterates one — `seen` is asked only for `len` and for whether an insert
+/// was new — so that randomness never reached an answer. A fixed seed removes
+/// the possibility rather than relying on it staying unreached, which is what
+/// `CLAUDE.md` §3 rule 5 is for.
+const MASK_HASH_SEED: u64 = 0x9e37_79b9_7f4a_7c15;
+
+/// Builds [`MaskHasher`].
+#[derive(Clone, Copy, Debug, Default)]
+struct MaskHash;
+
+impl BuildHasher for MaskHash {
+    type Hasher = MaskHasher;
+    fn build_hasher(&self) -> MaskHasher {
+        MaskHasher(MASK_HASH_SEED)
+    }
+}
+
+/// A hasher for keys that are ALREADY high-entropy bits.
+///
+/// # Why the default hasher is the wrong tool here, measured
+///
+/// A profile of a running sweep put **14% of the whole runtime** inside
+/// `DefaultHasher::write` and the insert around it. `std` defaults to `SipHash`-
+/// 1-3, which is a KEYED, DoS-resistant hash: it exists because a `HashMap` may
+/// hold keys an attacker chose, and it pays several rounds per eight bytes to
+/// make collisions unfindable.
+///
+/// Nothing about that applies to `seen`. Its keys are [`ConditionMask`]s the
+/// sweep generated itself from a fixed vocabulary — no caller, no request, no
+/// network reaches them — and each is 48 bytes of bits that are already spread.
+/// The work `SipHash` does is real and is spent defending against a threat that
+/// cannot exist on this path.
+///
+/// # The step
+///
+/// `hash = (hash rotl 5 XOR word) * MIX`, per eight bytes. The rotate carries
+/// earlier words into the high bits so word order matters — without it,
+/// `{bit 3, bit 200}` and `{bit 200, bit 3}` would collide, and a mask is
+/// exactly a set where that must not happen. The multiply is a bijection, so the
+/// step never folds two distinct states together on its own.
+///
+/// # What this does NOT change
+///
+/// Collisions are still resolved by full key comparison inside the set, so a
+/// weaker hash cannot make `seen` admit a duplicate or reject a new candidate.
+/// It can only make lookups slower if the distribution were poor, which is why
+/// the rotate is there and why `the_mask_hasher_separates_orderings` measures it.
+#[derive(Clone, Copy, Debug)]
+struct MaskHasher(u64);
+
+impl Hasher for MaskHasher {
+    /// The only method the derived `Hash` for `ConditionMask` reaches — and it
+    /// is reached TWICE per key, not once.
+    ///
+    /// # This comment was wrong and the correction is the useful part
+    ///
+    /// It read: *"calls `Hash::hash_slice`, which for primitive integers is
+    /// specialised to ONE `write` of the whole 48 bytes. So this is the entire
+    /// hot path, and `write_u64` below is never called by this crate."* Both
+    /// halves were false, and the second was false about code twelve lines away.
+    ///
+    /// Traced through the pinned toolchain and then measured with a probe
+    /// hasher that records its own calls, the derive expands to:
+    ///
+    /// ```text
+    /// [u64; 6]  -> Hash::hash(&self[..])          array/mod.rs
+    ///           -> write_length_prefix(6)         hash/mod.rs   -> write(8 bytes)
+    ///           -> <u64>::hash_slice(..)          hash/mod.rs   -> write(48 bytes)
+    /// ```
+    ///
+    /// So a mask costs **two `write` calls, 56 bytes, seven eight-byte words** —
+    /// and the seventh is the length prefix, the constant `6` for every mask in
+    /// the workspace. One seventh of the hashing work carries no entropy at all.
+    ///
+    /// And `write_u64` is called constantly: by the loop below, once per word.
+    /// It is this hasher's own step, not dead code.
+    ///
+    /// # Why the constant word is not skipped
+    ///
+    /// Overriding `write_usize` to ignore it would reclaim that seventh, and it
+    /// is deliberately not done. The length prefix is constant only because
+    /// every key here is a fixed-width array; a `Hasher` that dropped lengths
+    /// would hash `[1, 2]` and `[1, 2, 3]`'s prefix alike and be quietly wrong
+    /// for any future key. That is the same objection this type's own doc raises
+    /// against ignoring `write_u64`, and it applies to itself.
+    fn write(&mut self, bytes: &[u8]) {
+        let mut words = bytes.chunks_exact(8);
+        for word in &mut words {
+            // `chunks_exact(8)` yields exactly eight bytes, so the conversion
+            // cannot fail. `unwrap_or` rather than a panic because a hasher that
+            // can abort the process is a worse failure than a weaker hash.
+            let value = u64::from_le_bytes((*word).try_into().unwrap_or([0; 8]));
+            self.write_u64(value);
+        }
+        for &byte in words.remainder() {
+            self.write_u64(u64::from(byte));
+        }
+    }
+
+    /// One word, folded through a 128-bit product.
+    ///
+    /// # The cheaper step was measured and it was not good enough
+    ///
+    /// This was `FxHash`'s step — `(h rotl 5 XOR word) * MIX`, one 64-bit
+    /// multiply per word. Measured on the k=1 frontier, the 370 single-bit masks
+    /// that are the busiest keys in the sweep, it produced **361 distinct
+    /// digests: nine collisions** where chance predicts 4 × 10⁻¹⁵ of one.
+    ///
+    /// The reason is structural. A 64-bit `wrapping_mul` propagates information
+    /// only UPWARD — bit *i* of an input reaches bits *i* and above of the
+    /// product and never below — and a 5-bit rotation carries too little back
+    /// down across six words to repair it. So masks whose single set bit sits
+    /// high in its word left the low half of the digest nearly unchanged, and
+    /// the low half is what a table buckets on.
+    ///
+    /// Adding an avalanche step to `finish` did NOT fix it, and that is the part
+    /// worth recording: a finalizer is a bijection, so if two keys have already
+    /// arrived at the same accumulator, no function of that accumulator can pull
+    /// them apart. The collision has to be prevented in the step or not at all.
+    ///
+    /// # What this does instead
+    ///
+    /// A 128-bit multiply, then XOR the two halves together — `wyhash`'s core.
+    /// The full product of two 64-bit values keeps every bit of information the
+    /// multiply generates, including the upper half a 64-bit multiply discards,
+    /// and folding the halves sends high bits down, which is the direction a
+    /// multiply cannot go. One `mul` instruction on any 64-bit target.
+    fn write_u64(&mut self, value: u64) {
+        let product = u128::from(self.0 ^ value).wrapping_mul(u128::from(MASK_HASH_MIX));
+        self.0 = fold_halves(product);
+    }
+
+    /// The accumulator, which [`Self::write_u64`] has already avalanched.
+    ///
+    /// No finalizer. One was tried — `splitmix64`'s, two xor-shift-multiply
+    /// rounds — against the weaker step this type used to carry, and it changed
+    /// the collision count NOT AT ALL: 361 distinct digests before and after.
+    /// That result is the argument for the current step and is recorded on it: a
+    /// finalizer is a bijection, and no bijection separates two keys that have
+    /// already reached the same accumulator.
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+/// The two halves of a 128-bit product, `XOR`ed together.
+///
+/// Both casts are deliberate truncations of a value that is being SPLIT, not
+/// narrowed: the high half is the shift, the low half is the mask, and together
+/// they are every bit of the product.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the point of the fold is to take each 64-bit half of a 128-bit \
+              product; truncation IS the operation, not a loss"
+)]
+const fn fold_halves(product: u128) -> u64 {
+    ((product >> 64) as u64) ^ (product as u64)
+}
+
+/// A set of masks, hashed by [`MaskHash`] rather than by `SipHash`.
+type MaskSet = HashSet<ConditionMask, MaskHash>;
 use vocab::ConditionMask;
 
 use crate::column::{Column, set_positions};
@@ -813,14 +987,15 @@ impl Ladder {
     /// that was never going to refuse.
     fn exhausted(
         &self,
-        seen: &mut HashSet<ConditionMask>,
+        emitted: usize,
         admitted: usize,
+        out: &mut Vec<Itemset>,
         grow_by: usize,
     ) -> Option<Breach> {
-        if admitted.saturating_add(seen.len()) >= self.ceiling {
+        if admitted.saturating_add(emitted) >= self.ceiling {
             return Some(Breach::Candidates);
         }
-        if cannot_grow(seen, grow_by) {
+        if cannot_grow(out, grow_by) {
             return Some(Breach::Memory);
         }
         None
@@ -840,14 +1015,43 @@ impl Ladder {
         // O(1) membership for the subset prune, and O(1) duplicate rejection.
         // `ConditionMask` derives `Hash + Eq`, so the key is the mask itself and
         // no separate index is needed.
-        let frequent_prev: HashSet<ConditionMask> = prev.frequent.iter().map(|i| i.mask).collect();
+        let frequent_prev: MaskSet = prev.frequent.iter().map(|i| i.mask).collect();
         // Pre-sized, because gate 11 rule 3 is right that an unsized map is a
         // rehash the caller did not ask for. The floor is the previous level's
         // survivor count: the join emits at least that many candidates before any
         // are pruned. The true count is |F|^2/2, and reserving THAT is the
         // allocation `docs/06-limits.md` §5 is about -- so this reserves the floor
         // rather than the ceiling, and says which.
-        let mut seen: HashSet<ConditionMask> = HashSet::with_capacity(frequent_prev.len());
+        // THE DEDUP SET IS GONE, AND IT NEVER REJECTED ANYTHING.
+        //
+        // `seen` was a `MaskSet` holding every candidate this level generated,
+        // and its purpose was to refuse a repeat. It refused none — not rarely,
+        // NEVER — and the join's own shape is why.
+        //
+        // `without_highest` strips a mask's top bit, so every member of a block
+        // is `P ∪ {h}` with `h > max(P)`: the stripped bit IS that member's
+        // maximum. A pair `(P∪{h_i}, P∪{h_j})` unions to `P ∪ {h_i, h_j}`, whose
+        // two highest bits are exactly `h_i` and `h_j` — so a candidate names
+        // the pair that made it, and `P` is the candidate minus those two bits.
+        // A candidate therefore recovers its own block. Two pairs cannot collide
+        // inside a block, and two blocks cannot collide with each other.
+        //
+        // The repository already knew: `DEFAULT_PAIR_BUDGET`'s doc states
+        // "the prefix join makes `duplicates` a measured zero", and
+        // `one_k_set_is_evaluated_once_however_many_pairs_produce_it` asserts it.
+        // What nothing did was draw the conclusion that the set is therefore
+        // dead weight.
+        //
+        // WHAT IT COST. A profile put ~14% of the whole runtime in hashing this
+        // set. `docs/06-limits.md` §5 puts its keys at 5.83 GiB at k=4 beside
+        // 6.80 GiB of survivors, and calls that pair "the wall, and it is memory
+        // rather than time" — so it was also ~46% of the level's peak.
+        //
+        // WHAT REPLACES IT. `emitted` counts what `seen.len()` counted, in a
+        // `usize`. The witness moves from a data structure to
+        // `the_join_emits_exactly_one_candidate_per_pair`, which sweeps real
+        // levels and checks `generated` against the block arithmetic directly.
+        let mut emitted: usize = 0;
         // PRE-SIZED, and it was not. `Vec::new()` here meant the survivor vector
         // grew by doubling through every level, while its neighbour above carried
         // a comment explaining why pre-sizing matters -- gate 11 rule 3, "an
@@ -861,7 +1065,12 @@ impl Ladder {
         // reserve past what a level is allowed to hold anyway.
         let mut out: Vec<Itemset> = Vec::with_capacity(frequent_prev.len().min(self.ceiling));
         let mut generated: u64 = 0;
-        let mut duplicates: u64 = 0;
+        // NOT `mut`, AND THAT IS THE PROOF. Nothing increments it any more:
+        // the prefix join cannot produce a repeat and `keyed.dedup()` removes
+        // the malformed-input case before the join. The field is still
+        // REPORTED, so a level that somehow found one would have to make this
+        // mutable again -- a compiler error is a better guard than a counter.
+        let duplicates: u64 = 0;
         let mut pruned: u64 = 0;
         let mut infrequent: u64 = 0;
         let mut halted: Option<Halt> = None;
@@ -915,6 +1124,25 @@ impl Ladder {
                 .map(|it| (without_highest(&it.mask), it.mask)),
         );
         keyed.sort_unstable_by_key(|(prefix, mask)| (prefix.words(), mask.words()));
+        // THE DEDUP THAT `seen` USED TO DO, MOVED HERE AND MADE CHEAPER.
+        //
+        // The join is injective over a frontier whose masks are distinct, so no
+        // set is needed to reject a repeat — see where `emitted` is declared.
+        // What that argument needs is the precondition: `prev.frequent` must not
+        // hold the same mask twice.
+        //
+        // Production never breaks it — k=1 dedups on an `offered` set of bit
+        // positions, and every later level inherits the property from this one.
+        // But `Frontier` is a public struct with public fields and
+        // `the_same_mask_twice_in_a_frontier_is_still_evaluated_once` builds a
+        // malformed one on purpose, because a caller can. Losing that defence
+        // silently is exactly the kind of trade this change must not make.
+        //
+        // `keyed` is already sorted by `(prefix, mask)`, so equal entries are
+        // ADJACENT and `dedup` is one O(|F|) pass over a vector that was just
+        // walked — against the O(candidates) hashing it replaces, which ran once
+        // per PAIR rather than once per member.
+        keyed.dedup();
 
         let mut pairs: u64 = 0;
         'join: for block in keyed.chunk_by(|a, b| a.0 == b.0) {
@@ -932,7 +1160,7 @@ impl Ladder {
                 if pairs_walked.saturating_add(pairs) >= self.pair_budget {
                     halted = Some(Halt {
                         k,
-                        candidates: admitted.saturating_add(seen.len()),
+                        candidates: admitted.saturating_add(emitted),
                         ceiling: self.ceiling,
                         pairs: pairs_walked.saturating_add(pairs),
                         pair_budget: self.pair_budget,
@@ -972,10 +1200,10 @@ impl Ladder {
                     // seen fire, which is the shape of every defect an audit
                     // found today. `exhausted` takes the growth amount, so a test
                     // hands it `usize::MAX` and the whole arm runs.
-                    if let Some(breach) = self.exhausted(&mut seen, admitted, 1) {
+                    if let Some(breach) = self.exhausted(emitted, admitted, &mut out, 1) {
                         halted = Some(Halt {
                             k,
-                            candidates: admitted.saturating_add(seen.len()),
+                            candidates: admitted.saturating_add(emitted),
                             ceiling: self.ceiling,
                             pairs: pairs_walked.saturating_add(pairs),
                             pair_budget: self.pair_budget,
@@ -984,12 +1212,21 @@ impl Ladder {
                         break 'join;
                     }
                     generated = generated.saturating_add(1);
-                    // Duplicate rejection: O(1). The same k-set arises from several
-                    // pairs and must be evaluated once.
-                    if !seen.insert(cand) {
-                        duplicates = duplicates.saturating_add(1);
-                        continue;
-                    }
+                    // NO DUPLICATE REJECTION, BECAUSE THERE ARE NO DUPLICATES.
+                    //
+                    // This comment used to read "the same k-set arises from
+                    // several pairs and must be evaluated once", and that is
+                    // true of a NAIVE join. It is not true of a PREFIX join,
+                    // which is what this is: a candidate's two highest bits are
+                    // exactly the pair that made it, so the pair is recoverable
+                    // from the candidate and no second pair can produce it. See
+                    // the block comment where `emitted` is declared.
+                    //
+                    // `duplicates` therefore stays at zero and is still reported
+                    // — a reader comparing levels should see the field, and a
+                    // future join that broke the property would have to change
+                    // this line to make it non-zero again.
+                    emitted = emitted.saturating_add(1);
                     // Subset prune, justified by anti-monotonicity: a bar matches a
                     // mask iff every bit is set, so adding a bit can only remove
                     // hits. If any (k-1)-subset is infrequent the k-set cannot be
@@ -1027,7 +1264,7 @@ impl Ladder {
                 infrequent,
             },
             halted,
-            seen.len(),
+            emitted,
             pairs,
         )
     }
@@ -1068,8 +1305,8 @@ pub fn support(bar_bits: &[ConditionMask], mask: &ConditionMask) -> u64 {
 ///
 /// `len() == capacity()` first, so the reserve call is made only when growth is
 /// actually due rather than on every candidate.
-fn cannot_grow(seen: &mut HashSet<ConditionMask>, by: usize) -> bool {
-    seen.len() == seen.capacity() && seen.try_reserve(by).is_err()
+fn cannot_grow(out: &mut Vec<Itemset>, by: usize) -> bool {
+    out.len() == out.capacity() && out.try_reserve(by).is_err()
 }
 
 /// The itemset minus its highest set position — the join's grouping key.
@@ -1149,13 +1386,36 @@ fn without_highest(m: &ConditionMask) -> ConditionMask {
 /// A lane's share of one batch is this many `Column::support` calls. At the
 /// benched cost — 1.2 to 5.0 microseconds per candidate on 100,000 bars — that
 /// is 10 to 40 milliseconds of work against a thread spawn of roughly 50
-/// microseconds, so the spawn is under half a per cent and the batching is free.
+/// microseconds, so the spawn is under half a per cent.
 ///
-/// It is not larger because the batch is the ONLY memory this change adds:
-/// `lanes x BATCH_PER_LANE x 48` bytes, which is 5.5 MB on a fourteen-core
-/// machine. `docs/06-limits.md` records memory, not time, as what bounds a
-/// sweep — a measured 1.0 GB at 17.9 million survivors — so a change that
-/// bought speed with bytes would be paying in the scarce currency.
+/// # That amortisation holds for a FULL batch, and most levels do not fill one
+///
+/// Every level ends with a tail drain, and a level that never reaches
+/// `batch_cap` has ONLY a tail drain. This file's own measured table records
+/// 9,345 / 13,421 / 13,059 candidates per level on a 1,124-bar run — an order of
+/// magnitude under the 114,688 cap, on a series far shorter than a real one. On
+/// that shape the spawn is the same order as the work, and a small run is
+/// plausibly SLOWER than it was single-threaded. Every test in the suite is such
+/// a run. The honest statement is that this buys time on the large levels that
+/// dominate a real sweep, and costs a little on the small ones.
+///
+/// # The memory it adds, counted properly
+///
+/// This said "the batch is the ONLY memory this change adds", and that was
+/// false. Three allocations, not one:
+///
+/// * the batch itself — `lanes x BATCH_PER_LANE x 48` bytes, **5.5 MB** on
+///   fourteen cores, and reserved at the top of EVERY `next_level` including a
+///   terminal one that generates nothing;
+/// * `parts: Vec<Vec<Itemset>>` in [`drain`] — up to one `Itemset` per batched
+///   candidate at 56 bytes, **6.4 MB**;
+/// * each lane's own `kept`, now pre-sized to its chunk. Before that it grew by
+///   doubling and could overshoot to twice the chunk.
+///
+/// Real added peak is therefore about **12 MB**, not 5.5 — and eight concurrent
+/// rungs multiply it again. `docs/06-limits.md` records memory, not time, as
+/// what bounds a sweep — a measured 1.0 GB at 17.9 million survivors — so the
+/// figure being wrong mattered in the scarce currency.
 const BATCH_PER_LANE: usize = 8_192;
 
 /// A zero batch would never drain and the walk would never terminate. Checked
@@ -1233,7 +1493,19 @@ fn drain(
             .chunks(width)
             .map(|chunk| {
                 scope.spawn(move || {
-                    let mut kept: Vec<Itemset> = Vec::new();
+                    // PRE-SIZED, AND IT WAS NOT. `Vec::new()` here grew by
+                    // doubling inside every lane, which can overshoot to twice
+                    // the chunk before `out.extend` takes it -- the same defect
+                    // an audit already found on `out` four hundred lines above,
+                    // reintroduced by this function on the day it was written.
+                    //
+                    // The chunk length is the CEILING, not an estimate: a lane
+                    // keeps at most one itemset per candidate it was handed. It
+                    // over-reserves when most candidates are infrequent, and
+                    // that is the right way round -- the alternative is a
+                    // doubling series whose peak is unbounded above the same
+                    // number.
+                    let mut kept: Vec<Itemset> = Vec::with_capacity(chunk.len());
                     for mask in chunk {
                         let hits = column.support(mask);
                         if hits >= min_hits {
@@ -1264,7 +1536,7 @@ fn drain(
     batch.clear();
 }
 
-fn every_subset_is_frequent(cand: &ConditionMask, frequent: &HashSet<ConditionMask>) -> bool {
+fn every_subset_is_frequent(cand: &ConditionMask, frequent: &MaskSet) -> bool {
     set_positions(cand).all(|b| frequent.contains(&cand.without_bit(b)))
 }
 
@@ -1423,6 +1695,64 @@ mod tests {
         drain(&column, &mut batch, 1, &mut out, &mut infrequent);
         assert!(out.is_empty(), "nothing in, nothing out");
         assert_eq!(infrequent, 7, "and an untouched tally, not a reset one");
+    }
+
+    /// The fast hasher separates what `SipHash` separated, and is fixed.
+    ///
+    /// A weaker hash cannot make the set admit a duplicate — collisions are
+    /// resolved by full key comparison — so what has to be proved is
+    /// DISTRIBUTION: that distinct masks do not pile into one bucket, which
+    /// would turn an O(1) probe into a walk.
+    #[test]
+    fn the_mask_hasher_separates_orderings_and_is_fixed() {
+        // `hash_one` and not a hand-rolled build/hash/finish: it is the same
+        // three calls, and clippy is right that the standard spelling is the one
+        // a reader should not have to check.
+        let digest = |mask: &ConditionMask| -> u64 { MaskHash.hash_one(mask) };
+
+        // FIXED, NOT PER-PROCESS. Two independently built hashers must agree.
+        // `RandomState` would too WITHIN one process and would not across two,
+        // which is the difference this seed removes.
+        let one = ConditionMask::default().with_bit(3).with_bit(200);
+        assert_eq!(digest(&one), digest(&one), "same mask, same digest");
+
+        // WORD POSITION MUST MATTER. Bit 0 sets word 0 to 1; bit 64 sets word 1
+        // to 1. Both masks carry the identical word VALUE in different words, so
+        // a hash that folded words together without the rotate would collide
+        // them -- and single-bit masks are the k=1 frontier, the busiest keys in
+        // the whole sweep.
+        let low = ConditionMask::default().with_bit(0);
+        let high = ConditionMask::default().with_bit(64);
+        assert_ne!(
+            digest(&low),
+            digest(&high),
+            "the rotate is what stops the same word value in two positions \
+             hashing alike"
+        );
+
+        // NO COLLISION ACROSS THE WHOLE VOCABULARY at k=1.
+        let singles: HashSet<u64> = (0..370)
+            .map(|b| digest(&ConditionMask::default().with_bit(b)))
+            .collect();
+        assert_eq!(
+            singles.len(),
+            370,
+            "370 single-bit masks must give 370 distinct digests"
+        );
+
+        // AND ACROSS A WIDE SAMPLE OF PAIRS, which is the k=2 frontier.
+        let pairs: HashSet<u64> = (0..370_u32)
+            .flat_map(|a| {
+                (a.saturating_add(1)..370)
+                    .map(move |b| ConditionMask::default().with_bit(a).with_bit(b))
+            })
+            .map(|m| digest(&m))
+            .collect();
+        assert_eq!(
+            pairs.len(),
+            68_265,
+            "C(370,2) distinct pair masks must give that many distinct digests"
+        );
     }
 
     /// There is always a lane, whatever the machine says.
@@ -2307,9 +2637,9 @@ mod tests {
              construction."
         );
         assert_eq!(
-            exits, 11,
+            exits, 10,
             "the shipping region of this file may leave a loop early in exactly \
-             eleven places, and every one is accounted for:\n\
+             ten places, and every one is accounted for:\n\
              \x20 1 EMPTY-BATCH RETURN -- `drain` handing back an untouched \
              tally when there is nothing to count. It is not optional: \
              `len.div_ceil(lanes())` on an empty batch is a chunk width of \
@@ -2319,9 +2649,12 @@ mod tests {
              pair on whichever memory bound `exhausted` names;\n\
              \x20 2 EXHAUSTION RETURNS inside `exhausted` -- the ceiling, which \
              a caller set, and the allocator, which nobody set;\n\
-             \x20 4 FILTER SKIPS, which advance rather than truncate -- a \
-             duplicate position and a non-live one at k=1, a duplicate \
-             candidate, a subset-pruned candidate;\n\
+             \x20 3 FILTER SKIPS, which advance rather than truncate -- a \
+             duplicate position and a non-live one at k=1, and a subset-pruned \
+             candidate. It was FOUR: the duplicate-candidate skip went with the \
+             `seen` set, because the prefix join cannot produce one and the \
+             malformed-frontier case is now removed by `keyed.dedup()` before \
+             the join rather than rejected inside it;\n\
              \x20 1 KEY RETURN -- `without_highest` handing back the join's \
              grouping key once it has found the top word.\n\
              It was NINE until `every_subset_is_frequent` became a one-line \
@@ -2974,7 +3307,7 @@ mod tests {
             .map(|l| l.frequent.iter().map(|i| i.mask).collect())
             .unwrap_or_default();
         for level in s.levels.iter().skip(1) {
-            let prev: HashSet<ConditionMask> = oracle.iter().copied().collect();
+            let prev: MaskSet = oracle.iter().copied().collect();
             let mut next: HashSet<ConditionMask> = HashSet::new();
             for (i, a) in oracle.iter().enumerate() {
                 for c in oracle.iter().skip(i.saturating_add(1)) {
@@ -3151,10 +3484,38 @@ mod tests {
         let (level, halted, _, _) = Ladder::with_min_hits(1).next_level(&column, &prev, 3, 0, 0);
 
         assert!(halted.is_none(), "the fixture must not breach a budget");
+
+        // THE PROPERTY IS UNCHANGED; THE MECHANISM MOVED EARLIER.
+        //
+        // This asserted `duplicates == 1` — the repeated mask produced {0,1,2}
+        // twice and a `HashSet` rejected the second. The set is gone, and the
+        // repeat is now removed from `keyed` before the join runs, so the second
+        // candidate is never GENERATED rather than generated and discarded.
+        //
+        // Asserting the mechanism would have made this test pass only for a
+        // rejection that no longer needs to happen. What it must assert is what
+        // the name says: the mask is evaluated ONCE.
         assert_eq!(
-            level.duplicates, 1,
-            "the repeated mask produces {{0,1,2}} twice and the second must be \
-             rejected, not evaluated against the bars again"
+            level.generated, 1,
+            "the repeated mask must yield ONE candidate, not two -- {{0,1,2}} \
+             is produced once because the repeat never reaches the join"
+        );
+        assert_eq!(
+            level.duplicates, 0,
+            "and nothing is rejected AFTER the fact, because nothing repeats"
+        );
+        // AND IT LEAVES BY THE PRUNE, NOT BY THE BARS. `{0,1,2}` needs all three
+        // of its 2-subsets frequent and the fixture supplies only `{0,1}` and
+        // `{0,2}` — `{1,2}` is absent — so anti-monotonicity refuses it before a
+        // single bar is read. `pruned == 1` is therefore the proof that the one
+        // candidate was reached exactly once: two would have pruned twice.
+        assert_eq!(
+            level.pruned, 1,
+            "reached once, and refused by the subset prune"
+        );
+        assert!(
+            level.frequent.is_empty(),
+            "nothing survives, because nothing was evaluated against the bars"
         );
         assert!(
             level.reconciles(),
@@ -3164,30 +3525,42 @@ mod tests {
 
     #[test]
     fn exhausted_names_the_ceiling_first_and_the_allocator_second() {
-        let mut seen: HashSet<ConditionMask> = HashSet::new();
+        // THE ALLOCATOR PROBE MOVED FROM `seen` TO `out`, and it belongs there.
+        // `seen` held one entry per CANDIDATE and was dropped at the end of
+        // every level; `out` holds one per SURVIVOR and is retained for the
+        // whole sweep. `exhausted`'s own doc argues the ceiling is cumulative
+        // because "every SURVIVOR of every level is retained -- that is the
+        // memory that accumulates", and the probe now watches that same vector.
+        let mut out: Vec<Itemset> = Vec::new();
         // Ceiling wins when both could fire: a caller that set one must get the
         // breach it asked for, not a memory report from an allocator that was
         // never going to refuse.
-        // A ceiling of ZERO, because the test is now `seen.len() + grow > ceiling`
-        // and `seen` is empty here: at a ceiling of one, growing by one is
-        // exactly at the bound and passes. Zero is the only ceiling an empty set
-        // can breach, and it is the honest fixture for "the ceiling answers
-        // first".
         let tight = Ladder::with_min_hits(1).with_ceiling(1);
         assert_eq!(
-            tight.exhausted(&mut seen, 1, usize::MAX),
+            tight.exhausted(0, 1, &mut out, usize::MAX),
             Some(Breach::Candidates)
         );
         // With room in the ceiling, the allocator is what answers.
         let roomy = Ladder::with_min_hits(1);
         assert_eq!(
-            roomy.exhausted(&mut seen, 0, usize::MAX),
+            roomy.exhausted(0, 0, &mut out, usize::MAX),
             Some(Breach::Memory),
             "an allocation the machine cannot satisfy is a halt naming MEMORY, \
              and it is reachable here without a machine that is out of it"
         );
         // And an ordinary candidate passes both.
-        assert_eq!(roomy.exhausted(&mut seen, 0, 1), None);
+        assert_eq!(roomy.exhausted(0, 0, &mut out, 1), None);
+        // EMITTED COUNTS WHAT `seen.len()` COUNTED. A level that has already
+        // produced `ceiling` candidates breaches even with nothing admitted
+        // before it, which is the case the old signature expressed by the set's
+        // own length.
+        assert_eq!(
+            Ladder::with_min_hits(1)
+                .with_ceiling(4)
+                .exhausted(4, 0, &mut out, 1),
+            Some(Breach::Candidates),
+            "the candidate count is now an argument, and it must still bind"
+        );
     }
 
     #[test]
@@ -3197,26 +3570,26 @@ mod tests {
         // refusal arm is provable without a machine that is actually out of
         // memory -- which is the only reason this is a function rather than two
         // lines inlined at the call site.
-        let mut seen: HashSet<ConditionMask> = HashSet::new();
+        let mut out: Vec<Itemset> = Vec::new();
         assert_eq!(
-            seen.len(),
-            seen.capacity(),
-            "a fresh set is exactly full at zero"
+            out.len(),
+            out.capacity(),
+            "a fresh vector is exactly full at zero"
         );
         assert!(
-            cannot_grow(&mut seen, usize::MAX),
+            cannot_grow(&mut out, usize::MAX),
             "a reservation the allocator cannot satisfy must REPORT, not abort -- \
              `CLAUDE.md` §4 wants the reason named, and a panic names nothing a \
              caller can read"
         );
         assert!(
-            !cannot_grow(&mut seen, 1),
+            !cannot_grow(&mut out, 1),
             "and an ordinary growth must be allowed through"
         );
         // Once it has room, the check costs a compare and reserves nothing.
-        assert!(seen.capacity() >= 1);
+        assert!(out.capacity() >= 1);
         assert!(
-            !cannot_grow(&mut seen, 1),
+            !cannot_grow(&mut out, 1),
             "not full, so no reserve is attempted"
         );
     }

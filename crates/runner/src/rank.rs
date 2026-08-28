@@ -22,13 +22,25 @@
 //! Keeps `k` and throws the rest away as it goes. Memory becomes a function of
 //! how many results you want to LOOK at, not of how many exist.
 //!
-//! **10,000 kept is 0.80 MB**, and briefly 1.6 MB. A `Scored` is 80 bytes --
-//! `ConditionMask` 48, `hits` 8, `Edge` 24 -- not the 212 the sweep spends per
-//! RETAINED itemset, and this header priced it at 212 until an audit caught the
-//! borrowed figure. The transient doubling is real and stated: the final
-//! `collect` is an `ExactSizeIterator`, so a second keep-sized buffer exists
-//! while the heap's own is still alive. Both are O(keep), which is the claim
-//! that matters, and 0.80 MB is the number.
+//! **A `Scored` is 120 bytes** -- `ConditionMask` 48, `hits` 8, `Edge` 64. This
+//! header said 80, pricing `Edge` at 24 for three fields when it has EIGHT:
+//! `n`, `mean_paisa`, `wins`, `win_sum`, `loss_sum`, `mismatched`, `refused`,
+//! `t`. It drifted when the payoff fields landed and nothing re-measured it --
+//! the second time this one paragraph has carried a stale width, the first being
+//! the 212 an earlier audit caught.
+//!
+//! **The peak is `chunks x keep`, not `keep`.** The walk is chunked across the
+//! cores, each chunk holding its own bounded heap, so the bound moved when the
+//! parallel form landed and this paragraph did not move with it. Chunks are
+//! `4 x threads` per level, so on fourteen cores at `keep = 10_000` the peak is
+//! about **67 MB**, not the 0.80 MB written here before. Each chunk's heap is
+//! now reserved at `keep.min(part.len())`, so a SHORT chunk costs what it can
+//! hold rather than what the caller might have wanted.
+//!
+//! The transient doubling is real and stated: the final `collect` is an
+//! `ExactSizeIterator`, so a second keep-sized buffer exists while the heap's own
+//! is still alive. Every term is O(keep x cores), which is the claim that
+//! matters -- bounded by the MACHINE, and never by the size of the frequent set.
 //!
 //! # Ranked by |t|, and why the absolute value
 //!
@@ -290,7 +302,20 @@ fn top_of<K: Ranked1>(
     forward: &Forward,
     keep: usize,
 ) -> Vec<K> {
-    let mut heap: BinaryHeap<core::cmp::Reverse<K>> = BinaryHeap::with_capacity(keep);
+    // `keep.min(part.len())` AND NOT `keep`, WHICH WAS A REAL COST.
+    //
+    // A chunk cannot yield more rows than it holds, so reserving `keep` on a
+    // short chunk reserves for rows that cannot exist — and the over-reservation
+    // survives into the returned `Vec`, which inherits the heap's capacity, and
+    // every part is live at once before the merge.
+    //
+    // Measured against the defaults: `chunk_size` collapses to a width of 1 when
+    // the frequent set is smaller than four per thread, so a 40-survivor sweep on
+    // fourteen cores is FORTY chunks. At `keep = 10_000` and 120 bytes a
+    // `Scored`, reserving `keep` each was 48 MB to rank forty rows, against the
+    // 1.2 MB the single heap this replaced would have used.
+    let mut heap: BinaryHeap<core::cmp::Reverse<K>> =
+        BinaryHeap::with_capacity(keep.min(part.len()));
     for itemset in part {
         admit(
             &mut heap,

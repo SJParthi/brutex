@@ -116,10 +116,29 @@ pub fn load(
     )]
     let symbol_id = brutex_core::universe::fnv1a(underlying) as u32;
 
+    // THE ADVICE USED TO BE WRONG FOR SIX OF THE SEVEN CAUSES.
+    //
+    // This read "is not in the store for {vendor}: {why}. Nothing was read. Pull
+    // that instrument-month first." `open_existing` fails for absence, but also
+    // for `Locked` (ANOTHER WRITER HOLDS THIS MONTH), `CounterExceedsFile` (a
+    // torn file), a symbol or timeframe mismatch, and plain permission or I/O
+    // errors. Every one of them was reported as absence and answered with "pull
+    // it", which for a lock is the opposite of what the operator should do.
+    //
+    // The lock case is not hypothetical and is the likeliest of the seven: it is
+    // what a sweep started from the browser hits while a pull is still writing.
+    // Following the old advice — pull it again — extends the very lock that
+    // caused it.
+    //
+    // `{why}` already carries the real cause; what was missing was permission to
+    // read it as something other than "absent".
     let file = BarFile::open_existing(root, path, symbol_id).map_err(|why| {
         format!(
-            "{underlying} {rung_name} {year}-{month:02} is not in the store for \
-             {}: {why}. Nothing was read. Pull that instrument-month first.",
+            "{underlying} {rung_name} {year}-{month:02} could not be read from \
+             the store for {}: {why}. Nothing was read. If that reason is \
+             absence, pull the instrument-month. IF IT NAMES A LOCK, A WRITER \
+             HOLDS IT -- a pull is in flight, and sweeping now would silently \
+             leave this month out of the sample. Wait for the pull, then rerun.",
             vendor.as_str()
         )
     })?;
@@ -536,14 +555,45 @@ mod tests {
     fn a_month_that_was_never_pulled_says_so_and_names_the_pull() {
         let r = root("absent");
         let why = load(&r, Vendor::Dhan, "NIFTY", "1min", 2026, 8).expect_err("nothing is there");
+        // THE ABSENCE IS NAMED BY THE STORE, NOT BY THIS SENTENCE.
+        //
+        // This asserted the phrase "not in the store", which the wrapper used to
+        // say about EVERY failure -- a lock, a torn file, a permission error and
+        // a genuine absence alike. The wrapper no longer asserts absence it
+        // cannot know; it defers to `{why}`, which for this fixture is the
+        // store's own "does not exist".
+        //
+        // So the test now checks what is actually true here — that the file is
+        // reported missing — rather than a wording that was a guess in six cases
+        // out of seven.
         assert!(
-            why.contains("not in the store"),
-            "it names the absence: {why}"
+            why.contains("does not exist"),
+            "it names the absence, from the store's own error: {why}"
+        );
+        assert!(
+            why.contains("pull the instrument-month"),
+            "and tells the operator what to do about a real absence: {why}"
+        );
+        assert!(
+            why.contains("A WRITER HOLDS IT"),
+            "while naming the case where pulling again would be exactly wrong: \
+             {why}"
         );
         assert!(why.contains("dhan"), "and which feed's store: {why}");
+        // AND THE OTHER ACTION, WHICH IS THE OPPOSITE ONE.
+        //
+        // This asserted "Pull that instrument-month first" -- the old wrapper's
+        // single, unconditional instruction. It was right for absence and wrong
+        // for the six other causes `open_existing` can report, worst of all a
+        // lock: pulling again extends the very lock that blocked the read.
+        //
+        // Both branches are now stated and both are asserted, so a future edit
+        // cannot quietly drop the half that keeps an operator from making it
+        // worse.
         assert!(
-            why.contains("Pull that instrument-month first"),
-            "and the action that fixes it, because a filesystem error names the wrong next step: {why}"
+            why.contains("Wait for the pull, then rerun"),
+            "and the action for a lock, which is to wait rather than to pull: \
+             {why}"
         );
     }
 
@@ -576,7 +626,10 @@ mod tests {
             why.contains("RELIANCE"),
             "the refusal quotes what was asked: {why}"
         );
-        assert!(why.contains("not in the store"), "{why}");
+        assert!(
+            why.contains("does not exist"),
+            "the store's own reason survives the wrapper: {why}"
+        );
     }
 
     #[test]
