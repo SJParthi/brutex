@@ -1858,14 +1858,6 @@ fn audit_keep() -> usize {
 /// was the mistake this replaces.
 const STOP_FLOOR_POINTS: i64 = 5;
 
-/// How far apart the stop rungs sit, in index points.
-///
-/// Two and a half points, for the same reason the floor is five: it is the
-/// coarsest step that still distinguishes two stops a trader would place
-/// differently, and the finest that does not multiply the grid with levels
-/// nobody would name. Nine rungs from five to twenty-five.
-const STOP_STEP_POINTS_HALVES: i64 = 5;
-
 /// The stop ladder in ppm: `5, 7.5, 10 … 25` points, at the measured price.
 ///
 /// # Why the stops no longer share the general step
@@ -1888,6 +1880,32 @@ fn stop_ladder_ppm(bars: &[indicators::Candle]) -> Vec<i64> {
     let reference = reference_price(bars);
     let cap_halves = max_stop_points(bars).saturating_mul(2);
     let floor_halves = stop_floor_points(bars).saturating_mul(2);
+
+    // THE STEP IS THE SPAN OVER THE RUNG COUNT, AND BOTH COME FROM THE BARS.
+    //
+    // This advanced by `STOP_STEP_POINTS_HALVES` -- a fixed 2.5 index points,
+    // the same distance on NIFTY at 25,000 and on BANKNIFTY at 52,000, and the
+    // same distance in 2020 as in 2026. A ladder whose SPAN is derived from the
+    // instrument's own bar ranges but whose STEP is a constant does not scale
+    // with the instrument: on a quiet series it emits one or two rungs, and on
+    // a violent one it emits dozens, none of which anybody chose.
+    //
+    // `grid_rungs` already answers "how many rungs can this grid afford", and
+    // it is derived -- cap over the median-range step. Dividing the span by it
+    // gives a step that moves with the instrument AND keeps the cell count
+    // where the budget put it, which is the only thing a constant step was ever
+    // protecting.
+    //
+    // `max(1)` because the span can be smaller than the rung count on a very
+    // tight series, and a zero step is an infinite loop rather than a fine
+    // ladder.
+    let rungs = i64::try_from(grid_rungs(bars).max(1)).unwrap_or(1);
+    let step_halves = cap_halves
+        .saturating_sub(floor_halves)
+        .checked_div(rungs)
+        .unwrap_or(1)
+        .max(1);
+
     let mut out: Vec<i64> = Vec::with_capacity(16);
     let mut halves = floor_halves;
     while halves <= cap_halves {
@@ -1897,7 +1915,7 @@ fn stop_ladder_ppm(bars: &[indicators::Candle]) -> Vec<i64> {
         if ppm > 0 {
             out.push(ppm);
         }
-        halves = halves.saturating_add(STOP_STEP_POINTS_HALVES);
+        halves = halves.saturating_add(step_halves);
     }
     // A cap below the floor leaves nothing; one rung at the floor is still a
     // ladder and refusing here would drop the whole grid for a quiet
@@ -1949,7 +1967,7 @@ fn stop_ladder_ppm(bars: &[indicators::Candle]) -> Vec<i64> {
 /// only in the fallback for an empty slice. So on every real series
 /// `floor == cap`, [`stop_ladder_ppm`]'s `while halves <= cap_halves` ran
 /// exactly ONCE, and the shipped stop ladder had a single rung —
-/// [`STOP_STEP_POINTS_HALVES`] never advancing it. The doc above
+/// a fixed 2.5-point step never advancing it. The doc above
 /// [`stop_ladder_ppm`] claimed a span of *"5, 7.5, 10 … 25"* that no run has
 /// ever walked, and the test named for that span asserts nothing about its
 /// length: its ordering check is `rungs.windows(2).all(..)`, which is vacuously
@@ -2000,7 +2018,7 @@ fn stop_floor_points(bars: &[indicators::Candle]) -> i64 {
         // The stated NIFTY figure is the honest fallback and is named as one.
         return STOP_FLOOR_POINTS;
     };
-    points.clamp(1, MAX_STOP_POINTS)
+    points.max(1)
 }
 
 fn grid_step_ppm(bars: &[indicators::Candle]) -> i64 {
@@ -2131,7 +2149,7 @@ fn max_stop_points(bars: &[indicators::Candle]) -> i64 {
     let Some(points) = range_percentile(bars, 9, 10) else {
         return MAX_STOP_POINTS;
     };
-    points.clamp(1, MAX_STOP_POINTS)
+    points.max(1)
 }
 
 /// Reward-to-risk ratios, in hundredths, DENSE where strategies live and
@@ -3205,15 +3223,52 @@ fn audit_range_inner(
                 months_asked: span.asked,
                 months_found: span.found,
             }),
-            rules: Rules::BASELINE,
-            // The historical cut. `audit-range` takes no policy word, so it
-            // must not silently change which combinations it considers.
+            rules: Rules::operator(),
             // The environment's ceiling: an operator-facing command must not
             // silently narrow its own search.
             ceiling: None,
             // The full stack, unchanged: every operator-facing command validates.
             validate: true,
-            lens: runner::rank::Lens::Detectability,
+            // THE LENS THAT DECIDES WHICH COMBINATIONS ARE EVER PRICED, AND IT
+            // WAS ANSWERING A DIFFERENT QUESTION FROM THE ONE BEING ASKED.
+            //
+            // This read `Detectability`, described as "the historical cut" --
+            // and this function is what the browser's Run button reaches, so it
+            // is the ordering behind every sweep the operator has ever started.
+            //
+            // `screen_cap`'s doc states the consequence in its own words, with
+            // its own measurement: "The pipeline is: Apriori produces the
+            // combinations, they are ranked by |t|, and the first SCREEN_CAP of
+            // that ordering get an exit grid. On a real 15-minute run over 81
+            // months that read: 1,024,058 combinations found, 250 kept, 21
+            // priced." One in fifty thousand reached a grid, and the ordering
+            // that chose them ranks a LEVEL-LESS forward return -- no stop, no
+            // target, no trail. It asks "how far does this signal run
+            // UNSTOPPED".
+            //
+            // The operator's question is the other one, stated in that same
+            // doc: "which signal keeps every loser inside ten points and every
+            // winner past thirty". And it names the cost exactly: "A
+            // combination that is unremarkable unstopped and excellent under a
+            // tight stop scores low on the first question, is cut at 60, and
+            // never meets an exit grid at all. No tier ladder, no rule and no
+            // report can recover that. They all filter cells, and the cells
+            // were never computed."
+            //
+            // So the standing requirement -- massive win rate, very small stop,
+            // very small drawdown, top 10 to 25 -- was being systematically
+            // discarded before anything could measure it. `Rules` could not
+            // save it and neither could the exit grid: both filter cells that
+            // this cut prevented from existing.
+            //
+            // `Payoff` ranks by `Edge::payoff_bp`, mean win against mean loss,
+            // with `|t|` as the tie-break so a two-trade fluke cannot outrank a
+            // measured edge. That is the small-losers-large-winners shape, and
+            // it is what `elite_descend` and `descend` already select. Note
+            // that `payoff_bp` was inflated by every flat bar until the same
+            // day this changed: ranking by it before that fix would have
+            // ordered by a wrong number, so the two changes belong together.
+            lens: runner::rank::Lens::Payoff,
         },
     ))
 }
@@ -4574,6 +4629,83 @@ impl Rules {
     ///
     /// 2,000 ppm is 0.20% — about fifty points on a 25,000 index. 200 is a 1:2
     /// reward-to-risk. Twenty-five is the count an operator asked for.
+    /// The operator's own four criteria, resolved at RUNTIME, defaults stated.
+    ///
+    /// # Why this exists: two of the four were switched off
+    ///
+    /// The browser's Run button reaches `audit_range_inner`, which admitted rows
+    /// on [`Self::BASELINE`]. Measured against the operator's standing rule —
+    /// *"massive win rate, winning ratio, very small stop loss, very small max
+    /// drawdown, top 10 to 25"* — `BASELINE` reads:
+    ///
+    /// | the rule | `BASELINE` | what that means |
+    /// |---|---|---|
+    /// | win rate | `min_win_rate_bp: 0` | **rule OFF** — any win rate admitted |
+    /// | drawdown | `min_ret_over_dd_bp: 0` | **rule OFF** — any drawdown admitted |
+    /// | winning ratio | `min_rr_bp: 200` | 2.0x, and the operator states 1.25 |
+    /// | stop | `max_mae_ppm: 2_000` | 0.20%, typed once and never derived |
+    /// | top | `top: 25` | the one that matched |
+    ///
+    /// So two of the four things being asked for were not being asked at all,
+    /// and a third asked for something else. No amount of sweeping recovers a
+    /// criterion that was never applied.
+    ///
+    /// # Nothing here is baked
+    ///
+    /// Every field is read at RUNTIME from the environment, so an operator moves
+    /// any of them without a rebuild and every rung re-derives around the new
+    /// value. The defaults are the operator's stated rule rather than a guess:
+    /// 50% and 1.25 are their words, `top` stays 25 because that is what they
+    /// asked to see, and `min_assurance_bp` is DERIVED from whatever win rate
+    /// ends up in force — never typed, because a rate and a bound on that rate
+    /// are different quantities and setting one without the other is how a
+    /// profile comes to demand 92.5% while its table says 80%.
+    ///
+    /// `max_mae_ppm` defaults to zero, which DROPS the rule rather than
+    /// inventing a stop: the exit grid already sweeps a derived stop ladder, and
+    /// a ceiling nobody typed would silently discard variants the ladder was
+    /// built to try. An operator who wants a hard stop names one.
+    ///
+    /// | variable | field | default |
+    /// |---|---|---|
+    /// | `BRUTEX_MIN_WIN_RATE_BP` | `min_win_rate_bp` | `5_000` — 50% |
+    /// | `BRUTEX_MIN_RR_BP` | `min_rr_bp` | `125` — smallest win ≥ 1.25x largest loss |
+    /// | `BRUTEX_MIN_RET_OVER_DD_BP` | `min_ret_over_dd_bp` | `500` — made ≥ 5x the worst fall |
+    /// | `BRUTEX_MAX_MAE_PPM` | `max_mae_ppm` | `0` — no ceiling beyond the swept ladder |
+    /// | `BRUTEX_MIN_TRADES` | `min_trades` | `0` — the assurance bound carries it |
+    /// | `BRUTEX_TOP` | `top` | `25` |
+    #[must_use]
+    pub fn operator() -> Self {
+        /// One runtime override, or the stated default. Negative and malformed
+        /// values fall back rather than refusing: this is read on every rung of
+        /// every run, and halting a sweep over a typo in an optional variable
+        /// would be a worse failure than using the documented figure.
+        fn at(name: &str, default: i64) -> i64 {
+            std::env::var_os(name)
+                .and_then(|raw| raw.to_string_lossy().trim().parse::<i64>().ok())
+                .filter(|&v| v >= 0)
+                .unwrap_or(default)
+        }
+
+        let min_win_rate_bp = at("BRUTEX_MIN_WIN_RATE_BP", 5_000);
+        Self {
+            max_mae_ppm: at("BRUTEX_MAX_MAE_PPM", 0),
+            min_rr_bp: at("BRUTEX_MIN_RR_BP", 125),
+            min_win_rate_bp,
+            // DERIVED, NEVER TYPED. See `assurance_floor_bp`: at or below chance
+            // it returns the rate itself, which is an unsatisfiable pair — so a
+            // 50% rule carries no bound and `min_trades` below is what keeps a
+            // two-trade fluke out. That is the honest arrangement for a rate
+            // that IS the null hypothesis, and it is why the SEARCH is sized by
+            // `sizing_rate_bp` instead of by this.
+            min_assurance_bp: assurance_floor_bp(min_win_rate_bp),
+            min_weakest_bp: at("BRUTEX_MIN_WEAKEST_BP", 0),
+            min_trades: u64::try_from(at("BRUTEX_MIN_TRADES", 0)).unwrap_or(0),
+            min_ret_over_dd_bp: at("BRUTEX_MIN_RET_OVER_DD_BP", 500),
+            top: usize::try_from(at("BRUTEX_TOP", 25)).unwrap_or(25),
+        }
+    }
+
     const BASELINE: Self = Self {
         max_mae_ppm: 2_000,
         min_rr_bp: 200,
@@ -4685,6 +4817,28 @@ impl Rules {
             min_trades: 0,
             min_ret_over_dd_bp: 500,
             top,
+        }
+    }
+
+    /// The same rules with a different stated win rate, and its bound rederived.
+    ///
+    /// **Both fields move together or the pair is incoherent**, which is the
+    /// whole reason this exists rather than a caller writing
+    /// `Rules { min_win_rate_bp: x, ..elite }`. `min_win_rate_bp` is the
+    /// OBSERVED rate and `min_assurance_bp` is the 95% lower bound on the true
+    /// rate; setting one without the other is how a profile comes to demand
+    /// 92.5% while its table says 80%, which this constructor's own doc records
+    /// having happened.
+    ///
+    /// Used by [`statistical_support_floor`] to size a search at a rate that
+    /// can carry evidence, while rows are still admitted by the operator's own
+    /// rule — see [`sizing_rate_bp`] for why those cannot be one number.
+    #[must_use]
+    pub const fn with_win_rate(self, min_win_rate_bp: i64) -> Self {
+        Self {
+            min_win_rate_bp,
+            min_assurance_bp: assurance_floor_bp(min_win_rate_bp),
+            ..self
         }
     }
 }
@@ -5438,6 +5592,57 @@ fn validated_at(
 /// prune was applied under, and that threshold came from a cadence somebody
 /// typed.
 ///
+/// The win rate a SEARCH is sized by, which is not the rate a row is ADMITTED by.
+///
+/// # Why these are two different numbers
+///
+/// The operator's admission rule is *"at least 50% of trades win, and the
+/// smallest win is at least 1.25x the largest loss"*. [`Rules::elite`] enforces
+/// exactly that, and it is the right rule for judging a row.
+///
+/// It cannot size the search, and the reason is not a defect anywhere in this
+/// code. [`statistical_support_floor`] asks *"below how many round trips can the
+/// stated rate no longer clear its own confidence bound?"* — and "at least 50%
+/// of trades win" **is the null hypothesis of a coin flip**. A 95% lower bound
+/// on a 50% observation never reaches 50%: the Wilson bound approaches the
+/// observed rate from below and never arrives, so no sample size satisfies it.
+/// Measured, and pinned by
+/// `the_support_floor_is_twenty_nine_trades_and_a_fifty_percent_rule_is_untestable`:
+/// the pair `(5_000, 5_000)` exhausts `trades_needed_for` and returns its
+/// ceiling, which the caller cannot tell from an honest answer.
+///
+/// So the search is sized by the rate at which evidence becomes *measurable*,
+/// and rows are then admitted by the operator's own rule. Two questions, two
+/// numbers, said out loud instead of one number quietly doing both jobs badly.
+///
+/// # It is derived, and it is overridable
+///
+/// The default is the midpoint between chance and certainty — 75%, the rate at
+/// which one loss in four is the null being excluded. It is not a claim about
+/// this operator's strategy; it is the point on the scale where a bound is
+/// tight enough to prune and loose enough to be reachable, and it is stated
+/// here rather than buried at a call site.
+///
+/// `BRUTEX_SIZING_RATE_BP` overrides it at runtime, in basis points, with no
+/// rebuild — the operator who wants a deeper or shallower search moves this one
+/// number and every rung re-derives its own floor from its own bars around it.
+/// A value at or below chance is refused rather than obeyed, because it would
+/// reproduce the exact unsatisfiable pair this function exists to avoid.
+#[must_use]
+pub fn sizing_rate_bp() -> i64 {
+    /// Halfway between a coin flip and certainty. Every other point on the
+    /// scale is equally arbitrary; this one is at least the midpoint, and being
+    /// overridable is what keeps it from being a policy baked into a binary.
+    const DEFAULT: i64 = 7_500;
+    /// A coin flip. Below this there is no bound to clear.
+    const CHANCE: i64 = 5_000;
+
+    std::env::var_os("BRUTEX_SIZING_RATE_BP")
+        .and_then(|raw| raw.to_string_lossy().trim().parse::<i64>().ok())
+        .filter(|&bp| bp > CHANCE && bp < 10_000)
+        .unwrap_or(DEFAULT)
+}
+
 /// # What replaces it
 ///
 /// The honest stopping point is the sample below which the stated rules cannot
@@ -5507,7 +5712,30 @@ fn support_word(support_ppm: Option<u64>) -> String {
 /// effect.
 #[must_use]
 pub fn statistical_support_floor(bars: u64) -> u64 {
-    statistical_floor_ppm(&Rules::elite(1, 1), bars)
+    // SIZED BY [`sizing_rate_bp`], NOT BY THE ADMISSION RULE.
+    //
+    // This read `Rules::elite(1, 1)`, so whatever win rate `elite` happened to
+    // hold silently decided how deep every browser sweep searched. Two
+    // consequences, both measured:
+    //
+    // At `elite`'s old 8,000 the pair was `(8_000, 6_500)` and
+    // `trades_needed_for` answered 29 -- which after the ppm round trip is the
+    // `min_hits: 28` every rung of the operator's 2026-08-28 run was handed.
+    // On the 1-minute rung's 617,921 bars that is 0.0045% support, three
+    // orders of magnitude below the deepest figure D-0258 ever measured to
+    // COMPLETE, and the run recorded nothing in five hours.
+    //
+    // And at the operator's own 5,000 it would be worse rather than better:
+    // `assurance_floor_bp` returns the caller's figure at or below chance, so
+    // the pair becomes `(5_000, 5_000)` -- a 95% lower bound asked to reach the
+    // rate it is a bound on, which no sample size satisfies. `trades_needed_for`
+    // would exhaust its search and return the ceiling, and nothing downstream
+    // could tell that from a real answer.
+    //
+    // A rate that admits a row and a rate that sizes a search are different
+    // questions. `Rules::elite` answers the first and this answers the second.
+    let sizing = Rules::elite(1, 1).with_win_rate(sizing_rate_bp());
+    statistical_floor_ppm(&sizing, bars)
 }
 
 fn statistical_floor_ppm(rules: &Rules, bars: u64) -> u64 {
@@ -6282,6 +6510,47 @@ struct RungRow {
 /// until that rung's own bar count is. It is a second read of the same files:
 /// one open per month, and it buys the only thing that makes nine rungs
 /// comparable.
+/// The deepest threshold this column can be swept at and still COMPLETE.
+///
+/// # Why a search needs this and not only a statistical floor
+///
+/// [`statistical_support_floor`] answers *"below how many round trips can a
+/// stated rate no longer clear its own confidence bound"*, and that is a real
+/// bound that must be respected — but it is a bound on the SAMPLE, and a
+/// sufficient sample is roughly forty-seven trades. On a 617,921-bar rung that
+/// is 0.0074% support. Any floor derived only from sample size is therefore
+/// structurally incapable of bounding a long span: the trades it needs are
+/// always a vanishing fraction of the bars on offer.
+///
+/// What actually bounds an Apriori walk is the CANDIDATE CEILING, and
+/// [`runner::Sweeper::auto`] is the search that finds where the two meet. It
+/// brackets downward from `swept - 1`, walking the ladder at each rung, and
+/// settles on the deepest threshold whose sweep completed rather than breaching
+/// the budget. The column is folded once and every probe reuses it, so the cost
+/// is `log2(bars)` walks — paid once per rung per run, never per bar and never
+/// per candidate.
+///
+/// # It is derived from the machine as well as from the data
+///
+/// The ceiling handed to the probe is the one [`ceiling_from_env`] resolved for
+/// THIS machine and THIS run — core count, any operator override, and the
+/// division among concurrently running rungs that `SharedBy` applies. So the
+/// answer moves with the hardware, with the span, and with how many rungs are
+/// in flight, and none of those is a number anybody typed.
+///
+/// `None` when the probe could not settle: an empty column, or a column where
+/// even the cheapest threshold refused. The caller then falls back to the
+/// statistical floor rather than inventing one, which is the honest direction
+/// to fail — it searches deeper than it can afford and says so through the
+/// completion flag, instead of silently reporting extinction it never reached.
+fn affordable_min_hits(bars: &[indicators::Candle]) -> Option<u64> {
+    let mut ev = evaluator().ok()?;
+    let ceiling = ceiling_from_env().ok()?;
+    Sweeper::new(Ladder::with_min_hits(1).with_ceiling(ceiling))
+        .auto(bars, &mut ev)
+        .min_hits
+}
+
 fn one_rung(
     vendor_word: &str,
     underlying: &str,
@@ -6309,8 +6578,8 @@ fn one_rung(
             };
         }
     };
-    let bars = match stored::load_span(&root, vendor, underlying, rung, from, to) {
-        Ok(span) => span.bars.len(),
+    let span = match stored::load_span(&root, vendor, underlying, rung, from, to) {
+        Ok(span) => span,
         Err(why) => {
             return RungRow {
                 rung,
@@ -6318,6 +6587,7 @@ fn one_rung(
             };
         }
     };
+    let bars = span.bars.len();
     // DERIVED FROM THIS RUNG'S OWN BARS WHEN NOBODY NAMES A SUPPORT.
     //
     // `None` is not a default hiding in an `Option`; it is the ABSENCE of a
@@ -6332,11 +6602,49 @@ fn one_rung(
     // clear its own confidence bound? Under that, NO combination can pass
     // however good it looks — and stopping anywhere above it discards reachable
     // answers. D-0303.
-    let min_hits = min_hits_for(
+    let statistical = min_hits_for(
         bars,
         support_ppm
             .unwrap_or_else(|| statistical_support_floor(u64::try_from(bars).unwrap_or(u64::MAX))),
     );
+
+    // TWO FLOORS, AND THE SEARCH TAKES WHICHEVER BINDS. Neither is a constant
+    // and neither is typed; both are read off this rung's own bars at runtime.
+    //
+    // The STATISTICAL floor above answers "below how many round trips can a
+    // rate no longer clear its own confidence bound". It is necessary and it is
+    // not sufficient, and the reason is arithmetic rather than opinion: a
+    // sufficient sample is ~47 trades, which on the 1-minute rung's 617,921
+    // bars is 0.0074% support. A floor derived only from sample size is
+    // STRUCTURALLY INCAPABLE of bounding a search over a long span, because the
+    // sample it needs is always a vanishing fraction of the bars available.
+    //
+    // Measured, and this is the whole reason the operator's 2026-08-28 run
+    // recorded nothing in five hours: it ran at 0.0045%, while D-0258's cost
+    // curve records 4.7% as the deepest support ever measured to COMPLETE and
+    // 3.3% as already refused on candidate budget. Three orders of magnitude
+    // below anything observed to finish, and no rule downstream could recover
+    // it -- the run simply never ended.
+    //
+    // `Sweeper::auto` answers the OTHER question: which is the deepest
+    // threshold this column can be swept at and still COMPLETE under the
+    // ceiling this machine derived. It brackets downward from `swept - 1` and
+    // reports what it settled on, costing `log2(bars)` ladder walks over a
+    // column folded once -- bounded, per rung, and paid once per run.
+    //
+    // Taking the MAXIMUM is what makes the pair honest. Below the statistical
+    // floor no answer can be trusted however affordable it is; below the
+    // affordable floor no answer arrives at all however trustworthy it would
+    // be. A search that respects only one of them either reports noise or
+    // reports nothing, and this run did the second for five hours.
+    //
+    // An operator who NAMES a support still gets exactly what they named --
+    // `Some(_)` skips this entirely. The probe exists because `None` means
+    // "derive it", and deriving it from the data alone was half an answer.
+    let min_hits = match support_ppm {
+        Some(_) => statistical,
+        None => affordable_min_hits(&span.bars).map_or(statistical, |a| a.max(statistical)),
+    };
 
     // The long report is DISCARDED on purpose: nine of them is six thousand
     // lines. The row is read back from the store, which is the point of having
@@ -11516,7 +11824,7 @@ mod tests {
     /// filter, same sort, same median index, same divisor, same clamp, differing
     /// only in the empty-slice fallback. So `floor == cap` on every real series,
     /// `stop_ladder_ppm`'s `while halves <= cap_halves` ran exactly once, and
-    /// [`STOP_STEP_POINTS_HALVES`] never advanced anything. Every sweep this
+    /// a fixed 2.5-point step never advanced anything. Every sweep this
     /// repository has run tested ONE stop value, against a doc claiming a span
     /// of "5, 7.5, 10 … 25", while the operator's standing requirement is that
     /// the stop VARY.
