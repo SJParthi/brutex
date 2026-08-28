@@ -96,6 +96,7 @@
      so `Picker` in single-choice mode is the control `/ingest` already proved,
      and `DayField` -- which is day-granular -- is not. */
   import Picker from '$lib/Picker.svelte';
+  import { placeIn } from '$lib/place.js';
   import { monthLabel } from '$lib/dates.js';
   import { rupee, group, exact } from '$lib/money.js';
   import * as find from '$lib/find.js';
@@ -1598,10 +1599,15 @@
    * @param {string} symbol
    * @param {string} [forFeed] the feed the answer will be USED for
    */
+  /* THE RULE ITSELF IS IN `$lib/place.js` SO A TEST CAN DRIVE IT — the same
+     carve, for the same reason, that `$lib/pick.js` records for
+     `feeds.svelte.js`: `node --test` cannot import a `.svelte` file, so a rule
+     that lives in one is a rule nothing checks. `place.test.js` asserts the
+     cross-feed refusal WITHOUT a populated ledger, which the runtime path
+     needs and which needs a real sweep to produce. This wrapper is the page's
+     two pieces of state and nothing else. */
   function place(symbol, forFeed) {
-    if (forFeed && catalogue.feed !== forFeed) return null;
-    const row = catalogue.rows.find((r) => r.symbol === symbol);
-    return row ? { exchange: row.exchange, segment: row.segment } : null;
+    return placeIn(catalogue.rows, catalogue.feed, symbol, forFeed);
   }
 
   /* ONE COUNTER PER LOADER: THE LAST ASKED WINS, NOT THE LAST TO RETURN.
