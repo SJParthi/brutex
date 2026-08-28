@@ -933,6 +933,53 @@ impl Grid {
             .filter(|c| c.survives() && c.wins > 0)
             .max_by_key(|c| (c.edge_ratio(), c.pessimistic, merit(c)))
     }
+
+    /// The variant whose SMALLEST winner most exceeds its LARGEST loser, among
+    /// those that took at least `min_trades` round trips.
+    ///
+    /// # Three selectors, three different questions, and this is the third
+    ///
+    /// [`Self::best`] maximises the TOTAL, and [`Self::best_within`]'s own doc
+    /// records what that costs: the profit-maximising cell is normally
+    /// `-/-/-+0@0`, **the variant with no stop at all**. [`Self::sharpest`]
+    /// maximises [`Cell::edge_ratio`] — winner MFE over all MAE — which is a
+    /// statement about EXCURSIONS, about how far price ran while a position was
+    /// open. Neither answers what a losing trade actually cost.
+    ///
+    /// [`Cell::reward_to_risk_bp`] is the operator's own rule: smallest win over
+    /// largest loss, extremes over extremes, never mean over mean. This selector
+    /// is that rule used to CHOOSE rather than to judge afterwards.
+    ///
+    /// # `best_within` covers the constrained case; this covers the open one
+    ///
+    /// [`Self::best_within`] answers "of the cells that clear my threshold, which
+    /// makes the most money" — the right question once a threshold exists. This
+    /// answers "which cell has the best ratio at all", which is what a report has
+    /// to show when no threshold has been stated yet, and what an operator needs
+    /// in order to pick one. It takes no `Rules`, so it is reachable from any
+    /// crate holding a [`Grid`].
+    ///
+    /// # `min_trades` IS REQUIRED, because the metric has an infinity in it
+    ///
+    /// [`Cell::reward_to_risk_bp`] returns [`i64::MAX`] when `worst_trade` is not
+    /// negative — a cell that never lost. That is the correct answer to the RATIO
+    /// and a trap in a SELECTION: a cell firing twice with two winners would
+    /// otherwise outrank every cell that has actually been tested, and print as
+    /// the operator's best risk-reward.
+    ///
+    /// Two things stop it. Ties at [`i64::MAX`] break on `trades`, so among cells
+    /// that never lost the larger sample wins rather than the earlier one. And
+    /// the floor is a REQUIRED argument: this signature refuses to default it,
+    /// because a default is how the trap comes back wearing a caller's name.
+    ///
+    /// `None` when no variant took `min_trades` trades with at least one winner.
+    #[must_use]
+    pub fn by_reward_to_risk(&self, min_trades: u64) -> Option<&Cell> {
+        self.cells
+            .iter()
+            .filter(|c| c.wins > 0 && c.trades >= min_trades)
+            .max_by_key(|c| (c.reward_to_risk_bp(), c.trades, c.pessimistic, merit(c)))
+    }
 }
 
 /// The tie-break, and it is not cosmetic.
@@ -3291,6 +3338,167 @@ mod tests {
     /// differ only in the way the loophole exploited. Running a real grid and
     /// asserting which variant won would test the market fixture as much as the
     /// metric, and would pass or fail for reasons this test is not about.
+    /// The operator's rule picks a DIFFERENT cell than the total does, and the
+    /// gap between them is the whole reason the selector exists.
+    ///
+    /// `best()` maximises `pessimistic`, and `best_within`'s own doc records
+    /// where that lands: the no-stop cell, which by construction has the largest
+    /// loser in the grid. An operator whose rule is "my smallest win beats my
+    /// largest loss three times over" is never shown that cell's ratio, because
+    /// nothing selects on it.
+    #[test]
+    fn the_reward_to_risk_selector_refuses_the_cell_the_total_would_pick() {
+        // THE DISCIPLINED CELL. Smallest winner ₹6.00 against a largest loser of
+        // ₹2.00 — exactly 1:3 — and it makes ₹500 over forty round trips.
+        let disciplined = Cell {
+            trades: 40,
+            wins: 20,
+            min_win: 600,
+            worst_trade: -200,
+            pessimistic: 50_000,
+            ..Cell::default()
+        };
+
+        // THE STOPLESS CELL. It makes ten times the money, and it does it while
+        // its smallest winner (₹1.00) is a tenth of its largest loser (₹10.00).
+        // This is the cell `best()` returns.
+        let stopless = Cell {
+            trades: 40,
+            wins: 30,
+            min_win: 100,
+            worst_trade: -1_000,
+            pessimistic: 500_000,
+            ..Cell::default()
+        };
+
+        let g = Grid {
+            cells: vec![disciplined, stopless],
+            ..Grid::default()
+        };
+
+        // THE FIXTURE MUST REPRODUCE THE PROBLEM or the test proves nothing.
+        assert_eq!(
+            g.best().map(|c| c.pessimistic),
+            Some(500_000),
+            "`best` must still take the larger total -- this selector adds a \
+             question, it does not change that one"
+        );
+        assert_eq!(disciplined.reward_to_risk_bp(), 300, "1:3, in hundredths");
+        assert_eq!(stopless.reward_to_risk_bp(), 10, "1:0.1");
+
+        assert_eq!(
+            g.by_reward_to_risk(10).map(|c| c.pessimistic),
+            Some(50_000),
+            "the operator's rule must return the disciplined cell, and it is \
+             the one making TEN TIMES LESS money -- that is the trade being made"
+        );
+    }
+
+    /// The floor is the argument, and it is required because the metric is
+    /// unbounded above.
+    #[test]
+    fn the_trade_floor_excludes_a_sample_too_small_to_have_a_largest_loser() {
+        let tested = Cell {
+            trades: 40,
+            wins: 20,
+            min_win: 600,
+            worst_trade: -200,
+            ..Cell::default()
+        };
+        // TWO TRADES, BOTH WINNERS, ONE TINY LOSS. Its ratio is 9:1 and it is
+        // evidence of nothing.
+        let lucky = Cell {
+            trades: 2,
+            wins: 2,
+            min_win: 900,
+            worst_trade: -100,
+            ..Cell::default()
+        };
+        assert!(
+            lucky.reward_to_risk_bp() > tested.reward_to_risk_bp(),
+            "the fixture must make the small sample WIN on the raw metric, or \
+             the floor is not being tested"
+        );
+
+        let g = Grid {
+            cells: vec![tested, lucky],
+            ..Grid::default()
+        };
+        assert_eq!(
+            g.by_reward_to_risk(10).map(|c| c.trades),
+            Some(40),
+            "a floor of ten must exclude the two-trade cell"
+        );
+        assert_eq!(
+            g.by_reward_to_risk(1).map(|c| c.trades),
+            Some(2),
+            "and a floor of one must admit it -- the floor is the CALLER'S \
+             statement, not a constant hidden in here"
+        );
+    }
+
+    /// `i64::MAX` is the right ratio and the wrong sort key, so the tie is
+    /// broken on sample size rather than on position in the vector.
+    #[test]
+    fn among_cells_that_never_lost_the_larger_sample_wins() {
+        let brief = Cell {
+            trades: 3,
+            wins: 3,
+            min_win: 100,
+            worst_trade: 0,
+            ..Cell::default()
+        };
+        let long = Cell {
+            trades: 300,
+            wins: 300,
+            min_win: 100,
+            worst_trade: 0,
+            ..Cell::default()
+        };
+        assert_eq!(brief.reward_to_risk_bp(), i64::MAX, "nothing lost");
+        assert_eq!(long.reward_to_risk_bp(), i64::MAX, "nor here");
+
+        // `brief` FIRST, so a selector that merely took the last maximum would
+        // pass by accident. It is second on the reversed vector below.
+        let forward = Grid {
+            cells: vec![brief, long],
+            ..Grid::default()
+        };
+        let reversed = Grid {
+            cells: vec![long, brief],
+            ..Grid::default()
+        };
+        assert_eq!(forward.by_reward_to_risk(1).map(|c| c.trades), Some(300));
+        assert_eq!(
+            reversed.by_reward_to_risk(1).map(|c| c.trades),
+            Some(300),
+            "vector order must not decide which of two infinities is returned"
+        );
+    }
+
+    /// A variant with no winner has no smallest win, and an empty grid has no
+    /// answer. Both are `None` rather than a zero that would sort.
+    #[test]
+    fn a_variant_with_no_winner_and_an_empty_grid_both_refuse() {
+        let loser_only = Cell {
+            trades: 20,
+            wins: 0,
+            min_win: 0,
+            worst_trade: -500,
+            ..Cell::default()
+        };
+        let g = Grid {
+            cells: vec![loser_only],
+            ..Grid::default()
+        };
+        assert_eq!(
+            g.by_reward_to_risk(1),
+            None,
+            "a cell that never won must not be selectable on a REWARD ratio"
+        );
+        assert_eq!(Grid::default().by_reward_to_risk(1), None, "and no cells");
+    }
+
     #[test]
     fn a_stopless_variant_cannot_outrank_a_stopped_one_by_hiding_its_losers() {
         // THE STOPPED VARIANT. Winners ran 300 and sweated 100; losers were cut
