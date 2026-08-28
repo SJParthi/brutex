@@ -10547,24 +10547,68 @@ fn rolling_security_id(
     asked: &ingest::FnoRequest,
     site: &Site,
     wire: &Wire,
-) -> Result<brutex_core::vendor::VendorId, String> {
-    let key = brutex_core::instrument::InstrumentKey {
-        exchange: brutex_core::instrument::Exchange::Nse,
-        segment: brutex_core::instrument::Segment::Index,
-        underlying: asked.underlying,
-        kind: brutex_core::instrument::Kind::Index,
-    };
-    site.universe()
-        .read
-        .merged
-        .by_key
-        .get(&key)
-        .and_then(|e| e.ids.get(wire.store_vendor as usize).copied().flatten())
+) -> Result<(brutex_core::vendor::VendorId, bool), String> {
+    // BOTH SPOT SHAPES, AND ONLY THIS ONE COULD EVER MATCH AN INDEX.
+    //
+    // This built a single key with `Segment::Index` and `Kind::Index` written
+    // in. `ingest::parse_fno` admits any member of `FNO_UNDERLYINGS` — **213
+    // names, of which 209 are equities**, `ADANIENT` among them — and the merge
+    // keys those as `(Cash, Equity)`. So the probe missed for 209 of 213 and
+    // the route answered 503 saying *"this vendor's instrument master lists no
+    // id for the underlying"*, which is **false**: the master lists it, under
+    // the key an equity has. A refusal that names the wrong cause sends an
+    // operator to the vendor's master to look for a row that is already there.
+    //
+    // TWO PROBES, NOT A WALK. An F&O underlying is a spot instrument and there
+    // are exactly two spot shapes it can have; trying both is two hash probes
+    // against `by_key`, which is the same constant work the single probe was.
+    // Scanning `by_key` for a matching `underlying` would have been O(906) on
+    // this operator's universe and is what `CLAUDE.md` §3 rule 4 refuses.
+    //
+    // The index shape is tried FIRST because the four names that are indices —
+    // `NIFTY`, `BANKNIFTY`, `FINNIFTY`, `MIDCPNIFTY` — are the ones a rolling
+    // walk is most often started for, and because an equity cannot be keyed as
+    // an index: the two sets do not overlap, so the order is a preference and
+    // never a correctness question.
+    let shapes = [
+        (
+            brutex_core::instrument::Segment::Index,
+            brutex_core::instrument::Kind::Index,
+        ),
+        (
+            brutex_core::instrument::Segment::Cash,
+            brutex_core::instrument::Kind::Equity,
+        ),
+    ];
+    // WHICH SHAPE MATCHED TRAVELS WITH THE ID, because the caller needs both
+    // and one lookup answers both. The strike width is a property of the
+    // underlying's TYPE — the vendor serves ATM±10 on an index and ATM±3 on a
+    // stock — and the caller used to hardcode the index width, so
+    // `RollingSpec::stock_word` and `stock_offsets` had **zero production
+    // readers** and `offsets_for`'s stock branch was unreachable. Returning the
+    // answer here costs nothing: the probe that finds the id already knows.
+    let universe = site.universe();
+    shapes
+        .into_iter()
+        .find_map(|(segment, kind)| {
+            universe
+                .read
+                .merged
+                .by_key
+                .get(&brutex_core::instrument::InstrumentKey {
+                    exchange: brutex_core::instrument::Exchange::Nse,
+                    segment,
+                    underlying: asked.underlying,
+                    kind,
+                })
+                .and_then(|e| e.ids.get(wire.store_vendor as usize).copied().flatten())
+                .map(|id| (id, kind == brutex_core::instrument::Kind::Index))
+        })
         .ok_or_else(|| {
-            "this vendor's instrument master lists no id for the underlying, so \
-             there is nothing to name it by. Refused rather than sending another \
-             vendor's id, which would ask for a different instrument and be \
-             answered"
+            "this vendor's instrument master lists no id for the underlying, as \
+             either an index or an equity, so there is nothing to name it by. \
+             Refused rather than sending another vendor's id, which would ask \
+             for a different instrument and be answered"
                 .to_owned()
         })
 }
@@ -11279,8 +11323,8 @@ async fn fno_roll(
         );
     }
 
-    let security_id = match rolling_security_id(asked, site, wire) {
-        Ok(id) => id,
+    let (security_id, is_index) = match rolling_security_id(asked, site, wire) {
+        Ok(resolved) => resolved,
         Err(why) => {
             return page.say(
                 facts,
@@ -11295,7 +11339,18 @@ async fn fno_roll(
     // serves ATM±10 on an index and ATM±3 on a stock, and an ask outside a
     // type's own width is a request it answers with nothing — 28 empty calls
     // per expiry per side on every stock if the wider list were used for both.
-    let word = rolling.index_word;
+    //
+    // AND THE WORD NOW FOLLOWS THE UNDERLYING RATHER THAN BEING THE INDEX ONE.
+    // This read `rolling.index_word` unconditionally, so `stock_word` and
+    // `stock_offsets` had zero production readers and `offsets_for`'s stock
+    // branch was unreachable — four descriptor fields and three comments
+    // describing a path the code could not take. `rolling_security_id` already
+    // knows which shape it matched, so this costs no extra lookup. D-0349.
+    let word = if is_index {
+        rolling.index_word
+    } else {
+        rolling.stock_word
+    };
     let offsets = rolling.offsets_for(word);
     let planned = offsets.len()
         * rolling.sides.len()
@@ -17329,6 +17384,72 @@ mod tests {
             mine.field("web_built").is_some() && mine.field("autopilot_flies").is_some(),
             "a reader arriving afterwards must be able to tell whether this \
              process was serving a front end and whether it was flying: {mine:?}"
+        );
+    }
+
+    /// **THE STOCK WIDTH IS REACHABLE, AND THE UNDERLYING'S TYPE CHOOSES IT.**
+    ///
+    /// `RollingSpec::stock_word` and `stock_offsets` had **zero production
+    /// readers**: the driver read `rolling.index_word` unconditionally, so
+    /// `offsets_for`'s stock branch could not be entered. Four descriptor
+    /// fields and three comments described a path the code could not take.
+    ///
+    /// The two halves are asserted together because either alone proves
+    /// nothing. That the widths DIFFER is what makes choosing between them
+    /// matter — the vendor's own sentence is ATM±10 on an index and ATM±3 on a
+    /// stock, and asking the wide list for a stock is 28 empty calls per expiry
+    /// per side. That the SELECTION reads the resolved type is what makes the
+    /// narrow list reachable at all.
+    #[test]
+    fn the_stock_strike_width_is_reachable_and_narrower_than_the_index_one() {
+        let rolling = match pull::vendor::Feed::Dhan.descriptor().transport {
+            pull::vendor::Transport::Http(spec) => spec
+                .fno
+                .by_offset()
+                .expect("Dhan is addressed by strike offset"),
+            pull::vendor::Transport::LocalArchive(_) => panic!("this feed is HTTP"),
+        };
+
+        let index = rolling.offsets_for(rolling.index_word);
+        let stock = rolling.offsets_for(rolling.stock_word);
+        assert!(
+            stock.len() < index.len(),
+            "the stock list is the NARROW one — {} against {}; if these were \
+             equal the selection would be free and this whole defect would be \
+             cosmetic",
+            stock.len(),
+            index.len()
+        );
+        assert_eq!(stock, rolling.stock_offsets, "and it is the row's own list");
+        assert_eq!(index, rolling.index_offsets);
+
+        // AND THE DRIVER SELECTS ON THE RESOLVED TYPE rather than naming the
+        // index word. Read from the source because the choice sits inside an
+        // `async fn` that opens sockets; the property is which field it reads.
+        let src = include_str!("server.rs");
+        assert!(
+            src.contains("let word = if is_index {"),
+            "the strike width follows the underlying's own type"
+        );
+        // THE NEEDLE IS SPLIT SO IT CANNOT MATCH ITSELF. This file is its own
+        // haystack, so a literal written whole here would be found in this very
+        // assertion and the test would fail against correct code — which is
+        // exactly what it did on first run. `concat!` joins at compile time,
+        // and the source text carries the quote-comma the joined form does not.
+        let unconditional = concat!("let word = rolling.", "index_word;");
+        assert!(
+            !src.contains(unconditional),
+            "and the unconditional index word is gone — leaving it would make \
+             `stock_offsets` unreachable again with no test noticing"
+        );
+
+        // AND THE ID LOOKUP TRIES BOTH SPOT SHAPES. Without this half, every
+        // equity underlying refuses before the width is ever consulted:
+        // `parse_fno` admits 213 names and 209 of them are keyed
+        // `(Cash, Equity)`, which the single `(Index, Index)` probe missed.
+        assert!(
+            src.contains("brutex_core::instrument::Kind::Equity,"),
+            "rolling_security_id probes the equity shape as well as the index one"
         );
     }
 

@@ -25893,3 +25893,111 @@ stops being a target word and becomes a list of instruments that will each cost
 a socket. The source-text guard now reads BOTH function bodies by name — reading
 only `broker_run` would have silently stopped checking the predicates the day
 they moved, which is exactly what this edit did to it.
+
+---
+
+### D-0348
+
+**The one-click procedure produced a server that could serve every page and
+sweep nothing, and the launcher could not be the fix.**
+
+`cli::commit_stamp()` is `option_env!("BRUTEX_COMMIT")`, resolved at compile
+time, and a build without it refuses every sweep by §3 rule 3 — a run it cannot
+identify is a run it cannot record. That refusal is right and is unchanged.
+
+What was wrong is that **nothing set the variable on the path the operator
+actually uses.** `docs/07-plan.md` §0 states the whole procedure as *"open the
+directory in IntelliJ, press Run on the `api` binary"*, and the same section
+records the reason it cannot work: *"IntelliJ does not read that file. It takes
+run entries from `.idea/` or `.run/*.xml`, neither tracked."* The IDE
+auto-detects the binary and runs `cargo run` with no environment.
+
+Measured on the operator's own machine, twice, across two restarts, against 81
+months of freshly pulled Zerodha NIFTY: the server answered every page and
+refused every sweep. The operator's requirement is exactly two clicks — Run in
+the IDE, Run on the page — and neither of them could ever have worked.
+
+**The launcher is not available as a fix.** An IntelliJ run entry is
+`.run/*.xml`; `.xml` is not in `CLAUDE.md` §2's extension allowlist and has no
+by-name exception, so this repository cannot ship one. `.claude/launch.json` was
+corrected in the same change and drives the preview tools only — §0 already says
+IntelliJ does not read it.
+
+**So the build is the fix.** `crates/cli/build.rs` reads `.git/HEAD`, the ref it
+names, and `packed-refs` when `git gc` has moved it, and emits
+`cargo:rustc-env=BRUTEX_COMMIT`. An explicit environment value still wins, and
+`cargo:rerun-if-changed` on `HEAD` and `packed-refs` means a checkout re-stamps
+rather than carrying a stale answer.
+
+**Both alternatives stay refused, and their refusals are quoted rather than
+re-argued.** `crates/cli/src/lib.rs` says a build script calling `git rev-parse`
+is banned by §2 — this one starts nothing, it reads files git wrote — and says a
+run-time read of `.git/HEAD` *"would stamp a result with a commit whose source
+never produced it, which is worse than recording nothing"*. That objection is
+about WHEN, not about where the bytes come from: this read happens while the
+binary is compiled, so the answer is the commit the binary was compiled from,
+which is what `git rev-parse` would have returned and what rule 3 asks for.
+
+**What this costs, stated.** CI gate 13 layer 3 bans a build script anywhere in
+the tree and is explicit that it is *"STRICTER THAN CLAUDE.md SECTION 2 … the
+operator's instruction"*, with *"the allowlist below is the escape, and taking it
+should come with a decisions entry."* This is that entry, and `allow_build` now
+carries exactly one row. The clause the gate rested on — *"no version to stamp
+that `CARGO_PKG_VERSION` does not already carry"* — expired the day rule 3
+required the commit, and nothing had noticed because nobody had pressed Run and
+then tried to sweep.
+
+**Gate 2 is not relaxed.** It still greps every build script for the two
+spellings that start a child process, and still refuses a `build =` or `links =`
+key in any manifest; this script is picked up from the default path, so no
+manifest names it. A second build script, or this one growing a process, is a red
+build.
+
+**Gate 2 also caught the first draft of this file**, which is worth recording
+because it is the same trap the engine's source-text tests already solve: the
+doc comment explained the rule *using the rule's own vocabulary*, and gate 2
+reads the file whole without stripping comments. The engine assembles its needles
+with `concat!` for exactly this reason. The comment now names the two spellings
+only by description.
+
+### D-0349
+
+**The rolling id lookup could only ever find an INDEX, so it refused 209 of 213
+underlyings with a reason that was false — and the stock strike width it would
+then have needed had no reader at all.**
+
+Two defects on one path, and the first hid the second.
+
+**The lookup.** `rolling_security_id` built a single key with
+`Segment::Index` and `Kind::Index` written in. `ingest::parse_fno` admits any
+member of `FNO_UNDERLYINGS` — **213 names, of which 209 are equities**,
+`ADANIENT` among them — and the merge keys those `(Cash, Equity)`. So the probe
+missed for 209 of 213 and the route answered 503 with *"this vendor's instrument
+master lists no id for the underlying"*. That sentence is **not true**: the
+master lists it, under the key an equity has. A refusal naming the wrong cause
+sends an operator to the vendor's file to look for a row that is already there.
+
+Fixed with **two probes, not a walk**. An F&O underlying is a spot instrument
+and there are exactly two spot shapes it can have, so trying both is two hash
+probes against `by_key` — the same constant work the single probe was. Scanning
+`by_key` for a matching `underlying` would be O(906) on this operator's
+universe, which is what §3 rule 4 refuses. The order is a preference and never a
+correctness question: an equity cannot be keyed as an index, so the two sets do
+not overlap.
+
+**The width.** Behind that refusal sat a second one nothing could reach. The
+driver read `rolling.index_word` unconditionally, so `RollingSpec::stock_word`
+and `stock_offsets` had **zero production readers** and `offsets_for`'s stock
+branch was unreachable — four descriptor fields and three comments describing a
+path the code could not take. The vendor serves ATM±10 on an index and ATM±3 on
+a stock, and the comment directly above the defect says what the wide list costs
+on a narrow instrument: *"28 empty calls per expiry per side on every stock"*.
+
+`rolling_security_id` already knows which shape it matched, so it returns that
+beside the id and the width follows the underlying's own type. No extra lookup.
+
+**The test caught itself first, and the fix is worth recording.** It greps
+`server.rs` for the unconditional form — and `server.rs` is its own haystack, so
+the literal written whole appeared in the assertion and the test failed against
+correct code. The needle is built with `concat!`, which joins at compile time
+while the source text carries a quote-comma the joined form does not.
