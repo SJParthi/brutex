@@ -443,6 +443,22 @@ pub fn credential_fault_in_page(html: &str) -> bool {
     // EITHER. Those three describe how a credential is OBTAINED, which is what
     // a page explaining the transport talks about. These describe a vendor
     // REFUSING one, which a page has no other reason to contain.
+    // **THIS LIST IS THE FALLBACK, NOT THE ANSWER.** D-0351 gave the verdict a
+    // structural path — `Step::CredentialDied` decides it from the status AND
+    // the vendor's own `error_names`, the `CREDENTIAL_DEAD` control character
+    // carries it out, and `BrokerRun::credential_dead` records it. A caller
+    // holding a run reads that and never comes here.
+    //
+    // I tried to narrow this to the ladder's own sentences on the reasoning
+    // that every genuine death passes through that verdict.
+    // `the_headline_on_every_page_is_not_a_dead_token` refused it, and was
+    // right: a page can carry the vendor's RAW refusal — *"the vendor refused
+    // with status 403 and named it: TokenException"* — with no ladder sentence
+    // in it at all. That test's own comment names the risk in advance: *"THE
+    // CURE MUST NOT OVERSHOOT. A real dead token still halts."*
+    //
+    // So the status-shaped spellings stay. What removes the guesswork is a
+    // caller that does not need them, not a shorter list here.
     const VENDOR_SPELLINGS: [&str; 6] = [
         "status 401",
         "status 403",

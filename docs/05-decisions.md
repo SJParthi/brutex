@@ -26043,3 +26043,53 @@ recording: a broad `sed` on `code: &'static str,` added the parameter to five
 functions rather than one, and four of those already had it. Caught by the
 compiler in the same pass rather than left in the tree — the lesson from the
 build that went red mid-edit two entries ago.
+
+### D-0351
+
+**The verdict that halts a feed for a whole run was decided once, structurally,
+and then thrown away — so a reader downstream re-derived it by grepping a
+rendered HTML page.**
+
+`Step::CredentialDied` is the structural verdict: reached from the HTTP status
+AND from the vendor's own `error_names`. It produced a sentence, and the
+sentence was all that travelled. `autopilot::credential_fault_in_page` then
+lowercased the whole document and substring-matched six spellings to get the
+same answer back.
+
+That function's own doc records the classifier lying twice, and this file's
+marker doc records the identical lesson in almost the same words: *"a run-level
+decision made by searching prose read the word `credential` out of a paragraph
+about transport and halted every feed that ever failed"* (D-0283).
+
+**`CREDENTIAL_DEAD` is the third marker, and it is the same device as the two
+beside it.** `WIRE_REACHED` and `VENDOR_DOWN` already carry facts out of a
+refusal as control characters, *"so that no vendor sentence, instrument name or
+explanatory paragraph can forge one"*. This is that, for the fact that costs the
+most to get wrong. `read_markers` returns a `Markers` struct rather than a
+tuple — four fields, and one of them halts a feed.
+
+**The marker has to be HOISTED, and that is not a detail.** `with_retry` writes
+it at the head of its own reason; `fetch_chunks` then embeds that reason
+**mid-sentence** — *"…resumes from the store's own last held day: {why}"*. A
+marker left where it was would sit in the middle, `read_markers` only reads the
+head, and it would have travelled all the way to the operator's page as an
+invisible control character telling nothing anything. So it is lifted off before
+the sentence is built and put back in front of it.
+
+`BrokerRun::credential_dead` records it, and the page states it as a labelled
+fact rather than leaving it to be inferred from prose.
+
+**What this does NOT do, and the test that stopped me.** I narrowed
+`VENDOR_SPELLINGS` to the ladder's own sentences, reasoning that every genuine
+death passes through `Step::CredentialDied`.
+`the_headline_on_every_page_is_not_a_dead_token` refused it and was right: a page
+can carry the vendor's RAW refusal — *"the vendor refused with status 403 and
+named it: TokenException"* — with no ladder sentence in it at all. That test's
+own comment names the risk in advance: *"THE CURE MUST NOT OVERSHOOT. A real
+dead token still halts."* The five status-shaped spellings stay.
+
+So the page-sniffing fallback remains for the one caller that holds only a
+rendered page. What removes the guesswork is a caller that does not need it —
+and the structural path now exists for every caller that holds a run. Threading
+it into `pullrun` needs a third element through `spot_answer` and `pull_spot`;
+**that is recorded here as the remaining half rather than half-done.**

@@ -4600,6 +4600,36 @@ async fn broker_answer(
         facts.push(("Stopped", why.clone()));
     }
 
+    // THE CREDENTIAL VERDICT, STATED AS A FACT RATHER THAN LEFT TO BE INFERRED
+    // FROM THE PROSE.
+    //
+    // `autopilot::credential_fault_in_page` reads this page and decides whether
+    // to halt the feed for the rest of the run. It does that by lowercasing the
+    // whole document and substring-matching six spellings — and its own doc
+    // records that classifier lying twice, once matching the bare word
+    // *"credential"* which the receipt headline carries on EVERY page.
+    //
+    // The verdict is not a guess anywhere upstream: `Step::CredentialDied`
+    // decides it from the status AND the vendor's own `error_names`, and it
+    // travels here on `CREDENTIAL_DEAD`, a control character no vendor sentence
+    // can forge. Writing it out as a labelled fact means the page CARRIES the
+    // structural answer instead of only hinting at it, so the reader matches
+    // one exact line rather than inferring from five status-shaped ones.
+    //
+    // Only when true. A page that says "the credential is fine" on every
+    // ordinary run is noise, and a reader could not tell the label from the
+    // verdict. D-0351.
+    if run.credential_dead {
+        facts.push((
+            "Credential",
+            "the access token is no longer valid — this feed is halted for the \
+             rest of the run. §8 forbids minting one here, so re-asking cannot \
+             fix it; refresh it where it is minted and the next pull reads the \
+             new value."
+                .to_owned(),
+        ));
+    }
+
     if run.reached == 0 {
         let first = run
             .refused
@@ -4685,6 +4715,22 @@ pub(crate) struct BrokerRun {
     pub stopped: Option<String>,
     /// How long it took, in microseconds.
     pub took: u64,
+    /// Whether the retry ladder judged the CREDENTIAL dead, structurally.
+    ///
+    /// # Why the run records it rather than a reader guessing
+    ///
+    /// `autopilot::credential_fault_in_page` lowercases the rendered page and
+    /// substring-matches six spellings to answer this. Its own doc records that
+    /// classifier lying twice — once matching the bare word *"credential"*,
+    /// which the receipt headline carries on **every** page, so Dhan's `DH-905`
+    /// (a malformed request, credential read fine fourteen times in the same
+    /// run) halted the feed for the life of the process.
+    ///
+    /// The verdict exists at the refusal, where the status and the vendor's own
+    /// `error_names` are both in hand — `Step::CredentialDied`. It travels out
+    /// on [`CREDENTIAL_DEAD`], a control character no sentence can forge, and
+    /// lands here. D-0351.
+    pub credential_dead: bool,
 }
 
 impl BrokerRun {
@@ -5326,10 +5372,16 @@ pub(crate) async fn broker_run(
                 // got as far as a socket makes the whole run wire-touching:
                 // the question the status answers is whether the VENDOR was
                 // ever asked, and once it has been, it has been.
-                let (reached_wire, vendor_down, why) = read_markers(&why);
-                out.touched_wire = out.touched_wire || reached_wire;
-                vendor_down_streak = breaker_next(vendor_down_streak, vendor_down);
-                let why = format!("{}: {why}", instrument.underlying);
+                let marked = read_markers(&why);
+                out.touched_wire = out.touched_wire || marked.reached_wire;
+                vendor_down_streak = breaker_next(vendor_down_streak, marked.vendor_down);
+                // THE VERDICT IS RECORDED, NOT RE-DERIVED LATER FROM PROSE.
+                // `autopilot::credential_fault_in_page` lowercases the rendered
+                // page and substring-matches six spellings; this is the same
+                // fact, decided where the status and the vendor's own
+                // `error_names` were both in hand. D-0351.
+                out.credential_dead = out.credential_dead || marked.credential_dead;
+                let why = format!("{}: {}", instrument.underlying, marked.why);
                 // THE WHOLE REASON, WHERE IT IS NOT TRUNCATED.
                 //
                 // The audit journal is a FIXED 256-byte stride, so a refusal
@@ -5815,6 +5867,9 @@ where
         match step(why.status, invalid_auth, None, attempt, server_errors) {
             Step::NotEntitled => {
                 return Err(pull::chain::Refusal {
+                    // ALIVE, AND NOT ENTITLED. Two different facts, and
+                    // conflating them halts a feed over a subscription gap.
+                    credential_dead: false,
                     status: why.status,
                     detail: format!(
                         "{why} — the credential is ALIVE and this API key is not \
@@ -5826,6 +5881,10 @@ where
             }
             Step::CredentialDied => {
                 return Err(pull::chain::Refusal {
+                    // THE ONE VERDICT THAT HALTS A FEED, decided here from
+                    // the status and the vendor's own error contract -- not
+                    // re-derived downstream by grepping a rendered page.
+                    credential_dead: true,
                     status: why.status,
                     detail: format!(
                         "{why} — the access token is no longer valid mid-walk. \
@@ -5840,6 +5899,8 @@ where
             Step::Answered => return Err(why),
             Step::ServerDown { answered } => {
                 return Err(pull::chain::Refusal {
+                    // THE VENDOR'S SIDE FAILED; the credential was fine.
+                    credential_dead: false,
                     status: why.status,
                     // MARKED, SO THE RUN LOOP DOES NOT HAVE TO READ THIS
                     // SENTENCE TO KNOW WHAT IT SAYS. The marker is stripped in
@@ -5865,6 +5926,8 @@ where
         last = why;
     }
     Err(pull::chain::Refusal {
+        // EXHAUSTED IS ABOUT THE TRANSPORT, NOT THE TOKEN.
+        credential_dead: false,
         status: last.status,
         detail: format!(
             "{last} — and it failed {THROTTLE_ATTEMPTS} times, so the transport \
@@ -6234,7 +6297,19 @@ async fn fetch_chunks(
         };
         let answered = match with_retry(source, &request, asked.feed, site).await {
             Ok(body) => body,
-            Err(why) => {
+            Err(marked_why) => {
+                // THE MARKER IS LIFTED OFF BEFORE THE SENTENCE IS BUILT, AND PUT
+                // BACK IN FRONT OF IT.
+                //
+                // `with_retry` writes `CREDENTIAL_DEAD` at the head of its own
+                // reason, but the sentence below embeds that reason MID-STRING —
+                // *"…resumes from the store's own last held day: {why}"* — so a
+                // marker left where it was would end up in the middle, and
+                // `read_markers` only reads the head. It would have travelled
+                // all the way to the operator's page as an invisible control
+                // character and told nothing downstream anything.
+                let credential_dead = marked_why.starts_with(CREDENTIAL_DEAD);
+                let why = marked_why.trim_start_matches(CREDENTIAL_DEAD);
                 let sentence = {
                     // THE VENDOR'S OWN WORDS, IN THEIR OWN FIELD.
                     //
@@ -6274,6 +6349,11 @@ async fn fetch_chunks(
                         chunk.to(),
                         nth,
                     )
+                };
+                let sentence = if credential_dead {
+                    format!("{CREDENTIAL_DEAD}{sentence}")
+                } else {
+                    sentence
                 };
                 return prefix_or_refusal(bodies, sentence);
             }
@@ -6930,8 +7010,18 @@ async fn with_retry(
                         // Refused rather than re-read HERE, because §8 is
                         // explicit: this repository never mints. The value is
                         // read fresh on the NEXT pull, and the message says so.
+                        //
+                        // MARKED, SO NOTHING DOWNSTREAM HAS TO READ THIS
+                        // SENTENCE TO KNOW WHAT IT SAYS. The verdict is made
+                        // here, from the status and the vendor's own
+                        // `error_names`; `credential_fault_in_page` re-derived
+                        // it by lowercasing a rendered page, and its own doc
+                        // records that classifier lying twice. Same device as
+                        // `WIRE_REACHED` and `VENDOR_DOWN`, same reason,
+                        // stripped by `read_markers` before an operator ever
+                        // sees it. D-0351.
                         return Err(format!(
-                            "{text} — the access token is no longer valid mid-run \
+                            "{CREDENTIAL_DEAD}{text} — the access token is no longer valid mid-run \
                              (expiry, a logout, or a login to another session of \
                              the same vendor). This repository never mints one \
                              (§8): the refreshed value is read from Parameter \
@@ -7070,6 +7160,24 @@ const WIRE_REACHED: &str = "\u{1}";
 /// a longer per-instrument ladder affordable at all.
 const VENDOR_DOWN: &str = "\u{2}";
 
+/// Out-of-band marker: the retry ladder judged this a DEAD CREDENTIAL.
+///
+/// # Why the verdict is carried and not re-read from the page
+///
+/// It was re-read, by `autopilot::credential_fault_in_page`, which lowercases
+/// the rendered HTML and substring-matches six spellings. That function's own
+/// doc records the classifier lying twice — and this file's marker doc records
+/// the same lesson in the same words: *"a run-level decision made by searching
+/// prose read the word `credential` out of a paragraph about transport and
+/// halted every feed that ever failed"* (D-0283).
+///
+/// The verdict already exists where the refusal is made, with the status and
+/// the vendor's own `error_names` both in hand — `Step::CredentialDied`. A
+/// control character carries it out untouched, and no vendor sentence,
+/// instrument name or explanatory paragraph can forge one. Same device, same
+/// reason, third fact. D-0351.
+const CREDENTIAL_DEAD: &str = "\u{3}";
+
 /// Consecutive instruments lost to a vendor 5xx before the whole run stops.
 ///
 /// # The arithmetic this exists to bound
@@ -7145,15 +7253,34 @@ const fn breaker_trips(streak: u32) -> bool {
 /// explanatory paragraph can forge one — the D-0283 lesson, where a run-level
 /// decision made by searching prose read the word *credential* out of a
 /// paragraph about transport and halted every feed that ever failed.
-fn read_markers(why: &str) -> (bool, bool, &str) {
+fn read_markers(why: &str) -> Markers<'_> {
     let reached_wire = why.starts_with(WIRE_REACHED);
     let rest = why.trim_start_matches(WIRE_REACHED);
     let vendor_down = rest.starts_with(VENDOR_DOWN);
-    (
+    let rest = rest.trim_start_matches(VENDOR_DOWN);
+    let credential_dead = rest.starts_with(CREDENTIAL_DEAD);
+    Markers {
         reached_wire,
         vendor_down,
-        rest.trim_start_matches(VENDOR_DOWN),
-    )
+        credential_dead,
+        why: rest.trim_start_matches(CREDENTIAL_DEAD),
+    }
+}
+
+/// What the markers on one refusal said, and the sentence with them removed.
+///
+/// A struct rather than a tuple because it reached four fields and
+/// `(bool, bool, bool, &str)` at a call site says nothing about which bool is
+/// which — and one of them halts a feed for the rest of the run.
+struct Markers<'a> {
+    /// This instrument got as far as opening a socket.
+    reached_wire: bool,
+    /// The vendor's own side failed, rather than anything about the request.
+    vendor_down: bool,
+    /// The retry ladder judged the credential dead. See [`CREDENTIAL_DEAD`].
+    credential_dead: bool,
+    /// The reason, with every marker stripped — what an operator reads.
+    why: &'a str,
 }
 
 /// One refused instrument, on the surface that can hold the whole reason.
@@ -17222,6 +17349,82 @@ mod tests {
             .expect("present");
         assert!(wire.starts_with("2022-02-09"), "{wire}");
         assert!(wire.contains("not inclusive"), "{wire}");
+    }
+
+    /// **THE CREDENTIAL VERDICT TRAVELS ON A MARKER, AND THE THREE MARKERS
+    /// COMPOSE IN ORDER.**
+    ///
+    /// The verdict is decided at the refusal — `Step::CredentialDied`, from the
+    /// status AND the vendor's own `error_names`. It used to be re-derived far
+    /// downstream by `credential_fault_in_page`, which lowercases a rendered
+    /// page and substring-matches. That classifier's own doc records it lying
+    /// twice, and this file's marker doc records the same lesson: *"a run-level
+    /// decision made by searching prose read the word `credential` out of a
+    /// paragraph about transport and halted every feed that ever failed."*
+    ///
+    /// Three properties, and the third is the one a careless edit breaks:
+    /// each marker is read independently; they compose in the order
+    /// `read_markers` strips them; and **a marker anywhere but the head is not
+    /// read at all** — which is why `fetch_chunks` lifts it off the vendor's
+    /// reason before embedding that reason mid-sentence, and puts it back in
+    /// front afterwards.
+    #[test]
+    fn the_credential_marker_travels_and_composes_with_the_other_two() {
+        let plain = read_markers("the vendor said no");
+        assert!(!plain.reached_wire && !plain.vendor_down && !plain.credential_dead);
+        assert_eq!(plain.why, "the vendor said no");
+
+        let cred_text = format!("{CREDENTIAL_DEAD}token is dead");
+        let cred = read_markers(&cred_text);
+        assert!(cred.credential_dead, "the marker is read");
+        assert!(
+            !cred.reached_wire && !cred.vendor_down,
+            "and it is not confused with the other two"
+        );
+        assert_eq!(cred.why, "token is dead", "and it is stripped");
+
+        // ALL THREE, IN THE ORDER THEY ARE WRITTEN. `broker_window` prepends
+        // `WIRE_REACHED` to what `fetch_chunks` already marked, so this is the
+        // real production order and not an invented one.
+        let all_text = format!("{WIRE_REACHED}{VENDOR_DOWN}{CREDENTIAL_DEAD}everything");
+        let all = read_markers(&all_text);
+        assert!(all.reached_wire && all.vendor_down && all.credential_dead);
+        assert_eq!(all.why, "everything", "every marker stripped, prose intact");
+
+        // AND THE PRODUCTION PAIR: wire-reached then credential-dead, with no
+        // vendor-down between them. A reader that required them contiguously
+        // would miss this, which is the shape every real credential death has.
+        let real_text = format!("{WIRE_REACHED}{CREDENTIAL_DEAD}the access token");
+        let real = read_markers(&real_text);
+        assert!(
+            real.reached_wire && real.credential_dead && !real.vendor_down,
+            "the middle marker is optional"
+        );
+        assert_eq!(real.why, "the access token");
+
+        // THE MARKERS ARE DISTINCT AND NONE IS PRINTABLE. A printable marker
+        // could be forged by a vendor sentence, which is the whole reason these
+        // are control characters.
+        for marker in [WIRE_REACHED, VENDOR_DOWN, CREDENTIAL_DEAD] {
+            assert_eq!(marker.chars().count(), 1, "one character: {marker:?}");
+            assert!(
+                marker.chars().all(char::is_control),
+                "and a control one, so no vendor prose can forge it: {marker:?}"
+            );
+        }
+        assert_ne!(CREDENTIAL_DEAD, WIRE_REACHED);
+        assert_ne!(CREDENTIAL_DEAD, VENDOR_DOWN);
+
+        // A MARKER MID-STRING IS NOT READ, which is exactly why `fetch_chunks`
+        // hoists it: `with_retry` writes it at the head of its own reason, and
+        // that reason is then embedded mid-sentence.
+        let buried_text = format!("the broker said: {CREDENTIAL_DEAD}dead");
+        let buried = read_markers(&buried_text);
+        assert!(
+            !buried.credential_dead,
+            "only the head is read — a buried marker would travel to the \
+             operator as an invisible character and tell nothing anything"
+        );
     }
 
     #[tokio::test]

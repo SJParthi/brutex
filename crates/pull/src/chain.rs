@@ -84,6 +84,24 @@ pub struct Refusal {
     pub status: Option<u16>,
     /// Why, in the host's own words, unparaphrased.
     pub detail: String,
+    /// Whether the retry ladder judged this a DEAD CREDENTIAL — structurally,
+    /// from the vendor's own error contract or its status, before any of it
+    /// became prose.
+    ///
+    /// # Why the verdict has to travel rather than be re-derived
+    ///
+    /// It was re-derived, from the rendered HTML page, by lowercasing it and
+    /// substring-matching six spellings. That classifier's own doc records it
+    /// lying twice: once matching the bare word *"credential"*, which the
+    /// receipt's headline contains on **every** page it renders, and so halting
+    /// a feed for the life of the process over Dhan's `DH-905` — a malformed
+    /// request whose credential had read fine fourteen times in the same run.
+    ///
+    /// The verdict already exists at the point of refusal, where the status and
+    /// the vendor's own `error_names` are both in hand. Carrying it forward is
+    /// one bool; re-deriving it downstream from prose is guesswork that a
+    /// reworded sentence silently breaks. D-0351.
+    pub credential_dead: bool,
 }
 
 impl Refusal {
@@ -93,6 +111,11 @@ impl Refusal {
         Self {
             status: None,
             detail,
+            // A DROPPED SOCKET SAYS NOTHING ABOUT A TOKEN. Defaulting this to
+            // `true` anywhere would halt a feed for the rest of the run over a
+            // network blip, which is the opposite of the defect it exists to
+            // fix.
+            credential_dead: false,
         }
     }
 
@@ -102,6 +125,22 @@ impl Refusal {
         Self {
             status: Some(status),
             detail,
+            credential_dead: false,
+        }
+    }
+
+    /// A refusal the retry ladder judged to be a DEAD CREDENTIAL.
+    ///
+    /// Named rather than a field set at the call site, so the one verdict that
+    /// halts a feed for the rest of a run is stated in words wherever it is
+    /// made. §8: this repository never mints a token, so there is nothing to
+    /// retry into — the refreshed value is read on the next pull.
+    #[must_use]
+    pub const fn credential(status: Option<u16>, detail: String) -> Self {
+        Self {
+            status,
+            detail,
+            credential_dead: true,
         }
     }
 }
