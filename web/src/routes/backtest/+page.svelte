@@ -208,6 +208,13 @@
    * means the running binary predates the route — the page comes off disk and
    * the route does not.
    */
+  /**
+   * @param {string | null | undefined} feed
+   * @param {string | null | undefined} underlying
+   *   Both come off `running`, where every field but `in_flight` is optional —
+   *   so both may be absent, and the guard below is the reason they are typed
+   *   nullable rather than as plain strings.
+   */
   async function fetchTop(feed, underlying) {
     if (!feed || !underlying) {
       top = { phase: 'idle', report: '', why: '' };

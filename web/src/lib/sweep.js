@@ -38,9 +38,38 @@
  */
 
 /**
+ * THE `running` MEMBER, AND ALL THIRTEEN FIELDS IT CARRIES.
+ *
+ * This listed three — `in_flight`, `report`, `refusal` — because three were
+ * what `sweepOutcome` read. `crates/api/src/sweeprun.rs` writes thirteen, and
+ * the moment `/backtest` reached for a fourth (`run.feed` and
+ * `run.underlying`, to ask the frontier route for a top-25) the checker called
+ * them properties that do not exist. They exist; this file had never said so.
+ *
+ * ALL THIRTEEN ARE NAMED EVEN THOUGH THREE ARE READ, which is the rule
+ * `/ingest`'s own `PilotFeed` states in as many words: a typedef that lists
+ * only what today happens to be read is one that has to be edited before the
+ * next field can be looked at — and editing it is the step that gets skipped,
+ * leaving a true read reported as an error.
+ *
+ * ONLY `in_flight` IS REQUIRED. It is the one field every arm of
+ * `sweepOutcome` depends on, and the one the tests construct payloads around;
+ * the rest are optional so a build that has not yet grown a field is described
+ * by this type rather than contradicted by it.
+ *
  * @typedef {object} Running
  * @property {boolean} in_flight Whether the sweep is still going.
- * @property {string | null} [report] The nine-rung table, on a run that swept.
+ * @property {string} [kind] Which sweep this was.
+ * @property {string} [feed] The vendor the bars came from.
+ * @property {string} [underlying] The instrument swept, as the ledger spells it.
+ * @property {number} [from_year]
+ * @property {number} [from_month]
+ * @property {number} [to_year]
+ * @property {number} [to_month]
+ * @property {number | null} [support_ppm] The frequent floor, in parts per million.
+ * @property {number} [started_micros] Microseconds, the unit `crates/api` writes.
+ * @property {number | null} [finished_micros] `null` while the run is in flight.
+ * @property {string | null} [report] The rung table, on a run that swept.
  * @property {string | null} [refusal] Why nothing was swept, on a run that did not.
  */
 

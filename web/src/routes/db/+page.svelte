@@ -6520,21 +6520,69 @@
   }
 
   /**
+   * THE MONTHS THE FILE ACTUALLY COVERS — which is not the months SELECTED.
+   *
+   * MEASURED: with the day window at the store's full span, the grid reported
+   * `6,17,612 row(s) matched` and Export wrote **6,840** — one month, 2026-08,
+   * first row to last. The name it wrote them under was
+   * `…_2019-12_2026-08.csv`, because it was built from `monthsIn`, the
+   * SELECTION's span. A file spanning one month, named for eighty-one.
+   *
+   * The bars view is SERVER-PAGED: `barSorted` is `barWindowed` is `barRows`,
+   * and `barRows` is what is in memory. The census view is not — `sorted` is
+   * the whole matched set — so the two views need different answers and this
+   * derived is where they differ.
+   *
+   * IT READS `barPlan.read`, NOT THE ROWS. `read` is the list of month FILES
+   * the plan opened — bounded by months, not by bars — so this stays cheap at
+   * a few dozen entries while `csvRows` is six thousand and climbing. Folding
+   * the rows here instead would put an O(bars) walk behind a `title` attribute
+   * that re-renders on every keystroke.
+   */
+  const csvMonths = $derived.by(() => {
+    if (view !== 'bars') return monthsIn;
+    const seen = new Set();
+    for (const r of barPlan.read) if (r.month) seen.add(r.month);
+    return [...seen].sort();
+  });
+
+  /**
    * The file name, built only from KEYS.
    *
    * The feed's WIRE string, the rung's own spelling and the raw first and last
-   * `YYYY-MM` in the selection — never a display label, so two exports of the
-   * same selection are the same name on every machine whatever locale it runs.
+   * `YYYY-MM` THE FILE HOLDS — never a display label, so two exports of the
+   * same rows are the same name on every machine whatever locale it runs.
    */
   const csvName = $derived(
     `brutex-db-${view}_${feeds.active ?? 'no-feed'}_${timeframe || 'all-rungs'}_${
-      monthsIn[0] ?? 'none'
-    }_${monthsIn[monthsIn.length - 1] ?? 'none'}.csv`
+      csvMonths[0] ?? 'none'
+    }_${csvMonths[csvMonths.length - 1] ?? 'none'}.csv`
   );
 
-  /** What Export writes: the WHOLE matched set of the grid on screen, in the
-      order that grid is sorted in — never the page, and never the window. */
+  /**
+   * What Export writes.
+   *
+   * CENSUS: the whole matched set, never the page.
+   * BARS: every row LOADED — which is the months the plan read, not the
+   * matched total. Saying "the whole matched set" of both was true of one and
+   * false of the other, and the false half is the one that hands somebody a
+   * file 1% the size of the number printed above it.
+   */
   const csvRows = $derived(view === 'bars' ? barSorted : sorted);
+
+  /**
+   * How many rows the grid MATCHED but the file will NOT contain, or 0.
+   *
+   * `pageTotal` is the same number the pager prints, so the button and the
+   * line above it cannot disagree about what was matched.
+   *
+   * A READ-ONLY LEAF, DELIBERATELY. `windowSaid` carries a warning two hundred
+   * lines up about a reactive cycle on this exact figure — "Maximum call stack
+   * size exceeded and a blank page. It was hit, and the page went white."
+   * Nothing here writes paging state or is read by anything that does; it ends
+   * in a `title` attribute.
+   */
+  const csvShortBy = $derived(view === 'bars' ? Math.max(0, pageTotal - csvRows.length) : 0);
 
   function exportCsv() {
     /* THE BUTTON IS DISABLED IN THIS STATE AND SAYS WHY ON ITS OWN FACE; this
@@ -8133,7 +8181,11 @@
               ? 'Nothing to export — no bar has been read into this grid, so there are no records to write.'
               : `Nothing to export — ${blocked?.why ?? 'no instrument-month matches this selection'}`
             : view === 'bars'
-              ? `Write the ${fmt(csvRows.length)} bar(s) on this grid as CSV, named ${csvName} — the whole matched set, not the page. Built in the browser from rows already in memory: no request is made, and nothing is written into this repository. Every cell is the store's own wire form — microsecond stamps, prices and strikes in paisa, percentages as integer basis points, an EMPTY field for an unknown and never a zero.`
+              ? `Write the ${fmt(csvRows.length)} bar(s) LOADED on this grid as CSV, named ${csvName}.${
+                  csvShortBy > 0
+                    ? ` THIS IS NOT THE WHOLE MATCHED SET: ${fmt(pageTotal)} bar(s) match and ${fmt(csvShortBy)} of them are not in this file. The bars view is paged by the server — only the month files this query actually opened are in memory, and only what is in memory can be written. Narrow the window to the months you want and export again.`
+                    : ` That is every bar this query matched.`
+                } Built in the browser from rows already in memory: no request is made, and nothing is written into this repository. Every cell is the store's own wire form — microsecond stamps, prices and strikes in paisa, percentages as integer basis points, an EMPTY field for an unknown and never a zero.`
               : `Write the ${fmt(csvRows.length)} matched instrument-month(s) as CSV, named ${csvName}. Built in the browser from rows already in memory: no request is made, and nothing is written into this repository — the bytes go to your downloads. Every cell is the store's own wire form — raw YYYY-MM months, raw ISO expiries, strikes in paisa, percentages as the integer basis points they arrived as — so the file joins against the store. Only the header row is words.`}
           onclick={exportCsv}>Export CSV</button
         >
