@@ -5817,70 +5817,92 @@ fn screen(
     horizon: Horizon,
     rules: Rules,
 ) -> String {
-    let mut rows: Vec<Screened<'_>> = Vec::with_capacity(by_evidence.len().min(screen_cap()));
     // Built ONCE for the whole screen: the same ladder judges every combination,
     // and `Levels` only borrows it.
     let stop_rungs = stop_ladder_ppm(bars);
-    for (rank, scored) in by_evidence.iter().take(screen_cap()).enumerate() {
-        let side = side_of_evidence(scored);
-        // THE OPERATOR'S OWN STOP IS TRIED, NOT MERELY USED AS A FILTER.
-        //
-        // `max_mae_ppm` was a post-hoc test: build the grid from quantiles of
-        // each combination's own excursions, then discard every variant whose
-        // worst trade exceeded the rule. So the question the engine answered was
-        // "did this signal HAPPEN to keep every trade inside twenty points",
-        // which almost nothing does -- and never "does this signal work WITH a
-        // twenty point stop", which is the question actually being asked.
-        //
-        // The difference is not small. A quantile ladder's tightest rung is the
-        // 20th percentile of what the signal did, so on a loose signal the
-        // engine's tightest stop was 312 index points and a 20-point rule could
-        // only ever reject it. Raising the rung count subdivides the same
-        // distribution and never reaches below its floor.
-        //
-        // Passed as a rung, the level is tried like any other: every variant
-        // that could pair with a derived stop can pair with this one, and a
-        // combination that is mediocre on its own quantiles but strong under the
-        // operator's stop can now be found rather than filtered out unseen.
-        let g = grid::evaluate(
-            bars,
-            column,
-            &scored.mask,
-            horizon,
-            side,
-            grid::Levels {
-                rungs: grid_rungs(bars),
-                step_ppm: Some(grid_step_ppm(bars)),
-                forced: (rules.max_mae_ppm > 0).then_some(rules.max_mae_ppm),
-                ratios: true,
-                stops_ppm: &stop_rungs,
-            },
-        );
-        // THE BEST VARIANT THAT SATISFIES THE RULES, falling back to the best
-        // overall only so a failing combination can still be SHOWN with the rule
-        // it broke. Asking `best()` first and judging that was the error: the
-        // profit-maximising cell is the one with no stop at all, so every
-        // combination failed a stop rule by construction.
-        let within = g.best_within(|c| rules.admits(c)).copied();
-        let Some(cell) = within.or_else(|| g.best().copied()) else {
-            continue;
-        };
-        if cell.trades == 0 {
-            continue;
-        }
-        rows.push(Screened {
-            rank: rank.saturating_add(1),
-            tightest: g.tightest_containment().copied(),
-            admitted: within.is_some(),
-            names: runner::report::condition_names(&scored.mask).join(" · "),
-            cell,
-            scored,
-            consistency: None,
-            // Until measured, a row is steady: a rule that has not run yet
-            // cannot have been broken.
-            steady: true,
-        });
-    }
+
+    // ACROSS EVERY CORE. This was a sequential `for` over up to `screen_cap()`
+    // -- ten thousand -- combinations, each pricing a FULL exit grid over every
+    // bar of the span. The repo's own measurement of what that costs is in
+    // `screen_cap`'s doc: on NIFTY 60min over twelve months "the sweep takes 14
+    // seconds and `screen` returned nothing at all after fifty minutes, twice".
+    //
+    // The body is pure per candidate: `grid::evaluate` reads `bars`, `column`
+    // and `stop_rungs` immutably, `rules.admits` is a comparison, and the only
+    // thing leaving the iteration is the row it builds. Nothing accumulates
+    // across iterations -- the two `continue`s become `None` from a
+    // `filter_map`.
+    //
+    // DETERMINISM (CLAUDE.md S3 rule 5): rayon's INDEXED collect preserves
+    // order, so `rows` arrives in the same sequence a `for` produced. That
+    // matters even though the next statement sorts it, because `sort_by_key` is
+    // STABLE -- two rows with equal `(admitted, pessimistic)` keep their
+    // relative order, so a shuffled input would silently reorder ties and the
+    // reported top 25 could differ between runs on the same bytes. Byte-
+    // identical output on any core count is the property that makes this safe.
+    let mut rows: Vec<Screened<'_>> = by_evidence
+        .par_iter()
+        .take(screen_cap())
+        .enumerate()
+        .filter_map(|(rank, scored)| {
+            let side = side_of_evidence(scored);
+            // THE OPERATOR'S OWN STOP IS TRIED, NOT MERELY USED AS A FILTER.
+            //
+            // `max_mae_ppm` was a post-hoc test: build the grid from quantiles of
+            // each combination's own excursions, then discard every variant whose
+            // worst trade exceeded the rule. So the question the engine answered was
+            // "did this signal HAPPEN to keep every trade inside twenty points",
+            // which almost nothing does -- and never "does this signal work WITH a
+            // twenty point stop", which is the question actually being asked.
+            //
+            // The difference is not small. A quantile ladder's tightest rung is the
+            // 20th percentile of what the signal did, so on a loose signal the
+            // engine's tightest stop was 312 index points and a 20-point rule could
+            // only ever reject it. Raising the rung count subdivides the same
+            // distribution and never reaches below its floor.
+            //
+            // Passed as a rung, the level is tried like any other: every variant
+            // that could pair with a derived stop can pair with this one, and a
+            // combination that is mediocre on its own quantiles but strong under the
+            // operator's stop can now be found rather than filtered out unseen.
+            let g = grid::evaluate(
+                bars,
+                column,
+                &scored.mask,
+                horizon,
+                side,
+                grid::Levels {
+                    rungs: grid_rungs(bars),
+                    step_ppm: Some(grid_step_ppm(bars)),
+                    forced: (rules.max_mae_ppm > 0).then_some(rules.max_mae_ppm),
+                    ratios: true,
+                    stops_ppm: &stop_rungs,
+                },
+            );
+            // THE BEST VARIANT THAT SATISFIES THE RULES, falling back to the best
+            // overall only so a failing combination can still be SHOWN with the rule
+            // it broke. Asking `best()` first and judging that was the error: the
+            // profit-maximising cell is the one with no stop at all, so every
+            // combination failed a stop rule by construction.
+            let within = g.best_within(|c| rules.admits(c)).copied();
+            let cell = within.or_else(|| g.best().copied())?;
+            if cell.trades == 0 {
+                return None;
+            }
+            Some(Screened {
+                rank: rank.saturating_add(1),
+                tightest: g.tightest_containment().copied(),
+                admitted: within.is_some(),
+                names: runner::report::condition_names(&scored.mask).join(" · "),
+                cell,
+                scored,
+                consistency: None,
+                // Until measured, a row is steady: a rule that has not run yet
+                // cannot have been broken.
+                steady: true,
+            })
+        })
+        .collect();
 
     // PASSERS FIRST, then by net. `Reverse` and not a negation, for the reason
     // `audit::grid` gives: `pessimistic` saturates at `i64::MIN` and negating
