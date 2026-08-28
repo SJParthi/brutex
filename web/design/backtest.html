@@ -1,0 +1,2641 @@
+<title>Brutex Backtest Console</title>
+
+<!--
+  /backtest — THE DESIGN REFERENCE.
+
+  The third of these, after web/design/ingest.html and web/design/db.html, and
+  the one whose page was built without ever having had one. `/backtest` is the
+  largest route in the tree — 8,949 lines against /db's 12,531 spread over far
+  more surface — and every change to it was made against no stated system. This
+  file states the system, so the next change has something to disagree with.
+
+  ─────────────────────────────────────────────────────────────────────────────
+  WHAT IS DRAWN HERE IS A SHAPE, NOT A MEASUREMENT.
+
+  Every figure below is a SPECIMEN chosen to exercise a state: a crown that has
+  a winner, a group where one rung leads, a halted row, a row whose seal failed,
+  a span with a hole. No number here was read off this operator's ledger and
+  none should be quoted as one. `CLAUDE.md` §3 rule 1 governs claims about
+  vendors, exchanges, instruments and costs; a mockup's placeholder is not such
+  a claim, and it becomes one the moment somebody copies it into a document. It
+  is said here so nobody has to guess.
+
+  What IS load-bearing, and IS checkable against the source:
+
+    * the three heights, and the grid built on them
+    * which figure ranks, and which is drawn behind it
+    * what an excluded row looks like, and that it is never removed
+    * which zero is drawn and which zero is absent
+    * the order the page arrives in
+
+  ─────────────────────────────────────────────────────────────────────────────
+  THE THREE HEIGHTS — and a correction to the two references before this one.
+
+  ingest.html and db.html both close with the same footer line:
+
+      Control 34px · label 14px · row 34px
+
+  That is not what any of the three pages renders. All three drive their strip
+  controls through `web/src/lib/Picker.svelte`, and `.pbtn` there is
+  `padding: 11px 36px 11px 14px` on `font-size: var(--fs-base)` with
+  `line-height: var(--lh-base)` — 16px x 1.5 = 24px of content, plus 22px of
+  padding, plus 2px of border. **48px.** It is why
+  `backtest/+page.svelte` carries `.runbar .btn.run { height: 48px }`: the Run
+  button was sized to match the Picker beside it, which is the right direction
+  for that fix and leaves the two references stating a height nothing uses.
+
+  So this reference is drawn at 48. The number is not a preference; it is the
+  height of the one control all three pages share, and a reference that states
+  a different one is a reference the page cannot be checked against.
+
+  Picker is NOT restyled to reach 34. It is the console's shared multi-select
+  and a local override of it has already been tried: a `.pbtn` rule scoped to
+  one page took it from 48px to 31px and five passes of token-fiddling could
+  not put the row back together, because the mismatch was structural. A shared
+  component is sized once, where it is defined, or not at all.
+
+  ─────────────────────────────────────────────────────────────────────────────
+  THE SWEEP BAR IS A GRID WITH THREE NAMED TRACKS, and this is the defect the
+  reference exists to fix.
+
+  ingest.html states the rule in its own header:
+
+      Every control in the strip sits on ONE baseline because the strip is a
+      grid with named rows, not a flex row of variable-height columns -- that
+      was what made the previous draft ragged, and a refusal is now a chip that
+      cannot change a row's height.
+
+  `/backtest`'s sweep bar is exactly the draft that sentence refuses. `.runf` is
+  `display: flex; flex-direction: column` inside a `.runbar` with
+  `align-items: end`, so the fields are five independent columns that happen to
+  be bottom-aligned. Nothing structural holds their labels on one line or their
+  controls on one baseline: a label that wraps to two lines moves that field's
+  control down and leaves the row ragged, and the bar has a field whose label
+  can be replaced by `reading census…` at a different width.
+
+  Here the bar is ONE grid with `grid-template-rows: var(--lab-h) var(--ctl-h)
+  auto` and every field is `grid-template-rows: subgrid; grid-row: span 3`. The
+  label track, the control track and the note track are shared. A note may be
+  one line or four; the control above it does not move.
+
+  ─────────────────────────────────────────────────────────────────────────────
+  RANKING, AND WHAT IS DRAWN BEHIND IT.
+
+  `pessimistic` is adverse-extreme fills; `optimistic` is open fills. Every
+  selection surface in this workspace ranks on the first, so the worst case is
+  the SOLID bar and the sorted column, and the best case is an OUTLINE behind
+  it. The outline is always the taller of the two — as a filled block it
+  covered the number that actually ranks.
+
+  The GAP between them is a fact in its own right and is drawn as one: how much
+  of a headline is fill assumption rather than edge.
+
+  ─────────────────────────────────────────────────────────────────────────────
+  EXCLUSION IS A RAIL, NEVER A DELETION AND NEVER A FADE.
+
+  Three things put a run outside the ranking, and each keeps its row:
+
+    HALTED      the ladder stopped short, so `depth` is partial and
+                `combinations` covers less of the search while reading larger.
+    SEAL FAILED the bytes do not match the blake3 seal beside them. Every field
+                holds a legal value, which is exactly why the check exists.
+    NOT SWEPT   the timeframe is not one the engine sweeps, so `complete` is
+                the wrong question about the row.
+
+  A dimmed row reads as a less important version of the same thing; these are a
+  different kind of thing. Each carries a 3px rail in its own colour at the left
+  edge, at full contrast, and its figures stay legible. `CLAUDE.md` §4 bans a
+  fallback that hides a failure — removing the row would be exactly that, and
+  fading it is the quiet version.
+
+  ─────────────────────────────────────────────────────────────────────────────
+  WHICH ZERO IS DRAWN.
+
+  `Halted 0` and `Span holes 0` are drawn, because halting and short spans are
+  ordinary outcomes and their zero says the sweep had room.
+
+  The integrity bar is ABSENT at zero rather than reading `0`. On a healthy
+  store it would read zero forever, and a figure that reads zero forever trains
+  the eye to skip it — by the time it matters it has been furniture for months.
+  When it has something to say it is a full-width bar above the summary, not a
+  fifth tile inside it, because the summary is where the eye goes to be
+  reassured and this is the one thing on the page that must interrupt.
+
+  `Not swept` follows the same rule: it appears only when the ledger holds one.
+
+  ─────────────────────────────────────────────────────────────────────────────
+  WHAT IS DELIBERATELY NOT DRAWN.
+
+  No equity curve. The ledger carries four scalars per run and no series at
+  all, so a sparkline would be a shape invented from four numbers. What is
+  drawn instead is those four scalars to one scale, which is a real comparison.
+
+  No entry or exit markers on the price chart. Trades are recorded as a COUNT
+  with no trade list, so there is no timestamp to put a marker at.
+
+  No per-level ladder breakdown. `depth` and `combinations` are two scalars, so
+  "where did the frequent frontier empty" is unanswerable from this file. It is
+  drawn as a NAMED GAP with its reason, because a missing drill-down that says
+  why is information and one that is simply absent is a page that looks
+  finished and is not.
+
+  All motion respects prefers-reduced-motion.
+-->
+
+<style>
+  /* ====================================================================== 1
+     THE RAMP — web/src/lib/theme.css, verbatim, plus this reference's depth.
+     Light is the bare :root. Dark is declared TWICE so that both the OS
+     default and an explicit toggle resolve; a colour whose only definition
+     lives inside a media query has no value when the toggle wins.
+     =================================================================== */
+  :root {
+    --n0: #e9edf5;
+    --n1: #f5f7fb;
+    --n2: #ffffff;
+    --n3: #ffffff;
+    --n4: #eef1f7;
+    --n5: #edf0f6;
+    --n6: #dee3ed;
+    --n7: #c7cfdd;
+    --n8: #8b95a8;
+    --n9: #5a6478;
+    --n10: #38415a;
+    --n11: #0d1220;
+    --n12: #000814;
+    --up: #00875a;
+    --down: #d3143f;
+    --warn: #a86a06;
+    --info: #6d45d9;
+    --acc: #0e7f96;
+    --on-acc: #ffffff;
+    --acc-soft: rgba(14, 127, 150, 0.1);
+    --up-soft: rgba(0, 135, 90, 0.12);
+    --down-soft: rgba(211, 20, 63, 0.11);
+    --warn-soft: rgba(168, 106, 6, 0.13);
+    --info-soft: rgba(109, 69, 217, 0.11);
+    --focus: #0b6376;
+    --e1: 0 1px 2px rgba(16, 24, 40, 0.07);
+    --e2: 0 6px 16px rgba(16, 24, 40, 0.1), 0 0 0 1px rgba(16, 24, 40, 0.05);
+    --glass: rgba(255, 255, 255, 0.78);
+    --sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(255, 255, 255, 0));
+    --gridline: rgba(13, 18, 32, 0.045);
+    --fade: linear-gradient(90deg, transparent, var(--n3));
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme='light']) {
+      --n0: #070a11;
+      --n1: #0b0e14;
+      --n2: #11151f;
+      --n3: #141924;
+      --n4: #1a2030;
+      --n5: #1b212e;
+      --n6: #232a3a;
+      --n7: #333c51;
+      --n8: #5c6679;
+      --n9: #8a95ab;
+      --n10: #b3bdd0;
+      --n11: #e6ebf5;
+      --n12: #fbfcff;
+      --up: #00e19b;
+      --down: #ff4d6a;
+      --warn: #f0b429;
+      --info: #9d7cf5;
+      --acc: #22d3ee;
+      --on-acc: #04060c;
+      --acc-soft: rgba(34, 211, 238, 0.14);
+      --up-soft: rgba(0, 225, 155, 0.16);
+      --down-soft: rgba(255, 77, 106, 0.16);
+      --warn-soft: rgba(240, 180, 41, 0.16);
+      --info-soft: rgba(157, 124, 245, 0.16);
+      --focus: #67e8f9;
+      --e1: 0 1px 2px rgba(0, 0, 0, 0.5);
+      --e2: 0 4px 14px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.04);
+      --glass: rgba(17, 21, 31, 0.72);
+      --sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0));
+      --gridline: rgba(230, 235, 245, 0.045);
+    }
+  }
+  :root[data-theme='dark'] {
+    --n0: #070a11;
+    --n1: #0b0e14;
+    --n2: #11151f;
+    --n3: #141924;
+    --n4: #1a2030;
+    --n5: #1b212e;
+    --n6: #232a3a;
+    --n7: #333c51;
+    --n8: #5c6679;
+    --n9: #8a95ab;
+    --n10: #b3bdd0;
+    --n11: #e6ebf5;
+    --n12: #fbfcff;
+    --up: #00e19b;
+    --down: #ff4d6a;
+    --warn: #f0b429;
+    --info: #9d7cf5;
+    --acc: #22d3ee;
+    --on-acc: #04060c;
+    --acc-soft: rgba(34, 211, 238, 0.14);
+    --up-soft: rgba(0, 225, 155, 0.16);
+    --down-soft: rgba(255, 77, 106, 0.16);
+    --warn-soft: rgba(240, 180, 41, 0.16);
+    --info-soft: rgba(157, 124, 245, 0.16);
+    --focus: #67e8f9;
+    --e1: 0 1px 2px rgba(0, 0, 0, 0.5);
+    --e2: 0 4px 14px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.04);
+    --glass: rgba(17, 21, 31, 0.72);
+    --sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0));
+    --gridline: rgba(230, 235, 245, 0.045);
+  }
+
+  /* ====================================================================== 2
+     MAPPING + SCALES. The three heights alignment depends on.
+     =================================================================== */
+  :root {
+    --bg: var(--n1);
+    --bg-2: var(--n2);
+    --panel: var(--n3);
+    --panel-2: var(--n4);
+    --line: var(--n6);
+    --line-soft: var(--n5);
+    --line-hard: var(--n7);
+    --well: var(--n0);
+    --ink: var(--n11);
+    --ink-hi: var(--n12);
+    --ink-2: var(--n10);
+    --dim: var(--n9);
+    --faint: var(--n8);
+
+    --mono: ui-monospace, 'SF Mono', SFMono-Regular, 'JetBrains Mono', Menlo, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', system-ui, sans-serif;
+
+    --fs-micro: 9.5px;
+    --fs-mini: 10px;
+    --fs-xs: 11px;
+    --fs-sm: 12px;
+    --fs-base: 13px;
+    --fs-md: 14px;
+    --fs-lg: 17px;
+    --fs-xl: 22px;
+    --fs-2xl: 30px;
+    --fs-3xl: 46px;
+    --track-caps: 0.1em;
+
+    --s1: 2px;
+    --s2: 4px;
+    --s3: 6px;
+    --s4: 8px;
+    --s5: 12px;
+    --s6: 16px;
+    --s7: 24px;
+    --s8: 32px;
+    --s9: 48px;
+    --r1: 4px;
+    --r2: 6px;
+    --r: 8px;
+    --r4: 12px;
+    --r5: 16px;
+    --r-full: 999px;
+
+    /* THE THREE HEIGHTS. 48 is Picker's, measured, not chosen — see the
+       header. 14 is the label track. 34 is one ledger row, and it is also
+       this document's background grid, so a row that is off the grid is
+       visible against the page rather than only against its neighbours. */
+    --lab-h: 14px;
+    --ctl-h: 48px;
+    --row-h: 34px;
+    --topbar-h: 54px;
+
+    --gutter: var(--s7);
+    --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+    --ease-spring: cubic-bezier(0.2, 0.9, 0.3, 1.25);
+  }
+
+  /* Load-bearing: without it a 48px control with a 1px border measures 50 and
+     a row of controls sharing one track still does not share one edge. */
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: var(--fs-base);
+    line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    background-image: linear-gradient(var(--gridline) 1px, transparent 1px),
+      linear-gradient(90deg, var(--gridline) 1px, transparent 1px);
+    background-size: 100% 34px, 34px 100%;
+  }
+  :focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+    border-radius: var(--r1);
+  }
+  button {
+    font: inherit;
+    cursor: pointer;
+  }
+
+  /* ====================================================================== 3
+     MOTION. One orchestrated arrival in reading order. Nothing loops except
+     the live dot, which is reporting a fact that is still true.
+     =================================================================== */
+  @keyframes rise {
+    from {
+      opacity: 0;
+      transform: translateY(14px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  @keyframes drop {
+    from {
+      opacity: 0;
+      transform: translateY(-100%);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  @keyframes pop {
+    0% {
+      opacity: 0;
+      transform: scale(0.82);
+    }
+    100% {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  @keyframes fill {
+    from {
+      transform: scaleX(0);
+    }
+    to {
+      transform: none;
+    }
+  }
+  @keyframes grow {
+    from {
+      transform: scaleY(0);
+    }
+    to {
+      transform: none;
+    }
+  }
+  @keyframes pulse-dot {
+    0%,
+    100% {
+      opacity: 1;
+      transform: scale(1);
+    }
+    50% {
+      opacity: 0.45;
+      transform: scale(0.78);
+    }
+  }
+  .rise {
+    opacity: 0;
+    animation: rise 620ms var(--ease) forwards;
+  }
+  .topbar {
+    animation: drop 520ms var(--ease) both;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 1ms !important;
+      animation-delay: 0ms !important;
+      transition-duration: 1ms !important;
+    }
+    .rise {
+      opacity: 1;
+    }
+  }
+
+  /* ====================================================================== 4
+     THE GLOBAL BAR.
+     =================================================================== */
+  .topbar {
+    height: var(--topbar-h);
+    display: flex;
+    align-items: center;
+    gap: var(--s7);
+    padding: 0 var(--gutter);
+    background: var(--glass);
+    backdrop-filter: blur(14px) saturate(1.6);
+    -webkit-backdrop-filter: blur(14px) saturate(1.6);
+    border-bottom: 1px solid var(--line);
+    position: sticky;
+    top: 0;
+    z-index: 40;
+  }
+  .topbar::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: -1px;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--acc), transparent);
+    opacity: 0.55;
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: var(--s4);
+    font-family: var(--mono);
+    font-weight: 700;
+    font-size: var(--fs-md);
+    letter-spacing: -0.02em;
+    color: var(--ink-hi);
+  }
+  .brand .mark {
+    display: grid;
+    place-items: center;
+    width: 22px;
+    height: 22px;
+    border-radius: var(--r2);
+    background: var(--acc);
+    color: var(--on-acc);
+    font-size: var(--fs-sm);
+  }
+  /* SEVEN TABS AND A CLOCK DO NOT FIT A NARROW BAR, and the bar is not
+     allowed to solve that by getting wider than the page — a body that
+     scrolls sideways moves every column on every section. The nav is the
+     one part that may scroll in its own container, so the brand and the
+     right-hand cluster keep their places. */
+  .navs {
+    display: flex;
+    align-items: center;
+    gap: var(--s2);
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .navs::-webkit-scrollbar {
+    display: none;
+  }
+  .navs a {
+    flex: none;
+  }
+  .brand,
+  .topright {
+    flex: none;
+  }
+  .navs a {
+    height: 30px;
+    display: inline-flex;
+    align-items: center;
+    padding: 0 var(--s5);
+    border-radius: var(--r-full);
+    font-size: var(--fs-sm);
+    color: var(--dim);
+    text-decoration: none;
+  }
+  .navs a:hover {
+    background: var(--panel-2);
+    color: var(--ink);
+  }
+  .navs a.on {
+    background: var(--acc-soft);
+    color: var(--acc);
+    font-weight: 600;
+  }
+  .topright {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: var(--s5);
+  }
+  .clock {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s3);
+    font-family: var(--mono);
+    font-size: var(--fs-sm);
+    color: var(--dim);
+  }
+  .clock .live {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--up);
+    animation: pulse-dot 2.4s ease-in-out infinite;
+  }
+  .tog {
+    display: inline-flex;
+    border: 1px solid var(--line);
+    border-radius: var(--r-full);
+    overflow: hidden;
+  }
+  .tog button {
+    height: 26px;
+    padding: 0 var(--s5);
+    border: 0;
+    background: transparent;
+    color: var(--dim);
+    font-size: var(--fs-mini);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+  }
+  .tog button[aria-pressed='true'] {
+    background: var(--acc);
+    color: var(--on-acc);
+    font-weight: 700;
+  }
+
+  /* ====================================================================== 5
+     SHELL.
+     =================================================================== */
+  main {
+    max-width: 1560px;
+    margin: 0 auto;
+    padding: var(--s8) var(--gutter) var(--s9);
+    display: flex;
+    flex-direction: column;
+    gap: var(--s7);
+  }
+  .head {
+    display: flex;
+    align-items: flex-end;
+    gap: var(--s6);
+    flex-wrap: wrap;
+  }
+  .head h1 {
+    font-size: var(--fs-2xl);
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    color: var(--ink-hi);
+    margin: 0;
+    line-height: 1.05;
+  }
+  .head .sub {
+    font-size: var(--fs-md);
+    color: var(--dim);
+    padding-bottom: 3px;
+  }
+  .head .sub b {
+    color: var(--ink);
+  }
+  .feedchip {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s4);
+    height: 34px;
+    padding: 0 var(--s5);
+    border-radius: var(--r-full);
+    background: var(--panel);
+    border: 1px solid var(--line);
+    box-shadow: var(--e1);
+    font-size: var(--fs-sm);
+  }
+  .feedchip b {
+    color: var(--ink-hi);
+  }
+
+  /* ONE SHELL, NOT A STACK OF CARDS.
+     A gap between two boxes says they are separate things, and every section
+     inside this shell is a different view of ONE run. The shell owns the
+     border, the radius and the shadow; each section owns a bottom hairline and
+     nothing else.
+
+     NO `overflow: hidden` on the shell. It is the obvious way to get the
+     rounded corners and it clips `Picker`'s absolutely-positioned menu to the
+     panel edge, which makes a menu past its first few rows unusable. The
+     corners come from the first and last child instead, which is where the
+     rounding is visible; the sections between are square either way. */
+  .shell {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--r5);
+    box-shadow: var(--e2);
+    position: relative;
+  }
+  .shell > * {
+    border-bottom: 1px solid var(--line);
+  }
+  .shell > *:last-child {
+    border-bottom: 0;
+  }
+  .shell > *:first-child {
+    border-top-left-radius: calc(var(--r5) - 1px);
+    border-top-right-radius: calc(var(--r5) - 1px);
+  }
+  .shell > *:last-child {
+    border-bottom-left-radius: calc(var(--r5) - 1px);
+    border-bottom-right-radius: calc(var(--r5) - 1px);
+  }
+  .sec-h {
+    display: flex;
+    align-items: center;
+    gap: var(--s5);
+    padding: var(--s5) var(--s6);
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .ttl {
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    color: var(--faint);
+    font-weight: 700;
+  }
+  .spacer {
+    margin-left: auto;
+  }
+
+  /* ====================================================================== 6
+     THE SWEEP BAR — ONE GRID, THREE NAMED TRACKS.
+
+     `grid-template-rows: var(--lab-h) var(--ctl-h) auto` on the strip, and
+     every field is `subgrid` spanning all three. The label track, the control
+     track and the note track are SHARED across the row, so a note of four
+     lines and a note of none leave the controls above them on the same
+     baseline. This is the whole reason the bar is a grid and not five flex
+     columns.
+
+     `auto-fit` rather than a fixed five, because the column COUNT is a
+     consequence of the width; only the track floor is a decision.
+
+     THE NAME ROW IS PINNED AND NOTHING ELSE IS, and both halves of that
+     were paid for. Two drafts of this file were wrong in opposite ways:
+
+     1. Three tracks, everything auto-placed. `.sweep-k` took the label
+        track, the fields shifted down one, and every `.lab` ended up in
+        the 48px CONTROL track with every control in the note track. The
+        strip still looked internally consistent, because subgrid keeps
+        the fields agreeing with each OTHER while all of them are wrong
+        together — a grid with spanning children and no explicit placement
+        re-indexes itself silently.
+
+     2. Every field pinned to `grid-row: 2 / span 2`. That fixed (1) and
+        broke wrapping: a pinned field CANNOT move to a new row, so when
+        only three columns fitted the auto-placement algorithm invented
+        implicit columns for the other two. MEASURED at a 752px bar:
+        `grid-template-columns` computed to `210px 210px 210px 0px 0px`
+        and the Run button landed at x=727..849 — 81px outside the page,
+        which is the horizontal body scroll this console does not allow.
+
+     So: the NAME row is pinned, because that is the one that steals a
+     track. The fields span two rows and auto-place, so a field that does
+     not fit wraps to a FRESH label/control pair — its own baseline, which
+     is right: a wrapped line is a new row, exactly as `/db` stacks two
+     `.strip`s rather than ragging one. `.sweep-n` is last in the DOM and
+     spans every column, so it settles below whatever the fields used.
+     =================================================================== */
+  .sweep {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+    /* name · label · control · note — further triples are implicit */
+    grid-template-rows: auto var(--lab-h) var(--ctl-h) auto;
+    grid-auto-rows: auto;
+    gap: var(--s3) var(--s5);
+    padding: var(--s6);
+    align-items: start;
+    background: linear-gradient(120deg, var(--acc-soft) 0%, var(--panel) 38%);
+    position: relative;
+  }
+  /* The panel's own name above the fields, and what the press will do below
+     them. Both span the full width and neither is in the control track. */
+  .sweep-k,
+  .sweep-n {
+    grid-column: 1 / -1;
+  }
+  .sweep-k {
+    grid-row: 1;
+  }
+  .sweep-k {
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    color: var(--faint);
+    font-weight: 700;
+  }
+  .sweep-n {
+    font-size: var(--fs-sm);
+    line-height: 1.6;
+    color: var(--dim);
+    max-width: 96ch;
+  }
+  .sweep-n b {
+    color: var(--ink-hi);
+  }
+  .sweep-n .warnish {
+    color: var(--warn);
+  }
+  .field {
+    display: grid;
+    grid-template-rows: subgrid;
+    grid-row: span 3;
+    min-width: 0;
+  }
+  .lab {
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    color: var(--faint);
+    font-weight: 600;
+    line-height: var(--lab-h);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  /* THE PICKER, AS IT ACTUALLY RENDERS. Reproduced here at its measured
+     geometry rather than restyled — 48px, 9px radius, mono face, a two-tone
+     caret drawn in two gradients. A reference that draws the shared control
+     at a size the shared control is not is a reference nothing can be
+     checked against. */
+  .ctl {
+    height: var(--ctl-h);
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: var(--s4);
+    padding: 0 34px 0 14px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    color: var(--ink);
+    font-family: var(--mono);
+    font-size: var(--fs-base);
+    font-weight: 600;
+    text-align: left;
+    position: relative;
+    min-width: 0;
+  }
+  .ctl > span:first-child {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .ctl::after {
+    content: '';
+    position: absolute;
+    right: 12px;
+    top: 55%;
+    width: 10px;
+    height: 5px;
+    background-image: linear-gradient(45deg, transparent 50%, var(--acc) 50%),
+      linear-gradient(135deg, var(--acc) 50%, transparent 50%);
+    background-position: 0 0, 5px 0;
+    background-size: 5px 5px, 5px 5px;
+    background-repeat: no-repeat;
+    transform: translateY(-50%);
+  }
+  .ctl:hover {
+    border-color: var(--dim);
+  }
+  .ctl.wait {
+    color: var(--faint);
+    font-style: normal;
+    border-style: dashed;
+  }
+  .ctl.wait::after {
+    opacity: 0.3;
+  }
+  .note {
+    font-size: var(--fs-mini);
+    color: var(--faint);
+    line-height: 1.4;
+    min-width: 0;
+  }
+  .note b {
+    color: var(--dim);
+  }
+  /* The Run field: its label and note are hidden rather than absent, so the
+     field still occupies all three tracks and the button lands on the control
+     baseline with everything else. Removing them would collapse the field to
+     one track and lift the button. */
+  .field.go .lab,
+  .field.go .note {
+    visibility: hidden;
+  }
+
+  /* ====================================================================== 7
+     BUTTONS.
+     =================================================================== */
+  .btn {
+    height: 34px;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s3);
+    padding: 0 var(--s5);
+    border: 1px solid var(--line);
+    border-radius: var(--r);
+    background: var(--panel);
+    color: var(--ink);
+    font-size: var(--fs-sm);
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .btn:hover {
+    background: var(--panel-2);
+    border-color: var(--line-hard);
+  }
+  .btn.sm {
+    height: 28px;
+    font-size: var(--fs-xs);
+    padding: 0 var(--s4);
+  }
+  /* THE ONE CONTROL ON THIS PAGE THAT CAUSES WORK. Everything else reads;
+     this writes to an append-only ledger. It keeps the row's baseline — one
+     baseline is worth more than a tall button — and takes weight instead: the
+     accent, wider padding, tighter tracking, and a glow that says pressable
+     without moving anything. */
+  .btn.run {
+    height: var(--ctl-h);
+    width: 100%;
+    justify-content: center;
+    border: 0;
+    border-radius: 9px;
+    background: var(--acc);
+    color: var(--on-acc);
+    font-size: var(--fs-base);
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    box-shadow: 0 4px 18px -8px var(--acc);
+    transition:
+      transform 160ms var(--ease),
+      box-shadow 160ms var(--ease);
+  }
+  .btn.run:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 7px 24px -8px var(--acc);
+  }
+  .linky {
+    border: 0;
+    background: none;
+    padding: 0;
+    color: var(--acc);
+    font: inherit;
+    font-weight: 600;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+
+  /* ====================================================================== 8
+     THE INTEGRITY BAR — absent at zero. Full width, above the summary,
+     because the summary is where the eye goes to be reassured and this is
+     the one thing on the page that must interrupt.
+     =================================================================== */
+  .integrity {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--s5);
+    padding: var(--s5) var(--s6);
+    background: var(--info-soft);
+    border-left: 3px solid var(--info);
+  }
+  .integrity .mark {
+    font-size: var(--fs-lg);
+    line-height: 1;
+    color: var(--info);
+  }
+  .integrity strong {
+    display: block;
+    color: var(--ink-hi);
+    font-size: var(--fs-md);
+  }
+  .integrity span {
+    color: var(--ink-2);
+    font-size: var(--fs-sm);
+    line-height: 1.55;
+  }
+  .integrity code {
+    font-family: var(--mono);
+    font-size: var(--fs-xs);
+    background: var(--well);
+    padding: 1px 4px;
+    border-radius: var(--r1);
+  }
+
+  /* ====================================================================== 9
+     THE SUMMARY STRIP — four facts before any detail. Hairlines between the
+     cells come from a 1px grid gap over the line colour, so a cell can never
+     own an edge its neighbour disagrees about.
+     =================================================================== */
+  .facts {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 1px;
+    background: var(--line);
+  }
+  .fact {
+    background: var(--panel);
+    padding: var(--s6);
+    display: flex;
+    flex-direction: column;
+    gap: var(--s2);
+    position: relative;
+  }
+  .fact .k {
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    color: var(--faint);
+    font-weight: 600;
+  }
+  .fact .v {
+    font-size: var(--fs-xl);
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: var(--ink-hi);
+    font-variant-numeric: tabular-nums;
+    line-height: 1.1;
+  }
+  .fact .n {
+    font-size: var(--fs-mini);
+    color: var(--faint);
+    line-height: 1.4;
+  }
+  .fact.good .v {
+    color: var(--up);
+  }
+  .fact.warn .v {
+    color: var(--warn);
+  }
+  /* A ZERO THAT IS INFORMATION IS STILL A ZERO. It reads in the dim ink
+     rather than the warning one — the fact that there is nothing to warn
+     about is the message. */
+  .fact.nil .v {
+    color: var(--dim);
+  }
+  .fact.warn::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 3px;
+    background: var(--warn);
+  }
+
+  /* ===================================================================== 10
+     BLOCKS — a heading whose rule starts at the accent, then the content.
+     =================================================================== */
+  .block {
+    padding: var(--s6);
+    display: flex;
+    flex-direction: column;
+    gap: var(--s5);
+  }
+  .bh-row {
+    display: flex;
+    align-items: center;
+    gap: var(--s5);
+  }
+  .bh {
+    margin: 0;
+    font-size: var(--fs-md);
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    color: var(--ink-hi);
+    display: flex;
+    align-items: center;
+    gap: var(--s4);
+  }
+  .bh::before {
+    content: '';
+    width: 3px;
+    height: 14px;
+    border-radius: var(--r-full);
+    background: var(--acc);
+  }
+  .count {
+    margin-left: auto;
+    font-family: var(--mono);
+    font-size: var(--fs-xs);
+    color: var(--faint);
+  }
+  .find {
+    height: 30px;
+    width: 220px;
+    padding: 0 var(--s5);
+    border: 1px solid var(--line);
+    border-radius: var(--r-full);
+    background: var(--well);
+    color: var(--ink);
+    font-size: var(--fs-sm);
+  }
+
+  /* ===================================================================== 11
+     THE ANSWER. The one card on the page that is a verdict, so it is the one
+     card that is allowed to look like one: a well, an accent rail, and a
+     sheen that sweeps once on arrival and never again.
+     =================================================================== */
+  .crown {
+    display: flex;
+    align-items: center;
+    gap: var(--s6);
+    padding: var(--s6);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--acc);
+    border-radius: var(--r4);
+    background: linear-gradient(120deg, var(--acc-soft), var(--panel) 46%);
+    position: relative;
+    overflow: hidden;
+    flex-wrap: wrap;
+  }
+  .crown-mark {
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    color: var(--acc);
+    font-weight: 700;
+    writing-mode: vertical-rl;
+    transform: rotate(180deg);
+    align-self: stretch;
+    display: flex;
+    align-items: center;
+  }
+  .crown-body {
+    flex: 1 1 460px;
+    display: flex;
+    flex-direction: column;
+    gap: var(--s5);
+    min-width: 0;
+  }
+  .crown-id {
+    display: flex;
+    align-items: baseline;
+    gap: var(--s5);
+    flex-wrap: wrap;
+  }
+  .crown-id b {
+    font-size: var(--fs-xl);
+    letter-spacing: -0.02em;
+    color: var(--ink-hi);
+  }
+  .rung {
+    display: inline-flex;
+    align-items: center;
+    height: 22px;
+    padding: 0 var(--s4);
+    border-radius: var(--r1);
+    background: var(--well);
+    border: 1px solid var(--line);
+    font-family: var(--mono);
+    font-size: var(--fs-xs);
+    font-weight: 600;
+    color: var(--ink-2);
+  }
+  .dim {
+    color: var(--dim);
+    font-size: var(--fs-sm);
+  }
+  .crown-figs {
+    display: flex;
+    gap: var(--s8);
+    flex-wrap: wrap;
+  }
+  .fig {
+    display: flex;
+    flex-direction: column;
+    gap: var(--s1);
+  }
+  .fig .k {
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    color: var(--faint);
+    font-weight: 600;
+  }
+  .fig .v {
+    font-size: var(--fs-lg);
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    color: var(--ink-hi);
+  }
+  .fig.lead .v {
+    font-size: var(--fs-2xl);
+    letter-spacing: -0.025em;
+  }
+  .fig .v.up {
+    color: var(--up);
+  }
+  /* THE BEST CASE IS NEVER THE HEADLINE. It is drawn in the dim ink at the
+     ordinary size beside a worst case at display size — the hierarchy IS the
+     ranking rule. */
+  .fig .v.ghost {
+    color: var(--dim);
+    font-weight: 600;
+  }
+  .crown-note {
+    margin: 0;
+    font-size: var(--fs-sm);
+    color: var(--ink-2);
+    line-height: 1.55;
+    max-width: 86ch;
+  }
+  .crown-note b {
+    color: var(--ink-hi);
+  }
+  @keyframes sheen {
+    from {
+      transform: translateX(-120%);
+    }
+    to {
+      transform: translateX(220%);
+    }
+  }
+  .crown::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 40%;
+    background: linear-gradient(100deg, transparent, rgba(255, 255, 255, 0.16), transparent);
+    animation: sheen 1400ms var(--ease) 700ms 1 both;
+    pointer-events: none;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .crown::before {
+      animation: none;
+      opacity: 0;
+    }
+  }
+
+  /* ===================================================================== 12
+     WHICH RUNG CARRIES THE EDGE.
+
+     One row per comparable span — same feed, instrument, window and support
+     ratio. Bars share ONE scale within a row, so height is comparable across
+     the rungs in it and never across rows. A rung never swept for a span is
+     ABSENT rather than zero: zero is a measurement and absence is not.
+     =================================================================== */
+  .rgroup {
+    border: 1px solid var(--line);
+    border-radius: var(--r4);
+    background: var(--panel);
+    overflow: hidden;
+  }
+  .rgroup-head {
+    display: flex;
+    align-items: center;
+    gap: var(--s5);
+    flex-wrap: wrap;
+    padding: var(--s5) var(--s6);
+    background: var(--panel-2);
+    border-bottom: 1px solid var(--line);
+  }
+  .rgroup-head b {
+    color: var(--ink-hi);
+    font-size: var(--fs-md);
+  }
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s2);
+    height: 20px;
+    padding: 0 var(--s4);
+    border-radius: var(--r-full);
+    background: var(--well);
+    border: 1px solid var(--line);
+    font-family: var(--mono);
+    font-size: var(--fs-mini);
+    font-weight: 600;
+    color: var(--dim);
+    white-space: nowrap;
+  }
+  .pill.good {
+    background: var(--up-soft);
+    border-color: transparent;
+    color: var(--up);
+  }
+  .pill.warn {
+    background: var(--warn-soft);
+    border-color: transparent;
+    color: var(--warn);
+  }
+  .pill.seal {
+    background: var(--info-soft);
+    border-color: transparent;
+    color: var(--info);
+  }
+  .multiples {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
+    gap: var(--s2);
+    padding: var(--s6);
+    align-items: end;
+  }
+  .mult {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--s3);
+    padding: var(--s4) var(--s2);
+    border: 1px solid transparent;
+    border-radius: var(--r2);
+    background: none;
+    position: relative;
+  }
+  .mult:hover {
+    background: var(--panel-2);
+    border-color: var(--line);
+  }
+  .mult.leader {
+    background: var(--acc-soft);
+    border-color: var(--acc);
+  }
+  .mult-bars {
+    position: relative;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    width: 100%;
+    height: 120px;
+  }
+  /* THE BEST CASE IS AN OUTLINE, NOT A BLOCK. It is always the taller of the
+     two, so as a solid it covered the number that actually ranks. */
+  .mult-ghost {
+    position: absolute;
+    bottom: 0;
+    width: 30px;
+    border: 1px dashed var(--n7);
+    border-bottom: 0;
+    border-radius: var(--r1) var(--r1) 0 0;
+    animation: grow 720ms var(--ease) both;
+    transform-origin: bottom;
+  }
+  /* A FLOOR OF 4%, SO NOTHING VANISHES, and the FIGURE is printed beneath
+     every bar so the floor cannot be mistaken for the measurement. */
+  .mult-bar {
+    position: relative;
+    width: 22px;
+    border-radius: var(--r1) var(--r1) 0 0;
+    background: var(--up);
+    animation: grow 720ms var(--ease) 120ms both;
+    transform-origin: bottom;
+  }
+  .mult-bar.neg {
+    background: var(--down);
+  }
+  .mult-rung {
+    font-family: var(--mono);
+    font-size: var(--fs-xs);
+    font-weight: 700;
+    color: var(--ink);
+  }
+  .mult-fig {
+    font-family: var(--mono);
+    font-size: var(--fs-mini);
+    color: var(--dim);
+    font-variant-numeric: tabular-nums;
+  }
+  .mult-flag {
+    font-family: var(--mono);
+    font-size: 8.5px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    font-weight: 700;
+    color: var(--warn);
+  }
+  .mult-flag.seal {
+    color: var(--info);
+  }
+  /* EXCLUSION IS A RAIL. The bar keeps its height, its figure keeps its
+     contrast, and the rail says the row is a different KIND of thing rather
+     than a less important one. */
+  .mult.halted::before,
+  .mult.unsealed::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 3px;
+    border-radius: var(--r-full);
+    background: var(--warn);
+  }
+  .mult.unsealed::before {
+    background: var(--info);
+  }
+  .mult.halted .mult-bar {
+    background: var(--warn);
+  }
+  .mult.unsealed .mult-bar {
+    background: var(--info);
+  }
+  .rgroup-note {
+    margin: 0;
+    padding: 0 var(--s6) var(--s6);
+    font-size: var(--fs-sm);
+    color: var(--ink-2);
+    line-height: 1.55;
+  }
+  .rgroup-note b {
+    color: var(--ink-hi);
+  }
+  .rgroup-note.warn {
+    color: var(--warn);
+  }
+
+  /* ===================================================================== 13
+     THE LEDGER. Rows are --row-h, which is also the page's background grid.
+     The head is sticky inside the scroller, never inside the page.
+     =================================================================== */
+  .tblwrap {
+    border: 1px solid var(--line);
+    border-radius: var(--r4);
+    overflow: hidden;
+    background: var(--panel);
+  }
+  .tbl-scroll {
+    max-height: 408px;
+    overflow: auto;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-variant-numeric: tabular-nums;
+  }
+  thead th {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background: var(--panel-2);
+    border-bottom: 1px solid var(--line);
+    text-align: left;
+    padding: 0 var(--s5);
+    height: var(--row-h);
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    color: var(--faint);
+    font-weight: 700;
+    white-space: nowrap;
+  }
+  thead th.num {
+    text-align: right;
+  }
+  .caret {
+    color: var(--acc);
+    margin-left: var(--s2);
+  }
+  tbody td {
+    height: var(--row-h);
+    padding: 0 var(--s5);
+    border-bottom: 1px solid var(--line-soft);
+    font-size: var(--fs-sm);
+    color: var(--ink-2);
+    white-space: nowrap;
+  }
+  tbody td.num {
+    text-align: right;
+    font-family: var(--mono);
+  }
+  tbody td.strong {
+    color: var(--ink-hi);
+    font-weight: 700;
+  }
+  tbody td.neg {
+    color: var(--down);
+  }
+  tbody td b {
+    color: var(--ink-hi);
+  }
+  tbody tr:hover td {
+    background: var(--panel-2);
+  }
+  tbody tr.crowned td {
+    background: var(--acc-soft);
+  }
+  tbody tr.crowned td:first-child {
+    box-shadow: inset 3px 0 0 var(--acc);
+  }
+  /* The three exclusions, each a rail, none a fade. */
+  tbody tr.halted td:first-child {
+    box-shadow: inset 3px 0 0 var(--warn);
+  }
+  tbody tr.unsealed td:first-child {
+    box-shadow: inset 3px 0 0 var(--info);
+  }
+  tbody tr.notswept td:first-child {
+    box-shadow: inset 3px 0 0 var(--n7);
+  }
+  .sm {
+    font-size: var(--fs-mini);
+  }
+  /* The coverage gauge. Six pixels, not three: a 3px bar is a hairline and
+     reads as a rule rather than as a measurement. */
+  .cover {
+    display: inline-block;
+    width: 54px;
+    height: 6px;
+    border-radius: var(--r-full);
+    background: var(--well);
+    overflow: hidden;
+    vertical-align: middle;
+    margin-right: var(--s4);
+  }
+  .cover-fill {
+    display: block;
+    height: 100%;
+    background: var(--up);
+    animation: fill 820ms var(--ease) both;
+    transform-origin: left;
+  }
+  .cover-fill.short {
+    background: var(--warn);
+  }
+
+  /* ===================================================================== 14
+     THE DRILL-DOWN: the price terminal and the tester frames.
+     =================================================================== */
+  .term {
+    border: 1px solid var(--line);
+    border-radius: var(--r4);
+    overflow: hidden;
+    background: var(--panel);
+  }
+  .term-bar {
+    display: flex;
+    align-items: center;
+    gap: var(--s5);
+    padding: var(--s4) var(--s5);
+    border-bottom: 1px solid var(--line);
+    background: var(--panel-2);
+    flex-wrap: wrap;
+  }
+  .term-id {
+    display: flex;
+    align-items: baseline;
+    gap: var(--s4);
+  }
+  .term-id b {
+    font-size: var(--fs-md);
+    color: var(--ink-hi);
+  }
+  .term-feed {
+    font-family: var(--mono);
+    font-size: var(--fs-xs);
+    color: var(--faint);
+  }
+  .rungs {
+    margin-left: auto;
+    display: flex;
+    gap: var(--s1);
+    background: var(--well);
+    padding: 2px;
+    border-radius: var(--r-full);
+  }
+  .rungbtn {
+    height: 24px;
+    padding: 0 var(--s5);
+    border: 0;
+    border-radius: var(--r-full);
+    background: transparent;
+    font-family: var(--mono);
+    font-size: var(--fs-xs);
+    font-weight: 600;
+    color: var(--dim);
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s2);
+  }
+  .rungbtn:hover {
+    color: var(--ink);
+  }
+  .rungbtn.on {
+    background: var(--panel);
+    color: var(--ink-hi);
+    box-shadow: var(--e1);
+  }
+  .rungbtn .tick {
+    color: var(--up);
+    font-size: var(--fs-mini);
+  }
+  .legend {
+    display: flex;
+    align-items: center;
+    gap: var(--s5);
+    padding: var(--s4) var(--s5);
+    border-bottom: 1px solid var(--line-soft);
+    font-family: var(--mono);
+    font-size: var(--fs-xs);
+    color: var(--ink-2);
+    flex-wrap: wrap;
+  }
+  .legend i {
+    color: var(--faint);
+    font-style: normal;
+    margin-right: var(--s2);
+  }
+  .lg-t {
+    color: var(--faint);
+  }
+  .lg-chg.up {
+    color: var(--up);
+    font-weight: 700;
+  }
+  /* THE CHART AREA. Drawn as a frame with a real grid and a real axis and no
+     series, because the frame is TRUE and the series is what is missing. */
+  .plot {
+    height: 300px;
+    position: relative;
+    background: repeating-linear-gradient(
+        to bottom,
+        transparent 0 59px,
+        var(--line-soft) 59px 60px
+      ),
+      repeating-linear-gradient(to right, transparent 0 79px, var(--line-soft) 79px 80px);
+  }
+  .plot .candles {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: flex-end;
+    gap: 3px;
+    padding: var(--s6) var(--s6) 0;
+  }
+  .cndl {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-end;
+    min-width: 0;
+  }
+  .cndl i {
+    display: block;
+    width: 1px;
+    background: currentColor;
+  }
+  .cndl u {
+    display: block;
+    width: 100%;
+    max-width: 7px;
+    background: currentColor;
+    text-decoration: none;
+  }
+  .cndl.up {
+    color: var(--up);
+  }
+  .cndl.down {
+    color: var(--down);
+  }
+  .term-foot {
+    display: flex;
+    align-items: center;
+    gap: var(--s4);
+    padding: var(--s4) var(--s5);
+    border-top: 1px solid var(--line-soft);
+    flex-wrap: wrap;
+  }
+  .fnote {
+    font-size: var(--fs-mini);
+    color: var(--faint);
+  }
+  .ranges {
+    margin-left: auto;
+    display: flex;
+    gap: var(--s1);
+  }
+  .rangebtn {
+    height: 24px;
+    padding: 0 var(--s4);
+    border: 1px solid var(--line);
+    border-radius: var(--r1);
+    background: var(--panel);
+    font-family: var(--mono);
+    font-size: var(--fs-mini);
+    color: var(--dim);
+  }
+  .cnote {
+    margin: 0;
+    padding: var(--s5);
+    border-top: 1px solid var(--line-soft);
+    font-size: var(--fs-sm);
+    line-height: 1.6;
+    color: var(--dim);
+    background: var(--well);
+  }
+  .cnote b {
+    color: var(--ink-2);
+  }
+  .cnote code {
+    font-family: var(--mono);
+    font-size: var(--fs-xs);
+  }
+
+  /* A CHART FRAME WITH NO SERIES IN IT. Axes, gridlines, the zero line and
+     the legend are all drawn, because they are all TRUE — the shape of the
+     plot is not in doubt, only its contents. The plot area carries the
+     sentence naming the field the sweep would have to write. */
+  .frames {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+    gap: var(--s5);
+  }
+  .frame {
+    border: 1px solid var(--line);
+    border-radius: var(--r4);
+    background: var(--panel);
+    overflow: hidden;
+  }
+  .frame-h {
+    display: flex;
+    align-items: center;
+    gap: var(--s4);
+    padding: var(--s4) var(--s5);
+    border-bottom: 1px solid var(--line-soft);
+    font-size: var(--fs-sm);
+    font-weight: 700;
+    color: var(--ink-hi);
+  }
+  .frame-plot {
+    height: 168px;
+    position: relative;
+    background: repeating-linear-gradient(
+      to bottom,
+      transparent 0 41px,
+      var(--line-soft) 41px 42px
+    );
+  }
+  .frame-plot .zero {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 50%;
+    height: 1px;
+    background: var(--line-hard);
+  }
+  .frame-plot .missing {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    padding: var(--s6);
+    text-align: center;
+    font-size: var(--fs-sm);
+    color: var(--dim);
+    line-height: 1.55;
+  }
+  .frame-plot .missing b {
+    color: var(--warn);
+  }
+  .frame-plot .missing code {
+    font-family: var(--mono);
+    font-size: var(--fs-xs);
+    background: var(--well);
+    padding: 1px 4px;
+    border-radius: var(--r1);
+  }
+  .frame-x {
+    display: flex;
+    justify-content: space-between;
+    padding: var(--s3) var(--s5);
+    border-top: 1px solid var(--line-soft);
+    font-family: var(--mono);
+    font-size: var(--fs-mini);
+    color: var(--faint);
+  }
+  .quads {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 1px;
+    background: var(--line);
+    border: 1px solid var(--line);
+    border-radius: var(--r4);
+    overflow: hidden;
+  }
+  .quad {
+    background: var(--panel);
+    padding: var(--s5);
+    display: flex;
+    flex-direction: column;
+    gap: var(--s1);
+  }
+  .quad .k {
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    color: var(--faint);
+    font-weight: 600;
+  }
+  .quad .v {
+    font-size: var(--fs-lg);
+    font-weight: 700;
+    color: var(--ink-hi);
+    font-variant-numeric: tabular-nums;
+  }
+  .quad .v.up {
+    color: var(--up);
+  }
+  .quad .v.down {
+    color: var(--down);
+  }
+  .quad .u {
+    font-size: var(--fs-mini);
+    color: var(--faint);
+  }
+  /* THE PADLOCK. A cell the ledger cannot fill keeps its place and says so;
+     it does not read `0` and it does not read `—` with no reason. */
+  .quad.locked .v {
+    color: var(--faint);
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: var(--s3);
+    font-size: var(--fs-md);
+  }
+  .quad.locked .lock {
+    width: 13px;
+    height: 13px;
+    flex: none;
+    color: var(--warn);
+  }
+
+  /* ===================================================================== 15
+     STATES. The half no mockup carries, and the half that decides whether a
+     console is honest. Each is the panel in the condition named above it.
+     =================================================================== */
+  .states {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+    gap: var(--s6);
+  }
+  .state {
+    border: 1px solid var(--line);
+    border-radius: var(--r4);
+    background: var(--panel);
+    overflow: hidden;
+    box-shadow: var(--e1);
+  }
+  .state-k {
+    padding: var(--s4) var(--s5);
+    border-bottom: 1px solid var(--line-soft);
+    background: var(--panel-2);
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    color: var(--faint);
+    font-weight: 700;
+  }
+  .state-b {
+    padding: var(--s6);
+    display: flex;
+    flex-direction: column;
+    gap: var(--s4);
+  }
+  .state-b h3 {
+    margin: 0;
+    font-size: var(--fs-md);
+    color: var(--ink-hi);
+  }
+  .state-b p {
+    margin: 0;
+    font-size: var(--fs-sm);
+    line-height: 1.6;
+    color: var(--ink-2);
+  }
+  .state-b p b {
+    color: var(--ink-hi);
+  }
+  .cmd {
+    margin: 0;
+    padding: var(--s5);
+    background: var(--well);
+    border: 1px solid var(--line);
+    border-radius: var(--r2);
+    font-family: var(--mono);
+    font-size: var(--fs-xs);
+    color: var(--ink);
+    overflow-x: auto;
+    white-space: pre;
+  }
+  .note-bar {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--s4);
+    padding: var(--s5);
+    border-radius: var(--r2);
+    font-size: var(--fs-sm);
+    line-height: 1.6;
+  }
+  .note-bar.warn {
+    background: var(--warn-soft);
+    border-left: 3px solid var(--warn);
+    color: var(--ink-2);
+  }
+  .note-bar.bad {
+    background: var(--down-soft);
+    border-left: 3px solid var(--down);
+    color: var(--ink-2);
+  }
+  .note-bar.good {
+    background: var(--up-soft);
+    border-left: 3px solid var(--up);
+    color: var(--ink-2);
+  }
+  .note-bar b {
+    color: var(--ink-hi);
+  }
+  .spin {
+    width: 15px;
+    height: 15px;
+    flex: none;
+    border-radius: 50%;
+    border: 2px solid var(--line-hard);
+    border-top-color: var(--acc);
+    animation: spin 720ms linear infinite;
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  /* ===================================================================== 16
+     FOOTER — the load-bearing numbers, stated where they can be checked.
+     =================================================================== */
+  footer {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--s4) var(--s7);
+    padding-top: var(--s6);
+    border-top: 1px solid var(--line);
+    font-family: var(--mono);
+    font-size: var(--fs-mini);
+    color: var(--faint);
+  }
+</style>
+
+<header class="topbar">
+  <span class="brand"><span class="mark">X</span>bruteX</span>
+  <nav class="navs">
+    <a href="#top">Markets</a><a href="#top">Ingest</a><a href="#top">Autopilot</a><a href="#top"
+      >DB</a
+    ><a href="#top">Audit</a><a href="#top">Mapping</a><a class="on" href="#top">Backtest</a>
+  </nav>
+  <span class="topright">
+    <span class="clock"><i class="live"></i>IST 15:31:04</span>
+    <span class="tog" role="group" aria-label="Theme">
+      <button type="button" data-t="light" aria-pressed="true">Light</button>
+      <button type="button" data-t="dark" aria-pressed="false">Dark</button>
+    </span>
+  </span>
+</header>
+
+<main id="top">
+  <div class="head rise" style="animation-delay: 60ms">
+    <h1>Backtest</h1>
+    <span class="sub">Ranked on <b>worst-case fills</b> — never on the best case.</span>
+    <span class="feedchip">Feed <b>Groww</b> · results ledger v3</span>
+  </div>
+
+  <!-- ============================================================
+       ONE SHELL. Every section below is a different view of ONE run, so
+       there is no gap between them for the page's ground to show through.
+       ============================================================ -->
+  <div class="shell rise" style="animation-delay: 140ms">
+    <!-- ------------------------------------------------------------
+         THE SWEEP BAR — one grid, three named tracks.
+         Read the four fields as ONE row: every label sits on the label
+         track, every control on the control track, every note on the note
+         track. The note under `timeframes` is two lines and the note under
+         `from` is one; neither control moves.
+         ------------------------------------------------------------ -->
+    <section class="sweep" aria-label="New sweep">
+      <span class="sweep-k">New sweep</span>
+
+      <div class="field">
+        <span class="lab" id="f-inst">Instruments</span>
+        <span class="ctl" role="button" tabindex="0" aria-labelledby="f-inst"
+          ><span>2 of 2</span></span
+        >
+        <span class="note">NIFTY, BANKNIFTY — every spot index this feed holds</span>
+      </div>
+
+      <div class="field">
+        <span class="lab" id="f-tf">Timeframes</span>
+        <span class="ctl" role="button" tabindex="0" aria-labelledby="f-tf"
+          ><span>all 8</span></span
+        >
+        <span class="note">
+          Execution is always one-minute, whichever are picked. <b>1day is not offered</b> — it is
+          stored, never swept.
+        </span>
+      </div>
+
+      <div class="field">
+        <span class="lab" id="f-from">From</span>
+        <span class="ctl" role="button" tabindex="0" aria-labelledby="f-from"
+          ><span>Jan 2016</span></span
+        >
+        <span class="note">first month on disk</span>
+      </div>
+
+      <div class="field">
+        <span class="lab" id="f-to">To</span>
+        <span class="ctl" role="button" tabindex="0" aria-labelledby="f-to"
+          ><span>Aug 2026</span></span
+        >
+        <span class="note">last month on disk</span>
+      </div>
+
+      <div class="field go">
+        <span class="lab" aria-hidden="true">Go</span>
+        <button class="btn run" type="button">Run brute force</button>
+        <span class="note" aria-hidden="true">.</span>
+      </div>
+
+      <!-- WHAT THE PRESS WILL ACTUALLY DO, not what the controls express.
+           This is the note track spanning the full width, and it is where a
+           divergence between the form and the route is SAID rather than
+           hidden behind a disabled control. -->
+      <p class="sweep-n">
+        This press sweeps <b>NIFTY</b> on <b>Groww</b>, every intraday timeframe, a pattern needing
+        <b>20%</b> of that timeframe's own bars. There is no support control and no depth control:
+        the ladder walks upward until the frequent frontier empties, and a parameter that can be set
+        can be set wrongly and silently.
+        <span class="warnish">Not every timeframe holds the same history</span> — the short ones are
+        a shorter sample, not a corrected one.
+      </p>
+    </section>
+
+    <!-- ------------------------------------------------------------
+         THE INTEGRITY BAR. Absent at zero; here because there is one.
+         ------------------------------------------------------------ -->
+    <section class="integrity" role="alert">
+      <span class="mark" aria-hidden="true">⚠</span>
+      <div>
+        <strong>1 record failed the integrity seal</strong>
+        <span>
+          It read back whole and every field holds a legal value — which is exactly why this check
+          exists. The bytes do not match the <code>blake3</code> seal written beside them, so it is
+          shown, marked, and kept out of every ranking on this page. Treat its figures as unknown
+          rather than wrong, and run the sweep again to replace it.
+        </span>
+      </div>
+    </section>
+
+    <!-- ------------------------------------------------------------
+         THE SUMMARY — four facts before any detail. Two of them read zero
+         and are drawn anyway; the fifth appears only when it is not zero.
+         ------------------------------------------------------------ -->
+    <section class="facts" aria-label="Summary">
+      <div class="fact">
+        <span class="k">Runs recorded</span>
+        <span class="v" data-count="47">0</span>
+        <span class="n">all of them read</span>
+      </div>
+      <div class="fact good">
+        <span class="k">Complete</span>
+        <span class="v" data-count="38">0</span>
+        <span class="n">ran to extinction AND read back intact</span>
+      </div>
+      <div class="fact warn">
+        <span class="k">Halted</span>
+        <span class="v" data-count="7">0</span>
+        <span class="n">excluded from ranking — depth is partial</span>
+      </div>
+      <div class="fact nil">
+        <span class="k">Span holes</span>
+        <span class="v">0</span>
+        <span class="n">every span was whole</span>
+      </div>
+      <div class="fact warn">
+        <span class="k">Not swept</span>
+        <span class="v">1</span>
+        <span class="n">on a timeframe the engine never sweeps — listed, never ranked</span>
+      </div>
+    </section>
+
+    <!-- ------------------------------------------------------------
+         LEVEL 1 — THE ANSWER
+         ------------------------------------------------------------ -->
+    <section class="block">
+      <div class="bh-row"><h2 class="bh">The answer</h2></div>
+      <div class="crown">
+        <span class="crown-mark">best complete run</span>
+        <div class="crown-body">
+          <div class="crown-id">
+            <b>NIFTY</b>
+            <span class="rung">15min</span>
+            <span class="dim">groww</span>
+            <span class="dim">Jan 2016 – Aug 2026</span>
+          </div>
+          <div class="crown-figs">
+            <div class="fig lead">
+              <span class="k">worst-case total</span>
+              <span class="v up">₹13,504.20</span>
+            </div>
+            <div class="fig">
+              <span class="k">best-case total</span>
+              <span class="v ghost">₹18,930.75</span>
+            </div>
+            <div class="fig">
+              <span class="k">trades</span>
+              <span class="v">412</span>
+            </div>
+            <div class="fig">
+              <span class="k">combinations</span>
+              <span class="v">2,184,096</span>
+            </div>
+          </div>
+          <p class="crown-note">
+            Ranked on the worst-case number. The best case is <b>₹5,426.55</b> higher, which is how
+            much of the headline is fill assumption rather than edge.
+          </p>
+        </div>
+        <button class="btn sm" type="button">Drill in</button>
+      </div>
+    </section>
+
+    <!-- ------------------------------------------------------------
+         LEVEL 2 — WHICH RUNG CARRIES THE EDGE
+         ------------------------------------------------------------ -->
+    <section class="block">
+      <div class="bh-row"><h2 class="bh">Which rung carries the edge</h2></div>
+
+      <div class="rgroup">
+        <div class="rgroup-head">
+          <b>NIFTY</b>
+          <span class="dim">groww</span>
+          <span class="dim">Jan 2016 → Aug 2026</span>
+          <span class="dim">a pattern had to appear on 20.0% of bars to be kept</span>
+          <span class="pill">6 rungs swept at this ratio</span>
+          <span class="pill warn">1 halted</span>
+          <span class="pill seal">1 unsealed</span>
+        </div>
+
+        <!-- ONE SCALE PER ROW. Heights are comparable across the rungs in
+             this group and across nothing else. A rung never swept at this
+             span is ABSENT, not zero. -->
+        <div class="multiples">
+          <button class="mult leader" type="button">
+            <span class="mult-bars">
+              <span class="mult-ghost" style="height: 100%"></span>
+              <span class="mult-bar" style="height: 71%"></span>
+            </span>
+            <span class="mult-rung">15min</span>
+            <span class="mult-fig">₹13,504</span>
+          </button>
+          <button class="mult" type="button">
+            <span class="mult-bars">
+              <span class="mult-ghost" style="height: 64%"></span>
+              <span class="mult-bar" style="height: 48%"></span>
+            </span>
+            <span class="mult-rung">30min</span>
+            <span class="mult-fig">₹9,118</span>
+          </button>
+          <button class="mult" type="button">
+            <span class="mult-bars">
+              <span class="mult-ghost" style="height: 41%"></span>
+              <span class="mult-bar" style="height: 27%"></span>
+            </span>
+            <span class="mult-rung">5min</span>
+            <span class="mult-fig">₹5,140</span>
+          </button>
+          <button class="mult" type="button">
+            <span class="mult-bars">
+              <span class="mult-ghost" style="height: 18%"></span>
+              <span class="mult-bar neg" style="height: 11%"></span>
+            </span>
+            <span class="mult-rung">1min</span>
+            <span class="mult-fig">−₹2,077</span>
+          </button>
+          <button class="mult halted" type="button">
+            <span class="mult-bars">
+              <span class="mult-ghost" style="height: 55%"></span>
+              <span class="mult-bar" style="height: 39%"></span>
+            </span>
+            <span class="mult-rung">10min</span>
+            <span class="mult-fig">₹7,402</span>
+            <span class="mult-flag">halted</span>
+          </button>
+          <button class="mult unsealed" type="button">
+            <span class="mult-bars">
+              <span class="mult-ghost" style="height: 33%"></span>
+              <span class="mult-bar" style="height: 22%"></span>
+            </span>
+            <span class="mult-rung">3min</span>
+            <span class="mult-fig">₹4,188</span>
+            <span class="mult-flag seal">seal</span>
+          </button>
+        </div>
+
+        <p class="rgroup-note">
+          <b>15min</b> carries the most under worst-case fills across the 4 comparable rungs swept
+          here: ₹13,504.20 over 412 trades. The halted and unsealed rungs are charted and are not
+          ranked against them.
+        </p>
+      </div>
+    </section>
+
+    <!-- ------------------------------------------------------------
+         LEVEL 0 — THE LEDGER
+         ------------------------------------------------------------ -->
+    <section class="block">
+      <div class="bh-row">
+        <h2 class="bh">The ledger</h2>
+        <input class="find" type="search" placeholder="instrument, feed or rung…" aria-label="Filter runs" />
+        <span class="count">6 of 47 shown</span>
+      </div>
+
+      <div class="tblwrap">
+        <div class="tbl-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Instrument</th>
+                <th>Rung</th>
+                <th>Span</th>
+                <th>Coverage</th>
+                <th>Complete</th>
+                <th class="num">Trades</th>
+                <th class="num">Worst case ▾</th>
+                <th class="num">Best case</th>
+                <th>Finished</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr class="crowned">
+                <td><b>NIFTY</b> <span class="sm dim">groww</span></td>
+                <td><span class="rung">15min</span></td>
+                <td class="sm dim">Jan 2016 – Aug 2026</td>
+                <td>
+                  <span class="cover"><span class="cover-fill" style="width: 100%"></span></span>
+                  <span class="sm dim">128/128</span>
+                </td>
+                <td><span class="pill good">yes · depth 6</span></td>
+                <td class="num">412</td>
+                <td class="num strong">₹13,504.20</td>
+                <td class="num dim">₹18,930.75</td>
+                <td class="sm dim">28 Aug, 14:02</td>
+              </tr>
+              <tr>
+                <td><b>NIFTY</b> <span class="sm dim">groww</span></td>
+                <td><span class="rung">30min</span></td>
+                <td class="sm dim">Jan 2016 – Aug 2026</td>
+                <td>
+                  <span class="cover"><span class="cover-fill" style="width: 100%"></span></span>
+                  <span class="sm dim">128/128</span>
+                </td>
+                <td><span class="pill good">yes · depth 5</span></td>
+                <td class="num">268</td>
+                <td class="num strong">₹9,118.40</td>
+                <td class="num dim">₹12,004.10</td>
+                <td class="sm dim">28 Aug, 13:47</td>
+              </tr>
+              <tr class="halted">
+                <td><b>NIFTY</b> <span class="sm dim">groww</span></td>
+                <td><span class="rung">10min</span></td>
+                <td class="sm dim">Jan 2016 – Aug 2026</td>
+                <td>
+                  <span class="cover"><span class="cover-fill" style="width: 100%"></span></span>
+                  <span class="sm dim">128/128</span>
+                </td>
+                <td><span class="pill warn">NO · depth 4 partial</span></td>
+                <td class="num">331</td>
+                <td class="num strong">₹7,402.00</td>
+                <td class="num dim">₹10,415.65</td>
+                <td class="sm dim">28 Aug, 13:20</td>
+              </tr>
+              <tr class="unsealed">
+                <td><b>NIFTY</b> <span class="sm dim">groww</span></td>
+                <td><span class="rung">3min</span></td>
+                <td class="sm dim">Jan 2016 – Aug 2026</td>
+                <td>
+                  <span class="cover"><span class="cover-fill" style="width: 100%"></span></span>
+                  <span class="sm dim">128/128</span>
+                </td>
+                <!-- SEAL BEFORE DEPTH. A row that failed its seal has a
+                     `depth` that is itself one of the bytes in doubt, so
+                     printing "depth 5" would be reporting a number as the
+                     reason it cannot be trusted. -->
+                <td><span class="pill seal">NO · seal failed</span></td>
+                <td class="num">889</td>
+                <td class="num strong">₹4,188.05</td>
+                <td class="num dim">₹6,701.30</td>
+                <td class="sm dim">28 Aug, 12:55</td>
+              </tr>
+              <tr>
+                <td><b>BANKNIFTY</b> <span class="sm dim">groww</span></td>
+                <td><span class="rung">15min</span></td>
+                <td class="sm dim">Apr 2019 – Aug 2026</td>
+                <td>
+                  <span class="cover"
+                    ><span class="cover-fill short" style="width: 82%"></span
+                  ></span>
+                  <span class="sm dim">73/89</span>
+                </td>
+                <td><span class="pill good">yes · depth 5</span></td>
+                <td class="num">357</td>
+                <td class="num strong neg">−₹1,940.15</td>
+                <td class="num dim">₹402.90</td>
+                <td class="sm dim">28 Aug, 11:31</td>
+              </tr>
+              <tr class="notswept">
+                <td><b>NIFTY</b> <span class="sm dim">groww</span></td>
+                <td><span class="rung">1day</span></td>
+                <td class="sm dim">Jan 2016 – Aug 2026</td>
+                <td>
+                  <span class="cover"><span class="cover-fill" style="width: 100%"></span></span>
+                  <span class="sm dim">128/128</span>
+                </td>
+                <td><span class="pill warn">not swept · 1day</span></td>
+                <td class="num">61</td>
+                <td class="num strong">₹664.75</td>
+                <td class="num dim">₹880.20</td>
+                <td class="sm dim">27 Aug, 19:04</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ------------------------------------------------------------
+         LEVELS 3–7 — THE DRILL-DOWN
+         ------------------------------------------------------------ -->
+    <section class="block">
+      <div class="bh-row">
+        <h2 class="bh">NIFTY · 15min · Jan 2016 – Aug 2026</h2>
+        <span class="spacer"></span>
+        <button class="btn sm" type="button">Close</button>
+      </div>
+
+      <div class="term">
+        <div class="term-bar">
+          <div class="term-id">
+            <b>NIFTY</b>
+            <span class="term-feed">groww</span>
+          </div>
+          <div class="rungs" role="group" aria-label="Timeframe">
+            <button class="rungbtn" type="button">1min<span class="tick">✓</span></button>
+            <button class="rungbtn" type="button">5min<span class="tick">✓</span></button>
+            <button class="rungbtn on" type="button">15min<span class="tick">✓</span></button>
+            <button class="rungbtn" type="button">30min<span class="tick">✓</span></button>
+            <button class="rungbtn" type="button">1day</button>
+          </div>
+        </div>
+
+        <div class="legend">
+          <span class="lg-t">28 Aug 2026, 14:45</span>
+          <span><i>O</i>24,318.40</span>
+          <span><i>H</i>24,377.05</span>
+          <span><i>L</i>24,301.90</span>
+          <span><i>C</i>24,366.15</span>
+          <span class="lg-chg up">+0.20%</span>
+        </div>
+
+        <div class="plot">
+          <div class="candles" aria-hidden="true">
+            <span class="cndl up" style="height: 44%"
+              ><i style="height: 18%"></i><u style="height: 52%"></u><i style="height: 30%"></i
+            ></span>
+            <span class="cndl up" style="height: 52%"
+              ><i style="height: 14%"></i><u style="height: 61%"></u><i style="height: 25%"></i
+            ></span>
+            <span class="cndl down" style="height: 48%"
+              ><i style="height: 22%"></i><u style="height: 44%"></u><i style="height: 34%"></i
+            ></span>
+            <span class="cndl up" style="height: 61%"
+              ><i style="height: 11%"></i><u style="height: 70%"></u><i style="height: 19%"></i
+            ></span>
+            <span class="cndl up" style="height: 68%"
+              ><i style="height: 16%"></i><u style="height: 58%"></u><i style="height: 26%"></i
+            ></span>
+            <span class="cndl down" style="height: 58%"
+              ><i style="height: 26%"></i><u style="height: 41%"></u><i style="height: 33%"></i
+            ></span>
+            <span class="cndl down" style="height: 50%"
+              ><i style="height: 20%"></i><u style="height: 49%"></u><i style="height: 31%"></i
+            ></span>
+            <span class="cndl up" style="height: 63%"
+              ><i style="height: 13%"></i><u style="height: 66%"></u><i style="height: 21%"></i
+            ></span>
+            <span class="cndl up" style="height: 76%"
+              ><i style="height: 9%"></i><u style="height: 74%"></u><i style="height: 17%"></i
+            ></span>
+            <span class="cndl down" style="height: 70%"
+              ><i style="height: 24%"></i><u style="height: 46%"></u><i style="height: 30%"></i
+            ></span>
+            <span class="cndl up" style="height: 80%"
+              ><i style="height: 12%"></i><u style="height: 69%"></u><i style="height: 19%"></i
+            ></span>
+            <span class="cndl up" style="height: 87%"
+              ><i style="height: 15%"></i><u style="height: 62%"></u><i style="height: 23%"></i
+            ></span>
+          </div>
+        </div>
+
+        <div class="term-foot">
+          <span class="pill good">all 61,875 bars</span>
+          <span class="fnote">128 months read</span>
+          <span class="fnote">no month missing</span>
+          <span class="fnote">no volume pane — a spot index publishes none</span>
+          <div class="ranges" role="group" aria-label="Visible range">
+            <button class="rangebtn" type="button">1D</button>
+            <button class="rangebtn" type="button">1M</button>
+            <button class="rangebtn" type="button">1Y</button>
+            <button class="rangebtn" type="button">All</button>
+          </div>
+        </div>
+
+        <p class="cnote">
+          <b>No entries or exits are marked, and that is deliberate.</b> The ledger records 412
+          trades as a COUNT and keeps no trade list, so there is no timestamp to put a marker at. A
+          chart with plausible markers would look like the answer to "when did it trade", which
+          nothing on disk can answer. No indicator is overlaid either — one computed here would be a
+          second implementation of something <code>crates/indicators</code> already owns.
+        </p>
+      </div>
+    </section>
+
+    <!-- ------------------------------------------------------------
+         THE FOUR SCALARS, AND THE CELLS THE LEDGER CANNOT FILL.
+         ------------------------------------------------------------ -->
+    <section class="block">
+      <div class="bh-row"><h2 class="bh">What the record holds</h2></div>
+
+      <div class="quads">
+        <div class="quad">
+          <span class="k">Worst-case total</span>
+          <span class="v up">₹13,504.20</span>
+          <span class="u">adverse-extreme fills · ranks</span>
+        </div>
+        <div class="quad">
+          <span class="k">Best-case total</span>
+          <span class="v">₹18,930.75</span>
+          <span class="u">open fills · never ranks</span>
+        </div>
+        <div class="quad">
+          <span class="k">Worst single trade</span>
+          <span class="v down">−₹178.45</span>
+          <span class="u">largest loss on one trade</span>
+        </div>
+        <div class="quad">
+          <span class="k">Max drawdown</span>
+          <span class="v down">−₹1,204.60</span>
+          <span class="u">peak to trough</span>
+        </div>
+        <div class="quad locked">
+          <span class="k">Win rate</span>
+          <span class="v">
+            <svg class="lock" viewBox="0 0 16 16" aria-hidden="true">
+              <rect x="3" y="7" width="10" height="7" rx="1.4" fill="none" stroke="currentColor" stroke-width="1.4" />
+              <path d="M5.5 7V5a2.5 2.5 0 015 0v2" fill="none" stroke="currentColor" stroke-width="1.4" />
+            </svg>
+            not recorded
+          </span>
+          <span class="u">the ledger holds a trade COUNT, not a winner/loser split</span>
+        </div>
+        <div class="quad locked">
+          <span class="k">Where the ladder emptied</span>
+          <span class="v">
+            <svg class="lock" viewBox="0 0 16 16" aria-hidden="true">
+              <rect x="3" y="7" width="10" height="7" rx="1.4" fill="none" stroke="currentColor" stroke-width="1.4" />
+              <path d="M5.5 7V5a2.5 2.5 0 015 0v2" fill="none" stroke="currentColor" stroke-width="1.4" />
+            </svg>
+            not recorded
+          </span>
+          <span class="u">depth and combinations are two scalars — there is no per-level series</span>
+        </div>
+      </div>
+
+      <!-- A CHART FRAME WITH NO SERIES IN IT. Axes, gridlines, the zero line
+           and the x labels are all drawn because they are all TRUE. What is
+           missing is the series, and the plot area names the field the sweep
+           would have to write for it to appear. -->
+      <div class="frames">
+        <div class="frame">
+          <div class="frame-h">Equity curve</div>
+          <div class="frame-plot">
+            <span class="zero"></span>
+            <div class="missing">
+              <span>
+                <b>No series on disk.</b> The record carries four scalars and no time series at all.
+                A curve drawn from four numbers would be a shape this page invented — it appears
+                when the sweep writes <code>equity_points</code>.
+              </span>
+            </div>
+          </div>
+          <div class="frame-x"><span>Jan 2016</span><span>Feb 2021</span><span>Aug 2026</span></div>
+        </div>
+
+        <div class="frame">
+          <div class="frame-h">Per-level ladder</div>
+          <div class="frame-plot">
+            <span class="zero"></span>
+            <div class="missing">
+              <span>
+                <b>No per-level breakdown on disk.</b> <code>depth</code> is 6 and
+                <code>combinations</code> is 2,184,096 — two scalars, so "where did the frequent
+                frontier empty" cannot be answered from this file.
+              </span>
+            </div>
+          </div>
+          <div class="frame-x"><span>k=1</span><span>k=3</span><span>k=6</span></div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <!-- ============================================================
+       THE STATES — the half no mockup carries.
+       ============================================================ -->
+  <div class="head rise" style="animation-delay: 300ms">
+    <h1 style="font-size: var(--fs-xl)">The states</h1>
+    <span class="sub">Every condition this page can be in, and the sentence it says in each.</span>
+  </div>
+
+  <div class="states rise" style="animation-delay: 360ms">
+    <div class="state">
+      <div class="state-k">Before the work — the ledger cannot take a result</div>
+      <div class="state-b">
+        <h3>This ledger cannot record a new run</h3>
+        <p>
+          The results file is <b>version 2</b> and this build writes <b>version 3</b>. A run appended
+          at the wrong stride would corrupt every record after it <b>and still parse</b>, so the
+          engine refuses instead — which is correct, but it refuses <b>after</b> the sweep has run.
+          Run is disabled for that reason.
+        </p>
+        <pre class="cmd">mv results.bin results.bin.v2</pre>
+        <p><b>Nothing is deleted.</b> The runs already recorded stay readable in the moved file.</p>
+      </div>
+    </div>
+
+    <div class="state">
+      <div class="state-k">Running — indeterminate, and saying so</div>
+      <div class="state-b">
+        <div class="note-bar good">
+          <span class="spin" aria-hidden="true"></span>
+          <span>
+            <b>Sweeping.</b> The ladder walks upward until the frequent frontier empties, so how long
+            it takes is decided by the data rather than by a setting — a one-day span finishes in
+            milliseconds and a fine rung over seven years takes minutes per month.
+          </span>
+        </div>
+        <p>
+          No percentage bar. A sweep is 43 ms to hours depending on the rung, so a percentage would
+          be a guess and a spinner alone says nothing. The elapsed clock is the one honest progress
+          signal.
+        </p>
+      </div>
+    </div>
+
+    <div class="state">
+      <div class="state-k">Empty — and it is not an error</div>
+      <div class="state-b">
+        <h3>Nothing has been swept yet</h3>
+        <p>
+          The results ledger exists and is readable — it is simply empty. It is written by
+          <b>cli</b> when a sweep completes, not by this server.
+        </p>
+        <pre class="cmd">cli range-all groww NIFTY 2016 1 2026 8</pre>
+        <p>
+          The command is built from the census, never from literals. <b>This is not an error</b> — an
+          empty ledger and an unreadable one are different facts, and this is the first.
+        </p>
+      </div>
+    </div>
+
+    <div class="state">
+      <div class="state-k">Filtered to nothing — which filter, and the way out</div>
+      <div class="state-b">
+        <h3>No runs under groww</h3>
+        <p>
+          The ledger holds <b>47 runs</b>, none of them recorded against <b>groww</b>. A sweep is
+          stamped with the feed its bars came from, so a run under another vendor is a different run
+          and not this one seen differently.
+        </p>
+        <p>
+          Two empty states, and they are not the same fact. "The ledger is empty" and "this feed has
+          none of the runs it holds" have different causes and different fixes.
+        </p>
+        <button class="btn sm" type="button">Show every feed</button>
+      </div>
+    </div>
+
+    <div class="state">
+      <div class="state-k">Nothing to crown</div>
+      <div class="state-b">
+        <h3>NO COMPLETE RUN</h3>
+        <p>
+          All <b>7 runs</b> shown were halted by a budget, so every one of them searched less of the
+          ladder than its <b>combinations</b> figure suggests. None is comparable with a complete
+          run, so none is crowned.
+        </p>
+        <p>The slot keeps its place and says why it is empty. It is never filled with the best halted run.</p>
+      </div>
+    </div>
+
+    <div class="state">
+      <div class="state-k">The record contradicts itself</div>
+      <div class="state-b">
+        <div class="note-bar bad">
+          <span>
+            <b>This record contradicts itself.</b> Best-case fills total ₹402.90, which is LESS than
+            the worst-case ₹1,940.15 — and cannot be, because both price the same trades over the
+            same bars and one end of a bar is never worse than the other.
+          </span>
+        </div>
+        <p>
+          Named rather than plotted. The ghost bar would simply render shorter and read as a merely
+          surprising run.
+        </p>
+      </div>
+    </div>
+
+    <div class="state">
+      <div class="state-k">Zero by absence, not by breaking even</div>
+      <div class="state-b">
+        <div class="note-bar warn">
+          <span>
+            This run took <b>no trades at all</b>. Its totals are therefore zero by absence: the
+            combination it chose never fired an entry over 61,875 bars. A zero here is not a result
+            to compare.
+          </span>
+        </div>
+        <p>
+          The distinction is the whole point. A run that broke even and a run that never traded print
+          the same ₹0.00 and mean different things.
+        </p>
+      </div>
+    </div>
+
+    <div class="state">
+      <div class="state-k">Halted — excluded, never hidden</div>
+      <div class="state-b">
+        <div class="note-bar warn">
+          <span>
+            This run was <b>halted by a budget</b>. Its depth of 4 is as far as the ladder got, not
+            as far as it goes, and its combinations cover less of the search than that figure
+            suggests while reading larger.
+          </span>
+        </div>
+        <p>
+          It keeps its row, its bar and its figures at full contrast, with an amber rail at the left
+          edge. It is excluded from ranking — not dimmed, not sorted to the bottom, <b>excluded</b>.
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <footer class="rise" style="animation-delay: 420ms">
+    <span>Control 48px · label 14px · row 34px — one grid, three tracks</span>
+    <span>48 is Picker's measured height, not a preference — 16px × 1.5 + 22 + 2</span>
+    <span>worst case solid · best case outline · the gap is its own fact</span>
+    <span>3 exclusions, 3 rails: halted amber · seal violet · not swept grey</span>
+    <span>every figure here is a specimen, not a measurement</span>
+  </footer>
+</main>
+
+<script>
+  document.querySelector('.tog').addEventListener('click', function (event) {
+    var btn = event.target.closest('button[data-t]');
+    if (!btn) return;
+    document.documentElement.setAttribute('data-theme', btn.dataset.t);
+    this.querySelectorAll('button').forEach(function (b) {
+      b.setAttribute('aria-pressed', String(b === btn));
+    });
+  });
+
+  // Count-up on the summary, so the four facts arrive as measurements being
+  // taken rather than as text that was always there. Reduced motion gets the
+  // final value immediately.
+  var still = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  document.querySelectorAll('[data-count]').forEach(function (el, i) {
+    var target = Number(el.dataset.count);
+    var fmt = function (v) {
+      return v.toLocaleString('en-IN');
+    };
+    if (still) {
+      el.textContent = fmt(target);
+      return;
+    }
+    var start = null;
+    setTimeout(function () {
+      requestAnimationFrame(function step(t) {
+        if (start === null) start = t;
+        var p = Math.min(1, (t - start) / 1000);
+        el.textContent = fmt(Math.round(target * (1 - Math.pow(1 - p, 3))));
+        if (p < 1) requestAnimationFrame(step);
+      });
+    }, 400 + i * 120);
+  });
+</script>

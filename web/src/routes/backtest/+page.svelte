@@ -4806,6 +4806,18 @@
        it holds, and `auto` has nothing to scroll. */
     min-height: 0;
     overflow-y: auto;
+    /* AND `min-width: 0` FOR THE SAME REASON ON THE OTHER AXIS, which was
+       missing and cost 147px. A flex item's `min-width` defaults to `auto`,
+       so this column floored at its own min-content and pushed `.main`
+       wider than the shell that contains it: MEASURED at a 760px viewport,
+       `.shell` 760, `.main` 907, body scroll 147px. `/db` and `/ingest`
+       measure 760/760/0 at the same width, so this was not the layout --
+       it was this page, and only this page.
+
+       A sideways-scrolling body moves every column of every section below
+       it. Wide content still scrolls, but inside its own container: that is
+       what `.tbl-scroll` is for. */
+    min-width: 0;
   }
   /* NO `overflow: hidden`, AND THE RADIUS IS KEPT ANOTHER WAY.
 
@@ -7922,12 +7934,62 @@
 
      `auto-fit` rather than a fixed three, because this bar has five cells
      and `/db` has seven -- the column COUNT is a consequence of the
-     width, and only the track floor is a decision. */
+     width, and only the track floor is a decision.
+
+     ------------------------------------------------------------------
+     FOUR NAMED TRACKS AND `subgrid`, BECAUSE `align-items: end` IS NOT AN
+     ALIGNMENT. This bar was a grid of columns whose rows were whatever
+     each cell happened to be, bottom-aligned. That holds a row together
+     only while every cell is the same height, and this bar's cells are
+     NOT: a field renders `Picker` at 48px once the census answers, and
+     renders a `reading census...` line at 28px until it does -- and the
+     page's own logic guarantees both states are on screen at once,
+     because `heldNow` is null until an instrument is picked, so
+     `instruments` has its menu while `from` and `to` are still waiting.
+
+     MEASURED on this build at 1600px, giving field one a 48px control and
+     leaving the other three waiting:
+
+       label tops before   177 · 177 · 177 · 177
+       label tops after    177 · 197 · 197 · 197      <- 20px apart
+       control track       49.59px -> 70px
+
+     Four labels on two lines, in the ordinary intermediate state of the
+     page. `web/design/backtest.html` states the fix and both older
+     references state the rule: "a grid with named rows, not a flex row of
+     variable-height columns".
+
+     THE NAME ROW IS PINNED AND NOTHING ELSE IS, and both halves of that
+     were paid for while writing `web/design/backtest.html`:
+
+     1. Auto-place everything, and the strip silently re-indexes -- the
+        name takes the label track, every label lands in the CONTROL
+        track, and the row still looks internally consistent because
+        subgrid keeps the fields agreeing with each other while all of
+        them are wrong together.
+
+     2. Pin every field to `grid-row: 2 / span 2`, and wrapping breaks. A
+        pinned field cannot move to a new row, so when only three columns
+        fit the auto-placement algorithm invents implicit columns for the
+        rest. MEASURED on the reference at a 752px bar:
+        `grid-template-columns` computed to `210px 210px 210px 0px 0px`
+        and the Run button landed 81px outside the page -- horizontal body
+        scroll, which moves every column on every section below it.
+
+     So the NAME row is pinned, because it is the one that steals a track.
+     The fields span two rows and auto-place, so a field that does not fit
+     wraps to a FRESH label/control pair with its own baseline -- which is
+     correct, and is what `/db` does by stacking two `.strip`s rather than
+     ragging one. `.runbar-n` is last in the DOM and spans every column,
+     so it settles below whatever the fields used. */
   .runbar {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
-    align-items: end;
-    gap: 16px 12px;
+    /* name · label · control — further label/control pairs are implicit */
+    grid-template-rows: auto 16px 48px;
+    grid-auto-rows: auto;
+    align-items: start;
+    gap: 4px 12px;
     padding: 16px;
   }
   /* The two full-width rows: the panel's own name above the fields, and
@@ -7950,32 +8012,78 @@
     grid-column: 1 / -1;
   }
   .runbar-k {
+    grid-row: 1;
     font-size: var(--fs-micro);
     font-weight: var(--w-semi);
     letter-spacing: 0.1em;
     text-transform: uppercase;
     color: var(--n8);
     padding: 0;
+    margin-bottom: 8px;
   }
+  /* NOT PINNED TO A ROW. It is last in the DOM and spans every column, so
+     it auto-places below whatever the fields used -- one row-pair on a
+     desktop, two when the bar is narrow enough to wrap. */
   .runbar-n {
     font-size: var(--fs-xs);
     line-height: 1.55;
     padding: 0;
+    margin-top: 8px;
   }
+  /* THE FIELD IS A SUBGRID OF THE LABEL AND CONTROL TRACKS, so the two
+     tracks are shared across the whole bar rather than recomputed per
+     cell. A field that is waiting and a field that has its menu now sit
+     on the same two lines by construction, not by coincidence of height. */
   .runf {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
+    display: grid;
+    grid-template-rows: subgrid;
+    grid-row: span 2;
+    min-width: 0;
   }
-  .runf > span,
-  .runf-wait {
+  .runf > span:first-child {
     font-size: var(--fs-micro);
     font-weight: var(--w-semi);
     letter-spacing: 0.1em;
     text-transform: uppercase;
     color: var(--n8);
+    line-height: 16px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
+  /* A CONTROL THAT IS NOT THERE YET STILL OCCUPIES THE CONTROL TRACK.
+     This was a bare 28px line of text, which is what let the row collapse
+     around it. It is a dashed box at the control's own height now: the
+     place is held, and the absence is legible instead of being a gap that
+     reads as a narrower control. */
+  .runf-wait {
+    display: flex;
+    align-items: center;
+    height: 48px;
+    padding: 0 14px;
+    border: 1px dashed var(--n6);
+    border-radius: 9px;
+    background: var(--n3);
+    font-size: var(--fs-micro);
+    font-weight: var(--w-semi);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--n8);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  /* THE RUN BUTTON SPANS A PAIR AND SITS ON THE CONTROL TRACK. It has no
+     label of its own, so a bare one-row item would auto-place into the
+     first free cell -- which is a LABEL track, not a control one -- and
+     pinning it to row 3 is worse: with the fields already filling that
+     row it forces an implicit column and the 81px overflow above. It
+     takes a label+control pair like every other cell and aligns to the
+     bottom of it, so it lands on the control baseline by construction and
+     travels with the fields when they wrap. */
   .runbar .btn.run {
+    grid-row: span 2;
+    align-self: end;
     height: 48px;
     padding-inline: 1.4rem;
     font-size: var(--fs-sm);
