@@ -25647,3 +25647,31 @@ callers** — `grep -rn "gaps::" crates/` finds only its own `pub mod` line. Unt
 something consumes it, nothing in this build can tell a complete month from a
 holed one; this entry makes the moment of loss loud, not the state afterwards
 detectable. Recorded, not closed.
+
+### D-0342
+
+**`/instruments.json` answered as Dhan for a feed the caller named, under HTTP
+200.**
+
+`ingest::parse_vendor` answers the EMPTY string with Dhan itself, so the
+`.unwrap_or(Vendor::Dhan)` on this route was unreachable for an absent `?feed=`
+and caught exactly one input: **a feed somebody NAMED and this build does not
+read.**
+
+Everything downstream then became Dhan's answer. The row filter is
+`ids.get(feed as usize)`, so the list is Dhan's instruments; the per-symbol bar
+counts are Dhan's store; the census and master headers describe Dhan's counters.
+All of it under a 200, for a request that asked for something else.
+
+This was the **last of twelve** `parse_vendor` call sites in `crates/api` still
+substituting; the other eleven refuse by name. `masters_json` removed the
+identical line and recorded why, in words this entry does not improve on:
+*"REFUSED BY NAME, NEVER SUBSTITUTED. The `.unwrap_or(Vendor::Dhan)` that stood
+here was unreachable for an ABSENT feed — `parse_vendor` answers the empty
+string with Dhan itself — so the only input it ever caught was a feed somebody
+NAMED and this build does not read."* A comment elsewhere in the same file even
+named this route as the outlier that still did it.
+
+Both arms are pinned by the test, because only the pair is the rule: an absent
+feed must still resolve to the default. Refusing the unknown without that half
+would have broken every page that omits the parameter.

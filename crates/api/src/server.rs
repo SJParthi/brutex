@@ -1023,8 +1023,30 @@ async fn instruments_json(
     // An instrument belongs to a feed's list when that feed's master gave it an
     // id. `ids` is indexed by the vendor's own discriminant, so the test is one
     // array index per row and not a lookup.
-    let feed = ingest::parse_vendor(&param(uri.query().unwrap_or(""), "feed"))
-        .unwrap_or(brutex_core::vendor::Vendor::Dhan);
+    // REFUSED BY NAME, NEVER SUBSTITUTED — the same rule `masters_json` states
+    // twelve hundred lines below, and this route was the last of twelve
+    // `parse_vendor` call sites in this crate still breaking it.
+    //
+    // `ingest::parse_vendor` answers the EMPTY string with Dhan itself, so this
+    // `unwrap_or` was unreachable for an absent `?feed=` and caught exactly one
+    // input: a feed somebody NAMED and this build does not read. Everything
+    // downstream then became Dhan's answer under HTTP 200 — the row filter
+    // (`ids.get(feed as usize)`), the per-symbol bar counts, and the census and
+    // master headers. A wrong answer wearing the shape of a right one, which
+    // this file elsewhere calls the worst class of defect in the repository.
+    let asked_feed = param(uri.query().unwrap_or(""), "feed");
+    let Some(feed) = ingest::parse_vendor(&asked_feed) else {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/json; charset=utf-8"),
+        );
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            headers,
+            no_such_feed_json(&asked_feed),
+        );
+    };
     // SORTED, GROUPED, AND HELD-FIRST. `by_key` is a HashMap, so iterating it
     // gave the browser TATACOMM, GMRAIRPORT, PINELABS — an order stable per
     // process and meaningless to a human. Nothing was findable by scrolling and
@@ -17303,6 +17325,71 @@ mod tests {
             );
         })
         .await;
+    }
+
+    /// **`/instruments.json` REFUSES A FEED IT DOES NOT READ, RATHER THAN
+    /// ANSWERING AS DHAN.**
+    ///
+    /// The last of twelve `parse_vendor` call sites in this crate that
+    /// substituted. `ingest::parse_vendor` answers the EMPTY string with Dhan
+    /// itself, so the `.unwrap_or(Vendor::Dhan)` that stood here was
+    /// unreachable for an absent `?feed=` and caught exactly one input: a feed
+    /// somebody NAMED and this build does not read.
+    ///
+    /// Everything downstream then became Dhan's answer under **HTTP 200** — the
+    /// row filter, the per-symbol bar counts, and the census and master
+    /// headers. `masters_json` removed the identical line and said why: being
+    /// served one vendor's copy after asking for another's is a wrong answer
+    /// wearing the shape of a right one.
+    ///
+    /// Both arms are asserted because only the pair proves the rule: an absent
+    /// feed must still work, or "refuse the unknown" would have quietly broken
+    /// every page that omits the parameter.
+    #[tokio::test]
+    async fn instruments_json_refuses_a_named_feed_it_cannot_read() {
+        let dir = masters("feedrefuse", None, None);
+        let site = Site::serving(&dir, &store_root("feedrefuse"));
+        let loaded = std::sync::Arc::new(site);
+
+        let (status, _headers, body) = instruments_json(
+            axum::extract::State(std::sync::Arc::clone(&loaded)),
+            "/instruments.json?feed=notafeed".parse().expect("a uri"),
+        )
+        .await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::BAD_REQUEST,
+            "a feed this build cannot read is refused, never answered as \
+             another vendor's list: {body}"
+        );
+        assert!(
+            body.contains("notafeed"),
+            "and the refusal names what was asked for: {body}"
+        );
+
+        // AN ABSENT FEED IS NOT AN UNKNOWN ONE. `parse_vendor` answers the
+        // empty string with the descriptor's default, so every page that omits
+        // the parameter must still be served — without this half, "refuse the
+        // unknown" would have broken all of them.
+        let (status, _headers, body) = instruments_json(
+            axum::extract::State(loaded),
+            "/instruments.json".parse().expect("a uri"),
+        )
+        .await;
+        assert_ne!(
+            status,
+            axum::http::StatusCode::BAD_REQUEST,
+            "an absent feed resolves to the descriptor's default and must NOT \
+             take the unknown-feed arm: {body}"
+        );
+        assert!(
+            !body.contains("refused"),
+            "and it is not answered with the no-such-feed body: {body}"
+        );
+        // NOT asserted as 200: this fixture store holds no census, so the route
+        // answers 503 for a reason that has nothing to do with the feed. What
+        // matters here is only that it did not take the refusal arm — pinning
+        // the success code would be testing the fixture, not the rule.
     }
 
     /// **`/instruments.json` used to answer both of its failures with `200`
