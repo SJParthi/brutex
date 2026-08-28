@@ -97,7 +97,7 @@ type DayRuns = Vec<(i64, Vec<(u16, u16)>)>;
 /// the field and the accessor, where clippy is right that a reader has to parse
 /// it twice to learn it is a map.
 pub type Cache = std::sync::Mutex<
-    std::collections::HashMap<(Vendor, String), (std::time::SystemTime, Calendar)>,
+    std::collections::HashMap<(Vendor, String, String, String), (std::time::SystemTime, Calendar)>,
 >;
 
 /// Bars a full NSE equity session holds.
@@ -526,7 +526,22 @@ pub fn cached(
     months: &[YearMonth],
 ) -> Calendar {
     let stamp = manifest_stamp(store_root, vendor);
-    let key = (vendor, symbol.to_owned());
+    // THE KEY IS THE WHOLE PATH THIS DERIVATION READS, NOT JUST THE NAME.
+    //
+    // It was `(vendor, symbol)`, which was safe only for as long as every
+    // caller passed the same `exchange`/`segment` — and they did, because both
+    // passed the literals `"NSE"` and `"INDEX"`. Fixing the caller to send the
+    // census's real segment makes one symbol addressable under two of them, and
+    // a two-field key would then serve `NSE/CASH/X`'s calendar to a request for
+    // `NSE/INDEX/X` under a cache hit. That is the same class of defect the
+    // literals caused, arriving through the cache instead of the path: an
+    // answer for a different series wearing the shape of the right one.
+    let key = (
+        vendor,
+        exchange.to_owned(),
+        segment.to_owned(),
+        symbol.to_owned(),
+    );
     if let Some(now) = stamp {
         // READ THROUGH A POISONED LOCK rather than around it. A panic while
         // holding it means some other request died; the map is still readable,
@@ -990,5 +1005,131 @@ mod agreement {
         // The per-symbol payload is untouched: no caller of `json` gains fields
         // it did not ask for.
         assert!(!json(&exchange).contains("derivedFrom"));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic, reason = "test-only assertions")]
+mod segments {
+    use super::*;
+
+    /// One day's worth of bars for `symbol` under `segment`, on the daily rung.
+    ///
+    /// The daily rung alone is enough: `derive` builds its set of traded days
+    /// from `DAY_1` and only measures session LENGTH from `MINUTE_1`, so a
+    /// store with days and no minutes is a calendar with sessions of unknown
+    /// size — which is exactly the shape a segment probe either finds or does
+    /// not.
+    fn write_day(root: &std::path::Path, segment: &str, symbol: &str, month: YearMonth) {
+        let path = store::path::StorePath::new(store::path::PathParts {
+            vendor: Vendor::Dhan,
+            exchange: "NSE",
+            segment,
+            symbol,
+            contract: None,
+            timeframe: Timeframe::DAY_1,
+            month,
+            file: store::path::FileKind::Bars,
+        })
+        .expect("a legal path");
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the id is the cross-check `open` folds; any 32 bits serve"
+        )]
+        let symbol_id = brutex_core::universe::fnv1a(symbol) as u32;
+        let mut file =
+            store::file::BarFile::open_or_create(root, path, symbol_id).expect("a bar file");
+        // MIDDAY ON THE FIRST, so the bar is unambiguously inside the month the
+        // path names — the store resolves a record's slot from its stamp, and a
+        // bar stamped outside its own month is a different test, not a smaller
+        // one. Days-since-epoch by the civil-from-days algorithm the store uses.
+        let (y, m) = (i64::from(month.year()), i64::from(month.month()));
+        let (y2, m2) = if m <= 2 { (y - 1, m + 9) } else { (y, m - 3) };
+        let era = y2.div_euclid(400);
+        let yoe = y2 - era * 400;
+        let doy = (153 * m2 + 2) / 5;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        let days = era * 146_097 + doe - 719_468;
+        let rows = [store::format::Bar {
+            ts_micros: days * 86_400 * 1_000_000 + 6 * 3_600 * 1_000_000,
+            open: 100,
+            high: 110,
+            low: 90,
+            close: 105,
+            volume: 1,
+            open_interest: i64::MIN,
+        }];
+        file.append(&rows).expect("one legal daily bar");
+    }
+
+    /// **A CALENDAR IS READ FROM THE SEGMENT IT IS GIVEN, AND THERE IS NO
+    /// DEFAULT.**
+    ///
+    /// This is the regression test for the defect that cost `ADANIENT` its
+    /// whole history on the page. `calendar_json` keyed its month map on the
+    /// bare symbol and passed the literals `"NSE"` and `"INDEX"` for every
+    /// instrument, so an equity — stored under `CASH`, exactly where the
+    /// master's `instrument_type` column puts an `EQ` row — was probed at
+    /// `NSE/INDEX/ADANIENT/`. **366 measured refusals**, 61 held months × 2
+    /// rungs × 3 derivations, against 1,240 daily bars that were sitting on
+    /// disk the whole time.
+    ///
+    /// Both halves are asserted because only the pair proves the property. That
+    /// the right segment reads is necessary; that the WRONG one comes back
+    /// empty is what makes the first half evidence rather than coincidence — a
+    /// `derive` that ignored its `segment` argument and always found the file
+    /// would pass the first assertion alone.
+    #[test]
+    fn a_cash_instrument_is_read_from_cash_and_is_absent_from_index() {
+        let root = std::env::temp_dir().join(format!(
+            "brutex-calendar-segment-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch root");
+        let month = YearMonth::new(2026, 1).expect("a legal month");
+        write_day(&root, "CASH", "ADANIENT", month);
+
+        let (found, found_report) = derive(
+            &root,
+            Vendor::Dhan,
+            "NSE",
+            "CASH",
+            "ADANIENT",
+            std::slice::from_ref(&month),
+        );
+        assert_eq!(
+            found.sessions(),
+            1,
+            "the segment the bars were written under reads them back"
+        );
+        assert!(
+            found_report.unreadable.is_empty(),
+            "nothing was unreadable: {:?}",
+            found_report.unreadable
+        );
+
+        let (missed, missed_report) = derive(
+            &root,
+            Vendor::Dhan,
+            "NSE",
+            "INDEX",
+            "ADANIENT",
+            std::slice::from_ref(&month),
+        );
+        assert_eq!(
+            missed.sessions(),
+            0,
+            "the wrong segment finds nothing — which is why the literal was a \
+             silent wrong answer rather than a loud one"
+        );
+        assert!(
+            !missed_report.unreadable.is_empty(),
+            "and it is REPORTED unreadable rather than passed off as a month \
+             of holidays"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

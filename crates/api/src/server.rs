@@ -23483,6 +23483,58 @@ async fn vocab_json() -> (
     )
 }
 
+/// The identity a calendar is derived for — everything the store path needs.
+///
+/// Named because it is a `HashMap` key, a sort key and a destructuring target,
+/// and the bare triple reads as a puzzle by its third appearance.
+type SpotIdentity = (
+    brutex_core::instrument::Exchange,
+    brutex_core::instrument::Segment,
+    brutex_core::symbol::Symbol,
+);
+
+/// Every SPOT series a census reading holds, grouped by its whole identity.
+///
+/// # Why this is a function rather than six lines in the loop
+///
+/// So it can be tested. The defect it exists to prevent lived in exactly this
+/// grouping: the map was keyed on `series.symbol` alone, and the caller then
+/// had nothing left to pass for `exchange` and `segment`, so it substituted the
+/// literals `"NSE"` and `"INDEX"` — for every instrument, whatever the census
+/// said. `ADANIENT` is stored at `NSE/CASH/ADANIENT/`, so every probe went to
+/// `NSE/INDEX/ADANIENT/` and missed: **366 measured refusals** against 1,240
+/// daily bars that were on disk the whole time.
+///
+/// A test over `derive` cannot catch that — `derive` always honoured the
+/// segment it was handed. The fault was in what the caller handed it, and this
+/// is the smallest piece of the caller that can be given a census and asked
+/// what it kept.
+///
+/// **Contract-bearing series are dropped, deliberately.**
+/// [`crate::calendar_of::derive`] addresses a series by exchange, segment and
+/// symbol and hands [`crate::bars::open`] a `contract: None`, so an option or
+/// future CANNOT be read through it — those bars live at `symbol/contract/` and
+/// the probe would open `symbol/`. That is not a narrowing of the answer: a
+/// calendar is which DAYS a venue traded, and every contract on a venue trades
+/// that venue's days. Reading one through a spot path returns an empty calendar
+/// that votes for nothing, which is the silent miss this whole change ends.
+fn spot_months_by_identity(
+    held: &[(census::Series, store::path::YearMonth)],
+) -> std::collections::HashMap<SpotIdentity, Vec<store::path::YearMonth>> {
+    let mut by_series: std::collections::HashMap<SpotIdentity, Vec<store::path::YearMonth>> =
+        std::collections::HashMap::new();
+    for (series, month) in held {
+        if series.contract.is_some() {
+            continue;
+        }
+        by_series
+            .entry((series.exchange, series.segment, series.symbol))
+            .or_default()
+            .push(*month);
+    }
+    by_series
+}
+
 async fn calendar_json(
     axum::extract::State(site): axum::extract::State<Loaded>,
     uri: axum::http::Uri,
@@ -23544,13 +23596,6 @@ async fn calendar_json(
         // fresh census; this is the same fix, on the route that reports rather
         // than the one that gates. D-0318.
         let fresh = census::read_all(&site.store_root);
-        let mut names: Vec<String> = fresh
-            .iter()
-            .flat_map(|c| census::held_entries(std::slice::from_ref(c)))
-            .map(|(series, _)| series.symbol.as_str().to_owned())
-            .collect();
-        names.sort_unstable();
-        names.dedup();
         let mut readings: Vec<(String, pull::calendar::Calendar)> = Vec::new();
         // THE SAME FRESH READING, WALKED ONCE. Filtering `site.entries` here
         // would have re-introduced the staleness two lines after fixing it —
@@ -23562,27 +23607,44 @@ async fn calendar_json(
         // 205 names × 15,857 rows on this operator's store — 3.2 million string
         // compares to answer a question a map answers in one probe each. One
         // pass to build, O(1) per name after it: `CLAUDE.md` §3 rule 4.
-        let mut by_symbol: std::collections::HashMap<String, Vec<store::path::YearMonth>> =
-            std::collections::HashMap::new();
-        for (series, month) in fresh
-            .iter()
-            .flat_map(|c| census::held_entries(std::slice::from_ref(c)))
-        {
-            by_symbol
-                .entry(series.symbol.as_str().to_owned())
-                .or_default()
-                .push(month);
-        }
-        for name in names {
+        //
+        // KEYED ON THE WHOLE IDENTITY, NOT THE BARE NAME, and that is the fix.
+        // This map was keyed on `series.symbol` alone, and the two arguments
+        // below were the literals `"NSE"` and `"INDEX"` — for every symbol,
+        // whatever the census actually said. `Series` carries `exchange`,
+        // `segment` AND `contract`, all three populated from the same
+        // `EntryKey` `pull::ingest` wrote the file under; dropping them here
+        // left nothing to pass, so a constant was substituted.
+        //
+        // MEASURED: `ADANIENT` is stored at `NSE/CASH/ADANIENT/`, exactly where
+        // the master's `instrument_type` column says an `EQ` row belongs. This
+        // route asked `NSE/INDEX/ADANIENT/` **366 times** — 61 held months × 2
+        // rungs × 3 cache-missing derivations — and every probe missed. 1,240
+        // daily bars sat on disk reading as "no data", which is the shape
+        // `CLAUDE.md` §4 bans outright: a fallback that hides a failure.
+        //
+        // The mirror image was already fixed on the WRITE path, and the comment
+        // left there predicted this exact symptom: *"a later reader asking for
+        // `NSE/CASH/360ONE` finds nothing while the data sits one directory
+        // over"*. Same defect, opposite side, and the write side was the half
+        // that got repaired.
+        let by_series = spot_months_by_identity(&census::held_entries(&fresh));
+        // SORTED SO THE ANSWER IS REPRODUCIBLE. A `HashMap`'s iteration order
+        // varies per process, and `agree` ships the names it derived from —
+        // an unsorted walk would reorder `from` between two identical requests.
+        let mut keys: Vec<_> = by_series.keys().copied().collect();
+        keys.sort_unstable();
+        for key in keys {
+            let (exchange, segment, symbol) = key;
             let months: Vec<store::path::YearMonth> =
-                by_symbol.get(&name).cloned().unwrap_or_default();
+                by_series.get(&key).cloned().unwrap_or_default();
             let calendar = crate::calendar_of::cached(
                 &site.calendars,
                 &site.store_root,
                 feed,
-                "NSE",
-                "INDEX",
-                &name,
+                exchange.as_str(),
+                segment.as_str(),
+                symbol.as_str(),
                 &months,
             );
             // A SYMBOL THIS FEED HOLDS NOTHING FOR IS NOT A VOTE FOR ANYTHING.
@@ -23591,7 +23653,7 @@ async fn calendar_json(
             // calendar; counting that as agreement would let a feed's absence
             // close the exchange.
             if calendar.sessions() > 0 {
-                readings.push((name, calendar));
+                readings.push((symbol.as_str().to_owned(), calendar));
             }
         }
         let (exchange, clashes) = crate::calendar_of::agree(&readings);
@@ -23614,19 +23676,53 @@ async fn calendar_json(
     // from the boot snapshot while `/calendar.json` answered from disk. Two
     // routes on one handler disagreeing about what the store holds is worse
     // than both being stale, because only one of them is ever checked.
-    let months: Vec<store::path::YearMonth> = census::read_all(&site.store_root)
+    // THE ASKED SYMBOL'S OWN IDENTITY, READ FROM THE CENSUS RATHER THAN ASSUMED.
+    // This branch carried the same two literals the exchange branch did, and
+    // the same consequence: `/calendar.json?symbol=ADANIENT` probed
+    // `NSE/INDEX/ADANIENT/` while the bars sat in `NSE/CASH/ADANIENT/`.
+    let mut held: Option<(
+        brutex_core::instrument::Exchange,
+        brutex_core::instrument::Segment,
+    )> = None;
+    let mut months: Vec<store::path::YearMonth> = Vec::new();
+    for (series, month) in census::read_all(&site.store_root)
         .iter()
         .flat_map(|c| census::held_entries(std::slice::from_ref(c)))
-        .filter(|(series, _)| series.symbol.as_str() == symbol)
-        .map(|(_, month)| month)
-        .collect();
+    {
+        if series.contract.is_some() || series.symbol.as_str() != symbol {
+            continue;
+        }
+        let identity = (series.exchange, series.segment);
+        // ONE IDENTITY PER ANSWER. A name held under two segments is two
+        // different series, and merging their months would build one calendar
+        // out of two paths — asking for months of the second under the first,
+        // which is the very confusion this edit removes.
+        match held {
+            None => {
+                held = Some(identity);
+                months.push(month);
+            }
+            Some(seen) if seen == identity => months.push(month),
+            Some(_) => {}
+        }
+    }
+
+    // A NAME THE CENSUS DOES NOT HOLD HAS NO PATH TO PROBE, and this is the
+    // ONLY arm where the two words are not the symbol's own. `derive` over zero
+    // months opens no file, so nothing here reaches a path; naming the case
+    // explicitly is what stops a literal creeping back in, because the code
+    // this replaces passed `"NSE"`/`"INDEX"` on every call, held or not.
+    let (exchange, segment) = held.unwrap_or((
+        brutex_core::instrument::Exchange::Nse,
+        brutex_core::instrument::Segment::Index,
+    ));
 
     let calendar = crate::calendar_of::cached(
         &site.calendars,
         &site.store_root,
         feed,
-        "NSE",
-        "INDEX",
+        exchange.as_str(),
+        segment.as_str(),
         &symbol,
         &months,
     );
@@ -23635,4 +23731,134 @@ async fn calendar_json(
         [(axum::http::header::CONTENT_TYPE, json)],
         crate::calendar_of::json(&calendar),
     )
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic, reason = "test-only assertions")]
+mod calendar_identity {
+    use super::*;
+
+    /// One held spot series, as the census would report it.
+    fn spot(
+        exchange: brutex_core::instrument::Exchange,
+        segment: brutex_core::instrument::Segment,
+        symbol: &str,
+    ) -> census::Series {
+        census::Series {
+            contract: None,
+            exchange,
+            segment,
+            symbol: brutex_core::symbol::Symbol::new(symbol).expect("a legal symbol"),
+            timeframe: store::path::Timeframe::DAY_1,
+        }
+    }
+
+    /// **AN EQUITY KEEPS ITS OWN SEGMENT, AND TWO SEGMENTS OF ONE NAME STAY
+    /// APART.**
+    ///
+    /// The regression test for the defect that cost `ADANIENT` its entire
+    /// history on the page. The grouping this exercises was keyed on
+    /// `series.symbol` alone; with the segment discarded there was nothing for
+    /// the caller to pass, so it substituted `"NSE"`/`"INDEX"` for every
+    /// instrument. An `EQ` row is stored under `CASH` — where the master's
+    /// `instrument_type` column puts it — so every probe opened
+    /// `NSE/INDEX/ADANIENT/` and missed: **366 measured refusals** against
+    /// **1,240** daily bars already on disk. `CLAUDE.md` §4 bans that exact
+    /// shape: a fallback that hides a failure.
+    ///
+    /// The second half is not a bonus. One name under two segments is two
+    /// different series, and a map keyed on the name alone would merge their
+    /// months into one list — then ask for the second's months under the
+    /// first's path. Keying on the whole identity is what makes the first half
+    /// hold for a store that has both.
+    #[test]
+    fn an_equity_keeps_cash_and_a_name_under_two_segments_does_not_merge() {
+        use brutex_core::instrument::{Exchange, Segment};
+        let jan = store::path::YearMonth::new(2026, 1).expect("a legal month");
+        let feb = store::path::YearMonth::new(2026, 2).expect("a legal month");
+
+        let grouped = spot_months_by_identity(&[
+            (spot(Exchange::Nse, Segment::Cash, "ADANIENT"), jan),
+            (spot(Exchange::Nse, Segment::Cash, "ADANIENT"), feb),
+            (spot(Exchange::Nse, Segment::Index, "NIFTY"), jan),
+        ]);
+
+        let cash = grouped
+            .get(&(
+                Exchange::Nse,
+                Segment::Cash,
+                brutex_core::symbol::Symbol::new("ADANIENT").expect("a legal symbol"),
+            ))
+            .expect("the equity is keyed under CASH, which is where its bars are");
+        assert_eq!(cash.len(), 2, "both of its months, and only its own");
+        assert!(
+            !grouped.contains_key(&(
+                Exchange::Nse,
+                Segment::Index,
+                brutex_core::symbol::Symbol::new("ADANIENT").expect("a legal symbol"),
+            )),
+            "and it is NOT reachable under INDEX — the literal this replaces \
+             would have sent every read there"
+        );
+
+        // ONE NAME, TWO SEGMENTS, TWO ENTRIES. Keyed on the symbol alone these
+        // would have collapsed into a single list of three months.
+        let both = spot_months_by_identity(&[
+            (spot(Exchange::Nse, Segment::Cash, "NIFTY"), jan),
+            (spot(Exchange::Nse, Segment::Index, "NIFTY"), jan),
+            (spot(Exchange::Nse, Segment::Index, "NIFTY"), feb),
+        ]);
+        assert_eq!(both.len(), 2, "two identities, not one merged bucket");
+        let nifty = brutex_core::symbol::Symbol::new("NIFTY").expect("a legal symbol");
+        assert_eq!(
+            both.get(&(Exchange::Nse, Segment::Cash, nifty))
+                .map(Vec::len),
+            Some(1),
+            "the CASH row keeps its one month"
+        );
+        assert_eq!(
+            both.get(&(Exchange::Nse, Segment::Index, nifty))
+                .map(Vec::len),
+            Some(2),
+            "and the INDEX row keeps its two"
+        );
+    }
+
+    /// **A CONTRACT-BEARING SERIES IS DROPPED, NOT READ THROUGH A SPOT PATH.**
+    ///
+    /// `derive` hands `bars::open` a `contract: None`, so an option's bars —
+    /// which live at `symbol/contract/` — cannot be reached through it. Before
+    /// this filter such a series was grouped, probed at `symbol/`, found empty,
+    /// and silently contributed nothing to the exchange vote. Dropping it is
+    /// the same outcome stated out loud, and it keeps the vote's `from` list
+    /// honest about who was actually asked.
+    #[test]
+    fn a_contract_series_is_left_out_rather_than_probed_at_the_spot_path() {
+        use brutex_core::instrument::{Exchange, Expiry, Kind, Segment};
+        let jan = store::path::YearMonth::new(2026, 1).expect("a legal month");
+        let expiry = Expiry::new(2026, 1, 29).expect("a legal expiry");
+        let contract = brutex_core::instrument::Contract::of(Kind::Future { expiry })
+            .expect("a future has one");
+
+        let grouped = spot_months_by_identity(&[
+            (
+                census::Series {
+                    contract: Some(contract),
+                    ..spot(Exchange::Nse, Segment::Fno, "NIFTY")
+                },
+                jan,
+            ),
+            (spot(Exchange::Nse, Segment::Index, "NIFTY"), jan),
+        ]);
+
+        assert_eq!(grouped.len(), 1, "only the spot series survives");
+        assert!(
+            grouped.contains_key(&(
+                Exchange::Nse,
+                Segment::Index,
+                brutex_core::symbol::Symbol::new("NIFTY").expect("a legal symbol"),
+            )),
+            "and it is the spot one that survived, not the contract one"
+        );
+    }
 }

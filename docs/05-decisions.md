@@ -25299,3 +25299,67 @@ because checking `open` alone would let a row through whose close is null.
 object shapes agree on the same body shape, in one test. Given that this rule
 has now been added to a subset of the doors three times, a test that fails when
 they diverge is worth more than a comment asking the next person to remember.
+
+### D-0335
+
+**`/calendar.json` read every instrument out of `NSE/INDEX/`, so a stored
+equity read as an empty store.**
+
+`calendar_json` grouped the census's held entries into a
+`HashMap<String, Vec<YearMonth>>` keyed on `series.symbol` alone, then called
+`calendar_of::cached` with the string literals `"NSE"` and `"INDEX"` — on both
+branches, for every instrument, whatever the census actually said.
+
+`census::held_entries` returns `(Series, YearMonth)` and `Series` carries
+`exchange`, `segment` **and** `contract`, every one of them populated from the
+same `EntryKey` that `pull::ingest` wrote the file under. The grouping threw all
+three away, so by the time the call was reached there was nothing left to pass
+and a constant was substituted for a fact the code had already read.
+
+**Measured on the operator's store.** `ADANIENT` is an `EQ` row and is filed at
+`bars/dhan/NSE/CASH/ADANIENT/`, exactly where `Vendor::type_of` puts it. This
+route asked `bars/dhan/NSE/INDEX/ADANIENT/` **366 times** — 61 held months × 2
+rungs × 3 cache-missing derivations — and every probe missed. **1,240 daily bars
+were on disk throughout**, decoded and verified: paisa integers, two decimals,
+`i64::MIN` in open interest. The page reported no data for an instrument whose
+data was complete.
+
+That is `CLAUDE.md` §4's banned row exactly — *a fallback that hides a failure* —
+and the write path had already been repaired for the identical defect. The
+comment left behind there predicted this symptom in advance: *"a later reader
+asking for `NSE/CASH/360ONE` finds nothing while the data sits one directory
+over."* One half of the mirror was fixed and the other was not.
+
+**The fix is to key on the identity rather than the name.**
+`spot_months_by_identity` groups on `(Exchange, Segment, Symbol)` and the loop
+passes `exchange.as_str()` and `segment.as_str()` down. It is extracted as a
+function for one reason: a test over `derive` cannot catch this. `derive` always
+honoured the segment it was handed — the fault was in what the caller handed it,
+and this is the smallest piece of the caller that can be given a census and asked
+what it kept.
+
+**The cache key is widened with it, and that is not incidental.**
+`calendar_of::Cache` was keyed `(Vendor, String)`, which was safe only while every
+caller passed the same two literals. Making one symbol addressable under two
+segments would otherwise serve `NSE/CASH/X`'s calendar to a request for
+`NSE/INDEX/X` under a cache hit — the same wrong answer arriving through the map
+instead of the path.
+
+**Contract-bearing series are dropped, and stated rather than implied.**
+`derive` hands `bars::open` a `contract: None`, so an option or future cannot be
+addressed through it at all: those bars live at `symbol/contract/` and the probe
+opens `symbol/`. They were previously grouped, probed, found empty, and silently
+counted as voting for nothing. A calendar is which DAYS a venue traded and every
+contract on a venue trades that venue's days, so nothing is lost by leaving them
+out — but the `from` list now names only instruments that were really asked.
+
+**The order is pinned too.** `HashMap` iteration order varies per process and
+`agree` ships the names it derived from, so the keys are sorted before the walk;
+two identical requests would otherwise return `from` in different orders.
+
+Proved by `an_equity_keeps_cash_and_a_name_under_two_segments_does_not_merge`,
+`a_contract_series_is_left_out_rather_than_probed_at_the_spot_path` and
+`a_cash_instrument_is_read_from_cash_and_is_absent_from_index`. The last asserts
+both halves — that the right segment reads and that the wrong one comes back
+empty **and reported unreadable** — because the first half alone would pass
+against a `derive` that ignored its argument entirely.
