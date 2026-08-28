@@ -259,7 +259,7 @@ pub fn load(path: &std::path::Path, vendor: Vendor) -> Result<Loaded, String> {
     // a dead process".
     if header.len() > MAX_ROW_BYTES {
         return Err(format!(
-            "{}: header row is {} bytes; this reader splits at most              {MAX_ROW_BYTES}",
+            "{}: header row is {} bytes; this reader splits at most {MAX_ROW_BYTES}",
             path.display(),
             header.len()
         ));
@@ -268,6 +268,15 @@ pub fn load(path: &std::path::Path, vendor: Vendor) -> Result<Loaded, String> {
 
     let widest = cols.widest();
     let mut out = Loaded::default();
+    // ONE field vector for the whole file, cleared and refilled per row.
+    //
+    // `line.split(',').collect()` starts at capacity 0 and doubles, because
+    // `Split`'s `size_hint` is `(0, None)` -- five allocations and four
+    // memcpys for a 33-column Dhan row, about a million malloc/free pairs
+    // across 200,461 rows. The column count is fixed by the header, so the
+    // capacity is known before the loop starts. `docs/07-o1-architecture.md`
+    // law 2, and layer 9's rule against allocating inside a loop.
+    let mut f: Vec<&str> = Vec::with_capacity(widest + 1);
     for (n, line) in lines.enumerate() {
         if line.is_empty() {
             continue;
@@ -285,7 +294,8 @@ pub fn load(path: &std::path::Path, vendor: Vendor) -> Result<Loaded, String> {
             ));
             continue;
         }
-        let f: Vec<&str> = line.split(',').collect();
+        f.clear();
+        f.extend(line.split(','));
         // A ROW TOO SHORT TO HOLD THE COLUMNS IS AN ERROR, NOT A DEFAULT.
         //
         // Defaulting a missing field to `""` put the empty string into the
@@ -340,9 +350,18 @@ pub fn load(path: &std::path::Path, vendor: Vendor) -> Result<Loaded, String> {
                 }
                 // The COUNT says an alphabet moved; the CODE says which one.
                 if d.reason == Skip::UnrecognisedListingClass {
-                    *out.unrecognised
-                        .entry(row.listing_class.trim().to_owned())
-                        .or_insert(0) += 1;
+                    // `entry(k.to_owned())` allocates the key on EVERY row,
+                    // including the overwhelming majority where the code has
+                    // been seen before -- and the scenario this counter exists
+                    // to detect (a whole series renamed) is exactly the one
+                    // where every equity row lands here. Look first, allocate
+                    // only when the code is genuinely new.
+                    let code = row.listing_class.trim();
+                    if let Some(n) = out.unrecognised.get_mut(code) {
+                        *n += 1;
+                    } else {
+                        out.unrecognised.insert(code.to_owned(), 1);
+                    }
                 }
             }
             Err(e) => out.errors.push((n + 2, e.to_string())),

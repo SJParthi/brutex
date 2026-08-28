@@ -613,8 +613,13 @@ fn best_candidate(region: &[u8], below: Option<u64>) -> Result<(Header, Layout),
         .zip(region.chunks(SLOT_STRIDE_LEN).take(MAX_SLOTS))
         .filter_map(|(index, chunk)| match Header::decode_parts(chunk) {
             Err(refusal) => {
-                if is_specific(refusal) {
-                    fault.get_or_insert(refusal);
+                // KEEP THE MOST INFORMATIVE, not the first one seen. Was
+                // `fault.get_or_insert(refusal)`, which is "first in slot
+                // order" wearing the words "most specific".
+                if is_specific(refusal)
+                    && fault.is_none_or(|held| informativeness(refusal) > informativeness(held))
+                {
+                    fault = Some(refusal);
                 }
                 None
             }
@@ -650,6 +655,31 @@ const fn is_specific(refusal: FormatError) -> bool {
         refusal,
         FormatError::NotABarFile | FormatError::SlotTooShort { .. }
     )
+}
+
+/// How informative a refusal is, so "most specific" can mean something.
+///
+/// [`best_candidate`]'s doc promises *"the most specific refusal any slot
+/// produced"*, and the mechanism behind that sentence was `get_or_insert` --
+/// which keeps whichever specific refusal came first in SLOT ORDER. There was
+/// no ranking at all, so a file whose slot 0 was checksum-damaged and whose
+/// slot 1 held an intact version-1 header reported "the header is unreadable"
+/// instead of "this is a version 1 file": precisely the false diagnosis the
+/// paragraph says the mechanism exists to prevent.
+///
+/// Two ranks are enough, and more would be invented precision:
+///
+/// - **2 — it identifies the FILE.** [`FormatError::RetiredVersion`] and
+///   [`FormatError::UnknownVersion`] say what this file *is*. An operator can
+///   act on that; it is not a damage report.
+/// - **1 — it identifies damage to a SLOT.** A failed checksum, a wrong
+///   stride, a counter past the end. True, and less useful, because another
+///   slot may explain the file.
+const fn informativeness(refusal: FormatError) -> u8 {
+    match refusal {
+        FormatError::RetiredVersion(_) | FormatError::UnknownVersion(_) => 2,
+        _ => 1,
+    }
 }
 
 /// How many whole slot positions the region holds, capped at the family bound.

@@ -1471,3 +1471,90 @@ columns × 4 pills × 2 tracked states) would bound the no-search case but costs
 it saves. Truncating an over-long header instead of refusing it would decode a
 file whose shape is unknown, which `CLAUDE.md` §4 bans.
 
+---
+
+## D-0037 · 2026-08-28 · Tests that agreed with the code instead of checking it
+
+**Decision — `parse_expiry` requires digits and not merely width;
+`MasterRow::over_wide` destructures the struct so a new field cannot escape the
+gate; the master reader stops allocating per row; refusals are ranked by what
+they identify; and eight tests that could not fail are made able to.**
+
+The pattern under most of this: an assertion that holds however the code
+behaves. Coverage cannot see it — a tautology executes every line it names.
+
+**`parse_expiry` checked width, not shape.** `u8::from_str` accepts a leading
+sign, so `"+8"` is two bytes wide and parses as 8: `2026-+8-+4` decoded as
+August 4th, through a function documented as *"exactly `YYYY-MM-DD` with
+numeric parts"*. Impact today is nil — both call sites discard the value — which
+is exactly why it would have been found late.
+
+**`over_wide` had no compile-time tie to `MasterRow`.** It read ten fields
+through `self.`, so an eleventh field would compile clean and skip the width
+gate entirely — a field with no bound, which is the defect D-0033 exists for. It
+now destructures with no `..`, so the eleventh field is a build error.
+
+**The reader allocated per row.** `line.split(',').collect()` starts at capacity
+0 and doubles (`Split`'s `size_hint` is `(0, None)`), so a 33-column Dhan row
+paid five allocations and four memcpys — about a million malloc/free pairs
+across 200,461 rows, for a column count the header states before the loop
+begins. One vector is hoisted and refilled. `unrecognised` also allocated its
+key on every row, including the overwhelming majority where the code was already
+present — and the scenario that counter exists to detect is precisely the one
+where every equity row lands there.
+
+**"The most specific refusal" had no ranking.** `best_candidate`'s doc promised
+it; the mechanism was `Option::get_or_insert`, which is *first in slot order*.
+A file whose slot 0 was checksum-damaged and whose slot 1 held an intact
+version-1 header reported "the header is unreadable" instead of "this is a
+version 1 file" — the false diagnosis the paragraph says the mechanism exists to
+prevent. Two ranks, because more would be invented precision: a refusal that
+identifies the **file** beats one that reports damage to a **slot**.
+
+### The tests
+
+- **`commit_counter_publishes_last` compared the code against itself.** Its
+  expected value came from `commit.durable_through`, which is
+  `layout.offset_of(n_valid)` — the same call that produced the value under
+  test. `f(x) == f(x)`, and a reader that never advanced past generation 2
+  passed all 65 iterations. Pinned to literals now, and **that immediately
+  surfaced something true and undocumented: the commit becomes durable at byte
+  60, not 64.** The covered domain is `0..56 ‖ 60..64` and the reserved tail is
+  zero in every commit, so once the fields and the checksum have landed, the
+  four bytes still holding old data are byte-identical to their replacements.
+- **`a_damaged_slot_is_not_repaired_by_a_second_write_to_the_same_slot`
+  damaged nothing.** It proved only that slot indices alternate: no slot was
+  corrupted, nothing was written, nothing was read back. `docs/04-invariants.md`
+  maps rows to tests **by name**, so a name that outruns its body is how a row
+  acquires an unearned ✓.
+- **`capacity_and_ragged_tail_agree_with_the_bytes` never called
+  `ragged_tail_bytes`.** Same class.
+- **Three header field offsets were never asserted.** `flags` (12), `symbol_id`
+  (48) and `timeframe_secs` (52) are all named in `docs/02-store-format.md` and
+  none was pinned. The last two are adjacent `u32`s, so swapping them in both
+  `image` and the offset constants changes the bytes on disk while
+  `decode(commit().bytes) == header` still holds — a silent format mutation,
+  and those two fields did move between v1 and v2.
+- **`assert!(Header::decode(&long).is_ok())`** holds for a decoder that read the
+  wrong window and returned a different-but-valid header.
+- **The binary test asserted counts, never identity.** Every assertion held if
+  the merge kept the bond and dropped `NIFTY`. `docs/06-limits.md` §7b records
+  this exact shape as having already shipped once.
+- **Four of the six byte classes the path allowlist admits were never accepted
+  by any test.** Every segment any store test built was purely alphabetic, so
+  deleting `| b'&'` left the suite green — while `M&M` is an F&O underlying and
+  a Total Market constituent.
+
+### Recorded rather than fixed
+
+**The block checksum binds bytes, not position** (§14). Transposition is
+undetected; a flipped bit is not. Binding position changes the bytes on disk and
+needs a new format version, never an edit to this one (§3.8). Pinned by a test
+so the day it changes is deliberate.
+
+**S-04's ✓ was wider than its test** (§15). `crates/store` issues no I/O, so the
+crash is a function parameter and no barrier is ever taken. The row is reworded
+to what is proven rather than deleted, and `docs/06-limits.md` — which had zero
+occurrences of "durability", "fsync" or "no I/O" — now says so, along with the
+total absence of concurrency and property-based testing.
+

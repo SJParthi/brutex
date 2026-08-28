@@ -567,3 +567,69 @@ measures the *dashboard*, whose counts come from `Summary` and are genuinely
 O(1); there is no equivalent for the instruments page, so the constant is
 unknown even though the growth is.
 
+---
+
+## 14 · A block checksum binds the bytes, never the position
+
+`block::seal` uses the block index only to compute the covered length and to
+name an error. The number it returns is `crc32c(bytes)`, so two blocks holding
+identical bytes seal to an identical checksum:
+
+```
+seal(v2, n, 0, &b) == seal(v2, n, 1, &b)
+```
+
+**What this does and does not defend.** S-06 is about a flipped bit, and a
+flipped bit is detected — proven by a 896-bit flip walk. **Transposition is a
+different threat and this format does not defend against it.** A block moved
+from another position in the same file, duplicated, or copied out of a
+*different instrument's* file verifies clean.
+
+Binding the position means seeding the checksum with the block index, which
+changes the bytes on disk — a **new format version**, never an edit to this one
+(`CLAUDE.md` §3.8: store format versions are never mutated in place). Until a
+version does that, the property is pinned by
+`store::unit::a_block_checksum_binds_the_bytes_and_not_the_position` so that
+changing it is a deliberate act rather than a silent one.
+
+A 32-bit CRC is also not a signature: it detects accident, not intent. Nothing
+in this repository claims otherwise.
+
+---
+
+## 15 · This store has never written a byte to a disk
+
+`crates/store` performs **no I/O at all** — no `std::fs`, no `File`, no
+`fsync`, no mapping. Verified by grep across the whole crate, and stated in its
+own module docs (`header.rs`: *"This crate performs no I/O and cannot issue the
+barrier itself"*) and in its fault tests (*"No test here kills a real process or
+cuts real power"*).
+
+That is a deliberate boundary and it is the right one — but until now **this
+file did not mention it**, and this file is the one whose job is to record what
+a green build does not prove. It contained zero occurrences of "durability",
+"fsync" or "no I/O".
+
+| Invariant | What the test actually proves | What the words could be read to claim |
+|---|---|---|
+| S-03 | The published counter is one a completed commit issued, at every one of the 65 torn prefixes — and the commit becomes durable at **byte 60**, not 64, because the reserved tail is zero in every commit | that a concurrent *reader* observes this. There is no concurrency test of any kind |
+| S-04 | A reader offered a header that outruns the file falls back to the previous generation, and a lost extent is caught by the block checksum | that a real crash was survived. The crash is a **function parameter** (`file_len`), no barrier is issued, and no byte reaches a device |
+
+S-05 (ENOSPC) and S-10 (the advisory lock) are correctly marked `—` because
+they need I/O. S-04's ✓ is narrower than its sentence, and the row is reworded
+rather than deleted.
+
+**Concurrency is untested, entirely.** No `thread`, `spawn`, `Mutex`, `Arc<` or
+atomic appears in any test file. `header.rs` says a caller *"may hand it a
+`MAP_SHARED` mapping that a writer is concurrently `pwrite`-ing"*; that claim is
+supported by single-threaded prefix mixtures and by `decode`'s single-copy
+discipline, never by two threads.
+
+**There is no property-based, randomised or fuzz testing.** No `proptest`,
+`quickcheck`, `arbitrary` or `fuzz` appears in any manifest. One test is
+deterministically pseudo-random — the CRC differential against a bit-by-bit
+reference — and it randomises only the checksum's input bytes. Input classes
+therefore untested include arbitrary 64-byte slots into `Header::decode`,
+arbitrary region lengths between the five that are tried, and the whole
+2^32-scale middle of the `u64` range for the geometry arithmetic.
+

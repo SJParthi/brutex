@@ -16,7 +16,7 @@ reachable (the crate does not exist).
 | S-01 | `size_of::<Bar>() == 56` and `align_of::<Bar>() == 8` | `const _: () = assert!(…)` — a compile error, not a test | ✓ |
 | S-02 | `read(i)` returns the bytes `write(i, b)` wrote, for every *i* | `store::proptest::roundtrip` | — |
 | S-03 | A reader never observes a record beyond `n_valid` | `store::fault::commit_counter_publishes_last` | ✓ |
-| S-04 | A crash between data write and counter publish loses the tail and corrupts nothing | `store::fault::kill_between_write_and_commit` | ✓ |
+| S-04 | A reader offered a header that outruns the file falls back to the last supported commit, and a lost extent is detected by the block checksum. **This is narrower than "survives a crash"**: the crate issues no I/O, so the crash is a parameter and no barrier is ever taken — see `docs/06-limits.md` §15 | `store::fault::kill_between_write_and_commit` | ✓ |
 | S-05 | A full disk during append returns `Err`, never a signal | `store::fault::enospc_returns_error` | — |
 | S-06 | A flipped bit in any block is detected on the next read of that block | `store::fault::bitflip_detected` | ✓ |
 | S-07 | A file whose length does not divide by the stride truncates to the last whole record and logs | `store::fault::ragged_tail_truncates_loudly` | ✓ |
@@ -29,6 +29,9 @@ reachable (the crate does not exist).
 | S-14 | Splitting the checksum input at any point gives the answer for the whole | `store::unit::splitting_the_input_anywhere_gives_the_same_checksum` | ✓ |
 | S-15 | The lookup table is the polynomial: lane 0 is one folded byte, and lane *k* is lane *k−1* advanced by one zero byte | `store::crc::the_table_is_the_polynomial_lane_by_lane` | ✓ |
 | S-16 | A commit found in the wrong slot refuses the read **even when another slot still decodes**; a readable neighbour never excuses it | `store::fault::a_misplaced_slot_is_refused_even_when_the_other_slot_still_reads` | ✓ |
+| S-17 | The block checksum binds the bytes and **not** the position, so transposition is undetected — pinned so that changing it is deliberate | `store::unit::a_block_checksum_binds_the_bytes_and_not_the_position` | ✓ |
+| S-18 | When two slots produce two different specific refusals, the one that identifies the **file** is reported, not the one that came first in slot order | `store::fault::two_competing_refusals_report_the_one_that_identifies_the_file` | ✓ |
+| S-19 | The header's documented byte offsets are pinned for **every** field, including the two adjacent `u32`s that a swap would otherwise hide | `store::unit::the_record_is_exactly_the_documented_shape` | ✓ |
 
 ## Vocabulary and indicators
 
@@ -155,6 +158,8 @@ runs today.
 | I-41 | Every measured series code reaches its own verdict through the open-addressed tables that replaced the three `binary_search`es; a collision cannot silently reclassify a bond | `core::vendor::every_series_code_survives_the_open_addressed_table_it_moved_into` | ✓ |
 | I-42 | Every sort column has a **precomputed, total** order taken once at load, and descending is that order reversed — so no request sorts and reloads are byte-identical | `api::server::every_column_has_a_precomputed_total_order_and_descending_is_its_reverse` | ✓ |
 | I-43 | The header row is bounded before it is split, like every other row | `api::master::the_header_row_is_bounded_too_and_is_refused_before_it_is_split` | ✓ |
+| I-44 | A date component of the right **width** but the wrong **shape** is refused; `2026-+8-+4` is not August | `core::vendor::a_signed_date_component_is_refused_rather_than_read_as_a_number` | ✓ |
+| I-45 | A segment using every byte class the path allowlist admits — `&`, digits, `-`, `_` — is **accepted**, so `M&M` and `BAJAJ-AUTO` keep working | `store::unit::every_byte_class_the_allowlist_admits_is_actually_accepted` | ✓ |
 
 ## The instrument universes
 
