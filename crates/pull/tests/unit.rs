@@ -2691,6 +2691,85 @@ fn a_refusal_halves_every_allowance_and_drains_every_bucket() {
     );
 }
 
+/// **A HALVED DAY SPAN RECOVERS IN A BOUNDED NUMBER OF REQUESTS**, and at a
+/// flat `+1` it did not.
+///
+/// This is the defect that made a many-instrument pull impossible while a
+/// single-instrument pull was fine. `record_throttled` relaxes every span,
+/// because a vendor refusal names none of them — so one momentary per-second
+/// burst also halved the DAY allowance. At `+1` per success the day span then
+/// needed 50,000 clean requests to undo one halving, which is four times the
+/// ~12,996 a 213-instrument pull makes in total. It never recovered.
+///
+/// Measured in the operator's own log, the allowance walked
+/// 100,000 → 50,000 → 25,000 → 12,705 → 6,352 — a 15.7x collapse — and a pull
+/// needing 12,996 requests could no longer finish in a day. One instrument needs
+/// 61 and never reached the cliff.
+///
+/// The assertion is a BOUND, not an exact count: what must hold is that recovery
+/// costs a number of requests a backfill actually makes, whatever the ceiling
+/// is. The exact step is `ceiling / RECOVERY_STEPS` and pinning it would make
+/// this test a copy of the implementation.
+#[test]
+fn a_halved_day_allowance_recovers_in_requests_a_backfill_actually_makes() {
+    let mut governor = only(WindowSpan::Day, 100_000);
+    governor.record_throttled();
+    assert_eq!(
+        governor.permitted(WindowSpan::Day),
+        Some(50_000),
+        "the multiplicative decrease still halves"
+    );
+
+    let mut successes = 0u32;
+    while governor.permitted(WindowSpan::Day) != Some(100_000) {
+        governor.record_success();
+        successes += 1;
+        assert!(
+            successes <= 5_000,
+            "recovery must not cost more requests than a backfill makes; \
+             stalled at {:?} after {successes}",
+            governor.permitted(WindowSpan::Day)
+        );
+    }
+    assert!(
+        successes < 1_024,
+        "a halving is undone in under RECOVERY_STEPS successes, took {successes}"
+    );
+
+    // AND THE CEILING IS STILL A WALL. A proportional step must not overshoot
+    // the published figure — that would be inventing an allowance the vendor
+    // never granted, which is what the `min` exists to refuse.
+    for _ in 0..50 {
+        governor.record_success();
+        assert_eq!(governor.permitted(WindowSpan::Day), Some(100_000));
+    }
+}
+
+/// **THE SECOND SPAN IS UNCHANGED BY THE PROPORTIONAL STEP**, and that is what
+/// makes it safe to apply to every span rather than to one named by hand.
+///
+/// `5 / RECOVERY_STEPS` is zero and the floor makes it one, so a rate ceiling
+/// small enough that `+1` was already proportionate keeps exactly the behaviour
+/// it had. The test that would catch a regression here is the one below, which
+/// walks a ceiling of 8 permit by permit; this pins the vendor's own figure.
+#[test]
+fn a_small_rate_ceiling_still_recovers_one_permit_at_a_time() {
+    let mut governor = only(WindowSpan::Second, 5);
+    governor.record_throttled();
+    assert_eq!(governor.permitted(WindowSpan::Second), Some(2));
+
+    let mut walk = Vec::new();
+    for _ in 0..3 {
+        governor.record_success();
+        walk.push(governor.permitted(WindowSpan::Second));
+    }
+    assert_eq!(
+        walk,
+        vec![Some(3), Some(4), Some(5)],
+        "one permit at a time, exactly as before"
+    );
+}
+
 /// P-23 — sustained success walks the allowance back up one permit at a time,
 /// and stops **exactly** at the published ceiling.
 ///

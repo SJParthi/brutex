@@ -24032,3 +24032,471 @@ own price — 3_592_260, 3_544_705, 1_679_730 and 1_663_330 paisa.
 both directions, including half-up toward positive infinity on a negative.
 `a_fractional_count_is_still_refused_rather_than_snapped` pins the half that did
 not change.
+
+---
+
+### D-0322
+
+**One vendor refusal moved the governor twice, and the recovery step was flat
+where the decrease was proportional. Together they made a many-instrument pull
+impossible while a single-instrument pull was fine.**
+
+Two independent defects in the same feedback loop. Either alone is survivable;
+together they collapsed the operator's day allowance 15.7x and it never
+recovered.
+
+#### One — the 429 was counted twice
+
+`pull::http::HttpSource::window_async` reads the status and records the AIMD
+feedback there: `record_throttled` on a 429, `record_success` on a 2xx.
+`api::server::with_retry` recorded **both again**, on the same shared `Arc`
+handed over by `HttpSource::sharing`.
+
+So one answer moved the governor twice. A 429 **quartered** the allowance where
+AIMD halves it, and a clean answer raised it at double rate.
+
+`with_retry`'s own doc argued this must not happen, and then did it:
+
+> The multiplicative decrease is deliberately NOT taken here: both
+> `pull::http::HttpSource` entry points this wraps already call
+> `record_throttled` on a 429 and `record_success` on a 2xx, **which the bars
+> path's `window_async` does not** — so `with_retry` takes the decrease itself
+> and this must not, or one 429 would be counted twice and halve the ceiling on
+> a single refusal.
+
+The clause in bold contradicts the same sentence's own "both entry points", and
+it is the false half: `window_async`'s feedback block does exactly what
+`Discovery::get`'s does. `laddered` — the sibling wrapper for the F&O
+transports — already declined to record for precisely this reason and was
+right. `with_retry` believed the exemption.
+
+**The rule is now uniform: the transport reads the status, so the transport owns
+the feedback.** No wrapper records. The retry ladder still backs off — waiting
+is the loop's job, learning the ceiling is the transport's.
+
+#### Two — the decrease was proportional and the increase was not
+
+`Window::relax` halves. `Window::tighten_toward_ceiling` added exactly `1`. The
+two are only in balance when the ceiling is small, and this governor holds three
+spans whose ceilings differ by four orders of magnitude:
+
+| span | ceiling | halves to | successes to recover, at `+1` |
+|---|---|---|---|
+| second | 5 | 2 | 3 |
+| day | 100,000 | 50,000 | **50,000** |
+
+A vendor refusal names no span, so `record_throttled` relaxes all three — which
+is right, because a 429 genuinely does not say which bound was breached. But it
+means **one momentary per-second burst also halves the daily allowance**, and at
+`+1` the day span then needs more clean requests to recover than the entire
+backfill will ever make.
+
+#### What the two did together
+
+From the operator's own `pull.rate` events, in order:
+
+```
+per_day  100,000 → 50,000 → 25,000 → 12,705 → 6,352
+per_second     5 →      2 →      1
+```
+
+Each 429 halved twice. Recovery needed 93,648 successes and got none. A
+213-instrument day pull needs ~12,996 requests and could no longer finish at
+6,352/day. **One instrument needs 61 and never reached the cliff — which is the
+whole of why single worked and many did not.**
+
+The in-code measurement that already existed says the same thing from the other
+end: *a 785-instrument, 3-chunk pull fired ~2,355 requests in 365 s (~6.4/s) and
+458 instruments died on `status 429`* — 6.4/s against a 5/s ceiling, every one
+of those 429s moving the governor twice.
+
+#### The fix to the second half
+
+`tighten_toward_ceiling` adds `ceiling / RECOVERY_STEPS`, floored at one, so
+**recovery costs the same number of requests whatever the ceiling is**.
+
+`RECOVERY_STEPS` is 1,024, which is the conservative end of the range: a halved
+day span returns in ~512 clean requests — bounded, and reachable inside a
+backfill that makes ~13,000 — while still far slower than TCP's own rule, which
+restores a full window every round trip. A step small enough to recover in a
+handful of requests would let the governor re-breach as fast as it backed off,
+which is the oscillation the multiplicative decrease exists to damp.
+
+**The second span is untouched.** `5 / 1024` is zero and the floor makes it one,
+so every span small enough that `+1` was already proportionate keeps exactly the
+behaviour it had. That is what makes it safe to apply to all three rather than
+to a span named by hand — no span is singled out, and no vendor figure is
+invented.
+
+**Chosen, not measured.** No bench times a recovery and the vendor publishes no
+figure one could be derived from — `CLAUDE.md` §3 rule 1. What is measured is
+the failure it replaces.
+
+#### Not touched: the daily ceiling itself
+
+`DHAN_PER_DAY` remains 100,000. Dhan's two published tables contradict each
+other — `01-overview-getting-started.md` puts Data APIs at 100,000/day and Order
+APIs at 7,000; `22-rate-limits.md` swaps them — and the operator adjudicated it
+on 2026-08-19. `rate.rs` already carries that reasoning and a warning against
+"fixing" it. One new observation is recorded beside it rather than acted on: the
+governor, correcting downward on real 429s, settled at **6,352**, which is close
+to the other table's 7,000. That is evidence, not proof, and it changes nothing
+here — with both defects above fixed, a single 429 now costs one halving and
+recovers, whichever ceiling is right.
+
+#### The proof that matters
+
+`a_halved_day_allowance_recovers_in_requests_a_backfill_actually_makes` halves a
+100,000 ceiling and asserts recovery costs fewer than `RECOVERY_STEPS`
+successes, with a hard 5,000 bound that fails loudly rather than looping. It
+asserts a BOUND rather than an exact count, so it cannot become a copy of the
+implementation. `a_small_rate_ceiling_still_recovers_one_permit_at_a_time` pins
+the half that did not change, on the vendor's own figure of five.
+
+---
+
+### D-0323
+
+**A negative volume is refused where the vendor still owns it, and the floor
+lives beside the one field that has one.**
+
+Dhan sent `volume: -95342` on ADANIENT. It decoded cleanly at the vendor
+boundary, survived `fetch::land`, folded, and died ~1,500 lines later in
+`store::file::survey` as `StoreError::ImpossibleCount` — taking the whole
+instrument-month, its seven derived rungs, and every later month in the same
+batch with it. 24,032 rows discarded for one field on one row.
+
+#### This was an omission, not a decision
+
+`http::one_number` accepts any `i64` that is not the null sentinel. Its doc
+block defends that on *sentinel-collision* grounds and never asks whether a
+count has a floor. But the argument was already written one function above, in
+`one_price`'s refusal text, for the neighbouring field:
+
+> a stored negative passes every ordering check downstream, which is why it is
+> refused here rather than written
+
+That is the volume defect stated verbatim, for prices, one function up. The
+store agrees — `Bar::counts_are_sane` is `volume >= 0` with no exception — and
+the two simply never met.
+
+#### Why a sibling and not a clause in `one_number`
+
+`one_number` reads three fields and only one of them has zero as a floor.
+
+* `open_interest` has exactly one legal negative, `OI_NULL` = `i64::MIN`, which
+  `one_number` already refuses on its own grounds.
+* **`timestamp` has a legal negative RANGE**, and this is the one that would
+  have bitten. `session::IstMoment::from_epoch_secs` adds `IST_OFFSET_SECS` —
+  19,800 — *before* it tests the sign, so every epoch second in `-19_800..0` is
+  a real IST moment on 1970-01-01 and is accepted. A blanket `n < 0` inside
+  `one_number` would refuse a stamp the session filter admits: a behaviour
+  change with no source behind it.
+
+So `one_volume` wraps `one_number` and adds the floor, and the fields without a
+floor are untouched. `a_negative_timestamp_is_not_a_negative_count` pins the
+half that must not change.
+
+#### THREE DOORS, AND THE FIRST ATTEMPT GUARDED TWO
+
+A vendor body reaches a volume by three paths, and they do not share a decoder:
+
+| path | shape | used by |
+|---|---|---|
+| `decode_body`'s `ParallelArrays` arm → `numbers()` | column arrays | **Dhan** |
+| `decode_objects` | one object per bar | Groww |
+| `decode_positional` | positional cells | Zerodha |
+
+The first version of this change patched `decode_objects` and
+`decode_positional` and **missed the parallel-array arm — the only one Dhan
+uses**. The test written for the fix is what caught it: it drives a real
+parallel-array body and failed against a patch that looked complete at every
+call site named `one_number(..., "volume")`. The array helper `volumes()` closes
+the third door. A rule that guards two of three doors is not a rule.
+
+#### What the operator gets instead
+
+Before, from the store, with the vendor's body long gone:
+
+```
+NSE:ADANIENT: batch record 2333 has an impossible count: volume -95342,
+open interest -9223372036854775808
+```
+
+Three things are wrong with that as a diagnostic. **"record 2333" is an index
+into a per-month slice** produced after `months_in` split the batch — not the
+vendor's row, not a timestamp, not a date, and nothing the operator can open.
+**The open-interest number printed beside it is `OI_NULL` doing its job** — a
+legal value offered as a co-suspect. And the URL, the chunk and the date range
+are all gone.
+
+After, from `decode_body`, wrapped as `BodyNotUnderstood`:
+
+```
+the vendor answered and the body was not readable: "volume" holds -95342, and a
+volume counts shares traded: it is never negative, and zero means zero …
+```
+
+The chunk and its date range are still in the frame, and `with_retry` returns
+`BodyNotUnderstood` immediately rather than spending the 13.75 s throttle ladder
+— the variant exists for exactly this class of deterministic decode fault.
+
+#### What this deliberately does NOT do
+
+**It does not drop the row and count it.** That was considered. `DropCensus`
+exists, reaches the receipt, and the null-price skip already does drop-and-count
+two lines away — but `csv.rs` carries a written ruling on this exact question:
+
+> The unreadable degrade records something TRUE — the value is not known, so the
+> field is stored absent, and the counter says how often that happened. Storing
+> a value the vendor DID send as absent records something FALSE.
+
+And a negative volume is not a missing value: it is evidence the decoder may be
+reading the wrong column. If 200 of 375 bars carry one, drop-and-count silently
+writes the other 175 through the same suspect logic, while a refusal surfaces
+the systematic misread. §8 makes the hole permanent either way — a dropped row
+cannot be re-offered, because `BarFile::append` anchors its overlap at the
+file's tail.
+
+**The blast radius is a separate defect and is not fixed here.**
+`ingest::one`'s `?` at the `write_and_count` call abandons the month loop, so
+one bad month costs every later month in the batch. Collecting per-month
+failures instead of returning on the first would fix that without weakening any
+refusal. Recorded, not done.
+
+**`csv::decode` has the same hole**, at its `volume` field: `"-95342".parse()`
+succeeds and the value is taken. The archive path is a second entry point and
+wants the same refusal plus a `CsvError` variant beside `OpenInterestSentinel`.
+Recorded, not done.
+
+#### The proof that matters
+
+`a_negative_volume_is_refused_where_the_vendor_still_owns_the_value` drives a
+real parallel-array body — the shape Dhan answers in — and asserts the refusal
+names both the field and the value, then pins `one_volume` directly so a future
+caller cannot lose the rule by routing around `decode_body`. Zero is asserted to
+pass, because zero is a real zero and not an absence.
+
+Worth recording: **`StoreError::ImpossibleCount` had no test anywhere in the
+workspace** before this. `counts_are_sane` is tested as a predicate and
+`ImpossibleBar` is driven through `append`, but the count branch of `survey` was
+never exercised and its sentence never asserted. The error the operator actually
+received was the untested one.
+
+---
+
+### D-0324
+
+**Two defects that D-0321 and D-0322 introduced, found by adversarial review of
+those same changes and closed here.**
+
+Both were opened by a fix, both survived the whole suite, and neither was
+visible from the diff. Recorded as their own entry rather than folded into the
+entries they correct, because the ledger is append-only and because *"the fix
+had a hole"* is a fact about this repository worth being able to find.
+
+#### One — the snap opened a band where a real value stores as zero
+
+D-0321 replaced `csv::paisa` with `Paisa::from_rupee_text_half_up` on the JSON
+price path. Half-up sends everything under half a paisa to zero, and the reader
+it replaced had refused those values outright. So the change silently gained a
+band — `[0.00001, 0.005)` and its mirror — where a value the vendor actually
+sent decodes as a clean `0`.
+
+**Zero is a legal price here.** `Bar::ohlc_is_sane` admits it and
+`every_price_on_the_paisa_grid_survives_intact` pins `"0"` as real, so nothing
+downstream could tell an invented zero from a sent one. That is precisely the
+failure the null-column comment three hundred lines up already refuses in its
+own words: *"is not zero, it is absent, and zero-filling it writes a lie this
+store cannot tell from a real price afterwards."*
+
+**The negative half is the sharp one.** `-0.001` snaps to `0`, and `0 < 0` is
+false, so it walked straight past the below-zero guard — the guard whose entire
+purpose is to catch a descriptor whose `PriceScale` is wrong. That diagnostic
+was unreachable across the whole `(-0.005, 0)` band, and D-0321's own
+half-up test sidestepped it by asserting the negative cases against the
+converter directly *"because this decoder refuses a negative before it
+returns"* — true for `-14.5`, false for `-0.001`.
+
+`one_price` now refuses a value that snaps to zero when the vendor's text
+carries a non-zero digit. **The test is on the TEXT, not the number:** a value
+written with a non-zero digit is not zero, whatever it rounds to, while `0`,
+`0.00` and `-0.0` carry none and still decode as the real zero they are.
+
+Above `1e16` and below `1e-5` `serde_json` renders exponent notation, which the
+text reader refuses as `NotDecimal` — so the hole was bounded on both sides and
+is now closed in the middle.
+
+#### Two — removing the double count opened a hole for a NAMED throttle
+
+D-0322 removed both feedback calls from `api::with_retry` on the ground that
+`window_async` already records them. That is true, and it is true *on status
+alone*:
+
+```rust
+if status == 429 { g.record_throttled(); }
+else if answer.status().is_success() { g.record_success(); }
+```
+
+But `Step::Again { throttled: true }` has **two** sources, and only one of them
+is a 429. `step` also raises the rate ladder when the vendor NAMES a rate
+refusal in its body — `Disposition::Throttled`, which Dhan spells `DH-904` and
+`805` — and `step`'s own header says why: *a vendor that names a rate refusal
+under an unexpected status still gets the rate ladder rather than the backend
+one.*
+
+`Dhan Docs/20-annexure.md` publishes no HTTP status for either code, so this
+build cannot assume 429. Under a 400 or a 500 the transport's status-only test
+records nothing, and after D-0322 the wrapper recorded nothing either: the loop
+would sleep, re-ask, and **never narrow the allowance the vendor had just
+explicitly refused**.
+
+The decrease is taken in the wrapper again — but only when `throttled` is set
+*and* the status is not 429, which is exactly the set the transport misses.
+Neither path now records twice and neither records zero times.
+
+Two doc claims D-0322 had falsified are true again: `refusal.rs`'s *"the
+governor takes its multiplicative decrease first"* on `Disposition::Throttled`,
+and `narrows_the_rate`'s claim to make readable *"the distinction
+`crates/api/src/server.rs` already draws"*. Worth noting separately that
+`narrows_the_rate` has **zero callers workspace-wide** and `refusal::classify`
+has none either — the two-axis reconciliation is dead code, and the live path is
+`http::refusal_words`. Recorded, not acted on.
+
+#### What this says about the suite
+
+**Both defects survived every test.** Deleting the feedback blocks from
+`with_retry` is a mutation the entire workspace suite passes: `with_retry` has
+two call sites and no test calls it at runtime, so its governor behaviour is
+unpinned in both directions. That is why the 15.7x collapse ran in production
+undetected, and it is a gap `CLAUDE.md` §9's no-surviving-mutant rule names but
+no test currently closes.
+
+The zero-fill band was caught by a test written *for* the fix — one that drove a
+real parallel-array body rather than the converter — which is the same shape of
+catch that found the third volume door in D-0323. **A test that drives the
+production path finds what a test of the helper cannot.**
+
+#### The proof that matters
+
+`a_price_that_is_not_zero_never_snaps_to_zero` drives six values across both
+signs through `decode_body` and asserts each is refused by name, then asserts
+`0`, `0.0`, `0.00` and `-0.0` still decode as the real zero they are.
+
+The named-throttle path has **no runtime test**, and this entry says so rather
+than implying otherwise. Pinning it needs a `with_retry` harness that does not
+exist; until one does, the guard is argued from the code and not measured.
+
+---
+
+### D-0325
+
+**A vendor can misfile its own error code, so the contract reads the code AND
+the sentence beside it — and the place to put that rule was not where it looked
+like it should go.**
+
+Measured, from a `pull.http` refusal event: HTTP 400 carrying
+
+```json
+{"errorType":"Order_Error","errorCode":"DH-906","errorMessage":"Invalid Token"}
+```
+
+`dhan::read` maps `DH-906` to `Disposition::RequestWrong` and is **faithful** to
+`Dhan Docs/20-annexure.md` in doing so — *"Incorrect request for order — cannot
+be processed"*. The code table is right. The vendor sent the wrong code.
+
+#### What believing the code cost
+
+`RequestWrong` means *"this build's request is wrong; sending it again unchanged
+cannot help"*. So `api::server::step` answered `Step::Answered`, the credential
+was never re-read, and `pullrun`'s pass loop re-asked the whole instrument from
+chunk one — against a token that was already dead — with `MAX_PASSES` at 400.
+
+**`errorType` corroborated the wrong code.** It read `Order_Error`, which is the
+annexure's own type name for `DH-906`. A rule keyed on the type field would not
+have caught this. The message was the only field carrying the truth.
+
+#### THE OBVIOUS PLACE FOR THE RULE HAS NO CALLERS
+
+`refusal::classify` reconciles the two axes — status and named error — and
+carries `Verdict`, `Axis` and `contested`. It is the function this rule belongs
+in, and **it has zero production call sites.** Every executable call is in
+`crates/pull/tests/refusal.rs` or a doctest.
+
+The live path is `http::refusal_words`, which called `named_error_of` and
+`(contract.read)` directly and never touched `classify`. A rule added to
+`classify` would have passed its own tests and never run. Recorded here because
+the next person to reach for that function deserves to know before they spend
+the afternoon.
+
+`classify` is left in place and untouched. Deleting it, or wiring it up, is a
+separate decision with its own consequences — and either way the message rule
+would need `classify`'s signature widened, since `name: Option<&str>` carries
+the code alone.
+
+#### The shape: a row, not an override
+
+`crates/pull/src/refusal.rs`'s header states the rule this follows: *a vendor
+whose error contract is read later is **a row and a `from_wire`**, not an edit
+to any decision here.* So the message reader is a field on `ErrorNames` and a
+function in the vendor's own module, not a special case at the call site.
+
+* `ErrorNames::message: Option<MessageReader>` — the key, and a reader taking
+  `(code, message)`. **`None` is a recorded absence**, exactly as `envelope`'s
+  is: Kite and Groww declare it, have never been observed misfiling a code, and
+  take a byte-identical path.
+* `dhan::read_with_message` — the code decides, and the sentence is consulted
+  **only where the code's answer is not already an authentication verdict**.
+* `refusal::disposition_of` — one `from_str`, two `get`s. Calling
+  `named_error_of` twice would have parsed the body twice and made this module's
+  own cost table wrong for a reason no reader could see from the call site.
+
+#### The guard that matters
+
+`DH-902` and `806` are `NotEntitled` — the one disposition where no later run
+can succeed. Promoting either to a dead session would tell an unsubscribed
+operator to wait for a credential refresh that fixes nothing, which is **the
+exact failure this vendor module was written to close**. `read_with_message`
+returns before reading the sentence for any code that already answers
+`SessionDead` or `NotEntitled`: it can promote a misfiled code and can never
+demote a correct one.
+
+#### Why five phrases and not `contains("token")`
+
+Every phrase is one the vendor PUBLISHES for an authentication failure —
+`20-annexure.md`'s DH-901, 807, 808, 809 and `21-errors.md`'s
+`AUTHENTICATION_ERROR` — plus the one it was observed sending. The bare word
+`token` is deliberately absent, for the reason
+`autopilot::credential_fault_in_page` gives about the bare word *credential*: a
+substring that appears in prose classifies prose.
+
+The near misses are the test, not an afterthought. `811` is *"Invalid Expiry
+Date"* and `813` is *"Invalid `SecurityId`"*. Both contain "invalid", both are
+published `RequestWrong`, and a looser rule would have turned either into a
+credential refresh that fixes nothing.
+
+#### The operator-facing half
+
+`credential_fault_in_page` matched five spellings, all status-shaped or
+Kite-shaped, and was blind to this event **both before and after** the
+classification fix: the status is 400, not 401/403; `tokenexception` is Kite's
+word; and *"access token expired"* is not *"no longer valid"*. A sixth spelling
+— the `SessionDead` label itself — closes it. Verified safe against prose: no
+render surface prints the dispositions as a table, so that string reaches a page
+only when the verdict actually rendered.
+
+**The structural fix is not this.** That function's own doc argues *"rewording
+prose does not fix a classifier that reads prose — it only moves the next
+occurrence"*, and this is the third string added to it. The right answer is for
+`pullrun`'s manual-run path to read the typed `Disposition` off the run instead
+of grepping HTML. Larger, and recorded for its own entry.
+
+#### The proof that matters
+
+`the_body_that_carried_a_dead_token_under_an_order_code_is_read_as_a_dead_session`
+feeds the operator's literal body and asserts both halves: the code alone still
+reads as the annexure publishes it, and the whole contract reads the session as
+dead. `an_unsubscribed_account_is_never_promoted_to_a_dead_session` pins the
+guard on all six auth codes. `a_sentence_that_merely_contains_invalid_is_not_a_dead_session`
+pins the four near misses. `a_contract_without_a_message_reader_is_unchanged`
+pins that Kite and Groww take the path they always had.

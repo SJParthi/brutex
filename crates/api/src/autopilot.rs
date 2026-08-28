@@ -441,14 +441,27 @@ pub fn classify(reason: &str) -> Trouble {
 pub fn credential_fault_in_page(html: &str) -> bool {
     // NO BARE `"credential"`, AND NO `"parameter path"` OR `"aws identity"`
     // EITHER. Those three describe how a credential is OBTAINED, which is what
-    // a page explaining the transport talks about. These five describe a vendor
+    // a page explaining the transport talks about. These describe a vendor
     // REFUSING one, which a page has no other reason to contain.
-    const VENDOR_SPELLINGS: [&str; 5] = [
+    const VENDOR_SPELLINGS: [&str; 6] = [
         "status 401",
         "status 403",
         "tokenexception",
         "invalid_authentication",
         "access token expired",
+        // THE NAMED AXIS, WHICH THE FIVE ABOVE CANNOT SEE.
+        //
+        // Every one of them is status-shaped or Kite-shaped. A vendor that
+        // names a dead session under a status this list does not carry produced
+        // a page with none of the five on it: Dhan's HTTP 400 `DH-906` carrying
+        // `"errorMessage":"Invalid Token"`. Before D-0325 that read as
+        // `RequestWrong` and the page never mentioned a session at all; after
+        // it, the page says so and this had to be able to see it.
+        //
+        // Safe against prose: no render surface prints the dispositions as a
+        // table, so `Disposition::SessionDead`'s own label reaches a page only
+        // when that verdict actually rendered. D-0325.
+        "the session is dead",
     ];
     let lower = html.to_ascii_lowercase();
     VENDOR_SPELLINGS.iter().any(|m| lower.contains(m))

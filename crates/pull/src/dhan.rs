@@ -52,10 +52,88 @@ pub const DHAN: ErrorNames = ErrorNames {
     // `{status, errorType, errorCode, errorMessage}`.
     envelope: None,
     read,
+    // THIS VENDOR MISFILES ITS OWN CODES, MEASURED. `DH-906` — the annexure's
+    // "Order Error" — arrived under HTTP 400 carrying
+    // `"errorMessage":"Invalid Token"`. See [`read_with_message`].
+    message: Some(("errorMessage", read_with_message)),
     source: "Dhan Docs/20-annexure.md — 'Trading API Error' (ten DH-9xx codes) \
              and 'Data API Error' (twelve numeric codes), read 19 Aug 2026; \
              envelope shape from Dhan Docs/21-errors.md",
 };
+
+/// Whether the vendor's own SENTENCE names an authentication failure.
+///
+/// # Why the sentence is consulted at all
+///
+/// Measured: HTTP 400,
+/// `{"errorType":"Order_Error","errorCode":"DH-906","errorMessage":"Invalid Token"}`.
+/// [`read`] maps `DH-906` to [`Disposition::RequestWrong`] and is **faithful**
+/// to `Dhan Docs/20-annexure.md` in doing so — *"Incorrect request for order —
+/// cannot be processed"*. The vendor misused its own code, and `errorType`
+/// corroborated the code rather than the message: it read `Order_Error`. The
+/// message was the only field carrying the truth.
+///
+/// The cost was not a wrong label. `RequestWrong` means *"sending it again
+/// unchanged cannot help"*, so `api::server::step` answered `Step::Answered`,
+/// the credential was never re-read, and the pass loop re-asked the whole
+/// instrument from chunk one against a token that was already dead.
+///
+/// # Why these five spellings and NOT `contains("token")`
+///
+/// Every one is a sentence this vendor PUBLISHES for an authentication failure
+/// — `20-annexure.md`'s DH-901, 807, 808 and 809, and `21-errors.md`'s
+/// `AUTHENTICATION_ERROR` — plus the one it was observed sending. The bare word
+/// `token` is deliberately absent, for the reason
+/// `api::autopilot::credential_fault_in_page` gives about the bare word
+/// *credential*: a substring that appears in prose classifies prose.
+///
+/// The near misses are the point. `811` is *"Invalid Expiry Date"* and `813` is
+/// *"Invalid `SecurityId`"* — both contain "invalid", neither matches any phrase
+/// here, and both must keep their own dispositions.
+fn message_names_a_dead_session(message: &str) -> bool {
+    const AUTH_SPELLINGS: [&str; 5] = [
+        "invalid token",
+        "access token is invalid",
+        "access token is expired",
+        "invalid or expired access token",
+        "authentication failed",
+    ];
+    let lower = message.to_ascii_lowercase();
+    AUTH_SPELLINGS.iter().any(|phrase| lower.contains(phrase))
+}
+
+/// The disposition, from the code AND the sentence the vendor sent beside it.
+///
+/// **The code still decides**, exactly as [`read`] says. The sentence is
+/// consulted only where the code's own answer is *not already* an
+/// authentication verdict — so this can promote a misfiled code to
+/// [`Disposition::SessionDead`] and can never demote a correct one.
+///
+/// That guard is what keeps this module's founding distinction intact: `DH-902`
+/// and `806` are [`Disposition::NotEntitled`], the one disposition where no
+/// later run can succeed, and turning either into a dead session would tell an
+/// unsubscribed operator to wait for a credential refresh that fixes nothing —
+/// the exact failure this file was written to close. Both return before the
+/// sentence is read.
+///
+/// A vendor that stops misfiling its codes loses nothing: the sentence only
+/// ever adds a verdict where the code supplied one that the sentence
+/// contradicts.
+#[must_use]
+pub fn read_with_message(code: &str, message: &str) -> Option<Disposition> {
+    let by_code = read(code);
+    // AN AUTH VERDICT FROM THE CODE IS FINAL. Promote only; never demote.
+    if matches!(
+        by_code,
+        Some(Disposition::SessionDead | Disposition::NotEntitled)
+    ) {
+        return by_code;
+    }
+    if message_names_a_dead_session(message) {
+        return Some(Disposition::SessionDead);
+    }
+    by_code
+}
 
 /// What one of Dhan's codes means for a caller.
 ///
@@ -221,5 +299,112 @@ mod tests {
     fn the_contract_names_the_wire_field_and_its_source() {
         assert_eq!(DHAN.field, "errorCode");
         assert!(DHAN.source.contains("20-annexure.md"), "{}", DHAN.source);
+    }
+
+    /// **THE BODY THE OPERATOR ACTUALLY RECEIVED**, end to end.
+    ///
+    /// Quoted from a `pull.http` refusal event: HTTP 400 carrying `DH-906` —
+    /// the annexure's *"Incorrect request for order"* — with
+    /// `"errorMessage":"Invalid Token"`. `read` is faithful to the published
+    /// table and answers `RequestWrong`, which told the run its own request was
+    /// wrong and stopped it re-reading the credential.
+    ///
+    /// Note `errorType` reads `Order_Error`: the vendor's own type field
+    /// corroborated the wrong code. The message was the only field carrying the
+    /// truth, which is why the rule keys on it.
+    #[test]
+    fn the_body_that_carried_a_dead_token_under_an_order_code_is_read_as_a_dead_session() {
+        let body =
+            r#"{"errorType":"Order_Error","errorCode":"DH-906","errorMessage":"Invalid Token"}"#;
+        assert_eq!(
+            read("DH-906"),
+            Some(Disposition::RequestWrong),
+            "the code alone still reads as the annexure publishes it"
+        );
+        assert_eq!(
+            crate::refusal::disposition_of(body, &DHAN),
+            Some(Disposition::SessionDead),
+            "the sentence names a dead token and the whole contract reads it"
+        );
+    }
+
+    /// A REAL `DH-906` IS UNTOUCHED. The rule promotes on the sentence, so a
+    /// code carrying its own published meaning keeps it.
+    #[test]
+    fn an_order_error_that_names_an_order_is_still_a_request_fault() {
+        for sentence in [
+            "Incorrect request for order - cannot be processed",
+            "quantity exceeds freeze limit",
+            "",
+        ] {
+            assert_eq!(
+                read_with_message("DH-906", sentence),
+                Some(Disposition::RequestWrong),
+                "{sentence:?} names no authentication failure"
+            );
+        }
+    }
+
+    /// **THE GUARD THIS MODULE WAS WRITTEN FOR STILL HOLDS.**
+    ///
+    /// `DH-902` and `806` are `NotEntitled` — the one disposition where no later
+    /// run can succeed. Promoting either to a dead session would tell an
+    /// unsubscribed operator to wait for a credential refresh that fixes
+    /// nothing, which is the exact failure this file exists to close. The
+    /// sentence is never consulted for a code that already answers with an
+    /// authentication verdict, so even an auth-sounding message cannot demote
+    /// them.
+    #[test]
+    fn an_unsubscribed_account_is_never_promoted_to_a_dead_session() {
+        for code in ["DH-902", "806"] {
+            assert_eq!(
+                read_with_message(code, "Invalid Token"),
+                Some(Disposition::NotEntitled),
+                "{code} is an entitlement and no sentence may change that"
+            );
+        }
+        // And a code that IS a dead session stays one, message or not.
+        for code in ["DH-901", "807", "808", "809"] {
+            assert_eq!(read_with_message(code, ""), Some(Disposition::SessionDead));
+        }
+    }
+
+    /// **THE NEAR MISSES**, which are why the rule is not `contains("token")`.
+    ///
+    /// `811` is "Invalid Expiry Date" and `813` is "Invalid `SecurityId`". Both
+    /// contain "invalid", both are published `RequestWrong`, and a looser
+    /// substring rule would have turned either into a credential refresh that
+    /// fixes nothing.
+    #[test]
+    fn a_sentence_that_merely_contains_invalid_is_not_a_dead_session() {
+        for (code, sentence) in [
+            ("811", "Invalid Expiry Date"),
+            ("813", "Invalid SecurityId"),
+            ("814", "Invalid Request"),
+            ("810", "Client ID is invalid"),
+        ] {
+            assert_eq!(
+                read_with_message(code, sentence),
+                read(code),
+                "{code} {sentence:?} keeps the disposition its code publishes"
+            );
+        }
+        assert!(!message_names_a_dead_session("Invalid Expiry Date"));
+        assert!(!message_names_a_dead_session("token bucket exhausted"));
+        assert!(message_names_a_dead_session("Invalid Token"));
+        assert!(message_names_a_dead_session("Authentication Failed"));
+    }
+
+    /// A vendor declaring no message reader keeps the code-only path exactly.
+    #[test]
+    fn a_contract_without_a_message_reader_is_unchanged() {
+        assert!(crate::kite::KITE.message.is_none());
+        assert!(crate::groww::GROWW.message.is_none());
+        let body = r#"{"error_type":"TokenException","message":"Invalid Token"}"#;
+        assert_eq!(
+            crate::refusal::disposition_of(body, &crate::kite::KITE),
+            Some(Disposition::SessionDead),
+            "read through its own code, as before"
+        );
     }
 }

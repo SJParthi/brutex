@@ -855,7 +855,7 @@ pub fn decode_body(body: &str, spec: &HttpSpec) -> Result<RawWindow, FetchError>
                 high: prices(root, f.high, spec.prices)?,
                 low: prices(root, f.low, spec.prices)?,
                 close: prices(root, f.close, spec.prices)?,
-                volume: numbers(root, f.volume)?,
+                volume: volumes(root, f.volume)?,
                 timestamp: numbers(root, f.timestamp)?,
                 // OPEN INTEREST IS OPTIONAL AND ITS ABSENCE IS NOT A ZERO.
                 // A spot index has none, so the descriptor leaves the name
@@ -1001,7 +1001,7 @@ fn decode_objects(
         arrays
             .close
             .push(one_price(one(f.close)?, f.close, spec.prices)?);
-        arrays.volume.push(one_number(one(f.volume)?, f.volume)?);
+        arrays.volume.push(one_volume(one(f.volume)?, f.volume)?);
         arrays
             .timestamp
             .push(one_number(one(f.timestamp)?, f.timestamp)?);
@@ -1147,9 +1147,43 @@ fn one_price(v: &serde_json::Value, name: &str, scale: PriceScale) -> Result<i64
         // so `clippy::float_arithmetic` stays satisfied and a two-decimal price
         // round-trips character for character.
         PriceScale::Rupees => {
-            brutex_core::price::Paisa::from_rupee_text_half_up(&number.to_string())
+            let text = number.to_string();
+            let snapped = brutex_core::price::Paisa::from_rupee_text_half_up(&text)
                 .map_err(|_| refuse())?
-                .raw()
+                .raw();
+            // A NON-ZERO PRICE THAT SNAPS TO ZERO IS REFUSED, AND WITHOUT THIS
+            // THE SNAP OPENED A HOLE THE REFUSAL NEVER HAD.
+            //
+            // Half-up sends everything under half a paisa to zero, so a vendor
+            // sending `0.0001` — or, worse, `-0.001` — decoded as a clean `0`
+            // where `csv::paisa` had refused it outright. Zero is a legal price
+            // (`Bar::ohlc_is_sane` admits it and
+            // `every_price_on_the_paisa_grid_survives_intact` pins `"0"` as
+            // real), so nothing downstream could tell the difference.
+            //
+            // The negative case is the sharp one: `-0.001` snaps to `0`, and
+            // `0 < 0` is false, so it walked straight past the below-zero guard
+            // twenty lines down — the guard whose whole purpose is to catch a
+            // descriptor whose `PriceScale` is wrong. That diagnostic was
+            // unreachable for the entire `(-0.005, 0)` band.
+            //
+            // The test is on the TEXT, not the number: a value the vendor wrote
+            // with a non-zero digit is not zero, whatever it rounds to. `0`,
+            // `0.00` and `-0.0` carry no non-zero digit and still decode as the
+            // real zero they are. Bounded scan over one rendered number, so the
+            // cost is the same constant the conversion above already pays.
+            if snapped == 0 && text.bytes().any(|b| b.is_ascii_digit() && b != b'0') {
+                return Err(FetchError::TransportFailed {
+                    detail: format!(
+                        "{name:?} holds {v}, which is not zero and is smaller \
+                         than half a paisa, so snapping it to the tick grid \
+                         would store a zero the vendor did not send. Zero is a \
+                         real price here, which is exactly why a value that is \
+                         not zero must not become one."
+                    ),
+                });
+            }
+            snapped
         }
     };
     // A NEGATIVE PRICE IS NOT A PRICE, AND IT USED TO LAND.
@@ -1201,6 +1235,33 @@ fn numbers(root: &serde_json::Value, name: &str) -> Result<Vec<i64>, FetchError>
     array_at(root, name)?
         .iter()
         .map(|v| one_number(v, name))
+        .collect()
+}
+
+/// One named array of VOLUMES, which have a floor the other counts do not.
+///
+/// # Why this exists rather than a flag on [`numbers`]
+///
+/// [`numbers`] serves volume, timestamp and open interest, and only volume is
+/// floored at zero — see [`one_volume`] for why a timestamp's negative range is
+/// legal and must stay so. A boolean parameter would put the rule at the call
+/// site instead of beside the field, and a call site that passed the wrong
+/// boolean would fail silently.
+///
+/// **THIS IS THE ARRAY SHAPE DHAN ACTUALLY ANSWERS IN, and it was the site the
+/// first version of this fix missed.** There are three doors from a vendor body
+/// to a volume — this one, [`decode_objects`] and [`decode_positional`] — and
+/// patching the latter two left the parallel-array arm, which is the only one
+/// Dhan uses, still accepting `-95342`. A rule that guards two of three doors is
+/// not a rule.
+///
+/// # Errors
+///
+/// [`FetchError::TransportFailed`] naming the field and the value.
+fn volumes(root: &serde_json::Value, name: &str) -> Result<Vec<i64>, FetchError> {
+    array_at(root, name)?
+        .iter()
+        .map(|v| one_volume(v, name))
         .collect()
 }
 
@@ -1262,6 +1323,62 @@ fn one_number(v: &serde_json::Value, name: &str) -> Result<i64, FetchError> {
     } else {
         Err(refuse())
     }
+}
+
+/// One VOLUME, which counts shares traded and is therefore never negative.
+///
+/// # Why this is a sibling of [`one_number`] and not a clause inside it
+///
+/// [`one_number`] reads three fields and only one of them has zero as a floor.
+///
+/// * `open_interest` has exactly one legal negative — [`store::format::OI_NULL`],
+///   which is `i64::MIN` and which [`one_number`] already refuses on its own
+///   grounds.
+/// * **`timestamp` has a legal negative RANGE**, and this is the one that would
+///   have bitten. [`crate::session::IstMoment::from_epoch_secs`] adds
+///   `IST_OFFSET_SECS` — 19,800 — before testing the sign, so every epoch second
+///   in `-19_800..0` is a real IST moment on 1970-01-01 and is *accepted*. An
+///   `n < 0` test inside [`one_number`] would refuse a stamp the session filter
+///   admits, which is a behaviour change with no source behind it.
+///
+/// So the floor lives beside the field that has one.
+///
+/// # Why here and not at the store
+///
+/// [`store::format::Bar::counts_are_sane`] is the authority and already says
+/// `volume >= 0`. It runs in `store::file::survey`, one crate and ~1,500 lines
+/// away, and by then the value is one `i64` among millions with nothing left to
+/// say where it came from. That is the same argument [`one_price`] makes for a
+/// negative price and [`one_number`] makes for the null sentinel — and it was
+/// simply never made for volume. **An omission, not a decision:** `one_price`'s
+/// own refusal text already names the failure mode verbatim — *"a stored
+/// negative passes every ordering check downstream, which is why it is refused
+/// here rather than written"* — one function above the field that did not check.
+///
+/// Measured: a Dhan response carried `volume: -95342` on ADANIENT and died as
+/// `StoreError::ImpossibleCount` at batch record 2333, taking the whole
+/// instrument-month, its seven derived rungs, and every later month in the same
+/// batch with it. The operator's message named a batch index that maps to
+/// nothing they can open, and printed the open-interest null beside it as a
+/// second suspect. D-0323.
+///
+/// # Errors
+///
+/// [`FetchError::TransportFailed`] naming the field and the value.
+fn one_volume(v: &serde_json::Value, name: &str) -> Result<i64, FetchError> {
+    let n = one_number(v, name)?;
+    if n < 0 {
+        return Err(FetchError::TransportFailed {
+            detail: format!(
+                "{name:?} holds {n}, and a volume counts shares traded: it is \
+                 never negative, and zero means zero (CLAUDE.md §7). The store \
+                 refuses this at the append, where the field is one i64 among \
+                 millions and the vendor's body is gone — so it is refused \
+                 here, where both are still in hand."
+            ),
+        });
+    }
+    Ok(n)
 }
 
 /// The one object this vendor's bar fields are read from.
@@ -1498,10 +1615,16 @@ async fn refusal_words(
     // `None` all the way through when the feed declares no contract: the whole
     // `and_then` chain is skipped and nothing is parsed at all, which is what
     // keeps this free for every feed that has no error page read for it.
-    let verdict = names.and_then(|contract| {
-        crate::refusal::named_error_of(&body, contract.field, contract.envelope)
-            .and_then(|raw| (contract.read)(&raw))
-    });
+    //
+    // READ THROUGH THE WHOLE CONTRACT, NOT THE CODE ALONE. This chained
+    // `named_error_of` with `contract.read`, which sees only the code — and a
+    // vendor can misfile its own code. Dhan answered HTTP 400 with `DH-906`
+    // ("Order Error", per its annexure) carrying `"errorMessage":"Invalid
+    // Token"`, and the code's faithful reading told the run its REQUEST was
+    // wrong, so the credential was never re-read. `disposition_of` reads both
+    // keys in one parse and a contract declaring `message: None` takes the
+    // code-only path byte for byte. D-0325.
+    let verdict = names.and_then(|contract| crate::refusal::disposition_of(&body, contract));
     let words = match hint {
         Some(why) if body.is_empty() => why,
         Some(why) => format!("{why} — and it said: {said}"),
@@ -2073,7 +2196,7 @@ fn decode_positional(
         });
         arrays.volume.push(match cell(5)? {
             serde_json::Value::Null => 0,
-            given => one_number(given, "volume")?,
+            given => one_volume(given, "volume")?,
         });
     }
 
@@ -2760,7 +2883,10 @@ mod tests {
             ("100.006", 10_001),
             ("100.0049999", 10_000),
             ("100.12345", 10_012),
-            ("0.001", 0),
+            // `0.005` is the smallest value that rounds UP to a paisa and so is
+            // the smallest this decoder accepts. `0.001` rounds to zero and is
+            // refused — see `a_price_that_is_not_zero_never_snaps_to_zero`,
+            // which owns that rule and the reason for it.
             ("0.005", 1),
             ("100", 10_000),
             ("100.1", 10_010),
@@ -2780,6 +2906,50 @@ mod tests {
                 .expect("a decimal")
                 .raw();
             assert_eq!(got, want, "{sent} rounds toward positive infinity");
+        }
+    }
+
+    /// **A NON-ZERO PRICE MUST NOT SNAP TO ZERO**, and the hole this closes was
+    /// opened by the snap itself.
+    ///
+    /// Half-up sends everything under half a paisa to zero. `csv::paisa` had
+    /// refused those values outright, so the snap silently gained a band —
+    /// `[0.00001, 0.005)` and its mirror — where a real vendor value decodes as
+    /// a clean `0`. Zero is a LEGAL price here (`Bar::ohlc_is_sane` admits it,
+    /// and `every_price_on_the_paisa_grid_survives_intact` pins `"0"` as real),
+    /// so nothing downstream could tell the invented zero from a sent one.
+    ///
+    /// **The negative half is the sharp one.** `-0.001` snaps to `0`, and
+    /// `0 < 0` is false, so it walked past the below-zero guard entirely — the
+    /// guard that exists to catch a descriptor whose `PriceScale` is wrong. That
+    /// diagnostic was unreachable across the whole `(-0.005, 0)` band. Found by
+    /// adversarial review of the snap, not by the suite.
+    #[test]
+    fn a_price_that_is_not_zero_never_snaps_to_zero() {
+        for sent in ["0.0001", "0.004", "0.00001", "-0.001", "-0.004", "-0.0049"] {
+            let body = format!(
+                "{{\"open\":[{sent}],\"high\":[1],\"low\":[1],\"close\":[1],\
+                  \"volume\":[1],\"timestamp\":[1]}}"
+            );
+            let Err(FetchError::TransportFailed { detail }) =
+                decode_body(&body, &spec(PriceScale::Rupees))
+            else {
+                panic!("{sent} is not zero and must not be stored as one")
+            };
+            assert!(detail.contains("open"), "names the field: {detail}");
+        }
+
+        // AND A REAL ZERO IS STILL A REAL ZERO. The rule is about a value the
+        // vendor wrote with a non-zero digit, not about the number zero, which
+        // this store carries as a price like any other.
+        for sent in ["0", "0.0", "0.00", "-0.0"] {
+            let body = format!(
+                "{{\"open\":[{sent}],\"high\":[1],\"low\":[1],\"close\":[1],\
+                  \"volume\":[1],\"timestamp\":[1]}}"
+            );
+            let window = decode_body(&body, &spec(PriceScale::Rupees))
+                .unwrap_or_else(|why| panic!("{sent} is a real zero: {why}"));
+            assert_eq!(window.rows[0].open, 0, "{sent} decodes as the zero it is");
         }
     }
 
@@ -3575,6 +3745,67 @@ mod tests {
     /// interest at all*. Nothing recorded the reinterpretation in either
     /// direction.
     ///
+    /// **A NEGATIVE VOLUME IS REFUSED WHERE THE VENDOR STILL OWNS IT**, in both
+    /// response shapes.
+    ///
+    /// Measured: Dhan sent `volume: -95342` on ADANIENT. It decoded cleanly
+    /// here, survived `land`, folded, and died ~1,500 lines later at
+    /// `store::file::survey` as `ImpossibleCount` — taking the whole
+    /// instrument-month, its seven derived rungs, and every later month in the
+    /// batch. The operator's message named batch record 2333, which is an index
+    /// into a per-month slice they cannot open, and printed the open-interest
+    /// null beside it as a second suspect.
+    ///
+    /// The refusal names the field and the value, so the failure arrives with
+    /// the chunk and the date range still attached.
+    #[test]
+    fn a_negative_volume_is_refused_where_the_vendor_still_owns_the_value() {
+        // The columnar shape, and the value the operator actually received.
+        let body = r#"{"open":[1],"high":[1],"low":[1],"close":[1],
+                       "volume":[-95342],"timestamp":[1751337900]}"#;
+        let Err(FetchError::TransportFailed { detail }) =
+            decode_body(body, &spec(PriceScale::Rupees))
+        else {
+            panic!("a volume counts shares and is never negative")
+        };
+        assert!(detail.contains("volume"), "names the field: {detail}");
+        assert!(detail.contains("-95342"), "names the value: {detail}");
+
+        // And the unit, directly, so a future caller cannot lose the rule by
+        // routing around `decode_body`.
+        for bad in [-1_i64, -95_342, i64::MIN + 1] {
+            assert!(
+                one_volume(&serde_json::json!(bad), "volume").is_err(),
+                "{bad} is not a count of shares"
+            );
+        }
+        assert_eq!(
+            one_volume(&serde_json::json!(0), "volume").expect("zero is a real zero"),
+            0,
+            "zero means zero — it is not an absence"
+        );
+    }
+
+    /// **A NEGATIVE TIMESTAMP IS STILL ACCEPTED**, and this is why the floor is
+    /// on `one_volume` rather than on [`one_number`].
+    ///
+    /// `session::IstMoment::from_epoch_secs` adds `IST_OFFSET_SECS` — 19,800 —
+    /// before it tests the sign, so every epoch second in `-19_800..0` is a real
+    /// IST moment on 1970-01-01. A blanket `n < 0` inside `one_number` would
+    /// have refused a stamp the session filter admits, which is a behaviour
+    /// change with no source behind it and exactly the kind of collateral the
+    /// null-sentinel test above exists to catch.
+    #[test]
+    fn a_negative_timestamp_is_not_a_negative_count() {
+        for early in [-1_i64, -19_800, -12_345] {
+            assert_eq!(
+                one_number(&serde_json::json!(early), "timestamp").expect("a legal IST moment"),
+                early,
+                "{early} is 1970-01-01 in IST, not an impossible count"
+            );
+        }
+    }
+
     /// Its neighbour still passes, because a rule that refuses the value next to
     /// the one it means is a second defect wearing the first one's clothes.
     #[test]

@@ -173,6 +173,31 @@ pub const WINDOW_COUNT: usize = 3;
 /// genuinely publishes more is told what to raise.
 pub const MAX_CEILING: u32 = 1_000_000;
 
+/// How many clean requests it takes to climb from a floor of one back to a
+/// span's full ceiling.
+///
+/// [`Window::tighten_toward_ceiling`] adds `ceiling / RECOVERY_STEPS` per
+/// success rather than a flat `1`, so **recovery costs the same number of
+/// requests whatever the ceiling is**. Recovering from one halving is about
+/// half this many.
+///
+/// **1024 rather than a smaller number, because AIMD's stability rests on the
+/// increase being slow next to the decrease.** At 1024 a halved day span needs
+/// ~512 clean requests to return — bounded, and reachable inside a backfill that
+/// makes ~13,000 — while still being far more conservative than TCP's own rule,
+/// which restores a full window every round trip. A number small enough to
+/// recover in a handful of requests would let the governor re-breach as fast as
+/// it backed off, which is the oscillation the multiplicative decrease exists to
+/// damp.
+///
+/// **Chosen, not measured.** No bench in this workspace times a recovery, and
+/// the vendor publishes no figure a recovery rate could be derived from —
+/// `CLAUDE.md` §3 rule 1. What IS measured is the failure this replaces: the
+/// operator's log records the day allowance falling to 6,352 and a `+1` step
+/// needing 93,648 successes to undo it. Any proportional step fixes that; this
+/// one is the conservative end of the range. D-0322.
+pub const RECOVERY_STEPS: u32 = 1_024;
+
 /// Microseconds in the shortest span this governor bounds.
 pub const MICROS_PER_SECOND: u64 = 1_000_000;
 
@@ -503,13 +528,48 @@ impl Window {
         self.credit -= self.span.len_micros();
     }
 
-    /// Additive increase: one permit back, never past the published ceiling.
+    /// Additive increase: a step back toward the ceiling, never past it.
     ///
-    /// `+1` cannot overflow — `permitted <= ceiling <= MAX_CEILING`, which is
-    /// far below `u32::MAX` — and the `min` is what makes the published figure
-    /// an upper bound rather than a target.
+    /// # THE STEP IS PROPORTIONAL, AND `+1` MADE THE DAY SPAN UNRECOVERABLE
+    ///
+    /// [`Self::relax`] halves, so the decrease is proportional to the ceiling.
+    /// This used to add exactly `1`, so the INCREASE was not — and the two are
+    /// only in balance when the ceiling is small. Across the three spans this
+    /// governor holds, the ceilings differ by four orders of magnitude, and the
+    /// mismatch is the whole defect:
+    ///
+    /// | span | ceiling | halves to | successes to recover, at `+1` |
+    /// |---|---|---|---|
+    /// | second | 5 | 2 | 3 |
+    /// | day | 100,000 | 50,000 | **50,000** |
+    ///
+    /// A vendor refusal names no span, so `record_throttled` relaxes all three —
+    /// which means **one momentary per-second burst also halves the daily
+    /// allowance**, and the day span then needs more clean requests to recover
+    /// than the entire backfill will ever make. Measured in the operator's own
+    /// log: the day allowance walked 100,000 → 50,000 → 25,000 → 12,705 →
+    /// 6,352, a 15.7x collapse, and climbing back needed 93,648 successes. It
+    /// never did. A 213-instrument day pull needs ~12,996 requests and could not
+    /// finish at 6,352/day; one instrument needs 61 and never reached the cliff.
+    /// That asymmetry is the whole of why single worked and many did not.
+    ///
+    /// So the step is `ceiling / RECOVERY_STEPS`, floored at one. Recovery from
+    /// a halving now takes about `RECOVERY_STEPS / 2` successes **whatever the
+    /// ceiling is**, which is the property `+1` was reaching for and only had
+    /// for small numbers.
+    ///
+    /// **The second span is untouched by this**: `5 / 1024` is zero, the floor
+    /// makes it one, and its behaviour is exactly what it was. The change is a
+    /// no-op for every span small enough that `+1` was already proportionate,
+    /// which is what makes it safe to apply to all three rather than to a span
+    /// named by hand. D-0322.
+    ///
+    /// Cannot overflow: `permitted <= ceiling <= MAX_CEILING`, far below
+    /// `u32::MAX`, and the `min` is what keeps the published figure an upper
+    /// bound rather than a target.
     fn tighten_toward_ceiling(&mut self) {
-        self.permitted = (self.permitted + 1).min(self.ceiling);
+        let step = (self.ceiling / RECOVERY_STEPS).max(1);
+        self.permitted = self.permitted.saturating_add(step).min(self.ceiling);
     }
 
     /// Multiplicative decrease: halve the allowance, floor at one, drain the

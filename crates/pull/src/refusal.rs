@@ -229,6 +229,11 @@ impl fmt::Display for Disposition {
 /// publishes. Carrying the reader as `fn` keeps that property AND keeps this
 /// module free of any vendor's vocabulary.
 ///
+/// (A vendor's optional message key and its two-argument reader travel together
+/// as [`MessageReader`]: neither half means anything alone — a key with no
+/// reader is a string nobody consults, and a reader with no key has nothing to
+/// read — so a contract declares both or declares neither.)
+///
 /// # Adding a vendor is this struct and a `from_wire`
 ///
 /// One `const` beside the vendor's own module, one `Some(&…)` in its
@@ -258,6 +263,33 @@ pub struct ErrorNames {
     /// That name → what a caller may do, or `None` for a name this build does
     /// not know. **`None` must not be a catch-all**: see the module header.
     pub read: fn(&str) -> Option<Disposition>,
+    /// The key carrying the vendor's own SENTENCE, and a reader that may use it
+    /// where the code alone is wrong.
+    ///
+    /// # Why a vendor's own code is not always the last word
+    ///
+    /// Measured: Dhan answered HTTP 400 with
+    /// `{"errorType":"Order_Error","errorCode":"DH-906","errorMessage":"Invalid Token"}`.
+    /// [`Self::read`] maps `DH-906` to [`Disposition::RequestWrong`] and is
+    /// **faithful** to the vendor's published annexure in doing so — *"Incorrect
+    /// request for order — cannot be processed"*. The vendor misfiled its own
+    /// code, and `errorType` corroborated the code rather than the message: it
+    /// read `Order_Error`. **The message was the only field carrying the
+    /// truth.**
+    ///
+    /// The cost of believing the code was not a wrong label. `RequestWrong`
+    /// means *"sending it again unchanged cannot help"*, so the credential was
+    /// never re-read and the pass loop re-asked the whole instrument from chunk
+    /// one against a token that was already dead.
+    ///
+    /// # `None` is a recorded absence, exactly as [`Self::envelope`]'s is
+    ///
+    /// `None` for a vendor whose codes have not been OBSERVED to disagree with
+    /// their own messages. Not a hole — a vendor that has never been seen
+    /// misfiling a code gets the byte-identical path it had before this field
+    /// existed, and adding a reader on suspicion would be the invention §3 rule
+    /// 1 forbids.
+    pub message: Option<MessageReader>,
     /// Where the contract was read, in words an operator can go and check.
     pub source: &'static str,
 }
@@ -297,6 +329,15 @@ impl core::hash::Hash for ErrorNames {
         self.source.hash(state);
     }
 }
+
+/// A vendor's message key, and the reader that weighs it against the code.
+///
+/// The pair travels together because neither half means anything alone: a key
+/// with no reader is a string nobody consults, and a reader with no key has
+/// nothing to read. Named as one type so [`ErrorNames::message`] can say
+/// `Option<MessageReader>` — a contract declares both or declares neither, and
+/// there is no third state to represent.
+pub type MessageReader = (&'static str, fn(&str, &str) -> Option<Disposition>);
 
 /// Which of the two axes decided a [`Verdict`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -542,4 +583,54 @@ pub fn named_error_of(body: &str, field: &str, envelope: Option<&str>) -> Option
         None => &value,
     };
     Some(holder.get(field)?.as_str()?.to_owned())
+}
+
+/// One refused body → what a caller may do, reading the whole contract.
+///
+/// # Why this exists beside [`named_error_of`]
+///
+/// [`ErrorNames::message`] means a contract can need TWO keys out of one body,
+/// and the obvious spelling — calling [`named_error_of`] once per key — parses
+/// the body twice. That function is this module's one acknowledged linear cost,
+/// so doubling it on every refusal would make the cost table above wrong for a
+/// reason no reader could see from the call site. **One `from_str`, two `get`s.**
+///
+/// A contract declaring `message: None` takes the code-only path and is
+/// byte-identical to what it had before that field existed.
+///
+/// # Errors
+///
+/// Returns `None` — never a default disposition — when the body is not JSON,
+/// when the envelope or the code key is absent, or when the vendor's reader does
+/// not recognise the code. The caller falls back to the status, which is what it
+/// did for every vendor before any contract existed.
+///
+/// # Cost
+///
+/// One JSON parse, bounded by the body the caller already holds, then a constant
+/// number of key lookups. Same order as [`named_error_of`], not twice it.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
+#[must_use]
+pub fn disposition_of(body: &str, contract: &ErrorNames) -> Option<Disposition> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let holder = match contract.envelope {
+        Some(name) => value.get(name)?,
+        None => &value,
+    };
+    let code = holder.get(contract.field)?.as_str()?;
+    match contract.message {
+        // THE SENTENCE, WHERE THE VENDOR PUBLISHES ONE AND ITS CODES HAVE BEEN
+        // SEEN TO DISAGREE WITH IT. An absent or non-string message reads as
+        // empty rather than as a refusal: a missing sentence must not lose the
+        // code's own answer, which is right far more often than it is wrong.
+        Some((key, read_both)) => {
+            let sentence = holder.get(key).and_then(serde_json::Value::as_str);
+            read_both(code, sentence.unwrap_or_default())
+        }
+        None => (contract.read)(code),
+    }
 }

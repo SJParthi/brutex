@@ -46,6 +46,8 @@ pub const GROWW: ErrorNames = ErrorNames {
     // envelope field exists at all.
     envelope: Some("error"),
     read,
+    // NO MESSAGE READER. Not observed misfiling a code; see `kite::KITE`.
+    message: None,
     source: "Groww Docs/15-BONUS-REST-introduction.md — 'Error Codes' table \
              (seven GA00x codes) and the FAILURE envelope above it, read \
              19 Aug 2026",

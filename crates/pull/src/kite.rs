@@ -36,6 +36,10 @@ pub const KITE: ErrorNames = ErrorNames {
     // field exists because Groww does not.
     envelope: None,
     read,
+    // NO MESSAGE READER. This vendor has not been observed misfiling its own
+    // codes, and adding one on suspicion would be the invention §3 rule 1
+    // forbids. A recorded absence, exactly as `envelope` is.
+    message: None,
     source: "kite.trade/docs/connect/v3/exceptions/, read 19 Aug 2026 — nine \
              names — plus PermissionException from the vendor's own SDK, \
              github.com/zerodha/pykiteconnect kiteconnect/exceptions.py",

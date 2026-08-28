@@ -5530,11 +5530,17 @@ impl<D: pull::chain::Discovery> pull::chain::Discovery for Governed<'_, D> {
     /// earned the 429 of 2026-08-20 by a different road.
     ///
     /// The multiplicative decrease is deliberately NOT taken here.
-    /// `pull::http::HttpSource`'s `Discovery` implementation already calls
-    /// `record_throttled` on a 429 and `record_success` on a 2xx, which the bars
-    /// path's `window_async` does not — so [`with_retry`] takes the decrease
-    /// itself and this must not, or one 429 would be counted twice and halve the
-    /// ceiling on a single refusal.
+    /// `pull::http::HttpSource` records `record_throttled` on a 429 and
+    /// `record_success` on a 2xx at the point the status is read — in **both**
+    /// its entry points, `Discovery::get` and `window_async` alike. So no
+    /// wrapper takes it, or one 429 would be counted twice and quarter the
+    /// ceiling where AIMD halves it.
+    ///
+    /// This sentence used to end *"which the bars path's `window_async` does
+    /// not"*, and that half was false: `window_async`'s own feedback block does
+    /// exactly what `get`'s does. [`with_retry`] believed the exemption and took
+    /// the decrease as well, which is what collapsed the operator's day
+    /// allowance 15.7x. D-0322.
     ///
     /// # Cost
     ///
@@ -5579,11 +5585,15 @@ impl<D: pull::chain::Discovery> pull::chain::Discovery for Governed<'_, D> {
 /// # The governor is charged per attempt and decreased by the TRANSPORT
 ///
 /// Every attempt takes its own permit, retries included. The multiplicative
-/// decrease is deliberately NOT taken here: both `pull::http::HttpSource`
-/// entry points this wraps already call `record_throttled` on a 429 and
-/// `record_success` on a 2xx, which the bars path's `window_async` does not — so
-/// [`with_retry`] takes the decrease itself and this must not, or one 429 would
-/// be counted twice and halve the ceiling on a single refusal.
+/// decrease is deliberately NOT taken here: both `pull::http::HttpSource` entry
+/// points this wraps already call `record_throttled` on a 429 and
+/// `record_success` on a 2xx, so a wrapper that took it as well would count one
+/// 429 twice and quarter the ceiling where AIMD halves it.
+///
+/// The clause *"which the bars path's `window_async` does not"* stood here and
+/// contradicted the same sentence's own "both entry points". [`with_retry`]
+/// followed the false half and did take the decrease; this function did not, and
+/// was right. D-0322 makes them agree.
 ///
 /// # Cost
 ///
@@ -6489,20 +6499,31 @@ async fn with_retry(
             await_budget(feed, site).await?;
         }
         match source.window_async(request).await {
-            // THE ADDITIVE INCREASE. Without this the governor admits
-            // against a fixed budget forever and never learns the vendor's
-            // real ceiling -- AIMD with neither the A nor the D.
-            Ok(body) => {
-                if let Ok(budgets) = site.budgets.lock()
-                    && let Some(Some(shared)) = budgets.get(feed as usize)
-                {
-                    shared
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .record_success();
-                }
-                return Ok(body);
-            }
+            // THE ADDITIVE INCREASE IS TAKEN BY THE TRANSPORT, NOT HERE, AND
+            // IT USED TO BE TAKEN TWICE.
+            //
+            // `window_async` records `record_success` on a 2xx and
+            // `record_throttled` on a 429 at the point the status is read. This
+            // wrapper recorded them again on the same shared `Arc`, so one
+            // answer moved the governor twice: a 429 QUARTERED the allowance
+            // where AIMD halves it, and a success raised it at double rate.
+            //
+            // Measured in the operator's own log — the day allowance walked
+            // 100,000 → 50,000 → 25,000 → 12,705 → 6,352, a 15.7x collapse,
+            // while `record_success` adds ONE back per clean request. Climbing
+            // out of 6,352 needs 93,648 of them, so the budget did not recover
+            // within the life of the process and a 213-instrument pull could no
+            // longer finish at all. One instrument never reached the cliff,
+            // which is the whole of why single worked and many did not.
+            //
+            // This function's own doc argued the decrease must not be taken
+            // twice and then took it, on the premise that "the bars path's
+            // `window_async` does not" record. It does, at `http.rs`'s feedback
+            // block inside `window_async` itself. `laddered` already declines to
+            // record for exactly this reason; this now matches it, and the rule
+            // is uniform: **the transport reads the status, so the transport
+            // owns the feedback.** D-0322.
+            Ok(body) => return Ok(body),
             Err(why) => {
                 let text = why.to_string();
                 // THE STATUS IS CARRIED, SO IT IS READ RATHER THAN RE-PARSED.
@@ -6598,31 +6619,46 @@ async fn with_retry(
                         ));
                     }
                     Step::Again { wait_ms, throttled } => {
-                        if throttled {
-                            // THE MULTIPLICATIVE DECREASE, on every span,
-                            // because a 429 names none of them. See
-                            // `pull::rate::Governor`.
-                            //
-                            // Measured: a 785-instrument, 3-chunk pull fired
-                            // ~2,355 requests in 365 s (~6.4/s) and 458
-                            // instruments died on `status 429`.
-                            //
-                            // An earlier draft of this comment said the branch
-                            // "used to be unreachable" and that
-                            // `record_throttled` was dead workspace-wide. That
-                            // described a build TWO steps back, not the one
-                            // this replaced: the immediately preceding version
-                            // already tested `throttled` first and reached this
-                            // call. Corrected rather than deleted, because the
-                            // measurement above is why the branch exists.
-                            if let Ok(budgets) = site.budgets.lock()
-                                && let Some(Some(shared)) = budgets.get(feed as usize)
-                            {
-                                shared
-                                    .lock()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                    .record_throttled();
-                            }
+                        // THE DECREASE IS TAKEN EXACTLY WHERE THE TRANSPORT
+                        // CANNOT SEE IT, AND NOWHERE ELSE.
+                        //
+                        // `window_async` records the feedback on STATUS alone —
+                        // `record_throttled` on a 429, `record_success` on a
+                        // 2xx. Taking it here as well counted one 429 twice: the
+                        // allowance QUARTERED where AIMD halves it. Measured — a
+                        // 785-instrument, 3-chunk pull fired ~2,355 requests in
+                        // 365 s (~6.4/s), 458 instruments died on `status 429`,
+                        // and the day allowance walked 100,000 → 50,000 →
+                        // 25,000 → 12,705 → 6,352 against a recovery that adds
+                        // back per clean request.
+                        //
+                        // BUT `throttled` HAS TWO SOURCES AND ONLY ONE IS A 429.
+                        // `step` also raises the rate ladder when the vendor
+                        // NAMES a rate refusal in its body —
+                        // `Disposition::Throttled`, which Dhan spells `DH-904`
+                        // and `805` — and its own header says why: *a vendor
+                        // that names a rate refusal under an unexpected status
+                        // still gets the rate ladder rather than the backend
+                        // one.* `Dhan Docs/20-annexure.md` publishes no HTTP
+                        // status for either code, so this build cannot assume
+                        // 429, and under a 400 or a 500 the transport's
+                        // status-only test records NOTHING.
+                        //
+                        // Removing this block wholesale therefore fixed the
+                        // double count and opened a hole: a named throttle would
+                        // sleep, re-ask, and never narrow the allowance the
+                        // vendor had just refused. So the decrease is taken here
+                        // for the named case only, which is precisely the set
+                        // the transport misses. D-0322.
+                        if throttled
+                            && status != Some(429)
+                            && let Ok(budgets) = site.budgets.lock()
+                            && let Some(Some(shared)) = budgets.get(feed as usize)
+                        {
+                            shared
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .record_throttled();
                         }
                         tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
                     }
