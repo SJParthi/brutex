@@ -64,9 +64,22 @@
      * provenance, for the reader who asks.
      */
     rows = [],
-    /** A Set of selected keys, owned by the caller. */
+    /**
+     * A Set of selected keys, owned by the caller.
+     * @type {Set<string>}
+     */
     selected = new Set(),
-    /** Called with the next Set. The caller decides what selection means. */
+    /**
+     * Called with the next Set. The caller decides what selection means.
+     *
+     * TYPED, BECAUSE THE CALLERS WERE PAYING FOR IT NOT BEING. All five
+     * `emit` calls below pass a `Set<string>` and this prop said nothing, so
+     * `onchange={(next) => …}` at every call site took an implicitly-`any`
+     * parameter: the component's own contract left unstated, and the cost
+     * charged to the pages that use it.
+     *
+     * @type {((next: Set<string>) => void) | undefined}
+     */
     onchange,
     /** Button text when nothing is chosen, and the noun for the counts. */
     label = 'items',
@@ -246,7 +259,8 @@
           : `${selected.size} of ${rows.length} ${label}`)
   );
 
-  /** @param {unknown} next */
+  /** @param {Set<string>} next — every caller below builds one, and `unknown`
+   *  here was what let the prop above go untyped. */
   function emit(next) {
     onchange?.(next);
   }

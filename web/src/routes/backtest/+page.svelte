@@ -298,7 +298,10 @@
   /** @type {ReturnType<typeof setTimeout> | null} */
   let pollAt = null;
 
-  /** `YYYY-MM` as the two numbers the route wants, or null. */
+  /**
+   * `YYYY-MM` as the two numbers the route wants, or null.
+   * @param {string | null | undefined} text
+   */
   function months(text) {
     const m = /^(\d{4})-(\d{2})$/.exec(text ?? '');
     if (!m) return null;
@@ -844,7 +847,9 @@
         return;
       }
       const body = await response.json();
-      const target = (body?.targets ?? []).find((t) => t?.target === 'swept');
+      const target = (body?.targets ?? []).find(
+        (/** @type {{ target?: string } | null | undefined} */ t) => t?.target === 'swept'
+      );
       sweptSurface = target
         ? {
             label: String(target.label ?? 'Swept'),
@@ -1065,6 +1070,7 @@
    * alarm that fires on every row teaches the operator to ignore it, and
    * then the real one goes unread too.
    */
+  /** @param {{ sealed?: boolean }} r */
   const trustworthy = (r) => r.sealed !== false;
 
   /**
@@ -1683,7 +1689,10 @@
   let rungsSeq = 0;
   let benchSeq = 0;
 
-  /** @param {any} run */
+  /**
+   * @param {any} run
+   * @param {string} rung the timeframe to draw, which is not always the run's own
+   */
   async function loadSeries(run, rung) {
     const seq = ++seriesSeq;
     const at = place(run.underlying, run.feed);
@@ -2061,12 +2070,20 @@
    */
   const returnHistogram = $derived.by(() => {
     const bars = series.bars;
-    if (bars.length < 2) return { bins: [], max: 0, avgLoss: null, avgGain: null };
+    /* NOTHING TO DISTRIBUTE IS `null`, NOT A HISTOGRAM WITH HALF ITS FIELDS.
+       These two arms returned `{bins: [], max: 0, avgLoss: null, avgGain:
+       null}` — no `lo`, no `hi`, no `losers`, no `winners` — so the value's
+       type was a union in which the range was sometimes absent, and the panel
+       that reads `h.lo` was only correct because its caller happened to guard
+       on `bins.length`. An empty set of returns HAS no range: `lo: 0` would be
+       a measurement nobody took. One value for "there is no distribution" says
+       that, and the guard at the render site becomes the same question. */
+    if (bars.length < 2) return null;
     const rets = [];
     for (const b of bars) {
       if (b.o > 0) rets.push(Math.round(((b.c - b.o) / b.o) * 10_000));
     }
-    if (rets.length === 0) return { bins: [], max: 0, avgLoss: null, avgGain: null };
+    if (rets.length === 0) return null;
     const lo = Math.min(...rets);
     const hi = Math.max(...rets);
     const width = Math.max(1, Math.ceil((hi - lo) / 18));
@@ -2083,7 +2100,9 @@
     }
     const losses = rets.filter((r) => r < 0);
     const gains = rets.filter((r) => r > 0);
-    const mean = (xs) => (xs.length === 0 ? null : Math.round(xs.reduce((a, b) => a + b, 0) / xs.length));
+    /** @param {number[]} xs */
+    const mean = (xs) =>
+      xs.length === 0 ? null : Math.round(xs.reduce((a, b) => a + b, 0) / xs.length);
     return {
       bins,
       max: Math.max(1, ...bins.map((b) => b.n)),
@@ -2204,7 +2223,10 @@
 
   /** Which of the tester's three views is showing. */
   let testerView = $state('metrics');
-  /** The period scale on every periodic chart. TradingView's four. */
+  /**
+   * The period scale on every periodic chart. TradingView's four.
+   * @type {(typeof PERIOD_SCALES)[number]}
+   */
   let periodScale = $state('weekly');
   /** "Profits and losses" split. TradingView's two. */
   let plSplit = $state('signals');
@@ -2329,6 +2351,18 @@
     }
     return out;
   });
+
+  /**
+   * THE FOUR SCALES, WRITTEN ONCE.
+   *
+   * This list was an inline array literal at two `{#each}` sites and its
+   * labels were a third object here, so the four names existed in three
+   * places and a fifth scale would have had to be added to all of them. It is
+   * also what makes `PERIOD_LABEL[periodScale]` legal: indexing a four-key
+   * object with a `string` is an error precisely because `string` is not one
+   * of the four, and the fix is for `periodScale` to say that it is.
+   */
+  const PERIOD_SCALES = /** @type {const} */ (['daily', 'weekly', 'quarterly', 'yearly']);
 
   /** The heading TradingView puts above each periodic chart. */
   const PERIOD_LABEL = {
@@ -2473,6 +2507,10 @@
   /** The console's own palette, read off the document so both themes follow. */
   function chartTokens() {
     const s = getComputedStyle(document.documentElement);
+    /**
+     * @param {string} name a CSS custom property
+     * @param {string} fallback used when the theme does not define it
+     */
     const v = (name, fallback) => s.getPropertyValue(name).trim() || fallback;
     return {
       text: v('--n9', '#8a95ab'),
@@ -2585,12 +2623,13 @@
             // 0 Year, 1 Month, 2 DayOfMonth, 3 Time, 4 TimeWithSeconds. Without
             // this the axis labels in UTC while the legend beside it reads IST,
             // and the two name different times for the bar they both point at.
-            tickMarkFormatter: (time, type) => istLabel(Number(time), type <= 2)
+            tickMarkFormatter: (/** @type {unknown} */ time, /** @type {number} */ type) =>
+              istLabel(Number(time), type <= 2)
           },
           // The crosshair's own time label, same clock.
           localization: {
             locale: 'en-IN',
-            timeFormatter: (time) => `${istLabel(Number(time), false)} IST`
+            timeFormatter: (/** @type {unknown} */ time) => `${istLabel(Number(time), false)} IST`
           },
           crosshair: {
             mode: 1, // magnet: snaps to OHLC, which is what the price under the pointer means
@@ -2628,7 +2667,7 @@
         // library's floats. The Markets page takes the same care in the same
         // words.
         const byTime = new Map(bars.map((b) => [b.t, b]));
-        made.subscribeCrosshairMove((param) => {
+        made.subscribeCrosshairMove((/** @type {{ time?: unknown } | undefined} */ param) => {
           const at = param?.time == null ? null : byTime.get(Number(param.time));
           ohlc = at ?? null;
         });
@@ -2767,6 +2806,7 @@
     `${monthLabel(`${r.from_year}-${String(r.from_month).padStart(2, '0')}`)} → ${monthLabel(`${r.to_year}-${String(r.to_month).padStart(2, '0')}`)}`;
 
   /** Coverage as a whole percent, for the bar's width only — never displayed alone. */
+  /** @param {{ months_asked: number, months_found: number }} r */
   const coverPct = (r) =>
     r.months_asked > 0 ? Math.round((r.months_found / r.months_asked) * 100) : 0;
 
@@ -2829,7 +2869,17 @@
      and never will until the sweep writes one.
      ============================================================ -->
 
-{#snippet areaChart(points, ticks, xLabels, note)}
+<!-- THE DATA PARAMETERS BIND TO THE TYPE OF WHAT IS PASSED, with `typeof`,
+     rather than to a shape restated here. A snippet is called from one place
+     with one series; a second spelling of that series' shape is a second
+     thing to update when the derivation that builds it changes, and the one
+     that would not be updated is this one. -->
+{#snippet areaChart(
+  /** @type {typeof holdCurve} */ points,
+  /** @type {string[]} */ ticks,
+  /** @type {string[]} */ xLabels,
+  /** @type {string} */ note
+)}
   <div class="cf">
     <div class="cf-plot tall">
       <svg class="cf-svg" viewBox="0 0 1000 260" preserveAspectRatio="none" aria-hidden="true">
@@ -2848,7 +2898,12 @@
   </div>
 {/snippet}
 
-{#snippet barChart(bars, ticks, note, legend)}
+{#snippet barChart(
+  /** @type {typeof holdPeriods} */ bars,
+  /** @type {string[]} */ ticks,
+  /** @type {string} */ note,
+  /** @type {string[]} */ legend
+)}
   <div class="cf">
     <div class="cf-plot tall">
       <svg class="cf-svg" viewBox="0 0 1000 260" preserveAspectRatio="none" aria-hidden="true">
@@ -2883,7 +2938,10 @@
   </div>
 {/snippet}
 
-{#snippet histogram(h, note)}
+{#snippet histogram(
+  /** @type {NonNullable<typeof returnHistogram>} */ h,
+  /** @type {string} */ note
+)}
   <div class="cf">
     <div class="cf-plot">
       <svg class="cf-svg" viewBox="0 0 1000 200" preserveAspectRatio="none" aria-hidden="true">
@@ -2919,7 +2977,7 @@
   </div>
 {/snippet}
 
-{#snippet swingChart(sw, note)}
+{#snippet swingChart(/** @type {typeof holdSwings} */ sw, /** @type {string} */ note)}
   <div class="cf">
     <div class="cf-plot">
       <svg class="cf-svg" viewBox="0 0 1000 200" preserveAspectRatio="none" aria-hidden="true">
@@ -2943,7 +3001,19 @@
     <p class="cf-note">{note}</p>
   </div>
 {/snippet}
-{#snippet chartFrame(why, legend, ticks, xLabels, pager)}
+<!-- `legend` TAKES TWO FORMS AND ALWAYS HAS. The body reads `l.label ?? l`
+     and `l.dash` and `l.value`, which is written exactly so a caller can pass
+     a bare string OR a row with a dashed swatch and a trailing figure — and
+     both kinds of caller exist. Typing it `string[]`, as a first pass did,
+     was not a tightening: it was a claim that contradicted the `?? l` two
+     lines into the snippet it described. -->
+{#snippet chartFrame(
+  /** @type {string} */ why,
+  /** @type {Array<string | { label: string, dash?: boolean, value?: string }>} */ legend,
+  /** @type {string[]} */ ticks,
+  /** @type {string[]} */ xLabels,
+  /** @type {boolean} */ pager
+)}
   <div class="cf">
     <div class="cf-plot">
       {#if pager}
@@ -2974,9 +3044,18 @@
     {/if}
     {#if legend.length > 0}
       <ul class="cf-legend">
-        {#each legend as l, i (l.label ?? l)}
+        <!-- NORMALISED ONCE, INSTEAD OF `l.label ?? l` AT THREE READS. The
+             two forms are widened to the richer one at the top of the body,
+             so everything below reads one shape and the string case is
+             handled in exactly one place rather than implied by a `??` that
+             a reader has to decode three times. -->
+        {#each legend as raw, i (typeof raw === 'string' ? raw : raw.label)}
+          {@const l =
+            typeof raw === 'string'
+              ? /** @type {{ label: string, dash?: boolean, value?: string }} */ ({ label: raw })
+              : raw}
           <li class:dash={l.dash}>
-            <span class="cf-sw s{i}" class:dashed={l.dash}></span>{l.label ?? l}{#if l.value}<b>{l.value}</b>{/if}
+            <span class="cf-sw s{i}" class:dashed={l.dash}></span>{l.label}{#if l.value}<b>{l.value}</b>{/if}
           </li>
         {/each}
       </ul>
@@ -3163,7 +3242,7 @@
             title: h.full
           }))}
           selected={pickedSymbols}
-          onchange={(next) => {
+          onchange={(/** @type {Set<string>} */ next) => {
             // THE EMPTY SET IS ACCEPTED, AND THE FIRST VERSION REFUSED IT HERE.
             // `if (next.size === 0) return;` made "Clear all" a control that
             // silently did nothing while its label said otherwise -- which is
@@ -3210,7 +3289,7 @@
             title: `${monthLabel(r.from)} – ${monthLabel(r.to)}`
           }))}
           selected={pickedRungs}
-          onchange={(next) => {
+          onchange={(/** @type {Set<string>} */ next) => {
             pickedRungs = next;
             /* THE THIRD LATCH, and it was the missing one. `symbolTouched` and
                `spanTouched` exist because a default that keeps reasserting
@@ -3257,7 +3336,7 @@
           title="The first month of the span. Only months this instrument actually holds are offered."
           rows={monthRows('from')}
           selected={new Set(ask.from ? [ask.from] : [])}
-          onchange={(next) => {
+          onchange={(/** @type {Set<string>} */ next) => {
             const [m] = [...next];
             if (m) {
               ask.from = m;
@@ -3280,7 +3359,7 @@
           title="The last month of the span. Only months this instrument actually holds are offered."
           rows={monthRows('to')}
           selected={new Set(ask.to ? [ask.to] : [])}
-          onchange={(next) => {
+          onchange={(/** @type {Set<string>} */ next) => {
             const [m] = [...next];
             if (m) {
               ask.to = m;
@@ -4586,7 +4665,7 @@
                   <div class="tt-hrow tight">
                     <h5 class="tt-h5">{PERIOD_LABEL[periodScale]} PnL</h5>
                     <div class="tt-seg" role="group" aria-label="Period">
-                      {#each ['daily', 'weekly', 'quarterly', 'yearly'] as s (s)}
+                      {#each PERIOD_SCALES as s (s)}
                         <button class="tt-segbtn" class:on={periodScale === s} onclick={() => (periodScale = s)}>{s[0].toUpperCase() + s.slice(1)}</button>
                       {/each}
                     </div>
@@ -4649,7 +4728,7 @@
                   <div class="tt-hrow tight">
                     <h5 class="tt-h5">Strategy vs benchmark</h5>
                     <div class="tt-seg" role="group" aria-label="Period">
-                      {#each ['daily', 'weekly', 'quarterly', 'yearly'] as s (s)}
+                      {#each PERIOD_SCALES as s (s)}
                         <button class="tt-segbtn" class:on={periodScale === s} onclick={() => (periodScale = s)}>{s[0].toUpperCase() + s.slice(1)}</button>
                       {/each}
                     </div>
@@ -4789,7 +4868,7 @@
                   <div class="tt-two">
                     <div>
                       <h5 class="tt-h5">Returns distribution</h5>
-                      {#if returnHistogram.bins.length > 0}{@render histogram(returnHistogram, 'The distribution of per-BAR returns over the window on screen, from the bars on disk. NOT per trade — the sweep records ' + exact(openRun.trades) + ' as a count and keeps no list, so a per-trade histogram has no population to draw.')}{:else}{@render chartFrame('No bars are loaded, so there is nothing to distribute.', HIST_LEGEND, COUNT_TICKS, RETURN_TICKS, false)}{/if}
+                      {#if returnHistogram}{@render histogram(returnHistogram,'The distribution of per-BAR returns over the window on screen, from the bars on disk. NOT per trade — the sweep records ' + exact(openRun.trades) + ' as a count and keeps no list, so a per-trade histogram has no population to draw.')}{:else}{@render chartFrame('No bars are loaded, so there is nothing to distribute.', HIST_LEGEND, COUNT_TICKS, RETURN_TICKS, false)}{/if}
                     </div>
                     <div>
                       <h5 class="tt-h5">Trades distribution</h5>

@@ -472,7 +472,22 @@
     Number.isInteger(row?.bars) && /** @type {number} */ (row?.bars) >= 0
       ? /** @type {number} */ (row?.bars)
       : null;
-  /** @param {import('$lib/index.svelte.js').MasterRow} row */
+  /**
+   * A DISCRIMINATED UNION, SPELLED OUT, so `st.kind === 'count'` narrows.
+   *
+   * Inferred from the four returns, `kind` widens to `string` — and a `string`
+   * discriminant discriminates nothing, so `barCell` reading `st.n` under
+   * `{#if st.kind === 'count'}` was reading a field three of the four branches
+   * do not have. The four states are the whole point of this function; its own
+   * header calls them "four answers for one column, and they never look
+   * alike", and this is that sentence in a form the checker enforces.
+   *
+   * @param {import('$lib/index.svelte.js').MasterRow} row
+   * @returns {{ kind: 'nomaster', wait: boolean, why: string }
+   *          | { kind: 'unread', why: string }
+   *          | { kind: 'zero' }
+   *          | { kind: 'count', n: number }}
+   */
   function barState(row) {
     if (!masterIsThisFeed) return { kind: 'nomaster', wait: !catalogue.error, why: countRefusal };
     const n = barsOf(row);
@@ -569,6 +584,13 @@
     if (scroller) scroller.scrollTop = 0;
   }
 
+  /**
+   * @param {'bars' | 'segment' | 'symbol'} key the three the sort understands.
+   *        Listed rather than `string`, because the ordering below branches on
+   *        exactly these and treats everything else as `symbol` — so a fourth
+   *        column added to the header without a branch here would sort by name
+   *        and look like it had sorted.
+   */
   function sortBy(key) {
     if (sortKey === key) sortDir = -sortDir;
     else {
@@ -576,6 +598,7 @@
       sortDir = key === 'bars' ? -1 : 1; // biggest first for a count, A→Z for a name
     }
   }
+  /** @param {'bars' | 'segment' | 'symbol'} key */
   const arrow = (key) => (sortKey !== key ? '' : sortDir === 1 ? '▲' : '▼');
 
   /* ---- the virtual window ---------------------------------------------- */
@@ -635,9 +658,13 @@
     pickedKey = (held.find((r) => r.key === 'NSE-NIFTY') ?? held[0] ?? all[0]).key ?? null;
   });
 
+  /** @param {import('$lib/index.svelte.js').MasterRow} row */
   function pick(row) {
     if (!row) return;
-    pickedKey = row.key;
+    /* A ROW WITH NO KEY CANNOT BE SELECTED, and the same reasoning as the
+       default pick above: `pickedKey` is `string | null`, and putting
+       `undefined` there would be a third state nothing tests for. */
+    pickedKey = row.key ?? null;
     pin = null;
     hover = null;
     openTray = null;
@@ -666,6 +693,7 @@
     else if (top + ROW > el.scrollTop + el.clientHeight) el.scrollTop = top + ROW - el.clientHeight;
   });
 
+  /** @param {KeyboardEvent} e */
   function onSearchKey(e) {
     const page = Math.max(1, Math.floor(viewportH / ROW) - 1);
     switch (e.key) {
@@ -712,6 +740,7 @@
   }
 
   // `/` focuses the search from anywhere — never while typing into something.
+  /** @param {KeyboardEvent} e */
   function onWindowKey(e) {
     if (e.key === 'Escape' && openTray) {
       openTray = null;
@@ -745,6 +774,7 @@
    * rest is exact. A `split('-')` is not: `BAJAJ-AUTO` is a real NSE symbol
    * and splitting it would file it under a segment called `BAJAJ`.
    */
+  /** @param {string} censusKey the `EXCHANGE-SEGMENT-SYMBOL` spelling */
   function instrumentKeyOf(censusKey) {
     const a = censusKey.indexOf('-');
     if (a < 0) return null;
@@ -753,6 +783,12 @@
     return `${censusKey.slice(0, a)}-${censusKey.slice(b + 1)}`;
   }
   const censusByInstrument = $derived.by(() => {
+    /* THE SAME LESSON AS `censusMonths` ONE SCREEN UP. A bare `new Map()` is
+       `Map<any, any>`, so both `.reduce((a, m) => a + m.rows, 0)` call sites
+       in the markup took implicitly-`any` accumulators — an untyped
+       accumulator built here, spent two thousand lines away. Typed from the
+       value it is filled from, so it cannot drift from it. */
+    /** @type {typeof censusMonths} */
     const out = new Map();
     for (const [k, months] of censusMonths) {
       const ik = instrumentKeyOf(k);
@@ -880,6 +916,11 @@
     monthsAtBase.filter((m) => wantMonths.includes(m.month)).reduce((a, m) => a + m.rows, 0)
   );
 
+  /**
+   * @param {string} month `YYYY-MM`
+   * @param {string} rung the timeframe the month is pinned AT — a pin is the
+   *        pair, never a bare month.
+   */
   function pinMonth(month, rung) {
     basePref = rung;
     pin = pin && pin.month === month && pin.tf === rung ? null : { month, tf: rung };
@@ -1274,6 +1315,7 @@
   let themeTick = $state(0);
   function tokens() {
     const cs = getComputedStyle(document.documentElement);
+    /** @param {string} name a CSS custom property */
     const v = (name) => cs.getPropertyValue(name).trim();
     return {
       up: v('--up'),
@@ -1350,14 +1392,18 @@
             minBarSpacing: 0.02,
             // 0 Year, 1 Month, 2 DayOfMonth, 3 Time, 4 TimeWithSeconds. The
             // month name comes from the literal table, never from `Intl`.
-            tickMarkFormatter: (time, type) => {
+            tickMarkFormatter: (/** @type {unknown} */ time, /** @type {number} */ type) => {
               const ms = Number(time) * 1000;
               if (type <= 1) return monthLabel(isoMonth(ms));
               if (type === 2) return stampLabel(ms).slice(0, 11);
               return stampLabel(ms).slice(13);
             }
           },
-          localization: { locale: LOC, timeFormatter: (time) => `${stampLabel(Number(time) * 1000)} IST` },
+          localization: {
+            locale: LOC,
+            timeFormatter: (/** @type {unknown} */ time) =>
+              `${stampLabel(Number(time) * 1000)} IST`
+          },
           crosshair: {
             mode: 1, // magnet: snaps to OHLC, which is what the price under the pointer means
             vertLine: { color: c.faint, labelBackgroundColor: c.acc },
@@ -1377,7 +1423,7 @@
         // ONLY THE TIME COMES BACK OFF THE CHART. The bar itself is looked up
         // in a Map of the paisa integers, so no number this page displays has
         // been through the library's floats.
-        made.subscribeCrosshairMove((param) => {
+        made.subscribeCrosshairMove((/** @type {{ time?: unknown } | undefined} */ param) => {
           hover = param?.time != null ? { time: Number(param.time) } : null;
         });
         chart = made;
@@ -1408,6 +1454,7 @@
   });
 
   /** Epoch ms -> the `YYYY-MM` KEY form, so `monthLabel` can spell it. */
+  /** @param {number} ms epoch milliseconds */
   function isoMonth(ms) {
     const d = new Date(ms + IST_OFFSET * 1000);
     return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
@@ -1489,7 +1536,7 @@
      ====================================================================== -->
 
 <!-- THE FOUR NUMBER STATES, AND THEY NEVER LOOK ALIKE. -->
-{#snippet barCell(st)}
+{#snippet barCell(/** @type {ReturnType<typeof barState>} */ st)}
   {#if st.kind === 'count'}
     <span class="n">{group(st.n)}</span>
   {:else if st.kind === 'zero'}
@@ -1512,7 +1559,11 @@
 {/snippet}
 
 <!-- THE EVIDENCE LIST. What is known, quoted, beside what is not. -->
-{#snippet evid(items)}
+<!-- `readonly unknown[]` PER ROW, NOT A TUPLE. Callers pass a mixture of
+     two- and three-element literals AND spreads of `.map(…)` results, which
+     are plain arrays and not tuples; a tuple type would reject the spreads,
+     which are the longest lists this renders. -->
+{#snippet evid(/** @type {ReadonlyArray<readonly unknown[]>} */ items)}
   <dl class="evid">
     {#each items as [k, v, quiet] (k)}
       <div><dt>{k}</dt><dd class={quiet ? 'q' : ''}>{v}</dd></div>
@@ -1520,7 +1571,7 @@
   </dl>
 {/snippet}
 
-{#snippet skels(n, seed)}
+{#snippet skels(/** @type {number} */ n, /** @type {number} */ seed)}
   <div class="skels" aria-hidden="true">
     {#each Array(n) as _, i (i)}
       <span class="skel" style="width:{38 + ((i * seed) % 46)}%"></span>
@@ -2357,7 +2408,7 @@
                   [
                     'held on disk',
                     censusState === 'ready'
-                      ? `${group((censusByInstrument.get(pickedKey) ?? []).reduce((a, m) => a + m.rows, 0))} bars. The store is a different read and it did answer.`
+                      ? `${group((censusByInstrument.get(pickedKey ?? '') ?? []).reduce((a, m) => a + m.rows, 0))} bars. The store is a different read and it did answer.`
                       : 'not known — the census has not answered'
                   ]
                 ])}
