@@ -602,18 +602,26 @@ fn paisa(
     match scale {
         // Already paisa: an integer count, and nothing to convert.
         PriceScale::Paisa => cell.as_i64().ok_or(RollingError::Unrepresentable { field }),
-        // THE TEXT IS THE TRUTH, and `csv::paisa` owns the rule — the same
-        // sentence `http::decode_body` writes over the same conversion.
+        // THE TEXT IS THE TRUTH, and `core`'s half-up reader owns the rule —
+        // the same sentence `http::one_price` writes over the same conversion.
+        //
+        // THIS COMMENT USED TO CONTRADICT ITS OWN CALL. It ended, as it still
+        // does, on `CLAUDE.md` §7 snapping half-up at this boundary — and then
+        // called `csv::paisa`, which does not snap at all: it returns `None`
+        // past two decimals. The claim and the code disagreed inside one
+        // expression. This vendor's OHLC fields are `float` by its own
+        // documentation, so the third decimal is the float's error and not the
+        // exchange's price; refusing it discarded whole windows over a rounding
+        // artifact. See `http::prices` for the measurement. D-0321.
         //
         // Not `(x * 100.0).round()`. `float_arithmetic` is denied workspace-
         // wide, and the reason outlives the lint: a rupee figure that arrived
         // as text has an exact decimal the vendor wrote, and routing it through
         // an f64 to shift two places introduces a representation error into a
-        // value that had none. `CLAUDE.md` §7 snaps once, half-up, at the write
-        // boundary — and this is that boundary.
-        PriceScale::Rupees => {
-            crate::csv::paisa(&cell.to_string()).ok_or(RollingError::Unrepresentable { field })
-        }
+        // value that had none. The reader below walks the text digit by digit.
+        PriceScale::Rupees => brutex_core::price::Paisa::from_rupee_text_half_up(&cell.to_string())
+            .map(brutex_core::price::Paisa::raw)
+            .map_err(|_| RollingError::Unrepresentable { field }),
     }
 }
 

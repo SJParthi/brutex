@@ -1069,16 +1069,45 @@ pub const DECODED_PRICE_SCALE: PriceScale = PriceScale::Paisa;
 /// via shortest-round-trip formatting, so a two-decimal price round-trips
 /// character for character.
 ///
-/// A vendor sending **more precision than the tick grid holds** — `100.005` —
-/// is refused by name rather than snapped. That matches the CSV path exactly
-/// (`csv::paisa` returns `None` past two decimals) and it is the louder choice:
-/// a third decimal on an NSE price means the descriptor's `PriceScale` is
-/// wrong, and quietly rounding it would hide that.
+/// A VENDOR SENDING MORE DECIMALS THAN THE TICK GRID HOLDS IS **SNAPPED**,
+/// HALF-UP, AND THIS USED TO REFUSE INSTEAD.
+///
+/// The refusal read `100.005` as evidence that the descriptor's `PriceScale`
+/// was wrong, on the reasoning that a third decimal cannot occur on an NSE
+/// price. Measured against a real vendor, that reasoning is false, and the
+/// refusal cost every Dhan minute backfill this repository ever attempted:
+/// forty-two runs, none of which reached the store, each dying on chunk 1 of 21
+/// with `"open" holds 35922.6016`.
+///
+/// **The extra digits are the vendor's float, not the exchange's price.**
+/// `Dhan Docs/12-historical-data.md` types every OHLC field as `float`, and a
+/// binary float cannot hold most two-decimal decimals. BANKNIFTY's real
+/// `35922.60` is held as the nearest `f32`, `35922.6015625`, and printed to four
+/// places as `35922.6016`. That value is an exact dyadic rational —
+/// `35922.6015625 × 256 = 9_196_186`, a whole number — which only a float
+/// produces. The same holds for `35447.05` → `35447.0507812` → `35447.0508`.
+/// At that magnitude one `f32` step is 1/256 of a rupee, so of the hundred
+/// two-decimal endings only `.00`, `.25`, `.50` and `.75` survive the round
+/// trip: **96% of bars carry float error before the vendor sends them.**
+///
+/// So snapping half-up does not lose precision — it **removes the vendor's
+/// rounding error and recovers the exchange's own two-decimal value**. Keeping
+/// `35922.6016` would freeze that error into an append-only store forever, and
+/// `16797.2999` is further from the truth than `16797.30` is.
+///
+/// This is also what the law always said. `CLAUDE.md` §7 — *"Snapping happens
+/// once, at the write boundary, half-up"* — and `docs/05-decisions.md` D-0010
+/// both mandate the snap; the refusal was locked in a commit body with no
+/// ledger entry, which `CLAUDE.md` §9 requires. D-0321.
+///
+/// **Counts are not prices and are not snapped.** [`one_number`] still routes
+/// through [`crate::csv::paisa`] and still refuses a fractional share count:
+/// `250.5` of anything remains a shape this build does not understand.
 ///
 /// # Errors
 ///
 /// [`FetchError::TransportFailed`] naming the field and the value, for anything
-/// that is not a number or does not land exactly on the paisa grid.
+/// that is not a decimal number or does not fit `i64` paisa.
 fn prices(root: &serde_json::Value, name: &str, scale: PriceScale) -> Result<Vec<i64>, FetchError> {
     array_at(root, name)?
         .iter()
@@ -1095,7 +1124,7 @@ fn prices(root: &serde_json::Value, name: &str, scale: PriceScale) -> Result<Vec
 /// # Errors
 ///
 /// [`FetchError::TransportFailed`] naming the field and the value, for anything
-/// that is not a number or does not land exactly on the paisa grid.
+/// that is not a decimal number or does not fit `i64` paisa.
 fn one_price(v: &serde_json::Value, name: &str, scale: PriceScale) -> Result<i64, FetchError> {
     let refuse = || FetchError::TransportFailed {
         detail: format!(
@@ -1109,8 +1138,19 @@ fn one_price(v: &serde_json::Value, name: &str, scale: PriceScale) -> Result<i64
     let paisa = match scale {
         // Already paisa: an integer count, and nothing to convert.
         PriceScale::Paisa => number.as_i64().ok_or_else(refuse)?,
-        // Rupees: the text is the truth, and `csv::paisa` owns the rule.
-        PriceScale::Rupees => crate::csv::paisa(&number.to_string()).ok_or_else(refuse)?,
+        // Rupees: the text is the truth, and `core`'s half-up reader owns the
+        // rule. NOT `csv::paisa`, which refuses past two decimals — see the
+        // header on `prices` for why that refusal was wrong and what it cost.
+        //
+        // STILL NO FLOAT. `serde_json` renders the number back to its shortest
+        // round-tripping text and the conversion walks that text digit by digit,
+        // so `clippy::float_arithmetic` stays satisfied and a two-decimal price
+        // round-trips character for character.
+        PriceScale::Rupees => {
+            brutex_core::price::Paisa::from_rupee_text_half_up(&number.to_string())
+                .map_err(|_| refuse())?
+                .raw()
+        }
     };
     // A NEGATIVE PRICE IS NOT A PRICE, AND IT USED TO LAND.
     //
@@ -2675,28 +2715,91 @@ mod tests {
         }
     }
 
-    /// A price finer than the tick grid is **refused, not rounded**.
+    /// **THE FOUR VALUES THAT COST FORTY-TWO RUNS**, each landing on the
+    /// exchange's own price.
     ///
-    /// `CLAUDE.md` §7 fixes the grid at two decimals. A third decimal on an NSE
-    /// price does not mean "round me" — it means the descriptor's `PriceScale`
-    /// is wrong, or the field is not a price at all. Snapping would hide that.
-    /// `crate::csv::paisa` has always refused it on the archive path, and this
-    /// path now shares that one function, so the two cannot disagree.
+    /// These are not invented. They are the literal `open` values Dhan returned
+    /// on `/v2/charts/intraday` for security ids 25 and 13, quoted from
+    /// `pull.http` / `"vendor refused a window"` events, and every one of them
+    /// refused its whole 21-chunk window before this path snapped.
+    ///
+    /// The right-hand column is what the exchange actually published. Two of
+    /// these are provably `f32` artifacts — `35922.6015625 × 256 = 9_196_186`
+    /// and `35447.0507812 × 256 = 9_074_445`, both whole numbers, which only a
+    /// binary float produces — so the snap is not a loss of precision. It is
+    /// the removal of the vendor's rounding error.
     #[test]
-    fn a_price_finer_than_the_tick_grid_is_refused_rather_than_rounded() {
-        for sent in ["100.005", "100.12345", "1e300"] {
+    fn the_four_dhan_index_opens_that_refused_now_land_on_the_exchanges_price() {
+        for (sent, want, why) in [
+            ("35922.6016", 3_592_260_i64, "BANKNIFTY, f32 of 35922.60"),
+            ("35447.0508", 3_544_705, "BANKNIFTY, f32 of 35447.05"),
+            ("16797.2999", 1_679_730, "NIFTY, f64 of 16797.30"),
+            ("16633.2999", 1_663_330, "NIFTY, f64 of 16633.30"),
+        ] {
             let body = format!(
                 "{{\"open\":[{sent}],\"high\":[1],\"low\":[1],\"close\":[1],\
                   \"volume\":[1],\"timestamp\":[1]}}"
             );
-            let Err(FetchError::TransportFailed { detail }) =
-                decode_body(&body, &spec(PriceScale::Rupees))
-            else {
-                panic!("{sent} is off the paisa grid: refuse it, do not snap it")
-            };
+            let window = decode_body(&body, &spec(PriceScale::Rupees)).expect("decodes");
+            assert_eq!(window.rows[0].open, want, "{sent} is {why}");
+        }
+    }
+
+    /// Half-up, at the boundary and on both signs.
+    ///
+    /// `CLAUDE.md` §7 says half-up, and half-up on a NEGATIVE rounds toward
+    /// positive infinity — `-14.5` is `-14`, not `-15`. The negative rows are
+    /// reachable through this decoder only as a refusal (a price below zero is
+    /// rejected two statements later), so they are asserted against the
+    /// converter that owns the rule rather than through a body.
+    #[test]
+    fn the_snap_is_half_up_at_the_boundary_and_on_both_signs() {
+        for (sent, want) in [
+            ("100.004", 10_000_i64),
+            ("100.005", 10_001),
+            ("100.006", 10_001),
+            ("100.0049999", 10_000),
+            ("100.12345", 10_012),
+            ("0.001", 0),
+            ("0.005", 1),
+            ("100", 10_000),
+            ("100.1", 10_010),
+            ("100.10", 10_010),
+        ] {
+            let body = format!(
+                "{{\"open\":[{sent}],\"high\":[1],\"low\":[1],\"close\":[1],\
+                  \"volume\":[1],\"timestamp\":[1]}}"
+            );
+            let window = decode_body(&body, &spec(PriceScale::Rupees)).expect("decodes");
+            assert_eq!(window.rows[0].open, want, "{sent} snaps half-up to {want}");
+        }
+        // Half-up toward positive infinity on the negative side, asserted where
+        // the rule lives — this decoder refuses a negative before it returns.
+        for (sent, want) in [("-14.505", -1_450_i64), ("-14.506", -1_451)] {
+            let got = brutex_core::price::Paisa::from_rupee_text_half_up(sent)
+                .expect("a decimal")
+                .raw();
+            assert_eq!(got, want, "{sent} rounds toward positive infinity");
+        }
+    }
+
+    /// A COUNT IS NOT A PRICE AND IS STILL NOT SNAPPED.
+    ///
+    /// The snap above applies to `open/high/low/close` alone. `one_number`
+    /// still routes through [`crate::csv::paisa`], so a fractional share count
+    /// remains a shape this build refuses rather than rounds — half a share is
+    /// not a rounding error, it is a field that is not what it claims to be.
+    #[test]
+    fn a_fractional_count_is_still_refused_rather_than_snapped() {
+        for bad in ["250.5", "1.25"] {
+            let body = format!(
+                "{{\"open\":[1],\"high\":[1],\"low\":[1],\"close\":[1],\
+                  \"volume\":[{bad}],\"timestamp\":[1]}}"
+            );
+            let refused = decode_body(&body, &spec(PriceScale::Rupees));
             assert!(
-                detail.contains("open"),
-                "the refusal names the field: {detail}"
+                matches!(refused, Err(FetchError::TransportFailed { .. })),
+                "{bad} is not a count and must not be rounded into one"
             );
         }
     }

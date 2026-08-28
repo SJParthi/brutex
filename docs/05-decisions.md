@@ -23918,3 +23918,117 @@ feeds one July bar and one August bar in a single response and asserts both
 `2025-07.bin` and `2025-08.bin` exist with no member failed. A splitter that
 filed July under August would be **worse than the refusal it replaced**: the
 requests saved and the store silently wrong.
+
+---
+
+### D-0321
+
+**A vendor's extra decimals are its float's error, not the exchange's price, so
+they are SNAPPED half-up rather than refused.**
+
+`crates/pull/src/http.rs::one_price` routed every rupee price through
+`crate::csv::paisa`, which returns `None` past two decimal places. The header
+above it argued the refusal was the louder choice: *"a third decimal on an NSE
+price means the descriptor's `PriceScale` is wrong, and quietly rounding it
+would hide that."*
+
+**Measured against a real vendor, that premise is false, and the refusal cost
+every Dhan minute backfill this repository ever attempted.**
+
+#### What it cost
+
+Forty-two `1min` runs were started against Dhan's F&O underlyings. **None
+reached the store.** Each died on chunk 1 of 21 — the oldest window, because
+backfill runs oldest-first — with the same sentence:
+
+```
+"open" holds 35922.6016, which is not a price this build can put on the paisa grid
+```
+
+Eighty-four refusals were recorded across eight rotated log files, every one of
+them on the `open` field, on security ids 25 and 13, and carrying one of exactly
+four values. Because `api::server::fetch_chunks` treats a chunk failure as
+failure of the whole request, one refused value discarded the entire five-year
+span for that instrument: one run recorded `bars_stored: 439240,
+bars_committed: 0`.
+
+#### Why the extra digits are not precision
+
+`Dhan Docs/12-historical-data.md` types every OHLC field as **`float`**, on both
+the daily and the intraday endpoint. A binary float cannot hold most
+two-decimal decimals, and the four refused values are what that looks like:
+
+| Vendor sent | Exchange's price | Mechanism |
+|---|---|---|
+| `35922.6016` | 35922.60 | nearest `f32` is 35922.6015625 |
+| `35447.0508` | 35447.05 | nearest `f32` is 35447.0507812 |
+| `16797.2999` | 16797.30 | `f64` of 16797.30 is 16797.299999999999 |
+| `16633.2999` | 16633.30 | `f64` of 16633.30 is 16633.299999999999 |
+
+The first two are provable rather than plausible: `35922.6015625 × 256 =
+9_196_186` and `35447.0507812 × 256 = 9_074_445`, both whole numbers. A value
+that is an exact multiple of 2⁻⁸ came out of a float register; nothing else
+produces one.
+
+At that magnitude one `f32` step is 1/256 of a rupee, so of the hundred
+two-decimal endings only `.00`, `.25`, `.50` and `.75` survive the round trip.
+**Ninety-six per cent of bars carry float error before the vendor sends them.**
+Only four distinct values appear in the log because the pull dies on the first
+one and never reaches bar two.
+
+So the snap does not lose precision. It **removes the vendor's rounding error
+and recovers the exchange's own two-decimal value**, and it is the direction
+that loses nothing: `16797.2999` is further from the truth than `16797.30` is.
+
+#### Why not widen the grid instead
+
+Storing the four decimals faithfully was considered and refused. It would have
+needed a finer on-disk price grid, which is a new store format version — cheap
+in isolation, because `Bar` is seven bare `i64` and the stride does not change —
+but **24 production sites** across `core`, `pull`, `costs`, `runner`, `cli`,
+`api` and `lake` read the scale as 1/100, and two of them are traps:
+
+* `store::format::Greek` documents `gamma`, `vega`, `theta` and `rho` as
+  computed and stored **per paisa**. A grid change rescales four stored `f64`
+  columns silently — no compile error, no format bump, no failing test.
+* `web/src/lib/money.js` justifies its float divide on the paisa staying inside
+  `Number.MAX_SAFE_INTEGER`. At a 10⁻⁶ grid it does not.
+
+And the thing being preserved would be Dhan's float noise, frozen into an
+append-only store forever.
+
+#### What this restores
+
+`CLAUDE.md` §7 — *"Snapping happens once, at the write boundary, half-up"* — and
+D-0010, which says the same. **The refusal never had a ledger entry.** It was
+locked in the body of commit `49dd633` on 7 Aug 2026, which `CLAUDE.md` §9
+forbids: *"a `docs/05-decisions.md` entry exists for every locked choice"*. This
+is that entry, arriving late and reversing the choice it should have recorded.
+
+#### Where the snap does and does not apply
+
+`brutex_core::price::Paisa::from_rupee_text_half_up` owns the rule. It already
+existed, is float-free, walks the text digit by digit, and its own doc says it
+exists for exactly this case. `pull` already depended on `core`.
+
+* **`http::one_price`** — snaps. Every HTTP vendor, both response shapes.
+* **`rolling::paisa_of`** — snaps. Dhan's expired-options endpoint, same
+  provenance. Its comment already *claimed* to perform the §7 snap while calling
+  the function that refuses; the claim and the call disagreed inside one
+  expression.
+* **`http::one_number`** — does **not** snap, and must not. A count is not a
+  price: half a share is not a rounding error, it is a field that is not what it
+  claims to be. It still routes through `csv::paisa` and still refuses `250.5`.
+* **`csv::decode`** — unchanged. The local-archive path reads CSV text a vendor
+  wrote as text, which has not been through a float, so a third decimal there
+  still means what the old premise said it meant.
+
+#### The proof that matters
+
+`the_four_dhan_index_opens_that_refused_now_land_on_the_exchanges_price` feeds
+the four literal values from the log and asserts each lands on the exchange's
+own price — 3_592_260, 3_544_705, 1_679_730 and 1_663_330 paisa.
+`the_snap_is_half_up_at_the_boundary_and_on_both_signs` pins the boundary in
+both directions, including half-up toward positive infinity on a negative.
+`a_fractional_count_is_still_refused_rather_than_snapped` pins the half that did
+not change.
