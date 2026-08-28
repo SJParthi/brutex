@@ -808,13 +808,21 @@ fn note_answer(
 /// declared shape, and whatever [`RawWindow::decode`] refuses — which includes
 /// **the seven arrays disagreeing in length**, the trap that would otherwise
 /// yield a short window filed as complete.
-pub fn decode_body(body: &str, spec: &HttpSpec) -> Result<RawWindow, FetchError> {
+pub fn decode_body(
+    body: &str,
+    spec: &HttpSpec,
+    listing: crate::vendor::Listing,
+) -> Result<RawWindow, FetchError> {
+    // COUNTED ACROSS THE WHOLE BODY, reported ONCE. A per-row event would put
+    // a `telemetry::emit` inside the decode loop; one per window is the
+    // granularity `CLAUDE.md` section 3 rule 4 affords. See `one_volume`.
+    let mut corrected = 0usize;
     let root: serde_json::Value =
         serde_json::from_str(body).map_err(|why| FetchError::TransportFailed {
             detail: format!("the vendor's answer is not JSON: {why}"),
         })?;
 
-    match spec.response {
+    let decoded = match spec.response {
         ResponseShape::ParallelArrays { envelope } => {
             // EVERY FIELD IS READ FROM ONE OBJECT, RESOLVED ONCE.
             //
@@ -834,43 +842,54 @@ pub fn decode_body(body: &str, spec: &HttpSpec) -> Result<RawWindow, FetchError>
             // The descriptor has always carried `envelope` and this decoder
             // ignored it. It is now the answer: one container, named by the
             // row in `crate::vendor`, and all seven fields come out of it.
-            let root = container(&root, envelope)?;
-            let f = spec.fields;
-            let arrays = ParallelArrays {
-                // PRICES GO THROUGH `prices`, NOT `numbers`, AND THE
-                // DIFFERENCE IS 75 PAISE ON EVERY BAR THAT HAS THEM.
-                //
-                // `numbers` rounds a JSON number to an integer, which is right
-                // for a volume and a timestamp and WRONG for a price. A vendor
-                // quoting rupees sends `24500.75`; rounding that to `24501` and
-                // letting `fetch::to_paisa` multiply by 100 stores ₹24,501.00
-                // and the paise are gone, silently, on every bar.
-                //
-                // `CLAUDE.md` §7 puts the tick grid at TWO decimal places and
-                // the single snap at the write boundary. Rounding to whole
-                // rupees here is a snap at the wrong granularity in the wrong
-                // place. `prices` therefore scales first and rounds once, while
-                // the paise are still in the float.
-                open: prices(root, f.open, spec.prices)?,
-                high: prices(root, f.high, spec.prices)?,
-                low: prices(root, f.low, spec.prices)?,
-                close: prices(root, f.close, spec.prices)?,
-                volume: volumes(root, f.volume)?,
-                timestamp: numbers(root, f.timestamp)?,
-                // OPEN INTEREST IS OPTIONAL AND ITS ABSENCE IS NOT A ZERO.
-                // A spot index has none, so the descriptor leaves the name
-                // `None` and no array is looked for. When the descriptor DOES
-                // name one and the vendor omits it, that is a shape the
-                // descriptor got wrong and it must be refused rather than
-                // filled in — `CLAUDE.md` §7: `i64::MIN` is the null and zero
-                // means zero, so a silent `Vec::new()` here would later read
-                // back as real open interest of nothing.
-                open_interest: match f.open_interest {
-                    Some(name) => numbers(root, name)?,
-                    None => Vec::new(),
-                },
-            };
-            RawWindow::decode(&arrays)
+            // A CLOSURE, SO `?` CANNOT SKIP THE REPORT BELOW.
+            //
+            // This arm built its struct literal inline, so every `?` in it
+            // returned from `decode_body` ITSELF -- past
+            // `note_volumes_corrected`. A window that corrected an index volume
+            // and then failed on any later field emitted nothing at all, and
+            // this is the shape Dhan actually answers in, so production took
+            // exactly that path. The other two arms return a `Result` into
+            // `decoded` and were never affected. D-0332.
+            (|| -> Result<RawWindow, FetchError> {
+                let root = container(&root, envelope)?;
+                let f = spec.fields;
+                let arrays = ParallelArrays {
+                    // PRICES GO THROUGH `prices`, NOT `numbers`, AND THE
+                    // DIFFERENCE IS 75 PAISE ON EVERY BAR THAT HAS THEM.
+                    //
+                    // `numbers` rounds a JSON number to an integer, which is right
+                    // for a volume and a timestamp and WRONG for a price. A vendor
+                    // quoting rupees sends `24500.75`; rounding that to `24501` and
+                    // letting `fetch::to_paisa` multiply by 100 stores ₹24,501.00
+                    // and the paise are gone, silently, on every bar.
+                    //
+                    // `CLAUDE.md` §7 puts the tick grid at TWO decimal places and
+                    // the single snap at the write boundary. Rounding to whole
+                    // rupees here is a snap at the wrong granularity in the wrong
+                    // place. `prices` therefore scales first and rounds once, while
+                    // the paise are still in the float.
+                    open: prices(root, f.open, spec.prices)?,
+                    high: prices(root, f.high, spec.prices)?,
+                    low: prices(root, f.low, spec.prices)?,
+                    close: prices(root, f.close, spec.prices)?,
+                    volume: volumes(root, f.volume, listing, &mut corrected)?,
+                    timestamp: numbers(root, f.timestamp)?,
+                    // OPEN INTEREST IS OPTIONAL AND ITS ABSENCE IS NOT A ZERO.
+                    // A spot index has none, so the descriptor leaves the name
+                    // `None` and no array is looked for. When the descriptor DOES
+                    // name one and the vendor omits it, that is a shape the
+                    // descriptor got wrong and it must be refused rather than
+                    // filled in — `CLAUDE.md` §7: `i64::MIN` is the null and zero
+                    // means zero, so a silent `Vec::new()` here would later read
+                    // back as real open interest of nothing.
+                    open_interest: match f.open_interest {
+                        Some(name) => numbers(root, name)?,
+                        None => Vec::new(),
+                    },
+                };
+                RawWindow::decode(&arrays)
+            })()
         }
         // ONE OBJECT PER BAR — the shape `crate::vendor`'s Groww row declares.
         //
@@ -885,11 +904,65 @@ pub fn decode_body(body: &str, spec: &HttpSpec) -> Result<RawWindow, FetchError>
         // spreads across seven arrays, so the SAME `prices` and `numbers`
         // conversions run per object: rupees to paisa through `csv::paisa`, no
         // float, and a value off the tick grid refused by name.
-        ResponseShape::ArrayOfObjects { envelope } => decode_objects(&root, spec, envelope),
-        ResponseShape::PositionalRows { envelope, array } => {
-            decode_positional(&root, spec, envelope, array)
+        ResponseShape::ArrayOfObjects { envelope } => {
+            decode_objects(&root, spec, envelope, listing, &mut corrected)
         }
+        ResponseShape::PositionalRows { envelope, array } => {
+            decode_positional(&root, spec, envelope, array, listing, &mut corrected)
+        }
+    };
+    // ONLY WHEN A WINDOW ACTUALLY LANDED. A refused window wrote nothing, so an
+    // event saying values "were recorded as zero" would be describing a write
+    // that did not happen — and a correction counted against bars that were
+    // then thrown away is worse than no line at all.
+    if let Ok(window) = &decoded {
+        note_volumes_corrected(corrected, window.rows.len());
     }
+    decoded
+}
+
+/// Says how many index volumes were recorded as the zero their column always
+/// is, or says nothing when none were.
+///
+/// # Why this is one line per WINDOW and not per bar
+///
+/// A negative volume on an index is noise in a column with no referent — see
+/// [`one_volume`] — and correcting it silently is the fallback `CLAUDE.md` §4
+/// bans. Correcting it *loudly* is the same rule's other half.
+///
+/// One event per window rather than per row, because a 90-day minute chunk is
+/// ~34,000 bars and an emit inside that loop is the cost §3 rule 4 refuses. The
+/// count is the fact worth carrying; the individual rows are not.
+///
+/// It carries the bar count as a denominator, because `corrected` alone cannot
+/// separate "a few noisy rows" from "every row, so the decoder is reading the
+/// wrong column" -- and the second is what a negative volume means on every
+/// other listing. Only ever fires for `Listing::Index`: no other listing
+/// increments the counter, so no other listing reaches this.
+fn note_volumes_corrected(corrected: usize, bars: usize) {
+    if corrected == 0 {
+        return;
+    }
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::new(
+            telemetry::Level::Warn,
+            "pull.decode",
+            "an index carried a negative volume and it was recorded as zero",
+        )
+        .with(
+            "corrected",
+            telemetry::Value::Uint(u64::try_from(corrected).unwrap_or(u64::MAX)),
+        )
+        // THE DENOMINATOR, which its sibling event two hundred lines up already
+        // carries and this one did not. Without it, 34,000 of 34,000 — a
+        // decoder reading the wrong column, which is what a negative volume
+        // means everywhere else — reads exactly like 34,000 of 100,000, which
+        // is a vendor with a bad patch. Those want opposite responses.
+        .with(
+            "bars",
+            telemetry::Value::Uint(u64::try_from(bars).unwrap_or(u64::MAX)),
+        ),
+    );
 }
 
 /// One object per bar, into the same seven arrays the other shape arrives as.
@@ -918,6 +991,8 @@ fn decode_objects(
     root: &serde_json::Value,
     spec: &HttpSpec,
     envelope: Option<&'static str>,
+    listing: crate::vendor::Listing,
+    corrected: &mut usize,
 ) -> Result<RawWindow, FetchError> {
     let container = container(root, envelope)?;
     let f = spec.fields;
@@ -1001,7 +1076,9 @@ fn decode_objects(
         arrays
             .close
             .push(one_price(one(f.close)?, f.close, spec.prices)?);
-        arrays.volume.push(one_volume(one(f.volume)?, f.volume)?);
+        arrays
+            .volume
+            .push(one_volume(one(f.volume)?, f.volume, listing, corrected)?);
         arrays
             .timestamp
             .push(one_number(one(f.timestamp)?, f.timestamp)?);
@@ -1258,10 +1335,15 @@ fn numbers(root: &serde_json::Value, name: &str) -> Result<Vec<i64>, FetchError>
 /// # Errors
 ///
 /// [`FetchError::TransportFailed`] naming the field and the value.
-fn volumes(root: &serde_json::Value, name: &str) -> Result<Vec<i64>, FetchError> {
+fn volumes(
+    root: &serde_json::Value,
+    name: &str,
+    listing: crate::vendor::Listing,
+    corrected: &mut usize,
+) -> Result<Vec<i64>, FetchError> {
     array_at(root, name)?
         .iter()
-        .map(|v| one_volume(v, name))
+        .map(|v| one_volume(v, name, listing, corrected))
         .collect()
 }
 
@@ -1365,20 +1447,54 @@ fn one_number(v: &serde_json::Value, name: &str) -> Result<i64, FetchError> {
 /// # Errors
 ///
 /// [`FetchError::TransportFailed`] naming the field and the value.
-fn one_volume(v: &serde_json::Value, name: &str) -> Result<i64, FetchError> {
+fn one_volume(
+    v: &serde_json::Value,
+    name: &str,
+    listing: crate::vendor::Listing,
+    corrected: &mut usize,
+) -> Result<i64, FetchError> {
     let n = one_number(v, name)?;
-    if n < 0 {
-        return Err(FetchError::TransportFailed {
-            detail: format!(
-                "{name:?} holds {n}, and a volume counts shares traded: it is \
-                 never negative, and zero means zero (CLAUDE.md §7). The store \
-                 refuses this at the append, where the field is one i64 among \
-                 millions and the vendor's body is gone — so it is refused \
-                 here, where both are still in hand."
-            ),
-        });
+    if n >= 0 {
+        return Ok(n);
     }
-    Ok(n)
+    // AN INDEX IS NOT TRADED, SO ITS VOLUME COLUMN HAS NO REFERENT.
+    //
+    // NIFTY and BANKNIFTY are computed weighted averages. No share of an index
+    // changes hands, so there is no quantity for this column to carry — and
+    // measured across 6,493 stored BANKNIFTY minute bars, the ONLY value Dhan
+    // ever sends here is `0`. Operator-confirmed: index volume is normally
+    // zero, and a zero volume is legitimate for a thinly traded stock too.
+    //
+    // Against that, `-2` and `-125` are not a quantity being lost. They are
+    // noise in a column that is structurally empty, and refusing the window
+    // over them cost the whole 90-day chunk: measured, BANKNIFTY's minute
+    // backfill stopped dead at chunk 1 of 21 and NIFTY's at chunk 3, with every
+    // later month left absent while the OHLC in those chunks was perfectly
+    // good.
+    //
+    // So for an index the value is recorded as the zero the column always is —
+    // which is not a substitution, because there is nothing to substitute for —
+    // and it is COUNTED. `CLAUDE.md` §4: degrade loudly and name the reason.
+    // The caller emits one event per window carrying the count, so the
+    // correction reaches `/logs` rather than being absorbed.
+    //
+    // ANY OTHER LISTING STILL REFUSES. On an equity a negative volume means
+    // shares DID trade and the decoder is reading the wrong column, so zero
+    // would be a lie and the refusal is the whole of D-0323. The rule turns on
+    // whether the column can carry a quantity at all, never on the sign alone.
+    if listing == crate::vendor::Listing::Index {
+        *corrected = corrected.saturating_add(1);
+        return Ok(0);
+    }
+    Err(FetchError::TransportFailed {
+        detail: format!(
+            "{name:?} holds {n}, and a volume counts shares traded: it is never \
+             negative, and zero means zero (CLAUDE.md §7). The store refuses \
+             this at the append, where the field is one i64 among millions and \
+             the vendor's body is gone — so it is refused here, where both are \
+             still in hand."
+        ),
+    })
 }
 
 /// The one object this vendor's bar fields are read from.
@@ -2063,8 +2179,30 @@ impl HttpSource {
         // `TransportFailed` it read as "the vendor was not reached" — false,
         // and it sent `with_retry` through its whole ladder re-asking for bytes
         // that will come back identical. See `FetchError::BodyNotUnderstood`.
-        decode_body(&text, &self.spec).map_err(|why| FetchError::BodyNotUnderstood {
-            detail: why.to_string(),
+        decode_body(&text, &self.spec, request.listing).map_err(|why| {
+            // THE INNER SENTENCE, NOT THE INNER ERROR'S WHOLE DISPLAY.
+            //
+            // `decode_body` reports its faults as `TransportFailed`, whose
+            // `Display` opens *"the vendor was not reached"*. Wrapping that
+            // whole string inside `BodyNotUnderstood`'s *"the vendor answered
+            // and the body was not readable"* produced a sentence that
+            // contradicts itself in the same breath, and it is in the
+            // operator's own log:
+            //
+            //   the vendor answered and the body was not readable:
+            //   the vendor was not reached: "volume" holds -2
+            //
+            // Both halves cannot be true, and the reader has no way to tell
+            // which one to act on. Taking the detail alone keeps the part that
+            // names the fault and drops the claim that was never right.
+            FetchError::BodyNotUnderstood {
+                detail: match why {
+                    FetchError::TransportFailed { detail } => detail,
+                    // Any other variant is already a sentence about a body, so
+                    // its own `Display` is the honest one.
+                    other => other.to_string(),
+                },
+            }
         })
     }
 }
@@ -2091,6 +2229,8 @@ fn decode_positional(
     spec: &HttpSpec,
     envelope: Option<&'static str>,
     array: &'static str,
+    listing: crate::vendor::Listing,
+    corrected: &mut usize,
 ) -> Result<RawWindow, FetchError> {
     let container = container(root, envelope)?;
     let rows = array_at(container, array)?;
@@ -2196,7 +2336,7 @@ fn decode_positional(
         });
         arrays.volume.push(match cell(5)? {
             serde_json::Value::Null => 0,
-            given => one_volume(given, "volume")?,
+            given => one_volume(given, "volume", listing, corrected)?,
         });
     }
 
@@ -2804,7 +2944,12 @@ mod tests {
             "open":[24500.75],"high":[24500.75],"low":[24500.75],
             "close":[24500.75],"volume":[250],"timestamp":[1751337900]
         }"#;
-        let window = decode_body(body, &spec(PriceScale::Rupees)).expect("decodes");
+        let window = decode_body(
+            body,
+            &spec(PriceScale::Rupees),
+            crate::vendor::Listing::Equity,
+        )
+        .expect("decodes");
         let row = &window.rows[0];
         assert_eq!(
             row.open, 2_450_075,
@@ -2833,7 +2978,12 @@ mod tests {
                 "{{\"open\":[{sent}],\"high\":[{sent}],\"low\":[{sent}],\
                   \"close\":[{sent}],\"volume\":[1],\"timestamp\":[1751337900]}}"
             );
-            let window = decode_body(&body, &spec(PriceScale::Rupees)).expect("decodes");
+            let window = decode_body(
+                &body,
+                &spec(PriceScale::Rupees),
+                crate::vendor::Listing::Equity,
+            )
+            .expect("decodes");
             assert_eq!(window.rows[0].open, want, "{sent} rupees is {want} paisa");
         }
     }
@@ -2863,7 +3013,12 @@ mod tests {
                 "{{\"open\":[{sent}],\"high\":[1],\"low\":[1],\"close\":[1],\
                   \"volume\":[1],\"timestamp\":[1]}}"
             );
-            let window = decode_body(&body, &spec(PriceScale::Rupees)).expect("decodes");
+            let window = decode_body(
+                &body,
+                &spec(PriceScale::Rupees),
+                crate::vendor::Listing::Equity,
+            )
+            .expect("decodes");
             assert_eq!(window.rows[0].open, want, "{sent} is {why}");
         }
     }
@@ -2896,7 +3051,12 @@ mod tests {
                 "{{\"open\":[{sent}],\"high\":[1],\"low\":[1],\"close\":[1],\
                   \"volume\":[1],\"timestamp\":[1]}}"
             );
-            let window = decode_body(&body, &spec(PriceScale::Rupees)).expect("decodes");
+            let window = decode_body(
+                &body,
+                &spec(PriceScale::Rupees),
+                crate::vendor::Listing::Equity,
+            )
+            .expect("decodes");
             assert_eq!(window.rows[0].open, want, "{sent} snaps half-up to {want}");
         }
         // Half-up toward positive infinity on the negative side, asserted where
@@ -2931,9 +3091,11 @@ mod tests {
                 "{{\"open\":[{sent}],\"high\":[1],\"low\":[1],\"close\":[1],\
                   \"volume\":[1],\"timestamp\":[1]}}"
             );
-            let Err(FetchError::TransportFailed { detail }) =
-                decode_body(&body, &spec(PriceScale::Rupees))
-            else {
+            let Err(FetchError::TransportFailed { detail }) = decode_body(
+                &body,
+                &spec(PriceScale::Rupees),
+                crate::vendor::Listing::Equity,
+            ) else {
                 panic!("{sent} is not zero and must not be stored as one")
             };
             assert!(detail.contains("open"), "names the field: {detail}");
@@ -2947,8 +3109,12 @@ mod tests {
                 "{{\"open\":[{sent}],\"high\":[1],\"low\":[1],\"close\":[1],\
                   \"volume\":[1],\"timestamp\":[1]}}"
             );
-            let window = decode_body(&body, &spec(PriceScale::Rupees))
-                .unwrap_or_else(|why| panic!("{sent} is a real zero: {why}"));
+            let window = decode_body(
+                &body,
+                &spec(PriceScale::Rupees),
+                crate::vendor::Listing::Equity,
+            )
+            .unwrap_or_else(|why| panic!("{sent} is a real zero: {why}"));
             assert_eq!(window.rows[0].open, 0, "{sent} decodes as the zero it is");
         }
     }
@@ -2966,7 +3132,11 @@ mod tests {
                 "{{\"open\":[1],\"high\":[1],\"low\":[1],\"close\":[1],\
                   \"volume\":[{bad}],\"timestamp\":[1]}}"
             );
-            let refused = decode_body(&body, &spec(PriceScale::Rupees));
+            let refused = decode_body(
+                &body,
+                &spec(PriceScale::Rupees),
+                crate::vendor::Listing::Equity,
+            );
             assert!(
                 matches!(refused, Err(FetchError::TransportFailed { .. })),
                 "{bad} is not a count and must not be rounded into one"
@@ -2979,7 +3149,12 @@ mod tests {
     fn a_paisa_vendor_is_not_scaled_again() {
         let body = r#"{"open":[2450075],"high":[2450075],"low":[2450075],
                        "close":[2450075],"volume":[1],"timestamp":[1751337900]}"#;
-        let window = decode_body(body, &spec(PriceScale::Paisa)).expect("decodes");
+        let window = decode_body(
+            body,
+            &spec(PriceScale::Paisa),
+            crate::vendor::Listing::Equity,
+        )
+        .expect("decodes");
         assert_eq!(window.rows[0].open, 2_450_075, "already paisa, unchanged");
     }
 
@@ -2992,7 +3167,11 @@ mod tests {
                 "{{\"open\":[{bad}],\"high\":[1],\"low\":[1],\"close\":[1],\
                   \"volume\":[1],\"timestamp\":[1]}}"
             );
-            let refused = decode_body(&body, &spec(PriceScale::Rupees));
+            let refused = decode_body(
+                &body,
+                &spec(PriceScale::Rupees),
+                crate::vendor::Listing::Equity,
+            );
             assert!(
                 matches!(refused, Err(FetchError::TransportFailed { .. })),
                 "{bad} must be refused, not saturated to i64::MAX"
@@ -3003,7 +3182,11 @@ mod tests {
         let body = r#"{"open":["x"],"high":[1],"low":[1],"close":[1],
                        "volume":[1],"timestamp":[1]}"#;
         assert!(matches!(
-            decode_body(body, &spec(PriceScale::Rupees)),
+            decode_body(
+                body,
+                &spec(PriceScale::Rupees),
+                crate::vendor::Listing::Equity
+            ),
             Err(FetchError::TransportFailed { .. })
         ));
     }
@@ -3015,7 +3198,11 @@ mod tests {
         let body = r#"{"open":[1,2],"high":[1,2],"low":[1,2],"close":[1,2],
                        "volume":[1],"timestamp":[1,2]}"#;
         assert!(matches!(
-            decode_body(body, &spec(PriceScale::Rupees)),
+            decode_body(
+                body,
+                &spec(PriceScale::Rupees),
+                crate::vendor::Listing::Equity
+            ),
             Err(FetchError::LengthDisagreement { .. })
         ));
     }
@@ -3025,13 +3212,19 @@ mod tests {
     #[test]
     fn a_malformed_or_incomplete_body_is_refused_by_name() {
         assert!(matches!(
-            decode_body("not json", &spec(PriceScale::Rupees)),
+            decode_body(
+                "not json",
+                &spec(PriceScale::Rupees),
+                crate::vendor::Listing::Equity
+            ),
             Err(FetchError::TransportFailed { .. })
         ));
         let missing = r#"{"open":[1],"high":[1],"low":[1],"close":[1],"volume":[1]}"#;
-        let Err(FetchError::TransportFailed { detail }) =
-            decode_body(missing, &spec(PriceScale::Rupees))
-        else {
+        let Err(FetchError::TransportFailed { detail }) = decode_body(
+            missing,
+            &spec(PriceScale::Rupees),
+            crate::vendor::Listing::Equity,
+        ) else {
             panic!("a missing timestamp array must refuse")
         };
         assert!(
@@ -3045,8 +3238,12 @@ mod tests {
     fn arrays_under_the_declared_envelope_are_found() {
         let body = r#"{"data":{"open":[100.5],"high":[100.5],"low":[100.5],
                        "close":[100.5],"volume":[7],"timestamp":[1751337900]}}"#;
-        let window =
-            decode_body(body, &spec_under(PriceScale::Rupees, Some("data"))).expect("decodes");
+        let window = decode_body(
+            body,
+            &spec_under(PriceScale::Rupees, Some("data")),
+            crate::vendor::Listing::Equity,
+        )
+        .expect("decodes");
         assert_eq!(window.rows[0].open, 10_050);
     }
 
@@ -3073,8 +3270,12 @@ mod tests {
             "live":{"open":[100.5],"high":[100.5],"low":[100.5],"close":[100.5],
                     "volume":[7],"timestamp":[1751337900]}
         }"#;
-        let window =
-            decode_body(body, &spec_under(PriceScale::Rupees, Some("live"))).expect("decodes");
+        let window = decode_body(
+            body,
+            &spec_under(PriceScale::Rupees, Some("live")),
+            crate::vendor::Listing::Equity,
+        )
+        .expect("decodes");
         let row = &window.rows[0];
         assert_eq!(
             (row.open, row.high, row.low, row.close),
@@ -3087,8 +3288,12 @@ mod tests {
 
         // The other object is reachable only by naming it, which is the point:
         // which bar you get is the descriptor's decision, never the alphabet's.
-        let stale =
-            decode_body(body, &spec_under(PriceScale::Rupees, Some("cached"))).expect("decodes");
+        let stale = decode_body(
+            body,
+            &spec_under(PriceScale::Rupees, Some("cached")),
+            crate::vendor::Listing::Equity,
+        )
+        .expect("decodes");
         assert_eq!(stale.rows[0].open, 99_900);
     }
 
@@ -3101,9 +3306,11 @@ mod tests {
     fn no_envelope_means_the_top_level_and_nowhere_else() {
         let wrapped = r#"{"data":{"open":[1],"high":[1],"low":[1],"close":[1],
                           "volume":[1],"timestamp":[1]}}"#;
-        let Err(FetchError::TransportFailed { detail }) =
-            decode_body(wrapped, &spec(PriceScale::Rupees))
-        else {
+        let Err(FetchError::TransportFailed { detail }) = decode_body(
+            wrapped,
+            &spec(PriceScale::Rupees),
+            crate::vendor::Listing::Equity,
+        ) else {
             panic!("the descriptor says top level, so `data` is not searched")
         };
         assert!(
@@ -3123,9 +3330,11 @@ mod tests {
     fn a_missing_envelope_names_the_key_expected_and_the_keys_present() {
         let body = r#"{"payload":{"open":[1],"high":[1],"low":[1],"close":[1],
                        "volume":[1],"timestamp":[1]}}"#;
-        let Err(FetchError::TransportFailed { detail }) =
-            decode_body(body, &spec_under(PriceScale::Rupees, Some("data")))
-        else {
+        let Err(FetchError::TransportFailed { detail }) = decode_body(
+            body,
+            &spec_under(PriceScale::Rupees, Some("data")),
+            crate::vendor::Listing::Equity,
+        ) else {
             panic!("the declared envelope is absent and must be named")
         };
         assert!(detail.contains("\"data\""), "the key expected: {detail}");
@@ -3133,17 +3342,21 @@ mod tests {
 
         // A body that is not an object at all says that rather than listing
         // keys it does not have.
-        let Err(FetchError::TransportFailed { detail }) =
-            decode_body("[1,2,3]", &spec_under(PriceScale::Rupees, Some("data")))
-        else {
+        let Err(FetchError::TransportFailed { detail }) = decode_body(
+            "[1,2,3]",
+            &spec_under(PriceScale::Rupees, Some("data")),
+            crate::vendor::Listing::Equity,
+        ) else {
             panic!("an array is not an envelope")
         };
         assert!(detail.contains("not an object"), "{detail}");
 
         // And an object with no keys at all.
-        let Err(FetchError::TransportFailed { detail }) =
-            decode_body("{}", &spec_under(PriceScale::Rupees, Some("data")))
-        else {
+        let Err(FetchError::TransportFailed { detail }) = decode_body(
+            "{}",
+            &spec_under(PriceScale::Rupees, Some("data")),
+            crate::vendor::Listing::Equity,
+        ) else {
             panic!("an empty object holds no envelope")
         };
         assert!(detail.contains("no keys at all"), "{detail}");
@@ -3178,7 +3391,8 @@ mod tests {
         // The vendor's own first example row, verbatim from charter §4z.
         let body = r#"{"status":"success","data":{"candles":[
             ["2017-12-15T09:15:00+0530",1704.5,1705,1699.25,1702.8,2499]]}}"#;
-        let raw = decode_body(body, &zerodha).expect("the vendor's own example decodes");
+        let raw = decode_body(body, &zerodha, crate::vendor::Listing::Equity)
+            .expect("the vendor's own example decodes");
 
         assert_eq!(TRUE_UTC, 1_513_309_500, "the hand computation");
 
@@ -3763,9 +3977,11 @@ mod tests {
         // The columnar shape, and the value the operator actually received.
         let body = r#"{"open":[1],"high":[1],"low":[1],"close":[1],
                        "volume":[-95342],"timestamp":[1751337900]}"#;
-        let Err(FetchError::TransportFailed { detail }) =
-            decode_body(body, &spec(PriceScale::Rupees))
-        else {
+        let Err(FetchError::TransportFailed { detail }) = decode_body(
+            body,
+            &spec(PriceScale::Rupees),
+            crate::vendor::Listing::Equity,
+        ) else {
             panic!("a volume counts shares and is never negative")
         };
         assert!(detail.contains("volume"), "names the field: {detail}");
@@ -3775,15 +3991,103 @@ mod tests {
         // routing around `decode_body`.
         for bad in [-1_i64, -95_342, i64::MIN + 1] {
             assert!(
-                one_volume(&serde_json::json!(bad), "volume").is_err(),
+                one_volume(
+                    &serde_json::json!(bad),
+                    "volume",
+                    crate::vendor::Listing::Equity,
+                    &mut 0
+                )
+                .is_err(),
                 "{bad} is not a count of shares"
             );
         }
         assert_eq!(
-            one_volume(&serde_json::json!(0), "volume").expect("zero is a real zero"),
+            one_volume(
+                &serde_json::json!(0),
+                "volume",
+                crate::vendor::Listing::Equity,
+                &mut 0
+            )
+            .expect("zero is a real zero"),
             0,
             "zero means zero — it is not an absence"
         );
+    }
+
+    /// **AN INDEX'S NEGATIVE VOLUME IS THE ZERO ITS COLUMN ALWAYS IS**, and an
+    /// equity's is still refused.
+    ///
+    /// NIFTY and BANKNIFTY are computed weighted averages — no share of an
+    /// index changes hands, so the volume column has no referent. Measured
+    /// across 6,493 stored BANKNIFTY minute bars, the only value Dhan ever
+    /// sends there is `0`, and the operator confirms index volume is normally
+    /// zero.
+    ///
+    /// So `-2` and `-125` are not a quantity being lost; they are noise in a
+    /// structurally empty column. Refusing over them cost the whole 90-day
+    /// chunk: BANKNIFTY's minute backfill stopped at chunk 1 of 21 and NIFTY's
+    /// at chunk 3, every later month absent, while the OHLC in those chunks was
+    /// good.
+    ///
+    /// **The rule turns on whether the column can carry a quantity, never on
+    /// the sign alone.** On an equity a negative volume means shares DID trade
+    /// and the decoder is reading the wrong column, so zero would be a lie —
+    /// that half is D-0323 and is asserted here beside the change, because a
+    /// test for the new behaviour that did not also pin the old one would let
+    /// the refusal be widened away by accident.
+    #[test]
+    fn an_index_negative_volume_is_zero_and_an_equitys_is_still_refused() {
+        let body = r#"{"open":[1],"high":[1],"low":[1],"close":[1],
+                       "volume":[-125],"timestamp":[1751337900]}"#;
+
+        let window = decode_body(
+            body,
+            &spec(PriceScale::Rupees),
+            crate::vendor::Listing::Index,
+        )
+        .expect("an index has no volume, so noise in that column is not a refusal");
+        assert_eq!(
+            window.rows[0].volume, 0,
+            "recorded as the zero the column always is"
+        );
+        // AND THE OHLC SURVIVES, which is the whole point: the bar is good and
+        // only the empty column was noisy.
+        assert_eq!(window.rows[0].open, 100, "the price is untouched");
+
+        let refused = decode_body(
+            body,
+            &spec(PriceScale::Rupees),
+            crate::vendor::Listing::Equity,
+        );
+        assert!(
+            matches!(refused, Err(FetchError::TransportFailed { .. })),
+            "on an equity a negative volume means shares traded and the \
+             decoder is wrong — zero would be a lie"
+        );
+
+        // A DERIVATIVE IS TRADED TOO, so it keeps the refusal. Named rather
+        // than left to the `_` of a two-case test.
+        let refused = decode_body(
+            body,
+            &spec(PriceScale::Rupees),
+            crate::vendor::Listing::Derivative,
+        );
+        assert!(matches!(refused, Err(FetchError::TransportFailed { .. })));
+
+        // AND ZERO ITSELF IS UNTOUCHED ON EVERY LISTING. Zero is a real zero,
+        // not an absence — `CLAUDE.md` §7 — and it is what an index sends on
+        // every ordinary bar.
+        let zero = r#"{"open":[1],"high":[1],"low":[1],"close":[1],
+                       "volume":[0],"timestamp":[1751337900]}"#;
+        for listing in [
+            crate::vendor::Listing::Index,
+            crate::vendor::Listing::Equity,
+            crate::vendor::Listing::Derivative,
+        ] {
+            let window = decode_body(zero, &spec(PriceScale::Rupees), listing)
+                .expect("zero is a real volume on every listing");
+            assert_eq!(window.rows[0].volume, 0);
+        }
     }
 
     /// **A NEGATIVE TIMESTAMP IS STILL ACCEPTED**, and this is why the floor is
@@ -3858,13 +4162,15 @@ mod tests {
         let sane = r#"{"open":[24500.75],"high":[24500.75],"low":[24500.75],
                        "close":[24500.75],"volume":[250],"timestamp":[1751337900],
                        "open_interest":[41]}"#;
-        let window = decode_body(sane, &named).expect("an ordinary open interest decodes");
+        let window = decode_body(sane, &named, crate::vendor::Listing::Equity)
+            .expect("an ordinary open interest decodes");
         assert_eq!(window.rows.len(), 1, "the happy path still decodes");
 
         let sentinel = r#"{"open":[24500.75],"high":[24500.75],"low":[24500.75],
                           "close":[24500.75],"volume":[250],"timestamp":[1751337900],
                           "open_interest":[-9223372036854775808]}"#;
-        let why = decode_body(sentinel, &named).expect_err("the sentinel is refused");
+        let why = decode_body(sentinel, &named, crate::vendor::Listing::Equity)
+            .expect_err("the sentinel is refused");
         assert!(
             format!("{why}").contains("open_interest"),
             "and the refusal names the column: {why}"
@@ -4040,7 +4346,9 @@ mod tests {
             response: ResponseShape::ArrayOfObjects { envelope: None },
             ..spec(PriceScale::Rupees)
         };
-        let Err(FetchError::TransportFailed { detail }) = decode_body("{}", &shape) else {
+        let Err(FetchError::TransportFailed { detail }) =
+            decode_body("{}", &shape, crate::vendor::Listing::Equity)
+        else {
             panic!("an empty object holds no bars and must be refused")
         };
         assert!(
@@ -4082,7 +4390,12 @@ mod tests {
     fn a_count_written_as_a_decimal_is_read_and_a_fractional_one_is_refused() {
         let whole = r#"{"open":[1],"high":[1],"low":[1],"close":[1],
                         "volume":[250.0],"timestamp":[1751337900.0]}"#;
-        let window = decode_body(whole, &spec(PriceScale::Paisa)).expect("decodes");
+        let window = decode_body(
+            whole,
+            &spec(PriceScale::Paisa),
+            crate::vendor::Listing::Equity,
+        )
+        .expect("decodes");
         assert_eq!(window.rows[0].volume, 250, "250.0 of anything is 250");
         assert_eq!(window.rows[0].timestamp, 1_751_337_900);
 
@@ -4091,9 +4404,11 @@ mod tests {
                 "{{\"open\":[1],\"high\":[1],\"low\":[1],\"close\":[1],\
                   \"volume\":[{bad}],\"timestamp\":[1]}}"
             );
-            let Err(FetchError::TransportFailed { detail }) =
-                decode_body(&body, &spec(PriceScale::Paisa))
-            else {
+            let Err(FetchError::TransportFailed { detail }) = decode_body(
+                &body,
+                &spec(PriceScale::Paisa),
+                crate::vendor::Listing::Equity,
+            ) else {
                 panic!("{bad} is not a whole count and must be refused, not truncated")
             };
             assert!(detail.contains("volume"), "the refusal names it: {detail}");
@@ -4457,7 +4772,7 @@ mod tests {
             },
             ..spec(PriceScale::Rupees)
         };
-        let window = decode_body(body, &spec).expect("decodes");
+        let window = decode_body(body, &spec, crate::vendor::Listing::Equity).expect("decodes");
         assert_eq!(window.rows.len(), 2);
         // THE SAME PAISA CONVERSION as the column shape — one implementation,
         // so a rupee cannot be worth two different things depending on which
@@ -4486,7 +4801,9 @@ mod tests {
             },
             ..spec(PriceScale::Paisa)
         };
-        let Err(FetchError::TransportFailed { detail }) = decode_body(body, &spec) else {
+        let Err(FetchError::TransportFailed { detail }) =
+            decode_body(body, &spec, crate::vendor::Listing::Equity)
+        else {
             panic!("a bar with no close must be refused, not defaulted")
         };
         assert!(detail.contains("close"), "the field: {detail}");
@@ -4508,7 +4825,7 @@ mod tests {
             },
             ..spec(PriceScale::Paisa)
         };
-        let window = decode_body(body, &spec).expect("decodes");
+        let window = decode_body(body, &spec, crate::vendor::Listing::Equity).expect("decodes");
         assert_eq!(window.rows.len(), 1, "only the named envelope is read");
         assert_eq!(window.rows[0].open, 100, "99900 would be `cached` leaking");
         assert_eq!(window.rows[0].volume, 7);
@@ -4523,7 +4840,8 @@ mod tests {
             },
             ..spec(PriceScale::Paisa)
         };
-        let Err(FetchError::TransportFailed { detail }) = decode_body(r#"{"data":[]}"#, &spec)
+        let Err(FetchError::TransportFailed { detail }) =
+            decode_body(r#"{"data":[]}"#, &spec, crate::vendor::Listing::Equity)
         else {
             panic!("the declared envelope is absent and must be named")
         };
@@ -4540,7 +4858,8 @@ mod tests {
             },
             ..spec(PriceScale::Paisa)
         };
-        let window = decode_body(r#"{"payload":[]}"#, &spec).expect("decodes");
+        let window = decode_body(r#"{"payload":[]}"#, &spec, crate::vendor::Listing::Equity)
+            .expect("decodes");
         assert!(window.rows.is_empty(), "no bars is not an error");
     }
 

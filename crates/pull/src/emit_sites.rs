@@ -3,9 +3,17 @@
 //!
 //! # What was unproven, and it was all of it
 //!
-//! `crates/pull` holds 21 `telemetry::emit` call sites — the largest
+//! `crates/pull` holds **36** `telemetry::emit` call sites — the largest
 //! concentration in the workspace — and **not one of them had a test that drove
-//! the production helper and then found the record in a file.** The events that
+//! the production helper and then found the record in a file.**
+//!
+//! **THE COUNT IS MEASURED AND THE TABLE DOES NOT COVER ALL OF IT.** This header
+//! said 21 while the crate held 36, and `SITES` holds 24 rows, so twelve sites
+//! are driven by nothing here. Nothing pins either number -- there is no gate
+//! comparing the table to the crate -- so re-measure rather than trusting this
+//! sentence: `grep -c "telemetry::emit(" crates/pull/src/*.rs`. The gap is
+//! stated because a registry that looks exhaustive and is not is worse than one
+//! that says where it stops. The events that
 //! looked covered were not: the tests that assert on a `pull.member` line live
 //! in `crates/api/src/logs.rs` and build their own [`telemetry::Event`] on a
 //! locally-opened sink. They prove the *sink* writes. They never call
@@ -354,6 +362,26 @@ struct Site {
 /// header names, one row each.
 static SITES: &[Site] = &[
     Site {
+        // THE CORRECTION D-0332 MAKES, PROVEN TO REACH A FILE.
+        //
+        // Without this row `cargo mutants` replaces `note_volumes_corrected`
+        // with `()` and the whole suite stays green — measured, 1 missed of 2 —
+        // so gate 18's `--in-diff` run fails on the very commit that adds it.
+        // That is exactly the defect this module's own header exists to catch:
+        // a helper that silently stopped emitting would leave every other test
+        // passing.
+        //
+        // Asserting `bars` rather than `corrected` on purpose: the denominator
+        // is the field that was MISSING from the first draft of the event, and
+        // a count with nothing to divide it by cannot separate "a few noisy
+        // rows" from "the decoder is reading the wrong column".
+        at: "crates/pull/src/http.rs — note_volumes_corrected",
+        target: "pull.decode",
+        message: "an index carried a negative volume and it was recorded as zero",
+        says: ("bars", Says::Signs(1)),
+        drive: drive_index_volume_corrected,
+    },
+    Site {
         at: "crates/pull/src/rate.rs:663",
         target: "pull.rate",
         message: "throttled — every span backed off",
@@ -539,6 +567,33 @@ static SITES: &[Site] = &[
 // ===========================================================================
 
 /// A multiplicative decrease, through the governor's own public method.
+/// One index bar whose volume column carries noise, decoded through the shipped
+/// path.
+///
+/// The value is the operator's own: Dhan sent `-125` on BANKNIFTY's 1-minute
+/// index bars and it refused the whole 90-day chunk. The listing is what decides
+/// — see `http::one_volume` — so this drives `Index`, and the equity half of the
+/// rule is asserted by
+/// `http::an_index_negative_volume_is_zero_and_an_equitys_is_still_refused`.
+fn drive_index_volume_corrected(_scratch: &Scratch) {
+    let spec = match crate::vendor::Feed::Dhan.descriptor().transport {
+        crate::vendor::Transport::Http(spec) => spec,
+        crate::vendor::Transport::LocalArchive(_) => unreachable!("this feed is HTTP"),
+    };
+    let body = r#"{"open":[24500.75],"high":[24501.50],"low":[24499.25],
+                   "close":[24500.50],"volume":[-125],"timestamp":[1751337900]}"#;
+    let window = crate::http::decode_body(body, &spec, crate::vendor::Listing::Index)
+        .expect("an index has no volume, so noise in that column is not a refusal");
+    // `first()` RATHER THAN `[0]`: this file is production code, not a test
+    // module, so `clippy::indexing_slicing` applies to it exactly as it does to
+    // the decoder it drives.
+    let first = window
+        .rows
+        .first()
+        .expect("one bar was sent, so one decodes");
+    assert_eq!(first.volume, 0, "recorded as the zero the column always is");
+}
+
 fn drive_rate(_scratch: &Scratch) {
     let mut governor = crate::rate::Governor::new(Some(5), None, None)
         .expect("one published ceiling and two spans this vendor bounds nothing on");

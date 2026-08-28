@@ -24991,3 +24991,227 @@ to what is proven rather than deleted, and `docs/06-limits.md` — which had zer
 occurrences of "durability", "fsync" or "no I/O" — now says so, along with the
 total absence of concurrency and property-based testing.
 
+
+---
+
+### D-0332
+
+**An index is not traded, so its volume column has no referent — and refusing a
+90-day chunk over noise in an empty column stopped the backfill dead.**
+
+D-0323 refused a negative volume at the vendor boundary, and that was right: on
+an equity a negative volume means shares DID trade and the decoder is reading
+the wrong column, so storing zero would be a lie. What it did not distinguish is
+the one class of instrument where the column carries nothing at all.
+
+#### What it cost, measured
+
+Dhan sent `volume: -125` and `volume: -2` on NIFTY and BANKNIFTY **1-minute
+index** bars. From the operator's own log:
+
+```
+instrument 25 (BANKNIFTY)  chunk 1 of 21   volume -125
+instrument 13 (NIFTY)      chunk 3 of 21   volume -2
+instrument 25 (BANKNIFTY)  chunk 3 of 21   volume -2
+```
+
+BANKNIFTY's failure was at **chunk 1**, so its prefix was empty and D-0327's
+`prefix_or_refusal` correctly returned `Err` — the instrument yielded nothing at
+all. NIFTY's was at chunk 3, so chunks 1 and 2 landed and everything from
+2022-02-24 onward did not. The run finished `reached 2, failed 2`, and every
+month after February 2022 was absent.
+
+**The OHLC in those chunks was perfectly good.** The whole backfill stopped over
+a field that cannot mean anything for the instrument it was attached to.
+
+#### Why the column has no referent
+
+NIFTY and BANKNIFTY are computed weighted averages of their constituents. No
+share of an index changes hands, so there is no quantity for a volume column to
+carry.
+
+That is not asserted — it is **measured**. Reading the bars this build had
+already stored, through the shipped decoder, across 6,493 BANKNIFTY 1-minute
+bars in 2021-09: the only distinct value in the volume column is `0`.
+Operator-confirmed in the same terms: index volume is normally zero, and a zero
+volume is legitimate for a thinly traded stock too.
+
+So `-2` and `-125` are not a quantity being lost. They are noise in a column
+that is structurally empty.
+
+#### The rule, and what it deliberately does not widen
+
+**For `Listing::Index`, a negative volume is recorded as the zero the column
+always is.** Not a substitution — there is nothing to substitute for.
+
+**Every other listing still refuses**, unchanged. On an equity or a derivative a
+negative volume means shares traded and the decoder is wrong, so zero would be
+the lie §4 bans. The rule turns on whether the column can carry a quantity at
+all, **never on the sign alone**.
+
+`zero` itself is untouched on every listing — `CLAUDE.md` §7's "zero means zero"
+is exactly what an index sends on every ordinary bar.
+
+#### Counted, because a silent correction is the fallback §4 bans
+
+`note_volumes_corrected` emits one `pull.decode` event per WINDOW carrying the
+count and the listing, at `Warn`. Per window and not per row, because a 90-day
+minute chunk is ~34,000 bars and an emit inside that loop is the cost §3 rule 4
+refuses; the count is the fact worth carrying and the individual rows are not.
+
+**What that gives up, stated rather than hidden:** an operator can see that N
+volumes were corrected in a window and cannot see WHICH bars. Once written, a
+corrected zero is indistinguishable on disk from a vendor-sent zero — which for
+an index is a distinction without a difference, since every ordinary bar's value
+is zero anyway, but it is a real limit on any later audit.
+
+#### The listing had to be threaded, and that is the cost of the change
+
+`decode_body` took `(body, spec)` and now takes `(body, spec, listing)`, passed
+down to `decode_objects` and `decode_positional`. One production call site —
+`window_async`, which reads `request.listing` from the `BarRequest` the caller
+already built — and thirty-three test call sites, which pass
+`Listing::Equity` so their existing behaviour is unchanged and the refusal they
+assert still fires.
+
+**All three decode shapes carry it.** That is stated because D-0323 shipped
+having guarded two of three doors, and the door it missed was the only one Dhan
+uses.
+
+#### Not changed
+
+`csv::decode`'s volume field is not listing-aware and still takes any parsed
+`i64`. The archive path is a separate entry point with separate provenance, and
+this entry leaves it as it was — recorded, not closed.
+
+#### The proof that matters
+
+`an_index_negative_volume_is_zero_and_an_equitys_is_still_refused` drives the
+operator's own value through `decode_body` on all three listings: the index
+records zero AND keeps its OHLC, the equity and the derivative still refuse, and
+a real zero decodes untouched on all three. The equity half is asserted beside
+the change on purpose — a test for the new behaviour that did not also pin the
+old one would let the refusal be widened away by accident.
+
+---
+
+### D-0333
+
+**What two adversarial sweeps found on the vendor→store path, what was fixed
+with D-0332, and what is left standing.**
+
+D-0332 was handed to a pass told to refute it, and a second pass was told to
+find every remaining way the pull can fail. Between them they raised nineteen
+findings. This entry records all of them, because a sweep whose results are not
+written down has to be run again.
+
+#### Fixed here, with D-0332
+
+**A surviving mutant, which would have failed CI.** `cargo mutants` replaced
+`note_volumes_corrected` with `()` and the whole suite stayed green — 1 missed
+of 2. Gate 18 runs `--in-diff` over `crates/*/src/*.rs`, so the commit adding
+that function would have failed on it. A `SITES` row in
+`crate::emit_sites` now drives the correction through `decode_body` and reads
+the record back off the disk. Re-measured: **2 mutants, 2 caught.**
+
+**`?` escaped past the report, on the shape Dhan uses.** The `ParallelArrays`
+arm built its struct literal inline, so every `?` in it returned from
+`decode_body` itself — past the emit. A window that corrected an index volume
+and then failed on any later field emitted **nothing at all**, and that is
+production's path. The arm is a closure now, so no `?` can skip it.
+
+**And the other two arms emitted a lie.** They return a `Result` into `decoded`,
+so a window that corrected a volume and was then refused still logged *"recorded
+as zero"* about bars that were thrown away. The emit is gated on
+`decoded.is_ok()`.
+
+**The event had no denominator.** Its sibling two hundred lines up carries
+`bars`; this one carried only `corrected`. So 34,000-of-34,000 — the decoder
+reading the wrong column, which is what a negative volume means on every other
+listing — was indistinguishable from 34,000-of-100,000, a vendor with a bad
+patch. Those want opposite responses. `bars` is on the event, and the `listing`
+field is gone: it was always `"index"`, and its `match` carried two arms no
+input could reach, against §9's 100% floor.
+
+**A sentence that contradicted itself, already in the operator's log.**
+`decode_body` reports faults as `TransportFailed`, whose `Display` opens *"the
+vendor was not reached"*, and the caller wrapped that whole string inside
+`BodyNotUnderstood`'s *"the vendor answered and the body was not readable"*:
+
+```
+the vendor answered and the body was not readable:
+the vendor was not reached: "volume" holds -2
+```
+
+Both halves cannot be true. The wrap takes the inner detail alone now.
+
+**`P-55` had become false** and gate 10 could not see it — that gate checks only
+that the named test still exists, and it does, because it uses
+`Listing::Equity`. P-55 now names the carve-out and P-60 owns it.
+
+**This file's own header was wrong by 15.** It claimed `crates/pull` holds 21
+emit sites; measured, 36, with 24 `SITES` rows. Nothing pins either number, so
+the header now gives the measurement and the command to re-take it, and says
+plainly that twelve sites are driven by nothing.
+
+#### Standing, ranked — not fixed here
+
+**Tier 1, reachable with real Dhan data:**
+
+1. **`ParallelArrays` is the one shape with no null tolerance, and it is Dhan's.**
+   The positional arm skips a null price and zeroes a null volume; the objects
+   arm skips a null price; Dhan's arm refuses all of them. Dhan's own field
+   table marks every response field *Required: No*. The same three-doors shape
+   as D-0323, and the missed door is again the only one Dhan uses.
+2. **A vendor error under HTTP 200 bypasses the whole refusal contract** and
+   *raises* the rate allowance: `record_success` fires on any 2xx, and
+   `refusal_words` is gated on `!is_success()`. Dhan's own SDK example tests
+   `response["status"] == "failure"` and never reads the HTTP status.
+   `21-errors.md` also publishes an `E001`/`AUTH001` namespace `dhan::read`
+   does not know.
+3. **An all-empty answer is a clean success**, and `pull::gaps` — the module
+   that could tell it from a holiday — has zero production callers.
+   `prefix_or_refusal` tests `bodies.is_empty()`, which counts *answers*, not
+   rows, so an empty chunk 1 plus a refused chunk 2 is not an `Err` either.
+4. **`bars_committed` over-reports by exactly the overlap on every resumed
+   backfill** — `append` recurses on the suffix but the whole offered batch is
+   counted. D-0327 made resumes the normal shape, so this is now systematically
+   wrong on the one number an operator checks against the vendor.
+5. **Pre-socket failures are marked `WIRE_REACHED` and served as 502.** The
+   clock read, `clamp_to_floor` and `split_window` all fail before a socket
+   opens, and the comment two lines above the wrap asserts the opposite.
+
+**Tier 2:** a duplicate timestamp is silently merged and its volumes summed, its
+only trace a `folded` count at `Debug` below the default floor; an overlap with
+a hole in it refuses that instrument-month **permanently** under §8;
+`ingest::one`'s per-month `?` also discards census rows for months already
+written, producing a store that holds bars its own counter does not; a truncated
+or non-JSON 200 is classified as a permanent decode fault and gets zero retries;
+a negative volume on an *equity* still costs the suffix, which is D-0332's
+deliberate boundary and will fire once the equity universe is pulled.
+
+**Tier 3, latent:** `one_stamp` is unreachable from two of the three shapes, so
+three `TimestampEncoding` variants would refuse every bar; a
+seconds-for-millis units mismatch drops every bar as `BeforeWindow` with a clean
+receipt, while the opposite direction refuses loudly; `one_number` guards
+`i64::MIN` but not an ordinary negative open interest, live the moment F&O bars
+are pulled with `oi: true`; `rolling.rs` is a fourth volume door with no floor
+at all and no fold, so a duplicate stamp there loses the contract's window,
+overlay and census row together.
+
+#### Checked and found guarded — recorded so they are not chased again
+
+A future window, today mid-session, an inverted window, a single day, a holiday,
+a leap day, a 20-year span, a window below the history floor, two pulls of one
+instrument-month, autopilot versus manual, a crash mid-append, and an
+array-length mismatch are each refused or bounded, with the citation in the
+sweep. One measured behaviour worth knowing: Dhan sends index bars through
+15:38 against a 15:30 close, so roughly nine bars a day drop as
+`AtOrAfterSessionClose` — counted, decided, not a defect.
+
+#### What neither sweep could determine
+
+Whether Dhan emits in-array nulls, what it returns for a no-data window, and
+whether it ever repeats a row. All three turn on a live Dhan bars body, and
+`docs/08-vendor-samples.md` has never held one. The structural gaps are certain
+either way; their reachability is not.
