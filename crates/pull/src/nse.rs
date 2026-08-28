@@ -650,10 +650,19 @@ fn first_line(body: &str) -> &str {
 ///
 /// # Cost
 ///
-/// One pass. The output vector is reserved from a line count taken before the
-/// loop — `docs/07-o1-architecture.md` law 2, so it never grows — and the
-/// duplicate check walks a list bounded by [`MAX_CONSTITUENTS`], which is the
-/// same bound the file itself is held to.
+/// One pass, and it is one now.
+///
+/// The output vector and the seen-set are both reserved from a line count taken
+/// before the loop — `docs/07-o1-architecture.md` law 2, so neither grows — and
+/// the duplicate check is a HASH PROBE, O(1) per row.
+///
+/// **It said "one pass" while being two.** The check was
+/// `out.iter().any(|held| held.symbol == symbol)` inside the row loop, so the
+/// real cost was O(rows²): ~125,000 string comparisons on a NIFTY 500 file and
+/// ~50 million at the [`MAX_CONSTITUENTS`] bound. The sentence that defended it
+/// — that the check "walks a list bounded by `MAX_CONSTITUENTS`" — was true of
+/// the inner walk and silent about the outer one, which is how a quadratic
+/// reads as linear.
 pub fn constituents(body: &str) -> Result<Vec<Constituent<'_>>, NseError> {
     if body.len() > MAX_DOCUMENT_BYTES {
         return Err(NseError::TooLarge {
@@ -686,6 +695,30 @@ pub fn constituents(body: &str) -> Result<Vec<Constituent<'_>>, NseError> {
     }
 
     let mut out: Vec<Constituent<'_>> = Vec::with_capacity(rest.len());
+    // A HASH PROBE, NOT A WALK OF EVERYTHING KEPT SO FAR.
+    //
+    // The duplicate check below was `out.iter().any(|held| held.symbol == symbol)`
+    // INSIDE this loop, which is O(n^2) in the published constituent count --
+    // ~50 million string comparisons at the `MAX_CONSTITUENTS` bound of 10,000,
+    // and ~125,000 on a NIFTY 500 file. This function's own doc opened with the
+    // words "One pass", and its defence -- that "the duplicate check walks a
+    // list bounded by MAX_CONSTITUENTS" -- describes the INNER walk while
+    // silently dropping the outer factor.
+    //
+    // CI gate 11 exists to catch exactly this, in exactly this file: its
+    // preamble records that the previous O(n^2) here, `seen.contains(&href)` in
+    // `index_links`, "was found by a human reading, which is exactly the
+    // coverage this gate exists to stop depending on. D-0224." The rule was then
+    // written to the spelling THAT bug used -- `\.iter\(\)\.(find|position|
+    // rposition)\(` and `\.contains\(&` -- and `.iter().any(` matches neither,
+    // so the sibling function shipped the same defect in a spelling the new rule
+    // cannot see.
+    //
+    // `pull::universe::resolve`, this file's own join partner, already builds a
+    // `HashMap` and probes it. This does the same, pre-sized so it never
+    // rehashes: `docs/07-o1-architecture.md` law 2.
+    let mut seen: std::collections::HashSet<&str> =
+        std::collections::HashSet::with_capacity(rest.len());
     for (i, line) in rest.iter().enumerate() {
         // Rows are numbered with the header as 0, so a message names the line
         // an operator will count to in the file itself.
@@ -708,7 +741,7 @@ pub fn constituents(body: &str) -> Result<Vec<Constituent<'_>>, NseError> {
         if isin.is_empty() {
             return Err(NseError::RowNotIdentified { row, field: "ISIN" });
         }
-        if out.iter().any(|held| held.symbol == symbol) {
+        if !seen.insert(symbol) {
             return Err(NseError::DuplicateSymbol {
                 symbol: symbol.to_owned(),
                 row,

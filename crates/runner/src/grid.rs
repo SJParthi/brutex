@@ -2239,7 +2239,35 @@ fn levelled(
                 cross: crossings(bars, t.entry_bar, t.exit_bar, entry_price, side, ladders),
             }
         })
+        // A PATH WITH A REFUSED BAR IN IT IS NOT A CHEAPER MEASUREMENT, IT IS A
+        // DIFFERENT ONE. `evaluate` drops these and this did not, so the public
+        // `with_levels` and `per_trade` paths priced them.
+        //
+        // `crossings` skips a bar it cannot read WITHOUT advancing the running
+        // maxima, so every excursion figure after the hole is computed on a
+        // path that is missing part of itself -- and `Cell` has no field in
+        // which to say so, which makes the result indistinguishable from a
+        // clean one.
+        //
+        // The magnitude is already measured in this file, above `Grid::gapped`:
+        // ONE refused record among 2,250 bars moved the chosen cell from
+        // `target(0)` at 3,210 paisa to `trail(0) + arm(1)` at 499,089 -- a
+        // factor of 155, and a DIFFERENT exit instrument recommended. It
+        // reaches walk-forward scoring through `validate` and the operator's
+        // per-trade table through `cli`.
+        //
+        // Degrading loudly is `CLAUDE.md` S4's requirement and the count is
+        // already carried: `Timed::eligible` minus what survives here is
+        // exactly the refused set, and `evaluate` reports it as `refused_paths`.
+        .filter(|c| c.cross.refused() == 0)
         .collect();
+
+    // EVERY path refused is not "no trades" -- it is a measurement that could
+    // not be taken, and returning `None` says so with the same voice the
+    // emptiness check above uses rather than reporting a clean zero.
+    if candidates.is_empty() {
+        return None;
+    }
 
     let Chosen {
         stop,
