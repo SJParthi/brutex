@@ -1763,7 +1763,35 @@ jobs:
           # and all three are audited for staleness at the end of this step.
           allow_decl=''
           allow_lock=''
-          allow_build=''
+          # ONE ENTRY, AND LAYER 3'S OWN COMMENT PRESCRIBES HOW IT IS TAKEN:
+          # "The allowlist below is the escape, and taking it should come with a
+          # decisions entry." D-0348 is that entry.
+          #
+          # The clause layer 3 rests on is the one that expired. It reads "there
+          # is no C to compile, no protocol to generate from, no version to stamp
+          # that CARGO_PKG_VERSION does not already carry" -- and CLAUDE.md
+          # section 3 rule 3 requires the COMMIT, which no cargo variable
+          # carries. `cli::commit_stamp()` is `option_env!("BRUTEX_COMMIT")`, so
+          # a build nobody stamped by hand refuses every sweep.
+          #
+          # That was not theoretical. `docs/07-plan.md` section 0 states the
+          # whole procedure as "press Run on the api binary" in IntelliJ, and
+          # records that IntelliJ takes its run entries from `.idea/` or
+          # `.run/*.xml`, NEITHER TRACKED -- and `.xml` is not in CLAUDE.md
+          # section 2's extension allowlist, so this repository cannot ship one.
+          # The IDE auto-detects the binary and runs it with no environment.
+          # Measured on the operator's machine across two restarts, on 81 months
+          # of pulled Zerodha NIFTY: the server served every page and swept
+          # nothing. The launcher could not be the fix, so the build is.
+          #
+          # WHAT THE SCRIPT MAY STILL NOT DO IS UNCHANGED. Gate 2 greps every
+          # build.rs for `Command::new` and `std::process` and is not relaxed;
+          # `crates/cli/build.rs` contains neither and reads git's own files.
+          # Gate 2's second clause -- `build =` or `links =` in a manifest -- is
+          # also untouched, and this script is picked up from the DEFAULT path so
+          # no manifest names it. A second build script, or this one growing a
+          # process, is still a red build.
+          allow_build='crates/cli/build.rs 1'
 
           work=$(mktemp -d)
           bad=0
