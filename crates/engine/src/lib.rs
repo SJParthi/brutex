@@ -834,6 +834,9 @@ impl Ladder {
         admitted: usize,
         pairs_walked: u64,
     ) -> (Frontier, Option<Halt>, usize, u64) {
+        let lane_count = lanes();
+        let batch_cap = lane_count.saturating_mul(BATCH_PER_LANE);
+        let mut batch: Vec<ConditionMask> = Vec::with_capacity(batch_cap);
         // O(1) membership for the subset prune, and O(1) duplicate rejection.
         // `ConditionMask` derives `Hash + Eq`, so the key is the mask itself and
         // no separate index is needed.
@@ -995,15 +998,23 @@ impl Ladder {
                         pruned = pruned.saturating_add(1);
                         continue;
                     }
-                    let hits = column.support(&cand);
-                    if hits >= self.min_hits {
-                        out.push(Itemset { mask: cand, hits });
-                    } else {
-                        infrequent = infrequent.saturating_add(1);
+                    // COUNTED IN A BATCH, ACROSS EVERY CORE. `column.support`
+                    // is Theta(k * bars/64) and is the dominant cost of the
+                    // whole walk; everything above it here is a hash probe or a
+                    // six-word OR. Deferring it is what lets it be spread
+                    // without moving the dedup or the budget out of sequence.
+                    batch.push(cand);
+                    if batch.len() >= batch_cap {
+                        drain(column, &mut batch, self.min_hits, &mut out, &mut infrequent);
                     }
                 }
             }
         }
+        // THE TAIL, AND THE BREAK PATH TOO. `break 'join` leaves a partial
+        // batch, and a level that dropped it would report those candidates as
+        // neither frequent nor infrequent -- a silent loss of exactly the rows a
+        // halt is meant to be loud about.
+        drain(column, &mut batch, self.min_hits, &mut out, &mut infrequent);
         sort_canonically(&mut out);
         (
             Frontier {
@@ -1131,6 +1142,128 @@ fn without_highest(m: &ConditionMask) -> ConditionMask {
 /// It also matters more since the prefix join landed: with the join no longer
 /// walking a million pairs, this 384-probe loop is now a materially larger
 /// share of what a level costs than it was when the citation was written.
+/// Candidates one lane counts before a batch is drained.
+///
+/// # Sized so the spawn disappears, and no larger
+///
+/// A lane's share of one batch is this many `Column::support` calls. At the
+/// benched cost — 1.2 to 5.0 microseconds per candidate on 100,000 bars — that
+/// is 10 to 40 milliseconds of work against a thread spawn of roughly 50
+/// microseconds, so the spawn is under half a per cent and the batching is free.
+///
+/// It is not larger because the batch is the ONLY memory this change adds:
+/// `lanes x BATCH_PER_LANE x 48` bytes, which is 5.5 MB on a fourteen-core
+/// machine. `docs/06-limits.md` records memory, not time, as what bounds a
+/// sweep — a measured 1.0 GB at 17.9 million survivors — so a change that
+/// bought speed with bytes would be paying in the scarce currency.
+const BATCH_PER_LANE: usize = 8_192;
+
+/// A zero batch would never drain and the walk would never terminate. Checked
+/// here rather than in a test, because a test of a constant is a test that
+/// cannot fail at run time and this can only fail at compile time.
+const _: () = assert!(BATCH_PER_LANE > 0);
+
+/// How many support-counting lanes to run.
+///
+/// Read from the machine at run time rather than pinned, because a constant
+/// here is the same defect as a constant threshold: it decides on a machine it
+/// has never seen. `available_parallelism` reports every core the process may
+/// use — fourteen on the operator's M4 Pro, and correctly fewer inside a
+/// container or under a CPU quota.
+///
+/// One when the count cannot be read. That is a degraded run and not a wrong
+/// one: the walk is identical, it simply uses one lane, which is exactly what
+/// this function replaces.
+fn lanes() -> usize {
+    std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+}
+
+/// Count a batch of candidates across every core, keeping the frequent ones.
+///
+/// # This is the parallel half of the sweep, and the only one there is
+///
+/// Gate 22 pins `crates/engine`'s DEPENDENCY SET to `vocab` alone, so this
+/// crate cannot name `rayon`. It can name `std`, which the gate does not read
+/// and cannot: a scoped thread is not a dependency. The pin exists to keep a
+/// bar out of the sweep, and `std::thread::scope` brings no bar.
+///
+/// # Why the dedup and the budget stay sequential
+///
+/// Everything upstream of this call mutates shared state — `seen` admits or
+/// rejects a duplicate, the pair counter decides a halt — and those are hash
+/// probes and integer adds. Moving them would need locks and would change when
+/// a budget fires, which changes the ANSWER. `Column::support` is the opposite:
+/// it takes `&Column`, touches nothing, and costs `Theta(k * bars/64)`. Only
+/// the expensive, shared-nothing half is spread.
+///
+/// # Determinism
+///
+/// `scope` joins its handles in the order they were spawned, so `parts` is in
+/// chunk order and `out` receives the same sequence a single lane would have
+/// produced. `sort_canonically` then runs over the level regardless, so §3 rule
+/// 5 holds twice over. `a_batched_level_is_identical_to_a_single_lane_one`
+/// measures it rather than trusting either argument.
+///
+/// # A lane that panics takes the process down, carrying its own reason
+///
+/// `resume_unwind` and not `expect`: a support count cannot fail — it is an AND
+/// and a popcount over a slice the caller owns — so a panicking lane means
+/// memory has been corrupted underneath the walk, and continuing would file
+/// whatever it produced as a market fact. `CLAUDE.md` §4: degrade loudly, or
+/// refuse.
+///
+/// `expect` would satisfy that too and this crate bans it outright, correctly:
+/// it would replace the lane's own panic message with a fixed string, so an
+/// operator would be told "a support-counting lane" where the lane itself said
+/// which index it was and what it saw. `resume_unwind` re-raises the ORIGINAL
+/// payload, so the message that reaches the log is the one that knows something.
+fn drain(
+    column: &Column,
+    batch: &mut Vec<ConditionMask>,
+    min_hits: u64,
+    out: &mut Vec<Itemset>,
+    infrequent: &mut u64,
+) {
+    if batch.is_empty() {
+        return;
+    }
+    let width = batch.len().div_ceil(lanes()).max(1);
+    let parts: Vec<Vec<Itemset>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = batch
+            .chunks(width)
+            .map(|chunk| {
+                scope.spawn(move || {
+                    let mut kept: Vec<Itemset> = Vec::new();
+                    for mask in chunk {
+                        let hits = column.support(mask);
+                        if hits >= min_hits {
+                            kept.push(Itemset { mask: *mask, hits });
+                        }
+                    }
+                    kept
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|payload| std::panic::resume_unwind(payload))
+            })
+            .collect()
+    });
+    // INFREQUENT IS THE REMAINDER, NOT A SECOND COUNT. Counting it inside the
+    // lanes and summing would be one more thing to keep agreeing with `out`.
+    let kept: usize = parts.iter().map(Vec::len).sum();
+    let missed = batch.len().saturating_sub(kept);
+    *infrequent = infrequent.saturating_add(u64::try_from(missed).unwrap_or(u64::MAX));
+    for part in parts {
+        out.extend(part);
+    }
+    batch.clear();
+}
+
 fn every_subset_is_frequent(cand: &ConditionMask, frequent: &HashSet<ConditionMask>) -> bool {
     set_positions(cand).all(|b| frequent.contains(&cand.without_bit(b)))
 }
@@ -1206,6 +1339,102 @@ mod tests {
                     .fold(ConditionMask::default(), |m, &b| m.with_bit(b))
             })
             .collect()
+    }
+
+    /// §3 rule 5 across the lanes, measured rather than argued.
+    ///
+    /// The whole justification for counting support on every core is that a
+    /// support count reads `&Column` and writes nothing, so splitting it cannot
+    /// move an answer. This runs both forms over one batch and compares the
+    /// rows, their ORDER, and the infrequent tally.
+    #[test]
+    fn a_drained_batch_matches_a_single_lane_count() {
+        let b = bars(&[
+            &[0, 1, 2],
+            &[0, 1],
+            &[0, 2],
+            &[1, 2],
+            &[0],
+            &[1],
+            &[2],
+            &[0, 1, 2],
+        ]);
+        let column = Column::transpose(&b);
+
+        // FAR MORE CANDIDATES THAN CORES. `drain` splits into
+        // `len.div_ceil(lanes())` chunks, so a batch this size guarantees more
+        // than one lane actually runs on any machine the suite meets.
+        let candidates: Vec<ConditionMask> = (0..200_u32)
+            .map(|i| {
+                ConditionMask::default()
+                    .with_bit(i % 3)
+                    .with_bit(i.div_euclid(3) % 3)
+            })
+            .collect();
+        // FOUR OF EIGHT BARS. A single-bit mask clears it and a three-bit one
+        // does not, so both sides of the `>=` are exercised -- at 2 every
+        // candidate passed and the refusal branch was never entered.
+        let min_hits = 4;
+
+        let mut batch = candidates.clone();
+        let mut out_par: Vec<Itemset> = Vec::new();
+        let mut inf_par: u64 = 0;
+        drain(&column, &mut batch, min_hits, &mut out_par, &mut inf_par);
+
+        // THE SINGLE-LANE REFERENCE, written out rather than referenced, so a
+        // reader comparing the two can see both.
+        let mut out_seq: Vec<Itemset> = Vec::new();
+        let mut inf_seq: u64 = 0;
+        for mask in &candidates {
+            let hits = column.support(mask);
+            if hits >= min_hits {
+                out_seq.push(Itemset { mask: *mask, hits });
+            } else {
+                inf_seq = inf_seq.saturating_add(1);
+            }
+        }
+
+        assert_eq!(
+            out_par, out_seq,
+            "the lanes must produce the same rows in the same order as one lane"
+        );
+        assert_eq!(inf_par, inf_seq, "and the same infrequent tally");
+        assert!(
+            batch.is_empty(),
+            "the batch must be drained, not left behind"
+        );
+        assert!(
+            !out_par.is_empty() && inf_par > 0,
+            "the fixture must both KEEP and REFUSE candidates, or only half of \
+             the branch is under test"
+        );
+    }
+
+    /// An empty batch is a no-op, and must not move the counter it is handed.
+    ///
+    /// The early return exists because `div_ceil` on a zero length would give a
+    /// chunk width of zero and `chunks(0)` panics.
+    #[test]
+    fn an_empty_batch_drains_to_nothing_and_moves_no_counter() {
+        let column = Column::transpose(&bars(&[&[0], &[1]]));
+        let mut batch: Vec<ConditionMask> = Vec::new();
+        let mut out: Vec<Itemset> = Vec::new();
+        let mut infrequent: u64 = 7;
+        drain(&column, &mut batch, 1, &mut out, &mut infrequent);
+        assert!(out.is_empty(), "nothing in, nothing out");
+        assert_eq!(infrequent, 7, "and an untouched tally, not a reset one");
+    }
+
+    /// There is always a lane, whatever the machine says.
+    ///
+    /// The batch size is a constant and is checked by a `const` assertion at
+    /// its declaration; asserting it here would be a test that cannot fail.
+    #[test]
+    fn there_is_always_at_least_one_lane() {
+        assert!(
+            lanes() >= 1,
+            "a machine reporting no parallelism must still count support"
+        );
     }
 
     /// THREE MUTANTS NOTHING WAS STANDING BETWEEN.
@@ -2078,9 +2307,13 @@ mod tests {
              construction."
         );
         assert_eq!(
-            exits, 10,
+            exits, 11,
             "the shipping region of this file may leave a loop early in exactly \
-             ten places, and every one is accounted for:\n\
+             eleven places, and every one is accounted for:\n\
+             \x20 1 EMPTY-BATCH RETURN -- `drain` handing back an untouched \
+             tally when there is nothing to count. It is not optional: \
+             `len.div_ceil(lanes())` on an empty batch is a chunk width of \
+             zero, and `chunks(0)` panics.\n\
              \x20 3 BUDGET EXITS, each recording a `Halt` -- the k-loop on a \
              breach, the join's outer row on the pair budget, the join's inner \
              pair on whichever memory bound `exhausted` names;\n\
@@ -2308,13 +2541,26 @@ mod tests {
     #[test]
     fn the_sweep_counts_support_against_the_transposed_column() {
         let src = include_str!("lib.rs");
+        // THE SHIPPING REGION ONLY, AND THAT IS A CORRECTION.
+        //
+        // This counted over the WHOLE file and needled on `support(&` -- the
+        // ampersand doing the work of separating production from test, because
+        // it happened to appear in one and not the other. That was an accident
+        // of spelling, not a rule: the level join now hands `drain` a slice and
+        // `drain` iterates it, so its call reads `support(mask)` on an already
+        // borrowed item and the old needle stopped seeing it.
+        //
+        // Splitting on the first `#[cfg(test)]` is the same discipline the
+        // `column.rs` check below already uses, and it separates the two by what
+        // they ARE rather than by how they happen to be written.
+        let shipped = src.split("#[cfg(test)]").next().unwrap_or(src);
         assert_eq!(
-            src.matches(concat!("column.", "support(&")).count(),
+            shipped.matches(concat!("column.", "support(")).count(),
             2,
-            "both support sites in the sweep -- k=1 and the level join -- must \
-             read the transposed column. One of them has gone back to the \
-             row-major walk, which is 9x more bytes moved per candidate and which \
-             no behavioural test can see."
+            "both support sites in the sweep -- k=1 and the batch `drain` the \
+             level join feeds -- must read the transposed column. One of them \
+             has gone back to the row-major walk, which is 9x more bytes moved \
+             per candidate and which no behavioural test can see."
         );
         assert!(
             src.contains(concat!("Column::", "transpose(bar_bits)")),
