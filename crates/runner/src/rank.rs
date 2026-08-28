@@ -474,6 +474,7 @@ mod tests {
                 n: 10,
                 wins: 1,
                 win_sum: 90.0,
+                losses: 9,
                 loss_sum: -90.0,
                 t: 0.0,
                 ..Edge::default()
@@ -487,6 +488,7 @@ mod tests {
                 n: 10,
                 wins: 9,
                 win_sum: 90.0,
+                losses: 1,
                 loss_sum: -90.0,
                 t: 9.0,
                 ..Edge::default()

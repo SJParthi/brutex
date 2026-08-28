@@ -120,6 +120,45 @@ governor = "0.7"
 aws-config  = "1"
 aws-sdk-ssm = "1"
 
+[profile.dev]
+# THE PROFILE IS THE ONLY LEVER THIS REPOSITORY OWNS OVER THE Run BUTTON.
+#
+# Measured 2026-08-28: a browser-started sweep of zerodha NIFTY 2019-12..2026-08
+# ran for over two hours at thirteen cores and recorded nothing, from
+# `target/debug/api`. The cause is not in this repository and cannot be fixed
+# there: IntelliJ takes its run entry from `.idea/workspace.xml`, which pins
+# `buildProfileId = dev` with an empty environment, and `.idea/` is untracked by
+# design. The one IntelliJ format that COULD be committed is `.run/*.xml`, and
+# `.xml` is on no allowlist in CLAUDE.md S2 -- gate 1 fails the build for it.
+# `.claude/launch.json` names `--release` and IntelliJ never reads it.
+#
+# So the operator cannot press Run and get an optimised binary, and no launcher
+# this repository is allowed to ship can change that. What it CAN change is what
+# `dev` means.
+#
+# Why this workload is punished out of proportion at opt-level 0: the sweep's
+# inner line is `acc &= bits.get(base + word).copied().unwrap_or(0)` in
+# `engine::Column::support`, written that way because `[workspace.lints.clippy]`
+# denies `indexing_slicing`. That is the right call and it is free at opt-level
+# 3, where `get`, `copied`, `unwrap_or` and the iterator adapter all inline
+# away to a load and an AND. At opt-level 0 each one is a real call frame with
+# argument spills, per word, per candidate, hundreds of millions of times.
+#
+# `debug-assertions` and `overflow-checks` are LEFT AT THEIR `true` DEFAULTS.
+# This buys speed and does not weaken the refusal `[profile.release]` below
+# calls non-negotiable: a wrapped price is a plausible number that is wrong.
+#
+# Deliberately NOT setting `lto` or `codegen-units`: those buy the last few
+# percent for a large multiple of link time, which is the wrong trade for the
+# edit-build-run loop this profile exists to serve.
+#
+# `[profile.test]` inherits this. That is a second benefit rather than a cost --
+# `docs/05-decisions.md` records that `cargo test --workspace` does not
+# terminate on this tree because an end-to-end test sweeps in a debug build,
+# "measured at over an hour", and D-0287 found a genuinely red test hiding
+# behind that hang.
+opt-level = 3
+
 [profile.release]
 # Silent wrapping is not an acceptable answer to an arithmetic mistake in a
 # backtesting engine: a wrapped price is a plausible number that is wrong, which is

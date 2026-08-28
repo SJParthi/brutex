@@ -543,6 +543,19 @@ pub struct Edge {
     pub wins: u64,
     /// Sum of the strictly positive forward moves, in paisa.
     pub win_sum: f64,
+    /// Observations whose forward move was **strictly negative**.
+    ///
+    /// **This is not `n - wins`, and the difference is the flats.** It was
+    /// absent and [`Self::payoff_bp`] derived it by that subtraction, which
+    /// counts every flat bar as a loser for the purpose of averaging a
+    /// losers-only sum -- inflating the reported payoff by
+    /// `(losses + flats) / losses`. On a one-minute index series a forward move
+    /// of exactly zero is routine, so the inflation was routine too, and
+    /// [`crate::rank::ByPayoff`] orders the whole candidate list on it.
+    ///
+    /// Carried alongside `wins` rather than reconstructed, because the flats
+    /// are the one thing the other four fields genuinely cannot recover.
+    pub losses: u64,
     /// Sum of the strictly negative forward moves, in paisa. **Negative or
     /// zero.**
     pub loss_sum: f64,
@@ -654,7 +667,12 @@ impl Edge {
         if self.n < 2 || self.wins == 0 {
             return 0;
         }
-        let losses = self.n.saturating_sub(self.wins);
+        // COUNTED, NOT SUBTRACTED. `n - wins` is losers PLUS FLATS, and
+        // `loss_sum` holds losers only, so dividing one by the other shrank the
+        // mean loss and inflated this ratio by `(losses + flats) / losses` --
+        // on every mask with a single zero forward move, which on one-minute
+        // index bars is most of them. `Sides::losses` carries the real count.
+        let losses = self.losses;
         // Losses are counted as observations that were strictly negative, so a
         // sample of wins and flats has none — unbounded, and named rather than
         // divided by zero.
@@ -781,6 +799,21 @@ struct Sides {
     wins: u64,
     /// Sum of the strictly positive observations.
     win_sum: f64,
+    /// Strictly negative observations.
+    ///
+    /// **Counted rather than derived, and that is the whole point.** It was
+    /// absent, and [`Edge::payoff_bp`] recovered it as `n - wins` -- which is
+    /// losers PLUS FLATS, because [`Self::observe`] charges a zero to neither
+    /// side while the caller still counts it in `n`. Dividing a losers-only
+    /// `loss_sum` by that inflated count shrinks the mean loss and inflates the
+    /// payoff ratio by exactly `(losers + flats) / losers`.
+    ///
+    /// The doc on `observe` names this failure mode precisely -- it would "move
+    /// `Edge::payoff_bp` by the number of flat bars rather than by anything
+    /// about the setup" -- and the subtraction reintroduced it fifteen lines
+    /// away. A flat forward move on a one-minute index bar is routine, so it
+    /// fired constantly, and `ByPayoff` RANKS on the result.
+    losses: u64,
     /// Sum of the strictly negative observations. Negative or zero.
     loss_sum: f64,
 }
@@ -798,6 +831,7 @@ impl Sides {
             self.wins = self.wins.saturating_add(1);
             self.win_sum += x;
         } else if x < 0.0 {
+            self.losses = self.losses.saturating_add(1);
             self.loss_sum += x;
         }
     }
@@ -1028,21 +1062,27 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
         recent.push_back((source, x));
     }
 
+    // ONE ASSEMBLY POINT FOR BOTH EXITS. The early return and the final one
+    // differ in exactly one field, `t`, and every other field was spelled twice
+    // -- which is how a field can be added to one and forgotten in the other.
+    let assemble = |t: f64| Edge {
+        n,
+        mismatched,
+        refused,
+        mean_paisa: mean,
+        // CARRIED, not zeroed, on the `t = 0.0` path. A single observation has
+        // no `t` -- there is no spread to divide by -- but it did move one way
+        // or the other, and `payoff_bp` refuses a one-sided sample on its own
+        // terms rather than being handed a zero that looks measured.
+        wins: sides.wins,
+        win_sum: sides.win_sum,
+        losses: sides.losses,
+        loss_sum: sides.loss_sum,
+        t,
+    };
+
     if n < 2 {
-        return Edge {
-            n,
-            mismatched,
-            refused,
-            mean_paisa: mean,
-            // CARRIED, not zeroed. A single observation has no `t` -- there is
-            // no spread to divide by -- but it did move one way or the
-            // other, and `payoff_bp` refuses a one-sided sample on its own
-            // terms rather than being handed a zero that looks measured.
-            wins: sides.wins,
-            win_sum: sides.win_sum,
-            loss_sum: sides.loss_sum,
-            t: 0.0,
-        };
+        return assemble(0.0);
     }
     #[allow(
         clippy::cast_precision_loss,
@@ -1073,16 +1113,7 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
         // the inflated number this whole block exists to remove.
         0.0
     };
-    Edge {
-        n,
-        mismatched,
-        refused,
-        mean_paisa: mean,
-        wins: sides.wins,
-        win_sum: sides.win_sum,
-        loss_sum: sides.loss_sum,
-        t,
-    }
+    assemble(t)
 }
 
 #[cfg(test)]
@@ -1126,11 +1157,17 @@ mod tests {
     }
 
     /// An `Edge` with only the payoff fields set, for arithmetic tests.
-    fn sided(n: u64, wins: u64, win_sum: f64, loss_sum: f64) -> Edge {
+    ///
+    /// `losses` is taken rather than derived, because deriving it as `n - wins`
+    /// is the exact defect [`Edge::losses`] documents: it counts flats as
+    /// losers. A fixture that reconstructed it would agree with a broken
+    /// `payoff_bp` and disagree with a correct one.
+    fn sided(n: u64, wins: u64, win_sum: f64, losses: u64, loss_sum: f64) -> Edge {
         Edge {
             n,
             wins,
             win_sum,
+            losses,
             loss_sum,
             ..Edge::default()
         }
@@ -1196,10 +1233,10 @@ mod tests {
         //
         // A: nine losers of -10 and one winner of +90.  Mean 0.
         //    mean win 90, mean loss 10  -> payoff 9.00
-        let sniper = sided(10, 1, 90.0, -90.0);
+        let sniper = sided(10, 1, 90.0, 9, -90.0);
         // B: one loser of -90 and nine winners of +10.  Mean 0.
         //    mean win 10, mean loss 90  -> payoff 0.11
-        let grinder = sided(10, 9, 90.0, -90.0);
+        let grinder = sided(10, 9, 90.0, 1, -90.0);
 
         // Both fixtures leave `mean_paisa` at its default, so the point being
         // made is that the two carry the SAME mean and `t` therefore cannot
@@ -1223,17 +1260,46 @@ mod tests {
     #[test]
     fn the_payoff_names_each_absence_rather_than_returning_a_figure() {
         // One observation is not a distribution.
-        assert_eq!(sided(1, 1, 10.0, 0.0).payoff_bp(), 0, "n < 2");
+        // A FLAT BAR IS NOT A LOSER, AND THIS IS THE ASSERTION THAT SAYS SO.
+        //
+        // Forty wins totalling +4,000 and forty losers totalling -4,000 is a
+        // payoff of exactly 1.00, whatever else the sample contains. Adding
+        // twenty flats must not move it. `payoff_bp` derived its loser count as
+        // `n - wins`, which reads 60 here instead of 40, shrinks the mean loss
+        // from 100 to 66.67, and reports 150 -- a setup a third better than it
+        // is, on the statistic `ByPayoff` ranks the whole run by.
+        //
+        // Both fixtures below carry identical wins and identical losers. Only
+        // the flats differ, so the only way they can disagree is the bug.
+        let no_flats = sided(80, 40, 4_000.0, 40, -4_000.0);
+        let with_flats = sided(100, 40, 4_000.0, 40, -4_000.0);
+        assert_eq!(
+            no_flats.payoff_bp(),
+            100,
+            "forty up, forty down, one to one"
+        );
+        assert_eq!(
+            with_flats.payoff_bp(),
+            no_flats.payoff_bp(),
+            "twenty flat bars paid nothing and cost nothing, so they must not \
+             move the payoff ratio at all"
+        );
+
+        assert_eq!(sided(1, 1, 10.0, 0, 0.0).payoff_bp(), 0, "n < 2");
         // No upside at all.
-        assert_eq!(sided(10, 0, 0.0, -100.0).payoff_bp(), 0, "no wins");
+        assert_eq!(sided(10, 0, 0.0, 10, -100.0).payoff_bp(), 0, "no wins");
         // No downside at all -- unbounded, and named rather than divided by
         // zero. The same answer `Cell::return_over_drawdown` gives a variant
         // that never gave anything back, for the same reason.
-        assert_eq!(sided(10, 10, 100.0, 0.0).payoff_bp(), i64::MAX, "no losses");
+        assert_eq!(
+            sided(10, 10, 100.0, 0, 0.0).payoff_bp(),
+            i64::MAX,
+            "no losses"
+        );
         // Wins and FLATS only: the losses count is non-zero but nothing was
         // charged to that side, so there is still nothing to divide by.
         assert_eq!(
-            sided(10, 4, 100.0, 0.0).payoff_bp(),
+            sided(10, 4, 100.0, 0, 0.0).payoff_bp(),
             i64::MAX,
             "wins and flats"
         );
