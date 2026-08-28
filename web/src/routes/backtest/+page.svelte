@@ -140,6 +140,24 @@
    */
   let vocab = $state({ phase: 'idle', version: 0, bits: new Map(), why: '' });
 
+  /**
+   * The ranked combinations of the finished sweep — the thing the whole engine
+   * exists to produce, and the one thing this page never asked for.
+   *
+   * `record_frontier` writes up to `rules.top` rows per rung into
+   * `results/frontier.bin` — twenty-five per rung, two hundred for an eight-rung
+   * press — each carrying the mask, hits, observations, mean, `t`, payoff and
+   * win count. `GET /engine/top.json` reads them back and renders them WITH
+   * condition names already resolved server-side.
+   *
+   * Every part of that worked. No page ever called the route, so the rows were
+   * written correctly, read correctly by code nobody reached, and never seen.
+   * The ledger table below shows one row per RUN — the single winning
+   * combination — so the other twenty-four of each twenty-five have been
+   * invisible since the frontier file was added.
+   */
+  let top = $state({ phase: 'idle', report: '', why: '' });
+
   async function fetchVocab() {
     try {
       const response = await ask_('/vocab.json');
@@ -171,6 +189,56 @@
         version: 0,
         bits: new Map(),
         why: `The condition table could not be fetched: ${why instanceof Error ? why.message : String(why)}`
+      };
+    }
+  }
+
+  /**
+   * Reads the ranked combinations of a finished sweep.
+   *
+   * `feed` and `underlying` filter TOGETHER — the route refuses one without the
+   * other rather than guessing, so both are checked here before a request is
+   * made. Missing either is not an error worth showing: it means the sweep
+   * carried no identity to ask about, and the block simply stays hidden.
+   *
+   * The response is `{report, refusal}`, exactly one of which is non-null. A
+   * refusal is DISPLAYED rather than swallowed, for the reason `fetchVocab`
+   * gives beside it: a page that silently shows nothing looks identical to a
+   * sweep that found nothing, and those are opposite facts. A 404 in particular
+   * means the running binary predates the route — the page comes off disk and
+   * the route does not.
+   */
+  async function fetchTop(feed, underlying) {
+    if (!feed || !underlying) {
+      top = { phase: 'idle', report: '', why: '' };
+      return;
+    }
+    top = { phase: 'loading', report: '', why: '' };
+    try {
+      const response = await ask_(
+        `/engine/top.json?feed=${encodeURIComponent(feed)}` +
+          `&underlying=${encodeURIComponent(underlying)}`
+      );
+      const body = await response.json();
+      if (!response.ok || !body.report) {
+        top = {
+          phase: 'failed',
+          report: '',
+          why:
+            body.refusal ??
+            `/engine/top.json answered ${response.status}. The ranked ` +
+              `combinations were written to the store either way — this page ` +
+              `could not read them back. A 404 means the running binary is ` +
+              `older than this page.`
+        };
+        return;
+      }
+      top = { phase: 'ready', report: body.report, why: '' };
+    } catch (why) {
+      top = {
+        phase: 'failed',
+        report: '',
+        why: `The ranked combinations could not be fetched: ${why instanceof Error ? why.message : String(why)}`
       };
     }
   }
@@ -333,7 +401,15 @@
       // FINISHED: the ledger now has one more record, so the table is stale.
       // A REFUSAL DOES NOT RE-READ IT — nothing was appended, and re-reading
       // would redraw the same table under a red note as though it had changed.
-      if (next.phase === 'done') fetchLedger();
+      if (next.phase === 'done') {
+        fetchLedger();
+        // AND THE RANKED COMBINATIONS, which is what was actually being asked
+        // for. `fetchLedger` re-reads one row per run; this reads the twenty-five
+        // rows behind each of them. Fired together and awaited by neither,
+        // because they answer different questions and a slow frontier read must
+        // not hold up the ledger table.
+        fetchTop(next.run?.feed, next.run?.underlying);
+      }
     } catch (error) {
       sweep = {
         phase: 'failed',
@@ -3550,6 +3626,32 @@
          from this page. It is knowable here. -->
     {#if sweep.run.report}
       <pre class="runlog">{sweep.run.report}</pre>
+    {/if}
+
+    <!-- THE RANKED COMBINATIONS, WHICH IS THE ANSWER THE SWEEP WAS RUN FOR.
+         The block above is the eight-rung SUMMARY — one line per timeframe. The
+         ledger table below is one row per RUN, carrying the single winning
+         combination. Between them sat the thing actually being looked for: the
+         top twenty-five per rung, with hits, observations, mean, `t`, payoff,
+         win count and their conditions NAMED.
+         Those rows have been written to `results/frontier.bin` all along and
+         `/engine/top.json` has been able to read them all along. No page ever
+         called it, so twenty-four of every twenty-five results were invisible. -->
+    {#if top.phase === 'ready'}
+      <p class="inline-note runstate">
+        <b>The ranked combinations</b> — best first, conditions named.
+      </p>
+      <pre class="runlog">{top.report}</pre>
+    {:else if top.phase === 'loading'}
+      <p class="inline-note runstate dim">Reading the ranked combinations…</p>
+    {:else if top.phase === 'failed'}
+      <!-- SHOWN, NOT SWALLOWED. A page that quietly renders nothing here looks
+           exactly like a sweep that ranked nothing, and those are opposite
+           facts. -->
+      <p class="inline-note bad runstate">
+        <b>The ranked combinations could not be read.</b>
+        {top.why}
+      </p>
     {/if}
   {:else if sweep.phase === 'failed'}
     <p class="inline-note bad runstate">

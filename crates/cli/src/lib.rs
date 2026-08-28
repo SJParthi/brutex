@@ -1955,9 +1955,22 @@ fn stop_ladder_ppm(bars: &[indicators::Candle]) -> Vec<i64> {
 /// # Floors on the floor
 ///
 /// At least one point, because a ladder needs somewhere to start and a stop
-/// below the tick grid is not a price. At most [`MAX_STOP_POINTS`]'s own cap, so
-/// a violently wide instrument cannot produce a floor above its own ceiling and
-/// leave the ladder empty.
+/// below the tick grid is not a price.
+///
+/// **There is no upper clamp any more, and its removal is the point.** This
+/// sentence used to promise "at most [`MAX_STOP_POINTS`]'s own cap" and the
+/// code applied one — which is exactly how the ladder collapsed by a second
+/// route: on a violently wide instrument the 25th AND 90th percentiles both
+/// exceeded twenty-five points, both clamped to twenty-five, floor equalled cap,
+/// and the `while halves <= cap_halves` loop ran once. A cap expressed in NIFTY
+/// points cannot bound a ladder whose ends are percentiles of whatever
+/// instrument is in front of it.
+///
+/// A floor above its own ceiling is impossible without the clamp rather than
+/// because of it: both ends come from the same sorted distribution, so the 25th
+/// percentile cannot exceed the 90th. [`MAX_STOP_POINTS`] survives only as the
+/// fallback for a slice where no bar has any range at all, where there is no
+/// distribution to read a percentile from.
 /// One point of the sorted bar-range distribution, in POINTS.
 ///
 /// # Why this exists, and what it fixes
@@ -4624,9 +4637,29 @@ impl Rules {
         // requirement: not "massive profit", but "massive profit at a drawdown
         // I could sit through".
         //
-        // Zero drops the rule, the way `min_rr_bp` of zero does, so no command
-        // gains a policy nobody typed.
-        cell.worst_mae <= self.max_mae_ppm
+        // ZERO DROPS THE RULE, AND IT HAD TO BE SPELLED OUT TO ACTUALLY DO SO.
+        //
+        // The comment above already claimed this, "the way `min_rr_bp` of zero
+        // does" — and the analogy is exactly where it went wrong. Every other
+        // rule on this list is a `>=` against a floor, where zero is satisfied
+        // by anything and the rule genuinely disappears. This one is a `<=`
+        // against a CEILING, and a ceiling of zero is not absent, it is
+        // impossible: `Cell::worst_mae` is a non-negative ppm excursion that
+        // `grid::peak` starts at zero and only ever raises, measured from the
+        // entry bar's adverse extreme, so it is strictly positive on any bar
+        // with a range.
+        //
+        // So `max_mae_ppm == 0` rejected EVERY cell on the first conjunct, and
+        // `Rules::operator()` — which the browser sweep now admits on — takes
+        // exactly that default. The screen would have found nothing admitted,
+        // printed `YOUR RULES: UNMET`, and fallen through to the generated tier
+        // ladder on every single run: the operator's four stated criteria
+        // silently replaced by a cascade they never asked for, with no error
+        // anywhere. Found by audit before it reached a run.
+        //
+        // The other five keep their bare comparison, because for a floor the
+        // analogy holds and adding a guard would be noise.
+        (self.max_mae_ppm == 0 || cell.worst_mae <= self.max_mae_ppm)
             && cell.reward_to_risk_bp() >= self.min_rr_bp
             && cell.win_rate_bp() >= self.min_win_rate_bp
             && cell.trades >= self.min_trades

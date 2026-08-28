@@ -335,7 +335,18 @@ pub const DEFAULT_RUNGS: usize = 4;
 /// about the DEFAULT while leaving no way to move it.
 ///
 /// `BRUTEX_GRID_RUNGS` is the variable `cli` already reads for the same
-/// quantity, so setting it once now moves BOTH ladders and they cannot drift
+/// **This shares the rung COUNT and not the ladder SHAPE, and the difference is
+/// not cosmetic.** `Levels::derived(n)` sets `step_ppm: None`, `stops_ppm: &[]`
+/// and `ratios: false` — a QUANTILE ladder read off each combination's own
+/// excursions. The screen builds a point-stepped ratio grid with the derived
+/// stop ladder supplied to it. So even at an identical count the fold prices a
+/// different set of levels, and it then chooses with `sharpest().or_else(best)`
+/// where the screen chooses with `best_within(rules.admits)`. Sharing the count
+/// removes one of three disagreements; the remaining two are real and are not
+/// closed here. An earlier version of this doc claimed the ladders now match,
+/// which was wrong.
+///
+/// quantity, so setting it once moves BOTH counts and they cannot drift
 /// apart. Unset, the behaviour is exactly what it was.
 ///
 /// A zero is refused rather than obeyed: a ladder with no rungs prices only the

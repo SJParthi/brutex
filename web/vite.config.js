@@ -64,6 +64,19 @@ const ROUTES = [
 	// in development only, which is the trap the `/audit` note above records.
 	'/backtest/run',
 	'/backtest/run.json',
+	// THE RANKED COMBINATIONS OF A FINISHED SWEEP.
+	//
+	// `record_frontier` writes up to `rules.top` rows per rung into
+	// `results/frontier.bin` — twenty-five per rung, two hundred for an
+	// eight-rung press — and `/engine/top.json` reads them back with the
+	// condition names already resolved. Both halves shipped and worked; nothing
+	// in `web/src` ever fetched it, so twenty-four of every twenty-five results
+	// were written correctly and never seen by anyone.
+	//
+	// Listed with the `.json` suffix rather than as `/engine`, for the same
+	// reason `/backtest/run` is: `/engine/command` is a POST that no page calls
+	// and proxying the whole prefix would claim it too.
+	'/engine/top.json',
 	// `/audit` IS NOT HERE, AND ITS ABSENCE IS THE POINT.
 	//
 	// It used to be, and it made one URL serve two different applications:
