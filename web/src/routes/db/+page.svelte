@@ -5993,8 +5993,27 @@
    * offered member when the store holds none of them — which is honest: the
    * table is empty because the store is.
    */
+  /* `rows.length > 0` IS THE GUARD, AND `segmentRows.length > 0` WAS NOT ONE.
+     `segmentRows` is `SEG_VIEW.map(...)` — always exactly three rows, whatever
+     the store holds — so that test is a constant, not a gate, and this effect
+     fired on the very first tick. At mount `feeds.active` is still null and
+     `rows` is `[]`, so all three rows carry a `why`, `held` is `undefined`,
+     and `kind` was set to `segmentRows[0].key`. Because the outer guard is
+     `kind === ''` it then never re-evaluated, and `forgetPreviousFeed`
+     deliberately preserves `kind`, so a later feed never re-opened it either.
+
+     Net: "PREFER SOMETHING HELD" — the rule the paragraph above states — was
+     dead for this rung. The choice was always made against an empty store and
+     always landed on the first row. It is masked today only because spot is
+     the one populated segment, so `segmentRows[0]` happens to be right; it
+     becomes visible the day the store holds a settled contract and no spot row
+     for the selection.
+
+     Waiting for `rows` is what makes `why` mean "read, and this segment is
+     empty" rather than "nothing read yet" — the two states the fallback could
+     not tell apart. */
   $effect(() => {
-    if (kind === '' && segmentRows.length > 0) {
+    if (kind === '' && rows.length > 0 && segmentRows.length > 0) {
       const held = segmentRows.find((s) => s.why === undefined);
       kind = (held ?? segmentRows[0]).key;
     }
@@ -6613,7 +6632,24 @@
     return by;
   });
 
-  const openRowData = $derived(openKey ? (deco.find((r) => r.key === openKey) ?? null) : null);
+  /* AND A SECOND MAP, BECAUSE THE LINE BELOW WAS THE SCAN THE COMMENT ABOVE
+     SAYS THERE ISN'T. `byInstrument` genuinely made the MONTH list a probe;
+     resolving the opened ROW was still `deco.find(...)` — O(n) over the whole
+     census, which `docs/06-limits.md` §34 projects at 93,776 rows — re-run on
+     every `deco` change as well as on every open. One line under an invariant
+     it did not hold, which is the shape §3 rule 4 exists to catch.
+
+     Built in the same pass as `byInstrument` would have coupled two lookups
+     with different keys; a second Map over the same array is one more pass at
+     build time and turns the open into a probe for real. */
+  const byKey = $derived.by(() => {
+    /** @type {Map<string, DecoRow>} */
+    const m = new Map();
+    for (const it of deco) m.set(it.key, it);
+    return m;
+  });
+
+  const openRowData = $derived(openKey ? (byKey.get(openKey) ?? null) : null);
   const openMonths = $derived(openRowData ? (byInstrument.get(openRowData.instrument) ?? []) : []);
   const openTotals = $derived.by(() => {
     let bars = 0;
@@ -8194,6 +8230,29 @@
     <!-- ==================================================================
          THE CENSUS TABLE. Windowed: only the visible slice exists in the DOM.
          ================================================================== -->
+    <!-- ══ ABOVE THE VIEW SPLIT, BECAUSE A STRANDED RUNG IS NOT A PROPERTY OF
+         THE VIEW ══
+         This sat inside the `{:else}` below — the Bars branch — so it drew in
+         one of the two views and not the other. Switch to Coverage, strand a
+         Timeframe, an Expiry or a Side, and the table emptied with only the
+         generic `narrowing` list to explain it: no statement that the rung is
+         no longer offered, and no Clear button, because the refusal was
+         attached to the grid it happened to sit beside rather than to the rung
+         it is about. `view` is live in both directions again — the tablist
+         writes it — so "one view has it" means "half the time it is missing".
+         `stranded` folds the rungs, not the rows, so it is the same answer in
+         either view and belongs before the split. ══ -->
+    {#if stranded.length > 0}
+      <p class="stranded" role="status">
+        {#each stranded as st (st.rung)}
+          <span class="sitem">
+            <b>{st.rung}</b> is set to <b>{st.value}</b>, which the rungs above it no longer offer —
+            so no row can match.
+            <button class="btn ghost sm" type="button" onclick={st.clear}>Clear {st.rung}</button>
+          </span>
+        {/each}
+      </p>
+    {/if}
     {#if view === 'census'}
     <div class="tbl rise">
       <!-- The scroll region is FOCUSABLE ON PURPOSE and carries the row
@@ -8556,17 +8615,6 @@
            every one of them says so, on the header and in every cell.
            `CLAUDE.md` §4: degrade loudly and name the reason.
            ================================================================== -->
-      {#if stranded.length > 0}
-      <p class="stranded" role="status">
-        {#each stranded as st (st.rung)}
-          <span class="sitem">
-            <b>{st.rung}</b> is set to <b>{st.value}</b>, which the rungs above it no longer offer —
-            so no row can match.
-            <button class="btn ghost sm" type="button" onclick={st.clear}>Clear {st.rung}</button>
-          </span>
-        {/each}
-      </p>
-    {/if}
 
     <!-- ==================================================================
          THE WINDOW'S SHAPE, ABOVE THE NUMBERS.
