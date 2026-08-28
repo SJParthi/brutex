@@ -353,15 +353,23 @@ fn elite_arm(
             // cheap ceiling down to the floor one trade a week implies, and
             // stops at the first support that admits a row. See its doc for why
             // a typed threshold cannot find a rare setup at any value.
-            let text = elite_descend(
-                vendor,
-                underlying,
-                rung,
-                (fy, fm),
-                (ty, tm),
-                points_to_ppm(pts),
-                n,
-            );
+            // POINTS ALL THE WAY IN, converted against THESE bars.
+            //
+            // This read `points_to_ppm(pts)`, which converts against
+            // `NIFTY_REFERENCE` — a 25,000 constant — whatever instrument the
+            // operator named. `elite_descend_in_points`'s own doc states the
+            // cost: *"a NIFTY constant applied to BANKNIFTY does not
+            // approximate the operator's rule, it doubles it"*, and understates
+            // it on a 2020 low. So `elite NIFTY 20` and `elite BANKNIFTY 20`
+            // asked for different stops while printing the same number.
+            //
+            // The correctly-converting variant already existed and
+            // `crates/api/src/sweeprun.rs` already calls it — this argument
+            // parser was the one caller left on the constant. It reads the
+            // reference off the span it is about to sweep, so nothing here
+            // needs to know a price.
+            let text =
+                elite_descend_in_points(vendor, underlying, rung, (fy, fm), (ty, tm), pts, n);
             let refused = text.starts_with("refused");
             out.push_str(&text);
             if refused { MISUSED } else { OK }
@@ -1932,21 +1940,66 @@ fn stop_ladder_ppm(bars: &[indicators::Candle]) -> Vec<i64> {
 /// below the tick grid is not a price. At most [`MAX_STOP_POINTS`]'s own cap, so
 /// a violently wide instrument cannot produce a floor above its own ceiling and
 /// leave the ladder empty.
-fn stop_floor_points(bars: &[indicators::Candle]) -> i64 {
+/// One point of the sorted bar-range distribution, in POINTS.
+///
+/// # Why this exists, and what it fixes
+///
+/// [`stop_floor_points`] and [`max_stop_points`] were **byte-identical**: same
+/// filter, same sort, same median index, same divisor, same clamp, differing
+/// only in the fallback for an empty slice. So on every real series
+/// `floor == cap`, [`stop_ladder_ppm`]'s `while halves <= cap_halves` ran
+/// exactly ONCE, and the shipped stop ladder had a single rung —
+/// [`STOP_STEP_POINTS_HALVES`] never advancing it. The doc above
+/// [`stop_ladder_ppm`] claimed a span of *"5, 7.5, 10 … 25"* that no run has
+/// ever walked, and the test named for that span asserts nothing about its
+/// length: its ordering check is `rungs.windows(2).all(..)`, which is vacuously
+/// true on one element.
+///
+/// A floor and a ceiling must come from DIFFERENT places in the distribution or
+/// they are not a floor and a ceiling. Both now do, and both are still derived
+/// from this instrument's own bars rather than from a constant.
+///
+/// `numerator/denominator` is the fraction of the way through the sorted
+/// ranges. Percentiles rather than multiples of the median, because a multiple
+/// is a figure somebody chose and a percentile is a figure the data reports.
+fn range_percentile(
+    bars: &[indicators::Candle],
+    numerator: usize,
+    denominator: usize,
+) -> Option<i64> {
     let mut ranges: Vec<i64> = bars
         .iter()
         .map(|b| b.high.saturating_sub(b.low))
         .filter(|&r| r > 0)
         .collect();
     if ranges.is_empty() {
+        return None;
+    }
+    ranges.sort_unstable();
+    // `len - 1` so the last percentile addresses the last element rather than
+    // one past it; the `min` is belt and braces for a caller passing n > d.
+    let at = ranges
+        .len()
+        .saturating_sub(1)
+        .saturating_mul(numerator)
+        .checked_div(denominator)
+        .unwrap_or(0)
+        .min(ranges.len().saturating_sub(1));
+    // A bar range is paisa; points are paisa over PAISA_PER_POINT.
+    ranges.get(at).map(|&paisa| paisa / PAISA_PER_POINT)
+}
+
+/// The TIGHTEST stop worth testing: the 25th percentile of the bar range.
+///
+/// A stop inside the quarter of bars that barely move is a stop the instrument's
+/// ordinary noise takes out, and pricing it teaches nothing. Below that the
+/// ladder would spend every rung measuring the same stop-out.
+fn stop_floor_points(bars: &[indicators::Candle]) -> i64 {
+    let Some(points) = range_percentile(bars, 1, 4) else {
         // No bar has a range, so nothing about this instrument is measurable.
         // The stated NIFTY figure is the honest fallback and is named as one.
         return STOP_FLOOR_POINTS;
-    }
-    ranges.sort_unstable();
-    let median = ranges.get(ranges.len() / 2).copied().unwrap_or(0);
-    // A bar range is paisa; points are paisa over PAISA_PER_POINT.
-    let points = median / PAISA_PER_POINT;
+    };
     points.clamp(1, MAX_STOP_POINTS)
 }
 
@@ -2053,30 +2106,32 @@ const MAX_STOP_POINTS: i64 = 25;
 /// [`MAX_STOP_POINTS`], because a stop is a promise about the worst case and an
 /// operator who says twenty-five means it — the derivation may narrow that
 /// promise, never widen it.
+/// The LOOSEST stop worth testing: the 90th percentile of the bar range.
+///
+/// A stop wider than nine bars in ten is one that a single ordinary bar cannot
+/// reach, so above this the ladder is measuring the time exit rather than the
+/// stop. The tenth percentile left outside is the tail of violent bars, and
+/// sizing a stop to survive those is a different question from the one the
+/// ladder asks.
+///
+/// # What this used to be
+///
+/// A BAR RANGE IS ALREADY PAISA, SO NO REFERENCE IS INVOLVED. This once read
+/// `ppm_to_points_at(points_to_ppm_at(median, reference), reference)` — a round
+/// trip through both converters against the same reference, which is the
+/// identity up to integer truncation. So the result was the median bar range IN
+/// PAISA, and a NIFTY minute bar's few-hundred-paisa range clamped to
+/// [`MAX_STOP_POINTS`] on every real series: a function documented as derived
+/// from the data returned the constant it was meant to replace.
+///
+/// That was fixed to `median / PAISA_PER_POINT` — correct arithmetic, and
+/// **the same expression [`stop_floor_points`] had**, which is how the ladder
+/// came to have one rung. See [`range_percentile`].
 fn max_stop_points(bars: &[indicators::Candle]) -> i64 {
-    let mut ranges: Vec<i64> = bars
-        .iter()
-        .map(|b| b.high.saturating_sub(b.low))
-        .filter(|&r| r > 0)
-        .collect();
-    if ranges.is_empty() {
+    let Some(points) = range_percentile(bars, 9, 10) else {
         return MAX_STOP_POINTS;
-    }
-    ranges.sort_unstable();
-    let median = ranges.get(ranges.len() / 2).copied().unwrap_or(0);
-    // A BAR RANGE IS ALREADY PAISA, SO NO REFERENCE IS INVOLVED.
-    //
-    // This read `ppm_to_points_at(points_to_ppm_at(median, reference), reference)`
-    // — a round trip through both converters against the same reference, which
-    // is the identity up to integer truncation. So `in_points` was the median
-    // bar range IN PAISA, and a NIFTY minute bar's few-hundred-paisa range
-    // clamped to `MAX_STOP_POINTS` on every real series. A function documented
-    // as derived from the data returned the constant it was meant to replace.
-    //
-    // `high - low` is a difference of two paisa prices, which is paisa. Points
-    // are paisa over [`PAISA_PER_POINT`], with nothing to convert against.
-    let in_points = median / PAISA_PER_POINT;
-    in_points.clamp(1, MAX_STOP_POINTS)
+    };
+    points.clamp(1, MAX_STOP_POINTS)
 }
 
 /// Reward-to-risk ratios, in hundredths, DENSE where strategies live and
@@ -4205,7 +4260,7 @@ const fn min_hits_for(bars: usize, support_ppm: u64) -> u64 {
 /// `1s` is absent for a different reason: a seven-year second-resolution span is
 /// roughly sixty times the one-minute series and nothing here has measured what
 /// that costs. §3 rule 6 — an unmeasured bound is not a bound.
-const EVERY_RUNG: [&str; 8] = [
+pub const EVERY_RUNG: [&str; 8] = [
     "1min", "2min", "3min", "5min", "10min", "15min", "30min", "60min",
 ];
 
@@ -5378,6 +5433,35 @@ fn validated_at(
 ///
 /// Measured on the shipped Wilson bound: 80% against a coin-flip floor needs
 /// **four** round trips. The cadence floor demanded 526.
+/// How the banner names which rungs a run covered.
+///
+/// **NAMED, NOT COUNTED.** *"3 RUNGS"* beside a table of three rows is the same
+/// fact twice and says nothing about WHICH three — and the banner is what a
+/// reader comparing two reports reads first.
+fn rungs_word(rungs: &[&str]) -> String {
+    if rungs.len() == EVERY_RUNG.len() {
+        "ALL EIGHT INTRADAY RUNGS".to_owned()
+    } else {
+        format!("RUNGS {}", rungs.join(", "))
+    }
+}
+
+/// How the banner names the threshold a run used.
+///
+/// **The KIND of number, not just the number**, because the two are not
+/// interchangeable and a reader comparing two reports has to know which they
+/// are looking at. A fixed percentage is one question asked of every rung; a
+/// derived floor is a DIFFERENT question asked of each — *the lowest support at
+/// which a result here could still be believed* — so the same figure printed
+/// without its provenance would invite comparing runs that measured different
+/// things.
+fn support_word(support_ppm: Option<u64>) -> String {
+    support_ppm.map_or_else(
+        || "DERIVED per rung from its own bars".to_owned(),
+        |ppm| format!("{}.{}% (fixed)", ppm / 10_000, (ppm / 1_000) % 10),
+    )
+}
+
 /// The lowest support at which a result on `bars` could still be believed.
 ///
 /// # A number nobody typed and nobody baked in
@@ -7018,6 +7102,9 @@ fn return_over_drawdown_cell(pessimistic: i64, max_drawdown: i64) -> String {
 /// is a smaller answer, not no answer — and the refusal is printed in that
 /// rung's own row rather than as a footnote, so a reader cannot mistake an
 /// absent row for a poor result.
+///
+/// Every rung, which is [`EVERY_RUNG`]. For a chosen subset see
+/// [`range_over`], which this delegates to.
 #[must_use]
 pub fn range_all(
     vendor_word: &str,
@@ -7026,25 +7113,65 @@ pub fn range_all(
     to: (u16, u8),
     support_ppm: Option<u64>,
 ) -> String {
+    range_over(vendor_word, underlying, &EVERY_RUNG, from, to, support_ppm)
+}
+
+/// [`range_all`] over a CHOSEN subset of rungs.
+///
+/// # Why the subset exists
+///
+/// `range_all` is all-eight-or-nothing, and `/backtest` grew an instrument and
+/// a timeframe menu that could express a choice no route could carry: the page
+/// sent `rungs` and said, in words under the button, that the selection was not
+/// acted on yet. A control whose label and behaviour disagree is what
+/// `CLAUDE.md` §4 bans, and the honest sentence was a placeholder for this.
+///
+/// The eight are still the only rungs that may be asked for. `1day` is on disk
+/// to feed `indicators::daily` — the pivot ladder and yesterday's high and low —
+/// and is not a signal timeframe; an unknown rung is refused by name rather than
+/// silently dropped, because a sweep that quietly covers less than it was asked
+/// for is the same failure in a different coat.
+///
+/// An EMPTY subset is a refusal, not a no-op that prints an empty table.
+///
+/// # What it does not change
+///
+/// Determinism (§3 rule 5) is held by the same shape `range_all` relies on:
+/// `map` over an indexed parallel iterator preserves order, so the rows come
+/// out in the caller's rung order however the threads finish. Each rung still
+/// records its own run identity, so a subset sweep is indistinguishable in the
+/// ledger from the same rungs swept one at a time.
+#[must_use]
+pub fn range_over(
+    vendor_word: &str,
+    underlying: &str,
+    rungs: &[&'static str],
+    from: (u16, u8),
+    to: (u16, u8),
+    support_ppm: Option<u64>,
+) -> String {
+    if rungs.is_empty() {
+        return "refused: no rung was asked for. A sweep over no timeframe is not \
+                a sweep, and an empty table would report that as a result.\n"
+            .to_owned();
+    }
+    if let Some(bad) = rungs.iter().find(|r| !EVERY_RUNG.contains(r)) {
+        return format!(
+            "refused: `{bad}` is not a rung this engine sweeps. The eight are: \
+             {}.\n",
+            EVERY_RUNG.join(", ")
+        );
+    }
     let mut out = String::from(STORED_PROVENANCE);
     let _ = writeln!(
         out,
-        "feed {vendor_word} · {underlying} · ALL EIGHT INTRADAY RUNGS · {}-{:02}..{}-{:02} · support {}",
+        "feed {vendor_word} · {underlying} · {} · {}-{:02}..{}-{:02} · support {}",
+        rungs_word(rungs),
         from.0,
         from.1,
         to.0,
         to.1,
-        // THE BANNER SAYS WHICH KIND OF NUMBER IT IS, because the two are not
-        // interchangeable and a reader comparing two reports has to know. A
-        // fixed percentage is one question asked of every rung; a derived floor
-        // is a DIFFERENT question asked of each -- "the lowest support at which
-        // a result here could still be believed" -- so the same figure printed
-        // without its provenance would invite comparing runs that measured
-        // different things.
-        support_ppm.map_or_else(
-            || "DERIVED per rung from its own bars".to_owned(),
-            |ppm| format!("{}.{}% (fixed)", ppm / 10_000, (ppm / 1_000) % 10),
-        )
+        support_word(support_ppm)
     );
     let _ = writeln!(
         out,
@@ -7072,7 +7199,7 @@ pub fn range_all(
     // iterator preserves order, so `rows` is the same sequence whatever order
     // the threads finish in -- the same argument `batch::sweep_under` makes, and
     // for the same reason. A rerun produces the same bytes.
-    let rows: Vec<RungRow> = EVERY_RUNG
+    let rows: Vec<RungRow> = rungs
         .par_iter()
         .map(|&rung| one_rung(vendor_word, underlying, rung, from, to, support_ppm))
         .collect();
@@ -7729,8 +7856,50 @@ static LEDGER: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// downward: an unknown machine is not a small one, and halving the ladder on a
 /// failed query would be a silent narrowing of the search. D-0306.
 fn derived_ceiling() -> usize {
-    /// Cores on the machine `engine::DEFAULT_CEILING` was sized against.
-    const REFERENCE_CORES: usize = 10;
+    /// What [`std::thread::available_parallelism`] answers on the machine
+    /// `engine::DEFAULT_CEILING` was sized against.
+    ///
+    /// # It was 10 and that was a UNIT ERROR, measured on the reference machine
+    /// itself
+    ///
+    /// `range_all`'s comment says *"A MACHINE WITH TEN PERFORMANCE CORES"*, and
+    /// ten is what this constant first held. But the quantity multiplied below
+    /// is not performance cores — it is `available_parallelism`, and that
+    /// machine is an **Apple M4 Pro: 14 logical, 10 performance + 4
+    /// efficiency, 48 GB**. It answers **14**.
+    ///
+    /// Dividing a ceiling calibrated for 14-core behaviour by 10 and
+    /// multiplying it back by 14 inflates it by 1.4x — `187,904,808` candidates
+    /// where the calibration says `134,217,728`. At the ~146 bytes per
+    /// candidate `ceiling_from_env`'s own refusal quotes, that is **27 GB of
+    /// 48**, and `engine::DEFAULT_CEILING`'s table says `2^28` — 39.2 GB —
+    /// *"swaps on a 48 GB machine"*. The reference machine would have been
+    /// pushed most of the way there **by the code meant to protect it**.
+    ///
+    /// The reference must be in the unit of the measurement. It is 14, so the
+    /// reference machine now derives exactly `DEFAULT_CEILING` — the shipped
+    /// value, unchanged where it was calibrated — and every other machine
+    /// scales from there. Same class of defect as the paisa/points slip
+    /// `reference_price` records: not a wrong number, a right number in the
+    /// wrong unit. D-0307.
+    ///
+    /// # NO TEST CAN VERIFY THIS NUMBER, and pretending otherwise is worse than
+    /// saying so
+    ///
+    /// It is a MEASURED PROPERTY of a machine that is not present at test time:
+    /// `sysctl -n hw.logicalcpu` on the reference hardware. A test asserting it
+    /// would either hardcode 14 — proving only that two copies of one guess
+    /// agree — or read the machine it runs on, which is a different machine and
+    /// answers a different number.
+    ///
+    /// So it is treated as `CLAUDE.md` §3 rule 1 treats a vendor fact: recorded
+    /// with its source rather than derived. The source is
+    /// `docs/06-limits.md` §93, which names the hardware and the command.
+    /// `the_ceiling_is_derived_from_this_machine_and_not_from_an_assumed_one`
+    /// bounds the CONSEQUENCE — bytes per core — but that guard is loose enough
+    /// that the old value of 10 passed it at 1.96 GB against a 2 GB cap. It did
+    /// not catch this and is not claimed to.
+    const REFERENCE_CORES: usize = 14;
 
     let cores =
         std::thread::available_parallelism().map_or(REFERENCE_CORES, std::num::NonZero::get);
@@ -9624,6 +9793,11 @@ mod tests {
     /// new choice is APPENDED and never inserted.
     #[test]
     fn the_ceiling_is_derived_from_this_machine_and_not_from_an_assumed_one() {
+        /// `ceiling_from_env`'s own figure for one retained candidate.
+        const BYTES_PER_CANDIDATE: usize = 146;
+        /// What one core can be assumed to back, on any machine.
+        const MAX_BYTES_PER_CORE: usize = 2 * 1024 * 1024 * 1024;
+
         // `engine::DEFAULT_CEILING` is sized in that crate's own table against
         // "a 48 GB machine" -- a static fact about somebody else's hardware
         // deciding how far this ladder may walk before it halts. The derivation
@@ -9639,10 +9813,31 @@ mod tests {
         // the reference rather than guessing downward -- an unknown machine is
         // not a small one, and halving the ladder on a failed query would
         // narrow the search silently.
-        let per_core = engine::DEFAULT_CEILING / 10;
+        let per_core = engine::DEFAULT_CEILING / 14;
         assert!(
             derived >= per_core,
             "derived {derived} is below the single-core floor {per_core}"
+        );
+
+        // THE BYTES IT IMPLIES MUST STAY INSIDE WHAT A MACHINE CAN HOLD.
+        //
+        // This is the assertion that would have caught the unit error, and
+        // nothing else here would have: dividing by 10 while multiplying by
+        // `available_parallelism` passed every structural check above and
+        // produced 187,904,808 candidates on the reference machine -- 27 GB of
+        // its 48, against a calibration of 19.6 GB and a documented swap at
+        // 39.2 GB.
+        //
+        // 146 bytes per candidate is `ceiling_from_env`'s own figure. The bound
+        // is stated per CORE so it holds on any machine: a candidate allowance
+        // that needs more than 2 GB per core to hold is one no ordinary machine
+        // has the memory to back, whatever its core count.
+        let bytes_per_core = per_core.saturating_mul(BYTES_PER_CANDIDATE);
+        assert!(
+            bytes_per_core <= MAX_BYTES_PER_CORE,
+            "the per-core allowance implies {bytes_per_core} bytes, over the \
+             {MAX_BYTES_PER_CORE} a core can be assumed to back. REFERENCE_CORES \
+             must be in the unit `available_parallelism` answers in"
         );
 
         // AND IT IS A FUNCTION OF THE MACHINE, not a constant wearing a
@@ -9651,7 +9846,7 @@ mod tests {
         // they differ, and asserting equality either way would pin the test to
         // one machine. What holds everywhere is that the derivation is the
         // per-core allowance times the cores this machine reports.
-        let cores = std::thread::available_parallelism().map_or(10, std::num::NonZero::get);
+        let cores = std::thread::available_parallelism().map_or(14, std::num::NonZero::get);
         assert_eq!(
             derived,
             per_core.saturating_mul(cores).max(per_core),
@@ -11114,6 +11309,71 @@ mod tests {
         assert_eq!(ppm_to_points_at(800, -1), 0, "no price, no conversion");
     }
 
+    /// A ladder has more than one rung, and for eight months it did not.
+    ///
+    /// # The defect this pins
+    ///
+    /// `stop_floor_points` and `max_stop_points` were BYTE-IDENTICAL — same
+    /// filter, same sort, same median index, same divisor, same clamp, differing
+    /// only in the empty-slice fallback. So `floor == cap` on every real series,
+    /// `stop_ladder_ppm`'s `while halves <= cap_halves` ran exactly once, and
+    /// [`STOP_STEP_POINTS_HALVES`] never advanced anything. Every sweep this
+    /// repository has run tested ONE stop value, against a doc claiming a span
+    /// of "5, 7.5, 10 … 25", while the operator's standing requirement is that
+    /// the stop VARY.
+    ///
+    /// It survived because the test named for the span asserted the span only
+    /// through `rungs.windows(2).all(..)`, which yields nothing on a one-element
+    /// slice and is therefore vacuously true. A vacuous assertion is the
+    /// "test that asserts nothing" `CLAUDE.md` §4 bans, wearing a name that says
+    /// otherwise.
+    ///
+    /// The fixture is built here rather than taken from `synthetic`, because
+    /// `synthetic::bar` gives every bar a range of 120..=195 paisa — ONE point
+    /// for all of them once divided by [`PAISA_PER_POINT`] — so it cannot
+    /// express a ladder no matter how the bounds are derived. These ranges span
+    /// 2..=40 points, which is the shape a real index minute actually has.
+    #[test]
+    fn the_stop_ladder_has_more_than_one_rung_when_the_ranges_vary() {
+        let bars: Vec<indicators::Candle> = (0..400_i64)
+            .map(|i| {
+                // 2..=40 points of range, cycling, so the 25th and 90th
+                // percentiles land in genuinely different places.
+                let half = (2 + i % 39).saturating_mul(PAISA_PER_POINT) / 2;
+                let mid = synthetic::BASE.saturating_add(i.saturating_mul(10));
+                indicators::Candle::new(
+                    i.saturating_mul(60_000_000)
+                        .saturating_add(synthetic::IST_OPEN_UTC_MICROS),
+                    mid,
+                    mid.saturating_add(half),
+                    mid.saturating_sub(half),
+                    mid,
+                    1_000,
+                    indicators::OI_NULL,
+                )
+            })
+            .collect();
+
+        let floor = stop_floor_points(&bars);
+        let cap = crate::max_stop_points(&bars);
+        assert!(
+            floor < cap,
+            "the floor and the cap must come from DIFFERENT places in the range \
+             distribution, or there is no ladder to walk: floor {floor} cap {cap}"
+        );
+
+        let rungs = stop_ladder_ppm(&bars);
+        assert!(
+            rungs.len() > 1,
+            "the stop must VARY: a one-rung ladder is the collapse where the \
+             floor and the cap were the same expression: {rungs:?}"
+        );
+        assert!(
+            rungs.windows(2).all(|w| w.first() < w.last()),
+            "rungs ascend and are distinct: {rungs:?}"
+        );
+    }
+
     /// The shipped ladder lands where [`STOP_FLOOR_POINTS`] says it does.
     ///
     /// The units defect above was invisible at the ladder's own boundary
@@ -11139,6 +11399,13 @@ mod tests {
             rungs.windows(2).all(|w| w.first() < w.last()),
             "rungs ascend and are distinct: {rungs:?}"
         );
+
+        // NO SPAN IS ASSERTED HERE, AND THAT IS DELIBERATE. `synthetic::bar`
+        // gives every bar a range of 120..=195 paisa, which is ONE point for
+        // all of them, so this fixture cannot express a ladder however the
+        // bounds are derived. The span belongs to
+        // `the_stop_ladder_has_more_than_one_rung_when_the_ranges_vary`, which
+        // supplies bars that actually vary. This test is about UNITS.
 
         // COMPARED IN PPM, which is the unit the ladder is built in. Going the
         // other way and comparing points would fold the inverse's rounding into
