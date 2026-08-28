@@ -26204,3 +26204,46 @@ means threading that fact through them.
 
 Named here rather than shipped wrong. The finding stands; the fix needs a fact
 this layer is not currently given.
+
+### D-0353
+
+**A pull naming a vendor this build cannot read took DHAN's seat — on the F&O
+route, for the length of the whole walk.**
+
+Both pull routes read:
+
+```text
+let wants = ingest::parse_feed(&param(&body, "vendor")).unwrap_or(Feed::Dhan);
+```
+
+under a comment claiming parity with the parser used a few lines later: *"an
+unreadable one falls to the descriptor's default exactly as it does there, so
+the seat and the run can never disagree about which feed this is."*
+
+**The claim was false in both directions.** `parse_spot` does
+`parse_feed(&raw).ok_or(Refusal::UnknownVendor { got: raw })?` — it REFUSES. And
+`parse_feed` already answers the EMPTY string with Dhan, so this `unwrap_or` was
+unreachable for an absent vendor and caught exactly one input: **a feed somebody
+NAMED and this build does not read**.
+
+So `vendor=dahn` claimed Dhan's seat, and then the run refused it as an unknown
+vendor — after the seat was taken. On `/pull/fno` the seat is deliberately held
+to the end of the walk, so a typo could refuse a real Dhan pull for its whole
+duration, with a 409 naming a vendor the caller never mentioned. Both routes now
+refuse by name before any seat is claimed.
+
+**And the credential verdict is matched exactly rather than guessed.**
+`credential_fault_in_page` had only six substring guesses, because for years the
+page carried prose and nothing else. The page now states the verdict outright
+when `BrokerRun::credential_dead` is set — which came off the `CREDENTIAL_DEAD`
+marker, which was written where `Step::CredentialDied` was decided.
+
+**The writer and the reader share `CREDENTIAL_FACT`.** That is the whole point:
+rewording the sentence cannot silently break the match, which is exactly how a
+prose-matching reader fails — later, quietly, and far from the edit that caused
+it. The six guesses remain as a fallback for pages that carry no run at all,
+which is what makes them a fallback rather than the answer.
+
+Both new tests split their own needles with `concat!`, because `server.rs` is
+its own haystack: written whole, the literal appears in the assertion and the
+test fails against correct code. That happened twice before it was written down.
