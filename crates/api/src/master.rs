@@ -61,6 +61,19 @@ pub struct Loaded {
     /// listing" says nothing at all. See
     /// [`brutex_core::vendor::Skip::UnrecognisedListingClass`].
     pub unrecognised: BTreeMap<String, usize>,
+    /// Declines that are **not** a routine business outcome.
+    ///
+    /// [`brutex_core::vendor::Skip::is_routine`] existed and was consulted by
+    /// nothing but its own tests, so the distinction it draws -- "a venue we
+    /// do not store" against "a code we cannot read" -- reached no status and
+    /// no exit code. A vendor renaming `NSE` declined every row of both
+    /// masters and the process printed `ok`.
+    ///
+    /// Counted here so [`crate::server::Read::is_clean`] can refuse to call
+    /// that run clean. Kept as a plain count beside the per-code
+    /// [`Loaded::unrecognised`] map, because the count is what a monitor reads
+    /// and the code is what a human needs.
+    pub non_routine: usize,
 }
 
 impl Loaded {
@@ -291,6 +304,13 @@ pub fn load(path: &std::path::Path, vendor: Vendor) -> Result<Loaded, String> {
             // variant added later under whatever label it happens to name.
             Ok(Decoded::Skipped(d)) => {
                 *out.skipped.entry(d.reason.reason()).or_insert(0) += 1;
+                // Every non-routine decline, whatever its variant. Asking the
+                // `Skip` itself means a variant added later is counted here
+                // the moment it declares itself non-routine, rather than
+                // needing this site to be remembered.
+                if !d.reason.is_routine() {
+                    out.non_routine += 1;
+                }
                 if let Some(isin) = d.isin {
                     out.declined.push((isin, d.reason));
                 }

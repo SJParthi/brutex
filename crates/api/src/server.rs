@@ -166,6 +166,17 @@ pub struct Read {
     /// vendors disagree" and "there was only one vendor" are different facts
     /// that must not collapse into one status.
     pub unavailable: bool,
+    /// How many rows could not be read at all, across every vendor.
+    ///
+    /// The rows were always collected and always printed -- and never reached
+    /// [`Read::is_clean`], so a master that was 100% unreadable reported `ok`
+    /// and exited zero. `CLAUDE.md` section 4: degrade loudly and name the
+    /// reason, or refuse. Printing a number nobody gates on is neither.
+    pub unreadable: usize,
+    /// How many rows were declined for a reason that is not routine.
+    ///
+    /// See [`crate::master::Loaded::non_routine`].
+    pub non_routine: usize,
     /// How many rows were declined under a listing class nobody recognises.
     ///
     /// Not a merge disagreement — it is one vendor's file using a code this
@@ -247,6 +258,8 @@ impl Read {
         notes: Vec<String>,
         unavailable: bool,
         unrecognised: usize,
+        unreadable: usize,
+        non_routine: usize,
     ) -> Self {
         let summary = Summary::of(&merged);
         Self {
@@ -254,6 +267,8 @@ impl Read {
             summary,
             notes,
             unavailable,
+            unreadable,
+            non_routine,
             unrecognised,
         }
     }
@@ -267,6 +282,13 @@ impl Read {
     pub fn is_clean(&self) -> bool {
         !self.unavailable
             && self.unrecognised == 0
+            // A row nobody could read is an instrument that silently vanished.
+            && self.unreadable == 0
+            // And a decline that is not routine is the vendor having changed
+            // something under us -- a renamed exchange code declines every row
+            // in the file, which is indistinguishable from an empty universe
+            // unless it is counted here.
+            && self.non_routine == 0
             && self.merged.verdict() == merge::Verdict::Clean
     }
 
@@ -290,9 +312,17 @@ pub fn universe(dir: &Path) -> Read {
     let mut sources = Vec::new();
     let mut unavailable = false;
     let mut unrecognised = 0;
+    let mut unreadable = 0;
+    let mut non_routine = 0;
     for (vendor, path) in master_paths(dir) {
         match master::load(&path, vendor) {
             Ok(l) => {
+                // GATED, not merely printed. Both of these reach `is_clean`,
+                // so a file nobody could read and a decline that is not
+                // routine now change the status and the exit code instead of
+                // scrolling past in a note.
+                unreadable += l.errors.len();
+                non_routine += l.non_routine;
                 let mut note = format!(
                     "{}: {} kept, {} declined, {} unreadable",
                     vendor.as_str(),
@@ -359,7 +389,14 @@ pub fn universe(dir: &Path) -> Read {
             alone.join(", ")
         ));
     }
-    Read::new(merged, notes, unavailable, unrecognised)
+    Read::new(
+        merged,
+        notes,
+        unavailable,
+        unrecognised,
+        unreadable,
+        non_routine,
+    )
 }
 
 /// Liveness plus the decode tallies, so a machine can check what a human sees.
@@ -564,12 +601,35 @@ pub fn instruments_html_from(
         _ => true,
     };
 
+    let mut haystack = String::with_capacity(64);
     let mut keys: Vec<_> = read
         .merged
         .by_key
         .iter()
         .filter(|(_, e)| tracked(e.universe) && selected(e.universe))
-        .filter(|(k, _)| needle.is_empty() || k.to_string().to_uppercase().contains(&needle))
+        .filter(|(k, _)| {
+            // ONE buffer for the whole request, reused for every row.
+            //
+            // This was `k.to_string().to_uppercase().contains(&needle)`, which
+            // allocated TWO `String`s for every instrument tested -- roughly
+            // 5,400 allocations for one search across 2,700 instruments -- and
+            // the second could never change a byte. Every component of the
+            // rendering is uppercase ASCII by construction: `Symbol`
+            // uppercases at its boundary and admits nothing else, the exchange
+            // and the option side are enum strings, and expiry and strike are
+            // digits. `a_rendered_key_is_already_uppercase` proves it rather
+            // than asserting it in prose.
+            //
+            // Rendering into one reused buffer makes this one allocation per
+            // REQUEST instead of two per row. `docs/07-o1-architecture.md`
+            // layer 9.
+            if needle.is_empty() {
+                return true;
+            }
+            haystack.clear();
+            let _ = write!(haystack, "{k}");
+            haystack.contains(&needle)
+        })
         .map(|(k, e)| (*k, *e))
         .collect();
     let matched = keys.len();
@@ -1104,6 +1164,81 @@ mod tests {
         let (text, _) = report(&dir);
         assert!(text.contains("not an equity listing 1"), "{text}");
         assert!(text.contains("SME board 1"), "{text}");
+    }
+
+    #[test]
+    fn a_row_nobody_could_read_degrades_the_run_rather_than_only_printing() {
+        // The unreadable rows were collected, formatted and printed -- and
+        // `is_clean` never looked at them. A master that was 100% unreadable
+        // reported `ok` and exited zero, which is the one outcome a monitor
+        // cannot distinguish from a healthy run. Both vendors are present and
+        // agree here, so the ONLY thing that can degrade this run is the
+        // unreadable row: `NIFTY 100` carries a space, which is not a legal
+        // `Symbol`.
+        let dir = masters(
+            "unreadable_gated",
+            Some(&format!(
+                "{GROWW_HEAD}NSE,CASH,,RELIANCE,EQ,EQ,INE002A01018,,\n\
+                 NSE,CASH,,NIFTY 100,IDX,,NIFTY,,\n"
+            )),
+            Some(&format!(
+                "{DHAN_HEAD}NSE,E,INE002A01018,EQUITY,RELIANCE,RELIANCE INDUSTRIES,ES,EQ,,,\n"
+            )),
+        );
+        let (text, clean) = report(&dir);
+        assert!(!clean, "an unreadable row is not a clean read: {text}");
+        assert!(text.contains("DEGRADED"), "{text}");
+        assert!(
+            text.contains("1 unreadable"),
+            "and it still says how many: {text}"
+        );
+    }
+
+    #[test]
+    fn an_exchange_code_nobody_can_read_degrades_the_run_and_bse_does_not() {
+        // `NSE` drifting to `NSE_EQ` -- a rename, a padded column, a field
+        // shifted by one -- declined EVERY groww row as the routine "foreign
+        // exchange" and the report said `ok`. That is the same shape as the
+        // segment defect the decoder already raises a loud error for.
+        let dir = masters(
+            "unreadable_exchange",
+            Some(&format!(
+                "{GROWW_HEAD}NSE_EQ,CASH,,RELIANCE,EQ,EQ,INE002A01018,,\n"
+            )),
+            Some(&format!(
+                "{DHAN_HEAD}NSE,E,INE002A01018,EQUITY,RELIANCE,RELIANCE INDUSTRIES,ES,EQ,,,\n"
+            )),
+        );
+        let (text, clean) = report(&dir);
+        assert!(!clean, "an unreadable exchange code is not routine: {text}");
+        assert!(
+            text.contains("unrecognised exchange"),
+            "named, not lumped in: {text}"
+        );
+        assert!(
+            !text.contains("foreign exchange"),
+            "and never filed under the routine reason: {text}"
+        );
+
+        // BSE is a venue this engine RECOGNISES and does not store. That is
+        // ordinary business and must NOT degrade anything -- otherwise the fix
+        // above would make every real master permanently dirty.
+        let ok_dir = masters(
+            "foreign_exchange_is_routine",
+            Some(&format!(
+                "{GROWW_HEAD}BSE,CASH,,SENSEX,IDX,,SENSEX,,\n\
+                 NSE,CASH,,RELIANCE,EQ,EQ,INE002A01018,,\n"
+            )),
+            Some(&format!(
+                "{DHAN_HEAD}NSE,E,INE002A01018,EQUITY,RELIANCE,RELIANCE INDUSTRIES,ES,EQ,,,\n"
+            )),
+        );
+        let (ok_text, ok_clean) = report(&ok_dir);
+        assert!(ok_text.contains("foreign exchange"), "{ok_text}");
+        assert!(
+            ok_clean,
+            "a BSE row is routine and must stay clean: {ok_text}"
+        );
     }
 
     #[test]

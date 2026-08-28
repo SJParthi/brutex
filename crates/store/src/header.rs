@@ -584,8 +584,27 @@ impl Header {
 /// check, which says nothing; a slot naming a retired version, a wrong stride
 /// or a failed checksum says everything, and reporting the blank one instead
 /// would diagnose an intact file from another version as a destroyed header.
+///
+/// # A misplaced slot refuses the whole read
+///
+/// [`FormatError::SlotPositionMismatch`] is documented as "refused rather than
+/// tolerated", and until this was fixed it was tolerated: the fault was
+/// consulted only when NO slot decoded, so a commit written to the wrong slot
+/// was swallowed whenever any other slot still read. The failure that hides
+/// behind that is not hypothetical — slot position is
+/// `generation % slot_count`, so a commit in the wrong slot has landed on the
+/// slot holding the *previous* generation and destroyed it. Returning the
+/// older generation with `Ok` reports a healthy file that has silently lost
+/// every commit since.
+///
+/// So a position mismatch is now terminal for the read, whatever else decoded.
+/// `CLAUDE.md` section 4 bans a fallback that hides a failure: degrade loudly
+/// and name the reason, or refuse.
 fn best_candidate(region: &[u8], below: Option<u64>) -> Result<(Header, Layout), FormatError> {
     let mut fault: Option<FormatError> = None;
+    // Kept apart from `fault` because this one is not a last resort. It is
+    // returned even when a candidate was found.
+    let mut misplaced: Option<FormatError> = None;
 
     // `max_by_key` rather than a hand-written comparison: two positionally
     // valid slots can never share a generation, so `>` and `>=` would behave
@@ -604,7 +623,7 @@ fn best_candidate(region: &[u8], below: Option<u64>) -> Result<(Header, Layout),
                 if index == expected {
                     Some((header, layout))
                 } else {
-                    fault.get_or_insert(FormatError::SlotPositionMismatch {
+                    misplaced.get_or_insert(FormatError::SlotPositionMismatch {
                         expected,
                         found: index,
                     });
@@ -615,7 +634,13 @@ fn best_candidate(region: &[u8], below: Option<u64>) -> Result<(Header, Layout),
         .filter(|(header, _)| below.is_none_or(|limit| header.generation < limit))
         .max_by_key(|(header, _)| header.generation);
 
-    best.ok_or(fault.unwrap_or(FormatError::NoValidHeader))
+    // The mismatch wins over any candidate: a slot in the wrong place means a
+    // writer wrote where it must not, and the generation this call would
+    // otherwise return is exactly the one that write may have destroyed.
+    match misplaced {
+        Some(refusal) => Err(refusal),
+        None => best.ok_or(fault.unwrap_or(FormatError::NoValidHeader)),
+    }
 }
 
 /// Whether a refusal says something about the file, or only that a slot is not

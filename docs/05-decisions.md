@@ -1336,3 +1336,81 @@ fetched fresh, which is the part that is supposed to move.
 tests and `crates/engine` does not exist; their status stays `—`. Gate 8 now
 enforces over what exists rather than over nothing, which is a different claim
 from enforcing over everything. See `docs/06-limits.md` §7c.
+
+---
+
+## D-0035 · 2026-08-28 · A refusal that nothing gates on is not a refusal
+
+**Decision — `Skip::UnrecognisedExchange` is split from `Skip::ForeignExchange`;
+`Skip::is_routine` is consulted in production rather than only in its own tests;
+unreadable rows and non-routine declines both reach `Read::is_clean`; a
+misplaced header slot refuses the read even when another slot decodes; and
+`MemberIndex::len` reads a field instead of walking the table.**
+
+Five defects, one shape between the first three: a distinction the code drew
+correctly and then threw away before it reached a status, an exit code, or a
+caller.
+
+**The exchange gate.** `decode_master_row` read
+`!matches!(Exchange::parse(row.exchange), Ok(Exchange::Nse))`, which discards
+the `Err`. So a code the engine cannot parse and a venue it deliberately does
+not store were one outcome — `Skip::ForeignExchange`, which `is_routine()`
+reports as ordinary business. `NSE` drifting to `NSE_EQ` (a rename, a padded
+column, a field shifted by one) therefore declined **every row of both
+masters** while the report printed `ok` and exited zero. This is the identical
+failure `Vendor::segment_of` already raises a loud error for, one gate later,
+and whose doc says: *"A mapping bug must never be indistinguishable from a
+legitimate refusal."* The exchange gate was the one left quiet. `BSE` stays
+routine, because it is a real venue this engine chooses not to store.
+
+**`is_routine` was decorative.** It existed, it was correct, and the only code
+that called it was its own tests. The distinction reached nothing. It is now
+counted in `master::Loaded::non_routine` at the single site a decline is
+recorded — asking the `Skip` itself, so a variant added later is counted the
+moment it declares itself non-routine.
+
+**Unreadable rows were printed, never gated.** `Loaded::errors` carried the line
+number and the reason, `universe()` rendered them into notes, and `is_clean()`
+never looked. A master that was 100% unreadable reported `ok`. `CLAUDE.md` §4:
+degrade loudly and name the reason, or refuse — printing a number nobody gates
+on is neither.
+
+**A misplaced slot was tolerated.** `FormatError::SlotPositionMismatch` is
+documented as *"refused rather than tolerated"*, and `best_candidate` consulted
+the fault only when NO slot decoded. With a readable neighbour the mismatch was
+swallowed and the older generation returned as `Ok`. That is the worst available
+answer: slot position is `generation % slot_count`, so a commit in the wrong
+slot has landed on the slot holding the previous generation and destroyed it.
+Reporting the survivor as healthy hides the loss of every commit since. The
+existing test only ever blanked the other slot, so the tolerant path was never
+built.
+
+**A test that encoded the defect.** `bse_and_unknown_exchanges_are_skipped_not_stored`
+asserted that `MCX` — a code `Exchange::parse` cannot read — produced
+`ForeignExchange`. It pinned the conflation rather than catching it, which is
+how the defect survived a suite at 100% line and region coverage. Coverage
+proves a line ran; it cannot prove the assertion beside it was right.
+
+**`MemberIndex::len` walked the table.** `slots.iter().filter(..).count()` —
+O(N) in the TABLE size, 2,048 slots for a 750-member list, to answer a question
+whose answer was known before the table existed.
+`docs/07-o1-architecture.md` law 3 names this exact case. The count is now
+stored at construction. The collision test that used `len()` to prove "no member
+was overwritten" would have become a tautology, so it now compares against an
+independent walk defined in the test module.
+
+**Also in this change.** `merge::merge` pre-sizes `asserted` from the bound it
+already computed for `by_key` thirty lines below (law 2); the instruments search
+renders into one reused buffer instead of allocating two `String`s per
+instrument per request (law 9); and `docs/04-invariants.md` had **seven**
+identifiers — I-16 through I-22 — defined twice with different meanings. The
+later block is renumbered I-31..I-37; the earlier rows keep their numbers,
+because history is append-only. CI gate 10 now refuses a duplicate identifier,
+which is what let this happen: it walked rows→tests and never checked that a row
+was uniquely named.
+
+**Alternatives rejected.** Making `ForeignExchange` non-routine would mark every
+real master permanently dirty — both files list BSE rows by design. Deleting the
+duplicate invariant rows would have made the build green by erasing history,
+which `docs/04-invariants.md` forbids in its own closing section.
+

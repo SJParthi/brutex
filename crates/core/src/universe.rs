@@ -1122,6 +1122,14 @@ pub fn of_equity(symbol: &str) -> Universe {
 /// traded for the time, and it is constant rather than growing with the data.
 pub struct MemberIndex<const N: usize> {
     slots: [Option<&'static str>; N],
+    /// How many slots are filled, counted once at construction.
+    ///
+    /// The five laws' third rule is "never scan to answer a question" — "how
+    /// many do I have?" must be a read, not a walk. This field is what makes
+    /// [`MemberIndex::len`] a read. It is exact rather than approximate: the
+    /// builder inserts every member unconditionally, so the number of filled
+    /// slots is the number of members it was given.
+    count: usize,
 }
 
 impl<const N: usize> MemberIndex<N> {
@@ -1158,7 +1166,10 @@ impl<const N: usize> MemberIndex<N> {
             slots[at] = Some(members[i]);
             i += 1;
         }
-        Self { slots }
+        Self {
+            slots,
+            count: members.len(),
+        }
     }
 
     /// Whether the table holds this symbol.
@@ -1184,15 +1195,21 @@ impl<const N: usize> MemberIndex<N> {
     }
 
     /// How many members the table holds.
+    ///
+    /// A field read, not a walk of the slots. This used to be
+    /// `slots.iter().filter(..).count()`, which is O(N) in the TABLE size —
+    /// 2,048 slots for a 750-member list — to answer a question whose answer
+    /// was known before the table existed. `docs/07-o1-architecture.md` law 3
+    /// names this exact case.
     #[must_use]
-    pub fn len(&self) -> usize {
-        self.slots.iter().filter(|s| s.is_some()).count()
+    pub const fn len(&self) -> usize {
+        self.count
     }
 
     /// Whether the table is empty.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
+    pub const fn is_empty(&self) -> bool {
+        self.count == 0
     }
 }
 
@@ -1277,6 +1294,48 @@ pub fn of_instrument(key: &InstrumentKey) -> Universe {
 mod tests {
     use super::*;
 
+    /// Counts filled slots by walking them.
+    ///
+    /// This is the O(N) scan that [`MemberIndex::len`] deliberately is NOT.
+    /// It exists only here, as the independent oracle the stored count is
+    /// checked against: a field that reports its own input proves nothing.
+    fn filled_slots<const N: usize>(idx: &MemberIndex<N>) -> usize {
+        idx.slots.iter().filter(|s| s.is_some()).count()
+    }
+
+    #[test]
+    fn the_len_field_equals_the_slots_actually_filled() {
+        // U-06. `len()` reads a field instead of walking the table (law 3:
+        // never scan to answer a question). That is only sound while the field
+        // agrees with the table, so it is checked against a real walk -- on the
+        // two shipped tables, on a colliding table, and at both extremes.
+        for (name, walked, stored) in [
+            ("NTM", filled_slots(&NTM_INDEX), NTM_INDEX.len()),
+            ("F&O", filled_slots(&FNO_INDEX), FNO_INDEX.len()),
+        ] {
+            assert_eq!(walked, stored, "{name}: stored count is not the truth");
+        }
+
+        // A colliding build: probing forward must not lose a member, and the
+        // count must not drift from the slots either.
+        let collide: MemberIndex<16> = MemberIndex::build(&["A", "Q", "B"]);
+        assert_eq!(filled_slots(&collide), 3);
+        assert_eq!(collide.len(), 3);
+
+        // Both extremes.
+        let empty: MemberIndex<4> = MemberIndex::build(&[]);
+        assert_eq!(filled_slots(&empty), 0);
+        assert_eq!(empty.len(), 0);
+        assert!(empty.is_empty());
+
+        // Half full is the most `build` admits, and is where clustering is
+        // worst -- the count must still be exact there.
+        let tight: MemberIndex<4> = MemberIndex::build(&["X", "Y"]);
+        assert_eq!(filled_slots(&tight), 2);
+        assert_eq!(tight.len(), 2);
+        assert!(!tight.is_empty());
+    }
+
     #[test]
     fn a_collision_probes_forward_instead_of_overwriting() {
         // The probe loop inside `build` only runs when two members land on the
@@ -1295,7 +1354,15 @@ mod tests {
         );
         let members = ["A", "Q", "B", "C", "D", "E", "F", "G"];
         let idx: MemberIndex<16> = MemberIndex::build(&members);
-        assert_eq!(idx.len(), members.len(), "no member was overwritten");
+        // Counted by WALKING the slots, not by reading the stored count --
+        // `len()` is now a field read, so comparing it against `members.len()`
+        // would be comparing the input to itself and would hold however badly
+        // `build` behaved.
+        assert_eq!(
+            filled_slots(&idx),
+            members.len(),
+            "no member was overwritten"
+        );
         for m in members {
             assert!(idx.contains(m), "{m} survived the collision");
         }

@@ -498,3 +498,36 @@ the widest expansion the mutant reaches 264 and overflows. That is what
 and it is the reason the count above is five and not six. The lesson is that
 "equivalent modulo the result" and "equivalent" are different claims, and only
 the second one is a floor.
+
+---
+
+## 12 · The bar plane is sized against RAM, and never against disk
+
+`docs/07-o1-architecture.md` layer 7 budgets the **bit plane** at 7.75 GB of
+48 GB and concludes it "never exceeds RAM at this scale". Nothing in this
+repository sizes the **bar plane** against storage.
+
+That is the bound that binds first. The measurement host reports **119.55 GB
+free of a 500.28 GB volume**, not 500 — so the usable figure is under a quarter
+of the disk the machine advertises, and no invariant, decision or limit
+currently mentions it.
+
+**UNMEASURED**, and deliberately labelled so rather than estimated: there is no
+bar reader in `crates/store` yet and no ingest in the workspace at all, so
+bytes-per-instrument-year has never been taken on real data. The arithmetic the
+format permits is not the same claim as a measurement, and this file does not
+carry arithmetic dressed as one.
+
+What must exist before the first pull writes anything:
+
+- a measured bytes-per-instrument-year figure at the v2 stride, taken from real
+  bars rather than computed from the record size;
+- a refusal at the ingest boundary when the projected write exceeds measured
+  free space, named as such — `CLAUDE.md` §4 bans a fallback that hides a
+  failure, and running a volume to zero is the condition under which a writable
+  mapping raises `SIGBUS`, which is why §4 bans that too;
+- an invariant row here and a test beside it.
+
+Until those exist, "the engine fits on this machine" is a claim about memory
+only, and this section is what stops it being read as a claim about disk.
+

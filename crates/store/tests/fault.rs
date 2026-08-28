@@ -501,6 +501,69 @@ fn record_bytes_never_audition_as_a_header_slot() {
 }
 
 #[test]
+fn a_misplaced_slot_is_refused_even_when_the_other_slot_still_reads() {
+    // THE SHAPE THE OLD TEST NEVER BUILT, and the reason the defect survived.
+    //
+    // `a_commit_found_in_the_wrong_slot_is_refused` below overwrites slot 0
+    // and leaves slot 1 blank, so NO slot decodes, and the position fault
+    // surfaced only because it was the last resort. `best_candidate` consulted
+    // the fault exclusively when nothing else decoded -- so with a readable
+    // slot beside it the mismatch was swallowed and the older generation came
+    // back as `Ok`.
+    //
+    // That is the worst possible answer here. Slot position is
+    // `generation % slot_count`, so a commit in the wrong slot has landed on
+    // the slot that held the previous generation and destroyed it. Reporting
+    // the survivor as healthy hides the loss of every commit since.
+    let mut region = vec![0u8; REGION_LEN];
+
+    // Slot 0: genesis, generation 0, correctly placed.
+    let genesis = Header::genesis(7, 60, FLAG_CHECKSUMS);
+    let g = genesis.commit().expect("v2");
+    assert_eq!(g.slot, 0);
+    apply(&mut region, &g, SLOT_LEN);
+
+    // Slot 1: generation 1, correctly placed. Both slots now read.
+    let (from, to) = batch(0, 100);
+    let gen1 = genesis.advance(100, from, to).expect("fits");
+    let c1 = gen1.commit().expect("v2");
+    assert_eq!(c1.slot, 1);
+    apply(&mut region, &c1, SLOT_LEN);
+    assert_eq!(
+        Header::read_region(&region, file_len(200)).map(|r| r.n_valid),
+        Ok(100),
+        "the file is healthy before the bad write"
+    );
+
+    // Generation 3 belongs in slot 1. Write it into slot 0 instead.
+    // `batch(from, count)` -- the second argument is a COUNT, so these are the
+    // 50 records after 100 and the 50 after 150. Timestamps must strictly
+    // increase or `advance` refuses.
+    let (from2, to2) = batch(100, 50);
+    let gen2 = gen1.advance(150, from2, to2).expect("fits");
+    let (from3, to3) = batch(150, 50);
+    let gen3 = gen2.advance(200, from3, to3).expect("fits");
+    let bad = gen3.commit().expect("v2");
+    assert_eq!(bad.slot, 1, "generation 3 belongs in slot 1");
+    region
+        .iter_mut()
+        .zip(bad.bytes)
+        .for_each(|(dst, src)| *dst = src);
+
+    // Slot 1 still holds a perfectly valid generation 1. The read must still
+    // refuse: returning `Ok(100)` here would report a healthy file that has
+    // lost generations 2 and 3.
+    assert_eq!(
+        Header::read_region(&region, file_len(200)),
+        Err(FormatError::SlotPositionMismatch {
+            expected: 1,
+            found: 0,
+        }),
+        "a readable neighbour must not excuse a misplaced commit"
+    );
+}
+
+#[test]
 fn a_commit_found_in_the_wrong_slot_is_refused() {
     // A writer that puts a commit in the wrong slot overwrites the only
     // surviving copy of the previous one. That is a bug, not a state to

@@ -317,7 +317,28 @@ impl Vendor {
 #[non_exhaustive]
 pub enum Skip {
     /// Not an exchange this engine stores. `docs/05-decisions.md` D-0017.
+    ///
+    /// Raised only for an exchange code this engine **recognises and does not
+    /// store** -- today that is `BSE`. A code it cannot parse at all gets
+    /// [`Skip::UnrecognisedExchange`], for the same reason a bond and an
+    /// unknown series code are different reasons.
     ForeignExchange,
+    /// An exchange code this engine has never seen.
+    ///
+    /// # Why this is not `ForeignExchange`
+    ///
+    /// It was, and that made a mapping bug indistinguishable from a routine
+    /// refusal -- the exact defect [`Vendor::segment_of`] raises a loud error
+    /// for, one gate earlier. `Exchange::parse` returns `Err` for a code it
+    /// does not know, and the gate discarded that `Err` with a `matches!`, so
+    /// `NSE` drifting to `NSE_EQ` (a rename, a padded column, a shifted field)
+    /// declined **every row of both masters** as "foreign exchange" and the
+    /// process reported `ok` and exited zero.
+    ///
+    /// "A venue we do not store" and "a code we cannot read" are different
+    /// facts. This one is not routine: it degrades the run, so it reaches the
+    /// exit code rather than printing a routine skip.
+    UnrecognisedExchange,
     /// An exchange test instrument, not a real listing.
     TestInstrument,
     /// A segment this engine does not store, such as commodity.
@@ -417,6 +438,7 @@ impl Skip {
     pub const fn reason(self) -> &'static str {
         match self {
             Self::ForeignExchange => "foreign exchange",
+            Self::UnrecognisedExchange => "unrecognised exchange",
             Self::TestInstrument => "exchange test instrument",
             Self::ForeignSegment => "segment not stored",
             Self::LiveContract => "live derivative contract",
@@ -435,7 +457,10 @@ impl Skip {
     /// reach an exit code, or the two are the same fact to a monitor.
     #[must_use]
     pub const fn is_routine(self) -> bool {
-        !matches!(self, Self::UnrecognisedListingClass)
+        !matches!(
+            self,
+            Self::UnrecognisedListingClass | Self::UnrecognisedExchange
+        )
     }
 
     /// Whether this decline judges the **paper** rather than the venue.
@@ -784,10 +809,18 @@ pub fn decode_master_row(vendor: Vendor, row: MasterRow<'_>) -> Result<Decoded, 
         }))
     };
 
-    // Only NSE is stored. D-0017. An unparseable exchange is a decline: a
-    // master legitimately lists venues we do not store.
-    if !matches!(Exchange::parse(row.exchange), Ok(Exchange::Nse)) {
-        return declined(Skip::ForeignExchange);
+    // Only NSE is stored. D-0017.
+    //
+    // The `Err` arm is separated from the `Ok(other)` arm on purpose. This was
+    // `!matches!(Exchange::parse(..), Ok(Exchange::Nse))`, which threw the
+    // `Err` away and filed an UNREADABLE code under the routine "foreign
+    // exchange" decline. A master legitimately lists venues we do not store --
+    // that is `Ok(Bse)` and it is routine. A code that does not parse is the
+    // vendor having changed something under us, and it is not.
+    match Exchange::parse(row.exchange) {
+        Ok(Exchange::Nse) => {}
+        Ok(_) => return declined(Skip::ForeignExchange),
+        Err(_) => return declined(Skip::UnrecognisedExchange),
     }
     let exchange = Exchange::Nse;
 
@@ -1094,18 +1127,56 @@ mod tests {
 
     #[test]
     fn bse_and_unknown_exchanges_are_skipped_not_stored() {
-        // D-0017 -- NSE only.
+        // D-0017 -- NSE only. BSE is a venue this engine RECOGNISES and does
+        // not store, so it is the routine decline.
         assert_eq!(
             groww(row("BSE", "CASH", "SENSEX", "IDX", "", ""))
                 .expect("ok")
                 .skip(),
             Some(Skip::ForeignExchange)
         );
+        assert!(Skip::ForeignExchange.is_routine());
+
+        // `MCX` is a code `Exchange::parse` cannot read at all. This test used
+        // to assert it was ALSO `ForeignExchange` -- it encoded the defect
+        // rather than catching it, which is why the defect survived a suite at
+        // 100% coverage. The two are now different reasons, and only one of
+        // them is routine.
         assert_eq!(
             groww(row("MCX", "COMMODITY", "GOLD", "FUT", "2026-08-05", ""))
                 .expect("ok")
                 .skip(),
-            Some(Skip::ForeignExchange)
+            Some(Skip::UnrecognisedExchange)
+        );
+    }
+
+    #[test]
+    fn an_unreadable_exchange_degrades_the_run_and_a_foreign_one_does_not() {
+        // The failure this separation exists to stop: `NSE` drifting to
+        // `NSE_EQ` -- a rename, a padded column, a field shifted by one --
+        // declined EVERY row of BOTH masters as "foreign exchange", which is
+        // routine, so the process printed `ok` and exited zero on a universe
+        // of nothing. `Vendor::segment_of` raises a loud error for exactly
+        // this shape one gate later; the exchange gate was the one left quiet.
+        for unreadable in ["NSE_EQ", "nse", " NSE", "NSE ", "", "N", "NSEX"] {
+            let d = groww(row(unreadable, "CASH", "RELIANCE", "EQ", "", ""))
+                .expect("a decline, not an error");
+            assert_eq!(
+                d.skip(),
+                Some(Skip::UnrecognisedExchange),
+                "{unreadable:?} is not a venue, it is unreadable"
+            );
+            assert!(
+                !Skip::UnrecognisedExchange.is_routine(),
+                "{unreadable:?} must reach the exit code"
+            );
+        }
+
+        // And the two reasons never render as one string, so a report cannot
+        // merge them back together.
+        assert_ne!(
+            Skip::UnrecognisedExchange.reason(),
+            Skip::ForeignExchange.reason()
         );
     }
 
@@ -1906,6 +1977,7 @@ mod tests {
     fn every_skip_reason_is_distinct_and_says_what_it_declined() {
         let all = [
             Skip::ForeignExchange,
+            Skip::UnrecognisedExchange,
             Skip::TestInstrument,
             Skip::ForeignSegment,
             Skip::LiveContract,
