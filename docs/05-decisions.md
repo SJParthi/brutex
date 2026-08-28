@@ -25758,3 +25758,45 @@ names the GDFL tick file it was copied from. Both passed only because the
 decoder ignored the feed. They now name the feed their bytes actually are; the
 refusal that surfaced them — `10 fields, expected 5` — is correct, and widening
 the decoder back to admit it would have been the defect reinstated.
+
+### D-0345
+
+**`/db` asked for a whole MONTH per row to show one DAY, and the operator read
+that as the page being stuck.**
+
+`/bars.json` had no day parameter. It answered the whole month, always. `/db`
+shows one row per stored bar and reads that endpoint **once per
+instrument-month**, so narrowing the page to a single day changed nothing about
+what was fetched — the browser downloaded every month in the selection and threw
+away the days it had not asked for, in JavaScript, after parsing all of it.
+
+**The arithmetic, from the page's own measured constant.** It records 81 bytes a
+bar, *"measured at 668,251 bytes for 8,250 bars"*. A one-minute month is ~8,600
+bars, so ~670 KB a row. The operator's store answers `/store.json` with **549
+rows**. Asking for one day therefore moved on the order of **370 MB** and parsed
+every byte of it to render about 375 bars. Nothing hung; it was arithmetic.
+
+`/bars.json` now takes `from` and `to` as ISO days and filters where the bars
+already are. Three properties, and each is a different way to get it wrong:
+
+* **Inclusive at both ends.** `to` becomes the start of the day AFTER, so the
+  whole of the last day is inside the window without spelling
+  `23:59:59.999999` and hoping the final bar sits under it.
+* **Absent means unbounded**, so every existing caller — the chart, the
+  bookmarks — is unchanged.
+* **Malformed means unbounded, not refused.** This narrows a request that is
+  already valid without it; refusing a month over a typo in an optional
+  parameter is the louder wrong answer.
+
+**The IST sign is the part worth stating.** IST is UTC+05:30, so an IST day
+BEGINS `IST_OFFSET_SECS` *before* the UTC instant of the same date.
+`ist_midnight_micros` is one function so the sign is written once: inverted, it
+would shift every window by five and a half hours, which on a 09:15–15:29
+session silently drops the morning and admits the previous evening.
+
+**Not closed, and noticed while here:** `bars_json`'s doc paragraph is split by
+`timeframe_param`'s, which was spliced into the middle of it — the sentence
+*"because zero means"* continues fifty lines later as *"zero and writing 0 for
+'not sent' is a lie in the data"*, and the rung doc appears twice. Pre-existing
+in HEAD, left alone: repairing it means reconstructing which half belongs where,
+and guessing would be worse than naming it.

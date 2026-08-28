@@ -1930,6 +1930,67 @@ fn empty_bars_page(
     )
 }
 
+/// The bars of one month as a JSON array, narrowed to a half-open microsecond
+/// window.
+///
+/// `None` on either bound means no bound, so the un-windowed call is the whole
+/// month exactly as it always was. The window is half-open — `>= from`,
+/// `< to` — because the caller builds `to` as the start of the day AFTER the
+/// one asked for, which is how an inclusive day is expressed without spelling
+/// `23:59:59.999999` and hoping the last bar sits under it.
+///
+/// Extracted from [`bars_json`] because that function is at clippy's line
+/// ceiling, and because the emit is the part worth reading on its own: it is
+/// the only place a bar becomes bytes on this route.
+fn bars_array(rows: &[store::format::Bar], from: Option<i64>, to: Option<i64>) -> String {
+    let inside = |bar: &store::format::Bar| {
+        from.is_none_or(|at| bar.ts_micros >= at) && to.is_none_or(|at| bar.ts_micros < at)
+    };
+    let mut out = String::with_capacity(rows.len() * 96 + 32);
+    out.push('[');
+    let mut written = 0usize;
+    for bar in rows.iter().filter(|bar| inside(bar)) {
+        if written > 0 {
+            out.push(',');
+        }
+        written = written.saturating_add(1);
+        // `lightweight-charts` takes UTC seconds. The store holds micros.
+        let _ = write!(
+            out,
+            r#"{{"t":{},"o":{},"h":{},"l":{},"c":{},"v":{},"oi":{}}}"#,
+            bar.ts_micros / 1_000_000,
+            bar.open,
+            bar.high,
+            bar.low,
+            bar.close,
+            bar.volume,
+            if bar.open_interest == store::format::OI_NULL {
+                "null".to_owned()
+            } else {
+                bar.open_interest.to_string()
+            }
+        );
+    }
+    out.push(']');
+    out
+}
+
+/// Midnight IST on an ISO day, as UTC microseconds — `None` for anything that
+/// is not a day.
+///
+/// IST is UTC+05:30, so an IST day BEGINS `IST_OFFSET_SECS` before the UTC
+/// instant of the same date. Getting that sign wrong shifts every window by
+/// five and a half hours, which on a 09:15–15:29 session silently drops the
+/// morning and admits the previous evening.
+///
+/// `None` for a malformed day is the caller's whole contract, not an oversight:
+/// this BOUNDS a request that is already valid without it, so an unreadable
+/// bound is no bound rather than a refusal of the whole month.
+fn ist_midnight_micros(text: &str) -> Option<i64> {
+    let day = ingest::parse_day("day", text).ok()?;
+    Some((i64::from(day.days_from_epoch()) * 86_400 - pull::session::IST_OFFSET_SECS) * 1_000_000)
+}
+
 /// The rung a bars request names, defaulting to the one-minute grid.
 ///
 /// # Why a default at all, and why THIS one
@@ -2061,35 +2122,34 @@ async fn bars_json(
         Err(why) => return refuse(why),
     };
 
+    // AN OPTIONAL DAY WINDOW, AND WITHOUT IT THIS ENDPOINT COULD ONLY ANSWER
+    // "THE WHOLE MONTH".
+    //
+    // `/db` shows one row per stored bar and reads this endpoint once per
+    // instrument-month. Asking it for a SINGLE DAY was therefore ~549 requests
+    // of a full month each — the page's own measurement is 81 bytes a bar, so a
+    // one-minute month is ~670 KB and the day the operator asked for is ~2% of
+    // it. The browser downloaded, parsed and threw away the other 98%, which is
+    // what "the page is stuck" was.
+    //
+    // The bound is INCLUSIVE at both ends and stated in IST days, because that
+    // is what the operator picked and what `Day` spells. A malformed date is
+    // ignored rather than refused: this is a narrowing filter on a request that
+    // is already valid without it, and refusing the whole month over a typo in
+    // an optional parameter would be the louder wrong answer.
+    let from_micros = ist_midnight_micros(&param(query, "from"));
+    // THE END IS THE START OF THE DAY AFTER, so the whole of `to` is inside the
+    // window without spelling 23:59:59.999999 and hoping the last bar is under
+    // it. A `to` before `from` yields an empty answer rather than a refusal —
+    // an empty day is a legal thing to ask for and the page renders it.
+    let to_micros = ist_midnight_micros(&param(query, "to")).map(|at| at + 86_400 * 1_000_000);
+
     // THE WHOLE MONTH, in one pass. `page` reads by index, so this is
     // `n_valid` seeks of fixed length and nothing scans.
     let held = usize::try_from(file.header().n_valid).unwrap_or(usize::MAX);
     let (rows, faults) = bars::page(&file, 0, held);
 
-    let mut out = String::with_capacity(rows.len() * 96 + 32);
-    out.push('[');
-    for (n, bar) in rows.iter().enumerate() {
-        if n > 0 {
-            out.push(',');
-        }
-        // `lightweight-charts` takes UTC seconds. The store holds micros.
-        let _ = write!(
-            out,
-            r#"{{"t":{},"o":{},"h":{},"l":{},"c":{},"v":{},"oi":{}}}"#,
-            bar.ts_micros / 1_000_000,
-            bar.open,
-            bar.high,
-            bar.low,
-            bar.close,
-            bar.volume,
-            if bar.open_interest == store::format::OI_NULL {
-                "null".to_owned()
-            } else {
-                bar.open_interest.to_string()
-            }
-        );
-    }
-    out.push(']');
+    let out = bars_array(&rows, from_micros, to_micros);
 
     // A FAULTY RECORD IS NOT SILENTLY SKIPPED. `page` returns what it could
     // read and what it could not; dropping the second half would draw a chart
@@ -17309,6 +17369,107 @@ mod tests {
             .await
             .expect("task")
             .expect("a graceful shutdown is not a failure");
+    }
+
+    /// **`/bars.json` NARROWS TO A DAY WINDOW, AND WITHOUT IT THE PAGE COULD
+    /// ONLY ASK FOR A MONTH.**
+    ///
+    /// `/db` reads this endpoint once per instrument-month and shows one row
+    /// per stored bar. Asking it for a SINGLE DAY was ~549 requests of a full
+    /// month each; at the page's own measured 81 bytes a bar that is about
+    /// 670 KB per one-minute month, of which the chosen day is roughly 2%. The
+    /// browser downloaded, parsed and discarded the other 98%. The operator
+    /// reported it as the page being stuck; it was arithmetic.
+    ///
+    /// Three properties, and each is a separate way to get this wrong:
+    /// the window is **inclusive at both ends** (a `to` day whose bars fell
+    /// outside would silently lose the day the operator asked for); an
+    /// **absent** bound means no bound (or every existing caller breaks); and a
+    /// **malformed** bound is ignored rather than refused, because this
+    /// narrows a request that is already valid without it.
+    #[tokio::test]
+    async fn bars_json_narrows_to_the_day_window_and_ignores_a_malformed_one() {
+        let root = store_root("barsday");
+        // THE MONTH AND THE STAMPS AGREE. `19_723` is 1970-01-01 plus 19,723
+        // days, which is 2024-01-01, so the path says January 2024 and the bars
+        // are in it. A path naming one month over bars stamped in another would
+        // still have passed this filter — and would have quietly encoded that
+        // the two need not match.
+        let month = store::path::YearMonth::new(2024, 1).expect("a legal month");
+        // Three days, one bar each, at midday IST so no boundary is grazed.
+        let day_micros = |d: i64| ((19_723 + d) * 86_400 - 19_800 + 6 * 3_600) * 1_000_000;
+        let path = store::path::StorePath::new(store::path::PathParts {
+            vendor: Vendor::Dhan,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: store::path::Timeframe::MINUTE_1,
+            month,
+            file: store::path::FileKind::Bars,
+        })
+        .expect("a legal path");
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the id is the cross-check `open` folds; any 32 bits serve"
+        )]
+        let symbol_id = brutex_core::universe::fnv1a("NIFTY") as u32;
+        let mut file =
+            store::file::BarFile::open_or_create(&root, path, symbol_id).expect("a bar file");
+        let rows: Vec<store::format::Bar> = (0..3)
+            .map(|d| store::format::Bar {
+                ts_micros: day_micros(d),
+                open: 100 + d,
+                high: 110 + d,
+                low: 90 + d,
+                close: 105 + d,
+                volume: 1,
+                open_interest: i64::MIN,
+            })
+            .collect();
+        file.append(&rows).expect("three legal bars");
+        drop(file);
+
+        let site = Site::serving(&masters("barsday", None, None), &root);
+        let loaded = std::sync::Arc::new(site);
+        let read = |q: &str| {
+            let site = std::sync::Arc::clone(&loaded);
+            let uri: axum::http::Uri = format!(
+                "/bars.json?feed=dhan&exchange=NSE&segment=INDEX&symbol=NIFTY\
+                 &timeframe=1min&month=2024-01{q}"
+            )
+            .parse()
+            .expect("a uri");
+            async move { bars_json(axum::extract::State(site), uri).await }
+        };
+
+        let (_, _, all) = read("").await;
+        assert_eq!(all.matches("\"t\":").count(), 3, "no window is every bar");
+
+        // ONE DAY, THE MIDDLE ONE. Both neighbours must be excluded, which is
+        // what proves the window is a window and not a floor.
+        let (_, _, one) = read("&from=2024-01-02&to=2024-01-02").await;
+        assert_eq!(
+            one.matches("\"t\":").count(),
+            1,
+            "exactly the day asked for: {one}"
+        );
+        assert!(one.contains("\"o\":101"), "and it is the MIDDLE day: {one}");
+
+        // A FLOOR ALONE, so `from` does not silently imply a ceiling.
+        let (_, _, tail) = read("&from=2024-01-02").await;
+        assert_eq!(tail.matches("\"t\":").count(), 2, "the day and after it");
+
+        // AND A MALFORMED BOUND IS IGNORED, NOT REFUSED. This narrows a request
+        // that is already valid; refusing the whole month over a typo in an
+        // optional parameter would be the louder wrong answer.
+        let (code, _, junk) = read("&from=not-a-day").await;
+        assert_eq!(code, axum::http::StatusCode::OK, "{junk}");
+        assert_eq!(
+            junk.matches("\"t\":").count(),
+            3,
+            "an unreadable bound is no bound: {junk}"
+        );
     }
 
     /// **A CORRUPT COUNTER AND AN EMPTY STORE ARE NOT THE SAME ANSWER.**

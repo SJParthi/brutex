@@ -4382,7 +4382,22 @@
          `1min`, and a daily file is then asked for at a rung that has no
          file - the exact refusal /markets already paid for once. */
       timeframe: r.timeframe,
-      month: r.month
+      month: r.month,
+      /* THE DAY WINDOW GOES ON THE WIRE, and until it did this page asked for
+         a whole MONTH per row and threw ~98% of it away in the browser.
+
+         Measured on this build: 81 bytes a bar, so a one-minute month is about
+         670 KB, and `/db` reads one row per instrument-month — 549 of them on
+         the operator's store. Asking for a single day therefore moved roughly
+         370 MB and parsed every byte of it to render about 375 bars. That is
+         what "the page is stuck" was: not a hang, arithmetic.
+
+         Empty strings are omitted rather than sent blank, because the server
+         treats an unparseable day as "no bound" and a blank one would read as a
+         typo it is right to ignore — sending nothing says the same thing
+         without relying on that. */
+      ...(fromDay ? { from: fromDay } : {}),
+      ...(toDay ? { to: toDay } : {})
     });
     try {
       const res = await ask(`/bars.json?${q}`);
