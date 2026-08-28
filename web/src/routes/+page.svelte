@@ -271,7 +271,9 @@
      whole of defect 2 above. The stamp is what this browser OBSERVED — it is
      labelled that way and is never dressed up as a server timestamp.
      ====================================================================== */
+  /** @type {number | null} */
   let masterStamp = $state(null);
+  /** @type {string | null} */
   let masterStampFeed = $state(null);
   $effect(() => {
     const ready = catalogue.ready;
@@ -351,7 +353,9 @@
   let unreadOnly = $state(false);
   let sortKey = $state('bars');
   let sortDir = $state(-1);
+  /** @type {HTMLInputElement | null} */
   let searchEl = $state(null);
+  /** @type {'sym' | 'base' | 'tf' | 'uni' | null} */
   let openTray = $state(null);
 
   const UNIVERSES = [
@@ -496,6 +500,7 @@
   /* ---- the virtual window ---------------------------------------------- */
   const ROW = 30;
   const OVERSCAN = 6;
+  /** @type {HTMLElement | null} */
   let scroller = $state(null);
   let scrollTop = $state(0);
   let viewportH = $state(600);
@@ -526,6 +531,7 @@
      the new feed does not list this instrument, `picked` becomes null and the
      page says so by name rather than charting a stale row.
      ====================================================================== */
+  /** @type {string | null} */
   let pickedKey = $state(null);
   let cursor = $state(-1);
 
@@ -689,6 +695,7 @@
   // stored fact. An effect that reads the rung and writes the rung depends on
   // its own output; a derived cannot. Selecting a new instrument therefore
   // cannot leave a rung on the address bar that no file on disk answers to.
+  /** @type {string | null} */
   let basePref = $state(null);
   const base = $derived(storedRungs.includes(basePref) ? basePref : (storedRungs[0] ?? null));
 
@@ -699,6 +706,7 @@
   const asStored = $derived(base !== null && tfSeconds === rungSec(base));
 
   let range = $state('1M');
+  /** @type {{ month: string, tf: string } | null} */
   let pin = $state(null); // {month, tf} — always both, never a bare month
 
   const monthsAtBase = $derived(base === null ? [] : heldMonths.filter((m) => m.timeframe === base));
@@ -708,9 +716,16 @@
    * as a blank canvas: a pinned month that exists — at another rung.
    */
   const pinState = $derived.by(() => {
-    if (!pin) return null;
-    if (monthsAtBase.some((m) => m.month === pin.month)) return { ok: true };
-    return { ok: false, elsewhere: heldMonths.filter((m) => m.month === pin.month) };
+    /* READ ONCE INTO A LOCAL, and not only for the checker's benefit. `pin` is
+       reactive state, so each `pin.month` below was a separate read: the
+       narrowing from the guard does not survive into the two closures — which
+       is what `svelte-check` reported — and in principle three reads of a
+       mutable value need not agree with one another. One read, one value, and
+       the guard then covers every use of it. */
+    const p = pin;
+    if (!p) return null;
+    if (monthsAtBase.some((m) => m.month === p.month)) return { ok: true };
+    return { ok: false, elsewhere: heldMonths.filter((m) => m.month === p.month) };
   });
 
   // WHICH MONTHS TO ACTUALLY READ. `/bars.json` is one month per request — the
@@ -758,7 +773,9 @@
      THE BARS
      ====================================================================== */
   let barsLoading = $state(false);
+  /** @type {string | null} */
   let barsError = $state(null);
+  /** @type {string | null} */
   let barsFaults = $state(null);
   let rawBars = $state([]);
   let barsToken = 0;
@@ -966,6 +983,7 @@
   const lastBar = $derived(drawn.length ? drawn[drawn.length - 1] : null);
   const firstBar = $derived(drawn.length ? drawn[0] : null);
 
+  /** @type {{ time: number } | null} */
   let hover = $state(null); // {time} — the bar under the crosshair, or null
   const shown = $derived(hover?.time != null ? (byTime.get(hover.time) ?? lastBar) : lastBar);
   const shownUp = $derived(shown ? shown.c >= shown.o : true);
@@ -988,14 +1006,18 @@
   );
 
   /* ---- the canvas ------------------------------------------------------ */
+  /** @type {HTMLElement | null} */
   let host = $state(null);
+  /** @type {any} */
   let chart = $state(null);
+  /** @type {any} */
   let candles = $state(null);
   // PLAIN, NOT `$state`. Nothing in the markup reads it, and the draw effect
   // both tests and assigns it — as reactive state that is an effect depending
   // on its own output.
   let volume = null;
   let libMod = null;
+  /** @type {string | null} */
   let chartError = $state(null);
 
   // THE CHART TAKES ITS COLOURS FROM THE THEME, not from hexes typed into it.
