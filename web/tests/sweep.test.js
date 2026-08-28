@@ -110,6 +110,13 @@ test('a ledger the build cannot append to blocks the run, and names both version
 	assert.ok(block, 'this is the whole point: it must be knowable before Run');
 	assert.equal(block.version, 2);
 	assert.equal(block.writes, 3, 'the banner names both numbers, not just the mismatch');
+	// PINNED SEPARATELY BECAUSE THE MATCH CANNOT PIN IT. `ledgerBlock` returns
+	// `path: string | null` — the ledger can block without naming a file — and
+	// `assert.match` on a null path would fail with a type complaint about its
+	// argument rather than with the sentence this test is about. Asserting the
+	// path is THERE before asserting what it ends with states the two facts
+	// separately, and says which one broke.
+	assert.ok(block.path, 'a block that cannot name its file cannot be acted on');
 	assert.match(block.path, /runs\.bin$/, 'the operator has to know which file to move');
 });
 

@@ -133,7 +133,10 @@
      ====================================================================== */
   const IST_OFFSET = 19800; // +05:30 in seconds. Used for BUCKETING only.
 
-  /** The IST calendar day a UTC second falls in, as an integer. */
+  /**
+   * The IST calendar day a UTC second falls in, as an integer.
+   * @param {number} t a UTC epoch second
+   */
   const istDay = (t) => Math.floor((t + IST_OFFSET) / 86400);
 
   /**
@@ -144,9 +147,22 @@
    * order depend on the engine's partition choices. That defect has landed in
    * this repository three separate times, so there is now exactly one place
    * that can get it right.
+   *
+   * BOTH SIDES ARE THE SAME `T` ON PURPOSE. `@param {any}` would silence the
+   * checker and also permit `cmp(1, 'a')` — a relational compare between a
+   * number and a string, which JavaScript answers by coercing rather than by
+   * refusing, and which yields an ordering nobody intended. Binding one type
+   * variable across both parameters makes that call a compile error while
+   * still sorting numbers and strings alike.
+   *
+   * @template {string | number} T
+   * @param {T} a
+   * @param {T} b
+   * @returns {-1 | 0 | 1}
    */
   const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 
+  /** @param {unknown} s */
   const cap = (s) => String(s ?? '').charAt(0).toUpperCase() + String(s ?? '').slice(1);
 
   /**
@@ -187,7 +203,12 @@
      cannot be derived from bars that do not contain it.
      ====================================================================== */
   const LADDER_MINUTES = [1, 2, 3, 5, 15, 30, 60];
-  let extraMinutes = $state([]);
+  /* MINUTES, AND THE TYPE SAYS SO. A bare `$state([])` infers `never[]` under
+     `strict`, which makes every later `.sort(cmp)` and `rungEntry(m)` on it
+     unprovable — and, worse, would accept a string pushed in from a query
+     parameter, which is precisely how a rung width becomes `"15m" * 60`. */
+  let extraMinutes = $state(/** @type {number[]} */ ([]));
+  /** @param {number} m a rung width in minutes */
   const rungEntry = (m) => ({ id: m >= 60 && m % 60 === 0 ? `${m / 60}h` : `${m}m`, seconds: m * 60 });
   const timeframes = $derived.by(() => {
     const mins = [...new Set([...LADDER_MINUTES, ...extraMinutes])].sort(cmp);
@@ -206,6 +227,7 @@
   /* ======================================================================
      THE FEED — read here, chosen elsewhere.
      ====================================================================== */
+  /** @param {string | null | undefined} wire */
   const feedLabel = (wire) => feeds.all.find((f) => f.wire === wire)?.display ?? wire ?? 'no feed';
 
   /* ======================================================================
@@ -223,7 +245,18 @@
      measurement nobody took. It goes into `censusBad` with the reason, and
      every total computed from that series says so.
      ====================================================================== */
-  const seriesKey = (row) => `${row.exchange}-${row.segment}-${row.symbol}`;
+  /**
+   * THE SPELLING `census::Series` WRITES, built from a master row.
+   *
+   * A missing part interpolates as the string `undefined`, which would key a
+   * lookup that silently matches nothing rather than announcing that the row
+   * was unusable. `??` puts an EMPTY segment there instead: `NSE--NIFTY` still
+   * fails to match, and it fails visibly, in a key a reader can recognise.
+   *
+   * @param {import('$lib/index.svelte.js').MasterRow} row
+   */
+  const seriesKey = (row) =>
+    `${row.exchange ?? ''}-${row.segment ?? ''}-${row.symbol ?? ''}`;
 
   /* ----------------------------------------------------------------------
      THE FOLD IS NOT THIS PAGE'S ANY MORE.
@@ -381,6 +414,7 @@
    * place, with the reason, rather than synthesised from an alphabetical
    * order that would look exactly like a real answer.
    */
+  /** @param {import('$lib/index.svelte.js').MasterRow} row */
   const uniTokens = (row) =>
     Array.isArray(row.universes)
       ? row.universes
@@ -389,6 +423,10 @@
           .filter((t) => t && t !== 'other');
   const tiersAnswerable = $derived(rows.length === 0 || rows.some((r) => Array.isArray(r.universes)));
 
+  /**
+   * @param {import('$lib/index.svelte.js').MasterRow} row
+   * @param {string | null | undefined} token
+   */
   function inUniverse(row, token) {
     if (token === '*') return true;
     if (token == null) return false;
@@ -408,7 +446,12 @@
    *   nomaster— nothing about this row has been measured at all, because the
    *             master on hand is not this feed's.
    */
-  const barsOf = (row) => (Number.isInteger(row?.bars) && row.bars >= 0 ? row.bars : null);
+  /** @param {import('$lib/index.svelte.js').MasterRow | null | undefined} row */
+  const barsOf = (row) =>
+    Number.isInteger(row?.bars) && /** @type {number} */ (row?.bars) >= 0
+      ? /** @type {number} */ (row?.bars)
+      : null;
+  /** @param {import('$lib/index.svelte.js').MasterRow} row */
   function barState(row) {
     if (!masterIsThisFeed) return { kind: 'nomaster', wait: !catalogue.error, why: countRefusal };
     const n = barsOf(row);
@@ -438,10 +481,21 @@
     // refusal, said in the order the rows come out in.
     const key = sortKey === 'bars' && !masterIsThisFeed ? 'symbol' : sortKey;
     // Ordering runs over the MATCHES, never over the universe.
+    //
+    // THE TIE-BREAK COERCES ONCE, HERE. `symbol` comes off the wire and is
+    // typed as possibly absent, and `cmp` binds one type across both sides so
+    // it cannot be handed `string | undefined`. Naming the empty string as the
+    // stand-in makes a row with no symbol sort FIRST and sort STABLY, which is
+    // what an ordering primitive that refuses to lie about ties requires; the
+    // alternative — letting `undefined` through — makes every comparison
+    // against it return 0, and a comparator that calls unequal rows equal is
+    // the exact defect the header of `cmp` says has landed here three times.
+    const name = (/** @type {import('$lib/index.svelte.js').MasterRow} */ r) => r.symbol ?? '';
     return [...matched].sort((a, b) => {
-      if (key === 'bars') return cmp(barsOf(a) ?? 0, barsOf(b) ?? 0) * dir || cmp(a.symbol, b.symbol);
-      if (key === 'segment') return cmp(String(a.segment), String(b.segment)) * dir || cmp(a.symbol, b.symbol);
-      return cmp(a.symbol, b.symbol) * dir;
+      if (key === 'bars') return cmp(barsOf(a) ?? 0, barsOf(b) ?? 0) * dir || cmp(name(a), name(b));
+      if (key === 'segment')
+        return cmp(String(a.segment), String(b.segment)) * dir || cmp(name(a), name(b));
+      return cmp(name(a), name(b)) * dir;
     });
   });
 
@@ -467,7 +521,13 @@
     }
     return { uni, seg, held, zero, unread };
   });
-  const segments = $derived([...new Set(rows.map((r) => r.segment))].sort(cmp));
+  /* A ROW WITH NO SEGMENT CONTRIBUTES NO SEGMENT. Coercing it to `''` would
+     put a nameless entry in the segment filter that matches nothing an
+     operator can see; dropping it leaves the filter listing only segments
+     that exist, which is what the control claims to list. */
+  const segments = $derived(
+    [...new Set(rows.map((r) => r.segment).filter((s) => typeof s === 'string'))].sort(cmp)
+  );
 
   const narrowing = $derived(
     [
@@ -628,7 +688,13 @@
     if (e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey) return;
     const el = document.activeElement;
     const tag = el?.tagName;
-    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el?.isContentEditable) return;
+    /* `instanceof`, NOT A CAST. `document.activeElement` is an `Element`, and
+       `isContentEditable` is declared on `HTMLElement` — an SVG element in
+       focus has no such property, so asserting one would be claiming a field
+       that genuinely is not there rather than narrowing to the case where it
+       is. The runtime test is the same test the type wants. */
+    const editable = el instanceof HTMLElement && el.isContentEditable;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || editable) return;
     e.preventDefault();
     searchEl?.focus();
     searchEl?.select();
@@ -732,7 +798,14 @@
   // path is the index — so the range decides how many requests.
   const wantMonths = $derived.by(() => {
     if (monthsAtBase.length === 0) return [];
-    if (pin) return monthsAtBase.filter((m) => m.month === pin.month).map((m) => m.month);
+    /* READ ONCE, THEN USE THE READING. `pin` is `$state`, so a narrowing on it
+       does not survive into a callback — the checker is right that a mutable
+       binding can change between the test and the use, and refusing to carry
+       the narrowing is not pedantry. Taking one observation into a `const`
+       makes the whole derivation agree about which month is pinned, which is
+       the property this wanted anyway. */
+    const at = pin;
+    if (at) return monthsAtBase.filter((m) => m.month === at.month).map((m) => m.month);
     const spec = RANGES.find((r) => r.id === range) ?? RANGES[2];
     const all = monthsAtBase.map((m) => m.month);
     return spec.months === Infinity ? all : all.slice(-spec.months);
@@ -777,6 +850,24 @@
   let barsError = $state(null);
   /** @type {string | null} */
   let barsFaults = $state(null);
+  /**
+   * ONE BAR, AND EVERY FIELD IS REQUIRED — WHICH IS NOT THE CHOICE MADE FOR
+   * `MasterRow`, ON PURPOSE.
+   *
+   * A master row with no `bars` field means "the count is unknown", and the
+   * page has a way to say so. A BAR with no `h` means the payload is broken,
+   * and there is nothing truthful to draw from it: `?? 0` would put a zero
+   * price into a high-low comparison and a zero into a volume sum, and those
+   * are not absences, they are wrong measurements that look like right ones.
+   * §7 is explicit that prices are integers and never invented.
+   *
+   * So the type is required and `readMonth` REFUSES a bar that does not meet
+   * it, by name, rather than defaulting its way past one.
+   *
+   * @typedef {{ t: number, o: number, h: number, l: number, c: number, v: number }} Bar
+   */
+
+  /** @type {Bar[]} */
   let rawBars = $state([]);
   let barsToken = 0;
   // A RETRY HAS TO CHANGE SOMETHING. Re-assigning `range` to the value it
@@ -784,16 +875,34 @@
   // and nothing runs, so the button would look like a control and be furniture.
   let barsRetry = $state(0);
 
+  /**
+   * @param {import('$lib/index.svelte.js').MasterRow} row
+   * @param {string} month
+   * @param {string} feed
+   * @param {string} rung
+   * @returns {Promise<{ bars: Bar[], faults: string | null }>}
+   */
   async function readMonth(row, month, feed, rung) {
+    // A HALF-KNOWN PLACE IS NOT A PLACE, and this is the same refusal
+    // `$lib/place.js` states in those words. The three parts below are the
+    // store path — the path IS the index — and a row that cannot name one of
+    // them would build `…&segment=undefined&…` and ask the bar route for it:
+    // a request made of a value nobody supplied, answered with a 4xx that
+    // reads as a missing file rather than as a missing field.
+    const { exchange, segment, symbol } = row;
+    if (typeof exchange !== 'string' || typeof segment !== 'string' || typeof symbol !== 'string')
+      throw new Error(
+        `${month}: this master row does not name an exchange, a segment and a symbol, so there is no file to ask for.`
+      );
     // THE RUNG IS PART OF THE REQUEST. Omitting it defaults the server to
     // `1min` — which is how this page asked for `…/1min/2021-08.bin` for a
     // series filed under `1day/` and then reported "that read failed" about a
     // file that was never supposed to exist.
     const q = new URLSearchParams({
       feed,
-      exchange: row.exchange,
-      segment: row.segment,
-      symbol: row.symbol,
+      exchange,
+      segment,
+      symbol,
       timeframe: rung,
       month
     });
@@ -850,9 +959,16 @@
      Done on the paisa integers: min, max and last are exact on integers and
      lossy on floats. Buckets are aligned to IST, so an hourly candle breaks
      on the hour an Indian trader sees rather than 30 minutes off it. */
+  /**
+   * @param {Bar[]} raw
+   * @param {number | null} seconds
+   * @returns {Bar[]}
+   */
   function aggregate(raw, seconds) {
     if (seconds === null) return [];
+    /** @type {Bar[]} */
     const out = [];
+    /** @type {Bar | null} */
     let cur = null;
     for (const b of raw) {
       const start = Math.floor((b.t + IST_OFFSET) / seconds) * seconds - IST_OFFSET;
@@ -876,6 +992,41 @@
      branch that returns "empty" without a reason, and no fall-through that
      draws nothing and says nothing.
      ====================================================================== */
+
+  /**
+   * THE NINE ANSWERS, AS ONE SHAPE.
+   *
+   * Inferred from the returns alone this was a union of nine anonymous object
+   * literals, and TypeScript takes the intersection of their keys as the only
+   * safe read — so `chartReason.raw` and `chartReason.chartOnly`, which four
+   * branches set and five do not, were reported as properties that do not
+   * exist. They DO exist; they are absent, and absent is what the readers
+   * already test for. Declaring them optional says exactly that, and says it
+   * once instead of at every read site.
+   *
+   * `kind` IS THE NINE, LISTED. The template branches on it and its own
+   * comment calls those branches "a closed partition of `chartReason`" — a
+   * claim nothing could check while the type was `string`. A tenth kind added
+   * here without a branch there is now a compile error rather than a panel
+   * that renders as nothing at all.
+   *
+   * `month` and `tf` ride on the `pinmiss` answer for the same reason the
+   * sentence does: the panel that draws it needs the pinned pair, and reading
+   * it back off `pin` made the panel depend on a mutable value agreeing with
+   * the reason that was computed from it. One read, carried.
+   *
+   * @typedef {{
+   *   kind: 'nolist'|'gone'|'idle'|'error'|'wait'|'unreadable'|'nodata'|'norung'|'pinmiss',
+   *   tsub: string,
+   *   why: string | null,
+   *   raw?: boolean,
+   *   chartOnly?: boolean,
+   *   month?: string,
+   *   tf?: string
+   * }} ChartReason
+   */
+
+  /** @returns {ChartReason | null} */
   const chartReason = $derived.by(() => {
     if (blocked) return blocked;
     // "NOT LISTED" IS A CLAIM ABOUT THE VENDOR AND IT NEEDS A LIST TO MAKE IT.
@@ -917,10 +1068,12 @@
         tsub: 'no readable rung',
         why: 'This series is filed under a rung this build cannot map to a bar length, so no base is claimed and nothing is derived from a guess.'
       };
-    if (pinState && !pinState.ok)
+    if (pinState && !pinState.ok && pin)
       return {
         kind: 'pinmiss',
         tsub: 'that month is at another rung',
+        month: pin.month,
+        tf: pin.tf,
         why: `${monthLabel(pin.month)} holds no ${base} bars.`
       };
     if (barsLoading)
@@ -1412,7 +1565,14 @@
               onclick={() => {
                 basePref = r;
                 openTray = null;
-                if (pin && !heldMonths.some((m) => m.month === pin.month && m.timeframe === r)) pin = null;
+                /* ONE READ, THEN THE TEST. The guard's narrowing does not
+                   reach inside `some`, and the reason it does not is real:
+                   `pin` is mutable, and a pin observed by the guard need not
+                   be the pin observed by the predicate. Deciding whether to
+                   drop THIS pin has to be answered about one pin. */
+                const at = pin;
+                if (at && !heldMonths.some((m) => m.month === at.month && m.timeframe === r))
+                  pin = null;
               }}
             >
               <span class="nm">{r}</span>
@@ -2049,24 +2209,29 @@
                 <div class="acts"><button class="cta" type="button" onclick={rereadCensus}>Retry the census</button></div>
               </div>
             {:else if chartReason.kind === 'pinmiss'}
-              <!-- THE STATE THE OLD PAGE DREW AS A BLANK RECTANGLE. -->
+              <!-- THE STATE THE OLD PAGE DREW AS A BLANK RECTANGLE.
+                   THE PAIR COMES OFF THE REASON, NOT OFF `pin`. The reason was
+                   computed from one read of the pin; re-reading the mutable
+                   value here to render the sentence that reason produced is
+                   two reads of a changing thing describing one event. -->
               {@const other = pinState?.elsewhere ?? []}
+              {@const pinnedMonth = chartReason.month ?? ''}
               <div class="why">
-                <h3>{monthLabel(pin.month)} is held — at another rung</h3>
+                <h3>{monthLabel(pinnedMonth)} is held — at another rung</h3>
                 <p>
-                  The pin names {monthLabel(pin.month)} and the rung being read is {base}. The store has no {base} file for that month, so
+                  The pin names {monthLabel(pinnedMonth)} and the rung being read is {base}. The store has no {base} file for that month, so
                   there is nothing to draw. This is not an error and not an empty store: the month exists at
                   {other.map((o) => o.timeframe).join(' and ') || 'no rung at all'}.
                 </p>
                 {@render evid([
-                  ['pinned', `${pin.month} at ${pin.tf}`],
+                  ['pinned', `${pinnedMonth} at ${chartReason.tf ?? ''}`],
                   ['rung being read', base],
                   [`${base} files for that month`, '0'],
                   ...other.map((o) => [`${o.timeframe} file for that month`, `${group(o.rows)} bars`])
                 ])}
                 <div class="acts">
                   {#if other[0]}
-                    <button class="cta" type="button" onclick={() => pinMonth(pin.month, other[0].timeframe)}
+                    <button class="cta" type="button" onclick={() => pinMonth(pinnedMonth, other[0].timeframe)}
                       >Read {other[0].timeframe} for this month</button
                     >
                   {/if}
@@ -2373,7 +2538,8 @@
               {#each months as mo (mo)}
                 {@const rowsHere = heldMonths.filter((m) => m.month === mo)}
                 {@const hereAtBase = rowsHere.some((m) => m.timeframe === base)}
-                {@const pinned = pin != null && pin.month === mo}
+                {@const pinnedAt = pin}
+                {@const pinned = pinnedAt != null && pinnedAt.month === mo}
                 <div class="step" class:pinned>
                   {#if hereAtBase}
                     <button class="mo" type="button" title="Pin {monthLabel(mo)} at {base} — the rung being read." onclick={() => pinMonth(mo, base)}
@@ -2399,7 +2565,7 @@
                       class="rung"
                       class:base={r.timeframe === base}
                       type="button"
-                      aria-pressed={pinned && pin.tf === r.timeframe}
+                      aria-pressed={pinned && pinnedAt?.tf === r.timeframe}
                       title="{group(r.rows)} bars in {picked.key}/{r.timeframe}/{r.month}.bin{r.first != null &&
                       r.last != null
                         ? `, covering ${stampLabel(r.first / 1000)} to ${stampLabel(r.last / 1000)} IST`

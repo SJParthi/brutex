@@ -394,21 +394,6 @@
     }
   }
 
-  /**
-   * Which instrument a new sweep runs over.
-   *
-   * EMPTY UNTIL THE CENSUS SAYS OTHERWISE, and this was `'NIFTY'`. The
-   * store also holds BANKNIFTY at the same 121 months and nine rungs, and
-   * a literal here made it unreachable from this page entirely.
-   *
-   * IT IS DERIVED NOW, NOT SET. The chips own the choice; this is the one
-   * instrument the run route can take today, read off the front of that
-   * set. Keeping it as its own `$state` beside the set would be two
-   * sources for one fact, and the first to drift would be the one the
-   * request is built from.
-   */
-  const sweepSymbol = $derived([...pickedSymbols][0] ?? '');
-
   // A POLL MUST NOT OUTLIVE THE PAGE. Without this a navigation away leaves a
   // timer firing against a component that is gone.
   $effect(() => () => {
@@ -568,8 +553,32 @@
      ==================================================================== */
 
   /**
+   * `monthList` AND `daily` WERE ALWAYS BUILT AND WERE NEVER DECLARED.
+   *
+   * `loadCatalog` has emitted both on every entry since it was written —
+   * `monthList` is the sorted month keys the span control offers, `daily` the
+   * non-`min` rungs kept beside the swept ones. Three readers use them:
+   * `monthRows` maps `monthList`, and `coverNote` reads `daily.length` and
+   * maps its names.
+   *
+   * The checker reported those three as reads of a property that does not
+   * exist, which is the shape of a crash and was not one: the CONSTRUCTOR is
+   * the authority on what a value carries, and it carries them. The type was
+   * the stale half. Recording that here because the opposite reading — delete
+   * the reads — was equally available from the error alone, and would have
+   * removed two working controls.
+   *
    * @typedef {{ name: string, months: number, from: string, to: string }} Rung
-   * @typedef {{ leaf: string, full: string, months: number, from: string, to: string, rungs: Rung[] }} Held
+   * @typedef {{
+   *   leaf: string,
+   *   full: string,
+   *   months: number,
+   *   monthList: string[],
+   *   from: string,
+   *   to: string,
+   *   rungs: Rung[],
+   *   daily: Rung[]
+   * }} Held
    */
 
   /** @type {{ phase: 'idle'|'loading'|'ready'|'failed', why: string, held: Held[] }} */
@@ -644,6 +653,31 @@
   let pickedSymbols = $state(new Set());
   /** @type {Set<string>} rungs the run will cover. */
   let pickedRungs = $state(new Set());
+
+  /**
+   * Which instrument a new sweep runs over.
+   *
+   * EMPTY UNTIL THE CENSUS SAYS OTHERWISE, and this was `'NIFTY'`. The
+   * store also holds BANKNIFTY at the same 121 months and nine rungs, and
+   * a literal here made it unreachable from this page entirely.
+   *
+   * IT IS DERIVED NOW, NOT SET. The chips own the choice; this is the one
+   * instrument the run route can take today, read off the front of that
+   * set. Keeping it as its own `$state` beside the set would be two
+   * sources for one fact, and the first to drift would be the one the
+   * request is built from.
+   *
+   * IT LIVES BELOW `pickedSymbols` BECAUSE IT READS IT. This sat four
+   * hundred lines earlier, above the declaration, and the checker called it
+   * a use before declaration. Nothing crashed: `$derived` compiles to a
+   * thunk and is not evaluated until something reads it, and the four
+   * readers all run later. But "correct because the evaluation happens to be
+   * deferred" is a property of the compiler, not of the code, and it stops
+   * being true the moment anything above needs an eager read. Ordering the
+   * declaration after the thing it depends on costs nothing and removes the
+   * question.
+   */
+  const sweepSymbol = $derived([...pickedSymbols][0] ?? '');
 
   /**
    * Toggle one key in a chosen set.
