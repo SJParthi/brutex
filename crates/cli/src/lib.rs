@@ -7211,6 +7211,21 @@ pub fn range_over(
     // nine at once is under 2 GB of 48. Memory is not what bounds this; the
     // 1-minute rung's 623,546 bars are.
     //
+    // **THAT MEASUREMENT EXPIRED AND THE SENTENCE ABOVE IS KEPT TO SHOW HOW.**
+    // It was taken at 20% support. D-0303 then deleted the 20% and gave each
+    // rung a floor derived from its own bars, which on the operator's
+    // 2026-08-28 run resolved to 0.0045% -- four orders of magnitude lower, and
+    // candidate counts explode as support falls. Measured on that run: 13.8 GB
+    // resident, not 2. The licence for running eight at once was withdrawn by a
+    // change in another file and nobody re-took the reading.
+    //
+    // `SharedBy` is the arithmetic that makes the two agree: the ceiling is a
+    // MACHINE budget, so it is divided among the rungs actually in flight
+    // instead of being handed to each of them whole. Held across the map and
+    // dropped after it, so a panic inside cannot leave the divisor raised for
+    // the next request on a long-lived server.
+    let _sharing = SharedBy::these(rungs.len());
+    //
     // DETERMINISM (§3 rule 5) IS HELD BY SHAPE. `map` on an INDEXED parallel
     // iterator preserves order, so `rows` is the same sequence whatever order
     // the threads finish in -- the same argument `batch::sweep_under` makes, and
@@ -7799,6 +7814,59 @@ fn project_onto_execution(
 /// measurement, however sound it is.
 static LEDGER: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// How many sweeps are sharing this machine right now.
+///
+/// # The defect this closes, and it is why a run "ran out of budget"
+///
+/// [`derived_ceiling`] answers *"how many candidates fit in THIS MACHINE'S
+/// memory"* — `engine::DEFAULT_CEILING` at roughly 146 bytes each is about
+/// **19.6 GB**, and its own doc says that is *"a fact about ONE machine"*. It is
+/// therefore a budget for the machine, not for a caller.
+///
+/// [`range_over`] hands that whole-machine budget to **every rung at once**.
+/// Its `rungs.par_iter()` runs eight independent sweeps concurrently and
+/// nothing divided the ceiling between them, so eight sweeps each believed they
+/// could claim 19.6 GB: **157 GB of a 48 GB machine**. The guard that exists to
+/// stop the machine swapping was itself oversubscribing it eightfold.
+///
+/// # Why it was invisible
+///
+/// `range_over`'s own comment justified the concurrency with a measurement:
+/// *"0.20 GB resident per rung at 20% support, so nine at once is under 2 GB of
+/// 48. Memory is not what bounds this."* That was true when it was written and
+/// D-0303 then deleted the 20%, replacing it with a floor each rung derives
+/// from its own bars — which on the operator's 2026-08-28 run resolved to
+/// **0.0045%**, four orders of magnitude lower. Candidate counts explode as
+/// support falls, so the measurement that licensed running eight at once was
+/// invalidated by a change in a different file, and nobody re-took it.
+///
+/// Two changes each correct alone, wrong together. This is the arithmetic that
+/// makes them agree again: the machine's budget is DIVIDED among whoever is
+/// actually running, so the total claim is constant no matter how many rungs a
+/// request names.
+static SWEEPS_SHARING_THIS_MACHINE: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(1);
+
+/// Declares that `count` sweeps are about to share the machine, until dropped.
+///
+/// RAII rather than a pair of calls, so a panic or an early return inside the
+/// parallel map cannot leave the divisor raised and silently starve every later
+/// run in the same process — the server is long-lived and would carry it.
+struct SharedBy;
+
+impl SharedBy {
+    fn these(count: usize) -> Self {
+        SWEEPS_SHARING_THIS_MACHINE.store(count.max(1), std::sync::atomic::Ordering::Relaxed);
+        Self
+    }
+}
+
+impl Drop for SharedBy {
+    fn drop(&mut self) {
+        SWEEPS_SHARING_THIS_MACHINE.store(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// The candidate ceiling this run may use, from the environment or the default.
 ///
 /// # The last hard-coded number, and why it becomes an environment variable
@@ -7923,11 +7991,31 @@ fn derived_ceiling() -> usize {
     // `DEFAULT_CEILING` is `2^27` and `2^27 / 10` is about 13.4 million, which
     // needs 2^38 cores to leave `usize` on a 64-bit target. Saturating anyway,
     // because a bound that wraps is not a bound.
-    (engine::DEFAULT_CEILING / REFERENCE_CORES)
+    let whole_machine = (engine::DEFAULT_CEILING / REFERENCE_CORES)
         .saturating_mul(cores)
         // NEVER ZERO AND NEVER BELOW THE FLOOR A SINGLE CORE EARNS. A ceiling of
         // zero halts before the first candidate, which would report extinction
         // where the truth is that nothing was allowed to run.
+        .max(engine::DEFAULT_CEILING / REFERENCE_CORES);
+
+    // DIVIDED AMONG WHOEVER IS ACTUALLY RUNNING. See
+    // [`SWEEPS_SHARING_THIS_MACHINE`]: the figure above is a MEMORY budget for
+    // the machine, and `range_over` runs eight sweeps at once. Handing each of
+    // them the whole machine claimed 157 GB of 48 -- the guard against swapping
+    // oversubscribing the thing it guards.
+    //
+    // Dividing rather than serialising keeps the parallelism that makes eight
+    // rungs finish in one rung's wall clock; what changes is only how deep each
+    // is allowed to go before it must stop and say so.
+    let sharing = SWEEPS_SHARING_THIS_MACHINE.load(std::sync::atomic::Ordering::Relaxed);
+    whole_machine
+        .checked_div(sharing.max(1))
+        .unwrap_or(whole_machine)
+        // A SHARE IS STILL A SEARCH. Eight ways of a machine budget is millions
+        // of candidates, but the floor keeps a pathological share count from
+        // producing a ceiling that halts before the first level -- which reports
+        // extinction where the truth is that nothing was allowed to run, the
+        // same failure the `max` above refuses.
         .max(engine::DEFAULT_CEILING / REFERENCE_CORES)
 }
 
