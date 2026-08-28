@@ -25215,3 +25215,87 @@ Whether Dhan emits in-array nulls, what it returns for a no-data window, and
 whether it ever repeats a row. All three turn on a live Dhan bars body, and
 `docs/08-vendor-samples.md` has never held one. The structural gaps are certain
 either way; their reachability is not.
+
+---
+
+### D-0334
+
+**A null price skips its row in the parallel-array shape too — the third time a
+rule reached two of the three decode doors, and the third time the missed door
+was the only one Dhan answers in.**
+
+A vendor answers `open: null` for a minute that did not trade.
+`decode_objects` meets that one object at a time and `continue`s;
+`decode_positional` meets it one row at a time and does the same. **The
+parallel-array arm refused the whole window**, and that arm is Dhan's.
+
+Dhan's own field table in `Dhan Docs/12-historical-data.md` marks every response
+field **Required: No**.
+
+#### The pattern, stated because it has now happened three times
+
+* **D-0323** put a negative-volume floor on `decode_objects` and
+  `decode_positional` and missed the parallel-array arm — the only one Dhan
+  uses.
+* **D-0332** corrected an index's negative volume and had to thread the listing
+  through all three; that entry says in as many words that guarding two of three
+  is not a rule.
+* **This entry** is the null degrade, written for the objects arm when Groww's
+  equities needed it and for the positional arm after that, and never for the
+  columnar one.
+
+Each time the missed door was the same door. The three shapes are not three
+styles of the same code — they are three decoders, and a rule added to one is
+added to one.
+
+#### Why the columnar shape is the one that gets missed
+
+The other two meet a bar as a *unit* and can `continue` past it. A column reader
+maps over `open` and then over `high`, so skipping the third element of one
+without skipping the third element of the other six produces a bar assembled
+from rows that never lined up. There is no `continue` to reach for, so the arm
+refused instead.
+
+`kept_rows` computes the decision once, across the price quartet, and every
+column reader filters through the same mask. All four prices are checked before
+any row is kept, for the reason `decode_objects` already gives: keeping `open`
+and then discovering `close` is null leaves the columns at different lengths,
+and the message an operator gets is about lengths rather than about the null
+that caused it.
+
+**Skipped rather than zero-filled**, and counted. A zero price is a lie about a
+minute that had no trade, and this store cannot tell an invented zero from a
+real one afterwards. `note_null_bars` writes the same line the object shape has
+always written — an event carrying `skipped` and `bars`, and an `eprintln!`
+beside it, because the event reaches the file handed to somebody diagnosing a
+run that already finished.
+
+#### The length check moved, and the ordering is load-bearing
+
+Every column is now verified **before** the mask exists.
+
+The mask filters with `zip`, which stops at the shorter side, so a column
+*longer* than the mask would be silently trimmed to fit — every array the same
+length afterwards, and the disagreement gone. That is precisely the failure
+`RawWindow::decode`'s own length check exists to catch, and masking first would
+have walked around it.
+
+The refusal stays `LengthDisagreement`, which names all seven lengths at once; a
+check inside the filter would have had only two numbers and could not say which
+column was the odd one out. `open_interest` is folded into that check and
+reports the quartet's length when the descriptor declares no name — `None` is an
+absent column, not a column that arrived empty, and the two are different facts.
+
+#### The proof that matters
+
+`a_null_price_skips_its_row_rather_than_refusing_the_window` sends three minutes
+with the middle one null and asserts **which two survive**, field by field and
+stamp by stamp — not merely that two did. A filter applied to some columns and
+not others keeps the right *count* and the wrong *rows*, and only the field-level
+assertion catches that. It then walks all four prices, one null at a time,
+because checking `open` alone would let a row through whose close is null.
+
+`all_three_decode_shapes_skip_a_null_price_alike` asserts the columnar and
+object shapes agree on the same body shape, in one test. Given that this rule
+has now been added to a subset of the doors three times, a test that fails when
+they diverge is worth more than a comment asking the next person to remember.

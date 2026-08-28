@@ -854,6 +854,11 @@ pub fn decode_body(
             (|| -> Result<RawWindow, FetchError> {
                 let root = container(&root, envelope)?;
                 let f = spec.fields;
+                // THE MASK FIRST, so every column below is filtered the same
+                // way and a minute the vendor did not trade is skipped rather
+                // than refusing the whole window. See `kept_rows` for why this
+                // shape needed a mask when the other two did not.
+                let (keep, null_bars) = kept_rows(root, &f)?;
                 let arrays = ParallelArrays {
                     // PRICES GO THROUGH `prices`, NOT `numbers`, AND THE
                     // DIFFERENCE IS 75 PAISE ON EVERY BAR THAT HAS THEM.
@@ -869,12 +874,12 @@ pub fn decode_body(
                     // rupees here is a snap at the wrong granularity in the wrong
                     // place. `prices` therefore scales first and rounds once, while
                     // the paise are still in the float.
-                    open: prices(root, f.open, spec.prices)?,
-                    high: prices(root, f.high, spec.prices)?,
-                    low: prices(root, f.low, spec.prices)?,
-                    close: prices(root, f.close, spec.prices)?,
-                    volume: volumes(root, f.volume, listing, &mut corrected)?,
-                    timestamp: numbers(root, f.timestamp)?,
+                    open: prices(root, f.open, spec.prices, &keep)?,
+                    high: prices(root, f.high, spec.prices, &keep)?,
+                    low: prices(root, f.low, spec.prices, &keep)?,
+                    close: prices(root, f.close, spec.prices, &keep)?,
+                    volume: volumes(root, f.volume, listing, &mut corrected, &keep)?,
+                    timestamp: numbers(root, f.timestamp, &keep)?,
                     // OPEN INTEREST IS OPTIONAL AND ITS ABSENCE IS NOT A ZERO.
                     // A spot index has none, so the descriptor leaves the name
                     // `None` and no array is looked for. When the descriptor DOES
@@ -884,10 +889,11 @@ pub fn decode_body(
                     // means zero, so a silent `Vec::new()` here would later read
                     // back as real open interest of nothing.
                     open_interest: match f.open_interest {
-                        Some(name) => numbers(root, name)?,
+                        Some(name) => numbers(root, name, &keep)?,
                         None => Vec::new(),
                     },
                 };
+                note_null_bars(null_bars, keep.len());
                 RawWindow::decode(&arrays)
             })()
         }
@@ -1185,9 +1191,13 @@ pub const DECODED_PRICE_SCALE: PriceScale = PriceScale::Paisa;
 ///
 /// [`FetchError::TransportFailed`] naming the field and the value, for anything
 /// that is not a decimal number or does not fit `i64` paisa.
-fn prices(root: &serde_json::Value, name: &str, scale: PriceScale) -> Result<Vec<i64>, FetchError> {
-    array_at(root, name)?
-        .iter()
+fn prices(
+    root: &serde_json::Value,
+    name: &str,
+    scale: PriceScale,
+    keep: &[bool],
+) -> Result<Vec<i64>, FetchError> {
+    kept(array_at(root, name)?, keep)
         .map(|v| one_price(v, name, scale))
         .collect()
 }
@@ -1308,9 +1318,8 @@ fn one_price(v: &serde_json::Value, name: &str, scale: PriceScale) -> Result<i64
 /// # Errors
 ///
 /// [`FetchError::TransportFailed`] naming the field and the value.
-fn numbers(root: &serde_json::Value, name: &str) -> Result<Vec<i64>, FetchError> {
-    array_at(root, name)?
-        .iter()
+fn numbers(root: &serde_json::Value, name: &str, keep: &[bool]) -> Result<Vec<i64>, FetchError> {
+    kept(array_at(root, name)?, keep)
         .map(|v| one_number(v, name))
         .collect()
 }
@@ -1340,11 +1349,167 @@ fn volumes(
     name: &str,
     listing: crate::vendor::Listing,
     corrected: &mut usize,
+    keep: &[bool],
 ) -> Result<Vec<i64>, FetchError> {
-    array_at(root, name)?
-        .iter()
+    kept(array_at(root, name)?, keep)
         .map(|v| one_volume(v, name, listing, corrected))
         .collect()
+}
+
+/// Says how many rows carried a null price and were skipped, or says nothing.
+///
+/// The same report the object shape has always written, taken here so the
+/// columnar shape says it too. `CLAUDE.md` §4: a bar dropped silently is a
+/// fallback that hides a failure; a bar dropped and counted is the loud degrade
+/// the same rule allows.
+///
+/// **BOTH, and the event is the load-bearing one.** `eprintln!` reaches an
+/// operator watching a terminal; the event reaches the log FILE, which is what
+/// is handed to somebody diagnosing a run that already finished.
+fn note_null_bars(null_bars: usize, bars: usize) {
+    if null_bars == 0 {
+        return;
+    }
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::new(
+            telemetry::Level::Warn,
+            "pull.decode",
+            "bars carried a null price and were skipped",
+        )
+        .with(
+            "skipped",
+            telemetry::Value::Uint(u64::try_from(null_bars).unwrap_or(u64::MAX)),
+        )
+        .with(
+            "bars",
+            telemetry::Value::Uint(u64::try_from(bars).unwrap_or(u64::MAX)),
+        ),
+    );
+    eprintln!(
+        "brutex: {null_bars} of {bars} bars carried a null price and were \
+         skipped — the vendor reported no trade in those minutes"
+    );
+}
+
+/// Which rows of a columnar body are bars at all, and how many are not.
+///
+/// # WHY THE COLUMNAR SHAPE NEEDED THIS AND THE OTHER TWO DID NOT
+///
+/// A vendor answers `open: null` for a minute that did not trade.
+/// [`decode_objects`] meets that one object at a time and `continue`s;
+/// [`decode_positional`] meets it one row at a time and does the same. **The
+/// parallel-array shape meets it as a COLUMN**, and a `map` over a column
+/// cannot skip an element without skipping the same index in the other six — so
+/// it refused instead, and refusing is what one untraded minute cost.
+///
+/// **That is the third time a rule reached two of the three decode doors.**
+/// D-0323 missed this same arm on negative volumes, D-0332 missed it again, and
+/// both times the door that was missed is the only one Dhan answers in. Dhan's
+/// own field table marks every response field *Required: No*.
+///
+/// All four prices are checked before any row is kept, for the reason
+/// [`decode_objects`] gives: keeping `open` and then discovering `close` is null
+/// would leave the columns at different lengths, which `RawWindow` refuses with
+/// a message about column lengths that says nothing about the null that caused
+/// it.
+///
+/// **Skipped rather than zero-filled.** A zero price is a lie about a minute
+/// that had no trade, and this store cannot tell an invented zero from a real
+/// one afterwards.
+///
+/// # Errors
+///
+/// [`FetchError::TransportFailed`] when a named price column is absent — the
+/// refusal [`array_at`] already makes, taken here so a mask cannot be built from
+/// a column that does not exist.
+fn kept_rows(
+    root: &serde_json::Value,
+    f: &crate::vendor::FieldNames,
+) -> Result<(Vec<bool>, usize), FetchError> {
+    let quartet = [
+        array_at(root, f.open)?,
+        array_at(root, f.high)?,
+        array_at(root, f.low)?,
+        array_at(root, f.close)?,
+    ];
+    let volume = array_at(root, f.volume)?;
+    let timestamp = array_at(root, f.timestamp)?;
+    // OPEN INTEREST IS OPTIONAL AND ITS ABSENCE IS NOT A LENGTH.
+    //
+    // A spot index has none, so the descriptor leaves the name `None` and no
+    // array is looked for. `None` here therefore reports the same length as
+    // every other column rather than a zero, which would read as a column that
+    // arrived empty — a different fact, and the wrong one.
+    let open_interest = match f.open_interest {
+        Some(name) => array_at(root, name)?.len(),
+        None => quartet[0].len(),
+    };
+    // EVERY COLUMN IS CHECKED HERE, BEFORE THE MASK EXISTS, and that ordering
+    // is load-bearing rather than tidy.
+    //
+    // The mask filters with `zip`, which stops at the shorter side. A column
+    // LONGER than the mask would therefore be silently trimmed to fit and the
+    // disagreement would vanish — every array the same length, and a window of
+    // well-formed bars assembled from rows that never lined up. That is the
+    // exact failure `RawWindow::decode`'s length check exists to catch, and
+    // masking first would have walked around it.
+    //
+    // The refusal is `LengthDisagreement` and not something local, because that
+    // variant names all six lengths at once. Two numbers cannot say which
+    // column is the odd one out.
+    let rows = quartet[0].len();
+    let disagrees = quartet.iter().any(|column| column.len() != rows)
+        || volume.len() != rows
+        || timestamp.len() != rows
+        || open_interest != rows;
+    if disagrees {
+        return Err(FetchError::LengthDisagreement {
+            open: quartet[0].len(),
+            high: quartet[1].len(),
+            low: quartet[2].len(),
+            close: quartet[3].len(),
+            volume: volume.len(),
+            timestamp: timestamp.len(),
+            open_interest,
+        });
+    }
+    let mut keep = Vec::with_capacity(rows);
+    let mut skipped = 0usize;
+    for i in 0..rows {
+        let traded = quartet
+            .iter()
+            .all(|column| column.get(i).is_some_and(|v| !v.is_null()));
+        if !traded {
+            skipped = skipped.saturating_add(1);
+        }
+        keep.push(traded);
+    }
+    Ok((keep, skipped))
+}
+
+/// One column, filtered through the mask [`kept_rows`] computed.
+///
+/// # Errors
+///
+/// [`FetchError::TransportFailed`] when the column is a different length from
+/// the mask. That is a real disagreement between columns, and it is named here
+/// rather than left to surface later as a row count nobody can account for.
+fn kept<'a>(
+    column: &'a [serde_json::Value],
+    keep: &'a [bool],
+) -> impl Iterator<Item = &'a serde_json::Value> + use<'a> {
+    // NO LENGTH CHECK HERE, AND THAT IS WHY [`kept_rows`] RUNS FIRST.
+    //
+    // `zip` stops at the shorter side, so a column longer than the mask would
+    // be trimmed to fit and the disagreement would disappear — every array the
+    // same length, and a window of well-formed bars assembled from rows that
+    // never lined up. Checking here would also have only two numbers to report,
+    // and `LengthDisagreement` names all seven at once. So every column is
+    // verified before a mask exists, and this is a pure filter.
+    column
+        .iter()
+        .zip(keep.iter())
+        .filter_map(|(v, k)| k.then_some(v))
 }
 
 /// One count, whatever shape carried it.
@@ -3193,6 +3358,98 @@ mod tests {
 
     /// The seven-array length check is the trap `zip` would have hidden: a
     /// short array must refuse the whole window, not yield a short one.
+    #[test]
+    fn a_null_price_skips_its_row_rather_than_refusing_the_window() {
+        // Three minutes; the middle one did not trade, so the vendor answers
+        // `null` for it. This is the shape Dhan and Zerodha answer in.
+        let body = r#"{"open":[100.00,null,102.00],"high":[100.50,null,102.50],
+                       "low":[99.50,null,101.50],"close":[100.25,null,102.25],
+                       "volume":[10,0,12],"timestamp":[1751337900,1751337960,1751338020]}"#;
+        let window = decode_body(
+            body,
+            &spec(PriceScale::Rupees),
+            crate::vendor::Listing::Equity,
+        )
+        .expect("one untraded minute is not a reason to refuse the other two");
+
+        assert_eq!(window.rows.len(), 2, "the untraded minute is skipped");
+        // AND THE SURVIVORS ARE THE RIGHT TWO, not merely the right count. A
+        // filter applied to some columns and not others would keep two rows
+        // whose fields came from different minutes — a bar that never existed,
+        // which is the failure the mask is built once for.
+        assert_eq!(window.rows[0].open, 10_000);
+        assert_eq!(window.rows[0].close, 10_025);
+        assert_eq!(window.rows[0].timestamp, 1_751_337_900);
+        assert_eq!(window.rows[1].open, 10_200);
+        assert_eq!(window.rows[1].close, 10_225);
+        assert_eq!(window.rows[1].timestamp, 1_751_338_020);
+
+        // A NULL IN ANY OF THE FOUR IS ENOUGH. Checking only `open` would let a
+        // row through whose close is null, and the columns would then disagree
+        // in length — a message about lengths that says nothing about the null.
+        for field in ["open", "high", "low", "close"] {
+            let body = format!(
+                r#"{{"open":[{o}],"high":[{h}],"low":[{l}],"close":[{c}],
+                     "volume":[10],"timestamp":[1751337900]}}"#,
+                o = if field == "open" { "null" } else { "100.00" },
+                h = if field == "high" { "null" } else { "100.50" },
+                l = if field == "low" { "null" } else { "99.50" },
+                c = if field == "close" { "null" } else { "100.25" },
+            );
+            let window = decode_body(
+                &body,
+                &spec(PriceScale::Rupees),
+                crate::vendor::Listing::Equity,
+            )
+            .unwrap_or_else(|why| panic!("a null {field} skips its row: {why}"));
+            assert!(
+                window.rows.is_empty(),
+                "the only row had a null {field}, so no bar survives"
+            );
+        }
+    }
+
+    /// **THE COLUMNAR SHAPE REFUSED A NULL AND THE OTHER TWO NEVER DID.**
+    ///
+    /// This is the third time a rule reached two of three decode doors, and
+    /// both earlier times the door it missed was the one Dhan answers in —
+    /// D-0323 on negative volumes and D-0332 again. Dhan's own field table
+    /// marks every response field *Required: No*.
+    ///
+    /// So the three shapes are asserted to agree, on the same body shape, in
+    /// one test. A rule added to one arm and not the others fails here rather
+    /// than in a backfill.
+    #[test]
+    fn all_three_decode_shapes_skip_a_null_price_alike() {
+        // The parallel-array shape, which is Dhan's.
+        let columnar = r#"{"open":[100.00,null],"high":[100.50,null],
+                           "low":[99.50,null],"close":[100.25,null],
+                           "volume":[10,0],"timestamp":[1751337900,1751337960]}"#;
+        let window = decode_body(
+            columnar,
+            &spec(PriceScale::Rupees),
+            crate::vendor::Listing::Equity,
+        )
+        .expect("the columnar shape skips a null row");
+        assert_eq!(window.rows.len(), 1, "parallel arrays");
+
+        // The object-per-bar shape, which Groww's row declares.
+        let objects = r#"{"candles":[
+            {"open":100.00,"high":100.50,"low":99.50,"close":100.25,
+             "volume":10,"timestamp":1751337900},
+            {"open":null,"high":null,"low":null,"close":null,
+             "volume":0,"timestamp":1751337960}]}"#;
+        let spec_objects = HttpSpec {
+            response: ResponseShape::ArrayOfObjects {
+                envelope: Some("candles"),
+            },
+            ..spec(PriceScale::Rupees)
+        };
+        let window = decode_body(objects, &spec_objects, crate::vendor::Listing::Equity)
+            .expect("the object shape skips a null row");
+        assert_eq!(window.rows.len(), 1, "array of objects");
+    }
+
     #[test]
     fn arrays_that_disagree_in_length_refuse_the_whole_window() {
         let body = r#"{"open":[1,2],"high":[1,2],"low":[1,2],"close":[1,2],
