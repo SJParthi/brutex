@@ -7187,7 +7187,7 @@ const fn instrument_word(rolling: &pull::vendor::RollingSpec, is_index: bool) ->
 /// reader fails, silently and later.
 ///
 /// The six guesses stay as a fallback for pages that carry no run at all. This
-/// is what makes them a fallback rather than the answer. D-0353.
+/// is what makes them a fallback rather than the answer. D-0355.
 pub const CREDENTIAL_FACT: &str = "the access token is no longer valid — this feed is halted \
      for the rest of the run. §8 forbids minting one here, so re-asking cannot fix it; refresh \
      it where it is minted and the next pull reads the new value.";
@@ -8316,7 +8316,7 @@ pub(crate) async fn pull_spot(
     // The consequence is a 409 that names a vendor the caller never mentioned —
     // *"another pull already holds Dhan's seat"* for a request that said
     // `vendor=dahn`. Worse, it takes and holds Dhan's seat for the length of
-    // the walk, so a real Dhan pull is refused by a typo. D-0353.
+    // the walk, so a real Dhan pull is refused by a typo. D-0355.
     let asked_vendor = param(&body, "vendor");
     let Some(wants) = ingest::parse_feed(&asked_vendor) else {
         return (
@@ -11880,7 +11880,7 @@ pub(crate) async fn pull_fno(
     // same rule and the same reason as the spot route above. `parse_feed`
     // already answers the EMPTY string with Dhan, so the `unwrap_or` this
     // replaces caught only a feed somebody NAMED and this build does not read,
-    // and then held Dhan's seat for the whole walk on its behalf. D-0353.
+    // and then held Dhan's seat for the whole walk on its behalf. D-0355.
     let asked_vendor = param(&body, "vendor");
     let Some(wants) = ingest::parse_feed(&asked_vendor) else {
         return (
@@ -17484,7 +17484,7 @@ mod tests {
     /// **THE STRUCTURAL VERDICT IS EXACT AND CANNOT DRIFT FROM ITS WRITER.**
     ///
     /// `credential_fault_in_page` decides whether to halt a feed for the rest
-    /// of a run. Until D-0353 it had only six substring guesses to do it with,
+    /// of a run. Until D-0355 it had only six substring guesses to do it with,
     /// and its own doc records that classifier lying twice — once matching the
     /// bare word *"credential"*, which the receipt headline carries on **every**
     /// page.

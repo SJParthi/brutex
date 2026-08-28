@@ -490,7 +490,7 @@ pub fn credential_fault_in_page(html: &str) -> bool {
     // **The writer and this reader share `CREDENTIAL_FACT`**, so rewording the
     // sentence cannot silently break the match — which is exactly how a
     // prose-matching reader fails: later, quietly, and long after the edit that
-    // caused it. D-0353.
+    // caused it. D-0355.
     if html.contains(crate::server::CREDENTIAL_FACT) {
         return true;
     }
