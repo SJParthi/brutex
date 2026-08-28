@@ -25849,3 +25849,47 @@ third vendor edits no driver."* A response key stated in a `const fn` no row
 could reach was the one place that promise did not hold.
 
 Mutants on `side_key`: 4 tested, 4 caught.
+
+### D-0347
+
+**A run attempted every instrument the UNIVERSE named, including the ones this
+feed's master gives no id for — and the boot banner announced that on every
+start.**
+
+The banner, verbatim from the operator's console:
+
+> `zerodha · Everything tracked: 882 of 906 reachable — 24 lacks … A run of
+> target=all STILL ATTEMPTS ALL 906 and refuses these one at a time by name,
+> because `server::broker_run` filters by the universe and not by the feed.`
+
+Twenty-four instruments were carried through the whole loop — budget checked,
+ladder gated, request built — only to be refused at the point where a
+`securityId` had to be written, because the master never listed one. The
+information to skip them was already in hand before the first socket opened.
+
+**The test is the one `coverage::from_master` already makes**, which is what
+makes the banner's number and the run's behaviour agree instead of contradicting
+each other: an instrument belongs to a feed when that feed's master gave it an
+id. `Entry::ids` is indexed by the vendor's own discriminant, so `feed_can_name`
+is **one array index** — the bound does not move when either the universe or the
+feed's list grows.
+
+**A feed with no master admits everything, and that is not a loophole.**
+`Feed::store_vendor()` answers `None` for an archive feed, whose folder of files
+IS its own listing. There is no master to consult and nothing may invent a
+refusal on its behalf.
+
+**Two things moved with it.** The banner no longer says `STILL ATTEMPTS ALL` —
+it names what the run asks for and what it skips — and the guard test that
+existed to stop that sentence over-claiming has flipped with it. That test was
+right to demand the admission while the filter did not exist:
+*"the note must not claim a filter the pull path does not have."* It now demands
+the opposite, and additionally that the old sentence is **gone**, so the
+admission cannot survive the thing it was admitting.
+
+**`spot_targets` is extracted**, because `broker_run` was at clippy's line
+ceiling and because the selection is worth reading alone: it is where a request
+stops being a target word and becomes a list of instruments that will each cost
+a socket. The source-text guard now reads BOTH function bodies by name — reading
+only `broker_run` would have silently stopped checking the predicates the day
+they moved, which is exactly what this edit did to it.

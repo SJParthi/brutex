@@ -5105,32 +5105,51 @@ fn ladder_refusal(
     }
 }
 
-pub(crate) async fn broker_run(
+/// Whether this feed's own master gives this instrument an id.
+///
+/// # Why the pull path has to ask, and what it cost not to
+///
+/// `broker_run` filtered by the UNIVERSE and not by the FEED, and the boot
+/// banner said so out loud on every start: *"882 of 906 reachable — 24 lacks …
+/// A run of target=all STILL ATTEMPTS ALL 906 and refuses these one at a time
+/// by name."* Twenty-four instruments were carried through the whole loop —
+/// budget checked, ladder gated, request built — only to be refused at the
+/// point where a `securityId` had to be written, because this vendor's master
+/// never listed one.
+///
+/// This is the SAME test [`crate::coverage`] already makes to produce that
+/// number, which is what now makes the banner and the run agree instead of
+/// contradicting each other: an instrument belongs to a feed when that feed's
+/// master gave it an id.
+///
+/// # Cost
+///
+/// **One array index.** `Entry::ids` is indexed by the vendor's own
+/// discriminant, so the bound does not move when either the universe or the
+/// feed's list grows.
+///
+/// # A feed with no master admits everything, and that is not a loophole
+///
+/// [`pull::vendor::Feed::store_vendor`] answers `None` for an archive feed,
+/// whose folder of files IS its own listing. There is no master to consult, so
+/// nothing here may invent a refusal on its behalf.
+fn feed_can_name(feed: pull::vendor::Feed, entry: &merge::Entry) -> bool {
+    feed.store_vendor()
+        .is_none_or(|vendor| entry.ids.get(vendor as usize).copied().flatten().is_some())
+}
+/// The instruments one spot run will ask for, in the order it will ask.
+///
+/// # Three predicates, and each was added because the run did the wrong thing
+/// # without it
+///
+/// Extracted from [`broker_run`] because that function sits at clippy's line
+/// ceiling and because the selection is the part worth reading on its own: it
+/// is where a request stops being a target word and becomes a list of
+/// instruments that will each cost a socket.
+fn spot_targets(
     asked: &ingest::SpotRequest,
     site: &Site,
-    censuses: &[census::VendorCensus],
-) -> BrokerRun {
-    let started = std::time::Instant::now();
-    // BEFORE ANY SOCKET. See `Broker` for what this is guarding against and how
-    // it was found.
-    if site.broker == Broker::Refused {
-        return BrokerRun::unreachable_broker();
-    }
-
-    // THE UNIVERSE, ONE INSTRUMENT AT A TIME.
-    //
-    // This called `broker_window` ONCE and the callee hardcoded NIFTY, so spot
-    // did 1/800th of the job whatever universe was selected. That single
-    // literal is the whole of "spot does not work".
-    //
-    // The set is the operator's own tracked universe — the same
-    // `catalog::tracked` predicate the page and `/instruments.json` use, so the
-    // three cannot disagree about what "every instrument" means.
-    //
-    // PER-INSTRUMENT ISOLATION. One instrument that fails does not abort the
-    // other 799: its reason is recorded against its own name and the loop
-    // continues. Over ~11,200 requests a run that dies on the first network
-    // blip is a run that never finishes, and a single `?` here would be that.
+) -> Vec<brutex_core::instrument::InstrumentKey> {
     let mut targets: Vec<brutex_core::instrument::InstrumentKey> = site
         .universe()
         .read
@@ -5166,9 +5185,45 @@ pub(crate) async fn broker_run(
         // one, and it cannot happen: members that resolve to nothing leave an
         // empty list, and `broker_run` reports zero attempted rather than
         // quietly widening back to everything.
-        .filter(|(key, _)| asked.members.is_empty() || asked.members.contains(&key.underlying))
+        // AND THE FEED MUST NAME IT — `feed_can_name`, D-0347. Both predicates
+        // in one closure because each is a probe and neither allocates, so the
+        // pass stays one walk.
+        .filter(|(key, entry)| {
+            (asked.members.is_empty() || asked.members.contains(&key.underlying))
+                && feed_can_name(asked.feed, entry)
+        })
         .map(|(key, _)| *key)
         .collect();
+    targets
+}
+
+pub(crate) async fn broker_run(
+    asked: &ingest::SpotRequest,
+    site: &Site,
+    censuses: &[census::VendorCensus],
+) -> BrokerRun {
+    let started = std::time::Instant::now();
+    // BEFORE ANY SOCKET. See `Broker` for what this is guarding against and how
+    // it was found.
+    if site.broker == Broker::Refused {
+        return BrokerRun::unreachable_broker();
+    }
+
+    // THE UNIVERSE, ONE INSTRUMENT AT A TIME.
+    //
+    // This called `broker_window` ONCE and the callee hardcoded NIFTY, so spot
+    // did 1/800th of the job whatever universe was selected. That single
+    // literal is the whole of "spot does not work".
+    //
+    // The set is the operator's own tracked universe — the same
+    // `catalog::tracked` predicate the page and `/instruments.json` use, so the
+    // three cannot disagree about what "every instrument" means.
+    //
+    // PER-INSTRUMENT ISOLATION. One instrument that fails does not abort the
+    // other 799: its reason is recorded against its own name and the loop
+    // continues. Over ~11,200 requests a run that dies on the first network
+    // blip is a run that never finishes, and a single `?` here would be that.
+    let mut targets = spot_targets(asked, site);
     // Sorted so a run is reproducible: `HashMap` order is not stable between
     // processes, and an unordered backfill resumes in a different place after
     // every restart.
@@ -22545,14 +22600,36 @@ mod broker_target_tests {
         // 3. THE CALLER LOOPS. `broker_run` filters the merged universe by the
         //    chosen target, sorts it for reproducibility, and calls this once
         //    per member.
-        let run = src
-            .split_once("pub(crate) async fn broker_run")
-            .expect("broker_run exists")
-            .1;
-        let run = &run[..run.find("\n}\n").expect("it has an end")];
+        // THE SELECTION MOVED OUT OF `broker_run` AND THIS READS BOTH HALVES.
+        //
+        // D-0347 extracted `spot_targets`, so the predicates and the loop that
+        // consumes them no longer share a function body. Reading only
+        // `broker_run` would have quietly stopped checking the predicates —
+        // the assertion would still pass the day someone deleted them, because
+        // the text it looked for had simply moved somewhere this test does not
+        // read. Both are named explicitly for that reason.
+        let body_of = |name: &str| -> String {
+            let at = src
+                .split_once(name)
+                .unwrap_or_else(|| panic!("{name} exists"))
+                .1;
+            at[..at.find("\n}\n").expect("it has an end")].to_owned()
+        };
+        let select = body_of("fn spot_targets(");
+        let run = body_of("pub(crate) async fn broker_run");
         assert!(
-            run.contains("asked.target.names(key, entry.universe)"),
-            "broker_run builds its instrument list from the chosen target"
+            select.contains("asked.target.names(key, entry.universe)"),
+            "the selection is built from the chosen target"
+        );
+        assert!(
+            select.contains("feed_can_name(asked.feed, entry)"),
+            "and from what THIS FEED can name — without it a run attempts \
+             instruments whose master lists no id and refuses them one at a \
+             time, which is the boot banner's own 24-of-906 (D-0347)"
+        );
+        assert!(
+            run.contains("spot_targets(asked, site)"),
+            "broker_run builds its list through that selection"
         );
         assert!(
             run.contains("for (index, instrument) in targets.iter().enumerate()"),

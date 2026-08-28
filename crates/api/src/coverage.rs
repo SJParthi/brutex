@@ -295,9 +295,10 @@ impl Coverage {
                 let mut line = format!(
                     "{} · {}: {} of {} reachable — {} lacks, {} ambiguous, {} malformed, \
                      {} no NSE ISIN. \
-                     A run of target={} STILL ATTEMPTS ALL {} and refuses these one at a \
-                     time by name, because `server::broker_run` filters by the universe \
-                     and not by the feed — docs/06-limits.md §63",
+                     A run of target={} asks for the {} this feed can name and SKIPS the \
+                     rest before any budget or socket, because `server::broker_run` now \
+                     applies this same test — one array index per candidate. These names \
+                     are what it skipped",
                     vendor.as_str(),
                     target.label(),
                     covered.matched,
@@ -307,7 +308,12 @@ impl Coverage {
                     covered.malformed,
                     covered.no_nse_isin,
                     target.slug(),
-                    covered.accounted(),
+                    // THE REACHABLE COUNT, NOT THE PUBLISHED ONE. The sentence
+                    // used to end "STILL ATTEMPTS ALL {accounted}" and this
+                    // argument was that total; the run now asks for `matched`
+                    // and skips the difference, so the number here is what it
+                    // actually requests. D-0347.
+                    covered.matched,
                 );
                 let names: Vec<&str> = covered
                     .unresolved
@@ -998,14 +1004,27 @@ mod tests {
                 line.contains("target="),
                 "and names the slug a run would use: {line}"
             );
-            // AND SAYS WHAT THE RUN ACTUALLY DOES, which is not yet what this
-            // count says it should. `broker_run` filters by the universe, so
-            // the shortfall is refused instrument by instrument rather than
-            // never attempted; the note states that gap rather than implying a
-            // filter nobody wrote. docs/06-limits.md §63.
+            // AND SAYS WHAT THE RUN ACTUALLY DOES.
+            //
+            // **This assertion was the other way round, and it was right to
+            // be.** It read `line.contains("STILL ATTEMPTS ALL")` under the
+            // reason *"the note must not claim a filter the pull path does not
+            // have"* — because `broker_run` filtered by the universe, so the
+            // shortfall was refused instrument by instrument rather than never
+            // attempted, and a note implying otherwise would have been a
+            // comforting lie on every boot.
+            //
+            // D-0347 wrote that filter. `broker_run` now applies the same
+            // one-array-index test this module uses, so the claim is true and
+            // the guard flips with it: the note must describe the skip, and
+            // must NOT still carry the sentence that admitted its absence.
             assert!(
-                line.contains("STILL ATTEMPTS ALL"),
-                "the note must not claim a filter the pull path does not have: {line}"
+                line.contains("SKIPS the rest before any budget or socket"),
+                "the note must state the filter the pull path now has: {line}"
+            );
+            assert!(
+                !line.contains("STILL ATTEMPTS ALL"),
+                "and must not still admit an absence that was closed: {line}"
             );
         }
         assert!(
