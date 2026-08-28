@@ -91,8 +91,32 @@ let byPrefix = new Map();
 // last one ASKED, and the page answers confidently for the wrong broker.
 let inFlight = null;
 
-/** @param {string} feed */
+/**
+ * AN ABSENT FEED IS REFUSED HERE, NOT GUARDED FOR AT EVERY CALL SITE.
+ *
+ * The line below sent `?feed=${feed ?? ''}`, and the running API answers an
+ * EMPTY feed parameter with a 200 and the default vendor's whole master —
+ * measured: `/instruments.json?feed=` returns 161,232 bytes of Dhan. So a null
+ * feed reaching this function would not fail; it would quietly stamp one
+ * broker's instrument list as the answer for "no broker", which is the same
+ * class of fault as a cleared feed picker still showing Dhan.
+ *
+ * Both callers today write `if (feeds.active) loadCatalogue(feeds.active)`, so
+ * it is unreachable — by convention, at two sites, which is exactly the kind of
+ * safety that lasts until a third caller is written. Refusing here makes it
+ * structural, and the reason is stated rather than defaulted.
+ *
+ * @param {string | null | undefined} feed
+ */
 export async function loadCatalogue(feed) {
+  if (!feed) {
+    catalogue.rows = [];
+    catalogue.ready = false;
+    catalogue.feed = null;
+    catalogue.error =
+      'No feed was named, so no instrument master was read. This is a refusal, not an empty vendor: asking the API with a blank feed answers with the default vendor’s list, which would be counted here under a broker nobody selected.';
+    return;
+  }
   inFlight = feed;
   try {
     // THE FEED IS PART OF THE QUESTION. The two brokers do not list the same
