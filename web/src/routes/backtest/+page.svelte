@@ -1582,9 +1582,24 @@
    * contradict the moment a second exchange is swept. The layout already loads
    * this catalogue for the active feed, so the join costs no request.
    *
+   * THE RUN'S FEED IS THE PARENT HERE, NOT THE PAGE'S. `catalogue` is loaded
+   * for `feeds.active` (`+layout.svelte`), and this used it whatever run it
+   * was asked about — while the request it feeds is built with `run.feed`. Turn
+   * on "Show every feed" and a run from another vendor resolved its exchange
+   * and segment out of the ACTIVE vendor's master, then asked its own vendor
+   * for that path. Whether the two agree for a given symbol is a property of
+   * two masters nobody compared; the wiring is wrong either way, and the
+   * failure it produces — a 4xx from the bar route, or worse, a plausible file
+   * that is the wrong series — is not one a reader could trace back to here.
+   *
+   * So it refuses instead. `null` is the answer this already has for "cannot
+   * be resolved", and the caller's refusal arm names the reason.
+   *
    * @param {string} symbol
+   * @param {string} [forFeed] the feed the answer will be USED for
    */
-  function place(symbol) {
+  function place(symbol, forFeed) {
+    if (forFeed && catalogue.feed !== forFeed) return null;
     const row = catalogue.rows.find((r) => r.symbol === symbol);
     return row ? { exchange: row.exchange, segment: row.segment } : null;
   }
@@ -1614,7 +1629,7 @@
   /** @param {any} run */
   async function loadSeries(run, rung) {
     const seq = ++seriesSeq;
-    const at = place(run.underlying);
+    const at = place(run.underlying, run.feed);
     if (!at) {
       series = {
         phase: 'failed',
@@ -1622,12 +1637,23 @@
         total: 0,
         months_read: 0,
         months_missing: 0,
-        why: catalogue.ready
-          ? `${run.underlying} is not in ${catalogue.feed}'s instrument master, so the ` +
-            `exchange and segment its bar files are filed under cannot be resolved. The run ` +
-            `is still shown above — only its price series cannot be located.`
-          : `The instrument master for this feed has not loaded yet, so ${run.underlying}'s ` +
-            `exchange and segment are not known. Nothing was guessed.`
+        /* THREE CAUSES NOW, AND THE NEW ONE GOES FIRST because it is the only
+           one that is not about the instrument. A run from another vendor —
+           reachable the moment "Show every feed" is on — cannot have its path
+           resolved out of the ACTIVE vendor's master, and saying "not in the
+           master" would blame the symbol for a mismatch of feeds. */
+        why:
+          catalogue.ready && catalogue.feed !== run.feed
+            ? `This run is ${run.feed}'s and the instrument master loaded here is ` +
+              `${catalogue.feed}'s. The exchange and segment a bar file is filed under come ` +
+              `from the run's OWN vendor, so nothing was resolved rather than resolved from ` +
+              `the wrong one. Choose ${run.feed} in the feed control to load its series.`
+            : catalogue.ready
+              ? `${run.underlying} is not in ${catalogue.feed}'s instrument master, so the ` +
+                `exchange and segment its bar files are filed under cannot be resolved. The run ` +
+                `is still shown above — only its price series cannot be located.`
+              : `The instrument master for this feed has not loaded yet, so ${run.underlying}'s ` +
+                `exchange and segment are not known. Nothing was guessed.`
       };
       return;
     }
@@ -1835,7 +1861,7 @@
    */
   async function loadBenchmark(run, rung) {
     const seq = ++benchSeq;
-    const at = place(run.underlying);
+    const at = place(run.underlying, run.feed);
     if (!at) {
       bench = { phase: 'idle', open: 0, close: 0, why: '' };
       return;

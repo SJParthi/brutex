@@ -6032,8 +6032,27 @@
 
   const stranded = $derived.by(() => {
     const out = [];
-    if (picked && !instrumentKeys.has(picked)) {
-      out.push({ rung: 'Instrument', value: picked, clear: () => (filter = '') });
+    /* `filter && !picked`, AND THE OLD TEST COULD NOT FIRE AT ALL.
+       It read `picked && !instrumentKeys.has(picked)`. `instrumentKeys` maps
+       UPPER(key) -> key and `picked` is `instrumentKeys.get(typed) ?? ''`, so
+       `picked` is only ever truthy when it came OUT of that map — and for an
+       all-uppercase store key, which is every key this store produces,
+       `has(picked)` is then true and the guard is false. Meanwhile the exact
+       condition the branch exists for — `filter` naming an instrument the
+       coarser rungs no longer offer — is when the lookup MISSES, and `picked`
+       collapses to `''` and short-circuits it. Both arms wrong, in opposite
+       directions.
+
+       So the rung most likely to be stranded (see the Instrument gate above,
+       where a universe the store holds nothing of used to remove the control
+       outright) was the one rung that could never report it, and its Clear
+       button was unreachable.
+
+       `filter` is what the operator set and `picked` is what it resolved to;
+       set-but-unresolved is precisely stranded. `value` prints what he typed
+       rather than the empty string it resolved to. */
+    if (filter && !picked) {
+      out.push({ rung: 'Instrument', value: filter, clear: () => (filter = '') });
     }
     /* `SEG_VIEW`, NOT `kinds`. `kind` holds one of /ingest's three now — spot,
        futures, options — and `kinds` holds the store's own second field, INDEX /
@@ -7230,9 +7249,27 @@
            ONE `Picker`, THE SHARED COMPONENT, unchanged: it draws its own
            `.picker` root, its own filter box and its own tick per row, so this
            rung cannot drift from the same control on /markets and /ingest. -->
-      {#if instrumentRows.length > 0}
+      <!-- GATED ON WHAT IT ACTUALLY RENDERS. This read `instrumentRows` — the
+           STORE — while the `Picker` below folds `instrumentOffered`, which is
+           the MASTER whenever a universe is chosen. A universe whose members
+           this feed's store holds none of therefore removed the entire rung
+           from the DOM, taking with it every name `instrumentOffered` was
+           rewritten to expose. Its own header states the intent that gate
+           defeated: "a rung that can only name what you already have cannot
+           tell you what you are missing."
+
+           It compounds with the seeding effect below, which can seat `filter`
+           on an unheld member — and the search box that used to be the other
+           way out was deleted, so the only escape left was the Universe rung.
+
+           The `title` said "Held, not offered", which was the pre-rewrite
+           promise and is now false for the rows underneath it. Corrected here
+           rather than left to contradict them. -->
+      {#if instrumentOffered.length > 0}
         <div class="field">
-          <span class="lab" title="Held, not offered — every name here is a name this store can prove it has."
+          <span
+            class="lab"
+            title="Every name this feed's master lists for the chosen universe. One the store does not hold is drawn with a zero rather than omitted — a rung that can only name what you already have cannot tell you what you are missing."
             >Instrument</span
           >
           <Picker
