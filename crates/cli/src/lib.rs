@@ -2059,7 +2059,31 @@ fn grid_step_ppm(bars: &[indicators::Candle]) -> i64 {
     }
     ranges.sort_unstable();
     let median = ranges.get(ranges.len() / 2).copied().unwrap_or(1);
-    (median / 20).max(1)
+    // THE DIVISOR IS THE ONE CHOSEN FIGURE HERE, AND IT IS NO LONGER BAKED.
+    //
+    // Everything above this line is measured: each bar's range as a fraction of
+    // its own close is already a ppm figure, and the median of those is what a
+    // typical bar does on any instrument at any price level. Only the divisor
+    // is a decision, and the comment above states exactly what kind — a
+    // RESOLUTION, "so the ladder resolves WITHIN a typical bar rather than
+    // stepping past it".
+    //
+    // Twenty means twenty steps across a typical bar's range. Finer resolves
+    // stops a trader could not distinguish and multiplies the grid; coarser
+    // steps past the bar the stop has to sit inside. Nothing in the data
+    // decides between them, which is exactly why it must be movable rather
+    // than argued once and frozen: `BRUTEX_GRID_RESOLUTION` moves it at runtime
+    // and every ladder on every rung re-derives around the new value, with no
+    // rebuild.
+    //
+    // Refused at zero because a zero divisor is a panic, and refused below one
+    // for the same reason `.max(1)` guards the result: a step of zero is an
+    // infinite ladder, not a fine one.
+    let resolution = std::env::var_os("BRUTEX_GRID_RESOLUTION")
+        .and_then(|raw| raw.to_string_lossy().trim().parse::<i64>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(20);
+    median.checked_div(resolution).unwrap_or(median).max(1)
 }
 
 /// The reward-to-risk ratios the grid pairs each stop with, in hundredths.

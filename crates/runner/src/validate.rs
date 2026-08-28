@@ -318,6 +318,37 @@ impl Validated {
 /// where that trade sits.
 pub const DEFAULT_RUNGS: usize = 4;
 
+/// How deep the exit ladder goes in a walk-forward fold, resolved at RUNTIME.
+///
+/// # The inconsistency this closes
+///
+/// The SCREEN builds its exit grid with `cli::grid_rungs(bars)` — a rung count
+/// derived from the instrument's own median bar range. The WALK-FORWARD built
+/// its grid with [`DEFAULT_RUNGS`], a fixed four. So the ladder that judged a
+/// combination out of sample was not the ladder that chose it: on any series
+/// where the derived count is not four, the validation priced a coarser or
+/// finer set of exits than the screen did, and the two disagreed about which
+/// variant a combination even had.
+///
+/// [`DEFAULT_RUNGS`]'s own doc admits the figure is a stated assumption —
+/// *"nothing in the data says where that trade sits"* — and that is honest
+/// about the DEFAULT while leaving no way to move it.
+///
+/// `BRUTEX_GRID_RUNGS` is the variable `cli` already reads for the same
+/// quantity, so setting it once now moves BOTH ladders and they cannot drift
+/// apart. Unset, the behaviour is exactly what it was.
+///
+/// A zero is refused rather than obeyed: a ladder with no rungs prices only the
+/// no-exit baseline, which would silently turn every walk-forward fold into a
+/// buy-and-hold test.
+#[must_use]
+pub fn fold_rungs() -> usize {
+    std::env::var_os("BRUTEX_GRID_RUNGS")
+        .and_then(|raw| raw.to_string_lossy().trim().parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_RUNGS)
+}
+
 /// The excursion side matching a fill direction.
 ///
 /// Two enums for the same fact, in two crates that may not depend on each
@@ -724,7 +755,7 @@ pub fn walk_forward_shaped(
                     &item.mask,
                     horizon,
                     side_of(direction),
-                    crate::grid::Levels::derived(DEFAULT_RUNGS),
+                    crate::grid::Levels::derived(fold_rungs()),
                 );
                 let cell = g.sharpest().or_else(|| g.best())?;
                 if cell.trades == 0 {
