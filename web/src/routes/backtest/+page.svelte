@@ -603,6 +603,13 @@
   let spanTouched = $state(false);
   /** Has the operator picked an instrument themselves? Same rule. */
   let symbolTouched = $state(false);
+  /**
+   * Has the operator worked the TIMEFRAMES menu himself? Same rule again, and
+   * this one was missing — see the seed effect and the menu's `onchange`.
+   * Reset alongside `spanTouched` when the instrument changes, because which
+   * rungs exist is a property of the instrument, so a new one must re-seed.
+   */
+  let rungsTouched = $state(false);
 
   /* ====================================================================
      WHAT THE BRUTE FORCE WILL ACTUALLY RUN OVER
@@ -859,7 +866,14 @@
       // The run route sweeps them all today, so an empty or stale selection
       // would show fewer than the run covers -- which is the one direction
       // this control must never be wrong in.
-      if (held && pickedRungs.size === 0) {
+      //
+      // `!rungsTouched` IS WHAT MAKES "until he says otherwise" TRUE. Keyed on
+      // `size === 0` alone, this could not tell a stale selection from a
+      // deliberate Clear all -- and since the effect tracks `spanTouched`, the
+      // next edit to `from` or `to` refilled all eight rungs behind him. The
+      // argument above is about STALENESS; clearing is a decision, and the
+      // latch is the only thing that separates the two.
+      if (held && !rungsTouched && pickedRungs.size === 0) {
         pickedRungs = new Set(held.rungs.map((r) => r.name));
       }
     });
@@ -1375,7 +1389,23 @@
 
   /** @type {number | null} */
   let openIndex = $state(null);
-  const openRun = $derived(runs.find((r) => r.index === openIndex) ?? null);
+  /* `matched` AND NOT `runs`: THE DRILL BELONGS TO A ROW, AND MUST GO WITH IT.
+     `runs` is the feed-filtered set; `matched` is what the table actually
+     shows after the search box. Keyed on `runs`, the panel stayed fully
+     mounted — chart, tester and all — while the table above it had been
+     replaced by "Nothing matches …", so the page simultaneously said it had no
+     such row and drew a thousand lines describing one.
+
+     It is live now rather than theoretical: the ledger filter was dead until
+     this session (`prefix.build` keyed on a field a `Run` has not), so nothing
+     could empty `matched` and the divergence never showed. With the filter
+     working, one keystroke opens it.
+
+     The FEED path was already right — a run leaving `runs` nulls this and the
+     series effect resets — so only the displayed-set path needed the change,
+     and `matched` is the narrowest set that covers both. Not `sorted`: that
+     would couple the drill to the sort order for nothing. */
+  const openRun = $derived(matched.find((r) => r.index === openIndex) ?? null);
 
   /**
    * Did the open run never open a trade?
@@ -1559,8 +1589,31 @@
     return row ? { exchange: row.exchange, segment: row.segment } : null;
   }
 
+  /* ONE COUNTER PER LOADER: THE LAST ASKED WINS, NOT THE LAST TO RETURN.
+
+     All three drill loaders assigned their result to page state with no
+     ordering check. Open run A, then B before A's response lands, and A's
+     slower answer overwrote B's — the panel then drew one run's bars, rungs or
+     benchmark under another run's heading. The snippet design further down
+     states that "a chart cannot silently render one panel's data under another
+     panel's heading"; that held in the template and was defeated at the fetch.
+
+     `$lib/index.svelte.js` already solved this and says why in the same words:
+     "without this the last to RETURN wins instead of the last one ASKED, and
+     the page answers confidently for the wrong broker."
+
+     THREE COUNTERS AND NOT ONE, because all three run concurrently for the
+     same open run — a single shared counter would have each cancel the other
+     two. Each loader stamps its own call and drops only its own stale answers.
+     The checks sit after the awaits; the writes before them (`idle`,
+     `loading`) are synchronous and already correctly ordered. */
+  let seriesSeq = 0;
+  let rungsSeq = 0;
+  let benchSeq = 0;
+
   /** @param {any} run */
   async function loadSeries(run, rung) {
+    const seq = ++seriesSeq;
     const at = place(run.underlying);
     if (!at) {
       series = {
@@ -1592,6 +1645,12 @@
       // records off a cold page cache, and giving up on a read that is working
       // would report a wedged server that is not one.
       const response = await ask_(url, { cache: 'no-store', ms: 30_000 });
+      /* THE LAST ASKED WINS, NOT THE LAST TO RETURN — see `seriesSeq`. Open run
+         A, then B before A's window lands, and A's slower answer used to
+         overwrite B's: one run's bars under another run's heading, which is
+         exactly what the snippet design three hundred lines down says it makes
+         impossible, defeated one layer lower at the fetch. */
+      if (seq !== seriesSeq) return;
       if (!response.ok) {
         series = {
           phase: 'failed',
@@ -1604,6 +1663,7 @@
         return;
       }
       const body = await response.json();
+      if (seq !== seriesSeq) return;
       // ASCENDING, BECAUSE THE LIBRARY REQUIRES IT AND THE ROUTE DOES NOT
       // PROMISE IT. `/bars/window.json` answers newest first, which is right
       // for a table and wrong for a time axis; lightweight-charts throws on
@@ -1695,13 +1755,16 @@
    * @param {string} rung the timeframe to draw, which is not always the run’s own
    */
   async function loadRungs(run) {
+    const seq = ++rungsSeq;
     try {
       const response = await ask_(`/store.json?feed=${encodeURIComponent(run.feed)}`, {
         cache: 'no-store',
         ms: 30_000
       });
+      if (seq !== rungsSeq) return;
       if (!response.ok) return;
       const rows = await response.json();
+      if (seq !== rungsSeq) return;
       /** @type {Map<string, number>} */
       const months = new Map();
       for (const row of rows ?? []) {
@@ -1771,6 +1834,7 @@
    * @param {string} rung
    */
   async function loadBenchmark(run, rung) {
+    const seq = ++benchSeq;
     const at = place(run.underlying);
     if (!at) {
       bench = { phase: 'idle', open: 0, close: 0, why: '' };
@@ -1787,6 +1851,7 @@
           `&limit=${MAX_WINDOW_LIMIT}`,
         { cache: 'no-store', ms: 30_000 }
       );
+      if (seq !== benchSeq) return;
       if (!response.ok) {
         bench = {
           phase: 'failed',
@@ -1797,6 +1862,7 @@
         return;
       }
       const body = await response.json();
+      if (seq !== benchSeq) return;
       const bars = [...(body.bars ?? [])].sort((a, b) => a.t - b.t);
       if (bars.length === 0) {
         bench = {
@@ -2999,6 +3065,13 @@
             pickedSymbols = next;
             symbolTouched = true;
             spanTouched = false;
+            /* THE RUNG LATCH RELEASES WITH THE SPAN LATCH. Which timeframes
+               exist is a property of the instrument, so a new one must re-seed
+               them — holding the latch across a switch would leave the
+               previous instrument's selection, or an empty menu, standing over
+               a different series. Cleared here and nowhere else, exactly like
+               `spanTouched`. */
+            rungsTouched = false;
           }}
         />
       {:else}
@@ -3030,6 +3103,19 @@
           selected={pickedRungs}
           onchange={(next) => {
             pickedRungs = next;
+            /* THE THIRD LATCH, and it was the missing one. `symbolTouched` and
+               `spanTouched` exist because a default that keeps reasserting
+               itself is a control the operator does not own; the rung seed had
+               no such latch and keyed on `pickedRungs.size === 0` alone —
+               which is exactly the state "he just cleared them".
+
+               The seed effect tracks `spanTouched`. So: Clear all here, then
+               pick a month in `from`, and `spanTouched` flips false -> true,
+               the effect re-runs, the set is still empty, and ALL EIGHT
+               TIMEFRAMES COME BACK with no notice. Editing a control two rungs
+               DOWN the strip silently rewrote the one above it. A change of
+               feed or instrument did the same, by the same route. */
+            rungsTouched = true;
           }}
         />
       {:else}
@@ -3317,7 +3403,25 @@
         <p class="path"><span class="bt-lab">file</span> <code>{ledger.path}</code></p>
       {/if}
     </div>
-  {:else}
+    <!-- `{:else if ledger}` AND NOT A BARE `{:else}`, AND THE NARROWING IS
+         LOAD-BEARING RATHER THAN COSMETIC.
+
+         `ledger` is `Ledger | null | undefined` (`:482`) and this branch
+         dereferences it bare — `ledger.total`, `ledger.hit_scan_cap`,
+         `ledger.scanned`, `ledger.partial_tail`. The checker could not tie
+         `load.phase` to `load.body`, so those read as possible throws, and a
+         blanket `ledger?.` would have silenced the report while leaving the
+         hole: `refusal` is `ledger?.refusal ?? null` (`:486`), so a null
+         ledger yields a FALSY refusal, falls straight past the arm above, and
+         lands here — where the first read throws.
+
+         Traced before changing it: every writer of `load` sets `body: null`
+         only alongside `phase: 'failed'`, and the 503 path deliberately does
+         not early-return because the server sends a full object with
+         `refusal` set. So no code reaches it today. The gap is real in the
+         types and shut here rather than left to the next writer to rediscover
+         — and the arm below names the state instead of rendering blank. -->
+  {:else if ledger}
     <!-- ==============================================================
          INTEGRITY — shown ONLY when it has something to say
 
@@ -3357,12 +3461,24 @@
          SUMMARY — the four facts before any detail
          ============================================================== -->
     <section class="bt-strip">
+      <!-- ONE DENOMINATOR ACROSS THE ROW. This tile read `ledger.total` — the
+           WHOLE file, every feed — while the three beside it read
+           `completeRuns`, `haltedRuns` and `holedRuns`, all of which fold
+           `runs`, the feed-FILTERED set. On a store whose active feed holds 3
+           of 500 records the strip said "Runs recorded 500 · Complete 3 ·
+           Halted 0 · Span holes 0" as one row of four, and the only way to
+           know the first number was counted differently was to already know.
+           The whole-file figure is not lost: it moves to this tile's own note,
+           where the scan cap already lives, and it appears only when the two
+           actually differ. -->
       <div class="fact rise">
         <span class="k">Runs recorded</span>
-        <span class="v">{exact(ledger.total)}</span>
+        <span class="v">{exact(runs.length)}</span>
         <span class="n">
           {#if ledger.hit_scan_cap}
             showing the newest {exact(ledger.scanned)} — the read stopped at its ceiling
+          {:else if runs.length !== ledger.total}
+            of {exact(ledger.total)} in the file — the rest are under another feed
           {:else}
             all of them read
           {/if}
@@ -4885,6 +5001,24 @@
         </section>
       {/if}
     {/if}
+  {:else}
+    <!-- THE ARM THAT SHOULD NEVER DRAW, AND SAYS SO RATHER THAN SHOWING
+         NOTHING. Reached only if the ledger read reports `ready` while its
+         body is null — no writer in `crates/api/src/backtest.rs` produces
+         that, and every writer here pairs `body: null` with `phase: 'failed'`.
+         It exists because the alternative to narrowing was `ledger?.`
+         everywhere, which would have turned a throw into a silently blank
+         page: §4 allows a degraded answer that names its reason and forbids
+         one that hides it. -->
+    <div class="panel bt-note" role="alert">
+      <h2>The ledger read returned nothing to show</h2>
+      <p>
+        The request reported success and carried no ledger. That is a state this page has no
+        reading for — not an empty ledger, which says so itself, and not a failed read, which
+        carries its reason. Press <b>Re-read ledger</b>; if it recurs, the response body is the
+        thing to look at.
+      </p>
+    </div>
   {/if}
   </div>
 </div>
