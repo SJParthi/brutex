@@ -577,6 +577,81 @@ impl Cell {
         self.min_win.saturating_mul(100) / worst_loss
     }
 
+    /// What this variant would have made if EVERY winner had been its smallest
+    /// and EVERY loser its largest, in paisa.
+    ///
+    /// # The number the two thresholds are a proxy for
+    ///
+    /// An operator's bound is usually stated as a pair — "at least half the
+    /// trades win, and my smallest win beats my largest loss by a quarter". That
+    /// pair is a SUFFICIENT CONDITION for something simpler, and the simpler
+    /// thing is what they actually want to know:
+    ///
+    /// ```text
+    /// wins × min_win  −  losses × worst_loss
+    /// ```
+    ///
+    /// At a 50% win rate and a 1.25 ratio the arithmetic is
+    /// `500 × 1.25 − 500 × 1.00 = +125` per thousand trades — profitable in the
+    /// worst arrangement the sample admits. Stating the floor directly beats
+    /// stating the pair, because the pair cannot express the trade an operator
+    /// would happily make: a 40% win rate at a 2.0 ratio floors at `+200` and
+    /// fails a 50% threshold that the weaker `+125` passes.
+    ///
+    /// # This is a FLOOR, not a forecast
+    ///
+    /// It is what the sample already did under its own worst ordering, and it
+    /// says nothing about the next thousand trades. It cannot be beaten DOWN by
+    /// re-ordering the same trades, which is exactly why it is worth having:
+    /// `pessimistic` is the total that actually occurred, and this is the total
+    /// that could not have been undercut given the same wins, losses and
+    /// extremes.
+    ///
+    /// Zero losses makes it `wins × min_win`, which is correct: nothing lost, so
+    /// nothing subtracts. Zero wins makes it negative, which is also correct.
+    ///
+    /// Saturates rather than wrapping. The product is taken in `i128` because
+    /// `wins` and `min_win` are each free to be large, and a wrapped floor would
+    /// report a losing variant as the best one in the grid.
+    #[must_use]
+    pub fn guaranteed_floor(&self) -> i64 {
+        let losses = self.trades.saturating_sub(self.wins);
+        // `max(0)` and not an `abs`: a non-negative `worst_trade` means nothing
+        // lost, and a "loss" of zero must subtract zero rather than adding.
+        let worst_loss = self.worst_trade.saturating_neg().max(0);
+        let gain = i128::from(self.wins).saturating_mul(i128::from(self.min_win));
+        let pain = i128::from(losses).saturating_mul(i128::from(worst_loss));
+        let net = gain.saturating_sub(pain);
+        i64::try_from(net).unwrap_or(if net.is_positive() {
+            i64::MAX
+        } else {
+            i64::MIN
+        })
+    }
+
+    /// Whether this variant clears BOTH halves of a stated bound.
+    ///
+    /// `min_win_rate_bp` and `min_rr_bp` are both hundredths, matching
+    /// [`Self::win_rate_bp`] and [`Self::reward_to_risk_bp`]: a 50% win rate is
+    /// `5_000` and a 1.25 reward-to-risk is `125`.
+    ///
+    /// # Why `wins > 0` is a separate clause and not an implication
+    ///
+    /// A variant with no winners has `min_win` of zero, so its ratio is zero and
+    /// it fails any positive `min_rr_bp` — but a caller passing `min_rr_bp` of 0
+    /// would admit it, and "no winners" is never what an operator means by a
+    /// cleared bound. The clause makes that independent of the thresholds.
+    ///
+    /// `trades > 0` likewise: [`Self::win_rate_bp`] returns 0 on an empty cell,
+    /// which would pass a `min_win_rate_bp` of 0.
+    #[must_use]
+    pub const fn clears(&self, min_win_rate_bp: i64, min_rr_bp: i64) -> bool {
+        self.trades > 0
+            && self.wins > 0
+            && self.win_rate_bp() >= min_win_rate_bp
+            && self.reward_to_risk_bp() >= min_rr_bp
+    }
+
     /// What a winner ran, over what **every** trade cost in adverse excursion.
     ///
     /// The precision of the setup as a single number, in hundredths — integers
@@ -979,6 +1054,54 @@ impl Grid {
             .iter()
             .filter(|c| c.wins > 0 && c.trades >= min_trades)
             .max_by_key(|c| (c.reward_to_risk_bp(), c.trades, c.pessimistic, merit(c)))
+    }
+
+    /// The variant with the largest guaranteed floor, among those clearing the
+    /// stated bound.
+    ///
+    /// # The whole search, in one call
+    ///
+    /// Every exit setting is a candidate here, INCLUDING the one with no stop,
+    /// no target, no trailing stop and no trailing take-profit — that is
+    /// [`Self::baseline`]'s cell, and it competes on the same key as the rest. A
+    /// combination whose best answer is "hold to the time exit and place
+    /// nothing" is a real answer, and a search that could not return it would be
+    /// choosing the shape of the result in advance.
+    ///
+    /// # Why the ranking key is the floor rather than the total
+    ///
+    /// [`Self::best`] maximises [`Cell::pessimistic`] — the total that actually
+    /// occurred under worst-case fills. That is the right number to REPORT and
+    /// the wrong one to rank a bound on, because it is order-dependent in a way
+    /// the operator's rule is not: two variants with identical wins, losses and
+    /// extremes can differ in `pessimistic` purely by which trades happened to
+    /// be which. [`Cell::guaranteed_floor`] cannot be moved by re-ordering the
+    /// same trades, so ranking on it ranks the property rather than the sample's
+    /// arrangement of it.
+    ///
+    /// Ties break on `pessimistic`, then `merit`, so where two variants floor
+    /// identically the one that actually made more money wins — and a
+    /// constrained search agrees with [`Self::best`] wherever the bound does not
+    /// bind.
+    ///
+    /// `min_trades` is required for the reason [`Self::by_reward_to_risk`]
+    /// gives: without it a two-trade cell that never lost clears every bound and
+    /// floors above every tested one.
+    ///
+    /// `None` when no variant clears — which is a finding ABOUT THE COMBINATION,
+    /// not a gap in the grid, and the caller must say so rather than falling
+    /// back to [`Self::best`].
+    #[must_use]
+    pub fn best_clearing(
+        &self,
+        min_trades: u64,
+        min_win_rate_bp: i64,
+        min_rr_bp: i64,
+    ) -> Option<&Cell> {
+        self.cells
+            .iter()
+            .filter(|c| c.trades >= min_trades && c.clears(min_win_rate_bp, min_rr_bp))
+            .max_by_key(|c| (c.guaranteed_floor(), c.pessimistic, merit(c)))
     }
 }
 
@@ -3338,6 +3461,226 @@ mod tests {
     /// differ only in the way the loophole exploited. Running a real grid and
     /// asserting which variant won would test the market fixture as much as the
     /// metric, and would pass or fail for reasons this test is not about.
+    /// The operator's own worked example, reproduced exactly.
+    ///
+    /// *"If 1000 trades, 500 win, 500 loss, if the max stop loss is 1 ratio,
+    /// then our minimum winning ratio should be minimum 1.25."*
+    #[test]
+    fn the_operators_thousand_trade_example_floors_above_zero() {
+        // Largest loss ₹1.00, smallest win ₹1.25, half the trades win.
+        let c = Cell {
+            trades: 1_000,
+            wins: 500,
+            min_win: 125,
+            worst_trade: -100,
+            ..Cell::default()
+        };
+
+        assert_eq!(c.win_rate_bp(), 5_000, "50.00%, in hundredths");
+        assert_eq!(c.reward_to_risk_bp(), 125, "1.25, in hundredths");
+
+        // 500 x 125 - 500 x 100 = 62,500 - 50,000.
+        assert_eq!(
+            c.guaranteed_floor(),
+            12_500,
+            "even with every winner at its smallest and every loser at its \
+             largest, the sample makes 12,500 paisa"
+        );
+        assert!(
+            c.clears(5_000, 125),
+            "and it clears the bound it was built to sit exactly on"
+        );
+
+        // THE BOUND IS TIGHT ON BOTH SIDES. One hundredth under either
+        // threshold and the same cell fails, so neither clause is decoration.
+        assert!(!c.clears(5_001, 125), "a hair more win rate and it fails");
+        assert!(!c.clears(5_000, 126), "a hair more ratio and it fails");
+
+        // AND THE FLOOR CROSSES ZERO EXACTLY WHERE THE RATIO REACHES 1.00.
+        let level = Cell { min_win: 100, ..c };
+        assert_eq!(level.reward_to_risk_bp(), 100, "1.00");
+        assert_eq!(
+            level.guaranteed_floor(),
+            0,
+            "at 50% and 1:1 the worst arrangement breaks exactly even -- which \
+             is why the operator's margin is 1.25 and not 1.00"
+        );
+    }
+
+    /// The floor is defined at both edges of the loss distribution, and it
+    /// saturates rather than wrapping.
+    #[test]
+    fn the_guaranteed_floor_handles_no_losers_no_winners_and_overflow() {
+        // NOTHING LOST. Nothing subtracts, so the floor is the whole gain.
+        let unbeaten = Cell {
+            trades: 10,
+            wins: 10,
+            min_win: 700,
+            worst_trade: 0,
+            ..Cell::default()
+        };
+        assert_eq!(unbeaten.guaranteed_floor(), 7_000);
+
+        // A POSITIVE `worst_trade` IS STILL NOT A LOSS. `max(0)` must stop it
+        // being subtracted as a negative and ADDING to the floor.
+        let all_up = Cell {
+            worst_trade: 500,
+            ..unbeaten
+        };
+        assert_eq!(
+            all_up.guaranteed_floor(),
+            7_000,
+            "a non-negative worst trade subtracts nothing, it does not add"
+        );
+
+        // NOTHING WON. Every trade is a loser at the worst size.
+        let routed = Cell {
+            trades: 8,
+            wins: 0,
+            min_win: 0,
+            worst_trade: -250,
+            ..Cell::default()
+        };
+        assert_eq!(routed.guaranteed_floor(), -2_000);
+        assert!(
+            !routed.clears(0, 0),
+            "a cell with no winners must fail even a bound of zero and zero -- \
+             that is what the `wins > 0` clause is for"
+        );
+
+        // SATURATION, NOT WRAPPING. Unreachable from any real slice, and the
+        // fields are public so it is reachable from here -- which is the point:
+        // a wrapped floor would report a ruinous variant as the best in the grid.
+        let vast = Cell {
+            trades: u64::MAX,
+            wins: u64::MAX,
+            min_win: i64::MAX,
+            worst_trade: 0,
+            ..Cell::default()
+        };
+        assert_eq!(vast.guaranteed_floor(), i64::MAX, "saturates high");
+        let ruinous = Cell {
+            trades: u64::MAX,
+            wins: 0,
+            min_win: 0,
+            worst_trade: i64::MIN + 1,
+            ..Cell::default()
+        };
+        assert_eq!(ruinous.guaranteed_floor(), i64::MIN, "and saturates low");
+    }
+
+    /// The bound must be able to return the variant with NO stop, no target and
+    /// no trailing anything, because that is sometimes the answer.
+    #[test]
+    fn the_bound_ranks_the_no_exit_variant_alongside_every_other() {
+        // NO STOP, NO TARGET, NO TRAIL -- the time-exit baseline. It clears the
+        // bound comfortably.
+        let bare = Cell {
+            trades: 200,
+            wins: 120,
+            min_win: 400,
+            worst_trade: -200,
+            pessimistic: 30_000,
+            stop: None,
+            target: None,
+            tsl: None,
+            ttp: None,
+            ..Cell::default()
+        };
+        // A STOPPED VARIANT that makes far more money and does NOT clear: its
+        // smallest winner is under its largest loser.
+        let stopped = Cell {
+            trades: 200,
+            wins: 120,
+            min_win: 150,
+            worst_trade: -900,
+            pessimistic: 900_000,
+            stop: Some(2),
+            ..Cell::default()
+        };
+
+        let g = Grid {
+            cells: vec![stopped, bare],
+            ..Grid::default()
+        };
+
+        assert_eq!(
+            g.baseline().map(|c| c.pessimistic),
+            Some(30_000),
+            "the no-exit cell must be findable as the baseline"
+        );
+        assert_eq!(
+            g.best().map(|c| c.pessimistic),
+            Some(900_000),
+            "and `best` must still take the bigger total"
+        );
+        assert_eq!(
+            g.best_clearing(50, 5_000, 125).map(|c| c.pessimistic),
+            Some(30_000),
+            "the bound must return the NO-EXIT variant, because it is the one \
+             that clears -- a search that could not return it would be choosing \
+             the answer's shape in advance"
+        );
+    }
+
+    /// No variant clearing is a finding about the combination, and the floor
+    /// decides ties before the total does.
+    #[test]
+    fn nothing_clearing_is_none_and_the_floor_outranks_the_total() {
+        let short = Cell {
+            trades: 5,
+            wins: 4,
+            min_win: 900,
+            worst_trade: -100,
+            ..Cell::default()
+        };
+        let g = Grid {
+            cells: vec![short],
+            ..Grid::default()
+        };
+        assert!(
+            short.clears(5_000, 125),
+            "the cell clears on the RATIOS -- only the trade floor excludes it"
+        );
+        assert_eq!(
+            g.best_clearing(50, 5_000, 125),
+            None,
+            "and too few trades must refuse rather than fall back to `best`"
+        );
+
+        // TWO CLEARING CELLS. The one with the smaller total has the higher
+        // floor, because its losses are capped tighter.
+        let steady = Cell {
+            trades: 100,
+            wins: 60,
+            min_win: 500,
+            worst_trade: -100,
+            pessimistic: 40_000,
+            ..Cell::default()
+        };
+        let swingy = Cell {
+            trades: 100,
+            wins: 60,
+            min_win: 500,
+            worst_trade: -390,
+            pessimistic: 90_000,
+            ..Cell::default()
+        };
+        // steady: 60x500 - 40x100 = 26,000. swingy: 60x500 - 40x390 = 14,400.
+        assert_eq!(steady.guaranteed_floor(), 26_000);
+        assert_eq!(swingy.guaranteed_floor(), 14_400);
+        let g2 = Grid {
+            cells: vec![swingy, steady],
+            ..Grid::default()
+        };
+        assert_eq!(
+            g2.best_clearing(50, 5_000, 125).map(|c| c.pessimistic),
+            Some(40_000),
+            "the higher FLOOR wins even though the other made more money, \
+             because the floor cannot be moved by re-ordering the same trades"
+        );
+    }
+
     /// The operator's rule picks a DIFFERENT cell than the total does, and the
     /// gap between them is the whole reason the selector exists.
     ///
