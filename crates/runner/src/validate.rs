@@ -47,6 +47,7 @@
 use indicators::Candle;
 use indicators::column::Column;
 use indicators::evaluator::Evaluator;
+use rayon::prelude::*;
 use vocab::ConditionMask;
 
 use crate::outcome::Horizon;
@@ -688,46 +689,90 @@ pub fn walk_forward_shaped(
         // `DEFAULT_RUNGS` = 4, so 32 bytes; the element grows from 56 to 184
         // bytes inline. `scored` is scoped to the fold body and dropped with it,
         // so this is a bounded per-fold cost and not unbounded growth.
-        let mut scored: Vec<(ConditionMask, i64, ExitPick)> = Vec::with_capacity(closed.kept.len());
-        let mut priced: u64 = 0;
-        for item in &closed.kept {
-            priced = priced.saturating_add(1);
-            let g = crate::grid::evaluate(
-                train,
-                &train_column,
-                &item.mask,
-                horizon,
-                side_of(direction),
-                crate::grid::Levels::derived(DEFAULT_RUNGS),
-            );
-            let Some(cell) = g.sharpest().or_else(|| g.best()) else {
-                continue;
-            };
-            if cell.trades == 0 {
-                continue;
-            }
-            let s = Summary::of(&walk(train, &train_column, &item.mask, horizon, direction));
-            // The pick is built ONCE and used twice: by the out-of-sample pass,
-            // so it can apply this candidate's TRAINING exit to the test bars,
-            // and by the fold's own winner. Built before the `best` comparison
-            // so both see the same value, and cloned only into `best`, which
-            // improves a handful of times per fold rather than once per
-            // candidate — see the ordering note below.
-            let pick = ExitPick {
-                rungs: crate::grid::Chosen {
-                    stop: cell.stop,
-                    target: cell.target,
-                    tsl: cell.tsl,
-                    ttp: cell.ttp,
-                },
-                pessimistic: cell.pessimistic,
-                stops: g.stops.clone(),
-                targets: g.targets.clone(),
-                trails: g.trails.clone(),
-            };
-            let improves = best
-                .as_ref()
-                .is_none_or(|(_, _, held)| cell.pessimistic > held.pessimistic);
+        // ACROSS EVERY CORE, BECAUSE THIS IS THE LOOP THAT OWNS THE WALL CLOCK.
+        //
+        // This was a sequential `for`, and it is the dominant term of a whole
+        // run: `closed.kept` is UNCAPPED by design (see the note above, where a
+        // second cap was deliberately removed), each iteration prices a full
+        // exit grid over the training bars AND walks them again for the summary,
+        // and the enclosing walk-forward runs it once per fold per shape -- ten
+        // times per rung. Measured on the operator's 2026-08-28 run: after the
+        // parallel Apriori phase finished, the process fell from ~1180% CPU to
+        // ~240% and stayed there for hours. Thirteen of fourteen cores idle,
+        // inside the stage that was doing all the work.
+        //
+        // The body is pure per item: `evaluate` and `walk` read `train` and
+        // `train_column` immutably and share nothing. The only sequential
+        // dependencies were `best` and `priced`, and neither needs to be inside
+        // the loop -- `priced` is a count, and `best` is a fold over results
+        // that is trivial beside the pricing it compares.
+        //
+        // DETERMINISM (CLAUDE.md S3 rule 5) IS HELD BY SHAPE, the same argument
+        // `rank::walk` and `batch::sweep_under` already make: rayon's INDEXED
+        // `collect` preserves order, so `scored` is the identical sequence
+        // whatever order the threads finish in. `best` is then chosen by
+        // scanning that ordered vector with the same strict `>` the sequential
+        // version used, so ties resolve to the same earliest candidate and the
+        // winner is the same mask. Byte-identical output, on any core count.
+        let assessed: Vec<Option<(ConditionMask, Summary, ExitPick, i64)>> = closed
+            .kept
+            .par_iter()
+            .map(|item| {
+                let g = crate::grid::evaluate(
+                    train,
+                    &train_column,
+                    &item.mask,
+                    horizon,
+                    side_of(direction),
+                    crate::grid::Levels::derived(DEFAULT_RUNGS),
+                );
+                let cell = g.sharpest().or_else(|| g.best())?;
+                if cell.trades == 0 {
+                    return None;
+                }
+                let s = Summary::of(&walk(train, &train_column, &item.mask, horizon, direction));
+                // The pick is built ONCE and used twice: by the out-of-sample pass,
+                // so it can apply this candidate's TRAINING exit to the test bars,
+                // and by the fold's own winner. Built before the `best` comparison
+                // so both see the same value, and cloned only into `best`, which
+                // improves a handful of times per fold rather than once per
+                // candidate — see the ordering note below.
+                let pick = ExitPick {
+                    rungs: crate::grid::Chosen {
+                        stop: cell.stop,
+                        target: cell.target,
+                        tsl: cell.tsl,
+                        ttp: cell.ttp,
+                    },
+                    pessimistic: cell.pessimistic,
+                    stops: g.stops.clone(),
+                    targets: g.targets.clone(),
+                    trails: g.trails.clone(),
+                };
+                Some((item.mask, s, pick, cell.pessimistic))
+            })
+            .collect();
+
+        // ONE CLONE PER IMPROVEMENT, NOT ONE PER CANDIDATE -- the property the
+        // sequential version's comment was protecting, kept.
+        //
+        // `best` and the row `scored` holds are still ONE value: the pick is
+        // constructed once above and cloned only when it improves, which happens
+        // a handful of times per fold rather than once per candidate. At the
+        // 11,013-candidate fold this module records that is thousands of heap
+        // allocations saved, and the fold's winner still cannot disagree with
+        // its entry in the ranked vector about the chosen rungs.
+        //
+        // Scanned in the collected order with the same strict `>`, so a tie
+        // resolves to the earliest candidate exactly as it did sequentially.
+        let mut scored: Vec<(ConditionMask, i64, ExitPick)> = Vec::with_capacity(assessed.len());
+        let priced: u64 = u64::try_from(closed.kept.len()).unwrap_or(u64::MAX);
+        for (mask, s, pick, pessimistic) in assessed.into_iter().flatten() {
+            let improves =
+                best.as_ref()
+                    .is_none_or(|(_, _, held): &(ConditionMask, Summary, ExitPick)| {
+                        pessimistic > held.pessimistic
+                    });
             if improves {
                 // CLONED ONLY WHERE A SECOND COPY IS ACTUALLY NEEDED, which is
                 // here and not below.
@@ -745,9 +790,9 @@ pub fn walk_forward_shaped(
                 // its entry in the ranked vector cannot disagree about the
                 // chosen rungs. The clone that survives is the rare one — `best`
                 // improves a handful of times per fold, not once per candidate.
-                best = Some((item.mask, s, pick.clone()));
+                best = Some((mask, s, pick.clone()));
             }
-            scored.push((item.mask, cell.pessimistic, pick));
+            scored.push((mask, pessimistic, pick));
         }
 
         // The exit came out of the SAME evaluation that chose the combination,
