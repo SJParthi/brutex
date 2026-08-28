@@ -5291,6 +5291,22 @@ const fn assurance_floor_bp(min_win_rate_bp: i64) -> i64 {
 
     // A stated rate below chance is not a standard this bound can sharpen, so
     // the caller's own figure stands rather than being quietly raised.
+    //
+    // AT EXACTLY CHANCE THIS RETURNS AN UNSATISFIABLE PAIR, and the caller
+    // cannot tell. `(5_000, 5_000)` asks the 95% lower bound on a rate to reach
+    // the rate itself; the Wilson bound approaches from BELOW and never
+    // arrives, so `grid::trades_needed_for` exhausts its search and returns
+    // `TRADES_SEARCH_CEILING` — a number indistinguishable from an honest
+    // answer of "five thousand round trips".
+    //
+    // That is the arithmetic being right about something uncomfortable: "at
+    // least 50% of trades win" IS the null hypothesis of a coin flip and
+    // carries no evidence on its own. It matters because the operator's stated
+    // rule has a 50% leg, so anyone wiring that rule into `Rules::elite` will
+    // land here and silently get the ceiling as their support floor. The
+    // discriminating half of that rule is the reward-to-risk leg, not this one.
+    // Pinned by
+    // `the_support_floor_is_twenty_nine_trades_and_a_fifty_percent_rule_is_untestable`.
     if min_win_rate_bp <= CHANCE {
         return min_win_rate_bp;
     }
@@ -10698,6 +10714,79 @@ mod tests {
 
     /// Turning the rule off restores the old behaviour exactly.
     ///
+    /// The support floor lands where it does, and a 50% rule cannot be tested.
+    ///
+    /// # The number that sizes every browser sweep
+    ///
+    /// `sweeprun::conduct` passes `None`, so each rung derives its floor through
+    /// [`statistical_support_floor`] → `Rules::elite(1, 1)` →
+    /// `trades_needed_for(8_000, assurance_floor_bp(8_000), TRADES_SEARCH_CEILING)`.
+    /// That is **29 round trips**, pinned below. Measured against the operator's
+    /// own run of 2026-08-28: all eight rungs were handed `min_hits: 28` — 29
+    /// less the one trade the ppm round trip truncates away — which on the
+    /// 1-minute rung's 617,921 bars is 0.0045% support. `docs/05-decisions.md`
+    /// D-0258 records 4.7% as the deepest support ever measured to COMPLETE, so
+    /// this floor is three orders of magnitude below anything observed to
+    /// finish. Whoever changes `Rules::elite` moves this number, and it decides
+    /// whether a run ends.
+    ///
+    /// # Why the operator's 50% cannot simply be substituted
+    ///
+    /// The second row is the trap. [`assurance_floor_bp`] returns the caller's
+    /// own figure when it is at or below chance — deliberately, so a rate under
+    /// a coin flip is not quietly raised — which at exactly 5,000 makes the pair
+    /// `(5_000, 5_000)`: demand that the 95% LOWER BOUND on the rate reach the
+    /// rate itself. The Wilson bound approaches the observed rate FROM BELOW and
+    /// never arrives, so no sample size satisfies it and `trades_needed_for`
+    /// returns its ceiling — indistinguishable, to its caller, from an honest
+    /// answer of "five thousand trades".
+    ///
+    /// That is not a bug in the arithmetic. It is the arithmetic reporting that
+    /// **"at least 50% of trades win" is exactly the null hypothesis of a coin
+    /// flip**, and carries no evidence on its own. The discriminating half of
+    /// the operator's rule is the other one — smallest win at least 1.25x the
+    /// largest loss — which `grid::Cell::reward_to_risk_bp` already computes as
+    /// a true min/max. Any future wiring of that rule must size the search from
+    /// something satisfiable; the rows between show what a bound set below the
+    /// stated rate actually costs.
+    #[test]
+    fn the_support_floor_is_twenty_nine_trades_and_a_fifty_percent_rule_is_untestable() {
+        let cases = [
+            // (win rate bp, assurance bp, trades needed)
+            (8_000_i64, crate::assurance_floor_bp(8_000), 29_u64),
+            (
+                5_000,
+                crate::assurance_floor_bp(5_000),
+                crate::TRADES_SEARCH_CEILING,
+            ),
+            (5_000, 4_000, 83),
+            (5_000, 4_500, 361),
+            (6_000, 5_500, 352),
+        ];
+        for (rate, assurance, want) in cases {
+            let got =
+                runner::grid::trades_needed_for(rate, assurance, crate::TRADES_SEARCH_CEILING);
+            assert_eq!(
+                got, want,
+                "rate {rate}bp against a bound of {assurance}bp needs {want} \
+                 round trips, not {got}"
+            );
+        }
+
+        assert_eq!(
+            crate::assurance_floor_bp(5_000),
+            5_000,
+            "at chance the bound equals the rate, which is what makes it \
+             unsatisfiable -- see this test's doc"
+        );
+        assert_eq!(
+            runner::grid::trades_needed_for(5_000, 5_000, crate::TRADES_SEARCH_CEILING),
+            crate::TRADES_SEARCH_CEILING,
+            "an unsatisfiable pair returns the CEILING, and its caller cannot \
+             tell that from a real answer of five thousand"
+        );
+    }
+
     /// Asserted because every other rule in [`Rules`] documents "zero drops the
     /// rule", and a rule that quietly kept filtering at zero would disqualify
     /// rows an operator had explicitly stopped asking about.
