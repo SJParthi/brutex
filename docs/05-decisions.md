@@ -26001,3 +26001,45 @@ beside the id and the width follows the underlying's own type. No extra lookup.
 the literal written whole appeared in the assertion and the test failed against
 correct code. The needle is built with `concat!`, which joins at compile time
 while the source text carries a quote-comma the joined form does not.
+
+### D-0350
+
+**The expiry resolver re-spelled the vendor's own lists, so a row that grew was
+paid for and then dropped.**
+
+`rolling::expiry_of` held two copies of `RollingSpec`'s tables, written where no
+row could reach them:
+
+```text
+let steps: u8 = match code { "1" => 1, "2" => 2, "3" => 3, _ => refuse };
+let next = match flag { "WEEK" => …, "MONTH" => …, _ => refuse };
+```
+
+`server.rs` celebrates reading the DEPTH from the row — *"A vendor that serves
+four gets four the day its row says so, with no edit in this file"* — and it is
+right about the loop. But a `"4"` added to `expiry_codes` was iterated, built
+into a request, **sent, charged against the vendor's ceiling, and answered**
+before reaching that `_` arm. The row said four; the resolver said three; the
+difference was spent.
+
+**The ordinal is now the code's POSITION in the row.** `expiry_codes` is ordered
+near-to-far by its own doc, so the first is one step and the second is two. A
+code the row does not name is still refused — but that refusal can no longer
+disagree with what the driver iterated.
+
+**The cadence is a PAIR in the descriptor**, `("WEEK", Weekly)` and
+`("MONTH", Monthly)`, because the wire word and the calendar rule are two
+independent facts: `costs::expiry` has exactly two series, and a vendor spelling
+its weekly `W` or `WEEKLY` names the same one. The `match` inside the loop is now
+over `ExpiryCadence` rather than over a spelling, so it is **exhaustive** — a
+third cadence stops the build instead of failing after a request is paid for.
+
+The driver takes the first half of each pair and is otherwise unchanged, which
+is what `RollingSpec`'s own doc has always promised: *"a third vendor edits no
+driver."*
+
+**Threading the spec touched seven signatures**, and one of them is worth
+recording: a broad `sed` on `code: &'static str,` added the parameter to five
+functions rather than one, and four of those already had it. Caught by the
+compiler in the same pass rather than left in the tree — the lesson from the
+build that went red mid-edit two entries ago.

@@ -9578,7 +9578,7 @@ async fn roll_one(
     // The ANSWER is not kept, because one expiry cannot name a rolling answer —
     // see the split below. This asks whether the regime exists, not what it
     // resolves to.
-    pull::rolling::expiry_of(asked.underlying.as_str(), flag, code, window.to())
+    pull::rolling::expiry_of(asked.underlying.as_str(), &rolling, flag, code, window.to())
         .map_err(|why| format!("{label}: {why}"))?;
 
     // THE VENDOR'S WORD FOR THE RUNG, NOT THE STORE'S — and this sent the
@@ -9650,8 +9650,9 @@ async fn roll_one(
     // order and a contract's life is contiguous within them, so a run of equal
     // keys is a contract. One pass, no allocation per group beyond the bars it
     // actually files, and no hashing — `docs/07-o1-architecture.md` law 3.
-    let key_at =
-        |row: &pull::rolling::Row| rolling_key(row, asked.underlying.as_str(), flag, code, &label);
+    let key_at = |row: &pull::rolling::Row| {
+        rolling_key(row, asked.underlying.as_str(), flag, code, &rolling, &label)
+    };
 
     let mut total = 0usize;
     let mut declined = 0usize;
@@ -10740,6 +10741,7 @@ fn rolling_key(
     underlying: &str,
     flag: &'static str,
     code: &'static str,
+    rolling: &pull::vendor::RollingSpec,
     label: &str,
 ) -> Result<(Day, i64), String> {
     let day = crate::autopilot::day_of(row.bar.ts_micros)
@@ -10747,7 +10749,7 @@ fn rolling_key(
     // THE EXPIRY FOR THIS BAR'S OWN DAY. `expiry_of` answers "the Nth expiry on
     // or after this day", which is exactly the question the vendor answered
     // minute by minute.
-    let expiry = pull::rolling::expiry_of(underlying, flag, code, day)
+    let expiry = pull::rolling::expiry_of(underlying, &rolling, flag, code, day)
         .map_err(|why| format!("{label}: {why}"))?;
     let strike = row.strike.ok_or_else(|| {
         format!(
@@ -10973,11 +10975,15 @@ async fn roll_every(
     // with "this weekly was withdrawn for that slot, so no contract existed".
     // For a BANKNIFTY window in 2026 that is HALF of every request this walk
     // makes, spent to learn something the repository already knew.
+    // THE WIRE WORD IS WHAT THE WALK CARRIES; the calendar rule beside it is
+    // `rolling::expiry_of`'s to use, so this takes the first half of each pair
+    // and the driver is unchanged by a vendor that spells its cadences
+    // differently. D-0350.
     let cadences: Vec<&'static str> = rolling
         .expiry_flags
         .iter()
-        .copied()
-        .filter(|flag| cadence_has_contracts(asked, flag))
+        .map(|(word, _)| *word)
+        .filter(|flag| cadence_has_contracts(asked, &rolling, flag))
         .collect();
     let planned = planned_rolling_requests(cadences.len(), rolling, offsets.len(), chunks.len());
     say_walk_starting(
@@ -11036,7 +11042,7 @@ async fn roll_every(
                         // PER CHUNK. Before the budget is charged and before a
                         // socket is opened: a cadence with no contracts in this
                         // slice is not a request worth a permit.
-                        if !cadence_has_contracts_on(asked, flag, chunk.from()) {
+                        if !cadence_has_contracts_on(asked, &rolling, flag, chunk.from()) {
                             continue;
                         }
                         // THE GOVERNOR BEFORE EACH ONE. A month is 252 requests
@@ -11122,8 +11128,12 @@ async fn roll_every(
 /// # Cost
 ///
 /// One table lookup per cadence per walk — twice, not twice per request.
-fn cadence_has_contracts(asked: &ingest::FnoRequest, flag: &str) -> bool {
-    cadence_has_contracts_on(asked, flag, asked.window.from())
+fn cadence_has_contracts(
+    asked: &ingest::FnoRequest,
+    rolling: &pull::vendor::RollingSpec,
+    flag: &str,
+) -> bool {
+    cadence_has_contracts_on(asked, rolling, flag, asked.window.from())
 }
 
 /// The same question asked of ONE DAY, which is the granularity the rule needs.
@@ -11146,10 +11156,11 @@ fn cadence_has_contracts(asked: &ingest::FnoRequest, flag: &str) -> bool {
 /// cheaper than the thing it prevents.
 fn cadence_has_contracts_on(
     asked: &ingest::FnoRequest,
+    rolling: &pull::vendor::RollingSpec,
     flag: &str,
     on: pull::session::Day,
 ) -> bool {
-    pull::rolling::expiry_of(asked.underlying.as_str(), flag, "1", on).is_ok()
+    pull::rolling::expiry_of(asked.underlying.as_str(), &rolling, flag, "1", on).is_ok()
 }
 
 /// How many vendor requests this walk will make, before it makes any of them.
@@ -13912,6 +13923,21 @@ mod tests {
     /// would look identical. The second pins that monthlies ARE asked for, and
     /// the third pins the BOUNDARY: the same underlying, the same cadence, a
     /// day before the withdrawal, and the answer flips. That is what makes this
+    /// Dhan's rolling row, for the tests that need a spec to resolve a cadence.
+    ///
+    /// The shipped descriptor rather than an invented one: the point of
+    /// `expiry_flags` carrying its cadence is that the ROW decides, so a test
+    /// making up its own pairing would be testing the fixture.
+    fn dhan_rolling() -> pull::vendor::RollingSpec {
+        match pull::vendor::Feed::Dhan.descriptor().transport {
+            pull::vendor::Transport::Http(spec) => spec
+                .fno
+                .by_offset()
+                .expect("Dhan is addressed by strike offset"),
+            pull::vendor::Transport::LocalArchive(_) => panic!("this feed is HTTP"),
+        }
+    }
+
     /// a test of the dated table rather than of a constant.
     #[test]
     fn a_cadence_whose_contracts_were_withdrawn_is_never_asked_for() {
@@ -13924,11 +13950,11 @@ mod tests {
 
         // WITHDRAWN AFTER 2024-11-13, a cited fact in `costs::expiry`.
         assert!(
-            !cadence_has_contracts_on(&asked, "WEEK", asked.window.from()),
+            !cadence_has_contracts_on(&asked, &dhan_rolling(), "WEEK", asked.window.from()),
             "BANKNIFTY had no weekly contracts in 2026, so none may be asked for"
         );
         assert!(
-            cadence_has_contracts_on(&asked, "MONTH", asked.window.from()),
+            cadence_has_contracts_on(&asked, &dhan_rolling(), "MONTH", asked.window.from()),
             "monthlies never stopped — without this the assertion above would \
              pass for a walk that asked for nothing at all"
         );
@@ -13937,7 +13963,7 @@ mod tests {
         // cadence, a day on the other side of the withdrawal.
         let before = pull::session::Day::new(2024, 6, 1).expect("a real date");
         assert!(
-            cadence_has_contracts_on(&asked, "WEEK", before),
+            cadence_has_contracts_on(&asked, &dhan_rolling(), "WEEK", before),
             "weeklies existed before 2024-11-13, so this is a dated table and \
              not a constant that always refuses WEEK"
         );

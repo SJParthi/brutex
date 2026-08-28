@@ -2486,6 +2486,21 @@ pub enum Pooling {
     PerRequestKind,
 }
 
+/// Which of `costs::expiry`'s two series a cadence follows.
+///
+/// An enum rather than the vendor's word, because the word is what goes on the
+/// WIRE and this is what answers it. A vendor spelling its weekly `W` or
+/// `WEEKLY` names the same calendar rule, and a driver matching on the SPELLING
+/// would refuse it after the request had already been paid for. D-0350.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ExpiryCadence {
+    /// The weekly series. May be WITHDRAWN for a slot, which is a refusal and
+    /// not an empty answer — see `costs::expiry::next_weekly_expiry`.
+    Weekly,
+    /// The monthly series.
+    Monthly,
+}
+
 /// ADDRESSING AN EXPIRED CONTRACT BY ITS DISTANCE FROM THE MONEY.
 ///
 /// # Why this exists beside [`FnoDiscovery`] rather than instead of it
@@ -2574,7 +2589,20 @@ pub struct RollingSpec {
     /// cadence and an ordinal within it. A driver that assumed one cadence
     /// would silently fetch only the weeklies of an index that also has
     /// monthlies, and report a complete month.
-    pub expiry_flags: &'static [&'static str],
+    /// Each cadence's wire word paired with the calendar rule it follows.
+    ///
+    /// # Why a pair, and not the word alone
+    ///
+    /// The word is what goes on the wire; the RULE is which of
+    /// `costs::expiry`'s two series answers it, and neither is derivable from
+    /// the other. `rolling::expiry_of` used to re-spell the mapping in a
+    /// `match` on `"WEEK"` and `"MONTH"` — so a vendor row naming a third
+    /// cadence would have been iterated, built into a request, **paid for out
+    /// of the vendor's ceiling, answered**, and only then dropped at that
+    /// match's `_` arm as `NoExpiry`. The cost is spent before the refusal.
+    ///
+    /// This type's own doc promises a third vendor "edits no driver". D-0350.
+    pub expiry_flags: &'static [(&'static str, ExpiryCadence)],
     /// The expiry ordinals within a cadence — Dhan `1` near, `2` next, `3` far.
     ///
     /// Three, not "all of them": the vendor answers a fixed depth, and asking
@@ -4181,7 +4209,10 @@ const DHAN_ROLLING: RollingSpec = RollingSpec {
     sides: &[("CALL", "ce"), ("PUT", "pe")],
     // BOTH CADENCES. An index carries weeklies AND monthlies, and a driver
     // that walked one would report a whole month while holding half of it.
-    expiry_flags: &["WEEK", "MONTH"],
+    expiry_flags: &[
+        ("WEEK", ExpiryCadence::Weekly),
+        ("MONTH", ExpiryCadence::Monthly),
+    ],
     // `docs/14-expired-options-data.md`: 1=Near, 2=Next, 3=Far. A fourth is a
     // request the vendor answers with nothing.
     expiry_codes: &["1", "2", "3"],

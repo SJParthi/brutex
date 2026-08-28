@@ -90,10 +90,22 @@ use store::format::{Bar, OI_NULL, Overlay};
 /// measurement, however sound it is.
 pub fn expiry_of(
     underlying: &str,
+    spec: &RollingSpec,
     flag: &str,
     code: &str,
     on: crate::session::Day,
 ) -> Result<brutex_core::instrument::Expiry, RollingError> {
+    // THE CADENCE THE ROW NAMES, RESOLVED ONCE AND BEFORE THE WALK. Two
+    // comparisons against a fixed table — constant work, and a flag the row
+    // does not carry is refused here rather than inside the loop.
+    let cadence = spec
+        .expiry_flags
+        .iter()
+        .find(|(word, _)| *word == flag)
+        .map(|(_, cadence)| *cadence)
+        .ok_or(RollingError::NoExpiry {
+            why: "the expiry cadence is not one this vendor serves",
+        })?;
     let symbol =
         brutex_core::symbol::Symbol::new(underlying).map_err(|_| RollingError::NoExpiry {
             why: "the underlying is not a symbol this build knows",
@@ -107,41 +119,48 @@ pub fn expiry_of(
         }
     })?;
 
-    // THE ORDINAL IS WALKED, NOT INDEXED. "Next" is "the one after near", and
-    // the calendar answers only "the next on or after this day" — so stepping
-    // is the honest way to reach the second and the third, and a step that
-    // finds nothing is a refusal rather than a guess.
-    let steps: u8 = match code {
-        "1" => 1,
-        "2" => 2,
-        "3" => 3,
-        _ => {
-            return Err(RollingError::NoExpiry {
-                why: "the expiry ordinal is not one this vendor serves",
-            });
-        }
-    };
+    // THE ORDINAL IS THE CODE'S POSITION IN THE ROW, NOT A SECOND SPELLING OF
+    // IT.
+    //
+    // This was `match code { "1" => 1, "2" => 2, "3" => 3, _ => refuse }`, a
+    // copy of `RollingSpec::expiry_codes` written where no row can reach it.
+    // `server.rs` celebrates reading the DEPTH from the row — *"A vendor that
+    // serves four gets four the day its row says so, with no edit in this
+    // file"* — and a `"4"` added there reached this `_` arm **after** the
+    // request had been built, sent, paid for out of the vendor's ceiling and
+    // answered. The row said four; the resolver said three; the difference was
+    // spent.
+    //
+    // Position is the honest reading: `expiry_codes` is ordered near-to-far by
+    // its own doc, so the first is one step, the second is two. A code the row
+    // does not name is refused, and now that refusal cannot disagree with what
+    // the driver iterated.
+    let steps: u8 = spec
+        .expiry_codes
+        .iter()
+        .position(|known| *known == code)
+        .and_then(|at| u8::try_from(at.saturating_add(1)).ok())
+        .ok_or(RollingError::NoExpiry {
+            why: "the expiry ordinal is not one this vendor serves",
+        })?;
     let mut at = day;
     let mut found = None;
     for _ in 0..steps {
-        let next = match flag {
-            "WEEK" => costs::expiry::next_weekly_expiry(slot, at)
+        // THE CADENCE COMES FROM THE ROW, and the `match` below is now over an
+        // ENUM rather than over a spelling — so it is exhaustive, and a vendor
+        // that spells its weekly `W` or `WEEKLY` needs no edit here.
+        let next = match cadence {
+            crate::vendor::ExpiryCadence::Weekly => costs::expiry::next_weekly_expiry(slot, at)
                 .map_err(|_| RollingError::NoExpiry {
                     why: "the day is before this weekly regime was verified from",
                 })?
                 .ok_or(RollingError::NoExpiry {
                     why: "this weekly was withdrawn for that slot, so no contract existed",
                 })?,
-            "MONTH" => costs::expiry::next_monthly_expiry(slot, at).map_err(|_| {
-                RollingError::NoExpiry {
-                    why: "the day is before this monthly regime was verified from",
-                }
+            crate::vendor::ExpiryCadence::Monthly => costs::expiry::next_monthly_expiry(slot, at)
+                .map_err(|_| RollingError::NoExpiry {
+                why: "the day is before this monthly regime was verified from",
             })?,
-            _ => {
-                return Err(RollingError::NoExpiry {
-                    why: "the expiry cadence is not one this vendor serves",
-                });
-            }
         };
         found = Some(next);
         // ONE DAY PAST THE ONE JUST FOUND, so the next step cannot return it
@@ -1065,9 +1084,9 @@ mod tests {
         use crate::session::Day;
 
         let on = Day::new(2025, 9, 1).expect("a real day");
-        let near = expiry_of("NIFTY", "WEEK", "1", on).expect("near resolves");
-        let next = expiry_of("NIFTY", "WEEK", "2", on).expect("next resolves");
-        let far = expiry_of("NIFTY", "WEEK", "3", on).expect("far resolves");
+        let near = expiry_of("NIFTY", &spec(), "WEEK", "1", on).expect("near resolves");
+        let next = expiry_of("NIFTY", &spec(), "WEEK", "2", on).expect("next resolves");
+        let far = expiry_of("NIFTY", &spec(), "WEEK", "3", on).expect("far resolves");
 
         assert!(near < next, "next is after near: {near:?} !< {next:?}");
         assert!(next < far, "far is after next: {next:?} !< {far:?}");
@@ -1075,7 +1094,7 @@ mod tests {
         // AND A MONTHLY IS A DIFFERENT ANSWER FROM A WEEKLY. One cadence
         // standing in for the other would file a monthly's bars under a
         // weekly's date, which no later check could detect.
-        let monthly = expiry_of("NIFTY", "MONTH", "1", on).expect("monthly resolves");
+        let monthly = expiry_of("NIFTY", &spec(), "MONTH", "1", on).expect("monthly resolves");
         assert_ne!(
             monthly, near,
             "the monthly and the near weekly are not the same contract"
@@ -1096,7 +1115,7 @@ mod tests {
             ("NIFTY", "FORTNIGHT", "1"),
             ("NIFTY", "WEEK", "4"),
         ] {
-            let got = expiry_of(u, flag, code, on);
+            let got = expiry_of(u, &spec(), flag, code, on);
             assert!(
                 matches!(got, Err(RollingError::NoExpiry { .. })),
                 "{u}/{flag}/{code} is refused rather than guessed: {got:?}"
