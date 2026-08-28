@@ -1,4 +1,12 @@
-//! The first real vendor answers, written to disk before anything parses them.
+//! Real vendor answers, written to disk before anything parses them.
+//!
+//! **Two budgets, two questions.** [`record`] keeps the first few answers a
+//! feed gives, so a fixture can stop being hand-written. [`record_unreadable`]
+//! keeps the answers that DEFEATED the decoder, which is the question an
+//! operator asks after a backfill dies — and until it existed, the answer was
+//! *"the body is gone"*. Both are bounded by construction and neither can fail
+//! a pull; see [`record_unreadable`] for why the second one needed its own
+//! ceiling rather than sharing the first's.
 //!
 //! # Why this exists
 //!
@@ -210,6 +218,107 @@ pub fn record(
     Some(path)
 }
 
+/// How many bodies THIS BUILD COULD NOT READ each feed has kept.
+///
+/// A separate budget from [`TAKEN`], and separate on purpose. That one records
+/// the first few answers a feed gives so a fixture can stop being hand-written;
+/// this one records the answers that DEFEATED the decoder, which is a different
+/// question and the one an operator asks at 2am.
+static UNREADABLE: [AtomicU32; FEED_COUNT] = [const { AtomicU32::new(0) }; FEED_COUNT];
+
+/// How many bodies this feed has kept for being unreadable.
+#[must_use]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "`Feed` carries explicit discriminants 0..4 and `FEED_COUNT` pins \
+              this array's width, exactly as `kept` is bounded; the const \
+              assertion below proves the widest index is in range"
+)]
+pub fn unread_kept(feed: Feed) -> u32 {
+    UNREADABLE[feed as usize].load(Ordering::Relaxed)
+}
+
+// THE SAME COMPILE-TIME BOUND AS `slot`, on the narrower index. A sixth feed
+// stops this compiling rather than indexing past the array.
+const _: () = assert!((Feed::Zerodha as usize) == FEED_COUNT - 1);
+
+/// Keep a body **this build could not read**, if the feed's budget has room.
+///
+/// # Why this is worth its own budget
+///
+/// The measured case, and it is the reason this function exists. Dhan sent
+/// `volume: -125` for `ADANIENT`; the decoder refused it, the refusal cost that
+/// instrument every intraday rung it had, and afterwards **nothing could say
+/// what `-125` actually was** — a genuine value, a wrapped `int32`, or a column
+/// read at the wrong offset. Those three want different responses and the
+/// evidence to tell them apart had already been dropped on the floor.
+///
+/// The audit journal is a fixed-stride binary record: it keeps the URL and a
+/// message and never the payload. So a vendor defect was diagnosable only while
+/// the process that met it was still running, and only by someone watching.
+///
+/// This closes that. The body that defeated the decoder is written verbatim,
+/// beside the sentence saying what defeated it.
+///
+/// # Bounded by construction, like everything else here
+///
+/// [`PER_SLOT`] per feed for the life of the process — `FEED_COUNT * PER_SLOT`
+/// files at most, whatever a backfill does. A capture that grew with the
+/// failures would be a disk-filling fallback, and a run that fails a million
+/// times is exactly the run that must not also fill the disk. The first few are
+/// what carries the information: the millionth copy of one vendor defect says
+/// nothing the first did not.
+///
+/// # It never fails a pull, and here that matters more, not less
+///
+/// The caller is already on a failure path. Turning a diagnostic's failed write
+/// into a second, different failure would replace the reason the operator needs
+/// with one about the disk — `CLAUDE.md` §4 pointing the other way.
+pub fn record_unreadable(
+    root: &std::path::Path,
+    feed: Feed,
+    url: &str,
+    body: &str,
+    why: &str,
+) -> Option<std::path::PathBuf> {
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "same compile-time bound as `unread_kept` -- see the const \
+                  assertion above"
+    )]
+    let seq = UNREADABLE[feed as usize]
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |held| {
+            (held < PER_SLOT).then_some(held + 1)
+        })
+        .ok()?;
+
+    let dir = root.join("captures");
+    let path = dir.join(format!("{}-unreadable-{seq}.txt", feed.wire()));
+
+    let mut text = String::with_capacity(body.len() + 512);
+    text.push_str("# brutex UNREADABLE vendor body — verbatim, exactly as it arrived.\n");
+    text.push_str("# This build could not decode it. The reason is on the `why:` line.\n");
+    text.push_str("# No header was recorded: CLAUDE.md §8 puts the credential in one.\n");
+    let _ = std::fmt::Write::write_fmt(
+        &mut text,
+        format_args!(
+            "feed: {}\nurl: {url}\nwhy: {why}\nbytes: {}\n---\n",
+            feed.wire(),
+            body.len()
+        ),
+    );
+    text.push_str(body);
+
+    if std::fs::create_dir_all(&dir)
+        .and_then(|()| std::fs::write(&path, text.as_bytes()))
+        .is_err()
+    {
+        REFUSED.fetch_add(1, Ordering::Relaxed);
+        return None;
+    }
+    Some(path)
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic, reason = "test-only assertions")]
 mod tests {
@@ -287,6 +396,100 @@ mod tests {
             PER_SLOT,
             "and the counter does not climb past the ceiling, so it cannot wrap"
         );
+    }
+
+    /// **A BODY THIS BUILD COULD NOT READ IS KEPT VERBATIM, WITH THE REASON
+    /// BESIDE IT — AND THE BUDGET IS A HARD CEILING.**
+    ///
+    /// The gap this closes was measured, not imagined. Dhan sent
+    /// `volume: -125` for `ADANIENT`; the decoder refused it; the refusal cost
+    /// that instrument every intraday rung it had; and afterwards **nothing in
+    /// the system could say what `-125` actually was**. A genuine value, a
+    /// wrapped `int32`, and a column read at the wrong offset are three
+    /// different faults wanting three different responses, and the one artifact
+    /// that separates them had already been dropped — the audit journal is a
+    /// fixed-stride record that keeps a URL and a message and never a payload.
+    ///
+    /// Three things are asserted because all three are the point: the body is
+    /// **byte-for-byte** what arrived (a reshaped one would prove only that the
+    /// reshaping is self-consistent), the **reason travels with it** (a body
+    /// with no verdict is a puzzle rather than evidence), and the budget
+    /// **stops** (a capture that grew with the failures would fill a disk on
+    /// exactly the run that fails a million times).
+    #[test]
+    fn an_unreadable_body_is_kept_with_its_reason_and_the_budget_stops() {
+        let root = scratch("unreadable");
+        let body = r#"{"open":[1],"volume":[-125],"timestamp":[1751337900]}"#;
+        let why = "\"volume\" holds -125, and a volume counts shares traded";
+
+        let path = record_unreadable(&root, Feed::Dhan, "https://example.invalid/v2", body, why)
+            .expect("the first one is inside the budget");
+        let text = std::fs::read_to_string(&path).expect("it was written");
+
+        assert!(
+            text.ends_with(body),
+            "the body is verbatim and LAST, so a reader can take the final \
+             `bytes` bytes without searching for a delimiter that could occur \
+             inside JSON: {text}"
+        );
+        assert!(
+            text.contains(why),
+            "and the verdict travels with it — a body with no reason attached \
+             is a puzzle, not evidence: {text}"
+        );
+        assert!(
+            text.contains(&format!("bytes: {}", body.len())),
+            "the length is stated rather than delimited: {text}"
+        );
+        assert!(
+            text.contains("https://example.invalid/v2"),
+            "and the request that produced it: {text}"
+        );
+        assert!(
+            !text.to_ascii_lowercase().contains("authorization")
+                && !text.to_ascii_lowercase().contains("access-token"),
+            "NEVER a header — CLAUDE.md §8 puts the credential in one: {text}"
+        );
+
+        // THE CEILING IS HARD. `PER_SLOT` in total for this feed, whatever the
+        // run does afterwards.
+        for _ in 0..PER_SLOT {
+            drop(record_unreadable(
+                &root,
+                Feed::Dhan,
+                "https://example.invalid/v2",
+                body,
+                why,
+            ));
+        }
+        assert_eq!(
+            unread_kept(Feed::Dhan),
+            PER_SLOT,
+            "the budget is a ceiling, not a rate"
+        );
+        assert!(
+            record_unreadable(&root, Feed::Dhan, "u", body, why).is_none(),
+            "and past it the function writes nothing at all"
+        );
+
+        // AND IT IS A SEPARATE BUDGET FROM THE FIXTURE ONE. A run that spent
+        // its unreadable budget must still be able to keep a good answer, and
+        // the reverse — they answer different questions.
+        assert_eq!(
+            kept(Feed::Dhan, Method::Post),
+            0,
+            "spending the unreadable budget did not touch the fixture budget"
+        );
+
+        // ANOTHER FEED HAS ITS OWN. One vendor misbehaving must not blind the
+        // build to a second one starting to.
+        assert_eq!(unread_kept(Feed::Groww), 0, "budgets are per feed");
+        assert!(
+            record_unreadable(&root, Feed::Groww, "u", body, why).is_some(),
+            "and Groww's is still open"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// **THE TWO METHODS DO NOT SHARE A BUDGET.**

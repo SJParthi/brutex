@@ -2699,15 +2699,52 @@ impl HttpSource {
             // Both halves cannot be true, and the reader has no way to tell
             // which one to act on. Taking the detail alone keeps the part that
             // names the fault and drops the claim that was never right.
-            FetchError::BodyNotUnderstood {
-                detail: match why {
-                    FetchError::TransportFailed { detail } => detail,
-                    // Any other variant is already a sentence about a body, so
-                    // its own `Display` is the honest one.
-                    other => other.to_string(),
-                },
-            }
+            let detail = match why {
+                FetchError::TransportFailed { detail } => detail,
+                // Any other variant is already a sentence about a body, so
+                // its own `Display` is the honest one.
+                other => other.to_string(),
+            };
+            // AND KEEP THE BODY THAT DEFEATED US, BEFORE THE SENTENCE REPLACES
+            // IT.
+            //
+            // The measured case is the whole argument. Dhan sent
+            // `volume: -125` for `ADANIENT`; the refusal cost that instrument
+            // every intraday rung it had; and afterwards nothing could say what
+            // `-125` WAS — a genuine value, a wrapped `int32`, or a column read
+            // at the wrong offset. Three causes wanting three different
+            // responses, and the evidence to separate them was already gone:
+            // the audit journal is a fixed-stride record that keeps the URL and
+            // a message and never the payload.
+            //
+            // So the body is written here, where it is still in hand, and the
+            // sentence goes beside it rather than instead of it.
+            self.keep_unreadable(&url, &text, &detail);
+            FetchError::BodyNotUnderstood { detail }
         })
+    }
+
+    /// Record a body this build could not read, if the feed's budget has room.
+    ///
+    /// The mirror of [`Self::keep_first`] and bounded the same way — see
+    /// [`crate::capture::record_unreadable`] for why it is a separate budget
+    /// and why it can never fail the request. This one matters more on that
+    /// last point, not less: the caller is already returning a failure, and
+    /// replacing the operator's reason with one about the disk would be
+    /// `CLAUDE.md` §4 pointing the wrong way.
+    fn keep_unreadable(&self, url: &str, body: &str, why: &str) {
+        let Some(feed) = self.feed else {
+            return;
+        };
+        if crate::capture::unread_kept(feed) >= crate::capture::PER_SLOT {
+            return;
+        }
+        let Ok(root) = crate::folder::root() else {
+            return;
+        };
+        drop(crate::capture::record_unreadable(
+            &root, feed, url, body, why,
+        ));
     }
 
     /// Whether a 2xx answer is actually a success, and the governor feedback

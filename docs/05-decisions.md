@@ -25565,3 +25565,45 @@ unreadable."* — so the rendered doc for `bars_html` read as a fragment, and
 `param_or`'s own text appeared to belong to it. That is the third orphaned doc
 comment this file has produced by inserting an item mid-paragraph. Removing the
 helper closed the sentence over the gap.
+
+### D-0340
+
+**The body that defeated the decoder was thrown away, so no vendor defect could
+be diagnosed after the fact.**
+
+Dhan sent `volume: -125` for `ADANIENT`. The decoder refused it; D-0337 measured
+what the refusal cost. What could not be established, then or since, is **what
+`-125` actually was** — a genuine value, an `int32` that wrapped, or a column
+read at the wrong offset. Three faults wanting three different responses, and
+the artifact that separates them was already gone.
+
+It was gone because nothing keeps it. `store/audit/pull.journal` is a
+fixed-stride binary record holding a URL and a message; measured on the
+operator's store it was **7.8 KB and two records** for a run that committed
+~2 million bars. `crate::capture` existed and did not help: its budget records
+the first few answers a feed gives, so a fixture can stop being hand-written,
+and an answer that fails to decode is exactly the one it has no reason to keep.
+
+**`capture::record_unreadable` keeps it**, written from the `map_err` that
+builds `BodyNotUnderstood` — before the sentence replaces the evidence. Body
+verbatim and last in the file, the refusal's own words on a `why:` line, the URL,
+and the byte count stated rather than delimited, because a separator could occur
+inside a JSON body.
+
+**Its own budget, not a share of the fixture one.** They answer different
+questions and a run can need both: a feed that has spent its unreadable budget
+must still be able to keep a good answer, and a feed misbehaving must not blind
+the build to a second one starting to. `PER_SLOT` per feed, so
+`FEED_COUNT * PER_SLOT` files at most for the life of the process — a run that
+fails a million times is precisely the run that must not also fill the disk, and
+the millionth copy of one defect says nothing the first did not.
+
+**It can never fail a pull, and on this path that matters more rather than
+less.** The caller is already returning a failure. Turning a diagnostic's failed
+write into a second, different failure would replace the reason the operator
+needs with one about the disk — `CLAUDE.md` §4 pointing the wrong way. A refused
+write is counted in the same `REFUSED` counter the fixture path uses.
+
+**No header, ever**, which is unchanged and load-bearing: §8 puts the credential
+in one, so the function is given the URL and the body and is not given the
+request.
