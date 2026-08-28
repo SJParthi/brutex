@@ -80,11 +80,24 @@ fn permille(part: u64, whole: u64) -> String {
 ///
 /// # What is NOT in these figures, for a spot run
 ///
-/// Nothing. On a spot index there is no brokerage, no STT, no stamp duty and no
-/// GST, because a spot index is not tradeable and no order is placed —
-/// `costs::scope::is_cost_free` returns true for `IndexSpot` and says so. The
-/// only cost that exists is slippage, and it is applied: two ticks per round
-/// trip through `costs::fill::worst_case_fills`.
+/// **The spread, and this paragraph used to claim otherwise.** On a spot index
+/// there is no brokerage, no STT, no stamp duty and no GST, because a spot index
+/// is not tradeable and no order is placed — `costs::scope::is_cost_free`
+/// returns true for `IndexSpot` and says so. That half stands and is unchanged.
+///
+/// The half that did not stand: this block read *"the only cost that exists is
+/// slippage, and it is applied: two ticks per round trip through
+/// `costs::fill::worst_case_fills`"*. **Nothing in this crate calls that
+/// function.** Every reference to it under `crates/runner` is a doc comment or a
+/// record of its own removal — `trade.rs:255`, `:505`, `:533`. `trade::walk`
+/// prices its two brackets with `Anchor::Open` and `Anchor::PrintedExtreme`
+/// (`trade.rs:560`, `:565`), and `crate::grid` has always used the latter, so
+/// **no tick is added on any leg of any path**.
+///
+/// The consequence is a bound, not a rounding: `trade.rs`' own measured table
+/// records two horizons flipping from profitable to −27,883p and −8,658p on
+/// identical bars once the tick was charged. Every figure below is gross of the
+/// spread and the size of that omission is UNMEASURED.
 ///
 /// **That changes when options land.** An option leg carries the whole charge
 /// stack, and the figures here would then be gross of it until
@@ -106,15 +119,18 @@ pub fn render(
         "  INDEX SPOT run. There is no brokerage, STT, stamp or GST, because\n  \
          an INDEX is not tradeable: no order is placed, so nothing charges\n  \
          for one.\n\n  \
-         THE TWO BLOCKS BELOW PRICE FILLS DIFFERENTLY, AND THIS LINE USED TO\n  \
-         CLAIM THEY DID NOT. TRADES carries two ticks a round trip -- a buy a\n  \
-         tick above the bar's high and a sell a tick below its low. EXIT GRID\n  \
-         carries NO tick: it fills at the extremes the bar actually printed,\n  \
-         because on a one-minute series a price a tick outside the bar is one\n  \
-         nothing traded at, and naming it would be the invention §3 rule 1\n  \
-         forbids. So the grid's totals are a shade kinder than the trade\n  \
-         walk's on the same bars, and the difference is exactly two ticks per\n  \
-         round trip.\n\n  \
+         NEITHER BLOCK BELOW CHARGES A TICK, AND THIS LINE USED TO SAY ONE\n  \
+         OF THEM DID. Both TRADES and EXIT GRID fill at prices the bar\n  \
+         actually printed -- the open on the kind reading, the printed\n  \
+         extreme on the harsh one -- because a price a tick outside the bar\n  \
+         is one nothing traded at, and naming it would be the invention §3\n  \
+         rule 1 forbids. The sentence this replaces credited TRADES with two\n  \
+         ticks a round trip through `costs::fill::worst_case_fills`, and\n  \
+         NOTHING in this crate calls that function.\n\n  \
+         SO EVERY TOTAL BELOW IS GROSS OF THE SPREAD. The two blocks differ\n  \
+         in WHICH printed price each leg takes and in nothing else. There is\n  \
+         no slippage allowance in either, and the cost of crossing the\n  \
+         spread is measured nowhere in this run.\n\n  \
          THIS IS SCOPED TO AN INDEX AND TO NOTHING ELSE. A STOCK spot IS\n  \
          tradeable -- you buy real shares -- so brokerage, STT, stamp, the\n  \
          exchange charge and GST all apply there, and so do they on options.\n  \
@@ -1295,24 +1311,40 @@ mod tests {
         let out = super::render(None, None, None, None, None, 10);
         assert!(out.contains("no brokerage"));
 
-        // THE TWO BLOCKS PRICE FILLS DIFFERENTLY, AND THE HEADER MUST SAY SO.
+        // NEITHER BLOCK CHARGES A TICK, AND THE HEADER MUST SAY SO.
         //
-        // This asserted `"Slippage IS in these figures"` — a single claim over
-        // the whole report, true when both halves used `Anchor::AdverseExtreme`.
-        // The exit grid now fills at `PrintedExtreme`, the bar's own high and
-        // low with no tick added, because a price a tick outside a one-minute
-        // bar is one nothing traded at. `crate::trade::walk` still carries the
-        // tick. So one sentence covering both became false for one of them, and
-        // the test that would have caught it was asserting the sentence rather
-        // than the difference.
+        // THIS ASSERTION USED TO PIN A CLAIM THAT HAD STOPPED BEING TRUE, and
+        // the shape is worth keeping because it is the second time this exact
+        // line has done it. It first asserted `"Slippage IS in these figures"` —
+        // one claim over the whole report, true while both halves used
+        // `Anchor::AdverseExtreme`. When the grid moved to `PrintedExtreme` that
+        // sentence became false for one half, so the assertion was split into
+        // "the trade walk still carries the tick" and "the grid does not".
+        //
+        // The trade walk then moved to `PrintedExtreme` as well — `trade.rs:565`
+        // — and the first half became false in its turn. `worst_case_fills` has
+        // no caller anywhere under `crates/runner`: every reference to it in
+        // this crate is a doc comment or a record of its own removal. So the
+        // test went on requiring the report to state a cost the engine had
+        // stopped charging, which is the failure wearing a success's clothes
+        // that `CLAUDE.md` §4 bans.
+        //
+        // The fix is to assert the PROPERTY rather than the sentence: no tick on
+        // either path, and the resulting omission named rather than implied.
         assert!(
-            out.contains("two ticks a round trip"),
-            "the trade walk's slippage must still be stated"
+            out.contains("NEITHER BLOCK BELOW CHARGES A TICK"),
+            "the header must state that no tick is charged on EITHER path, \
+             because both `trade::walk` and `grid` now fill at printed prices"
         );
         assert!(
-            out.contains("EXIT GRID\n         carries NO tick") || out.contains("carries NO tick"),
-            "and the grid's absence of one must be stated beside it, or a reader \
-             compares two totals believing they were priced the same way"
+            out.contains("GROSS OF THE SPREAD"),
+            "and it must name what that omits, or a reader takes a gross figure \
+             for a net one"
+        );
+        assert!(
+            !out.contains("carries two ticks"),
+            "the two-tick claim must not return while `worst_case_fills` has no \
+             caller -- wire the tick first, then say so"
         );
 
         // THE SCOPE IS THE POINT. "No brokerage" is true of an INDEX and false
