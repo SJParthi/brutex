@@ -25363,3 +25363,39 @@ Proved by `an_equity_keeps_cash_and_a_name_under_two_segments_does_not_merge`,
 both halves — that the right segment reads and that the wrong one comes back
 empty **and reported unreadable** — because the first half alone would pass
 against a `derive` that ignored its argument entirely.
+
+### D-0336
+
+**A vendor error under HTTP 200 bypassed the refusal contract entirely, and
+RAISED the rate allowance on its way past.**
+
+`window_async` recorded rate feedback from the STATUS alone: a 429 narrowed the
+allowance, and anything else — 200 included — recorded a success and earned the
+additive increase. The body was read for a refusal afterwards, by which point the
+governor had already been told the request went well.
+
+That is not a hypothetical shape for this vendor. Dhan's own SDK example checks
+`response["status"] == "failure"` and never looks at the HTTP status, which is
+the vendor telling its own users that a 200 carries no promise. A body of
+`{"errorCode":"DH-901"}` under a 200 therefore produced **no disposition at
+all**: no session-dead, no credential re-read, no backoff ladder — and a rate
+allowance one step wider than before, for a call that failed.
+
+`HttpSource::weigh_answered_body` moves the decision to where the evidence is.
+The body goes through `refusal::disposition_of` BEFORE any success is recorded;
+a named refusal returns `VendorRefused` carrying its disposition, and only a body
+with no refusal in it earns the increase. `Disposition::Throttled` — and only
+that one — records the throttle.
+
+**That last clause is where `cargo mutants` caught a live defect in the fix.**
+Flipping `named == Throttled` to `!=` survived the whole suite. The mutation is
+not cosmetic: it would make the governor back off for a DEAD TOKEN and accelerate
+into a rate limit, which is both wrong answers at once. A throttle is a statement
+about pace and nothing else is, so a dead token must leave the allowance exactly
+where it was.
+
+`only_a_throttle_named_in_the_body_narrows_the_allowance` reads the allowance
+through the shared governor rather than asserting on a return value, because the
+narrowing IS the side effect and there is nothing else to look at. It drives
+`DH-904` and asserts the allowance falls, then `DH-901` on a second client and
+asserts it does not move. Mutants: 4 tested, 2 caught, 2 unviable, **0 missed**.

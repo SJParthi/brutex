@@ -2275,15 +2275,20 @@ impl HttpSource {
         // 429 IS THE ONLY STATUS READ AS RATE. Treating every refusal as a
         // throttle would back off for a bad credential or a malformed window and
         // hide the real cause behind an ever-slower run.
-        if let Some(lock) = self.governor.as_ref() {
+        //
+        // THE SUCCESS HALF IS DEFERRED UNTIL THE BODY HAS BEEN READ, and that
+        // is not tidiness. A vendor can answer HTTP 200 and put its refusal in
+        // the body — Dhan's own SDK example tests `response["status"] ==
+        // "failure"` and never reads the HTTP status at all. Recording success
+        // here told the governor a failed call had succeeded and RAISED the
+        // allowance on it. See `answered_with_a_refusal` below.
+        if status == 429
+            && let Some(lock) = self.governor.as_ref()
+        {
             let mut g = lock
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if status == 429 {
-                g.record_throttled();
-            } else if answer.status().is_success() {
-                g.record_success();
-            }
+            g.record_throttled();
         }
 
         if !answer.status().is_success() {
@@ -2338,6 +2343,29 @@ impl HttpSource {
             });
         }
 
+        // A REFUSAL UNDER A 200, WHICH BYPASSED EVERY GUARD THIS MODULE HAS.
+        //
+        // `refusal_words` is reached only from the `!is_success()` branch, so a
+        // vendor that answers 200 with `{"errorCode":"DH-901", …}` produced no
+        // `Disposition` at all: no `SessionDead`, no `NotEntitled`, no
+        // `Throttled`. `api::server::step` never saw a named refusal, the
+        // credential was never re-read, and the ladder never ran. The body then
+        // failed to decode and surfaced as `BodyNotUnderstood` — a *decode*
+        // fault, which is deliberately not retryable — so a dead token
+        // mid-backfill read as an unreadable body while the run carried on.
+        //
+        // And it was worse than silent: the old `record_success` above fired on
+        // any 2xx, so every one of those failures RAISED the vendor allowance.
+        //
+        // Dhan's own SDK example in `Dhan Docs/21-errors.md` tests
+        // `response["status"] == "failure"` and never reads the HTTP status.
+        // D-0325 already measured this vendor misfiling its error metadata; this
+        // is the same vendor putting a refusal under the wrong status.
+        //
+        // Read through the WHOLE contract, so a code the vendor misfiled is
+        // still read by its sentence — the rule D-0325 established.
+        self.weigh_answered_body(&text, status)?;
+
         // NAMED AS A DECODE FAULT, BECAUSE THE EXCHANGE ALREADY SUCCEEDED.
         //
         // Everything below this line is reading bytes that arrived. Left as
@@ -2369,6 +2397,77 @@ impl HttpSource {
                 },
             }
         })
+    }
+
+    /// Whether a 2xx answer is actually a success, and the governor feedback
+    /// that follows from the answer.
+    ///
+    /// # A refusal under a 200 bypassed every guard this module has
+    ///
+    /// [`refusal_words`] is reached only from the `!is_success()` branch, so a
+    /// vendor answering `200` with `{"errorCode":"DH-901", …}` produced no
+    /// [`crate::refusal::Disposition`] at all — no `SessionDead`, no
+    /// `NotEntitled`, no `Throttled`. `api::server::step` never saw a named
+    /// refusal, the credential was never re-read, and the ladder never ran. The
+    /// body then failed to decode and surfaced as
+    /// [`FetchError::BodyNotUnderstood`], which is deliberately NOT retryable —
+    /// so a dead token mid-backfill read as an unreadable body while the run
+    /// carried on.
+    ///
+    /// And it was worse than silent: `record_success` fired on any 2xx, so every
+    /// one of those failures RAISED the vendor allowance.
+    ///
+    /// Dhan's own SDK example in `Dhan Docs/21-errors.md` tests
+    /// `response["status"] == "failure"` and never reads the HTTP status.
+    /// D-0325 measured this vendor misfiling its error metadata; this is the
+    /// same vendor putting a refusal under the wrong status.
+    ///
+    /// **Read through the whole contract**, so a code the vendor misfiled is
+    /// still read by its sentence — the rule D-0325 established.
+    ///
+    /// A feed declaring no `error_names` has no contract to read and takes the
+    /// success path unchanged, exactly as it did before this existed.
+    ///
+    /// # Errors
+    ///
+    /// [`FetchError::VendorRefused`] carrying the disposition the body named, so
+    /// the caller's ladder sees the same verdict it would have seen had the
+    /// vendor used the status.
+    fn weigh_answered_body(&self, text: &str, status: u16) -> Result<(), FetchError> {
+        if let Some(contract) = self.spec.error_names
+            && let Some(named) = crate::refusal::disposition_of(text, contract)
+        {
+            // THE GOVERNOR LEARNS THE RIGHT THING FROM IT. A throttle named in
+            // the body is still a throttle; any other refusal is one the
+            // allowance has nothing to say about, so it is neither raised nor
+            // narrowed.
+            if named == crate::refusal::Disposition::Throttled
+                && let Some(lock) = self.governor.as_ref()
+            {
+                let mut g = lock
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                g.record_throttled();
+            }
+            return Err(FetchError::VendorRefused {
+                status,
+                detail: format!(
+                    "the vendor answered {status} and put a refusal in the \
+                     body: {text}"
+                ),
+                named: Some(named),
+            });
+        }
+        // ONLY NOW IS IT A SUCCESS. The status was 2xx and the body carries no
+        // refusal this vendor's contract can name, so the additive increase is
+        // earned rather than assumed.
+        if let Some(lock) = self.governor.as_ref() {
+            let mut g = lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            g.record_success();
+        }
+        Ok(())
     }
 }
 
@@ -3448,6 +3547,105 @@ mod tests {
         let window = decode_body(objects, &spec_objects, crate::vendor::Listing::Equity)
             .expect("the object shape skips a null row");
         assert_eq!(window.rows.len(), 1, "array of objects");
+    }
+
+    #[test]
+    fn a_refusal_under_a_200_is_a_refusal_and_never_a_success() {
+        let shipped = match crate::vendor::Feed::Dhan.descriptor().transport {
+            crate::vendor::Transport::Http(spec) => spec,
+            crate::vendor::Transport::LocalArchive(_) => panic!("this feed is HTTP"),
+        };
+        let source = HttpSource::new(shipped, Credential::token("shhh".to_owned()))
+            .expect("a client for the shipped Dhan row");
+
+        // THE SHAPE DHAN'S OWN SDK EXAMPLE TESTS FOR: a body that says failure
+        // under a status that says success. `21-errors.md` checks
+        // `response["status"] == "failure"` and never reads the HTTP status.
+        let dead = r#"{"errorType":"Invalid_Authentication","errorCode":"DH-901",
+                       "errorMessage":"Client ID or access token is invalid"}"#;
+        let Err(FetchError::VendorRefused { status, named, .. }) =
+            source.weigh_answered_body(dead, 200)
+        else {
+            panic!("a body naming DH-901 is a refusal whatever the status says")
+        };
+        assert_eq!(status, 200, "the status the vendor actually sent");
+        assert_eq!(
+            named,
+            Some(crate::refusal::Disposition::SessionDead),
+            "and it carries the disposition, so the ladder sees the same \
+             verdict it would have seen had the vendor used the status"
+        );
+
+        // A MISFILED CODE IS STILL READ BY ITS SENTENCE, which is D-0325's
+        // rule and has to survive being reached from this new path too.
+        let misfiled = r#"{"errorType":"Order_Error","errorCode":"DH-906",
+                          "errorMessage":"Invalid Token"}"#;
+        let Err(FetchError::VendorRefused { named, .. }) =
+            source.weigh_answered_body(misfiled, 200)
+        else {
+            panic!("the sentence names a dead token")
+        };
+        assert_eq!(named, Some(crate::refusal::Disposition::SessionDead));
+
+        // AN ORDINARY BODY IS STILL A SUCCESS. A bars answer carries no error
+        // code, so the contract finds nothing and the additive increase is
+        // earned — the path every good request takes.
+        source
+            .weigh_answered_body(r#"{"open":[1],"close":[1]}"#, 200)
+            .expect("a body with no refusal in it is a success");
+    }
+
+    /// **A THROTTLE NAMED IN THE BODY STILL NARROWS THE ALLOWANCE**, and any
+    /// other refusal leaves it alone.
+    ///
+    /// Written because `cargo mutants` proved the test above could not tell the
+    /// two apart: flipping `named == Throttled` to `!=` survived the whole
+    /// suite. That mutation is the live defect it looks like — a throttle would
+    /// stop narrowing the rate while every unrelated refusal narrowed it
+    /// instead, so the governor would back off for a dead token and accelerate
+    /// into a rate limit.
+    ///
+    /// The allowance is read through the shared governor rather than asserted
+    /// on a returned value, because the narrowing IS the side effect and there
+    /// is nothing else to look at.
+    #[test]
+    fn only_a_throttle_named_in_the_body_narrows_the_allowance() {
+        let shipped = match crate::vendor::Feed::Dhan.descriptor().transport {
+            crate::vendor::Transport::Http(spec) => spec,
+            crate::vendor::Transport::LocalArchive(_) => panic!("this feed is HTTP"),
+        };
+        let ceiling = crate::rate::DHAN_PER_SECOND;
+        let allowance = |source: &HttpSource| -> Option<u32> {
+            source.governor.as_ref().and_then(|lock| {
+                lock.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .permitted(crate::rate::WindowSpan::Second)
+            })
+        };
+
+        // DH-904 is the vendor's own word for "too many requests".
+        let source = HttpSource::new(shipped, Credential::token("shhh".to_owned()))
+            .expect("a client for the shipped Dhan row");
+        assert_eq!(allowance(&source), Some(ceiling), "untouched to begin with");
+        let throttled = r#"{"errorCode":"DH-904","errorMessage":"Too many requests"}"#;
+        assert!(source.weigh_answered_body(throttled, 200).is_err());
+        assert!(
+            allowance(&source).is_some_and(|now| now < ceiling),
+            "a throttle under a 200 is still a throttle"
+        );
+
+        // AND A REFUSAL THAT IS NOT ABOUT RATE LEAVES IT WHERE IT WAS. A dead
+        // token says nothing about pace, so backing off for it would slow every
+        // remaining request for a reason that is not pace.
+        let source = HttpSource::new(shipped, Credential::token("shhh".to_owned()))
+            .expect("a second client, its own governor");
+        let dead = r#"{"errorCode":"DH-901","errorMessage":"token expired"}"#;
+        assert!(source.weigh_answered_body(dead, 200).is_err());
+        assert_eq!(
+            allowance(&source),
+            Some(ceiling),
+            "a dead token is not a pace, so the allowance is untouched"
+        );
     }
 
     #[test]
