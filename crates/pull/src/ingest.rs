@@ -1979,6 +1979,27 @@ fn derive_all(
 /// # Errors
 ///
 /// A rung whose bucket is zero seconds, or a fold the bar set refuses.
+// A FOLD AT THE VENDOR'S OWN RUNG IS DUPLICATE STAMPS, AND IT IS STILL ONLY
+// `Debug`. RECORDED, NOT FIXED.
+//
+// Coarsening is this function's job: a one-second archive filed as `1min` folds
+// by design. But if the VENDOR was asked for one minute and the bars are filed
+// at one minute, there is nothing to coarsen — every reduction is two rows
+// sharing a timestamp, and `fold` MERGES them: high widened, low widened, close
+// from the last, and **volume summed**. A vendor repeating 09:15 twice at 1,000
+// lots each stores one bar of 2,000, `Ingested::balances` stays true, and the
+// receipt reads clean. `ingest`'s own comment calls this *"the signature, and
+// nothing wrote it down"*.
+//
+// **The rule cannot be written from here.** It needs "the rung the VENDOR was
+// asked for", and `Plan::request.granularity` is not that — on the archive path
+// it is the rung the OPERATOR wants the file written at, while the source is a
+// one-second folder. A rule keyed on it warns on every archive pull, which is
+// the noise §4 exists to prevent and strictly worse than this `Debug` line.
+//
+// Closing it means threading the source rung through `from_dir` and
+// `from_window`, which know it and `Plan` does not. Named here rather than
+// half-fixed. D-0354.
 fn fold_in_place(
     bars: &mut Vec<store::format::Bar>,
     timeframe: Timeframe,

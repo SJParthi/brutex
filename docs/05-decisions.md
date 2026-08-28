@@ -26171,3 +26171,36 @@ a fallback rather than the answer.
 assertion searching for it — one counted three matches where two exist, the
 other failed against correct code. Both needles are built with `concat!`: joined
 at compile time, while the source carries a quote-comma the joined form does not.
+
+### D-0354
+
+**A fold at the vendor's OWN rung merges duplicate timestamps and sums their
+volumes, and it is reported only at `Debug`. Recorded, not fixed — and the
+attempt is why.**
+
+Coarsening is `fold_in_place`'s job: a one-second archive filed as `1min` folds
+by design and says so at `Debug`, which is right. But when the VENDOR was asked
+for one minute and the bars are being filed at one minute there is nothing to
+coarsen — every reduction is two rows sharing a timestamp, and `fold` MERGES
+them: high widened, low widened, close from the last, and **volume summed**.
+
+A vendor repeating 09:15 twice at 1,000 lots each stores one bar of 2,000.
+`Ingested::balances` stays true, the receipt reads clean, and the only trace is a
+`Debug` line below the default floor. `ingest`'s own comment already names this:
+*"the signature, and nothing wrote it down."*
+
+**I wrote the rule and then took it out, and the reason is the entry worth
+keeping.** The obvious key is `plan.request.granularity` — and it is the wrong
+one. On the HTTP path it genuinely names what the vendor was asked for. On the
+ARCHIVE path it names the rung the OPERATOR wants written, while the source is a
+folder of one-second rows. Measured against this crate's own fixture:
+`emit_sites`' archive plan carries `Granularity::Minute1` and folds by design, so
+a rule keyed on that field warns on **every archive pull** — noise, which is
+what §4 exists to prevent, and strictly worse than the `Debug` line it replaced.
+
+`Plan` does not carry the source rung, and the two public doors that DO know it —
+`from_dir` and `from_window` — hand it a `Plan` and nothing else. Closing this
+means threading that fact through them.
+
+Named here rather than shipped wrong. The finding stands; the fix needs a fact
+this layer is not currently given.
