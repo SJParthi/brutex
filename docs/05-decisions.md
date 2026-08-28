@@ -26247,3 +26247,38 @@ which is what makes them a fallback rather than the answer.
 Both new tests split their own needles with `concat!`, because `server.rs` is
 its own haystack: written whole, the literal appears in the assertion and the
 test fails against correct code. That happened twice before it was written down.
+
+### D-0356
+
+**The history clamp read the feed's widest floor while a per-rung one sat beside
+it — and this fix changes no window today, which is stated rather than glossed.**
+
+`HttpSpec::history_floor` is one date for a whole feed.
+`Descriptor::history_floor(rung)` is per rung. The clamp read the first, and that
+field's own doc named both the cost and the fix: *"Groww's one-minute rung is
+narrowed to three months by its own documentation and this field says 2020, so a
+one-minute backfill to 2020 is clamped to 2020 and spends six years of requests
+the vendor answers empty. The fix is one line at the clamp's call site —
+`asked.granularity` is in scope there."*
+
+**MEASURED: the two authorities currently AGREE on every rung both feeds
+declare.** I wrote the test expecting them to differ and it failed. Groww's
+minute row binds to `Fixed { 2020-01-01 }`, not the rolling quarter — because
+the operator restated that floor from his own account on 12 Aug 2026, and
+`GROWW_HISTORY`'s own comment records why a direct observation from the
+entitlement holder outranks the vendor's published general claim.
+
+So **no window changes**. The six years of empty requests D-0113 describes are
+not being spent today, and a note claiming this fix recovered them would be a
+claim this build cannot support.
+
+It is still the right authority to ask. Consulting the one that is *allowed* to
+narrow means the day a row does narrow a rung, the clamp honours it with no
+second edit — and it removes the "two authorities, one consulted" shape that put
+the cost in a doc comment instead of in the code. The test pins the agreement, so
+the moment it stops holding a test says so and this entry's claim is re-examined
+rather than silently outdated.
+
+**`Unstated` falls back rather than refusing.** A rung the table says nothing
+about is not a rung with no history; it is a rung nobody has written a row for.
+Refusing there would turn a missing row into a silent hole.

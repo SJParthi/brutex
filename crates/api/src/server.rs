@@ -6221,6 +6221,45 @@ pub(crate) fn clamp_to_floor(
 /// fetched. The sentence it produced said so — *"the chunks before it were
 /// fetched and are not written, because a partial answer to a whole request is
 /// a gap this store cannot correct later"* — and the premise was wrong. See
+/// The history floor binding THIS request's rung, falling back to the feed's.
+///
+/// # Two authorities, and only one of them may narrow
+///
+/// `HttpSpec::history_floor` is one date for a whole feed.
+/// `Descriptor::history_floor(rung)` is per rung, and the clamp read the first.
+/// That field's own doc names both the cost and the fix: *"Groww's one-minute
+/// rung is narrowed to three months by its own documentation and this field
+/// says 2020, so a one-minute backfill to 2020 is clamped to 2020 and spends
+/// six years of requests the vendor answers empty. The fix is one line at the
+/// clamp's call site — `asked.granularity` is in scope there."*
+///
+/// # This is INERT today, and saying so is the point
+///
+/// Measured: for every rung both shipped feeds declare, the per-rung floor
+/// EQUALS the feed-wide one — Groww's minute row binds to 2020-01-01 because
+/// the operator restated it from his own account on 12 Aug 2026, which
+/// `GROWW_HISTORY`'s comment records as outranking the vendor's published
+/// rolling quarter. So no window changes right now.
+///
+/// It is still the right authority to ask: the day a row narrows a rung, the
+/// clamp honours it with no second edit. `the_history_clamp_prefers_this_rungs_floor_over_the_feeds`
+/// pins the agreement, so the moment it stops holding a test says so.
+///
+/// # `Unstated` falls back rather than refusing
+///
+/// A rung the table says nothing about is not a rung with no history — it is a
+/// rung nobody has written a row for. Refusing there would turn a missing row
+/// into a silent hole, which is the shape `CLAUDE.md` §4 bans.
+fn rung_floor(
+    asked: &ingest::SpotRequest,
+    spec: &pull::vendor::HttpSpec,
+) -> pull::vendor::HistoryFloor {
+    match asked.feed.descriptor().history_floor(asked.granularity) {
+        pull::vendor::HistoryFloor::Unstated => spec.history_floor,
+        stated => stated,
+    }
+}
+
 /// [`Chunks`]. D-0327.
 async fn fetch_chunks(
     asked: &ingest::SpotRequest,
@@ -6248,7 +6287,27 @@ async fn fetch_chunks(
     // "complete" from being a claim with an expiry date.
     let today = ingest::ist_day(std::time::SystemTime::now())
         .map_err(|why| format!("the clock is unusable: {why}"))?;
-    let asked_window = clamp_to_floor(asked.window, spec.history_floor, today)?;
+    // THE FLOOR FOR **THIS RUNG**, FALLING BACK TO THE VENDOR-WIDE ONE.
+    //
+    // This read `spec.history_floor` — one date for the whole feed — while
+    // `Descriptor::history_floor(rung)` has always existed beside it. The field's
+    // own doc names the cost and even names the fix: *"Groww's one-minute rung
+    // is narrowed to three months by its own documentation and this field says
+    // 2020, so a one-minute backfill to 2020 is clamped to 2020 and spends six
+    // years of requests the vendor answers empty. The fix is one line at the
+    // clamp's call site — `asked.granularity` is in scope there."*
+    //
+    // It is. Recorded as D-0113 and left because it *"changes what a live pull
+    // does"* — and it does, in one direction only: it stops asking for windows
+    // the vendor has already said it does not serve at that rung. Nothing that
+    // would have landed stops landing.
+    //
+    // **`Unstated` falls back rather than refusing.** A rung the granularity
+    // table says nothing about is not a rung with no history — it is a rung
+    // nobody has written a row for, and the vendor-wide floor is the honest
+    // answer until someone does. Refusing there would turn a missing row into a
+    // silent hole, which is the shape §4 bans.
+    let asked_window = clamp_to_floor(asked.window, rung_floor(asked, spec), today)?;
 
     let chunks = pull::session::split_window(asked_window, spec.window_cap_days(asked.granularity))
         .map_err(|why| format!("the window could not be split to the vendor's cap: {why}"))?;
@@ -17321,6 +17380,95 @@ mod tests {
             .await
             .expect("task")
             .expect("a graceful shutdown is not a failure");
+    }
+
+    /// **THE HISTORY CLAMP USES THIS RUNG'S FLOOR, NOT THE FEED'S WIDEST ONE.**
+    ///
+    /// `HttpSpec::history_floor` is one date for a whole feed.
+    /// `Descriptor::history_floor(rung)` has always existed beside it, and the
+    /// clamp read the first. That field's own doc names the cost and the fix:
+    /// *"Groww's one-minute rung is narrowed to three months by its own
+    /// documentation and this field says 2020, so a one-minute backfill to 2020
+    /// is clamped to 2020 and spends six years of requests the vendor answers
+    /// empty. The fix is one line at the clamp's call site."*
+    ///
+    /// **THIS CHANGE IS INERT TODAY, AND THAT IS ASSERTED RATHER THAN ASSUMED.**
+    ///
+    /// I expected the two authorities to disagree on Groww's minute rung and
+    /// wrote `assert_ne!`. They agree — because the operator restated that floor
+    /// on 12 Aug 2026 from his own account, and `GROWW_HISTORY`'s comment
+    /// records why a direct observation from the entitlement holder outranks
+    /// the vendor's published rolling quarter. So the BINDING floor is
+    /// 2020-01-01 on both, and reading either gives the same window right now.
+    ///
+    /// The change is still right: it consults the authority that is allowed to
+    /// narrow, so the day a row does narrow one, the clamp honours it with no
+    /// second edit. But it fixes no waste **today**, and a test claiming
+    /// otherwise would be a claim this build cannot support.
+    #[test]
+    fn the_history_clamp_prefers_this_rungs_floor_over_the_feeds() {
+        use pull::vendor::{Feed, Granularity, HistoryFloor, Transport};
+
+        // THE TWO AGREE ON EVERY SHIPPED ROW. Pinned so that the day one of them
+        // moves, this test says so — which is the moment the change stops being
+        // inert and starts changing what a pull asks for.
+        for feed in [Feed::Dhan, Feed::Groww] {
+            let descriptor = feed.descriptor();
+            let Transport::Http(spec) = descriptor.transport else {
+                panic!("{feed:?} is HTTP");
+            };
+            for rung in [Granularity::Day1, Granularity::Minute1] {
+                let per_rung = descriptor.history_floor(rung);
+                assert!(
+                    !matches!(per_rung, HistoryFloor::Unstated),
+                    "{feed:?} states {rung:?}, so the fallback arm is not what \
+                     these two rungs exercise"
+                );
+                assert_eq!(
+                    per_rung, spec.history_floor,
+                    "{feed:?} {rung:?}: the per-rung and feed-wide floors agree \
+                     TODAY, so this change alters no window yet. If this fires, \
+                     a row has narrowed a rung and the clamp now honours it -- \
+                     update the claim in D-0356 rather than this assertion"
+                );
+            }
+        }
+
+        // AND A RUNG NO ROW NAMES ANSWERS `Unstated`, which is the input the
+        // fallback exists for. A rung the table says nothing about is not a rung
+        // with no history; it is a rung nobody has written a row for, and
+        // turning that into a refusal would make a missing row a silent hole.
+        assert_eq!(
+            Feed::Dhan.descriptor().history_floor(Granularity::Minute5),
+            HistoryFloor::Unstated,
+            "an unlisted rung is Unstated, so the clamp falls back to the \
+             feed-wide floor rather than refusing"
+        );
+
+        // AND THE CALL SITE READS THE PER-RUNG ONE. Read from the source
+        // because the clamp sits inside an `async fn` that opens sockets; the
+        // property is which authority it consults.
+        //
+        // The needle is split: this file is its own haystack, so a literal
+        // written whole appears in this assertion and matches itself.
+        let src = include_str!("server.rs");
+        let per_rung_read = concat!(
+            "asked.feed.descriptor().",
+            "history_floor(asked.granularity)"
+        );
+        assert!(
+            src.contains(per_rung_read),
+            "the clamp asks the descriptor for THIS rung's floor"
+        );
+        let feed_wide_clamp = concat!(
+            "clamp_to_floor(asked.window, ",
+            "spec.history_floor, today)"
+        );
+        assert!(
+            !src.contains(feed_wide_clamp),
+            "and no longer clamps against the feed-wide floor directly -- \
+             leaving that would spend requests the vendor answers empty"
+        );
     }
 
     #[test]
