@@ -7774,27 +7774,52 @@ fn run_local(
         // always was, and this argument did not narrow it.
         granularity,
     };
-    // THE COLUMN SHAPE IS STILL A LITERAL HERE, AND IT IS A KNOWN DEFECT.
+    // THE COLUMN SHAPE COMES FROM THE FEED'S OWN LAYOUT, AND THE REASON IT DID
+    // NOT WAS STALE.
     //
-    // `Columns::Gdfl` is GDFL's ten-column shape, used for EVERY archive feed.
-    // `TrueData`'s index rows carry five (`docs/08-vendor-samples.md`), so this
-    // constant decodes one of the two vendors against the other's shape.
+    // This read `Columns::Gdfl` — GDFL's ten-column shape — for EVERY archive
+    // feed, so a `TrueData` file was decoded against the other vendor's shape.
+    // The comment defending it argued the fix was blocked: *"`TrueData`
+    // declares a layout for `INDEX` only. Deriving the shape without also
+    // deciding the segment turns a wrong decode into a refusal for the one feed
+    // whose files this path is exercised with."*
     //
-    // The measured shape now EXISTS to read — `ColumnLayout::shape`, keyed on
-    // `(feed, segment)` and cross-checked against the layout's own column list
-    // by a `const` block in `pull::vendor` — and `crate::folder` reads it.
-    // This site cannot simply take it, because the segment below is also a
-    // literal: this function files every archive bar under `FNO`, and
-    // `TrueData` declares a layout for `INDEX` only. Deriving the shape without
-    // also deciding the segment turns a wrong decode into a refusal for the
-    // one feed whose files this path is exercised with.
+    // **That is no longer true, and `pull::vendor` says so in one line:**
+    // `layouts: &[TRUEDATA_INDEX, TRUEDATA_FNO]`. Both archive feeds declare an
+    // FNO layout, so `layout(Fno)` resolves for each and the refusal the
+    // comment feared cannot happen. `ColumnLayout::shape` is cross-checked
+    // against that layout's own column list by a `const` block in the same
+    // file, so the two cannot drift.
     //
-    // Left as it stands, deliberately and named, rather than half-fixed. The
-    // segment is a store-path decision — it decides where bars are FILED — and
-    // `CLAUDE.md` §8's append-only rule means getting it wrong writes a
-    // directory nothing can rename. Recorded in `docs/06-limits.md`.
+    // **The SEGMENT is still a literal and is still a known defect**, recorded
+    // in `docs/06-limits.md` and untouched here. That one decides where bars
+    // are FILED, and §8's append-only rule means getting it wrong writes a
+    // directory nothing can rename — so it needs a segment on the request
+    // rather than a better guess in this function. Fixing the decode without
+    // it is not a half-fix: a file read with the wrong column shape is wrong in
+    // every field, and a file read correctly and filed under a debatable
+    // segment is wrong in one.
+    let pull::vendor::Transport::LocalArchive(archive) = feed.descriptor().transport else {
+        // Unreachable through the pull form, which routes a REST feed to
+        // `broker_run`. Stated rather than `unreachable!()`, which would be a
+        // region the coverage floor can never enter.
+        return Err(format!(
+            "{} declares no archive, so there is no column layout to read one \
+             with.",
+            feed.display()
+        ));
+    };
+    let Some(layout) = archive.layout(Segment::Fno) else {
+        return Err(format!(
+            "{} declares no FNO column layout, and this path files under FNO. \
+             Refused rather than decoded against another vendor's shape — a \
+             file read with the wrong columns is wrong in every field, and the \
+             store is append-only.",
+            feed.display()
+        ));
+    };
     let plan = pull::ingest::Plan {
-        columns: pull::csv::Columns::Gdfl,
+        columns: layout.shape,
         request: &request,
         encoding: pull::vendor::TimestampEncoding::EpochSecondsUtc,
         scale: pull::vendor::PriceScale::Paisa,
@@ -17820,10 +17845,22 @@ mod tests {
     /// HTTP broker — and a folder beside it is a contradiction the route is now
     /// right to resolve in the broker's favour. So the feed is stated, which is
     /// what an operator does on the page too.
+    /// **GDFL, BECAUSE THE FIXTURES ARE GDFL FILES.**
+    ///
+    /// This said `Feed::TrueData` while `vendor_folder` — whose own doc reads
+    /// *"A folder holding one GDFL member"* — writes ten-column GDFL rows under
+    /// a GDFL header. The pair was incoherent and nothing noticed, because
+    /// `run_local` hardcoded `Columns::Gdfl` for every archive feed: the file
+    /// was decoded as GDFL whatever the form said.
+    ///
+    /// Now that the shape comes from the feed's own layout, the mismatch is a
+    /// refusal — `10 fields, expected 5`, `TrueData`'s F&O row being five wide.
+    /// That refusal is CORRECT, and the fix is to name the feed these bytes
+    /// actually are rather than to widen the decoder back.
     fn spot_form(folder: &Path, from: &str, to: &str) -> String {
         format!(
             "target=swept&vendor={}&from={from}&to={to}&folder={}",
-            pull::vendor::Feed::TrueData.wire(),
+            pull::vendor::Feed::Gdfl.wire(),
             folder.display()
         )
     }

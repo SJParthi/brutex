@@ -25721,3 +25721,40 @@ the one that still conflated the two.
 The comment in `from_rows` is corrected rather than deleted: the property it
 asserts does hold now, but it holds because the caller was fixed, not because
 the sentence was right.
+
+### D-0344
+
+**Every archive file was decoded against GDFL's column shape, whatever feed it
+came from — and the comment defending that was stale.**
+
+`run_local` set `columns: pull::csv::Columns::Gdfl` for every archive feed.
+GDFL's F&O row is ten columns; TrueData's is **five**. So a TrueData file was
+read against the other vendor's shape, field by field, and filed.
+
+The comment beside it named the defect and argued the fix was blocked:
+*"`TrueData` declares a layout for `INDEX` only. Deriving the shape without also
+deciding the segment turns a wrong decode into a refusal for the one feed whose
+files this path is exercised with."*
+
+**That has not been true for as long as `pull::vendor` has read
+`layouts: &[TRUEDATA_INDEX, TRUEDATA_FNO]`.** Both archive feeds declare an FNO
+layout — `TRUEDATA_FNO` at five columns, `GDFL_FNO` at ten — so `layout(Fno)`
+resolves for each and the refusal the comment feared cannot happen.
+`ColumnLayout::shape` is cross-checked against that layout's own column list by
+a `const` block in the same file, so the two cannot drift.
+
+**The SEGMENT is still a literal and is still recorded in `docs/06-limits.md`.**
+That one decides where bars are FILED, and §8's append-only rule means getting it
+wrong writes a directory nothing can rename — so it needs a segment on the
+request rather than a better guess in this function. Fixing the decode without it
+is not a half-fix: a file read with the wrong column shape is wrong in **every**
+field; a file read correctly and filed under a debatable segment is wrong in one.
+
+**Two test fixtures were incoherent and nothing could notice.** `spot_form`
+declared `Feed::TrueData` while `vendor_folder` — whose own doc reads *"A folder
+holding one GDFL member"* — wrote ten-column GDFL rows under a GDFL header. So
+did `one_press_over_an_archive_feed_puts_bars_on_disk`, whose fixture comment
+names the GDFL tick file it was copied from. Both passed only because the
+decoder ignored the feed. They now name the feed their bytes actually are; the
+refusal that surfaced them — `10 fields, expected 5` — is correct, and widening
+the decoder back to admit it would have been the defect reinstated.

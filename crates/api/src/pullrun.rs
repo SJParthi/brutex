@@ -1582,14 +1582,21 @@ mod tests {
             bound,
             conduct(
                 Loaded::clone(&site),
+                // GDFL, BECAUSE THE FIXTURE ABOVE IS A GDFL FILE. Its own
+                // comment says so — `GFDLNFO_TICK_01072025/...`, ten columns —
+                // and it was run under `TrueData`, whose F&O row is five wide.
+                // The pair was incoherent and nothing noticed, because
+                // `run_local` hardcoded `Columns::Gdfl` for every archive feed.
+                // Now the shape comes from the feed's own layout, so the feed
+                // has to be the one these bytes actually came from. D-0344.
                 vec![Leg {
                     route: Route::Spot,
-                    vendor: pull::vendor::Feed::TrueData.wire().to_owned(),
+                    vendor: pull::vendor::Feed::Gdfl.wire().to_owned(),
                     dir: "1min".to_owned(),
                     label: "archive · 1 minute".to_owned(),
                     body: format!(
                         "target=swept&vendor={}&from=2025-07-01&to=2025-07-01&folder={}",
-                        pull::vendor::Feed::TrueData.wire(),
+                        pull::vendor::Feed::Gdfl.wire(),
                         folder.display()
                     ),
                 }],
