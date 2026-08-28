@@ -25607,3 +25607,43 @@ write is counted in the same `REFUSED` counter the fixture path uses.
 **No header, ever**, which is unchanged and load-bearing: §8 puts the credential
 in one, so the function is given the URL and the body and is not given the
 request.
+
+### D-0341
+
+**A chunk that answered with no rows was a silent success, and the month it left
+a hole in was then marked complete for ever.**
+
+`fetch_chunks` pushed every answered body with no emptiness check. The only
+record of a zero-row chunk was a `Trace` line, which is below the default floor.
+`note_short_window` never fired, because `unfetched` is set only when a chunk
+REFUSED.
+
+The rest of the path is worse than the omission. `from_window` meets an empty
+batch, records no entry and no failure. `Ingested::balances()` is `0 == 0 + 0`
+and answers YES. The run reports `Stored`. And then — this is the part that
+makes it permanent — if a LATER chunk of the same month lands, the manifest's
+`last_ts_micros` reaches the month's end, `autopilot::next_window` answers
+`None` because it is a pure last-timestamp test with no interior-hole check, and
+the month is marked complete. §8 forbids the rewrite and `Header::advance`
+refuses a batch beginning before what is committed, so nothing can ever go back
+for those days.
+
+**Emptiness alone is not proof of a hole, and that is why this counts rather
+than refuses.** A chunk covering only holidays legitimately holds no bars. But
+`split_window` sizes chunks from the vendor's published cap — ~90 days for
+Dhan's minute route — and there is no stretch of the Indian calendar that long
+without a session in it. So an empty chunk travels through `unfetched`, the same
+channel a refusal uses, and `note_short_window` turns it into a member failure:
+the books do not balance, the receipt names it, and the operator decides.
+
+**The suffix is KEPT, which is the difference from a refusal.** The vendor
+answered; it answered with nothing. The chunks after it may carry bars worth
+having, and discarding them would be the D-0327 defect arriving from the other
+direction.
+
+**What this does not close.** `crates/pull/src/gaps.rs` was built to classify
+every absent minute as a session, a hole, or unmeasured, and it has **zero
+callers** — `grep -rn "gaps::" crates/` finds only its own `pub mod` line. Until
+something consumes it, nothing in this build can tell a complete month from a
+holed one; this entry makes the moment of loss loud, not the state afterwards
+detectable. Recorded, not closed.

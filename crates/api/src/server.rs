@@ -6169,10 +6169,56 @@ async fn fetch_chunks(
                 .with("rows", telemetry::Value::Uint(rows as u64)),
         );
     }
-    Ok(Chunks {
-        bodies,
-        unfetched: None,
-    })
+    // A CHUNK THAT ANSWERED WITH NOTHING IS NOT A CHUNK THAT ANSWERED.
+    //
+    // Every answered body was pushed here with no emptiness check, and the only
+    // trace of a zero-row chunk was the `Trace` line above — below the default
+    // floor. `note_short_window` never fired, because `unfetched` is set only
+    // when a chunk REFUSED.
+    //
+    // The consequence is permanent. `from_window` sees an empty batch, records
+    // no entry and no failure; `Ingested::balances()` is `0 == 0 + 0` and
+    // answers YES; the run reports `Stored`. If a LATER chunk of the same month
+    // lands, the manifest's `last_ts_micros` reaches the month's end,
+    // `autopilot::next_window` answers `None`, and the month is marked
+    // complete — with the empty chunk's days missing for ever. §8 forbids the
+    // rewrite and `Header::advance` refuses a batch that starts before what is
+    // committed, so nothing can go back for them.
+    //
+    // **Emptiness alone is not proof of a hole**, and that is why this counts
+    // rather than refuses. A chunk covering only holidays legitimately holds no
+    // bars. But `split_window` sizes chunks from the vendor's published cap —
+    // ~90 days for Dhan's minute route — and there is no 90-day stretch of the
+    // Indian calendar without a session in it. So an empty chunk is reported as
+    // a member failure exactly as a short window is: the books do not balance,
+    // the receipt names it, and the operator decides. `CLAUDE.md` §4 — degrade
+    // loudly and name the reason.
+    //
+    // The suffix is NOT discarded, which is the difference from a refusal. The
+    // vendor answered; it simply answered with nothing, and the chunks after it
+    // may well carry bars worth keeping.
+    let hollow: Vec<pull::session::Window> = bodies
+        .iter()
+        .filter(|(_, body)| body.rows.is_empty())
+        .map(|(window, _)| *window)
+        .collect();
+    let unfetched = hollow.first().map(|first| {
+        format!(
+            "{} of {} chunk(s) answered with NO ROWS AT ALL, the first covering \
+             {}..={}. The vendor was reached and did not refuse — it returned an \
+             empty window. A chunk spans up to the vendor's published cap and \
+             there is no stretch that long without a session in it, so this is \
+             reported rather than taken as a quiet success: an empty chunk whose \
+             month is later completed by another chunk would leave those days \
+             missing permanently, because the store is append-only and cannot go \
+             back for them.",
+            hollow.len(),
+            chunks.len(),
+            first.from(),
+            first.to(),
+        )
+    });
+    Ok(Chunks { bodies, unfetched })
 }
 
 /// Records a window that landed SHORT as a failure of its own member.
@@ -11841,6 +11887,91 @@ fn bars_refusal(
     )
 }
 
+/// The exchange and segment to read one symbol's bars from.
+///
+/// Empty strings mean **nothing held under that name and nothing asked** — the
+/// caller refuses rather than probing a guessed path. Extracted from
+/// [`bars_html`] rather than inlined because that function is already at
+/// clippy's line ceiling, and because the precedence rule below is worth
+/// reading on its own.
+///
+/// # The default this replaces
+///
+/// `param_or(query, "segment", "INDEX")`, justified in its own doc as *"the
+/// only values the engine surface has (`CLAUDE.md` §1)"*. §1 keeps two sets
+/// apart in consecutive sentences: the engine SWEEPS two instruments, and
+/// *"futures, options and single stocks may be stored. They are never swept."*
+/// This route reads the store.
+///
+/// D-0335 fixed the same defect on `/calendar.json`, where the literal was
+/// LIVE: `ADANIENT` is filed at `NSE/CASH/ADANIENT/` and was probed at
+/// `NSE/INDEX/ADANIENT/` **366 times**, against 1,240 daily bars that were on
+/// disk the whole time. Here it was latent only because `render` always writes
+/// `&segment=` from the census — a hand-typed `/bars?symbol=ADANIENT` read the
+/// wrong segment and reported "no data".
+///
+/// Resolved rather than refused, because this route is reachable by hand and a
+/// URL that needs three parameters to answer a one-parameter question is the
+/// worse answer. Refused only when the census does not hold the name at all,
+/// which is the honest reply to "show me the bars for something nothing has
+/// stored". D-0339.
+fn locate_series(site: &Site, query: &str, symbol: &str) -> Option<(String, String)> {
+    let asked_exchange = param(query, "exchange");
+    let asked_segment = param(query, "segment");
+    // AN EXPLICIT PAIR WINS OUTRIGHT AND COSTS NO CENSUS READ. The census
+    // answers a question the caller did not ask; it must never override one
+    // they did, and it must not be walked to confirm one either.
+    if !asked_exchange.is_empty() && !asked_segment.is_empty() {
+        return Some((asked_exchange, asked_segment));
+    }
+    let located = census::read_all(&site.store_root)
+        .iter()
+        .flat_map(|c| census::held_entries(std::slice::from_ref(c)))
+        .find(|(series, _)| series.contract.is_none() && series.symbol.as_str() == symbol)
+        .map(|(series, _)| {
+            (
+                series.exchange.as_str().to_owned(),
+                series.segment.as_str().to_owned(),
+            )
+        });
+    // NOTHING HELD AND NOTHING ASKED IS `None`, NOT AN EMPTY PAIR. There is no
+    // path to probe, and guessing one answers "does not exist" for a reason
+    // that is not the true one — the whole defect this replaces.
+    let (found_exchange, found_segment) = located?;
+    Some((
+        if asked_exchange.is_empty() {
+            found_exchange
+        } else {
+            asked_exchange
+        },
+        if asked_segment.is_empty() {
+            found_segment
+        } else {
+            asked_segment
+        },
+    ))
+}
+
+/// The refusal for a symbol no feed in this store holds.
+///
+/// Its own function so [`bars_html`] stays under clippy's line ceiling, and
+/// because the sentence is the point: it names why the route could not LOOK,
+/// which is a different fact from a month being absent — and answering the
+/// second when the first is true is what the `"INDEX"` default did.
+fn unlocatable(site: &Site, symbol: &str) -> (axum::http::StatusCode, String) {
+    bars_refusal(
+        site,
+        symbol,
+        "—",
+        "—",
+        "no feed in this store holds a spot series under that name, so there \
+         is no exchange or segment to read it from. Refused rather than \
+         guessed: a guessed path answers \"does not exist\" for a reason that \
+         is not the true one. Pass ?exchange= and ?segment= explicitly to \
+         address a series the census does not carry.",
+    )
+}
+
 /// One month of bars, or a named refusal.
 ///
 /// Every failure arm here names what it looked for: an unreadable month must
@@ -11857,85 +11988,17 @@ fn bars_refusal(
 /// surface has (`CLAUDE.md` §1)"*. That conflates two sets §1 keeps apart in
 /// consecutive sentences: the engine SWEEPS two instruments, and *"futures,
 /// options and single stocks may be stored. They are never swept."* This route
-/// reads the store. D-0339 removed the helper, and the paragraph closed over
-/// the gap it left.
+/// reads the store. D-0339 removed the helper and [`locate_series`] replaced
+/// it, placed ABOVE this paragraph rather than inside it — which is the mistake
+/// that split it in the first place.
 #[must_use]
 pub fn bars_html(site: &Site, query: &str) -> (axum::http::StatusCode, String) {
     let symbol = param(query, "symbol");
-    // THE SEGMENT IS RESOLVED FROM THE CENSUS, NEVER DEFAULTED.
-    //
-    // This read `param_or(query, "segment", "INDEX")`, and the comment on
-    // `param_or` justified it: an absent `?segment=` means INDEX *"because
-    // those are the only values the engine surface has (`CLAUDE.md` §1)"*. That
-    // conflates two different sets. §1 says the engine SWEEPS exactly two
-    // instruments — and in the same breath that *"futures, options and single
-    // stocks may be stored. They are never swept."* This route reads the STORE.
-    //
-    // D-0335 fixed the same defect on `/calendar.json`, where the literal was
-    // live: `ADANIENT` is filed at `NSE/CASH/ADANIENT/` and was probed at
-    // `NSE/INDEX/ADANIENT/` **366 times** against 1,240 daily bars that were on
-    // disk the whole time. Here it was latent only because `render` always
-    // writes `&segment=` from the census — a hand-typed
-    // `/bars?symbol=ADANIENT` read the wrong segment and reported "no data".
-    //
-    // Resolved rather than refused, because this route is reachable by hand and
-    // a URL that needs three parameters to answer a one-parameter question is
-    // a worse answer than looking the symbol up. Refused only when the census
-    // does not hold the name at all, which is the honest reply to "show me the
-    // bars for something nothing has stored".
-    let asked_segment = param(query, "segment");
-    let asked_exchange = param(query, "exchange");
-    let located = if asked_segment.is_empty() || asked_exchange.is_empty() {
-        census::read_all(&site.store_root)
-            .iter()
-            .flat_map(|c| census::held_entries(std::slice::from_ref(c)))
-            .find(|(series, _)| series.contract.is_none() && series.symbol.as_str() == symbol)
-            .map(|(series, _)| {
-                (
-                    series.exchange.as_str().to_owned(),
-                    series.segment.as_str().to_owned(),
-                )
-            })
-    } else {
-        None
+    // THE SEGMENT COMES FROM THE CENSUS, NEVER FROM A DEFAULT — see
+    // `locate_series` for what the default was and what it cost.
+    let Some((exchange, segment)) = locate_series(site, query, &symbol) else {
+        return unlocatable(site, &symbol);
     };
-    let (exchange, segment) = match (located, asked_exchange, asked_segment) {
-        // AN EXPLICIT PARAMETER ALWAYS WINS. The census answers a question the
-        // caller did not ask; it must never override one they did.
-        (_, ex, seg) if !ex.is_empty() && !seg.is_empty() => (ex, seg),
-        (Some((ex, seg)), asked_ex, asked_seg) => (
-            if asked_ex.is_empty() { ex } else { asked_ex },
-            if asked_seg.is_empty() { seg } else { asked_seg },
-        ),
-        // NOTHING HELD UNDER THIS NAME AND NOTHING ASKED. There is no path to
-        // probe, and guessing one produces "does not exist" for a reason that
-        // is not the true one — which is the whole defect this replaces.
-        (None, asked_ex, asked_seg) => (
-            if asked_ex.is_empty() {
-                String::new()
-            } else {
-                asked_ex
-            },
-            if asked_seg.is_empty() {
-                String::new()
-            } else {
-                asked_seg
-            },
-        ),
-    };
-    if exchange.is_empty() || segment.is_empty() {
-        return bars_refusal(
-            site,
-            &symbol,
-            "—",
-            "—",
-            "no feed in this store holds a spot series under that name, so \
-             there is no exchange or segment to read it from. Refused rather \
-             than guessed: a guessed path answers \"does not exist\" for a \
-             reason that is not the true one. Pass ?exchange= and ?segment= \
-             explicitly to address a series the census does not carry.",
-        );
-    }
     // ONE PARSER, shared with the pull form. This route had its own copy that
     // compared with `==` while `ingest::parse_vendor` used
     // `eq_ignore_ascii_case`, so `?vendor=Groww` meant a different vendor here
@@ -21070,6 +21133,121 @@ mod tests {
             got.bodies.iter().all(|(w, _)| w.to() <= kept_last),
             "the kept chunks ascend, so the store can take them in order"
         );
+    }
+
+    /// **A CHUNK THAT ANSWERS WITH NO ROWS IS REPORTED, NEVER TAKEN AS A QUIET
+    /// SUCCESS.**
+    ///
+    /// The path this closes ends in permanent loss and none of it is loud.
+    /// `fetch_chunks` pushed every answered body with no emptiness check, and
+    /// the only trace of a zero-row chunk was a `Trace` line — below the
+    /// default floor. `note_short_window` never fired, because `unfetched` is
+    /// set only when a chunk REFUSED.
+    ///
+    /// Downstream: `from_window` sees an empty batch, records no entry and no
+    /// failure; `Ingested::balances()` is `0 == 0 + 0` and answers YES; the run
+    /// reports `Stored`. If a LATER chunk of the same month lands, the
+    /// manifest's `last_ts_micros` reaches the month's end,
+    /// `autopilot::next_window` answers `None`, and the month is marked
+    /// complete — with the empty chunk's days gone for ever. §8 forbids the
+    /// rewrite and `Header::advance` refuses a batch beginning before what is
+    /// committed, so nothing can go back for them.
+    ///
+    /// **The suffix is kept, which is what separates this from a refusal.** The
+    /// vendor answered; it answered with nothing. The chunks after it may carry
+    /// bars worth having, and discarding them would be the D-0327 defect again.
+    #[tokio::test]
+    async fn a_chunk_that_answers_with_no_rows_is_named_rather_than_taken_as_success() {
+        const BODY: &str = concat!(
+            r#"{"open":[24500.75],"high":[24501.50],"low":[24499.25],"#,
+            r#""close":[24500.50],"volume":[250],"timestamp":[1751337900]}"#
+        );
+        // EVERY COLUMN PRESENT AND EVERY COLUMN EMPTY. This is a well-formed
+        // answer that decodes cleanly to zero bars — not a malformed one, which
+        // would take the refusal path and prove nothing about this rule.
+        const HOLLOW: &str = concat!(
+            r#"{"open":[],"high":[],"low":[],"#,
+            r#""close":[],"volume":[],"timestamp":[]}"#
+        );
+        let _sink = crate::emitted::sink();
+        let dir = masters("hollow", None, None);
+        let site = Site::serving(&dir, &store_root("hollow"));
+        let asked = ingest::parse_spot(
+            "target=swept&from=2026-01-05&to=2026-06-30",
+            day(2026, 8, 10),
+        )
+        .expect("a real target and a window in the past");
+
+        let framed = |body: &str| -> &'static str {
+            Box::leak(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                )
+                .into_boxed_str(),
+            )
+        };
+        // EMPTY FIRST, THEN A REAL ONE — the ordering that used to be silent.
+        // An empty LAST chunk leaves `last_ts_micros` short and the month
+        // resumes on its own; an empty chunk followed by a landing one is what
+        // drives the manifest to the month's end and closes the month over the
+        // hole.
+        let (url, reached) = loopback_script(Box::leak(Box::new([framed(HOLLOW), framed(BODY)])));
+
+        let shipped = match pull::vendor::Feed::Dhan.descriptor().transport {
+            pull::vendor::Transport::Http(spec) => spec,
+            pull::vendor::Transport::LocalArchive(_) => panic!("this feed is HTTP"),
+        };
+        let spec = pull::vendor::HttpSpec {
+            base_url: Box::leak(url.into_boxed_str()),
+            ..shipped
+        };
+        let source =
+            pull::http::HttpSource::new(spec, pull::http::Credential::token("shhh".to_owned()))
+                .expect("a client");
+
+        let got = fetch_chunks(
+            &asked,
+            &site,
+            &source,
+            "13",
+            pull::vendor::Listing::Index,
+            &spec,
+        )
+        .await
+        .expect("an empty answer is not a refusal, so this is not an Err");
+
+        assert!(
+            reached
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .is_ok(),
+            "the loopback vendor was contacted"
+        );
+        assert!(
+            got.bodies.len() >= 2,
+            "the suffix is KEPT — an empty chunk is not a refusal and must not \
+             discard the chunks after it: {:?}",
+            got.bodies.iter().map(|(w, _)| *w).collect::<Vec<_>>()
+        );
+        let why = got.unfetched.as_ref().expect(
+            "an empty chunk must say so — this is the whole finding: it used to \
+             travel as a clean success and close its month over the hole",
+        );
+        assert!(
+            why.contains("NO ROWS AT ALL"),
+            "the reason names what happened: {why}"
+        );
+        assert!(
+            why.contains("append-only"),
+            "and why it cannot be corrected later, which is what makes it \
+             worth stopping for: {why}"
+        );
+
+        // `unfetched` is the same channel a refused chunk uses, and
+        // `note_short_window` turns it into a member failure — proved by
+        // `a_refused_chunk_keeps_the_contiguous_prefix_and_names_what_is_missing`.
+        // Reaching that channel is therefore the whole of what this rule needs;
+        // asserting the conversion again here would test that test.
     }
 
     /// An EMPTY prefix is still an `Err`, and that boundary carries a status.
