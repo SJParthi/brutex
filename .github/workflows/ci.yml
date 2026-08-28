@@ -1577,6 +1577,29 @@ jobs:
           fi
           echo "OK — greeks depends on nothing and names no workspace type."
 
+      - name: Gate 10b — no invariant identifier means two things
+        run: |
+          set -euo pipefail
+          # docs/04-invariants.md carried I-16 through I-22 TWICE, in two
+          # tables, with different claims and different tests. An identifier
+          # that resolves to two invariants cannot be cited unambiguously in a
+          # decision entry, and CLAUDE.md section 3.8 requires history to be
+          # append-only -- identifiers are never renumbered or reused.
+          #
+          # Gate 10 could not see it: it walks rows -> tests and never asks
+          # whether a row is uniquely named. See D-0329.
+          f=docs/04-invariants.md
+          dups=$(grep -oE '^\| [A-Z]+-[0-9]+[a-z]? ' "$f" \
+                 | tr -d '| ' | sort | uniq -d || true)
+          if [ -n "$dups" ]; then
+            printf 'INVARIANT IDENTIFIER DEFINED MORE THAN ONCE:\n%s\n' "$dups"
+            echo
+            echo "Give the LATER row an unused number. Never renumber the"
+            echo "earlier one -- that rewrites history. See D-0329."
+            exit 1
+          fi
+          echo "OK — every invariant identifier is unique."
+
       - name: Gate 7 — the browser crate depends on core alone
         run: |
           set -euo pipefail

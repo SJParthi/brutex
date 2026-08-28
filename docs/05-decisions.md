@@ -24759,3 +24759,235 @@ in any of them is indistinguishable from a hang in the others.
 **This does not fix the crawl.** The host is silent and nothing here changes
 that. It makes the next failure diagnosable, which is the difference between a
 defect that can be worked on and one that can only be watched.
+
+---
+
+> **The three entries below arrived from `origin/main` and were RENUMBERED from
+> D-0035, D-0036 and D-0037.** Those numbers were already taken here, by three
+> unrelated decisions dated 1 and 7 August, and `CLAUDE.md` §3 rule 8 makes a
+> ledger number permanent. The two branches had been appending independently:
+> `feat/pull` reached D-0328 while `main` was still at D-0037, and every one of
+> main's new invariant ids — `S-04`, `S-16`..`S-19`, `I-31`..`I-35` — collided
+> the same way. Renumbering the incoming side is what preserves both sets;
+> renumbering this side would have broken 1,033 commits' worth of references.
+> Internal cross-references inside these three entries were rewritten to match.
+
+### D-0329 · 2026-08-28 · A refusal that nothing gates on is not a refusal
+
+**Decision — `Skip::UnrecognisedExchange` is split from `Skip::ForeignExchange`;
+`Skip::is_routine` is consulted in production rather than only in its own tests;
+unreadable rows and non-routine declines both reach `Read::is_clean`; a
+misplaced header slot refuses the read even when another slot decodes; and
+`MemberIndex::len` reads a field instead of walking the table.**
+
+Five defects, one shape between the first three: a distinction the code drew
+correctly and then threw away before it reached a status, an exit code, or a
+caller.
+
+**The exchange gate.** `decode_master_row` read
+`!matches!(Exchange::parse(row.exchange), Ok(Exchange::Nse))`, which discards
+the `Err`. So a code the engine cannot parse and a venue it deliberately does
+not store were one outcome — `Skip::ForeignExchange`, which `is_routine()`
+reports as ordinary business. `NSE` drifting to `NSE_EQ` (a rename, a padded
+column, a field shifted by one) therefore declined **every row of both
+masters** while the report printed `ok` and exited zero. This is the identical
+failure `Vendor::segment_of` already raises a loud error for, one gate later,
+and whose doc says: *"A mapping bug must never be indistinguishable from a
+legitimate refusal."* The exchange gate was the one left quiet. `BSE` stays
+routine, because it is a real venue this engine chooses not to store.
+
+**`is_routine` was decorative.** It existed, it was correct, and the only code
+that called it was its own tests. The distinction reached nothing. It is now
+counted in `master::Loaded::non_routine` at the single site a decline is
+recorded — asking the `Skip` itself, so a variant added later is counted the
+moment it declares itself non-routine.
+
+**Unreadable rows were printed, never gated.** `Loaded::errors` carried the line
+number and the reason, `universe()` rendered them into notes, and `is_clean()`
+never looked. A master that was 100% unreadable reported `ok`. `CLAUDE.md` §4:
+degrade loudly and name the reason, or refuse — printing a number nobody gates
+on is neither.
+
+**A misplaced slot was tolerated.** `FormatError::SlotPositionMismatch` is
+documented as *"refused rather than tolerated"*, and `best_candidate` consulted
+the fault only when NO slot decoded. With a readable neighbour the mismatch was
+swallowed and the older generation returned as `Ok`. That is the worst available
+answer: slot position is `generation % slot_count`, so a commit in the wrong
+slot has landed on the slot holding the previous generation and destroyed it.
+Reporting the survivor as healthy hides the loss of every commit since. The
+existing test only ever blanked the other slot, so the tolerant path was never
+built.
+
+**A test that encoded the defect.** `bse_and_unknown_exchanges_are_skipped_not_stored`
+asserted that `MCX` — a code `Exchange::parse` cannot read — produced
+`ForeignExchange`. It pinned the conflation rather than catching it, which is
+how the defect survived a suite at 100% line and region coverage. Coverage
+proves a line ran; it cannot prove the assertion beside it was right.
+
+**`MemberIndex::len` walked the table.** `slots.iter().filter(..).count()` —
+O(N) in the TABLE size, 2,048 slots for a 750-member list, to answer a question
+whose answer was known before the table existed.
+`docs/07-o1-architecture.md` law 3 names this exact case. The count is now
+stored at construction. The collision test that used `len()` to prove "no member
+was overwritten" would have become a tautology, so it now compares against an
+independent walk defined in the test module.
+
+**Also in this change.** `merge::merge` pre-sizes `asserted` from the bound it
+already computed for `by_key` thirty lines below (law 2); the instruments search
+renders into one reused buffer instead of allocating two `String`s per
+instrument per request (law 9); and `docs/04-invariants.md` had **seven**
+identifiers — I-16 through I-22 — defined twice with different meanings. The
+later block is renumbered I-31..I-37; the earlier rows keep their numbers,
+because history is append-only. CI gate 10 now refuses a duplicate identifier,
+which is what let this happen: it walked rows→tests and never checked that a row
+was uniquely named.
+
+**Alternatives rejected.** Making `ForeignExchange` non-routine would mark every
+real master permanently dirty — both files list BSE rows by design. Deleting the
+duplicate invariant rows would have made the build green by erasing history,
+which `docs/04-invariants.md` forbids in its own closing section.
+
+---
+
+### D-0330 · 2026-08-28 · The order is taken once, and the header is a row
+
+**Decision — every sort order the instruments page offers is computed once by
+`server::Orders::of` and walked per request; `board_of` probes three
+`MemberIndex` tables instead of binary-searching three arrays; the header row is
+bounded by `MAX_ROW_BYTES` before it is split; and `Columns::locate` pre-sizes
+its map. Layer 12's grade drops from ✓ to ◐.**
+
+**The page sorted the universe on every request.** `instruments_html_from`
+collected the whole filtered set into a `Vec` and `sort_unstable_by_key`-ed it,
+for an order that cannot change — a `Read` is built once and never mutated. The
+row cap bounded what was *rendered*; nothing bounded what was *looked at*, and
+`docs/07-o1-architecture.md` layer 12 carried a ✓ saying otherwise.
+
+This is the same defect, and the same repair, as `Summary`: those counts were
+folded out of `by_key` per request until it was measured at **97.18×** from 900
+to 90,000 instruments. Sorting was the other half and was left in place.
+
+**The grade is now ◐, not ✓.** Removing the sort deletes the
+O(universe · log universe) term, and the filter walk that remains is
+O(universe) — a substring search cannot be answered from an order, and making
+the universe filter bounded needs a precomputed order per filter combination.
+`docs/06-limits.md` §13 states exactly which part of a request is bounded and
+which is not, with the constant marked UNMEASURED because the instruments page
+has never been benched across universe sizes. Calling it ✓ after a partial
+repair would be the same false claim in a quieter voice.
+
+**`board_of` binary-searched three tables per row.** Layer 4 says "never
+`binary_search`", and `universe.rs` carries the whole argument for why — it
+replaced exactly this pattern with exactly this table: *"`binary_search` over
+750 entries is ~10 comparisons — O(log n) wearing an O(1) label."* The
+replacement was built, proved, and not applied to the hotter path. The ordering
+made the common case the worst case too: of the 12,617 rows reaching this gate,
+7,137 are non-equity, and the 120-entry table they match was searched **last**.
+
+The arrays stay sorted. Sortedness no longer protects a search, but it keeps the
+disjointness check readable and a new code obvious in a diff, so I-31's wording
+is corrected rather than its property dropped.
+
+**The header was the one row with no bound.** `MAX_ROW_BYTES` is checked inside
+the loop over what remains *after* `lines.next()` has taken the header — so
+every data row was guarded and the header was not. That is the D-0033 shape
+exactly: a scan with nothing bounding its length, immediately above the guard
+that exists to bound it. It is reachable: a vendor endpoint serving an HTML
+error page instead of a CSV arrives as one enormous first line, which
+`Columns::locate` then splits and hashes field by field — inside the function
+whose stated premise is that *"one `metadata` call is the difference between a
+named refusal and a dead process."*
+
+**Alternatives rejected.** Precomputing an order per filter combination (6
+columns × 4 pills × 2 tracked states) would bound the no-search case but costs
+48 vectors of the universe, which at 90,000 instruments is worse than the walk
+it saves. Truncating an over-long header instead of refusing it would decode a
+file whose shape is unknown, which `CLAUDE.md` §4 bans.
+
+---
+
+### D-0331 · 2026-08-28 · Tests that agreed with the code instead of checking it
+
+**Decision — `parse_expiry` requires digits and not merely width;
+`MasterRow::over_wide` destructures the struct so a new field cannot escape the
+gate; the master reader stops allocating per row; refusals are ranked by what
+they identify; and eight tests that could not fail are made able to.**
+
+The pattern under most of this: an assertion that holds however the code
+behaves. Coverage cannot see it — a tautology executes every line it names.
+
+**`parse_expiry` checked width, not shape.** `u8::from_str` accepts a leading
+sign, so `"+8"` is two bytes wide and parses as 8: `2026-+8-+4` decoded as
+August 4th, through a function documented as *"exactly `YYYY-MM-DD` with
+numeric parts"*. Impact today is nil — both call sites discard the value — which
+is exactly why it would have been found late.
+
+**`over_wide` had no compile-time tie to `MasterRow`.** It read ten fields
+through `self.`, so an eleventh field would compile clean and skip the width
+gate entirely — a field with no bound, which is the defect D-0033 exists for. It
+now destructures with no `..`, so the eleventh field is a build error.
+
+**The reader allocated per row.** `line.split(',').collect()` starts at capacity
+0 and doubles (`Split`'s `size_hint` is `(0, None)`), so a 33-column Dhan row
+paid five allocations and four memcpys — about a million malloc/free pairs
+across 200,461 rows, for a column count the header states before the loop
+begins. One vector is hoisted and refilled. `unrecognised` also allocated its
+key on every row, including the overwhelming majority where the code was already
+present — and the scenario that counter exists to detect is precisely the one
+where every equity row lands there.
+
+**"The most specific refusal" had no ranking.** `best_candidate`'s doc promised
+it; the mechanism was `Option::get_or_insert`, which is *first in slot order*.
+A file whose slot 0 was checksum-damaged and whose slot 1 held an intact
+version-1 header reported "the header is unreadable" instead of "this is a
+version 1 file" — the false diagnosis the paragraph says the mechanism exists to
+prevent. Two ranks, because more would be invented precision: a refusal that
+identifies the **file** beats one that reports damage to a **slot**.
+
+### The tests
+
+- **`commit_counter_publishes_last` compared the code against itself.** Its
+  expected value came from `commit.durable_through`, which is
+  `layout.offset_of(n_valid)` — the same call that produced the value under
+  test. `f(x) == f(x)`, and a reader that never advanced past generation 2
+  passed all 65 iterations. Pinned to literals now, and **that immediately
+  surfaced something true and undocumented: the commit becomes durable at byte
+  60, not 64.** The covered domain is `0..56 ‖ 60..64` and the reserved tail is
+  zero in every commit, so once the fields and the checksum have landed, the
+  four bytes still holding old data are byte-identical to their replacements.
+- **`a_damaged_slot_is_not_repaired_by_a_second_write_to_the_same_slot`
+  damaged nothing.** It proved only that slot indices alternate: no slot was
+  corrupted, nothing was written, nothing was read back. `docs/04-invariants.md`
+  maps rows to tests **by name**, so a name that outruns its body is how a row
+  acquires an unearned ✓.
+- **`capacity_and_ragged_tail_agree_with_the_bytes` never called
+  `ragged_tail_bytes`.** Same class.
+- **Three header field offsets were never asserted.** `flags` (12), `symbol_id`
+  (48) and `timeframe_secs` (52) are all named in `docs/02-store-format.md` and
+  none was pinned. The last two are adjacent `u32`s, so swapping them in both
+  `image` and the offset constants changes the bytes on disk while
+  `decode(commit().bytes) == header` still holds — a silent format mutation,
+  and those two fields did move between v1 and v2.
+- **`assert!(Header::decode(&long).is_ok())`** holds for a decoder that read the
+  wrong window and returned a different-but-valid header.
+- **The binary test asserted counts, never identity.** Every assertion held if
+  the merge kept the bond and dropped `NIFTY`. `docs/06-limits.md` §7b records
+  this exact shape as having already shipped once.
+- **Four of the six byte classes the path allowlist admits were never accepted
+  by any test.** Every segment any store test built was purely alphabetic, so
+  deleting `| b'&'` left the suite green — while `M&M` is an F&O underlying and
+  a Total Market constituent.
+
+### Recorded rather than fixed
+
+**The block checksum binds bytes, not position** (§14). Transposition is
+undetected; a flipped bit is not. Binding position changes the bytes on disk and
+needs a new format version, never an edit to this one (§3.8). Pinned by a test
+so the day it changes is deliberate.
+
+**S-04's ✓ was wider than its test** (§15). `crates/store` issues no I/O, so the
+crash is a function parameter and no barrier is ever taken. The row is reworded
+to what is proven rather than deleted, and `docs/06-limits.md` — which had zero
+occurrences of "durability", "fsync" or "no I/O" — now says so, along with the
+total absence of concurrency and property-based testing.
+

@@ -311,6 +311,20 @@ pub struct Read {
     /// Carried as a field because `is_clean` must consult it, and a count
     /// folded into a note string is not consultable.
     pub unreadable: usize,
+    /// How many rows were declined for a reason that is NOT routine.
+    ///
+    /// A BSE listing is a venue this build chooses not to store — routine, and
+    /// a healthy master is full of them. An exchange code no decoder can parse
+    /// is not: it means the column moved, or the vendor renamed a venue, and
+    /// every row behind it is being dropped for a reason nobody chose.
+    ///
+    /// The two were one outcome until D-0329 separated them, so `NSE` drifting
+    /// to `NSE_EQ` would have declined every row of every master while the
+    /// report printed `ok` and exited zero. Gated here rather than merely
+    /// printed, which is the difference the decision is named for.
+    ///
+    /// See [`crate::master::Loaded::non_routine`].
+    pub non_routine: usize,
     /// Every ordering and every filter the pages offer, decided once.
     ///
     /// The reason it is here and not built per request is `docs/05-decisions.md`
@@ -351,6 +365,7 @@ impl Read {
         unread: Vec<(Vendor, String)>,
         unrecognised: usize,
         unreadable: usize,
+        non_routine: usize,
     ) -> Self {
         let catalog = Catalog::build(&merged);
         // THE JOIN IS BUILT HERE, AND ITS BUCKETS ARE NOTES.
@@ -389,6 +404,7 @@ impl Read {
             unread,
             unrecognised,
             unreadable,
+            non_routine,
             catalog,
             constituents,
             coverage,
@@ -422,6 +438,10 @@ impl Read {
         self.unreadable == 0
             && !self.unavailable
             && self.unrecognised == 0
+            // A DECLINE NOBODY CHOSE. See the field: routine declines are what
+            // a healthy master is full of, and this counts only the ones that
+            // mean a column moved. D-0329.
+            && self.non_routine == 0
             && self.merged.verdict() == merge::Verdict::Clean
     }
 
@@ -522,6 +542,10 @@ pub fn universe(dir: &Path) -> Read {
     let mut unread: Vec<(Vendor, String)> = Vec::new();
     let mut unrecognised = 0;
     let mut unreadable = 0;
+    // COUNTED BESIDE `unreadable` AND GATED BESIDE IT. Both reach `is_clean`,
+    // so a file nobody could read and a decline nobody chose now change the
+    // status and the exit code instead of scrolling past in a note. D-0329.
+    let mut non_routine = 0;
     for (vendor, path) in master_paths(dir) {
         match master::load(&path, vendor) {
             Ok(l) => {
@@ -533,6 +557,7 @@ pub fn universe(dir: &Path) -> Read {
                     l.errors.len()
                 );
                 unreadable += l.errors.len();
+                non_routine += l.non_routine;
                 for (reason, n) in l.skipped_by_reason() {
                     let _ = write!(note, " · {reason} {n}");
                 }
@@ -596,7 +621,7 @@ pub fn universe(dir: &Path) -> Read {
             alone.join(", ")
         ));
     }
-    Read::new(merged, notes, unread, unrecognised, unreadable)
+    Read::new(merged, notes, unread, unrecognised, unreadable, non_routine)
 }
 
 /// Liveness plus the decode tallies, so a machine can check what a human sees.

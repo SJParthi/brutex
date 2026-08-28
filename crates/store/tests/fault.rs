@@ -153,6 +153,13 @@ fn a_torn_header_commit_never_reports_an_uncommitted_count() {
     assert_eq!(published_from, Some(60));
 }
 
+/// The prefix at which a slot write becomes durable.
+///
+/// Not 64. The covered domain is `0..56 ‖ 60..64` and the reserved tail is zero
+/// in every commit, so once the fields and the checksum have landed the four
+/// bytes still holding old data are byte-identical to their replacements.
+const DURABLE_AT: usize = 60;
+
 #[test]
 fn commit_counter_publishes_last() {
     // docs/04-invariants.md S-03: a reader never observes a record beyond
@@ -179,16 +186,45 @@ fn commit_counter_publishes_last() {
         // bytes are there, and the counter is still what decides.
         let read = Header::read_region(&region, file_len(175)).expect("never lost");
         let horizon = v2.offset_of(read.n_valid).expect("fits");
-        let published = if read.n_valid == next.n_valid {
-            commit.durable_through
-        } else {
-            previous_commit.durable_through
-        };
+
+        // PINNED TO LITERALS, not to the code's own arithmetic. This compared
+        // `horizon` against `commit.durable_through`, which is
+        // `layout.offset_of(n_valid)` -- the same call that produced `horizon`.
+        // The assertion was `f(x) == f(x)`, and a `read_region` that never
+        // advanced past generation 2 passed all 65 iterations.
+        //
+        // THE COMMIT BECOMES DURABLE AT BYTE 60, NOT 64 -- and the literal
+        // assertion below is what surfaced it. The covered domain is
+        // `0..56 ‖ 60..64` (S-13) and the reserved tail 60..64 is zero in
+        // EVERY commit, so once the fields (0..56) and the checksum (56..60)
+        // have landed, the four bytes still holding old data are byte-identical
+        // to the four that would replace them. The slot is genuinely,
+        // correctly valid. Below 60 the checksum is a mixture of two commits
+        // and fails, so the reader falls back to generation 2 in the other slot.
+        //
+        // The old assertion compared the horizon against the code's own
+        // `offset_of` output and so could never have shown this.
+        let expected_records = if prefix >= DURABLE_AT { 175 } else { 150 };
         assert_eq!(
-            horizon, published,
-            "at prefix {prefix} the reader's horizon was not a published one",
+            read.n_valid, expected_records,
+            "at prefix {prefix} the reader published the wrong counter",
+        );
+        assert_eq!(
+            horizon,
+            HEADER_LEN + expected_records * RECORD_STRIDE,
+            "at prefix {prefix} the horizon is not the counter's own offset",
+        );
+        // And the horizon is always a durable_through some completed commit
+        // actually issued -- never a byte further.
+        assert!(
+            horizon == previous_commit.durable_through || horizon == commit.durable_through,
+            "at prefix {prefix} the horizon was never published by any commit",
         );
     }
+    // The walk must have reached BOTH answers, or the loop proved nothing
+    // about publication at all.
+    assert_eq!(next.n_valid, 175);
+    assert_eq!(previous.n_valid, 150);
 }
 
 #[test]
@@ -364,6 +400,30 @@ fn a_damaged_slot_is_not_repaired_by_a_second_write_to_the_same_slot() {
     for pair in slots.windows(2) {
         assert_ne!(pair[0], pair[1], "consecutive commits shared a slot");
     }
+
+    // AND THE PROPERTY THE NAME PROMISES, which the body never exercised: no
+    // slot was corrupted, nothing was written and nothing was read back, so
+    // "a damaged copy of the newest state is never the only copy" was asserted
+    // nowhere. docs/04-invariants.md maps rows to tests BY NAME, so a name
+    // that outruns its body is how a row acquires an unearned ✓.
+    let (mut region, header) = three_commits();
+    // Slot 0 holds generation 2 (150 records), slot 1 holds generation 1 (100).
+    assert_eq!(header.n_valid, 150);
+    assert_eq!(
+        Header::read_region(&region, file_len(150)).map(|r| r.n_valid),
+        Ok(150),
+    );
+
+    // Destroy the newest copy. The previous generation lives in the OTHER
+    // slot, which the newest write could not have touched, so it survives.
+    let damaged = &mut region[0..SLOT_LEN];
+    damaged[0] ^= 0xFF;
+    let recovered =
+        Header::read_region(&region, file_len(150)).expect("the previous copy survives");
+    assert_eq!(
+        recovered.n_valid, 100,
+        "generation 1 must still be readable from the slot the bad write never touched",
+    );
 }
 
 #[test]
@@ -495,6 +555,109 @@ fn record_bytes_never_audition_as_a_header_slot() {
     assert_eq!(
         Header::read_region(&blank, file_len(2_000)),
         Err(FormatError::NoValidHeader),
+    );
+}
+
+#[test]
+fn two_competing_refusals_report_the_one_that_identifies_the_file() {
+    // `best_candidate`'s doc promises "the most specific refusal any slot
+    // produced". The mechanism was `Option::get_or_insert`, which keeps
+    // whichever specific refusal came FIRST IN SLOT ORDER -- there was no
+    // ranking at all. No test ever put two DIFFERENT specific faults in
+    // competition: the existing both-slots-damaged test flips byte 0 of each,
+    // which yields `NotABarFile` twice, and that is explicitly not specific.
+    //
+    // Slot 0: a valid version-2 header with a corrupted checksum, which says
+    // only that this slot is damaged.
+    // Slot 1: an intact version-1 header, which says what the FILE is.
+    //
+    // Reporting `SlotChecksum` here would tell an operator their header is
+    // unreadable when the truth is that they are pointing a version-2 reader
+    // at a version-1 file -- the exact false diagnosis the doc says the
+    // mechanism exists to prevent.
+    let mut region = vec![0u8; REGION_LEN];
+    let genesis = Header::genesis(7, 60, FLAG_CHECKSUMS);
+    let g = genesis.commit().expect("v2");
+    assert_eq!(g.slot, 0);
+    apply(&mut region, &g, SLOT_LEN);
+    // Corrupt a covered byte so slot 0 fails its checksum rather than its magic.
+    region[16] ^= 0xFF;
+
+    // Slot 1: the version-1 geometry, intact.
+    let at = usize::try_from(Layout::V2.slot_offset(1)).expect("fits");
+    region[at..at + 8].copy_from_slice(b"BRUTEXB1");
+    region[at + 8..at + 10].copy_from_slice(&1u16.to_le_bytes());
+    region[at + 10..at + 12].copy_from_slice(&56u16.to_le_bytes());
+    region[at + 16..at + 24].copy_from_slice(&10u64.to_le_bytes());
+
+    assert_eq!(
+        Header::read_region(&region, file_len(10)),
+        Err(FormatError::RetiredVersion(1)),
+        "the refusal that identifies the file must win over one that only \
+         reports damage to a slot",
+    );
+}
+
+#[test]
+fn a_misplaced_slot_is_refused_even_when_the_other_slot_still_reads() {
+    // THE SHAPE THE OLD TEST NEVER BUILT, and the reason the defect survived.
+    //
+    // `a_commit_found_in_the_wrong_slot_is_refused` below overwrites slot 0
+    // and leaves slot 1 blank, so NO slot decodes, and the position fault
+    // surfaced only because it was the last resort. `best_candidate` consulted
+    // the fault exclusively when nothing else decoded -- so with a readable
+    // slot beside it the mismatch was swallowed and the older generation came
+    // back as `Ok`.
+    //
+    // That is the worst possible answer here. Slot position is
+    // `generation % slot_count`, so a commit in the wrong slot has landed on
+    // the slot that held the previous generation and destroyed it. Reporting
+    // the survivor as healthy hides the loss of every commit since.
+    let mut region = vec![0u8; REGION_LEN];
+
+    // Slot 0: genesis, generation 0, correctly placed.
+    let genesis = Header::genesis(7, 60, FLAG_CHECKSUMS);
+    let g = genesis.commit().expect("v2");
+    assert_eq!(g.slot, 0);
+    apply(&mut region, &g, SLOT_LEN);
+
+    // Slot 1: generation 1, correctly placed. Both slots now read.
+    let (from, to) = batch(0, 100);
+    let gen1 = genesis.advance(100, from, to).expect("fits");
+    let c1 = gen1.commit().expect("v2");
+    assert_eq!(c1.slot, 1);
+    apply(&mut region, &c1, SLOT_LEN);
+    assert_eq!(
+        Header::read_region(&region, file_len(200)).map(|r| r.n_valid),
+        Ok(100),
+        "the file is healthy before the bad write"
+    );
+
+    // Generation 3 belongs in slot 1. Write it into slot 0 instead.
+    // `batch(from, count)` -- the second argument is a COUNT, so these are the
+    // 50 records after 100 and the 50 after 150. Timestamps must strictly
+    // increase or `advance` refuses.
+    let (from2, to2) = batch(100, 50);
+    let gen2 = gen1.advance(150, from2, to2).expect("fits");
+    let (from3, to3) = batch(150, 50);
+    let gen3 = gen2.advance(200, from3, to3).expect("fits");
+    let bad = gen3.commit().expect("v2");
+    assert_eq!(bad.slot, 1, "generation 3 belongs in slot 1");
+    region
+        .iter_mut()
+        .zip(bad.bytes)
+        .for_each(|(dst, src)| *dst = src);
+
+    // Slot 1 still holds a perfectly valid generation 1. The read must still
+    // refuse: returning `Ok(100)` here would report a healthy file that has
+    // lost generations 2 and 3.
+    assert_eq!(
+        Header::read_region(&region, file_len(200)),
+        Err(FormatError::SlotPositionMismatch {
+            expected: 1,
+            found: 0,
+        }),
+        "a readable neighbour must not excuse a misplaced commit"
     );
 }
 

@@ -126,6 +126,27 @@ fn the_binary_reports_what_it_read_and_exits_zero() {
     assert!(text.contains("merged: 2 instruments"), "{text}");
     assert!(text.contains("0 isin conflicts"), "{text}");
     assert!(text.contains("0 eligibility conflicts"), "{text}");
+
+    // COUNTS ARE NOT IDENTITY. Every assertion above holds if the merge kept
+    // `SOMEBOND` and dropped `NIFTY` -- the numbers would be identical.
+    // docs/06-limits.md section 7b records exactly this shape as having already
+    // shipped once: "The decoder could not read NIFTY ... Coverage proves lines
+    // ran. It cannot prove they ran on data shaped like reality."
+    //
+    // The census lines name the universes, so they are what pins WHICH
+    // instruments survived rather than how many.
+    // Both NIFTY and RELIANCE are F&O underlyings; only RELIANCE is a NIFTY
+    // Total Market constituent, because NIFTY is the index itself. Those two
+    // numbers differ, so together they say WHICH pair survived and not merely
+    // that two did -- swap either instrument for the bond and one of them moves.
+    assert!(
+        text.contains("F&O underlyings: 2 resolved, 2 confirmed by every master read"),
+        "both NIFTY and RELIANCE are F&O underlyings: {text}",
+    );
+    assert!(
+        text.contains("NIFTY Total Market: 1 resolved, 1 confirmed by every master read"),
+        "RELIANCE alone is a Total Market constituent -- the index is not: {text}",
+    );
 }
 
 #[test]

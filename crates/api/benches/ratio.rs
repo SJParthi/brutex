@@ -189,7 +189,10 @@ fn read_of(n: usize) -> Read {
         // unread: every vendor's master was read, by construction.
         Vec::new(),
         0,
-        // unreadable: a synthetic bench universe decodes cleanly by construction.
+        // unreadable, then non_routine: a synthetic bench universe decodes
+        // cleanly by construction, so this harness measures render cost on a
+        // CLEAN universe and neither degrade gate fires.
+        0,
         0,
     )
 }
