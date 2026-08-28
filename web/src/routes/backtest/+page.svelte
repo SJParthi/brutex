@@ -441,7 +441,13 @@
    * @property {number} winner_mae
    * @property {number} winner_mfe
    * @property {number} all_mae
-   * @property {unknown} exit_rungs
+   * The five exit axes as rung indices, `-1` where an axis is unused.
+   * `crates/cli` holds it as `[i*; 5]` and reads it with `.first()` and
+   * `.get(n).unwrap_or(-1)`, so it is five signed numbers on the wire. It was
+   * `unknown`, which made the panel's `{#each … ?? []}` an iteration over a
+   * value the checker could not call iterable. OPTIONAL, because that `?? []`
+   * is the reader's own statement that a build may not send it.
+   * @property {number[]} [exit_rungs]
    * @property {string[]} mask_words
    */
 
@@ -1813,11 +1819,24 @@
   /** @type {HTMLElement | null} */
   let chartHost = $state(null);
   let chartError = $state('');
-  /** The bar under the crosshair, for the legend. Null when the pointer is off. */
+  /**
+   * The bar under the crosshair, for the legend. Null when the pointer is off.
+   *
+   * FIVE FIELDS, WHICH IS WHAT THE LEGEND READS. `$state(null)` inferred
+   * `null`, so the guarded `{#if ohlc}` narrowed to `never` and every `ohlc.c`
+   * under it was a read on a type with no properties at all. Declaring more
+   * than the legend uses would be describing the wire from memory rather than
+   * from a reader.
+   *
+   * @type {{ t: number, o: number, h: number, l: number, c: number } | null}
+   */
   let ohlc = $state(null);
   /** Which rung the CHART shows. Starts at the run's own and is switchable. */
   let chartRung = $state('');
-  /** Every rung the store holds for this instrument, newest census first. */
+  /**
+   * Every rung the store holds for this instrument, newest census first.
+   * @type {{ name: string, months: number }[]}
+   */
   let storeRungs = $state([]);
 
   /**
@@ -1828,8 +1847,13 @@
    * `/store.json` is the census `/db` already reads — one row per
    * (instrument, month, rung) — so the rung set is a fold over it.
    *
+   * `rung` WAS DOCUMENTED AND WAS NEVER A PARAMETER. The doc described a
+   * second argument — "the timeframe to draw, which is not always the run's
+   * own" — that this function has never taken; the rung it draws is
+   * `chartRung`, which the switcher writes. A parameter tag naming nothing is
+   * a reader being told to pass something no caller passes.
+   *
    * @param {any} run
-   * @param {string} rung the timeframe to draw, which is not always the run’s own
    */
   async function loadRungs(run) {
     const seq = ++rungsSeq;
@@ -2461,7 +2485,10 @@
     };
   }
 
-  /** The chart handle, kept so the range presets can drive the time scale. */
+  /**
+   * The chart handle, kept so the range presets can drive the time scale.
+   * @type {any} matching the loose handles on `/` — see the note there.
+   */
   let chartApi = null;
 
   /**
@@ -2528,6 +2555,7 @@
     const bars = series.bars;
     if (!host || bars.length === 0) return;
     let dead = false;
+    /** @type {any} the chart handle, same looseness as `chartApi` above. */
     let made = null;
     (async () => {
       try {
@@ -2611,7 +2639,11 @@
       } catch (why) {
         // A chart library that will not load is a NAMED failure, not a blank
         // rectangle. Every figure above this panel still stands.
-        if (!dead) chartError = String(why?.message ?? why);
+        /* `catch` BINDS `unknown`. The same guard `loadVocab` already uses
+           above, for the same reason: `?.message` on a thrown non-Error is
+           `undefined` and falls through, but on an object whose `message` is
+           not a string it prints `[object Object]` as the failure reason. */
+        if (!dead) chartError = why instanceof Error ? why.message : String(why);
       }
     })();
     return () => {

@@ -290,8 +290,23 @@
           : 'none'
   );
   const censusError = $derived(store.error);
-  const censusMonths = $derived(censusState === 'ready' ? store.byInstrument : new Map());
-  const censusBad = $derived(censusState === 'ready' ? store.badByInstrument : new Map());
+  /* THE EMPTY FALLBACK IS TYPED LIKE THE REAL ONE.
+     `store.byInstrument` is `Map<string, StoreCell[]>`, but a bare `new Map()`
+     beside it is `Map<any, any>` — so the union of the two arms is a map whose
+     `.get()` answers `any`, and every callback that walks a month list
+     downstream took an implicitly-`any` parameter. One untyped empty
+     collection at the top of a derivation erased the types of a dozen readers
+     of it, which is the compounding `noImplicitAny` exists to stop. */
+  const censusMonths = $derived(
+    censusState === 'ready'
+      ? store.byInstrument
+      : /** @type {typeof store.byInstrument} */ (new Map())
+  );
+  const censusBad = $derived(
+    censusState === 'ready'
+      ? store.badByInstrument
+      : /** @type {typeof store.badByInstrument} */ (new Map())
+  );
   // THE STAMP IS THE CURRENT VALUE'S OR IT IS NOTHING. `store.at` is already
   // cleared on a failed read, so this cannot print a minute over a refusal.
   const censusStamp = $derived(censusState === 'ready' ? store.at : null);
@@ -332,7 +347,13 @@
      function, so they can differ about what to SHOW and can never differ
      about WHAT HAPPENED.
      ====================================================================== */
-  const blocked = $derived.by(() => {
+  /* THE SAME SHAPE AS `chartReason`, BECAUSE IT IS ONE OF ITS ANSWERS.
+     `chartReason` opens with `if (blocked) return blocked;`, so these five
+     branches are already part of that union whether or not they say so, and
+     inferring `kind` as `string` here is what made the declared nine
+     unassignable. Two names for one shape is the drift where a kind added to
+     one is unhandled by the other. */
+  const blocked = $derived.by(/** @returns {ChartReason | null} */ () => {
     if (feeds.error)
       return {
         kind: 'error',
@@ -606,7 +627,12 @@
     if (didPick || all.length === 0) return;
     didPick = true;
     const held = all.filter((r) => (barsOf(r) ?? 0) > 0);
-    pickedKey = (held.find((r) => r.key === 'NSE-NIFTY') ?? held[0] ?? all[0]).key;
+    /* A ROW THAT CANNOT NAME ITSELF IS NOT A DEFAULT SELECTION. `key` comes
+       off the wire, so `?? null` here means "nothing was picked" rather than
+       picking a row whose key is the string `undefined` — which every lookup
+       downstream would then fail to match, silently, and for a reason no
+       message would name. */
+    pickedKey = (held.find((r) => r.key === 'NSE-NIFTY') ?? held[0] ?? all[0]).key ?? null;
   });
 
   function pick(row) {
@@ -617,6 +643,12 @@
     openTray = null;
   }
 
+  /**
+   * @param {number} delta rows to move by, signed
+   * @param {number | null} [absolute] a row to jump to instead. The default is
+   *        `null` and NOT `undefined`, so inference read the parameter as
+   *        `null` alone and rejected every caller that passed a number.
+   */
   function moveCursor(delta, absolute = null) {
     const n = hits.length;
     if (n === 0) return;
@@ -750,9 +782,23 @@
   const badMonths = $derived(picked ? (censusBad.get(seriesKey(picked)) ?? []) : []);
   const censusTotal = $derived(heldMonths.reduce((a, m) => a + m.rows, 0));
 
-  /** Every rung this build can map a bar length to, finest first. */
+  /**
+   * Every rung this build can map a bar length to, finest first.
+   *
+   * THE LENGTH IS RESOLVED ONCE PER RUNG, NOT ONCE PER COMPARISON. The sort
+   * called `rungSec` inside the comparator, so a set of n rungs resolved it
+   * O(n log n) times to order n values — and the comparator was handed
+   * `number | null` besides, because the filter above it narrows the ARRAY and
+   * not the return of a second call. Pairing each rung with its length, then
+   * dropping the unmappable ones with a predicate that narrows, gives the
+   * comparator two numbers and calls the resolver n times.
+   */
   const storedRungs = $derived(
-    [...new Set(heldMonths.map((m) => m.timeframe))].filter((t) => rungSec(t) !== null).sort((a, b) => cmp(rungSec(a), rungSec(b)))
+    [...new Set(heldMonths.map((m) => m.timeframe))]
+      .map((t) => ({ t, s: rungSec(t) }))
+      .filter(/** @returns {x is { t: string, s: number }} */ (x) => x.s !== null)
+      .sort((a, b) => cmp(a.s, b.s))
+      .map((x) => x.t)
   );
   /** Rungs on disk this build has no bar length for. Named, never guessed at. */
   const unmappedRungs = $derived([...new Set(heldMonths.map((m) => m.timeframe))].filter((t) => rungSec(t) === null));
@@ -763,9 +809,28 @@
   // cannot leave a rung on the address bar that no file on disk answers to.
   /** @type {string | null} */
   let basePref = $state(null);
-  const base = $derived(storedRungs.includes(basePref) ? basePref : (storedRungs[0] ?? null));
+  /* THE NULL PREFERENCE IS NOT A MEMBER, AND IT NEVER WAS. `storedRungs` is
+     `string[]` now that its length lookup is typed, so `.includes(null)` is
+     rejected rather than quietly answered `false` — which is the answer it was
+     always giving. Saying it in the guard costs nothing and stops the
+     un-chosen case from riding on a coincidence of `Array.includes`. */
+  const base = $derived(
+    basePref !== null && storedRungs.includes(basePref) ? basePref : (storedRungs[0] ?? null)
+  );
 
-  const offered = $derived(base === null ? [] : timeframes.filter((t) => t.seconds >= rungSec(base)));
+  /* THE FLOOR IS READ ONCE AND GUARDED. `base` being non-null does not make
+     `rungSec(base)` non-null — that is a second question about the same value,
+     and comparing `t.seconds >= null` coerces to `>= 0`, which offers EVERY
+     rung as derivable from a base whose length this build cannot map. It is
+     unreachable today because `storedRungs` drops unmappable rungs before
+     `base` can name one, but the arm that would be wrong is the one that
+     silently offers everything. */
+  const offered = $derived.by(() => {
+    if (base === null) return [];
+    const floor = rungSec(base);
+    if (floor === null) return [];
+    return timeframes.filter((t) => t.seconds >= floor);
+  });
   let tfPref = $state('5m');
   const tf = $derived(offered.some((t) => t.id === tfPref) ? tfPref : (offered[0]?.id ?? null));
   const tfSeconds = $derived(offered.find((t) => t.id === tf)?.seconds ?? null);
@@ -828,7 +893,15 @@
     const n = Number(addRung);
     if (!Number.isInteger(n) || n < 1 || n > 1440) return `${addRung} is not a whole number of minutes between 1 and 1440.`;
     if (base === null) return 'No rung on disk can be read here, so nothing can be derived from one.';
-    if (n * 60 < rungSec(base)) return `${n}m is finer than the ${base} bars being read — it cannot be derived from them.`;
+    /* THE SAME SECOND QUESTION AS `offered`. `base` names a rung; whether this
+       build can map that rung to a bar length is not settled by it being
+       named. Refusing here is the honest arm: a rung whose length is unknown
+       cannot be shown to be coarser than the one being typed, and `n * 60 <
+       null` would coerce to `< 0` and let every width through. */
+    const floor = rungSec(base);
+    if (floor === null)
+      return `This build cannot map ${base} to a bar length, so it cannot say whether ${n}m is finer than it.`;
+    if (n * 60 < floor) return `${n}m is finer than the ${base} bars being read — it cannot be derived from them.`;
     if (timeframes.some((t) => t.seconds === n * 60)) return `${n}m is already on the ladder.`;
     return null;
   });
@@ -1026,8 +1099,12 @@
    * }} ChartReason
    */
 
-  /** @returns {ChartReason | null} */
-  const chartReason = $derived.by(() => {
+  /* THE ANNOTATION GOES ON THE FUNCTION, NOT ON THE `const`. `@returns` above
+     the declaration describes `chartReason` AS a function — which it is not,
+     it is the value one returned — so the callback's nine object literals went
+     on being inferred as a bare union and the reads went on failing. Inside
+     the call, attached to the arrow, it is the callback's return type. */
+  const chartReason = $derived.by(/** @returns {ChartReason | null} */ () => {
     if (blocked) return blocked;
     // "NOT LISTED" IS A CLAIM ABOUT THE VENDOR AND IT NEEDS A LIST TO MAKE IT.
     // A row missing from an EMPTY set of rows is not evidence of anything.
@@ -1136,8 +1213,13 @@
   const lastBar = $derived(drawn.length ? drawn[drawn.length - 1] : null);
   const firstBar = $derived(drawn.length ? drawn[0] : null);
 
-  /** @type {{ time: number } | null} */
-  let hover = $state(null); // {time} — the bar under the crosshair, or null
+  // {time} — the bar under the crosshair, or null.
+  // THE CAST IS INSIDE `$state`, not a `@type` above it. Above the
+  // declaration the annotation did not reach the binding and `hover` stayed
+  // `null`, so `hover?.time != null` narrowed the true branch to `never` and
+  // both reads inside it failed. Annotating the initialiser types the value
+  // `$state` is given, which is what the binding takes its type from.
+  let hover = $state(/** @type {{ time: number } | null} */ (null));
   const shown = $derived(hover?.time != null ? (byTime.get(hover.time) ?? lastBar) : lastBar);
   const shownUp = $derived(shown ? shown.c >= shown.o : true);
 
@@ -1168,7 +1250,20 @@
   // PLAIN, NOT `$state`. Nothing in the markup reads it, and the draw effect
   // both tests and assigns it — as reactive state that is an effect depending
   // on its own output.
+  /* TYPED `any`, TO MATCH `chart` AND `candles` DIRECTLY ABOVE.
+     `lightweight-charts` does publish `IChartApi` and `ISeriesApi`, and these
+     four handles could carry them — but two of the four already say `any` and
+     a file that types half its handles precisely and half loosely is harder to
+     read than one that is consistent. The reason the loose choice stands is
+     that `null` was the only inferred type here, which made `volume.setData`
+     an error on a value the draw effect assigns before it reads: an implicit
+     `any` in a place where the checker could not even see the assignment.
+     Saying `any` explicitly is what `noImplicitAny` is asking for. Tightening
+     all four to the library's interfaces is a separate change with its own
+     measurement, not a thing to do halfway inside an annotation pass. */
+  /** @type {any} */
   let volume = null;
+  /** @type {any} */
   let libMod = null;
   /** @type {string | null} */
   let chartError = $state(null);
@@ -1222,6 +1317,7 @@
     void volumeMode; // READ, NOT USED — the dependency that forces the rebuild
     if (!el) return;
     let dead = false;
+    /** @type {any} the chart handle, same looseness as `chart` above. */
     let made = null;
 
     (async () => {
@@ -1289,7 +1385,12 @@
       } catch (why) {
         // A chart library that will not load is a NAMED failure, not a blank
         // rectangle. Everything else on the page still works.
-        if (!dead) chartError = String(why?.message ?? why);
+        /* `catch` BINDS `unknown`, AND THE GUARD IS NOT CEREMONY. `?.message`
+           on a thrown STRING is `undefined`, so the old form fell through to
+           `String(why)` and worked — but on a thrown object with a `message`
+           that is itself an object it printed `[object Object]` as the reason
+           a chart is missing. The idiom is already used at `loadVocab`. */
+        if (!dead) chartError = why instanceof Error ? why.message : String(why);
       }
     })();
 
@@ -1627,7 +1728,7 @@
             >
               <span class="nm">{t.id}</span>
               <span class="de"
-                >{t.seconds === rungSec(base)
+                >{base !== null && t.seconds === rungSec(base)
                   ? 'as stored'
                   : `${Math.ceil(22500 / t.seconds)} candles per session, derived from ${base}`}</span
               >
