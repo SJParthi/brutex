@@ -5994,6 +5994,68 @@ pub(crate) fn clamp_to_floor(
         .map_err(|why| format!("the clamped window is not forward: {why}"))
 }
 
+/// Every chunk this request will ask for, decided WITHOUT opening a socket.
+///
+/// # WHY THIS IS NOT INSIDE `fetch_chunks`
+///
+/// It was, and it made three refusals lie about who refused.
+///
+/// [`broker_window`] wraps every `Err` out of [`fetch_chunks`] in
+/// [`WIRE_REACHED`], on the stated ground that `fetch_chunks` "is the only call
+/// in this function that opens a socket". Three of that function's four failure
+/// paths ran BEFORE the first one was opened — an unusable clock, a window
+/// wholly below the feed's [`pull::vendor::HistoryFloor`], and a vendor window
+/// cap of zero. Each was marked as the VENDOR's, so [`read_markers`] reported
+/// `reached_wire`, [`broker_run`] set [`BrokerRun::touched_wire`], and the route
+/// answered `502 BAD_GATEWAY`.
+///
+/// That is the exact defect `BrokerRun::touched_wire` exists to remove, arriving
+/// by a path it did not cover: the page draws `Last pull HTTP 502` and an
+/// operator reads *the broker is down* when the truth is *you asked for days
+/// this feed never held*. A status blaming a third party for this side's own
+/// refusal — `CLAUDE.md` §4's fallback that hides a failure, wearing the wrong
+/// name rather than no name.
+///
+/// Moved rather than given a typed error, because `broker_window`'s boundary
+/// comment states a PRECONDITION about everything above it. Making that
+/// sentence true is a smaller thing to keep true than a second error channel
+/// whose two arms can drift apart.
+///
+/// # It also runs before anything is spent
+///
+/// Above [`await_budget`] and above the credential read, so a window below the
+/// floor now costs neither a rate permit nor a Parameter Store round-trip to
+/// ap-south-1. That is the rule `await_budget`'s own comment states — *"a
+/// request that will not be issued must not first cost a Parameter Store
+/// round-trip"* — and clamping downstream of it was breaking that rule for
+/// every below-floor window.
+/// `every_cost_in_broker_window_is_paid_after_the_transport_is_known` pins the
+/// order.
+fn planned_chunks(
+    asked: &ingest::SpotRequest,
+    spec: &pull::vendor::HttpSpec,
+) -> Result<Vec<pull::session::Window>, String> {
+    // CLAMPED TO THE FEED'S HISTORY FLOOR BEFORE ANYTHING IS SPLIT.
+    //
+    // Asking below the floor is not an error the vendor reports usefully: it
+    // answers EMPTY, and an empty answer is indistinguishable from a day that
+    // did not trade. So a 2020-to-yesterday backfill against a feed whose
+    // history starts later spends real requests on data that does not exist and
+    // reports success.
+    //
+    // For Dhan it is worse than waste. Its floor ROLLS — `docs/00-charter.md`
+    // §4: "rolling ~5 years. Not a fixed floor — it moves every day". Asking
+    // for 2020 today is asking for ~5 months it no longer has, and that gap
+    // widens every month while nothing notices. Clamping is what stops
+    // "complete" from being a claim with an expiry date.
+    let today = ingest::ist_day(std::time::SystemTime::now())
+        .map_err(|why| format!("the clock is unusable: {why}"))?;
+    let asked_window = clamp_to_floor(asked.window, spec.history_floor, today)?;
+
+    pull::session::split_window(asked_window, spec.window_cap_days(asked.granularity))
+        .map_err(|why| format!("the window could not be split to the vendor's cap: {why}"))
+}
+
 /// Every legal chunk of the operator's window, fetched over one client.
 ///
 /// A vendor caps how much history one request may name — 30 days for Groww at
@@ -6037,29 +6099,15 @@ async fn fetch_chunks(
     // BESIDE THE ID, because they are read from the same master row and the
     // vendor requires both. See the `listing` field on the request below.
     listing: pull::vendor::Listing,
-    // BY REFERENCE: `HttpSpec` is 280 bytes and only one field is read.
-    spec: &pull::vendor::HttpSpec,
+    // ALREADY CLAMPED AND ALREADY SPLIT, by [`planned_chunks`] and above the
+    // caller's wire boundary.
+    //
+    // Taking the `HttpSpec` and doing that work here is what made this
+    // function's `Err` mean two different things — see `planned_chunks`. Every
+    // remaining way out of this function that is an `Err` has been on a socket,
+    // which is the precondition `broker_window` marks its refusals under.
+    chunks: &[pull::session::Window],
 ) -> Result<Chunks, String> {
-    // CLAMPED TO THE FEED'S HISTORY FLOOR BEFORE ANYTHING IS SPLIT.
-    //
-    // Asking below the floor is not an error the vendor reports usefully: it
-    // answers EMPTY, and an empty answer is indistinguishable from a day that
-    // did not trade. So a 2020-to-yesterday backfill against a feed whose
-    // history starts later spends real requests on data that does not exist and
-    // reports success.
-    //
-    // For Dhan it is worse than waste. Its floor ROLLS — `docs/00-charter.md`
-    // §4: "rolling ~5 years. Not a fixed floor — it moves every day". Asking
-    // for 2020 today is asking for ~5 months it no longer has, and that gap
-    // widens every month while nothing notices. Clamping is what stops
-    // "complete" from being a claim with an expiry date.
-    let today = ingest::ist_day(std::time::SystemTime::now())
-        .map_err(|why| format!("the clock is unusable: {why}"))?;
-    let asked_window = clamp_to_floor(asked.window, spec.history_floor, today)?;
-
-    let chunks = pull::session::split_window(asked_window, spec.window_cap_days(asked.granularity))
-        .map_err(|why| format!("the window could not be split to the vendor's cap: {why}"))?;
-
     let mut bodies = Vec::with_capacity(chunks.len());
     for (nth, chunk) in chunks.iter().enumerate() {
         // THE BUDGET IS CHARGED PER REQUEST, NOT PER FORM SUBMISSION. One
@@ -7196,6 +7244,20 @@ async fn broker_window(
     // multi-instrument pull rather than being quietly deleted.
     finished_day_only(asked)?;
 
+    // WHAT WILL BE ASKED FOR, DECIDED HERE, WHERE A REFUSAL IS STILL THIS
+    // SIDE'S.
+    //
+    // This ran inside `fetch_chunks`, below the wire boundary, so a window
+    // wholly beneath the feed's history floor came back wearing `WIRE_REACHED`
+    // and the route answered `502 BAD_GATEWAY` — the broker blamed for a
+    // refusal decided from the form. See [`planned_chunks`].
+    //
+    // Above `await_budget` for the same reason the transport check is: the
+    // clamp is decidable from the descriptor and the request, so a window this
+    // feed never held must not first spend a permit and a Parameter Store
+    // round-trip to discover that.
+    let chunks = planned_chunks(asked, &spec)?;
+
     // THE RATE BUDGET, SPENT BEFORE THE SOCKET AND NOT AFTER.
     //
     // `crates/pull/src/rate.rs` implements an AIMD governor — additive increase
@@ -7327,18 +7389,31 @@ async fn broker_window(
     // THE WIRE STARTS HERE, AND THE REFUSAL SAYS SO.
     //
     // Everything above this line is decidable from the request: the transport,
-    // the rung, whether the session has closed, the rate permit, the credential.
-    // `fetch_chunks` is the only call in this function that opens a socket, so
-    // a failure from it — and only from it — is one the VENDOR is responsible
-    // for.
+    // the rung, whether the session has closed, WHICH CHUNKS WILL BE ASKED FOR,
+    // the rate permit, the credential. `fetch_chunks` is the only call in this
+    // function that opens a socket, so a failure from it — and only from it —
+    // is one the VENDOR is responsible for.
+    //
+    // **That sentence was false for three refusals, and this is the line that
+    // made it true again.** The clock read, the history-floor clamp and the
+    // window split all lived inside `fetch_chunks`, ahead of its first socket,
+    // and every one of them came back marked as the vendor's. They are
+    // `planned_chunks` now, above — see its header for what the 502 cost.
     //
     // Marked with a sentinel rather than inferred from the message. Matching a
     // refusal's PROSE is how a 403 came to be filed as a transport blip
     // elsewhere in this file; this is a marker this code writes and this code
     // strips, which is a different thing from reading a vendor's words.
-    let bodies = fetch_chunks(asked, site, &source, instrument_id.as_str(), listing, &spec)
-        .await
-        .map_err(|why| format!("{WIRE_REACHED}{why}"))?;
+    let bodies = fetch_chunks(
+        asked,
+        site,
+        &source,
+        instrument_id.as_str(),
+        listing,
+        &chunks,
+    )
+    .await
+    .map_err(|why| format!("{WIRE_REACHED}{why}"))?;
 
     let Some(store_vendor) = feed.store_vendor() else {
         return Err(format!(
@@ -18613,39 +18688,66 @@ mod tests {
         }
     }
 
-    /// The fetch loop reads the DESCRIPTOR's cap, not a literal and not `None`.
+    /// The chunk plan reads the DESCRIPTOR's cap, not a literal and not `None`.
     ///
     /// Written against the source because the alternative is a live broker.
     /// It exists because a mutant that replaced `spec.window_cap_days` with a
     /// hardcoded `None` — sending the whole window, which is the entire bug —
     /// passed every other test here: they assert that the descriptor CARRIES
     /// the cap and that `split_window` divides correctly, and both remain true
-    /// while the loop ignores the answer.
+    /// while the caller ignores the answer.
+    ///
+    /// # THE SPLIT MOVED, AND THIS TEST FOLLOWED IT
+    ///
+    /// It searched `fetch_chunks`, where the loop lived when `broker_window`
+    /// crossed the 100-line lint. The clamp and the split are `planned_chunks`
+    /// now, ABOVE the wire boundary, because computing them below it filed
+    /// three of this side's own refusals as the vendor's and answered
+    /// `502 BAD_GATEWAY` for them —
+    /// `a_window_wholly_below_the_history_floor_is_a_bad_request_and_not_a_bad_gateway`.
+    ///
+    /// Following it is the point rather than an inconvenience: had the needle
+    /// simply been allowed to leave the searched span, this test would have
+    /// gone on passing while the cap it names stopped being consulted at all.
+    /// That is the failure mode its neighbour's header describes biting the
+    /// ordering test once already.
     #[test]
     fn the_fetch_loop_takes_its_cap_from_the_descriptor() {
-        // `fetch_chunks`, because the loop moved there when `broker_window`
-        // crossed the 100-line lint. The test follows the code rather than
-        // passing because the needle left the span it was searching — which is
-        // the failure mode that already bit the ordering test once.
         let me = include_str!("server.rs");
         let body = me
-            .split_once("async fn fetch_chunks")
-            .expect("fetch_chunks exists")
+            .split_once("fn planned_chunks")
+            .expect("planned_chunks exists")
             .1;
         let body = &body[..body
             .find("\n}\n")
-            .expect("fetch_chunks' body ends at a column-0 brace")];
+            .expect("planned_chunks' body ends at a column-0 brace")];
 
         assert!(
             body.contains("spec.window_cap_days"),
             "the chunking must be driven by the feed's own declared cap — a \
              literal here is one vendor's number applied to every vendor, and \
-             a `None` is the un-split window this loop exists to prevent"
+             a `None` is the un-split window this plan exists to prevent"
         );
         assert!(
             body.contains("split_window("),
             "and the split must be the one function that computes it, not a \
              second copy of the arithmetic"
+        );
+
+        // AND THE LOOP DOES NOT GET ITS OWN COPY BACK. `fetch_chunks` taking a
+        // spec again is how the clamp returns below the wire boundary, which is
+        // the defect `planned_chunks` was extracted to remove.
+        let loop_body = me
+            .split_once("async fn fetch_chunks")
+            .expect("fetch_chunks exists")
+            .1;
+        let loop_body = &loop_body[..loop_body
+            .find("\n}\n")
+            .expect("fetch_chunks' body ends at a column-0 brace")];
+        assert!(
+            !loop_body.contains("window_cap_days") && !loop_body.contains("clamp_to_floor("),
+            "the socket loop decides nothing it could have decided before \
+             opening one — every `Err` it returns is marked as the vendor's"
         );
     }
 
@@ -19579,6 +19681,122 @@ mod tests {
         assert!(
             !code.contains("contains(") && !code.contains("starts_with("),
             "and never by reading the refusal's words: {code}"
+        );
+    }
+
+    /// **A WINDOW THE FEED NEVER HELD IS THIS SIDE'S REFUSAL, AND ANSWERED 400.**
+    ///
+    /// The test above pins the STRUCTURE — one marker, at the socket call, and a
+    /// status read off the recorded flag. It passed throughout the defect this
+    /// one exists for, because the structure was right and the marker was being
+    /// put on the wrong refusals.
+    ///
+    /// `fetch_chunks` had four ways out that are `Err`, and only ONE of them had
+    /// been on a socket: a first chunk the vendor refused. The other three ran
+    /// before any socket was opened — an unusable clock, a window wholly below
+    /// the feed's `HistoryFloor`, and a vendor window cap of zero. `broker_window`
+    /// wrapped every one of them in `WIRE_REACHED` on the stated ground that
+    /// `fetch_chunks` "is the only call in this function that opens a socket",
+    /// so `read_markers` reported `reached_wire`, `broker_run` set
+    /// `BrokerRun::touched_wire`, and the route answered `502 BAD_GATEWAY`.
+    ///
+    /// Which is precisely what `touched_wire` was added to stop — its own header
+    /// says so: the page draws `Last pull HTTP 502` and an operator reads *the
+    /// broker is down*. Groww's floor is `Fixed { 2020, 1, 1 }`, so a 2019
+    /// window is refused by arithmetic and this test does not move with the
+    /// clock.
+    ///
+    /// # It also asserts WHERE the refusal came from
+    ///
+    /// The status alone would pass for the wrong reason. A run that got as far
+    /// as `credentialed_source` on a machine with no Parameter Store also
+    /// answers 400 — so the body is asserted to name the FLOOR and asserted not
+    /// to name a credential. That pair is what proves the clamp now runs above
+    /// `await_budget` and above the credential read, rather than below both
+    /// where it used to and where it charged a permit and an ap-south-1
+    /// round-trip before refusing a window it could always see was empty.
+    #[tokio::test]
+    async fn a_window_wholly_below_the_history_floor_is_a_bad_request_and_not_a_bad_gateway() {
+        let _sink = crate::emitted::sink();
+        let dir = masters(
+            "below-floor",
+            Some(&format!(
+                "{GROWW_HEAD}NSE,CASH,,NIFTY,IDX,,NIFTY,,,NSE-NIFTY\n"
+            )),
+            Some(&format!(
+                "{DHAN_HEAD}NSE,I,NA,INDEX,NIFTY,NIFTY,INDEX,NA,0001-01-01,,,1333\n"
+            )),
+        );
+        let root = store_root("below-floor");
+        let site = Site::serving(&dir, &root);
+        let journal = audit::Journal::at(&root);
+
+        // 2019, against a floor of 2020-01-01: every day asked for is older
+        // than this vendor has ever served. The day rung, because the 1-minute
+        // one is gated behind a 1day pass and that gate answers 409 before the
+        // loop this test is about is ever entered.
+        let asked = ingest::parse_spot(
+            &format!(
+                "target=swept&vendor={}&from=2019-01-07&to=2019-01-11&granularity=1day",
+                pull::vendor::Feed::Groww.wire()
+            ),
+            day(2026, 8, 10),
+        )
+        .expect("a real target and a window five years in the past");
+
+        // THE RUN'S OWN RECORD FIRST. The status is DERIVED from `touched_wire`,
+        // so asserting the status alone would pass for any refusal at all —
+        // including the credential failure a machine with no Parameter Store
+        // produces, which is what this path used to reach before it got here.
+        let out = broker_run(&asked, &site, &[]).await;
+        assert_eq!(
+            out.attempted, 1,
+            "one index in the master, and it was tried"
+        );
+        assert_eq!(
+            out.reached, 0,
+            "and none answered, because none was ever asked"
+        );
+        assert!(
+            !out.touched_wire,
+            "NO SOCKET WAS OPENED, and this is the whole defect. The clamp lived \
+             inside `fetch_chunks`, below `broker_window`'s wire boundary, so a \
+             window the feed never held came back wearing `WIRE_REACHED` and the \
+             run recorded a vendor that was never contacted: {:?}",
+            out.refused
+        );
+        assert!(
+            out.refused
+                .iter()
+                .any(|why| why.contains("history starts at 2020-01-01")),
+            "the reason is the floor, with the arithmetic that decided it: {:?}",
+            out.refused
+        );
+        // SCOPED TO THE REFUSAL, never the page. The chrome around it names
+        // Parameter Store in prose that is rendered for every broker pull, so
+        // asserting over the document would assert about the furniture — the
+        // same trap `an_archive_feed_with_no_folder_says_so_instead_of_asking_for_a_token`
+        // documents one screen up.
+        assert!(
+            !out.refused.iter().any(|why| why.contains("credential")),
+            "and no credential was sought to discover a window that was refusable \
+             from the form — the clamp runs above the read now, so a below-floor \
+             window costs neither a permit nor a round-trip to ap-south-1: {:?}",
+            out.refused
+        );
+
+        // AND THE STATUS AN OPERATOR ACTUALLY READS OFF THE PAGE.
+        let (code, body) = broker_answer(asked, moment(), &site, &journal, Vec::new()).await;
+        assert_eq!(
+            code,
+            axum::http::StatusCode::BAD_REQUEST,
+            "a window below the feed's own floor is decidable from the form. \
+             Nothing upstream was asked and nothing upstream failed, so 502 \
+             would blame a broker that was never reached: {body}"
+        );
+        assert!(
+            body.contains("history starts at 2020-01-01"),
+            "and the receipt names the floor rather than a gateway: {body}"
         );
     }
 
@@ -20897,7 +21115,7 @@ mod tests {
             &source,
             "13",
             pull::vendor::Listing::Index,
-            &spec,
+            &planned_chunks(&asked, &spec).expect("the form names a window this feed holds"),
         )
         .await
         .expect("chunk one answered, so the prefix is not empty and this is not an Err");
@@ -21045,7 +21263,7 @@ mod tests {
             &source,
             "13",
             pull::vendor::Listing::Index,
-            &spec,
+            &planned_chunks(&asked, &spec).expect("the form names a window this feed holds"),
         )
         .await;
         assert!(answered.is_err(), "a 503 is a refusal");
@@ -21103,7 +21321,7 @@ mod tests {
             &source,
             "1333",
             pull::vendor::Listing::Index,
-            &spec,
+            &planned_chunks(&asked, &spec).expect("the form names a window this feed holds"),
         )
         .await
         .expect("a 200 in this descriptor's own shape decodes to a window");

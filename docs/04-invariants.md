@@ -2896,3 +2896,35 @@ a downloader.
 | MR-37 | **And a hole INSIDE the span still refuses.** Narrowing the question must not weaken it: excusing an interior gap would let the minute pass run over a day pass that genuinely failed, which is what the gate exists to prevent. An instrument holding nothing at all keeps every month owed, because that is a day pass that has not run | the same test asserts both arms | ✓ |
 | MR-38 | **The fetch is chunked to the vendor's cap, not to the store's file boundary.** `split_window` clamped every chunk to a month end because `ingest::one` refused a cross-month batch, which turned a 2,460-day window into 81 requests where Zerodha's documented 2,000-day `day` cap needs 2 — measured at 0.35 s per instrument-month against a 0.33 s ceiling, 94 minutes against 2.3. `months_in` splits a decoded batch into one run per month and `one` writes each to its own file | `pull::session::a_chunk_fills_the_cap_and_the_chunks_tile_the_window` · `the_documented_caps_turn_a_seven_year_window_into_a_handful_of_requests` | ✓ |
 | MR-39 | **And the bars reach the right month.** A splitter that filed July's bars under August would be worse than the refusal it replaced — the requests saved and the store silently wrong until a backtest read the wrong window. The split is over DECODED bars, so the month comes from the same `TimestampEncoding` dispatch that `land` uses, never a second implementation of it | `pull::broker::a_batch_spanning_two_months_lands_in_both_and_the_bars_go_to_the_right_one` | ✓ |
+
+## A refusal decided before the socket is this side's, and answers 400 — D-0338
+
+The rows are prefixed `WB-` rather than continuing an existing block, for the
+reason `HF-` gives above: two sessions share this tree and a collided identifier
+is worse than a new prefix.
+
+D-0124 gave `BrokerRun::touched_wire` to separate *this side refused* from *the
+vendor did*, after a run that reached nothing answered `502 BAD_GATEWAY` and an
+operator read `Last pull HTTP 502` as the broker being down. The flag was right
+and was being fed the wrong answer: `broker_window` marked **every** `Err` out
+of `fetch_chunks` with `WIRE_REACHED`, and three of that function's four failure
+paths ran before any socket was opened.
+
+Every row below is proved with no socket, no credential, no vendor and no bar.
+The floor row is asserted against Groww's **fixed** `2020-01-01`, not a rolling
+one, so the test does not assert something different each day it runs.
+
+| ID | Invariant | Proof | ✓ |
+|---|---|---|---|
+| WB-01 | **A window wholly below the feed's history floor answers `400 BAD_REQUEST`, never 502.** The refusal is arithmetic on two dates — nothing upstream is asked and nothing upstream fails, so a 502 blames a broker that was never contacted. The run's own record is asserted first, because the status is DERIVED from `touched_wire` and asserting the status alone would pass for any refusal, including the credential failure a machine with no Parameter Store produces | `api::server::a_window_wholly_below_the_history_floor_is_a_bad_request_and_not_a_bad_gateway` | ✓ |
+| WB-02 | **`touched_wire` stays false for it, and the reason names the floor.** `attempted: 1`, `reached: 0`, and the refusal carries `history starts at 2020-01-01` — the arithmetic that decided it, not a vendor's words. Reintroducing the defect (marking `planned_chunks`' error with `WIRE_REACHED`) fails this row, which is what makes it a test of the fix rather than of the fixture | the same test | ✓ |
+| WB-03 | **No credential is sought to discover it.** `planned_chunks` runs above `await_budget` and above the credential read, so a below-floor window costs neither a rate permit nor a `GetParameter` round-trip to `ap-south-1` — the rule `await_budget`'s own comment states and the clamp had been breaking. Asserted over the REFUSAL, never the page: the chrome names Parameter Store in prose rendered for every broker pull | the same test · `every_cost_in_broker_window_is_paid_after_the_transport_is_known` | ✓ |
+| WB-04 | **The socket loop decides nothing it could have decided earlier.** `fetch_chunks` no longer takes an `HttpSpec` and names neither `window_cap_days` nor `clamp_to_floor`, so the clamp cannot reappear below the boundary. Its remaining `Err` is a first chunk the vendor refused — a later chunk returns `Ok` with `unfetched` (D-0327) — which is what makes `WIRE_REACHED` true of all of them | `api::server::the_fetch_loop_takes_its_cap_from_the_descriptor` | ✓ |
+| WB-05 | **The plan still reads the descriptor's cap.** Moving the split must not lose what it was proved to do: a hardcoded `None` sends the whole window, which is the entire bug the split exists to prevent, and it passes every test that only asserts the descriptor CARRIES a cap | the same test | ✓ |
+
+**Not pinned, and worth knowing.** The clock arm — `ingest::ist_day` failing —
+and the `WindowCapIsZero` arm are now decidable before the socket by the same
+move, but neither has a test that drives it to a status: no shipped descriptor
+declares a zero cap, and forcing an unusable clock would mean reaching for the
+system clock a test must not depend on. They are correct by construction here
+rather than by assertion, which is weaker than the floor row above it.

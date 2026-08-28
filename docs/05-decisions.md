@@ -25464,3 +25464,65 @@ caught** — 58 tested, 58 caught. Two of them were only killable by an
 trimmed by `zip` to fit the mask, which is the silent misalignment this
 ordering exists to prevent, and it is the case that proves the check earns its
 place.
+
+### D-0338 · 2026-08-28 · The wire boundary is where the socket is, not where the call is
+
+**Decision — the clock read, the history-floor clamp and the window split leave
+`server::fetch_chunks` for `server::planned_chunks`, called from `broker_window`
+above `await_budget`. `WIRE_REACHED` is applied to `fetch_chunks` alone, whose
+every remaining `Err` has been on a socket, so only a failure the vendor caused
+answers `502 BAD_GATEWAY`.**
+
+**`BrokerRun::touched_wire` was right, and was being told the wrong thing.**
+D-0124 added the flag because a run that reached nothing answered
+`502 BAD_GATEWAY` whatever stopped it — measured at 213 attempted, 0 reached,
+13.9 ms, with the page drawing `Last pull HTTP 502` and an operator reading *the
+broker is down*. The flag fixed the runs that never entered `broker_window`. It
+did not fix the ones that entered it and were refused inside `fetch_chunks`
+before a socket was opened.
+
+`broker_window` wrapped **every** `Err` out of `fetch_chunks` in `WIRE_REACHED`,
+on a stated ground written into the code beside it: *"`fetch_chunks` is the only
+call in this function that opens a socket, so a failure from it — and only from
+it — is one the VENDOR is responsible for."* That sentence was false for three
+of its four failure paths:
+
+- `ingest::ist_day(SystemTime::now())` — the clock is unusable
+- `clamp_to_floor` — the window is wholly below the feed's `HistoryFloor`
+- `pull::session::split_window` — e.g. `SessionError::WindowCapIsZero`
+
+Each ran before the first request was built. Each came back marked as the
+vendor's, so `read_markers` reported `reached_wire`, `broker_run` set
+`touched_wire`, and the route answered 502. A `Fixed { 2020, 1, 1 }` floor asked
+for 2019 blamed Groww for a refusal that was arithmetic on two dates.
+
+Only the fourth is the vendor's: `with_retry` failing on the FIRST chunk, which
+leaves an empty prefix and is the `Err` arm `prefix_or_refusal` documents. A
+failure on any LATER chunk returns `Ok` with `unfetched` set (D-0327), so it was
+never in question.
+
+**Moved rather than given a typed error.** A `ChunkFailure { reached_wire, why }`
+would also have separated them, at the cost of a second error channel whose two
+arms can drift apart, and it would have left the boundary comment stating a
+precondition its callee still violated. Making the sentence true is a smaller
+thing to keep true. It also keeps
+`a_run_that_never_reached_a_socket_is_a_bad_request_and_not_a_bad_gateway`
+meaningful: that test asserts ONE marker at ONE call, and it passed throughout
+this defect because the structure was right and the marker was on the wrong
+refusals.
+
+**It also stops paying for a refusal it can see coming.** The clamp now sits
+above `await_budget` and above the credential read, so a below-floor window
+costs neither a rate permit nor a `GetParameter` round-trip to `ap-south-1`.
+That is the rule `await_budget`'s own comment states — *"a request that will not
+be issued must not first cost a Parameter Store round-trip"* — and clamping
+downstream of both had been breaking it for every below-floor window since the
+clamp was introduced. `every_cost_in_broker_window_is_paid_after_the_transport_is_known`
+pins the order.
+
+**What this does not change.** `clamp_to_floor` itself, its refusal sentences,
+the sentinel mechanism, and the 502 a genuinely-refused first chunk still
+answers. `fetch_chunks` loses its `HttpSpec` parameter, which is what stops the
+clamp reappearing below the boundary; `the_fetch_loop_takes_its_cap_from_the_descriptor`
+now asserts both halves — that the plan reads `spec.window_cap_days`, and that
+the socket loop names neither it nor `clamp_to_floor`.
