@@ -137,12 +137,16 @@ impl Columns {
     /// for every row, which the decoder would report as thousands of routine
     /// skips rather than as the mapping bug it is.
     fn locate(header: &str, vendor: Vendor) -> Result<Self, String> {
-        let idx: HashMap<&str, usize> = header
-            .trim_end()
-            .split(',')
-            .enumerate()
-            .map(|(i, name)| (name.trim(), i))
-            .collect();
+        // PRE-SIZED from the comma count, which is known before the map is
+        // built. `collect` starts a `HashMap` at capacity 0 and doubles, so
+        // every header paid a run of rehashes to hold a number of columns the
+        // header itself had already stated. `docs/07-o1-architecture.md`
+        // layer 3, and the same reservation `merge::merge` makes.
+        let columns = header.bytes().filter(|b| *b == b',').count() + 1;
+        let mut idx: HashMap<&str, usize> = HashMap::with_capacity(columns);
+        for (i, name) in header.trim_end().split(',').enumerate() {
+            idx.insert(name.trim(), i);
+        }
         let need = |n: &str| -> Result<usize, String> {
             idx.get(n)
                 .copied()
@@ -240,6 +244,26 @@ pub fn load(path: &std::path::Path, vendor: Vendor) -> Result<Loaded, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut lines = text.lines();
     let header = lines.next().ok_or_else(|| "file is empty".to_owned())?;
+    // THE HEADER IS A ROW, AND IT WAS THE ONE ROW WITH NO BOUND.
+    //
+    // `MAX_ROW_BYTES` is checked inside the loop below, which iterates what is
+    // left AFTER `lines.next()` has already taken the header -- so every data
+    // row was guarded and the header was not. That is the D-0033 shape exactly:
+    // a scan with nothing bounding its length, sitting immediately above the
+    // guard that exists to bound it.
+    //
+    // It is reachable: a vendor endpoint serving an HTML error page instead of
+    // a CSV arrives as one enormous first line. `Columns::locate` then splits
+    // it and hashes every field, inside the very function whose premise is
+    // that "one `metadata` call is the difference between a named refusal and
+    // a dead process".
+    if header.len() > MAX_ROW_BYTES {
+        return Err(format!(
+            "{}: header row is {} bytes; this reader splits at most              {MAX_ROW_BYTES}",
+            path.display(),
+            header.len()
+        ));
+    }
     let cols = Columns::locate(header, vendor)?;
 
     let widest = cols.widest();
@@ -626,6 +650,41 @@ mod tests {
             !err.contains("this reader holds at most"),
             "the size arm fired at the bound itself: {err}"
         );
+    }
+
+    #[test]
+    fn the_header_row_is_bounded_too_and_is_refused_before_it_is_split() {
+        // THE ONE ROW THAT HAD NO BOUND. `MAX_ROW_BYTES` is checked inside the
+        // loop over what is left AFTER `lines.next()` took the header, so every
+        // data row was guarded and the header was not -- the D-0033 shape, one
+        // line above the guard that exists to prevent it.
+        //
+        // A vendor endpoint serving an HTML error page instead of a CSV arrives
+        // as exactly this: one enormous first line, split and hashed field by
+        // field inside the function whose premise is a named refusal rather
+        // than a dead process.
+        let wide = "a,".repeat(MAX_ROW_BYTES);
+        let body = format!("{wide}\nNSE,CASH,,RELIANCE,EQ,EQ,INE002A01018,,\n");
+        let err = load(&tmp("wideheader", &body), Vendor::Groww)
+            .expect_err("an unbounded header must be refused, not split");
+        assert!(
+            err.contains("header row is") && err.contains(&MAX_ROW_BYTES.to_string()),
+            "the refusal names the bound: {err}"
+        );
+
+        // And a header of ordinary width is still read exactly as before, so
+        // the bound refuses the absurd without touching the real file.
+        let ok = load(
+            &tmp(
+                "okheader",
+                "exchange,segment,underlying_symbol,trading_symbol,instrument_type,\
+                 series,isin,expiry_date,strike_price\n\
+                 NSE,CASH,,RELIANCE,EQ,EQ,INE002A01018,,\n",
+            ),
+            Vendor::Groww,
+        )
+        .expect("an ordinary header still loads");
+        assert_eq!(ok.kept.len(), 1);
     }
 
     #[test]

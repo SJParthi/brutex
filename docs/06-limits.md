@@ -531,3 +531,39 @@ What must exist before the first pull writes anything:
 Until those exist, "the engine fits on this machine" is a claim about memory
 only, and this section is what stops it being read as a claim about disk.
 
+---
+
+## 13 · A page request is O(universe), and the sort is the only part removed
+
+`docs/07-o1-architecture.md` layer 12 graded the instruments page ✓ —
+*"bounded page, never the set"* — while `instruments_html_from` collected the
+whole filtered universe into a `Vec` and `sort_unstable_by_key`-ed it on **every
+request**. The row cap bounded what was rendered; nothing bounded what was
+looked at.
+
+D-0036 removed the sort. Every order the page offers is taken once at load by
+`server::Orders::of`, and a request walks the precomputed order instead. That
+deletes the O(universe · log universe) term and the sort's allocation.
+
+**What remains is O(universe), and is not being called anything else.** The
+walk still visits every key, because the universe filter and the search cannot
+be answered from an order:
+
+| Part of a request | Cost | Bounded? |
+|---|---|---|
+| Choosing the order | O(1) — six precomputed slices | yes |
+| Universe / tracked filter | O(universe) | no |
+| Substring search | O(universe), one buffer, no allocation per row | no |
+| Paging and render | O(rows on the page), capped at `PAGE_ROWS` | yes |
+
+Making the filter bounded needs a precomputed order **per filter combination**
+— 6 columns × 4 universe pills × 2 tracked states — and a substring search
+cannot be precomputed at all without an index this repository does not have. At
+the measured 2,700 instruments the walk is not the cost that matters; at
+90,000 it would be. The honest grade is ◐, and layer 12 now carries it.
+
+**UNMEASURED:** the page has not been benched across universe sizes. C-11
+measures the *dashboard*, whose counts come from `Summary` and are genuinely
+O(1); there is no equivalent for the instruments page, so the constant is
+unknown even though the growth is.
+

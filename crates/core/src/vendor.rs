@@ -34,6 +34,7 @@ use crate::instrument::{Exchange, Expiry, InstrumentKey, Kind, Segment};
 use crate::isin::Isin;
 use crate::price::Paisa;
 use crate::symbol::Symbol;
+use crate::universe::MemberIndex;
 
 /// Which vendor a row came from.
 ///
@@ -626,8 +627,9 @@ enum EquityVerdict {
 /// still declines; every one of them is `ES` in Dhan's paper-class column; and
 /// they are ordinary listed companies.
 ///
-/// Sorted, because `board_of` binary-searches it and an unsorted array makes
-/// `binary_search` return garbage in silence.
+/// Kept sorted. `board_of` no longer binary-searches it -- it probes
+/// [`EQUITY_BOARD_INDEX`] instead -- but the order is what makes the
+/// disjointness check readable and a new code obvious in a diff.
 pub const EQUITY_BOARD_SERIES: [&str; 6] = ["BE", "BZ", "E1", "EQ", "IT", "SZ"];
 
 /// The NSE series codes that are the SME board.
@@ -654,7 +656,8 @@ pub const SME_BOARD_SERIES: [&str; 2] = ["SM", "ST"];
 /// outcome — [`Skip::UnrecognisedListingClass`]. The list is data, so a new
 /// NSE debt series is a one-line append and nothing else moves.
 ///
-/// Sorted, for `board_of`'s binary search.
+/// Kept sorted, for the same reason [`EQUITY_BOARD_SERIES`] is: readability
+/// and a legible diff. The lookup itself goes through [`NON_EQUITY_INDEX`].
 pub const NON_EQUITY_SERIES: [&str; 120] = [
     "AK", "AL", "AM", "AN", "AZ", "BA", "BC", "BR", "BS", "BU", "BV", "BW", "BX", "D1", "GB", "GS",
     "IV", "MF", "N0", "N1", "N2", "N3", "N4", "N5", "N6", "N7", "N8", "N9", "NA", "NB", "NC", "ND",
@@ -687,15 +690,43 @@ pub const NON_EQUITY_SERIES: [&str; 120] = [
 /// An unrecognised code is a decline, not an error, for the reason
 /// [`Skip::UnrecognisedListingClass`] gives — but it is its own decline, and
 /// never confused with a bond.
+/// The equity board series, as an open-addressed table.
+///
+/// 6 members in 16 slots. See [`board_of`] for why these exist.
+static EQUITY_BOARD_INDEX: MemberIndex<16> = MemberIndex::build(&EQUITY_BOARD_SERIES);
+
+/// The SME board series, as an open-addressed table. 2 members in 8 slots.
+static SME_BOARD_INDEX: MemberIndex<8> = MemberIndex::build(&SME_BOARD_SERIES);
+
+/// The measured non-equity series, as an open-addressed table.
+///
+/// 120 members in 256 slots — the table `board_of` used to `binary_search`
+/// last, and therefore the one the common case paid in full.
+static NON_EQUITY_INDEX: MemberIndex<256> = MemberIndex::build(&NON_EQUITY_SERIES);
+
 fn board_of(series: &str) -> EquityVerdict {
     // Dhan pads this column, e.g. `"   ES   "`. Trimming Groww's already-tight
     // values costs nothing and cannot change a verdict.
     let series = series.trim();
-    if EQUITY_BOARD_SERIES.binary_search(&series).is_ok() {
+    // HASH, MASK, PROBE -- three times, not three binary searches.
+    //
+    // This was `EQUITY_BOARD_SERIES.binary_search(..)` and two more like it.
+    // `docs/07-o1-architecture.md` layer 4 says "never `binary_search`", and
+    // `universe.rs` carries the whole argument for why -- it replaced exactly
+    // this pattern with exactly this table: "`binary_search` over 750 entries
+    // is ~10 comparisons -- O(log n) wearing an O(1) label". The replacement
+    // was built, proved and then not applied to the hotter of the two paths.
+    //
+    // The ordering made the common case the worst case as well: of the 12,617
+    // rows that reach this gate, 7,137 are non-equity, and the 120-entry table
+    // they match was searched LAST -- so the majority of rows paid all three
+    // searches. Each is now a bounded probe, and the order no longer decides
+    // the cost.
+    if EQUITY_BOARD_INDEX.contains(series) {
         EquityVerdict::MainBoard
-    } else if SME_BOARD_SERIES.binary_search(&series).is_ok() {
+    } else if SME_BOARD_INDEX.contains(series) {
         EquityVerdict::Sme
-    } else if NON_EQUITY_SERIES.binary_search(&series).is_ok() {
+    } else if NON_EQUITY_INDEX.contains(series) {
         EquityVerdict::NotEquity
     } else {
         EquityVerdict::Unrecognised
@@ -1701,6 +1732,45 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn every_series_code_survives_the_open_addressed_table_it_moved_into() {
+        // I-41. `board_of` probes three `MemberIndex` tables instead of
+        // binary-searching three arrays. A collision that silently dropped a
+        // member would not fail to compile and would not look wrong -- it would
+        // reclassify a measured bond as `Unrecognised`, which is a LOUD decline
+        // that degrades the run, so an entire real master would start reporting
+        // an alphabet change that never happened.
+        //
+        // So every code in every array is asserted to reach its own verdict
+        // through the real entry point.
+        for code in EQUITY_BOARD_SERIES {
+            assert_eq!(board_of(code), EquityVerdict::MainBoard, "{code}");
+        }
+        for code in SME_BOARD_SERIES {
+            assert_eq!(board_of(code), EquityVerdict::Sme, "{code}");
+        }
+        for code in NON_EQUITY_SERIES {
+            assert_eq!(board_of(code), EquityVerdict::NotEquity, "{code}");
+        }
+
+        // The counts match the arrays, so nothing was overwritten on the way in.
+        assert_eq!(EQUITY_BOARD_INDEX.len(), EQUITY_BOARD_SERIES.len());
+        assert_eq!(SME_BOARD_INDEX.len(), SME_BOARD_SERIES.len());
+        assert_eq!(NON_EQUITY_INDEX.len(), NON_EQUITY_SERIES.len());
+
+        // And a code in none of them is still its own reason, never a bond.
+        for absent in ["ZZ9", "QQ", "", "  ", "eq", "N", "XX"] {
+            assert_eq!(
+                board_of(absent),
+                EquityVerdict::Unrecognised,
+                "{absent:?} is unseen, not non-equity"
+            );
+        }
+
+        // Trimming still happens before the probe -- Dhan pads this column.
+        assert_eq!(board_of("   EQ   "), EquityVerdict::MainBoard);
     }
 
     #[test]

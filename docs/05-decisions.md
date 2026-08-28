@@ -1414,3 +1414,60 @@ real master permanently dirty — both files list BSE rows by design. Deleting t
 duplicate invariant rows would have made the build green by erasing history,
 which `docs/04-invariants.md` forbids in its own closing section.
 
+---
+
+## D-0036 · 2026-08-28 · The order is taken once, and the header is a row
+
+**Decision — every sort order the instruments page offers is computed once by
+`server::Orders::of` and walked per request; `board_of` probes three
+`MemberIndex` tables instead of binary-searching three arrays; the header row is
+bounded by `MAX_ROW_BYTES` before it is split; and `Columns::locate` pre-sizes
+its map. Layer 12's grade drops from ✓ to ◐.**
+
+**The page sorted the universe on every request.** `instruments_html_from`
+collected the whole filtered set into a `Vec` and `sort_unstable_by_key`-ed it,
+for an order that cannot change — a `Read` is built once and never mutated. The
+row cap bounded what was *rendered*; nothing bounded what was *looked at*, and
+`docs/07-o1-architecture.md` layer 12 carried a ✓ saying otherwise.
+
+This is the same defect, and the same repair, as `Summary`: those counts were
+folded out of `by_key` per request until it was measured at **97.18×** from 900
+to 90,000 instruments. Sorting was the other half and was left in place.
+
+**The grade is now ◐, not ✓.** Removing the sort deletes the
+O(universe · log universe) term, and the filter walk that remains is
+O(universe) — a substring search cannot be answered from an order, and making
+the universe filter bounded needs a precomputed order per filter combination.
+`docs/06-limits.md` §13 states exactly which part of a request is bounded and
+which is not, with the constant marked UNMEASURED because the instruments page
+has never been benched across universe sizes. Calling it ✓ after a partial
+repair would be the same false claim in a quieter voice.
+
+**`board_of` binary-searched three tables per row.** Layer 4 says "never
+`binary_search`", and `universe.rs` carries the whole argument for why — it
+replaced exactly this pattern with exactly this table: *"`binary_search` over
+750 entries is ~10 comparisons — O(log n) wearing an O(1) label."* The
+replacement was built, proved, and not applied to the hotter path. The ordering
+made the common case the worst case too: of the 12,617 rows reaching this gate,
+7,137 are non-equity, and the 120-entry table they match was searched **last**.
+
+The arrays stay sorted. Sortedness no longer protects a search, but it keeps the
+disjointness check readable and a new code obvious in a diff, so I-31's wording
+is corrected rather than its property dropped.
+
+**The header was the one row with no bound.** `MAX_ROW_BYTES` is checked inside
+the loop over what remains *after* `lines.next()` has taken the header — so
+every data row was guarded and the header was not. That is the D-0033 shape
+exactly: a scan with nothing bounding its length, immediately above the guard
+that exists to bound it. It is reachable: a vendor endpoint serving an HTML
+error page instead of a CSV arrives as one enormous first line, which
+`Columns::locate` then splits and hashes field by field — inside the function
+whose stated premise is that *"one `metadata` call is the difference between a
+named refusal and a dead process."*
+
+**Alternatives rejected.** Precomputing an order per filter combination (6
+columns × 4 pills × 2 tracked states) would bound the no-search case but costs
+48 vectors of the universe, which at 90,000 instruments is worse than the walk
+it saves. Truncating an over-long header instead of refusing it would decode a
+file whose shape is unknown, which `CLAUDE.md` §4 bans.
+

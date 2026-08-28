@@ -134,7 +134,7 @@ runs today.
 
 | # | Must hold | Proven by | |
 |---|---|---|---|
-| I-31 | The three measured series tables are sorted, mutually disjoint and non-empty, so `binary_search` cannot return garbage and no code can get two verdicts | `core::vendor::the_measured_series_tables_are_sorted_disjoint_and_complete` | ✓ |
+| I-31 | The three measured series tables are sorted, mutually disjoint and non-empty, so no code can get two verdicts. (The sortedness protected a `binary_search` until D-0036 replaced it with a probe; the disjointness is what still decides correctness) | `core::vendor::the_measured_series_tables_are_sorted_disjoint_and_complete` | ✓ |
 | I-32 | A cash-equity row whose series this engine has never seen gets its **own** reason, never the one a debenture gets | `core::vendor::an_unrecognised_series_is_its_own_loud_reason_never_a_bond` | ✓ |
 | I-33 | The unrecognised **code itself** reaches the operator, not only a count of it | `api::master::an_unrecognised_series_is_recorded_under_the_code_itself` | ✓ |
 | I-34 | A fund plan is declined from **both** vendors, and a genuine ETF on the equity board is still kept | `core::vendor::a_mutual_fund_plan_is_declined_from_both_vendors_on_one_series_alphabet` | ✓ |
@@ -152,6 +152,9 @@ runs today.
 | I-38 | An exchange code that cannot be parsed is its **own** reason and is not routine; a venue this engine merely does not store still is | `core::vendor::an_unreadable_exchange_degrades_the_run_and_a_foreign_one_does_not` | ✓ |
 | I-39 | A row nobody could read degrades the run, so an unreadable master cannot report `ok` | `api::server::a_row_nobody_could_read_degrades_the_run_rather_than_only_printing` | ✓ |
 | I-40 | A decline that is not routine reaches the status, while a routine one leaves it clean | `api::server::an_exchange_code_nobody_can_read_degrades_the_run_and_bse_does_not` | ✓ |
+| I-41 | Every measured series code reaches its own verdict through the open-addressed tables that replaced the three `binary_search`es; a collision cannot silently reclassify a bond | `core::vendor::every_series_code_survives_the_open_addressed_table_it_moved_into` | ✓ |
+| I-42 | Every sort column has a **precomputed, total** order taken once at load, and descending is that order reversed — so no request sorts and reloads are byte-identical | `api::server::every_column_has_a_precomputed_total_order_and_descending_is_its_reverse` | ✓ |
+| I-43 | The header row is bounded before it is split, like every other row | `api::master::the_header_row_is_bounded_too_and_is_refused_before_it_is_split` | ✓ |
 
 ## The instrument universes
 
