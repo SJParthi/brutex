@@ -51,6 +51,8 @@
 use core::cmp::Ordering;
 use std::collections::BinaryHeap;
 
+use rayon::prelude::*;
+
 use engine::Sweep;
 use indicators::column::Column;
 use vocab::ConditionMask;
@@ -259,34 +261,124 @@ pub fn rank_by(
     }
 }
 
-/// One pass over the frequent set, keeping the best `keep` under `K`'s ordering.
-fn walk<K: Ranked1>(sweep: &Sweep, column: &Column, forward: &Forward, keep: usize) -> Ranked {
-    let mut heap: BinaryHeap<core::cmp::Reverse<K>> = BinaryHeap::with_capacity(keep);
-    let mut considered: u64 = 0;
+/// Admit one scored value into a heap already holding at most `keep`.
+///
+/// The admission price is the weakest currently held. Comparing before pushing
+/// is what keeps the heap at `keep` rather than letting it grow and trimming
+/// afterwards -- the trim-after form allocates the whole result set, which is
+/// the thing this module refuses to do.
+fn admit<K: Ranked1>(heap: &mut BinaryHeap<core::cmp::Reverse<K>>, keep: usize, scored: K) {
+    if heap.len() < keep {
+        heap.push(core::cmp::Reverse(scored));
+        return;
+    }
+    let weakest_is_weaker = heap.peek().is_some_and(|core::cmp::Reverse(w)| *w < scored);
+    if weakest_is_weaker {
+        heap.pop();
+        heap.push(core::cmp::Reverse(scored));
+    }
+}
 
-    for itemset in sweep.all_frequent() {
-        considered = considered.saturating_add(1);
-        if keep == 0 {
-            continue;
-        }
-        let scored = K::wrap(Scored {
-            mask: itemset.mask,
-            hits: itemset.hits,
-            edge: edge(column, forward, &itemset.mask),
-        });
-        if heap.len() < keep {
-            heap.push(core::cmp::Reverse(scored));
-            continue;
-        }
-        // The admission price is the weakest currently held. Comparing before
-        // pushing is what keeps the heap at `keep` rather than letting it grow
-        // and trimming afterwards -- the trim-after form allocates the whole
-        // result set, which is the thing this module refuses to do.
-        let weakest_is_weaker = heap.peek().is_some_and(|core::cmp::Reverse(w)| *w < scored);
-        if weakest_is_weaker {
-            heap.pop();
-            heap.push(core::cmp::Reverse(scored));
-        }
+/// The best `keep` of one contiguous run of itemsets, scored.
+///
+/// One bounded heap, exactly as the whole walk used to be. This is the unit of
+/// parallel work: it touches nothing outside the slice it was handed, so any
+/// number of these run at once without coordination.
+fn top_of<K: Ranked1>(
+    part: &[engine::Itemset],
+    column: &Column,
+    forward: &Forward,
+    keep: usize,
+) -> Vec<K> {
+    let mut heap: BinaryHeap<core::cmp::Reverse<K>> = BinaryHeap::with_capacity(keep);
+    for itemset in part {
+        admit(
+            &mut heap,
+            keep,
+            K::wrap(Scored {
+                mask: itemset.mask,
+                hits: itemset.hits,
+                edge: edge(column, forward, &itemset.mask),
+            }),
+        );
+    }
+    heap.into_iter().map(|core::cmp::Reverse(s)| s).collect()
+}
+
+/// How many itemsets one parallel chunk carries.
+///
+/// # Chosen from the CORE COUNT, not from the data
+///
+/// Peak memory across the pass is `chunks x keep`, so a chunk size fixed in
+/// itemsets would make it a function of `|frequent|` -- which at the measured
+/// 17.8 million survivors is exactly the whole-result-set allocation this
+/// module exists to refuse. Sizing the other way round, from the number of
+/// threads, keeps the peak proportional to the MACHINE.
+///
+/// Four chunks per thread rather than one: the cost of a chunk varies with how
+/// many of its masks hit, so equal-sized chunks are not equal-cost, and a few
+/// spare chunks let rayon's work-stealing fill a core that finished early.
+/// Four is the smallest multiple that measurably does so and the largest that
+/// keeps `chunks x keep` inside a tenth of what one bar column costs.
+///
+/// At least one, because a chunk of zero itemsets would divide by zero above
+/// and never terminate below.
+fn chunk_size(total: usize) -> usize {
+    let want = rayon::current_num_threads().saturating_mul(4).max(1);
+    total.div_ceil(want).max(1)
+}
+
+/// One pass over the frequent set, keeping the best `keep` under `K`'s ordering.
+///
+/// # Spread across every core, and byte-identical to the pass it replaces
+///
+/// `edge` is `O(bars)` and is called once per frequent itemset, so this pass is
+/// `O(|frequent| x bars)` -- the largest single cost after the enumeration, and
+/// the enumeration is the half that cannot be spread (gate 22 pins
+/// `crates/engine` to `vocab` alone). This half has no such constraint.
+///
+/// **`CLAUDE.md` §3 rule 5 is satisfied by the ORDERING, not by the schedule.**
+/// [`Scored::cmp`] falls through to `self.mask.words().cmp(..)` and the masks in
+/// a frequent set are unique, so no two values can compare `Equal`. A strict
+/// total order has exactly one sorted sequence whatever order its elements
+/// arrived in -- which is why merging per-chunk heaps cannot move a result, and
+/// why `sort_unstable_by` is still sound here despite the name.
+///
+/// The argument is not trusted on its own:
+/// `a_parallel_walk_is_byte_identical_to_a_sequential_one` runs both forms over
+/// the same sweep and compares every field of every row.
+fn walk<K: Ranked1 + Send>(
+    sweep: &Sweep,
+    column: &Column,
+    forward: &Forward,
+    keep: usize,
+) -> Ranked {
+    let total: usize = sweep.levels.iter().map(|l| l.frequent.len()).sum();
+    let considered = u64::try_from(total).unwrap_or(u64::MAX);
+
+    // KEEP ZERO STILL COUNTS. The caller asked how many candidates survived and
+    // that answer does not depend on how many of them are returned.
+    if keep == 0 {
+        return Ranked {
+            top: Vec::new(),
+            considered,
+        };
+    }
+
+    let width = chunk_size(total);
+    let parts: Vec<Vec<K>> = sweep
+        .levels
+        .par_iter()
+        .flat_map(|level| level.frequent.par_chunks(width))
+        .map(|part| top_of::<K>(part, column, forward, keep))
+        .collect();
+
+    // THE MERGE IS SEQUENTIAL AND THAT IS NOT A BOTTLENECK: it walks
+    // `chunks x keep` values doing one comparison each, against a parallel phase
+    // that walked `|frequent| x bars`.
+    let mut heap: BinaryHeap<core::cmp::Reverse<K>> = BinaryHeap::with_capacity(keep);
+    for scored in parts.into_iter().flatten() {
+        admit(&mut heap, keep, scored);
     }
 
     let mut top: Vec<K> = heap.into_iter().map(|core::cmp::Reverse(s)| s).collect();
@@ -519,6 +611,94 @@ mod tests {
             u64::try_from(out.sweep.all_frequent().count()).unwrap_or(u64::MAX),
             "every combination is still counted, because 'kept none of four' and \
              'kept none of sixty-one million' are different facts"
+        );
+    }
+
+    /// §3 rule 5, measured rather than argued.
+    ///
+    /// The chunked pass and the one-heap pass must agree BYTE for byte, not
+    /// approximately: same rows, same order, same float bit patterns. The
+    /// reason it holds is that `Scored::cmp` ends on the mask and masks are
+    /// unique, so a strict total order has exactly one sorted sequence whatever
+    /// order its elements arrived in. This runs both and checks.
+    #[test]
+    fn a_parallel_walk_is_byte_identical_to_a_sequential_one() {
+        use super::admit;
+        use crate::outcome::edge;
+        use std::collections::BinaryHeap;
+
+        let bars = synthetic::sessions(12);
+        let out = Sweeper::new(Ladder::with_min_hits(400).with_ceiling(200_000))
+            .run(&bars, &mut evaluator());
+        let column = Column::build(&bars, &mut evaluator());
+        let f = forward(&bars, Horizon::DEFAULT);
+        let keep = 40;
+
+        let parallel = rank(&out.sweep, &column, &f, keep);
+
+        // THE SEQUENTIAL REFERENCE, written out rather than referenced: it is
+        // the algorithm this module carried before the chunking, and a reader
+        // comparing the two should be able to see both.
+        let mut heap: BinaryHeap<core::cmp::Reverse<Scored>> = BinaryHeap::with_capacity(keep);
+        let mut considered: u64 = 0;
+        for itemset in out.sweep.all_frequent() {
+            considered = considered.saturating_add(1);
+            admit(
+                &mut heap,
+                keep,
+                Scored {
+                    mask: itemset.mask,
+                    hits: itemset.hits,
+                    edge: edge(&column, &f, &itemset.mask),
+                },
+            );
+        }
+        let mut expect: Vec<Scored> = heap.into_iter().map(|core::cmp::Reverse(s)| s).collect();
+        expect.sort_unstable_by(|a, b| b.cmp(a));
+
+        assert!(
+            !expect.is_empty(),
+            "the fixture must produce rows, or this test proves nothing about \
+             either walk"
+        );
+        assert_eq!(parallel.considered, considered, "same count");
+        assert_eq!(parallel.top.len(), expect.len(), "same number of rows");
+
+        for (rank_index, (got, want)) in parallel.top.iter().zip(&expect).enumerate() {
+            assert_eq!(
+                got.mask.words(),
+                want.mask.words(),
+                "row {rank_index}: a different combination"
+            );
+            assert_eq!(got.hits, want.hits, "row {rank_index}: hits");
+            assert_eq!(got.edge.n, want.edge.n, "row {rank_index}: n");
+            // BIT PATTERNS, NOT `==`. Two floats can compare equal and differ in
+            // their representation, and §3 rule 5 is about the BYTES.
+            assert_eq!(
+                got.edge.t.to_bits(),
+                want.edge.t.to_bits(),
+                "row {rank_index}: t is not bit-identical"
+            );
+            assert_eq!(
+                got.edge.mean_paisa.to_bits(),
+                want.edge.mean_paisa.to_bits(),
+                "row {rank_index}: mean is not bit-identical"
+            );
+        }
+    }
+
+    /// The chunk width is sized from the machine and never zero.
+    #[test]
+    fn a_chunk_is_never_empty_however_little_there_is_to_do() {
+        use super::chunk_size;
+        assert!(chunk_size(0) >= 1, "an empty sweep must not divide by zero");
+        assert!(chunk_size(1) >= 1);
+        assert!(chunk_size(7) >= 1);
+        // AND IT SHRINKS AS THE WORK GROWS, which is what makes peak memory a
+        // function of the core count rather than of the frequent set.
+        assert!(
+            chunk_size(10_000_000) >= chunk_size(10),
+            "a larger sweep must not produce a SMALLER chunk"
         );
     }
 

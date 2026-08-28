@@ -1029,6 +1029,7 @@ dependencies = [
  "costs",
  "engine",
  "indicators",
+ "rayon",
  "vocab",
 ]
 

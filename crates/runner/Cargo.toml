@@ -48,6 +48,43 @@ engine      = { path = "../engine", version = "0.1.0" }
 # records that gap rather than pretending the drawing is complete.
 costs       = { path = "../costs", version = "0.1.0" }
 
+# THE TEN PERFORMANCE CORES THE RANKING NEVER TOUCHED.
+#
+# `crates/cli` already carries this arrow and its own comment explains where it
+# may NOT go: gate 22 clause A pins `vocab indicators engine` to `vocab` alone,
+# so `crates/engine` -- which holds the candidate loop -- cannot take it, and
+# parallelism over CANDIDATE ENUMERATION is not expressible without a law
+# change. That is still true and this arrow does not attempt one.
+#
+# WHAT IT DOES REACH IS THE OTHER HALF OF THE COST. `rank::walk` calls
+# `outcome::edge` once per frequent itemset and each call is O(bars), so the
+# ranking pass is O(|frequent| x bars) -- the largest single cost after the
+# enumeration and, unlike the enumeration, embarrassingly parallel. Nothing in
+# `docs/06-limits.md` claims otherwise; it was simply never spread.
+#
+# GATE 22 PERMITS THIS AND THE GATE SAYS SO ITSELF. `runner` is on `SWEEP` and
+# not on `PINNED`, and the two lists ask different questions: `PINNED` fixes a
+# dependency SET, `SWEEP` refuses a CAPABILITY, and the capability it refuses is
+# the filesystem -- clause B `std::fs`, clause C the `store` import, clause D
+# `include_str!`, clause E. rayon touches none of them. The gate's own comment
+# states that `runner` "MUST NOT be added" to `PINNED` because that would
+# contradict the law rather than extend it.
+#
+# DETERMINISM IS PROVED, NOT ASSUMED, AND THE PROOF IS ALREADY IN `rank.rs`.
+# `Scored::cmp` falls through to `self.mask.words().cmp(..)`, and its comment
+# names the reason: "keeps section 3 rule 5's byte-for-byte reproducibility".
+# Masks are unique across the frequent set, so NO TWO SCORED VALUES CAN COMPARE
+# EQUAL -- the sorted output is therefore unique whatever order the chunks
+# merge in. `a_parallel_walk_is_byte_identical_to_a_sequential_one` measures it
+# rather than trusting the argument.
+#
+# AND THE MEMORY DESIGN IS PRESERVED. This module refuses to allocate the whole
+# result set -- its own comment calls the trim-after form "the thing this module
+# refuses to do" -- so the parallel form keeps a BOUNDED heap per chunk and
+# merges those. Peak is chunks x keep, which is a function of the core count and
+# not of |frequent|.
+rayon       = { workspace = true }
+
 [lints]
 workspace = true
 
