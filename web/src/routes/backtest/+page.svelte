@@ -1137,13 +1137,24 @@
    * Support as parts per thousand of the bars swept.
    *
    * **THE RATIO IS THE COMPARABLE QUANTITY, NOT THE COUNT**, and grouping on
-   * the count was a real bug this page shipped with for one screenshot. A
-   * `range-all` sweep holds the support PERCENTAGE constant across rungs, so
-   * the absolute `min_hits` necessarily differs at every rung because the bar
-   * count does. Measured on the store's own ledger: 4,324/21,620 at 30min,
-   * 2,328/11,643 at 60min and 334/1,671 at 1day are all 20.0% — three views of
-   * one question — and keying on `min_hits` split them into three groups of
-   * one, which is exactly the comparison this section exists to make.
+   * the count was a real bug this page shipped with for one screenshot. When
+   * this was written a `range-all` sweep held the support PERCENTAGE constant
+   * across rungs, so the absolute `min_hits` necessarily differed at every rung
+   * because the bar count does. Measured on the store's own ledger at the time:
+   * 4,324/21,620 at 30min, 2,328/11,643 at 60min and 334/1,671 at 1day are all
+   * 20.0% — three views of one question — and keying on `min_hits` split them
+   * into three groups of one, which is exactly the comparison this section
+   * exists to make.
+   *
+   * **D-0303 INVERTED THIS AND THE GROUPING HAS NOT BEEN REVISITED.** With the
+   * floor now derived per rung, it is `min_hits` that comes out constant and
+   * the percentage that varies: measured 2026-08-28, all eight rungs of one
+   * NIFTY run were handed 28 hits, which is 0.0045% at 1min and 0.243% at
+   * 60min — a factor of 54 apart. So grouping by ratio now splits one run into
+   * eight rows where it used to join three, and grouping by `min_hits` would
+   * join them. Which is right depends on what the reader is comparing, and
+   * that is a design question rather than a typo; recorded here so the next
+   * reader is not misled by the paragraph above it.
    *
    * Per-thousand rather than per-cent so two genuinely different thresholds a
    * tenth of a percent apart stay apart. `bars === 0` yields `-1`, a value no
@@ -3225,10 +3236,19 @@
 
          This is CLAUDE.md §6's argument for `k`, applied where it applies
          equally: "a parameter that can be set can be set wrongly and
-         silently." The engine holds it at 20% and derives the actual hit count
-         per rung from that rung's own bars, so nine rungs get nine different
-         thresholds without anyone typing one. It is printed beside the result
-         rather than hidden -- see the note at the end of this bar. -->
+         silently." The engine holds NO percentage at all: D-0303 deleted the
+         `const SUPPORT_PPM = 200_000` this comment used to describe, and
+         `sweeprun::conduct` passes `None`, so each rung derives its own floor
+         from its own bars through `cli::statistical_support_floor`. A support
+         named in the request body is IGNORED rather than obeyed -- there is a
+         test called exactly that.
+
+         THIS COMMENT SAID 20% UNTIL 2026-08-28, and so did the sentence under
+         the button. Measured against the run the operator started that day:
+         every rung was handed 28 hits, which on the 1-minute rung's 617,921
+         bars is 0.0045% -- not 20%, and not within four orders of magnitude of
+         it. A control that quietly does something other than what it shows is
+         the failure §4 bans, and this page was showing the wrong thing. -->
     <!-- DISABLED WHEN THE LEDGER CANNOT TAKE THE RESULT. A sweep that cannot
          record is nine rungs of real work thrown away, and the refusal arrives
          AFTER it. `blocked` is the server's own answer -- see `ledgerBlock`. -->
@@ -3286,7 +3306,8 @@
              control -- the selection still travels in the request, so the
              day the route reads it nothing here has to change. -->
         this press sweeps <b>{sweepSymbol || '—'}</b> on <b>{activeFeed}</b>, every intraday
-        timeframe, a pattern needing <b>20%</b> of that timeframe's own bars.
+        timeframe, at a support each timeframe <b>derives from its own bars</b> —
+        no fixed percentage is sent or held.
         {#if pickedSymbols.size > 1 || (heldNow && pickedRungs.size < heldNow.rungs.length)}
           <b class="warnish">The rest of the selection is not sent yet</b> — the run route takes one
           instrument and no timeframe list.
@@ -3757,9 +3778,14 @@
                    store's key. Same month, same product, same format. -->
               <span class="dim">{monthLabel(g.from)} → {monthLabel(g.to)}</span>
               <span class="dim">
-                <!-- "support ≥ 20.0% of bars" is the engine's word for it. What
-                     it MEANS is how often a pattern had to show up before the
-                     sweep would keep it, and that is what the reader needs. -->
+                <!-- "support" is the engine's word for it. What it MEANS is how
+                     often a pattern had to show up before the sweep would keep
+                     it, and that is what the reader needs. This said
+                     "support ≥ 20.0% of bars" as though 20% were the figure;
+                     the engine names no percentage at all and each rung derives
+                     its own. The number below is computed from the run's OWN
+                     `min_hits` and `bars`, so it was always right even while
+                     the sentence beside it was not. -->
                 {g.perMille < 0
                   ? 'how often a pattern had to appear — unknown, no bars were read'
                   : `a pattern had to appear on ${(g.perMille / 10).toFixed(1)}% of bars to be kept`}
