@@ -3845,7 +3845,31 @@
    * bearing on which file a reader opens first.
    */
   const barPlan = $derived.by(() => {
-    const all = [...matched].sort(
+    /* MONTHS THE WINDOW CANNOT CONTAIN ARE NOT READ AT ALL.
+
+       A day window forces the exact-plan fallback — the note below says why —
+       and the fallback read EVERY matched instrument-month. With the window on
+       August, that opened January through July as well: seven files fetched,
+       parsed, and discarded whole by `barWindowed`, which is the exact waste
+       the prefix-sum plan exists to avoid, reintroduced by the one control
+       that disables it.
+
+       They were not merely wasted. Each contributed a manifest disagreement —
+       "returned 0 bar(s), the census claims 575" — because a month outside the
+       window contributes nothing while the census still counts it. The guard
+       on `barDisagree` stops the accusation; this stops the read that produced
+       it.
+
+       MONTH GRAIN, AND ONLY WHOLLY-OUTSIDE MONTHS GO. A month is `YYYY-MM` and
+       the bounds are `YYYY-MM-DD`, so comparing the first seven characters is
+       an ISO-safe overlap test: the partial months at each end are kept whole
+       and `barWindowed` trims them by day, exactly as before. Nothing that
+       could contribute a row is dropped. */
+    const lo = dayWindowNarrows && fromDay ? fromDay.slice(0, 7) : '';
+    const hi = dayWindowNarrows && toDay ? toDay.slice(0, 7) : '';
+    const inWindow = (/** @type {any} */ r) =>
+      (!lo || r.month >= lo) && (!hi || r.month <= hi);
+    const all = [...matched].filter(inWindow).sort(
       (/** @type {any} */ a, /** @type {any} */ b) =>
         txt(b.month, a.month) || txt(a.instrument, b.instrument) || tfCmp(a.timeframe, b.timeframe)
     );
@@ -5077,8 +5101,42 @@
      that says the rows in hand are a page rather than a file. That is why this
      block had to move down here — it now depends on a value declared above
      `barPage` and below where it used to sit. */
+  /**
+   * IS THE DAY WINDOW NARROWING ANYTHING? One definition, read by the
+   * disagreement test below and by `filtered`.
+   *
+   * NOT "are the fields set": both date controls open seeded at the store's own
+   * floor and ceiling, so they are ALWAYS set, and "set" would be true before
+   * the operator had touched either. Only a value differing from the full span
+   * narrows.
+   */
+  const dayWindowNarrows = $derived(
+    dayWindowApplies && Boolean(spanCeil) && (fromDay !== spanFloor || toDay !== spanCeil)
+  );
+
+  /* AND A DAY WINDOW IS THE SECOND CONDITION THIS TEST CANNOT SURVIVE.
+     The paragraph above has the principle exactly right — the comparison means
+     something only when the WHOLE MONTH was read — and then guards one of the
+     two ways that stops being true.
+
+     `barPlan`'s own notes state the other: "a day window — `barWindowed`
+     filters AFTER the fetch, so the census count for a month stops predicting
+     how many of its rows survive." Every matched instrument-month is read,
+     INCLUDING months lying wholly outside the window, and each of those
+     contributes nothing while the census still claims its full count.
+
+     Measured on the operator's screen: ADANIENT 15min narrowed to
+     03–28 Aug 2026 drew seven warnings at once — `2026-07` "returned 0 bar(s)
+     and the census manifest claims 575", then 06, 05, 04, 03, 02 and 01, each
+     with its own number. Seven accusations of a corrupt store, produced
+     entirely by the reader's own date filter, under a grid that was answering
+     the question correctly. The same false alarm the sort-by-Close case
+     raised, arriving by the other road.
+
+     The store fact this exists to catch is not lost: clear the window and the
+     whole month is read again, and a real shortfall still says so. */
   const barDisagree = $derived(
-    windowSaid !== null
+    windowSaid !== null || dayWindowNarrows
       ? []
       : barState.files.filter(
           (/** @type {any} */ f) => f.error === null && f.bars.length !== f.row.rows
@@ -5303,8 +5361,11 @@
            narrowing while a week's worth of rows was all it would show.
            Compared against the seeded span, not against empty: the fields open
            populated at the store's own floor and ceiling, so "set" is not
-           "narrowed" — only a value that differs from the full span is. */
-        (Boolean(spanCeil) && (fromDay !== spanFloor || toDay !== spanCeil))
+           "narrowed" — only a value that differs from the full span is.
+           `dayWindowNarrows` is that comparison, named once and shared with
+           the manifest-disagreement guard, which needs the identical question
+           answered the identical way. */
+        dayWindowNarrows
     )
   );
 
