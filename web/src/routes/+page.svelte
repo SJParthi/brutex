@@ -71,12 +71,24 @@
    *
    * (The block name is spelled in prose ON PURPOSE. Typed as a mustache it
    * counts as a real each-block opening from inside this comment, and left
-   * this file at 16 opens against 15 closes. The same trap catches a tag name
-   * typed literally in angle brackets in a comment. Neither is theoretical --
-   * both were live here. Note this is NOT the cause of the unclosed-script
-   * error `svelte-check` reports against the last line of this file: that one
-   * predates these comments, survives every block balancing, and is still
-   * unexplained.)
+   * this file at 16 opens against 15 closes. The same trap catches a TAG name
+   * typed in angle brackets in a comment -- and that one was not theoretical
+   * either: a literal style-element tag, a few lines below this, is what made
+   * `svelte-check` report "script was left open" against the last line of this
+   * file for as long as anyone had looked.
+   *
+   * THAT WAS NEVER ONE ERROR. `svelte-check` runs `svelte2tsx`, not the
+   * compiler -- the compiler parses this file without complaint, which is why
+   * it has built and run the whole time -- and svelte2tsx reads that tag,
+   * inside this script's own comment, as a real element open and never
+   * recovers. The single parse failure it then reports SUPPRESSES TYPE
+   * CHECKING FOR THE WHOLE FILE. Taking the angle brackets out moved this file
+   * from 1 reported error to 173: it had not been checked at all, and the
+   * clean report was the loudest thing in it.
+   *
+   * So: no tag name in angle brackets, and no block in mustaches, anywhere in
+   * this file's comments. It costs the entire file's type coverage and the
+   * loss is invisible.)
    *
    * MONTHS FROM A LITERAL THREE-LETTER TABLE — `$lib/dates.js`. `Intl` under
    * `en-IN` emits `Sept`, four letters where the other eleven are three, and a
@@ -92,7 +104,7 @@
    *
    * NO COLOUR IS NAMED HERE. Every value in the stylesheet below is a
    * `theme.css` token, so the theme toggle reaches all of it. A literal in a
-   * page `<style>` is a second theme the toggle cannot reach.
+   * page-level style block is a second theme the toggle cannot reach.
    */
   import { catalogue, loadCatalogue, search } from '$lib/index.svelte.js';
   import { feeds } from '$lib/feeds.svelte.js';
