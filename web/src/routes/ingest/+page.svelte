@@ -2760,7 +2760,28 @@
     if (ticked.length > 0 && ticked.length < insPool.length) {
       for (const m of ticked) p.append('member', m.symbol ?? m.key);
     }
-    if (isFolderFeed) p.set('folder', folder);
+    /* THE FOLDER FOLLOWS THE BODY'S OWN VENDOR, NOT THE PAGE'S SCOPE — the
+       same correction the `vendor` argument above already records, applied to
+       the field the fan-out missed.
+
+       `isFolderFeed` reads `sourceKind`, which reads `active`, which is
+       `feeds.active`. So this asked "is the SCOPE a folder feed?" while
+       building a body for whichever vendor `wireBodyFor` was called with, and
+       `wireBodies` calls it once per feed in `feedsChosen`. Both directions
+       were wrong: with a folder feed as scope, a ticked BROKER's body carried
+       a `folder=` field it has no use for — and `problems` then blocked the
+       whole run until a path was typed for a run that touches no folder. With
+       a broker as scope, a ticked folder feed sent NO `folder=` and nothing
+       refused it.
+
+       Latent rather than live: it needs a feed with `kind === 'folder'` AND
+       `ready === true`, and every archive on this build is unready. Fixed at
+       the same time as the `vendor` argument's own note rather than left for
+       the day one flips ready, because that is the day it stops being
+       findable by reading. */
+    const forVendor = vendor ?? feeds.active;
+    const kindOf = feeds.all.find((f) => f.wire === forVendor)?.kind ?? null;
+    if (kindOf === 'folder') p.set('folder', folder);
     return p.toString();
   }
   /** One body per ticked rung, in the ladder's order — what Start would send. */
@@ -6977,8 +6998,33 @@
     void resumeRun();
     const want = decodeSel(window.location.search);
     urlWant = want;
-    // THE FIELDS WITH NO ASYNC PREREQUISITE, applied at once.
-    if (want.universe) universe = want.universe;
+    /* THE FIELDS WITH NO ASYNC PREREQUISITE, applied at once — and the
+       universe is CHECKED against the menu before it is applied.
+
+       `urlstate.js` states the split in its own header: it decodes and "does
+       not validate… the vocabularies live on the page and THE PAGE OWNS SAYING
+       WHAT IT COULD NOT HONOUR". This assigned the raw token, and
+       `universeSpec` falls back to `SWEPT` for anything unrecognised — which
+       is not an inert default. `SWEPT.target` is `'swept'`, a real sendable
+       target, and `SWEPT` is deliberately absent from `UNIVERSES` so it has no
+       row in the menu and none in `refusedUniverses`. So a stale token gave a
+       LIVE target with no ticked row, the ladder's `instruments` rung opened
+       on it, and Start would have sent `target=swept` — the "button showing a
+       choice nobody can make" defect the note at the universe menu records as
+       already fixed once, by moving the DEFAULT off `'swept'`. The FALLBACK
+       was left pointing at it.
+
+       Reachable by any bookmark carrying `?universe=swept` from before the
+       sweep pair left the menu, which is the exact scenario `urlstate.js`
+       names, or any hand-edited token.
+
+       An unhonourable token is dropped rather than substituted, and the
+       address bar then says so on its own: the writer below re-encodes from
+       `universe`, so the URL rewrites itself to the value actually in force
+       instead of continuing to claim one the page refused. */
+    if (want.universe && UNIVERSES.some((u) => u.id === want.universe)) {
+      universe = want.universe;
+    }
     if (want.segs) segSet = new Set(want.segs);
     if (want.rungs) {
       rungSet = new Set(want.rungs);
