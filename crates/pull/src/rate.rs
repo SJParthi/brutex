@@ -13,13 +13,51 @@
 //! refused, and pays for every discovery with a `429`.
 //!
 //! So the published figure is used for exactly one thing: an **upper bound the
-//! allowance may never pass**. Everything below it is earned. One success buys
-//! one permit back; one refusal halves the allowance. The allowance therefore
-//! walks *toward* whatever the vendor is honouring today, from above after a
-//! refusal and from below after a recovery, and it never walks past what the
-//! vendor published.
+//! allowance may never pass**. Everything below it is earned. One refusal steps
+//! the allowance down; [`SUCCESSES_PER_STEP`] clean answers step it back up.
+//! The allowance therefore walks *toward* whatever the vendor is honouring
+//! today, from above after a refusal and from below after a recovery, and it
+//! never walks past what the vendor published.
 //!
-//! # Why AIMD, stated as an argument rather than asserted
+//! # THE DECREASE IS ADDITIVE NOW, AND THE ASYMMETRY MOVED RATHER THAN LEFT
+//!
+//! This module halved on a refusal, and the argument for halving is reproduced
+//! in full below because it is a good argument that does not apply here.
+//!
+//! **Chiu & Jain is about *n* clients sharing one budget.** Its subject is
+//! fairness convergence between competing flows, and the multiplicative
+//! decrease is what shrinks the spread between them. This governor has no peers
+//! to be fair to: one repository, one vendor, one figure the vendor published
+//! and the operator recorded. The fairness half of that argument has nothing to
+//! bind to.
+//!
+//! **The cost half does apply, and it is kept.** A refusal must cost more than
+//! a success returns, or a governor that is refused climbs back as fast as it
+//! retreats and re-breaches forever. That property survives here — it simply
+//! comes from *frequency* rather than from *multiplication*: one step down per
+//! refusal against one step up per [`SUCCESSES_PER_STEP`] clean answers, the
+//! same asymmetry TCP gets from `cwnd += 1/cwnd`, reached without a fraction
+//! and without a float.
+//!
+//! **A symmetric additive rule was tried first and does not converge.** With
+//! one step down per refusal and one step *up* per success, a vendor publishing
+//! 8/s and honouring 3/s held the allowance at a stable **6** — double what it
+//! would serve — because three successes a second exactly cancelled three
+//! refusals a second. That is measured, not reasoned:
+//! `pull::unit::the_allowance_converges_onto_the_rate_the_vendor_actually_honours`
+//! catches it, and it is why [`Window::earned`] exists.
+//!
+//! **What halving cost, which is why it went.** The step is now
+//! `ceiling / BACKOFF_STEPS` — proportional to the ceiling, so the penalty
+//! still scales with the span rather than being a flat one — but it is bounded
+//! below by the published figure instead of by zero. Halving a documented quota
+//! discards capacity known to exist: measured, the day allowance walked
+//! 100,000 → 50,000 → 25,000 → 12,705 → 6,352 on five refusals and a
+//! 213-instrument pull needing ~12,996 requests could no longer finish at all.
+//! The trade is that converging from far above the honoured rate now takes ~32
+//! refusals where halving took ~10. See `docs/05-decisions.md` D-0326.
+//!
+//! # Why AIMD was chosen originally, stated as an argument rather than asserted
 //!
 //! Additive increase, multiplicative decrease — the rule TCP congestion control
 //! uses, taken for the reason TCP takes it (Chiu & Jain, 1989). Consider *n*
@@ -196,7 +234,39 @@ pub const MAX_CEILING: u32 = 1_000_000;
 /// operator's log records the day allowance falling to 6,352 and a `+1` step
 /// needing 93,648 successes to undo it. Any proportional step fixes that; this
 /// one is the conservative end of the range. D-0322.
-pub const RECOVERY_STEPS: u32 = 1_024;
+pub const SUCCESSES_PER_STEP: u32 = 32;
+
+/// How many refusals it takes to walk a span from its ceiling down to one.
+///
+/// [`Window::relax`] subtracts `ceiling / BACKOFF_STEPS` rather than halving.
+/// The vendor PUBLISHED these figures and the operator recorded them, so a
+/// refusal is evidence the current rate is too high — not evidence the
+/// documented quota was a fiction. Halving discards capacity known to exist;
+/// stepping down does not.
+///
+/// **32, which is [`RECOVERY_STEPS`] / 32**, so one refusal costs what
+/// thirty-two clean requests earn. That asymmetry is the part of AIMD worth
+/// keeping — back off decisively, recover gradually — and it survives here
+/// without either move being multiplicative.
+///
+/// Both constants are `ceiling / N`, so each span moves at a rate proportional
+/// to its own magnitude. A rate ceiling of five steps by whole permits and
+/// reaches a real reduction in two or three refusals; a daily quota of 100,000
+/// erodes 3.1% at a time and stays usable. One rule, and no span singled out by
+/// hand.
+///
+/// **Chosen, not measured**, exactly as [`SUCCESSES_PER_STEP`] is —
+/// `CLAUDE.md` §3 rule 1. What is measured is the failure it replaces. D-0326.
+pub const BACKOFF_STEPS: u32 = 32;
+
+const _: () = assert!(
+    SUCCESSES_PER_STEP > 1,
+    "one step down per refusal against one step up per success is a SYMMETRIC \
+     rule, and a symmetric rule settles ABOVE the rate the vendor honours \
+     rather than below it. Measured: a vendor publishing 8/s and honouring \
+     3/s held the allowance at a stable 6, because three successes a second \
+     exactly cancelled three refusals a second. The asymmetry lives here"
+);
 
 /// Microseconds in the shortest span this governor bounds.
 pub const MICROS_PER_SECOND: u64 = 1_000_000;
@@ -436,6 +506,27 @@ pub struct Window {
     ceiling: u32,
     permitted: u32,
     credit: u64,
+    /// Clean answers banked toward the next step back up.
+    ///
+    /// # Why a counter and not simply a smaller step
+    ///
+    /// The decrease must be coarser than the increase, or the two moves cancel
+    /// and the governor settles ABOVE the rate the vendor honours instead of
+    /// below it. In integer permits that asymmetry cannot come from the step
+    /// size alone: at a ceiling of five or eight, `ceiling / N` floors to one in
+    /// **both** directions and the ratio collapses to 1:1.
+    ///
+    /// Measured, and it is why this field exists: with a symmetric step, a
+    /// vendor publishing 8/s and honouring 3/s drove the allowance to a stable
+    /// **6** — double what it would actually serve — because three successes a
+    /// second (+3) exactly balanced three refusals a second (−3). The old
+    /// halving hid the problem by being multiplicative.
+    ///
+    /// So the step is the same size in both directions and the INCREASE is
+    /// rationed instead: one step back costs [`SUCCESSES_PER_STEP`] clean
+    /// answers, at every ceiling. Same asymmetry TCP gets from `cwnd += 1/cwnd`,
+    /// reached without a fraction and without a float.
+    earned: u32,
 }
 
 impl Window {
@@ -464,6 +555,9 @@ impl Window {
             span,
             ceiling,
             permitted: ceiling,
+            // NOTHING BANKED YET. A fresh window starts at its published
+            // ceiling, so there is nothing to climb toward and nothing earned.
+            earned: 0,
             // `as u64` rather than `u64::from`, and for the reason
             // `session::Day::new` gives four hundred lines away: `From` is not
             // const-stable on this toolchain, and this constructor is `const`
@@ -568,12 +662,68 @@ impl Window {
     /// `u32::MAX`, and the `min` is what keeps the published figure an upper
     /// bound rather than a target.
     fn tighten_toward_ceiling(&mut self) {
-        let step = (self.ceiling / RECOVERY_STEPS).max(1);
-        self.permitted = self.permitted.saturating_add(step).min(self.ceiling);
+        self.earned = self.earned.saturating_add(1);
+        if self.earned < SUCCESSES_PER_STEP {
+            return;
+        }
+        self.earned = 0;
+        self.permitted = self
+            .permitted
+            .saturating_add(Self::step_of(self.ceiling))
+            .min(self.ceiling);
     }
 
-    /// Multiplicative decrease: halve the allowance, floor at one, drain the
+    /// One move of the allowance, up or down, for a span of this size.
+    ///
+    /// **The same number in both directions**, so the asymmetry lives entirely
+    /// in how OFTEN each move happens — one step down per refusal against one
+    /// step up per [`SUCCESSES_PER_STEP`] clean answers. Two knobs would be two
+    /// things to get wrong, and a step that differed by direction would floor to
+    /// one in both at a small ceiling anyway, which is the trap this shape
+    /// avoids.
+    ///
+    /// `ceiling / BACKOFF_STEPS`, floored at one whole permit: proportional
+    /// where the ceiling is large enough to divide, and the smallest move
+    /// integers allow where it is not.
+    const fn step_of(ceiling: u32) -> u32 {
+        let step = ceiling / BACKOFF_STEPS;
+        if step == 0 { 1 } else { step }
+    }
+
+    /// Decremental decrease: step the allowance DOWN, floor at one, drain the
     /// bucket.
+    ///
+    /// # THIS HALVED, AND HALVING A PUBLISHED QUOTA THROWS AWAY KNOWN CAPACITY
+    ///
+    /// Classic AIMD halves because it is arbitrating a **contended** resource
+    /// whose true capacity nobody published — the multiplicative decrease is
+    /// what makes competing flows converge and share. That is not this. Each
+    /// span here is a figure the vendor WROTE DOWN and the operator recorded, so
+    /// a refusal is evidence the current *rate* is too high, not evidence the
+    /// documented quota was a fiction.
+    ///
+    /// Halving on that evidence discards capacity that is known to exist.
+    /// Measured, with the double-count of D-0322 compounding it: the day
+    /// allowance walked 100,000 → 50,000 → 25,000 → 12,705 → 6,352 on five
+    /// refusals, and a 213-instrument pull needing ~12,996 requests could no
+    /// longer finish at all.
+    ///
+    /// So the decrease is a STEP, the mirror of
+    /// [`Self::tighten_toward_ceiling`]'s. Both are `ceiling / N`, which makes
+    /// each span move at a rate proportional to its own magnitude rather than at
+    /// one rate imposed on ceilings four orders of magnitude apart:
+    ///
+    /// | span | ceiling | one refusal costs | one success returns |
+    /// |---|---|---|---|
+    /// | second | 5 | 1 (20%) | 1 (20%) |
+    /// | day | 100,000 | 3,125 (3.1%) | 97 (0.1%) |
+    ///
+    /// **The decrease is [`BACKOFF_STEPS`] times coarser than the increase**, so
+    /// backing off is still decisively faster than recovering — the property
+    /// AIMD's asymmetry exists for — without either being multiplicative. A rate
+    /// span, whose ceiling is small, still moves in whole permits and reaches a
+    /// real reduction in a few refusals; a day quota erodes gently and stays
+    /// usable.
     ///
     /// **The floor is one, never zero.** An allowance of zero is an absorbing
     /// state — no request is ever admitted, so no success is ever observed, so
@@ -581,12 +731,23 @@ impl Window {
     /// that can permanently stop a pull on one bad minute, and the recovery
     /// would look exactly like a hung process.
     ///
-    /// **The bucket is drained as well as the allowance halved.** A refusal
-    /// says the budget the governor believed in was wrong; leaving the credit
-    /// in place would let the caller spend the disproven budget immediately
-    /// after being told it does not exist.
+    /// **The bucket is drained as well as the allowance stepped down.** A
+    /// refusal says the budget the governor believed in was wrong; leaving the
+    /// credit in place would let the caller spend the disproven budget
+    /// immediately after being told it does not exist. That half is unchanged.
+    ///
+    /// Cannot underflow: `saturating_sub` then `max(1)`. D-0326.
     fn relax(&mut self) {
-        self.permitted = (self.permitted / 2).max(1);
+        // THE BANK IS EMPTIED TOO. Clean answers banked toward the next step up
+        // were evidence the current rate was fine, and a refusal is that
+        // evidence being withdrawn. Carrying them forward would let a run that
+        // was just refused climb back on the strength of successes that came
+        // before the refusal.
+        self.earned = 0;
+        self.permitted = self
+            .permitted
+            .saturating_sub(Self::step_of(self.ceiling))
+            .max(1);
         self.credit = 0;
     }
 }

@@ -44,8 +44,21 @@ use pull::manifest::{
 use pull::rate::{
     DHAN_PER_DAY, DHAN_PER_SECOND, GROWW_PER_MINUTE, GROWW_PER_SECOND_UNVERIFIED, Governor,
     GovernorError, MAX_CEILING, MICROS_PER_DAY, MICROS_PER_MINUTE, MICROS_PER_SECOND, PoolKey,
-    Pools, RequestKind, Verdict, WINDOW_COUNT, WindowSpan,
+    Pools, RequestKind, SUCCESSES_PER_STEP, Verdict, WINDOW_COUNT, WindowSpan,
 };
+
+/// Earns exactly one step back up, at the cadence `Window::tighten_toward_ceiling`
+/// rations it to.
+///
+/// A step costs `SUCCESSES_PER_STEP` clean answers rather than one, and that
+/// ratio is the whole asymmetry: one step DOWN per refusal against one step UP
+/// per thirty-two successes. Written as a helper so the tests below say "one
+/// step" and do not each hard-code the number — D-0326.
+fn earn_one_step(governor: &mut Governor) {
+    for _ in 0..SUCCESSES_PER_STEP {
+        governor.record_success();
+    }
+}
 use pull::secret::{
     CredentialHalt, CredentialReader, ParameterStore, Secret, SecretError, SecretSource,
     SsmSecretSource,
@@ -2652,21 +2665,31 @@ fn a_window_saturates_exactly_at_its_allowance_and_not_one_over() {
     );
 }
 
-/// P-22 — a refusal halves the allowance and drains the bucket, and the
+/// P-22 — a refusal STEPS DOWN every allowance and drains every bucket, and the
 /// published ceiling is untouched.
 ///
-/// The multiplicative half of AIMD. Every live span backs off, because a
-/// vendor's throttle response names none of them.
+/// Every live span backs off, because a vendor's throttle response names none
+/// of them. **It used to halve.** D-0326 replaced that with a decremental step:
+/// these figures are ones the vendor published and the operator recorded, so a
+/// refusal is evidence the current rate is too high, not evidence the
+/// documented quota was a fiction — and halving discards capacity known to
+/// exist.
+///
+/// The step is `ceiling / BACKOFF_STEPS`, floored at one whole permit, so each
+/// span moves at a rate proportional to its own magnitude rather than at one
+/// rate imposed on ceilings four orders of magnitude apart.
 #[test]
-fn a_refusal_halves_every_allowance_and_drains_every_bucket() {
+fn a_refusal_steps_down_every_allowance_and_drains_every_bucket() {
     let mut governor = Governor::new(Some(8), Some(500), Some(100_000)).expect("within bounds");
     assert_eq!(governor.admit(0), Verdict::Admit);
 
     governor.record_throttled();
 
-    assert_eq!(governor.permitted(WindowSpan::Second), Some(4));
-    assert_eq!(governor.permitted(WindowSpan::Minute), Some(250));
-    assert_eq!(governor.permitted(WindowSpan::Day), Some(50_000));
+    // 8/32 floors to zero, so the small rate ceiling moves by one whole permit;
+    // 500/32 is 15; 100,000/32 is 3,125.
+    assert_eq!(governor.permitted(WindowSpan::Second), Some(7));
+    assert_eq!(governor.permitted(WindowSpan::Minute), Some(485));
+    assert_eq!(governor.permitted(WindowSpan::Day), Some(96_875));
     // The ceiling is a published figure and a back-off is not evidence about
     // it. Only the allowance moves.
     assert_eq!(governor.ceiling(WindowSpan::Second), Some(8));
@@ -2674,50 +2697,63 @@ fn a_refusal_halves_every_allowance_and_drains_every_bucket() {
     assert_eq!(governor.ceiling(WindowSpan::Day), Some(100_000));
     // The bucket is drained as well: the budget the governor believed in has
     // just been disproven, and leaving credit behind would let the caller spend
-    // it immediately after being told it does not exist.
+    // it immediately after being told it does not exist. UNCHANGED by D-0326 —
+    // the step replaced the halving, not the drain.
     assert_eq!(governor.credit_micro_permits(WindowSpan::Second), Some(0));
     assert_eq!(governor.credit_micro_permits(WindowSpan::Minute), Some(0));
     assert_eq!(governor.credit_micro_permits(WindowSpan::Day), Some(0));
 
     // And the next request is refused by the span that must wait longest — the
-    // day, at 86,400,000,000 / 50,000 microseconds — not by the first span
-    // looked at.
+    // day — not by the first span looked at. The wait is derived from the
+    // allowance rather than written as a literal, so it states the RELATIONSHIP
+    // and does not have to be recomputed by hand when a constant moves.
+    let day_permits = u64::from(governor.permitted(WindowSpan::Day).expect("a day span"));
     assert_eq!(
         governor.admit(0),
         Verdict::Deny {
             span: WindowSpan::Day,
-            wait_micros: 1_728_000,
+            wait_micros: MICROS_PER_DAY.div_ceil(day_permits),
         }
     );
 }
 
-/// **A HALVED DAY SPAN RECOVERS IN A BOUNDED NUMBER OF REQUESTS**, and at a
-/// flat `+1` it did not.
+/// **A REFUSED DAY SPAN COSTS LITTLE AND RECOVERS IN A BOUNDED NUMBER OF
+/// REQUESTS**, and under halve-down / `+1`-up it did neither.
 ///
 /// This is the defect that made a many-instrument pull impossible while a
 /// single-instrument pull was fine. `record_throttled` relaxes every span,
 /// because a vendor refusal names none of them — so one momentary per-second
-/// burst also halved the DAY allowance. At `+1` per success the day span then
-/// needed 50,000 clean requests to undo one halving, which is four times the
-/// ~12,996 a 213-instrument pull makes in total. It never recovered.
+/// burst also halved the DAY allowance, and at `+1` per success undoing that
+/// needed 50,000 clean requests: four times the ~12,996 a 213-instrument pull
+/// makes in total. It never recovered.
 ///
 /// Measured in the operator's own log, the allowance walked
 /// 100,000 → 50,000 → 25,000 → 12,705 → 6,352 — a 15.7x collapse — and a pull
 /// needing 12,996 requests could no longer finish in a day. One instrument needs
 /// 61 and never reached the cliff.
 ///
-/// The assertion is a BOUND, not an exact count: what must hold is that recovery
-/// costs a number of requests a backfill actually makes, whatever the ceiling
-/// is. The exact step is `ceiling / RECOVERY_STEPS` and pinning it would make
-/// this test a copy of the implementation.
+/// Both halves are asserted as BOUNDS rather than exact counts. What must hold
+/// is that one refusal leaves a usable budget and that recovery costs a number
+/// of requests a backfill actually makes — whatever the ceiling is. Pinning
+/// `ceiling / BACKOFF_STEPS` and `ceiling / RECOVERY_STEPS` here would make this
+/// test a copy of the implementation, which is the shape that agrees with the
+/// code instead of checking it.
 #[test]
-fn a_halved_day_allowance_recovers_in_requests_a_backfill_actually_makes() {
+fn a_refused_day_allowance_stays_usable_and_recovers_in_bounded_requests() {
     let mut governor = only(WindowSpan::Day, 100_000);
     governor.record_throttled();
-    assert_eq!(
-        governor.permitted(WindowSpan::Day),
-        Some(50_000),
-        "the multiplicative decrease still halves"
+
+    let after = governor.permitted(WindowSpan::Day).expect("a day span");
+    assert!(
+        after < 100_000,
+        "a refusal must narrow the allowance, not leave it"
+    );
+    // THE BOUND THAT MATTERS. A 213-instrument day pull needs ~12,996 requests.
+    // One refusal must not put that out of reach — which is exactly what the
+    // halving did by the third one.
+    assert!(
+        after > 50_000,
+        "one refusal must not cost half the published quota; left {after}"
     );
 
     let mut successes = 0u32;
@@ -2733,7 +2769,17 @@ fn a_halved_day_allowance_recovers_in_requests_a_backfill_actually_makes() {
     }
     assert!(
         successes < 1_024,
-        "a halving is undone in under RECOVERY_STEPS successes, took {successes}"
+        "one refusal is undone in under RECOVERY_STEPS successes, took {successes}"
+    );
+
+    // AND BACKING OFF IS STILL DECISIVELY FASTER THAN RECOVERING, which is the
+    // one property of AIMD worth keeping. Without it a governor that is refused
+    // climbs back as fast as it retreats and re-breaches at the same rate
+    // forever.
+    assert!(
+        successes > 1,
+        "one refusal must cost more than one success to undo, or the two \
+         moves cancel and nothing converges"
     );
 
     // AND THE CEILING IS STILL A WALL. A proportional step must not overshoot
@@ -2756,35 +2802,69 @@ fn a_halved_day_allowance_recovers_in_requests_a_backfill_actually_makes() {
 fn a_small_rate_ceiling_still_recovers_one_permit_at_a_time() {
     let mut governor = only(WindowSpan::Second, 5);
     governor.record_throttled();
-    assert_eq!(governor.permitted(WindowSpan::Second), Some(2));
+    assert_eq!(
+        governor.permitted(WindowSpan::Second),
+        Some(4),
+        "5/BACKOFF_STEPS floors to zero, so a rate ceiling this small steps by \
+         one whole permit"
+    );
 
-    let mut walk = Vec::new();
+    earn_one_step(&mut governor);
+    assert_eq!(
+        governor.permitted(WindowSpan::Second),
+        Some(5),
+        "and one step back up returns it -- but costs SUCCESSES_PER_STEP clean \
+         answers, which is the asymmetry"
+    );
+}
+
+/// **A RATE SPAN STILL REACHES A REAL REDUCTION IN A FEW REFUSALS.**
+///
+/// The worry about replacing the halving is that a decremental step is too
+/// gentle to escape a real rate limit. It is not, and the reason is that the
+/// step is proportional: a small ceiling's step is a whole permit, which is 20%
+/// of five. Three refusals take the vendor's published five down to two —
+/// exactly where one halving used to land — and they cost three refused
+/// requests instead of one.
+///
+/// That is the trade D-0326 makes, stated as a test rather than as a claim: a
+/// rate span converges nearly as fast, and a daily QUOTA no longer collapses to
+/// pay for it.
+#[test]
+fn three_refusals_take_a_rate_ceiling_where_one_halving_used_to() {
+    let mut governor = only(WindowSpan::Second, 5);
     for _ in 0..3 {
-        governor.record_success();
-        walk.push(governor.permitted(WindowSpan::Second));
+        governor.record_throttled();
     }
     assert_eq!(
-        walk,
-        vec![Some(3), Some(4), Some(5)],
-        "one permit at a time, exactly as before"
+        governor.permitted(WindowSpan::Second),
+        Some(2),
+        "five down to two, which is where a single halving landed"
     );
 }
 
 /// P-23 — sustained success walks the allowance back up one permit at a time,
 /// and stops **exactly** at the published ceiling.
 ///
-/// The additive half of AIMD, and the reason a refusal is expensive: the halving
-/// above cost four permits in one step, and every one of them has to be earned
-/// back separately.
+/// The additive half, and the reason a refusal still costs: every permit given
+/// up has to be earned back one at a time. D-0326 made the decrease additive
+/// too, so the two moves are now mirrors of each other -- `ceiling / N` in
+/// both directions, with backing off the coarser of the two.
 #[test]
 fn sustained_success_walks_up_one_permit_at_a_time_and_stops_at_the_ceiling() {
     let mut governor = only(WindowSpan::Second, 8);
-    governor.record_throttled();
+    // FOUR REFUSALS TO GET HERE, WHERE ONE HALVING USED TO. That is D-0326's
+    // trade written as arithmetic: at this ceiling the step is one whole permit
+    // in each direction, so reaching four costs four refused requests instead of
+    // one — and a daily quota no longer collapses to pay for the difference.
+    for _ in 0..4 {
+        governor.record_throttled();
+    }
     assert_eq!(governor.permitted(WindowSpan::Second), Some(4));
 
     let mut walk = Vec::new();
     for _ in 0..4 {
-        governor.record_success();
+        earn_one_step(&mut governor);
         walk.push(governor.permitted(WindowSpan::Second));
     }
     assert_eq!(walk, vec![Some(5), Some(6), Some(7), Some(8)]);
@@ -2835,7 +2915,11 @@ fn the_allowance_never_reaches_zero_however_many_refusals() {
         governor.record_throttled();
         walk.push(governor.permitted(WindowSpan::Second).expect("bounded"));
     }
-    assert_eq!(walk, vec![2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]);
+    // One whole permit per refusal down to the floor, and the floor holds
+    // however many more arrive. The FLOOR is the invariant; the descent is a
+    // consequence of the step and is written out so a change to either is
+    // visible rather than absorbed.
+    assert_eq!(walk, vec![4, 3, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1]);
     assert!(walk.iter().all(|permitted| *permitted >= 1));
 
     // And one permit per second is a rate, not a stop: after one second's worth
@@ -2848,8 +2932,8 @@ fn the_allowance_never_reaches_zero_however_many_refusals() {
         }
     );
     assert_eq!(governor.admit(MICROS_PER_SECOND), Verdict::Admit);
-    // Which is what lets it climb back out.
-    governor.record_success();
+    // Which is what lets it climb back out -- one step, at the rationed cadence.
+    earn_one_step(&mut governor);
     assert_eq!(governor.permitted(WindowSpan::Second), Some(2));
 }
 
@@ -2976,7 +3060,7 @@ fn a_tie_between_two_spans_is_broken_by_the_shorter_one() {
     let mut governor = Governor::new(Some(2), Some(120), None).expect("within bounds");
     governor.record_throttled();
     assert_eq!(governor.permitted(WindowSpan::Second), Some(1));
-    assert_eq!(governor.permitted(WindowSpan::Minute), Some(60));
+    assert_eq!(governor.permitted(WindowSpan::Minute), Some(117));
 
     assert_eq!(
         governor.admit(0),
@@ -3185,7 +3269,9 @@ fn one_request_kinds_pool_is_exhausted_while_the_other_is_untouched() {
         Verdict::Admit
     );
 
-    // And a throttle on one kind halves that kind's allowance alone.
+    // And a throttle on one kind narrows that kind's allowance ALONE. The
+    // isolation is what this asserts; the size of the step is D-0326's and is
+    // pinned by the governor's own tests.
     pools
         .governor_mut(RequestKind::Historical)
         .record_throttled();
@@ -3193,7 +3279,7 @@ fn one_request_kinds_pool_is_exhausted_while_the_other_is_untouched() {
         pools
             .governor(RequestKind::Historical)
             .permitted(WindowSpan::Second),
-        Some(4)
+        Some(7)
     );
     assert_eq!(
         pools
@@ -3603,7 +3689,7 @@ fn the_allowance_converges_onto_the_rate_the_vendor_actually_honours() {
     // And when the vendor stops refusing, it walks back up to the published
     // ceiling and stops there.
     for _ in 0..GROWW_PER_SECOND_UNVERIFIED {
-        governor.record_success();
+        earn_one_step(&mut governor);
     }
     assert_eq!(
         governor.permitted(WindowSpan::Second),

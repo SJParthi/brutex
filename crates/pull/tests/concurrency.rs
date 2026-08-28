@@ -148,8 +148,11 @@ fn a_throttle_recorded_by_one_thread_binds_every_other() {
         Governor::new(Some(CEILING), None, None).expect("a governor with a per-second ceiling"),
     );
 
-    // One caller learns the vendor is refusing. Multiplicative decrease: the
-    // allowance halves and the bucket drains.
+    // One caller learns the vendor is refusing. Decremental decrease: the
+    // allowance steps DOWN by `ceiling / BACKOFF_STEPS`, floored at one whole
+    // permit, and the bucket drains. It used to halve; see D-0326 for why
+    // halving a figure the vendor published throws away capacity known to
+    // exist.
     governor
         .lock()
         .expect("the governor lock")
@@ -159,8 +162,8 @@ fn a_throttle_recorded_by_one_thread_binds_every_other() {
             .lock()
             .expect("the governor lock")
             .permitted(WindowSpan::Second),
-        Some(2),
-        "five halved, rounded down"
+        Some(CEILING - 1),
+        "a rate ceiling this small steps by one whole permit"
     );
 
     // The drained bucket means nothing at all is issued at that instant, from
@@ -168,9 +171,12 @@ fn a_throttle_recorded_by_one_thread_binds_every_other() {
     // get to spend a budget that was just disproven.
     assert_eq!(hammer(&governor, 0), 0, "a drained bucket issues nothing");
 
-    // A second later the halved allowance is what earns back, and it is what
-    // bounds the pool: two, not five, however many threads are asking.
-    assert_eq!(hammer(&governor, MICROS_PER_SECOND), 2);
+    // A second later the REDUCED allowance is what earns back, and it is what
+    // bounds the pool: four, not five, however many threads are asking. The
+    // number is the point rather than its size — one refusal narrows the
+    // ceiling for every thread, and the narrowed figure is the one the pool
+    // honours.
+    assert_eq!(hammer(&governor, MICROS_PER_SECOND), u64::from(CEILING - 1));
 
     let held = governor.lock().expect("the governor lock");
     assert_eq!(

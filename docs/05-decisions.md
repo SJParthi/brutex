@@ -24500,3 +24500,262 @@ dead. `an_unsubscribed_account_is_never_promoted_to_a_dead_session` pins the
 guard on all six auth codes. `a_sentence_that_merely_contains_invalid_is_not_a_dead_session`
 pins the four near misses. `a_contract_without_a_message_reader_is_unchanged`
 pins that Kite and Groww take the path they always had.
+
+---
+
+### D-0326
+
+**The decrease is incremental now, not multiplicative — and making it symmetric
+first proved why the asymmetry had to survive the change.**
+
+The operator's instruction: *don't reduce the budget, just use an incremental
+and decremental approach.* The reasoning behind it is sound and this entry
+records both why it is right and the one thing it nearly broke.
+
+#### Why halving was wrong for THIS governor
+
+`crates/pull/src/rate.rs`'s header carries a full derivation of AIMD from Chiu
+& Jain (1989), and it is a good argument that **does not apply here**. Its
+subject is fairness convergence between *n* clients sharing one budget, and the
+multiplicative decrease is what shrinks the spread between competing flows. This
+governor has no peers: one repository, one vendor, one figure the vendor
+published and the operator recorded.
+
+Against a *documented* quota, a refusal is evidence the current **rate** is too
+high — not evidence the quota was a fiction. Halving on that evidence discards
+capacity known to exist. Measured, with D-0322's double-count compounding it:
+the day allowance walked 100,000 → 50,000 → 25,000 → 12,705 → 6,352 on five
+refusals, and a 213-instrument pull needing ~12,996 requests could no longer
+finish at all.
+
+#### The symmetric version was tried first and does not converge
+
+One step down per refusal, one step up per success. It settled **above** the
+rate the vendor honours rather than below it, and the existing test caught it:
+
+> `the_allowance_converges_onto_the_rate_the_vendor_actually_honours` — a vendor
+> publishing 8/s and honouring 3/s. The allowance settled at a stable **6**.
+
+The arithmetic is exact. At allowance `P` the loop issues `P` per second, of
+which 3 succeed (+3) and `P − 3` are refused (−(P − 3)). Net is `6 − P`, zero at
+`P = 6`. **Double what the vendor would serve, forever.**
+
+In integer permits that asymmetry cannot come from the step *size* alone: at a
+ceiling of five or eight, `ceiling / N` floors to one in **both** directions and
+any ratio between the two constants collapses to 1:1. The old halving hid the
+problem by being multiplicative.
+
+#### The shape that works
+
+**One step size, used in both directions, and the increase is rationed.**
+
+* `Window::step_of` — `ceiling / BACKOFF_STEPS`, floored at one whole permit.
+  Proportional where the ceiling divides, and the smallest move integers allow
+  where it does not.
+* One step DOWN per refusal.
+* One step UP per `SUCCESSES_PER_STEP` clean answers, counted in
+  `Window::earned`.
+
+That is the same asymmetry TCP gets from `cwnd += 1/cwnd`, reached without a
+fraction and without a float — `clippy::float_arithmetic` is denied
+workspace-wide and this path is on the governor's hot side.
+
+`earned` is emptied by a refusal as well. Clean answers banked toward the next
+step up were evidence the current rate was fine, and a refusal withdraws that
+evidence; carrying them forward would let a run that was just refused climb back
+on the strength of successes that preceded it.
+
+| span | ceiling | one refusal costs | one step back costs |
+|---|---|---|---|
+| second | 5 | 1 permit (20%) | 32 clean answers |
+| second | 8 | 1 permit (12.5%) | 32 clean answers |
+| day | 100,000 | 3,125 (3.1%) | 32 clean answers |
+
+#### What the trade actually is, stated plainly
+
+Converging from far above the honoured rate now takes **~32 refusals where
+halving took ~10**, because the step is proportional to the ceiling rather than
+to the current allowance. Each of those refusals is a real `429` emitted at the
+vendor.
+
+That is the cost, and it buys: a daily quota that erodes 3.1% at a time instead
+of collapsing 15.7×, and a rate span that still reaches a real reduction in two
+or three refusals because its step is a whole permit out of five.
+
+`Governor` remains `Copy` and the compile-time `size_of <= 128` assertion still
+holds, so the space proof the module rests on is unaffected by the new counter.
+
+#### Not touched
+
+`DHAN_PER_DAY` stays at 100,000, per the operator's 2026-08-19 adjudication
+against two contradicting vendor tables. Nothing here changes a ceiling; this is
+entirely about how the *allowance* moves beneath one.
+
+#### The proof that matters
+
+`the_allowance_converges_onto_the_rate_the_vendor_actually_honours` is the test
+that failed on the symmetric version and passes now — it is the reason
+`SUCCESSES_PER_STEP` exists, and its `const _` assertion says so in the failure
+message. `a_refused_day_allowance_stays_usable_and_recovers_in_bounded_requests`
+asserts both bounds — one refusal leaves more than half the published quota, and
+recovery costs fewer requests than a backfill makes — as BOUNDS rather than
+exact counts, so it cannot become a copy of the implementation.
+`three_refusals_take_a_rate_ceiling_where_one_halving_used_to` states the trade
+as arithmetic rather than as a claim.
+
+---
+
+### D-0327
+
+**A refused chunk discards the suffix, not the whole answer — and the sentence
+that justified discarding everything was wrong on its own terms.**
+
+`api::server::fetch_chunks` accumulated chunk bodies into a local `Vec` and
+returned `Err` on any failure, dropping every chunk already fetched. Its own
+message gave the reason:
+
+> the chunks before it were fetched and are not written, because a partial
+> answer to a whole request is a gap this store cannot correct later
+
+The premise is false, and it was expensive: one refused value discarded an
+entire five-year span, and one measured run recorded `bars_stored: 439240,
+bars_committed: 0` — four and a half lakh bars fetched, decoded, and thrown
+away.
+
+#### Why a contiguous prefix is not a gap
+
+`pull::session::split_window` returns chunks that **ascend, tile the window
+exactly, and never overlap**. That is not an assumption — the loop sets
+`start = end + 1` on every iteration, and
+`a_chunk_fills_the_cap_and_the_chunks_tile_the_window` walks six caps against
+four windows and asserts the tiling directly.
+
+So chunks `1..k-1` are a contiguous run **strictly older** than the one that
+failed. `store::header::Header::advance` refuses only a batch that begins at or
+before what is already committed; every day of the prefix precedes every day of
+the suffix, so the suffix remains a legal append. Both shapes the next run can
+take are already handled: an exact suffix is accepted outright, and a
+whole-window re-offer goes through `already_stored` and `suffix_that_follows`,
+which the store's own comments call *"the normal shape of a resumed backfill"*.
+
+**The resume is derived from the store, not from this run.**
+`autopilot::next_window` and `pull::fnowork::owed` both probe
+`Entry::last_ts_micros` — a **timestamp**, not a flag — and ask for the day
+after. So the next run asks for exactly the suffix this one discarded, and
+nothing has to remember it happened. That distinction is load-bearing: a boolean
+version of `owed` was withdrawn precisely because one bar made a contract-month
+read as held.
+
+#### There were TWO discard sites, and the second was never mentioned
+
+The refusal site is the one the message names. The other is the budget wait one
+loop above it — `await_budget(...).await?` — which dropped the prefix
+identically and silently. Both return the prefix now.
+
+#### A short window must never read as a whole one
+
+The bars that landed are real; the run is not a success. `Chunks::unfetched`
+travels to `broker_run`, which pushes it onto the same `failures` list every
+other member failure uses. `Ingested::balances` returns false when any failure
+is present, so a run that fetched 65 months of 66 says its books do not balance
+rather than reading clean, and `note_member_failure`, `landed_answer` and the
+autopilot all see it without a new surface being invented.
+
+**An empty prefix stays an `Err`**, and that boundary carries an HTTP status:
+`broker_window` marks a failure from this call with `WIRE_REACHED` and
+`broker_run` turns that into 502-versus-400. A run whose FIRST chunk refused
+reached the wire and stored nothing, which is what the `Err` arm has always
+meant.
+
+#### The known limit, recorded rather than hidden
+
+`ladder::probing` is `census.entry(k).is_some()` — a **boolean**, keyed on
+`(contract, exchange, segment, symbol, timeframe, month)` with no window in the
+key. One bar makes an instrument-month read as held.
+
+Today a month file is either absent or holds everything the run asked for in it,
+so that boolean is accidentally sound. **Under a prefix commit the boundary
+month becomes a normal partially-filled month**, and the day-rung gate could
+admit a minute-rung pull for a month whose day pass is 23/31 done — against the
+operator's rule that a minute pull follows a *complete* day pull.
+
+Exposure is bounded at **one instrument-month per failed instrument per run**
+and is self-healing, because the next day-pass run completes it. It is recorded
+here rather than closed, and the two closures are known: trim the last prefix
+body to a month boundary at the landing site, or make `probing`
+completeness-aware by comparing `last_ts_micros` against the month's last
+askable day — the same rule `next_window` already uses.
+
+**Also unchanged:** the expired-F&O walk keeps its own all-or-nothing contract.
+`fetch_chain_chunks` is a separate loop with separate reasoning, and this entry
+changed the spot path only.
+
+#### The proof that matters
+
+`a_refused_chunk_keeps_the_contiguous_prefix_and_names_what_is_missing` drives a
+loopback vendor that answers the first request and refuses the second, over a
+real socket, through the shipped `fetch_chunks`. It asserts three things, each
+of which would fail a different mutation: the prefix survives at all, the reason
+the rest is missing travels with it, and every kept chunk is strictly older than
+the one that refused — the line that would catch `split_window` if it ever
+stopped ascending. `an_empty_prefix_is_still_a_refusal_and_not_an_empty_success`
+pins the boundary that carries the status.
+
+`loopback_script` is a one-parameter extension of the existing
+`loopback_vendor`, not a second fake: the bytes on the wire and the code reading
+them are exactly what they were.
+
+---
+
+### D-0328
+
+**A transport error that names no cause is a failure the operator cannot act
+on.**
+
+All four `niftyindices.com` constituent pages refused every thirty seconds for
+days, and the page said only:
+
+> `https://www.niftyindices.com/indices/equity/broad-based-indices was not
+> reached: error sending request for url (…)`
+
+A sentence that names a failure and no reason. `CLAUDE.md` §4 requires the
+opposite half of exactly that rule — *degrade loudly and name the reason*.
+
+#### What was actually happening, measured from the log
+
+The intervals between the four failures were **29.998 s, 30.002 s and
+30.001 s** — exactly `resolve::DOCUMENT_TIMEOUT_SECS`.
+
+So the host was not refusing the crawl and was not answering it either. It
+accepted the request and went silent, and the whole budget was spent waiting.
+**A DNS failure or a refused connection returns in milliseconds; only a hang
+costs the full timeout.** That single measurement rules out the three causes an
+operator would otherwise chase first.
+
+#### Why the reason was invisible
+
+`reqwest::Error`'s `Display` prints *"error sending request for url (…)"* and
+stops there. Everything that says WHICH failure it was — DNS not resolving, a
+TLS handshake refused, a connection reset, a timeout — lives in `source()`, and
+`resolve.rs` formatted the error with `{why}`, which prints only the outermost
+link.
+
+`cause_chain` walks the chain and appends each cause, bounded at eight links
+because a cyclic `source()` is a hang rather than a diagnostic. The next failure
+will say `caused by: operation timed out` instead of leaving the operator to
+guess.
+
+#### And a connect timeout, which the sibling client already had
+
+`masters::PublicFetch` reaches `nseindia.com` and sets `connect_timeout(10s)`
+separately from its overall budget, for a reason it wrote down: *"a host that
+accepts the socket and never speaks burns the whole minute before the ladder
+learns anything; DNS and TLS either work in ten seconds or are not going to."*
+
+That argument was right and the crawl client did not have it. Without a connect
+timeout one 30-second budget covers DNS, TLS and the answer together, so a hang
+in any of them is indistinguishable from a hang in the others.
+
+**This does not fix the crawl.** The host is silent and nothing here changes
+that. It makes the next failure diagnosable, which is the difference between a
+defect that can be worked on and one that can only be watched.

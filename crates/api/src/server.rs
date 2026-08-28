@@ -5200,7 +5200,8 @@ pub(crate) async fn broker_run(
                 vendor_down_streak = breaker_next(vendor_down_streak, false);
                 out.reached += 1;
                 out.origin.clone_from(&landed.origin);
-                let landed_one = land_one(&landed, site);
+                let mut landed_one = land_one(&landed, site);
+                note_short_window(&landed, &mut landed_one);
                 // A MEMBER THAT REACHED THE VENDOR AND STILL DID NOT LAND IS A
                 // FAILURE, and it is a different one from a refusal — the
                 // socket worked and the store did not. Both belong on the page;
@@ -5301,6 +5302,16 @@ struct BrokerWindow {
     /// fire. A counter that cannot be non-zero reporting zero is the fallback
     /// that hides a failure `CLAUDE.md` §4 bans.
     bodies: Vec<(pull::session::Window, pull::fetch::RawWindow)>,
+    /// Why this instrument's window is SHORT, or `None` when it is whole.
+    ///
+    /// A short window is not a failure of the bars that did land, and it is not
+    /// a success either. `broker_run` records it as a member failure, so
+    /// `Ingested::balances` answers NO and the receipt says the books do not
+    /// balance — `CLAUDE.md` §4, degrade loudly and name the reason.
+    ///
+    /// Always `None` on the expired-F&O path, which keeps its own
+    /// all-or-nothing contract until it is separately revisited. See [`Chunks`].
+    unfetched: Option<String>,
     /// Which instrument they are.
     instrument: String,
     /// The URL they came from, for the receipt.
@@ -5975,6 +5986,8 @@ pub(crate) fn clamp_to_floor(
 ///
 /// # The cap is looked up PER RUNG, and an absent one is not "no split"
 ///
+/// (See [`Chunks`] for what happens when one chunk of many refuses.)
+///
 /// `docs/00-charter.md` §4 records Groww's cap **at 1-minute granularity** and
 /// Dhan's against its intraday-charts endpoint. Neither records a day-level
 /// figure, so neither descriptor carries one — UNVERIFIED, absent rather than
@@ -5983,6 +5996,14 @@ pub(crate) fn clamp_to_floor(
 /// rung. That is why the `None` arm that sent the window WHOLE is gone: it was
 /// the un-split request this function exists to prevent, wearing the label of a
 /// vendor that published nothing.
+///
+/// # A FAILURE DISCARDS THE SUFFIX, NOT THE WHOLE ANSWER
+///
+/// This returned `Err` on any chunk failure and dropped every chunk already
+/// fetched. The sentence it produced said so — *"the chunks before it were
+/// fetched and are not written, because a partial answer to a whole request is
+/// a gap this store cannot correct later"* — and the premise was wrong. See
+/// [`Chunks`]. D-0327.
 async fn fetch_chunks(
     asked: &ingest::SpotRequest,
     site: &Site,
@@ -5993,7 +6014,7 @@ async fn fetch_chunks(
     listing: pull::vendor::Listing,
     // BY REFERENCE: `HttpSpec` is 280 bytes and only one field is read.
     spec: &pull::vendor::HttpSpec,
-) -> Result<Vec<(pull::session::Window, pull::fetch::RawWindow)>, String> {
+) -> Result<Chunks, String> {
     // CLAMPED TO THE FEED'S HISTORY FLOOR BEFORE ANYTHING IS SPLIT.
     //
     // Asking below the floor is not an error the vendor reports usefully: it
@@ -6023,8 +6044,14 @@ async fn fetch_chunks(
         // The first chunk's permit was taken in `broker_window`, before the
         // credential was read — a request that will not be issued must not cost
         // a round-trip to ap-south-1. The rest are charged here.
-        if nth > 0 {
-            await_budget(asked.feed, site).await?;
+        if nth > 0
+            && let Err(why) = await_budget(asked.feed, site).await
+        {
+            // THE SECOND DISCARD SITE, and it was not the one anybody looked
+            // at. A budget that will not admit is as fatal to this loop as a
+            // vendor that will not answer, and it dropped the prefix exactly
+            // the same way.
+            return prefix_or_refusal(bodies, why);
         }
 
         let request = pull::fetch::BarRequest {
@@ -6043,13 +6070,10 @@ async fn fetch_chunks(
             // `pull::fetch::FetchError::RungNotSpellable`.
             granularity: asked.granularity,
         };
-        bodies.push((
-            // THE CHUNK'S OWN WINDOW, travelling with the answer it belongs to
-            // rather than being recomputed — or, as it was, discarded.
-            *chunk,
-            with_retry(source, &request, asked.feed, site)
-                .await
-                .map_err(|why| {
+        let answered = match with_retry(source, &request, asked.feed, site).await {
+            Ok(body) => body,
+            Err(why) => {
+                let sentence = {
                     // THE VENDOR'S OWN WORDS, IN THEIR OWN FIELD.
                     //
                     // Logging the wrapped string below loses them: telemetry
@@ -6077,16 +6101,25 @@ async fn fetch_chunks(
                     );
                     format!(
                         "the broker did not answer with a window. This was \
-                         request {} of {}, covering {}..={} — the chunks before \
-                         it were fetched and are not written, because a partial \
-                         answer to a whole request is a gap this store cannot \
-                         correct later: {why}",
+                         request {} of {}, covering {}..={}. The {} chunk(s) \
+                         before it are CONTIGUOUS and older, so they are \
+                         written; this chunk and every one after it is \
+                         discarded, and the next run resumes from the store's \
+                         own last held day: {why}",
                         nth + 1,
                         chunks.len(),
                         chunk.from(),
-                        chunk.to()
+                        chunk.to(),
+                        nth,
                     )
-                })?,
+                };
+                return prefix_or_refusal(bodies, sentence);
+            }
+        };
+        bodies.push((
+            // THE CHUNK'S OWN WINDOW, travelling with the answer it belongs to
+            // rather than being recomputed — or, as it was, discarded.
+            *chunk, answered,
         ));
         // ONE LINE PER REQUEST THAT ACTUALLY WENT OUT, at `Trace`.
         //
@@ -6111,7 +6144,98 @@ async fn fetch_chunks(
                 .with("rows", telemetry::Value::Uint(rows as u64)),
         );
     }
-    Ok(bodies)
+    Ok(Chunks {
+        bodies,
+        unfetched: None,
+    })
+}
+
+/// Records a window that landed SHORT as a failure of its own member.
+///
+/// # Why a short window is a failure and not a smaller success
+///
+/// D-0327 lets a contiguous prefix reach the store instead of discarding it,
+/// and the whole safety of that change rests on the shortfall being **loud**.
+/// `pull::ingest::Ingested::balances` returns false when any failure is
+/// present, so a run that fetched 65 months of 66 reports that its books do not
+/// balance rather than reading clean.
+///
+/// It goes in the same `failures` list every other member failure does, so
+/// `note_member_failure` emits it, `landed_answer` prints it, and
+/// `site.autopilot` sees it — no new surface, and nothing to remember to check.
+/// Counting it anywhere else would be the fallback that hides a failure
+/// `CLAUDE.md` §4 bans.
+fn note_short_window(landed: &BrokerWindow, into: &mut pull::ingest::Ingested) {
+    if let Some(why) = &landed.unfetched {
+        into.failures.push(pull::ingest::Failure {
+            instrument: landed.instrument.clone(),
+            why: why.clone(),
+        });
+    }
+}
+
+/// Every chunk that answered, and the reason the rest did not.
+///
+/// # Why the prefix is written and the suffix is not
+///
+/// `fetch_chunks` used to return `Err` on any chunk failure, dropping every
+/// chunk already fetched. Its own sentence gave the reason: *"a partial answer
+/// to a whole request is a gap this store cannot correct later"*. **The premise
+/// is wrong, and it was expensive** — one refused value discarded an entire
+/// five-year span, and one measured run recorded `bars_stored: 439240,
+/// bars_committed: 0`.
+///
+/// `pull::session::split_window` returns chunks that **ascend, tile the window
+/// exactly, and never overlap** — `a_chunk_fills_the_cap_and_the_chunks_tile_the_window`
+/// asserts all three directly. So chunks `1..k-1` are a contiguous run strictly
+/// OLDER than the one that failed, and an append-only store takes them without
+/// complaint: `store::header::Header::advance` refuses only a batch that begins
+/// at or before what is already committed, and every day of the prefix precedes
+/// every day of the suffix.
+///
+/// **The resume is derived from the STORE, not from this run.**
+/// `autopilot::next_window` and `pull::fnowork::owed` both probe
+/// `Entry::last_ts_micros` — a timestamp, not a flag — and ask for the day
+/// after. So the next run asks for exactly the suffix this one discarded, and
+/// nothing has to remember that it happened.
+///
+/// # What a prefix is NOT allowed to become
+///
+/// A short window is not a success. [`Self::unfetched`] travels to the caller,
+/// which records it as a member failure — so `Ingested::balances` answers NO and
+/// the receipt says the books do not balance. `CLAUDE.md` §4: degrade loudly and
+/// name the reason, never a fallback that hides a failure. D-0327.
+struct Chunks {
+    /// The contiguous prefix that answered, oldest first.
+    bodies: Vec<(pull::session::Window, pull::fetch::RawWindow)>,
+    /// Why the run stopped, or `None` when every chunk answered.
+    ///
+    /// Carried rather than returned as an `Err`, because a prefix that landed
+    /// and a prefix that did not are two different facts and the receipt has to
+    /// say both. `None` with an EMPTY `bodies` cannot happen: an empty prefix is
+    /// the `Err` arm — see [`prefix_or_refusal`].
+    unfetched: Option<String>,
+}
+
+/// The prefix if there is one, or the refusal if there is not.
+///
+/// **An empty prefix stays an `Err`, and that is not a detail.**
+/// `broker_window` marks a failure from this call with `WIRE_REACHED` and
+/// `broker_run` turns that into 502-versus-400. A run whose FIRST chunk refused
+/// reached the wire and stored nothing, which is exactly what the `Err` arm has
+/// always meant — so that path is unchanged and every test of it still holds.
+fn prefix_or_refusal(
+    bodies: Vec<(pull::session::Window, pull::fetch::RawWindow)>,
+    why: String,
+) -> Result<Chunks, String> {
+    if bodies.is_empty() {
+        Err(why)
+    } else {
+        Ok(Chunks {
+            bodies,
+            unfetched: Some(why),
+        })
+    }
 }
 
 /// How many times a chunk is attempted before the instrument is given up on.
@@ -7211,7 +7335,13 @@ async fn broker_window(
         // SPOT. `broker_window` serves the spot path; the expired-F&O walk
         // builds its own with the contract discovery returned.
         contract: None,
-        bodies,
+        bodies: bodies.bodies,
+        // WHY THIS WINDOW IS SHORT, when it is. Travels beside the bars rather
+        // than being inferred from their count, because a window that is short
+        // because the vendor refused and one that is short because the month
+        // had fewer trading days are the same number of bars and opposite
+        // facts. See `Chunks`.
+        unfetched: bodies.unfetched,
         exchange: instrument.exchange.as_str(),
         segment: instrument.segment.as_str(),
         window: asked.window,
@@ -8249,6 +8379,13 @@ async fn fno_land(
             // this loop does not read.
             listing: pull::vendor::Listing::Derivative,
             bodies,
+            // THE EXPIRED-F&O WALK KEEPS ITS ALL-OR-NOTHING CONTRACT.
+            //
+            // `fetch_chain_chunks` is a separate loop with its own reasoning
+            // (see its header), and D-0327 changed the SPOT path only. `None`
+            // here is that boundary stated rather than inherited: this path
+            // never returns a short window, so it never reports one.
+            unfetched: None,
             instrument: found.underlying.clone(),
             origin: origin.clone(),
             spec: wire.spec,
@@ -20619,6 +20756,42 @@ mod tests {
     /// one about events it does not emit. Rust attaches a doc block to whatever
     /// item follows it, silently. The block is back on its own test below; this
     /// note is here so the same insertion is not made again.
+    /// A loopback vendor that answers a SCRIPT — one reply per request, in
+    /// order, repeating the last once the script runs out.
+    ///
+    /// [`loopback_vendor`] answers every request identically, which cannot
+    /// express the case D-0327 exists for: a run where the first chunk answers
+    /// and a later one refuses. One extra parameter rather than a second fake,
+    /// because the bytes on the wire and the code reading them stay exactly what
+    /// they were.
+    fn loopback_script(
+        answers: &'static [&'static str],
+    ) -> (String, std::sync::mpsc::Receiver<()>) {
+        use std::io::{Read as _, Write as _};
+        let socket = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+        let addr = socket.local_addr().expect("an address");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut nth = 0usize;
+            while let Ok((mut stream, _)) = socket.accept() {
+                let mut buf = [0u8; 4096];
+                drop(stream.read(&mut buf));
+                let _reached = tx.send(());
+                // THE LAST ANSWER REPEATS. A script shorter than the chunk plan
+                // must not close the socket mid-run and turn a scripted refusal
+                // into a transport fault, which is a different failure with a
+                // different disposition.
+                let answer = answers.get(nth).or_else(|| answers.last());
+                if let Some(bytes) = answer {
+                    drop(stream.write_all(bytes.as_bytes()));
+                }
+                drop(stream.flush());
+                nth += 1;
+            }
+        });
+        (format!("http://{addr}"), rx)
+    }
+
     fn loopback_vendor(answer: &'static str) -> (String, std::sync::mpsc::Receiver<()>) {
         use std::io::{Read as _, Write as _};
         let socket = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
@@ -20634,6 +20807,123 @@ mod tests {
             }
         });
         (format!("http://{addr}"), rx)
+    }
+
+    /// **THE CONTIGUOUS PREFIX IS KEPT AND THE SUFFIX IS NOT**, driven over a
+    /// real socket.
+    ///
+    /// This is the property D-0327 exists for, and the one a mutation would
+    /// silently remove: `fetch_chunks` used to return `Err` on any chunk
+    /// failure, dropping every chunk it had already fetched. One measured run
+    /// recorded `bars_stored: 439240, bars_committed: 0` — four and a half lakh
+    /// bars fetched, decoded, and thrown away over one refused value.
+    ///
+    /// The vendor here answers the first request and refuses the second, so the
+    /// plan must have at least two chunks: the window below is six months at a
+    /// rung this feed publishes no cap for, which `split_window` clamps to the
+    /// month.
+    ///
+    /// **Three things are asserted and each would fail a different mutation:**
+    /// the prefix survives at all; the reason the rest is missing travels with
+    /// it; and every kept chunk is strictly OLDER than the one that refused,
+    /// which is what makes appending them legal in a store that cannot prepend.
+    #[tokio::test]
+    async fn a_refused_chunk_keeps_the_contiguous_prefix_and_names_what_is_missing() {
+        const BODY: &str = concat!(
+            r#"{"open":[24500.75],"high":[24501.50],"low":[24499.25],"#,
+            r#""close":[24500.50],"volume":[250],"timestamp":[1751337900]}"#
+        );
+        let _sink = crate::emitted::sink();
+        let dir = masters("prefix", None, None);
+        let site = Site::serving(&dir, &store_root("prefix"));
+        let asked = ingest::parse_spot(
+            "target=swept&from=2026-01-05&to=2026-06-30",
+            day(2026, 8, 10),
+        )
+        .expect("a real target and a window in the past");
+
+        let ok: &'static str = Box::leak(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{BODY}",
+                BODY.len()
+            )
+            .into_boxed_str(),
+        );
+        let (url, reached) = loopback_script(Box::leak(Box::new([
+            ok,
+            "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 9\r\n\r\ntoo busy\n",
+        ])));
+
+        let shipped = match pull::vendor::Feed::Dhan.descriptor().transport {
+            pull::vendor::Transport::Http(spec) => spec,
+            pull::vendor::Transport::LocalArchive(_) => panic!("this feed is HTTP"),
+        };
+        let spec = pull::vendor::HttpSpec {
+            base_url: Box::leak(url.into_boxed_str()),
+            ..shipped
+        };
+        let source =
+            pull::http::HttpSource::new(spec, pull::http::Credential::token("shhh".to_owned()))
+                .expect("a client");
+
+        let got = fetch_chunks(
+            &asked,
+            &site,
+            &source,
+            "13",
+            pull::vendor::Listing::Index,
+            &spec,
+        )
+        .await
+        .expect("chunk one answered, so the prefix is not empty and this is not an Err");
+
+        assert!(
+            reached
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .is_ok(),
+            "the loopback vendor was contacted"
+        );
+        assert_eq!(
+            got.bodies.len(),
+            1,
+            "the prefix is exactly the chunks before the refusal: {:?}",
+            got.bodies.iter().map(|(w, _)| *w).collect::<Vec<_>>()
+        );
+        let why = got
+            .unfetched
+            .as_ref()
+            .expect("a short window must say WHY it is short, or it reads as a whole one");
+        assert!(
+            why.contains("request 2 of"),
+            "the reason names which chunk refused: {why}"
+        );
+
+        // THE SAFETY ARGUMENT, ASSERTED RATHER THAN TRUSTED. Appending a prefix
+        // to a store that cannot prepend is legal only because every kept chunk
+        // is strictly older than every discarded one. If `split_window` ever
+        // stopped ascending, this is the line that would catch it.
+        let kept_last = got.bodies.last().map(|(w, _)| w.to()).expect("one chunk");
+        assert!(
+            got.bodies.iter().all(|(w, _)| w.to() <= kept_last),
+            "the kept chunks ascend, so the store can take them in order"
+        );
+    }
+
+    /// An EMPTY prefix is still an `Err`, and that boundary carries a status.
+    ///
+    /// `broker_window` marks a failure from `fetch_chunks` with `WIRE_REACHED`
+    /// and `broker_run` turns that into 502-versus-400. A run whose FIRST chunk
+    /// refused reached the wire and stored nothing, which is what the `Err` arm
+    /// has always meant — so widening `Ok` to cover the empty case would change
+    /// an HTTP status, not just a shape.
+    #[tokio::test]
+    async fn an_empty_prefix_is_still_a_refusal_and_not_an_empty_success() {
+        let bodies = Vec::new();
+        let refused = prefix_or_refusal(bodies, "the vendor refused chunk one".to_owned());
+        assert!(
+            refused.is_err(),
+            "nothing was fetched, so there is nothing to write and this is a refusal"
+        );
     }
 
     /// **THE TWO SITES PAST THE SOCKET, DRIVEN OVER A REAL ONE.**
@@ -20793,10 +21083,14 @@ mod tests {
         .await
         .expect("a 200 in this descriptor's own shape decodes to a window");
         assert_eq!(
-            window.len(),
+            window.bodies.len(),
             1,
             "three days is one chunk at this feed's 90-day cap, so one request \
              went out and one answer came back"
+        );
+        assert!(
+            window.unfetched.is_none(),
+            "every chunk answered, so nothing is short"
         );
         assert!(
             served
@@ -20806,9 +21100,10 @@ mod tests {
              it actually sent"
         );
         assert_eq!(
-            window.first().map(|(_, body)| body.rows.len()),
+            window.bodies.first().map(|(_, body)| body.rows.len()),
             Some(1),
-            "one bar on the wire is one row after the shipped decode: {window:?}"
+            "one bar on the wire is one row after the shipped decode: {:?}",
+            window.bodies
         );
 
         let chunks = crate::emitted::landed(from, "pull.chunk", "answered");

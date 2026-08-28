@@ -556,6 +556,26 @@ impl HttpDocuments {
             // agent usually checks these too, and `*/*` is what a script sends.
             .default_headers(browser_headers())
             .timeout(core::time::Duration::from_secs(DOCUMENT_TIMEOUT_SECS))
+            // TEN SECONDS TO GET CONNECTED, SEPARATELY — and this one was
+            // MEASURED to be missing rather than added on principle.
+            //
+            // All four index pages failed every thirty seconds for days, and
+            // the intervals between the failures were 29.998 s, 30.002 s and
+            // 30.001 s: **exactly `DOCUMENT_TIMEOUT_SECS`**. So the host was not
+            // refusing the crawl and was not answering it either — it accepted
+            // the request and went silent, and the whole budget was spent
+            // waiting. A DNS failure or a refused connection returns in
+            // milliseconds; only a hang costs the full timeout.
+            //
+            // Without a connect timeout the single 30 s budget covers DNS, TLS
+            // and the answer together, so a hang in any of them looks identical
+            // to a hang in the others. `masters::PublicFetch` splits them for
+            // exactly this reason, in its own words: *"a host that accepts the
+            // socket and never speaks burns the whole minute before the ladder
+            // learns anything; DNS and TLS either work in ten seconds or are
+            // not going to."* That argument was right and this client did not
+            // have it. D-0327.
+            .connect_timeout(core::time::Duration::from_secs(10))
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|why| format!("the HTTPS client could not be built: {why}"))?;
@@ -576,14 +596,73 @@ impl HttpDocuments {
     /// read**, and against the body afterwards. The first is a courtesy the
     /// host may decline to offer; the second is the one that binds, because a
     /// `Content-Length` is a claim and the bytes are the fact.
+    ///
+    /// **The transport's own words carry every cause underneath them** — see
+    /// [`Self::cause_chain`] for what was being dropped and what it cost.
     pub async fn get_async(&self, url: &str) -> Result<String, String> {
         let answer = self
             .client
             .get(url)
             .send()
             .await
-            .map_err(|why| format!("{url} was not reached: {why}"))?;
+            .map_err(|why| format!("{url} was not reached: {}", Self::cause_chain(&why)))?;
+        Self::body_of(answer, url).await
+    }
 
+    /// The error, and every cause underneath it.
+    ///
+    /// # Why the chain and not just the error
+    ///
+    /// `reqwest::Error`'s `Display` prints *"error sending request for url
+    /// (…)"* and **stops there**. Everything that says WHICH failure it was —
+    /// DNS not resolving, a TLS handshake refused, a connection reset, a
+    /// timeout — lives in `source()` and was being dropped on the floor.
+    ///
+    /// Measured, and this is what it cost: all four `niftyindices.com`
+    /// constituent pages refused every thirty seconds for days, and the
+    /// operator's page said only *"was not reached: error sending request for
+    /// url"* — a sentence that names a failure and no cause, so there was
+    /// nothing to act on. Meanwhile the sibling `masters` client reached
+    /// `nseindia.com` fine, which made the difference look like the host rather
+    /// than something this build could see.
+    ///
+    /// `CLAUDE.md` §4: *degrade loudly and name the reason.* An error that
+    /// names no reason is the half of that rule this was failing.
+    ///
+    /// # Cost
+    ///
+    /// One pass over a chain whose depth is fixed by the transport — three or
+    /// four links, never a function of the request, the host or the response.
+    /// Runs only on a failure.
+    fn cause_chain(why: &dyn std::error::Error) -> String {
+        let mut out = why.to_string();
+        let mut link = why.source();
+        // A BOUND, because a cyclic `source()` is a hang and not a diagnostic.
+        // Nothing in `reqwest` builds one, and a chain that long is already a
+        // sentence no operator reads.
+        for _ in 0..8 {
+            let Some(cause) = link else { break };
+            out.push_str(" — caused by: ");
+            out.push_str(&cause.to_string());
+            link = cause.source();
+        }
+        out
+    }
+
+    /// The answer's body, or the reason it is not one.
+    ///
+    /// Split from [`Self::get_async`] so the transport failure and the answer
+    /// failures are two functions rather than one long one — the send is the
+    /// only step that can fail with no answer at all, and it is the only step
+    /// that needs [`Self::cause_chain`]. Every refusal below still names its own
+    /// fault, unflattened, exactly as before.
+    ///
+    /// # Errors
+    ///
+    /// A sentence naming the status for a non-success answer, the byte count for
+    /// one past [`crate::nse::MAX_DOCUMENT_BYTES`], and the read's own words for
+    /// a body that arrived and could not be decoded.
+    async fn body_of(answer: reqwest::Response, url: &str) -> Result<String, String> {
         let status = answer.status();
         if !status.is_success() {
             // A 3xx is a route change, and it is named as one rather than left
