@@ -385,6 +385,25 @@ struct Tally {
     /// indistinguishable on the wire from a vendor that simply sends no open
     /// interest, and those are different facts about the feed.
     unreadable_open_interest: u64,
+    /// Rows whose volume field parsed as a NEGATIVE count and were skipped.
+    ///
+    /// # The third door, and it was the one still open
+    ///
+    /// A volume counts shares traded, so a negative one is not a quantity —
+    /// D-0323 on the JSON path, and P-64 turned that refusal from a whole
+    /// window into a single row. This decoder had neither: `parse::<i64>()`
+    /// accepts a leading minus, so the operator's measured `-125` would have
+    /// parsed cleanly here, landed, and died ~1,500 lines downstream at
+    /// `store::file::survey` as `ImpossibleCount` — with a batch index that
+    /// names no line of the file it came from.
+    ///
+    /// **Skipped, never stored as `0`.** Its neighbour
+    /// [`Self::unreadable_volume`] substitutes a zero because an unreadable
+    /// field cannot be expressed as absence in `RawRow::volume`. That reasoning
+    /// does not carry here: a field that PARSED and said `-125` is the vendor
+    /// stating something impossible, and writing `0` beside it would be
+    /// asserting no trade in a minute we have no reading for.
+    negative_volume: u64,
 }
 
 /// One decoded file, on the rolling log.
@@ -435,6 +454,15 @@ fn note_decoded(columns: Columns, tally: Tally, rows: usize) {
             .with(
                 "unreadable_oi",
                 telemetry::Value::Uint(tally.unreadable_open_interest),
+            )
+            // SKIPPED ROWS ARE NOT SUBSTITUTIONS AND GET THEIR OWN FIELD. The
+            // two above qualify a `rows` figure that still counts them; this
+            // one explains why `rows` is SHORT of `rows_in`, which is a
+            // different question and an operator asking it should not have to
+            // subtract the other two to answer it.
+            .with(
+                "negative_volume",
+                telemetry::Value::Uint(tally.negative_volume),
             ),
     );
 }
@@ -498,6 +526,7 @@ pub fn decode(body: &str, columns: Columns) -> Result<Vec<RawRow>, CsvError> {
         skipped: 0,
         unreadable_volume: 0,
         unreadable_open_interest: 0,
+        negative_volume: 0,
     };
     // ONE EVENT PER FILE, ON EITHER OUTCOME. The pass below is per row and
     // logs nothing; this is where its two counters are read. A file that
@@ -577,6 +606,28 @@ fn decode_rows(body: &str, columns: Columns, tally: &mut Tally) -> Result<Vec<Ra
             line: line_no,
             got: price_text.to_owned(),
         })?;
+        // A NEGATIVE PRICE IS MALFORMED, AND THIS DECODER WAS THE ONE THAT
+        // NEVER SAID SO.
+        //
+        // `paisa` parses a leading minus and hands back the negative — by
+        // design, since it is also used where a signed delta is legal — and
+        // nothing here tested the sign. The JSON path has refused a negative
+        // price since D-0321; `Bar::ohlc_is_sane` refuses one at the append.
+        // Between the two sat this decoder, passing it through to die a crate
+        // later against a batch index that names no line of this file.
+        //
+        // Refused rather than skipped, which is deliberate and matches this
+        // file's own design: a malformed line refuses the WHOLE file here, and
+        // the refusal carries the line number and the text. A row skipped
+        // quietly in a format whose every field is positional is more likely a
+        // column offset that is wrong than one bad price, and refusing is what
+        // makes that discoverable.
+        if price < 0 {
+            return Err(CsvError::PriceMalformed {
+                line: line_no,
+                got: price_text.to_owned(),
+            });
+        }
 
         // IST wall clock to UTC epoch seconds, converted HERE where the format
         // is known. Carrying the IST-ness onward is exactly the shape of W1.
@@ -641,6 +692,31 @@ fn decode_rows(body: &str, columns: Columns, tally: &mut Tally) -> Result<Vec<Ra
             parsed
         };
 
+        // VOLUME IS READ HERE AND NOT IN THE LITERAL BELOW, for the reason open
+        // interest is: one of its outcomes now leaves the row out entirely, and
+        // a `continue` spelled inside a struct field is not a thing.
+        //
+        // A field that will not PARSE is still the counted zero it always was —
+        // `RawRow::volume` is `i64` and cannot express absence, and that
+        // substitution is `Tally::unreadable_volume`. A field that parses and
+        // says `-125` is a different fact: the vendor stated a quantity that
+        // cannot exist, and a zero beside it would assert no trade in a minute
+        // this build has no reading for. So that row is skipped and counted.
+        let volume = {
+            let text = fields.get(at.volume).copied().unwrap_or_default();
+            match text.trim().parse::<i64>() {
+                Ok(n) if n < 0 => {
+                    tally.negative_volume = tally.negative_volume.saturating_add(1);
+                    continue;
+                }
+                Ok(n) => n,
+                Err(_) => {
+                    tally.unreadable_volume = tally.unreadable_volume.saturating_add(1);
+                    0
+                }
+            }
+        };
+
         // A snapshot row carries ONE price, not four. Open, high, low and close
         // are all that price, and that is honest for a snapshot: nothing in the
         // row claims a range, so nothing here invents one.
@@ -655,15 +731,7 @@ fn decode_rows(body: &str, columns: Columns, tally: &mut Tally) -> Result<Vec<Ra
             // read is not a trade — and the substitution is counted where it
             // cannot be avoided. Open interest is read above instead, because
             // absence IS expressible there and one of its outcomes refuses.
-            volume: {
-                let parsed = fields
-                    .get(at.volume)
-                    .and_then(|v| v.trim().parse::<i64>().ok());
-                if parsed.is_none() {
-                    tally.unreadable_volume = tally.unreadable_volume.saturating_add(1);
-                }
-                parsed.unwrap_or(0)
-            },
+            volume,
             open_interest,
         });
     }
@@ -1118,18 +1186,41 @@ mod tests {
 
             // AND ONLY THAT COLUMN. §7 spends `i64::MIN` on an absent OPEN
             // INTEREST and on nothing else, so the same value in the VOLUME
-            // column is not this refusal — widening the guard to the whole row
-            // would be inventing a rule nothing has written down. An impossible
-            // volume is caught where the rule for it already lives:
-            // `store::format::Bar::counts_are_sane` requires `volume >= 0`
-            // (D-0148), at the store's survey rather than here.
+            // column is not THIS refusal — widening the sentinel guard to the
+            // whole row would be inventing a rule nothing has written down.
+            //
+            // **What the row meets instead is the volume rule, and that is a
+            // change.** This assertion used to read `Some(i64::MIN)` — the
+            // value carried past this boundary untouched — on the reasoning
+            // that an impossible volume belongs to `Bar::counts_are_sane` at
+            // the store's survey. That is where it was caught, and D-0337
+            // measured what it cost: `survey` names a batch index that maps to
+            // no line of any file, and it refuses the whole batch rather than
+            // the row. The volume guard now sits here, beside the sentinel one,
+            // and skips the row.
+            //
+            // Both halves still hold and the test still separates them: the
+            // file DECODES (so the sentinel guard is still scoped to the
+            // open-interest column) and the row is GONE (so a count that cannot
+            // be a count no longer travels).
             let (odd_volume, _) = one_row(columns, &sentinel, &ordinary);
             let carried = decode(&odd_volume, columns)
-                .expect("the guard is scoped to the one field §7 spends the value on");
-            assert_eq!(
-                carried.first().map(|row| row.volume),
-                Some(i64::MIN),
-                "{columns:?}: carried past this boundary rather than refused at it"
+                .expect("the sentinel guard is scoped to the one field §7 spends the value on");
+            assert!(
+                carried.is_empty(),
+                "{columns:?}: a negative volume skips its row here rather than \
+                 travelling to the store to refuse a whole batch: {carried:?}"
+            );
+
+            // AND AN ORDINARY NEGATIVE GOES THE SAME WAY, so the rule is about
+            // the sign and not about that one value. `-125` is the number the
+            // operator's own vendor sent.
+            let (minus, _) = one_row(columns, "-125", &ordinary);
+            assert!(
+                decode(&minus, columns)
+                    .expect("still not a file-level refusal")
+                    .is_empty(),
+                "{columns:?}: -125 is not a count of shares either"
             );
         }
     }

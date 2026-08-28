@@ -3,12 +3,12 @@
 //!
 //! # What was unproven, and it was all of it
 //!
-//! `crates/pull` holds **41** `telemetry::emit` call sites — the largest
+//! `crates/pull` holds **42** `telemetry::emit` call sites — the largest
 //! concentration in the workspace — and **not one of them had a test that drove
 //! the production helper and then found the record in a file.**
 //!
 //! **THE COUNT IS MEASURED AND THE TABLE DOES NOT COVER ALL OF IT.** This header
-//! said 21 while the crate held 36, and `SITES` holds 26 rows, so the rest
+//! said 21 while the crate held 36, and `SITES` holds 27 rows, so the rest
 //! are driven by nothing here. Nothing pins either number -- there is no gate
 //! comparing the table to the crate -- so re-measure rather than trusting this
 //! sentence: `grep -c "telemetry::emit(" crates/pull/src/*.rs`. The gap is
@@ -399,6 +399,13 @@ static SITES: &[Site] = &[
         drive: drive_impossible_bar_skipped,
     },
     Site {
+        at: "crates/pull/src/http.rs:1483",
+        target: "pull.decode",
+        message: "bars carried a negative open interest and were skipped",
+        says: ("bars", Says::Signs(2)),
+        drive: drive_negative_interest_skipped,
+    },
+    Site {
         at: "crates/pull/src/rate.rs:663",
         target: "pull.rate",
         message: "throttled — every span backed off",
@@ -668,6 +675,42 @@ fn drive_impossible_bar_skipped(_scratch: &Scratch) {
         .first()
         .expect("one row survived, so one decodes");
     assert_eq!(first.volume, 9, "and the GOOD row is what survived");
+}
+
+/// A derivative window whose second row reports a negative open interest.
+///
+/// Open interest is contracts outstanding and is never below zero. `i64::MIN`
+/// is deliberately NOT used here: §7 spends that value on "the vendor sent
+/// none", so it is a sentinel collision that `one_number` refuses by name
+/// rather than a bad count this skips — and driving it here would emit nothing.
+fn drive_negative_interest_skipped(_scratch: &Scratch) {
+    let shipped = match crate::vendor::Feed::Dhan.descriptor().transport {
+        crate::vendor::Transport::Http(spec) => spec,
+        crate::vendor::Transport::LocalArchive(_) => unreachable!("this feed is HTTP"),
+    };
+    let named = crate::vendor::HttpSpec {
+        fields: crate::vendor::FieldNames {
+            open_interest: Some("open_interest"),
+            ..shipped.fields
+        },
+        ..shipped
+    };
+    let body = r#"{"open":[24500.75,24501.00],"high":[24501.50,24501.75],
+                   "low":[24499.25,24500.50],"close":[24500.50,24501.25],
+                   "volume":[9,11],"timestamp":[1751337900,1751337960],
+                   "open_interest":[41,-5]}"#;
+    let window = crate::http::decode_body(body, &named, Listing::Derivative)
+        .expect("one impossible count does not refuse the window");
+    assert_eq!(
+        window.rows.len(),
+        1,
+        "the negative row is the one that went"
+    );
+    let first = window
+        .rows
+        .first()
+        .expect("one row survived, so one decodes");
+    assert_eq!(first.open_interest, Some(41), "and the GOOD row survived");
 }
 
 fn drive_rate(_scratch: &Scratch) {

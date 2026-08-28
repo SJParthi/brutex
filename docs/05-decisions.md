@@ -25464,3 +25464,62 @@ caught** — 58 tested, 58 caught. Two of them were only killable by an
 trimmed by `zip` to fit the mask, which is the silent misalignment this
 ordering exists to prevent, and it is the case that proves the check earns its
 place.
+
+### D-0338
+
+**The two doors D-0337 did not reach: the archive decoder had no sign check at
+all, and open interest had no guard one column over from the volume that does.**
+
+D-0337 moved the JSON path's refusals from the window to the row. Three gaps
+were named in that work and left open. This closes them.
+
+**`csv::decode_rows` accepted a negative price and a negative volume.**
+`csv::paisa` parses a leading minus by design — it is the shared helper and a
+signed delta is legal elsewhere — and nothing here tested the sign. A snapshot
+row carries ONE price into all four OHLC fields, so a negative one builds a bar
+that `Bar::ohlc_is_sane` refuses at the append: the row travelled ~1,500 lines
+to die against a batch index naming no line of the file it came from. The price
+is now refused **at the line**, with the line number and the text, which matches
+this decoder's own design — a malformed line refuses the whole file here, and a
+row skipped quietly in a positional format is more likely a wrong column offset
+than one bad price.
+
+The volume is treated differently and deliberately: it **skips the row** and is
+counted. Its neighbour, an UNREADABLE volume, is stored as `0` because
+`RawRow::volume` is `i64` and cannot express absence — but a field that parsed
+and said `-125` is the vendor stating something impossible, and a zero beside it
+would assert no trade in a minute this build has no reading for.
+
+**`open_interest` had no negative guard.** `one_number` refuses only the
+`i64::MIN` sentinel, so `open_interest: -5` decoded, landed, and died at
+`survey` as `ImpossibleCount` — precisely the omission D-0323 fixed for volume,
+left open one field over. `kept_rows` now reads the column's VALUES rather than
+only its `.len()`, and skips the row.
+
+**`i64::MIN` is exempt and the first draft got that exactly wrong.** §7 spends
+that value on *"the vendor sent no open interest"*, so a vendor sending it
+literally is a sentinel collision that must be shouted about, not skipped.
+Written as `as_i64().is_some_and(..).unwrap_or_else(|| as_f64()..)` the sentinel
+passed the integer predicate, fell through to the float fallback, came back
+`-9.22e18`, and was silently skipped — swallowing the one case that needs to be
+loud. **An existing test caught it**, which is the whole argument for the
+`match`: when there IS an integer spelling it is the entire answer, and
+`as_f64` is only for a value that is not an integer at all.
+
+**Two more tests asserted the old rules and both were changed with their reasons
+recorded.** `the_sentinel_guard_reads_each_layouts_own_open_interest_column`
+asserted a negative volume was *"carried past this boundary rather than refused
+at it"*, on the reasoning that `Bar::counts_are_sane` owns that rule. It does —
+and D-0337 measured what owning it there costs. Both halves of that test still
+hold and it still separates them: the file DECODES, so the sentinel guard is
+still scoped to the open-interest column, and the row is GONE, so a count that
+cannot be a count no longer travels. `a_price_is_put_on_the_paisa_grid_exactly_or_refused`
+asserted a negative price stayed negative in paisa because *"the grid arithmetic
+does not care"*. The arithmetic does not; the store does.
+
+**`cargo mutants` found four survivors across two rounds and both were real
+holes in the float branch.** `n < 0.0` survived becoming `==`, `>` and `<=`
+because no case sent a non-integer open interest at all — and the `<=` mutant is
+the one that mattered: it would have deleted the bar of every contract with zero
+open interest, which is most of an option chain every day. 55 mutants, 54 caught,
+1 unviable, **0 missed**.

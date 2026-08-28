@@ -858,7 +858,8 @@ pub fn decode_body(
                 // way and a minute the vendor did not trade is skipped rather
                 // than refusing the whole window. See `kept_rows` for why this
                 // shape needed a mask when the other two did not.
-                let (keep, null_bars, negative_bars) = kept_rows(root, &f, listing)?;
+                let decided = kept_rows(root, &f, listing)?;
+                let keep = decided.keep;
                 let arrays = ParallelArrays {
                     // PRICES GO THROUGH `prices`, NOT `numbers`, AND THE
                     // DIFFERENCE IS 75 PAISE ON EVERY BAR THAT HAS THEM.
@@ -893,8 +894,9 @@ pub fn decode_body(
                         None => Vec::new(),
                     },
                 };
-                note_null_bars(null_bars, keep.len());
-                note_negative_volume_bars(negative_bars, keep.len());
+                note_null_bars(decided.null_bars, keep.len());
+                note_negative_volume_bars(decided.negative_volume, keep.len());
+                note_negative_interest_bars(decided.negative_open_interest, keep.len());
                 let mut arrays = arrays;
                 note_impossible_bars(drop_impossible_bars(&mut arrays), keep.len());
                 RawWindow::decode(&arrays)
@@ -1436,6 +1438,40 @@ fn note_negative_volume_bars(negative_bars: usize, bars: usize) {
     );
 }
 
+/// One event per WINDOW for rows whose open interest cannot be a count.
+///
+/// Its own message rather than sharing the volume's, because the two send an
+/// operator to different places: a bad volume on a spot pull says the decoder
+/// is reading the wrong column, and a bad open interest can only come from a
+/// derivative request, where the contract itself may be the thing that is
+/// wrong.
+fn note_negative_interest_bars(negative_bars: usize, bars: usize) {
+    if negative_bars == 0 {
+        return;
+    }
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::new(
+            telemetry::Level::Warn,
+            "pull.decode",
+            "bars carried a negative open interest and were skipped",
+        )
+        .with(
+            "skipped",
+            telemetry::Value::Uint(u64::try_from(negative_bars).unwrap_or(u64::MAX)),
+        )
+        .with(
+            "bars",
+            telemetry::Value::Uint(u64::try_from(bars).unwrap_or(u64::MAX)),
+        ),
+    );
+    eprintln!(
+        "brutex: {negative_bars} of {bars} bars carried a NEGATIVE open \
+         interest and were skipped — open interest is contracts outstanding \
+         and is never below zero. `i64::MIN` is NOT counted here: that is the \
+         null sentinel and is refused by name."
+    );
+}
+
 /// One event per WINDOW for rows whose four prices cannot be a bar.
 ///
 /// Same per-window rule and same denominator as the two above, and the same
@@ -1502,7 +1538,7 @@ fn kept_rows(
     root: &serde_json::Value,
     f: &crate::vendor::FieldNames,
     listing: crate::vendor::Listing,
-) -> Result<(Vec<bool>, usize, usize), FetchError> {
+) -> Result<Kept, FetchError> {
     let quartet = [
         array_at(root, f.open)?,
         array_at(root, f.high)?,
@@ -1517,8 +1553,15 @@ fn kept_rows(
     // array is looked for. `None` here therefore reports the same length as
     // every other column rather than a zero, which would read as a column that
     // arrived empty — a different fact, and the wrong one.
+    // THE VALUES TOO, NOT ONLY THE LENGTH — this read the `.len()` and threw
+    // the column away, which is why a negative open interest had no guard at
+    // all on this path.
+    let open_interest_column: &[serde_json::Value] = match f.open_interest {
+        Some(name) => array_at(root, name)?,
+        None => &[],
+    };
     let open_interest = match f.open_interest {
-        Some(name) => array_at(root, name)?.len(),
+        Some(_) => open_interest_column.len(),
         None => quartet[0].len(),
     };
     // EVERY COLUMN IS CHECKED HERE, BEFORE THE MASK EXISTS, and that ordering
@@ -1553,6 +1596,7 @@ fn kept_rows(
     let mut keep = Vec::with_capacity(rows);
     let mut skipped = 0usize;
     let mut negative = 0usize;
+    let mut interest = 0usize;
     for i in 0..rows {
         let traded = quartet
             .iter()
@@ -1589,12 +1633,67 @@ fn kept_rows(
             && volume.get(i).is_some_and(|v| {
                 v.as_i64().is_some_and(|n| n < 0) || v.as_f64().is_some_and(|n| n < 0.0)
             });
+        // AND AN OPEN INTEREST THAT IS NOT A COUNT EITHER.
+        //
+        // An open interest is contracts outstanding: never negative, exactly as
+        // a volume is never negative. D-0323 gave the volume its guard and left
+        // this field one column over with none, so `open_interest: -5` decoded,
+        // landed, and died a crate later at `survey` as `ImpossibleCount` —
+        // against a batch index that names no vendor row.
+        //
+        // **`i64::MIN` IS EXEMPT AND MUST STAY EXEMPT.** §7 spends that value on
+        // "the vendor sent no open interest", so a vendor sending it literally
+        // is a SENTINEL COLLISION, not a bad count — `one_number` refuses it by
+        // name, loudly, and skipping the row here would swallow the one case
+        // that needs to be shouted about.
+        //
+        // THE `match` IS NOT A STYLE CHOICE. Written as
+        // `as_i64().is_some_and(..).unwrap_or_else(|| as_f64()..)` the sentinel
+        // falls straight through: `as_i64()` answers `Some(i64::MIN)`, the
+        // predicate correctly says "not impossible", and the fallback then asks
+        // `as_f64()`, which answers `-9.22e18` and says "negative" — so the row
+        // is skipped and the loud refusal never fires. An existing test caught
+        // exactly that. The integer spelling, when there IS one, is the whole
+        // answer; `as_f64` is only for a value that is not an integer at all.
+        let interest_is_impossible =
+            open_interest_column
+                .get(i)
+                .is_some_and(|v| match v.as_i64() {
+                    Some(n) => n < 0 && n != i64::MIN,
+                    None => v.as_f64().is_some_and(|n| n < 0.0),
+                });
         if quantity_is_impossible {
             negative = negative.saturating_add(1);
+        } else if interest_is_impossible {
+            interest = interest.saturating_add(1);
         }
-        keep.push(!quantity_is_impossible);
+        keep.push(!quantity_is_impossible && !interest_is_impossible);
     }
-    Ok((keep, skipped, negative))
+    Ok(Kept {
+        keep,
+        null_bars: skipped,
+        negative_volume: negative,
+        negative_open_interest: interest,
+    })
+}
+
+/// What [`kept_rows`] decided, and what it had to skip to decide it.
+///
+/// A struct rather than a tuple because it grew to four fields and
+/// `(Vec<bool>, usize, usize, usize)` at a call site says nothing about which
+/// count is which — and these three counts get three different messages.
+struct Kept {
+    /// One flag per row: whether it is a bar this build can store.
+    keep: Vec<bool>,
+    /// Rows skipped because a price was null — the vendor reporting no trade.
+    null_bars: usize,
+    /// Rows skipped because the volume was negative on a traded listing.
+    negative_volume: usize,
+    /// Rows skipped because the open interest was negative.
+    ///
+    /// Never counts `i64::MIN`, which is the null sentinel and is refused by
+    /// name in [`one_number`] rather than skipped.
+    negative_open_interest: usize,
 }
 
 /// Rows whose four prices cannot be a bar, dropped from every column at once.
@@ -5255,6 +5354,125 @@ mod tests {
         assert!(
             format!("{why}").contains("open_interest"),
             "and the refusal names the column: {why}"
+        );
+    }
+
+    /// **A NEGATIVE OPEN INTEREST SKIPS ITS ROW — AND `i64::MIN` STILL REFUSES
+    /// THE WINDOW, LOUDLY.**
+    ///
+    /// Two rules that look alike and are not, which is why they are asserted
+    /// together. An open interest is contracts outstanding and is never below
+    /// zero, so `-5` is a count that cannot be a count: the row goes, exactly
+    /// as a negative volume's does. But `i64::MIN` is the value `CLAUDE.md` §7
+    /// spends on *"the vendor sent no open interest"*, so a vendor sending it
+    /// literally is a SENTINEL COLLISION rather than a bad reading — stored, it
+    /// would read back as an absence — and it must be shouted about, not
+    /// quietly skipped.
+    ///
+    /// The first draft of this guard got that exactly wrong and an existing
+    /// test caught it: written as
+    /// `as_i64().is_some_and(..).unwrap_or_else(|| as_f64()..)`, the sentinel
+    /// passed the integer predicate, fell through to the float fallback, came
+    /// back `-9.22e18`, and was skipped — swallowing the one case that needs to
+    /// be loud.
+    #[test]
+    fn a_negative_open_interest_skips_its_row_and_the_sentinel_still_shouts() {
+        let named = HttpSpec {
+            fields: FieldNames {
+                open_interest: Some("open_interest"),
+                ..spec(PriceScale::Rupees).fields
+            },
+            ..spec(PriceScale::Rupees)
+        };
+
+        // AN ORDINARY NEGATIVE: the row goes, the window and its neighbour stay.
+        let body = r#"{"open":[24500.75,24501.00],"high":[24500.75,24501.00],
+                       "low":[24500.75,24501.00],"close":[24500.75,24501.00],
+                       "volume":[250,260],"timestamp":[1751337900,1751337960],
+                       "open_interest":[41,-5]}"#;
+        let window = decode_body(body, &named, crate::vendor::Listing::Equity)
+            .expect("one impossible count does not refuse the window");
+        assert_eq!(window.rows.len(), 1, "the negative row went");
+        assert_eq!(window.rows[0].volume, 250, "and the good row stayed");
+        assert_eq!(
+            window.rows[0].open_interest,
+            Some(41),
+            "with its own open interest"
+        );
+
+        // THE SENTINEL, BESIDE A GOOD ROW: still a refusal, never a skip. A
+        // second row is present precisely so a skip would leave something
+        // behind and read as success — without it, an empty window and a
+        // refusal would be hard to tell apart.
+        let sentinel = r#"{"open":[24500.75,24501.00],"high":[24500.75,24501.00],
+                           "low":[24500.75,24501.00],"close":[24500.75,24501.00],
+                           "volume":[250,260],"timestamp":[1751337900,1751337960],
+                           "open_interest":[41,-9223372036854775808]}"#;
+        let why = decode_body(sentinel, &named, crate::vendor::Listing::Equity)
+            .expect_err("the sentinel is refused, not skipped");
+        assert!(
+            format!("{why}").contains("open_interest"),
+            "and the refusal names the column: {why}"
+        );
+
+        // ZERO IS A REAL MEASUREMENT ON EVERY LISTING. §7: zero means zero, and
+        // an open interest of nothing is a fact a derivative reports daily.
+        let zero = r#"{"open":[24500.75],"high":[24500.75],"low":[24500.75],
+                       "close":[24500.75],"volume":[250],"timestamp":[1751337900],
+                       "open_interest":[0]}"#;
+        let window = decode_body(zero, &named, crate::vendor::Listing::Derivative)
+            .expect("zero open interest is a reading, not an absence");
+        assert_eq!(window.rows.len(), 1, "zero is not negative");
+        assert_eq!(window.rows[0].open_interest, Some(0), "and it is a zero");
+
+        // AND THE FLOAT SPELLING, which is a separate branch and was a separate
+        // hole. `serde_json` answers `as_i64()` for `-5` and `None` for `-5.0`,
+        // so a guard that read only the integer spelling would pass every
+        // float-encoded negative straight through. `cargo mutants` proved this
+        // branch untested three times over — `<` survived being turned into
+        // `==`, `>` and `<=`, because nothing sent a non-integer here at all.
+        for sent in ["-5.0", "-0.5"] {
+            let body = format!(
+                "{{\"open\":[24500.75,24501.00],\"high\":[24500.75,24501.00],\
+                   \"low\":[24500.75,24501.00],\"close\":[24500.75,24501.00],\
+                   \"volume\":[250,260],\"timestamp\":[1751337900,1751337960],\
+                   \"open_interest\":[41,{sent}]}}"
+            );
+            let window = decode_body(&body, &named, crate::vendor::Listing::Derivative)
+                .unwrap_or_else(|why| panic!("{sent} skips its row, not the window: {why}"));
+            assert_eq!(window.rows.len(), 1, "{sent}: the negative row went");
+            assert_eq!(
+                window.rows[0].open_interest,
+                Some(41),
+                "{sent}: and the good row stayed"
+            );
+        }
+
+        // A POSITIVE FLOAT IS NOT COLLATERAL DAMAGE — a whole number sent with
+        // a decimal point is still a count, and `one_number` accepts it.
+        //
+        // `0.0` IS THE ROW THAT PINS THE BOUNDARY. The comparison is `< 0.0`,
+        // and `cargo mutants` turned it into `<= 0.0` and survived everything
+        // above: no case sent a float zero, so nothing noticed that every
+        // contract with no open interest — which is most of the option chain,
+        // every day — would have had its bar deleted. §7 again: zero means
+        // zero, and it is a measurement rather than an absence.
+        let float_ok = r#"{"open":[24500.75,24501.00],"high":[24500.75,24501.00],
+                           "low":[24500.75,24501.00],"close":[24500.75,24501.00],
+                           "volume":[250,260],"timestamp":[1751337900,1751337960],
+                           "open_interest":[41.0,0.0]}"#;
+        let window = decode_body(float_ok, &named, crate::vendor::Listing::Derivative)
+            .expect("41.0 is a count of contracts and 0.0 is a count of none");
+        assert_eq!(
+            window.rows.len(),
+            2,
+            "BOTH rows are kept — a float zero is not a negative"
+        );
+        assert_eq!(window.rows[0].open_interest, Some(41));
+        assert_eq!(
+            window.rows[1].open_interest,
+            Some(0),
+            "and zero open interest survives as the zero it is"
         );
     }
 

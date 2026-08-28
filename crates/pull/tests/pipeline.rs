@@ -439,11 +439,35 @@ fn a_price_is_put_on_the_paisa_grid_exactly_or_refused() {
         );
     }
 
-    // A negative price is a legal decimal and stays negative in paisa. The
-    // engine never asks for one; the grid arithmetic does not care.
-    let signed = decode("20221003,09:15:01,-1.25,0,0\n", Columns::TrueDataIndex)
-        .expect("a signed decimal is still a decimal");
-    assert_eq!(signed[0].close, -125);
+    // A NEGATIVE PRICE IS REFUSED HERE, AND THIS ASSERTION WAS THE OTHER WAY
+    // ROUND.
+    //
+    // It read `assert_eq!(signed[0].close, -125)`, on the reasoning that a
+    // signed decimal is still a decimal and "the grid arithmetic does not
+    // care". The arithmetic does not — `csv::paisa` still parses the minus,
+    // which is why it is the shared helper — but the STORE does: a snapshot row
+    // carries one price into all four OHLC fields, and
+    // `store::format::Bar::ohlc_is_sane` requires every one of them to be at or
+    // above zero. So the old behaviour carried a row that could not be stored
+    // ~1,500 lines to `survey`, which refuses it against a batch index naming
+    // no line of any file.
+    //
+    // Refused at the boundary instead, where the line number and the text the
+    // vendor sent are both still in hand. D-0338.
+    let refused = decode("20221003,09:15:01,-1.25,0,0\n", Columns::TrueDataIndex)
+        .expect_err("nothing this build reads trades below zero");
+    assert_eq!(
+        discriminant(&refused),
+        discriminant(&CsvError::PriceMalformed {
+            line: 1,
+            got: String::new(),
+        }),
+        "a negative price is malformed, and named — got {refused}"
+    );
+    assert!(
+        format!("{refused}").contains("-1.25"),
+        "and the refusal carries the value the vendor sent: {refused}"
+    );
 }
 
 /// A blank line is skipped and the row count is unaffected.
