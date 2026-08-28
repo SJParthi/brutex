@@ -4620,14 +4620,7 @@ async fn broker_answer(
     // ordinary run is noise, and a reader could not tell the label from the
     // verdict. D-0351.
     if run.credential_dead {
-        facts.push((
-            "Credential",
-            "the access token is no longer valid — this feed is halted for the \
-             rest of the run. §8 forbids minting one here, so re-asking cannot \
-             fix it; refresh it where it is minted and the next pull reads the \
-             new value."
-                .to_owned(),
-        ));
+        facts.push(("Credential", CREDENTIAL_FACT.to_owned()));
     }
 
     if run.reached == 0 {
@@ -5196,7 +5189,7 @@ fn spot_targets(
     asked: &ingest::SpotRequest,
     site: &Site,
 ) -> Vec<brutex_core::instrument::InstrumentKey> {
-    let mut targets: Vec<brutex_core::instrument::InstrumentKey> = site
+    let targets: Vec<brutex_core::instrument::InstrumentKey> = site
         .universe()
         .read
         .merged
@@ -6330,7 +6323,7 @@ async fn fetch_chunks(
                             .with("of", telemetry::Value::Uint(chunks.len() as u64))
                             .with("from", telemetry::Value::Str(&chunk.from().to_string()))
                             .with("to", telemetry::Value::Str(&chunk.to().to_string()))
-                            .with("vendor_said", telemetry::Value::Str(&why)),
+                            .with("vendor_said", telemetry::Value::Str(why)),
                     );
                     debug_assert!(
                         noted.is_written() || telemetry::global().is_none(),
@@ -7159,6 +7152,45 @@ const WIRE_REACHED: &str = "\u{1}";
 /// 5xx. See [`VENDOR_DOWN_INSTRUMENTS`] for why a run-level count is what makes
 /// a longer per-instrument ladder affordable at all.
 const VENDOR_DOWN: &str = "\u{2}";
+
+/// The vendor's word for what KIND of instrument is being asked for.
+///
+/// The strike width follows from it — the vendor serves ATM±10 on an index and
+/// ATM±3 on a stock, and asking the wide list for a stock is 28 empty calls per
+/// expiry per side. `fno_roll` read `rolling.index_word` unconditionally, so
+/// `stock_word` and `stock_offsets` had zero production readers and
+/// `offsets_for`'s stock branch was unreachable. D-0349.
+const fn instrument_word(rolling: &pull::vendor::RollingSpec, is_index: bool) -> &'static str {
+    if is_index {
+        rolling.index_word
+    } else {
+        rolling.stock_word
+    }
+}
+
+/// The sentence a page carries when, and ONLY when, the run's structural
+/// verdict was a dead credential.
+///
+/// # Why one constant and not two sentences
+///
+/// `autopilot::credential_fault_in_page` reads a rendered page and decides
+/// whether to halt a feed for the rest of a run. It does that with six
+/// substring guesses, because for years the page carried only prose and a
+/// reader had nothing else to go on — and that classifier's own doc records it
+/// lying twice.
+///
+/// The page now states the verdict outright, from
+/// [`BrokerRun::credential_dead`], which came off the [`CREDENTIAL_DEAD`]
+/// marker, which was set where `Step::CredentialDied` was decided. **The writer
+/// and the reader share this constant**, so the exact-match check cannot be
+/// broken by rewording the sentence — which is precisely how a prose-matching
+/// reader fails, silently and later.
+///
+/// The six guesses stay as a fallback for pages that carry no run at all. This
+/// is what makes them a fallback rather than the answer. D-0353.
+pub const CREDENTIAL_FACT: &str = "the access token is no longer valid — this feed is halted \
+     for the rest of the run. §8 forbids minting one here, so re-asking cannot fix it; refresh \
+     it where it is minted and the next pull reads the new value.";
 
 /// Out-of-band marker: the retry ladder judged this a DEAD CREDENTIAL.
 ///
@@ -8270,11 +8302,42 @@ pub(crate) async fn pull_spot(
     // holding one broker's month and none of the other's.
     //
     // THE FEED IS PARSED BEFORE THE SEAT IS TAKEN, and it has to be: a seat
-    // cannot be per-feed if it is claimed before anyone knows which feed. This
-    // is the same O(1) form lookup `parse_spot` does later, and an unreadable
-    // one falls to the descriptor's default exactly as it does there, so the
-    // seat and the run can never disagree about which feed this is.
-    let wants = ingest::parse_feed(&param(&body, "vendor")).unwrap_or(pull::vendor::Feed::Dhan);
+    // cannot be per-feed if it is claimed before anyone knows which feed.
+    //
+    // **AND A NAMED FEED THIS BUILD CANNOT READ IS REFUSED, NOT SUBSTITUTED.**
+    // This read `.unwrap_or(Feed::Dhan)` under a comment claiming *"an
+    // unreadable one falls to the descriptor's default exactly as it does
+    // there, so the seat and the run can never disagree"*. That claim was
+    // false: `parse_spot` does `parse_feed(&raw).ok_or(Refusal::UnknownVendor)`
+    // — it REFUSES. And `parse_feed` already answers the EMPTY string with
+    // Dhan, so this `unwrap_or` was unreachable for an absent vendor and caught
+    // exactly one input: a feed somebody NAMED and this build does not read.
+    //
+    // The consequence is a 409 that names a vendor the caller never mentioned —
+    // *"another pull already holds Dhan's seat"* for a request that said
+    // `vendor=dahn`. Worse, it takes and holds Dhan's seat for the length of
+    // the walk, so a real Dhan pull is refused by a typo. D-0353.
+    let asked_vendor = param(&body, "vendor");
+    let Some(wants) = ingest::parse_feed(&asked_vendor) else {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            receipt(),
+            axum::response::Html(accepted_html(
+                "Spot pull",
+                vec![(
+                    "Refused because",
+                    format!(
+                        "{asked_vendor:?} is not a feed this build has a descriptor \
+                         for, so there is no seat to take and no vendor to ask. \
+                         Refused rather than answered as another feed: a pull \
+                         that took Dhan's seat for a request naming something \
+                         else would refuse the real Dhan pull behind it."
+                    ),
+                )],
+                Broker::Refused,
+            )),
+        );
+    };
     let Some(_seat) = site.autopilot.take_seat(wants) else {
         return (
             axum::http::StatusCode::CONFLICT,
@@ -10876,7 +10939,7 @@ fn rolling_key(
     // THE EXPIRY FOR THIS BAR'S OWN DAY. `expiry_of` answers "the Nth expiry on
     // or after this day", which is exactly the question the vendor answered
     // minute by minute.
-    let expiry = pull::rolling::expiry_of(underlying, &rolling, flag, code, day)
+    let expiry = pull::rolling::expiry_of(underlying, rolling, flag, code, day)
         .map_err(|why| format!("{label}: {why}"))?;
     let strike = row.strike.ok_or_else(|| {
         format!(
@@ -11287,7 +11350,7 @@ fn cadence_has_contracts_on(
     flag: &str,
     on: pull::session::Day,
 ) -> bool {
-    pull::rolling::expiry_of(asked.underlying.as_str(), &rolling, flag, "1", on).is_ok()
+    pull::rolling::expiry_of(asked.underlying.as_str(), rolling, flag, "1", on).is_ok()
 }
 
 /// How many vendor requests this walk will make, before it makes any of them.
@@ -11484,11 +11547,7 @@ async fn fno_roll(
     // branch was unreachable — four descriptor fields and three comments
     // describing a path the code could not take. `rolling_security_id` already
     // knows which shape it matched, so this costs no extra lookup. D-0349.
-    let word = if is_index {
-        rolling.index_word
-    } else {
-        rolling.stock_word
-    };
+    let word = instrument_word(&rolling, is_index);
     let offsets = rolling.offsets_for(word);
     let planned = offsets.len()
         * rolling.sides.len()
@@ -11817,7 +11876,31 @@ pub(crate) async fn pull_fno(
     // returns — the whole walk, not one leg of it. Binding it to `_` would drop
     // it immediately and reintroduce the gap this exists to close, which is why
     // the name has an underscore prefix rather than being the bare wildcard.
-    let wants = ingest::parse_feed(&param(&body, "vendor")).unwrap_or(pull::vendor::Feed::Dhan);
+    // A NAMED FEED THIS BUILD CANNOT READ IS REFUSED, NOT SUBSTITUTED — the
+    // same rule and the same reason as the spot route above. `parse_feed`
+    // already answers the EMPTY string with Dhan, so the `unwrap_or` this
+    // replaces caught only a feed somebody NAMED and this build does not read,
+    // and then held Dhan's seat for the whole walk on its behalf. D-0353.
+    let asked_vendor = param(&body, "vendor");
+    let Some(wants) = ingest::parse_feed(&asked_vendor) else {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            axum::response::Html(accepted_html(
+                "Expired F&O pull",
+                vec![(
+                    "Refused because",
+                    format!(
+                        "{asked_vendor:?} is not a feed this build has a descriptor \
+                         for, so there is no seat to take and no vendor to ask. \
+                         Refused rather than answered as another feed: this walk \
+                         holds its seat to the end, so a typo would refuse the \
+                         real pull behind it for the length of the walk."
+                    ),
+                )],
+                Broker::Refused,
+            )),
+        );
+    };
     let Some(_seat) = site.autopilot.take_seat(wants) else {
         return (
             axum::http::StatusCode::CONFLICT,
@@ -17271,6 +17354,65 @@ mod tests {
         assert!(ingest_html.contains("0 instrument(s)"), "{ingest_html}");
     }
 
+    /// **A FEED THIS BUILD CANNOT READ NEVER TAKES ANOTHER FEED'S SEAT.**
+    ///
+    /// Both pull routes read `parse_feed(...).unwrap_or(Feed::Dhan)` under a
+    /// comment claiming parity with `parse_spot` — *"an unreadable one falls to
+    /// the descriptor's default exactly as it does there, so the seat and the
+    /// run can never disagree"*. The claim was false: `parse_spot` does
+    /// `parse_feed(&raw).ok_or(Refusal::UnknownVendor)?` and REFUSES.
+    ///
+    /// And `parse_feed` already answers the EMPTY string with Dhan, so the
+    /// `unwrap_or` was unreachable for an absent vendor and caught exactly one
+    /// input: a feed somebody NAMED and this build does not read. That request
+    /// then took **Dhan's** seat — on the F&O route, for the length of the
+    /// whole walk — so a typo refused the real Dhan pull behind it, with a 409
+    /// naming a vendor the caller never mentioned.
+    ///
+    /// Both arms are asserted because only the pair is the rule: an absent
+    /// vendor must still resolve to the default, or refusing the unknown would
+    /// have broken every form that omits the field.
+    #[test]
+    fn an_unreadable_feed_is_refused_rather_than_taking_dhans_seat() {
+        // THE PARSER'S OWN CONTRACT, which is what both routes now honour.
+        assert_eq!(
+            ingest::parse_feed(""),
+            Some(pull::vendor::Feed::Dhan),
+            "an ABSENT vendor is the descriptor's default -- every form that \
+             omits the field depends on this"
+        );
+        assert_eq!(
+            ingest::parse_feed("dahn"),
+            None,
+            "a NAMED vendor this build cannot read is not a default, and the \
+             `unwrap_or` that stood in both routes turned exactly this into Dhan"
+        );
+
+        // AND BOTH ROUTES REFUSE IT BEFORE THE SEAT. Read from the source
+        // because taking a seat needs a live `Site` and an async runtime; the
+        // property is that neither route substitutes.
+        let src = include_str!("server.rs");
+        let substituting = concat!("parse_feed(&param(&body, \"vendor\")).", "unwrap_or(");
+        assert!(
+            !src.contains(substituting),
+            "neither pull route may substitute a feed before claiming its seat \
+             -- a request naming one vendor must never hold another's"
+        );
+        // SPLIT, BECAUSE THIS FILE IS ITS OWN HAYSTACK. Written whole, the
+        // needle appears in this very assertion and the count comes back three.
+        // `concat!` joins at compile time; the source carries a quote-comma the
+        // joined form does not.
+        let refusing = concat!(
+            "let Some(wants) = ingest::",
+            "parse_feed(&asked_vendor) else {"
+        );
+        assert_eq!(
+            src.matches(refusing).count(),
+            2,
+            "and both of them refuse by name: spot and expired-F&O"
+        );
+    }
+
     /// **`/bars` RESOLVES THE SEGMENT FROM THE CENSUS AND REFUSES RATHER THAN
     /// GUESSING.**
     ///
@@ -17336,6 +17478,68 @@ mod tests {
             status,
             axum::http::StatusCode::NOT_FOUND,
             "a located series with no such month is NOT FOUND, not BAD REQUEST"
+        );
+    }
+
+    /// **THE STRUCTURAL VERDICT IS EXACT AND CANNOT DRIFT FROM ITS WRITER.**
+    ///
+    /// `credential_fault_in_page` decides whether to halt a feed for the rest
+    /// of a run. Until D-0353 it had only six substring guesses to do it with,
+    /// and its own doc records that classifier lying twice — once matching the
+    /// bare word *"credential"*, which the receipt headline carries on **every**
+    /// page.
+    ///
+    /// The page now states the verdict outright when the run set it, and the
+    /// writer and the reader **share one constant**. That is the whole point:
+    /// rewording the sentence cannot silently break the match, which is exactly
+    /// how a prose-matching reader fails — later, quietly, and far from the
+    /// edit that caused it.
+    ///
+    /// The last assertion is the one that would catch a regression nobody meant
+    /// to make: a page with the fact on it must NOT depend on the six guesses,
+    /// so the fact alone — with none of those spellings anywhere near it — has
+    /// to be enough.
+    #[test]
+    fn the_credential_fact_is_matched_exactly_and_needs_no_guesswork() {
+        use crate::autopilot::credential_fault_in_page;
+        use crate::server::CREDENTIAL_FACT;
+
+        // THE FACT ALONE, in a page carrying none of the six spellings. If the
+        // exact check were removed this would fall through and answer false.
+        let page = format!("<p>Instruments attempted</p><p>{CREDENTIAL_FACT}</p>");
+        assert!(
+            credential_fault_in_page(&page),
+            "the structural fact is sufficient on its own: {page}"
+        );
+        for guess in [
+            "status 401",
+            "status 403",
+            "tokenexception",
+            "invalid_authentication",
+            "access token expired",
+            "the session is dead",
+        ] {
+            assert!(
+                !page.to_ascii_lowercase().contains(guess),
+                "and it carries none of the guesses — {guess:?} would have made \
+                 this test pass for the wrong reason"
+            );
+        }
+
+        // AND AN ORDINARY PAGE IS STILL NOT A DEAD TOKEN. Without this the
+        // check could be `true` unconditionally and the test above would pass.
+        assert!(
+            !credential_fault_in_page("<p>Instruments attempted</p><p>3 of 3 reached</p>"),
+            "a clean run is not a credential fault"
+        );
+
+        // THE CONSTANT IS SHARED, NOT COPIED. A test that spelled the sentence
+        // itself would keep passing while the writer drifted away from it —
+        // which is the failure mode this whole change exists to remove.
+        assert!(
+            !CREDENTIAL_FACT.is_empty() && CREDENTIAL_FACT.contains("no longer valid"),
+            "the constant is the sentence, and this test reads it rather than \
+             restating it"
         );
     }
 

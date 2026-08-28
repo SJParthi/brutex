@@ -26127,3 +26127,47 @@ shape: `calendar_json` (D-0318) and `broker_run`'s ladder gate both read
 anything in it. The pattern is that a field filled once at boot and read for ever
 is a cache nobody named, and the store is the one thing in this process that
 changes underneath it.
+
+### D-0353
+
+**Two routes claimed a per-feed seat under a feed they had substituted, and the
+comment defending it named a parity that did not exist.**
+
+`pull_spot` and `pull_fno` both read:
+
+```text
+let wants = ingest::parse_feed(&param(&body, "vendor")).unwrap_or(Feed::Dhan);
+```
+
+under a comment claiming *"an unreadable one falls to the descriptor's default
+exactly as it does there, so the seat and the run can never disagree"*. The
+claim is false. `parse_spot` does
+`parse_feed(&raw).ok_or(Refusal::UnknownVendor)?` — it **refuses**.
+
+And `parse_feed` already answers the EMPTY string with Dhan, so the `unwrap_or`
+was unreachable for an absent vendor and caught exactly one input: **a feed
+somebody NAMED and this build does not read**. That request then took **Dhan's**
+seat. On the F&O route the seat is held to the end of the walk by design, so a
+typo refused the real Dhan pull behind it — with a 409 naming a vendor the
+caller never mentioned.
+
+Both routes now refuse by name before the seat is claimed. Both arms are pinned
+by the test, because only the pair is the rule: an ABSENT vendor must still
+resolve to the default, or refusing the unknown breaks every form that omits the
+field.
+
+**And the credential verdict now matches exactly rather than by guesswork.**
+D-0351 gave it a structural path — decided at the refusal, carried on a control
+character, recorded on `BrokerRun`. What remained was the reader.
+`credential_fault_in_page` now checks `CREDENTIAL_FACT` first, and **the writer
+and the reader share that constant**, so rewording the sentence cannot silently
+break the match. That is precisely how a prose-matching reader fails: later,
+quietly, and far from the edit that caused it. The six substring guesses stay
+beneath it as the fallback for a page carrying no run — which is what makes them
+a fallback rather than the answer.
+
+**Two source-text guards caught themselves before they caught anything else.**
+`server.rs` is its own haystack, so a literal written whole appears in the very
+assertion searching for it — one counted three matches where two exist, the
+other failed against correct code. Both needles are built with `concat!`: joined
+at compile time, while the source carries a quote-comma the joined form does not.
