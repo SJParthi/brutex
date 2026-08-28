@@ -26282,3 +26282,37 @@ rather than silently outdated.
 **`Unstated` falls back rather than refusing.** A rung the table says nothing
 about is not a rung with no history; it is a rung nobody has written a row for.
 Refusing there would turn a missing row into a silent hole.
+
+### D-0357
+
+**`bars_committed` reported the whole batch a resume OFFERED, not the suffix it
+WROTE — and that is what a resume does every time it runs.**
+
+`write_and_count` kept the `Appended` discriminant and then answered
+`bars.len()` whenever anything was written. On a PARTIAL overlap that is wrong
+by the overlap, and `BarFile::append`'s own doc supplies the case: 375 bars
+held, `08-04..08-06` offered at 1,260, of which **885** were actually written.
+The receipt said 1,260.
+
+This is not an edge case. It is the ordinary shape of every resumed backfill:
+the store holds a prefix, the next run offers a window starting inside it, and
+`append` recurses on the suffix that follows.
+
+**It broke the one comparison two render surfaces rely on.** `render.rs` and
+`server.rs` both name `bars_stored` ≠ `bars_committed` as the signature of
+*"sixteen lakh bars offered, none written"*. That reading is only reliable when
+the overlap is TOTAL — on a normal resume the two were equal by construction and
+the figure was simply inflated, so an operator reading the receipt to judge
+whether a backfill was progressing was given a number that always looked healthy.
+
+**`Committed { first_index, n_valid }` already carried the answer.** `n_valid`
+is the counter after the append and `first_index` is where this batch's first
+record landed, so the difference is what this call wrote. On a partial overlap
+`append` recurses on the suffix, so both values describe the suffix and the
+subtraction is correct without the caller needing to know that.
+
+Proved by `a_partial_overlap_counts_the_suffix_it_wrote_not_the_batch_it_offered`,
+which asserts all three arms because each is a different one: a first write
+reports every bar, a partial overlap reports **only the suffix** — the assertion
+the old code failed — and a total re-offer reports **zero**, which is the number
+that makes a re-run distinguishable from a first run.

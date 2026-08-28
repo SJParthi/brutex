@@ -2168,10 +2168,34 @@ fn write_and_count(
     // THE DISCRIMINANT IS KEPT, AND IT WAS THROWN AWAY. `Committed` and
     // `AlreadyPresent` are the difference between a run that wrote a month and
     // one that re-offered it, and `?` on its own erased that.
-    let committed = matches!(
-        file.append(bars).map_err(|why| why.to_string())?,
-        store::file::Appended::Committed { .. }
-    );
+    // AND THE COUNT IS THE ONE THE APPEND REPORTS, NOT THE ONE WE OFFERED.
+    //
+    // This kept only the discriminant and then answered `bars.len()` — the
+    // whole batch — whenever anything was written. On a PARTIAL overlap that is
+    // wrong by the overlap: `BarFile::append`'s own doc gives the case, held
+    // 2026-08-04 at 375 bars and offered 08-04..08-06 at 1,260, of which 885
+    // were actually written. The receipt said 1,260.
+    //
+    // That is the ordinary shape of a resume, not an edge case, and it breaks
+    // the one comparison two render surfaces use to spot a run that offered
+    // everything and wrote nothing: `bars_stored` against `bars_committed`. The
+    // signature only reads when the overlap is TOTAL; on a normal resume the
+    // two were equal and the figure was inflated.
+    //
+    // `Committed { first_index, n_valid }` already carries the answer —
+    // `n_valid` is the counter AFTER the append and `first_index` is where this
+    // batch's first record landed, so the difference is what this call wrote.
+    // On a partial overlap `append` recurses on the suffix, so both values
+    // describe the suffix and the subtraction is right without knowing that.
+    let written = match file.append(bars).map_err(|why| why.to_string())? {
+        store::file::Appended::Committed {
+            first_index,
+            n_valid,
+        } => usize::try_from(n_valid.saturating_sub(first_index)).unwrap_or(0),
+        // NOTHING WAS WRITTEN AND NO GENERATION WAS SPENT. Zero is the number
+        // that makes a re-run distinguishable from a first run on a receipt.
+        store::file::Appended::AlreadyPresent { .. } => 0,
+    };
     let header = file.header();
     let closes = month_closes(&file, &header, bars)?;
     Ok((
@@ -2184,10 +2208,8 @@ fn write_and_count(
             },
             closes,
         ),
-        // WRITTEN, NOT MERELY OFFERED. Zero when the month already held this
-        // batch byte for byte — the number that makes a re-run distinguishable
-        // from a first run on a receipt.
-        if committed { bars.len() } else { 0 },
+        // WRITTEN, NOT MERELY OFFERED, AND NOT THE WHOLE BATCH EITHER.
+        written,
     ))
 }
 
@@ -2791,7 +2813,10 @@ mod tests {
     use store::format::Bar;
     use store::header::Header;
 
-    use super::{CensusLock, MAX_CENSUS_BYTES, beyond_ceiling, closes_in_hand, install_locked};
+    use super::{
+        CensusLock, EntryKey, MAX_CENSUS_BYTES, beyond_ceiling, closes_in_hand, install_locked,
+        write_and_count,
+    };
 
     /// A scratch directory of this test's own, named after the line that asked
     /// for it so two tests cannot collide in a shared `TMPDIR`.
@@ -2805,6 +2830,95 @@ mod tests {
         ));
         std::fs::create_dir_all(root.join("manifest")).expect("the manifest directory");
         root
+    }
+
+    /// **A PARTIAL-OVERLAP RESUME REPORTS WHAT IT WROTE, NOT WHAT IT OFFERED.**
+    ///
+    /// `write_and_count` kept only the `Appended` discriminant and then answered
+    /// `bars.len()` — the whole batch — whenever anything was written. On a
+    /// partial overlap that is wrong by the overlap, and `BarFile::append`'s own
+    /// doc gives the case: 375 bars held, 1,260 offered, **885 written**. The
+    /// receipt said 1,260.
+    ///
+    /// That is the ordinary shape of a resume, and it breaks the one comparison
+    /// two render surfaces use to spot a run that offered everything and wrote
+    /// nothing — `bars_stored` against `bars_committed`. The signature only
+    /// reads when the overlap is TOTAL; on a normal resume the two were equal
+    /// and the number was simply inflated.
+    ///
+    /// Three cases, because each is a different arm: a first write reports all
+    /// of it, a partial overlap reports only the suffix, and a total re-offer
+    /// reports **zero** — the number that makes a re-run distinguishable from a
+    /// first run.
+    #[test]
+    fn a_partial_overlap_counts_the_suffix_it_wrote_not_the_batch_it_offered() {
+        let root = scratch("partialcount");
+        let month = store::path::YearMonth::new(2026, 1).expect("a legal month");
+        let parts = || store::path::PathParts {
+            vendor: brutex_core::vendor::Vendor::Dhan,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: store::path::Timeframe::MINUTE_1,
+            month,
+            file: store::path::FileKind::Bars,
+        };
+        let entry = EntryKey {
+            contract: None,
+            exchange: brutex_core::instrument::Exchange::Nse,
+            segment: brutex_core::instrument::Segment::Index,
+            symbol: brutex_core::symbol::Symbol::new("NIFTY").expect("a symbol"),
+            timeframe: store::path::Timeframe::MINUTE_1,
+            month,
+        };
+        // Midday IST on 2026-01-01, one bar a minute, so every stamp is inside
+        // the month the path names.
+        let at = |n: i64| {
+            let days = 20_454_i64; // 2026-01-01
+            (days * 86_400 - 19_800 + 6 * 3_600 + n * 60) * 1_000_000
+        };
+        let bar = |n: i64| Bar {
+            ts_micros: at(n),
+            open: 100 + n,
+            high: 110 + n,
+            low: 90 + n,
+            close: 105 + n,
+            volume: 1,
+            open_interest: i64::MIN,
+        };
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the id is the cross-check `open` folds; any 32 bits serve"
+        )]
+        let symbol_id = brutex_core::universe::fnv1a("NIFTY") as u32;
+
+        // FIRST WRITE: all three land, all three are counted.
+        let first: Vec<Bar> = (0..3).map(bar).collect();
+        let (_, wrote) =
+            write_and_count(&first, &root, symbol_id, parts(), entry).expect("a first write");
+        assert_eq!(wrote, 3, "a first write reports every bar it wrote");
+
+        // PARTIAL OVERLAP: five offered, the first three already held, so TWO
+        // are written. This is the assertion the old code failed -- it said 5.
+        let overlapping: Vec<Bar> = (0..5).map(bar).collect();
+        let (_, wrote) = write_and_count(&overlapping, &root, symbol_id, parts(), entry)
+            .expect("the suffix follows and is appended");
+        assert_eq!(
+            wrote, 2,
+            "only the SUFFIX was written -- reporting 5 here is the defect, and \
+             it is what a resume does every time it runs"
+        );
+
+        // TOTAL RE-OFFER: nothing is written, and the count says so.
+        let (_, wrote) = write_and_count(&overlapping, &root, symbol_id, parts(), entry)
+            .expect("re-offering the same batch is safe");
+        assert_eq!(
+            wrote, 0,
+            "a re-run wrote nothing, which is what tells it apart from a first run"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// **A LOCK THAT CANNOT BE OPENED IS A REFUSAL, NOT A RUN WITHOUT ONE.**
