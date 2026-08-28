@@ -472,9 +472,19 @@
   {/if}
 
   {#if open}
+    <!-- `tabindex="-1"` BECAUSE THE PANEL ITSELF TAKES KEYS. `onkeydown` is
+         bound here, and a key event only reaches this element if focus can
+         rest on it -- without a tabindex the handler depends entirely on a
+         focused DESCENDANT, so a press with focus on the panel (which is where
+         opening puts it) reached nothing.
+         `-1` and not `0`: reachable by script, never a stop on the Tab ring,
+         which is what a dialog wants. This clears
+         `a11y_interactive_supports_focus`, the last warning `svelte-check`
+         reported against this tree. -->
     <div
       class="cal"
       role="dialog"
+      tabindex="-1"
       aria-label={`Choose ${label.toLowerCase()}`}
       bind:this={panel}
       onkeydown={onKey}

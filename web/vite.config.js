@@ -113,7 +113,62 @@ const ROUTES = [
 	// `web/src` on every run, so a fifth drift fails a test rather than
 	// producing a plausible error message about JSON.
 	'/folder.json',
-	'/ingest/status.json'
+	'/ingest/status.json',
+	// THE FIFTH DRIFT, and the test above called its shot: it said a fifth
+	// would fail a test rather than produce a plausible error about JSON, and
+	// this is it. `/mapping` reads `/masters/status.json` to learn which
+	// masters are on disk, and the route was never listed here.
+	//
+	// `/masters/` WITH THE TRAILING SLASH, for the reason the autopilot block
+	// gives. `/masters` on its own is a PAGE, rendered by Rust at
+	// `server.rs:12047` -- but the slash form is what the two data routes this
+	// app actually calls both start with (`/masters/status.json`, and
+	// `/masters/refresh` at `+page.svelte:120`), so one entry covers both
+	// without this list making a claim about the page.
+	//
+	// It failed quietly rather than loudly: `readMasters` swallows the throw
+	// on purpose -- a status read is not that page's subject -- so in
+	// `npm run dev` the HTML fallback came back 200, `r.json()` threw,
+	// `onDisk` stayed `[]`, and the join simply showed nothing on disk. No
+	// banner, no console error, a page that looked answered.
+	'/masters/',
+	// AND THE SIXTH, FOUND IN THE SAME PASS. `/universe/resolve` is registered
+	// in `server.rs` and called from `web/src`, and was missing here too.
+	//
+	// Both of these were found by diffing the WHOLE of what `web/src` fetches
+	// against this list in one go, rather than by re-running the test and
+	// taking its next single complaint. The test reports one gap per run and
+	// says so in its own comment; that makes a green suite after one addition
+	// evidence of nothing, and it is how this list reached six drifts. The
+	// diff is ten fetched paths against eighteen entries -- it is cheap, and
+	// it is the only form of the check that terminates.
+	'/universe/resolve',
+	// DRIFTS SEVEN, EIGHT AND NINE — and the reason all three sat here unseen
+	// through a green suite is now fixed in `web/tests/proxy.test.js` itself.
+	//
+	// That scanner matched `fetch(` and `ask(`. Two files import the helper
+	// under a local alias — `ask as request` in `ingest/+page.svelte`, `ask as
+	// ask_` in `backtest/+page.svelte` — which hid 15 of the tree's 28 call
+	// sites. The suite read 145/145 while these three were each called, each
+	// served by the binary, and each absent from this list. A checker that
+	// cannot see half the call sites reports the list clean by construction.
+	//
+	// `/calendar.json` is the expensive one. `/ingest` reads it for the NSE
+	// holiday table; under `npm run dev` the HTML fallback answers 200, `.ok`
+	// is true, `.json()` throws, the `owed` map stays empty, and
+	// `holidaysKnownFor()` is false for every day — so `isSession()` falls back
+	// to "weekday = session". Eight Saturdays that traded and every holiday are
+	// then wrong, and the page's whole shortfall arithmetic is computed against
+	// a calendar nobody supplied. No banner: the catch writes `why` and the
+	// numbers carry on.
+	//
+	// `/vocab.json` — `/backtest` renders stored masks as raw 64-bit words
+	// instead of condition names. `/universes.json` — `/backtest` fails
+	// SILENTLY (`if (!response.ok) { sweptSurface = null; return; }` and a bare
+	// `catch {}`), so the swept-target sentence just vanishes.
+	'/calendar.json',
+	'/vocab.json',
+	'/universes.json'
 ];
 
 export default {

@@ -149,6 +149,51 @@
   }
 
   /* ====================================================================
+     THE LIT TAB IS DRAGGED BACK INTO VIEW
+     --------------------------------------------------------------------
+     Below ~907px the nav is a scroll container -- see `.topbar nav` in
+     `theme.css` for why it, and not the brand or the feed, is the thing
+     that yields. A scrolled list has an offscreen end, and with eight
+     tabs starting from `scrollLeft: 0` the offscreen end held `Backtest`
+     and `Logs`. So `/backtest` at 760px lit a tab nobody could see, and
+     the bar answered "where am I" with silence.
+
+     That is worse than the sideways scroll it replaced. `current()`
+     already decides which tab is lit; this only makes the nav agree,
+     and it is the one part of the fix a stylesheet cannot do -- CSS has
+     no way to say "keep this child in view".
+
+     `nearest` in both axes so it scrolls the MINIMUM: the tab is pulled
+     just inside the edge and the rest of the list keeps whatever position
+     it had. Instant, not smooth, and deliberately so -- this fires on
+     every navigation, and a bar that slides on each one is motion that
+     carries no fact. Above the threshold the nav does not overflow and
+     `scrollIntoView` is a no-op, so nothing moves on a wide screen.
+
+     TWO CALLERS, BECAUSE THE BROWSER IS NOT ONE OF THEM. A focused child
+     is supposed to be scrolled into view by the engine itself, and here it
+     is NOT: measured at 760px, tabbing onto `Mapping` left `scrollLeft` at
+     0 with 25.6px of the tab and the whole right side of its focus ring
+     outside the clip box, and it stayed there four seconds later. The same
+     element, given `scrollIntoView`, moves the container to 27.5 on
+     demand. So the engine is the gap, and `focusin` closes it -- a
+     keyboard user who cannot see the ring has lost their place, which is
+     WCAG 2.4.11 and the reason `theme.css` reserves the 6px in the first
+     place. `focusin` and not `focus` because only the former bubbles.
+     ==================================================================== */
+  /** @type {HTMLElement | null} */
+  let navEl = $state(null);
+
+  /** @param {Element | null | undefined} el */
+  const keepInNav = (el) => el?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+
+  $effect(() => {
+    // The read IS the subscription -- without it the effect never re-runs.
+    page.url.pathname;
+    keepInNav(navEl?.querySelector('[aria-current="page"]'));
+  });
+
+  /* ====================================================================
      WHICH ROUTES CARRY THEIR OWN FEED CONTROL
      --------------------------------------------------------------------
      EXACTLY ONE CONTROL FOR ONE VALUE, ON EVERY ROUTE. That is the rule,
@@ -180,9 +225,19 @@
      route joins this list on the day it grows a control of its own, and
      the count stays at one in both directions.
 
+     `/backtest` JOINED ON THE DAY IT GREW ONE, which is the condition this
+     paragraph sets. Its feed rung is the FIRST control of `.runbar`, ahead of
+     instruments, timeframes and the span, because that is the order the
+     answers depend on each other: a run is stamped with the feed its bars came
+     from, the instruments offered are whichever ones that feed's store holds,
+     and the ledger below is filtered to runs carrying it. The rung sits in
+     `.bt-shell`, an unconditional child of `.page`, so it is drawn in the
+     loading, failed, refusal, no-feed, empty-ledger and ready states alike —
+     the same test `/db` had to pass, and the reason the entry is safe to add.
+
      Prefix-matched with `current()` so `/ingest/anything` and `/db/anything`
      are covered by the same entries, for the same reason the nav is. ==== */
-  const FEED_OWNED = ['/ingest', '/db'];
+  const FEED_OWNED = ['/ingest', '/db', '/backtest'];
   const feedInBar = $derived(!FEED_OWNED.some(current));
 
   /* ====================================================================
@@ -347,7 +402,30 @@
   function commit(i) {
     const f = options[i];
     if (!f || !usable(f)) return;
-    feeds.active = f.wire;
+    /* CHOOSING THE FEED THAT IS ALREADY CHOSEN CLEARS IT, and that is the only
+       way this product can reach "no feed at all".
+
+       IT WAS UNREACHABLE, AND FOUR SCREENS WERE WRITTEN FOR IT. Every write to
+       `feeds.active` in `web/src` assigns a concrete wire -- this one, the two
+       `.utab` buttons on /db, /ingest's `named[0]`, /db's guarded
+       `if (next)`, and `pickDefaultFeed` on load. None of them can produce
+       `null` once `/feeds.json` answers with a row. So `/ingest`'s "No feed is
+       selected" blank, `/db`'s two, `/audit`'s, and the four "no feed is
+       chosen" branches on `/` were all dead: written, styled, and impossible
+       to display.
+
+       The load-time default STAYS -- `$lib/feeds.svelte.js` explains why a page
+       that opens on an empty feed reads as a broken build, and that argument is
+       about the first paint, not about whether the operator may then say no.
+       A default is not a decision he made; clearing is.
+
+       No new row in the listbox, deliberately: `hi`, `activeIndex`,
+       `aria-activedescendant` and `optEls` all index `options` directly, and a
+       synthetic entry would have to be Feed-shaped to survive `usable()`. A
+       toggle on the selected option needs none of that and is reachable by
+       Enter on the highlighted row, which a footer button inside
+       `role="listbox"` would not be. */
+    feeds.active = f.wire === feeds.active ? null : f.wire;
     close();
   }
 
@@ -676,7 +754,11 @@
   <header class="topbar">
     <span class="brand">bru<b>tex</b></span>
 
-    <nav aria-label="Primary">
+    <nav
+      aria-label="Primary"
+      bind:this={navEl}
+      onfocusin={(e) => keepInNav(/** @type {Element} */ (e.target))}
+    >
       {#each NAV as t (t.href)}
         <!-- `data-sveltekit-reload` ONLY WHERE THE ENTRY ASKS FOR IT. An empty
              string renders the attribute; `undefined` omits it entirely, so the
@@ -799,6 +881,11 @@
               aria-selected={f.wire === feeds.active}
               aria-disabled={!usable(f)}
               data-hi={hi === i}
+              title={!usable(f)
+                ? (f.why ?? `${f.display} is not available.`)
+                : f.wire === feeds.active
+                  ? `${f.display} is the chosen feed. Choosing it again clears the selection, and every page then shows what it shows with no feed scoped.`
+                  : `Scope every page to ${f.display}.`}
               onclick={() => commit(i)}
               onpointerdown={(e) => e.preventDefault()}
               onpointerenter={() => usable(f) && (hi = i)}

@@ -1090,6 +1090,36 @@
     return calendar.owed.size > 0 && isoDay >= calendar.first && isoDay <= calendar.last;
   }
 
+  /**
+   * THE SAME QUESTION AT MONTH GRAIN, and the census verdict was the one place
+   * on this page that never asked it.
+   *
+   * `sessionsByMonth` and `minuteBarsByMonth` are both folded out of
+   * `calendar.owed`, so both are EMPTY when the calendar did not answer — and
+   * both were read with `?? 0`. That turned "never measured" into "expected
+   * zero", which is the one conversion this page forbids everywhere else. The
+   * consequence is not a cosmetic one: `bars >= 0` is true for every series
+   * that holds anything, so the verdict came out `ok` — a series was reported
+   * VERIFIED, `Months unproved 0`, against an expectation nobody supplied, with
+   * a tooltip reading "1,234 stored against 0 expected".
+   *
+   * The `expect === null` -> `unknown` branch already existed and was simply
+   * unreachable, because `?? 0` had removed the null before it was tested.
+   *
+   * Month grain rather than day: the verdict is computed per month, and a month
+   * is measured only if the calendar's own span reaches it. `slice(0, 7)`
+   * compares `YYYY-MM` lexically, which is ordering-safe for ISO dates.
+   *
+   * @param {string} ym a month as `YYYY-MM`
+   */
+  function calendarCoversMonth(ym) {
+    return (
+      calendar.owed.size > 0 &&
+      ym >= calendar.first.slice(0, 7) &&
+      ym <= calendar.last.slice(0, 7)
+    );
+  }
+
   /** The measured span in words, or empty when there is no span at all. */
   const calendarSpan = $derived(
     calendar.owed.size ? `${dayLabel(calendar.first)} – ${dayLabel(calendar.last)}` : ''
@@ -1859,12 +1889,33 @@
    * keeping them apart is what lets the strip go on counting one feed while the
    * run fans out over several.
    *
-   * EMPTY MEANS "the scope feed", so the control needs no seeding and cannot
-   * drift out of step with the page when the operator changes scope.
+   * UNTOUCHED MEANS "the scope feed", so the control needs no seeding and
+   * cannot drift out of step with the page when the operator changes scope.
+   *
+   * # UNTOUCHED AND CLEARED ARE NOT THE SAME STATE, and reading them as one
+   * was the bug
+   *
+   * This used to key on `pullFeeds.size > 0`. An empty set therefore meant
+   * "follow the scope" no matter HOW it came to be empty -- so pressing clear
+   * in the picker put the set back to empty, the fallback re-supplied the
+   * scope feed, and the control snapped straight back to showing Dhan. There
+   * was no way to say "no feeds" at all, and the whole ladder below stayed
+   * open on a run that had nothing to run.
+   *
+   * `feedsTouched` is exactly `rungTouched`'s and `windowTouched`'s argument
+   * applied to this control -- A DEFAULT IS NOT A DECISION HE MADE, and the
+   * corollary is that a decision to take everything off is still a decision.
+   * Once he has worked the picker the set is authoritative, empty included.
+   *
+   * Still O(1) in the data: the set is bounded by the descriptor table -- five
+   * feeds -- so the spread is a constant-bounded copy and nothing here walks a
+   * bar, a row or a census.
    */
   let pullFeeds = $state(new Set());
+  /** Whether the operator has worked the feed picker himself. See above. */
+  let feedsTouched = $state(false);
   const feedsChosen = $derived(
-    pullFeeds.size > 0 ? [...pullFeeds] : feeds.active ? [feeds.active] : []
+    feedsTouched ? [...pullFeeds] : feeds.active ? [feeds.active] : []
   );
   /**
    * WHETHER THE OPERATOR HAS TOUCHED THE TIMEFRAME HIMSELF.
@@ -4174,9 +4225,21 @@
 
   const ladder = $derived.by(() => {
     const steps = [
+      // `feedsChosen`, NOT `active`. The first rung of the ladder has to be
+      // gated by the control immediately above it, and that control is the
+      // feed PICKER on this form -- not the page's scope, which the operator
+      // cannot empty and which therefore always read as ready. Gating on
+      // `active` meant clearing every feed left the whole ladder standing:
+      // a universe, an instrument list and a window, all offered for a run
+      // with no feed to run against, and a Pull button under them.
+      //
+      // Now the cut below propagates from the top for the same reason it
+      // already propagates everywhere else -- one unready parent closes every
+      // rung beneath it. `why` needed no change: it already named this exact
+      // control as the thing to go and answer.
       {
         id: 'universe',
-        parentReady: Boolean(active) && !archiveHidden,
+        parentReady: feedsChosen.length > 0 && !archiveHidden,
         why: 'Select a broker feed in the first control of this strip — the universe below is that feed’s answer.'
       },
       {
@@ -4740,8 +4803,15 @@
             // reached. Multiplying claimed 626,625 where the exchange offered
             // 623,574, and every one-minute series read SHORT by ~3,100 while
             // being complete but for 28 minutes. See `minuteBarsByMonth`.
+            /* `!calendarCoversMonth(ym)` -> null, AND IT GUARDS BOTH RUNGS.
+               Both denominators come out of `calendar.owed`: the minute rung
+               reads `minuteBarsByMonth`, the day rung multiplies `sessions`,
+               which is `sessionsByMonth.get(ym) ?? 0`. With no calendar both
+               are empty, so both used to resolve to 0 and every populated
+               series read `ok` against an expectation of zero. See
+               `calendarCoversMonth`. */
             const expect =
-              r.per === null || !derivable
+              r.per === null || !derivable || !calendarCoversMonth(ym)
                 ? null
                 : r.dir === '1min'
                   ? (minuteBarsByMonth.get(ym) ?? 0)
@@ -6877,7 +6947,17 @@
       writer below and by nothing else. */
   const selectionSearch = $derived(
     encodeSel({
-      feeds: pullFeeds.size > 0 ? pullFeeds : feeds.active ? [feeds.active] : [],
+      /* `feedsTouched`, THE SAME DISCRIMINATOR THE READER USES. This kept the
+         pre-fix spelling (`pullFeeds.size > 0`) after `feedsChosen` moved on,
+         so the two disagreed by construction: Clear-all sets
+         `feedsTouched = true, pullFeeds = {}`, `feedsChosen` correctly answers
+         `[]` and the ladder cuts -- and this fell through to the scope feed and
+         wrote `?feed=dhan`. In-session the address bar simply lied. On reload
+         it did worse: the hydrator read `dhan` back and re-selected it, which
+         is the original Clear-all bug returning through the URL.
+         `encode`'s `putSet` writes a bare `feed=` for an empty iterable and
+         `decode` returns an empty Set, so cleared round-trips exactly. */
+      feeds: feedsTouched ? [...pullFeeds] : feeds.active ? [feeds.active] : [],
       universe,
       // ALL TICKED IS `null`, WHICH IS NO FIELD AT ALL -- the same rule
       // `wireBodyFor` follows on the wire, and it keeps a 750-name selection
@@ -6922,12 +7002,34 @@
     if (!wantFeeds || urlFeedPinned || feeds.all.length === 0) return;
     untrack(() => {
       const named = [...wantFeeds].filter((w) => feeds.all.some((f) => f.wire === w));
-      if (named.length > 0) {
+      // THIS EFFECT IS THE OTHER WRITER OF `pullFeeds`, AND IT HAD TO LEARN
+      // THE FLAG TOO. `feedsTouched` was added to `feedsChosen` (the reader)
+      // and to the Picker's `onchange`, and this was missed -- so hydration
+      // set the set and left the flag false, and `feedsChosen` then ignored
+      // the set entirely. With `?feed=groww,zerodha` the page loaded two feeds
+      // into `pullFeeds`, ran on ONE, and went on writing both to the address
+      // bar: the URL and the run disagreed permanently.
+      if (named.length > 1) {
+        // A REAL FAN-OUT, which is a decision and therefore touched.
         feeds.active = named[0];
+        pullFeeds = new Set(named);
+        feedsTouched = true;
+      } else if (named.length === 1) {
         // ONE NAMED FEED IS THE SCOPE FEED AND NOT A FAN-OUT. `pullFeeds`
-        // empty means "the scope feed", so seeding it with a single entry
-        // would say the same thing twice and drift from `feeds.active`.
-        pullFeeds = named.length > 1 ? new Set(named) : new Set();
+        // empty plus `feedsTouched` false means "follows the scope", so
+        // seeding it with a single entry would say the same thing twice and
+        // drift from `feeds.active`.
+        feeds.active = named[0];
+        pullFeeds = new Set();
+        feedsTouched = false;
+      } else if (wantFeeds.size === 0) {
+        // `feed=` WITH NOTHING AFTER IT IS "THE OPERATOR TICKED NONE", which
+        // `$lib/urlstate.js` documents as a first-class value and every other
+        // set on this page already round-trips. Without this arm a cleared
+        // selection came back as the scope feed and re-opened the whole
+        // ladder -- the reload half of the Clear-all bug.
+        pullFeeds = new Set();
+        feedsTouched = true;
       }
       urlFeedPinned = true;
     });
@@ -8314,8 +8416,18 @@
            WHEN THERE IS A WINDOW, EVERY WORD OF IT COMES BACK. Nothing here is
            deleted and no refusal is hidden: this is a section that has nothing
            to report until it does. -->
-      {#if windowOk}
-      <section class="census">
+      <!-- `shows.get('window')` AND NOT `windowOk` ALONE. `windowOk` asks only
+           whether the two date boxes span a positive number of days, and the
+           dates keep their values while the ladder above them is cut -- so
+           with every feed cleared this census went on drawing 33 rows of
+           per-instrument counts under a strip reading "measured Dhan", for a
+           run with no feed chosen. The dates were the only thing it consulted,
+           and the dates were still valid.
+           `shows.get('window')` is the ladder's own answer to "is everything
+           above this control answered", which is the question this section
+           actually depends on. A Map lookup, so the gate stays O(1). -->
+      {#if shows.get('window') && windowOk}
+      <section class="census rise">
         <!-- ══ THE HEADING AND THE TWO STRIPS ARE GONE, AT THE OPERATOR'S
              INSTRUCTION ══
              What stood between the form and the table: a heading restating the
@@ -9034,11 +9146,32 @@
       }))}
       selected={new Set(feedsChosen)}
       onchange={(/** @type {Set<string>} */ sel) => {
-        /* BACK TO EMPTY WHEN THE PICK IS JUST THE SCOPE FEED, so the control
-           returns to "follows the page" rather than pinning a value that then
-           stops tracking a scope change. */
-        pullFeeds =
-          sel.size === 1 && [...sel][0] === feeds.active ? new Set() : new Set(sel);
+        /* BACK TO FOLLOWING THE PAGE WHEN THE PICK IS JUST THE SCOPE FEED, so
+           the control does not pin a value that then stops tracking a scope
+           change. That is `feedsTouched = false`, NOT merely an empty set --
+           see the note on `feedsChosen`. Clearing every feed also empties the
+           set, and the two must not be read as one thing: cleared is a
+           decision and stays. */
+        const justScope = sel.size === 1 && [...sel][0] === feeds.active;
+        feedsTouched = !justScope;
+        pullFeeds = justScope ? new Set() : new Set(sel);
+        /* WITH NO SCOPE, THE FIRST PICK BECOMES IT — otherwise this control is
+           a DEAD END in the one state it most needs to work.
+
+           `{:else if !active}` gates the whole page body on `feeds.active`, and
+           its blank draws this same rung as the way out. But the two lines
+           above write only `pullFeeds` and `feedsTouched`; neither touches the
+           scope. So on that screen ticking a feed changed the Picker's face and
+           the request bodies while the page went on reading "No feed is
+           selected", and the only escape was the back button. `/ingest` is in
+           `FEED_OWNED`, so the top bar draws no picker to recover with either.
+
+           Only when there is no scope. Once one exists this stays out of the
+           way: the scope is the strip's business and a fan-out must be able to
+           tick a second vendor without silently moving what the counts below
+           are measured against. That separation is the whole reason
+           `pullFeeds` and `feeds.active` are two values — see `feedsChosen`. */
+        if (!feeds.active && sel.size > 0) feeds.active = [...sel][0];
       }}
     />
     <!-- ONE FEED SAYS NOTHING HERE; MORE THAN ONE HAS SOMETHING ONLY THIS

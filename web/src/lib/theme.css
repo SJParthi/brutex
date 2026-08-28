@@ -94,7 +94,29 @@
      `--up-soft` moves with it, being the same hue at 12%. DARK IS UNTOUCHED:
      #00e19b there clears the floor comfortably. */
   --up: #00764e;
-  --down: #d3143f;
+  /* #d3143f MISSED BY 0.07, AND ONLY ON ITS OWN TINT. On white it measured
+     5.33:1 and passed, which is why it stood. On `--down-soft` -- the same hue
+     at 11% over white, i.e. `#fae5ea` -- it measured 4.428:1 against the 4.5
+     that normal-size text needs. Not a rounding quibble: 51 of the 71 contrast
+     failures left across the console were this one pair -- 26 on /mapping's
+     outcome chips, 21 on /audit, 4 on /autopilot.
+     Red 211 -> 205 takes the relative luminance 0.1471 -> 0.1384, the ratio to
+     4.63 on the tint and 5.57 on white. Six parts in 255 of one channel: below
+     a just-noticeable difference, and the semantic is unchanged. Computed off
+     the rendered pixels, not chosen by eye.
+
+     AND DARK WAS *NOT* UNTOUCHED. This paragraph used to end "DARK IS
+     UNTOUCHED -- #ff4d6a on its own 16% tint already clears", asserted from
+     the light measurement and never actually computed. True on `--bg` (5.058),
+     `--bg-2` (4.715) and `--panel` (4.534); FALSE on the two grounds that
+     matter most -- `--panel-2` 4.179 and `--line-soft` 4.149, which are the
+     table-row HOVER surfaces. The figure dimmed below the floor exactly when
+     the operator pointed at it, and `bx-flash-down` inherits whatever row it
+     fires on, so the tick flash failed on every `--panel-2` row.
+     Dark `--down` is now `#ff6178`: 4.635 / 4.601 on those two, 5.028 and
+     5.230 on the others. `#ff5c76` was the smaller step and was rejected --
+     it still measured 4.481 on `--line-soft`. */
+  --down: #cd133d;
   /* AMBER IS MEASURED, NOT CHOSEN BY EYE — the same exercise `--n8` above
      records, which `--warn` had never had. It was #a86a06, and that fails WCAG
      AA as TEXT on every opaque surface this app paints: 3.78:1 on --well, the
@@ -113,7 +135,31 @@
      value; DARK IS UNTOUCHED, since #f0b429 there already clears the floor. */
   --warn: #945d05;
   --info: #6d45d9;
-  --acc: #0e7f96;
+  --acc: #0d768c;
+  /* HOW FAR `/audit`'s HEAT GRID MAY TRAVEL TOWARD `--acc`. A THEME value,
+     because the two ramps run in OPPOSITE directions.
+
+     The cell is `color-mix(--acc, fill x ceiling, --well)`. In light that walks
+     from near-white DOWN to a mid teal, so the darkest cell is the hardest and
+     `--ink` clears it at 5.81:1 -- 72% is safe.
+
+     In dark it walks from near-black UP to bright cyan, so the BRIGHTEST cell
+     is the hardest: at 72% the busiest month renders `#1a9bb0`, where `--ink`
+     measures 2.76:1. Fifty-nine such cells on one screen, measured.
+
+     No ink fixes it. Spanning the dark ramp would need a foreground at relative
+     luminance >= 0.19 (against the near-black end) and <= 0.018 (against the
+     bright end) at the same time -- impossible, so at 72% a mid-fill DEAD BAND
+     exists where neither `--ink` nor `--on-acc` passes. `--on-acc` clears only
+     at fill = 1 (6.14) and fails everywhere below. That is why the original
+     "dark ink for dense cells" rule was right for DARK and wrong for LIGHT,
+     and why deleting it fixed light and broke dark.
+
+     So the RAMP yields, not the ink. At 50% the brightest dark cell is
+     `#156f80` and `--ink` measures 4.86:1, the five steps still plainly
+     distinct (`#070a11 . #0a232d . #0e3c48 . #115564 . #156f80`). One ink
+     across the whole scale, in both themes, and the heat still reads. */
+  --heat-ceiling: 72%;
   --acc-hi: #1c58c8;
   --on-acc: #ffffff;
 
@@ -155,10 +201,11 @@
     --n12: #fbfcff;
 
     --up: #00e19b;
-    --down: #ff4d6a;
+    --down: #ff6178;
     --warn: #f0b429;
-    --info: #9d7cf5;
+    --info: #a98cf7;
     --acc: #22d3ee;
+    --heat-ceiling: 50%;
     --acc-hi: #7aa7ff;
     --on-acc: #04060c;
 
@@ -198,10 +245,11 @@
   --n12: #fbfcff;
 
   --up: #00e19b;
-  --down: #ff4d6a;
+  --down: #ff6178;
   --warn: #f0b429;
-  --info: #9d7cf5;
+  --info: #a98cf7;
   --acc: #22d3ee;
+  --heat-ceiling: 50%;
   --acc-hi: #7aa7ff;
   --on-acc: #04060c;
 
@@ -244,10 +292,11 @@
   --n12: #000814;
 
   --up: #00764e;
-  --down: #d3143f;
+  --down: #cd133d;
   --warn: #945d05;
   --info: #6d45d9;
-  --acc: #0e7f96;
+  --acc: #0d768c;
+  --heat-ceiling: 72%;
   --acc-hi: #1c58c8;
   --on-acc: #ffffff;
 
@@ -290,6 +339,19 @@
   --accdeep: var(--acc-soft);
   --line: var(--n6);
   --line-soft: var(--n5);
+  /* AN EDGE, NEVER A TEXT COLOUR -- and it was used as one 28 times.
+     `--n7` is `#c7cfdd`, and its own comment two hundred lines up calls it a
+     hairline. Painted on type it measures 1.57:1 on white, 1.46:1 on `--bg`
+     and 1.39:1 on `--panel-2` -- against the 4.5:1 that normal-size text
+     needs. Measured across `/`: 126 segment tags and measured zeros, 16
+     separators, 5 bay-header captions, all of them effectively invisible.
+     They read as a design that had a fourth, quieter tier of text. It does
+     not exist: to clear 4.5:1 on `--panel-2` a foreground has to sit at or
+     below a relative luminance of 0.156, which lands on `#626c7e` -- which
+     IS `--faint` (`#5f6a7c`). There is no legible step between `--faint` and
+     a hairline, so quieter-than-faint has to be said with size or weight,
+     never with a lighter grey. Those 28 sites now use `--faint`.
+     Border and rule declarations keep this token; that is what it is for. */
   --line-hard: var(--n7);
   --well: var(--n0);
 
@@ -547,8 +609,36 @@ body {
    ========================================================================== */
 
 /* ---- shell ---------------------------------------------------------- */
+/*
+  THE COLUMN IS PINNED TO THE VIEWPORT, AND THE `minmax(0, ...)` IS THE WHOLE
+  POINT OF THE DECLARATION.
+
+  This grid names its rows and said nothing about its column, so the column was
+  implicit — `grid-auto-columns: auto`. An `auto` track takes its MINIMUM from
+  the largest automatic minimum size among its items, and a grid item that is
+  not a scroll container reads that as its MIN-CONTENT size. `.main` opts out
+  with `min-width: 0`. The top bar cannot: it is a nowrap flex row, so its
+  min-content is the sum of everything in it — 907px, measured.
+
+  So the track became 907px wide on a 760px viewport, `.main` was stretched to
+  match, and the BODY scrolled sideways. Not the page content: `.page`
+  hidden outright still left `main` at 907. The bar sized the app.
+
+  It showed up on five routes and not the other two, and the surviving two are
+  not a layout family — they are `FEED_OWNED`. `/ingest` and `/db` draw the
+  feed picker in their own control strip, so the bar stands down there, and
+  907 minus that picker is under 760. `/`, `/autopilot`, `/audit`, `/mapping`
+  and `/backtest` all keep it and all overflowed, across three different page
+  roots. The bar's contents were always the variable.
+
+  `1fr` alone would NOT have fixed it — a `fr` track still floors at the item's
+  automatic minimum. `minmax(0, 1fr)` is what states the floor is zero, which
+  is what lets the column be the container and hands the overflow to the bar,
+  where the next rule deals with it.
+*/
 .shell {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: var(--topbar-h) 1fr;
   height: 100dvh;
 }
@@ -573,12 +663,60 @@ body {
   color: var(--acc);
 }
 /* The nav is one flex item holding the tabs, so it can be a landmark without
-   the tabs losing the spacing they had when they were bare children. */
+   the tabs losing the spacing they had when they were bare children.
+
+   IT IS ALSO WHERE THE BAR'S OVERFLOW GOES, now that the shell no longer
+   widens the app to fit it. Something in the bar has to yield below ~907px and
+   the nav is the only honest candidate: the brand names the product, and the
+   right-hand cluster is the API state and the feed — the two controls an
+   operator reaches for when a page looks wrong, so neither may drift off the
+   edge. Eight tabs, on the other hand, are a list, and a list can scroll.
+
+   `min-width: 0` alone only let the nav SHRINK; the tabs are `nowrap`, so they
+   spilled out of it and sat under the status cluster, unclickable. The scroll
+   container is what makes the shrunk nav navigable rather than merely narrow.
+
+   `overflow-y: hidden` is required, not tidiness: declaring one axis makes the
+   other compute to `auto`, and the active tab's underline sits at
+   `bottom: -1px`, so 1px of vertical overflow would have raised a second
+   scrollbar inside a 46px bar. `align-self: stretch` gives the nav the bar's
+   full height so that underline stays inside the box the axis now clips. */
 .topbar nav {
   display: flex;
   align-items: center;
   gap: var(--s1);
   min-width: 0;
+  align-self: stretch;
+  overflow-x: auto;
+  overflow-y: hidden;
+  /* ROOM FOR THE FOCUS RING, AT BOTH ENDS OF THE SCROLL.
+
+     `:focus-visible` draws `2px` of outline at `2px` of offset, so the ring
+     stands 4px outside the tab on every side. A scroll container clips at its
+     PADDING box, and a browser scrolls a focused child FLUSH to that edge — so
+     three of the eight tabs (`Markets` at rest, `Mapping` and `Logs` once
+     tabbed to) had the ring sliced off. Measured, not predicted.
+
+     A keyboard user who cannot see where focus landed has no way back, which
+     is WCAG 2.4.11 and the same class of defect as a control that scrolled off
+     the edge. Vertically there was nothing to fix: `align-self: stretch` above
+     leaves 3.1px of clearance top and bottom, so `overflow-y: hidden` never
+     touches the ring.
+
+     `padding-inline` is what puts the room INSIDE the clip box; `margin-inline`
+     takes the same amount back out of the flex layout so the tabs do not move;
+     and `scroll-padding-inline` is what stops `scrollIntoView` from parking a
+     tab against the edge and undoing the other two. All three, or none.
+
+     6px AND NOT 4px. Four is what the ring actually measures, and four put its
+     outer edge EXACTLY on the clip boundary -- 0.0px of margin at the head of
+     the scroll and 0.1px at the tail, measured. That is not a pass, it is a
+     coin toss against subpixel rounding on a fractional-DPR display. Six
+     leaves 2px of real slack and costs nothing, because the negative margin
+     hands the same 2px straight back to the layout. */
+  padding-inline: 6px;
+  margin-inline: -6px;
+  scroll-padding-inline: 6px;
 }
 .tab {
   position: relative;
@@ -1074,6 +1212,16 @@ button.status.bad:hover {
   background: var(--acc-soft);
   color: var(--ink);
 }
+/* THE ELAPSED CLOCK FOLLOWS THE STRIP IT SITS IN. `.status .ms` is `--faint`,
+   which is right on the bar's own `--bg-2` and wrong the moment `.busy` puts
+   `--acc-soft` behind it: measured in dark, `--faint` `#828da4` on the
+   composited `#13303c` is 4.153:1 — under the floor, and this strip is only on
+   screen WHILE A PULL IS RUNNING, which is precisely when the clock is being
+   read. `--ink-2` measures 7.328 there. Light already cleared at 4.763 and
+   improves too, so one rule serves both themes. */
+.status.busy .ms {
+  color: var(--ink-2);
+}
 .dot {
   width: 7px;
   height: 7px;
@@ -1194,10 +1342,33 @@ button.status.bad:hover {
   color: var(--ink);
   border-color: var(--acc);
 }
+/* THE COUNT IS QUIETER BY WEIGHT, NOT BY OPACITY.
+
+   `opacity: 0.55` composites the ink toward whatever sits behind it, and at
+   11.5px the result is not quiet, it is unreadable. Measured in DARK: `--dim`
+   `#8a95ab` at 0.55 over `--bg-2` `#11151f` renders `#545b6c` — 2.685:1,
+   under even the 3:1 floor that only large text may use. LIGHT fails the same
+   way for the same reason. Seven of these sit on `/audit`'s filter tabs, and
+   an opacity-composited colour is invisible to a contrast scan that reads
+   `color` alone, which is why this outlived the sweep that fixed the rest.
+
+   Same lesson as `--line-hard`: there is no legible step below `--faint`, so
+   "quieter" has to be said with weight, never with a contrast level that
+   fails. The tab is 650 and the count drops to 500 — a visible hierarchy at
+   full legibility.
+
+   RE-QUIETED PER STATE, NOT PINNED: `.utab:hover` and `[aria-pressed]` both
+   raise the tab to `--ink`, so the count follows with `--ink-2` rather than
+   holding one tone against three different grounds. */
 .utab .n {
-  opacity: 0.55;
+  color: var(--faint);
+  font-weight: 500;
   margin-left: 5px;
   font-variant-numeric: tabular-nums;
+}
+.utab:hover .n,
+.utab[aria-pressed='true'] .n {
+  color: var(--ink-2);
 }
 
 .vrow .tag,

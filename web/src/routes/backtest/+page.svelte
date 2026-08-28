@@ -66,7 +66,7 @@
    *
    * # O(1)
    *
-   * The filter is a prefix probe into a Map built once per payload — the same
+   * The filter is an infix probe into a Map built once per payload — the same
    * technique `/db` and `web/typeahead.js` use — never a scan of the ledger and
    * never a request per character. Rows are windowed: only the visible slice is
    * in the DOM, inside a spacer of the exact total height, so the scrollbar is
@@ -98,7 +98,7 @@
   import Picker from '$lib/Picker.svelte';
   import { monthLabel } from '$lib/dates.js';
   import { rupee, group, exact } from '$lib/money.js';
-  import * as prefix from '$lib/prefix.js';
+  import * as find from '$lib/find.js';
   import { sweepOutcome, ledgerBlock } from '$lib/sweep.js';
   /* THE FEED'S OWN MASTER, ALREADY ON HAND. `+layout.svelte` calls
      `loadCatalogue(feeds.active)` on every feed change, so resolving a
@@ -506,8 +506,27 @@
      that hides a fact. ------------------------------------------------ */
   let everyFeed = $state(false);
   const activeFeed = $derived(feeds.active ?? '');
+  /* `!activeFeed` NO LONGER MEANS "SHOW EVERYTHING" -- that was a fallback
+     that hid a fact, which is the exact thing the paragraph above forbids.
+
+     It was unreachable when written: `feeds.active` could not be null once
+     `/feeds.json` answered, because every writer in the tree assigned a
+     concrete wire. It is reachable NOW -- `+layout.svelte` lets the operator
+     clear the feed by choosing the chosen one again -- and the moment it was,
+     this line began mixing every vendor's runs into one table.
+
+     Silently, and doubly so. `hiddenByFeed` became `allRuns.length -
+     runs.length` = 0, which suppresses the "recorded under another feed" note;
+     and `everyFeed` was false, which suppresses the "Showing every feed" note.
+     Both escape hatches closed over a table holding four vendors' records
+     under one heading -- while the run bar three inches above it read "choose
+     a feed first". The two halves of the page disagreed about whether a feed
+     was selected, and only one of them was right.
+
+     No feed now yields NO rows, and the empty-state branch below names the
+     reason and offers the same way out. */
   const runs = $derived(
-    everyFeed || !activeFeed ? allRuns : allRuns.filter((r) => r.feed === activeFeed)
+    everyFeed ? allRuns : activeFeed ? allRuns.filter((r) => r.feed === activeFeed) : []
   );
   const hiddenByFeed = $derived(allRuns.length - runs.length);
 
@@ -1210,15 +1229,36 @@
    * so typing `bank`, `zer` or `15m` all narrow. Built once per payload,
    * probed per keystroke — never a scan, never a request per character.
    */
-  const searchable = $derived(
-    runs.map((r) => ({ ...r, id: `${r.underlying} ${r.feed} ${r.timeframe}`.toLowerCase() }))
+  /* `$lib/find.js` AND NOT `$lib/prefix.js`, BECAUSE THIS FILTER WAS DEAD.
+     `prefix.build` keys on `row.symbol` and SKIPS any row without one
+     (`prefix.js:42-43`). A `Run` has `underlying`, `feed`, `timeframe` and
+     `index` — never `symbol` — so the Map was built EMPTY and
+     `prefix.probe` returned `[]` for every query. Reproduced against this
+     exact shape: index size 0; `n`, `nifty`, `bank`, `zer`, `15m` all 0 rows.
+     Typing anything printed "Nothing matches …" forever, and the header three
+     paragraphs up called it "a prefix probe into a Map built once per payload"
+     — the Map existed and held nothing.
+
+     A second, independent break sat on the same two lines: this lower-cased
+     the query while `prefix.probe` upper-cases it, against an `id` that was
+     also lower-cased. Even with the field renamed the two cases never met.
+
+     Renaming the field would not have been enough anyway. The behaviour
+     promised above is INFIX — `zer` is not a prefix of `NIFTY zerodha 30min` —
+     and `prefix.js` cannot serve that at any key. `find.js` is the module that
+     does, takes an explicit key accessor (its own header names this exact
+     "the census spells it `sym`, the master spells it `symbol`" trap), and
+     upper-cases both sides itself. Verified against this shape: `bank`, `zer`,
+     `15m` and `30` each narrow to one row, `xyz` to none, empty to all.
+
+     The `searchable` spread goes with it — an O(rows x fields) copy per
+     payload that existed only to carry the `id` this now derives on the fly.
+     `find.probe` groups by key rather than preserving input order, which costs
+     nothing here: `sorted` re-sorts `[...matched]` immediately below. */
+  const byPrefix = $derived(
+    find.build(runs, (r) => `${r.underlying} ${r.feed} ${r.timeframe}`)
   );
-  const byPrefix = $derived(prefix.build(searchable));
-  const matched = $derived.by(() => {
-    const typed = query.trim().toLowerCase();
-    if (!typed) return searchable;
-    return prefix.probe(byPrefix, searchable, typed);
-  });
+  const matched = $derived(find.probe(byPrefix, runs, query));
 
   /* ====================================================================
      SORTING
@@ -1282,8 +1322,23 @@
     const rows = [...matched];
     const { col, desc } = sort;
     rows.sort((a, b) => {
-      const av = a[col];
-      const bv = b[col];
+      /* THE COLUMN IS A RUNTIME STRING, SO THE INDEX IS SPELLED AS ONE.
+         `col` comes from `sortBy`, which the header buttons call with a
+         `COLUMNS` key — it cannot be narrowed to `keyof Run` from here. This
+         read as untyped while `matched` was the `searchable` spread; dropping
+         that spread (see the filter above) put real `Run` objects in and made
+         the dynamic index visible to the checker. The cast states what was
+         already true rather than widening anything: `sort.col` is only ever
+         set from `COLUMNS`, and every branch below tests the VALUE's type
+         before comparing it. */
+      const rec = /** @type {Record<string, unknown>} */ (
+        /** @type {unknown} */ (a)
+      );
+      const rec2 = /** @type {Record<string, unknown>} */ (
+        /** @type {unknown} */ (b)
+      );
+      const av = /** @type {any} */ (rec[col]);
+      const bv = /** @type {any} */ (rec2[col]);
       let d;
       if (typeof av === 'string') d = av.localeCompare(bv);
       else if (typeof av === 'boolean') d = Number(av) - Number(bv);
@@ -2818,6 +2873,85 @@
   <div class="bt-shell">
   <section class="runbar">
     <span class="runbar-k">New sweep</span>
+    <!-- ══ THE FEED, FIRST, AND ON THIS PAGE RATHER THAN IN THE TOP BAR ══
+
+         `+layout.svelte`'s `FEED_OWNED` states the protocol: exactly one
+         control for one value on every route, and a route joins that list ON
+         THE DAY IT GROWS A CONTROL OF ITS OWN. This is that control, so
+         `/backtest` joins the list in the same commit — drawing it here while
+         the bar still drew it too would be the two-controls-for-one-value
+         defect the comment names, which is worse than none.
+
+         FIRST, because it is first in the cascade and not merely first in the
+         layout. A run's identity is `blake3(mask ‖ direction ‖ instrument ‖
+         timeframe ‖ params ‖ data_digest ‖ vocab_version ‖ commit)`, and the
+         feed decides the bars every one of those terms is measured over: the
+         instruments below are whichever ones this feed's store holds, and the
+         ledger is filtered to runs stamped with it. Reading the strip left to
+         right now follows the order the answers actually depend on each other,
+         which is what /ingest and /db already do.
+
+         IT MEETS THE CONDITION FOR JOINING. `/db` qualified because it draws
+         its rung in every state — the failed read, the unchosen feed, the
+         empty store — and a control that vanishes with its data is the dead
+         end the list exists to prevent. `.bt-shell` is an unconditional child
+         of `.page` with no branch between, so this renders on the loading, the
+         failed, the refusal, the no-feed, the empty-ledger and the ready
+         state alike.
+
+         `single`, and the same `Picker` /db and /ingest use — the feed is a
+         SELECTION, exactly one, never a set. `detail` carries the fact THIS
+         page owns: how many runs the ledger holds under each feed, the way
+         /db's rung carries held cells. A refused feed is drawn, dead, and
+         quotes `/feeds.json`'s own reason rather than paraphrasing it. ══ -->
+    <div class="runf">
+      <span>feed</span>
+      <Picker
+        single
+        filter={feeds.all.length > 8}
+        label="feeds"
+        title={`Every run below is this feed's. A sweep is stamped with the feed its bars came from, so changing this changes which runs the ledger shows and which instruments the sweep can be built over — it is not a different view of one set.${feeds.error ? ` The feed list itself could not be read: ${feeds.error}.` : ''}`}
+        summary={feeds.error
+          ? 'Feed list unread'
+          : feeds.all.length === 0
+            ? 'No feeds'
+            : (feeds.all.find((f) => f.wire === feeds.active)?.display ?? 'Select a feed')}
+        rows={feeds.all.map((f) => {
+          const ready = f.ready === true;
+          /* COUNTED OFF THE LEDGER THIS PAGE ALREADY HOLDS — `allRuns` is the
+             whole file before the feed filter, so this is a measurement and
+             not a second request. Zero runs is a measured zero and says so. */
+          const held = allRuns.filter((r) => r.feed === f.wire).length;
+          return {
+            key: f.wire,
+            name: f.display,
+            detail: !ready
+              ? 'unavailable'
+              : load.phase !== 'ready'
+                ? 'ledger not read'
+                : `${exact(held)} run${held === 1 ? '' : 's'}`,
+            disabled: !ready,
+            why: ready
+              ? undefined
+              : (f.why ??
+                'the server marked this feed not ready and stated no reason, which is itself the thing to fix.'),
+            title: ready
+              ? `Scopes this page to ${f.display}. The ledger shows the runs stamped with it, and a new sweep is built over the instruments its store holds.`
+              : `${f.display} is refused by the server, and this is /feeds.json's own reason rather than a paraphrase of it: ${f.why ?? 'no reason stated.'}`
+          };
+        })}
+        selected={new Set([feeds.active])}
+        onchange={(/** @type {Set<string>} */ sel) => {
+          /* `if (next)` AND NOT AN UNGUARDED WRITE: `Picker` in `single` mode
+             always emits exactly one key, so an empty set cannot arrive here —
+             but writing `feeds.active = undefined` if it ever did would clear
+             the scope for the whole product from a control that never meant
+             to. Clearing the feed is the top bar's job, deliberately. */
+          const next = [...sel][0];
+          if (next) feeds.active = next;
+        }}
+      />
+    </div>
     <!-- A PICKER, NOT A FREE-TEXT BOX. The set of instruments is a fact the
          census already states; typing one lets an operator name something the
          store does not hold and learn about it from a refusal a minute later.
@@ -3223,7 +3357,7 @@
          SUMMARY — the four facts before any detail
          ============================================================== -->
     <section class="bt-strip">
-      <div class="fact">
+      <div class="fact rise">
         <span class="k">Runs recorded</span>
         <span class="v">{exact(ledger.total)}</span>
         <span class="n">
@@ -3234,7 +3368,7 @@
           {/if}
         </span>
       </div>
-      <div class="fact" class:good={completeRuns.length > 0}>
+      <div class="fact rise" class:good={completeRuns.length > 0}>
         <span class="k">Complete</span>
         <span class="v">{exact(completeRuns.length)}</span>
         <span class="n">
@@ -3245,7 +3379,7 @@
           {/if}
         </span>
       </div>
-      <div class="fact" class:warn={haltedRuns.length > 0} class:nil={haltedRuns.length === 0}>
+      <div class="fact rise" class:warn={haltedRuns.length > 0} class:nil={haltedRuns.length === 0}>
         <span class="k">Halted</span>
         <span class="v">{exact(haltedRuns.length)}</span>
         <span class="n">
@@ -3254,7 +3388,7 @@
             : 'excluded from ranking — depth is partial'}
         </span>
       </div>
-      <div class="fact" class:warn={holedRuns.length > 0} class:nil={holedRuns.length === 0}>
+      <div class="fact rise" class:warn={holedRuns.length > 0} class:nil={holedRuns.length === 0}>
         <span class="k">Span holes</span>
         <span class="v">{exact(holedRuns.length)}</span>
         <span class="n">
@@ -3268,7 +3402,7 @@
            populate. It appears when the ledger holds one and says what it
            means, and is absent otherwise. -->
       {#if offSurfaceRuns.length > 0}
-        <div class="fact warn">
+        <div class="fact warn rise">
           <span class="k">Not swept</span>
           <span class="v">{exact(offSurfaceRuns.length)}</span>
           <span class="n">
@@ -3286,16 +3420,35 @@
       </p>
     {/if}
 
-    {#if hiddenByFeed > 0}
+    <!-- THE NO-FEED ARM COMES FIRST, because "under another feed" is the wrong
+         sentence when there is no feed to be other than. Before this arm
+         existed the state produced NO note at all — see the comment on `runs`
+         — so the table simply widened to every vendor in silence. -->
+    {#if !activeFeed && !everyFeed}
+      <p class="inline-note">
+        No feed is chosen, so nothing is scoped to one and no run is shown.
+        {exact(allRuns.length)}
+        {allRuns.length === 1 ? 'run is' : 'runs are'} recorded across every feed. Choose a feed in
+        the top bar, or
+        <button class="linky" onclick={() => (everyFeed = true)}>show every feed</button>.
+      </p>
+    {:else if hiddenByFeed > 0}
       <p class="inline-note">
         {exact(hiddenByFeed)}
         {hiddenByFeed === 1 ? 'run is' : 'runs are'} recorded under another feed and not shown.
         <button class="linky" onclick={() => (everyFeed = true)}>Show every feed</button>
       </p>
-    {:else if everyFeed && activeFeed}
+    {:else if everyFeed}
       <p class="inline-note">
         Showing every feed.
-        <button class="linky" onclick={() => (everyFeed = false)}>Back to {activeFeed}</button>
+        <!-- THE BUTTON NEEDS A FEED TO NAME. Dropping the old `&& activeFeed`
+             from this arm rendered the label as "Back to " with nothing after
+             it — a button offering to return somewhere it could not name. -->
+        {#if activeFeed}
+          <button class="linky" onclick={() => (everyFeed = false)}>Back to {activeFeed}</button>
+        {:else}
+          No feed is chosen, so there is none to narrow back to — pick one in the top bar.
+        {/if}
       </p>
     {/if}
 
@@ -3344,9 +3497,26 @@
             <p class="path"><span class="bt-lab">file</span> <code>{ledger.path}</code></p>
           {/if}
         </div>
+      <!-- NO FEED IS NOT "NO RUNS UNDER THIS FEED". Without this arm the panel
+           below rendered its heading as "No runs under this feed" and its body
+           as "none of them recorded against <b></b>" — an empty bold where a
+           vendor name belongs, directly contradicting the note above it, which
+           had just said no feed was chosen at all. The filter did not empty
+           this table; the absence of a filter did. -->
+      {:else if !activeFeed}
+        <div class="panel bt-note">
+          <h2>No feed is chosen</h2>
+          <p>
+            The ledger holds {exact(allRuns.length)}
+            {allRuns.length === 1 ? 'run' : 'runs'} across every feed. A sweep is stamped with the
+            feed its bars came from, so these are not one set seen differently — choose a feed in
+            the top bar to see its own, or show them all together.
+          </p>
+          <button class="btn" onclick={() => (everyFeed = true)}>Show every feed</button>
+        </div>
       {:else}
         <div class="panel bt-note">
-          <h2>No runs under {activeFeed || 'this feed'}</h2>
+          <h2>No runs under {activeFeed}</h2>
           <p>
             The ledger holds {exact(allRuns.length)}
             {allRuns.length === 1 ? 'run' : 'runs'}, none of them recorded against
@@ -3360,7 +3530,7 @@
       <!-- ============================================================
            LEVEL 1 — THE ANSWER
            ============================================================ -->
-      <section class="block">
+      <section class="block rise">
         <h2 class="bh">The answer</h2>
         {#if best}
           <div class="crown">
@@ -3421,7 +3591,7 @@
       <!-- ============================================================
            LEVEL 2 — NINE RUNGS SIDE BY SIDE
            ============================================================ -->
-      <section class="block">
+      <section class="block rise">
         <h2
           class="bh"
           title="One row per comparable span — same feed, instrument, window and support ratio. Bars share one scale within a row, so height is comparable across rungs. A rung never swept for a span is absent rather than zero."
@@ -3541,7 +3711,7 @@
       <!-- ============================================================
            LEVEL 0 — THE LEDGER
            ============================================================ -->
-      <section class="block">
+      <section class="block rise">
         <div class="bh-row">
           <h2 class="bh">The ledger</h2>
           <input
@@ -3556,7 +3726,7 @@
 
         {#if sorted.length === 0}
           <p class="inline-note">
-            Nothing matches <b>{query}</b>. The filter is a prefix probe over instrument, feed and
+            Nothing matches <b>{query}</b>. The filter matches any part of the instrument, feed and
             rung — it does not search identities.
           </p>
         {:else}

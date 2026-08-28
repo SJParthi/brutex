@@ -516,7 +516,29 @@ function read(feed, generation) {
 export function syncStore(feed) {
   const generation = store.generation; // TRACKED — this is the shared clock
   wanted = feed ?? null;
-  if (!feed) return;
+  if (!feed) {
+    /* NO FEED NOW CLEARS, BECAUSE NULL STOPPED MEANING ONLY "NOT YET".
+       The parameter doc above is accurate for the case it was written for — a
+       page mounting before `/feeds.json` lands — and in that case there is
+       nothing to clear, so this is a no-op.
+
+       It is no longer the only case. The operator can now clear the feed
+       outright (`+layout.svelte`: choosing the chosen feed again), and this
+       function returned WITHOUT touching `store`, leaving the previous feed's
+       fold live — `state === 'ready'`, its rows, its counts, its `error`.
+       Pages that stamp their readings against `feeds.active` survived that;
+       three do not, and rendered the old feed's numbers under a heading
+       saying no feed was selected: `/db`'s `error`, `/audit`'s `payload`,
+       `/mapping`'s `load`. `read()` is the only other writer that clears, and
+       it is precisely what this branch skips.
+
+       Clearing at the one place all of them share beats stamping three pages
+       separately. `empty()` is the same unasked state the module starts in, so
+       "no feed" and "before the first feed" become one state — which is what
+       they actually are. */
+    clearValue();
+    return;
+  }
   read(feed, generation);
 }
 

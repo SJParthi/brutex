@@ -66,8 +66,17 @@
    * crosshair reads bars back out of a Map keyed on the timestamp rather than
    * off the chart, so no displayed number has been through a float.
    *
-   * KEY FORM EVERYWHERE A KEY IS USED. `YYYY-MM` in `{#each}` keys, Map keys,
+   * KEY FORM EVERYWHERE A KEY IS USED. `YYYY-MM` in each-block keys, Map keys,
    * comparisons and request parameters; `monthLabel()` only at a text node.
+   *
+   * (The block name is spelled in prose ON PURPOSE. Typed as a mustache it
+   * counts as a real each-block opening from inside this comment, and left
+   * this file at 16 opens against 15 closes. The same trap catches a tag name
+   * typed literally in angle brackets in a comment. Neither is theoretical --
+   * both were live here. Note this is NOT the cause of the unclosed-script
+   * error `svelte-check` reports against the last line of this file: that one
+   * predates these comments, survives every block balancing, and is still
+   * unexplained.)
    *
    * MONTHS FROM A LITERAL THREE-LETTER TABLE — `$lib/dates.js`. `Intl` under
    * `en-IN` emits `Sept`, four letters where the other eleven are three, and a
@@ -1235,7 +1244,21 @@
   <!-- ==================================================================
        THE HELM — the store address, as a control.
        ================================================================== -->
-  <div class="helm">
+  <!-- `rise` HERE AND ON THE THREE BAYS, AND NOWHERE ELSE ON THIS PAGE.
+       `theme.css` already owns the entrance: the class carries its own
+       `:nth-child` stagger, so the panels arrive in reading order for the cost
+       of one word each and no new keyframe. The helm is child 1 of `.mkt`; the
+       bays are children 1..3 of `.deck`. The helm's own KNOBS are pointedly
+       not given it -- a `<span class="sep">/</span>` sits between every pair,
+       so the count would step 0/120/240 and then fall off the six-child cap,
+       which is a stagger that looks like a stutter.
+
+       THE VIRTUAL LIST IS DELIBERATELY LEFT STILL. `.rrow` is recycled out of
+       `hits.slice(firstRow, ...)`, so `row-in` there would re-fire on every
+       scroll frame -- motion on a row that never arrived and only scrolled
+       into being. That is decoration, and the rule on this console is that
+       motion marks a fact that MOVED. -->
+  <div class="helm rise">
     <!-- THE FEED IS NOT CHOSEN HERE. It is chosen once, in the top bar, and
          this page writes it zero times. The knob carries the CURRENT VALUE so
          the address is legible, and says on its own face where the choice is
@@ -1476,7 +1499,7 @@
     <!-- ================================================================
          LEFT BAY — WHICH SERIES
          ================================================================ -->
-    <section class="bay bay-list" aria-label="Which instrument">
+    <section class="bay bay-list rise" aria-label="Which instrument">
       <div class="bayhead">
         <h2>Instruments</h2>
         <span class="rt">{feeds.active ? feedLabel(feeds.active) : ''}</span>
@@ -1805,7 +1828,7 @@
     <!-- ================================================================
          CENTRE BAY — WHAT IT LOOKS LIKE
          ================================================================ -->
-    <section class="bay bay-plot" aria-label="The series">
+    <section class="bay bay-plot rise" aria-label="The series">
       <div class="bayhead">
         <h2 class="ident">{picked ? picked.symbol : 'No instrument'}</h2>
         {#if picked}
@@ -2115,7 +2138,7 @@
     <!-- ================================================================
          RIGHT BAY — WHAT IS ON DISK
          ================================================================ -->
-    <aside class="bay bay-store" aria-label="What is on disk">
+    <aside class="bay bay-store rise" aria-label="What is on disk">
       <div class="bayhead">
         <h2>On disk</h2>
         <span class="rt">{censusState === 'ready' && feeds.active ? feedLabel(feeds.active) : ''}</span>
@@ -2194,7 +2217,25 @@
           {/if}
 
           <!-- ---- the tally. Three number states, never one glyph for two. -->
-          <dl class="tally">
+          <!-- RE-ENTRY, AND POINTEDLY NOT `flash-up`. Every figure below is
+               replaced wholesale when a different series is picked, and that
+               is worth marking: six numbers changing silently in the corner of
+               the eye is how an operator ends up reading the last series'
+               totals. But the tick flash is SEMANTIC on this console -- green
+               means the value went UP. Nothing went up here; a different
+               question was asked. So the panel re-enters and stays colourless,
+               and `flash-up`/`flash-down` are left for a figure that genuinely
+               moved against its own previous value.
+
+               A keyed block is the retrigger the keyframe's own comment
+               prescribes -- named in prose here, not typed as a mustache, for
+               the reason set out in the script header.
+
+               Keyed on `picked?.key` and not on the numbers, so re-reading the
+               census for the SAME series does not blink a panel that did not
+               change. The tally holds no state, so tearing it down is free. -->
+          {#key picked?.key}
+          <dl class="tally fade-in">
             <div><dt>Bars on disk</dt><dd>{@render barCell(barState(picked))}</dd></div>
             <div>
               <dt>Month files</dt>
@@ -2243,6 +2284,7 @@
               </dd>
             </div>
           </dl>
+          {/key}
 
           <!-- ---- THE PARTITION. Buckets on screen add to a total on screen,
                and when they do not the page says MISMATCH rather than picking
@@ -2456,7 +2498,7 @@
   }
   .knob > b :global(em) {
     font-style: normal;
-    color: var(--line-hard);
+    color: var(--faint);
     letter-spacing: 0;
     text-transform: none;
     font-weight: var(--w-mid);
@@ -2493,7 +2535,7 @@
   }
   .face i {
     font-style: normal;
-    color: var(--line-hard);
+    color: var(--faint);
     font-size: var(--fs-micro);
     transform: translateY(1px);
   }
@@ -2526,7 +2568,7 @@
   .sep {
     display: flex;
     align-items: center;
-    color: var(--line-hard);
+    color: var(--faint);
     font-family: var(--mono);
     font-size: var(--fs-md);
     padding: 0 var(--s1);
@@ -2557,7 +2599,7 @@
     color: var(--down);
   }
   .stamp span.off {
-    color: var(--line-hard);
+    color: var(--faint);
   }
 
   /* ---- .tray — what a knob opens. Its search box is a real box. ---- */
@@ -2606,7 +2648,7 @@
     box-shadow: 0 0 0 3px var(--acc-soft);
   }
   .sift input::placeholder {
-    color: var(--line-hard);
+    color: var(--faint);
     font-weight: 400;
     font-family: var(--sans);
     font-size: var(--fs-md);
@@ -2614,7 +2656,7 @@
   .sift .hint {
     padding: 7px var(--s2) 0;
     font-size: var(--fs-xs);
-    color: var(--line-hard);
+    color: var(--faint);
   }
   .trow {
     display: flex;
@@ -2671,7 +2713,7 @@
   .traynote {
     padding: var(--s4) 11px;
     font-size: var(--fs-xs);
-    color: var(--line-hard);
+    color: var(--faint);
     line-height: 1.45;
   }
   .traynote b {
@@ -2798,7 +2840,7 @@
   }
   .bayhead .rt {
     font-size: var(--fs-xs);
-    color: var(--line-hard);
+    color: var(--faint);
     font-family: var(--mono);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -2843,7 +2885,7 @@
   .sbox input::placeholder {
     font-family: var(--sans);
     font-weight: var(--w-mid);
-    color: var(--line-hard);
+    color: var(--faint);
   }
 
   .facet {
@@ -3032,7 +3074,7 @@
   }
   .rrow .sg {
     font-size: var(--fs-mini);
-    color: var(--line-hard);
+    color: var(--faint);
     font-family: var(--mono);
   }
   .rrow .bl {
@@ -3055,7 +3097,7 @@
     font-family: var(--mono);
   }
   .rfoot .sum.off {
-    color: var(--line-hard);
+    color: var(--faint);
   }
   .rfoot .sum.amber {
     color: var(--warn);
@@ -3063,7 +3105,7 @@
   .rfoot .lg {
     margin-left: auto;
     font-size: var(--fs-mini);
-    color: var(--line-hard);
+    color: var(--faint);
   }
 
   /* ---- the shape every refusal takes, in any bay ---- */
@@ -3179,7 +3221,7 @@
   }
   .quote .rf {
     font-size: var(--fs-mini);
-    color: var(--line-hard);
+    color: var(--faint);
     text-transform: uppercase;
     letter-spacing: var(--track-caps);
   }
@@ -3219,7 +3261,7 @@
   }
   .reading .seg u {
     text-decoration: none;
-    color: var(--line-hard);
+    color: var(--faint);
     font-size: var(--fs-micro);
     letter-spacing: var(--track-caps);
     text-transform: uppercase;
@@ -3227,7 +3269,7 @@
     font-family: var(--sans);
   }
   .reading .arrow {
-    color: var(--line-hard);
+    color: var(--faint);
   }
   .reading .seg.bad {
     color: var(--down);
@@ -3271,7 +3313,7 @@
     font-size: var(--fs-micro);
     letter-spacing: var(--track-caps);
     text-transform: uppercase;
-    color: var(--line-hard);
+    color: var(--faint);
     font-weight: var(--w-bold);
   }
   .pair b {
@@ -3333,7 +3375,7 @@
   }
   .span .gone {
     font-size: var(--fs-xs);
-    color: var(--line-hard);
+    color: var(--faint);
   }
   .spangap {
     flex: 1;
@@ -3466,7 +3508,7 @@
   .credit {
     padding: 5px var(--s5);
     font-size: var(--fs-mini);
-    color: var(--line-hard);
+    color: var(--faint);
     border-top: 1px solid var(--line-soft);
     flex: none;
   }
@@ -3510,7 +3552,7 @@
     font-size: var(--fs-micro);
     letter-spacing: var(--track-caps);
     text-transform: uppercase;
-    color: var(--line-hard);
+    color: var(--faint);
     font-weight: var(--w-bold);
     margin-right: var(--s1);
   }
@@ -3625,7 +3667,7 @@
   }
   .stackhead span {
     font-size: var(--fs-mini);
-    color: var(--line-hard);
+    color: var(--faint);
     font-family: var(--mono);
   }
   .stack {
@@ -3661,7 +3703,7 @@
   }
   .step .mo[aria-disabled='true'],
   .step .mo[aria-disabled='true']:hover {
-    color: var(--line-hard);
+    color: var(--faint);
     cursor: not-allowed;
   }
   .step .mo.bad {
@@ -3726,7 +3768,7 @@
     font-size: var(--fs-micro);
     letter-spacing: var(--track-caps);
     text-transform: uppercase;
-    color: var(--line-hard);
+    color: var(--faint);
     font-weight: var(--w-bold);
     flex: 0 0 auto;
   }
@@ -3756,7 +3798,7 @@
   .railnote {
     padding: var(--s5) var(--s5) var(--s6);
     font-size: var(--fs-xs);
-    color: var(--line-hard);
+    color: var(--faint);
     line-height: 1.5;
   }
   .railnote b {
@@ -3771,7 +3813,7 @@
     font-weight: var(--w-semi);
   }
   .n0 {
-    color: var(--line-hard);
+    color: var(--faint);
     font-weight: var(--w-semi);
   }
   .nq {
@@ -3786,7 +3828,7 @@
   /* NOT AMBER: nothing is wrong yet, the read simply has not answered. */
   .nw {
     font-size: var(--fs-xs);
-    color: var(--line-hard);
+    color: var(--faint);
     cursor: help;
   }
 

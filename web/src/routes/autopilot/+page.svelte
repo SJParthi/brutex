@@ -1923,7 +1923,7 @@
              THE WATCH BAY — what is happening right now, and the partition
              that makes a full meter over outstanding work impossible to draw.
              ========================================================== -->
-        <section class="bay">
+        <section class="bay rise">
           <div class="bay-h">
             <span class="bay-t">Right now</span>
             {#if ap?.state === 'running' && ap.now}
@@ -2029,7 +2029,7 @@
              per month: a later month written first permanently blocks the
              earlier days inside that file.
              ========================================================== -->
-        <section class="bay">
+        <section class="bay rise">
           <div class="bay-h">
             <span class="bay-t">Coverage — oldest first</span>
             {#if ap?.target}
@@ -2218,7 +2218,7 @@
         <!-- ==========================================================
              THE SNAG BAY — what is stuck. A failure is never a count alone.
              ========================================================== -->
-        <section class="bay">
+        <section class="bay rise">
           <div class="bay-h">
             <span class="bay-t">What is stuck</span>
             {#if ap}
@@ -2297,7 +2297,7 @@
              this page, and by nothing else. This is the panel the owner reads
              when he comes back.
              ========================================================== -->
-        <section class="bay">
+        <section class="bay rise">
           <div class="bay-h">
             <span class="bay-t">While you were away</span>
             <span class="chip" title="How long this tab has been watching.">{clock(now - watchAt) ?? '00:00'}</span>
@@ -2891,7 +2891,7 @@
     background: linear-gradient(90deg, var(--acc-soft), transparent 70%);
   }
   .rung.void .rung-n {
-    color: var(--line-hard);
+    color: var(--faint);
   }
   .rung-m {
     font-family: var(--mono);
@@ -2954,7 +2954,7 @@
     text-overflow: ellipsis;
   }
   .rung-x {
-    color: var(--line-hard);
+    color: var(--faint);
     font-size: var(--fs-xs);
     text-align: center;
   }
@@ -3083,7 +3083,7 @@
     font-size: 9px;
     letter-spacing: 0.14em;
     text-transform: uppercase;
-    color: var(--line-hard);
+    color: var(--faint);
     font-weight: var(--w-heavy);
     background: var(--panel-2);
     border-bottom: 1px solid var(--line-soft);

@@ -4014,18 +4014,49 @@
   let factFlash = $state(new Map());
   /** @type {Map<string, number>} */
   const factSeen = new Map();
+  /** Whether `factSeen` yet holds a REAL reading. See the effect below. */
+  let factSeeded = false;
+  /* THREE FAULTS, AND THE PARAGRAPH ABOVE DESCRIBED A BEHAVIOUR THIS NEVER HAD.
+     It claims "`null` ON THE FIRST PASS, so arriving at the page is not a
+     change". The first pass is not the first READING — it is MOUNT, when
+     `coverBand` is still its empty default, so `factSeen` was seeded with 0
+     rather than left unset. The census then landed and `0 -> 6,23,498` counted
+     as a change: both hero figures flashed GREEN on every single arrival.
+
+     It repeated on every feed switch, and always green in BOTH directions.
+     `rows` collapses to `[]` the moment the selection moves, so a change of
+     feed runs `N -> 0 -> M` and the last leg is upward whichever way the store
+     actually went. `forgetPreviousFeed` clears `prev`, `barsBefore`, `flash`
+     and `moved` — it never knew about `factSeen`, and now does.
+
+     And it fired on TYPING. The effect read `coverBand` reactively, so
+     narrowing the filter changed both numbers and lit them as though the store
+     had moved. The sibling effect below fixed precisely this and says so —
+     "Typing in the filter changes all six numbers and flashes none of them" —
+     by depending on `fetchedAt` alone and reading every figure under
+     `untrack`. This now does the same.
+
+     `fetchedAt` is already stamped against the live feed
+     (`store.lastOk.feed === feeds.active`) and is 0 when there is no good
+     reading for it, so it is both the correct dependency and the correct
+     guard: no reading, no comparison, no flash. */
   $effect(() => {
-    const now = new Map([
-      ['bars', coverBand.bars],
-      ['months', coverBand.months]
-    ]);
+    const at = fetchedAt;
+    if (!at) return;
     /** @type {Map<string, 'up' | 'down'>} */
     const lit = new Map();
-    for (const [k, v] of now) {
-      const was = factSeen.get(k);
-      if (was !== undefined && was !== v) lit.set(k, v > was ? 'up' : 'down');
-      factSeen.set(k, v);
-    }
+    untrack(() => {
+      const now = new Map([
+        ['bars', coverBand.bars],
+        ['months', coverBand.months]
+      ]);
+      for (const [k, v] of now) {
+        const was = factSeen.get(k);
+        if (factSeeded && was !== undefined && was !== v) lit.set(k, v > was ? 'up' : 'down');
+        factSeen.set(k, v);
+      }
+      factSeeded = true;
+    });
     if (lit.size === 0) return;
     factFlash = lit;
     /* CLEARED SO IT CAN FIRE AGAIN. An animation class that stays on never
@@ -5247,7 +5278,18 @@
         expiry ||
         side ||
         strikePick.size ||
-        mnyPick.size
+        mnyPick.size ||
+        /* THE DAY WINDOW COUNTS AS A FILTER, and it was the only live one
+           missing from this list. `month`, `holesOnly`, `fromMonth` and
+           `toMonth` are all documented dead; `fromDay`/`toDay` are the two the
+           operator can actually move, and `barWindowed` really does narrow on
+           them. Left out, a reader who had cut the window to one week saw no
+           "filtered" state and no Reset button — the page said nothing was
+           narrowing while a week's worth of rows was all it would show.
+           Compared against the seeded span, not against empty: the fields open
+           populated at the store's own floor and ceiling, so "set" is not
+           "narrowed" — only a value that differs from the full span is. */
+        (Boolean(spanCeil) && (fromDay !== spanFloor || toDay !== spanCeil))
     )
   );
 
@@ -5646,6 +5688,12 @@
     barsSeeded = false;
     prev.clear();
     barsBefore.clear();
+    /* THE HERO FIGURES FORGET TOO. Omitting these two was why `bars held` and
+       `months covered` flashed on every feed change — and always green, since
+       `rows` empties between feeds so the last leg is always upward. Cleared
+       alongside `prev`, which is the same fact for the tiles. */
+    factSeen.clear();
+    factSeeded = false;
     for (const t of timers.values()) clearTimeout(t);
     timers.clear();
     clearTimeout(movedTimer);
@@ -6808,6 +6856,19 @@
     timeframe = '';
     fromMonth = '';
     toMonth = '';
+    /* THE DAY WINDOW, WHICH THIS BUTTON USED TO LEAVE BEHIND. The comment
+       above says "EVERY RUNG, OR THE BUTTON LIES", and these two were the only
+       live, operator-settable rung it skipped: `month`, `holesOnly`,
+       `fromMonth` and `toMonth` are all documented dead, while `fromDay` and
+       `toDay` genuinely narrow `barWindowed`. Narrow the window to a week,
+       press Reset all filters, and every other rung returned to its opening
+       value while the week silently stayed.
+       EMPTY AND NOT THE SPAN: the seeding effect's guard is exactly
+       `fromDay === '' && toDay === ''`, so clearing them re-arms it and the
+       store's own floor and ceiling come back on the next reading. Writing the
+       span here instead would duplicate that logic and drift from it. */
+    fromDay = '';
+    toDay = '';
     clearContract();
   }
 
@@ -7040,7 +7101,7 @@
          height it is given, and a column that will not shrink hands it the
          whole document instead.
          ================================================================== -->
-    <div class="board" bind:this={boardEl}>
+    <div class="board rise" bind:this={boardEl}>
 
     <!-- ==================================================================
          THE QUERY STRIP.
@@ -7065,7 +7126,7 @@
          is authored after the one that narrows it, so tab order follows the
          markup for free.
          ================================================================== -->
-    <section class="strip" aria-label="Query">
+    <section class="strip rise" aria-label="Query">
       <span class="lead">Query</span>
 
       <!-- THE FEED IS THE PAGE'S SCOPE AND IT IS CHOSEN HERE — the strip's
@@ -7591,7 +7652,7 @@
          181px of a 960px viewport (measured) to explain that there was nothing
          to configure. The sentence stays and says the same thing; only the
          panel around it stops behaving like a panel of rungs. -->
-    <section class="strip sub" class:bare={!contractRungs.expiry} aria-label="Contract">
+    <section class="strip sub rise" class:bare={!contractRungs.expiry} aria-label="Contract">
       <span class="lead">Contract</span>
       {#if !contractRungs.expiry}
         <span class="note quiet"
@@ -7828,7 +7889,7 @@
          many the store holds behind it. It is lifted OUT of the counted line
          rather than repeated in it.
          ================================================================== -->
-    <div class="anchor">
+    <div class="anchor rise">
       <h1
         class="sym"
         title={picked
@@ -8082,7 +8143,7 @@
          THE CENSUS TABLE. Windowed: only the visible slice exists in the DOM.
          ================================================================== -->
     {#if view === 'census'}
-    <div class="tbl">
+    <div class="tbl rise">
       <!-- The scroll region is FOCUSABLE ON PURPOSE and carries the row
            cursor. A keyboard operator has no other way to reach 20,516 rows —
            giving each row a tab stop is not navigation — so the box is the

@@ -211,7 +211,32 @@
 
   /** @param {string|null} feed */
   async function fetchJoin(feed) {
-    if (!feed) return;
+    if (!feed) {
+      /* NO FEED IS A STATE, NOT A REASON TO RETURN AND LEAVE THE LAST ONE UP.
+         This was a bare `return`, placed BEFORE the line below, so `load` kept
+         whatever it already held. That lied in two directions:
+
+         * From the opening `{ phase: 'loading' }`, arriving here with no feed
+           left "Asking the exchange list…" on screen permanently — no request
+           sent, and nothing that could ever resolve it. A spinner for a
+           question nobody asked is the shape `$lib/ask.js` exists to prevent
+           one layer down.
+         * After a feed HAD loaded, clearing it left `phase: 'ready'` with the
+           previous vendor's whole join rendered — every count, every row —
+           beneath a header reading "Every index symbol <feed> lists". The
+           attribution was then false and nothing on the page said so.
+
+         `failed` with a stated reason is the honest state: no request was
+         made, and the sentence names the control that decides it. It reuses
+         the refusal block that already exists rather than inventing a fourth
+         phase. */
+      load = {
+        phase: 'failed',
+        body: null,
+        why: 'No feed is chosen, so there is no master to join against. This join is per feed — choose one in the top bar and it runs.'
+      };
+      return;
+    }
     load = { phase: 'loading', body: null, why: '' };
     try {
       const response = await ask(`/indexmap.json?feed=${encodeURIComponent(feed)}`, {
@@ -363,27 +388,27 @@
     </div>
   {:else}
     <div class="census">
-      <div class="cell">
+      <div class="cell rise">
         <span class="n">{publishedCount}</span><span class="k">Published by NSE</span>
         <span class="s">Index names on the exchange's own list.</span>
       </div>
-      <div class="cell">
+      <div class="cell rise">
         <span class="n">{listed}</span><span class="k">Listed by feed</span>
         <span class="s">Index symbols in this feed's master.</span>
       </div>
-      <div class="cell p">
+      <div class="cell p rise">
         <span class="n">{verbatim}</span><span class="k">Confirmed</span>
         <span class="s">The symbol is the published name. Proof.</span>
       </div>
-      <div class="cell r">
+      <div class="cell r rise">
         <span class="n">{aliased}</span><span class="k">Renamed</span>
         <span class="s">This engine renamed it; the vendor's name is published.</span>
       </div>
-      <div class="cell i">
+      <div class="cell i rise">
         <span class="n">{abbreviated}</span><span class="k">Abbreviated</span>
         <span class="s">Shortens exactly one name. Inference.</span>
       </div>
-      <div class="cell x">
+      <div class="cell x rise">
         <span class="n">{refused}</span><span class="k">Refused</span>
         <span class="s">{resolved} of {listed} resolved. These did not.</span>
       </div>

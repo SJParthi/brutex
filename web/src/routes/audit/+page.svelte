@@ -1813,13 +1813,30 @@
     /* THE INK IS CHOSEN, NOT ASSUMED. A pale cell with white digits on it is a
        number nobody can read, which is what a fixed `--on-acc` gave for every
        month below half the busiest one. */
-    background: color-mix(in srgb, var(--acc) calc(var(--fill) * 72%), var(--well));
+    /* THE CEILING IS A THEME TOKEN, NOT 72% HARDCODED. Light and dark ramp in
+       opposite directions, so the value that keeps one ink legible differs per
+       theme — 72% in light, 50% in dark. The whole derivation, with the
+       measurements, is on `--heat-ceiling` in `theme.css`. */
+    background: color-mix(
+      in srgb,
+      var(--acc) calc(var(--fill) * var(--heat-ceiling)),
+      var(--well)
+    );
     color: var(--ink);
     border: 1px solid transparent;
   }
-  .cell.held.dense {
-    color: var(--on-acc);
-  }
+  /* THE WHITE-INK BRANCH IS GONE, BECAUSE IT COULD NEVER PASS AT ANY FILL.
+     The comment above got the principle right and the threshold wrong. The
+     background tops out at `--fill * 72%` of `--acc` over `--well`, so the
+     BUSIEST month in the grid -- `--fill: 1` -- still only reaches 73.6% of
+     the accent. Measured on the running page, that cell renders `#4b9eb1`,
+     and `--on-acc` white on it is 3.08:1 against the 4.5 these digits need.
+     Not "pale cells are the problem": every cell was, the densest included,
+     because the ceiling is 72% and no cell is ever darker than that.
+     `--ink` on that same densest cell measures 5.82:1, and on the palest it
+     is better still, so one ink covers the whole ramp. If a dark ink ever
+     stops working it will be because the ceiling was raised, and that is the
+     thing to check first. */
   .cell.held.filling {
     outline: 2px solid var(--up);
     outline-offset: -2px;

@@ -59,7 +59,36 @@ function fetched() {
     // ceiling, so the call sites spell it `ask`. Scanning for only the bare word
     // would report a clean list while covering nothing — which is precisely how
     // this list drifted four times.
-    for (const m of text.matchAll(/\b(?:fetch|ask)\(\s*[`'"](\/[^`'"?]*)/g)) {
+    //
+    // AND WHATEVER THE FILE RENAMED `ask` TO ON THE WAY IN. Two files import it
+    // under a local alias -- `import { ask as request }` in
+    // `ingest/+page.svelte` and `import { ask as ask_ }` in
+    // `backtest/+page.svelte` -- which put 15 of the tree's 28 call sites
+    // outside this scan entirely. `request(` matched nothing; `ask_(` failed
+    // because the old pattern required `ask` to be followed immediately by `(`.
+    //
+    // WHAT THE BLIND SPOT COST: this suite passed 145/145 while
+    // `/calendar.json`, `/vocab.json` and `/universes.json` were each called,
+    // each served, and each absent from ROUTES. `/calendar.json` is the
+    // expensive one -- under `npm run dev` the HTML fallback answers 200,
+    // `.json()` throws, the holiday table stays empty, and `/ingest` reverts to
+    // "weekday = session", so every shortfall figure on that page is computed
+    // against an invented calendar. Silently.
+    //
+    // A green suite from a scanner that cannot see half the call sites is worse
+    // than no suite: it is exactly the false assurance this file exists to
+    // prevent. So the alias is read out of the import and joined to the pattern.
+    const callees = new Set(['fetch', 'ask']);
+    for (const a of text.matchAll(/import\s*\{[^}]*\bask\s+as\s+([A-Za-z_$][\w$]*)/g)) {
+      callees.add(a[1]);
+    }
+    const names = [...callees].map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+    // `(?![\w$])` rather than a trailing `\b`: `\b` between `ask` and `_` does
+    // not exist, but the bare name still matched the alias's prefix and then
+    // failed on the `(`, so `ask_(` was invisible twice over.
+    for (const m of text.matchAll(
+      new RegExp(String.raw`\b(?:${names})(?![\w$])\s*\(\s*[\`'"](\/[^\`'"?]*)`, 'g')
+    )) {
       out.add({ path: m[1], file: file.slice(web.length + 1) }.path);
     }
   }
