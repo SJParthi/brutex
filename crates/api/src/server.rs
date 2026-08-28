@@ -12102,7 +12102,25 @@ pub fn store_html(
     // — with bars on disk and a manifest counting them. `/store.json` already
     // reads per request and answers 15,857 rows where this page answered none,
     // which is two surfaces disagreeing about the same question.
-    let entries = census::held_entries(&census::read_all(&site.store_root));
+    // ONE READING, USED FOR BOTH HALVES OF THE PAGE.
+    //
+    // The row LIST was read fresh here and the row COUNTS were then resolved
+    // against `site.censuses` — the snapshot taken once in `Site::load` and
+    // never again. So one page carried two answers about the same store, from
+    // two different moments.
+    //
+    // Measured on the operator's store, 2026-08-28: a server booted before its
+    // first pull answered `/store.json` naming ONE instrument while three sat
+    // on disk with 3.8 million bars between them. The rows came from disk; the
+    // counts came from a store that no longer existed. In the softer and worse
+    // form, a month whose bar count grew since boot renders the OLD count as a
+    // fact.
+    //
+    // `census_now` is the same call `/store.json` already makes per request —
+    // one manifest read, which `read_all` performs anyway to build `entries`.
+    // Taking both from it costs nothing and removes the disagreement by
+    // construction rather than by remembering to refresh two things. D-0352.
+    let (censuses, entries) = census_now(site);
 
     let (rows, total, last_page) = if held_only {
         let kept = census::filtered(&entries, &filter);
@@ -12110,12 +12128,7 @@ pub fn store_html(
         let last = total.saturating_sub(1) / PAGE_ROWS;
         let page = page.min(last);
         (
-            census::held_page(
-                &kept,
-                &site.censuses,
-                page.saturating_mul(PAGE_ROWS),
-                PAGE_ROWS,
-            ),
+            census::held_page(&kept, &censuses, page.saturating_mul(PAGE_ROWS), PAGE_ROWS),
             total,
             last,
         )
@@ -12190,7 +12203,12 @@ pub fn store_html(
             // reaches here at all.
             feed,
             today,
-            censuses: &site.censuses,
+            // THE SAME FRESH READING THE ROWS CAME FROM. This was
+            // `&site.censuses`, the boot snapshot, so the vendor cards could
+            // print *"UNAVAILABLE — nothing has been ingested for this vendor"*
+            // over a manifest counting months, on the same page as the rows it
+            // was counting. D-0352.
+            censuses: &censuses,
             rows: &rows,
             page,
             last_page,

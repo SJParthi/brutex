@@ -26093,3 +26093,37 @@ rendered page. What removes the guesswork is a caller that does not need it —
 and the structural path now exists for every caller that holds a run. Threading
 it into `pullrun` needs a third element through `spot_answer` and `pull_spot`;
 **that is recorded here as the remaining half rather than half-done.**
+
+### D-0352
+
+**`/store` read its rows from disk and its counts from the boot snapshot, so one
+page carried two answers about the same store.**
+
+The row LIST was read fresh — `census::held_entries(&census::read_all(…))`, with
+a comment explaining exactly why staleness there was fatal. The row COUNTS were
+then resolved against `site.censuses`, which `Site::load` fills once and never
+again, and the vendor cards took the same stale snapshot.
+
+**Measured on the operator's store, 2026-08-28.** A server that booted before its
+first pull answered `/store.json` naming **one** instrument while **three** sat
+on disk with **3.8 million bars** between them. The rows came from the disk; the
+counts came from a store that no longer existed. The operator could not use the
+page to see how far a running pull had got — which is the one question it exists
+to answer.
+
+The softer form is worse because it does not look wrong: a month whose bar count
+grew since boot renders the **old count as a fact**, with no indication that it
+is a measurement from another moment.
+
+`census_now` is the same call `/store.json` already makes per request, and it is
+one manifest read — the very read `held_entries` performs anyway to build the
+rows. Taking both halves from it costs nothing and removes the disagreement **by
+construction** rather than by remembering to refresh two things that are used
+together.
+
+This is the third surface to have had this defect and the third fix of the same
+shape: `calendar_json` (D-0318) and `broker_run`'s ladder gate both read
+`site.entries` and both answered from a snapshot taken before the store had
+anything in it. The pattern is that a field filled once at boot and read for ever
+is a cache nobody named, and the store is the one thing in this process that
+changes underneath it.
