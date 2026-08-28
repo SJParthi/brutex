@@ -25675,3 +25675,49 @@ named this route as the outlier that still did it.
 Both arms are pinned by the test, because only the pair is the rule: an absent
 feed must still resolve to the default. Refusing the unknown without that half
 would have broken every page that omits the parameter.
+
+### D-0343
+
+**A committed month's census row was thrown away when the OVERLAY write failed —
+so the bars existed, nothing counted them, and every retry repeated it.**
+
+`from_rows` sets `done.pending` and `done.counted = 1` **before** attempting the
+overlay, under a comment asserting the property could not break: *"the caller
+returns an error if the batch cannot be published, so there is no path where
+this reports counted and the census does not hold it."*
+
+The overlay was that path. Its failure goes into `failures`;
+`land_rolling_group` returned `Err` on **any** failure; and the caller's `Err`
+arm `continue`s without reaching `census_rows.extend(pending)`. The bars are
+already on disk.
+
+**And it never heals.** The next run offers the same bars — `AlreadyPresent` —
+and the same overlay, which refuses again for the same reason. The row is
+dropped again. `/store.json` and `fnowork::owed` read the month as absent, so it
+is asked for again, and vendor quota is spent on it for ever. This is the state
+`pull::ingest`'s own module header calls *"the one outcome worse than a run that
+refused outright"*, and the receipt names the OVERLAY as the fault while the
+real damage is a census row nobody wrote.
+
+A concrete trigger, since the shape matters: `land_rolling_group` filters
+overlays with `Overlay::states_something`, so the overlay series is a SUBSET of
+the bar stamps, and which subset depends on which rows carried an `iv` or a
+`spot`. A re-pull where the vendor now states an IV for a row it previously left
+null offers an overlay stamp INSIDE the committed overlay range;
+`suffix_that_follows` finds the mismatch and refuses.
+
+**The fix is at the caller, and `pending.is_none()` is the honest test for
+"nothing landed".** `from_rows` returns early without setting `pending` when the
+BAR write fails, and sets it only once the bars are down. So
+`land_rolling_group` returns `Err` only in the first case; otherwise it publishes
+the census row and carries the reason beside it, and the caller records that as
+a run failure through `note_run_failure`.
+
+That is the rule this file already states one screen up, for the greeks: *"A
+FAILURE HERE IS THIS RUN'S, NOT THE WALK'S"* — and the spot path has always done
+it, naming *"holds N bar(s) the census does not count"*. The derivative path was
+the one that still conflated the two.
+
+The comment in `from_rows` is corrected rather than deleted: the property it
+asserts does hold now, but it holds because the caller was fixed, not because
+the sentence was right.

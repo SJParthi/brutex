@@ -1212,12 +1212,23 @@ pub fn from_rows(
     // grows by that same count. `from_rows` below records the one entry it has;
     // `roll_one` collects and records once.
     done.pending = Some(one);
-    // COUNTED, BECAUSE IT WILL BE. The row is going to the caller's batch and
-    // the caller returns an error if the batch cannot be published, so there is
-    // no path where this reports counted and the census does not hold it —
-    // which is the property `Ingested::counted`'s own doc asserts: a member
-    // that stored bars is either in this count or named in `failures`, with no
-    // third place to be.
+    // COUNTED, BECAUSE IT WILL BE — **and the reason given here was wrong.**
+    //
+    // This said: *"the caller returns an error if the batch cannot be
+    // published, so there is no path where this reports counted and the census
+    // does not hold it."* The overlay write below WAS that path. It runs after
+    // `pending` and `counted` are set; its failure went into `failures`; and
+    // `land_rolling_group` returned `Err` on any failure, so the caller's `Err`
+    // arm skipped `census_rows.extend(pending)` entirely. Bars on disk, census
+    // row dropped, `counted: 1` a lie — and every retry repeated it, because
+    // the bars come back `AlreadyPresent` and the overlay refuses again.
+    //
+    // The property holds now, and it holds because the CALLER was fixed rather
+    // than because this line was right: `land_rolling_group` returns `Err` only
+    // when `pending.is_none()` — which is the honest test for "nothing landed",
+    // since the early return above leaves it unset when the BAR write fails —
+    // and otherwise publishes the row with the reason travelling beside it.
+    // D-0343.
     done.counted = 1;
 
     // THE OVERLAY AFTER THE BARS, NEVER BEFORE. If the bar write fails there is

@@ -9619,7 +9619,7 @@ async fn roll_one(
         // written stayed on disk with nothing on the receipt naming what was
         // abandoned, which is the §4 fallback that hides a failure wearing a
         // partial success.
-        let (landed_bars, pending) = match land_rolling_group(
+        let (landed_bars, pending, trouble) = match land_rolling_group(
             group,
             contract,
             asked,
@@ -9638,6 +9638,14 @@ async fn roll_one(
             }
         };
         total = total.saturating_add(landed_bars);
+        // A TROUBLE THAT DID NOT STOP THE BARS IS STILL A FAILURE OF THIS RUN.
+        //
+        // The bars are on disk and their census row is in `pending`, so both
+        // travel; the reason travels too rather than being swallowed by the
+        // success. `CLAUDE.md` §4 — degrade loudly and name the reason.
+        if let Some(why) = trouble {
+            note_run_failure(&mut failed, &mut why_not, why);
+        }
         // AND NOW THE GREEKS, AFTER THE BARS THEY PRICE.
         //
         // `land_rolling_group` has returned, so the bars are on disk and every
@@ -10599,7 +10607,7 @@ fn land_rolling_group(
     endpoint: &str,
     window: pull::session::Window,
     label: &str,
-) -> Result<(usize, Option<pull::manifest::Held>), String> {
+) -> Result<(usize, Option<pull::manifest::Held>, Option<String>), String> {
     let bars: Vec<store::format::Bar> = group.iter().map(|r| r.bar).collect();
     // ONLY THE OVERLAYS THAT STATE SOMETHING. A contract whose vendor sent
     // neither a spot nor a volatility has nothing to overlay, and a file of
@@ -10640,12 +10648,42 @@ fn land_rolling_group(
         &site.store_root,
         plan,
     );
-    if let Some(first) = done.failures.first() {
-        return Err(format!("{label}: {}", first.why));
+    // A FAILURE **AFTER** THE BARS LANDED MUST NOT DISCARD THEIR CENSUS ROW.
+    //
+    // This returned `Err` on any failure, and the caller's `Err` arm `continue`s
+    // without reaching `census_rows.extend(pending)`. `from_rows` sets
+    // `pending` and `counted = 1` BEFORE attempting the overlay, on the stated
+    // premise that *"the caller returns an error if the batch cannot be
+    // published, so there is no path where this reports counted and the census
+    // does not hold it"*. The overlay is exactly that path.
+    //
+    // The result is the state `pull::ingest`'s own header calls the one outcome
+    // worse than a run that refused outright: bars committed to disk, their
+    // census row dropped, `counted: 1` a lie, and the receipt naming the
+    // OVERLAY as the fault. Every retry repeats it — bars `AlreadyPresent`,
+    // overlay refused, row dropped — so the month can never be counted,
+    // `/store.json` and `fnowork::owed` read it as absent, and vendor quota is
+    // spent on it for ever.
+    //
+    // `pending.is_none()` is the honest test for "nothing landed": `from_rows`
+    // returns early without setting it when the BAR write fails, and sets it
+    // only once the bars are on disk. So the row is published either way and
+    // the reason travels beside it — which is what the spot path already does,
+    // naming *"holds N bar(s) the census does not count"*. It is also the rule
+    // this file states one screen up for the greeks: a failure here is this
+    // run's, not the walk's.
+    let trouble = done
+        .failures
+        .first()
+        .map(|first| format!("{label}: {}", first.why));
+    if let Some(why) = trouble.clone()
+        && done.pending.is_none()
+    {
+        return Err(why);
     }
     // THE CENSUS ROW TRAVELS WITH THE COUNT. `from_rows` no longer writes it;
     // the caller collects every group's row and records them in one cycle.
-    Ok((done.bars_stored, done.pending))
+    Ok((done.bars_stored, done.pending, trouble))
 }
 
 /// Every request in the cross product, fetched and filed.
