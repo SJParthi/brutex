@@ -858,7 +858,7 @@ pub fn decode_body(
                 // way and a minute the vendor did not trade is skipped rather
                 // than refusing the whole window. See `kept_rows` for why this
                 // shape needed a mask when the other two did not.
-                let (keep, null_bars) = kept_rows(root, &f)?;
+                let (keep, null_bars, negative_bars) = kept_rows(root, &f, listing)?;
                 let arrays = ParallelArrays {
                     // PRICES GO THROUGH `prices`, NOT `numbers`, AND THE
                     // DIFFERENCE IS 75 PAISE ON EVERY BAR THAT HAS THEM.
@@ -894,6 +894,9 @@ pub fn decode_body(
                     },
                 };
                 note_null_bars(null_bars, keep.len());
+                note_negative_volume_bars(negative_bars, keep.len());
+                let mut arrays = arrays;
+                note_impossible_bars(drop_impossible_bars(&mut arrays), keep.len());
                 RawWindow::decode(&arrays)
             })()
         }
@@ -1119,6 +1122,11 @@ fn decode_objects(
         );
     }
 
+    // THE THIRD DOOR GETS THE RULE AT THE SAME TIME AS THE FIRST. Three
+    // separate rules in this decoder reached two of the three shapes and missed
+    // the same one; this one is applied at every `RawWindow::decode` in the
+    // file, so a shape cannot be forgotten without deleting the call.
+    note_impossible_bars(drop_impossible_bars(&mut arrays), items.len());
     RawWindow::decode(&arrays)
 }
 
@@ -1391,6 +1399,74 @@ fn note_null_bars(null_bars: usize, bars: usize) {
     );
 }
 
+/// One event per WINDOW for rows dropped over an impossible volume.
+///
+/// Per window and never per row, for the reason [`note_volumes_corrected`]
+/// gives: a 90-day minute chunk is ~34,000 bars, and an emit inside that loop
+/// is the cost `CLAUDE.md` §3 rule 4 refuses.
+///
+/// **The denominator is carried because the ratio is the diagnosis.** A handful
+/// out of 34,000 is a vendor sending noise in a column that mostly works.
+/// 34,000 of 34,000 is the decoder reading the wrong column entirely, and those
+/// two want opposite responses from an operator.
+fn note_negative_volume_bars(negative_bars: usize, bars: usize) {
+    if negative_bars == 0 {
+        return;
+    }
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::new(
+            telemetry::Level::Warn,
+            "pull.decode",
+            "bars carried a negative volume and were skipped",
+        )
+        .with(
+            "skipped",
+            telemetry::Value::Uint(u64::try_from(negative_bars).unwrap_or(u64::MAX)),
+        )
+        .with(
+            "bars",
+            telemetry::Value::Uint(u64::try_from(bars).unwrap_or(u64::MAX)),
+        ),
+    );
+    eprintln!(
+        "brutex: {negative_bars} of {bars} bars carried a NEGATIVE volume and \
+         were skipped — a volume counts shares traded, so those rows carry no \
+         quantity. The rest of the window is kept: this used to refuse all of \
+         it, which cost one instrument every intraday rung it had."
+    );
+}
+
+/// One event per WINDOW for rows whose four prices cannot be a bar.
+///
+/// Same per-window rule and same denominator as the two above, and the same
+/// reason for both.
+fn note_impossible_bars(dropped: usize, bars: usize) {
+    if dropped == 0 {
+        return;
+    }
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::new(
+            telemetry::Level::Warn,
+            "pull.decode",
+            "bars carried an impossible OHLC and were skipped",
+        )
+        .with(
+            "skipped",
+            telemetry::Value::Uint(u64::try_from(dropped).unwrap_or(u64::MAX)),
+        )
+        .with(
+            "bars",
+            telemetry::Value::Uint(u64::try_from(bars).unwrap_or(u64::MAX)),
+        ),
+    );
+    eprintln!(
+        "brutex: {dropped} of {bars} bars carried an impossible OHLC and were \
+         skipped — a high below its low, or a negative price. Caught here, \
+         where the vendor's own row is still in hand, rather than at the store \
+         append where the index names nothing an operator can open."
+    );
+}
+
 /// Which rows of a columnar body are bars at all, and how many are not.
 ///
 /// # WHY THE COLUMNAR SHAPE NEEDED THIS AND THE OTHER TWO DID NOT
@@ -1425,7 +1501,8 @@ fn note_null_bars(null_bars: usize, bars: usize) {
 fn kept_rows(
     root: &serde_json::Value,
     f: &crate::vendor::FieldNames,
-) -> Result<(Vec<bool>, usize), FetchError> {
+    listing: crate::vendor::Listing,
+) -> Result<(Vec<bool>, usize, usize), FetchError> {
     let quartet = [
         array_at(root, f.open)?,
         array_at(root, f.high)?,
@@ -1475,16 +1552,151 @@ fn kept_rows(
     }
     let mut keep = Vec::with_capacity(rows);
     let mut skipped = 0usize;
+    let mut negative = 0usize;
     for i in 0..rows {
         let traded = quartet
             .iter()
             .all(|column| column.get(i).is_some_and(|v| !v.is_null()));
         if !traded {
             skipped = skipped.saturating_add(1);
+            keep.push(false);
+            continue;
         }
-        keep.push(traded);
+        // A NEGATIVE VOLUME SKIPS ITS ROW RATHER THAN REFUSING THE WINDOW.
+        //
+        // The sign is read here, off the JSON, because `one_volume` can only
+        // answer with an `Err` and an `Err` in a column `map` refuses all of it.
+        // That is what the measured `-125` on `ADANIENT` cost: one row killed a
+        // 90-day window, the window's failure ended the backfill at request 1
+        // of 21, and losing 1-minute lost all eight intraday rungs with it,
+        // because 2/3/5/10/15/30/60 are rolled up locally from it.
+        //
+        // **The refusal was right about the value and wrong about its reach.**
+        // A volume counts shares traded and a negative one is not a quantity —
+        // D-0323 stands. What changes is the granularity: a skipped ROW is a
+        // legal gap in an append-only month, because bars need only be strictly
+        // increasing; a skipped CHUNK is not, because `Header::advance` refuses
+        // any batch beginning at or before what is committed, which is why the
+        // chunk loop's suffix discard must stay exactly as it is.
+        //
+        // AN INDEX IS NOT FILTERED HERE and that is P-60, not an oversight.
+        // Its volume column has no referent at all — measured across 6,493
+        // stored BANKNIFTY minute bars, the only distinct value is `0` — so
+        // `one_volume` records the zero the column always is and counts it. An
+        // equity's negative means shares DID trade and the decoder is reading
+        // the wrong column, so its row carries no usable quantity and goes.
+        let quantity_is_impossible = listing != crate::vendor::Listing::Index
+            && volume.get(i).is_some_and(|v| {
+                v.as_i64().is_some_and(|n| n < 0) || v.as_f64().is_some_and(|n| n < 0.0)
+            });
+        if quantity_is_impossible {
+            negative = negative.saturating_add(1);
+        }
+        keep.push(!quantity_is_impossible);
     }
-    Ok((keep, skipped))
+    Ok((keep, skipped, negative))
+}
+
+/// Rows whose four prices cannot be a bar, dropped from every column at once.
+///
+/// Returns how many were dropped.
+///
+/// # Why this is here and not at the store's write boundary
+///
+/// It **is** at the write boundary as well — `Bar::ohlc_is_sane` is what
+/// `survey` calls, and it is the reason `BANKNIFTY: batch record 7075 has
+/// impossible OHLC` was ever printed. The trouble is where that leaves an
+/// operator. By the time `survey` sees the batch the rows have been session
+/// filtered and folded, so `7075` is an index into a vector that no longer
+/// corresponds to a vendor row, a timestamp, or a file anyone can open. The
+/// message names a fault and nothing that can be acted on.
+///
+/// Measured: **six consecutive runs** refused on `NIFTY` record 5997 and
+/// `BANKNIFTY` record 7075, month 2021-08, ~4½ minutes apart. The vendor
+/// returns the same bytes every time, so a deterministic refusal was retried
+/// forever and the month never landed.
+///
+/// Here the check runs while the window is still the vendor's own rows, one
+/// pass, O(1) per row — and it drops the row instead of the batch, so the other
+/// ~8,000 bars in that chunk survive.
+///
+/// # The relationship, and why the sign is checked too
+///
+/// The same predicate `Bar::ohlc_is_sane` uses: the high is at or above all
+/// three others, the low at or below open and close, and none of the four is
+/// negative. `prices` already refuses a negative price on the JSON path, so the
+/// sign clause is redundant there and load-bearing on the archive path, whose
+/// decoder parses a leading minus and never checks it.
+///
+/// # Why every column, including the ones it does not read
+///
+/// A row is a bar. Dropping index `i` from the prices and not from `volume` or
+/// `timestamp` would reassemble every later bar out of one row's prices and the
+/// next row's stamp — the same misalignment `kept_rows` builds a shared mask to
+/// avoid. `open_interest` is filtered only when it is present, because an empty
+/// vector there means the vendor sends none at all, which is not a length.
+fn drop_impossible_bars(arrays: &mut ParallelArrays) -> usize {
+    let rows = arrays.open.len();
+    let mut keep = Vec::with_capacity(rows);
+    let mut dropped = 0usize;
+    for i in 0..rows {
+        // A COLUMN SHORTER THAN `open` KEEPS ITS ROW. `RawWindow::decode` owns
+        // the length disagreement and names all seven at once; answering it
+        // here with a silent drop would erase the very evidence it reports.
+        let sane = match (
+            arrays.open.get(i),
+            arrays.high.get(i),
+            arrays.low.get(i),
+            arrays.close.get(i),
+        ) {
+            (Some(&open), Some(&high), Some(&low), Some(&close)) => {
+                high >= open
+                    && high >= low
+                    && high >= close
+                    && low <= open
+                    && low <= close
+                    && open >= 0
+                    && high >= 0
+                    && low >= 0
+                    && close >= 0
+            }
+            _ => true,
+        };
+        if !sane {
+            dropped = dropped.saturating_add(1);
+        }
+        keep.push(sane);
+    }
+    if dropped == 0 {
+        return 0;
+    }
+    // ONE MASK, APPLIED THE SAME WAY TO EVERY COLUMN. `retain` visits in order,
+    // so a fresh counter per column reads the same verdict for the same row; a
+    // shared iterator would be consumed by the first column and let the rest
+    // through untouched, which is the misalignment this whole function exists
+    // to prevent.
+    let filter = |column: &mut Vec<i64>| {
+        let mut nth = 0usize;
+        column.retain(|_| {
+            let live = keep.get(nth).copied().unwrap_or(true);
+            nth = nth.saturating_add(1);
+            live
+        });
+    };
+    filter(&mut arrays.open);
+    filter(&mut arrays.high);
+    filter(&mut arrays.low);
+    filter(&mut arrays.close);
+    filter(&mut arrays.volume);
+    filter(&mut arrays.timestamp);
+    // OPEN INTEREST ONLY WHEN THE VENDOR SENDS IT. An empty vector here means
+    // the descriptor names no column at all, which is not a length that can
+    // disagree — filtering it would leave it empty and filtering it wrongly
+    // would invent one.
+    if !arrays.open_interest.is_empty() {
+        filter(&mut arrays.open_interest);
+    }
+    dropped
 }
 
 /// One column, filtered through the mask [`kept_rows`] computed.
@@ -2629,6 +2841,8 @@ fn decode_positional(
         );
     }
 
+    // AND THE SECOND DOOR. See the note on the object shape's call.
+    note_impossible_bars(drop_impossible_bars(&mut arrays), rows.len());
     RawWindow::decode(&arrays)
 }
 
@@ -3274,8 +3488,17 @@ mod tests {
             ("16633.2999", 1_663_330, "NIFTY, f64 of 16633.30"),
         ] {
             let body = format!(
-                "{{\"open\":[{sent}],\"high\":[1],\"low\":[1],\"close\":[1],\
-                  \"volume\":[1],\"timestamp\":[1]}}"
+                // A FLAT BAR AT THE PROBE, NOT A PROBE BESIDE THREE ONES.
+                // These fixtures read `open: 16633.2999, high: 1, low: 1` — an
+                // open far above its high and below its low, which
+                // `Bar::ohlc_is_sane` refuses and the store would never have
+                // accepted. They passed only because nothing between the socket
+                // and the append checked the relationship. Now that
+                // `drop_impossible_bars` does, the fixture has to be a bar; the
+                // probe goes in all four columns, which is a legal flat minute
+                // and still asserts exactly what it asserted about `open`.
+                "{{\"open\":[{sent}],\"high\":[{sent}],\"low\":[{sent}],\
+                  \"close\":[{sent}],\"volume\":[1],\"timestamp\":[1]}}"
             );
             let window = decode_body(
                 &body,
@@ -3312,8 +3535,17 @@ mod tests {
             ("100.10", 10_010),
         ] {
             let body = format!(
-                "{{\"open\":[{sent}],\"high\":[1],\"low\":[1],\"close\":[1],\
-                  \"volume\":[1],\"timestamp\":[1]}}"
+                // A FLAT BAR AT THE PROBE, NOT A PROBE BESIDE THREE ONES.
+                // These fixtures read `open: 16633.2999, high: 1, low: 1` — an
+                // open far above its high and below its low, which
+                // `Bar::ohlc_is_sane` refuses and the store would never have
+                // accepted. They passed only because nothing between the socket
+                // and the append checked the relationship. Now that
+                // `drop_impossible_bars` does, the fixture has to be a bar; the
+                // probe goes in all four columns, which is a legal flat minute
+                // and still asserts exactly what it asserted about `open`.
+                "{{\"open\":[{sent}],\"high\":[{sent}],\"low\":[{sent}],\
+                  \"close\":[{sent}],\"volume\":[1],\"timestamp\":[1]}}"
             );
             let window = decode_body(
                 &body,
@@ -3352,8 +3584,17 @@ mod tests {
     fn a_price_that_is_not_zero_never_snaps_to_zero() {
         for sent in ["0.0001", "0.004", "0.00001", "-0.001", "-0.004", "-0.0049"] {
             let body = format!(
-                "{{\"open\":[{sent}],\"high\":[1],\"low\":[1],\"close\":[1],\
-                  \"volume\":[1],\"timestamp\":[1]}}"
+                // A FLAT BAR AT THE PROBE, NOT A PROBE BESIDE THREE ONES.
+                // These fixtures read `open: 16633.2999, high: 1, low: 1` — an
+                // open far above its high and below its low, which
+                // `Bar::ohlc_is_sane` refuses and the store would never have
+                // accepted. They passed only because nothing between the socket
+                // and the append checked the relationship. Now that
+                // `drop_impossible_bars` does, the fixture has to be a bar; the
+                // probe goes in all four columns, which is a legal flat minute
+                // and still asserts exactly what it asserted about `open`.
+                "{{\"open\":[{sent}],\"high\":[{sent}],\"low\":[{sent}],\
+                  \"close\":[{sent}],\"volume\":[1],\"timestamp\":[1]}}"
             );
             let Err(FetchError::TransportFailed { detail }) = decode_body(
                 &body,
@@ -3370,8 +3611,17 @@ mod tests {
         // this store carries as a price like any other.
         for sent in ["0", "0.0", "0.00", "-0.0"] {
             let body = format!(
-                "{{\"open\":[{sent}],\"high\":[1],\"low\":[1],\"close\":[1],\
-                  \"volume\":[1],\"timestamp\":[1]}}"
+                // A FLAT BAR AT THE PROBE, NOT A PROBE BESIDE THREE ONES.
+                // These fixtures read `open: 16633.2999, high: 1, low: 1` — an
+                // open far above its high and below its low, which
+                // `Bar::ohlc_is_sane` refuses and the store would never have
+                // accepted. They passed only because nothing between the socket
+                // and the append checked the relationship. Now that
+                // `drop_impossible_bars` does, the fixture has to be a bar; the
+                // probe goes in all four columns, which is a legal flat minute
+                // and still asserts exactly what it asserted about `open`.
+                "{{\"open\":[{sent}],\"high\":[{sent}],\"low\":[{sent}],\
+                  \"close\":[{sent}],\"volume\":[1],\"timestamp\":[1]}}"
             );
             let window = decode_body(
                 &body,
@@ -3547,6 +3797,372 @@ mod tests {
         let window = decode_body(objects, &spec_objects, crate::vendor::Listing::Equity)
             .expect("the object shape skips a null row");
         assert_eq!(window.rows.len(), 1, "array of objects");
+    }
+
+    /// **A ROW WHOSE FOUR PRICES CANNOT BE A BAR IS DROPPED, AND THE WINDOW
+    /// SURVIVES — IN EVERY DECODE SHAPE.**
+    ///
+    /// The store already refuses these: `Bar::ohlc_is_sane` is what printed
+    /// `BANKNIFTY: batch record 7075 has impossible OHLC`. Two things were
+    /// wrong with catching it only there. It arrives ~1,500 lines downstream,
+    /// where the rows have been session-filtered and folded, so `7075` indexes
+    /// a vector that maps to no vendor row, no timestamp and no file an
+    /// operator can open. And it takes the whole batch with it.
+    ///
+    /// Measured: **six consecutive runs**, ~4½ minutes apart, refused on
+    /// `NIFTY` record 5997 and `BANKNIFTY` record 7075 — the same two records
+    /// in the same month, 2021-08, every time. The vendor returns the same
+    /// bytes on every request, so a deterministic refusal was retried for ever
+    /// and the month never landed.
+    ///
+    /// Asserted on all three shapes for the reason the null-price rule learned
+    /// three times over: a rule added to a subset of the doors is a rule that
+    /// will be missing from Dhan's.
+    #[test]
+    fn an_impossible_bar_is_dropped_and_the_rest_of_the_window_survives() {
+        // Row 2's high is BELOW its low, which no bar can be.
+        let columnar = r#"{"open":[100.00,244.00],"high":[100.50,243.00],
+                           "low":[99.50,244.50],"close":[100.25,244.00],
+                           "volume":[10,11],"timestamp":[1751337900,1751337960]}"#;
+        let window = decode_body(
+            columnar,
+            &spec(PriceScale::Rupees),
+            crate::vendor::Listing::Equity,
+        )
+        .expect("one impossible row does not refuse the window");
+        assert_eq!(window.rows.len(), 1, "parallel arrays: one row dropped");
+        // WHICH row survived, not merely how many. A filter applied to the
+        // prices and not to `volume` or `timestamp` keeps the right count and
+        // reassembles every later bar from one row's prices and the next row's
+        // stamp — the misalignment `kept_rows` builds a shared mask to avoid.
+        assert_eq!(window.rows[0].volume, 10, "and it is the good row");
+        assert_eq!(window.rows[0].open, 10_000, "with its own price");
+        assert_eq!(
+            window.rows[0].timestamp, 1_751_337_900,
+            "and its own stamp, which is the half a count cannot catch"
+        );
+
+        let objects = r#"{"candles":[
+            {"open":100.00,"high":100.50,"low":99.50,"close":100.25,
+             "volume":10,"timestamp":1751337900},
+            {"open":244.00,"high":243.00,"low":244.50,"close":244.00,
+             "volume":11,"timestamp":1751337960}]}"#;
+        let spec_objects = HttpSpec {
+            response: ResponseShape::ArrayOfObjects {
+                envelope: Some("candles"),
+            },
+            ..spec(PriceScale::Rupees)
+        };
+        let window = decode_body(objects, &spec_objects, crate::vendor::Listing::Equity)
+            .expect("the object shape drops it too");
+        assert_eq!(window.rows.len(), 1, "array of objects");
+        assert_eq!(window.rows[0].volume, 10, "and the same row survived");
+
+        // A FLAT BAR IS LEGAL AND MUST NOT BE DROPPED. Every price equal is a
+        // minute that traded at one level, which is common at an open and on an
+        // illiquid name — a filter that used strict comparisons would silently
+        // delete them all.
+        let flat = r#"{"open":[100.00],"high":[100.00],"low":[100.00],
+                       "close":[100.00],"volume":[3],"timestamp":[1751337900]}"#;
+        let window = decode_body(
+            flat,
+            &spec(PriceScale::Rupees),
+            crate::vendor::Listing::Equity,
+        )
+        .expect("a flat bar is a bar");
+        assert_eq!(
+            window.rows.len(),
+            1,
+            "open == high == low == close is legal"
+        );
+
+        // AND A ZERO-PRICED BAR IS KEPT. `ohlc_is_sane` admits zero, and
+        // `CLAUDE.md` §7 says zero means zero rather than absence — so the
+        // sign clause must refuse only what is BELOW zero.
+        let zero = r#"{"open":[0],"high":[0],"low":[0],"close":[0],
+                       "volume":[0],"timestamp":[1751337900]}"#;
+        let window = decode_body(
+            zero,
+            &spec(PriceScale::Rupees),
+            crate::vendor::Listing::Equity,
+        )
+        .expect("zero is a price like any other");
+        assert_eq!(window.rows.len(), 1, "zero is not negative");
+    }
+
+    /// One column set, for driving [`drop_impossible_bars`] directly.
+    fn arrays_of(quads: &[(i64, i64, i64, i64)], with_oi: bool) -> ParallelArrays {
+        ParallelArrays {
+            open: quads.iter().map(|q| q.0).collect(),
+            high: quads.iter().map(|q| q.1).collect(),
+            low: quads.iter().map(|q| q.2).collect(),
+            close: quads.iter().map(|q| q.3).collect(),
+            // `try_from` RATHER THAN `as`. A fixture row count cannot overflow
+            // an `i64`, but `as` is the cast this workspace refuses outright —
+            // and the values matter here: each column carries a DISTINCT number
+            // per row, so a filter that took the wrong row is caught by the
+            // value rather than only by the length.
+            volume: (0..quads.len())
+                .map(|i| 1_000 + i64::try_from(i).unwrap_or(0))
+                .collect(),
+            timestamp: (0..quads.len())
+                .map(|i| 1_751_337_900 + i64::try_from(i).unwrap_or(0))
+                .collect(),
+            open_interest: if with_oi {
+                (0..quads.len())
+                    .map(|i| 7_000 + i64::try_from(i).unwrap_or(0))
+                    .collect()
+            } else {
+                Vec::new()
+            },
+        }
+    }
+
+    /// **EVERY CLAUSE OF THE BAR RELATIONSHIP IS LOAD-BEARING, ONE AT A TIME.**
+    ///
+    /// Driven directly rather than through [`decode_body`] because two of the
+    /// clauses cannot be reached that way at all: `prices` refuses a negative
+    /// price on the JSON path before the filter ever sees it, so the sign half
+    /// of this predicate is unreachable from a body. It is kept because
+    /// `Bar::ohlc_is_sane` — the store's own copy of this rule — carries it for
+    /// the archive path, whose decoder parses a leading minus and never checks
+    /// it, and a filter that agreed with the store on five clauses out of nine
+    /// would be the more dangerous kind of nearly-right.
+    ///
+    /// `cargo mutants` is why this test exists in this shape: ten mutants of
+    /// these two functions survived the body-level tests, including every `&&`
+    /// in the relationship. Each row below fails **exactly one** clause while
+    /// the clauses before it hold, which is what it takes to catch an `&&`
+    /// turning into an `||`.
+    #[test]
+    fn each_clause_of_the_bar_relationship_drops_the_row_on_its_own() {
+        // (open, high, low, close, why)
+        for (open, high, low, close, why) in [
+            (300, 200, 100, 150, "the high is below the open"),
+            (100, 100, 200, 100, "the high is below the low"),
+            (100, 100, 50, 200, "the high is below the close"),
+            (100, 300, 200, 250, "the low is above the open"),
+            (200, 300, 150, 100, "the low is above the close"),
+            (-100, -50, -200, -100, "the open is negative"),
+            (-50, -40, -200, -100, "the high is negative"),
+            (0, 0, -1, 0, "the low is negative"),
+            (0, 0, -1, -1, "the close is negative"),
+        ] {
+            let mut one = arrays_of(&[(open, high, low, close)], false);
+            assert_eq!(
+                drop_impossible_bars(&mut one),
+                1,
+                "{why}: ({open},{high},{low},{close}) is not a bar"
+            );
+            assert!(one.open.is_empty(), "{why}: and the row is gone");
+            assert!(one.volume.is_empty(), "{why}: from every column");
+            assert!(one.timestamp.is_empty(), "{why}: the stamp too");
+        }
+
+        // AND EVERY LEGAL SHAPE SURVIVES UNTOUCHED. Without this the whole
+        // function could return "drop everything" and every row above passes.
+        for (open, high, low, close, why) in [
+            (100, 110, 90, 105, "an ordinary bar"),
+            (100, 100, 100, 100, "a flat bar — common at an open"),
+            (0, 0, 0, 0, "zero is a price, not an absence (CLAUDE.md §7)"),
+            (100, 110, 90, 110, "the close AT the high"),
+            (100, 110, 90, 90, "the close AT the low"),
+        ] {
+            let mut one = arrays_of(&[(open, high, low, close)], false);
+            assert_eq!(drop_impossible_bars(&mut one), 0, "{why} is a bar");
+            assert_eq!(one.open.len(), 1, "{why}: and it is kept");
+        }
+    }
+
+    /// **THE DROP TAKES THE SAME ROW OUT OF EVERY COLUMN, INCLUDING OPEN
+    /// INTEREST — AND LEAVES AN ABSENT OPEN-INTEREST COLUMN ABSENT.**
+    ///
+    /// A row is a bar. Dropping index `i` from the prices and not from `volume`
+    /// or `timestamp` would rebuild every later bar out of one row's prices and
+    /// the next row's stamp, which is exactly the misalignment `kept_rows`
+    /// builds a shared mask to avoid — and it would do it while keeping all
+    /// seven lengths equal, so nothing downstream would notice.
+    ///
+    /// The second half is its own rule: an EMPTY `open_interest` means the
+    /// descriptor names no such column, which is not a length that can
+    /// disagree. `CLAUDE.md` §7 — `i64::MIN` is the null and zero means zero —
+    /// so a column filled in here would later read back as real open interest.
+    #[test]
+    fn a_dropped_row_leaves_every_column_and_an_absent_one_stays_absent() {
+        // Middle row is impossible; the two either side are bars.
+        let quads = [
+            (100, 110, 90, 105),
+            (100, 100, 200, 100),
+            (300, 310, 290, 305),
+        ];
+
+        let mut with_oi = arrays_of(&quads, true);
+        assert_eq!(drop_impossible_bars(&mut with_oi), 1);
+        assert_eq!(with_oi.open, vec![100, 300], "prices keep rows 0 and 2");
+        assert_eq!(with_oi.high, vec![110, 310]);
+        assert_eq!(with_oi.low, vec![90, 290]);
+        assert_eq!(with_oi.close, vec![105, 305]);
+        assert_eq!(with_oi.volume, vec![1_000, 1_002], "and so does the volume");
+        assert_eq!(
+            with_oi.timestamp,
+            vec![1_751_337_900, 1_751_337_902],
+            "and the stamps — the half a length check cannot catch"
+        );
+        assert_eq!(
+            with_oi.open_interest,
+            vec![7_000, 7_002],
+            "open interest is a column like any other when it is present"
+        );
+
+        let mut without = arrays_of(&quads, false);
+        assert_eq!(drop_impossible_bars(&mut without), 1);
+        assert!(
+            without.open_interest.is_empty(),
+            "an absent column stays absent — filtering it would invent one"
+        );
+        assert_eq!(without.open.len(), 2, "and the rest still filtered");
+    }
+
+    /// **A WINDOW OF NOTHING BUT BARS IS RETURNED UNTOUCHED, AND SAYS SO.**
+    ///
+    /// The early return is the common path — almost every window — and a
+    /// mutant that removed it would still pass every test above, because
+    /// filtering a mask of all-true is a no-op. Asserting the COUNT is what
+    /// separates "nothing was dropped" from "the filter ran and found nothing".
+    #[test]
+    fn a_clean_window_is_not_filtered_at_all() {
+        let mut clean = arrays_of(&[(100, 110, 90, 105), (200, 210, 190, 205)], true);
+        assert_eq!(drop_impossible_bars(&mut clean), 0, "nothing to drop");
+        assert_eq!(clean.open, vec![100, 200]);
+        assert_eq!(clean.open_interest, vec![7_000, 7_001], "untouched");
+    }
+
+    /// **A NEGATIVE VOLUME IS CAUGHT IN BOTH JSON SPELLINGS.**
+    ///
+    /// `serde_json` answers `as_i64()` for `-125` and `None` for `-125.0`,
+    /// which is a float — so a decoder that read only the integer spelling
+    /// would let every float-encoded negative straight through. Dhan types
+    /// volume as `int` in its field table and as `int32` in its binary feed
+    /// spec, and this decoder does not get to assume which one arrives.
+    #[test]
+    fn a_negative_volume_is_caught_whether_it_arrives_as_an_int_or_a_float() {
+        for sent in ["-125", "-125.0", "-0.5"] {
+            let body = format!(
+                "{{\"open\":[100.00,100.00],\"high\":[100.00,100.00],\
+                   \"low\":[100.00,100.00],\"close\":[100.00,100.00],\
+                   \"volume\":[9,{sent}],\"timestamp\":[1751337900,1751337960]}}"
+            );
+            let window = decode_body(
+                &body,
+                &spec(PriceScale::Rupees),
+                crate::vendor::Listing::Equity,
+            )
+            .unwrap_or_else(|why| panic!("{sent} drops its row, not the window: {why}"));
+            assert_eq!(window.rows.len(), 1, "{sent}: the negative row went");
+            assert_eq!(window.rows[0].volume, 9, "{sent}: the good row stayed");
+        }
+
+        // AND A POSITIVE FLOAT VOLUME IS NOT COLLATERAL DAMAGE.
+        let ok = r#"{"open":[100.00],"high":[100.00],"low":[100.00],
+                     "close":[100.00],"volume":[9.0],"timestamp":[1751337900]}"#;
+        let window = decode_body(
+            ok,
+            &spec(PriceScale::Rupees),
+            crate::vendor::Listing::Equity,
+        )
+        .expect("a whole number sent as a float is still a count");
+        assert_eq!(window.rows.len(), 1, "a positive float volume is kept");
+    }
+
+    /// **EVERY COLUMN IS LENGTH-CHECKED, AND EACH ONE ON ITS OWN.**
+    ///
+    /// The check is a chain of `||`, and a single odd column proves only the
+    /// clause it happens to hit — `cargo mutants` turned three of those `||`
+    /// into `&&` and every one survived, because no test made `volume`,
+    /// `timestamp` or `open_interest` the short column by itself.
+    #[test]
+    fn each_column_on_its_own_can_be_the_odd_length_one() {
+        for (name, body) in [
+            (
+                "high",
+                r#"{"open":[1,1],"high":[1],"low":[1,1],"close":[1,1],
+                    "volume":[1,1],"timestamp":[1,2]}"#,
+            ),
+            (
+                "low",
+                r#"{"open":[1,1],"high":[1,1],"low":[1],"close":[1,1],
+                    "volume":[1,1],"timestamp":[1,2]}"#,
+            ),
+            (
+                "close",
+                r#"{"open":[1,1],"high":[1,1],"low":[1,1],"close":[1],
+                    "volume":[1,1],"timestamp":[1,2]}"#,
+            ),
+            (
+                "volume",
+                r#"{"open":[1,1],"high":[1,1],"low":[1,1],"close":[1,1],
+                    "volume":[1],"timestamp":[1,2]}"#,
+            ),
+            (
+                "timestamp",
+                r#"{"open":[1,1],"high":[1,1],"low":[1,1],"close":[1,1],
+                    "volume":[1,1],"timestamp":[1]}"#,
+            ),
+        ] {
+            let got = decode_body(
+                body,
+                &spec(PriceScale::Rupees),
+                crate::vendor::Listing::Equity,
+            );
+            assert!(
+                matches!(got, Err(FetchError::LengthDisagreement { .. })),
+                "a short {name} column is a disagreement, not a window: {got:?}"
+            );
+        }
+
+        // AND THE LONGER SIDE, WHICH IS THE ONE THAT MATTERS.
+        //
+        // A SHORT column is caught twice over: this check refuses it, and if
+        // this check were removed `RawWindow::decode`'s own length check would
+        // still refuse it. So a short column cannot tell the two apart, and
+        // `cargo mutants` proved exactly that — turning these `||` into `&&`
+        // survived every short-column case above.
+        //
+        // A LONGER column is the case only this check can catch. The mask is
+        // applied with `zip`, which stops at the shorter side, so an
+        // over-length column would be silently TRIMMED to fit: seven equal
+        // lengths, a clean decode, and a window of well-formed bars assembled
+        // from rows that never lined up. That is the failure this ordering
+        // exists to prevent, and `is_err()` is the assertion that proves it —
+        // under the mutant these decode successfully.
+        for (name, body) in [
+            (
+                "volume",
+                r#"{"open":[1,1],"high":[1,1],"low":[1,1],"close":[1,1],
+                    "volume":[1,1,1],"timestamp":[1,2]}"#,
+            ),
+            (
+                "timestamp",
+                r#"{"open":[1,1],"high":[1,1],"low":[1,1],"close":[1,1],
+                    "volume":[1,1],"timestamp":[1,2,3]}"#,
+            ),
+            (
+                "high",
+                r#"{"open":[1,1],"high":[1,1,1],"low":[1,1],"close":[1,1],
+                    "volume":[1,1],"timestamp":[1,2]}"#,
+            ),
+        ] {
+            let got = decode_body(
+                body,
+                &spec(PriceScale::Rupees),
+                crate::vendor::Listing::Equity,
+            );
+            assert!(
+                matches!(got, Err(FetchError::LengthDisagreement { .. })),
+                "an over-length {name} column must be REFUSED, never trimmed to \
+                 fit the mask: {got:?}"
+            );
+        }
     }
 
     #[test]
@@ -4430,17 +5046,18 @@ mod tests {
     #[test]
     fn a_negative_volume_is_refused_where_the_vendor_still_owns_the_value() {
         // The columnar shape, and the value the operator actually received.
-        let body = r#"{"open":[1],"high":[1],"low":[1],"close":[1],
-                       "volume":[-95342],"timestamp":[1751337900]}"#;
-        let Err(FetchError::TransportFailed { detail }) = decode_body(
+        // TWO ROWS, because the window now survives one bad one and a single
+        // row could not tell a dropped row from a refused window.
+        let body = r#"{"open":[1,1],"high":[1,1],"low":[1,1],"close":[1,1],
+                       "volume":[7,-95342],"timestamp":[1751337900,1751337960]}"#;
+        let kept = decode_body(
             body,
             &spec(PriceScale::Rupees),
             crate::vendor::Listing::Equity,
-        ) else {
-            panic!("a volume counts shares and is never negative")
-        };
-        assert!(detail.contains("volume"), "names the field: {detail}");
-        assert!(detail.contains("-95342"), "names the value: {detail}");
+        )
+        .expect("the impossible row goes; the window does not");
+        assert_eq!(kept.rows.len(), 1, "only the good row survives");
+        assert_eq!(kept.rows[0].volume, 7, "and it is the good one");
 
         // And the unit, directly, so a future caller cannot lose the rule by
         // routing around `decode_body`.
@@ -4509,25 +5126,34 @@ mod tests {
         // only the empty column was noisy.
         assert_eq!(window.rows[0].open, 100, "the price is untouched");
 
-        let refused = decode_body(
-            body,
-            &spec(PriceScale::Rupees),
+        // ON A TRADED LISTING THE ROW GOES AND THE WINDOW STAYS. Two rows so
+        // there is something left to assert on: a one-row body would decode to
+        // an empty window and could not tell "the bad row was dropped" from
+        // "the whole thing was refused", which is the distinction this change
+        // is entirely about.
+        let pair = r#"{"open":[1,2],"high":[1,2],"low":[1,2],"close":[1,2],
+                       "volume":[5,-125],"timestamp":[1751337900,1751337960]}"#;
+        for listing in [
             crate::vendor::Listing::Equity,
-        );
-        assert!(
-            matches!(refused, Err(FetchError::TransportFailed { .. })),
-            "on an equity a negative volume means shares traded and the \
-             decoder is wrong — zero would be a lie"
-        );
-
-        // A DERIVATIVE IS TRADED TOO, so it keeps the refusal. Named rather
-        // than left to the `_` of a two-case test.
-        let refused = decode_body(
-            body,
-            &spec(PriceScale::Rupees),
             crate::vendor::Listing::Derivative,
-        );
-        assert!(matches!(refused, Err(FetchError::TransportFailed { .. })));
+        ] {
+            let kept = decode_body(pair, &spec(PriceScale::Rupees), listing)
+                .expect("one impossible row does not refuse the window");
+            assert_eq!(
+                kept.rows.len(),
+                1,
+                "{listing:?}: the negative row is dropped and the good one is \
+                 kept — this used to refuse all of it, which is what cost \
+                 ADANIENT every intraday rung it had"
+            );
+            assert_eq!(
+                kept.rows[0].volume, 5,
+                "{listing:?}: and it is the GOOD row that survived, not the \
+                 bad one zero-filled — a zero volume on a traded listing would \
+                 be the lie D-0323 refuses"
+            );
+            assert_eq!(kept.rows[0].open, 100, "{listing:?}: its price too");
+        }
 
         // AND ZERO ITSELF IS UNTOUCHED ON EVERY LISTING. Zero is a real zero,
         // not an absence — `CLAUDE.md` §7 — and it is what an index sends on

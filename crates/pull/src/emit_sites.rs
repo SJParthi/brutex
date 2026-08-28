@@ -3,12 +3,12 @@
 //!
 //! # What was unproven, and it was all of it
 //!
-//! `crates/pull` holds **36** `telemetry::emit` call sites — the largest
+//! `crates/pull` holds **41** `telemetry::emit` call sites — the largest
 //! concentration in the workspace — and **not one of them had a test that drove
 //! the production helper and then found the record in a file.**
 //!
 //! **THE COUNT IS MEASURED AND THE TABLE DOES NOT COVER ALL OF IT.** This header
-//! said 21 while the crate held 36, and `SITES` holds 24 rows, so twelve sites
+//! said 21 while the crate held 36, and `SITES` holds 26 rows, so the rest
 //! are driven by nothing here. Nothing pins either number -- there is no gate
 //! comparing the table to the crate -- so re-measure rather than trusting this
 //! sentence: `grep -c "telemetry::emit(" crates/pull/src/*.rs`. The gap is
@@ -382,6 +382,23 @@ static SITES: &[Site] = &[
         drive: drive_index_volume_corrected,
     },
     Site {
+        at: "crates/pull/src/http.rs:1416",
+        target: "pull.decode",
+        message: "bars carried a negative volume and were skipped",
+        // TWO SENT, ONE KEPT. The denominator is the whole window, so a reader
+        // can tell "a vendor sent noise in one minute" from "the decoder is
+        // reading the wrong column entirely" — the two want opposite responses.
+        says: ("bars", Says::Signs(2)),
+        drive: drive_negative_volume_skipped,
+    },
+    Site {
+        at: "crates/pull/src/http.rs:1447",
+        target: "pull.decode",
+        message: "bars carried an impossible OHLC and were skipped",
+        says: ("bars", Says::Signs(2)),
+        drive: drive_impossible_bar_skipped,
+    },
+    Site {
         at: "crates/pull/src/rate.rs:663",
         target: "pull.rate",
         message: "throttled — every span backed off",
@@ -592,6 +609,65 @@ fn drive_index_volume_corrected(_scratch: &Scratch) {
         .first()
         .expect("one bar was sent, so one decodes");
     assert_eq!(first.volume, 0, "recorded as the zero the column always is");
+}
+
+/// A traded listing sends one good minute and one with a negative volume.
+///
+/// The row goes; the window stays. Before this the whole window was refused,
+/// and the measured cost of that was `ADANIENT` losing every intraday rung it
+/// had: one bad row killed a 90-day chunk, the chunk's failure ended the
+/// backfill at request 1 of 21, and the seven derived rungs are rolled up from
+/// the 1-minute one that never landed.
+fn drive_negative_volume_skipped(_scratch: &Scratch) {
+    let spec = match crate::vendor::Feed::Dhan.descriptor().transport {
+        crate::vendor::Transport::Http(spec) => spec,
+        crate::vendor::Transport::LocalArchive(_) => unreachable!("this feed is HTTP"),
+    };
+    let body = r#"{"open":[24500.75,24501.00],"high":[24501.50,24501.75],
+                   "low":[24499.25,24500.50],"close":[24500.50,24501.25],
+                   "volume":[9,-125],"timestamp":[1751337900,1751337960]}"#;
+    let window = crate::http::decode_body(body, &spec, crate::vendor::Listing::Equity)
+        .expect("one impossible row does not refuse the window");
+    assert_eq!(
+        window.rows.len(),
+        1,
+        "the negative row is the one that went"
+    );
+    let first = window
+        .rows
+        .first()
+        .expect("one row survived, so one decodes");
+    assert_eq!(first.volume, 9, "and the GOOD row is what survived");
+}
+
+/// One minute whose high sits below its low, beside one that is a bar.
+///
+/// Caught here, where the vendor's own row is still in hand. The store catches
+/// it too — `Bar::ohlc_is_sane` is what printed `batch record 7075 has
+/// impossible OHLC` — but by then the rows are session-filtered and folded, so
+/// that index names no vendor row, no timestamp and no file an operator can
+/// open. Measured: six consecutive runs refused on the same two records.
+fn drive_impossible_bar_skipped(_scratch: &Scratch) {
+    let spec = match crate::vendor::Feed::Dhan.descriptor().transport {
+        crate::vendor::Transport::Http(spec) => spec,
+        crate::vendor::Transport::LocalArchive(_) => unreachable!("this feed is HTTP"),
+    };
+    // The second row's high is BELOW its low, which no bar can be.
+    let body = r#"{"open":[24500.75,24501.00],"high":[24501.50,24400.00],
+                   "low":[24499.25,24500.50],"close":[24500.50,24450.00],
+                   "volume":[9,11],"timestamp":[1751337900,1751337960]}"#;
+    let window = crate::http::decode_body(body, &spec, crate::vendor::Listing::Equity)
+        .expect("one impossible row does not refuse the window");
+    assert_eq!(
+        window.rows.len(),
+        1,
+        "the impossible row is the one that went"
+    );
+    let first = window
+        .rows
+        .first()
+        .expect("one row survived, so one decodes");
+    assert_eq!(first.volume, 9, "and the GOOD row is what survived");
 }
 
 fn drive_rate(_scratch: &Scratch) {

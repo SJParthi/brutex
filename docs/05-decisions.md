@@ -25399,3 +25399,68 @@ through the shared governor rather than asserting on a return value, because the
 narrowing IS the side effect and there is nothing else to look at. It drives
 `DH-904` and asserts the allowance falls, then `DH-901` on a second client and
 asserts it does not move. Mutants: 4 tested, 2 caught, 2 unviable, **0 missed**.
+
+### D-0337
+
+**One impossible row refused its whole window, and the window's refusal ended
+the backfill — so a single bad integer cost one instrument every intraday rung
+it had.**
+
+Two vendor faults were measured on the operator's store and both took the same
+path out.
+
+`ADANIENT`: Dhan sent `volume: -125`. `one_volume` refused it, correctly —
+a volume counts shares traded. But the columnar decoder assembles a bar as a
+COLUMN and collects into a `Result`, so the first `Err` short-circuits the whole
+array. The window died, its failure ended the chunk loop at **request 1 of 21**,
+and because Dhan's descriptor holds exactly one intraday spelling
+(`Minute1 → "1"`) with 2/3/5/10/15/30/60 rolled up locally from it, losing the
+1-minute rung lost **all eight**. ADANIENT holds 61 months of daily bars and
+zero intraday bars.
+
+`NIFTY` record 5997 and `BANKNIFTY` record 7075: an impossible OHLC, month
+2021-08, identical across **six consecutive runs ~4½ minutes apart**. The vendor
+returns the same bytes every time, so the retry was deterministic and could
+never converge.
+
+**The refusals were right about the values and wrong about their reach.** The
+fix is granularity, not tolerance:
+
+* `kept_rows` gains the listing and drops a row whose volume is negative on a
+  traded listing. An index is untouched — P-60 — because its volume column has
+  no referent at all and `one_volume` records the zero it always is.
+* `drop_impossible_bars` runs at all three `RawWindow::decode` sites and drops a
+  row whose four prices cannot be a bar: the same predicate as
+  `Bar::ohlc_is_sane`, applied where the vendor's own row is still in hand
+  rather than ~1,500 lines downstream where the batch index names nothing an
+  operator can open.
+* Both count, and both emit one `pull.decode` warning **per window** carrying a
+  denominator — never per row, because a 90-day minute chunk is ~34,000 bars and
+  an emit in that loop is the cost §3 rule 4 refuses. The ratio is the diagnosis:
+  a few of 34,000 is vendor noise, 34,000 of 34,000 is the decoder reading the
+  wrong column.
+
+**What was deliberately NOT changed, and this is the important half.** The
+obvious fix — make `fetch_chunks` continue past a failed chunk instead of
+returning — would be actively destructive. `Header::advance` refuses any batch
+beginning at or before what is committed, so writing chunk N+1 over a skipped
+chunk N makes chunk N **permanently unwritable**: an append-only hole no re-run
+can fill. The suffix discard is the safeguard, and it stays exactly as it is. A
+skipped ROW is a legal gap because bars need only be strictly increasing; a
+skipped CHUNK is not. That asymmetry is the whole reason this fix works at the
+row.
+
+**Three test fixtures had to change, and they were never bars.** They read
+`open: 16633.2999, high: 1, low: 1, close: 1` — an open far above its high and
+below its low, which the store would have refused at the append. They passed only
+because nothing between the socket and `survey` checked the relationship. The
+probe now goes in all four columns, which is a legal flat minute and asserts the
+same thing about `open`.
+
+**`cargo mutants` found ten survivors in the first draft and every one is now
+caught** — 58 tested, 58 caught. Two of them were only killable by an
+**over-length** column: a short column is refused twice over, here and again by
+`RawWindow::decode`, so it cannot tell the two checks apart. A longer one is
+trimmed by `zip` to fit the mask, which is the silent misalignment this
+ordering exists to prevent, and it is the case that proves the check earns its
+place.
