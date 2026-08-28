@@ -3217,17 +3217,22 @@ pub const HTTP_LIVE: &str = "THE HTTP PATH IS WIRED TO THIS ROUTE. The credentia
      the request, and pull::http::HttpSource::window_async puts it on a socket. \
      WHICH PATH A PULL TAKES IS DECIDED BY THE FEED'S OWN TRANSPORT, not by \
      whether the folder box is blank: an HTTP feed is asked over the network \
-     and an archive feed reads the folder, whatever else the form says. Before \
-     anything is spent, the feed's rate budget is charged through \
-     pull::rate::Governor, held per feed on the site so its buckets survive \
-     between requests — a request that will not be issued costs no credential \
-     read and no socket. WHAT IS STILL MISSING, so this sentence does not \
-     overstate itself the way its predecessors did: a window longer than the \
-     vendor's per-request cap is still sent whole rather than split, so a \
-     multi-year range is refused by the vendor or silently truncated by it \
-     (pull::session::split_window computes the chunks and has no caller yet); \
-     a window that stores nothing still reports STORED; and the expired-F&O \
-     endpoints are not modelled at all.";
+     and an archive feed reads the folder, whatever else the form says. BEFORE \
+     ANYTHING IS SPENT, the window is clamped to the feed's own history floor \
+     and split to its per-request cap by server::planned_chunks, and only then \
+     is the rate budget charged through pull::rate::Governor, held per feed on \
+     the site so its buckets survive between requests — so a request that will \
+     not be issued costs no credential read, no socket, and no rate permit, and \
+     a window this feed never held is refused as a BAD REQUEST rather than \
+     blamed on the broker as a 502. THIS PANEL KEEPS NO LIST OF ITS OWN \
+     SHORTCOMINGS, and that is deliberate. It carried one for months after \
+     every item on it had been fixed — it said windows were sent whole and that \
+     pull::session::split_window had no caller, that a run storing nothing \
+     reported STORED, and that expired derivatives were not modelled, and all \
+     three were false. A hand-kept second copy of a fact drifts away from the \
+     fact; docs/06-limits.md is the record that is maintained, and the \
+     correspondence tests beside this constant assert the facts rather than \
+     these words.";
 
 /// What the page says when the broker is NOT reachable from this process.
 ///
@@ -20527,6 +20532,73 @@ mod tests {
             halt_for(Broker::Refused),
             "the two states must read differently or the choice is decoration"
         );
+    }
+
+    /// **THE BANNER DOES NOT CLAIM DEFECTS THIS BUILD NO LONGER HAS.**
+    ///
+    /// Split from [`the_ingest_page_names_what_exists_and_what_does_not`]
+    /// because it is a different property and that test was at the workspace's
+    /// 100-line ceiling. That one asks whether the banner names what EXISTS;
+    /// this one asks whether it names shortcomings that are over.
+    ///
+    /// `HTTP_LIVE` carried three claims under "WHAT IS STILL MISSING" and every
+    /// one was false by the time anyone read it: that a window was sent whole
+    /// because `pull::session::split_window` had no caller, that a run storing
+    /// nothing reported STORED, and that expired derivatives were not modelled
+    /// at all. The operator was shown three defects the build did not have, on
+    /// the panel that reports their own pull.
+    ///
+    /// Asserting the SENTENCE is what let it rot — the same failure the sibling
+    /// test's header describes. So the FACTS are asserted instead, and the
+    /// constant is asserted not to grow a fresh copy of them.
+    #[test]
+    fn the_live_banner_claims_no_shortcoming_this_build_has_already_fixed() {
+        use crate::server::{Broker, halt_for};
+
+        let me =
+            std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/server.rs"))
+                .expect("this module's own source must be readable, or this proves nothing");
+        assert!(
+            me.contains("fn broker_window"),
+            "sanity: the source really was read"
+        );
+        assert!(
+            me.contains("planned_chunks(asked, &spec)"),
+            "the banner says the window is clamped and split before anything is \
+             spent; `broker_window` must actually call the planner for that to \
+             be true"
+        );
+        assert!(
+            me.contains("split_window("),
+            "and the split must have a caller in this file — the precise claim \
+             the old banner got wrong"
+        );
+        let planner = me
+            .split_once("fn planned_chunks")
+            .expect("planned_chunks exists")
+            .1;
+        let planner = &planner[..planner
+            .find("\n}\n")
+            .expect("planned_chunks' body ends at a column-0 brace")];
+        assert!(
+            planner.contains("clamp_to_floor(") && planner.contains("split_window("),
+            "both halves of the claim live in the planner, so neither can be \
+             quietly dropped while the sentence survives"
+        );
+        for stale in [
+            "has no caller yet",
+            "still reports STORED",
+            "are not modelled at all",
+            "is still sent whole",
+        ] {
+            assert!(
+                !halt_for(Broker::Live).contains(stale),
+                "the live banner is claiming a defect this build does not have \
+                 ({stale:?}). If a NEW limit needs recording it belongs in \
+                 docs/06-limits.md, which is maintained, and not in a string \
+                 nothing checks"
+            );
+        }
 
         // AND THE PAGE SAYS EXACTLY THAT, with none of the old sentence left.
         let dir = agreeing("banner");

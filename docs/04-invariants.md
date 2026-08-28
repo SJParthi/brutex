@@ -2928,3 +2928,33 @@ move, but neither has a test that drives it to a status: no shipped descriptor
 declares a zero cap, and forcing an unusable clock would mean reaching for the
 system clock a test must not depend on. They are correct by construction here
 rather than by assertion, which is weaker than the floor row above it.
+
+## A refusal that cannot improve by waiting is retired, and the banner keeps no stale list — D-0339
+
+Continues the `WB-` block above, which is the same story one layer out: D-0338
+fixed what the OPERATOR reads for a below-floor window (400, not 502) and did
+not change what the AUTOPILOT does with it. `classify` had no needle for the
+refusal, so it took the unrecognised arm — `Trouble::Transport`, the retryable
+one — and the ladder scheduled up to nine asks over roughly half a day for an
+answer fixed before the first.
+
+Every row below is proved with no socket, no credential, no vendor, no store and
+no clock: `observe` reads none of them by design, and the two rows that need a
+refusal drive the real `clamp_to_floor` rather than a copy of its words.
+
+| ID | Invariant | Proof | ✓ |
+|---|---|---|---|
+| WB-06 | **A window below the feed's history floor classifies as `Trouble::Unaskable`, and the fixture is the real refusal.** The needle is a sentence `server::clamp_to_floor` authors — *"older than the vendor holds"* — and nothing else in the workspace writes it, which is the distinction D-0283 turns on. The test calls `clamp_to_floor` rather than pasting its words, so rewording the refusal turns the classifier red in the same commit instead of silently returning the month to the retry ladder | `api::autopilot::every_reason_this_build_produces_is_classified` | ✓ |
+| WB-07 | **A straddling window is not classified at all.** A window crossing the floor is clamped to the part that exists and SUCCEEDS, so there is nothing to classify — asserted so a later widening of the needle cannot start retiring months that are perfectly askable | the same test | ✓ |
+| WB-08 | **The month is retired on the FIRST ask, with its allowance already spent.** `MAX_MONTH_ATTEMPTS` is 3 and `STALL_RETRIES` is 2 at `STALL_RECHECK_SECS` apart, so the transport arm spent up to nine asks over ~12 h holding the oldest-month slot. Time moves the comparison the wrong way — a `Fixed` floor never moves, a `Rolling` one moves further away daily — so every one of those asks was known-futile when scheduled | `api::autopilot::a_month_below_the_history_floor_is_retired_at_once_and_never_reconsidered` | ✓ |
+| WB-09 | **`reconsider` really does pass it over, driven rather than inferred.** The stall is pushed at `retried: STALL_RETRIES`, which is the EXISTING terminal state — `reconsider` already skips at the bound and `stall_note` already says *"whose allowance is SPENT — this process will not ask for those again"*. No new field and no new page text, so there is no second mechanism to keep in step | the same test calls `reconsider` and asserts `None` | ✓ |
+| WB-10 | **The feed is not halted and the month is not counted done.** A halt would stop a feed whose credential is live and whose every month above the floor is askable; an `Advance` would count a month the store never received as complete, which is `CLAUDE.md` §4's fallback that hides a failure. A stall names the reason and moves past it | the same test asserts `halted.is_none()` and that the stall is recorded | ✓ |
+| WB-11 | **One instrument's sentence does not retire a month that others answered.** `TickOutcome::reason` is only the FIRST thing that went wrong, so the arm is guarded by `reached == 0`. Without it a partial success becomes a permanent gap — the store cannot prepend, so a month passed over is not recoverable by asking again later | the same test drives the `reached: 1` case and asserts `Next::Wait` with no stall | ✓ |
+| WB-12 | **The `/pull` banner claims no shortcoming this build has already fixed.** `HTTP_LIVE` told the operator that windows were sent whole because `split_window` had no caller, that a run storing nothing reported STORED, and that expired derivatives were not modelled — three defects the build did not have, on the panel reporting their own pull. The list is removed rather than corrected: a hand-kept second copy of a fact drifts away from the fact, which is why `CLAUDE.md` §5 refuses one for the vocabulary. The test asserts the FACTS behind the sentences that remain, and that the four dead phrases never return | `api::server::the_live_banner_claims_no_shortcoming_this_build_has_already_fixed` | ✓ |
+
+**Not pinned, and worth knowing.** `Trouble::Unaskable` has exactly one needle.
+`pull::session::SessionError::WindowCapIsZero` is equally permanent and is
+deliberately not classified: no shipped descriptor declares a zero cap, so an
+arm for it would be a row no test can drive and no run can reach — coverage in
+appearance only. If a descriptor ever declares one, that is the moment to add
+the arm and a test that reaches it, not before.

@@ -319,9 +319,11 @@ pub struct Failed {
 
 /// Which kind of trouble a reason names, and therefore what to do about it.
 ///
-/// Three kinds and not one, because they send an operator to three different
-/// places: their AWS role, their network, and their disk. A single "it failed"
-/// would retry a dead credential sixty-four times and hammer a full disk.
+/// Four kinds and not one, because they send an operator to four different
+/// places: their AWS role, their disk, their network, and — for the last —
+/// nowhere at all, because nothing they can do changes the answer. A single
+/// "it failed" would retry a dead credential sixty-four times and hammer a full
+/// disk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Trouble {
     /// The credential could not be read, or the token is dead.
@@ -337,6 +339,37 @@ pub enum Trouble {
     /// A timeout, a reset, a 5xx, a throttle the governor could not absorb.
     /// Worth retrying with backoff.
     Transport,
+    /// The window asked for is one this feed will NEVER hold.
+    ///
+    /// # Why waiting is the one thing that cannot help
+    ///
+    /// `server::clamp_to_floor` refuses a window that ends before the feed's
+    /// [`pull::vendor::HistoryFloor`]. That is arithmetic on two dates, and
+    /// **time moves it the wrong way**: a `Fixed` floor never moves at all, and
+    /// a `Rolling` one moves FORWARD every day — `docs/00-charter.md` §4 records
+    /// Dhan's as *"rolling ~5 years. Not a fixed floor — it moves every day"*.
+    /// So a window below the floor at this tick is further below it at the next.
+    ///
+    /// Classified [`Trouble::Transport`] it took the retry ladder:
+    /// [`MAX_MONTH_ATTEMPTS`] attempts with backoff, then a stall, then up to
+    /// [`STALL_RETRIES`] reconsiderations [`STALL_RECHECK_SECS`] apart with
+    /// three more attempts each — up to nine asks spread over half a day,
+    /// holding the oldest-month slot each time, for an answer fixed before the
+    /// first one. Bounded, so not the runaway the Kite 403 was, but every one
+    /// of those attempts was known-futile when it was scheduled.
+    ///
+    /// This is the same lesson [`classify`]'s `403` arm records one screen up,
+    /// and the same shape: a permanent fact wearing a retryable label.
+    /// [`FeedState::observe`] stalls it at once with its retry allowance
+    /// already spent, so `reconsider` passes over it and [`stall_note`] tells
+    /// the operator this process will not ask again.
+    ///
+    /// **It is not a halt.** Nothing is broken — the feed is healthy, the
+    /// credential is live, and every month above the floor is still askable. It
+    /// is not an [`Next::Advance`] either: that would count a month the store
+    /// never received as done, which is `CLAUDE.md` §4's fallback that hides a
+    /// failure. A stall records the month, names the reason, and moves past it.
+    Unaskable,
 }
 
 /// Which kind of trouble a reason names.
@@ -391,12 +424,28 @@ pub fn classify(reason: &str) -> Trouble {
         "permission denied",
         "read-only filesystem",
     ];
+    // A WINDOW THE FEED WILL NEVER HOLD, AND THE PHRASE IS THIS BUILD'S OWN.
+    //
+    // `server::clamp_to_floor` writes *"Every day asked for is older than the
+    // vendor holds"* and nothing else in the workspace does — it is not a
+    // vendor's words being read, which is the D-0283 mistake, but a sentence
+    // this repository authors and this table recognises. See
+    // `Trouble::Unaskable` for why waiting cannot change it.
+    //
+    // The floor sentence ONLY. `split_window`'s `WindowCapIsZero` is equally
+    // permanent, and it is deliberately absent: no shipped descriptor declares
+    // a zero cap, so an arm for it would be a classification no test can drive
+    // and no run can reach — a row that looks like coverage and is not.
+    const UNASKABLE: [&str; 1] = ["older than the vendor holds"];
     let lower = reason.to_ascii_lowercase();
     if CREDENTIAL.iter().any(|m| lower.contains(m)) {
         return Trouble::Credential;
     }
     if STORE.iter().any(|m| lower.contains(m)) {
         return Trouble::Store;
+    }
+    if UNASKABLE.iter().any(|m| lower.contains(m)) {
+        return Trouble::Unaskable;
     }
     Trouble::Transport
 }
@@ -1119,11 +1168,16 @@ impl FeedState {
     ///    resume point forward, so the next window is strictly smaller; the
     ///    month cannot loop, and counting it against the bound would stall a
     ///    month that is simply large.
-    /// 5. **The same store refusal twice halts.** Hammering a full disk is
+    /// 5. **A month below the feed's history floor is retired on the first
+    ///    ask**, with its retry allowance already spent, provided nothing
+    ///    reached. Waiting moves a rolling floor further away and a fixed one
+    ///    not at all, so the ladder's nine attempts over half a day were all
+    ///    known-futile when they were scheduled. See [`Trouble::Unaskable`].
+    /// 6. **The same store refusal twice halts.** Hammering a full disk is
     ///    waste.
-    /// 6. **Anything else is a transport failure**: backoff, bounded by
+    /// 7. **Anything else is a transport failure**: backoff, bounded by
     ///    [`MAX_MONTH_ATTEMPTS`], then stalled and passed.
-    /// 7. **Nothing stored and nothing wrong is dry.** Two of those retire the
+    /// 8. **Nothing stored and nothing wrong is dry.** Two of those retire the
     ///    month, which is `docs/07-plan.md` §9.2's rule.
     pub fn observe(&mut self, out: &TickOutcome) -> Next {
         if let Some(reason) = out.reason.clone() {
@@ -1163,6 +1217,44 @@ impl FeedState {
             return Next::Retry;
         }
         if let Some(reason) = out.reason.clone() {
+            // A MONTH THIS FEED WILL NEVER HOLD IS RETIRED ON THE FIRST ASK.
+            //
+            // `reached == 0` is asserted rather than assumed. The history floor
+            // is a property of the FEED and the tick asks one feed for one
+            // window, so a below-floor refusal is every instrument's refusal
+            // and nothing can have answered — but `reason` is only the FIRST
+            // thing that went wrong, and retiring a month on one sentence while
+            // other instruments were answering would turn a partial success
+            // into a permanent gap. If anything reached, this is not that case
+            // and the ordinary ladder takes it.
+            if classify(&reason) == Trouble::Unaskable && out.reached == 0 {
+                let why = format!(
+                    "this month is below the feed's own history floor, so it is \
+                     retired rather than retried: {reason} Nothing about this \
+                     improves by waiting — a fixed floor never moves and a \
+                     rolling one moves further away every day — so the retry \
+                     allowance is spent here rather than over the next twelve \
+                     hours. The feed is NOT halted: every month above the floor \
+                     is still asked for."
+                );
+                self.stalls.push(Stall {
+                    month: self.frontier,
+                    attempts: self.attempts.saturating_add(1),
+                    reason: why.clone(),
+                    // SPENT ON ARRIVAL, which is the existing terminal state
+                    // rather than a new one. `reconsider` skips a stall at the
+                    // bound and `stall_note` already tells the operator this
+                    // process will not ask for it again — the correct sentence
+                    // for this month, already written.
+                    retried: STALL_RETRIES,
+                    // NOT STAMPED, for the reason the arm below gives: this
+                    // function reads no clock so that every branch is drivable
+                    // from a test without one.
+                    at_unix: 0,
+                });
+                self.clear_month();
+                return Next::Stall { reason: why };
+            }
             let repeat = classify(&reason) == Trouble::Store && self.attempts > 0;
             if repeat {
                 let why = format!(
@@ -4199,6 +4291,38 @@ mod tests {
         assert_eq!(classify("permission denied opening /x/y"), Trouble::Store);
         assert_eq!(classify("refused with status 500"), Trouble::Transport);
         assert_eq!(classify("something nobody has seen"), Trouble::Transport);
+
+        // THE BELOW-FLOOR SENTENCE, TAKEN FROM THE FUNCTION THAT WRITES IT.
+        //
+        // Not a copy of the words. `classify` reads a needle out of a sentence
+        // `server::clamp_to_floor` authors, and a hand-typed fixture here would
+        // keep passing on the day that sentence is reworded — leaving a
+        // permanently-unaskable month back on the retry ladder with nothing
+        // red. Driving the real function couples the two, which is the whole
+        // point: reword the refusal and this goes red in the same commit.
+        let floor = pull::vendor::HistoryFloor::Fixed {
+            year: 2020,
+            month: 1,
+            day: 1,
+        };
+        let below = Window::new(day(2019, 1, 7), day(2019, 1, 11)).expect("a real window");
+        let refusal = crate::server::clamp_to_floor(below, floor, day(2026, 8, 10))
+            .expect_err("a window ending before the floor is refused");
+        assert_eq!(
+            classify(&refusal),
+            Trouble::Unaskable,
+            "a window this feed will never hold must not take the retry ladder: {refusal}"
+        );
+
+        // AND THE STRADDLING CASE IS NOT UNASKABLE. A window that crosses the
+        // floor is clamped and SUCCEEDS, so there is no reason to classify at
+        // all — asserted so that a future widening of the needle cannot start
+        // retiring months that are perfectly askable.
+        let straddling = Window::new(day(2019, 12, 30), day(2020, 1, 3)).expect("a real window");
+        assert!(
+            crate::server::clamp_to_floor(straddling, floor, day(2026, 8, 10)).is_ok(),
+            "the part that exists is taken, so this is not a refusal at all"
+        );
     }
 
     /// **The same unit failing repeatedly stops after the bound, and the stop
@@ -4246,6 +4370,107 @@ mod tests {
             status.json().contains("it is down"),
             "the stall reaches the JSON: {}",
             status.json()
+        );
+    }
+
+    /// **A MONTH BELOW THE FEED'S FLOOR IS RETIRED ON THE FIRST ASK.**
+    ///
+    /// The test above spends [`MAX_MONTH_ATTEMPTS`] before stalling, which is
+    /// right for a transport fault: it might be a blip. A window below the
+    /// feed's history floor cannot be a blip. `clamp_to_floor` refused it by
+    /// comparing two dates, and time moves that comparison the WRONG way — a
+    /// `Fixed` floor never moves and a `Rolling` one moves further away daily.
+    ///
+    /// Classified as transport it took three attempts with backoff, a stall,
+    /// then up to [`STALL_RETRIES`] reconsiderations [`STALL_RECHECK_SECS`]
+    /// apart with three attempts each: up to nine asks over half a day, holding
+    /// the oldest-month slot, for an answer that was fixed before the first.
+    ///
+    /// This asserts all three halves of the repair — one ask, an allowance
+    /// already spent so `reconsider` passes it over, and NO halt, because the
+    /// feed is perfectly healthy for every month above the floor.
+    #[test]
+    fn a_month_below_the_history_floor_is_retired_at_once_and_never_reconsidered() {
+        let mut state = FeedState::new(
+            pull::vendor::Feed::Groww,
+            brutex_core::vendor::Vendor::Groww,
+            month(2019, 1),
+        );
+        // THE REAL REFUSAL AGAIN, not a fixture that agrees with itself.
+        let floor = pull::vendor::HistoryFloor::Fixed {
+            year: 2020,
+            month: 1,
+            day: 1,
+        };
+        let below = Window::new(day(2019, 1, 7), day(2019, 1, 11)).expect("a real window");
+        let refusal = crate::server::clamp_to_floor(below, floor, day(2026, 8, 10))
+            .expect_err("a window ending before the floor is refused");
+
+        let unaskable = TickOutcome {
+            attempted: 773,
+            reached: 0,
+            stored: 0,
+            reason: Some(refusal.clone()),
+            complete: false,
+            stopped: false,
+            journal_error: None,
+        };
+
+        let verdict = state.observe(&unaskable);
+        let Next::Stall { reason } = verdict else {
+            panic!("the first ask must retire the month, got {verdict:?}");
+        };
+        assert!(
+            reason.contains("older than the vendor holds"),
+            "the vendor's own arithmetic is carried verbatim: {reason}"
+        );
+        assert!(
+            reason.contains("retired rather than retried"),
+            "and the operator is told this was a decision, not an exhaustion: {reason}"
+        );
+        assert_eq!(state.stalls.len(), 1, "recorded, not silently skipped");
+        assert_eq!(state.stalls[0].month, month(2019, 1));
+        assert_eq!(
+            state.stalls[0].retried, STALL_RETRIES,
+            "the allowance is spent on arrival, so `reconsider` passes it over"
+        );
+        assert!(
+            state.halted.is_none(),
+            "the FEED is not halted — every month above the floor is still askable"
+        );
+
+        // AND `reconsider` REALLY DOES PASS IT OVER, driven rather than
+        // inferred from the field. A stall at the bound is the existing
+        // terminal state; this asserts this month actually landed in it.
+        let mut feeds = vec![state];
+        let later = 1_000_000i64.saturating_add(STALL_RECHECK_SECS * 4);
+        assert_eq!(
+            reconsider(&mut feeds, later),
+            None,
+            "a month the feed will never hold must never be put back on the ladder"
+        );
+
+        // THE GUARD: the same sentence does NOT retire a month when something
+        // answered. `reason` is only the FIRST thing that went wrong, and
+        // retiring a month while other instruments were storing bars would turn
+        // a partial success into a permanent gap.
+        let mut mixed_state = FeedState::new(
+            pull::vendor::Feed::Groww,
+            brutex_core::vendor::Vendor::Groww,
+            month(2019, 1),
+        );
+        let mixed = TickOutcome {
+            reached: 1,
+            reason: Some(refusal),
+            ..unaskable.clone()
+        };
+        assert!(
+            matches!(mixed_state.observe(&mixed), Next::Wait { .. }),
+            "something answered, so this is the ordinary ladder and not a retirement"
+        );
+        assert!(
+            mixed_state.stalls.is_empty(),
+            "and nothing was retired on one instrument's sentence"
         );
     }
 

@@ -25526,3 +25526,80 @@ answers. `fetch_chunks` loses its `HttpSpec` parameter, which is what stops the
 clamp reappearing below the boundary; `the_fetch_loop_takes_its_cap_from_the_descriptor`
 now asserts both halves — that the plan reads `spec.window_cap_days`, and that
 the socket loop names neither it nor `clamp_to_floor`.
+
+### D-0339 · 2026-08-28 · A month the feed will never hold is retired, not retried
+
+**Decision — `autopilot::Trouble` gains `Unaskable`, `classify` recognises the
+sentence `server::clamp_to_floor` writes, and `FeedState::observe` retires such
+a month on the FIRST ask with its retry allowance already spent. The feed is not
+halted and the month is not counted as done. Separately, `server::HTTP_LIVE`
+stops carrying a hand-kept list of its own shortcomings, because all three
+entries on it had been false for some time.**
+
+**The retry ladder was scheduling asks it already knew the answer to.** D-0338
+made a below-floor window answer `400` instead of `502`, which fixed what the
+OPERATOR reads. It did not change what the AUTOPILOT does with the same refusal:
+`classify` had no needle for it, so it fell to the unrecognised arm —
+`Trouble::Transport`, the retryable one.
+
+Measured against the constants rather than a run: `MAX_MONTH_ATTEMPTS` is 3, so
+three asks with 30 s→900 s backoff, then a stall; `STALL_RETRIES` is 2 and
+`STALL_RECHECK_SECS` is 6 h, so up to two reconsiderations with three asks each.
+**Up to nine asks over roughly half a day, holding the oldest-month slot each
+time**, for an answer fixed before the first one was issued.
+
+Bounded, so not the runaway the Kite 403 was — that one had no bound at all and
+is what `classify`'s `403` arm records. But this is the same shape: a permanent
+fact wearing a retryable label. `clamp_to_floor` refuses by comparing two dates,
+and **time moves that comparison the wrong way** — a `Fixed` floor never moves,
+and a `Rolling` one moves FORWARD daily (`docs/00-charter.md` §4 on Dhan: *"it
+moves every day"*). A window below the floor now is further below it later.
+
+**Retired, not halted, and not advanced.** Three outcomes were available and two
+are wrong. A halt stops a feed that is entirely healthy — the credential is
+live and every month above the floor is still askable. An `Advance` counts a
+month the store never received as done, which is `CLAUDE.md` §4's fallback that
+hides a failure. A `Stall` records the month with its reason and moves past it,
+which is degrade-loudly.
+
+**The terminal state already existed.** The stall is pushed with
+`retried: STALL_RETRIES`, which is the bound `reconsider` already skips at and
+which `stall_note` already renders as *"whose allowance is SPENT — this process
+will not ask for those again"*. No new field, no new page text, no second
+mechanism to keep in step with the first.
+
+**`reached == 0` is a condition, not a comment.** `TickOutcome::reason` is only
+the FIRST thing that went wrong. The history floor is a property of the feed and
+a tick asks one feed for one window, so a below-floor refusal is every
+instrument's refusal — but retiring a month on one sentence while other
+instruments were storing bars would turn a partial success into a permanent gap.
+If anything reached, the ordinary ladder takes it.
+
+**The needle is a sentence this repository authors, not a vendor's.** *"Every
+day asked for is older than the vendor holds"* is written by `clamp_to_floor`
+and by nothing else in the workspace, which is the distinction D-0283 turns on —
+that defect read the word *credential* out of a vendor's paragraph about
+transport. `every_reason_this_build_produces_is_classified` drives the real
+`clamp_to_floor` rather than a copy of its words, so rewording the refusal turns
+the classifier red in the same commit instead of silently returning the month to
+the ladder. `split_window`'s `WindowCapIsZero` is equally permanent and
+deliberately absent: no shipped descriptor declares a zero cap, so an arm for it
+would be a classification nothing can drive.
+
+**And the banner stopped describing a build that no longer exists.**
+`HTTP_LIVE` — rendered on `/pull` for every broker run — carried three claims
+under *"WHAT IS STILL MISSING"*, and all three were false: that a window was
+sent whole because `pull::session::split_window` *"has no caller yet"* (it is
+called by `planned_chunks`, D-0338, and by `fetch_chunks` before that); that a
+run storing nothing *"still reports STORED"* (it reports `NOT STARTED`); and
+that the expired-F&O endpoints were *"not modelled at all"* (`pull::fno`,
+`pull::fnowork` and the discovery walk in `api::server` model them, with
+per-vendor facts about which publish expired history).
+
+An operator was being shown three defects the build did not have, on the panel
+reporting their own pull. The list is not corrected — it is **removed**, because
+a hand-kept second copy of a fact drifts away from the fact; that is the same
+reason `CLAUDE.md` §5 refuses one for the vocabulary. `docs/06-limits.md` is the
+maintained record. `the_live_banner_claims_no_shortcoming_this_build_has_already_fixed`
+asserts the facts behind the remaining sentences and asserts that the four dead
+phrases never come back.
