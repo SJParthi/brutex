@@ -1103,6 +1103,56 @@ impl Grid {
             .filter(|c| c.trades >= min_trades && c.clears(min_win_rate_bp, min_rr_bp))
             .max_by_key(|c| (c.guaranteed_floor(), c.pessimistic, merit(c)))
     }
+
+    /// The variant with the largest guaranteed floor among those a
+    /// [`crate::bound::Bound`] admits.
+    ///
+    /// [`Self::best_clearing`] takes three loose integers; this takes the
+    /// criteria as one value. Two reasons that matters, and neither is style:
+    ///
+    /// 1. **Two `i64` thresholds side by side transpose silently.** A caller
+    ///    passing `(125, 5_000)` instead of `(5_000, 125)` compiles, runs, and
+    ///    admits everything — a 1.25% win-rate floor and a 50:1 reward ratio.
+    /// 2. **A bound built from an HTTP body has to survive to the report.** The
+    ///    criteria a run was judged under belong beside its result, and a value
+    ///    can be carried there where three arguments cannot.
+    ///
+    /// Every exit setting competes, [`Self::baseline`]'s no-stop-no-target cell
+    /// included, for the reason [`Self::best_clearing`] gives.
+    ///
+    /// `None` when the bound admits nothing — a finding about the combination,
+    /// which the caller must report rather than answering with [`Self::best`].
+    /// [`Self::refusals`] is how to say why.
+    #[must_use]
+    pub fn best_under(&self, bound: &crate::bound::Bound) -> Option<&Cell> {
+        self.cells
+            .iter()
+            .filter(|c| bound.admits(c))
+            .max_by_key(|c| (c.guaranteed_floor(), c.pessimistic, merit(c)))
+    }
+
+    /// Every variant's verdict under a bound, in cell order.
+    ///
+    /// # An empty result is not an explanation
+    ///
+    /// When [`Self::best_under`] returns `None` an operator has been told that
+    /// none of several thousand exit settings passed, and nothing about why.
+    /// The settings could have failed on six different clauses and the answer
+    /// would look identical.
+    ///
+    /// This is the audit trail for that: one [`crate::bound::Verdict`] per
+    /// variant, each naming the clause that decided it and both sides of the
+    /// comparison. A caller that tallies these can tell an operator "every
+    /// setting cleared the ratio and missed the trade floor" — which is a
+    /// different instruction from "nothing passed".
+    ///
+    /// Allocates one `Vec` sized to the grid. That is O(variants), the same
+    /// order as the grid the caller already holds, and it is why this is a
+    /// separate call rather than something [`Self::best_under`] always pays.
+    #[must_use]
+    pub fn refusals(&self, bound: &crate::bound::Bound) -> Vec<crate::bound::Verdict> {
+        self.cells.iter().map(|c| bound.verdict(c)).collect()
+    }
 }
 
 /// The tie-break, and it is not cosmetic.
@@ -3678,6 +3728,92 @@ mod tests {
             Some(40_000),
             "the higher FLOOR wins even though the other made more money, \
              because the floor cannot be moved by re-ordering the same trades"
+        );
+    }
+
+    /// The bound-taking selector agrees with the loose-argument one, and the
+    /// refusal list explains an empty answer.
+    #[test]
+    fn the_bound_selects_and_the_refusals_say_why_when_it_cannot() {
+        use crate::bound::{Bound, Verdict};
+
+        let bound = Bound::new(50, 5_000, 125, 1);
+
+        let passes = Cell {
+            trades: 200,
+            wins: 120,
+            min_win: 400,
+            worst_trade: -200,
+            pessimistic: 30_000,
+            ..Cell::default()
+        };
+        // FAILS ON THE RATIO ONLY: 150 over 900 is 0.16, well under 1.25.
+        let thin = Cell {
+            trades: 200,
+            wins: 120,
+            min_win: 150,
+            worst_trade: -900,
+            pessimistic: 900_000,
+            ..Cell::default()
+        };
+        // FAILS ON SAMPLE SIZE ONLY.
+        let brief = Cell {
+            trades: 9,
+            wins: 8,
+            min_win: 800,
+            worst_trade: -100,
+            pessimistic: 5_000,
+            ..Cell::default()
+        };
+
+        let g = Grid {
+            cells: vec![thin, brief, passes],
+            ..Grid::default()
+        };
+
+        assert_eq!(
+            g.best_under(&bound).map(|c| c.pessimistic),
+            Some(30_000),
+            "the bound must return the admitted cell, not the richest one"
+        );
+        assert_eq!(
+            g.best_under(&bound).map(|c| c.pessimistic),
+            g.best_clearing(50, 5_000, 125).map(|c| c.pessimistic),
+            "and it must agree with the loose-argument form it replaces"
+        );
+
+        // THE REFUSAL LIST IS ONE VERDICT PER VARIANT, IN CELL ORDER, and each
+        // names a DIFFERENT clause -- which is the whole point: an operator
+        // told only "nothing passed" cannot tell these three cases apart.
+        assert_eq!(
+            g.refusals(&bound).as_slice(),
+            [
+                Verdict::RewardToRiskShort {
+                    got: 16,
+                    needs: 125
+                },
+                Verdict::TooFewTrades { took: 9, needs: 50 },
+                Verdict::Admitted,
+            ],
+            "one verdict per cell, in cell order, each naming a DIFFERENT \
+             clause -- an operator told only \"nothing passed\" cannot tell \
+             these three cases apart"
+        );
+
+        // NOTHING ADMITTED IS `None`, AND THE REFUSALS STILL EXPLAIN IT.
+        let hopeless = Grid {
+            cells: vec![thin, brief],
+            ..Grid::default()
+        };
+        assert_eq!(hopeless.best_under(&bound), None);
+        assert!(
+            hopeless.refusals(&bound).iter().all(|v| !v.admitted()),
+            "an empty selection must be matched by a refusal for every cell"
+        );
+        assert_eq!(
+            Grid::default().refusals(&bound),
+            Vec::new(),
+            "and no cells refuses nothing"
         );
     }
 

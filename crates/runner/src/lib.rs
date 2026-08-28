@@ -52,6 +52,7 @@
 pub mod align;
 pub mod audit;
 pub mod bootstrap;
+pub mod bound;
 pub mod closed;
 pub mod excursion;
 pub mod grid;
