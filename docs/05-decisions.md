@@ -25523,3 +25523,45 @@ because no case sent a non-integer open interest at all — and the `<=` mutant 
 the one that mattered: it would have deleted the bar of every contract with zero
 open interest, which is most of an option chain every day. 55 mutants, 54 caught,
 1 unviable, **0 missed**.
+
+### D-0339
+
+**`/bars` defaulted its segment to INDEX too, and the helper that did it was
+sitting inside another function's doc comment.**
+
+The last surviving `"INDEX"` literal on a read path. `bars_html` read
+`param_or(query, "segment", "INDEX")` and `param_or(query, "exchange", "NSE")`,
+and `param_or`'s own doc justified them: those are *"the only values the engine
+surface has (`CLAUDE.md` §1)"*.
+
+§1 keeps two sets apart in consecutive sentences, and this conflates them. The
+engine SWEEPS exactly two instruments — and in the next breath, *"futures,
+options and single stocks may be **stored**. They are never swept."* This route
+reads the STORE.
+
+**It was latent, not live, and that is the only reason it is a separate entry
+from D-0335.** `render` always writes `&segment=` from the census, so every link
+on the site carried the right one. A hand-typed `/bars?symbol=ADANIENT` did not,
+and answered "does not exist" for an instrument with 1,240 bars on disk.
+
+**Resolved rather than refused, with one exception.** A URL that needs three
+parameters to answer a one-parameter question is a worse answer than looking the
+symbol up, so an absent `?segment=` is filled from the census. An EXPLICIT
+parameter always wins — the census answers a question the caller did not ask and
+must never override one they did — and a name the census does not hold at all is
+**refused by name**, because guessing a path answers "does not exist" for a
+reason that is not the true one.
+
+**The two outcomes are now different statuses, and that is the point rather than
+a detail.** `400` is *"I could not work out where to look"*; `404` is *"I looked
+there and the month is absent"*. The defect collapsed both into the second. An
+operator chasing a missing month and one chasing a wrong path need opposite next
+steps — which is the distinction this route's own doc comment opens with.
+
+**`param_or` is deleted, and deleting it repaired a sentence.** It had been
+inserted between the two halves of `bars_html`'s doc paragraph, splitting
+*"...the same distinction `census::Census` draws between absent"* from *"and
+unreadable."* — so the rendered doc for `bars_html` read as a fragment, and
+`param_or`'s own text appeared to belong to it. That is the third orphaned doc
+comment this file has produced by inserting an item mid-paragraph. Removing the
+helper closed the sentence over the gap.

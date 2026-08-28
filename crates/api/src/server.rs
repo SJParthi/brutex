@@ -11846,26 +11846,96 @@ fn bars_refusal(
 /// Every failure arm here names what it looked for: an unreadable month must
 /// say *which path*, because "no data" and "the wrong path" send an operator to
 /// opposite places — the same distinction `census::Census` draws between absent
-/// A query parameter, or `fallback` when it is absent or empty.
-///
-/// The two spellings this route needs — an absent `?segment=` means INDEX and
-/// an absent `?exchange=` means NSE, because those are the only values the
-/// engine surface has (`CLAUDE.md` §1). Written once so the two cannot drift.
-fn param_or(query: &str, name: &str, fallback: &str) -> String {
-    let raw = param(query, name);
-    if raw.is_empty() {
-        fallback.to_owned()
-    } else {
-        raw
-    }
-}
-
 /// and unreadable.
+///
+/// # The helper that used to sit inside this sentence
+///
+/// `param_or` lived between the two halves of the paragraph above — literally
+/// splitting *"between absent"* from *"and unreadable"* — and supplied the two
+/// defaults this route no longer takes. Its own doc justified them: an absent
+/// `?segment=` means INDEX *"because those are the only values the engine
+/// surface has (`CLAUDE.md` §1)"*. That conflates two sets §1 keeps apart in
+/// consecutive sentences: the engine SWEEPS two instruments, and *"futures,
+/// options and single stocks may be stored. They are never swept."* This route
+/// reads the store. D-0339 removed the helper, and the paragraph closed over
+/// the gap it left.
 #[must_use]
 pub fn bars_html(site: &Site, query: &str) -> (axum::http::StatusCode, String) {
     let symbol = param(query, "symbol");
-    let segment = param_or(query, "segment", "INDEX");
-    let exchange = param_or(query, "exchange", "NSE");
+    // THE SEGMENT IS RESOLVED FROM THE CENSUS, NEVER DEFAULTED.
+    //
+    // This read `param_or(query, "segment", "INDEX")`, and the comment on
+    // `param_or` justified it: an absent `?segment=` means INDEX *"because
+    // those are the only values the engine surface has (`CLAUDE.md` §1)"*. That
+    // conflates two different sets. §1 says the engine SWEEPS exactly two
+    // instruments — and in the same breath that *"futures, options and single
+    // stocks may be stored. They are never swept."* This route reads the STORE.
+    //
+    // D-0335 fixed the same defect on `/calendar.json`, where the literal was
+    // live: `ADANIENT` is filed at `NSE/CASH/ADANIENT/` and was probed at
+    // `NSE/INDEX/ADANIENT/` **366 times** against 1,240 daily bars that were on
+    // disk the whole time. Here it was latent only because `render` always
+    // writes `&segment=` from the census — a hand-typed
+    // `/bars?symbol=ADANIENT` read the wrong segment and reported "no data".
+    //
+    // Resolved rather than refused, because this route is reachable by hand and
+    // a URL that needs three parameters to answer a one-parameter question is
+    // a worse answer than looking the symbol up. Refused only when the census
+    // does not hold the name at all, which is the honest reply to "show me the
+    // bars for something nothing has stored".
+    let asked_segment = param(query, "segment");
+    let asked_exchange = param(query, "exchange");
+    let located = if asked_segment.is_empty() || asked_exchange.is_empty() {
+        census::read_all(&site.store_root)
+            .iter()
+            .flat_map(|c| census::held_entries(std::slice::from_ref(c)))
+            .find(|(series, _)| series.contract.is_none() && series.symbol.as_str() == symbol)
+            .map(|(series, _)| {
+                (
+                    series.exchange.as_str().to_owned(),
+                    series.segment.as_str().to_owned(),
+                )
+            })
+    } else {
+        None
+    };
+    let (exchange, segment) = match (located, asked_exchange, asked_segment) {
+        // AN EXPLICIT PARAMETER ALWAYS WINS. The census answers a question the
+        // caller did not ask; it must never override one they did.
+        (_, ex, seg) if !ex.is_empty() && !seg.is_empty() => (ex, seg),
+        (Some((ex, seg)), asked_ex, asked_seg) => (
+            if asked_ex.is_empty() { ex } else { asked_ex },
+            if asked_seg.is_empty() { seg } else { asked_seg },
+        ),
+        // NOTHING HELD UNDER THIS NAME AND NOTHING ASKED. There is no path to
+        // probe, and guessing one produces "does not exist" for a reason that
+        // is not the true one — which is the whole defect this replaces.
+        (None, asked_ex, asked_seg) => (
+            if asked_ex.is_empty() {
+                String::new()
+            } else {
+                asked_ex
+            },
+            if asked_seg.is_empty() {
+                String::new()
+            } else {
+                asked_seg
+            },
+        ),
+    };
+    if exchange.is_empty() || segment.is_empty() {
+        return bars_refusal(
+            site,
+            &symbol,
+            "—",
+            "—",
+            "no feed in this store holds a spot series under that name, so \
+             there is no exchange or segment to read it from. Refused rather \
+             than guessed: a guessed path answers \"does not exist\" for a \
+             reason that is not the true one. Pass ?exchange= and ?segment= \
+             explicitly to address a series the census does not carry.",
+        );
+    }
     // ONE PARSER, shared with the pull form. This route had its own copy that
     // compared with `==` while `ingest::parse_vendor` used
     // `eq_ignore_ascii_case`, so `?vendor=Groww` meant a different vendor here
@@ -16704,6 +16774,74 @@ mod tests {
         // The ingest page then offers every target with a truthful zero.
         let ingest_html = pull_html(&site, day(2026, 8, 7));
         assert!(ingest_html.contains("0 instrument(s)"), "{ingest_html}");
+    }
+
+    /// **`/bars` RESOLVES THE SEGMENT FROM THE CENSUS AND REFUSES RATHER THAN
+    /// GUESSING.**
+    ///
+    /// This route read `param_or(query, "segment", "INDEX")`, whose own doc
+    /// justified the default: those are *"the only values the engine surface
+    /// has"*. `CLAUDE.md` §1 keeps two sets apart in consecutive sentences —
+    /// the engine SWEEPS two instruments, and *"futures, options and single
+    /// stocks may be stored. They are never swept."* This route reads the
+    /// store, so the sweep surface is the wrong set to default from.
+    ///
+    /// It was latent rather than live: `render` always writes `&segment=` from
+    /// the census, so only a hand-typed URL reached it. D-0335 fixed the same
+    /// literal where it WAS live, on `/calendar.json`, and measured the cost —
+    /// 366 probes into a directory that will never exist, against 1,240 daily
+    /// bars sitting on disk.
+    ///
+    /// A store holding nothing under the name now REFUSES and says why, instead
+    /// of reporting an absent month — "no data" and "I looked in the wrong
+    /// place" send an operator to opposite places, which is the distinction
+    /// this route's own doc comment opens with.
+    #[test]
+    fn the_bars_route_refuses_a_name_it_cannot_locate_rather_than_guessing_index() {
+        let root = store_root("barssegment");
+        let dir = agreeing("barssegment");
+        let site = Site::new(universe(&dir), census::read_all(&root), root);
+
+        let (status, body) = bars_html(&site, "symbol=ADANIENT&vendor=dhan&month=2026-01");
+        assert_eq!(
+            status,
+            axum::http::StatusCode::BAD_REQUEST,
+            "a refusal is a 400 and a rendered page — the same status every \
+             other arm of this route answers with, never a 500 and never a 200 \
+             carrying an empty month"
+        );
+        assert!(
+            body.contains("no feed in this store holds a spot series under that name"),
+            "it names WHY it could not look, rather than reporting an absent \
+             month: {body}"
+        );
+
+        // AN EXPLICIT PAIR IS STILL HONOURED. The census answers a question the
+        // caller did not ask; it must never override one they did — and this is
+        // the half that keeps the route usable for a series the census has not
+        // caught up with.
+        let (status, body) = bars_html(
+            &site,
+            "symbol=ADANIENT&vendor=dhan&month=2026-01&exchange=NSE&segment=CASH",
+        );
+        assert!(
+            !body.contains("no feed in this store holds a spot series"),
+            "an explicitly addressed series is looked for, not refused: {body}"
+        );
+
+        // AND THE TWO OUTCOMES ARE DIFFERENT STATUSES, which is the whole point
+        // of the change rather than a detail of it. **400** is "I could not
+        // work out where to look"; **404** is "I looked there and the month is
+        // absent". The defect this replaces collapsed both into the second —
+        // it guessed `NSE/INDEX/`, found nothing, and reported an absent month
+        // for a reason that was not the true one. An operator chasing a missing
+        // month and an operator chasing a wrong path need opposite next steps,
+        // which is the distinction this route's own doc comment opens with.
+        assert_eq!(
+            status,
+            axum::http::StatusCode::NOT_FOUND,
+            "a located series with no such month is NOT FOUND, not BAD REQUEST"
+        );
     }
 
     #[test]
