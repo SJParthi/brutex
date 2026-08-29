@@ -184,18 +184,30 @@ pub fn derive(
             }
             Some(_) => {
                 report.months_walked = report.months_walked.saturating_add(1);
-                if let Ok(days) =
-                    read_minute_spans(store_root, vendor, exchange, segment, symbol, *month)
-                {
-                    for (day, runs) in days {
-                        // `get_mut`, NEVER `insert`. A minute bar on a day the
-                        // daily rung does not know is the store contradicting
-                        // itself, and inventing a session for it is the one
-                        // thing this module must not do.
-                        if let Some(slot) = traded.get_mut(&day) {
-                            *slot = runs;
+                // THE MINUTE SIDE'S REFUSAL IS RECORDED, AND IT WAS THE ONE
+                // `Err` IN THIS FUNCTION THAT WAS NOT.
+                //
+                // Fourteen lines above, the daily read does
+                // `Err(why) => report.unreadable.push(why)`, and
+                // `Report::unreadable`'s own doc says *"Named, never silent. A
+                // month that failed to open is not a month with no sessions."*
+                // This arm dropped its error — and `months_walked` had already
+                // been incremented, so the report claimed a walk that never
+                // happened and every day in the month fell to
+                // `OpenLengthUnmeasured` with nothing saying why.
+                match read_minute_spans(store_root, vendor, exchange, segment, symbol, *month) {
+                    Ok(days) => {
+                        for (day, runs) in days {
+                            // `get_mut`, NEVER `insert`. A minute bar on a day
+                            // the daily rung does not know is the store
+                            // contradicting itself, and inventing a session for
+                            // it is the one thing this module must not do.
+                            if let Some(slot) = traded.get_mut(&day) {
+                                *slot = runs;
+                            }
                         }
                     }
+                    Err(why) => report.unreadable.push(why),
                 }
             }
             // NO MINUTE FILE AT ALL. Every day in it keeps `None`, which becomes
@@ -242,14 +254,57 @@ fn read_days(
     let file = crate::bars::open(
         store_root, vendor, exchange, segment, symbol, rung, month, None,
     )?;
+    // AN UNREADABLE DAILY BAR IS NOT A HOLIDAY, AND SKIPPING IT MADE ONE.
+    //
+    // This loop was `if let Ok(bar) = file.read_record(index)`, so a record
+    // whose checksum failed never entered `out`, the day never entered
+    // `traded`, and this module — whose header declares *"the daily rung IS the
+    // calendar. A `1day` bar is proof the exchange traded that day"* — reported
+    // an exchange holiday that never happened.
+    //
+    // Its own header names the hazard one paragraph later: *"deriving 'which
+    // days traded' from the rung being validated would make a failed pull read
+    // as a holiday."* The circularity it guards against is between RUNGS; this
+    // was the same outcome reached by dropping a byte.
+    //
+    // **The blast radius is every consumer of the derived calendar**, which
+    // since D-0365 includes `/gaps.json`'s peer denominator: a corrupt daily
+    // record in ANY peer removes that day from what the exchange owed, and a
+    // real hole on that day then reads as no loss.
+    //
+    // `crates/api/src/bars.rs` had the answer two files away — it collects
+    // `faults` beside the rows and the caller reports the gap. `Report` already
+    // carries `unreadable` for exactly this, with the doc *"Named, never
+    // silent. A month that failed to open is not a month with no sessions."*
+    // A record that failed to READ is not a day with no session, by the same
+    // sentence.
+    let mut unreadable = 0_u32;
     let mut out: BTreeMap<i64, u32> = BTreeMap::new();
     let mut index = 0_u64;
     while index < file.records() {
-        if let Ok(bar) = file.read_record(index) {
-            let (day, _) = ist(bar.ts_micros);
-            *out.entry(day).or_insert(0) += 1;
+        match file.read_record(index) {
+            Ok(bar) => {
+                let (day, _) = ist(bar.ts_micros);
+                *out.entry(day).or_insert(0) += 1;
+            }
+            Err(_) => unreadable = unreadable.saturating_add(1),
         }
         index = index.saturating_add(1);
+    }
+    // REFUSE THE WHOLE MONTH RATHER THAN ANSWER FROM PART OF IT.
+    //
+    // The caller records this in `Report::unreadable` and treats the month as
+    // one it could not read — which is the honest state. Answering with the
+    // days that DID decode would hand back a calendar missing exactly the days
+    // whose bars are damaged, and that is the holiday this refusal exists to
+    // stop being invented.
+    if unreadable > 0 {
+        return Err(format!(
+            "{unreadable} daily record(s) in {month} could not be read, so this \
+             month cannot say which days traded. A day whose bar did not decode \
+             is not a day the exchange was shut, and answering without it would \
+             put a holiday in the calendar that never happened."
+        ));
     }
     Ok(out.into_iter().collect())
 }
@@ -308,20 +363,44 @@ fn read_minute_spans(
     // against a true 28. The walk is already happening; recording where it
     // BREAKS costs one comparison per bar and removes the error entirely.
     let mut runs: BTreeMap<i64, Vec<(u16, u16)>> = BTreeMap::new();
+    // AND HERE A DROPPED RECORD SPLITS A RUN, WHICH IS WORSE THAN LOSING IT.
+    //
+    // The runs above are what become the day's trading WINDOWS. Skip one
+    // unreadable minute in the middle of a session and the run breaks in two,
+    // so the calendar reports a session with a hole in it — a scheduled midday
+    // break the exchange never took. Every consumer then treats the minutes
+    // inside that invented break as `outside-window`, which is not a loss, so a
+    // genuine gap on those minutes becomes invisible.
+    //
+    // That is the same failure the module's 180-bar note above describes,
+    // arriving from the opposite direction: there the outer span over-counted a
+    // real break, here a byte invents one.
+    let mut unreadable = 0_u32;
     let mut index = 0_u64;
     while index < file.records() {
-        if let Ok(bar) = file.read_record(index) {
-            let (day, minute) = ist(bar.ts_micros);
-            let day_runs = runs.entry(day).or_default();
-            match day_runs.last_mut() {
-                // CONTIGUOUS: extend. Bars arrive in timestamp order, so the
-                // last run is the only one this minute can belong to.
-                Some(last) if last.1.saturating_add(1) == minute => last.1 = minute,
-                Some(last) if last.1 == minute => {}
-                _ => day_runs.push((minute, minute)),
+        match file.read_record(index) {
+            Ok(bar) => {
+                let (day, minute) = ist(bar.ts_micros);
+                let day_runs = runs.entry(day).or_default();
+                match day_runs.last_mut() {
+                    // CONTIGUOUS: extend. Bars arrive in timestamp order, so
+                    // the last run is the only one this minute can belong to.
+                    Some(last) if last.1.saturating_add(1) == minute => last.1 = minute,
+                    Some(last) if last.1 == minute => {}
+                    _ => day_runs.push((minute, minute)),
+                }
             }
+            Err(_) => unreadable = unreadable.saturating_add(1),
         }
         index = index.saturating_add(1);
+    }
+    if unreadable > 0 {
+        return Err(format!(
+            "{unreadable} minute record(s) in {month} could not be read, so the \
+             session windows this month would report are not the ones it traded. \
+             A minute that did not decode splits a run, and a split run is a \
+             midday break the exchange never took."
+        ));
     }
     Ok(runs.into_iter().collect())
 }

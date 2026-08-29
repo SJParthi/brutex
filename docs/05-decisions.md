@@ -27220,3 +27220,109 @@ the seventh lives in `lib.rs`, which is how the census missed it.
 The same guard now stands there: the fixture varies its bars by `(k * 11) % 61`,
 so a body that ignores its input emits the same words on every bar, and the run
 must not be constant.
+
+### D-0374
+
+**CI gate 10 was RED, and it had been red long enough for the rows to describe
+behaviour the code no longer had.**
+
+`docs/04-invariants.md` opens with *"An invariant with no test named beside it
+is deleted from this file, not shipped. A consistency check in CI fails if a
+row's test does not exist."* Five rows named tests that exist in **no tracked
+file**, and none was in gate 10's row-id allowlist:
+
+| Row | Cited | Verdict |
+|---|---|---|
+| P-22 | `a_refusal_halves_every_allowance_and_drains_every_bucket` | renamed by D-0326 |
+| RG-04 | `a_daily_window_is_split_by_the_month_and_not_by_the_one_minute_cap` | renamed by D-0320 |
+| RG-05 | `no_chunk_ever_spans_two_months` | **deleted** by D-0320 |
+| SW-18 | `the_rung_list_here_agrees_with_the_one_cli_refuses_by` | renamed |
+| MR-30 | `universe_route_tests` | never a `fn` — a `mod` |
+
+Four are in-place renames, confirmed by `git log -S` on the exact hunks. The
+citations are repointed.
+
+**Three of them also described retired behaviour, and repointing alone would
+have left a green gate over a false document.**
+
+- **P-22 said "halves".** D-0326 replaced halving with `ceiling / BACKOFF_STEPS`
+  floored at one permit, because *"halving on that evidence discards capacity
+  known to exist"* — one 429 took 500-per-minute to 250. Measured today: 8→7,
+  500→485, 100,000→96,875, every bucket drained, every published ceiling
+  untouched.
+- **RG-04 asserted the OPPOSITE of what its test now proves**, and all four of
+  its request counts were wrong. It read *"a daily window is split by the month
+  and never by the one-minute cap"* — true until D-0320 removed the month clamp
+  that cost forty requests out of every forty-one. The test's
+  `if daily_cap.is_some()` branch now asserts `daily.len() < WINDOW_MONTHS`, and
+  *"the day rung is still being cut at month ends"* is its FAILURE message.
+- **SW-18 described a cross-check that was vacuous.** It claimed the test *"asks
+  `cli` about a rung it cannot sweep and compares"*.
+  `elite_descend_in_points` never validates against `EVERY_RUNG` — it hands the
+  name to `stored::load_span`, whose refusal lists the STORE's nine timeframes —
+  so the comparison ran in one direction only, api ⊆ refusal. The drift it was
+  meant to catch **happened**: api's copy held `1day` and was missing `30min`
+  while the suite stayed green. `EVERY_RUNG` is now re-exported from `cli` and
+  the assertion is identity.
+
+**RG-05 is marked `✗` rather than repointed, and that is the judgement in this
+entry.** Its successor deliberately stopped asserting the property: the month
+clause survives only under `if cap.is_none()`. MR-38 already cites that test.
+Pointing a second row at it — one stating a property it no longer asserts —
+would be a green tick over exactly the drift this file exists to refuse. The
+`~~strikethrough~~ + reason + ✗` shape follows X-05 and X-06b.
+
+**How it was found, and why nothing caught it.** An audit replicated gate 10's
+own algorithm against the tree. The document is gate-checked and `CLAUDE.md`
+§10's caveat says to believe the gate where one exists — but a gate nobody has
+watched go red is not evidence either, and this one had been red across at least
+two ledger entries that renamed its tests.
+
+1,666 tests green across `api`, `pull` and `store`; `clippy -D warnings` clean.
+
+### D-0375
+
+**A corrupt daily bar became a public holiday, and a corrupt minute became a
+midday break the exchange never took.**
+
+`api::calendar_of` declares in its own header: *"**The daily rung is the
+calendar.** A `1day` bar is proof the exchange traded that day."* Both of its
+readers walked records with `if let Ok(bar) = file.read_record(index)`.
+
+So a daily record whose checksum failed was **skipped**: the day never entered
+`traded`, and the derived calendar reported a trading holiday that never
+happened. The module's header names this hazard one paragraph later — *"deriving
+'which days traded' from the rung being validated would make a failed pull read
+as a holiday"* — and guards the circularity **between rungs**. This reached the
+same outcome by dropping a byte.
+
+`read_minute_spans` is worse. Its runs become the day's trading WINDOWS, so a
+skipped minute mid-session **splits a run in two** and the calendar reports a
+scheduled break. Every consumer then treats those minutes as `outside-window`,
+which is not a loss — so a genuine gap there becomes invisible. That is the
+180-bar defect this module already records, arriving from the opposite
+direction: there the outer span over-counted a real break, here a byte invents
+one.
+
+**The blast radius includes `/gaps.json`.** Since D-0365 the completeness audit
+takes its denominator from peer calendars, so **one corrupt daily record in any
+peer removes that day from what the exchange owed**, and a real hole on that day
+reads as no loss.
+
+Both now count unreadable records and **refuse the month** rather than answering
+from part of it. Answering with the days that DID decode hands back a calendar
+missing exactly the days whose bars are damaged, which is the holiday the
+refusal exists to stop being invented.
+
+**And the caller's minute-side `Err` was the one in that function not
+recorded.** Fourteen lines above it, the daily read does
+`Err(why) => report.unreadable.push(why)`, under a doc reading *"Named, never
+silent. A month that failed to open is not a month with no sessions."* The
+minute arm dropped its error — and `months_walked` had already been
+incremented, so the report claimed a walk that never happened while every day
+in the month fell to `OpenLengthUnmeasured` with nothing saying why.
+
+`crates/api/src/bars.rs` had the answer two files away: it collects `faults`
+beside the rows and the caller reports the gap.
+
+781 `api` tests green, `clippy -D warnings` clean.
