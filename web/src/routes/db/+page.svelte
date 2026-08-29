@@ -3312,8 +3312,6 @@
   let pageOver = $state(0);
   /** @type {HTMLElement | null} */
   let factsEl = $state(null);
-  /** @type {HTMLElement | null} */
-  let cbandEl = $state(null);
   /* ---------------------------------------------------------------------
      WHAT TRIGGERS THE MEASUREMENT IS THE WHOLE PROBLEM, AND TWO OBVIOUS
      ANSWERS WERE BUILT AND MEASURED FAILING BEFORE THIS ONE.
@@ -3419,15 +3417,13 @@
     const measure = () => {
       barBoxH = el.clientHeight;
       const f = factsEl?.getBoundingClientRect().height ?? 0;
-      const c = cbandEl?.getBoundingClientRect().height ?? 0;
-      /* THE TWO PANELS ARE PRICED DIFFERENTLY BECAUSE THEY FOLD DIFFERENTLY.
-         The counted line LEAVES, so it is worth its whole height plus the
-         column gap that goes with it. The band STAYS and only loses its heading
-         and its legend, so it is worth the difference between what it measures
-         now and what it measures slim — never the whole thing, which is what
-         the label claimed while the band was being deleted outright. */
-      if (f || c)
-        foldPx = (f ? f + BOARD_GAP : 0) + (c ? Math.max(0, c - CBAND_SLIM_H) : 0);
+      /* ONE PANEL FOLDS NOW, NOT TWO. The coverage band was the other term: it
+         STAYED and shed only its heading and legend, so it was priced at the
+         difference between its full and its slim height. It has left the page,
+         so there is nothing left to price and the `CBAND_SLIM_H` term goes with
+         it. The counted line still LEAVES outright, so it is still worth its
+         whole height plus the column gap that went with it. */
+      if (f) foldPx = f + BOARD_GAP;
     };
     measure();
     const settle = setTimeout(measure, 0);
@@ -3463,13 +3459,12 @@
      accuracy and nothing else, which is why it is worth an approximation
      rather than a `getComputedStyle` call on every resize. */
   const BOARD_GAP = 8;
-  /* THE SLIM BAND'S HEIGHT: the 26px rail, `--s2` of padding each side and its
-     1px border. Written rather than measured because the slim band does not
-     EXIST while the full one is on screen, and the value is only ever used to
-     price the button's label — being a few pixels out costs that label a little
-     accuracy and costs the layout nothing, since the fit itself is measured
-     after the fold rather than predicted from this. */
-  const CBAND_SLIM_H = 36;
+  /* `CBAND_SLIM_H` STOOD HERE AND WENT WITH THE BAND IT MEASURED. It was the
+     slim rail's 36px, used to price how much height the fold reclaimed from a
+     band that STAYED and shed only its furniture. The band has left the page,
+     so the fold has one term and a constant describing an element that no
+     longer renders is exactly the stale copy this file spends its comments
+     avoiding. */
   /** What the fold is worth right now, in rows. */
   const foldRows = $derived(Math.max(0, Math.floor(foldPx / ROW)));
 
@@ -4947,6 +4942,53 @@
    */
   const timeNarrows = $derived(!dayRung && Boolean(fromTime || toTime));
 
+  /**
+   * EVERY MINUTE THE LOADED ROWS ACTUALLY HOLD, newest logic aside — sorted,
+   * with how many bars open on each.
+   *
+   * THE LIST IS THE DATA, NOT A CLOCK. A generic 24x60 picker offers 1,440
+   * minutes of which a trading day has 375, so nine out of ten choices would
+   * land on nothing and the control would spend most of its surface being
+   * wrong. Folding the loaded rows means every row offered is a row that
+   * exists, and the count beside it says how many days share that minute.
+   *
+   * IT SIZES ITSELF TO THE RUNG for free: 375 entries at `1min`, 25 at
+   * `15min`, and `Picker`'s filter box handles the long case — the same
+   * control, and the same interaction, as every other rung on this strip.
+   *
+   * O(barRows) AND ONLY WHEN THEY CHANGE. It is a `$derived`, so the walk
+   * happens on a new read and not on a re-render; the rows it walks are the
+   * ones already in memory for the grid.
+   */
+  const timeOptions = $derived.by(() => {
+    if (dayRung) return [];
+    /** @type {Map<string, number>} */
+    const seen = new Map();
+    for (const b of barRows) {
+      const t = timeLabel(b.ts);
+      if (t === '—') continue;
+      seen.set(t, (seen.get(t) ?? 0) + 1);
+    }
+    return [...seen.keys()].sort().map((t) => ({
+      key: t,
+      name: t,
+      detail: `${fmt(seen.get(t) ?? 0)} bar(s)`
+    }));
+  });
+
+  /**
+   * THE SAME LIST WITH AN EXPLICIT WAY OUT.
+   *
+   * `Picker` shows its bulk header only in multi-select, so a `single` menu has
+   * no Clear all — and a bound you can set but not unset is a trap. `Any` is a
+   * row like the others, in the place a reader already looks, rather than a
+   * second gesture they have to know about.
+   */
+  const timeBounds = $derived([
+    { key: '', name: 'Any', detail: 'no bound' },
+    ...timeOptions
+  ]);
+
   const barWindowed = $derived.by(() => {
     /* THE TIME PAIR IS PART OF THE SAME WINDOW AND IS APPLIED IN THE SAME
        PASS. A second `.filter` would walk the rows twice to answer one
@@ -5291,12 +5333,22 @@
    * `pagePlan.base` is the offset of the first loaded row, so the page holding
    * row N is a division, not a search.
    */
-  function jumpToTime() {
+  /**
+   * @param {string} [at] the minute to land on. Defaults to `goTime` so the
+   *   parameter is only ever passed by the control that HAS the new value —
+   *   a `$state` write and a read of it in the same handler is a sequencing
+   *   question nobody should have to answer while reading a click handler.
+   */
+  function jumpToTime(at = goTime) {
     landedRk = '';
     jumpWhy = '';
-    const want = minuteOf(goTime);
+    const want = minuteOf(at);
     if (want === null) {
-      jumpWhy = `“${goTime.trim()}” is not a time. Write it as HH:MM on a 24-hour clock — 14:32.`;
+      /* UNREACHABLE FROM THE CONTROL, KEPT FOR THE FUNCTION. The picker offers
+         only minutes folded out of the loaded rows, so it cannot produce a
+         value this rejects. This is a function boundary, and the next caller
+         is not required to have read the picker. */
+      jumpWhy = `“${String(at).trim()}” is not a time. It must be HH:MM on a 24-hour clock — 14:32.`;
       return;
     }
     if (dayRung) {
@@ -5332,7 +5384,7 @@
     jumpWhy =
       bestGap === 0
         ? ''
-        : `No bar opens at ${goTime.trim()}. Landed on ${timeLabel(hit.ts)} — the nearest loaded, ${fmt(bestGap)} minute(s) away.`;
+        : `No bar opens at ${String(at).trim()}. Landed on ${timeLabel(hit.ts)} — the nearest loaded, ${fmt(bestGap)} minute(s) away.`;
   }
 
   /** @param {number} n */
@@ -7260,8 +7312,17 @@
 
 <div class="pane db">
   <div class="pane-head">
-    <span class="pane-title">DB · {feedName}</span>
-
+    <!-- THE TITLE SAID WHAT TWO OTHER CONTROLS ALREADY SAY. `DB` is the lit tab
+         in the nav directly above it and `{feedName}` is the BROKER FEED
+         picker directly below it, so the line was a third statement of a fact
+         the reader had on screen twice, holding a row of the fold open to make
+         it.
+         THE BAR ITSELF STAYS, AND SO DOES WHAT IS IN IT. `as of …` is the read
+         stamp — the only thing on the page that says how old these numbers are
+         — and `Refresh` is a control. Deleting a label is not the same act as
+         deleting either of those, and `.pane-head` is shared with /ingest,
+         /autopilot and /audit: dropping the bar here alone would make this the
+         one page in the console without a head. -->
     <span class="spacer"></span>
 
     <!-- FRESHNESS IS A CLAIM, AND A FAILED READ CANNOT MAKE IT.
@@ -7379,8 +7440,14 @@
          SO THE SECTION IS NOT `aria-hidden` ANY MORE — it holds a live control
          — and the attribute moved onto the five placeholder cells, which is
          where it belonged: a `.skel` line has nothing to announce. -->
+    <!-- THE `QUERY` LEAD IS GONE AND THE `aria-label` CARRIES IT.
+         Every control under it is labelled — BROKER FEED, UNIVERSE, INSTRUMENT,
+         SEGMENT, TIMEFRAME, the dates and the times — so the word named a group
+         a reader had already identified from its contents, and spent a line of
+         the fold doing it. The section is still announced as "Query" to anything
+         reading the document rather than looking at it, which is the half of
+         the label that was carrying information. -->
     <section class="strip" aria-label="Query">
-      <span class="lead">Query</span>
       {@render feedRung()}
       {#each [0, 1, 2, 3, 4] as i (i)}
         <div class="field" aria-hidden="true">
@@ -7491,8 +7558,17 @@
          is authored after the one that narrows it, so tab order follows the
          markup for free.
          ================================================================== -->
+    <!-- THE `QUERY` LEAD IS GONE AND THE `aria-label` CARRIES IT.
+         Every control under it is labelled — BROKER FEED, UNIVERSE, INSTRUMENT,
+         SEGMENT, TIMEFRAME, and the dates and times — so the word named a group
+         a reader had already identified from its contents, and spent a line of
+         the fold doing it. The section is still announced as "Query" to
+         anything reading the document rather than looking at it, which is the
+         half of the label that was carrying information.
+         `Contract` KEEPS ITS LEAD, and the difference is not inconsistency:
+         that strip is USUALLY EMPTY, and its lead is what says a named section
+         exists at all before there is a control in it to imply one. -->
     <section class="strip rise" aria-label="Query">
-      <span class="lead">Query</span>
 
       <!-- THE FEED IS THE PAGE'S SCOPE AND IT IS CHOSEN HERE — the strip's
            first cell, because every rung after it is this feed's answer. One
@@ -7877,62 +7953,65 @@
                  reads as two unrelated controls. `flex-basis: 100%` puts the
                  break where the MEANING is: days on one line, minutes on the
                  next, and the trio can never be separated from each other. -->
+            <!-- PICKED, NOT TYPED — the same control as every other rung.
+                 These were three text boxes wanting `HH:MM`, which asked a
+                 reader to KNOW a minute before they could look at one, and to
+                 type it correctly. Every other control on this strip is a
+                 `Picker`; there was no reason these were not, and two
+                 consequences followed from that alone. The list can only offer
+                 minutes the loaded rows actually hold, so a choice cannot land
+                 on nothing. And `.pbtn` is already 48px here — measured, the
+                 same as the day fields beside it — so the alignment comes for
+                 free rather than being re-derived. -->
             <div class="times">
               <div class="tcell">
                 <span class="tlbl" id="lab-tfrom">From time</span>
-              <input
-                class="tin"
-                type="text"
-                inputmode="numeric"
-                placeholder="HH:MM"
-                maxlength="5"
-                aria-labelledby="lab-tfrom"
-                bind:value={fromTime}
-                title="Only bars opening at or after this minute, IST. Compared against the Time column itself, so what you filter and what you read are the same value. Leave it empty for no lower bound."
-              />
-            </div>
-            <div class="tcell">
-              <span class="tlbl" id="lab-tto">To time</span>
-              <input
-                class="tin"
-                type="text"
-                inputmode="numeric"
-                placeholder="HH:MM"
-                maxlength="5"
-                aria-labelledby="lab-tto"
-                bind:value={toTime}
-                title="Only bars opening at or before this minute, IST. Leave it empty for no upper bound."
-              />
-            </div>
-            <div class="tcell gocell">
-              <span class="tlbl" id="lab-goto">Go to</span>
-              <div class="gorow">
-                <input
-                  class="tin"
-                  type="text"
-                  inputmode="numeric"
-                  placeholder="HH:MM"
-                  maxlength="5"
-                  aria-labelledby="lab-goto"
-                  bind:value={goTime}
-                  onkeydown={(e) => {
-                    if (e.key === 'Enter') {
-                      e.preventDefault();
-                      jumpToTime();
-                    }
-                  }}
-                  title="Move the page to the bar nearest this minute and mark it. This FILTERS NOTHING — the rows either side stay on screen, because a print is read against its neighbours."
+                <Picker
+                  single
+                  filter
+                  label="minutes"
+                  disabled={timeOptions.length === 0}
+                  summary={fromTime || 'Any'}
+                  rows={timeBounds}
+                  selected={new Set([fromTime])}
+                  onchange={(/** @type {Set<string>} */ s) => (fromTime = [...s][0] ?? '')}
                 />
-                <button
-                  class="btn gobtn"
-                  type="button"
-                  onclick={jumpToTime}
-                  disabled={goTime.trim() === ''}
-                  title={goTime.trim() === ''
-                    ? 'Write a time first — HH:MM on a 24-hour clock.'
-                    : `Land on the bar nearest ${goTime.trim()}.`}>Go</button
-                >
               </div>
+              <div class="tcell">
+                <span class="tlbl" id="lab-tto">To time</span>
+                <Picker
+                  single
+                  filter
+                  label="minutes"
+                  disabled={timeOptions.length === 0}
+                  summary={toTime || 'Any'}
+                  rows={timeBounds}
+                  selected={new Set([toTime])}
+                  onchange={(/** @type {Set<string>} */ s) => (toTime = [...s][0] ?? '')}
+                />
+              </div>
+              <div class="tcell gocell">
+                <span class="tlbl" id="lab-goto">Go to</span>
+                <!-- SELECTING IS THE WHOLE GESTURE. The `Go` button beside the
+                     old box existed because typing has no moment of
+                     completion; picking a row does, so a second press to
+                     confirm the press just made is furniture. Re-choosing the
+                     same minute jumps again, which is what a reader who has
+                     paged away and wants to come back will try. -->
+                <Picker
+                  single
+                  filter
+                  label="minutes"
+                  disabled={timeOptions.length === 0}
+                  summary={goTime || 'Pick a minute'}
+                  rows={timeOptions}
+                  selected={new Set([goTime])}
+                  onchange={(/** @type {Set<string>} */ s) => {
+                    const at = [...s][0] ?? '';
+                    goTime = at;
+                    if (at) jumpToTime(at);
+                  }}
+                />
               </div>
             </div>
           {/if}
@@ -9097,44 +9176,19 @@
       </div>
     {/if}
 
-    <!-- THE BAND IS OUTSIDE THE FOLD, and `class:slim` is what it does instead
-         of leaving. See the note above the counted line: this rail is the only
-         picture on the page, so `compact` takes its heading and its legend and
-         leaves the data. -->
-    {#if view === 'bars' && coverBand.cells.length > 0}
-      <div class="cband" role="img"
-           class:slim={compact}
-           bind:this={cbandEl}
-           aria-label="{coverBand.months} months in this selection, {fmt(coverBand.bars)} bars.">
-        {#if !compact}
-          <div class="cband-head">
-            <span class="cb-title">WINDOW</span>
-            <span class="cb-facts">
-              <b>{coverBand.months}</b> month{coverBand.months === 1 ? '' : 's'}
-              · <b>{fmt(coverBand.bars)}</b> bars
-              · <span class="cb-span">{coverBand.cells[0].month} → {coverBand.cells[coverBand.cells.length - 1].month}</span>
-            </span>
-          </div>
-        {/if}
-        <div class="cband-rail">
-          {#each coverBand.cells as c, i (c.month)}
-            <span
-              class="cb-cell {c.state}"
-              style="--h:{Math.max(8, Math.round(c.share * 100))}%;--d:{Math.min(i * 9, 700)}ms"
-              title="{c.month} — {c.rows === 0 ? 'no bars' : fmt(c.rows) + ' bars'}{c.state === 'short' ? ', short of the fullest month in this selection' : ''}"
-            ></span>
-          {/each}
-        </div>
-        {#if !compact}
-          <div class="cband-legend">
-            <span class="cb-key held"></span> held
-            <span class="cb-key short"></span> short of the fullest month here
-            <span class="cb-key absent"></span> nothing stored
-            <span class="cb-note">height is each month against the fullest in this selection — not against a session calendar, which this page does not read</span>
-          </div>
-        {/if}
-      </div>
-    {/if}
+    <!-- THE COVERAGE BAND IS GONE.
+         It drew one bar per month, scaled against the fullest month in the
+         selection, and at 81 months that is 81 slivers a few pixels wide — a
+         shape rather than a reading. Every figure it carried is still on the
+         page and in a form that can be read rather than estimated: the month
+         count and the bar total are the counted line above it, and a month's
+         own rows are a row of the census grid, which is the view the coverage
+         tab exists to show.
+         WHAT IT COST WAS THE FOLD. On an 780px window the table was drawing
+         THREE rows, and this rail plus its heading and legend was the tallest
+         thing between the query and the data. A picture that is only a picture
+         does not outrank the rows on a page whose whole job is the rows.
+         `coverBand` itself stays: `.facts` above reads its totals. -->
 
     <div class="tbl">
         <!-- THE FIT IS PUBLISHED ON THE ELEMENT, AND IT IS KEPT RATHER THAN
@@ -10180,19 +10234,23 @@
      the group moves as one when the row runs out. The `.dates` gap is reused
      rather than restated so the six controls sit on a single rhythm. */
   .times {
-    /* `0 1 auto` — SHRINKS BUT NEVER GROWS. With `1` it took a third of the
-       slack under the cap and pushed the day fields below the 274 they have
-       always drawn at; the times have a natural size and no reason to exceed
-       it, so the growth belongs entirely to the two fields that had it before
-       this row existed. */
-    flex: 0 1 auto;
+    /* `0 0 auto` AND `nowrap` — THE TRIO IS ONE THING OR IT IS NOWHERE.
+       Wrapping INSIDE this group is what put GO TO on its own line under FROM
+       and TO: the three had room between them to break, so they broke. With
+       `nowrap` the only break available is the one in `.dates`, which moves
+       the whole group at once — the grouping is then a property of the
+       structure rather than of whether the arithmetic happened to hold.
+       `0 0` because the pickers have a natural size and no reason to leave it;
+       the slack under the cap belongs to the two day fields, which had it
+       before this row existed. */
+    flex: 0 0 auto;
     display: flex;
     align-items: flex-start;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     gap: var(--s5);
   }
   .tcell {
-    flex: 0 1 128px;
+    flex: 0 0 auto;
     min-width: 0;
     display: flex;
     flex-direction: column;
@@ -10210,46 +10268,11 @@
     color: var(--faint);
     white-space: nowrap;
   }
-  /* `.din`, declaration for declaration, minus the flex-grow a day needs. */
-  .tin {
-    flex: 1 1 auto;
-    min-width: 0;
-    appearance: none;
-    background: var(--panel);
-    border: 1px solid var(--line);
-    border-radius: 9px;
-    color: var(--ink);
-    font-family: var(--mono);
-    font-size: var(--fs-base);
-    font-weight: var(--w-semi);
-    font-variant-numeric: tabular-nums;
-    padding: 11px 13px;
-    line-height: var(--lh-base);
-    text-align: center;
-  }
-  .tin::placeholder {
-    color: var(--faint);
-    font-weight: var(--w-reg);
-  }
-  .tin:focus-visible {
-    outline: 2px solid var(--acc);
-    outline-offset: 2px;
-  }
-  .gorow {
-    display: flex;
-    align-items: center;
-    gap: var(--s4);
-  }
-  /* THE BUTTON MATCHES THE FIELD IT SITS BESIDE, not the button it inherits
-     from. `.btn` is `--ctl-h` (42px) and the inputs on this row are 48px, so
-     the shared class alone would leave it three pixels short at each end —
-     the same five-pixel drift the block above is written about, arriving from
-     the other side. */
-  .gobtn {
-    flex: 0 0 auto;
-    height: 48px;
-    border-radius: 9px;
-  }
+  /* THE INPUT RULES ARE GONE WITH THE INPUTS. `.tin`, `.gorow` and `.gobtn`
+     styled three text boxes and a confirm button into agreeing with a day
+     field; `Picker` renders `.pbtn`, which already measures 48px on this strip
+     and needs no help. Six declarations that had to be kept in step with a
+     component they only resembled are now zero. */
   /* Not a refusal and not a success — it reports what the press DID, including
      "it landed elsewhere, and here is how far". `--dim` rather than `--warn`:
      nothing has gone wrong when the market had no print at the minute asked
@@ -10456,141 +10479,6 @@
     color: var(--dim);
   }
 
-  /* SLIM IS THE BAND WITHOUT ITS FURNITURE, NOT A SMALLER BAND. The rail keeps
-     its own height, its cells keep their proportions and their titles, and the
-     `aria-label` on the container still carries the months and the bar count
-     that the folded heading was stating in words. What leaves is a caption and
-     a key — 103px becomes about 40 — so the one picture on this page survives
-     the windows that need the rows most. */
-  .cband.slim {
-    padding: var(--s2) var(--s4);
-  }
-  .cband {
-    margin: var(--s3) 0 var(--s2);
-    padding: var(--s3) var(--s4);
-    border: 1px solid var(--line);
-    border-radius: var(--r2);
-    background: var(--bg-2);
-  }
-  .cband-head {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: var(--s3);
-    flex-wrap: wrap;
-    margin-bottom: var(--s2);
-  }
-  .cb-title {
-    font-family: var(--mono);
-    font-size: var(--fs-micro);
-    letter-spacing: 0.14em;
-    color: var(--dim);
-  }
-  .cb-facts {
-    font-size: var(--fs-mini);
-    color: var(--ink-2);
-    font-variant-numeric: tabular-nums;
-  }
-  .cb-facts b {
-    color: var(--ink);
-    font-weight: var(--w-mid);
-  }
-  .cb-span {
-    font-family: var(--mono);
-    color: var(--dim);
-  }
-  /* THE RAIL IS A FLEX ROW OF EQUAL COLUMNS, so 81 months and 3 months both
-     fill the width and neither needs a horizontal scrollbar. `align-items:
-     flex-end` is what makes the height read as a quantity growing off a
-     baseline rather than as a floating block. */
-  .cband-rail {
-    display: flex;
-    align-items: flex-end;
-    gap: 2px;
-    /* 26px, DOWN FROM 34. The rail's cells are a RELATIVE comparison — each is
-       a percentage of the tallest — so its readability is set by the ratio
-       between neighbouring bars, not by the absolute height of the tallest.
-       Eight pixels off the top changes no ratio and the shortest visible cell
-       still clears the 2px floor `.cb-cell` sets. Given up to the table's
-       25-row floor, which is measured in a unit this band has no claim on. */
-    height: 26px;
-    padding-bottom: 1px;
-    border-bottom: 1px solid var(--line-soft);
-  }
-  .cb-cell {
-    flex: 1 1 0;
-    min-width: 2px;
-    height: var(--h);
-    border-radius: 1px;
-    background: var(--up-soft);
-    border-bottom: 2px solid var(--up);
-    /* THE GROW IS THE ONE PIECE OF MOTION HERE, and it carries a fact: the
-       block rises to the height that IS its share, so the animation is the
-       measurement arriving rather than decoration. Staggered by index so the
-       window reads left to right, which is the order the months are in. */
-    animation: cb-grow 420ms var(--ease, cubic-bezier(0.2, 0.7, 0.3, 1)) both;
-    animation-delay: var(--d);
-  }
-  .cb-cell.short {
-    background: var(--warn-soft);
-    border-bottom-color: var(--warn);
-  }
-  .cb-cell.absent {
-    background: transparent;
-    border-bottom-color: var(--line-hard);
-  }
-  @keyframes cb-grow {
-    from {
-      height: 0;
-      opacity: 0;
-    }
-    to {
-      height: var(--h);
-      opacity: 1;
-    }
-  }
-  /* A READER WHO ASKED FOR LESS MOTION GETS THE MEASUREMENT AND NOT THE
-     ARRIVAL. The height is the fact; the growth is only how it got there. */
-  @media (prefers-reduced-motion: reduce) {
-    .cb-cell {
-      animation: none;
-    }
-  }
-  .cband-legend {
-    display: flex;
-    align-items: center;
-    gap: var(--s1);
-    flex-wrap: wrap;
-    margin-top: var(--s2);
-    font-size: var(--fs-micro);
-    color: var(--dim);
-  }
-  .cb-key {
-    display: inline-block;
-    width: 10px;
-    height: 6px;
-    border-radius: 1px;
-    background: var(--up-soft);
-    border-bottom: 2px solid var(--up);
-  }
-  .cb-key.short {
-    background: var(--warn-soft);
-    border-bottom-color: var(--warn);
-  }
-  .cb-key.absent {
-    background: transparent;
-    border-bottom-color: var(--line-hard);
-  }
-  .cb-key + .cb-key {
-    margin-left: var(--s2);
-  }
-  /* THE CAVEAT TRAVELS WITH THE PICTURE. A band that implied "complete" would
-     be claiming a session count this page never reads. */
-  .cb-note {
-    margin-left: auto;
-    font-style: italic;
-    max-width: 46ch;
-  }
 
   /* THE HAND-ROLLED FEED MENU IS GONE, and with it the last place this page
      drew a control of its own. `.mnyb`, `.menu`, `.opt` and their tick/name/
