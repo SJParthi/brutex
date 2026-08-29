@@ -7017,12 +7017,52 @@
    * has already asked the vendor for bars must be allowed to write them, or
    * pressing Stop would throw away answers that were already paid for.
    */
+  /**
+   * WHY THIS READS THE ANSWER NOW, AND DID NOT BEFORE.
+   *
+   * `POST /pull/run/stop` replies `200 {"stopping":false}` when there was
+   * nothing to stop — no run in the slot, or one already finished. This
+   * function used to await that response and DISCARD it, so "the server took
+   * it" and "the server had nothing to take" produced the identical silence.
+   * `fetch` does not throw on a non-2xx either, so the `catch` below never sees
+   * an HTTP failure. Both are the fallback that hides a failure §4 bans.
+   *
+   * IT IS ALSO NOT INSTANT, AND THAT IS DELIBERATE ON THE SERVER'S SIDE.
+   * `pull_run_stop` sets a flag; `pullrun` reads it at leg and pass
+   * boundaries, because a leg that has already asked the vendor for bars must
+   * be allowed to write them — pressing stop must not throw away answers that
+   * were already paid for. Measured on a live run: the flag was set, the run
+   * wound down, and the summary read "Stopped after 8 pass(es); 4887858 bar(s)
+   * landed before you pressed stop". Correct, and completely invisible from the
+   * page, which is what `stopAsked` fixes.
+   */
+  let stopAsked = $state(false);
+
   async function stopWatching() {
+    /* SET BEFORE THE AWAIT, so the button changes on the press rather than on
+       the reply. A control that looks identical for the two seconds it takes to
+       answer is a control the operator presses again. */
+    stopAsked = true;
     aborted = true;
+    let said;
     try {
-      await request('/pull/run/stop', { ms: 10_000, method: 'POST' });
+      const r = await request('/pull/run/stop', { ms: 10_000, method: 'POST' });
+      if (!r.ok) throw new Error(`the server answered HTTP ${r.status}`);
+      said = await r.json();
     } catch (why) {
+      stopAsked = false;
       pollError = `Stop could not be delivered, so the run may still be going: ${why}. Reload this page to see what it is doing.`;
+      return;
+    }
+    /* THE SERVER'S OWN ANSWER, NOT AN ASSUMPTION. `stopping:false` means it
+       found no running task to flag — the run had already ended, or this page
+       is watching one that is not in the slot. Either way the operator must be
+       told, because the alternative is a button that reports success for having
+       done nothing. */
+    if (said?.stopping !== true) {
+      stopAsked = false;
+      pollError =
+        'Nothing was stopped: the server reports no run in progress. It may have finished on its own — the status below is the reading that matters.';
       return;
     }
     controller?.abort();
@@ -7045,6 +7085,9 @@
     live = null;
     samples = [];
     aborted = false;
+    /* CLEARED WITH THE REST, or the next run's Stop button is born saying
+       "Stopping…" for a run nobody has stopped. */
+    stopAsked = false;
   }
 
   let showRaw = $state(false);
@@ -8421,7 +8464,32 @@
                      It tells the server BEFORE it stops watching: aborting the
                      poll alone would end the looking and leave the run going,
                      which is worse than offering no button at all. -->
-                <button class="btn ghost" type="button" onclick={stopWatching}>Stop</button>
+                <!-- ══ THE PRESS IS ACKNOWLEDGED IMMEDIATELY, AND IT WAS NOT ══
+                     MEASURED on a live run: the operator pressed Stop, the
+                     server took it — `/pull/run.json` later read
+                     `"stopping":true` and finished with "Stopped after 8
+                     pass(es); 4887858 bar(s) landed before you pressed stop" —
+                     and the PAGE said nothing at all. The button kept saying
+                     `Stop`, the progress bar kept climbing, and the run went on
+                     until its next leg boundary, which is exactly what a
+                     control that did nothing would look like.
+                     A stop is not instant BY DESIGN — `pull_run_stop` sets a
+                     flag and the loop reads it between legs, because a leg that
+                     has already asked the vendor for bars must be allowed to
+                     write them rather than throw away answers already paid for.
+                     That is right, and it is precisely why the press has to be
+                     acknowledged the moment it happens: the delay is legitimate
+                     and invisible, so the only thing that can distinguish
+                     "winding down" from "broken" is this label. -->
+                <button
+                  class="btn ghost"
+                  type="button"
+                  disabled={stopAsked}
+                  title={stopAsked
+                    ? 'The server has been told. It stops at the next leg boundary — a leg that has already asked the vendor for bars is allowed to write them first, so this is not instant.'
+                    : 'Stops the run at its next leg boundary. Bars already fetched are still written.'}
+                  onclick={stopWatching}>{stopAsked ? 'Stopping…' : 'Stop'}</button
+                >
               {/if}
               {#if phase === 'done'}
                 <button class="btn ghost" type="button" onclick={reset}>Clear the result</button>
@@ -8459,7 +8527,15 @@
               <div class="prog" class:stall={stalled}>
                 <div class="prog-h">
                   <span class="prog-t">
-                    {#if phase === 'running'}
+                    {#if phase === 'running' && stopAsked}
+                      <!-- THE PANEL SAYS IT TOO, because the button is one word
+                           at the top of a form and this is the thing the eye is
+                           already on while a run is going. A bar that keeps
+                           climbing under the word `Pulling` is the whole reason
+                           a stop looks ignored. -->
+                      <span class="dot warn live" aria-hidden="true"></span>
+                      stopping {feedName(feeds.active)} at the next leg
+                    {:else if phase === 'running'}
                       <span class="dot acc live" aria-hidden="true"></span>
                       {Verb}ing {feedName(feeds.active)}
                     {:else}
