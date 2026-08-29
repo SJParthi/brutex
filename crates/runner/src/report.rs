@@ -166,7 +166,70 @@ fn excluded_by_name(out: &mut String, sweep: &Sweep) {
             e.position
         );
     }
+    vwap_absence_note(out, sweep);
     let _ = writeln!(out);
+}
+
+/// Says WHY the VWAP family is false, when it is the family that was excluded.
+///
+/// # The reason string was accurate and the reader drew the wrong conclusion
+///
+/// `Why::AlwaysFalse` renders as *"never true on any loaded bar"*, which is
+/// literally correct and reads as a statement about the MARKET: these conditions
+/// were tested and the price never did that. For the twenty VWAP positions it is
+/// a statement about the DATA, and the two call for opposite responses -- one is
+/// a finding, the other is a family of the vocabulary that was switched off
+/// before the sweep began.
+///
+/// # MEASURED, 2026-08-29, and it is not a defect to be fixed
+///
+/// `cli` passes `vwap::Availability::Absent` unconditionally, and an audit read
+/// that as a wiring bug hiding twenty usable conditions. It is not. Queried
+/// against this operator's own store over `/bars.json` -- zerodha, 60min,
+/// `NIFTY 2020-03`, `NIFTY 2026-08` and `BANKNIFTY 2025-06` -- **every bar
+/// carries `v: 0`, in all three, with no exception.** NSE publishes no volume
+/// for a spot INDEX, and the engine's whole surface is two spot indices. VWAP is
+/// a volume-weighted mean with nothing to weight by, so `Absent` is the right
+/// answer and no wiring changes it.
+///
+/// What remains wrong is smaller and is stated rather than repaired here: the
+/// right answer is DECLARED rather than derived. `vwap::availability_of` reads
+/// the whole slice, which at bar 0 would depend on bar N and is the look-ahead
+/// §3 rule 7 forbids, so the caller cannot simply call it. Deriving it from the
+/// WARM-UP PREFIX would be look-ahead-free -- those bars are never swept -- but
+/// needs two column passes, because the boundary is only known after the first.
+/// On this store the two answers are identical, so it is a correctness question
+/// for an instrument that has volume rather than one affecting any run today.
+///
+/// # Cost
+///
+/// One scan of `sweep.excluded`, which is at most `table::COUNT`, at the same
+/// once-per-run boundary as the rest of the report.
+fn vwap_absence_note(out: &mut String, sweep: &Sweep) {
+    let family = sweep
+        .excluded
+        .iter()
+        .filter(|e| e.reason == Why::AlwaysFalse)
+        .filter(|e| {
+            u16::try_from(e.position)
+                .ok()
+                .and_then(vocab::table::name)
+                .is_some_and(|n| n.contains("vwap"))
+        })
+        .count();
+    if family == 0 {
+        return;
+    }
+    let _ = writeln!(
+        out,
+        "\n    {family} of those are the VWAP family, and the reason is the DATA \
+         and not the market:\n    \
+         VWAP is a volume-weighted mean and this series carries no volume, so \
+         every VWAP\n    position is false for the whole run. NSE publishes no \
+         volume for a spot INDEX,\n    and this engine sweeps two of them. Those \
+         conditions were switched off before\n    the sweep began -- they were \
+         not tested and found rare."
+    );
 }
 
 /// The condition names of `mask`, joined for one line of a report.
@@ -1568,5 +1631,75 @@ mod tests {
         let text = render_auto(&auto, None);
         assert!(text.contains('-'), "an empty denominator renders as a dash");
         assert!(!text.is_empty());
+    }
+
+    /// A VWAP exclusion says the DATA had no volume, not that the market never did it.
+    ///
+    /// # Why the accurate string was still the wrong one
+    ///
+    /// `Why::AlwaysFalse` renders as "never true on any loaded bar". For a
+    /// candlestick pattern that is a finding about the market. For the VWAP
+    /// family it is a fact about the FEED, and an audit of this repository read
+    /// the identical wording as evidence of a wiring bug hiding twenty usable
+    /// conditions.
+    ///
+    /// It is not one. Measured against the operator's own store over
+    /// `/bars.json` -- zerodha 60min, `NIFTY 2020-03`, `NIFTY 2026-08`,
+    /// `BANKNIFTY 2025-06` -- every bar carries `v: 0`. NSE publishes no volume
+    /// for a spot index and this engine sweeps two of them, so `Absent` is
+    /// correct. What was wrong was that the report could not say so.
+    #[test]
+    fn a_vwap_exclusion_names_the_missing_volume_and_not_the_market() {
+        use crate::report::excluded_by_name;
+        use engine::Why;
+        let mut sweep = Sweep::default();
+        // 52 and 53 are `close_above_vwap` / `close_below_vwap`; 33 is a body
+        // predicate that has nothing to do with volume and must NOT be counted.
+        for position in [52_u32, 53] {
+            sweep.excluded.push(engine::Excluded {
+                position,
+                support: Some(0),
+                reason: Why::AlwaysFalse,
+            });
+        }
+        sweep.excluded.push(engine::Excluded {
+            position: 33,
+            support: Some(0),
+            reason: Why::AlwaysFalse,
+        });
+
+        let mut out = String::new();
+        excluded_by_name(&mut out, &sweep);
+
+        assert!(
+            out.contains("2 of those are the VWAP family"),
+            "the note must count the VWAP positions and only those -- position \
+             33 is a body predicate and its absence IS a statement about the \
+             market. Got:\n{out}"
+        );
+        assert!(
+            out.contains("carries no volume"),
+            "the note must name the cause, which is the feed. Got:\n{out}"
+        );
+        assert!(
+            out.contains("not tested and found rare"),
+            "and must say explicitly that these were switched off before the \
+             sweep rather than measured and rejected. Got:\n{out}"
+        );
+
+        // AND IT STAYS SILENT WHEN NO VWAP POSITION WAS EXCLUDED, so a run whose
+        // series does carry volume is not told about an absence it does not have.
+        let mut other = Sweep::default();
+        other.excluded.push(engine::Excluded {
+            position: 33,
+            support: Some(0),
+            reason: Why::AlwaysFalse,
+        });
+        let mut quiet = String::new();
+        excluded_by_name(&mut quiet, &other);
+        assert!(
+            !quiet.contains("VWAP family"),
+            "no VWAP exclusion, no VWAP note. Got:\n{quiet}"
+        );
     }
 }
