@@ -7289,41 +7289,34 @@
        rule that keeps the dropdown from stretching to the width of a page. -->
   {#if feeds.error}
     <div class="blank">
-      <h2>The feed list could not be read</h2>
-      <p>Nothing can be ingested until the server names a feed to ingest into.</p>
+      <h2 title="Nothing can be ingested until the server names a feed to ingest into.">
+        The feed list could not be read
+      </h2>
       <p class="mono down">{feeds.error}</p>
       <div class="blankpick">{@render feedRung()}</div>
     </div>
   {:else if !active}
+    <!-- THE PARAGRAPHS ARE GONE FROM ALL THREE BLANKS, AT THE OPERATOR'S
+         INSTRUCTION, AND THE CONTROL IS WHAT REPLACES THEM. Each of these
+         screens is the page saying "not with this feed", each already draws the
+         picker that fixes it, and each was explaining in three lines of prose
+         what the dropdown underneath demonstrates in one press. The headings
+         carry the state, the server's own refusal is still quoted verbatim, and
+         the explanations are on the heading's `title`. -->
     <div class="blank">
-      <h2>No feed is selected</h2>
-      <p>
-        Ingest writes into exactly one feed's store, so one has to be chosen before a window means
-        anything. Pick one here — it is the same control that stands first in the strip once a feed
-        is chosen, and it is the only one on this page.
-      </p>
+      <h2 title="Ingest writes into exactly one feed's store, so one has to be chosen before a window means anything. This is the same control that stands first in the strip once a feed is chosen, and it is the only one on this page.">
+        No feed is selected
+      </h2>
       <div class="blankpick">{@render feedRung()}</div>
     </div>
   {:else if archiveHidden}
     <div class="blank">
-      <h2>{active.display} has nothing to ingest yet</h2>
-      <p>
-        This is an archive feed: it reads CSV files that have to be bought first. The server refuses
-        it for a reason of its own, quoted here rather than paraphrased.
-      </p>
+      <h2 title="This is an archive feed: it reads CSV files that have to be bought first. Buy the archive and give the feed a store prefix, or select a broker feed below. The folder form appears here the day this feed reports itself ready — nothing on this page names a vendor.">
+        {active.display} has nothing to ingest yet
+      </h2>
+      <!-- THE SERVER'S OWN WORDS SURVIVE EVERY CUT. A refusal paraphrased is a
+           refusal the operator cannot act on, and §4 requires it named. -->
       <p class="warn mono">{active.why}</p>
-      <p class="alt">
-        <!-- `.lab`, NOT `.lbl`, AND THE PAGE NOW HAS ONE LABEL FACE INSTEAD OF
-             TWO. This was the only `.lbl` on the page against six `.lab`, and
-             the local rule that styled it also overrode `theme.css`'s own
-             `--fs-mini` down to `--fs-micro` — so the one odd label was odd in
-             two ways at once, in a different face and at a size neither `.lbl`
-             nor `.lab` actually specifies anywhere else. -->
-        <span class="lab">What to do</span>
-        Buy the archive and give the feed a store prefix, or select a broker feed below. The folder
-        form appears here the day this feed reports itself ready — nothing on this page names a
-        vendor.
-      </p>
       <div class="blankpick">{@render feedRung()}</div>
     </div>
   {:else}
@@ -7628,7 +7621,7 @@
                      measures and reports on — the ask, the census, the outcome
                      rows. -->
                 <div class="field">
-                  <span class="lab">Instruments in that universe</span>
+                  <span class="lab">Instruments</span>
                   <div class="dd">
                     <button
                       class="ddb"
@@ -8127,11 +8120,17 @@
                   {#if narrowings.length > 0}
                     <span
                       class="note warn wrap"
-                      title="Each floor is declared in pull::vendor with the operator's own observation as its source, and the server clamps to the same floors again on arrival — this states the narrowing, it does not perform it alone."
+                      title="Asked from the FROM DATE above; these request(s) start later because their feed answers no earlier. Each floor is declared in pull::vendor with the operator's own observation as its source, and the server clamps to the same floors again on arrival — this states the narrowing, it does not perform it alone."
                     >
-                      asked from {dayLabel(from)}; {n(narrowings.length)} request(s) start later
-                      because their feed answers no earlier —
-                      {narrowings.map((w) => `${w.feed} · ${w.rung} from ${dayLabel(w.at)}`).join(', ')}
+                      <!-- THE CLAUSE WENT, THE CLAMP DID NOT. This read "asked
+                           from D; N request(s) start later because their feed
+                           answers no earlier — ..." and the middle of that is
+                           an explanation of the list that follows it. The list
+                           IS the fact: each feed, its rung, and the day it
+                           actually starts. `→` carries "asked from D, gets D2"
+                           in one glyph. The full sentence is on the `title`. -->
+                      {dayLabel(from)} →
+                      {narrowings.map((w) => `${w.feed} · ${w.rung} ${dayLabel(w.at)}`).join(', ')}
                     </span>
                   {/if}
 
@@ -8311,8 +8310,13 @@
                 class="hint"
                 title="The request is one synchronous POST already on the wire and no route amends it, so an edit now could only change what a NEXT run asks for. The outcome list below is a difference measured against the store as it stood when this one left."
               >
+                <!-- THE CLAUSE IS GONE AND THE TAG IS THE WHOLE MESSAGE. It
+                     read "Busy, not broken — every control above answers again
+                     when this run does", which is a sentence explaining a
+                     greyed-out fieldset to someone already looking at one. The
+                     `locked` tag says it, the spinner on the button says it,
+                     and the full sentence is on the paragraph's `title`. -->
                 <span class="tag acc">locked</span>
-                Busy, not broken — every control above answers again when this run does.
               </p>
             {/if}
 
@@ -8417,16 +8421,19 @@
                       <span class="dot acc live" aria-hidden="true"></span>
                       {Verb}ing {feedName(feeds.active)}
                     {:else}
-                      {Verb} of {feedName(feeds.active)} finished
+                      {feedName(feeds.active)} · done
                     {/if}
                   </span>
                   <!-- THE FRACTION IN WORDS, BESIDE THE SAME FRACTION AS A
                        LENGTH. The bar is read at a glance and the figures are
                        read when the glance raises a question; neither is
                        sufficient alone, and they are the same division. -->
-                  <span class="prog-n mono">
+                  <span
+                    class="prog-n mono"
+                    title="Instrument-months written against instrument-months this request asks for. Both counted from the store, not from issued requests."
+                  >
                     <b>{n(Math.round(share * 100))}%</b>
-                    · {n((baseline?.units ?? 0) + unitsDone)} / {n(expectedUnits)} instrument-month(s)
+                    · {n((baseline?.units ?? 0) + unitsDone)}/{n(expectedUnits)}
                   </span>
                 </div>
                 <div
@@ -8445,10 +8452,18 @@
                      written nothing — a claim with no measurement under it. -->
                 <div class="prog-f">
                   {#if stalled}
-                    <span class="warn"
-                      >Nothing has landed for {n(stalledSecs)}s — the request is still open. That is
-                      what a waiting rate governor looks like from outside, and also what a slow
-                      vendor looks like; this page cannot tell them apart.</span
+                    <!-- MY OWN PROSE, CUT TO THE FACT. It read "Nothing has
+                         landed for Ns — the request is still open. That is what
+                         a waiting rate governor looks like from outside, and
+                         also what a slow vendor looks like; this page cannot
+                         tell them apart." The number and the word `stalled` are
+                         the fact; the two clauses after the dash are the
+                         inference, and they belong on the `title` where a
+                         reader who wants to know WHY will look. -->
+                    <span
+                      class="warn"
+                      title="The request is still open. That is what a waiting rate governor looks like from outside, and also what a slow vendor looks like — this page cannot tell them apart, so it names the observation rather than the cause."
+                      >stalled {n(stalledSecs)}s</span
                     >
                   {:else if everGrew}
                     <span><b class="mono">{n(rowsGained)}</b> bar(s) landed</span>
@@ -8460,11 +8475,15 @@
                     {/if}
                     {#if etaSecs !== null}
                       <span title="An extrapolation, and labelled as one: the units still to go divided by the rate measured so far. A vendor that slows down or a governor that backs off makes it wrong.">
-                        about <b class="mono">{clockOf(etaSecs * 1000)}</b> left, at that rate
+                        ~<b class="mono">{clockOf(etaSecs * 1000)}</b> left
                       </span>
                     {/if}
                   {:else if phase === 'running'}
-                    <span class="dim">Nothing has landed yet — the first leg is still on the wire.</span>
+                    <span
+                      class="dim"
+                      title="Nothing has landed yet — the first leg is still on the wire. This line is drawn only until the store first grows, because a panel that says `bars are landing` before any have is a claim with no measurement under it."
+                      >nothing landed yet</span
+                    >
                   {/if}
                 </div>
               </div>
@@ -8751,12 +8770,14 @@
           <i class="dot {provenance.tone}" class:live={provenance.live}></i>
           <b class="pword">{provenance.word}</b>
           <span class="pdetail">{provenance.detail}</span>
-          <span class="spacer"></span>
-          <span
-            class="pnote"
-            title="BARS STORED is measured — it is counted out of /store.json, which the server rebuilds per request. BARS EXPECTED is arithmetic: NSE sessions inside the window times the bars one session holds. The first is a fact about disk; the second is a claim about the calendar, and this page never lets one wear the other's clothes. CLAUDE.md section 3 rule 6."
-            >stored is measured · expected is arithmetic</span
-          >
+          <!-- `.pnote` IS GONE, AT THE OPERATOR'S INSTRUCTION. It printed
+               "stored is measured · expected is arithmetic" on every load — a
+               true sentence about how the NEXT panel's two columns differ,
+               said on a strip about when the store was read. It is a REMARK:
+               nothing anybody can act on, occupying a full line above the one
+               figure this band exists to state. The distinction it draws is
+               already on the Bars stored / expected header's own `title`,
+               which is where a reader who wants it will look. -->
         </div>
 
         {#if verdictTotal > 0}
@@ -8839,16 +8860,34 @@
              move. What was missing is this sentence.
              ================================================================== -->
         {#if feedHoldsElsewhere}
-          <p class="elsewhere" role="status">
+          <p
+            class="elsewhere"
+            role="status"
+            title="Every row below reads `never pulled` because this window asks for a universe none of these bars is in. This is a PULL page, so it opens on a universe you are about to ASK for; /db is a READ page, so it opens on everything you HAVE. Neither default is wrong. Switch the universe above to see these bars here, or open the store, which opens on everything held rather than on one membership."
+          >
             <i class="dot info"></i>
+            <!-- SIXTY-TWO WORDS DOWN TO TWELVE, AT THE OPERATOR'S
+                 INSTRUCTION. It read: "Every row below reads never pulled, and
+                 this feed is not empty: it holds N bar(s) across M
+                 instrument-month(s) — none of them in X. Switch the universe
+                 above to see them, or open the store, which opens on everything
+                 held rather than on one membership."
+
+                 THE FACT SURVIVES WHOLE AND ONLY THE EXPLANATION GOES. The
+                 three numbers are the fact — what is held, over how many cells,
+                 and that none is in the chosen set — and they are still here,
+                 still bold, still in that order. What went is the narration
+                 around them: the reader does not need to be told that the rows
+                 below say `never pulled`, because they are directly below and
+                 they say it; and the clause about which page opens on what is a
+                 paragraph about product design, not about this store.
+                 Both are on the line's own `title`, and the link still goes
+                 where it went. -->
             <span>
-              Every row below reads <b>never pulled</b>, and this feed is not empty:
-              it holds <b>{n(feedHoldsElsewhere.barsTotal)}</b> bar(s) across
-              <b>{n(feedHoldsElsewhere.cells)}</b> instrument-month(s) — none of them
-              in <b>{universeSpec.label}</b>. Switch the universe above to see them,
-              or open
-              <a class="link" href="/db" data-sveltekit-reload>the store</a>, which opens
-              on everything held rather than on one membership.
+              Held elsewhere: <b>{n(feedHoldsElsewhere.barsTotal)}</b> bar(s),
+              <b>{n(feedHoldsElsewhere.cells)}</b> instrument-month(s), none in
+              <b>{universeSpec.label}</b>.
+              <a class="link" href="/db" data-sveltekit-reload>Open the store</a>
             </span>
           </p>
         {/if}
@@ -8875,7 +8914,7 @@
               type="search"
               bind:value={cQuery}
               oninput={() => (cPage = 1)}
-              placeholder="Find among {n(censusNames)} name(s) in the census — any part of the symbol"
+              placeholder="Find a symbol"
               aria-label="Find a trading symbol in the census"
               title={`Narrows what this table DRAWS and nothing else. The ask above is unchanged by anything typed here, and the pager keeps the unfiltered total beside the filtered one. What narrows a PULL is the instrument tick list — it sends one member= per name and the server filters on it — and this box deliberately does not, because two controls narrowing one request is how the button, the receipt and the run come to give three answers to one question. Matches ANY PART of a symbol, not just the start: BANK finds AXISBANK, HDFCBANK, ICICIBANK and KOTAKBANK as well as BANKNIFTY — the outcome list above, after a run, is a different table and matches from the START instead. ${n(censusNames)} name(s) across ${n(censusRows.length)} series in this window.`}
             />
@@ -8923,7 +8962,6 @@
                         <span class="hrow"
                           >Segment{cSort.key === 'seg' ? (cSort.dir > 0 ? ' ▲' : ' ▼') : ''}</span
                         >
-                        <span class="hsub">what the route fills</span>
                       </button>
                     </th>
                   {/if}
@@ -8933,7 +8971,6 @@
                         <span class="hrow"
                           >Timeframe{cSort.key === 'tf' ? (cSort.dir > 0 ? ' ▲' : ' ▼') : ''}</span
                         >
-                        <span class="hsub">one bar covers</span>
                       </button>
                     </th>
                   {/if}
@@ -8962,7 +8999,6 @@
                             : ' ▼'
                           : ''}</span
                       >
-                      <span class="hsub">of {n(windowMonths.length)} in the window</span>
                     </button>
                   </th>
                   <!-- NOT SORTABLE, AND THAT IS NOT AN OMISSION. Every other
@@ -8977,7 +9013,6 @@
                     title="Every month file in the window, oldest on the left, coloured by its own verdict — so a series missing its FIRST six months and one missing its LAST six can be told apart, which neither Months unproved nor Verdict can do. Consecutive months holding the same verdict are drawn as one band. The faint vertical lines are years."
                   >
                     <span class="hrow">Coverage</span>
-                    <span class="hsub">oldest → newest</span>
                   </th>
                   <th>
                     <button
@@ -12063,8 +12098,7 @@
      along a single line, half a size larger than every header beside it.
      The direct-child combinator is what keeps this off the sortable headers —
      theirs are nested inside the button and are already handled. */
-  .cscroll th > .hrow,
-  .cscroll th > .hsub {
+  .cscroll th > .hrow {
     display: block;
   }
   .cscroll .sort {
@@ -12123,15 +12157,17 @@
     font-weight: var(--w-bold);
     letter-spacing: var(--track-caps);
   }
-  /* A COLUMN THAT CANNOT STATE ITS OWN UNIT IN THE HEADER is a column whose
-     meaning lives in a tooltip. The second line is not decoration. */
-  .cscroll .hsub {
-    font-size: var(--fs-micro);
-    font-weight: var(--w-reg);
-    letter-spacing: 0;
-    text-transform: none;
-    color: var(--ghost, var(--faint));
-  }
+  /* `.hsub` IS GONE ENTIRELY, AT THE OPERATOR'S INSTRUCTION, AND ITS OWN
+     COMMENT ARGUED AGAINST GOING: "a column that cannot state its own unit in
+     the header is a column whose meaning lives in a tooltip."
+     That is a fair argument and it lost to a measurement — SEVEN of them, one
+     under every header, on a table whose job is to be read at a glance. Seven
+     second lines is a paragraph laid out sideways above the data, and it cost
+     more than the units bought. Every clause is on its header's own `title`,
+     and the two that carried a real number (the window's month count, and the
+     coverage strip's direction) are now stated by the columns themselves: the
+     strip runs oldest-first and says so in its label, and the month count is
+     the denominator printed in every cell of the column it belonged to. */
   /* LEFT — see the note on `.cscroll th.num .sort` for the measurement. THIS IS
      NOW THE ONLY `.cscroll td.num` IN THE BLOCK, which is what the earlier
      version of this note was asking for: a second one used to sit ~120 lines
@@ -12258,14 +12294,9 @@
     color: var(--faint);
   }
 
-  .blank .alt {
-    display: block;
-    margin-top: var(--s6);
-    text-align: left;
-    font-size: var(--fs-xs);
-    line-height: var(--lh-base);
-    color: var(--dim);
-  }
+  /* `.blank .alt` went with the "What to do" paragraph it styled — the archive
+     blank's three lines of advice, now on its heading's `title`. Gate W4 is a
+     floor at zero, so the rule could not stay behind the markup. */
 
   /* EVERY transition and animation this file adds is inside the guard, the
      same rule $lib/theme.css holds itself to. A reduced-motion operator gets
