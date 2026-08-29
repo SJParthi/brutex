@@ -12858,6 +12858,15 @@ pub fn router_serving(site: Loaded, assets: std::sync::Arc<assets::Assets>) -> a
             "/backtest.json",
             axum::routing::get(crate::backtest::backtest_json),
         )
+        // ONE RUN'S ROUND TRIPS. The page has drawn a per-trade table since it
+        // was written and every cell of it rendered a padlock, because the file
+        // it reads was never written and no route ever served it. `cli::trades`
+        // writes it now; this serves it. Keyed on the `identity` the ledger
+        // above already prints on every row.
+        .route(
+            "/trades.json",
+            axum::routing::get(crate::trades::trades_json),
+        )
         // THE CONSOLE CAN NOW CAUSE A RUN, not only report one.
         //
         // POST, and there is no GET, for the same reason `/universe/resolve`
