@@ -7870,10 +7870,18 @@
                control whose only two settings are "all" and "none" is not a
                control, which is the rule the Contract strip above follows. -->
           {#if !dayRung}
-            <div class="cell tcell">
-              <span class="lab" id="lab-tfrom">From time</span>
+            <!-- THE THREE TIME CONTROLS TAKE THEIR OWN LINE, TOGETHER.
+                 `DayField` is `flex: 1 1 190px` and GROWS, so with all five in
+                 one wrapping row the two dates ate the line and the break fell
+                 between FROM TIME and TO TIME — a pair split across rows, which
+                 reads as two unrelated controls. `flex-basis: 100%` puts the
+                 break where the MEANING is: days on one line, minutes on the
+                 next, and the trio can never be separated from each other. -->
+            <div class="times">
+              <div class="tcell">
+                <span class="tlbl" id="lab-tfrom">From time</span>
               <input
-                class="search tin"
+                class="tin"
                 type="text"
                 inputmode="numeric"
                 placeholder="HH:MM"
@@ -7883,10 +7891,10 @@
                 title="Only bars opening at or after this minute, IST. Compared against the Time column itself, so what you filter and what you read are the same value. Leave it empty for no lower bound."
               />
             </div>
-            <div class="cell tcell">
-              <span class="lab" id="lab-tto">To time</span>
+            <div class="tcell">
+              <span class="tlbl" id="lab-tto">To time</span>
               <input
-                class="search tin"
+                class="tin"
                 type="text"
                 inputmode="numeric"
                 placeholder="HH:MM"
@@ -7896,11 +7904,11 @@
                 title="Only bars opening at or before this minute, IST. Leave it empty for no upper bound."
               />
             </div>
-            <div class="cell tcell">
-              <span class="lab" id="lab-goto">Go to</span>
+            <div class="tcell gocell">
+              <span class="tlbl" id="lab-goto">Go to</span>
               <div class="gorow">
                 <input
-                  class="search tin"
+                  class="tin"
                   type="text"
                   inputmode="numeric"
                   placeholder="HH:MM"
@@ -7924,6 +7932,7 @@
                     ? 'Write a time first — HH:MM on a 24-hour clock.'
                     : `Land on the bar nearest ${goTime.trim()}.`}>Go</button
                 >
+              </div>
               </div>
             </div>
           {/if}
@@ -10132,30 +10141,102 @@
   }
 
   /* ---- the time window and the landing ---------------------------------
-     THE INPUT IS `.search` AND THE BUTTON IS `.btn`, both from `theme.css`,
-     because both already exist there with a focus ring, a disabled state and a
-     placeholder colour measured against this palette. What is added here is
-     only the DELTA — the width of `HH:MM` and the monospace that makes a
-     column of times line up. Re-implementing a shared control locally is how
-     the Picker once came out 31px tall on one page and 48px on another, and
-     nothing about a text box needed re-deciding. */
-  .tcell {
-    flex: 0 0 auto;
+     THESE SIT INSIDE `.dates`, BESIDE TWO `DayField`s, SO THEY ARE BUILT TO
+     `DayField`'s RECIPE AND NOT TO A DIFFERENT ONE.
+
+     A first version used `.cell` and the shared `.search`, and every single
+     metric came out wrong against the control six pixels to its left —
+     MEASURED on the running page: 40px tall against 48, padding 7/6 against
+     11/13, weight 400 against 600, radius 8 against 9, and the label in 12px
+     MONO against 12.5px sans at 700. The cell was `display: block` while
+     `.dcell` is a flex column with a 4px gap, so the label did not even sit on
+     the same line as its neighbour's.
+
+     That is a STRUCTURAL mismatch, and `theme.css` says why token-nudging
+     cannot fix one: the strip's fields are subgrid rows precisely so that
+     label, control and note share a baseline rather than being "three flex
+     children per column, each free to be its own height". A control that opts
+     out of the structure cannot be aligned back into it.
+
+     `line-height` IS THE ONE THAT HIDES. `DayField`'s own comment records
+     agreeing on 16px, 600, 11px/13px, 9px radius and mono and STILL rendering
+     48 against 43, because it set no line-height and inherited a smaller one.
+     It is listed here for the same reason it is listed there.
+
+     Not pushed into `DayField`: that component is a DAY control — a calendar
+     popup, day bounds, a struck-through rejection line — and a time box shares
+     its metrics, not its behaviour. Copying six declarations is cheaper than a
+     second mode on a shared component, and this comment is the link between
+     them. */
+  /* A FULL-WIDTH BASIS, WHICH IS THE SAME TRICK `.field.wide` USES ONE LEVEL
+     UP. `1 / -1` there and `100%` here both say "start your own line at every
+     width", and both exist because the thing they wrap is a GROUP whose parts
+     stop meaning anything apart. */
+  .times {
+    flex: 1 0 100%;
+    display: flex;
+    align-items: flex-start;
+    flex-wrap: wrap;
+    gap: var(--s5);
   }
+  .tcell {
+    flex: 0 1 128px;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--s2);
+  }
+  .gocell {
+    flex: 0 1 190px;
+  }
+  /* `.dlbl`, declaration for declaration. */
+  .tlbl {
+    font-size: var(--fs-mini);
+    font-weight: var(--w-bold);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    color: var(--faint);
+    white-space: nowrap;
+  }
+  /* `.din`, declaration for declaration, minus the flex-grow a day needs. */
   .tin {
-    width: 8.5ch;
-    padding-inline: var(--s3);
+    flex: 1 1 auto;
+    min-width: 0;
+    appearance: none;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    color: var(--ink);
     font-family: var(--mono);
+    font-size: var(--fs-base);
+    font-weight: var(--w-semi);
     font-variant-numeric: tabular-nums;
+    padding: 11px 13px;
+    line-height: var(--lh-base);
     text-align: center;
+  }
+  .tin::placeholder {
+    color: var(--faint);
+    font-weight: var(--w-reg);
+  }
+  .tin:focus-visible {
+    outline: 2px solid var(--acc);
+    outline-offset: 2px;
   }
   .gorow {
     display: flex;
     align-items: center;
-    gap: var(--s3);
+    gap: var(--s4);
   }
+  /* THE BUTTON MATCHES THE FIELD IT SITS BESIDE, not the button it inherits
+     from. `.btn` is `--ctl-h` (42px) and the inputs on this row are 48px, so
+     the shared class alone would leave it three pixels short at each end —
+     the same five-pixel drift the block above is written about, arriving from
+     the other side. */
   .gobtn {
     flex: 0 0 auto;
+    height: 48px;
+    border-radius: 9px;
   }
   /* Not a refusal and not a success — it reports what the press DID, including
      "it landed elsewhere, and here is how far". `--dim` rather than `--warn`:

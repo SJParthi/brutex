@@ -278,9 +278,21 @@
    * "smallest drawdown" over a set that includes them puts the combinations
    * nobody measured at the very top, looking perfect. `priced` is the field that
    * separates the two facts and this is where it earns its place.
+   *
+   * # One definition, two callers
+   *
+   * A plain function rather than a `$derived` body, because the SAME ordering
+   * has to serve the open run's own frontier AND the top ten of every timeframe
+   * at once. Written twice it would be two definitions of "best" that agree the
+   * day they are written and disagree the first time a weight is added — the
+   * failure mode this repository has hit five times in other files.
+   *
+   * @param {any[]} rows every combination recorded for one run
+   * @param {any} w the operator's weights
+   * @param {number} n how many to keep
    */
-  const ranked = $derived.by(() => {
-    const priced = combos.rows.filter((r) => r.priced);
+  function rankRows(rows, w, n) {
+    const priced = rows.filter((r) => r.priced);
     if (priced.length === 0) return [];
 
     // One pass per measurement to learn its range, so the normalisation below is
@@ -319,23 +331,107 @@
       // value is already the better one and they are not inverted — reading them
       // as "less is better" on the raw number would rank the worst rows first.
       const score =
-        weights.drawdown * (1 - norm(r.max_drawdown, ranges.drawdown)) +
-        weights.worstTrade * norm(r.worst_trade, ranges.worstTrade) +
-        weights.losingPct * (1 - norm(losingPct(r), ranges.losingPct)) +
-        weights.losingTrades * (1 - norm(r.losses, ranges.losingTrades)) +
-        weights.profit * norm(r.pessimistic, ranges.profit) +
-        weights.winningTrades * norm(r.wins, ranges.winningTrades) +
-        weights.winRate * norm(r.win_rate_bp, ranges.winRate) +
-        weights.rewardRisk * norm(r.reward_to_risk_bp, ranges.rewardRisk) +
-        weights.avgWin * norm(r.avg_win, ranges.avgWin) +
-        weights.avgLoss * norm(r.avg_loss, ranges.avgLoss);
+        w.drawdown * (1 - norm(r.max_drawdown, ranges.drawdown)) +
+        w.worstTrade * norm(r.worst_trade, ranges.worstTrade) +
+        w.losingPct * (1 - norm(losingPct(r), ranges.losingPct)) +
+        w.losingTrades * (1 - norm(r.losses, ranges.losingTrades)) +
+        w.profit * norm(r.pessimistic, ranges.profit) +
+        w.winningTrades * norm(r.wins, ranges.winningTrades) +
+        w.winRate * norm(r.win_rate_bp, ranges.winRate) +
+        w.rewardRisk * norm(r.reward_to_risk_bp, ranges.rewardRisk) +
+        w.avgWin * norm(r.avg_win, ranges.avgWin) +
+        w.avgLoss * norm(r.avg_loss, ranges.avgLoss);
       return { ...r, score };
     });
 
     // Sorted on score, ties broken by the sweep's own rank so the order is
     // total and two runs of the same data list the same rows in the same order.
     scored.sort((a, b) => b.score - a.score || a.rank - b.rank);
-    return scored.slice(0, topN);
+    return scored.slice(0, n);
+  }
+
+  const ranked = $derived.by(() => rankRows(combos.rows, weights, topN));
+
+  /**
+   * Every timeframe's frontier at once, so "the top ten per timeframe" is one
+   * board rather than eight visits.
+   *
+   * # Why the NEWEST run per rung and not every run
+   *
+   * The ledger is append-only, so one rung swept three times holds three rows,
+   * and stacking their combinations into one ranking would compare a 22%-support
+   * search against a 10% one as though they answered the same question. They do
+   * not: support decides which combinations were ENUMERATED AT ALL. One run per
+   * rung, the newest, and the support each was run at is printed beside it.
+   */
+  let board = $state({ phase: 'idle', groups: [], why: '' });
+
+  /** @param {any[]} rowsIn the ledger rows currently in view */
+  async function fetchBoard(rowsIn) {
+    // O(1) PER ROW AND ONE PASS. A Map keyed by rung keeps the newest, so
+    // picking eight runs out of a ledger of twenty thousand never sorts and
+    // never scans twice — the same technique `/db` uses, per CLAUDE.md §3 rule 4.
+    const newest = new Map();
+    for (const r of rowsIn) {
+      const had = newest.get(r.timeframe);
+      if (!had || r.finished_micros > had.finished_micros) newest.set(r.timeframe, r);
+    }
+    if (newest.size === 0) {
+      board = { phase: 'ready', groups: [], why: 'No completed run is in view.' };
+      return;
+    }
+    board = { phase: 'loading', groups: [], why: '' };
+    try {
+      // FETCHED IN PARALLEL because the eight are independent: eight sequential
+      // round trips would make the board eight times slower for no reason.
+      const groups = await Promise.all(
+        [...newest.values()].map(async (run) => {
+          const response = await ask_(
+            `/frontier.json?identity=${encodeURIComponent(run.identity)}`
+          );
+          const body = await response.json();
+          return {
+            rung: run.timeframe,
+            run,
+            rows: Array.isArray(body.rows) ? body.rows : [],
+            why: body.refusal ?? (response.ok ? '' : `/frontier.json answered ${response.status}`)
+          };
+        })
+      );
+      // Ordered by the rung's own minutes, so the board reads 1min → 60min
+      // rather than in whatever order the ledger happened to hold.
+      groups.sort((a, b) => minutesOf(a.rung) - minutesOf(b.rung));
+      board = { phase: 'ready', groups, why: '' };
+    } catch (why) {
+      board = {
+        phase: 'failed',
+        groups: [],
+        why: `The board could not be fetched: ${why instanceof Error ? why.message : String(why)}`
+      };
+    }
+  }
+
+  /** @param {string} rung e.g. "15min" */
+  function minutesOf(rung) {
+    const digits = String(rung).match(/^\d+/);
+    return digits ? Number(digits[0]) : Number.MAX_SAFE_INTEGER;
+  }
+
+  const board10 = $derived.by(() =>
+    board.groups.map((g) => ({
+      ...g,
+      priced: g.rows.filter((r) => r.priced).length,
+      top: rankRows(g.rows, weights, topN)
+    }))
+  );
+
+  // FETCHED WHEN THE LEDGER CHANGES, NOT WHEN A WEIGHT MOVES. The effect reads
+  // `runs` and nothing else, so dragging a weight re-ranks in the browser
+  // without asking the server for the same rows again — `board10` is derived and
+  // recomputes on its own. Re-ranking is the cheap half and refetching is the
+  // expensive one; tying them together would have made every slider a round trip.
+  $effect(() => {
+    void fetchBoard(runs);
   });
 
   /** @param {string|undefined} identity */
@@ -4450,6 +4546,124 @@
           </p>
         {/each}
       </section>
+      <!-- ============================================================
+           LEVEL 0.5 — THE TOP TEN OF EVERY TIMEFRAME
+
+           The ledger below shows ONE row per run: the single combination the
+           exit grid picked. This board shows the ten best of every timeframe,
+           ranked on the operator's own eleven criteria, and it is the surface
+           the whole `/frontier.json` route exists to serve.
+
+           Ranked in the BROWSER on purpose. A score compiled into the binary is
+           one more number nobody can see -- the exact failure that cost this
+           project two nights, from a hardcoded support floor to a hardcoded
+           ranking lens. Every weight below is a control.
+           ============================================================ -->
+      <section class="block rise">
+        <div class="bh-row">
+          <h2 class="bh">Top {topN} of every timeframe</h2>
+          <span class="count">
+            {#if board.phase === 'loading'}reading…{:else}{exact(board10.length)} timeframes{/if}
+          </span>
+        </div>
+
+        <div class="wrow">
+          <label class="wlab">
+            show top
+            <input class="wnum" type="number" min="1" max="100" bind:value={topN} />
+          </label>
+          {#each [['drawdown', 'less max drawdown'], ['worstTrade', 'less max stop loss'], ['losingPct', 'less losing %'], ['losingTrades', 'less losing trades'], ['profit', 'more max profit'], ['winningTrades', 'more winning trades'], ['winRate', 'higher win %'], ['rewardRisk', 'higher win:loss ratio'], ['avgWin', 'higher average win'], ['avgLoss', 'smaller average loss']] as [key, label] (key)}
+            <label class="wlab">
+              {label}
+              <input
+                class="wrange"
+                type="range"
+                min="0"
+                max="3"
+                step="0.5"
+                bind:value={weights[key]}
+              />
+              <b class="wval">{weights[key]}</b>
+            </label>
+          {/each}
+        </div>
+
+        {#if board.phase === 'failed' || board.why}
+          <p class="inline-note">{board.why}</p>
+        {/if}
+
+        {#each board10 as g (g.rung)}
+          <div class="tt-sec">
+            <div class="tt-hrow">
+              <h4 class="tt-h">
+                {g.rung}
+                <span class="dim">
+                  · {exact(g.run.bars)} bars · support {(
+                    (g.run.min_hits / Math.max(1, g.run.bars)) *
+                    100
+                  ).toFixed(1)}% · depth {g.run.depth} · {exact(g.run.combinations)} combinations enumerated
+                </span>
+              </h4>
+            </div>
+            {#if g.top.length > 0}
+              <div class="tt-tblwrap">
+                <table class="tt-tbl rungprog">
+                  <thead>
+                    <tr>
+                      <th>#</th><th class="n">score</th><th class="n">trades</th>
+                      <th class="n">win %</th><th class="n">win / loss</th>
+                      <th class="n">worst fills</th><th class="n">best fills</th>
+                      <th class="n">max drawdown</th><th class="n">worst trade</th>
+                      <th class="n">avg win</th><th class="n">avg loss</th>
+                      <th class="n">reward:risk</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {#each g.top as c, i (c.rank)}
+                      <tr>
+                        <td><b>{i + 1}</b></td>
+                        <td class="n">{c.score.toFixed(2)}</td>
+                        <td class="n">{exact(c.trades)}</td>
+                        <td class="n">{(c.win_rate_bp / 100).toFixed(1)}%</td>
+                        <td class="n"><span class="up">{exact(c.wins)}</span> / <span class="down">{exact(c.losses)}</span></td>
+                        <td class="n {c.pessimistic < 0 ? 'down' : 'up'}">{money(c.pessimistic)}</td>
+                        <td class="n {c.optimistic < 0 ? 'down' : 'up'}">{money(c.optimistic)}</td>
+                        <td class="n down">{money(c.max_drawdown)}</td>
+                        <td class="n down">{money(c.worst_trade)}</td>
+                        <td class="n up">{money(c.avg_win)}</td>
+                        <td class="n down">{money(c.avg_loss)}</td>
+                        <td class="n">{(c.reward_to_risk_bp / 100).toFixed(2)}×</td>
+                      </tr>
+                    {/each}
+                  </tbody>
+                </table>
+              </div>
+              <!-- BOTH READINGS, SIDE BY SIDE, ALWAYS. `worst fills` enters at the
+                   worst price the execution bar printed and resolves every
+                   ambiguous bar as the STOP; `best fills` enters at the open and
+                   resolves it as the TARGET. The truth is between them, and a
+                   table showing only one of the two would be picking a side the
+                   data cannot settle. -->
+              <p class="tt-note2 dim">
+                {exact(g.priced)} of {exact(g.rows.length)} recorded combinations were priced
+                against the exit grid; the rest store zeros and are excluded, because a zero
+                drawdown outranks every real one.
+              </p>
+            {:else}
+              <p class="tt-note2">
+                {#if g.why}{g.why}{:else}No priced combination was recorded for this rung.{/if}
+              </p>
+            {/if}
+          </div>
+        {/each}
+
+        {#if board.phase === 'ready' && board10.length === 0}
+          <p class="inline-note">
+            No completed run is in view, so there is nothing to rank yet.
+          </p>
+        {/if}
+      </section>
+
 
       <!-- ============================================================
            LEVEL 0 — THE LEDGER
@@ -10060,5 +10274,49 @@
   }
   .rungprog .num {
     font-variant-numeric: tabular-nums;
+  }
+
+  /* ---- the ranking weights ----------------------------------------------
+     Ten controls, one per criterion the operator named. Laid out as a wrapping
+     flex row rather than a grid so a narrow window reflows instead of scrolling
+     sideways -- the page body must never scroll horizontally. */
+  .wrow {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 0.9rem;
+    align-items: center;
+    margin: 0.35rem 0 0.9rem;
+    padding: 0.6rem 0.75rem;
+    border: 1px solid var(--n6);
+    border-radius: 8px;
+    background: var(--n2);
+  }
+  .wlab {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.72rem;
+    letter-spacing: 0.02em;
+    color: var(--n9);
+    white-space: nowrap;
+  }
+  .wrange {
+    width: 5.5rem;
+    accent-color: var(--acc);
+  }
+  .wnum {
+    width: 3.6rem;
+    padding: 0.15rem 0.3rem;
+    font: inherit;
+    font-variant-numeric: tabular-nums;
+    color: var(--n11);
+    background: var(--n3);
+    border: 1px solid var(--n6);
+    border-radius: 5px;
+  }
+  .wval {
+    min-width: 1.6rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--n11);
   }
 </style>
