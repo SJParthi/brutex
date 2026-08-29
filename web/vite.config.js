@@ -77,6 +77,20 @@ const ROUTES = [
 	// reason `/backtest/run` is: `/engine/command` is a POST that no page calls
 	// and proxying the whole prefix would claim it too.
 	'/engine/top.json',
+	// THE EVENT FEED, WHICH IS THE ONLY LIVE PROGRESS THAT EXISTS.
+	//
+	// `GET /backtest/run.json` reads a struct written exactly twice — once when
+	// a sweep is accepted and once when it returns — so a multi-hour eight-rung
+	// run is a boolean to the page. MEASURED: two overnight runs held thirteen
+	// cores for seven hours each and the operator could not tell a working sweep
+	// from a hung one.
+	//
+	// The events carry what the struct does not: a span load per rung with its
+	// bar count and derived `min_hits`, and now a `rung finished` per rung with
+	// its outcome and, on a refusal, the reason. `/logs.json` has served them
+	// all along and nothing in `web/src` fetched it — the Rust-rendered `/logs`
+	// page linked to it and the console never did.
+	'/logs.json',
 	// `/audit` IS NOT HERE, AND ITS ABSENCE IS THE POINT.
 	//
 	// It used to be, and it made one URL serve two different applications:

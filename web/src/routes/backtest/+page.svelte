@@ -158,6 +158,62 @@
    */
   let top = $state({ phase: 'idle', report: '', why: '' });
 
+  /**
+   * Live progress, taken from the event log because the status endpoint has none.
+   *
+   * `GET /backtest/run.json` reads a struct written exactly TWICE — once when a
+   * sweep is accepted and once when it returns. It carries `in_flight` and a
+   * start time and nothing else, so an eight-rung run over eighty-one months is
+   * a boolean for its whole duration. Measured: two overnight runs each held
+   * thirteen cores for seven hours, and there was no way from this page to tell
+   * a working sweep from a hung one.
+   *
+   * The events carry what the struct does not — `stored span loaded` per rung
+   * with its bar count and derived `min_hits`, and `rung finished` per rung with
+   * its outcome and, on a refusal, the reason. `/logs.json` has served them all
+   * along; nothing here ever asked.
+   *
+   * Polled on the same 2-second tick as the sweep status, so it costs one extra
+   * request per tick and stops the moment the run does.
+   */
+  let live = $state({ phase: 'idle', rungs: [], why: '' });
+
+  /** Rungs seen so far, newest first, as `{rung, bars, minHits, done, why}`. */
+  async function fetchLive() {
+    try {
+      const response = await ask_('/logs.json?limit=120', { cache: 'no-store' });
+      if (!response.ok) {
+        live = { phase: 'failed', rungs: [], why: `/logs.json answered ${response.status}` };
+        return;
+      }
+      const body = await response.json();
+      // ONE ROW PER RUNG, not one per event: a rung emits a span load and later
+      // a finish, and the reader wants the rung's state, not its history.
+      const byRung = new Map();
+      for (const record of body.records ?? []) {
+        if (record.target !== 'cli.audit') continue;
+        const f = record.fields ?? {};
+        if (!f.rung) continue;
+        const held = byRung.get(f.rung) ?? { rung: f.rung, bars: 0, minHits: 0, done: false, why: '' };
+        if (f.bars) held.bars = f.bars;
+        if (f.min_hits) held.minHits = f.min_hits;
+        if (record.message === 'rung finished') {
+          held.done = true;
+          held.why = f.why ?? '';
+          held.recorded = f.recorded === 1;
+        }
+        byRung.set(f.rung, held);
+      }
+      live = { phase: 'ready', rungs: [...byRung.values()], why: '' };
+    } catch (why) {
+      live = {
+        phase: 'failed',
+        rungs: [],
+        why: `The event feed could not be read: ${why instanceof Error ? why.message : String(why)}`
+      };
+    }
+  }
+
   async function fetchVocab() {
     try {
       const response = await ask_('/vocab.json');
@@ -402,6 +458,10 @@
       const next = sweepOutcome(body.running);
       sweep = next;
       if (next.phase === 'running') {
+        // AND THE EVENT FEED, on the same tick. `next` carries no progress —
+        // see `live` — so this is where the page learns which rungs have
+        // loaded, what threshold each derived, and which have finished.
+        fetchLive();
         pollAt = setTimeout(pollSweep, 2000);
         return;
       }
@@ -410,6 +470,9 @@
       // would redraw the same table under a red note as though it had changed.
       if (next.phase === 'done') {
         fetchLedger();
+        // ONE LAST READ, so the finished state shows every rung's outcome
+        // rather than freezing on whatever the last poll happened to catch.
+        fetchLive();
         // AND THE RANKED COMBINATIONS, which is what was actually being asked
         // for. `fetchLedger` re-reads one row per run; this reads the twenty-five
         // rows behind each of them. Fired together and awaited by neither,
@@ -3603,9 +3666,46 @@
   {/if}
 
   {#if sweep.phase === 'running'}
-    <!-- INDETERMINATE, AND SAYING SO. A sweep is 43 ms to hours depending on
-         the rung; a percentage bar would be a guess and a spinner alone says
-         nothing. The elapsed clock is the one honest progress signal. -->
+    <!-- IT IS NO LONGER INDETERMINATE, AND THIS TABLE IS WHY.
+         The note below still says the TOTAL is unknowable, which is true — the
+         ladder walks until the frontier empties. What was ALSO unknowable, and
+         did not have to be, is which of the eight timeframes had loaded, what
+         threshold each derived from its own bars, and which had finished. Two
+         overnight runs held thirteen cores for seven hours with no way to tell
+         a working sweep from a hung one. The events carried it; nothing asked. -->
+    {#if live.phase === 'ready' && live.rungs.length > 0}
+      <div class="tt-tblwrap">
+        <table class="tt-tbl rungprog">
+          <thead>
+            <tr><th>timeframe</th><th class="num">bars</th><th class="num">needs</th><th class="num">support</th><th>state</th></tr>
+          </thead>
+          <tbody>
+            {#each live.rungs as r (r.rung)}
+              <tr>
+                <td><b>{r.rung}</b></td>
+                <td class="num">{r.bars ? r.bars.toLocaleString() : '—'}</td>
+                <td class="num">{r.minHits ? r.minHits.toLocaleString() : '—'}</td>
+                <td class="num">
+                  {r.bars && r.minHits ? `${((r.minHits / r.bars) * 100).toFixed(2)}%` : '—'}
+                </td>
+                <td>
+                  {#if r.done && r.recorded}<span class="ok">recorded</span>
+                  {:else if r.done}<span class="warnish">refused — {r.why || 'no reason given'}</span>
+                  {:else}<span class="dim">sweeping…</span>{/if}
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      </div>
+    {:else if live.phase === 'failed'}
+      <p class="inline-note bad runstate">{live.why}</p>
+    {/if}
+
+    <!-- The TOTAL is still indeterminate, and saying so. A sweep is 43 ms to
+         hours depending on the rung; a percentage bar over the whole run would
+         be a guess. The table above is measured; the sentence below is honest
+         about what is not. -->
     <p class="inline-note runstate">
       <span class="spin sm" aria-hidden="true"></span>
       <b>Sweeping.</b> The ladder walks upward until the frequent frontier empties, so how long
@@ -9669,5 +9769,16 @@
     .row {
       transition: none;
     }
+  }
+
+  /* THE LIVE RUNG TABLE. Inherits `tt-tbl` for grid and type; this adds only
+     the one thing it needs -- room to breathe while a run is in flight, and
+     tabular figures so bar counts and thresholds line up down the column as
+     they change. */
+  .rungprog {
+    margin: 0.6rem 0 0.9rem;
+  }
+  .rungprog .num {
+    font-variant-numeric: tabular-nums;
   }
 </style>

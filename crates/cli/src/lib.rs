@@ -6998,6 +6998,42 @@ fn one_rung(
     } else {
         latest_for(vendor_word, underlying, rung, from, to, min_hits)
     };
+
+    // A RUNG FINISHING IS AN EVENT, AND IT WAS NOT ONE.
+    //
+    // `one_rung` emitted nothing on completion. Eight rungs would finish and the
+    // log stayed silent between "stored span loaded" at the start and the
+    // report at the very end, so an operator watching a multi-hour run could not
+    // tell a working sweep from a hung one — and could not tell which of the
+    // eight had finished, or that any had.
+    //
+    // MEASURED, twice, over two nights: a sweep held thirteen cores for seven
+    // hours with no event of any kind after the eight span loads. The run was
+    // healthy. Nothing said so.
+    //
+    // Gate 17 silences `vocab engine indicators runner` because those hold the
+    // loops, and its rule is not "each call is cheap" but "the innermost loop
+    // calls nothing at all". This is `cli`, at the rung boundary — one event per
+    // rung per run, which is the granularity gate 17's own comment prescribes as
+    // the affordable one, and the same granularity `batch` already reports at.
+    //
+    // The refusal is carried when there is one: a rung that refused is the case
+    // an operator most needs to see, and it is exactly the case that produced no
+    // row for `/backtest.json` to show.
+    crate::note(
+        &telemetry::Event::info("cli.audit", "rung finished")
+            .with("feed", vendor_word)
+            .with("underlying", underlying)
+            .with("rung", rung)
+            .with("bars", u64::try_from(bars).unwrap_or(u64::MAX))
+            .with("min_hits", min_hits)
+            .with("recorded", u64::from(outcome.is_ok()))
+            .with(
+                "why",
+                outcome.as_ref().err().map_or("", String::as_str),
+            ),
+    );
+
     RungRow { rung, outcome }
 }
 
