@@ -220,9 +220,10 @@
      be a claim about a document this file does not own — the same reason
      `BoardGroup.rows` is `any[]`. */
   let tradeList = $state(
-    /** @type {{ phase: string, rows: any[], why: string }} */ ({
+    /** @type {{ phase: string, rows: any[], periods: any, why: string }} */ ({
       phase: 'idle',
       rows: [],
+      periods: null,
       why: ''
     })
   );
@@ -942,10 +943,10 @@
   /** @param {string|undefined} identity */
   async function fetchTrades(identity) {
     if (!identity) {
-      tradeList = { phase: 'idle', rows: [], why: '' };
+      tradeList = { phase: 'idle', rows: [], periods: null, why: '' };
       return;
     }
-    tradeList = { phase: 'loading', rows: [], why: '' };
+    tradeList = { phase: 'loading', rows: [], periods: null, why: '' };
     try {
       const response = await ask_(`/trades.json?identity=${encodeURIComponent(identity)}`);
       const body = await response.json();
@@ -955,16 +956,272 @@
       tradeList = {
         phase: response.ok ? 'ready' : 'failed',
         rows: Array.isArray(body.trades) ? body.trades : [],
+        // THE PERIOD BUCKETS WERE BEING DROPPED. `/trades.json` sends eight of
+        // them -- day, week, month, quarter, half, year, weekday, hour -- each
+        // carrying `trades`, `wins`, `worst_wins`, `largest_win` and
+        // `largest_loss`. Four metrics this page renders as "not recorded"
+        // are sums of that object.
+        periods: body.periods ?? null,
         why: body.refusal ?? (response.ok ? '' : `/trades.json answered ${response.status}`)
       };
     } catch (why) {
       tradeList = {
         phase: 'failed',
         rows: [],
+        periods: null,
         why: `The trades could not be fetched: ${why instanceof Error ? why.message : String(why)}`
       };
     }
   }
+
+  /** Weekday bucket keys, and `0` IS MONDAY. */
+  const WEEKDAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+
+  /**
+   * One UTC hour bucket, labelled in the exchange's own clock.
+   *
+   * # IST IS NOT A WHOLE NUMBER OF HOURS, and that is the whole comment
+   *
+   * `Period::bucket` keys the hour grain by the **UTC** hour index. India is
+   * UTC+5:30, so a UTC hour does not line up with an IST hour: UTC 04 spans IST
+   * **09:30–10:30**, straddling two IST hours. Adding five and calling it an
+   * hour would be wrong by thirty minutes on every row, in the direction that
+   * makes the opening bucket look like it starts at the bell when it starts an
+   * hour later.
+   *
+   * So the label is the half-open IST range the bucket actually covers, and the
+   * UTC key it came from rides along in the title.
+   *
+   * @param {number} utcHour
+   */
+  function istHourLabel(utcHour) {
+    const start = (utcHour * 60 + 330) % 1440;
+    const end = (start + 60) % 1440;
+    /** @param {number} m */
+    const hhmm = (m) =>
+      `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+    return `${hhmm(start)}–${hhmm(end)}`;
+  }
+
+  /**
+   * When this run made its money — by weekday and by hour of the session.
+   *
+   * # The operator's question, computed and then thrown away
+   *
+   * *"every day how many wins how many loss every week every month every
+   * quarter every half every year"* is quoted in `crates/api/src/trades.rs`,
+   * and `cli::trades` answers it: `/trades.json` has been serving eight grains
+   * on every request. The page stored the object and rendered none of it.
+   *
+   * MEASURED on the 60min NIFTY run: every one of its 177 trades falls on a
+   * **Friday**, and the IST 09:30–10:30 bucket alone is worth more at worst-case
+   * fills than the entire run. A concentration like that is the difference
+   * between an edge and an artefact, and it was one `{#each}` away from being
+   * visible.
+   *
+   * Sorted by worst-case money rather than by key, because the question is
+   * *"which"* and not *"in what order do Mondays come"*.
+   */
+  /** Month names for the `month` grain, whose key is `year * 12 + (month - 1)`. */
+  const MONTH_NAMES = [
+    'January',
+    'February',
+    'March',
+    'April',
+    'May',
+    'June',
+    'July',
+    'August',
+    'September',
+    'October',
+    'November',
+    'December'
+  ];
+
+  const timePatterns = $derived.by(() => {
+    const p = tradeList.periods;
+    if (!p) return null;
+    /** @param {any[]} buckets @param {(k: number) => string} label */
+    const shape = (buckets, label) =>
+      (Array.isArray(buckets) ? buckets : []).map((b) => {
+        const trades = b.trades ?? 0;
+        const wins = b.worst_wins ?? 0;
+        return {
+          key: b.key,
+          label: label(b.key),
+          trades,
+          wins,
+          losses: trades - wins,
+          rateBp: trades ? Math.round((wins / trades) * 10_000) : 0,
+          worst: b.worst_paisa ?? 0,
+          best: b.best_paisa ?? 0
+        };
+      });
+
+    // Chronological within the grain, because a column chart of hours that
+    // jumps 09:30, 13:30, 10:30 is unreadable however it is sorted.
+    const byKey = (/** @type {any[]} */ rows) => [...rows].sort((a, b) => a.key - b.key);
+    const hours = byKey(shape(p.hour, istHourLabel));
+
+    /**
+     * EVERY SLOT IN THE GRAIN, INCLUDING THE EMPTY ONES.
+     *
+     * The reference draws seven weekday columns and twelve month columns
+     * whatever the data holds, and that is not decoration: on this operator's
+     * 60-minute run EVERY ONE of the 177 trades falls on a single weekday. A
+     * chart of the buckets that exist draws one bar and says nothing; a chart
+     * of all seven draws one bar beside six empty ones and says the whole
+     * finding at a glance.
+     *
+     * Months are folded ACROSS YEARS — the bucket key is `year * 12 + (month -
+     * 1)`, so a five-year span puts five keys on "August", and the reference's
+     * axis is the twelve calendar months rather than sixty ledger keys.
+     *
+     * @param {number} size how many slots the grain has
+     * @param {(i: number) => number} keyOf the bucket key a slot collects
+     * @param {(i: number) => string} label
+     * @param {any[]} rows
+     */
+    const fill = (size, keyOf, label, rows) =>
+      Array.from({ length: size }, (unused, i) => {
+        const want = keyOf(i);
+        const hit = rows.filter((r) => ((r.key % size) + size) % size === want % size);
+        const trades = hit.reduce((n, r) => n + r.trades, 0);
+        const wins = hit.reduce((n, r) => n + r.wins, 0);
+        return {
+          key: i,
+          label: label(i),
+          trades,
+          wins,
+          losses: trades - wins,
+          rateBp: trades ? Math.round((wins / trades) * 10_000) : 0,
+          worst: hit.reduce((n, r) => n + r.worst, 0),
+          best: hit.reduce((n, r) => n + r.best, 0)
+        };
+      });
+
+    // SUNDAY FIRST, because the reference's axis reads Sun Mon Tue Wed Thu Fri
+    // Sat — while `Period::bucket` keys 0 as MONDAY. Slot `i` therefore collects
+    // weekday key `(i + 6) % 7`, and getting that backwards would label Friday's
+    // column Saturday.
+    const days = fill(
+      7,
+      (i) => (i + 6) % 7,
+      (i) => WEEKDAY_NAMES[(i + 6) % 7],
+      shape(p.weekday, (k) => WEEKDAY_NAMES[k] ?? `weekday ${k}`)
+    );
+    const months = fill(
+      12,
+      (i) => i,
+      (i) => MONTH_NAMES[i],
+      shape(p.month, (k) => MONTH_NAMES[((k % 12) + 12) % 12] ?? `month ${k}`)
+    );
+    if (hours.length === 0 && p.weekday?.length === 0 && p.month?.length === 0) return null;
+
+    // BEST BY WIN RATE, NOT BY MONEY, which is what the reference's tiles say:
+    // "09:00, 43.90% winners". A bucket of one trade that won is 100% and is not
+    // an answer, so a bucket must carry at least a twentieth of the run's trades
+    // to be eligible — stated rather than silently applied.
+    const total = hours.reduce((n, r) => n + r.trades, 0);
+    const floor = Math.max(1, Math.round(total / 20));
+    /** @param {any[]} rows */
+    const best = (rows) => {
+      const eligible = rows.filter((r) => r.trades >= floor);
+      if (eligible.length === 0) return null;
+      return eligible.reduce((a, b) => (b.rateBp > a.rateBp ? b : a));
+    };
+    return {
+      hours,
+      days,
+      months,
+      bestHour: best(hours),
+      bestDay: best(days),
+      bestMonth: best(months),
+      floor,
+      total
+    };
+  });
+
+  /** Which grain the `Results by time` chart is drawing. */
+  let timeGrain = $state('hours');
+
+  /** The rows the chart is currently drawing, and the tallest column in them. */
+  const timeRows = $derived.by(() => {
+    if (!timePatterns) return { rows: [], tallest: 1 };
+    const rows =
+      timeGrain === 'days'
+        ? timePatterns.days
+        : timeGrain === 'months'
+          ? timePatterns.months
+          : timePatterns.hours;
+    return { rows, tallest: Math.max(1, ...rows.map((r) => r.trades)) };
+  });
+
+  /** Mean bars held, for the reference's fourth tile. */
+  const averageDuration = $derived.by(() => {
+    if (tradeRows.length === 0) return null;
+    const sum = tradeRows.reduce((n, t) => n + (t.bars_held ?? 0), 0);
+    return Math.round(sum / tradeRows.length);
+  });
+
+  /**
+   * The counts four locked metrics said were not recorded.
+   *
+   * # What was wrong
+   *
+   * `Total winners`, `Total losers`, `Percent profitable` and `Largest profit`
+   * each rendered a padlock reading *"No win count is recorded"* or *"Only the
+   * worst single trade is kept"*. Both sentences were true of the RESULTS
+   * ledger, which keeps four scalars per run — and both stopped being true when
+   * `cli::trades` began writing per-trade rows and `/trades.json` began serving
+   * `periods`. Every bucket carries `trades`, `wins`, `worst_wins`,
+   * `largest_win` and `largest_loss`; the totals are their sums.
+   *
+   * MEASURED on this store: 177 trades, and the `year` buckets sum to exactly
+   * 177 — so the buckets partition the trade list rather than sampling it.
+   *
+   * # `worst_wins` is the headline, and that is not a detail
+   *
+   * `wins` counts trades that won at the BEST fill; `worst_wins` counts those
+   * that won at the WORST. On this run the two are 99 and 68 — a win rate of
+   * 55.93% or 38.42% depending on which is quoted. The page's header says
+   * *"ranked on worst-case fills"*, so the worst is the headline and the best
+   * travels beside it. Quoting only the flattering one is the failure this
+   * whole console exists to avoid.
+   *
+   * `year` and not `day`: the coarsest bucket set is the fewest rows to add,
+   * and every set totals the same because each partitions the same list.
+   */
+  const tradeTotals = $derived.by(() => {
+    const buckets = tradeList.periods?.year;
+    if (!Array.isArray(buckets) || buckets.length === 0) return null;
+    let trades = 0;
+    let wins = 0;
+    let worstWins = 0;
+    let largestWin = -Infinity;
+    let largestLoss = Infinity;
+    for (const b of buckets) {
+      trades += b.trades ?? 0;
+      wins += b.wins ?? 0;
+      worstWins += b.worst_wins ?? 0;
+      if (Number.isFinite(b.largest_win)) largestWin = Math.max(largestWin, b.largest_win);
+      if (Number.isFinite(b.largest_loss)) largestLoss = Math.min(largestLoss, b.largest_loss);
+    }
+    if (trades === 0) return null;
+    return {
+      trades,
+      wins,
+      worstWins,
+      losses: trades - worstWins,
+      bestLosses: trades - wins,
+      // Basis points, so the two rates are compared as integers rather than as
+      // floats the way §7 keeps money.
+      rateBp: Math.round((worstWins / trades) * 10_000),
+      bestRateBp: Math.round((wins / trades) * 10_000),
+      largestWin: Number.isFinite(largestWin) ? largestWin : null,
+      largestLoss: Number.isFinite(largestLoss) ? largestLoss : null
+    };
+  });
 
   /**
    * The running total, so the table can show a cumulative column.
@@ -985,6 +1242,18 @@
       return { ...t, cumulative: running };
     });
   });
+
+  /**
+   * The trades table's rows, NEWEST FIRST.
+   *
+   * The reference opens on trade 321 and counts down, because the question a
+   * trades list is opened with is *"what did it just do"* and not *"what did it
+   * do first"*. The header carries the `↓` that says so.
+   *
+   * Reversed for DISPLAY only — `tradeRows` accumulates chronologically, and
+   * running that sum backwards would make every cumulative figure wrong.
+   */
+  const tradeRowsShown = $derived([...tradeRows].reverse());
 
   /** Rungs seen so far, newest first, as `{rung, bars, minHits, done, why}`. */
   async function fetchLive() {
@@ -3742,6 +4011,62 @@
   }
 
   /**
+   * One trade leg's moment, in the shape TradingView's List of trades prints it.
+   *
+   * # Why a second formatter and not [`when`]
+   *
+   * `when` is `en-IN`, which resolves `hour: '2-digit'` to a TWELVE-hour clock
+   * with `am`/`pm`. The reference prints `Aug 28, 2026, 14:12` — twenty-four
+   * hour, no meridiem — and a trades table is read by scanning a column of
+   * times for the gap between two of them, which a meridiem suffix makes
+   * slower, not clearer. `hour12: false` is the whole difference.
+   *
+   * # This column was printing a bar INDEX
+   *
+   * `/trades.json` has been sending `entry_micros` and `exit_micros` since
+   * `cli::trades` wrote them — MEASURED on this store, `1584074700000000`,
+   * a real March 2020 timestamp. The column headed *"Date and time"* rendered
+   * `bar {exact(t.exit_bar)}` regardless: an ordinal into the bar file, under a
+   * header promising a date. The index is still worth having, so it moves to
+   * the cell's `title` rather than being dropped.
+   *
+   * @param {number} micros
+   */
+  function tradeWhen(micros) {
+    if (!Number.isFinite(micros) || micros <= 0) return 'not stamped';
+    return new Date(micros / 1000).toLocaleString('en-IN', {
+      timeZone: IST,
+      year: 'numeric',
+      month: 'short',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false
+    });
+  }
+
+  /**
+   * A paisa figure as a percentage of the span's opening price.
+   *
+   * The reference prints every money column as two lines — `450.8 INR` above,
+   * `0.31%` below — because a figure in currency says nothing about whether it
+   * was a large move without a base to divide by. `bench.open` is that base:
+   * the first close of the swept span, already fetched for the buy-and-hold
+   * comparison, so this costs no request.
+   *
+   * `null` when the base is not loaded yet or is zero. NOT `0` — a ratio with
+   * no base is undefined, and `0.00%` reads as "measured, and flat".
+   *
+   * @param {number|null|undefined} paisa
+   * @returns {string|null}
+   */
+  function shareOfOpen(paisa) {
+    const base = bench.open;
+    if (!Number.isFinite(paisa) || !Number.isFinite(base) || !base) return null;
+    return `${((Number(paisa) / Number(base)) * 100).toFixed(2)}%`;
+  }
+
+  /**
    * A unix second as the chart's own axis label, in IST.
    *
    * `lightweight-charts` labels its time axis in UTC unless a formatter says
@@ -5930,7 +6255,15 @@
                     <div class="tt-q"><span class="tt-k">Gross profit</span><span class="tt-qv"><Lock why="Only the net total is recorded." /></span></div>
                     <div class="tt-q"><span class="tt-k">Gross loss</span><span class="tt-qv"><Lock why="Only the net total is recorded." /></span></div>
                     <div class="tt-q"><span class="tt-k">Profit factor</span><span class="tt-qv"><Lock why="Needs gross profit and gross loss." /></span></div>
-                    <div class="tt-q"><span class="tt-k">Commission load</span><span class="tt-qv"><Lock why="crates/costs applies costs inside the sweep; the record keeps the net, not the fee line." /></span></div>
+                    <!-- THIS LOCK USED TO SAY "crates/costs applies costs inside
+                         the sweep", and that is not true. `costs::scope::is_cost_free`
+                         returns true for `IndexSpot`, and `crates/runner/src/audit.rs`
+                         states it plainly: "Nothing in this crate calls that
+                         function", "no tick is added on any leg of any path",
+                         "Every figure below is gross of the spread and the size
+                         of that omission is UNMEASURED." A padlock claiming a
+                         cost was applied is worse than one admitting it was not. -->
+                    <div class="tt-q"><span class="tt-k">Commission load</span><span class="tt-qv"><Lock why="No cost is applied at all. crates/costs implements the full statutory stack, but costs::scope::is_cost_free returns true for a spot index and nothing in crates/runner calls it — every figure on this page is GROSS of brokerage, spread and the statutory charges, and the size of that omission is UNMEASURED." /></span></div>
                   </div>
 
                   <div class="tt-hrow tight">
@@ -6167,7 +6500,11 @@
               <div class="tt-sec">
                 <h4 class="tt-h">Trades analysis</h4>
                 <div class="tt-pills" role="group" aria-label="Trades analysis">
-                  {#each [['distribution', 'Distribution'], ['streaks', 'Streaks'], ['details', 'Trades analysis details']] as [key, label] (key)}
+                  <!-- `Time patterns` IS THE REFERENCE'S FOURTH PILL, and it was
+                       the one missing. Its data has been on the wire the whole
+                       time: `/trades.json` serves a `weekday` and an `hour`
+                       bucket set on every request. -->
+                  {#each [['distribution', 'Distribution'], ['streaks', 'Streaks'], ['time', 'Time patterns'], ['details', 'Trades analysis details']] as [key, label] (key)}
                     <button class="tt-pill" class:on={taTab === key} onclick={() => (taTab = key)}>{label}</button>
                   {/each}
                 </div>
@@ -6233,6 +6570,118 @@
                       </p>
                     </div>
                   </div>
+                {:else if taTab === 'time'}
+                  <!-- ══ RESULTS BY TIME ══
+                       The operator's question, quoted verbatim in
+                       `crates/api/src/trades.rs`: "every day how many wins how
+                       many loss every week every month every quarter every half
+                       every year". `cli::trades` answers it and `/trades.json`
+                       serves eight grains on every request; this page stored the
+                       object and drew none of it.
+
+                       Shaped after the reference: four tiles, then one stacked
+                       column per bucket with winners below and losers above —
+                       NOT a table. A column chart answers "which bucket" at a
+                       glance, which is the whole question. -->
+                  {#if timePatterns}
+                    <div class="tt-quad">
+                      <div class="tt-q">
+                        <span class="tt-k">Best hour for entries</span>
+                        <span class="tt-qv"
+                          >{#if timePatterns.bestHour}{timePatterns.bestHour.label}<em class="tt-pc2"
+                              >{pct(timePatterns.bestHour.rateBp)} winners</em
+                            >{:else}<Lock small why="No hour bucket carries enough trades to name a best one." />{/if}</span
+                        >
+                      </div>
+                      <div class="tt-q">
+                        <span class="tt-k">Best day for entries</span>
+                        <span class="tt-qv"
+                          >{#if timePatterns.bestDay}{timePatterns.bestDay.label}<em class="tt-pc2"
+                              >{pct(timePatterns.bestDay.rateBp)} winners</em
+                            >{:else}<Lock small why="No weekday bucket carries enough trades to name a best one." />{/if}</span
+                        >
+                      </div>
+                      <div class="tt-q">
+                        <span class="tt-k">Best month for entries</span>
+                        <span class="tt-qv"
+                          >{#if timePatterns.bestMonth}{timePatterns.bestMonth.label}<em class="tt-pc2"
+                              >{pct(timePatterns.bestMonth.rateBp)} winners</em
+                            >{:else}<Lock small why="No month bucket carries enough trades to name a best one." />{/if}</span
+                        >
+                      </div>
+                      <div class="tt-q">
+                        <span class="tt-k">Average trade duration</span>
+                        <span class="tt-qv"
+                          >{#if averageDuration !== null}{exact(averageDuration)}<em class="tt-pc2"
+                              >bars</em
+                            >{:else}<Lock small why="Needs the per-trade bar counts, which arrive with the trade file." />{/if}</span
+                        >
+                      </div>
+                    </div>
+
+                    <div class="tt-hrow tight">
+                      <h5 class="tt-h5">Results by time</h5>
+                      <div class="tt-seg" role="group" aria-label="Time grain">
+                        {#each [['hours', 'Hours'], ['days', 'Days'], ['months', 'Months']] as [key, label] (key)}
+                          <button
+                            class="tt-segbtn"
+                            class:on={timeGrain === key}
+                            onclick={() => (timeGrain = key)}>{label}</button
+                          >
+                        {/each}
+                      </div>
+                    </div>
+
+                    {#if timeRows.rows.length > 0}
+                      <div class="rbt">
+                        <div class="rbt-plot">
+                          {#each timeRows.rows as r (r.key)}
+                            <div class="rbt-col" title="{r.label} · {exact(r.trades)} trades · {exact(r.wins)} won at worst-case fills">
+                              <div class="rbt-stack">
+                                <!-- LOSERS ABOVE, WINNERS BELOW, as the reference
+                                     stacks them: the green base is what the
+                                     bucket kept and the red is what sat on top
+                                     of it. -->
+                                <span
+                                  class="rbt-loss"
+                                  style="height:{(r.losses / timeRows.tallest) * 100}%"
+                                ></span>
+                                <span
+                                  class="rbt-win"
+                                  style="height:{(r.wins / timeRows.tallest) * 100}%"
+                                ></span>
+                              </div>
+                              <span class="rbt-x">{r.label}</span>
+                            </div>
+                          {/each}
+                        </div>
+                        <ul class="rbt-leg">
+                          <li><i class="rbt-dot win"></i>Winners</li>
+                          <li><i class="rbt-dot loss"></i>Losers</li>
+                        </ul>
+                      </div>
+                      <p class="tt-note2 dim">
+                        Winners are counted at <b>worst-case fills</b>, the reading this page is
+                        headed by — the same buckets count
+                        {exact(timePatterns.hours.reduce((n, r) => n + (r.trades - r.losses), 0))} more
+                        at best-case. A bucket must hold at least {exact(timePatterns.floor)} trades
+                        — a twentieth of the run's {exact(timePatterns.total)} — before it can be
+                        named a best one above, so a single lucky trade cannot take the tile.
+                        {#if timeGrain === 'hours'}
+                          Buckets are keyed by the <b>UTC</b> hour and IST is UTC+5:30, so each label
+                          is the IST window that hour actually covers rather than a whole IST hour.
+                        {/if}
+                      </p>
+                    {:else}
+                      <p class="tt-note2">This grain recorded no bucket for this run.</p>
+                    {/if}
+                  {:else}
+                    <p class="tt-note2">
+                      {#if tradeList.why}{tradeList.why}
+                      {:else if tradeList.phase === 'loading'}Reading this run's trades…
+                      {:else}This run recorded no trade file, so it has no time pattern to show.{/if}
+                    </p>
+                  {/if}
                 {:else if taTab === 'streaks'}
                   <div class="tt-quad">
                     <div class="tt-q"><span class="tt-k">Longest winning streak</span><span class="tt-qv"><Lock why="Needs the ordered win/loss outcome of every trade." /></span></div>
@@ -6264,9 +6713,31 @@
                         <tr><td>Total trades</td><td class="n">{exact(openRun.trades)}</td><td class="n"><Lock small why="Direction is one of the nine terms inside the run's identity hash, not a field beside it." /></td><td class="n"><Lock small why="Direction is one of the nine terms inside the run's identity hash, not a field beside it." /></td></tr>
                         {#if showAllMetrics}
                         <tr><td>Total open trades</td><td class="n"><Lock small why="The sweep closes every position at the span's end; open positions are not recorded." /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
-                        <tr><td>Total winners</td><td class="n"><Lock small why="No win count is recorded." /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
-                        <tr><td>Total losers</td><td class="n"><Lock small why="No loss count is recorded." /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
-                        <tr><td>Percent profitable</td><td class="n"><Lock small why="Cannot be inferred from a net total." /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
+                        <!-- REAL SINCE `/trades.json` STARTED SERVING `periods`.
+                             These three read "No win count is recorded", which
+                             was true of the RESULTS ledger and stopped being
+                             true of the trade file. Both fill models are shown
+                             because they disagree by seventeen points of win
+                             rate on this run, and the page's header commits to
+                             the worst one. -->
+                        <tr>
+                          <td>Total winners</td>
+                          <td class="n up">{#if tradeTotals}{exact(tradeTotals.worstWins)}<em class="tt-pc2">{exact(tradeTotals.wins)} at best fills</em>{:else}<Lock small why="This run recorded no trade file, so there is nothing to count." />{/if}</td>
+                          <td class="n"><Lock small why="Direction is one of the nine terms of the run identity, not a column on a trade — a long run and a short run are two runs." /></td>
+                          <td class="n"><Lock small why="Direction is one of the nine terms of the run identity, not a column on a trade — a long run and a short run are two runs." /></td>
+                        </tr>
+                        <tr>
+                          <td>Total losers</td>
+                          <td class="n down">{#if tradeTotals}{exact(tradeTotals.losses)}<em class="tt-pc2">{exact(tradeTotals.bestLosses)} at best fills</em>{:else}<Lock small why="This run recorded no trade file, so there is nothing to count." />{/if}</td>
+                          <td class="n"><Lock small why="Direction is one of the nine terms of the run identity, not a column on a trade." /></td>
+                          <td class="n"><Lock small why="Direction is one of the nine terms of the run identity, not a column on a trade." /></td>
+                        </tr>
+                        <tr>
+                          <td>Percent profitable</td>
+                          <td class="n">{#if tradeTotals}{pct(tradeTotals.rateBp)}<em class="tt-pc2">{pct(tradeTotals.bestRateBp)} at best fills</em>{:else}<Lock small why="This run recorded no trade file, so there is nothing to divide." />{/if}</td>
+                          <td class="n"><Lock small why="Direction is one of the nine terms of the run identity, not a column on a trade." /></td>
+                          <td class="n"><Lock small why="Direction is one of the nine terms of the run identity, not a column on a trade." /></td>
+                        </tr>
                         {/if}
                         <tr><td>Average PnL</td><td class="n"><span class="tv">{perTrade ? money(perTrade.worst) : "—"}</span><span class="tp">{perTrade && bench.open > 0 ? `${((perTrade.worst / bench.open) * 100).toFixed(2)}%` : ""}</span></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         {#if showAllMetrics}
@@ -6423,10 +6894,10 @@
                   <table class="tt-tbl ghosted">
                     <thead>
                       <tr>
-                        <th>Trade number</th><th>Type</th><th>Date and time</th><th>Signal</th><th class="n">Price</th>
+                        <th>Trade number <span class="lot-sort">↓</span></th><th>Type</th><th>Date and time</th><th>Signal</th><th class="n">Price</th>
                         <th class="n">Size</th><th class="n">Net PnL</th><th class="n">Return</th>
-                        <th class="n">Favorable excursion</th><th class="n">Adverse excursion</th>
-                        <th class="n">Cumulative PnL</th><th class="n">Duration (bars)</th>
+                        <th class="n" title="crates/costs implements the full statutory stack — brokerage, STT, exchange, SEBI, IPFT, GST, stamp — and costs::scope::is_cost_free returns true for a spot index, so no tick is added on any leg. Every figure in this table is GROSS.">Commission</th><th class="n">Favorable excursion</th><th class="n">Adverse excursion</th>
+                        <th class="n" title="A running sum of the ADVERSE excursion, not of realised profit — the sweep records no realised result per trade. The reference column name is kept; this is what fills it.">Cumulative PnL</th><th class="n">Duration (bars)</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -6437,39 +6908,58 @@
                            than as a log, and it is now drawn with real rows.
                            Every cell here was a padlock until `cli::trades`
                            wrote the file and `/trades.json` served it. -->
-                      {#if tradeList.phase === 'ready' && tradeRows.length > 0}
-                        {#each tradeRows as t (t.seq)}
+                      {#if tradeList.phase === 'ready' && tradeRowsShown.length > 0}
+                        {#each tradeRowsShown as t (t.seq)}
                           <tr class="lot-a">
                             <td rowspan="2" class="lot-num">{t.seq + 1}</td>
                             <td>Exit</td>
-                            <td>bar {exact(t.exit_bar)}</td>
+                            <!-- THE DATE, NOT THE BAR INDEX. `/trades.json` sends
+                                 `exit_micros`; this column rendered an ordinal
+                                 into the bar file under a header reading "Date
+                                 and time". The index keeps its place in the
+                                 tooltip, where it is useful and not misread. -->
+                            <td title="bar {exact(t.exit_bar)}">{tradeWhen(t.exit_micros)}</td>
                             <td><Lock small why="The exit signal is not stored per trade — the run's chosen exit variant is on the record above." /></td>
                             <td class="n"><Lock small why="Prices are not repeated per trade; the bar index above indexes the stored bars." /></td>
                             <td class="n"><Lock small why="Position size is not part of a sweep — the engine measures one unit of the index." /></td>
                             <td rowspan="2" class="n"><Lock small why="Realised net P&L per trade is not stored; the excursions beside it are." /></td>
                             <td rowspan="2" class="n"><Lock small why="Return needs a realised result, which is not stored per trade." /></td>
-                            <td rowspan="2" class="n up">{money(t.best)}</td>
-                            <td rowspan="2" class="n down">{money(t.worst)}</td>
-                            <td rowspan="2" class="n {t.cumulative < 0 ? 'down' : 'up'}">{money(t.cumulative)}</td>
+                            <td rowspan="2" class="n"><Lock small why="No cost is applied. costs::scope::is_cost_free returns true for a spot index and crates/runner adds no tick on any leg, so a commission of 0.00 would be a measurement nobody took." /></td>
+                            <!-- TWO LINES PER MONEY CELL, as the reference draws
+                                 them: the figure, then what share of the span's
+                                 opening price it is. A number in rupees does not
+                                 say whether the move was large. -->
+                            <td rowspan="2" class="n up">
+                              {money(t.best)}
+                              {#if shareOfOpen(t.best)}<em class="lot-pc">{shareOfOpen(t.best)}</em>{/if}
+                            </td>
+                            <td rowspan="2" class="n down">
+                              {money(t.worst)}
+                              {#if shareOfOpen(t.worst)}<em class="lot-pc">{shareOfOpen(t.worst)}</em>{/if}
+                            </td>
+                            <td rowspan="2" class="n {t.cumulative < 0 ? 'down' : 'up'}">
+                              {money(t.cumulative)}
+                              {#if shareOfOpen(t.cumulative)}<em class="lot-pc">{shareOfOpen(t.cumulative)}</em>{/if}
+                            </td>
                             <td rowspan="2" class="n">{exact(t.bars_held)}</td>
                           </tr>
                           <tr class="lot-b">
                             <td>Entry</td>
-                            <td>bar {exact(t.entry_bar)}</td>
-                            <td>signal at bar {exact(t.signal_bar)}</td>
+                            <td title="bar {exact(t.entry_bar)}">{tradeWhen(t.entry_micros)}</td>
+                            <td title="bar {exact(t.signal_bar)}">signal bar</td>
                             <td class="n"><Lock small why="Prices are not repeated per trade; the bar index beside it indexes the stored bars." /></td>
                             <td class="n"><Lock small why="Position size is not part of a sweep — the engine measures one unit of the index." /></td>
                           </tr>
                         {/each}
                       {:else if tradeList.phase === 'loading'}
-                        <tr><td colspan="12" class="dim">Reading this run's trades…</td></tr>
+                        <tr><td colspan="13" class="dim">Reading this run's trades…</td></tr>
                       {:else}
                         <!-- NAMED, NOT BLANK. An empty table and a failed fetch
                              look identical unless one of them says so, and the
                              route answers 200-with-a-reason precisely so the
                              two can be told apart here. -->
                         <tr>
-                          <td colspan="12">
+                          <td colspan="13">
                             <p class="tt-note2">
                               {#if tradeList.why}{tradeList.why}
                               {:else if tradeList.phase === 'ready'}This run recorded no round trips.
@@ -11088,6 +11578,104 @@
   }
   .cunk {
     color: var(--warn);
+  }
+
+  /* ══ TWO LINES PER MONEY CELL ══
+     The reference pairs every currency figure with what share of the price it
+     is, because a number in rupees does not say whether the move was large.
+     `display:block` so the percentage takes its own line under the figure. */
+  .lot-pc,
+  .tt-pc2 {
+    display: block;
+    font-style: normal;
+    font-size: 0.68rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--n8);
+    margin-top: 0.1rem;
+  }
+  .lot-sort {
+    color: var(--n8);
+    font-weight: 400;
+  }
+
+  /* ══ RESULTS BY TIME ══
+     One stacked column per bucket, winners below and losers above, as the
+     reference draws it. Columns are laid out by the grid rather than by a
+     width calculation, so seven weekdays and five session hours both fill the
+     plot without a per-grain constant. */
+  .rbt {
+    margin: var(--s5) 0 var(--s4);
+  }
+  .rbt-plot {
+    display: flex;
+    align-items: flex-end;
+    gap: var(--s4);
+    height: 12rem;
+    padding: var(--s4) var(--s3) 0;
+    border-bottom: 1px solid var(--line);
+    overflow-x: auto;
+  }
+  .rbt-col {
+    flex: 1 1 0;
+    min-width: 2.6rem;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    height: 100%;
+    justify-content: flex-end;
+  }
+  .rbt-stack {
+    width: 100%;
+    max-width: 2.2rem;
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+  }
+  .rbt-loss,
+  .rbt-win {
+    display: block;
+    width: 100%;
+    min-height: 0;
+  }
+  .rbt-loss {
+    background: var(--down);
+    border-radius: var(--r1) var(--r1) 0 0;
+  }
+  .rbt-win {
+    background: var(--up);
+  }
+  .rbt-x {
+    margin-top: var(--s3);
+    font-size: 0.64rem;
+    color: var(--n8);
+    white-space: nowrap;
+  }
+  .rbt-leg {
+    display: flex;
+    justify-content: center;
+    gap: var(--s6);
+    list-style: none;
+    margin: var(--s4) 0 0;
+    padding: 0;
+    font-size: 0.7rem;
+    color: var(--n9);
+  }
+  .rbt-leg li {
+    display: flex;
+    align-items: center;
+    gap: var(--s2);
+  }
+  .rbt-dot {
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: var(--r-full);
+  }
+  .rbt-dot.win {
+    background: var(--up);
+  }
+  .rbt-dot.loss {
+    background: var(--down);
   }
 
   /* ---- the engine's own knobs -------------------------------------------
