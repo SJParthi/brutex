@@ -2690,8 +2690,22 @@ jobs:
           #       second says so itself: "BEFORE ANYTHING IS OPENED OR CREATED". stderr is
           #       the only channel in existence at that instant, which is the same
           #       argument telemetry/src/sink.rs carries below.
-          #   pull/src/http.rs   eprintln! 2
-          #       Null-price bar notices, which ALSO emit `pull.decode` events.
+          #   pull/src/http.rs   eprintln! 6
+          #       Bar-refusal notices, every one of which ALSO emits a
+          #       `pull.decode` event immediately above the print -- verified
+          #       site by site, not assumed. 2 -> 6 on 2026-08-29 because the
+          #       declaration was stale by FOUR: the null-price pair it named
+          #       had been joined by a negative-volume notice, a negative
+          #       open-interest notice, an impossible-OHLC notice and a second
+          #       null-price site on the interval path, each added with its
+          #       emit already in place -- which is the shape this gate asks
+          #       for -- and none of them added here.
+          #
+          #       A DECLARATION THAT IS BEHIND ITS CODE IS THE STALE LIE GATE 1d
+          #       REFUSES, and this one was behind by four for long enough that
+          #       it failed the build and hid every gate after it: no step sets
+          #       `continue-on-error`, so gates 11, 12, 17 and 22 never ran
+          #       while this number was wrong.
           #   telemetry/src/sink.rs  eprintln! 1
           #       The sink's own last-resort notice. It is the thing that failed,
           #       so it is the one place stderr is the only channel left.
@@ -2779,7 +2793,7 @@ jobs:
           greeks/src/bsm.rs:println!:4
           greeks/src/normal.rs:println!:3
           greeks/src/solver.rs:println!:5
-          pull/src/http.rs:eprintln!:2
+          pull/src/http.rs:eprintln!:6
           telemetry/src/record.rs:eprintln!:1
           telemetry/src/sink.rs:eprintln!:1'
 
