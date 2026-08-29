@@ -810,6 +810,63 @@ impl Ladder {
     /// even if every candidate were frequent.
     #[must_use]
     pub fn walk(self, bar_bits: &[ConditionMask], live: &[u32]) -> Sweep {
+        // THE SIGNATURE ABOVE IS BYTE-PINNED by
+        // `the_sweep_cannot_compute_a_condition_bit` (invariant V-06), which
+        // reads this file as text and requires that exact string. So the
+        // reporting variant is a SIBLING and this stays a delegate: adding a
+        // parameter here would fail V-06 for a reason that has nothing to do
+        // with what V-06 is about.
+        self.walk_reporting(bar_bits, live, &|_, _, _| {})
+    }
+
+    /// [`Self::walk`], reporting each level as it completes.
+    ///
+    /// # The silence this fills, measured
+    ///
+    /// `~/.brutex/store/logs/cli/events.ndjson` holds a **71-minute gap** with no
+    /// event of any kind: all eight rungs announced themselves between 13:16:54
+    /// and 13:17:49, and the next line in the file is a different run's span
+    /// load. **No rung ever wrote a "finished".** That window is this function's
+    /// k-loop, and until now nothing inside it could say anything.
+    ///
+    /// # Why a closure and not an atomic
+    ///
+    /// Both pass CI gate 17, which greps for four literal tokens -- `telemetry::`,
+    /// `log::`, `println!`, `eprintln!` -- and an atomic contains none of them.
+    /// The prose beside that gate says "with no atomic"; no shell in the file
+    /// enforces it. So the choice is made on other grounds, and there are two:
+    ///
+    /// A level boundary has SIX numbers worth reporting -- the level, its
+    /// survivors, what it generated, what it pruned, what the bars refused, and
+    /// the cumulative pairs -- and an atomic carries one scalar. More decisively,
+    /// `cli::range_over` walks **eight rungs concurrently** through
+    /// `rungs.par_iter()`, so one process-global cell would be eight walks
+    /// overwriting each other. A closure captures the rung's own identity in the
+    /// caller's frame and that problem cannot arise.
+    ///
+    /// `&dyn Fn` rather than `impl Fn`: a generic would monomorphise the hottest
+    /// function in the workspace once per closure type. The indirect call happens
+    /// once per LEVEL -- single digits per walk -- so it is charged where nothing
+    /// is measuring, and it keeps the method object-safe for `runner` to forward
+    /// without putting a generic on `Sweeper`.
+    ///
+    /// # Where it is called from, and why not one line earlier
+    ///
+    /// After `current` becomes the level just built and BEFORE the halt test, so
+    /// a halted level is reported too. A caller watching a walk that stops at the
+    /// ceiling needs the level that stopped it, which is exactly the one the
+    /// `break` would otherwise skip.
+    ///
+    /// The arguments are the completed level, the cumulative distinct candidates
+    /// admitted, and the cumulative pairs walked -- the same two the budgets are
+    /// measured against, so a reader can see how close a walk is to refusing
+    /// while it still has time to act.
+    pub fn walk_reporting(
+        self,
+        bar_bits: &[ConditionMask],
+        live: &[u32],
+        on_level: &dyn Fn(&Frontier, usize, u64),
+    ) -> Sweep {
         let bars = len_u64(bar_bits.len());
         let mut sweep = Sweep {
             bars,
@@ -956,6 +1013,16 @@ impl Ladder {
             pairs_walked = pairs_walked.saturating_add(walked);
             sweep.levels.push(current);
             current = next;
+            // THE LEVEL BOUNDARY. Reached exactly once per k, and the only point
+            // in this crate that is: everything per-candidate is inside
+            // `next_level` and everything per-bar is below that in `column.rs`.
+            // A walk of depth eight makes eight calls here, which is the
+            // granularity gate 17's own remedy text prescribes.
+            //
+            // BEFORE the halt test, deliberately -- see the method doc. A caller
+            // watching a walk that stops at the ceiling needs the level that
+            // stopped it, and that is the one the `break` below would skip.
+            on_level(&current, admitted, pairs_walked);
             // A HALTED LEVEL IS PARTIAL, so climbing off it would build k+1 from
             // an incomplete frontier and label the result complete. Anti-monotonicity
             // only licenses the prune when the previous level is the WHOLE frequent
@@ -3525,6 +3592,97 @@ mod tests {
     /// The only thing that sees all nine is recomputing the answer at a scale
     /// above every other fixture here, from the other layout. A counter cannot
     /// catch a cap on the quantity the counter itself reports.
+    /// The reporter fires ONCE PER LEVEL, including the level that halted.
+    ///
+    /// # The silence this closes, measured
+    ///
+    /// `~/.brutex/store/logs/cli/events.ndjson` holds a 71-minute window with no
+    /// event of any kind: eight rungs announced themselves within 55 seconds and
+    /// none of them ever wrote a "finished". That window is this walk's k-loop.
+    ///
+    /// # What it must NOT do
+    ///
+    /// Fire per candidate, or per bar. A walk of depth `d` makes exactly `d`
+    /// calls, and this asserts the count against `sweep.levels.len()` rather than
+    /// against a literal -- a literal would pass while the loop reported the same
+    /// level twice, which is precisely the shape a progress channel fails in.
+    ///
+    /// # The halted level is reported too
+    ///
+    /// `on_level` is called before the halt test, so a caller watching a walk
+    /// that stops at the ceiling receives the level that stopped it. A reporter
+    /// placed after the test would go silent at exactly the moment an operator
+    /// most needs to see something.
+    #[test]
+    fn the_reporter_fires_once_per_level_and_the_halted_one_is_not_skipped() {
+        use core::cell::RefCell;
+
+        // Eight positions over sixty-four bars, dense enough that the ladder
+        // climbs several levels before it dies -- a one-level walk would satisfy
+        // "once per level" trivially and prove nothing about the loop.
+        let live: Vec<u32> = (0..8).collect();
+        let spec: Vec<Vec<u32>> = (0..64_u32)
+            .map(|bar| (0..8_u32).filter(|b| bar % (b + 2) != 0).collect())
+            .collect();
+        let rows: Vec<&[u32]> = spec.iter().map(Vec::as_slice).collect();
+        let column = bars(&rows);
+
+        // A walk that runs to extinction on its own.
+        let seen: RefCell<Vec<(u32, usize, u64)>> = RefCell::new(Vec::new());
+        let complete = Ladder::with_min_hits(1).walk_reporting(&column, &live, &|f, a, p| {
+            seen.borrow_mut().push((f.k, a, p));
+        });
+        let reported = seen.borrow().clone();
+        assert_eq!(
+            reported.len(),
+            complete.levels.len().saturating_sub(1),
+            "one call per level the LOOP built. k=1 is built before the loop and \
+             is not reported, so the count is levels minus that first one -- \
+             asserted against the walk's own output rather than a literal, \
+             because a literal would pass while the loop reported one level twice."
+        );
+        // The levels arrive in ascending k, once each: a reporter that fired
+        // inside `next_level` would repeat a k or skip one.
+        let ks: Vec<u32> = reported.iter().map(|&(k, _, _)| k).collect();
+        let mut ascending = ks.clone();
+        ascending.sort_unstable();
+        ascending.dedup();
+        assert_eq!(
+            ks, ascending,
+            "levels must arrive in ascending k, once each"
+        );
+
+        // The cumulative counters only ever grow, which is what makes them
+        // readable as progress rather than as a per-level figure.
+        for pair in reported.windows(2) {
+            let (Some(&(_, a0, p0)), Some(&(_, a1, p1))) = (pair.first(), pair.get(1)) else {
+                continue;
+            };
+            assert!(a1 >= a0, "admitted is cumulative and cannot shrink");
+            assert!(p1 >= p0, "pairs walked is cumulative and cannot shrink");
+        }
+
+        // AND A HALTED WALK REPORTS THE LEVEL THAT HALTED IT. A ceiling of one
+        // stops the first join, and the caller must still hear about it.
+        let halted_seen: RefCell<Vec<u32>> = RefCell::new(Vec::new());
+        let halted =
+            Ladder::with_min_hits(1)
+                .with_ceiling(1)
+                .walk_reporting(&column, &live, &|f, _, _| {
+                    halted_seen.borrow_mut().push(f.k);
+                });
+        assert!(
+            halted.halted.is_some(),
+            "the fixture must breach the ceiling"
+        );
+        assert!(
+            !halted_seen.borrow().is_empty(),
+            "the level that halted the walk must be reported -- a reporter placed \
+             after the halt test goes silent exactly when an operator most needs \
+             to see something"
+        );
+    }
+
     #[test]
     fn a_production_shape_sweep_equals_its_brute_force() {
         /// Sixteen co-occurring live positions: frontier width to 10,090, where
