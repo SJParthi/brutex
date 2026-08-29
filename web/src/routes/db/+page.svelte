@@ -12993,7 +12993,10 @@
      cursor row, both of which mean something else here. */
   .brow[data-dir='up'] > td:first-child,
   .brow[data-dir='down'] > td:first-child {
-    background-image: linear-gradient(90deg, var(--dirc), transparent 82%);
+    /* `--dirw`, NOT `--dirc` — see the two-strengths note where both are set.
+       This is the wash; `--dirc` is the 3px spine, and they want opposite
+       weights out of the same hue. */
+    background-image: linear-gradient(90deg, var(--dirw), transparent 70%);
   }
   /* ---------------------------------------------------------------------
      `--dirc` AND NOT `color`, AND THE DIFFERENCE WAS AN ACCESSIBILITY BUG.
@@ -13010,14 +13013,36 @@
      A custom property carries the direction to the one element that wants it
      and stops at every element that does not. The text goes back to inheriting
      the row's own colour, which measures 9.65. */
+  /* TWO STRENGTHS, BECAUSE ONE TOKEN WAS DOING TWO JOBS THAT WANT OPPOSITE
+     ONES. `--dirc` at 58% is right for the SPINE — a 3px mark needs weight to
+     register, and colour on something that thin is the least visible channel
+     available. The same 58% behind a WASH across 82% of the cell is not a
+     tint, it is a fill: measured on the running page as
+     `color(srgb 0 0.462745 0.305882 / 0.58)` spread over the Date column,
+     which is why that column reads as permanently selected and why the
+     question asked of it was "why is this highlighted".
+     The rule drawing the wash states the requirement in its own words — "at a
+     strength that reads as a tint rather than a highlight; a full-row fill
+     would fight the alternating stripe and the cursor row, both of which mean
+     something else here" — and then borrowed the spine's number and did the
+     thing it forbade.
+     `--dirw` is that wash at roughly a sixth of the strength. Same hue, same
+     token source, same meaning, and it stops competing with the stripe and the
+     cursor row over what a background signifies. */
   .brow[data-dir='up'] > td:first-child {
     --dirc: color-mix(in srgb, var(--up) 58%, transparent);
+    --dirw: color-mix(in srgb, var(--up) 9%, transparent);
   }
   .brow[data-dir='down'] > td:first-child {
     --dirc: color-mix(in srgb, var(--down) 58%, transparent);
+    --dirw: color-mix(in srgb, var(--down) 9%, transparent);
   }
+  /* A FLAT BAR GETS NO WASH AT ALL. Its spine keeps a muted mark because the
+     RANGE is still a fact, but "the close equalled the open" is not a
+     direction and a tint saying it is would be inventing one. */
   .brow[data-dir='flat'] > td:first-child {
     --dirc: color-mix(in srgb, var(--dim) 45%, transparent);
+    --dirw: transparent;
   }
 
   /* O / H / L ARE CONTEXT; CLOSE IS THE FIGURE. Four prices at one weight makes
