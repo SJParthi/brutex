@@ -88,8 +88,22 @@ const MASK_HASH_MIX: u64 = 0x517c_c1b7_2722_0a95;
 const MASK_HASH_SEED: u64 = 0x9e37_79b9_7f4a_7c15;
 
 /// Builds [`MaskHasher`].
+///
+/// # Public because the hasher this crate rejected is running one crate over
+///
+/// `MaskHasher`'s own doc records the measurement: profiling put **14% of
+/// runtime** inside `DefaultHasher::write` for `ConditionMask` keys, which is
+/// why `seen` stopped using `SipHash`. `runner::closed` builds
+/// `HashSet<ConditionMask>` and `HashMap<ConditionMask, u64>` at FRONTIER SCALE
+/// -- tables forty times larger than `seen` ever was -- on the default hasher,
+/// four times per `audit-range` run.
+///
+/// Exporting is the fix that keeps ONE spelling of this decision. A copy in
+/// `runner` would be a second definition of a measured choice, correct the day
+/// it was written and free to drift after. Visibility adds no dependency, so
+/// gate 22 clause A -- which pins this crate to `vocab` alone -- is untouched.
 #[derive(Clone, Copy, Debug, Default)]
-struct MaskHash;
+pub struct MaskHash;
 
 impl BuildHasher for MaskHash {
     type Hasher = MaskHasher;
@@ -129,7 +143,7 @@ impl BuildHasher for MaskHash {
 /// It can only make lookups slower if the distribution were poor, which is why
 /// the rotate is there and why `the_mask_hasher_separates_orderings` measures it.
 #[derive(Clone, Copy, Debug)]
-struct MaskHasher(u64);
+pub struct MaskHasher(u64);
 
 impl Hasher for MaskHasher {
     /// The only method the derived `Hash` for `ConditionMask` reaches — and it
@@ -257,7 +271,8 @@ const fn fold_halves(product: u128) -> u64 {
 }
 
 /// A set of masks, hashed by [`MaskHash`] rather than by `SipHash`.
-type MaskSet = HashSet<ConditionMask, MaskHash>;
+/// A frontier-scale set of masks on the measured hasher rather than the default.
+pub type MaskSet = HashSet<ConditionMask, MaskHash>;
 use vocab::ConditionMask;
 
 use crate::column::{Column, set_positions};

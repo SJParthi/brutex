@@ -39,9 +39,29 @@
 
 use std::collections::{HashMap, HashSet};
 
+use rayon::prelude::*;
+
 use engine::column::set_positions;
-use engine::{Itemset, Sweep};
+use engine::{Itemset, MaskHash, Sweep};
 use vocab::ConditionMask;
+
+/// A mask-keyed set on the hasher `engine` measured, not the one it rejected.
+///
+/// # 14% of runtime, and this module was paying it four times a run
+///
+/// `engine::MaskHasher`'s doc records the profile: `DefaultHasher::write` was
+/// **14% of whole-sweep runtime** on `ConditionMask` keys, which is why
+/// `engine`'s own `seen` set stopped using `SipHash`. Every table below was still
+/// `std::collections::HashSet`/`HashMap` — the default hasher — at FRONTIER
+/// SCALE, which is forty times larger than `seen` ever was.
+///
+/// A `ConditionMask` is six `u64`s and hashing one costs two `write` calls over
+/// 56 bytes. `SipHash`-1-3 does real work on that; `MaskHash` is a 128-bit
+/// multiply with half-folding and a rotate.
+type MaskKeyed = HashSet<ConditionMask, MaskHash>;
+
+/// The same, carrying each mask's hit count.
+type MaskCounts = HashMap<ConditionMask, u64, MaskHash>;
 
 /// What survived the redundancy check, and what it cost to find out.
 #[derive(Clone, Debug, Default)]
@@ -96,20 +116,74 @@ fn frequent_total(sweep: &Sweep) -> usize {
 /// allocation of a result nobody reads.
 #[must_use]
 pub fn redundant_count(sweep: &Sweep) -> u64 {
-    let mut redundant: HashSet<ConditionMask> = HashSet::with_capacity(frequent_total(sweep));
+    u64::try_from(redundant_masks(sweep).len()).unwrap_or(u64::MAX)
+}
+
+/// The redundant masks themselves, shared by [`redundant_count`] and [`closed`].
+///
+/// # This walk ran FOUR TIMES per `audit-range` run, single-threaded
+///
+/// MEASURED 2026-08-29: a sweep sat at 93% CPU — one core of fourteen — for five
+/// minutes with every sample inside this function, while rayon had not spawned a
+/// worker because the parallel phase had not been reached. `report::render`,
+/// `report::render_findings`, `cli::closed_by_evidence` and
+/// `cli::grid_exposure` each reach it once, and `validate` reaches [`closed`]
+/// once per fold on top of that.
+///
+/// At forty million survivors one call is roughly 40M map inserts and 200-240M
+/// lookups — `Σ|F_k| · k̄` — against a `HashSet` that hashbrown rounds to
+/// 67,108,864 buckets, about 3.3 GB held for the whole walk.
+///
+/// # Parallel per level pair, and the shape is what makes it safe
+///
+/// `below` is built once per pair and then read IMMUTABLY by every itemset in
+/// the level above; the only write is inserting into `redundant`. So the inner
+/// loop is a pure map from one itemset to the masks it disqualifies, and rayon's
+/// `flat_map` + set reduction expresses it exactly.
+///
+/// **Determinism holds by the SHAPE of the answer, not by ordering.** The result
+/// is a SET and the caller asks it only for `len` and for membership — never for
+/// iteration order — so which thread inserted a mask cannot reach an output.
+/// That is the same argument `engine::MASK_HASH_SEED` makes about its own fixed
+/// seed, and `CLAUDE.md` §3 rule 5 needs nothing more here.
+///
+/// The level loop stays sequential: pairs are few (one per ladder level) and
+/// each already spreads across the machine internally, so nesting would only
+/// contend for the same pool.
+fn redundant_masks(sweep: &Sweep) -> MaskKeyed {
+    let mut redundant: MaskKeyed =
+        MaskKeyed::with_capacity_and_hasher(frequent_total(sweep), MaskHash);
+    // `zip` with `skip(1)` rather than `windows(2)` and a `let..else`: that
+    // pattern's else arm cannot fire, and an arm no run reaches is the coverage
+    // hole §9 refuses.
     for (lower, upper) in sweep.levels.iter().zip(sweep.levels.iter().skip(1)) {
-        let below: HashMap<ConditionMask, u64> =
-            lower.frequent.iter().map(|i| (i.mask, i.hits)).collect();
-        for larger in &upper.frequent {
-            for bit in set_positions(&larger.mask) {
-                let smaller = larger.mask.without_bit(bit);
-                if below.get(&smaller) == Some(&larger.hits) {
-                    redundant.insert(smaller);
-                }
-            }
-        }
+        let below: MaskCounts = lower
+            .frequent
+            .iter()
+            .map(|i| (i.mask, i.hits))
+            .collect::<MaskCounts>();
+        // BORROWED ONCE, EXPLICITLY. The inner `move` closure would otherwise
+        // try to take `below` out of the outer one, which the compiler refuses
+        // for an `Fn` — every worker needs it, none may own it. A `&` binding is
+        // `Copy`, so each thread captures the pointer and the map itself stays
+        // put.
+        let below = &below;
+        let found: Vec<ConditionMask> = upper
+            .frequent
+            .par_iter()
+            .flat_map_iter(move |larger| {
+                set_positions(&larger.mask).filter_map(move |bit| {
+                    let smaller = larger.mask.without_bit(bit);
+                    // Equal support means the extra condition costs nothing:
+                    // every bar the smaller one fires on, the larger one fires
+                    // on too.
+                    (below.get(&smaller) == Some(&larger.hits)).then_some(smaller)
+                })
+            })
+            .collect();
+        redundant.extend(found);
     }
-    u64::try_from(redundant.len()).unwrap_or(u64::MAX)
+    redundant
 }
 
 /// The closed frequent itemsets of a sweep.
@@ -128,26 +202,13 @@ pub fn closed(sweep: &Sweep) -> Closed {
     let considered = u64::try_from(total).unwrap_or(u64::MAX);
 
     // A set is disqualified by a superset one bit larger with identical support.
-    // Collected first, then applied, because a level is read while the level
-    // above it is being walked and mutating during that would be a scan.
-    let mut redundant: HashSet<ConditionMask> = HashSet::with_capacity(total);
-    // `zip` with `skip(1)` rather than `windows(2)` and a `let..else`: that
-    // pattern's else arm cannot fire, and an arm no run reaches is the coverage
-    // hole §9 refuses.
-    for (lower, upper) in sweep.levels.iter().zip(sweep.levels.iter().skip(1)) {
-        let below: HashMap<ConditionMask, u64> =
-            lower.frequent.iter().map(|i| (i.mask, i.hits)).collect();
-        for larger in &upper.frequent {
-            for bit in set_positions(&larger.mask) {
-                let smaller = larger.mask.without_bit(bit);
-                // Equal support means the extra condition costs nothing: every
-                // bar the smaller one fires on, the larger one fires on too.
-                if below.get(&smaller) == Some(&larger.hits) {
-                    redundant.insert(smaller);
-                }
-            }
-        }
-    }
+    //
+    // THE WALK IS [`redundant_masks`], NOT A SECOND COPY OF IT. This function
+    // and `redundant_count` held the identical nested loop, so the same
+    // multi-gigabyte pass existed twice and only one of them could be optimised
+    // at a time. One spelling, and both callers get the parallel form and the
+    // measured hasher.
+    let redundant = redundant_masks(sweep);
 
     let kept: Vec<Itemset> = sweep
         .all_frequent()

@@ -177,8 +177,10 @@ pub struct Ranked {
     /// The `|t|` a row must reach to be distinguishable from luck, given how
     /// many hypotheses THIS run tested.
     ///
-    /// `significance::bonferroni_t(significance::effective_trials(sweep))`,
-    /// computed once per walk from the run's own counters. No literal enters:
+    /// `significance::bonferroni_t(significance::trials(sweep))`, computed once per
+    /// walk from the run's own counters. It named `effective_trials` until that
+    /// call was measured at 93% CPU on ONE core for five minutes -- see `walk`.
+    /// No literal enters:
     /// the only constant behind it is `significance::FWER`, a stated convention
     /// that was already there.
     ///
@@ -408,7 +410,15 @@ impl Ranked1 for ByPayoff {
         // which is deliberate: `outcome::edge` only returns `t = 0` for it
         // because every comparison against NaN is false, and that protection is
         // incidental rather than intended.
-        let clears = scored.edge.t.abs() >= bar;
+        // `is_finite` FIRST, AND WITHOUT IT AN INFINITE `t` WAS PROMOTED.
+        //
+        // The doc below this once claimed "a non-finite `t` never clears", and
+        // that was true of NaN and FALSE of infinity: `f64::INFINITY >= bar` is
+        // `true` for every finite bar, and `clears` is the FIRST key -- so a
+        // degenerate sample was lifted to the HEAD of the ordering. The exact
+        // failure `Scored::Ord` exists to prevent, reintroduced one key above it.
+        // The test only drove `NAN`, which is why it passed.
+        let clears = scored.edge.t.is_finite() && scored.edge.t.abs() >= bar;
         Self { scored, clears }
     }
     fn unwrap(self) -> Scored {
@@ -572,7 +582,33 @@ fn walk<K: Ranked1 + Send>(
     // `effective_trials` is O(|F|) through `closed::redundant_count`, paid once
     // per walk and never inside the scoring loop -- gate 17's rule is that the
     // innermost loop calls nothing at all, and this sits two levels above it.
-    let bar = crate::significance::bonferroni_t(crate::significance::effective_trials(sweep));
+    // `trials` AND NOT `effective_trials`, AND THE DIFFERENCE WAS A REGRESSION
+    // I SHIPPED AND THEN MEASURED.
+    //
+    // `effective_trials` is `trials` minus `closed::redundant_count`, and that
+    // subtraction is not cheap: `redundant_count` is `O(sum |F_k| * k)` -- one
+    // hash lookup per SET BIT of every itemset -- plus a `HashSet` sized at the
+    // whole frontier and a `HashMap` rebuilt per level pair. Its own doc says
+    // "UNVERIFIED as a measured figure: no bench row covers this yet."
+    //
+    // MEASURED 2026-08-29 on zerodha NIFTY 60min at 1.99% support: with
+    // `effective_trials` here, a run sat at 93% CPU -- ONE core of fourteen --
+    // for five minutes with every sample inside `redundant_count`, and rayon
+    // never spawned a worker because the parallel phase had not been reached.
+    // On a 42-million-survivor frontier that is roughly 420 million lookups and
+    // two gigabytes of masks, on the hot path of every run. Before this line
+    // existed `redundant_count` ran ONCE, in `crate::report`, after the sweep.
+    //
+    // `trials` sums `infrequent + frequent.len()` per level: O(levels), which is
+    // a handful of additions.
+    //
+    // WHAT IT COSTS IN CORRECTNESS IS IN THE SAFE DIRECTION. Not subtracting the
+    // duplicate support sets counts some hypotheses twice, so the trial count is
+    // HIGHER and the bar is STRICTER. A stricter bar admits fewer rows; it
+    // cannot admit one that the exact count would have refused. `crate::report`
+    // still prints `effective_trials` where it can afford to, and the two
+    // figures are allowed to differ for this stated reason.
+    let bar = crate::significance::bonferroni_t(crate::significance::trials(sweep));
 
     // KEEP ZERO STILL COUNTS. The caller asked how many candidates survived and
     // that answer does not depend on how many of them are returned.
@@ -811,11 +847,22 @@ mod tests {
             ByPayoff::wrap(at(4.0), 4.0) > ByPayoff::wrap(at(3.9), 4.0),
             "a t exactly at the bar clears it"
         );
-        // NaN does not clear, so a real row below the bar still outranks it.
-        assert!(
-            ByPayoff::wrap(at(0.1), 4.0) > ByPayoff::wrap(at(f64::NAN), 4.0),
-            "a degenerate sample is the absence of a result, not a strong one"
-        );
+        // NO NON-FINITE `t` CLEARS, AND INFINITY IS THE ONE THAT DID.
+        //
+        // This test drove `NAN` alone and passed while `f64::INFINITY >= bar`
+        // was `true` for every finite bar. Because `clears` is the FIRST key, an
+        // infinite `t` was lifted to the HEAD of the ordering -- the exact
+        // failure `Scored::Ord` was written to prevent, reintroduced one key
+        // above it. Both signs of infinity are driven now, at three bars.
+        for t in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            for bar in [0.0, 4.0, 6.1] {
+                assert!(
+                    ByPayoff::wrap(at(0.1), bar) > ByPayoff::wrap(at(t), bar),
+                    "a degenerate sample is the absence of a result, not a \
+                     strong one: t={t} must not clear a bar of {bar}"
+                );
+            }
+        }
     }
 
     /// The bar reaches [`Ranked`] and is the run's own, not a constant.

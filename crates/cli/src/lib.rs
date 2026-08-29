@@ -8970,6 +8970,23 @@ fn shared_share_of(whole: usize) -> usize {
         .checked_div(sharing.max(1))
         .unwrap_or(whole)
         .max(one_core_share())
+        // NEVER MORE THAN WAS ASKED FOR, AND WITHOUT THIS A TYPED CEILING WAS
+        // SILENTLY RAISED.
+        //
+        // The floor above is there so a pathological share count cannot produce
+        // a ceiling that halts before the first level. Applied to a figure the
+        // operator TYPED, it did something else: `BRUTEX_CEILING=1000` came back
+        // as 9,586,980, and `ceiling_from_env` refuses `0` with a message
+        // promising "a candidate count of 1 or more" — so every value from 1 to
+        // 9,586,979 was accepted and then overridden without a word.
+        //
+        // A knob that silently means something other than what was typed is the
+        // defect §6 describes: *"a parameter that can be set can be set wrongly
+        // and silently."* Wrongly is the operator's business; silently is not.
+        // Clamping down to `whole` leaves the intended case untouched —
+        // 400,000,000 over eight rungs is still 50,000,000 — and makes a small
+        // typed ceiling mean the small thing it says.
+        .min(whole)
 }
 
 /// The ladder for this run: the operator's threshold and the machine's ceiling.

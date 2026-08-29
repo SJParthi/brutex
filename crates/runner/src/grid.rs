@@ -2238,6 +2238,7 @@ pub fn per_trade(
         ladders,
         variant,
         Some(&mut rows),
+        None,
     )?;
     Some((cell, rows))
 }
@@ -2255,7 +2256,61 @@ pub fn with_levels(
     ladders: Ladders<'_>,
     variant: Chosen,
 ) -> Option<Cell> {
-    levelled(bars, column, mask, horizon, side, ladders, variant, None)
+    levelled(
+        bars, column, mask, horizon, side, ladders, variant, None, None,
+    )
+}
+
+/// [`with_levels`], told the square-off table instead of rebuilding it.
+///
+/// # The allocation this removes is per CANDIDATE, and no ratio gate can see it
+///
+/// `trade::forced_exits` is a pure function of the bars: two allocations the
+/// size of the slice plus one reverse pass, and it says so itself — *"Constant
+/// per candidate, so no ratio gate could see it."* [`with_levels`] reaches it
+/// through `trade::walk`, which passes `None`, so **every candidate in a
+/// parallel map rebuilt the identical table**.
+///
+/// `crate::validate` hoists it above its in-sample `par_iter` and has since the
+/// in-sample pass was parallelised. The out-of-sample pass was left behind
+/// because this function had no parameter to hoist INTO — `evaluate_with`
+/// gained one and `with_levels` did not. That pass is, by its own comment,
+/// *"roughly three quarters of what is left"*.
+///
+/// Scale from the module's own figures: 11,013 candidates per fold over 91,874
+/// bars is about **2 x 10^9 redundant element writes per fold**, none of which
+/// changes an answer.
+///
+/// Same result as [`with_levels`] for the same inputs — the table is derived
+/// from `bars` either way, so passing the caller's copy is an identity.
+#[must_use]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the seven `with_levels` already takes, plus the table it is being \
+              handed. Bundling them would change a public surface to avoid a \
+              lint about one added parameter."
+)]
+pub fn with_levels_using(
+    bars: &[Candle],
+    column: &Column,
+    mask: &ConditionMask,
+    horizon: Horizon,
+    side: Side,
+    ladders: Ladders<'_>,
+    variant: Chosen,
+    exits: &[Option<crate::trade::SquareOff>],
+) -> Option<Cell> {
+    levelled(
+        bars,
+        column,
+        mask,
+        horizon,
+        side,
+        ladders,
+        variant,
+        None,
+        Some(exits),
+    )
 }
 
 /// [`with_levels`] and [`per_trade`] share this; only the collector differs.
@@ -2275,8 +2330,11 @@ fn levelled(
     ladders: Ladders<'_>,
     variant: Chosen,
     trades: Option<&mut Vec<TradeRow>>,
+    exits: Option<&[Option<crate::trade::SquareOff>]>,
 ) -> Option<Cell> {
-    let timed = crate::trade::walk(bars, column, mask, horizon, direction_of(side));
+    // `walk_with` AND NOT `walk`, so a caller that already holds the square-off
+    // table can hand it over. `walk` is `walk_with(.., None)` and rebuilds it.
+    let timed = crate::trade::walk_with(bars, column, mask, horizon, direction_of(side), exits);
     if timed.eligible.is_empty() {
         return None;
     }
@@ -3595,25 +3653,25 @@ const fn stop_slippage(
     if !pessimistic || !matches!(kind, Resting::Stop) {
         return exit;
     }
+    // ASSIGNED, NOT COMPARED, AND THE COMPARE THAT WAS HERE COULD NOT FIRE.
+    //
+    // This read `if bar.low < exit { bar.low } else { exit }` with a comment
+    // claiming a gap fill "can sit on the far side of the extreme". It cannot.
+    // `level_fill` returns either the resting level -- which it has just tested
+    // lies INSIDE `[low, high]` -- or `bar.open`, and `Candle::check` guarantees
+    // `low <= open <= high`. So `exit >= bar.low` held on every path and the
+    // false arm was unreachable: a mutant replacing the whole body with this
+    // assignment SURVIVED, which §4 makes a build failure rather than a nit.
+    //
+    // Writing what it does also states the stronger claim honestly. On a gap the
+    // reading is now "triggered at the open, filled at the bar's low", which is
+    // what a stop-market order through a gap actually suffers; `gapped` records
+    // that it happened and the price no longer pretends otherwise.
     match side {
         // A long exits by SELLING, so its adverse extreme is the low; a short
-        // exits by buying, so it is the high. Compared rather than assigned,
-        // because a GAP already answered with the open and the open can sit on
-        // the far side of the extreme.
-        Side::Long => {
-            if bar.low < exit {
-                bar.low
-            } else {
-                exit
-            }
-        }
-        Side::Short => {
-            if bar.high > exit {
-                bar.high
-            } else {
-                exit
-            }
-        }
+        // exits by buying, so it is the high.
+        Side::Long => bar.low,
+        Side::Short => bar.high,
     }
 }
 

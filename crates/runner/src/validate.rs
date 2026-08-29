@@ -921,6 +921,23 @@ pub fn walk_forward_shaped(
                 // order. `crate::pbo` ranks that vector positionally against
                 // `in_sample_all`, so an order change here would silently
                 // mis-pair every candidate with another's out-of-sample score.
+                // HOISTED, EXACTLY AS THE IN-SAMPLE PASS ALREADY HOISTS IT.
+                //
+                // `trade::forced_exits` is a pure function of the bars — two
+                // allocations the size of the slice plus one reverse pass — and
+                // it says so itself: *"Constant per candidate, so no ratio gate
+                // could see it."* Every candidate below reached it through
+                // `with_levels` -> `trade::walk`, which passes `None`, so all
+                // 11,013 of them rebuilt the identical table over the same
+                // 91,874 bars. About 2 x 10^9 redundant element writes per fold,
+                // none of which changes an answer.
+                //
+                // The in-sample pass has hoisted since it was parallelised. This
+                // one was left behind because `with_levels` had no parameter to
+                // hoist INTO — `evaluate_with` gained one and it did not — and
+                // this pass is, by the comment above, "roughly three quarters of
+                // what is left".
+                let oos_exits = crate::trade::forced_exits(upto);
                 oos_all = scored
                     .par_iter()
                     .map(|(mask, _, pick)| {
@@ -942,7 +959,7 @@ pub fn walk_forward_shaped(
                         // window scores 0, exactly as before: `with_levels`
                         // returns `None` on an empty trade set, and 0 is the
                         // level-less total of no trades rather than a sentinel.
-                        crate::grid::with_levels(
+                        crate::grid::with_levels_using(
                             upto,
                             &confined,
                             mask,
@@ -954,6 +971,7 @@ pub fn walk_forward_shaped(
                                 trails: &pick.trails,
                             },
                             pick.rungs,
+                            &oos_exits,
                         )
                         .map_or(0, |c| c.pessimistic)
                     })
@@ -968,7 +986,7 @@ pub fn walk_forward_shaped(
                 // nothing about the test bars decides a level.
                 let with = ladders.as_ref().zip(chosen_exit).and_then(
                     |((stops, targets, trails), variant)| {
-                        crate::grid::with_levels(
+                        crate::grid::with_levels_using(
                             upto,
                             &confined,
                             &mask,
@@ -980,6 +998,7 @@ pub fn walk_forward_shaped(
                                 trails,
                             },
                             variant,
+                            &oos_exits,
                         )
                         .map(|c| c.pessimistic)
                     },

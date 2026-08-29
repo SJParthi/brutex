@@ -255,10 +255,48 @@ pub fn render(outcome: &Outcome, id: Option<&RunId>) -> String {
 /// number, the same standard depth and memory are held to.
 fn significance(out: &mut String, sweep: &Sweep) {
     let raw = crate::significance::trials(sweep);
-    // The EFFECTIVE count is what the bar is computed from. Two masks with
-    // identical support are one hypothesis counted twice, and charging for a
-    // trial nobody ran raises the bar against real findings.
-    let n = crate::significance::effective_trials(sweep);
+    // THE BAR IS COMPUTED FROM `raw`, AND IT USED TO BE COMPUTED FROM THE
+    // EFFECTIVE COUNT.
+    //
+    // That paragraph read: "The EFFECTIVE count is what the bar is computed
+    // from. Two masks with identical support are one hypothesis counted twice,
+    // and charging for a trial nobody ran raises the bar against real
+    // findings." Every word of it is still true about the STATISTICS, and it is
+    // no longer what this report can afford.
+    //
+    // `effective_trials` subtracts `closed::redundant_count`, which is
+    // `O(sum |F_k| * k)` -- one hash lookup per set bit of every itemset --
+    // against a set hashbrown rounds to 67,108,864 buckets at forty million
+    // survivors. MEASURED 2026-08-29: a run sat at 93% CPU, one core of
+    // fourteen, for five minutes inside that call. An `audit-range` run reached
+    // it FOUR times; this is the third of those removed.
+    //
+    // `rank::walk` orders on `bonferroni_t(trials(..))` for the same reason, and
+    // the two must agree or the report prints "clears" for a row the ordering
+    // demoted -- which `one_sweep_prints_one_bar_and_the_rows_are_judged_against_it`
+    // exists to catch, and did.
+    //
+    // NOT SUBTRACTING IS THE SAFE DIRECTION. Counting a duplicate twice makes
+    // `n` larger and the bar STRICTER, so the report can refuse a finding the
+    // exact count would have allowed. It cannot admit one the exact count would
+    // have refused. The deflation is a sharpening this run cannot pay for on the
+    // ranking path, not a correction it needs.
+    let n = raw;
+    // THE DEFLATED COUNT IS STILL SHOWN, because it is real information and this
+    // is the one place that can afford to compute it.
+    //
+    // A first attempt at the above deleted this too, and
+    // `the_report_states_the_bar_a_result_must_clear` caught it: that test
+    // asserts `distinct < raw`, and on the shipped fixture 3,591 of 3,798 masks
+    // have support identical to a superset's. Ninety-four per cent duplication
+    // is a fact about the vocabulary an operator should see, and dropping the
+    // row to save a call would have hidden it.
+    //
+    // It stays HERE and not in `rank::walk` because the difference is where the
+    // call sits, not whether it is affordable: this runs once, at the report
+    // boundary, after every parallel phase has finished. `walk` ran it BEFORE
+    // the parallel phase, which is what left thirteen cores idle.
+    let distinct = crate::significance::effective_trials(sweep);
     let _ = writeln!(out, "SIGNIFICANCE");
     row(
         out,
@@ -269,7 +307,7 @@ fn significance(out: &mut String, sweep: &Sweep) {
     row(
         out,
         "  distinct tests among them",
-        &n.to_string(),
+        &distinct.to_string(),
         "exact duplicates removed -- same support, same test",
     );
     if n < 2 {
@@ -359,12 +397,21 @@ fn paisa(mean: f64) -> i64 {
 #[must_use]
 pub fn render_findings(ranked: &Ranked, sweep: &Sweep) -> String {
     let mut out = String::with_capacity(1_024);
-    // THE SAME BAR THE SIGNIFICANCE SECTION PRINTS. It used `trials` while that
-    // section used `effective_trials`, so one report carried two different
-    // Bonferroni figures for one sweep and the per-row verdict used the harsher
-    // one -- rejecting findings the page above had already said were allowed.
-    let n = crate::significance::effective_trials(sweep);
-    let bar = crate::significance::bonferroni_t(n);
+    // THE BAR THE ORDERING ACTUALLY USED, READ RATHER THAN RECOMPUTED.
+    //
+    // This recomputed it from `effective_trials`, and once `rank::walk` began
+    // ordering on `bonferroni_t(trials(..))` the two disagreed BY CONSTRUCTION
+    // wherever a redundant support set exists -- `effective_trials <= trials`
+    // and `bonferroni_t` is monotone, so the report could print "clears" for a
+    // row the ordering had already demoted. `Ranked::bar` was added to end that
+    // disagreement and nothing read it; this is the read.
+    //
+    // It also deletes one of the FOUR `closed::redundant_count` walks a single
+    // `audit-range` run was paying -- each roughly 40M map inserts and 200-240M
+    // lookups against a multi-gigabyte set. The trial count itself was never
+    // printed here; it existed only to feed `bonferroni_t`, so reading the bar
+    // removes the call outright rather than moving it.
+    let bar = ranked.bar;
 
     let _ = writeln!(out, "FINDINGS");
     row(
@@ -385,6 +432,30 @@ pub fn render_findings(ranked: &Ranked, sweep: &Sweep) -> String {
         &format!("{bar:.2}"),
         "Bonferroni 5% on this run's own trial count",
     );
+    // A TRUNCATED LADDER MAKES EVERY ROW BELOW CONDITIONAL, AND THIS SECTION
+    // DID NOT SAY SO.
+    //
+    // `render` prints the halt in its own block, but `render_findings` is
+    // rendered on its own by `cli::screen` and reads as a complete answer there.
+    // A bar computed from a trial count the walk never finished collecting is
+    // not wrong — it is the honest bar for what WAS tested — but a reader
+    // comparing rows against it needs to know the frontier stopped early, which
+    // is exactly the "failure wearing a success's clothes" §4 bans.
+    //
+    // This is also the only remaining use of `sweep` in this function. The
+    // parameter used to feed `effective_trials`; reading `ranked.bar` removed
+    // that call, and rather than take a `&Sweep` and ignore it — a signature
+    // that lies, and one this crate cannot change because two of its callers are
+    // in a file another session holds — it now carries the one fact the findings
+    // cannot be read without.
+    if let Some(halt) = sweep.halted.as_ref() {
+        row(
+            &mut out,
+            "ladder HALTED",
+            &format!("k={}", halt.k),
+            "the frontier stopped short, so these are the best of a PARTIAL search",
+        );
+    }
     let _ = writeln!(out);
 
     if ranked.top.is_empty() {
@@ -1302,7 +1373,14 @@ mod tests {
             top: vec![weak],
             considered: 3_689,
             halted: None,
-            bar: 0.0,
+            // THE REAL BAR THIS SWEEP DEMANDS, not a literal.
+            //
+            // `render_findings` reads `ranked.bar` rather than recomputing, so a
+            // fixture carrying `0.0` would make every row clear and this test
+            // would assert nothing. Deriving it the way `rank::walk` does keeps
+            // the fixture honest and keeps the two in step if the trial count
+            // ever changes again.
+            bar: crate::significance::bonferroni_t(crate::significance::trials(&out.sweep)),
         };
         let text = crate::report::render_findings(&ranked, &out.sweep);
 
