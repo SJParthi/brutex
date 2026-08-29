@@ -221,15 +221,35 @@ never drew, and saying otherwise would be a measurement nobody took.
 Three derived values walk every row **currently loaded** — not the store, but
 not a constant either. At today's read budget that is ~7,500 rows.
 
-| What | Cost | Why it is not yet fixed |
-|---|---|---|
-| `barWindowed` | O(loaded) filter per window change | The day and time bounds are applied after the fetch, because `/bars/window.json` takes no time parameter |
-| `timeOptions` | O(loaded) fold on `barRows` change | Builds the minute list the Go-to picker offers |
-| `csvRows` / export | O(loaded) walk on press | Writes what is in memory; the button states the shortfall |
+| What | Per operation | Total | Verdict |
+|---|---|---|---|
+| `barWindowed` | O(1) per row tested | O(loaded) per window change | Compliant |
+| `timeOptions` | O(1) per row folded | O(loaded), once per fetch | Compliant |
+| `csvRows` / export | O(1) per row written | O(rows written) | Compliant, and irreducible |
 
-Each is a **maintain-incrementally** problem — law 3, "never scan to answer a
-question" — and none of them does. They are listed so the table above cannot be
-read as covering them.
+**THIS TABLE FIRST SAID ALL THREE WERE LAW-3 VIOLATIONS, AND THAT WAS WRONG.**
+It read "each is a maintain-incrementally problem — law 3, never scan to answer
+a question — and none of them does". Checked against the definition this
+repository actually uses, in `docs/06-limits.md` §1: "**Per-operation cost is
+constant.** … **Total work is not constant.** It scales with symbols × bars ×
+candidates. It has to; that is the shape of the problem." By that standard all
+three are exactly what §1 describes as correct, and filing them as defects put
+a false entry in the ledger — which is worse than the omission it replaced,
+because a reader would go and "fix" code that is already right.
+
+**Law 3 is about COUNTS, not transformations.** Its words are "How many do I
+have? must be a read, not a walk" — a question a counter can answer without
+touching the elements. None of these three asks that. `barWindowed` produces a
+subset, `timeOptions` produces a distinct set, and the export produces bytes.
+You cannot emit 7,500 CSV rows in fewer than 7,500 writes, and a function that
+claimed to would be writing something other than the rows.
+
+What remains true, and is waste rather than complexity: **`barWindowed`
+recomputes wholesale on every window change.** Ten adjustments of the time
+bound cost ten passes over the loaded rows to produce ten answers, nine of
+which are thrown away. That is a constant factor on an already-proportional
+operation, not a class — and it is named here so the distinction between the
+two is on the record rather than being rediscovered as a "violation".
 
 ### O(1) space is not achievable and is not offered
 
