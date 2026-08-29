@@ -1116,7 +1116,7 @@
   });
 
   /** Weekday bucket keys, and `0` IS MONDAY. */
-  const WEEKDAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+  const WEEKDAY_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
   /**
    * One UTC hour bucket, labelled in the exchange's own clock.
@@ -1165,18 +1165,18 @@
    */
   /** Month names for the `month` grain, whose key is `year * 12 + (month - 1)`. */
   const MONTH_NAMES = [
-    'January',
-    'February',
-    'March',
-    'April',
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
     'May',
-    'June',
-    'July',
-    'August',
-    'September',
-    'October',
-    'November',
-    'December'
+    'Jun',
+    'Jul',
+    'Aug',
+    'Sep',
+    'Oct',
+    'Nov',
+    'Dec'
   ];
 
   const timePatterns = $derived.by(() => {
@@ -2868,15 +2868,22 @@
   const noTrades = $derived(openRun !== null && openRun.trades === 0);
 
   /**
-   * Are the seventeen padlocked metrics expanded?
+   * Are the padlocked metrics expanded?
    *
-   * Closed by default. The table is a TradingView-parity list and 68% of
-   * its cells are locks; folding them puts the seven rows this engine
-   * actually records where they can be read. The line that replaces them
-   * states the count and the reason, so the fold hides nothing it does
-   * not name.
+   * # OPEN by default now, and the reason it was closed has gone
+   *
+   * It was closed because *"68% of its cells are locks"* and folding them put
+   * the seven real rows where they could be read. That was true and is not any
+   * more: the trade file made `Average profit`, `Average loss`, their ratio,
+   * `Largest profit` and all three `Average bars in …` rows real, so most of
+   * what the fold hid is now measured.
+   *
+   * The reference shows all twenty rows at once with no disclosure control at
+   * all, and a fold that hides real numbers is worse than one that hides
+   * padlocks. The control stays — a reader who wants the short list can still
+   * collapse it — but the default is the reference's.
    */
-  let showAllMetrics = $state(false);
+  let showAllMetrics = $state(true);
 
   /**
    * Open or close a run's drill-down, AND GO TO IT WHEN IT OPENS.
@@ -3640,7 +3647,7 @@
   /** Which "Performance analysis" tab. TradingView's five, in its order. */
   let paTab = $state('breakdown');
   /** Which "Trades analysis" tab. TradingView's three, in its order. */
-  let taTab = $state('details');
+  let taTab = $state('distribution');
 
   /**
    * Return on ONE UNIT of the index, in basis points.
@@ -3871,6 +3878,20 @@
    * @param {number | null | undefined} bps
    */
   const pct = (bps) => (bps === null || bps === undefined ? '—' : `${bps >= 0 ? '+' : ''}${(bps / 100).toFixed(2)}%`);
+
+  /**
+   * The same, UNSIGNED — for a share of a whole rather than a change.
+   *
+   * A `+` belongs on a figure that could have gone the other way: a return, an
+   * outperformance, a P&L. It is meaningless on a proportion. The reference
+   * writes `31.87%` for profitable trades and `43.90% winners` for the best
+   * hour, never `+31.87%`, because no share of a total is ever negative and the
+   * sign carries no information.
+   *
+   * @param {number | null | undefined} bps
+   */
+  const share = (bps) =>
+    bps === null || bps === undefined ? '—' : `${(bps / 100).toFixed(2)}%`;
 
   /**
    * An excursion in parts per million, as the percent a reader can act on.
@@ -4177,7 +4198,13 @@
    */
   function tradeWhen(micros) {
     if (!Number.isFinite(micros) || micros <= 0) return 'not stamped';
-    return new Date(micros / 1000).toLocaleString('en-IN', {
+    // `en-US` FOR THE ORDER, `IST` FOR THE CLOCK. The reference prints
+    // `Aug 28, 2026, 14:12` — month first. `en-IN` orders it day-first and
+    // gives `28 Aug 2026, 14:12`, which is the right convention for this
+    // operator's locale and the wrong one for matching the reference. The time
+    // ZONE is unaffected and stays Asia/Kolkata: this changes the order of the
+    // fields, never which moment they name.
+    return new Date(micros / 1000).toLocaleString('en-US', {
       timeZone: IST,
       year: 'numeric',
       month: 'short',
@@ -5531,6 +5558,25 @@
                   <span class="v">{exact(best.combinations)}</span>
                 </div>
               </div>
+              <!-- AND WHICH COMBINATION WON IT. "The answer" named a feed, an
+                   instrument, a rung, a span and four figures, and never the
+                   thing that produced them. A best run whose conditions are not
+                   named is not an answer to any question worth asking. -->
+              <div class="crown-combo">
+                <span class="crown-combo-k">won by</span>
+                <span class="crown-combo-v">
+                  {#if load.body?.has_mask === undefined}
+                    <span class="dim"
+                      >the running server does not send <code>has_mask</code> — rebuild and restart
+                      it</span
+                    >
+                  {:else if !load.body?.has_mask}
+                    <span class="dim">this record predates the condition mask</span>
+                  {:else}
+                    {@render conditionNames(best.mask_words)}
+                  {/if}
+                </span>
+              </div>
               <p class="crown-note">
                 Ranked on the worst-case number. The best case is
                 <b>{money(best.optimistic - best.pessimistic)}</b> higher, which is how much of
@@ -6201,6 +6247,44 @@
                somebody about money.
                ========================================================== -->
           <section class="tester">
+            <!-- ══ WHICH COMBINATION IS THIS? ══
+                 THE QUESTION THE WHOLE PANEL ANSWERED NOWHERE.
+
+                 Opening a run showed Key stats, a performance chart, five
+                 analysis tabs, a trades table and forty-odd numbers — under a
+                 header reading "Brute-force sweep · NIFTY · 30min". Not one of
+                 them said WHICH combination of conditions produced any of it.
+                 The winning mask was decoded in the Properties tab, which is a
+                 third tab behind a third click, and the default view is
+                 `metrics`.
+
+                 The operator has asked for this more times than for anything
+                 else on this page — "no name has been given as i asked you
+                 what's the combination topped" — and the answer has been one
+                 `{@render}` away since `/backtest.json` started sending
+                 `mask_words` and `/vocab.json` started naming the bits.
+
+                 It sits above the toolbar rather than inside it because it is
+                 not a control: it is the subject every control below operates
+                 on, and it must be true of `metrics`, `trades` and `properties`
+                 alike. -->
+            <div class="tt-subject">
+              <span class="tt-subject-k">Combination</span>
+              {#if load.body?.has_mask === undefined}
+                <span class="tt-subject-v dim"
+                  >The running server does not send <code>has_mask</code>. Rebuild and restart it to
+                  name the conditions here.</span
+                >
+              {:else if !load.body?.has_mask}
+                <span class="tt-subject-v dim"
+                  >This ledger predates the condition mask, so the run's own record cannot say which
+                  conditions won.</span
+                >
+              {:else}
+                <span class="tt-subject-v">{@render conditionNames(openRun.mask_words)}</span>
+              {/if}
+            </div>
+
             <!-- ---- toolbar ---- -->
             <div class="tt-bar">
               <div class="tt-name">
@@ -6340,7 +6424,7 @@
                            `/trades.json`'s period buckets. One page cannot say a
                            number is unrecorded and then show it. -->
                       <span class="tt-qv big">
-                        {pct(tradeTotals.rateBp)}
+                        {share(tradeTotals.rateBp)}
                         <em class="tt-frac">{exact(tradeTotals.worstWins)}/{exact(tradeTotals.trades)}</em>
                       </span>
                       <span class="tt-note"
@@ -6452,7 +6536,7 @@
                          the list and the factor is their quotient. -->
                     <div class="tt-q">
                       <span class="tt-k">Gross profit</span>
-                      <span class="tt-qv up"
+                      <span class="tt-qv"
                         >{#if tradeStats}{money(tradeStats.grossProfit)}{:else}<Lock why="Needs the trade file, which this run did not record." />{/if}</span
                       >
                     </div>
@@ -6783,17 +6867,17 @@
                             <li>
                               <span class="sw up"></span><span class="nm">Winners</span>
                               <span class="ct">{exact(tradeStats.wins)} trades</span>
-                              <span class="pc">{pct(Math.round((tradeStats.wins / tradeStats.trades) * 10000))}</span>
+                              <span class="pc">{share(Math.round((tradeStats.wins / tradeStats.trades) * 10000))}</span>
                             </li>
                             <li>
                               <span class="sw down"></span><span class="nm">Losers</span>
                               <span class="ct">{exact(tradeStats.losses)} trades</span>
-                              <span class="pc">{pct(Math.round((tradeStats.losses / tradeStats.trades) * 10000))}</span>
+                              <span class="pc">{share(Math.round((tradeStats.losses / tradeStats.trades) * 10000))}</span>
                             </li>
                             <li>
                               <span class="sw flat"></span><span class="nm">Breakevens</span>
                               <span class="ct">{exact(tradeStats.breakevens)} trades</span>
-                              <span class="pc">{pct(Math.round((tradeStats.breakevens / tradeStats.trades) * 10000))}</span>
+                              <span class="pc">{share(Math.round((tradeStats.breakevens / tradeStats.trades) * 10000))}</span>
                             </li>
                           </ul>
                         {:else}
@@ -6859,31 +6943,31 @@
                       <div class="tt-q">
                         <span class="tt-k">Best hour for entries</span>
                         <span class="tt-qv"
-                          >{#if timePatterns.bestHour}{timePatterns.bestHour.label}<em class="tt-pc2"
-                              >{pct(timePatterns.bestHour.rateBp)} winners</em
+                          >{#if timePatterns.bestHour}{timePatterns.bestHour.label},<em class="tt-unit2"
+                              >{share(timePatterns.bestHour.rateBp)} winners</em
                             >{:else}<Lock small why="No hour bucket carries enough trades to name a best one." />{/if}</span
                         >
                       </div>
                       <div class="tt-q">
                         <span class="tt-k">Best day for entries</span>
                         <span class="tt-qv"
-                          >{#if timePatterns.bestDay}{timePatterns.bestDay.label}<em class="tt-pc2"
-                              >{pct(timePatterns.bestDay.rateBp)} winners</em
+                          >{#if timePatterns.bestDay}{timePatterns.bestDay.label},<em class="tt-unit2"
+                              >{share(timePatterns.bestDay.rateBp)} winners</em
                             >{:else}<Lock small why="No weekday bucket carries enough trades to name a best one." />{/if}</span
                         >
                       </div>
                       <div class="tt-q">
                         <span class="tt-k">Best month for entries</span>
                         <span class="tt-qv"
-                          >{#if timePatterns.bestMonth}{timePatterns.bestMonth.label}<em class="tt-pc2"
-                              >{pct(timePatterns.bestMonth.rateBp)} winners</em
+                          >{#if timePatterns.bestMonth}{timePatterns.bestMonth.label},<em class="tt-unit2"
+                              >{share(timePatterns.bestMonth.rateBp)} winners</em
                             >{:else}<Lock small why="No month bucket carries enough trades to name a best one." />{/if}</span
                         >
                       </div>
                       <div class="tt-q">
                         <span class="tt-k">Average trade duration</span>
                         <span class="tt-qv"
-                          >{#if averageDuration !== null}{exact(averageDuration)}<em class="tt-pc2"
+                          >{#if averageDuration !== null}{exact(averageDuration)}<em class="tt-unit2"
                               >bars</em
                             >{:else}<Lock small why="Needs the per-trade bar counts, which arrive with the trade file." />{/if}</span
                         >
@@ -6962,14 +7046,14 @@
                     <div class="tt-q">
                       <span class="tt-k">Longest winning streak</span>
                       <span class="tt-qv"
-                        >{#if tradeStats}{exact(tradeStats.longestWin)}<em class="tt-pc2">trades</em
+                        >{#if tradeStats}{exact(tradeStats.longestWin)}<em class="tt-unit2">trades</em
                           >{:else}<Lock why="Needs the trade file, which this run did not record." />{/if}</span
                       >
                     </div>
                     <div class="tt-q">
                       <span class="tt-k">Longest losing streak</span>
                       <span class="tt-qv"
-                        >{#if tradeStats}{exact(tradeStats.longestLoss)}<em class="tt-pc2">trades</em
+                        >{#if tradeStats}{exact(tradeStats.longestLoss)}<em class="tt-unit2">trades</em
                           >{:else}<Lock why="Needs the trade file, which this run did not record." />{/if}</span
                       >
                     </div>
@@ -6977,7 +7061,7 @@
                       <span class="tt-k">Average winning streak</span>
                       <span class="tt-qv"
                         >{#if tradeStats?.avgWinStreak !== null && tradeStats}{tradeStats.avgWinStreak?.toFixed(1)}<em
-                            class="tt-pc2">trades</em
+                            class="tt-unit2">trades</em
                           >{:else}<Lock why="This run recorded no winning trade, so it has no winning streak." />{/if}</span
                       >
                     </div>
@@ -6985,7 +7069,7 @@
                       <span class="tt-k">Average losing streak</span>
                       <span class="tt-qv"
                         >{#if tradeStats?.avgLossStreak !== null && tradeStats}{tradeStats.avgLossStreak?.toFixed(1)}<em
-                            class="tt-pc2">trades</em
+                            class="tt-unit2">trades</em
                           >{:else}<Lock why="This run recorded no losing trade, so it has no losing streak." />{/if}</span
                       >
                     </div>
@@ -7035,7 +7119,7 @@
                         </tr>
                         <tr>
                           <td>Percent profitable</td>
-                          <td class="n">{#if tradeTotals}{pct(tradeTotals.rateBp)}<em class="tt-pc2">{pct(tradeTotals.bestRateBp)} at best fills</em>{:else}<Lock small why="This run recorded no trade file, so there is nothing to divide." />{/if}</td>
+                          <td class="n">{#if tradeTotals}{share(tradeTotals.rateBp)}<em class="tt-pc2">{share(tradeTotals.bestRateBp)} at best fills</em>{:else}<Lock small why="This run recorded no trade file, so there is nothing to divide." />{/if}</td>
                           <td class="n"><Lock small why="Direction is one of the nine terms of the run identity, not a column on a trade." /></td>
                           <td class="n"><Lock small why="Direction is one of the nine terms of the run identity, not a column on a trade." /></td>
                         </tr>
@@ -7096,12 +7180,11 @@
                               aria-expanded={showAllMetrics}
                               onclick={() => (showAllMetrics = !showAllMetrics)}
                             >
-                              {showAllMetrics ? 'Hide' : 'Show'} the 17 metrics that need a per-trade
-                              list
+                              {showAllMetrics ? 'Show only the headline rows' : 'Show every metric'}
                             </button>
                             <span class="dim sm">
-                              — the sweep records counts and net totals, never the trades
-                              themselves.
+                              — the reference lists all twenty at once. Nine are still padlocked;
+                              each names the field it would need.
                             </span>
                           </td>
                         </tr>
@@ -7235,7 +7318,7 @@
                             <td title="bar {exact(t.exit_bar)}">{tradeWhen(t.exit_micros)}</td>
                             <td><Lock small why="The exit signal is not stored per trade — the run's chosen exit variant is on the record above." /></td>
                             <td class="n"><Lock small why="Prices are not repeated per trade; the bar index above indexes the stored bars." /></td>
-                            <td class="n"><Lock small why="Position size is not part of a sweep — the engine measures one unit of the index." /></td>
+                            <td rowspan="2" class="n"><Lock small why="Position size is not part of a sweep — the engine measures one unit of the index." /></td>
                             <!-- REAL, AND THE PADLOCK HERE WAS THE MISREADING.
                                  It said "Realised net P&L per trade is not
                                  stored; the excursions beside it are" — and
@@ -7266,7 +7349,7 @@
                                  header was not. -->
                             <td rowspan="2" class="n"><Lock small why="Maximum favourable excursion is recorded once per RUN, not once per trade — see Excursion under Growth and decline. The figure that used to sit here was the best-case realised result, which is a different quantity." /></td>
                             <td rowspan="2" class="n"><Lock small why="Maximum adverse excursion is recorded once per RUN, not once per trade — see Excursion under Growth and decline. The figure that used to sit here was the worst-case realised result, which is a different quantity." /></td>
-                            <td rowspan="2" class="n {t.cumulative < 0 ? 'down' : 'up'}">
+                            <td rowspan="2" class="n">
                               {money(t.cumulative)}
                               {#if shareOfOpen(t.cumulative)}<em class="lot-pc">{shareOfOpen(t.cumulative)}</em>{/if}
                             </td>
@@ -7277,7 +7360,6 @@
                             <td title="bar {exact(t.entry_bar)}">{tradeWhen(t.entry_micros)}</td>
                             <td title="bar {exact(t.signal_bar)}">signal bar</td>
                             <td class="n"><Lock small why="Prices are not repeated per trade; the bar index beside it indexes the stored bars." /></td>
-                            <td class="n"><Lock small why="Position size is not part of a sweep — the engine measures one unit of the index." /></td>
                           </tr>
                         {/each}
                       {:else if tradeList.phase === 'loading'}
@@ -10479,9 +10561,15 @@
     color: var(--n9);
   }
 
-  /* ---- list of trades: the two-row block ---- */
-  .tt-tbl tr.lot-a td {
-    border-bottom: 0;
+  /* ---- list of trades: the two-row block ----
+     TWO DIVIDER WEIGHTS, which is what makes this read as trades rather than as
+     rows. The reference draws a FAINT hairline between a trade's Exit and Entry
+     legs that spans only the per-leg band — Type through Price — and stops dead
+     before the spanning columns and before the trade number. Between trades it
+     draws a full-bleed line at normal weight. This had only the second, so the
+     two legs of one trade floated with nothing tying them together. */
+  .tt-tbl tr.lot-a td:not([rowspan]) {
+    border-bottom: 1px solid var(--line-soft);
     padding-bottom: 0.2rem;
   }
   .tt-tbl tr.lot-b td {
@@ -10494,7 +10582,15 @@
     vertical-align: middle;
     padding-bottom: 0.46rem;
   }
+  /* HOVER LIFTS THE WHOLE TRADE, NOT ONE LEG. Highlighting `lot-a` alone split
+     a trade in half under the cursor, which is exactly the reading the two-row
+     block exists to prevent. `:has` ties the pair; the plain rules under it are
+     the fallback where `:has` is unsupported. */
   .tt-tbl tr.lot-a:hover,
+  .tt-tbl tr.lot-b:hover {
+    background: var(--n4);
+  }
+  .tt-tbl tr.lot-a:hover + tr.lot-b,
   .tt-tbl tr.lot-b:hover {
     background: var(--n4);
   }
@@ -11340,10 +11436,15 @@
   .tt-pill:hover {
     color: var(--n11);
   }
+  /* THE SELECTED PILL IS FILLED, NOT OUTLINED. The reference fills it with a
+     near-white and inverts the text; this drew a transparent pill with an
+     accent border, which reads as "focused" rather than as "selected" and is
+     the one control state a reader scans a tab strip for. */
   .tt-pill.on {
-    background: var(--n2);
-    border-color: var(--acc);
-    color: var(--n12);
+    background: var(--ink);
+    border-color: var(--ink);
+    color: var(--bg-2);
+    font-weight: var(--w-semi);
   }
   .tt-pill:focus-visible {
     outline: 2px solid var(--focus);
@@ -11913,6 +12014,19 @@
      The reference pairs every currency figure with what share of the price it
      is, because a number in rupees does not say whether the move was large.
      `display:block` so the percentage takes its own line under the figure. */
+  /* ══ THE UNIT SITS ON THE VALUE'S LINE ══
+     `4 trades`, `35 bars`, `Monday, 40.26% winners` — the reference keeps the
+     unit and the qualifier on ONE line beside the number, at the same size.
+     `.tt-pc2` puts them on a dim second line, which is right for a genuinely
+     separate fact ("… at best fills") and wrong for the word that names the
+     number's unit. */
+  .tt-unit2 {
+    font-style: normal;
+    font-size: inherit;
+    color: var(--n9);
+    margin-left: 0.3em;
+  }
+
   .lot-pc,
   .tt-pc2 {
     display: block;
@@ -11932,6 +12046,69 @@
      reference draws it. Columns are laid out by the grid rather than by a
      width calculation, so seven weekdays and five session hours both fill the
      plot without a per-grain constant. */
+  /* The winning combination on the headline card. Its own row rather than a
+     fifth figure, because it is a list of names and not a number. */
+  .crown-combo {
+    display: flex;
+    align-items: baseline;
+    gap: var(--s4);
+    flex-wrap: wrap;
+    margin-top: var(--s5);
+    padding-top: var(--s4);
+    border-top: 1px solid var(--line-soft);
+  }
+  .crown-combo-k {
+    flex: 0 0 auto;
+    font-size: 0.62rem;
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    font-weight: var(--w-semi);
+    color: var(--n8);
+  }
+  .crown-combo-v {
+    flex: 1 1 18rem;
+    min-width: 0;
+    font-size: 0.76rem;
+    line-height: 1.5;
+  }
+  .crown-combo-v code {
+    font-family: var(--mono);
+    font-size: 0.94em;
+  }
+
+  /* ══ THE SUBJECT LINE ══
+     Above the toolbar and full width, because it is what every control below
+     operates on. Accent-tinted rather than neutral so it reads as the panel's
+     subject and not as one more row of metadata. */
+  .tt-subject {
+    display: flex;
+    align-items: baseline;
+    gap: var(--s4);
+    flex-wrap: wrap;
+    padding: var(--s4) var(--s5);
+    background: var(--acc-soft);
+    border-bottom: 1px solid var(--line);
+  }
+  .tt-subject-k {
+    flex: 0 0 auto;
+    font-size: 0.62rem;
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    font-weight: var(--w-semi);
+    color: var(--acc);
+  }
+  .tt-subject-v {
+    flex: 1 1 20rem;
+    min-width: 0;
+    font-size: 0.78rem;
+    line-height: 1.5;
+    color: var(--n11);
+  }
+  .tt-subject-v code {
+    font-family: var(--mono);
+    font-size: 0.94em;
+  }
+
   /* The two-walks disclosure. Loud enough not to be skimmed past, because a
      reader who misses it will compare two numbers that cannot be compared. */
   .tt-warnnote {
