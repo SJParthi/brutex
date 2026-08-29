@@ -618,8 +618,6 @@ fn write_fresh_header(file: &mut File, path: &Path) -> Result<(), Refusal> {
     //
     // One seek and one read of sixteen bytes, once per FRESH ledger.
     // Not per record and not per bar.
-    file.flush()
-        .map_err(|why| format!("the header could not be flushed: {why}"))?;
     let mut written_back = [0_u8; HEADER_BYTES];
     let stored = file
         .seek(SeekFrom::Start(0))
@@ -637,6 +635,24 @@ fn write_fresh_header(file: &mut File, path: &Path) -> Result<(), Refusal> {
             path.display()
         ));
     }
+    // THE FSYNC COMES AFTER THE READ-BACK, AND THE ORDER IS THE POINT.
+    //
+    // `sync_all` is here for the reason [`Results::append_locked`] gives at
+    // length: on a `File`, `flush` is a documented no-op, so the line this
+    // replaces asked the operating system for nothing and a ledger header could
+    // sit in the page cache and be lost. The read-back above proves the bytes
+    // come back; it reads THROUGH that cache, so it proves the path stores what
+    // it is given and not that the header survives a power loss. Both are wanted.
+    //
+    // Running the sync first made the test beside this fail, and the failure was
+    // the right one: `sync_all` on `/dev/null` returns `ENOTSUP`, so the generic
+    // "could not be flushed" pre-empted the specific "accepted a header and did
+    // not keep it" -- replacing the diagnosis that names the actual cause with
+    // one that names a symptom. A device that cannot fsync must still reach the
+    // refusal that tells the operator their store points at a black hole, so the
+    // sharper check goes first and the durability barrier goes after it.
+    file.sync_all()
+        .map_err(|why| format!("the header could not be flushed: {why}"))?;
     Ok(())
 }
 
@@ -947,11 +963,36 @@ impl Results {
             .map_err(|why| format!("the results file could not be extended: {why}"))?;
         self.file
             .write_all(&record.to_bytes())
-            .and_then(|()| self.file.flush())
+            // `sync_all`, NOT `flush`, AND THE DIFFERENCE IS THE WHOLE RECORD.
+            //
+            // `Write::flush` on a `std::fs::File` is a DOCUMENTED NO-OP: `File`
+            // holds no user-space buffer, so there is nothing for it to push and
+            // it returns `Ok(())` without asking the operating system for
+            // anything. This line read `flush` and therefore promised a
+            // durability it never delivered -- the bytes sat in the page cache
+            // and the call reported success.
+            //
+            // That is not a cosmetic difference here, because it INVERTS THE ONE
+            // ORDERING THIS MODULE'S CALLER DEPENDS ON. The write order is
+            // ledger, then frontier, then trades, and the reason is stated at the
+            // call site: "a detail row whose run has no ledger row is an orphan.
+            // Writing the ledger first makes that unreachable rather than merely
+            // unlikely." But `frontier.rs` ends its append with `sync_all` and
+            // `trades.rs` with `sync_data`, so BOTH detail files were durable and
+            // the parent they hang off was not. On a power loss the two children
+            // survive and the ledger row does not -- which is precisely the
+            // orphan the ordering exists to make unreachable, arriving by the one
+            // route the ordering cannot see.
+            //
+            // `sync_all` rather than `sync_data`: a record extends the file, so
+            // the length is part of what has to survive. `trades.rs` may use
+            // `sync_data` because a torn length there costs a detail row; a torn
+            // length here costs the run those rows belong to.
+            .and_then(|()| self.file.sync_all())
             // A FAILED WRITE IS ROLLED BACK, AND THIS IS THE ONE PLACE THAT IS
             // NOT A SILENT REPAIR.
             //
-            // `write_all` on a full filesystem can put SOME of the 213 bytes
+            // `write_all` on a full filesystem can put SOME of the 261 bytes
             // down before it fails, and `Results::open` refuses a ledger whose
             // tail is a part-record — correctly, since it cannot know what put
             // the bytes there. So one `ENOSPC` would leave a ledger that every
@@ -1832,5 +1873,75 @@ mod tests {
         let full = hasher.finalize();
         out.extend_from_slice(full.get(..SEAL_BYTES).expect("eight seal bytes"));
         out
+    }
+
+    /// The ledger reaches the DISK, and `flush` is not how a `File` does that.
+    ///
+    /// # Why this is a source guard and not a behavioural test
+    ///
+    /// Because durability cannot be observed from inside the process that wants
+    /// it. Proving a record survives a power loss needs a power loss; proving
+    /// `sync_all` was called needs to see the call. Everything a behavioural test
+    /// could assert here -- that the bytes read back, that the count grew -- was
+    /// ALREADY TRUE with `flush`, which is exactly why the defect survived: on a
+    /// `std::fs::File`, `Write::flush` is a documented no-op that returns
+    /// `Ok(())` without asking the operating system for anything.
+    ///
+    /// # What it cost
+    ///
+    /// The write order is ledger, then frontier, then trades, so that a detail
+    /// row whose run has no ledger row is unreachable rather than merely
+    /// unlikely. `frontier.rs` ends its append with `sync_all` and `trades.rs`
+    /// with `sync_data`, so both detail files were durable and the parent they
+    /// hang off was not -- inverting that ordering at the only layer it could not
+    /// see, and making the orphan reachable again by the one route it does not
+    /// check.
+    ///
+    /// A grep and not a brace count: a literal `flush()` inside a string or a
+    /// doc comment is text, so only code lines are read -- the lesson several
+    /// guards in this workspace have already learnt.
+    #[test]
+    fn the_ledger_is_fsynced_and_never_merely_flushed() {
+        let src = include_str!("results.rs");
+        let shipping = src.split("#[cfg(test)]").next().unwrap_or(src);
+        let code: Vec<&str> = shipping
+            .lines()
+            .map(|line| line.split_once("//").map_or(line, |(before, _)| before))
+            .collect();
+
+        let flushes = code.iter().filter(|l| l.contains(".flush()")).count();
+        assert_eq!(
+            flushes, 0,
+            "no shipping line in results.rs may call `flush()`: on a `File` it \
+             is a no-op, so it promises a durability it does not deliver. The \
+             record append and the fresh-header write must both use `sync_all`."
+        );
+
+        let syncs = code.iter().filter(|l| l.contains(".sync_all()")).count();
+        assert_eq!(
+            syncs, 2,
+            "exactly two durability barriers are expected: one in \
+             `append_locked`, after the record is written and before the offset \
+             is returned, and one after the fresh header is read back. A third \
+             would be per-record work nobody asked for; a first would mean one \
+             of the two was dropped."
+        );
+
+        // AND THE HEADER'S BARRIER COMES AFTER ITS READ-BACK, which is the order
+        // the refusal depends on: `sync_all` on `/dev/null` returns `ENOTSUP`,
+        // so syncing first replaces "accepted a header and did not keep it" --
+        // the message that names the cause -- with a generic flush failure that
+        // names a symptom. `a_ledger_that_does_not_keep_what_it_is_given_is_refused`
+        // is what fails when this order is reversed; this assertion says why.
+        let header_fn = shipping
+            .split_once("accepted a header and did not keep it")
+            .map(|(before, after)| (before, after))
+            .expect("the header refusal must still exist");
+        assert!(
+            header_fn.1.contains(".sync_all()"),
+            "the fresh-header `sync_all` must come AFTER the read-back refusal, \
+             so a device that cannot fsync still reaches the refusal that names \
+             what is actually wrong with the operator's store"
+        );
     }
 }
