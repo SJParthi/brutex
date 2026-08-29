@@ -2039,6 +2039,85 @@ fn timeframe_param(query: &str) -> Result<store::path::Timeframe, String> {
 }
 
 /// zero and writing 0 for "not sent" is a lie in the data.
+/// Open the one instrument-month a query addresses, or say why it cannot be.
+///
+/// # The five parameters, and why they are read in one place
+///
+/// `feed`, `month`, `rung`, `exchange`/`segment`/`symbol` and the optional
+/// `contract` address exactly one bar file. Two routes now ask that question —
+/// `/bars.json`, which draws it, and `/gaps.json`, which audits it — and a
+/// second hand-written copy of this parsing is a second set of refusal
+/// sentences that can drift from the first. An operator who gets
+/// `"is not a YYYY-MM month"` from one route and a 404 from the other for the
+/// same typo is being told two different things about one fact.
+///
+/// The month is handed back beside the file because the caller cannot recover
+/// it: `BarFile` knows its path, and the audit needs the month's FIRST and LAST
+/// day to state what the calendar owed — including the days at either end
+/// where a hole is invisible to anything derived from the bars themselves.
+///
+/// # Errors
+///
+/// The refusal sentence, ready to render. Every one names the parameter it
+/// could not read and what shape it wanted.
+fn open_addressed(
+    site: &Loaded,
+    query: &str,
+) -> Result<(store::file::BarFile, store::path::YearMonth), String> {
+    let Some(vendor) = ingest::parse_vendor(&param(query, "feed")) else {
+        return Err(format!(
+            "{:?} is not a feed this build can read",
+            param(query, "feed")
+        ));
+    };
+    // `YYYY-MM`, the same spelling every other route uses.
+    let raw_month = param(query, "month");
+    let Some(month) = raw_month
+        .split_once('-')
+        .and_then(|(y, m)| store::path::YearMonth::new(y.parse().ok()?, m.parse().ok()?).ok())
+    else {
+        return Err(format!("{raw_month:?} is not a YYYY-MM month"));
+    };
+    let timeframe = timeframe_param(query)?;
+    // THE CONTRACT IS ITS OWN PARAMETER, and absent is a real answer.
+    //
+    // A spot series has no contract segment and its path is one level
+    // shallower; an option's bars live under `symbol/contract/`. Before this,
+    // the route took only `symbol` and `bars::open` passed `None`, so the page
+    // concatenated the two — `BANKNIFTY-2026-07-28-5410000-CE` — and the store
+    // refused it at 31 bytes against a 24-byte cap. Present-but-unparseable
+    // refuses by name rather than falling back to `None`: falling back would
+    // read the UNDERLYING's month and answer with a different instrument's
+    // bars, which is the one failure worse than a 400.
+    let raw_contract = param(query, "contract");
+    let contract = if raw_contract.is_empty() {
+        None
+    } else {
+        match brutex_core::instrument::Contract::parse(&raw_contract) {
+            Some(contract) => Some(contract),
+            None => {
+                return Err(format!(
+                    "{raw_contract:?} is not a contract segment this store can \
+                     name. It is the part BELOW the symbol — `2026-07-28-5410000-CE`, \
+                     not `BANKNIFTY-2026-07-28-5410000-CE` — and it takes only \
+                     uppercase letters, digits and hyphens."
+                ));
+            }
+        }
+    };
+    let file = bars::open(
+        &site.store_root,
+        vendor,
+        &param(query, "exchange"),
+        &param(query, "segment"),
+        &param(query, "symbol"),
+        timeframe,
+        month,
+        contract,
+    )?;
+    Ok((file, month))
+}
+
 async fn bars_json(
     axum::extract::State(site): axum::extract::State<Loaded>,
     uri: axum::http::Uri,
@@ -2064,61 +2143,8 @@ async fn bars_json(
         )
     };
 
-    let Some(vendor) = ingest::parse_vendor(&param(query, "feed")) else {
-        return refuse(format!(
-            "{:?} is not a feed this build can read",
-            param(query, "feed")
-        ));
-    };
-    // `YYYY-MM`, the same spelling every other route uses.
-    let raw_month = param(query, "month");
-    let Some(month) = raw_month
-        .split_once('-')
-        .and_then(|(y, m)| store::path::YearMonth::new(y.parse().ok()?, m.parse().ok()?).ok())
-    else {
-        return refuse(format!("{raw_month:?} is not a YYYY-MM month"));
-    };
-    let timeframe = match timeframe_param(query) {
-        Ok(tf) => tf,
-        Err(why) => return refuse(why),
-    };
-    // THE CONTRACT IS ITS OWN PARAMETER, and absent is a real answer.
-    //
-    // A spot series has no contract segment and its path is one level
-    // shallower; an option's bars live under `symbol/contract/`. Before this,
-    // the route took only `symbol` and `bars::open` passed `None`, so the page
-    // concatenated the two — `BANKNIFTY-2026-07-28-5410000-CE` — and the store
-    // refused it at 31 bytes against a 24-byte cap. Present-but-unparseable
-    // refuses by name rather than falling back to `None`: falling back would
-    // read the UNDERLYING's month and answer with a different instrument's
-    // bars, which is the one failure worse than a 400.
-    let raw_contract = param(query, "contract");
-    let contract = if raw_contract.is_empty() {
-        None
-    } else {
-        match brutex_core::instrument::Contract::parse(&raw_contract) {
-            Some(contract) => Some(contract),
-            None => {
-                return refuse(format!(
-                    "{raw_contract:?} is not a contract segment this store can \
-                     name. It is the part BELOW the symbol — `2026-07-28-5410000-CE`, \
-                     not `BANKNIFTY-2026-07-28-5410000-CE` — and it takes only \
-                     uppercase letters, digits and hyphens."
-                ));
-            }
-        }
-    };
-    let file = match bars::open(
-        &site.store_root,
-        vendor,
-        &param(query, "exchange"),
-        &param(query, "segment"),
-        &param(query, "symbol"),
-        timeframe,
-        month,
-        contract,
-    ) {
-        Ok(file) => file,
+    let (file, _month) = match open_addressed(&site, query) {
+        Ok(open) => open,
         Err(why) => return refuse(why),
     };
 
@@ -2165,6 +2191,133 @@ async fn bars_json(
         );
     }
     (axum::http::StatusCode::OK, json(), out)
+}
+
+/// Whether one stored instrument-month is COMPLETE, and where it is not.
+///
+/// # `pull::gaps` had zero callers, and that is the hole this fills
+///
+/// The module classifies every absent minute into four reasons — `closed`,
+/// `outside-window`, `vendor-hole`, `unmeasured` — with a taxonomy built
+/// precisely so a complete series stops reading as a short one. Nothing called
+/// it. Measured across the whole workspace: `grep -rn "gaps::"` outside its own
+/// file returned **nothing**, so every fact it can state was unreachable and
+/// the store could not be asked the one question that matters after a pull —
+/// *is this month whole?*
+///
+/// P-68 named this as its own unclosed half: an empty chunk is now loud at the
+/// moment it happens, and the STATE afterwards was still undetectable. A
+/// backfill that lost a chunk in March 2021 leaves a store that looks exactly
+/// like one that did not, because `n_valid` counts what is there and nothing
+/// counts what should be.
+///
+/// # Why a count of bars can never answer it
+///
+/// The arithmetic answer — "375 bars a day times the trading days" — is wrong
+/// in both directions and was the reason this was hard. Muhurat trades one hour
+/// in the afternoon; a disaster-recovery Saturday has a two-hour hole in the
+/// middle by design; five Diwali sessions before 2025 have a length this build
+/// does not know. Counting calls all three a loss. `classify` consults the
+/// calendar per day and only `vendor-hole` is a loss.
+///
+/// # Cost, stated rather than claimed
+///
+/// One pass over the month's bars and one over its minutes: ~44,640 minutes for
+/// a 31-day month against at most ~11,625 stored one-minute bars, both walked
+/// by a single forward cursor that never rewinds. That is **not O(1)** and is
+/// not claimed to be — `CLAUDE.md` §3 rule 4 names the five operations that
+/// must be constant (bar lookup, condition lookup, mask evaluation, duplicate
+/// rejection, result append) and a completeness audit is none of them. It is
+/// linear in the month, bounded by a constant month, and asked once per
+/// instrument-month by an operator rather than in any loop. `MAX_GAPS` bounds
+/// the answer's SIZE, and `Ledger::truncated` says so out loud when it bites —
+/// a truncated ledger that read like a complete one would report a store
+/// healthier than it is.
+async fn gaps_json(
+    axum::extract::State(site): axum::extract::State<Loaded>,
+    uri: axum::http::Uri,
+) -> (
+    axum::http::StatusCode,
+    [(axum::http::HeaderName, &'static str); 1],
+    String,
+) {
+    let query = uri.query().unwrap_or("");
+    let json = || {
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/json; charset=utf-8",
+        )]
+    };
+    let refuse = |why: String| {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            json(),
+            format!(r#"{{"error":{}}}"#, render::json_string(&why)),
+        )
+    };
+
+    let (file, month) = match open_addressed(&site, query) {
+        Ok(open) => open,
+        Err(why) => return refuse(why),
+    };
+
+    // THE RANGE COMES FROM THE MONTH, NOT FROM THE BARS. Deriving it from the
+    // first and last stored bar is the mistake that makes this endpoint agree
+    // with itself and disagree with the store: a month whose first four
+    // trading days never landed would report a clean interior and a perfect
+    // score, because the missing days would be outside a range they defined.
+    let Ok(first_day) = pull::session::Day::new(month.year(), month.month(), 1) else {
+        return refuse(format!(
+            "{month} is a month this build's calendar cannot name a first day \
+             for, so there is no range to audit against"
+        ));
+    };
+    let first = i64::from(first_day.days_from_epoch());
+    let last = i64::from(first_day.end_of_month().days_from_epoch());
+
+    // THE WHOLE MONTH, by index. `page` reads at a fixed stride, so this is
+    // `n_valid` seeks of known length and nothing scans.
+    let held = usize::try_from(file.header().n_valid).unwrap_or(usize::MAX);
+    let (rows, faults) = bars::page(&file, 0, held);
+    let stamps: Vec<i64> = rows.iter().map(|bar| bar.ts_micros).collect();
+
+    let ledger = pull::gaps::classify(&stamps, first, last);
+
+    // RUNS, NOT MINUTES, and the reason travels with each one. 1,176 of 1,204
+    // measured absences were four contiguous events; a per-minute list is the
+    // same facts 43× longer.
+    let runs = ledger
+        .gaps
+        .iter()
+        .map(|gap| {
+            format!(
+                r#"{{"day":{},"from":{},"to":{},"minutes":{},"reason":{}}}"#,
+                gap.day,
+                gap.from,
+                gap.to,
+                gap.minutes(),
+                render::json_string(gap.reason.word())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+
+    // A FAULTY RECORD IS NOT SILENTLY SKIPPED, and here it matters more than it
+    // does on the drawing route: a bar `page` could not read is a bar this
+    // audit did not see, so it would be counted as a HOLE. Reporting the count
+    // beside the verdict is what stops "the file is damaged" from being read as
+    // "the vendor is missing minutes" — opposite faults wanting opposite fixes.
+    let body = format!(
+        r#"{{"expected":{},"held":{},"lost_minutes":{},"absent_minutes":{},"truncated":{},"unreadable_records":{},"faults":{},"gaps":[{runs}]}}"#,
+        ledger.expected,
+        ledger.held,
+        ledger.lost_minutes(),
+        ledger.absent_minutes(),
+        ledger.truncated,
+        faults.len(),
+        render::json_string(&faults.join("; ")),
+    );
+    (axum::http::StatusCode::OK, json(), body)
 }
 
 /// One page of bars across a RANGE of months, answered in ONE request.
@@ -12734,6 +12887,14 @@ pub fn router(site: Loaded) -> axum::Router {
 /// set an environment variable — `set_var` is `unsafe` under edition 2024 and
 /// this crate forbids `unsafe`. Every routing-order and traversal test drives
 /// this one over a scratch directory it owns.
+#[expect(
+    clippy::too_many_lines,
+    reason = "a route TABLE, one line per route plus the reason each exists. \
+              Splitting it to satisfy a line count would put half the surface \
+              in a second function and leave no single place to read what this \
+              build serves — and shortening the comments to fit would delete \
+              the reasons rather than the length."
+)]
 pub fn router_serving(site: Loaded, assets: std::sync::Arc<assets::Assets>) -> axum::Router {
     let typeahead = std::sync::Arc::clone(&assets);
     axum::Router::new()
@@ -12763,6 +12924,7 @@ pub fn router_serving(site: Loaded, assets: std::sync::Arc<assets::Assets>) -> a
             axum::routing::get(crate::folder::folder_json),
         )
         .route("/bars.json", axum::routing::get(bars_json))
+        .route("/gaps.json", axum::routing::get(gaps_json))
         // ONE MONTH, AND ONE WINDOW OVER MANY. The first is what a chart of a
         // month wants; the second is what a grid over a store wants, and asking
         // the first for the second is the 2,187-request storm it replaces.
@@ -18267,6 +18429,184 @@ mod tests {
             junk.matches("\"t\":").count(),
             3,
             "an unreadable bound is no bound: {junk}"
+        );
+    }
+
+    /// **A COMPLETE SESSION SCORES ZERO LOSSES, AND ONE MISSING MINUTE IS
+    /// FOUND — while the weekend around it stays NOT a loss.**
+    ///
+    /// This is the test that makes `pull::gaps` reachable. It had zero callers
+    /// workspace-wide, so a store that lost a chunk in a backfill was
+    /// indistinguishable from one that never had those minutes to lose.
+    ///
+    /// **Driven from the calendar rather than from a date this test believes
+    /// something about.** Writing "2024-01-09 is a Tuesday with a 09:15 open"
+    /// would pin the assertion to the holiday table, and a table amended in
+    /// either direction — a session added, a holiday corrected — would fail
+    /// this test for a change that is right. So the fixture ASKS
+    /// `calendar::kind_of` for an open day, stores exactly the minutes that
+    /// day's session expects, and asserts against the answer.
+    ///
+    /// The two halves are one test on purpose: a classifier that reported
+    /// everything as a hole would pass the second assertion alone, and one that
+    /// reported nothing would pass the first alone.
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "two stores built minute by minute from the calendar, and the \
+                  pair is the test: a classifier reporting everything as a hole \
+                  passes the second half alone, one reporting nothing passes \
+                  the first. Splitting them would let either mutant through."
+    )]
+    async fn the_gaps_route_finds_a_missing_minute_and_calls_the_weekend_no_loss() {
+        let root = store_root("gapsaudit");
+        let month = store::path::YearMonth::new(2024, 1).expect("a legal month");
+        let first = pull::session::Day::new(2024, 1, 1).expect("a legal day");
+        let from_day = i64::from(first.days_from_epoch());
+        let to_day = i64::from(first.end_of_month().days_from_epoch());
+
+        // EVERY MINUTE THE CALENDAR OWES FOR THE WHOLE MONTH, asked for per-day
+        // rather than assumed uniform: Muhurat is one hour in the afternoon, so
+        // a session's minutes are a property of its DAY.
+        //
+        // The first draft of this fixture filled ONE day and asserted zero
+        // losses against a month owing 22 of them. The route was right and the
+        // test was wrong — it reported `expected: 8250, held: 375, lost: 7875`,
+        // correctly — which is the shape a fixture that assumes its answer
+        // takes, and the reason the range below is the month's rather than the
+        // stored bars'.
+        let owed: Vec<(i64, u16)> = (from_day..=to_day)
+            .filter_map(|day| match pull::calendar::kind_of(day) {
+                pull::calendar::DayKind::Open(session) => Some((day, session)),
+                _ => None,
+            })
+            .flat_map(|(day, session)| {
+                (0..=1_439_u16)
+                    .filter(move |m| session.expects(*m))
+                    .map(move |m| (day, m))
+            })
+            .collect();
+
+        // Stamped in IST. `19_800` is the 5h30m offset in seconds, subtracted
+        // because the store keeps UTC.
+        let at =
+            |day: i64, minute: u16| (day * 86_400 - 19_800 + i64::from(minute) * 60) * 1_000_000;
+        assert!(
+            owed.len() > 2,
+            "January 2024 owes at least three minutes, or there is no middle to remove"
+        );
+
+        let path = |m| {
+            store::path::StorePath::new(store::path::PathParts {
+                vendor: Vendor::Dhan,
+                exchange: "NSE",
+                segment: "INDEX",
+                symbol: "NIFTY",
+                contract: None,
+                timeframe: store::path::Timeframe::MINUTE_1,
+                month: m,
+                file: store::path::FileKind::Bars,
+            })
+            .expect("a legal path")
+        };
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the id is the cross-check `open` folds; any 32 bits serve"
+        )]
+        let symbol_id = brutex_core::universe::fnv1a("NIFTY") as u32;
+        let bar = |(day, minute): (i64, u16)| store::format::Bar {
+            ts_micros: at(day, minute),
+            open: 100,
+            high: 110,
+            low: 90,
+            close: 105,
+            volume: 1,
+            open_interest: i64::MIN,
+        };
+
+        let mut file =
+            store::file::BarFile::open_or_create(&root, path(month), symbol_id).expect("a file");
+        let whole: Vec<store::format::Bar> = owed.iter().copied().map(bar).collect();
+        file.append(&whole).expect("every minute the month owes");
+        drop(file);
+
+        let site = std::sync::Arc::new(Site::serving(&masters("gapsaudit", None, None), &root));
+        let audit = |site: std::sync::Arc<Site>| {
+            let uri: axum::http::Uri = "/gaps.json?feed=dhan&exchange=NSE&segment=INDEX\
+                 &symbol=NIFTY&timeframe=1min&month=2024-01"
+                .parse()
+                .expect("a uri");
+            async move { gaps_json(axum::extract::State(site), uri).await }
+        };
+
+        let (code, _, whole_body) = audit(std::sync::Arc::clone(&site)).await;
+        assert_eq!(code, axum::http::StatusCode::OK, "{whole_body}");
+        assert!(
+            whole_body.contains(r#""lost_minutes":0"#),
+            "every minute the session expects is stored, so nothing is LOST — \
+             and a classifier that counted the closed days as losses would fail \
+             exactly here: {whole_body}"
+        );
+        assert!(
+            !whole_body.contains(r#""vendor-hole""#),
+            "and not one run is named a vendor hole: {whole_body}"
+        );
+        // THE ABSENCES ARE STILL REPORTED, which is what separates "no loss"
+        // from "nothing to say". January has ~30 days this month owes nothing
+        // for, and an operator asking where they went deserves the answer.
+        assert!(
+            whole_body.contains(r#""reason":"closed""#)
+                || whole_body.contains(r#""reason":"unmeasured""#),
+            "the days that owed nothing are named rather than omitted: {whole_body}"
+        );
+
+        // NOW REMOVE ONE MINUTE FROM THE MIDDLE. A fresh store, because
+        // `Header::advance` refuses a batch beginning at or before what is
+        // committed — the append-only rule that makes a skipped chunk
+        // permanently unwritable, and it applies to a test's fixture too.
+        let holed_root = store_root("gapsaudithole");
+        let mut holed = store::file::BarFile::open_or_create(&holed_root, path(month), symbol_id)
+            .expect("a file");
+        let cut = owed.len() / 2;
+        let (hole_day, hole_minute) = owed.get(cut).copied().expect("a middle minute");
+        let rows: Vec<store::format::Bar> = owed
+            .iter()
+            .copied()
+            .filter(|at| *at != (hole_day, hole_minute))
+            .map(bar)
+            .collect();
+        holed.append(&rows).expect("the month with one minute out");
+        drop(holed);
+
+        let holed_site = std::sync::Arc::new(Site::serving(
+            &masters("gapsaudithole", None, None),
+            &holed_root,
+        ));
+        let (_, _, holed_body) = audit(holed_site).await;
+        assert!(
+            holed_body.contains(r#""lost_minutes":1"#),
+            "exactly the one minute removed is a loss: {holed_body}"
+        );
+        assert!(
+            holed_body.contains(&format!(
+                r#""day":{hole_day},"from":{hole_minute},"to":{hole_minute},"minutes":1,"reason":"vendor-hole""#
+            )),
+            "and the run names WHICH minute, on which day — a count alone \
+             cannot be gone and looked at: {holed_body}"
+        );
+        // THE DENOMINATOR MOVED AND THE NUMERATOR DID NOT. `expected` is what
+        // the calendar owed and is identical across both stores; `held` is one
+        // lower. Asserting both is what proves the hole was found by comparing
+        // them rather than by counting the bars twice.
+        assert!(
+            holed_body.contains(&format!(r#""held":{}"#, rows.len())),
+            "the count held is the count stored: {holed_body}"
+        );
+        assert!(
+            whole_body.contains(&format!(r#""expected":{}"#, owed.len()))
+                && holed_body.contains(&format!(r#""expected":{}"#, owed.len())),
+            "the calendar owes the same either way — that is the fixed point a \
+             hole is measured against: {whole_body} / {holed_body}"
         );
     }
 

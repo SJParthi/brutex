@@ -26448,3 +26448,71 @@ for the same reason.
 **What is still not proven.** `SITES` now holds 28 rows against 42 `emit` call
 sites in the crate, so 14 remain driven by nothing. The header says so and
 nothing pins either number; re-measure rather than trusting the sentence.
+
+### D-0361
+
+**`pull::gaps` had ZERO callers, so the store could not be asked whether a
+month was whole. `/gaps.json` is the caller.**
+
+The module classifies every absent minute into four reasons — `closed`,
+`outside-window`, `vendor-hole`, `unmeasured` — with a taxonomy built precisely
+so a complete series stops reading as a short one. Measured across the
+workspace, `grep -rn "gaps::"` outside its own file returned **nothing**. Every
+fact it could state was unreachable.
+
+P-68 named this as its own unclosed half: an empty chunk is loud at the moment
+it happens, and the STATE afterwards was undetectable. A backfill that lost a
+chunk in March 2021 leaves a store byte-indistinguishable from one that never
+had those minutes, because `n_valid` counts what is there and nothing counted
+what should be. §8's append-only rule and `Header::advance` together mean
+nothing can go back for them, so the only remedy is *knowing*.
+
+**Why a count of bars can never answer it.** The arithmetic answer — 375 bars a
+day times the trading days — is wrong in both directions, which is why this was
+left undone. Muhurat trades one hour in the afternoon; a disaster-recovery
+Saturday has a two-hour hole in the middle by design; five Diwali sessions
+before 2025 have a length this build does not know. Counting calls all three a
+loss and a real loss indistinguishable from them. `classify` consults the
+calendar per day and only `vendor-hole` is a loss.
+
+**The range comes from the MONTH, not from the bars.** Deriving it from the
+first and last stored bar is the mistake that makes the endpoint agree with
+itself and disagree with the store: a month whose first four trading days never
+landed would report a clean interior and a perfect score, because the missing
+days would fall outside a range they themselves defined. `Day::new(year,
+month, 1)` and `Day::end_of_month` fix the denominator independently of the
+data being audited.
+
+**`open_addressed` is extracted rather than copied.** `/bars.json` and
+`/gaps.json` address the same instrument-month from the same five parameters,
+and a second hand-written copy of that parsing is a second set of refusal
+sentences free to drift. An operator getting `"is not a YYYY-MM month"` from
+one route and a 404 from the other for one typo is being told two different
+things about one fact. The month is returned beside the file because
+`BarFile` cannot give it back and the audit needs it.
+
+**Cost, stated rather than claimed.** One pass over the month's bars and one
+over its minutes — ~44,640 minutes for a 31-day month against at most ~11,625
+stored one-minute bars, both walked by a single forward cursor that never
+rewinds. **This is not O(1) and is not claimed to be.** `CLAUDE.md` §3 rule 4
+names the five operations that must be constant — bar lookup, condition lookup,
+mask evaluation, duplicate rejection, result append — and a completeness audit
+is none of them. It is linear in a month, the month is a constant, and it is
+asked once per instrument-month by an operator rather than inside any loop.
+`MAX_GAPS` bounds the answer's SIZE and `Ledger::truncated` says so out loud
+when it bites, because a truncated ledger reading like a complete one would
+report a store healthier than it is.
+
+**Unreadable records are counted beside the verdict**, and that matters more
+here than on the drawing route: a bar `bars::page` could not read is a bar this
+audit did not see, so it would be scored as a hole. "The file is damaged" and
+"the vendor is missing minutes" are opposite faults wanting opposite fixes, and
+collapsing them would send an operator the wrong way.
+
+**What this does NOT yet do.** It answers ONE instrument-month per request.
+Asking it across a store the size of the operator's — 121 months × instruments
+× rungs — one request at a time is the same fan-out `bars_range` exists to
+refuse, so a ranged form is the next step and is not claimed to be here. It is
+also not yet on a page: `CLAUDE.md`'s own record of `/logs` shipping reachable
+only by typing its URL applies, and this is the second half of that debt, not
+its repayment.
