@@ -4520,7 +4520,7 @@ jobs:
           crates/telemetry/src/encode.rs 1
           crates/telemetry/src/record.rs 1
           crates/cli/src/live.rs 1
-          .
+          '
 
           # ---- rule 3. docs/07 law 2: pre-size every map. -------------------
           # Only HashMap/HashSet. A BTreeMap has no `with_capacity` — capacity
