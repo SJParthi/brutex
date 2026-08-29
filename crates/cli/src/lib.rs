@@ -47,6 +47,7 @@
 pub mod batch;
 pub mod frontier;
 pub mod knobs;
+pub mod live;
 pub mod results;
 pub mod stability;
 pub mod stored;
