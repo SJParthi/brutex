@@ -6814,15 +6814,29 @@
                         >{#if tradeStats?.profitFactor !== null && tradeStats}{tradeStats.profitFactor?.toFixed(3)}{:else}<Lock why="This run recorded no losing trade at worst-case fills, so gross loss is zero — a profit factor with no denominator is undefined, not infinite." />{/if}</span
                       >
                     </div>
-                    <!-- THIS LOCK USED TO SAY "crates/costs applies costs inside
-                         the sweep", and that is not true. `costs::scope::is_cost_free`
-                         returns true for `IndexSpot`, and `crates/runner/src/audit.rs`
-                         states it plainly: "Nothing in this crate calls that
-                         function", "no tick is added on any leg of any path",
-                         "Every figure below is gross of the spread and the size
-                         of that omission is UNMEASURED." A padlock claiming a
-                         cost was applied is worse than one admitting it was not. -->
-                    <div class="tt-q"><span class="tt-k">Commission load</span><span class="tt-qv"><Lock why="No cost is applied at all. crates/costs implements the full statutory stack, but costs::scope::is_cost_free returns true for a spot index and nothing in crates/runner calls it — every figure on this page is GROSS of brokerage, spread and the statutory charges, and the size of that omission is UNMEASURED." /></span></div>
+                    <!-- TWO DIFFERENT THINGS, AND THIS LOCK USED TO LUMP THEM.
+                         It read "every figure on this page is GROSS of
+                         brokerage, spread and the statutory charges, and the
+                         size of that omission is UNMEASURED" — alarming the
+                         operator about a half that is CORRECT.
+
+                         `costs::scope::is_cost_free(Segment::IndexSpot)` is
+                         TRUE, and its own doc says why: a spot index is not
+                         tradeable and no order is placed, so there is no
+                         brokerage, no STT, no stamp duty and no GST to charge.
+                         `crates/runner/src/audit.rs` states the same. The
+                         engine sweeps exactly two instruments, both spot
+                         indices (CLAUDE.md §1), so zero is the right answer and
+                         `costs::trip` having no caller on this path is the
+                         right shape — not a gap.
+
+                         What IS absent is the SPREAD, which is a fill-model
+                         question and not a levy. `trade.rs`' own measured table
+                         records two horizons flipping from profitable to
+                         −27,883p and −8,658p once a tick was charged, so it is
+                         a bound and not a rounding. Kept separate, and kept
+                         visible. -->
+                    <div class="tt-q"><span class="tt-k">Commission load</span><span class="tt-qv"><Lock why="ZERO IS THE ANSWER, not a missing one. A spot index is not tradeable and no order is placed, so there is no brokerage, no STT, no stamp duty and no GST — costs::scope::is_cost_free returns true for IndexSpot and says so, and this engine sweeps only spot indices. What is NOT charged is the SPREAD, which is a fill-model question rather than a levy: no tick is added on any leg, and trade.rs records two horizons flipping sign once one was. That omission is real and unmeasured; the statutory stack is not missing, it is zero." /></span></div>
                   </div>
 
                   <div class="tt-hrow tight">
@@ -7666,7 +7680,7 @@
                       <tr>
                         <th>Trade number <span class="lot-sort">↓</span></th><th>Type</th><th>Date and time</th><th>Signal</th><th class="n">Price</th>
                         <th class="n">Size</th><th class="n">Net PnL</th><th class="n">Return</th>
-                        <th class="n" title="crates/costs implements the full statutory stack — brokerage, STT, exchange, SEBI, IPFT, GST, stamp — and costs::scope::is_cost_free returns true for a spot index, so no tick is added on any leg. Every figure in this table is GROSS.">Commission</th><th class="n">Favorable excursion</th><th class="n">Adverse excursion</th>
+                        <th class="n" title="A spot index is not tradeable and no order is placed, so brokerage, STT, exchange, SEBI, IPFT, GST and stamp are all ZERO by rule — costs::scope::is_cost_free returns true for IndexSpot. That is the answer, not a missing one. The SPREAD is separate and is not charged: no tick is added on any leg.">Commission</th><th class="n">Favorable excursion</th><th class="n">Adverse excursion</th>
                         <th class="n" title="A running sum of each trade's realised WORST-CASE result — the strategy's equity curve under the pessimistic fill model, which is the reading this page ranks on.">Cumulative PnL</th><th class="n">Duration (bars)</th>
                       </tr>
                     </thead>
@@ -7710,7 +7724,7 @@
                             <td rowspan="2" class="n {t.worst < 0 ? 'down' : 'up'}">
                               {shareOfOpen(t.worst) ?? '—'}
                             </td>
-                            <td rowspan="2" class="n"><Lock small why="No cost is applied. costs::scope::is_cost_free returns true for a spot index and crates/runner adds no tick on any leg, so a commission of 0.00 would be a measurement nobody took." /></td>
+                            <td rowspan="2" class="n"><Lock small why="Zero by rule, not by omission: a spot index is not tradeable and no order is placed, so costs::scope::is_cost_free returns true for IndexSpot and there is no levy to charge. Shown as a lock rather than 0.00 because the SPREAD is separately not charged — no tick is added on any leg — and a bare zero would read as though both had been priced." /></td>
                             <!-- MFE AND MAE ARE NOT PER-TRADE HERE, and these two
                                  columns used to be filled with `best` and `worst`
                                  — which are the two FILL MODELS of one result,
