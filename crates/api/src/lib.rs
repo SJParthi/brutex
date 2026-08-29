@@ -65,6 +65,9 @@ pub mod frontierjson;
 pub mod indexmap;
 pub mod ingest;
 pub mod ladder;
+/// WHAT A RUN HAS FOUND SO FAR, while it is still running. `cli::live` shipped a
+/// complete reader and this is the caller its own doc names.
+pub mod livejson;
 pub mod logs;
 pub mod master;
 /// Refreshing the instrument masters from the browser, and saying when they

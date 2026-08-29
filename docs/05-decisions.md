@@ -27810,3 +27810,68 @@ evidence rather than on instruction, and `chosen_side` makes that observable.
 
 **Not fixed here:** `Validated`'s summary rows still do not name a side, and
 `cli`'s walk-forward banner does not either. Only the per-fold table does.
+
+### D-0388
+
+**`/live.json`, and the measurement that made it urgent.**
+
+`crates/cli/src/live.rs` is 863 lines that write a run's top-N to
+`results/live/<hex>.bin` on every improvement, and it ships `live::current` to
+read the directory back. That reader had **zero callers**, and the only
+occurrence of the string `live.json` anywhere in the tree was the doc comment in
+`live.rs` naming the route that was supposed to call it.
+
+**Asked for the status of a running sweep, the only honest answer required
+decoding the files by hand.** Five hours into an eight-rung `range-all`: `xxd -s
+16` for `trials`, 24 for `bar_milli`, 32 for `priced`, then 40 plus a 208-byte
+stride for the rows, with each field's offset counted out of `Row::to_bytes`.
+Eight files, 25 rows each, sitting on disk and reachable by nothing.
+
+What that decode found is why the route matters: **best `|t|` 2.894 against a
+bar of 5.443**, across eight rungs whose trial counts ran from 148,817 to
+3,635,864. Nothing was close, and nothing said so anywhere an operator could
+look.
+
+**It does not judge the rows, and that is the load-bearing decision.**
+`/frontier.json` calls `Row::derived()` and `Row::verdict()` and serves a `meets`
+block. Doing that here would compute a win rate of 0%, a reward-to-risk of
+0.00x and a verdict of FAIL from eight fields nobody has written — `publish_ranked`
+runs BEFORE the exit grid, so every money field is a structural zero. Three
+figures nobody measured wearing the shape of three that somebody did, which §4
+bans by name. The sweep half is real at publish time and is served; the payload
+carries `"ranked_only": true` so the absence is stated rather than inferred.
+
+`clears_bar` is on each row because both integers are already there and putting
+the comparison in the payload removes the chance of two figures on different
+scales being eyeballed against each other. It is on `|t|`, because a short's
+evidence is negative.
+
+### D-0389
+
+**The exit grid is 87.6% of the runtime and emitted nothing at all.**
+
+Measured by sampling a real `range-all`: 18,068 samples in the grid against
+1,403 in the sweep and 887 everywhere else. `emit_ladder_level` reports every
+k-level, so an operator watching `/logs` sees the first 12% of a run in detail
+and then silence — and a five-hour sweep four hours into its grid looks identical
+to one that hung. That is not a hypothetical: this session killed a sweep whose
+last sign of life was 66 minutes old.
+
+**Gate 17 permits this, and `cli` is why.** The gate silences `vocab engine
+indicators runner` because those hold the innermost loops, and its own remedy
+text prescribes the shape: *"plain integer counters … emitted ONCE at a
+structural boundary — per k-level, per instrument, per run"*. `trade_and_screen`
+is called once per rung and holds no loop over bars and none over candidates;
+`screen_cascade` beneath it holds both and must never emit. Verified after the
+change: all four swept crates still grep clean.
+
+Entry and exit, so the pair brackets the phase — a run that died inside it leaves
+the entry unmatched, which is itself the reading an operator needs.
+
+**`Summary::priced` is a structural zero and now says so.** Its stated job is to
+separate "ranked, grid still running" from "finished", but `publish_ranked` is
+called once, before the grid, and `Live::finish` deletes the file at the end —
+so there is no second publish and no moment at which a real count could be
+written. The real count is emitted at the grid's own boundary, where it exists.
+Making the field live needs a publish per tier inside `screen_cascade` and is
+not done here. §3 rule 6: a limit stated beats a field that looks measured.

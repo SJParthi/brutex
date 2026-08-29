@@ -4690,6 +4690,36 @@ fn trade_and_screen(
     // on a `Cell`, and until now `screen` computed one per candidate and
     // returned only the rendered table -- so the frontier could store the
     // sweep's statistics and nothing about the money.
+    // THE PHASE THAT IS 87.6% OF THE RUNTIME, AND IT EMITTED NOTHING.
+    //
+    // Measured by sampling a real `range-all`: 18,068 samples in the exit grid
+    // against 1,403 in the sweep and 887 everywhere else. `emit_ladder_level`
+    // reports every k-level of the ladder, so an operator watching `/logs` sees
+    // the first 12% of a run in detail and then silence for the rest -- and a
+    // five-hour sweep that has been in the grid for four of them looks
+    // identical to one that hung.
+    //
+    // GATE 17 PERMITS THIS AND `cli` IS WHY. The gate silences `vocab engine
+    // indicators runner` because those hold the innermost loops, and its own
+    // remedy prescribes the shape: "plain integer counters ... emitted ONCE at
+    // a structural boundary -- per k-level, per instrument, per run". This
+    // function is called ONCE per rung and holds no loop over bars or over
+    // candidates; `screen_cascade` below it does, and must never emit.
+    //
+    // Entry and exit, so the pair brackets the phase and a run that died inside
+    // it leaves the entry alone -- which is itself the reading an operator
+    // needs.
+    note(
+        &telemetry::Event::info("cli.grid", "exit grid entered")
+            .with("bars", u64::try_from(bars.len()).unwrap_or(u64::MAX))
+            .with(
+                "candidates",
+                u64::try_from(by_evidence.len()).unwrap_or(u64::MAX),
+            )
+            .with("rungs", u64::try_from(grid_rungs(bars)).unwrap_or(u64::MAX))
+            .with("cap", u64::try_from(screen_cap()).unwrap_or(u64::MAX))
+            .with("validate", u64::from(validate)),
+    );
     let mut priced: std::collections::HashMap<[u64; 6], grid::Cell> =
         std::collections::HashMap::with_capacity(by_evidence.len().min(screen_cap()));
     let screened = screen_cascade(
@@ -4700,6 +4730,25 @@ fn trade_and_screen(
         rules,
         validate,
         &mut priced,
+    );
+    // AND WHAT IT PRICED, which is the number the live view could not carry:
+    // `Summary::priced` is written once, before this phase, so it is a
+    // structural zero for the whole of it. This is where the real count exists.
+    note(
+        &telemetry::Event::info("cli.grid", "exit grid finished")
+            .with("priced", u64::try_from(priced.len()).unwrap_or(u64::MAX))
+            .with(
+                "candidates",
+                u64::try_from(by_evidence.len()).unwrap_or(u64::MAX),
+            )
+            .with(
+                "trades",
+                u64::try_from(taken.trades.len()).unwrap_or(u64::MAX),
+            )
+            .with(
+                "report_bytes",
+                u64::try_from(screened.len()).unwrap_or(u64::MAX),
+            ),
     );
     (taken, exits, screened, priced)
 }
@@ -10170,8 +10219,22 @@ fn publish_ranked(
     let summary = crate::live::Summary {
         trials,
         bar_milli,
-        // NOTHING IS PRICED YET, and saying zero is the point: it is what
-        // separates "ranked, grid still running" from "finished".
+        // NOTHING IS PRICED YET, and saying zero is correct HERE. What is not
+        // correct is that it can never say anything else.
+        //
+        // `publish_ranked` is called ONCE, immediately before the exit grid
+        // starts, and `Live::finish` DELETES the file at the end -- so there is
+        // no second publish and no moment at which a real count could be
+        // written. The field's stated job is to separate "ranked, grid still
+        // running" from "finished", and it is a structural zero for the whole
+        // of the 87.6% of runtime the grid occupies.
+        //
+        // `api::livejson` therefore serves `"ranked_only": true` rather than
+        // inviting a reader to infer progress from this, and the real count is
+        // emitted as telemetry at the grid's own boundary in `trade_and_screen`
+        // -- which is where it exists. Making this field live needs a publish
+        // per tier inside `screen_cascade`, and that is not done here. §3 rule
+        // 6: a limit stated is better than a field that looks measured.
         priced: 0,
     };
 

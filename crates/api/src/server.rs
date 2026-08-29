@@ -13663,6 +13663,16 @@ pub fn router_serving(site: Loaded, assets: std::sync::Arc<assets::Assets>) -> a
             "/frontier.json",
             axum::routing::get(crate::frontierjson::frontier_json),
         )
+        // WHAT IS RUNNING RIGHT NOW. `/frontier.json` above serves a FINISHED
+        // run and shows the PREVIOUS one for however long this one takes;
+        // `/backtest/run.json` says `in_flight` and a start stamp and no
+        // measurement at all. `cli::live` has written each run's top-N to
+        // `results/live/<hex>.bin` since it landed and shipped `current` to read
+        // it back, and that reader had NO CALLER -- its own doc names this path.
+        //
+        // Measured need: asked for the status of a five-hour eight-rung sweep,
+        // the only way to answer was to decode the files by hand with `xxd`.
+        .route("/live.json", axum::routing::get(crate::livejson::live_json))
         // THE CONSOLE CAN NOW CAUSE A RUN, not only report one.
         //
         // POST, and there is no GET, for the same reason `/universe/resolve`
@@ -26332,7 +26342,7 @@ mod universe_route_tests {
 }
 
 /// 32 bytes as lower-case hex.
-fn hex32(bytes: [u8; 32]) -> String {
+pub(crate) fn hex32(bytes: [u8; 32]) -> String {
     use core::fmt::Write as _;
     bytes.iter().fold(String::with_capacity(64), |mut acc, b| {
         let _ = write!(acc, "{b:02x}");
