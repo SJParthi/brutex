@@ -213,6 +213,16 @@ pub struct Column {
     sourced: Sourced,
     census: Census,
     first_swept: Option<usize>,
+    /// Signals [`Column::reproject`] refused because an EARLIER signal already
+    /// owns the execution bar they resolved to. Always zero on a column that has
+    /// not been reprojected -- a signal series cannot collide with itself.
+    ///
+    /// Separate from the `dropped` count `reproject` returns, and deliberately:
+    /// that one answers "the series ran out after this signal", this one answers
+    /// "the position was already open". Folding them would put two different
+    /// facts behind one number, and the caller prints that number with the first
+    /// one's wording.
+    collided: u64,
 }
 
 /// What [`Column::sources`] indexes — and it is TWO different things.
@@ -318,6 +328,10 @@ impl Column {
             sourced: Sourced::Signal,
             census,
             first_swept,
+            // A SIGNAL SERIES CANNOT COLLIDE WITH ITSELF: every bar is its own
+            // source, so no two rows can name one index. Only reprojection can
+            // put two signals on one execution bar.
+            collided: 0,
         }
     }
 
@@ -438,9 +452,42 @@ impl Column {
         let mut bits = Vec::with_capacity(self.bits.len());
         let mut source = Vec::with_capacity(self.source.len());
         let mut dropped: u64 = 0;
+        let mut collided: u64 = 0;
         for (&mask, &target) in self.bits.iter().zip(onto.iter()) {
             match target {
                 None => dropped = dropped.saturating_add(1),
+                // ONE FILL BAR, ONE ROW. A SECOND SIGNAL ON IT IS NOT A SECOND
+                // OBSERVATION.
+                //
+                // `align::onto_execution` is forward-only and returns the FIRST
+                // execution bar stamped at or after each signal's close, so when
+                // the execution series has a hole two consecutive signals resolve
+                // to the same bar -- `align`'s own test asserts `[Some(10),
+                // Some(10)]` as the correct output. Both rows were then pushed
+                // with the same `source`, and `outcome::edge` zips `bits` with
+                // `sources` and accumulates one observation per ROW: the same
+                // forward return entered the mean twice. `n` inflates, the
+                // standard error understates, `|t|` inflates -- and `|t|` is what
+                // picks the combination that gets traded.
+                //
+                // MEASURED, not hypothetical: the 81 months of one-minute zerodha
+                // NIFTY this store holds are 618,296 bars against roughly 626,625
+                // for 1,671 sessions of 375 -- about 8,329 missing, 1.32%. A hole
+                // of one bar is enough to collide two 2-minute signals.
+                //
+                // The FIRST signal keeps the bar, and that is the physical answer
+                // rather than a tiebreak: it is the earliest signal that could
+                // have acted, and by the time the second fires the position it
+                // would open is already open. Acting on the later one would also
+                // be filling at a bar chosen by information that arrived after it.
+                //
+                // Duplicates are always ADJACENT because the alignment is
+                // monotonically non-decreasing, so comparing against the last
+                // pushed index is exact and costs one compare per row -- no set,
+                // no allocation, and the pass stays O(len).
+                Some(index) if source.last().copied() == Some(index) => {
+                    collided = collided.saturating_add(1);
+                }
                 Some(index) => {
                     bits.push(mask);
                     source.push(index);
@@ -473,6 +520,7 @@ impl Column {
                 sourced: Sourced::Fill,
                 census,
                 first_swept,
+                collided,
             },
             dropped,
         ))
@@ -481,6 +529,27 @@ impl Column {
     #[must_use]
     pub fn bits(&self) -> &[ConditionMask] {
         &self.bits
+    }
+
+    /// Signals refused because an earlier signal already owns the execution bar
+    /// they resolved to. Zero unless this column was reprojected.
+    ///
+    /// # Why it is exposed rather than returned
+    ///
+    /// [`Column::reproject`] returns `(Self, u64)` and has exactly one production
+    /// caller. Widening that tuple is a change to a file this work does not own,
+    /// so the count rides on the column instead -- which is where it belongs
+    /// anyway: it describes the column that came out, not the call that made it.
+    ///
+    /// **It has no reader yet.** The banner that prints `signals with no
+    /// execution bar` is where this belongs beside it, and until that line is
+    /// added an operator cannot see how many signals a hole in the execution
+    /// series cost them. The DEFECT is closed either way -- those signals no
+    /// longer enter the mean twice -- but the disclosure is not, and saying so
+    /// here is the honest version of `CLAUDE.md` §3 rule 6.
+    #[must_use]
+    pub const fn collided(&self) -> u64 {
+        self.collided
     }
 
     /// Where every offered bar went.
@@ -1203,6 +1272,86 @@ mod reproject_tests {
             "swept describes the signal bars and does not move"
         );
         assert_eq!(projected.census().warming, column.census().warming);
+        assert_eq!(projected.collided(), 0, "a one-to-one map collides nothing");
+    }
+
+    /// TWO SIGNALS, ONE FILL BAR, ONE ROW -- and the second is counted, not lost.
+    ///
+    /// # The number this changes
+    ///
+    /// `align::onto_execution` is forward-only and returns the first execution
+    /// bar stamped at or after each signal's close, so a hole in the execution
+    /// series resolves two consecutive signals to the same bar; `align`'s own
+    /// test asserts `[Some(10), Some(10)]` as the correct output. Both rows used
+    /// to be pushed with that same source, and `outcome::edge` accumulates one
+    /// observation per ROW -- so one forward return entered the mean twice.
+    ///
+    /// That inflates `n`, understates the standard error and inflates `|t|`, and
+    /// `|t|` is what selects the combination that gets traded. A duplicated
+    /// observation is the cheapest possible way to manufacture significance.
+    ///
+    /// The FIRST signal keeps the bar: it is the earliest that could have acted,
+    /// and by the time the second fires the position is already open.
+    #[test]
+    fn two_signals_resolving_to_one_fill_bar_produce_one_row() {
+        let bars = run(6);
+        let mut ev = build_evaluator(Availability::Absent);
+        let column = Column::build(&bars, &mut ev);
+        assert!(column.len() >= 4, "the fixture must give enough rows");
+
+        // A hole in the execution series: rows 1 and 2 both resolve to bar 7,
+        // and rows 3 and 4 both resolve to bar 9. Everything else is distinct.
+        let mut onto: Vec<Option<usize>> = (0..column.len()).map(|i| Some(i + 20)).collect();
+        if let Some(slot) = onto.get_mut(1) {
+            *slot = Some(7);
+        }
+        if let Some(slot) = onto.get_mut(2) {
+            *slot = Some(7);
+        }
+        if let Some(slot) = onto.get_mut(3) {
+            *slot = Some(9);
+        }
+        if let Some(slot) = onto.get_mut(4) {
+            *slot = Some(9);
+        }
+
+        let (projected, dropped) = column
+            .reproject(&onto, 9_999)
+            .expect("the map is parallel to the column");
+
+        assert_eq!(dropped, 0, "nothing here failed to resolve");
+        assert_eq!(
+            projected.collided(),
+            2,
+            "one duplicate per colliding pair, and it is COUNTED rather than \
+             silently dropped -- a signal the execution series could not give \
+             its own bar is a fact the operator is owed"
+        );
+        assert_eq!(
+            projected.len(),
+            column.len().saturating_sub(2),
+            "two rows fewer, and exactly two"
+        );
+
+        // THE ONE PROPERTY THAT MATTERS DOWNSTREAM: no execution bar appears
+        // twice, so no forward return can be counted twice.
+        let mut seen = projected.sources().to_vec();
+        let before = seen.len();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(
+            seen.len(),
+            before,
+            "every source must be distinct -- this is the assertion that stands \
+             between a hole in the one-minute series and a fabricated t-statistic"
+        );
+
+        // And the survivor is the FIRST of each pair, not the last.
+        assert!(
+            projected.sources().contains(&7) && projected.sources().contains(&9),
+            "the fill bars themselves are kept; it is the second claimant on \
+             each that is refused"
+        );
     }
 
     /// Dropped rows are counted and removed, and nothing else shifts.
