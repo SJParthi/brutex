@@ -1878,8 +1878,39 @@ const STOP_FLOOR_POINTS: i64 = 5;
 /// compared by the person reading it.
 fn stop_ladder_ppm(bars: &[indicators::Candle]) -> Vec<i64> {
     let reference = reference_price(bars);
-    let cap_halves = max_stop_points(bars).saturating_mul(2);
-    let floor_halves = stop_floor_points(bars).saturating_mul(2);
+
+    // IN HALVES DERIVED FROM PAISA, NOT FROM ROUNDED POINTS.
+    //
+    // These read `max_stop_points(bars) * 2` and `stop_floor_points(bars) * 2`,
+    // and both of those divide paisa by `PAISA_PER_POINT` FIRST -- a hundred to
+    // one -- so the whole range distribution was collapsed into whole points
+    // before the span was measured. On a series whose 25th percentile bar range
+    // is 120 paisa and whose 90th is 195, both round to ONE point, floor equals
+    // cap, and the loop below runs exactly once: the one-rung collapse, arriving
+    // by a third route after the identical-expressions route and the
+    // `MAX_STOP_POINTS`-clamp route were closed. `synthetic::bar` produces
+    // precisely that shape, so every synthetic fixture in this crate was still
+    // exercising a one-rung ladder.
+    //
+    // Reading the percentiles in paisa and converting to halves here keeps the
+    // resolution the instrument actually has. The points-rounded functions stay
+    // for the callers that speak to an operator in points.
+    let halves_of = |paisa: i64| {
+        paisa
+            .saturating_mul(2)
+            .checked_div(PAISA_PER_POINT)
+            .unwrap_or(0)
+    };
+    let cap_halves = range_percentile(bars, 9, 10)
+        .map_or_else(|| max_stop_points(bars).saturating_mul(2), halves_of)
+        .max(1);
+    let floor_halves = range_percentile(bars, 1, 4)
+        .map_or_else(|| stop_floor_points(bars).saturating_mul(2), halves_of)
+        .max(1)
+        // A floor above its own cap would leave the loop empty. Both come from
+        // one sorted distribution so this cannot fire on real bars; it is the
+        // guard that makes that argument checkable rather than assumed.
+        .min(cap_halves);
 
     // THE STEP IS THE SPAN OVER THE RUNG COUNT, AND BOTH COME FROM THE BARS.
     //
@@ -2016,8 +2047,34 @@ fn range_percentile(
         .checked_div(denominator)
         .unwrap_or(0)
         .min(ranges.len().saturating_sub(1));
-    // A bar range is paisa; points are paisa over PAISA_PER_POINT.
-    ranges.get(at).map(|&paisa| paisa / PAISA_PER_POINT)
+    ranges.get(at).copied()
+}
+
+/// [`range_percentile`] rounded to whole index points.
+///
+/// **The rounding is the reason the two are separate.** A bar range is paisa,
+/// and points are paisa over [`PAISA_PER_POINT`] — a hundred to one. Dividing
+/// FIRST and comparing after collapses the distribution: on a series whose
+/// 25th percentile bar range is 120 paisa and whose 90th is 195, both round to
+/// ONE point, floor equals cap, and `stop_ladder_ppm`'s
+/// `while halves <= cap_halves` runs exactly once. That is the one-rung collapse
+/// this whole family was rewritten to fix, arriving by a third route after the
+/// identical-expressions route and the `MAX_STOP_POINTS`-clamp route were both
+/// closed.
+///
+/// It is not hypothetical: `synthetic::bar` produces exactly that shape, which
+/// is why `the_stop_ladder_spans_the_points_its_constants_name` cannot express
+/// a ladder and a separate fixture had to be built for the span assertion.
+///
+/// So the LADDER reads paisa and keeps its resolution, and callers that speak
+/// to an operator in points — the report, `grid_rungs`' reach — round here,
+/// once, at the edge.
+fn range_percentile_points(
+    bars: &[indicators::Candle],
+    numerator: usize,
+    denominator: usize,
+) -> Option<i64> {
+    range_percentile(bars, numerator, denominator).map(|paisa| paisa / PAISA_PER_POINT)
 }
 
 /// The TIGHTEST stop worth testing: the 25th percentile of the bar range.
@@ -2026,7 +2083,7 @@ fn range_percentile(
 /// ordinary noise takes out, and pricing it teaches nothing. Below that the
 /// ladder would spend every rung measuring the same stop-out.
 fn stop_floor_points(bars: &[indicators::Candle]) -> i64 {
-    let Some(points) = range_percentile(bars, 1, 4) else {
+    let Some(points) = range_percentile_points(bars, 1, 4) else {
         // No bar has a range, so nothing about this instrument is measurable.
         // The stated NIFTY figure is the honest fallback and is named as one.
         return STOP_FLOOR_POINTS;
@@ -2183,7 +2240,7 @@ const MAX_STOP_POINTS: i64 = 25;
 /// **the same expression [`stop_floor_points`] had**, which is how the ladder
 /// came to have one rung. See [`range_percentile`].
 fn max_stop_points(bars: &[indicators::Candle]) -> i64 {
-    let Some(points) = range_percentile(bars, 9, 10) else {
+    let Some(points) = range_percentile_points(bars, 9, 10) else {
         return MAX_STOP_POINTS;
     };
     points.max(1)
@@ -2356,7 +2413,80 @@ fn grid_rungs(bars: &[indicators::Candle]) -> usize {
     let cap = max_stop_points(bars);
     // At least two rungs, so a ladder always offers a tighter and a looser
     // choice rather than one level dressed as a grid.
-    usize::try_from(cap / step_points).unwrap_or(2).max(2)
+    let from_the_data = usize::try_from(cap / step_points).unwrap_or(2).max(2);
+    // AND NO MORE THAN THE MACHINE CAN HOLD. See `rungs_within_cell_budget`:
+    // `cap / step_points` was bounded only by `MAX_STOP_POINTS` clamping `cap`,
+    // and removing that clamp -- correct in itself, it was collapsing the stop
+    // ladder -- left this division with no upper bound at all.
+    from_the_data.min(rungs_within_cell_budget())
+}
+
+/// The most rungs whose grid still fits the memory this machine can spare.
+///
+/// # The blow-up this bounds, which two separate fixes composed into
+///
+/// [`runner::grid::variants`] is `(S+1)·[(T+1)(R+1) + (T(T+1)/2)·(R(R+1)/2)]` —
+/// **quadratic in targets AND in trails** — and `ratio_targets` grows the
+/// target ladder with the stop ladder, so the true shape is about `n^5/4`.
+/// `grid::evaluate` reserves that count UP FRONT with `Vec::with_capacity`, so
+/// the reservation is the allocation whether or not the cells are ever pushed.
+///
+/// | rungs | cells | at ~152 B each |
+/// |---|---:|---:|
+/// | 4 | 625 | 95 KB |
+/// | 8 | 12,393 | 1.9 MB |
+/// | 16 | 319,345 | 49 MB |
+/// | 40 | 27,637,321 | **4.2 GB, per candidate** |
+///
+/// Two changes made forty reachable and neither considered the other. Removing
+/// the `MAX_STOP_POINTS` clamp from [`max_stop_points`] was right — the clamp
+/// was collapsing the stop ladder to one rung — but that clamp was also the
+/// only thing bounding `cap / step_points` above. And `screen` was
+/// parallelised, so `available_parallelism` of these grids are live at once.
+/// The candidate ceiling covers none of it: [`derived_ceiling`] counts APRIORI
+/// candidates, and an exit grid is transient per-candidate work it never sees.
+///
+/// # Derived, not typed
+///
+/// [`derived_ceiling`] already answers *"how many 146-byte records fit in this
+/// machine's share"* — scaled by core count and divided among concurrent rungs
+/// by `SharedBy`. A `Cell` is about the same width, and a grid is TRANSIENT
+/// where a candidate is RETAINED, so a grid gets a small fraction of that: one
+/// part in 1,024, split again across the threads each holding one.
+///
+/// On the reference machine that is roughly nine thousand cells per candidate,
+/// solving to seven or eight rungs — the range the old constant already sat in,
+/// now reached by arithmetic rather than by a number that happened to hold. A
+/// larger machine earns more; a smaller one is protected.
+///
+/// Solved by walking upward rather than inverting a quintic: the answer is
+/// small, the walk is bounded, and `variants` is a `const fn` of a few
+/// multiplies.
+fn rungs_within_cell_budget() -> usize {
+    /// A grid is transient per-candidate work rather than retained state, so it
+    /// takes a thousandth of the retained budget instead of a share of it.
+    const GRID_SHARE: usize = 1_024;
+    /// Past this the quintic makes each further rung absurd, and a bound that
+    /// cannot terminate is not a bound.
+    const SEARCH_LIMIT: usize = 64;
+    /// A ladder always offers a tighter and a looser choice, whatever the
+    /// budget says — one level is not a grid.
+    const FLOOR: usize = 2;
+
+    let threads = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+    let budget = derived_ceiling()
+        .checked_div(GRID_SHARE)
+        .and_then(|share| share.checked_div(threads))
+        .unwrap_or(0);
+
+    let mut best = FLOOR;
+    for n in FLOOR..=SEARCH_LIMIT {
+        if runner::grid::variants(n, n, n) > budget {
+            break;
+        }
+        best = n;
+    }
+    best
 }
 
 /// The strongest combination by evidence that is also **closed**.
@@ -5109,7 +5239,7 @@ impl Tier {
     /// This tier as the rules the screen applies.
     #[must_use]
     pub fn rules(&self, top: usize) -> Rules {
-        Rules {
+        crate::Rules {
             max_mae_ppm: points_to_ppm(self.max_points),
             min_rr_bp: self.min_rr_bp,
             min_win_rate_bp: self.min_win_rate_bp,
@@ -5336,11 +5466,30 @@ fn policy_of(
     rules: Rules,
     lens: runner::rank::Lens,
     validate: bool,
-) -> [u64; 6] {
+) -> [u64; 14] {
     [
         // Negative is not expected and is not silently folded to zero: the cast
         // is saturating so a negative rule still differs from an absent one.
         u64::try_from(rules.max_mae_ppm).unwrap_or(u64::MAX),
+        // THE OTHER SIX RULES, AND WHY THEY WERE NOT HERE UNTIL NOW.
+        //
+        // `max_mae_ppm` alone was SUFFICIENT while this path built its rules
+        // from `Rules::BASELINE`, a `const`: nothing else could vary, so nothing
+        // else could split two runs. `Rules::operator()` reads seven
+        // environment variables, and every one of them changes which cell
+        // `best_within(|c| rules.admits(c))` selects -- and therefore the
+        // recorded `pessimistic`, `trades` and exit rungs.
+        //
+        // Making six fields runtime-variable without extending this array
+        // reopened exactly the hole D-0294 closed, in the same commit that
+        // widened them. They are APPENDED BELOW, after the ceiling, because
+        // "append, never insert" is about POSITIONS and not about reading
+        // order: putting them here first would shift the lens, the rung count,
+        // the screen cap, `validate` and the ceiling down five places and
+        // silently re-key every identity ever recorded. The first attempt at
+        // this commit did exactly that, and
+        // `every_knob_that_moves_the_answer_moves_the_identity` caught it by
+        // asserting the ceiling is still the term the ladder uses.
         match lens {
             runner::rank::Lens::Detectability => 0,
             runner::rank::Lens::Payoff => 1,
@@ -5370,6 +5519,32 @@ fn policy_of(
         // `u64::MAX` marks that unreadable case distinctly rather than folding
         // it to the default's key. D-0305.
         ceiling_from_env().map_or(u64::MAX, |ceiling| ceiling as u64),
+        // ---- APPENDED BELOW THIS LINE. Nothing above it may move. ----
+        //
+        // THE SEVENTH THROUGH THIRTEENTH: the rest of `Rules`. Each changes
+        // which cell `best_within(|c| rules.admits(c))` selects, and therefore
+        // the recorded `pessimistic`, `trades` and exit rungs. `top` also
+        // decides how many frontier rows the run writes, so two runs at
+        // different `top` produce different stored output from identical bars.
+        u64::try_from(rules.min_rr_bp).unwrap_or(u64::MAX),
+        u64::try_from(rules.min_win_rate_bp).unwrap_or(u64::MAX),
+        u64::try_from(rules.min_assurance_bp).unwrap_or(u64::MAX),
+        u64::try_from(rules.min_weakest_bp).unwrap_or(u64::MAX),
+        u64::try_from(rules.min_ret_over_dd_bp).unwrap_or(u64::MAX),
+        rules.min_trades,
+        rules.top as u64,
+        // THE FOURTEENTH: the grid resolution, which `grid_rungs` does not
+        // fully carry.
+        //
+        // `BRUTEX_GRID_RESOLUTION` moves `grid_step_ppm`, which sets the target
+        // and trail ladder SPACING. The `grid_rungs` term above captures it only
+        // through `cap / step_points` -- and once `ppm_to_points_at(step, ref)`
+        // rounds to zero, `.max(1)` pins `step_points` at one and `grid_rungs`
+        // at `cap` for EVERY finer resolution, while `step_ppm` keeps shrinking
+        // and the grid keeps changing. Two runs at 40 and at 200 can share a
+        // rung count, hold different grids, produce different answers and carry
+        // the same `RunId`. The step itself is folded so they cannot.
+        u64::try_from(grid_step_ppm(bars)).unwrap_or(u64::MAX),
     ]
 }
 
@@ -6106,6 +6281,28 @@ fn screen(
     // and `Levels` only borrows it.
     let stop_rungs = stop_ladder_ppm(bars);
 
+    // AND SO ARE THESE TWO, WHICH WERE NOT, AND THAT WAS THE EXPENSIVE HALF.
+    //
+    // `rungs` and `step_ppm` were computed INSIDE the loop below — once per
+    // candidate, up to `screen_cap()` of them. Neither depends on the
+    // candidate. Each call walks every bar:
+    //
+    //   `grid_step_ppm`  allocates a Vec of one i64 per bar and sorts it
+    //   `grid_rungs`     calls `reference_price` (two scans), `grid_step_ppm`
+    //                    AGAIN, and `max_stop_points` -> another alloc and sort
+    //
+    // Three allocations of `bars.len()` and three sorts, per candidate. At
+    // 617,921 bars that is ~15 MB allocated and freed per candidate and about
+    // 3.5e7 comparisons -- ten thousand times over, and once the loop went
+    // parallel, on every core at once.
+    //
+    // The line above already knew to do this and says so in its own words:
+    // "Built ONCE for the whole screen". One of four invariants was hoisted and
+    // the other three were left in the loop. Parallelising the loop hid the
+    // redundancy behind more cores rather than removing it.
+    let rungs = grid_rungs(bars);
+    let step_ppm = grid_step_ppm(bars);
+
     // ACROSS EVERY CORE. This was a sequential `for` over up to `screen_cap()`
     // -- ten thousand -- combinations, each pricing a FULL exit grid over every
     // bar of the span. The repo's own measurement of what that costs is in
@@ -6157,8 +6354,8 @@ fn screen(
                 horizon,
                 side,
                 grid::Levels {
-                    rungs: grid_rungs(bars),
-                    step_ppm: Some(grid_step_ppm(bars)),
+                    rungs,
+                    step_ppm: Some(step_ppm),
                     forced: (rules.max_mae_ppm > 0).then_some(rules.max_mae_ppm),
                     ratios: true,
                     stops_ppm: &stop_rungs,
@@ -10397,11 +10594,86 @@ mod tests {
         // length first precisely so adding one re-keys.
         assert_eq!(
             start.len(),
-            6,
-            "six choices are folded in. If this moved, `policy_of`'s doc table \
-             and the append-never-insert rule both need reading before the number \
-             is changed"
+            14,
+            "fourteen choices are folded in. If this moved, `policy_of`'s doc \
+             table and the append-never-insert rule both need reading before the \
+             number is changed"
         );
+
+        // EIGHT WERE APPENDED WHEN `Rules::operator()` MADE THEM VARIABLE, and
+        // this tripwire is what forced the doc to be read first.
+        //
+        // While this path built its rules from `Rules::BASELINE` -- a `const` --
+        // `max_mae_ppm` alone was a sufficient summary of them: nothing else
+        // could differ between two runs, so nothing else could split them.
+        // `Rules::operator()` reads seven environment variables, every one of
+        // which changes which cell `best_within(|c| rules.admits(c))` selects
+        // and therefore the recorded `pessimistic`, `trades` and exit rungs.
+        // `BRUTEX_GRID_RESOLUTION` is the eighth: it moves `grid_step_ppm`, and
+        // the `grid_rungs` term carries it only until `ppm_to_points_at` rounds
+        // to zero and `.max(1)` pins the count while the step keeps shrinking.
+        //
+        // Asserted per-field rather than by length alone, because a length
+        // check passes just as well if a field is folded TWICE and another not
+        // at all.
+        for (label, moved) in [
+            (
+                "min_rr_bp",
+                crate::Rules {
+                    min_rr_bp: base.min_rr_bp + 1,
+                    ..base
+                },
+            ),
+            (
+                "min_win_rate_bp",
+                crate::Rules {
+                    min_win_rate_bp: base.min_win_rate_bp + 1,
+                    ..base
+                },
+            ),
+            (
+                "min_assurance_bp",
+                crate::Rules {
+                    min_assurance_bp: base.min_assurance_bp + 1,
+                    ..base
+                },
+            ),
+            (
+                "min_weakest_bp",
+                crate::Rules {
+                    min_weakest_bp: base.min_weakest_bp + 1,
+                    ..base
+                },
+            ),
+            (
+                "min_ret_over_dd_bp",
+                crate::Rules {
+                    min_ret_over_dd_bp: base.min_ret_over_dd_bp + 1,
+                    ..base
+                },
+            ),
+            (
+                "min_trades",
+                crate::Rules {
+                    min_trades: base.min_trades + 1,
+                    ..base
+                },
+            ),
+            (
+                "top",
+                crate::Rules {
+                    top: base.top + 1,
+                    ..base
+                },
+            ),
+        ] {
+            assert_ne!(
+                policy_of(&bars, moved, lens, true),
+                start,
+                "{label} changes which cell is admitted, so two runs that differ \
+                 in it are two answers and must not share a RunId"
+            );
+        }
 
         // THE SIXTH IS THE ONE D-0294 MISSED, and it is the knob that decides
         // whether the ladder explored the space at all.
@@ -11984,12 +12256,27 @@ mod tests {
             "rungs ascend and are distinct: {rungs:?}"
         );
 
-        // NO SPAN IS ASSERTED HERE, AND THAT IS DELIBERATE. `synthetic::bar`
-        // gives every bar a range of 120..=195 paisa, which is ONE point for
-        // all of them, so this fixture cannot express a ladder however the
-        // bounds are derived. The span belongs to
-        // `the_stop_ladder_has_more_than_one_rung_when_the_ranges_vary`, which
-        // supplies bars that actually vary. This test is about UNITS.
+        // AND IT IS A LADDER HERE TOO, WHICH IT COULD NOT BE UNTIL TODAY.
+        //
+        // This block used to say no span could be asserted on this fixture:
+        // `synthetic::bar` gives every bar a range of 120..=195 paisa, and the
+        // ladder derived its ends from percentiles ROUNDED TO WHOLE POINTS, so
+        // all of them collapsed to one point and floor equalled cap. The
+        // fixture was blamed; the rounding was the cause. `stop_ladder_ppm` now
+        // reads the percentiles in paisa, and 120 and 195 are two different
+        // halves.
+        //
+        // Asserting it here matters because the check below is
+        // `rungs.windows(2)`, which yields NOTHING on a one-element slice and is
+        // therefore vacuously true — the "test that asserts nothing" S4 bans,
+        // and the exact reason the original one-rung defect survived unseen.
+        // Leaving it unasserted on the grounds that this fixture cannot express
+        // a ladder made that vacuity permanent.
+        assert!(
+            rungs.len() > 1,
+            "the stop must VARY on the shared fixture too, or the ascending \
+             check above is vacuous and this test is guarding nothing: {rungs:?}"
+        );
 
         // COMPARED IN PPM, which is the unit the ladder is built in. Going the
         // other way and comparing points would fold the inverse's rounding into

@@ -869,8 +869,33 @@ pub fn walk_forward_shaped(
                 // about twice what it did. That is what an answer to "is my
                 // SELECTION fooling me" costs, and the alternative was not
                 // computing it at all.
+                // ACROSS EVERY CORE, LIKE THE IN-SAMPLE PASS ABOVE.
+                //
+                // Parallelising the in-sample pricing and leaving this
+                // sequential moved the bottleneck rather than removing it. Using
+                // this module's own measured figures -- `evaluate` at 77,815 ns
+                // against a bare walk at 18,389 ns per candidate -- spreading
+                // only the first pass takes a fold from about 96 us per
+                // candidate to about 24, a 4x gain and not the 14x the core
+                // count offers, because this second grid then accounts for
+                // roughly three quarters of what is left.
+                //
+                // MEASURED on the operator's own machine while a real sweep ran:
+                // 5.7 to 7.8 of fourteen cores busy. Half the machine idle,
+                // inside the stage that was doing the work -- exactly the shape
+                // the in-sample fix was supposed to have ended.
+                //
+                // The body is pure per candidate: `with_levels` applies ONE
+                // named variant whose rungs came from `train`, reading `test`
+                // and `test_column` immutably, and nothing accumulates across
+                // iterations. Determinism holds for the same reason it holds
+                // above -- `scored` is a `Vec`, so `par_iter().map().collect()`
+                // is an INDEXED collect and `oos_all` arrives in the identical
+                // order. `crate::pbo` ranks that vector positionally against
+                // `in_sample_all`, so an order change here would silently
+                // mis-pair every candidate with another's out-of-sample score.
                 oos_all = scored
-                    .iter()
+                    .par_iter()
                     .map(|(mask, _, pick)| {
                         // EVERY CANDIDATE ON THE TEST BARS, WEARING THE EXIT IT
                         // CHOSE IN TRAINING.
