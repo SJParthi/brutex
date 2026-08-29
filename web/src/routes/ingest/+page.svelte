@@ -5296,24 +5296,39 @@
    *
    * @type {{ tone: string, word: string, detail: string, live: boolean }}
    */
+  /**
+   * `at` IS NEW AND IT IS WHAT THE LINE NOW DRAWS. The strip printed `detail`,
+   * which for the healthy case was
+   * `Zerodha · 29 Aug 2026, 14:19 · read 1` — a feed the strip above already
+   * names, a timestamp, and a count of THIS TAB'S OWN fetches. The last of
+   * those is a fact about the browser, not about the store, and no reader has
+   * ever needed it.
+   *
+   * So the healthy line is now the timestamp alone, under a green dot. `detail`
+   * is unchanged and moves to the `title`, because the four unhealthy states
+   * still need their full sentence — a read that failed, or one measured for a
+   * DIFFERENT feed, leaves the last good numbers on screen still looking
+   * current, and that is the whole reason this line exists.
+   */
   const provenance = $derived.by(() => {
+    const at = store.at === null ? '' : stampLabel(store.at);
     if (store.state === 'reading') {
-      return { tone: 'acc', word: 'reading', live: true,
+      return { tone: 'acc', word: 'reading', live: true, at,
                detail: 'asking /store.json for what is on disk right now' };
     }
     if (store.state === 'error') {
-      return { tone: 'down', word: 'unreadable', live: false,
+      return { tone: 'down', word: 'unreadable', live: false, at,
                detail: store.error ?? 'the read failed and gave no reason' };
     }
     if (store.state !== 'ready' || store.at === null) {
-      return { tone: '', word: 'not read', live: false,
+      return { tone: '', word: 'not read', live: false, at: '',
                detail: 'nothing has been counted yet — these are not numbers, they are placeholders' };
     }
     if (store.feed !== null && feeds.active !== null && store.feed !== feeds.active) {
-      return { tone: 'warn', word: 'stale', live: false,
+      return { tone: 'warn', word: 'stale', live: false, at,
                detail: `these numbers were measured for ${feedName(store.feed)}, and you are asking about ${feedName(feeds.active)}` };
     }
-    return { tone: 'up', word: 'measured', live: false,
+    return { tone: 'up', word: 'measured', live: false, at,
              detail: `${feedName(store.feed)} · ${stampLabel(store.at)} · read ${n(store.reads)}` };
   });
 
@@ -8081,7 +8096,20 @@
                        has no expired-futures series at all, so ticking both
                        sends it one — and that gap is exactly where a silent
                        drop lives. -->
-                  {#if fnoDeclined.length > 0 || fnoPartial.length > 0}
+                  <!-- ══ GATED ON AN F&O SEGMENT BEING TICKED, WHICH IT NEVER
+                       WAS ══
+                       This drew whenever any feed declined expired derivatives,
+                       whether or not the request ASKED for any. With Segments
+                       set to Spot — the default, and the only segment
+                       `/pull/spot` fills — the strip printed "Zerodha states no
+                       expired-derivative history" above a form that had not
+                       mentioned derivatives. A refusal about a segment nobody
+                       ticked is not a refusal, it is a fact about the vendor,
+                       and §4 asks for the first.
+                       It still draws in full the moment futures or options is
+                       ticked, which is when it becomes something the operator
+                       can act on. -->
+                  {#if segmentsReached.some((s) => s.key !== 'spot') && (fnoDeclined.length > 0 || fnoPartial.length > 0)}
                     <!-- `.rows` RATHER THAN AN INLINE `display:flex`, AND THE
                          MARKER IS WHY. `.note.warn` puts its `▲` on the
                          container's `::before`; making that container a COLUMN
@@ -8117,22 +8145,22 @@
                        typed, `narrowings` is empty, and this line does not draw.
                        When it does draw it is because the request differs from
                        the form, which §4 does not allow to be silent. -->
-                  {#if narrowings.length > 0}
-                    <span
-                      class="note warn wrap"
-                      title="Asked from the FROM DATE above; these request(s) start later because their feed answers no earlier. Each floor is declared in pull::vendor with the operator's own observation as its source, and the server clamps to the same floors again on arrival — this states the narrowing, it does not perform it alone."
-                    >
-                      <!-- THE CLAUSE WENT, THE CLAMP DID NOT. This read "asked
-                           from D; N request(s) start later because their feed
-                           answers no earlier — ..." and the middle of that is
-                           an explanation of the list that follows it. The list
-                           IS the fact: each feed, its rung, and the day it
-                           actually starts. `→` carries "asked from D, gets D2"
-                           in one glyph. The full sentence is on the `title`. -->
-                      {dayLabel(from)} →
-                      {narrowings.map((w) => `${w.feed} · ${w.rung} ${dayLabel(w.at)}`).join(', ')}
-                    </span>
-                  {/if}
+                  <!-- ══ THE SENTENCE IS GONE BECAUSE THE BAR BELOW IS THE SAME
+                       FACT, DRAWN ══
+                       It read "01 Jan 2015 → Zerodha · 1 minute 28 Aug 2016",
+                       directly above a lane whose track is dead-then-live and
+                       whose right-hand label is `28 Aug 2016`. One clamp, said
+                       twice, once in text and once as a proportion — and the
+                       proportion is the half a reader can act on, because
+                       "starts 28 Aug 2016" does not tell you that six and a
+                       half years of the window are empty and the picture does.
+                       §4 IS SATISFIED BY THE LANE, NOT ABANDONED. The rule is
+                       that a narrowing may not be silent; it is not that the
+                       narrowing must be prose. The lane draws only when a feed
+                       cannot answer for the whole window — the same condition
+                       this `{#if}` tested — and its `aria-label` states the
+                       percentage and the date in words for a reader who is not
+                       looking at it. -->
 
                   <!-- ══ THE WINDOW, DRAWN ══
                        The sentence above names a date; this names a PROPORTION,
@@ -8195,10 +8223,24 @@
                                 ? `${lane.feed}'s store holds ${n(lane.bars)} bar(s) across every instrument, timeframe and month it has — NOT only this window. What this window holds is the census below, and that is scoped to the feed the counts are stamped with.`
                                 : `${lane.feed}'s store reads cleanly and holds nothing at all. Nothing has been asked of this vendor yet.`}
                           >
+                            <!-- ══ THE COUNT IS GONE AND THE TWO REFUSALS STAY ══
+                                 `N held` was the whole store — every instrument,
+                                 timeframe and month the vendor has, NOT this
+                                 window — printed at the end of a lane that is
+                                 entirely about this window. Its own `title` had
+                                 to say "NOT only this window" in capitals to
+                                 stop it being read as one, which is a label
+                                 arguing with the line it sits on. The census
+                                 below answers "what does this window hold", and
+                                 it is scoped correctly.
+                                 `store unreadable` and `nothing held` are not
+                                 counts, they are STATES, and each calls for a
+                                 different action — a broken store no pull will
+                                 fix, against a vendor never asked. Those stay. -->
                             {lane.broken !== null
                               ? 'store unreadable'
                               : lane.bars > 0
-                                ? `${n(lane.bars)} held`
+                                ? ''
                                 : 'nothing held'}
                           </span>
                         </div>
@@ -8766,10 +8808,27 @@
              `aria-live="polite"` because this line changing IS the news: a read
              going stale or failing is exactly the thing a reader must not have
              to notice for themselves. -->
-        <div class="prov" aria-live="polite">
+        <!-- ══ ONE LINE, NOT A BAND ══
+             This was `● MEASURED  Zerodha · 29 Aug 2026, 14:19 · read 1` on its
+             own row above the partition. Three of those four things were
+             already on the page — the word restates the green dot, the feed is
+             the first control of the strip, and `read 1` is a counter of this
+             tab's own fetches, which is a fact about the browser rather than
+             about the store.
+             WHAT IT IS FOR SURVIVES INTACT, and it is the reason this line
+             cannot simply go: a table looks identical whether the store was
+             read a second ago, read for a DIFFERENT feed, read and failed, or
+             never read at all — and the dangerous one is the failure, because
+             it leaves the last good numbers on screen still looking current.
+             The DOT carries that (tone + `live`), the timestamp carries when,
+             and the word is drawn only when it is not `measured` — i.e. only
+             when something is wrong and the reader must be told in words. -->
+        <div class="prov" aria-live="polite" title={provenance.detail}>
           <i class="dot {provenance.tone}" class:live={provenance.live}></i>
-          <b class="pword">{provenance.word}</b>
-          <span class="pdetail">{provenance.detail}</span>
+          {#if provenance.tone !== 'up'}
+            <b class="pword">{provenance.word}</b>
+          {/if}
+          <span class="pdetail">{provenance.at}</span>
           <!-- `.pnote` IS GONE, AT THE OPERATOR'S INSTRUCTION. It printed
                "stored is measured · expected is arithmetic" on every load — a
                true sentence about how the NEXT panel's two columns differ,
@@ -8793,21 +8852,18 @@
                  scope it belongs to beside it. Nothing new is computed:
                  `verdictSettled` and `verdictTotal` are the same two values the
                  chip row already ends with. -->
-            <div class="state-head">
-              <span class="state-who">
-                <b class="state-feed">{feedName(feeds.active)}</b>
-                <span class="state-scope">{universeSpec.label} · {n(verdictTotal)} series in this window</span>
-              </span>
-              <span class="spacer"></span>
-              <span
-                class="state-num"
-                class:allset={verdictSettled === verdictTotal}
-                title="Settled means verified or out of reach — the two verdicts no pull would change."
-              >
-                <b>{n(verdictSettled)}</b><span class="state-of">/{n(verdictTotal)}</span>
-                <span class="state-lab">settled</span>
-              </span>
-            </div>
+            <!-- ══ MY OWN HEADLINE IS GONE, AND THE OPERATOR WAS RIGHT ══
+                 It read "Zerodha / NIFTY 50 · 50 series in this window /
+                 0 /50 SETTLED", and every part of it was already on screen:
+                 the feed is the first control of the strip, the universe is the
+                 second, and `0/50 settled` is the same fact as the `50 never
+                 pulled` chip directly beneath it. I added a band to fix a page
+                 that had too many bands.
+                 What the band was reaching for — somewhere for the eye to land
+                 — is now the CHIP ROW itself, one line down, which already
+                 counts every verdict and is the only thing here that was never
+                 a restatement. -->
+
             <div
               class="tallybar"
               role="img"
@@ -8883,9 +8939,14 @@
                  paragraph about product design, not about this store.
                  Both are on the line's own `title`, and the link still goes
                  where it went. -->
+            <!-- DOWN TO ONE CLAUSE AND A LINK. `instrument-month(s)` is the
+                 engine's unit, not a reader's — it means "one symbol for one
+                 calendar month", and a page that has to be read at a glance
+                 cannot spend a noun on it. The bar count is the fact anybody
+                 recognises, and `none in X` is the whole reason the table below
+                 says `never pulled`. -->
             <span>
-              Held elsewhere: <b>{n(feedHoldsElsewhere.barsTotal)}</b> bar(s),
-              <b>{n(feedHoldsElsewhere.cells)}</b> instrument-month(s), none in
+              <b>{n(feedHoldsElsewhere.barsTotal)}</b> bar(s) held, none in
               <b>{universeSpec.label}</b>.
               <a class="link" href="/db" data-sveltekit-reload>Open the store</a>
             </span>
@@ -11581,77 +11642,6 @@
     font-variant-numeric: tabular-nums;
     font-weight: var(--w-bold);
     color: var(--ink);
-  }
-  /* ---- the headline over the partition ----
-     THE ONE FIGURE THIS BAND WAS MISSING. Everything here was `--fs-micro`
-     under a 7px rule, so the answer to "where does this feed stand" was set at
-     the same size as the footnote saying how it was measured. A page needs
-     somewhere for the eye to land, and on a page whose job is "what does this
-     window still owe" that place is the settled fraction.
-
-     `--fs-lg` and NOT a display face: this is a figure to be read, not a
-     banner. The denominator and the word beside it stay small on purpose —
-     they are the units, and units at the same weight as the value is how a
-     number stops reading as a number. */
-  .state-head {
-    display: flex;
-    align-items: flex-end;
-    flex-wrap: wrap;
-    gap: var(--s2) var(--s4);
-    min-width: 0;
-  }
-  .state-who {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    min-width: 0;
-  }
-  .state-feed {
-    font-family: var(--mono);
-    font-size: var(--fs-md);
-    font-weight: var(--w-bold);
-    color: var(--ink-hi);
-    letter-spacing: -0.01em;
-  }
-  .state-scope {
-    font-size: var(--fs-micro);
-    color: var(--faint);
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .state-num {
-    display: flex;
-    align-items: baseline;
-    gap: 4px;
-    white-space: nowrap;
-    font-family: var(--num);
-    font-variant-numeric: tabular-nums;
-  }
-  .state-num b {
-    font-size: var(--fs-lg);
-    font-weight: var(--w-bold);
-    line-height: 1;
-    color: var(--warn);
-  }
-  /* NOTHING LEFT TO DO IS THE ONLY GREEN STATE, and it is the only one that
-     earns the up tone. A partly-settled window is not a partial success to be
-     congratulated; it is work outstanding, which is what `--warn` says. */
-  .state-num.allset b {
-    color: var(--up);
-  }
-  .state-of {
-    font-size: var(--fs-mini);
-    color: var(--faint);
-  }
-  .state-lab {
-    font-family: var(--sans);
-    font-size: var(--fs-micro);
-    color: var(--faint);
-    letter-spacing: var(--track-caps);
-    text-transform: uppercase;
-    margin-left: 2px;
   }
 
   /* ---- the reach lanes ----
