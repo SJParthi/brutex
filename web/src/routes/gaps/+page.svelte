@@ -87,7 +87,15 @@
    *   months: number,
    *   months_absent: number,
    *   truncated: boolean,
-   *   calendar: { first: string | null, last: string | null, stale: boolean },
+   *   calendar: {
+   *     first: string | null,
+   *     last: string | null,
+   *     days: number,
+   *     source: 'peers' | 'table',
+   *     stale: boolean,
+   *     covers_span: boolean,
+   *     voted_by: string[]
+   *   },
    *   month: MonthVerdict[]
    * }} Answer
    */
@@ -372,22 +380,36 @@
       </div>
     </div>
 
+    <p class="whence">
+      Measured against
+      {#if b.calendar?.source === 'peers'}
+        <b>{b.calendar.voted_by.length} peer reading{b.calendar.voted_by.length === 1 ? '' : 's'}</b>
+        — {b.calendar.voted_by.join(', ')} — agreed by union, covering
+        {b.calendar.first} to {b.calendar.last}. The series being audited is not among them: a
+        calendar derived from it would read every hole as the edge of a trading window and answer
+        <em>no losses</em> for any input.
+      {:else}
+        the <b>typed calendar table</b>, {b.calendar?.first} to {b.calendar?.last}. No other feed
+        or symbol in this store could vote, and deriving a calendar from the audited series itself
+        would make every hole invisible.
+      {/if}
+    </p>
+
     {#if b.calendar?.stale}
       <div class="refusal">
-        <span class="rlabel">The calendar has run out</span>
+        <span class="rlabel">The table has run out</span>
         <p>
-          <code>pull::calendar</code> knows {b.calendar.first} to
-          <b>{b.calendar.last}</b>, and today is past it. Every day after that is
-          <b>unmeasured</b> — not a loss and not a clean bill, because this build has no holiday
-          list for it. Those days add nothing to <em>owed</em> while their bars still count as
-          <em>held</em>, which is why <em>held</em> can exceed <em>owed</em> above.
+          The typed calendar knows {b.calendar.first} to <b>{b.calendar.last}</b>, and today is past
+          it. Every day after that is <b>unmeasured</b> — not a loss and not a clean bill, because
+          this build has no holiday list for it. Those days add nothing to <em>owed</em> while their
+          bars still count as <em>held</em>, which is why <em>held</em> can exceed <em>owed</em>
+          above.
         </p>
         <p class="rhint">
-          {fmt(b.unmeasured_minutes)} minutes in this answer are unclaimed for that reason. Nothing
-          else in the workspace notices this: <code>LAST_DAY</code> appears outside
-          <code>pull::calendar</code> exactly once, in that module's own test. Extending the table
-          is an exchange fact and belongs in <code>docs/00-charter.md</code> — this build will not
-          invent a trading day.
+          {fmt(b.unmeasured_minutes)} minutes in this answer are unclaimed for that reason. Storing
+          a second feed's copy of any symbol on this exchange would replace the table with a peer
+          reading that widens by itself. Extending the table instead is an exchange fact and belongs
+          in <code>docs/00-charter.md</code> — this build will not invent a trading day.
         </p>
       </div>
     {:else if b.unmeasured_minutes > 0}
@@ -568,6 +590,15 @@
   .refusal .rhint {
     font-size: var(--fs-xs, 11px);
     color: var(--n8);
+  }
+  .whence {
+    font-size: var(--fs-xs, 11px);
+    color: var(--n8);
+    line-height: 1.6;
+    max-width: 78ch;
+    margin: 0 0 var(--s4);
+    padding-left: var(--s3);
+    border-left: 2px solid var(--n3);
   }
   .census {
     display: flex;

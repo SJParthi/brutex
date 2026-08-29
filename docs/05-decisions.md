@@ -26691,3 +26691,57 @@ Zerodha both hold 2025-10 complete, 7,560 of 7,560.** That is exactly the case
 `Reason::VendorHole` documents: it cannot be repaired from the same vendor,
 because a re-run returns the same nothing, and the route to zero is another
 feed's copy of the same minute.
+
+### D-0365
+
+**The audit's denominator may not come from the series being audited, and the
+obvious fix for D-0364 did exactly that.**
+
+D-0364 reported the typed calendar's staleness honestly and left the denominator
+alone. The next step looked obvious: `api::calendar_of` derives a `Calendar`
+from the store's own rungs and widens by itself, so point `/gaps.json` at it and
+the staleness disappears. That was wired in, and **a test refused it inside one
+run.**
+
+`calendar_of` reads each session's WINDOWS off contiguous runs of minute bars.
+So a series audited against its own derivation cannot have a hole: the hole is
+the boundary between two runs, and a boundary is not a loss. Measured, with one
+minute deleted mid-session from an otherwise complete month:
+
+```
+expected 8,249   held 8,249   lost_minutes 0
+{"day":19738,"from":556,"to":556,"minutes":1,"reason":"outside-window"}
+```
+
+The missing minute was reported as a fact about the exchange. **A denominator
+that cannot see a hole is not a denominator**, and this one answers "no losses"
+for every possible input.
+
+`calendar_of::agree`'s own doc had already named it: *"A shorter reading is that
+instrument's hole, not a shorter exchange day — the opposite rule would let one
+vendor's missing morning shorten the calendar for everything else, which is how
+an expected-bar count becomes quietly too small and a real loss stops being
+reported."* The module's `derive` is sound for the job it was written for —
+answering what the exchange did — and unsound as a yardstick for the very series
+it was derived from.
+
+**What ships: peers, agreed by union, with the audited series excluded.**
+`peer_calendar` walks the census across every feed, derives a calendar for each
+spot series on the same exchange and segment, **skips the one being audited**,
+and `agree`s the rest. A day is a session if ANY reading saw one and the session
+taken is the LONGEST any reading measured, so one peer's own hole cannot shorten
+the day for everybody, and one honest peer settles what the exchange did.
+
+**No peers means the TABLE, and the answer says so.** A store holding one feed's
+copy of one symbol has nothing independent to vote. `classify_against` falls back
+to `pull::calendar`'s typed table and `"source":"table"` names it, with
+`"voted_by":[]` beside it. Substituting the series' own derivation there would be
+the `CLAUDE.md` §4 fallback that hides a failure: it would answer, confidently,
+zero. **A stale-but-independent calendar beats a fresh-but-circular one**, and
+the test pins the case that proves it — a minute deleted at a session's OPEN,
+which the table catches and the derivation reports as a later open.
+
+**Every answer names what decided it**: `source`, `first`, `last`, `days`,
+`covers_span`, `stale` (meaningful only when the table answered) and `voted_by`.
+A number an operator cannot attribute to a calendar is a number they cannot act
+on, which is the whole reason the first version of this route was hard to trust.

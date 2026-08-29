@@ -2335,20 +2335,25 @@ async fn gaps_json(
         ));
     }
 
-    let mut months = Vec::new();
-    let mut walked = 0_usize;
-    let mut truncated_range = false;
+    // THE SPAN, WALKED ONCE, AND THE CALENDAR DERIVED FROM IT ONCE.
+    //
+    // Collected before the audit rather than during it, because
+    // `calendar_of::derive` reads the whole span's daily rung to decide which
+    // days traded — asking it per month would re-derive the same answer once
+    // per month and, worse, would give each month a calendar built from its own
+    // data alone.
+    let mut span = Vec::new();
     let mut cursor = asked.month;
+    let mut truncated_range = false;
     loop {
-        if walked >= MAX_AUDIT_MONTHS {
+        if span.len() >= MAX_AUDIT_MONTHS {
             // NEVER A SILENT `take(N)`. A ceiling that stopped quietly would
             // report the months it never reached as no news, which is the
             // direction that reads as health.
             truncated_range = true;
             break;
         }
-        months.push(audit_one(&site, &asked, cursor));
-        walked = walked.saturating_add(1);
+        span.push(cursor);
         if cursor >= last_month {
             break;
         }
@@ -2358,6 +2363,60 @@ async fn gaps_json(
         cursor = next;
     }
 
+    // THE CALENDAR MUST NOT COME FROM THE SERIES BEING AUDITED, AND THE FIRST
+    // DRAFT OF THIS ROUTE TOOK IT FROM EXACTLY THERE.
+    //
+    // The problem being solved is real: `pull::calendar`'s typed table ends at
+    // `LAST_DAY = 2026-08-21`, and on 2026-08-29 this route answered
+    // `expected 5,625, held 7,500, lost 0` for NIFTY at one minute in 2026-08 —
+    // twenty trading days of bars against fifteen the table could vouch for.
+    // Every day past the table falls to `Unmeasured`.
+    //
+    // The obvious repair was `calendar_of::cached` for THIS series, which never
+    // goes stale. **It is also completely circular, and a test proved it in one
+    // run.** `calendar_of` derives each session's LENGTH from the first and
+    // last minute bar and its WINDOWS from contiguous runs of them, so a
+    // missing minute does not read as a hole — it reads as the edge of a
+    // window. Measured: with one minute deleted mid-session, the answer was
+    // `expected 8,249, held 8,249, lost 0` and the gap list carried
+    // `{"day":19738,"from":556,"to":556,"reason":"outside-window"}`. The hole
+    // became a fact about the exchange.
+    //
+    // `calendar_of::agree`'s own doc names this: *"A shorter reading is that
+    // instrument's hole, not a shorter exchange day — the opposite rule would
+    // let one vendor's missing morning shorten the calendar for everything
+    // else, which is how an expected-bar count becomes quietly too small and a
+    // real loss stops being reported."*
+    //
+    // So the readings are the PEERS — every other feed's copy of a spot series
+    // on this exchange and segment — agreed by union, and the audited series is
+    // excluded from its own denominator. A bar is proof the exchange traded;
+    // silence is not proof that it did not.
+    let peers = peer_calendar(&site, &asked);
+    let months: Vec<AuditedMonth> = span
+        .iter()
+        .map(|month| audit_one(&site, &asked, *month, peers.calendar.as_ref()))
+        .collect();
+
+    (
+        axum::http::StatusCode::OK,
+        json(),
+        gaps_body(&months, &span, &peers, truncated_range),
+    )
+}
+
+/// The audit's whole answer, from the months it walked.
+///
+/// Split from the handler so the route stays inside the workspace's 100-line
+/// ceiling, and because rendering has nothing to do with deciding: everything
+/// here is a fold over `months` or a fact about the calendar that produced
+/// them, and none of it opens a file.
+fn gaps_body(
+    months: &[AuditedMonth],
+    span: &[store::path::YearMonth],
+    peers: &PeerCalendar,
+    truncated_range: bool,
+) -> String {
     // THE ROLL-UP IS A SUM OF THE MONTHS, not a second computation over them. A
     // total that could disagree with the rows below it is a total nobody can
     // act on.
@@ -2373,50 +2432,170 @@ async fn gaps_json(
 
     let unmeasured: u64 = months.iter().map(|m| u64::from(m.unmeasured)).sum();
 
-    // THE CALENDAR'S OWN COVERAGE, IN THE ANSWER, BECAUSE IT BOUNDS EVERY
-    // NUMBER ABOVE IT.
+    // THE CALENDAR THAT DECIDED THESE NUMBERS, NAMED IN THE ANSWER.
     //
-    // `pull::calendar` knows `FIRST_DAY..=LAST_DAY` and nothing outside it. A
-    // day past the table is `Unmeasured`: it adds nothing to `expected`, it is
-    // not a loss, and no claim is made either way — which is right, and which
-    // makes `held` LARGER than `expected` for any month running past the end.
+    // `expected` counts only days the calendar can vouch for. A day it cannot
+    // is `Unmeasured`: it adds nothing to `expected`, it is not a loss, and no
+    // claim is made either way — which is right, and which makes `held` LARGER
+    // than `expected` for any span running past the calendar's edge.
     //
-    // Measured on the operator's store the day this shipped: NIFTY at one
-    // minute for 2026-08 answered `expected 5,625, held 7,500, lost 0`. Twenty
-    // trading days of bars against fifteen the calendar could vouch for,
-    // because `LAST_DAY` is 2026-08-21 and the request was made on 2026-08-29.
     // Read without this block that pair is an arithmetic bug, and an operator
-    // right to distrust it has no way to find out that it is not one.
+    // right to distrust it has no way to find out that it is not one. Measured
+    // before the derived calendar was wired in: NIFTY at one minute for 2026-08
+    // answered `expected 5,625, held 7,500, lost 0` — twenty trading days of
+    // bars against fifteen the TABLE could vouch for, because
+    // `pull::calendar::LAST_DAY` is 2026-08-21 and the request was made on
+    // 2026-08-29.
     //
-    // **Nothing anywhere else notices the table expiring.** Measured:
-    // `LAST_DAY` appears outside `crates/pull/src/calendar.rs` exactly once,
-    // in that module's own test. The calendar went stale and every surface
-    // stayed silent, because until `/gaps.json` nothing called `gaps` at all.
-    // `CLAUDE.md` §4 bans a fallback that hides a failure — degrade loudly and
-    // name the reason — and reporting `stale: true` beside the bound is that
-    // naming. Extending the table is NOT done here and must not be: a trading
-    // day this build invented would be the §3 rule 1 invention, and the
-    // holiday list is an exchange fact that belongs in `docs/00-charter.md`.
-    let last_known =
-        pull::session::Day::from_days(u32::try_from(pull::calendar::LAST_DAY).unwrap_or(u32::MAX));
+    // `covers_span` is the honest statement, and it is source-independent:
+    // whichever calendar answered, what an operator needs to know is whether
+    // the span they ASKED for is inside what can be vouched for.
+    //
+    // The bounds are the ones actually used. With peers, that is the union of
+    // their spans; without, the typed table's `FIRST_DAY..=LAST_DAY`, which is
+    // where `stale` still means something and is reported.
+    let (first_bound, last_bound, source) = peers.calendar.as_ref().map_or_else(
+        || (pull::calendar::FIRST_DAY, pull::calendar::LAST_DAY, "table"),
+        |cal| (cal.first_day(), cal.last_day(), "peers"),
+    );
     let first_known =
-        pull::session::Day::from_days(u32::try_from(pull::calendar::FIRST_DAY).unwrap_or(0));
-    let stale = ingest::today_ist()
-        .is_ok_and(|today| i64::from(today.days_from_epoch()) > pull::calendar::LAST_DAY);
+        pull::session::Day::from_days(u32::try_from(first_bound.max(0)).unwrap_or(u32::MAX));
+    let last_known =
+        pull::session::Day::from_days(u32::try_from(last_bound.max(0)).unwrap_or(u32::MAX));
     let day_text = |day: Result<pull::session::Day, _>| {
         day.map_or_else(
             |_| "null".to_owned(),
             |d| format!(r#""{:04}-{:02}-{:02}""#, d.year(), d.month(), d.day()),
         )
     };
+    // THE TABLE'S STALENESS IS STILL REPORTED, because it is still the fallback
+    // and it is still a maintenance fact. It is `false` when peers answered:
+    // the flag is about whichever calendar bounded this answer, not about a
+    // constant nobody consulted.
+    let stale = source == "table"
+        && ingest::today_ist()
+            .is_ok_and(|today| i64::from(today.days_from_epoch()) > pull::calendar::LAST_DAY);
+    // AN ABSENT OR SHORT CALENDAR IS ITS OWN ANSWER, NOT A ZERO. A store with
+    // one feed's copy of one symbol has nothing independent to vote, so every
+    // minute falls to `Unmeasured` and `expected` is 0 beside a `held` of
+    // hundreds of thousands. That is not a store owing nothing; it is a question
+    // this build cannot settle, and it says so rather than reporting a clean
+    // sheet an operator would read as health.
+    let calendar_days = peers
+        .calendar
+        .as_ref()
+        .map_or(0, pull::calendar::Calendar::span);
+    let covers_span = span.first().is_some_and(|m| {
+        pull::session::Day::new(m.year(), m.month(), 1)
+            .is_ok_and(|d| i64::from(d.days_from_epoch()) >= first_bound)
+    }) && span.last().is_some_and(|m| {
+        pull::session::Day::new(m.year(), m.month(), 1)
+            .is_ok_and(|d| i64::from(d.end_of_month().days_from_epoch()) <= last_bound)
+    });
+    let voted = peers
+        .from
+        .iter()
+        .map(|name| render::json_string(name))
+        .collect::<Vec<_>>()
+        .join(",");
 
-    let body = format!(
-        r#"{{"expected":{expected},"held":{held},"lost_minutes":{lost},"unmeasured_minutes":{unmeasured},"months":{},"months_absent":{absent_files},"truncated":{truncated_range},"calendar":{{"first":{},"last":{},"stale":{stale}}},"month":[{rows}]}}"#,
+    format!(
+        r#"{{"expected":{expected},"held":{held},"lost_minutes":{lost},"unmeasured_minutes":{unmeasured},"months":{},"months_absent":{absent_files},"truncated":{truncated_range},"calendar":{{"first":{},"last":{},"days":{calendar_days},"source":"{source}","stale":{stale},"covers_span":{covers_span},"voted_by":[{voted}]}},"month":[{rows}]}}"#,
         months.len(),
         day_text(first_known),
         day_text(last_known),
-    );
-    (axum::http::StatusCode::OK, json(), body)
+    )
+}
+
+/// A calendar for auditing one series, built from everything EXCEPT that
+/// series.
+///
+/// # Why the audited series may not vote
+///
+/// `calendar_of` reads a session's windows off contiguous runs of minute bars,
+/// so a series with a hole derives a calendar in which that hole is a window
+/// boundary. Auditing a series against its own derivation therefore answers
+/// "no losses" for every possible input — measured, in one test run: one minute
+/// deleted mid-session produced `expected 8,249, held 8,249, lost 0` with the
+/// missing minute reported as `outside-window`.
+///
+/// `agree` is a UNION — a day is a session if ANY reading saw one, and the
+/// session taken is the LONGEST any reading measured — so a peer's own hole
+/// cannot shorten the day for everybody, and one honest peer is enough to
+/// establish what the exchange did.
+///
+/// # When there are no peers
+///
+/// A store holding one feed's copy of one symbol has nothing independent to
+/// compare against. That returns `None`, `gaps::classify_against` falls back to
+/// the typed table, and `source` says `table` so the answer names what decided
+/// it. Substituting the series' own derivation there would be the §4 fallback
+/// that hides a failure: it would answer, confidently, zero.
+struct PeerCalendar {
+    /// The agreed calendar, or `None` when nothing independent could vote.
+    calendar: Option<pull::calendar::Calendar>,
+    /// The `feed:symbol` readings that voted, sorted, for the answer to name.
+    from: Vec<String>,
+}
+
+/// Build a [`PeerCalendar`] for the series `asked` addresses.
+fn peer_calendar(site: &Loaded, asked: &Addressed) -> PeerCalendar {
+    // A FRESH CENSUS, for the reason D-0318 records: a list captured before the
+    // store had anything in it reports a complete store as short.
+    let fresh = census::read_all(&site.store_root);
+    let mut readings: Vec<(String, pull::calendar::Calendar)> = Vec::new();
+    for vendor_census in &fresh {
+        let by_series =
+            spot_months_by_identity(&census::held_entries(std::slice::from_ref(vendor_census)));
+        let mut keys: Vec<_> = by_series.keys().copied().collect();
+        // SORTED SO THE ANSWER IS REPRODUCIBLE. A `HashMap`'s iteration order
+        // varies per process and `from` ships the names that voted.
+        keys.sort_unstable();
+        for key in keys {
+            let (exchange, segment, symbol) = key;
+            // THE AUDITED SERIES DOES NOT VOTE ON ITSELF. This one comparison
+            // is the whole difference between a denominator and a tautology.
+            if vendor_census.vendor == asked.vendor
+                && symbol.as_str() == asked.symbol
+                && exchange.as_str() == asked.exchange
+                && segment.as_str() == asked.segment
+            {
+                continue;
+            }
+            let months: Vec<store::path::YearMonth> =
+                by_series.get(&key).cloned().unwrap_or_default();
+            let calendar = crate::calendar_of::cached(
+                &site.calendars,
+                &site.store_root,
+                vendor_census.vendor,
+                exchange.as_str(),
+                segment.as_str(),
+                symbol.as_str(),
+                &months,
+            );
+            // A SERIES THIS FEED HOLDS NOTHING FOR IS NOT A VOTE FOR ANYTHING —
+            // counting an empty calendar as agreement would let an absence
+            // close the exchange.
+            if calendar.sessions() > 0 {
+                readings.push((
+                    format!("{}:{}", vendor_census.vendor.as_str(), symbol.as_str()),
+                    calendar,
+                ));
+            }
+        }
+    }
+    if readings.is_empty() {
+        return PeerCalendar {
+            calendar: None,
+            from: Vec::new(),
+        };
+    }
+    let (agreed, _clashes) = crate::calendar_of::agree(&readings);
+    let from: Vec<String> = readings.into_iter().map(|(name, _)| name).collect();
+    PeerCalendar {
+        calendar: Some(agreed),
+        from,
+    }
 }
 
 /// How many months one audit request will walk before it stops and says so.
@@ -2504,7 +2683,12 @@ impl AuditedMonth {
 /// this agree with itself and disagree with the store: a month whose first four
 /// trading days never landed would report a clean interior and a perfect score,
 /// because the missing days would fall outside a range they themselves defined.
-fn audit_one(site: &Loaded, asked: &Addressed, month: store::path::YearMonth) -> AuditedMonth {
+fn audit_one(
+    site: &Loaded,
+    asked: &Addressed,
+    month: store::path::YearMonth,
+    calendar: Option<&pull::calendar::Calendar>,
+) -> AuditedMonth {
     let empty = |absent_file: Option<String>| AuditedMonth {
         month,
         expected: 0,
@@ -2536,7 +2720,7 @@ fn audit_one(site: &Loaded, asked: &Addressed, month: store::path::YearMonth) ->
     let n = usize::try_from(file.header().n_valid).unwrap_or(usize::MAX);
     let (rows, faults) = bars::page(&file, 0, n);
     let stamps: Vec<i64> = rows.iter().map(|bar| bar.ts_micros).collect();
-    let ledger = pull::gaps::classify(&stamps, first, last);
+    let ledger = pull::gaps::classify_against(&stamps, first, last, calendar);
 
     // RUNS, NOT MINUTES, and the reason travels with each one. 1,176 of 1,204
     // measured absences were four contiguous events; a per-minute list is the
@@ -18752,14 +18936,14 @@ mod tests {
             "January 2024 owes at least three minutes, or there is no middle to remove"
         );
 
-        let path = |m| {
+        let path = |m, tf| {
             store::path::StorePath::new(store::path::PathParts {
                 vendor: Vendor::Dhan,
                 exchange: "NSE",
                 segment: "INDEX",
                 symbol: "NIFTY",
                 contract: None,
-                timeframe: store::path::Timeframe::MINUTE_1,
+                timeframe: tf,
                 month: m,
                 file: store::path::FileKind::Bars,
             })
@@ -18780,11 +18964,43 @@ mod tests {
             open_interest: i64::MIN,
         };
 
-        let mut file =
-            store::file::BarFile::open_or_create(&root, path(month), symbol_id).expect("a file");
+        /* THE DAILY RUNG IS THE CALENDAR, so the fixture writes it.
+        `calendar_of` derives which days traded from `1day` and measures the
+        minute rung against it — deliberately, because a minute rung
+        validating itself would make a failed pull read as a holiday. A
+        fixture with minute bars alone therefore yields NO calendar, every
+        minute falls to `Unmeasured`, and the route answers `expected 0`
+        beside a `held` of thousands. That is the honest answer to a question
+        this build cannot settle, and it is not the case under test here. */
+        let daily = |root: &std::path::Path, days: &[i64]| {
+            let mut file = store::file::BarFile::open_or_create(
+                root,
+                path(month, store::path::Timeframe::DAY_1),
+                symbol_id,
+            )
+            .expect("a daily file");
+            let rows: Vec<store::format::Bar> = days
+                .iter()
+                .map(|d| bar((*d, pull::calendar::OPEN_MINUTE)))
+                .collect();
+            file.append(&rows).expect("one daily bar per open day");
+        };
+        let open_days: Vec<i64> = {
+            let mut seen: Vec<i64> = owed.iter().map(|(d, _)| *d).collect();
+            seen.dedup();
+            seen
+        };
+
+        let mut file = store::file::BarFile::open_or_create(
+            &root,
+            path(month, store::path::Timeframe::MINUTE_1),
+            symbol_id,
+        )
+        .expect("a file");
         let whole: Vec<store::format::Bar> = owed.iter().copied().map(bar).collect();
         file.append(&whole).expect("every minute the month owes");
         drop(file);
+        daily(&root, &open_days);
 
         let site = std::sync::Arc::new(Site::serving(&masters("gapsaudit", None, None), &root));
         let audit = |site: std::sync::Arc<Site>| {
@@ -18821,9 +19037,36 @@ mod tests {
         // committed — the append-only rule that makes a skipped chunk
         // permanently unwritable, and it applies to a test's fixture too.
         let holed_root = store_root("gapsaudithole");
-        let mut holed = store::file::BarFile::open_or_create(&holed_root, path(month), symbol_id)
-            .expect("a file");
-        let cut = owed.len() / 2;
+        let mut holed = store::file::BarFile::open_or_create(
+            &holed_root,
+            path(month, store::path::Timeframe::MINUTE_1),
+            symbol_id,
+        )
+        .expect("a file");
+        /* AN INTERIOR MINUTE, AND THE FIRST DRAFT TOOK AN EDGE ONE — which
+        found nothing, and the finding is the reason this comment is long.
+
+        `calendar_of` derives which DAYS traded from the daily rung, and its
+        header is right that this is not circular. But it derives each
+        session's LENGTH from "the first and last minute bar", and that half
+        IS circular: delete the bar at 09:15 and the derived session simply
+        starts at 09:16. Measured — `owed.len()/2` landed on the first minute
+        of day 19738, the route answered `expected 8,249, held 8,249, lost 0`
+        and the gap run for that day read `"to":555` where every other day
+        read `554`. The session shrank to fit the hole.
+
+        So this picks a minute with a present neighbour on BOTH sides within
+        its own day, which is the case the derivation can see. The blind spot
+        is asserted below rather than left for someone to trip over, and it
+        is recorded in `docs/06-limits.md`. */
+        let interior = |i: usize| {
+            let (day, _) = owed[i];
+            owed.get(i.wrapping_sub(1)).is_some_and(|(d, _)| *d == day)
+                && owed.get(i + 1).is_some_and(|(d, _)| *d == day)
+        };
+        let cut = (1..owed.len().saturating_sub(1))
+            .find(|i| *i >= owed.len() / 2 && interior(*i))
+            .expect("a minute with a neighbour either side inside one day");
         let (hole_day, hole_minute) = owed.get(cut).copied().expect("a middle minute");
         let rows: Vec<store::format::Bar> = owed
             .iter()
@@ -18833,6 +19076,12 @@ mod tests {
             .collect();
         holed.append(&rows).expect("the month with one minute out");
         drop(holed);
+        /* THE SAME DAILY RUNG, so the derived calendar is IDENTICAL across both
+        stores. That is what makes the comparison mean anything: `expected`
+        has to be the fixed point a hole is measured against, and a
+        denominator derived separately per store would move with the very
+        data under test. */
+        daily(&holed_root, &open_days);
 
         let holed_site = std::sync::Arc::new(Site::serving(
             &masters("gapsaudithole", None, None),
@@ -18863,6 +19112,230 @@ mod tests {
                 && holed_body.contains(&format!(r#""expected":{}"#, owed.len())),
             "the calendar owes the same either way — that is the fixed point a \
              hole is measured against: {whole_body} / {holed_body}"
+        );
+        // ONE FEED, ONE SYMBOL — SO NOTHING INDEPENDENT CAN VOTE, and the
+        // answer says the TABLE decided it rather than quietly deriving a
+        // denominator from the very bars under test.
+        assert!(
+            whole_body.contains(r#""source":"table""#) && whole_body.contains(r#""voted_by":[]"#),
+            "the answer NAMES the calendar that decided it, and with no peer to \
+             vote that is the typed table: {whole_body}"
+        );
+
+        // ─── AND THE TABLE SEES AN EDGE HOLE, WHICH IS WHY IT IS THE FALLBACK
+        //
+        // This block first asserted the OPPOSITE, against a single-series
+        // derived calendar: `calendar_of` reads a session's windows off
+        // contiguous runs of minute bars, so deleting 09:15 moved the derived
+        // open to 09:16 and the loss vanished. Measured, `expected 8,249,
+        // held 8,249, lost 0`.
+        //
+        // A denominator that cannot see a hole is not a denominator. The table
+        // knows 09:15–15:29 independently of what the store holds, so it
+        // catches the edge case the derivation cannot — which is the whole
+        // reason a stale-but-independent calendar beats a fresh-but-circular
+        // one, and why peers are agreed by UNION when they are available.
+        let edge_root = store_root("gapsaudityedge");
+        let mut edge = store::file::BarFile::open_or_create(
+            &edge_root,
+            path(month, store::path::Timeframe::MINUTE_1),
+            symbol_id,
+        )
+        .expect("a file");
+        let (edge_day, edge_minute) = owed.first().copied().expect("a first minute");
+        let edge_rows: Vec<store::format::Bar> = owed
+            .iter()
+            .copied()
+            .filter(|at| *at != (edge_day, edge_minute))
+            .map(bar)
+            .collect();
+        edge.append(&edge_rows)
+            .expect("the month less its first minute");
+        drop(edge);
+        daily(&edge_root, &open_days);
+        let edge_site = std::sync::Arc::new(Site::serving(
+            &masters("gapsaudityedge", None, None),
+            &edge_root,
+        ));
+        let (_, _, edge_body) = audit(edge_site).await;
+        assert!(
+            edge_body.contains(r#""lost_minutes":1"#),
+            "the first minute of the month's first session is missing and the \
+             table CALLS it — the case a self-derived calendar reported as a \
+             clean sheet: {edge_body}"
+        );
+        assert!(
+            edge_body.contains(&format!(
+                r#""day":{edge_day},"from":{edge_minute},"to":{edge_minute},"minutes":1,"reason":"vendor-hole""#
+            )),
+            "naming the exact minute, at the session's own open: {edge_body}"
+        );
+    }
+
+    /// **A PEER VOTES, AND ITS HOLE DOES NOT SHORTEN THE DAY FOR THE SERIES
+    /// UNDER AUDIT.**
+    ///
+    /// This is the assertion `peer_calendar` exists for, and the one that
+    /// separates a denominator from a tautology.
+    ///
+    /// `calendar_of` reads a session's windows off contiguous runs of minute
+    /// bars, so a series audited against its OWN derivation answers "no losses"
+    /// for every possible input — measured, in one run: a minute deleted
+    /// mid-session gave `expected 8,249, held 8,249, lost 0` and reported the
+    /// missing minute as `outside-window`. The hole became a fact about the
+    /// exchange.
+    ///
+    /// `agree` is a union — a day is a session if ANY reading saw one, and the
+    /// session taken is the LONGEST any reading measured — so here Groww holds
+    /// a full session, Dhan is missing a minute inside it, and Dhan's audit
+    /// must still call that minute a loss. The opposite rule is the one
+    /// `calendar_of::agree`'s own doc warns about: *"how an expected-bar count
+    /// becomes quietly too small and a real loss stops being reported."*
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "two feeds' stores built bar by bar and census row by census \
+                  row, and the second feed is the point: a fixture with one \
+                  cannot tell a peer-agreed denominator from a self-derived one, \
+                  which is the exact substitution this test exists to refuse."
+    )]
+    async fn a_peers_reading_is_the_denominator_and_the_audited_series_does_not_vote() {
+        let root = store_root("gapspeer");
+        let month = store::path::YearMonth::new(2024, 1).expect("a legal month");
+        let first = pull::session::Day::new(2024, 1, 1).expect("a legal day");
+        // ONE OPEN DAY IS ENOUGH, and a narrow window keeps the fixture small:
+        // what is under test is whose reading decides, not how long a session
+        // is. `Observed`'s runs come from the bars, so the peer's window is
+        // whatever it stores.
+        let day = (first.days_from_epoch()..=first.end_of_month().days_from_epoch())
+            .map(i64::from)
+            .find(|d| {
+                matches!(
+                    pull::calendar::kind_of(*d),
+                    pull::calendar::DayKind::Open(_)
+                )
+            })
+            .expect("January 2024 has an open day");
+        let at =
+            |day: i64, minute: u16| (day * 86_400 - 19_800 + i64::from(minute) * 60) * 1_000_000;
+        let bar = |d: i64, m: u16| store::format::Bar {
+            ts_micros: at(d, m),
+            open: 100,
+            high: 110,
+            low: 90,
+            close: 105,
+            volume: 1,
+            open_interest: i64::MIN,
+        };
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the id is the cross-check `open` folds; any 32 bits serve"
+        )]
+        let symbol_id = brutex_core::universe::fnv1a("NIFTY") as u32;
+        /* THE BARS AND THE CENSUS ROW TOGETHER, because `peer_calendar` reads
+        the CENSUS to learn which series exist — walking the tree instead
+        would be the scan `CLAUDE.md` §3 rule 4 refuses. A fixture that wrote
+        only bar files left the census empty, `peer_calendar` found no
+        readings at all, and the route fell back to the table: measured, the
+        first draft of this test asserted `source: peers` and got `table`. */
+        let write = |vendor, tf, rows: &[store::format::Bar]| {
+            let path = store::path::StorePath::new(store::path::PathParts {
+                vendor,
+                exchange: "NSE",
+                segment: "INDEX",
+                symbol: "NIFTY",
+                contract: None,
+                timeframe: tf,
+                month,
+                file: store::path::FileKind::Bars,
+            })
+            .expect("a legal path");
+            let mut file =
+                store::file::BarFile::open_or_create(&root, path, symbol_id).expect("a file");
+            file.append(rows).expect("bars");
+            drop(file);
+            let key = pull::manifest::EntryKey {
+                contract: None,
+                exchange: brutex_core::instrument::Exchange::Nse,
+                segment: brutex_core::instrument::Segment::Index,
+                symbol: brutex_core::symbol::Symbol::new("NIFTY").expect("a legal symbol"),
+                timeframe: tf,
+                month,
+            };
+            let held = pull::manifest::Held::new(
+                pull::manifest::Entry {
+                    key,
+                    rows: rows.len() as u64,
+                    first_ts_micros: rows.first().map_or(0, |b| b.ts_micros),
+                    last_ts_micros: rows.last().map_or(0, |b| b.ts_micros),
+                },
+                pull::manifest::Closes::UNKNOWN,
+            );
+            assert_eq!(
+                pull::ingest::record_held(&root, vendor, std::slice::from_ref(&held)),
+                None,
+                "the census records what was written, or says why not"
+            );
+        };
+
+        // THE FULL SESSION THE TABLE AGREES WITH, so the fixture is not making
+        // a claim about the exchange that the rest of this build would dispute.
+        let open = pull::calendar::OPEN_MINUTE;
+        let close = pull::calendar::LAST_MINUTE;
+        let whole: Vec<store::format::Bar> = (open..=close).map(|m| bar(day, m)).collect();
+        // The peer: complete, and a daily bar so its calendar has a day at all.
+        write(Vendor::Groww, store::path::Timeframe::MINUTE_1, &whole);
+        write(
+            Vendor::Groww,
+            store::path::Timeframe::DAY_1,
+            &[bar(day, open)],
+        );
+        // The series under audit: one minute short, mid-session.
+        let hole = open + 10;
+        let holed: Vec<store::format::Bar> = (open..=close)
+            .filter(|m| *m != hole)
+            .map(|m| bar(day, m))
+            .collect();
+        write(Vendor::Dhan, store::path::Timeframe::MINUTE_1, &holed);
+        write(
+            Vendor::Dhan,
+            store::path::Timeframe::DAY_1,
+            &[bar(day, open)],
+        );
+
+        let site = std::sync::Arc::new(Site::serving(&masters("gapspeer", None, None), &root));
+        let uri: axum::http::Uri = "/gaps.json?feed=dhan&exchange=NSE&segment=INDEX\
+             &symbol=NIFTY&timeframe=1min&month=2024-01"
+            .parse()
+            .expect("a uri");
+        let (code, _, body) = gaps_json(axum::extract::State(site), uri).await;
+
+        assert_eq!(code, axum::http::StatusCode::OK, "{body}");
+        assert!(
+            body.contains(r#""source":"peers""#),
+            "a peer exists, so the denominator is its reading and the answer \
+             says so: {body}"
+        );
+        assert!(
+            body.contains(r#""groww:NIFTY""#),
+            "and NAMES which reading voted, so the number can be traced: {body}"
+        );
+        assert!(
+            !body.contains(r#""dhan:NIFTY""#),
+            "while the series under audit is NOT among its own voters — that \
+             one exclusion is the whole difference between a denominator and a \
+             tautology: {body}"
+        );
+        assert!(
+            body.contains(r#""lost_minutes":1"#),
+            "and the minute Dhan is missing is a LOSS, not a shorter exchange \
+             day, because agreement takes the LONGEST session anyone saw: {body}"
+        );
+        assert!(
+            body.contains(&format!(
+                r#""day":{day},"from":{hole},"to":{hole},"minutes":1,"reason":"vendor-hole""#
+            )),
+            "named to the minute: {body}"
         );
     }
 
@@ -18995,14 +19468,35 @@ mod tests {
         // one. Asserted rather than left to a reader, because NOTHING ELSE in
         // this workspace notices the table expiring: `LAST_DAY` appears outside
         // `pull::calendar` exactly once, in that module's own test.
+        // NO DAILY RUNG IN THIS FIXTURE, SO NO CALENDAR — AND THAT IS THE
+        // ANSWER, NOT A ZERO.
+        //
+        // `calendar_of` derives which days traded from the `1day` rung,
+        // deliberately: a minute rung validating itself would make a failed pull
+        // read as a holiday. A series stored without its daily rung therefore
+        // yields NO calendar at all, every minute falls to `Unmeasured`, and
+        // `expected` is 0 beside a `held` of however many bars are there.
+        //
+        // Reported as `days: 0, covers_span: false` rather than as a clean
+        // sheet, which is the §4 distinction: this is a question the build
+        // cannot answer, not a store that owes nothing. An operator shown
+        // `lost_minutes: 0` with no other signal would read it as health.
+        // NOTHING INDEPENDENT TO VOTE, SO THE TABLE ANSWERS — AND IT SAYS SO.
+        //
+        // This store holds one feed's copy of one symbol, so `peer_calendar`
+        // finds no reading that is not the series under audit. Deriving a
+        // calendar from that series would answer "no losses" for every possible
+        // input; the typed table is independent of the bars, so it reports the
+        // month as almost entirely missing, which it is.
         assert!(
-            three.contains(r#""calendar":{"first":"2019-12-02","last":""#),
-            "every answer names the span the calendar can speak for: {three}"
+            three.contains(r#""source":"table""#) && three.contains(r#""voted_by":[]"#),
+            "with no peer to vote the table answers, and the response names it \
+             rather than leaving a number un-attributable: {three}"
         );
         assert!(
-            three.contains(r#""unmeasured_minutes":"#),
-            "and the minutes it makes NO claim about, which is what explains a \
-             held larger than an expected: {three}"
+            three.contains(r#""lost_minutes":8249"#),
+            "one bar stored against a month the calendar owes 8,250 — the table \
+             is independent of the bars, so it can still say that: {three}"
         );
         let (short_code, _, short) = ask("&to=2024-1").await;
         assert_eq!(
