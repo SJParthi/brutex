@@ -439,7 +439,7 @@ pub fn from_dir(
 #[must_use]
 pub fn from_members(members: &[Member], store_root: &Path, plan: Plan<'_>) -> Ingested {
     let done = from_members_inner(members, store_root, plan);
-    note_run(&done);
+    note_run(&done, members, &plan);
     done
 }
 
@@ -474,9 +474,69 @@ pub fn from_members(members: &[Member], store_root: &Path, plan: Plan<'_>) -> In
 /// `CLAUDE.md` §5 calls affordable — one event per run — and it is emitted from
 /// the single public entry point every run passes through, so a caller cannot
 /// take a path that skips it.
-fn note_run(done: &Ingested) {
+fn note_run(done: &Ingested, members: &[Member], plan: &Plan<'_>) {
+    // WHAT THIS EVENT IS ABOUT, WHICH IT DID NOT SAY.
+    //
+    // Measured on the operator's store, 2026-08-28: **884 `ingested` events in
+    // one log**, each carrying `members / rows / bars / committed / folded /
+    // dropped / failures` and **not one naming its instrument, month or rung**.
+    // So the log recorded that something was ingested 884 times and could not
+    // answer "which month came up short" — the question the counters exist for.
+    //
+    // A number nobody can attribute is not an audit trail. `CLAUDE.md` §4 asks
+    // for the reason to be NAMED, and a count with no subject names nothing.
+    //
+    // THE NAME COMES FROM THE PLAN, AND THE FIRST DRAFT TOOK IT FROM THE WRONG
+    // PLACE. That draft read `Ingested::pending`, whose `Entry::key` is exactly
+    // the tuple wanted — and `pending` is set in `from_rows` alone, the rolling
+    // contract path. **Every one of the 884 measured events comes through
+    // `from_members`**, where it is `None` from first line to last, so the
+    // naming was a no-op on the only path that emits. `emit_sites` refused it,
+    // which is the whole reason that table exists.
+    //
+    // The plan carries the run's constants unconditionally, so they are named
+    // unconditionally. The cost is the `with` calls below and one `YearMonth`
+    // render — O(1) per RUN, not per bar, which is the granularity gate 17's
+    // own comment prescribes as the affordable one.
+    //
+    // THE INSTRUMENT IS NAMED ONLY WHEN THERE IS ONE. A broker pull is always
+    // `from_members(slice::from_ref(&member), ..)` — one member, one subject —
+    // while a folder walk can carry many, and no single symbol is true of that
+    // run. Picking the first would be a name that reads exactly like a fact and
+    // is not one, which is the `CLAUDE.md` §4 failure-in-a-success's-clothes
+    // shape. The per-member `pull.member` lines name those individually.
+    //
+    // THE STRINGS OUTLIVE THE EVENT, DELIBERATELY. `Value::Str` borrows, so
+    // both rendered values are bound here, ahead of the builder, rather than
+    // inline where each would be dropped at the end of its own statement.
+    let span = plan.request.window;
+    let month = match (span.from().year_month(), span.to().year_month()) {
+        // ONE KEY, NOT TWO, AND A SPAN IS A SUBSTRING OF ITS OWN FIRST MONTH.
+        // The log's field match is substring, so `month=2022-10` still finds a
+        // run that spanned into November — which a separate `to_month` key
+        // would have hidden from exactly the query an operator types.
+        (Ok(first), Ok(last)) if first == last => first.to_string(),
+        (Ok(first), Ok(last)) => format!("{first}..{last}"),
+        // A day outside the store's month range has no month to name. Saying so
+        // beats naming a month the run did not touch.
+        _ => String::new(),
+    };
+    let rung = plan.timeframe().map_or("", Timeframe::as_str);
+    let event = telemetry::Event::info("pull.run", "ingested")
+        .with("vendor", telemetry::Value::Str(plan.vendor.as_str()))
+        .with("exchange", telemetry::Value::Str(plan.exchange))
+        .with("segment", telemetry::Value::Str(plan.segment))
+        .with("rung", telemetry::Value::Str(rung))
+        .with("month", telemetry::Value::Str(&month));
+    let event = match members {
+        [only] => event.with(
+            "instrument",
+            telemetry::Value::Str(only.instrument.as_str()),
+        ),
+        _ => event,
+    };
     let _dropped_when_filtered = telemetry::emit(
-        &telemetry::Event::info("pull.run", "ingested")
+        &event
             .with("members", telemetry::Value::Uint(done.members as u64))
             .with("rows", telemetry::Value::Uint(done.rows_read as u64))
             .with("bars", telemetry::Value::Uint(done.bars_stored as u64))

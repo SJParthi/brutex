@@ -399,6 +399,25 @@ static SITES: &[Site] = &[
         drive: drive_impossible_bar_skipped,
     },
     Site {
+        // THE ONE EVENT PER RUN, AND THE FIELD ASSERTED IS ITS NAME.
+        //
+        // Measured on a real store: 884 of these in the rolling log, one per
+        // instrument-month, each carrying `members / rows / bars / committed /
+        // folded / dropped / failures` — and **none of them naming what was
+        // ingested**. So 884 records said something came up short and not one
+        // could answer WHICH month did, which is the whole reason a log is
+        // searchable rather than merely written.
+        //
+        // Asserting `instrument` rather than `bars` on purpose: the counts were
+        // there from the first draft and the name was not. A count with no
+        // subject is the failure this row exists to refuse.
+        at: "crates/pull/src/ingest.rs — note_run",
+        target: "pull.run",
+        message: "ingested",
+        says: ("instrument", Says::Holds(INSTRUMENT)),
+        drive: drive_run_named,
+    },
+    Site {
         at: "crates/pull/src/http.rs:1483",
         target: "pull.decode",
         message: "bars carried a negative open interest and were skipped",
@@ -1143,5 +1162,24 @@ fn every_emit_site_in_this_crate_reaches_a_file() {
             .all(|record| record.message != "census image built"),
         "a re-run over the same folder moves nothing, so it images nothing and \
          leaves the census byte for byte as it was"
+    );
+}
+
+/// One completed run, named.
+///
+/// The ingest that [`drive_census_imaged`] runs also produces the run line, so
+/// this drive is that one call and nothing else — a run whose members all
+/// landed is the case where a missing name is hardest to notice, because
+/// nothing else in the record is wrong.
+fn drive_run_named(scratch: &Scratch) {
+    let done = ingest_body(scratch);
+    // NOT `pending`, AND THIS ASSERTION IS THE CORRECTION. It first read
+    // `done.pending.is_some()`, because that is where the first draft of
+    // `note_run` took the name from — and it is `None` on this path and on
+    // every path a broker pull takes. The name comes from the plan now, so what
+    // is worth asserting here is that the run this row drives really ran.
+    assert_eq!(
+        done.members, 1,
+        "one member was read, so the run has exactly one subject to name"
     );
 }

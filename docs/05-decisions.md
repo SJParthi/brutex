@@ -26391,3 +26391,60 @@ a `HashMap` walk has no order to rely on.
 that does not exist reads as absent and `derive` records it in
 `Report::unreadable`, exactly as designed. This is a cost and a noise defect, not
 a correctness one, and the calendars it produced were right throughout.
+
+### D-0360
+
+**The run line names what it ingested, and the first draft named it from a
+field that is `None` on every path that emits.**
+
+`crates/pull/src/ingest.rs` `note_run` writes one `pull.run "ingested"` event
+per completed run. Measured on the operator's store on 2026-08-28: **884 of
+them in one rolling log**, each carrying `members`, `rows`, `bars`,
+`committed`, `folded`, `dropped` and `failures` — and **not one naming its
+instrument, month or rung.** So the log recorded 884 times that something had
+been ingested and could not answer *which* month came up short, which is the
+only question those counters exist to serve. A number nobody can attribute is
+not an audit trail.
+
+**The correction that was wrong first.** `Ingested` already carries
+`pending: Option<Held>`, whose `Entry::key` is exactly the
+`(exchange, segment, symbol, timeframe, month)` tuple wanted, so the first
+draft read the name from there — free, no threading, no lookup. It compiled,
+the whole 714-test suite stayed green, and it named nothing: `pending` is
+assigned in `from_rows` alone, the rolling-contract path, and **every one of
+the 884 measured events comes through `from_members`**, where it is `None`
+from the first line to the last. A broker pull is
+`from_members(slice::from_ref(&member), ..)`; the folder walk is
+`from_dir` → `from_members`. Neither sets it.
+
+What refused the draft was `emit_sites`, on the row added in the same change:
+its drive asserted `done.pending.is_some()` and the assertion failed. That
+table exists because a helper which silently stops emitting leaves every other
+test in the crate green, and here it caught the weaker sibling — a helper that
+still emits, with the field empty.
+
+**What ships.** `note_run` takes `members` and the `Plan`, and names the run's
+constants from the plan, which carries them unconditionally: `vendor`,
+`exchange`, `segment`, `rung` (via `Plan::timeframe`), and `month` from the
+request window.
+
+`month` is **one key, not two.** A window inside a single month renders
+`2022-10`; one that spans renders `2022-10..2022-11`. The log's field match is
+substring, so a search for `month=2022-10` still finds the spanning run — which
+a separate `to_month` key would have hidden from exactly the query an operator
+types.
+
+`instrument` is named **only when the run has exactly one member.** A broker
+pull always does. A folder walk can carry many, and no single symbol is true of
+that run; picking the first would read exactly like a fact and not be one,
+which is the failure-wearing-a-success's-clothes shape `CLAUDE.md` §4 bans. The
+per-member `pull.member` lines name those individually.
+
+**Cost.** Five `with` calls and one `YearMonth` render, per RUN — not per bar
+and not per candidate. That is the granularity CI gate 17's own comment
+prescribes as the affordable one, and `CLAUDE.md` §5 puts `telemetry` on `cli`
+for the same reason.
+
+**What is still not proven.** `SITES` now holds 28 rows against 42 `emit` call
+sites in the crate, so 14 remain driven by nothing. The header says so and
+nothing pins either number; re-measure rather than trusting the sentence.
