@@ -9997,7 +9997,11 @@ fn audit_bars(
     // half, and `audit::render` prints an explicit absence for each unsupplied
     // stage rather than a zero — so a page produced this way says which
     // questions it did not ask.
-    let (folds, rolling) = shapes_if(validate, &bars, horizon, first, ladder, &fresh);
+    // `bars` IS THE SIGNAL SERIES, and the walk-forward would TRADE whatever it
+    // is handed. See `walk_forward_may_trade`: it proceeds when the two series
+    // are one and refuses with a stated reason when they are not.
+    let may = walk_forward_may_trade(execution.is_some());
+    let (folds, rolling) = shapes_if(validate, &bars, horizon, first, ladder, &fresh, &may);
     // PBO, WHICH USED TO BE A `None` FOR A REASON THAT IS NOW FIXED.
     //
     // `pbo::place` ranks a fold's candidates in-sample, finds where the winner
@@ -10107,6 +10111,53 @@ fn overfitting_of(folds: &runner::validate::Validated) -> Option<runner::pbo::Pb
 /// `Validated::default()` is an EMPTY walk, not a failed one. `audit::render`
 /// prints an explicit absence for an unsupplied stage rather than a zero, so a
 /// page made this way says which question it did not ask.
+/// Whether the walk-forward may trade the series it sweeps.
+///
+/// # It may, exactly when there is one series
+///
+/// `walk_forward_shaped` sweeps conditions on the slice it is handed and then
+/// takes positions on that same slice. When no execution series was supplied,
+/// `project_onto_execution` returns the input unchanged, the two are the same
+/// bars, and the walk is correct -- `cli sweep`, `cli audit`, `audit-stored` and
+/// the synthetic path are all in that case.
+///
+/// `audit-range` and `range-all` are not. They find conditions on a signal rung
+/// and fill on the one-minute series, and handing the signal series to a
+/// function that will trade it is wrong in a direction that looks like an
+/// answer: on 60-minute bars the last one inside the fill window is the 14:15
+/// bucket, so `entry + horizon` exceeds it for every entry and every fold trade
+/// takes the forced exit there. A five-hour hold, printed as out-of-sample
+/// evidence for a strategy that holds fifteen minutes.
+///
+/// The sibling call was already corrected -- `bootstrap_family` gets
+/// `trade_bars` -- and this one was not, because both arguments are
+/// `&[Candle]` and nothing could tell them apart.
+///
+/// # Why it refuses rather than being repaired here
+///
+/// Repairing it needs per-fold reprojection, not a different argument: a fold is
+/// a range of SIGNAL indices and the execution series is indexed differently, so
+/// every fold boundary has to be mapped through the alignment. That is a change
+/// to leakage-sensitive code and belongs in its own commit with its own tests.
+/// Until then this is the half of `CLAUDE.md` §4 that is available: degrade
+/// loudly and name the reason, or refuse -- never both silently.
+fn walk_forward_may_trade(has_execution_series: bool) -> runner::validate::TradesOnTheseBars {
+    if !has_execution_series {
+        return runner::validate::TradesOnTheseBars::Yes;
+    }
+    runner::validate::TradesOnTheseBars::No(
+        "the walk-forward sweeps conditions and takes positions on ONE series, \
+         and this run separates them: conditions come from the signal rung and \
+         fills happen on the execution series. Trading the signal series would \
+         take every fold's exit at the last bar inside the fill window -- a \
+         whole-session hold standing in for one that lasts minutes -- so no fold \
+         was run rather than a wrong number reported. The in-sample ranking, the \
+         exit grid and the three bootstrap tests are unaffected: they already \
+         run on the execution series."
+            .to_owned(),
+    )
+}
+
 fn shapes_if(
     validate: bool,
     bars: &[indicators::Candle],
@@ -10114,9 +10165,10 @@ fn shapes_if(
     first: &runner::rank::Scored,
     ladder: engine::Ladder,
     fresh: &Evaluator,
+    trades_here: &runner::validate::TradesOnTheseBars,
 ) -> (runner::validate::Validated, runner::validate::Validated) {
     if validate {
-        both_shapes(bars, horizon, first, ladder, fresh)
+        both_shapes(bars, horizon, first, ladder, fresh, trades_here)
     } else {
         (
             runner::validate::Validated::default(),
@@ -10135,6 +10187,7 @@ fn both_shapes(
     // for no reason -- the closure needs its own copy either way, and it takes
     // one from the borrow.
     fresh: &Evaluator,
+    trades_here: &runner::validate::TradesOnTheseBars,
 ) -> (runner::validate::Validated, runner::validate::Validated) {
     let splits = walk_forward_splits(bars.len());
     let side = direction_of(side_of_evidence(first));
@@ -10147,6 +10200,7 @@ fn both_shapes(
         &sweeper,
         &mut || *fresh,
         runner::split::Shape::Anchored,
+        trades_here.clone(),
     );
     let rolling = runner::validate::walk_forward_shaped(
         bars,
@@ -10156,6 +10210,7 @@ fn both_shapes(
         &sweeper,
         &mut || *fresh,
         runner::split::Shape::Rolling,
+        trades_here.clone(),
     );
     (anchored, rolling)
 }

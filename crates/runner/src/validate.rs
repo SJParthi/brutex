@@ -231,11 +231,61 @@ pub struct FoldResult {
     pub out_of_sample_all: Vec<i64>,
 }
 
+/// Whether the slice handed to [`walk_forward_shaped`] is the one positions are
+/// taken on.
+///
+/// # Why a type and not a `bool`
+///
+/// Because a `bool` is what allowed the defect. `cli` called
+/// `shapes_if(validate, &bars, ..)` three lines above
+/// `bootstrap_family(&trade_bars, ..)`, and no signature in between could
+/// distinguish the signal series from the execution series -- both are
+/// `&[Candle]`, both are the right length, and both compile. The sibling call was
+/// corrected and this one was not, because nothing made the difference sayable.
+///
+/// A caller now has to name which series it is handing over, and a caller that
+/// does not know is a caller that should not be validating.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TradesOnTheseBars {
+    /// The conditions were found on this series AND positions are taken on it.
+    /// The walk proceeds.
+    Yes,
+    /// They are different series, and the reason names which. The walk refuses
+    /// rather than measuring a holding period nobody trades.
+    No(String),
+}
+
 /// A whole walk-forward.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Validated {
     /// One entry per test period, in time order.
     pub folds: Vec<FoldResult>,
+    /// Why no fold was run, when none was. `None` means the walk was attempted.
+    ///
+    /// # An empty `folds` had two meanings and a reader could not separate them
+    ///
+    /// A slice too short to split produces no folds, and so does a refusal. Both
+    /// rendered as the same blank table, so "this span cannot be validated" and
+    /// "this run declined to validate" were one output. `CLAUDE.md` §4 bans a
+    /// result that hides a failure behind a success, and a silent zero is that
+    /// result.
+    ///
+    /// The refusal this was added for: [`walk_forward_shaped`] takes ONE series
+    /// and uses it for both roles -- it sweeps conditions on it AND trades on it.
+    /// That is correct whenever the two series are the same, which is every
+    /// caller that passes no execution series. It is wrong when they differ, and
+    /// the difference is not small: on a 60-minute signal series the last bar
+    /// inside the fill window is the 14:15 bucket, so every fold trade takes the
+    /// forced exit there and a five-hour hold is reported as validation of a
+    /// strategy that holds minutes.
+    ///
+    /// Its sibling was already corrected -- `cli` passes the trade series to
+    /// `bootstrap_family`, under a comment naming this exact defect class -- and
+    /// this call was left behind. Repairing it needs per-fold reprojection rather
+    /// than a different argument, because a fold is a range of SIGNAL indices and
+    /// the execution series is indexed differently. Until that lands, the walk
+    /// refuses and says so, which is the half of §4 that is available today.
+    pub refused: Option<String>,
 }
 
 impl Validated {
@@ -483,6 +533,11 @@ pub fn walk_forward(
         sweeper,
         &mut evaluator,
         Shape::Anchored,
+        // THIS WRAPPER HAS ONE SLICE AND SO ANSWERS FOR IT. A caller with two
+        // series cannot express the difference through this signature, which is
+        // why it must reach for `walk_forward_shaped` directly and say which it
+        // is handing over.
+        TradesOnTheseBars::Yes,
     )
 }
 
@@ -525,6 +580,18 @@ pub fn walk_forward(
               level-less out-of-sample walk -- came from those two halves \
               drifting apart in a reader's head."
 )]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "eight, and the eighth is the one that stops a wrong answer. \
+              Bundling them into a struct is the usual remedy and is the wrong \
+              one here: `bars` and `trades_on_these_bars` are a QUESTION and its \
+              ANSWER, and a struct literal lets a caller fill the answer in \
+              without looking at the slice it is about -- which is exactly how \
+              `cli` came to hand this function the signal series while its \
+              sibling three lines away got the trade series. A positional \
+              argument the compiler refuses to default is what makes the caller \
+              say which series it has. The other seven were already here."
+)]
 pub fn walk_forward_shaped(
     bars: &[Candle],
     horizon: Horizon,
@@ -533,7 +600,34 @@ pub fn walk_forward_shaped(
     sweeper: &crate::Sweeper,
     evaluator: &mut impl FnMut() -> Evaluator,
     shape: Shape,
+    trades_on_these_bars: TradesOnTheseBars,
 ) -> Validated {
+    // ONE SERIES, TWO ROLES, AND THE CALLER MUST SAY WHETHER THAT IS TRUE.
+    //
+    // Everything below sweeps conditions on `bars` and then trades on `bars`:
+    // `forced_exits(train)`, `grid::evaluate_with(train, ..)` and
+    // `walk_with(train, ..)` all take the same slice the ladder was walked over.
+    // That is correct exactly when the run's positions are taken on the series
+    // its conditions were found on, which is every caller that supplies no
+    // execution series -- `cli sweep`, `cli audit`, `audit-stored`, synthetic.
+    //
+    // It is wrong for `audit-range` and `range-all` at any signal rung above one
+    // minute, and wrong in a direction that looks like an answer. On a 60-minute
+    // series the last bar inside the fill window is the 14:15 bucket, so
+    // `wanted = entry + horizon` exceeds it for every entry and every fold trade
+    // takes the forced exit there: a five-hour hold, reported as out-of-sample
+    // validation of a strategy that holds fifteen minutes.
+    //
+    // A `bool` would have been enough to express this and is exactly what let
+    // the defect exist -- `cli` passed `&bars` where its sibling three lines away
+    // passed `&trade_bars`, and nothing in either signature could tell them
+    // apart. A named type makes the caller answer the question out loud.
+    if let TradesOnTheseBars::No(why) = trades_on_these_bars {
+        return Validated {
+            folds: Vec::new(),
+            refused: Some(why),
+        };
+    }
     let mut out = Validated::default();
 
     for (index, fold) in shape
@@ -1043,7 +1137,78 @@ fn restricted(column: &Column, from: usize) -> Column {
     reason = "the exception every test module in this workspace takes."
 )]
 mod tests {
-    use super::{Shape, Validated, walk_forward, walk_forward_shaped};
+    use super::{Shape, TradesOnTheseBars, Validated, walk_forward, walk_forward_shaped};
+
+    /// A caller whose two series differ gets NO folds and a stated reason.
+    ///
+    /// # The number this refuses to print
+    ///
+    /// `walk_forward_shaped` sweeps conditions on the slice it is given and then
+    /// trades on that same slice -- `forced_exits`, `grid::evaluate_with` and
+    /// `walk_with` all take it. Correct whenever positions are taken on the
+    /// series the conditions were found on, which is every caller that supplies
+    /// no execution series.
+    ///
+    /// `cli`'s `audit-range` and `range-all` are not those callers. On a
+    /// 60-minute signal series the last bar inside the fill window is the 14:15
+    /// bucket, so `entry + horizon` exceeds it for every entry and every fold
+    /// trade takes the forced exit there -- a five-hour hold standing in for one
+    /// that lasts fifteen minutes, printed as out-of-sample evidence.
+    ///
+    /// Its sibling was already corrected: `cli` hands `bootstrap_family` the
+    /// trade series, under a comment naming this defect class. This call kept the
+    /// signal series because both arguments are `&[Candle]` and no signature
+    /// could tell them apart. `TradesOnTheseBars` is what makes the difference
+    /// sayable, and this is what makes it enforced.
+    #[test]
+    fn a_walk_that_would_trade_the_wrong_series_refuses_and_names_the_reason() {
+        let bars = crate::synthetic::sessions(12);
+        let refused = walk_forward_shaped(
+            &bars,
+            h(15),
+            3,
+            Direction::Long,
+            &sweeper(),
+            &mut evaluator,
+            Shape::Anchored,
+            TradesOnTheseBars::No("the fills happen elsewhere".to_owned()),
+        );
+        assert!(
+            refused.folds.is_empty(),
+            "a refused walk runs no fold at all"
+        );
+        assert_eq!(
+            refused.refused.as_deref(),
+            Some("the fills happen elsewhere"),
+            "and it carries the caller's own reason verbatim, because the reason \
+             names which parts of the report are still trustworthy"
+        );
+
+        // THE SAME CALL WITH THE SAME BARS RUNS when the caller says the series
+        // is the one positions are taken on -- so the refusal is the flag's doing
+        // and not a fixture too short to split, which renders identically and is
+        // the confusion `Validated::refused` exists to end.
+        let ran = walk_forward_shaped(
+            &bars,
+            h(15),
+            3,
+            Direction::Long,
+            &sweeper(),
+            &mut evaluator,
+            Shape::Anchored,
+            TradesOnTheseBars::Yes,
+        );
+        assert!(
+            ran.refused.is_none(),
+            "an attempted walk records no refusal"
+        );
+        assert!(
+            !ran.folds.is_empty(),
+            "and this fixture does split, which is what makes the contrast mean \
+             something"
+        );
+    }
+
     use crate::Sweeper;
     use crate::outcome::Horizon;
     use costs::fill::Direction;
@@ -1096,6 +1261,7 @@ mod tests {
             &sweeper(),
             &mut evaluator,
             Shape::Anchored,
+            TradesOnTheseBars::Yes,
         );
         let rolling = walk_forward_shaped(
             &bars,
@@ -1105,6 +1271,7 @@ mod tests {
             &sweeper(),
             &mut evaluator,
             Shape::Rolling,
+            TradesOnTheseBars::Yes,
         );
 
         assert_eq!(anchored.folds.len(), 3, "three splits, three folds");
@@ -1168,6 +1335,7 @@ mod tests {
             &sweeper(),
             &mut evaluator,
             Shape::Anchored,
+            TradesOnTheseBars::Yes,
         );
 
         assert_eq!(

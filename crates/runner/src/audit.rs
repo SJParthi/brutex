@@ -853,6 +853,21 @@ pub fn grid(out: &mut String, g: &Grid, keep: usize) {
 /// Walk-forward: what was chosen on the past, and what it did on the future.
 pub fn walk_forward(out: &mut String, v: &Validated) {
     let _ = writeln!(out, "WALK-FORWARD");
+    // A REFUSAL AND A SHORT SLICE ARE DIFFERENT FACTS AND USED TO PRINT THE SAME
+    // LINE.
+    //
+    // An empty `folds` meant "this span could not be split" and nothing else,
+    // so a walk that DECLINED to run rendered as one that had nothing to run on.
+    // Those call for opposite responses: a short span is answered by a longer
+    // one, a refusal is answered by fixing what it names. `Validated::refused`
+    // carries the reason and this prints it verbatim rather than summarising it,
+    // because the reason names which parts of the report are still trustworthy.
+    if let Some(why) = v.refused.as_deref() {
+        row(out, "folds", "REFUSED", "no fold was run, and this is why:");
+        let _ = writeln!(out, "    {why}");
+        let _ = writeln!(out);
+        return;
+    }
     if v.folds.is_empty() {
         row(
             out,
@@ -1556,6 +1571,7 @@ mod tests {
                     ..crate::validate::FoldResult::default()
                 },
             ],
+            refused: None,
         };
         let mut out = String::new();
         walk_forward(&mut out, &v);
