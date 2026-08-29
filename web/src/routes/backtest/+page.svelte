@@ -1258,7 +1258,7 @@
       // `{t, v}` is the shape `areaChart` already eats, `t` in SECONDS off each
       // trade's own exit stamp.
       points: rows.map((t, i) => ({ t: Math.round((t.exit_micros ?? 0) / 1e6), v: curve[i] })),
-      maxRunUp: maxRunUp || null,
+      maxRunUp: runUps.length > 0 ? maxRunUp : null,
       avgRunUp: mean(runUps),
       openStretch,
       openIsRunUp: openStretch >= 0,
@@ -3934,6 +3934,22 @@
     yearly: 'Yearly'
   };
 
+  /**
+   * The same four as a NOUN, for a sentence that buckets "by" one of them.
+   *
+   * The empty-state message built this with `periodScale.replace('ly', '')`,
+   * which is correct for three of the four and renders the fourth as
+   * **"bucket by dai"** — `'daily'` has no `ly` to strip except the one inside
+   * the word. A four-entry map cannot be wrong about a fifth case because there
+   * is not one.
+   */
+  const PERIOD_NOUN = {
+    daily: 'day',
+    weekly: 'week',
+    quarterly: 'quarter',
+    yearly: 'year'
+  };
+
   /** One scale for the two benchmark bars. */
   const benchScale = $derived(
     Math.max(1, Math.abs(outperformance?.strategy ?? 0), Math.abs(outperformance?.hold ?? 0))
@@ -4624,9 +4640,9 @@
           <path d={linePath(points)} fill="none" stroke="var(--acc)" stroke-width="2" vector-effect="non-scaling-stroke" stroke-linejoin="round" />
         {/if}
       </svg>
-      <div class="cf-axis">{#each ticks as t (t)}<span>{t}</span>{/each}</div>
+      <div class="cf-axis">{#each ticks as t, ti (ti)}<span>{t}</span>{/each}</div>
     </div>
-    <div class="cf-x">{#each xLabels as x (x)}<span>{x}</span>{/each}</div>
+    <div class="cf-x">{#each xLabels as x, xi (xi)}<span>{x}</span>{/each}</div>
     <p class="cf-note">{note}</p>
   </div>
 {/snippet}
@@ -4657,14 +4673,14 @@
           />
         {/each}
       </svg>
-      <div class="cf-axis">{#each ticks as t (t)}<span>{t}</span>{/each}</div>
+      <div class="cf-axis">{#each ticks as t, ti (ti)}<span>{t}</span>{/each}</div>
     </div>
     <div class="cf-x">
       {#each barLabels(bars) as x (x)}<span>{x}</span>{/each}
     </div>
     {#if legend}
       <ul class="cf-legend">
-        {#each legend as l, i (l)}<li><span class="cf-sw s{i}"></span>{l}</li>{/each}
+        {#each legend as l, i (i)}<li><span class="cf-sw s{i}"></span>{l}</li>{/each}
       </ul>
     {/if}
     <p class="cf-note">{note}</p>
@@ -4766,13 +4782,13 @@
            SCALE is a true statement about the plot even when the series is
            not there: these are the gridlines the data would be read against. -->
       <div class="cf-axis">
-        {#each ticks as t (t)}<span>{t}</span>{/each}
+        {#each ticks as t, ti (ti)}<span>{t}</span>{/each}
       </div>
       <div class="cf-msg"><Lock /> <span>{why}</span></div>
     </div>
     {#if xLabels.length > 0}
       <div class="cf-x">
-        {#each xLabels as x (x)}<span>{x}</span>{/each}
+        {#each xLabels as x, xi (xi)}<span>{x}</span>{/each}
       </div>
     {/if}
     {#if legend.length > 0}
@@ -4782,7 +4798,7 @@
              so everything below reads one shape and the string case is
              handled in exactly one place rather than implied by a `??` that
              a reader has to decode three times. -->
-        {#each legend as raw, i (typeof raw === 'string' ? raw : raw.label)}
+        {#each legend as raw, i (i)}
           {@const l =
             typeof raw === 'string'
               ? /** @type {{ label: string, dash?: boolean, value?: string }} */ ({ label: raw })
@@ -6551,7 +6567,7 @@
                     <span class="tt-k">Total PnL</span>
                     <span class="tt-qv big" class:up={openRun.pessimistic >= 0} class:down={openRun.pessimistic < 0}>
                       {money(openRun.pessimistic)}<em class="tt-unit">POINTS</em>
-                      <em class="tt-pc">{pct(strategyBps)}</em>
+                      <em class="tt-pc">{noTrades ? 'none' : pct(strategyBps)}</em>
                     </span>
                     <span class="tt-note">worst-case fills · {money(openRun.optimistic)} at best</span>
                   </div>
@@ -6591,7 +6607,7 @@
                         <em class="tt-frac">{exact(tradeTotals.worstWins)}/{exact(tradeTotals.trades)}</em>
                       </span>
                       <span class="tt-note"
-                        >at worst-case fills · {pct(tradeTotals.bestRateBp)} at best</span
+                        >at worst-case fills · {share(tradeTotals.bestRateBp)} at best</span
                       >
                     {:else}
                       <span class="tt-qv big">
@@ -6849,7 +6865,7 @@
                     )}
                   {:else}
                     {@render chartFrame(
-                      'No bars are loaded, so there is nothing to bucket by ' + periodScale.replace('ly', '') + '.',
+                      'No bars are loaded, so there is nothing to bucket by ' + PERIOD_NOUN[periodScale] + '.',
                       ['Realized profit', 'Realized loss', 'Favorable excursion', 'Adverse excursion'],
                       PNL_TICKS,
                       periodTicks,
@@ -6857,7 +6873,7 @@
                     )}
                   {/if}
                   <p class="tt-note2">
-                    Return is on <b>one unit of the index</b>, against the price at the span's start ({money(bench.open)}).
+                    Return is on <b>one unit of the index</b>, against the price at the span's start {bench.phase === 'ready' && bench.open > 0 ? ` (${money(bench.open)})` : ' — not loaded, so every percentage on this tab is withheld rather than divided by zero'}.
                     The ledger records no capital, so a return on equity has no denominator on disk. Annualised over the
                     {exact(openRun.months_found)} months actually found.
                   </p>
@@ -6945,7 +6961,7 @@
                       <span class="tt-qv"
                         >{#if equity && equity.avgRunUpDuration !== null}{equity.avgRunUpDuration.toFixed(1)}<em
                             class="tt-unit2">trades</em
-                          >{:else}<Lock why="The curve never made a new high, so no run-up has both ends to measure between." />{/if}</span
+                          >{:else}<Lock why="This run has no completed rising stretch — the curve turned fewer than twice." />{/if}</span
                       >
                     </div>
                     <div class="tt-q">
@@ -6953,7 +6969,7 @@
                       <span class="tt-qv"
                         >{#if equity && equity.avgDrawdownDuration !== null}{equity.avgDrawdownDuration.toFixed(1)}<em
                             class="tt-unit2">trades</em
-                          >{:else}<Lock why="No drawdown has closed — the curve never recovered a previous high — so none can be averaged." />{/if}</span
+                          >{:else}<Lock why="This run has no completed falling stretch — the curve turned fewer than twice." />{/if}</span
                       >
                     </div>
                     <div class="tt-q"><span class="tt-k">Max drawdown</span><span class="tt-qv down">{money(Math.abs(openRun.max_drawdown))}<em class="tt-pc">{drawdownBps === null ? '' : `${(drawdownBps / 100).toFixed(2)}%`}</em></span></div>
@@ -7020,7 +7036,7 @@
                             >{#if r.v !== null}<span class="tt-cmpfill down" style="width:{(Math.abs(r.v) / reach) * 100}%"></span>{/if}</span
                           >
                           <span class="tt-cmpval down"
-                            >{#if r.v === null}<Lock small why="No drawdown has closed — the curve never recovered a previous high — so there is none to average." />{:else}{money(r.v)}{/if}</span
+                            >{#if r.v === null}<Lock small why="This run has no completed falling stretch — the curve turned fewer than twice." />{:else}{money(r.v)}{/if}</span
                           >
                         </div>
                       {/each}
@@ -7118,12 +7134,12 @@
                     <div class="tt-q"><span class="tt-k">Expected payoff</span><span class="tt-qv">{perTrade ? money(perTrade.worst) : '—'}</span></div>
                     <div class="tt-q"><span class="tt-k">Outliers PnL</span><span class="tt-qv"><Lock why="Needs a per-trade list to find outliers in." /></span></div>
                     <div class="tt-q"><span class="tt-k">Largest profit</span><span class="tt-qv">{#if tradeStats?.largestWin}{money(tradeStats.largestWin)}{:else}<Lock why="This run recorded no winning trade at worst-case fills." />{/if}</span></div>
-                    <div class="tt-q"><span class="tt-k">Largest loss</span><span class="tt-qv down">{money(openRun.worst_trade)}</span></div>
+                    <div class="tt-q"><span class="tt-k">Largest loss</span><span class="tt-qv down">{money(Math.abs(openRun.worst_trade))}</span></div>
                   </div>
                   <div class="tt-two">
                     <div>
                       <h5 class="tt-h5">Returns distribution</h5>
-                      {#if returnHistogram}{@render histogram(returnHistogram,'The distribution of per-BAR returns over the window on screen, from the bars on disk. NOT per trade — the sweep records ' + exact(openRun.trades) + ' as a count and keeps no list, so a per-trade histogram has no population to draw.')}{:else}{@render chartFrame('No bars are loaded, so there is nothing to distribute.', HIST_LEGEND, COUNT_TICKS, RETURN_TICKS, false)}{/if}
+                      {#if returnHistogram}{@render histogram(returnHistogram,'The distribution of per-BAR returns over the window on screen, from the bars on disk — NOT per trade. The trade file does carry a per-trade result and the donut beside this is cut from it; what it does not carry is a per-trade RETURN, which needs each trade\'s own entry price rather than the span\'s opening one.')}{:else}{@render chartFrame('No bars are loaded, so there is nothing to distribute.', HIST_LEGEND, COUNT_TICKS, RETURN_TICKS, false)}{/if}
                     </div>
                     <div>
                       <h5 class="tt-h5">Trades distribution</h5>
@@ -7315,10 +7331,19 @@
                         </ul>
                       </div>
                       <p class="tt-note2 dim">
+                        <!-- THIS PRINTED THE WORST-CASE WINNER TOTAL AS A
+                             DIFFERENCE. `shape()` sets `losses = trades - wins`
+                             where `wins` is already `worst_wins`, so
+                             `trades - losses` IS the worst-case winner count —
+                             the sentence said "N more at best-case" while N was
+                             the number already shown as the worst-case
+                             numerator. `shape()` discards `b.wins`, so the
+                             best-case figure was not even in scope. It comes
+                             from `tradeTotals`, which counts both. -->
                         Winners are counted at <b>worst-case fills</b>, the reading this page is
-                        headed by — the same buckets count
-                        {exact(timePatterns.hours.reduce((n, r) => n + (r.trades - r.losses), 0))} more
-                        at best-case. A bucket must hold at least {exact(timePatterns.floor)} trades
+                        headed by{#if tradeTotals} — the same trades count
+                          <b>{exact(tradeTotals.wins - tradeTotals.worstWins)}</b> more at
+                          best-case{/if}. A bucket must hold at least {exact(timePatterns.floor)} trades
                         — a twentieth of the run's {exact(timePatterns.total)} — before it can be
                         named a best one above, so a single lucky trade cannot take the tile.
                         {#if timeGrain === 'hours'}
@@ -7381,7 +7406,7 @@
                     </div>
                   </div>
                   {@render chartFrame(
-                    'Every figure on this tab is a property of the ORDER trades resolved in. The ledger keeps a count and a net, both order-independent, so nothing here is recoverable from it.',
+                    'The four figures above ARE recoverable and are measured — a walk of the trade file in `seq` order gives every streak length. What is missing is the per-streak series this chart would draw: `tradeStats` records how long each run was and discards the runs themselves.',
                     [],
                     STREAK_TICKS,
                     [],
@@ -7434,13 +7459,20 @@
                         <tr><td>Average loss</td><td class="n">{#if tradeStats?.avgLoss !== null && tradeStats}{money(tradeStats.avgLoss)}{:else}<Lock small why="No losing trade at worst-case fills." />{/if}</td><td class="n"><Lock small why="Direction is a term of the run identity, not a column on a trade." /></td><td class="n"><Lock small why="Direction is a term of the run identity, not a column on a trade." /></td></tr>
                         <tr><td>Average profit / average loss</td><td class="n">{#if tradeStats?.winLossRatio !== null && tradeStats}{tradeStats.winLossRatio?.toFixed(3)}{:else}<Lock small why="Needs both a winning and a losing trade to form the ratio." />{/if}</td><td class="n"><Lock small why="Direction is a term of the run identity, not a column on a trade." /></td><td class="n"><Lock small why="Direction is a term of the run identity, not a column on a trade." /></td></tr>
                         <tr><td>Largest profit</td><td class="n up">{#if tradeStats?.largestWin}{money(tradeStats.largestWin)}{:else}<Lock small why="No winning trade at worst-case fills." />{/if}</td><td class="n"><Lock small why="Direction is a term of the run identity, not a column on a trade." /></td><td class="n"><Lock small why="Direction is a term of the run identity, not a column on a trade." /></td></tr>
-                        <tr><td>Largest profit %</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
-                        <tr><td>Largest profit as % of gross profit</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
+                        <!-- TWO OF THESE WERE BARE PADLOCKS OVER ARITHMETIC THE
+                             PAGE ALREADY DOES ONE ROW AWAY. `largestWin` and
+                             `grossProfit` are both on `tradeStats`, and the
+                             identical division against `bench.open` is written
+                             out for `Largest loss` below. A lock with no `why`
+                             is what `Lock.svelte` calls "a lock that teaches an
+                             operator to stop asking". -->
+                        <tr><td>Largest profit %</td><td class="n">{#if tradeStats?.largestWin && shareOfOpen(tradeStats.largestWin)}{shareOfOpen(tradeStats.largestWin)}{:else}<Lock small why="Needs a winning trade and the span's opening price to divide by." />{/if}</td><td class="n"><Lock small why="Direction is a term of the run identity, not a column on a trade." /></td><td class="n"><Lock small why="Direction is a term of the run identity, not a column on a trade." /></td></tr>
+                        <tr><td>Largest profit as % of gross profit</td><td class="n">{#if tradeStats?.largestWin && tradeStats.grossProfit > 0}{share(Math.round((tradeStats.largestWin / tradeStats.grossProfit) * 10000))}{:else}<Lock small why="Needs a winning trade — with no gross profit there is nothing for the largest one to be a share of." />{/if}</td><td class="n"><Lock small why="Direction is a term of the run identity, not a column on a trade." /></td><td class="n"><Lock small why="Direction is a term of the run identity, not a column on a trade." /></td></tr>
                         {/if}
                         <tr><td>Largest loss</td><td class="n down"><span class="tv">{money(openRun.worst_trade)}</span><span class="tp">{bench.open > 0 ? `${((openRun.worst_trade / bench.open) * 100).toFixed(2)}%` : ""}</span></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         {#if showAllMetrics}
                         <tr><td>Largest loss %</td><td class="n"><Lock small why="Needs the entry price of that trade." /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
-                        <tr><td>Largest loss as % of gross loss</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
+                        <tr><td>Largest loss as % of gross loss</td><td class="n">{#if tradeStats?.largestLoss && tradeStats.grossLoss > 0}{share(Math.round((tradeStats.largestLoss / tradeStats.grossLoss) * 10000))}{:else}<Lock small why="Needs a losing trade — with no gross loss there is nothing for the largest one to be a share of." />{/if}</td><td class="n"><Lock small why="Direction is a term of the run identity, not a column on a trade." /></td><td class="n"><Lock small why="Direction is a term of the run identity, not a column on a trade." /></td></tr>
                         <tr><td>Outliers</td><td class="n"><Lock small why="Needs a per-trade list." /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         <tr><td>Outliers P&amp;L</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         <!-- THE OLD LOCK WAS RIGHT ABOUT THE WRONG ARITHMETIC.
