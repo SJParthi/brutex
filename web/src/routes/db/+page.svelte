@@ -9182,6 +9182,7 @@
             class:noday={dayRung}
             class:nofuture={!shape.contract}
             class:nooption={!shape.option}
+            class:norung={timeframe !== ''}
             data-move={barMove}
             style="min-width:{BAR_WIDTH}px"
           >
@@ -12525,12 +12526,45 @@
      Adding a column at the front shifted every rule below and broke both
      contract hidings with no error anywhere — caught by rendering the table, not
      by a gate. */
+  /* OPEN INTEREST (11) AND OI CHG % (12) JOIN THEM, AND SHOULD ALWAYS HAVE.
+     Open interest is the count of contracts outstanding. A spot index has no
+     contracts, so the number is not "zero interest" — the QUANTITY DOES NOT
+     EXIST. Both columns were drawing `0` and `—` on every spot row, which is
+     the page stating a measurement of something that cannot be measured, and
+     they are two of the eleven columns a reader scans on the commonest view
+     this page has.
+     MEASURED, which is what made it worth doing: of the eleven columns visible
+     on NIFTY 1min, six carry information. These two are a third of the waste,
+     and the only part of it that is structural rather than a property of the
+     instrument — an equity has real volume, an index does not, and no rule
+     here can know that in advance. A contract's OI is real; spot's is not,
+     always, for every feed. */
+  .bgrid.lean.nofuture > colgroup > col:nth-child(11),
+  .bgrid.lean.nofuture > colgroup > col:nth-child(12),
   .bgrid.lean.nofuture > colgroup > col:nth-child(13),
   .bgrid.lean.nofuture > colgroup > col:nth-child(14),
+  .bgrid.lean.nofuture > thead > tr > th:nth-child(11),
+  .bgrid.lean.nofuture > thead > tr > th:nth-child(12),
   .bgrid.lean.nofuture > thead > tr > th:nth-child(13),
   .bgrid.lean.nofuture > thead > tr > th:nth-child(14),
+  .bgrid.lean.nofuture > tbody > tr > td:nth-child(11),
+  .bgrid.lean.nofuture > tbody > tr > td:nth-child(12),
   .bgrid.lean.nofuture > tbody > tr > td:nth-child(13),
   .bgrid.lean.nofuture > tbody > tr > td:nth-child(14) {
+    display: none;
+  }
+
+  /* THE RUNG COLUMN (3) GOES WHEN ONE RUNG IS CHOSEN. `TIMEFRAME` in the strip
+     above already says `1min`, and the column then prints that same word once
+     per row — eleven times on a full screen, in a fixed-width cell, next to
+     the two columns that actually vary. When the rung is `Everything` it is
+     the only thing distinguishing a 1min row from a 1day one and it stays.
+     GATED ON THE CONTROL, NOT ON THE DATA. `timeframe !== ''` is a fact about
+     the query; testing whether the loaded rows happen to share a rung would
+     make the column appear and vanish as pages turn. */
+  .bgrid.lean.norung > colgroup > col:nth-child(3),
+  .bgrid.lean.norung > thead > tr > th:nth-child(3),
+  .bgrid.lean.norung > tbody > tr > td:nth-child(3) {
     display: none;
   }
 
