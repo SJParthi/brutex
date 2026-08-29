@@ -1145,43 +1145,69 @@
     const curve = tradeStats.curve;
     const rows = [...tradeList.rows].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
 
-    // ── run-ups and drawdowns as alternating segments of the curve ──
-    // Measured in TRADES, because the curve advances one point per trade; a
-    // duration in bars would need the gaps between them, which it does not hold.
-    let peak = 0;
-    let peakAt = 0;
-    let trough = 0;
-    let troughAt = 0;
-    let maxRunUp = 0;
+    // ── MAX DRAWDOWN: underwater from the running peak ──
+    // The standard definition, and the one the ledger uses: the deepest fall
+    // from any high to any subsequent low. Kept separate from the segmentation
+    // below because it answers a different question — "what is the worst this
+    // ever got" rather than "how long is a typical decline".
+    let peak = curve[0];
     let maxDrawdown = 0;
+    for (const v of curve) {
+      if (v > peak) peak = v;
+      maxDrawdown = Math.max(maxDrawdown, peak - v);
+    }
+
+    // ── RUN-UPS AND DRAWDOWNS: alternating SWINGS, not new highs ──
+    //
+    // MEASURED, and the first attempt at this was wrong. Segmenting on a NEW
+    // ALL-TIME HIGH finds nothing on a curve that never makes one: this
+    // operator's 2,101-trade run peaks at −Rs 10.85 and bottoms at −Rs 20,949.95,
+    // so it is underwater from the first trade to the last. Under that rule the
+    // run reported ZERO run-ups, ZERO closed drawdowns, and a padlock on five
+    // rows that had just been unlocked.
+    //
+    // The reference's own heading says which rule it means: "Alternating growth
+    // and decline". A run-up is a RISING STRETCH and a drawdown a FALLING one,
+    // bounded by the local turns between them — which exist on any curve that
+    // is not monotonic. The same run yields 476 run-ups and 477 drawdowns.
+    //
+    // This is also the rule `holdSwings` already uses for the benchmark chart on
+    // this page, so the two now segment alike rather than two ways.
     /** @type {number[]} */ const runUps = [];
     /** @type {number[]} */ const runUpLens = [];
     /** @type {number[]} */ const drawdowns = [];
     /** @type {number[]} */ const drawdownLens = [];
-    for (let i = 0; i < curve.length; i += 1) {
-      const v = curve[i];
-      if (v > peak) {
-        // A new high closes the drawdown that was open under the old one.
-        if (peak - trough > 0) {
-          drawdowns.push(peak - trough);
-          drawdownLens.push(Math.max(1, i - troughAt));
+    let dir = 0;
+    let anchor = curve[0];
+    let anchorAt = 0;
+    for (let i = 1; i < curve.length; i += 1) {
+      const up = curve[i] > curve[i - 1];
+      const down = curve[i] < curve[i - 1];
+      if (dir === 0) {
+        dir = up ? 1 : down ? -1 : 0;
+        continue;
+      }
+      // A flat step is not a turn — it extends whichever stretch is open.
+      if ((dir === 1 && down) || (dir === -1 && up)) {
+        const magnitude = Math.abs(curve[i - 1] - anchor);
+        const length = i - 1 - anchorAt;
+        if (dir === 1) {
+          runUps.push(magnitude);
+          runUpLens.push(length);
+        } else {
+          drawdowns.push(magnitude);
+          drawdownLens.push(length);
         }
-        runUps.push(v - trough);
-        runUpLens.push(Math.max(1, i - troughAt));
-        maxRunUp = Math.max(maxRunUp, v - trough);
-        peak = v;
-        peakAt = i;
-        trough = v;
-        troughAt = i;
-      } else if (v < trough) {
-        trough = v;
-        troughAt = i;
-        maxDrawdown = Math.max(maxDrawdown, peak - trough);
+        anchor = curve[i - 1];
+        anchorAt = i - 1;
+        dir = up ? 1 : -1;
       }
     }
     const mean = (/** @type {number[]} */ xs) =>
       xs.length === 0 ? null : xs.reduce((a, b) => a + b, 0) / xs.length;
-    const currentRunUp = curve[curve.length - 1] - trough;
+    const maxRunUp = runUps.length > 0 ? Math.max(...runUps) : 0;
+    // The stretch still open at the end, signed by its direction.
+    const currentRunUp = curve[curve.length - 1] - anchor;
 
     // ── Sharpe and Sortino on per-trade returns ──
     const base = Number(bench.open);
@@ -1225,7 +1251,10 @@
       sortino,
       low: Math.min(0, ...curve),
       high: Math.max(0, ...curve),
-      peakAt
+      // How many turns the curve made, which is what makes the averages above
+      // readable: an average over four hundred swings is a different claim from
+      // an average over two.
+      swings: runUps.length + drawdowns.length
     };
   });
 
@@ -6974,10 +7003,15 @@
                          are two different walks and this block would otherwise
                          quietly replace one with the other. -->
                     <p class="tt-note2 dim">
-                      Measured on the trade file's equity curve, in trades. The ledger records
-                      <b>{money(Math.abs(openRun.max_drawdown))}</b> for the same run — a different
-                      number because it walks the stopped exit grid and this walks the unstopped
-                      trade list.
+                      Run-ups and drawdowns are <b>alternating swings</b> of the equity curve — a
+                      rising stretch and a falling one, bounded by the turns between them —
+                      averaged over {exact(equity.swings)} of them, and measured in trades because
+                      the curve advances one point per trade. <b>Maximum drawdown is different</b>:
+                      it is the deepest fall from any high to any later low, which is the figure the
+                      ledger also keeps. The ledger records
+                      <b>{money(Math.abs(openRun.max_drawdown))}</b> for it — a smaller number than
+                      the one above because the ledger walks the stopped exit grid and this walks
+                      the unstopped trade list.
                     </p>
                   {:else}
                     <div class="tt-cmp">
