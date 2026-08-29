@@ -49,6 +49,13 @@ pub mod frontier;
 pub mod results;
 pub mod stability;
 pub mod stored;
+/// Every round trip a recorded run took, keyed by that run's identity.
+///
+/// The backtest page has drawn a per-trade table since it was written and every
+/// cell of it is a padlock, because nothing ever wrote the file it reads. See
+/// the module for why the store that existed in `crates/api` could not be that
+/// writer.
+pub mod trades;
 
 use brutex_core::vendor::Vendor;
 use costs::fill::Direction;
@@ -8882,6 +8889,68 @@ struct Recording<'a> {
 /// still on the page — so this REPORTS the refusal beside the result rather than
 /// discarding a completed sweep over a detail file. `CLAUDE.md` §4 asks for the
 /// reason to be named beside the answer, and that is what this does.
+/// Writes this run's round trips, and never fails the run.
+///
+/// # Why the page has been showing padlocks
+///
+/// `web/src/routes/backtest/+page.svelte` draws a per-trade table — trade
+/// number, entry and exit, price, net P&L, favourable and adverse excursion,
+/// cumulative P&L, duration — and every cell of it renders a `Lock` carrying
+/// its own sentence: *"No trade number — no trade list is recorded."* The
+/// display was built and the file was never written. `crates/api/src/trades.rs`
+/// held a store of the right shape with zero callers on either side; see
+/// [`crate::trades`] for the three reasons it could not be the writer.
+///
+/// # It reports rather than refuses
+///
+/// Same contract as [`record_frontier`]: a `String` for the report, never a
+/// `Result`. The trades are DETAIL about a run that already happened and whose
+/// ledger row is already written — losing them must not turn a completed sweep
+/// into a failure. A refusal is named in the returned text and the run stands.
+///
+/// Ordered after the ledger row and the frontier for the reason `record_frontier`
+/// gives: a detail row whose run has no ledger row is an orphan, and writing the
+/// ledger first makes that unreachable rather than merely unlikely.
+fn record_trades(
+    root: &std::path::Path,
+    id: &runner::identity::RunId,
+    taken: &runner::trade::Trades,
+) -> String {
+    if taken.trades.is_empty() {
+        return String::new();
+    }
+    let identity = id.bytes();
+    let rows: Vec<trades::Row> = taken
+        .trades
+        .iter()
+        .enumerate()
+        .map(|(seq, t)| trades::Row {
+            identity,
+            seq: u32::try_from(seq).unwrap_or(u32::MAX),
+            signal_bar: u64::try_from(t.signal_bar).unwrap_or(u64::MAX),
+            entry_bar: u64::try_from(t.entry_bar).unwrap_or(u64::MAX),
+            exit_bar: u64::try_from(t.exit_bar).unwrap_or(u64::MAX),
+            best: t.best,
+            worst: t.worst,
+        })
+        .collect();
+
+    // THE SAME LOCK THE LEDGER TAKES, AND FOR THE SAME REASON. `open` rebuilds
+    // the block index by reading the file, so two rungs finishing together
+    // would each index a file the other is appending to.
+    let Ok(_guard) = LEDGER.lock() else {
+        return "  the trades were not recorded: the results lock was poisoned\n".to_owned();
+    };
+    let mut file = match trades::Trades::open(root) {
+        Ok(file) => file,
+        Err(why) => return format!("  the trades were not recorded: {why}\n"),
+    };
+    match file.append_all(&rows) {
+        Ok(written) => format!("  {written} trade(s) recorded for this run\n"),
+        Err(why) => format!("  the trades were not recorded: {why}\n"),
+    }
+}
+
 fn record_frontier(
     root: &std::path::Path,
     id: &runner::identity::RunId,
@@ -9590,6 +9659,14 @@ fn audit_bars(
         // run has no ledger row is an orphan, and this ordering makes that
         // unreachable rather than merely unlikely.
         out.push_str(&record_frontier(into.root, run_id, &by_evidence, rules.top));
+        // AND THE ROUND TRIPS THEMSELVES, last of the three.
+        //
+        // The ledger says a run happened, the frontier says which combinations
+        // it ranked, and this says what the chosen one actually DID — the rows
+        // the page has been drawing padlocks into since it was written. Ordered
+        // last for the same reason the frontier is ordered after the ledger: a
+        // detail file whose run has no row above it is an orphan.
+        out.push_str(&record_trades(into.root, run_id, &taken));
     }
     out.push_str(walk_forward_caveat(execution.is_some(), folds.decided()));
     out.push_str(&audit::render(
