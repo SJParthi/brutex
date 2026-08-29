@@ -7488,12 +7488,19 @@
                         </label>
                       </div>
                       <div class="tt-q">
+                        <!-- THE BASIS IS NAMED, because it is NOT the same number the
+                             ledger row reports. `trades.bin` holds the level-less walk —
+                             entries taken and held to the horizon, no stop and no target
+                             — while the row's `pessimistic` is the chosen exit cell. On a
+                             measured two-month run those are -24,605 and -12,375. Both are
+                             right; showing either as "the total" beside the other is what
+                             made them look like a contradiction. -->
                         <span class="tt-k">Total without the best trade</span>
                         <span class="tt-qv"
                           >{money(robustnessVerdict.withoutBest)}<em class="tt-unit2"
                             >from {money(robustnessVerdict.total)} over {exact(
                               robustnessVerdict.trades
-                            )} trades</em
+                            )} trades, held to the horizon with no stop or target</em
                           ></span
                         >
                       </div>

@@ -701,6 +701,81 @@ mod tests {
     /// The baked tables were themselves derived from this store on 2026-08-22,
     /// so a disagreement means the derivation is wrong — this is the bridge that
     /// lets the constants be deleted with evidence rather than with hope.
+    /// A run list longer than `MAX_WINDOWS` is merged across its narrowest gaps,
+    /// and the minutes inside those gaps stay OWED.
+    ///
+    /// # The defect this pins, and the test that was cited but never written
+    ///
+    /// `from_runs` used to `break` past the second run, and its doc said
+    /// `a_third_window_is_dropped_rather_than_merged` pinned that. **No such
+    /// test has ever existed**, and every call site in the crate passes one or
+    /// two runs — so the drop path was documented, defended in prose, and
+    /// completely uncovered.
+    ///
+    /// What it cost is not the under-count the old doc weighed. `expects`
+    /// answers "was this minute owed", and past the second run it answered
+    /// `false` for the whole tail of the session, so a real hole was classified
+    /// as `outside-window` and vanished. Two interior gaps is an ordinary NIFTY
+    /// day, not the "visible surprise" the doc anticipated.
+    #[test]
+    fn interior_gaps_are_merged_and_the_minutes_inside_them_stay_owed() {
+        // An ordinary session that lost one minute at 11:01 and one at 13:01:
+        // 09:15-11:00, 11:02-13:00, 13:02-15:29. Three runs, two gaps.
+        let day = Observed::from_runs(19_522, &[(555, 660), (662, 780), (782, 929)])
+            .session
+            .expect("a day with bars has a session");
+
+        // THE TAIL IS OWED, AND UNDER THE DROP IT WAS NOT.
+        //
+        // This is the whole of the defect. Dropping the third run left the
+        // windows at 09:15-11:00 and 11:02-13:00, so every minute from 13:02 to
+        // the close — 148 of them — answered `false` to "was this owed" and any
+        // hole among them was filed as `outside-window`. Merging carries the
+        // span to 15:29.
+        assert!(
+            day.expects(929) && day.expects(800),
+            "the last two and a half hours of the session are owed"
+        );
+        assert!(!day.expects(930), "and the close still bounds it");
+
+        // ONE GAP SURVIVES, BECAUSE THE TYPE HOLDS TWO WINDOWS.
+        //
+        // `Session` is a fixed `[Window; MAX_WINDOWS]`, so a day with three
+        // contiguous stretches cannot express all three boundaries and exactly
+        // one gap must be absorbed. The narrowest goes first; with a tie the
+        // earlier one goes. That leaves one minute unowed instead of 148, which
+        // is the honest limit of this shape rather than a claim it is perfect.
+        assert_eq!(
+            day.count, 2,
+            "three runs collapse to the two the type holds"
+        );
+        assert!(
+            day.expects(661),
+            "the absorbed gap's minute is owed and a hole there is reported"
+        );
+
+        // The disaster-recovery Saturday shape, plus one lost minute inside the
+        // morning window: 09:15-09:44, 09:46-09:59, then 11:30-12:29. The 91
+        // minute break must survive as the boundary; the one-minute gap must not.
+        let dr = Observed::from_runs(19_784, &[(555, 584), (586, 599), (690, 749)])
+            .session
+            .expect("a day with bars has a session");
+
+        assert_eq!(
+            dr.count, 2,
+            "the widest gap survives as a genuine window boundary"
+        );
+        assert!(
+            dr.expects(585),
+            "the one-minute hole inside the morning window is owed"
+        );
+        assert!(
+            !dr.expects(650),
+            "the 91-minute closure between the windows is NOT owed, and merging \
+             the narrowest gap first is what keeps that true"
+        );
+    }
+
     #[test]
     fn the_derivation_agrees_with_the_baked_tables_it_replaces() {
         // The four irregular sessions, with the runs the store actually holds —
@@ -792,21 +867,83 @@ impl Observed {
     /// Build a session from contiguous runs, as a caller walking a day finds
     /// them.
     ///
-    /// **Runs past [`MAX_WINDOWS`] are dropped and the count says so** rather
-    /// than being merged into the span. Merging would silently reinstate the
-    /// 180-bar over-count this signature exists to remove; dropping under-counts
-    /// instead, which reports fewer owed bars and therefore never invents a
-    /// hole. Nothing in the operator's store needs a third window, and
-    /// `a_third_window_is_dropped_rather_than_merged` pins the behaviour so a
-    /// venue that does is a visible surprise rather than a wrong number.
+    /// **Excess runs are MERGED ACROSS THEIR SMALLEST GAPS**, never dropped.
+    ///
+    /// # Dropping made real holes invisible
+    ///
+    /// This used to `break` past [`MAX_WINDOWS`], on the reasoning that
+    /// under-counting owed bars *"never invents a hole"*. That is true and it is
+    /// not the failure that matters: [`Session::expects`] answers "was this
+    /// minute OWED", and it returns `false` for every minute past the second
+    /// run. A gap classifier asking about a hole at 14:30 on a day that already
+    /// lost two minutes is told the minute was never expected, so the hole is
+    /// classified `outside-window` and DISAPPEARS. Dropping under-counted the
+    /// owed bars *and* suppressed detection of the missing ones.
+    ///
+    /// The premise was a type confusion. [`MAX_WINDOWS`] is `2` because no
+    /// measured VENUE session has three — the disaster-recovery Saturdays trade
+    /// 09:15–09:59 and 11:30–12:29. But the caller here, a walk over a day's
+    /// bars, emits one run per contiguous stretch of bars PRESENT. Two missing
+    /// minutes in an ordinary session produce three runs, which on a NIFTY month
+    /// is routine rather than the *"visible surprise"* the old doc expected.
+    ///
+    /// # Why merging the SMALLEST gaps is the right collapse
+    ///
+    /// A window boundary and a data hole look identical in a run list; only the
+    /// size of the gap separates them. The DR Saturday's break is 91 minutes,
+    /// and a couple of dropped ticks is one or two. So the runs are joined
+    /// across their narrowest gaps first, until the count fits: the widest gaps
+    /// survive as genuine window boundaries, and the narrow ones are absorbed
+    /// into a span where the minutes inside them are correctly OWED and
+    /// therefore correctly reported as holes.
+    ///
+    /// No constant decides which is which — the day's own gap distribution
+    /// does, so a venue that changes its hours needs nothing rebuilt here.
     #[must_use]
     pub fn from_runs(day: i64, runs: &[(u16, u16)]) -> Self {
         if runs.is_empty() {
             return Self { day, session: None };
         }
+        let mut merged: Vec<(u16, u16)> = runs.to_vec();
+        while merged.len() > MAX_WINDOWS {
+            // The narrowest gap between adjacent runs, by its LEFT index. The
+            // list arrives in minute order, so `next.0 - this.1` is the gap.
+            //
+            // `windows(2)` and `min_by_key` rather than an index loop: this file
+            // forbids raw indexing, and the pair iterator makes the adjacency
+            // structural instead of arithmetic that has to be read to be
+            // trusted. Ties take the earliest, which `min_by_key` guarantees.
+            let at = merged
+                .windows(2)
+                .enumerate()
+                .min_by_key(|(_, pair)| {
+                    pair.get(1)
+                        .zip(pair.first())
+                        .map_or(u16::MAX, |(next, this)| next.0.saturating_sub(this.1))
+                })
+                .map_or(0, |(i, _)| i);
+
+            // `at + 1` is in range because the loop condition guarantees at
+            // least three elements and `at` indexes a `windows(2)` pair, so the
+            // `get` pair below cannot be `None` — but it answers rather than
+            // panicking if that reasoning ever stops holding.
+            if let Some((from, to)) = merged
+                .get(at)
+                .map(|l| l.0)
+                .zip(merged.get(at + 1).map(|r| r.1))
+            {
+                if let Some(slot) = merged.get_mut(at) {
+                    *slot = (from, to);
+                }
+                merged.remove(at + 1);
+            } else {
+                break;
+            }
+        }
+
         let mut windows = [Window { from: 0, to: 0 }; MAX_WINDOWS];
         let mut count = 0_u8;
-        for (i, &(from, to)) in runs.iter().enumerate() {
+        for (i, &(from, to)) in merged.iter().enumerate() {
             let Some(slot) = windows.get_mut(i) else {
                 break;
             };

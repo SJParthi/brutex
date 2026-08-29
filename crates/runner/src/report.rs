@@ -420,11 +420,22 @@ pub fn render_findings(ranked: &Ranked, sweep: &Sweep) -> String {
         &ranked.considered.to_string(),
         "",
     );
+    // THE CAPTION NAMES THE SORT THAT ACTUALLY RAN.
+    //
+    // This was the literal "best by |t|" on every render, while
+    // `audit_range_inner` selects `Lens::Payoff` and `ByPayoff` orders by
+    // `(clears, payoff, |t|, mask)`. The run's own output refuted it: rank 1
+    // carried t = -0.15 and rank 9,648 carried t = -2.34, so a reader comparing
+    // the caption against the table saw the strongest evidence near the BOTTOM
+    // of a list captioned as sorted by evidence.
     row(
         &mut out,
         "kept",
         &ranked.top.len().to_string(),
-        "best by |t|",
+        match ranked.lens {
+            crate::rank::Lens::Detectability => "best by |t|",
+            crate::rank::Lens::Payoff => "best by payoff, clearing rows first, ties by |t|",
+        },
     );
     row(
         &mut out,
@@ -1381,6 +1392,9 @@ mod tests {
             // the fixture honest and keeps the two in step if the trial count
             // ever changes again.
             bar: crate::significance::bonferroni_t(crate::significance::trials(&out.sweep)),
+            // The historical order, which is what this fixture asserted before
+            // `Ranked` carried the lens at all.
+            lens: crate::rank::Lens::Detectability,
         };
         let text = crate::report::render_findings(&ranked, &out.sweep);
 
@@ -1450,6 +1464,9 @@ mod tests {
             considered: 3_689,
             halted: None,
             bar: 0.0,
+            // The historical order, which is what this fixture asserted before
+            // `Ranked` carried the lens at all.
+            lens: crate::rank::Lens::Detectability,
         };
         let text = crate::report::render_findings(&ranked, &out.sweep);
         assert!(

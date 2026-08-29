@@ -225,7 +225,8 @@ mod tests {
     fn serially() -> MutexGuard<'static, ()> {
         static ONE_AT_A_TIME: OnceLock<Mutex<()>> = OnceLock::new();
         let lock = ONE_AT_A_TIME.get_or_init(|| Mutex::new(()));
-        lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        lock.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// The whole point: a knob nobody set reads through to the environment, so
@@ -325,7 +326,10 @@ mod tests {
             ("BRUTEX_TOP", "500"),
             ("BRUTEX_SCREEN_CAP", "500"),
         ]);
-        assert_eq!(one, "BRUTEX_SCREEN_CAP=500 BRUTEX_TOP=500 BRUTEX_VALIDATE=0");
+        assert_eq!(
+            one,
+            "BRUTEX_SCREEN_CAP=500 BRUTEX_TOP=500 BRUTEX_VALIDATE=0"
+        );
         assert_eq!(one, other, "iteration order must not reach the log");
         assert_eq!(render(Vec::new()), "", "and nothing set renders empty");
     }

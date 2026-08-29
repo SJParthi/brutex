@@ -1060,6 +1060,19 @@ pub struct Robustness {
     /// would flatter every ratio below.
     pub trades: u64,
     /// Worst-fill total over every counted trade, in paisa.
+    ///
+    /// # NOT the ledger row's `pessimistic`, and the two differ by construction
+    ///
+    /// `record_trades` is handed `taken` — the level-less [`runner::trade::walk`]
+    /// — so `trades.bin` holds the HOLD-TO-HORIZON walk: entries taken, exits at
+    /// the horizon, no stop and no target. The ledger row's `pessimistic` is the
+    /// chosen exit cell out of the grid. Measured on a two-month 60min run they
+    /// are −24,605 and −12,375: the same trades, priced under two different exit
+    /// policies, differing by roughly 2x.
+    ///
+    /// Both numbers are right. Presenting either as "the total" without saying
+    /// which is what makes them look like a contradiction, so every surface that
+    /// renders this one says what it is priced on.
     pub total: i64,
     /// The single largest winning round trip, at the worst fill. Zero when no
     /// trade ended above water.

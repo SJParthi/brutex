@@ -135,7 +135,11 @@ impl Eq for Scored {}
 /// The kept combinations, and how many were weighed to find them.
 #[derive(Clone, Debug, Default)]
 pub struct Ranked {
-    /// Best first, by |t|.
+    /// Best first, by whichever order [`Self::lens`] names.
+    ///
+    /// This doc used to read "best first, by |t|" unconditionally, which is
+    /// true of [`Lens::Detectability`] and false of [`Lens::Payoff`] — the
+    /// lens `audit_range_inner` actually selects.
     pub top: Vec<Scored>,
     /// Every combination the sweep produced — the number this kept `top` out of.
     ///
@@ -208,6 +212,15 @@ pub struct Ranked {
     /// dressed up: `bonferroni_t` returns `0.0` for `n < 1`, and a run with no
     /// hypotheses has nothing to correct for.
     pub bar: f64,
+    /// The order [`Self::top`] is in.
+    ///
+    /// Carried so a report can NAME the sort rather than assume one. [`walk`]
+    /// is generic over the ordering TYPE, so the choice is erased by the time a
+    /// report renders and the caption had to guess. It guessed "best by |t|"
+    /// under [`Lens::Payoff`], where rank 1 carried `t = -0.15` and rank 9,648
+    /// carried `t = -2.34` — the strongest evidence near the bottom of a list
+    /// captioned as sorted by evidence.
+    pub lens: Lens,
 }
 
 /// The best `keep` combinations by |t|, in memory proportional to `keep`.
@@ -287,9 +300,14 @@ pub fn rank_within(
 ///
 /// Neither lens is correct in general and neither replaces the other, which is
 /// why this is a parameter rather than a new default.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Lens {
     /// Rank by `|t|` — the historical behaviour, unchanged and bit-identical.
+    ///
+    /// `#[default]` because it is the order every caller had before `Lens`
+    /// existed, so a `Ranked::default()` in a fixture keeps meaning what it
+    /// meant rather than silently claiming the payoff sort.
+    #[default]
     Detectability,
     /// Rank by [`crate::outcome::Edge::payoff_bp`], ties broken by `|t|`.
     ///
@@ -374,6 +392,13 @@ impl Ord for ByPayoff {
 
 /// What a heap of some ordering needs to hold and hand back a [`Scored`].
 trait Ranked1: Ord + Sized {
+    /// THE LENS THIS ORDERING IS. Carried so [`Ranked`] can name how it was
+    /// sorted: `walk` is generic over the ordering TYPE, so without this the
+    /// lens is erased by the time a report is rendered and the caption has to
+    /// guess. It guessed "best by |t|" under the payoff lens, where rank 1 had
+    /// t = -0.15 and rank 9,648 had t = -2.34.
+    const LENS: Lens;
+
     /// Wrap one scored row, told the significance bar its run demands.
     ///
     /// The bar is passed to every lens even though only [`ByPayoff`] keeps it,
@@ -385,6 +410,8 @@ trait Ranked1: Ord + Sized {
 }
 
 impl Ranked1 for Scored {
+    const LENS: Lens = Lens::Detectability;
+
     /// IGNORES THE BAR, AND THAT IS CORRECT RATHER THAN AN OMISSION.
     ///
     /// This lens orders by `|t|` and the bar is a threshold ON `|t|`, so
@@ -400,6 +427,8 @@ impl Ranked1 for Scored {
 }
 
 impl Ranked1 for ByPayoff {
+    const LENS: Lens = Lens::Payoff;
+
     fn wrap(scored: Scored, bar: f64) -> Self {
         // `>=` and not `>`: a `t` exactly at the bar clears it, which is how
         // `crate::report` has always phrased the same test.
@@ -618,6 +647,7 @@ fn walk<K: Ranked1 + Send>(
             considered,
             halted: None,
             bar,
+            lens: K::LENS,
         };
     }
 
@@ -640,6 +670,7 @@ fn walk<K: Ranked1 + Send>(
             considered,
             halted: budget,
             bar,
+            lens: K::LENS,
         };
     }
 
@@ -669,6 +700,7 @@ fn walk<K: Ranked1 + Send>(
         considered,
         halted: None,
         bar,
+        lens: K::LENS,
     }
 }
 

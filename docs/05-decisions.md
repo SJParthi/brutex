@@ -27596,3 +27596,74 @@ Verified by running the binary against an isolated store: six positionals parse
 and reach the sweep, seven pass the operator's figure through, eight are refused
 by name.
 
+
+### D-0381 — a sum was claimed as a per-day fact, and dropped runs made real holes invisible
+
+Two calendar defects, both of the family where a derivation proves one thing
+and the code claims another.
+
+**`calendar_of::derive` had a fast path that skipped the walk** when a month's
+minute count equalled `sessions * FULL`, and stamped a full 09:15-15:29 window
+onto EVERY day in the month, under the comment *"every day in this month is a
+full session, by arithmetic"*. The equality proves the MEAN is `FULL` and says
+nothing about any term: one day short by a bar beside one day long by a bar is
+the same sum, and so is a day with a daily bar and no minute series at all
+beside a day carrying twice its share. Both were then reported as complete —
+the claim `LENGTH_UNMEASURED` exists to refuse for the five Muhurat days.
+
+The equality would be sufficient if no day could EXCEED `FULL`, and that cannot
+be shown: the store enforces strictly increasing `ts_micros`, not one bar per
+minute, so two records at 09:15:00 and 09:15:30 both land in minute 0. The walk
+already handles exactly that (`Some(last) if last.1 == minute`), which is the
+store's own model admitting it is reachable. Every month is walked now and
+`months_by_counter` counts where the arithmetic AGREED rather than where it
+stood in for a measurement. This is an audit path, not the sweep's inner loop:
+§3 rule 4 bounds bar lookup, condition lookup, mask evaluation, duplicate
+rejection and result append, and a calendar walk is none of them.
+
+**`Observed::from_runs` dropped every run past the second**, defended in its own
+doc on the grounds that under-counting owed bars *"never invents a hole"*. True,
+and not the failure that matters: `Session::expects` answers *"was this minute
+OWED"*, and past the second run it answered `false` for the whole tail — so a
+real hole at 14:30 on a day that had already lost two minutes was classified
+`outside-window` and DISAPPEARED. It under-counted owed bars and suppressed
+detection of the missing ones.
+
+The premise was a type confusion. `MAX_WINDOWS` is 2 because no measured VENUE
+session has three; the caller is a walk over a day's bars emitting one run per
+contiguous stretch PRESENT, and two missing minutes make three runs. Runs are
+now joined across their NARROWEST gaps until the count fits: the disaster-
+recovery Saturday's 91-minute break survives as a genuine boundary, a
+one-minute gap is absorbed and its minutes stay owed. No constant decides
+which — the day's own gap distribution does.
+
+Measured: three runs with the tail at 13:02-15:29 previously left 148 minutes
+unowed; one now. The doc cited `a_third_window_is_dropped_rather_than_merged`
+as pinning the old behaviour and **no such test has ever existed** — every call
+site in the crate passes one or two runs, so the drop path was documented,
+defended, and completely uncovered.
+`interior_gaps_are_merged_and_the_minutes_inside_them_stay_owed` covers it now,
+including the DR-Saturday shape.
+
+### D-0382 — the findings caption named a sort that was not running
+
+`render_findings` printed the literal `best by |t|` on every render while
+`audit_range_inner` selects `Lens::Payoff`, whose `ByPayoff` orders by
+`(clears, payoff, |t|, mask)`. The run's own output refuted it: rank 1 carried
+`t = -0.15` and rank 9,648 carried `t = -2.34`, so the strongest evidence sat
+near the BOTTOM of a list captioned as sorted by evidence. `Ranked::top`'s doc
+said the same thing and was equally wrong.
+
+`rank::walk` is generic over the ordering TYPE, so the lens was erased before
+any report could name it. `Ranked1` gained an associated `const LENS`, `Ranked`
+gained the field, and the caption reads the run's own answer. `Lens` derives
+`Default` as `Detectability` so a fixture that does not set it keeps meaning
+what it meant.
+
+Also recorded rather than fixed: `trades.bin` holds the LEVEL-LESS
+`trade::walk`, so `Robustness::total` is the hold-to-horizon figure while the
+ledger row's `pessimistic` is the chosen exit cell — measured at -24,605 against
+-12,375 on one two-month 60min run. Both are correct and the page showed both as
+"total". Changing what is recorded is an append-only format decision and is not
+made here; every surface now names the basis it is priced on.
+

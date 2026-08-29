@@ -109,10 +109,19 @@ const FULL: u64 = pull::calendar::FULL_BARS as u64;
 /// What one derivation found, beside the calendar itself.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Report {
-    /// Months whose minute counter matched `sessions × 375` exactly, so no walk
-    /// was needed.
+    /// Months whose minute counter matched `sessions × 375` exactly.
+    ///
+    /// **A SIGNAL, NOT A SHORTCUT.** This used to mean "no walk was needed",
+    /// and the walk was genuinely skipped: a sum equal to `n × 375` was taken as
+    /// proof that each of the `n` days held 375 bars. It proves the MEAN, not
+    /// the terms — one short day beside one long day sums identically, and the
+    /// month was then reported as complete on every day. Every month is walked
+    /// now, and this counts the months where the arithmetic agreed with what the
+    /// walk found rather than the months where it stood in for one.
     pub months_by_counter: u32,
-    /// Months walked because their counter did not match.
+    /// Months whose minute file opened and was walked.
+    ///
+    /// Every month with a minute file, since the counter no longer skips one.
     pub months_walked: u32,
     /// Months whose daily file could not be opened, by reason.
     ///
@@ -166,23 +175,47 @@ pub fn derive(
         }
     }
 
-    // THE MINUTE RUNG SECOND, AND ONLY WHERE THE COUNTER SAYS IT IS WORTH IT.
+    // THE MINUTE RUNG SECOND, AND EVERY MONTH IS WALKED.
+    //
+    // # A SUM IS NOT A PER-DAY FACT, and this used to claim it was
+    //
+    // There was a fast path here: when the month's record count equalled
+    // `sessions * FULL` it skipped the walk and stamped a full 09:15-15:29
+    // window onto EVERY day in the month, under the comment *"every day in this
+    // month is a full session, by arithmetic"*.
+    //
+    // That is false. `held == n * FULL` proves the MEAN is `FULL`; it says
+    // nothing about any single term. One day short by a bar and another long by
+    // one is the same sum, and so is a day with a daily bar and NO minute series
+    // at all beside a day carrying twice its share. The branch then reported
+    // both as complete sessions — the exact claim `LENGTH_UNMEASURED` exists to
+    // refuse for the five Muhurat days.
+    //
+    // The equality would be sufficient if no day could EXCEED `FULL`. It cannot
+    // be shown here: the store enforces strictly increasing `ts_micros`, not
+    // one bar per minute, so two records at 09:15:00 and 09:15:30 both fall in
+    // minute 0 and the day holds `FULL + 1`. The walk below already handles
+    // exactly that case (`Some(last) if last.1 == minute`), which is the store's
+    // own model admitting it is reachable.
+    //
+    // So the counter is now a SIGNAL rather than a shortcut. It still says
+    // whether the sum matched, and `months_by_counter` still counts those
+    // months — but the per-day answer comes from the walk that measures it.
+    // This is an audit path, not the sweep's inner loop: `CLAUDE.md` §3 rule 4
+    // bounds bar lookup, condition lookup, mask evaluation, duplicate rejection
+    // and result append, and a calendar walk is none of them.
     for month in months {
         let sessions = traded.keys().filter(|day| in_month(**day, *month)).count();
         let expected = (sessions as u64).saturating_mul(FULL);
-        match minute_count(store_root, vendor, exchange, segment, symbol, *month) {
-            Some(held) if held == expected => {
-                // EVERY DAY IN THIS MONTH IS A FULL SESSION, by arithmetic. A
-                // walk could find nothing a subtraction has not already proved,
-                // so it is not made.
-                report.months_by_counter = report.months_by_counter.saturating_add(1);
-                for (day, slot) in &mut traded {
-                    if in_month(*day, *month) {
-                        *slot = vec![(pull::calendar::OPEN_MINUTE, pull::calendar::LAST_MINUTE)];
-                    }
+        // NO MINUTE FILE AT ALL falls straight through. Every day in that month
+        // keeps `None`, which becomes `OpenLengthUnmeasured` — the exchange
+        // traded and this build cannot say for how long. Not a hole, and not a
+        // holiday.
+        if let Some(held) = minute_count(store_root, vendor, exchange, segment, symbol, *month) {
+            {
+                if held == expected {
+                    report.months_by_counter = report.months_by_counter.saturating_add(1);
                 }
-            }
-            Some(_) => {
                 report.months_walked = report.months_walked.saturating_add(1);
                 // THE MINUTE SIDE'S REFUSAL IS RECORDED, AND IT WAS THE ONE
                 // `Err` IN THIS FUNCTION THAT WAS NOT.
@@ -210,10 +243,6 @@ pub fn derive(
                     Err(why) => report.unreadable.push(why),
                 }
             }
-            // NO MINUTE FILE AT ALL. Every day in it keeps `None`, which becomes
-            // `OpenLengthUnmeasured` — the exchange traded and this build cannot
-            // say for how long. Not a hole, and not a holiday.
-            None => {}
         }
     }
 
