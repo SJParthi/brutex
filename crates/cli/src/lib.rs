@@ -5544,6 +5544,58 @@ fn screen_cap() -> usize {
         .unwrap_or(DEFAULT)
 }
 
+/// The cap for this rung: the operator's count, or one measured to fit a budget.
+///
+/// Returns [`screen_cap`] unchanged when no budget is named, so every existing
+/// caller and every existing run is unaffected. With `BRUTEX_SCREEN_BUDGET_MS`
+/// set, a fixed prefix is priced and timed, and [`cap_within_budget`] turns that
+/// throughput into a count.
+///
+/// # The calibration is real work, and doing it twice is the cheaper mistake
+///
+/// The prefix is priced here and priced again in the pass that follows. Feeding
+/// its results forward would mean carrying a partial answer through the
+/// determinism argument — the real pass is a single `par_iter` whose output
+/// order is what §3 rule 5 rests on — to save 256 candidates out of a cap that
+/// is typically thousands. Two hundred and fifty-six is a rounding error against
+/// any budget worth naming; a spliced answer is not.
+fn cap_for_budget(
+    bars: &[indicators::Candle],
+    column: &indicators::column::Column,
+    horizon: Horizon,
+    by_evidence: &[&runner::rank::Scored],
+) -> usize {
+    let Some(budget) = screen_budget_ms() else {
+        return screen_cap();
+    };
+    let sample = CALIBRATION_CANDIDATES.min(by_evidence.len());
+    let began = std::time::Instant::now();
+    let _warm: usize = by_evidence
+        .par_iter()
+        .take(sample)
+        .map(|scored| {
+            usize::from(
+                grid::evaluate(
+                    bars,
+                    column,
+                    &scored.mask,
+                    horizon,
+                    side_of_evidence(scored),
+                    grid::Levels::derived(grid_rungs(bars)),
+                )
+                .best()
+                .is_some(),
+            )
+        })
+        .sum();
+    cap_within_budget(
+        sample,
+        began.elapsed().as_nanos(),
+        budget,
+        by_evidence.len().min(screen_cap()),
+    )
+}
+
 /// How many candidates the throughput measurement prices before deciding a cap.
 ///
 /// # Fixed, and it has to be
@@ -6632,34 +6684,7 @@ fn screen(
     // measures the thing it is bounding rather than a constant from somebody
     // else's hardware. The prefix is a fixed size, so what is timed does not
     // itself depend on the timing.
-    let priced_cap = screen_budget_ms().map_or_else(screen_cap, |budget| {
-        let sample = CALIBRATION_CANDIDATES.min(by_evidence.len());
-        let began = std::time::Instant::now();
-        let _warm: usize = by_evidence
-            .par_iter()
-            .take(sample)
-            .map(|scored| {
-                usize::from(
-                    grid::evaluate(
-                        bars,
-                        column,
-                        &scored.mask,
-                        horizon,
-                        side_of_evidence(scored),
-                        grid::Levels::derived(grid_rungs(bars)),
-                    )
-                    .best()
-                    .is_some(),
-                )
-            })
-            .sum();
-        cap_within_budget(
-            sample,
-            began.elapsed().as_nanos(),
-            budget,
-            by_evidence.len().min(screen_cap()),
-        )
-    });
+    let priced_cap = cap_for_budget(bars, column, horizon, by_evidence);
     let mut rows: Vec<Screened<'_>> = by_evidence
         .par_iter()
         .take(priced_cap)

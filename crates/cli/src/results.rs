@@ -573,7 +573,23 @@ pub struct Results {
     /// another process rewrote the header, which is not a thing this format
     /// permits.
     version: u32,
-    seen: std::collections::HashSet<[u8; 32]>,
+    /// Every identity this ledger holds, and the byte offset it sits at.
+    ///
+    /// # It was a `HashSet` and the offset was thrown away
+    ///
+    /// The open loop walks every record and stands on `at` — the exact byte the
+    /// record begins at — and inserted only the identity. So this file could
+    /// answer "is this run already recorded" in one probe and **could not
+    /// retrieve that run at all**: the only accessor was [`Self::read`], keyed by
+    /// ORDINAL, so identity-to-record meant a full scan.
+    ///
+    /// `frontier.rs` and `trades.rs` both store `Block { first, count }` and can
+    /// do it. The ledger they hang off could not, and the offset it needed was
+    /// already in the loop variable. Found by an O(1) audit.
+    ///
+    /// The map costs eight bytes per run more than the set. At the 20,000-run
+    /// ceiling `api` enforces that is 160 KB, against a file of 5.2 MB.
+    seen: std::collections::HashMap<[u8; 32], u64>,
     /// Byte offset this process has absorbed identities up to.
     ///
     /// `seen` is built once at open, so it knows nothing about a record ANOTHER
@@ -787,7 +803,7 @@ impl Results {
         // tolerates by never entering.
         let records = len.saturating_sub(HEADER) / stride;
         let mut seen =
-            std::collections::HashSet::with_capacity(usize::try_from(records).unwrap_or(0));
+            std::collections::HashMap::with_capacity(usize::try_from(records).unwrap_or(0));
         let mut at = HEADER;
         while at + stride <= len {
             // A DAMAGED RECORD IS SKIPPED HERE, NOT REFUSED.
@@ -800,7 +816,7 @@ impl Results {
             // stay addressable, and `read` refuses it BY NAME when asked for.
             let (raw, sealed) = read_at(&mut file, at, version)?;
             if sealed {
-                seen.insert(Record::from_bytes(&raw).identity);
+                seen.insert(Record::from_bytes(&raw).identity, at);
             }
             at = at.saturating_add(stride);
         }
@@ -863,7 +879,54 @@ impl Results {
     /// measurement, however sound it is.
     #[must_use]
     pub fn holds(&self, identity: &[u8; 32]) -> bool {
-        self.seen.contains(identity)
+        self.seen.contains_key(identity)
+    }
+
+    /// The run with this identity: one hash probe, then one read.
+    ///
+    /// # This was not expressible, and the offset it needs was already held
+    ///
+    /// Until the index carried offsets, this file could answer *"is this run
+    /// recorded"* in one probe and could not hand back the run. [`Self::read`]
+    /// is keyed by ORDINAL, so a caller holding an identity — which is what
+    /// every other results file is keyed by, and what `/backtest.json` and
+    /// `cli top` both start from — had to walk the ledger.
+    ///
+    /// `frontier.rs` and `trades.rs` have had `Block { first, count }` and this
+    /// capability all along. The ledger they hang off did not, while standing on
+    /// the byte offset in its own open loop and discarding it. Found by an O(1)
+    /// audit rather than by anything failing.
+    ///
+    /// # Cost
+    ///
+    /// One `HashMap` probe on a 32-byte key, then the same seek-and-read
+    /// [`Self::read`] performs — independent of how many runs the ledger holds.
+    ///
+    /// **UNVERIFIED as a measurement.** The bound is argued from the shape of
+    /// the code; `C-CLI-03` times the probe half and nothing times this pairing.
+    ///
+    /// # Errors
+    ///
+    /// `Ok(None)` when no run has this identity, which is not an error. A
+    /// refusal when the record is there and unreadable — a failed seal, a short
+    /// read — because that is a damaged ledger rather than an absent run, and
+    /// `CLAUDE.md` §4 refuses to report the second as the first.
+    pub fn of_identity(&mut self, identity: &[u8; 32]) -> Result<Option<Record>, Refusal> {
+        let Some(&at) = self.seen.get(identity) else {
+            return Ok(None);
+        };
+        // THE ORDINAL IS DERIVED FROM THE OFFSET, so this reuses `read` and its
+        // shared lock rather than opening a second path to the same bytes. A
+        // second reader would be a second place for the seal check to drift.
+        let stride = self.stride();
+        if stride == 0 {
+            return Err(format!(
+                "the ledger reports a stride of zero, so byte {at} names no \
+                 record. This is a header this build cannot address."
+            ));
+        }
+        let index = at.saturating_sub(HEADER) / stride;
+        self.read(index).map(Some)
     }
 
     /// Appends one run. **O(1)** — a seek to the end and one write.
@@ -1057,7 +1120,7 @@ impl Results {
                  over a barrier that failed, which is the larger harm."
             )
         })?;
-        self.seen.insert(record.identity);
+        self.seen.insert(record.identity, at);
         self.scanned = at.saturating_add(STRIDE);
         Ok(at.saturating_sub(HEADER) / STRIDE)
     }
@@ -1092,7 +1155,8 @@ impl Results {
             // damaged record is refused by `read` at the moment someone tries to
             // use its numbers. Refusing an append because an unrelated row went
             // bad would stop a run for a reason that has nothing to do with it.
-            self.seen.insert(Record::from_bytes(&raw).identity);
+            self.seen
+                .insert(Record::from_bytes(&raw).identity, self.scanned);
             self.scanned = at.saturating_add(STRIDE);
         }
         Ok(())
@@ -1908,6 +1972,65 @@ mod tests {
         let full = hasher.finalize();
         out.extend_from_slice(full.get(..SEAL_BYTES).expect("eight seal bytes"));
         out
+    }
+
+    /// A run is retrievable BY IDENTITY, in one probe and one read.
+    ///
+    /// # What this could not do before
+    ///
+    /// The index was a `HashSet<[u8; 32]>` built by an open loop that stands on
+    /// the byte offset of every record and discarded it. So the ledger could say
+    /// whether a run was recorded and could not hand it back: `read` is keyed by
+    /// ORDINAL, and every caller that has an identity — `/backtest.json`,
+    /// `cli top`, the frontier and trades files, all of which are identity-keyed
+    /// — would have had to walk the file.
+    ///
+    /// The offset was in the loop variable the whole time. Found by an O(1)
+    /// audit rather than by anything failing, which is the shape of every defect
+    /// this class produces: nothing is wrong per call, so review has nothing to
+    /// catch.
+    #[test]
+    fn a_run_is_found_by_its_identity_and_not_by_its_position() {
+        let r = root("by-identity");
+        let mut ledger = Results::open(&r).expect("a writable root");
+
+        // Three runs, so the one wanted is neither first nor last -- a first-row
+        // hit would pass on a ledger that ignored the identity entirely.
+        let wanted = record(9);
+        for one in [record(1), wanted, record(3)] {
+            ledger.append(&one).expect("appendable");
+        }
+
+        let found = ledger
+            .of_identity(&[9_u8; 32])
+            .expect("a readable ledger")
+            .expect("the run is there");
+        assert_eq!(
+            found.identity, wanted.identity,
+            "the identity asked for is the identity returned"
+        );
+        assert_eq!(
+            found.combinations, wanted.combinations,
+            "and it is the whole record, not just a hit"
+        );
+
+        // AN ABSENT RUN IS `None`, NOT A REFUSAL. "no run has this identity" is
+        // an answer; §4 refuses to dress it as a failure.
+        assert!(
+            ledger
+                .of_identity(&[7_u8; 32])
+                .expect("a readable ledger")
+                .is_none(),
+            "an identity nobody recorded answers None"
+        );
+
+        // AND IT AGREES WITH THE ORDINAL PATH, so the offset arithmetic is right
+        // rather than merely self-consistent.
+        let by_ordinal = ledger.read(1).expect("the second record");
+        assert_eq!(
+            by_ordinal.identity, wanted.identity,
+            "the wanted run is at ordinal 1, so both paths must name it"
+        );
     }
 
     /// The ledger reaches the DISK, and `flush` is not how a `File` does that.
