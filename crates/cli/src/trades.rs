@@ -497,6 +497,14 @@ fn hex32(bytes: &[u8; 32]) -> String {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "the same exception every test module in this workspace takes: a \
+              test that cannot panic cannot fail."
+)]
 mod tests {
     use super::{Block, Row, STRIDE_BYTES, Trades};
 
