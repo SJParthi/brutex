@@ -11508,7 +11508,14 @@
   .prov:has(.dot.warn) .pword { color: var(--warn); }
   .prov:has(.dot.down) .pword { color: var(--down); }
   .prov:has(.dot.up) .pword { color: var(--up); }
-  .pnote { font-family: var(--mono); white-space: nowrap; }
+  /* `.pnote` went with the "stored is measured · expected is arithmetic" line.
+     THE COMPILER DID NOT REPORT IT, and that is worth recording: Svelte's
+     unused-CSS pass flagged `.blank .alt` in the same commit but stayed silent
+     on this one-class selector, exactly as it stayed silent on `.tt-fix` and
+     `.tt-lockbig` in `routes/backtest`. Gate W4 counts what the compiler
+     reports, so "0 unused selectors" is a floor on DESCENDANT selectors and not
+     a proof that no rule is dead. Removing a rule's markup means removing the
+     rule in the same edit; the gate will not remind you. */
 
   /* ---- the partition ----
      A BAR AND A LEGEND, AND NEITHER IS A BUTTON. Every colour here comes from
