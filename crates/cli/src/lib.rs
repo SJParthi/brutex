@@ -3357,7 +3357,7 @@ fn audit_range_inner(
     // no single place holding what this run's policy IS, and the identity
     // simply did not carry it. Naming them here makes the two physically the
     // same values rather than two spellings that happen to agree.
-    let rules = Rules::operator();
+    let rules = Rules::derived(&span.bars, horizon_for(&span.bars, rung != EXECUTION_RUNG));
     let lens = runner::rank::Lens::Payoff;
     let validate = validate_from_env();
     let ladder = ladder_for(min_hits)?;
@@ -5026,6 +5026,62 @@ impl Rules {
         }
     }
 
+    /// [`Self::operator`] with the two floors DERIVED FROM THE BARS.
+    ///
+    /// # The defaults were a coin flip, and this file says so about itself
+    ///
+    /// `operator()` defaults `min_win_rate_bp` to `5_000`. `assurance_floor_bp`
+    /// twenty lines away states what that means: *"at least 50% of trades win IS
+    /// the null hypothesis of a coin flip and carries no evidence on its own."*
+    /// A rule set whose own neighbour calls it evidence-free is not a rule.
+    ///
+    /// **And a coin is the wrong null anyway.** The question is not "did more
+    /// than half the trades win" but "did more win than would have won by
+    /// entering at random on this instrument, over this span, at this horizon".
+    /// NIFTY drifts upward; on a long lens a 50% win rate can be WORSE than
+    /// buying arbitrary bars, and the floor would admit it.
+    ///
+    /// So the floor is the series' own base rate: the fraction of forward
+    /// windows that closed positive. Measured, per rung, per span — not chosen.
+    ///
+    /// # The reward-to-risk floor follows from it rather than standing beside it
+    ///
+    /// `operator()` defaults `min_rr_bp` to `125` independently, so the pair can
+    /// be inconsistent: at a 40% win rate, 1.25:1 loses money, and at 80% it
+    /// demands nothing. Break-even reward-to-risk at win rate `p` is
+    /// `(1 - p) / p` — arithmetic, not taste — and this asks for that plus the
+    /// same 25% margin the constant `125` encodes over `100`. The two floors can
+    /// no longer disagree, because one is computed from the other.
+    ///
+    /// # An explicit knob still wins
+    ///
+    /// A derived floor is a better DEFAULT, not a policy the operator may not
+    /// override. `BRUTEX_MIN_WIN_RATE_BP` and `BRUTEX_MIN_RR_BP` are read first
+    /// and used verbatim when set; the derivation fills the gap where a constant
+    /// used to sit. Both figures reach the run identity through `policy_of`
+    /// already, so a run at a derived floor and one at a stated floor are
+    /// different runs and are recorded as such.
+    ///
+    /// # Cost
+    ///
+    /// One pass over the forward returns the run has already computed — O(bars),
+    /// once per rung, off every per-candidate path.
+    #[must_use]
+    pub fn derived(bars: &[indicators::Candle], horizon: Horizon) -> Self {
+        let mut rules = Self::operator();
+        let Some(base_bp) = base_win_rate_bp(bars, horizon) else {
+            return rules;
+        };
+        if crate::knobs::var("BRUTEX_MIN_WIN_RATE_BP").is_none() {
+            rules.min_win_rate_bp = base_bp;
+            rules.min_assurance_bp = assurance_floor_bp(base_bp);
+        }
+        if crate::knobs::var("BRUTEX_MIN_RR_BP").is_none() {
+            rules.min_rr_bp = breakeven_rr_bp(rules.min_win_rate_bp);
+        }
+        rules
+    }
+
     const BASELINE: Self = Self {
         max_mae_ppm: 2_000,
         min_rr_bp: 200,
@@ -6036,6 +6092,62 @@ impl Screened<'_> {
 /// that arrives as `min_win_rate_bp` from the caller, and this function reads it
 /// so a caller demanding LESS than a coin flip is not silently raised to one.
 #[must_use]
+/// What fraction of forward windows closed positive, in basis points.
+///
+/// The null a strategy has to beat: entering at random on this instrument, over
+/// this span, at this horizon. `None` when nothing was measurable — a span with
+/// no bars, or one where every forward window was refused — because a floor
+/// derived from no observations is a number wearing a measurement's clothes.
+///
+/// # Why the denominator is DECIDED windows and not bars
+///
+/// `Forward` refuses a window that would run past the session close or past the
+/// end of the file. Counting those in the denominator would drag the base rate
+/// toward zero on the coarse rungs, where a larger share of bars sit near a
+/// close — making the floor easiest exactly where trades are hardest to place.
+fn base_win_rate_bp(bars: &[indicators::Candle], horizon: Horizon) -> Option<i64> {
+    let forward = runner::outcome::forward(bars, horizon);
+    let (mut decided, mut positive) = (0_i64, 0_i64);
+    for index in 0..bars.len() {
+        let Some(delta) = forward.at(index) else {
+            continue;
+        };
+        decided = decided.saturating_add(1);
+        if delta > 0 {
+            positive = positive.saturating_add(1);
+        }
+    }
+    if decided == 0 {
+        return None;
+    }
+    positive.checked_mul(10_000)?.checked_div(decided)
+}
+
+/// Break-even reward-to-risk at a win rate, plus a quarter for margin.
+///
+/// At win rate `p` a strategy breaks even when the average win is `(1 - p) / p`
+/// times the average loss — arithmetic, not preference. The `+25%` is the same
+/// margin the constant `125` encoded over `100`, kept so a derived floor is no
+/// laxer than the stated one was at its own assumed rate.
+///
+/// A rate at or above 100% would divide by a break-even of zero and a rate at or
+/// below zero is not a rate; both fall back to the stated default rather than
+/// producing an unsatisfiable pair, which `assurance_floor_bp` records as the
+/// failure that cannot be told apart from an honest answer.
+const fn breakeven_rr_bp(win_rate_bp: i64) -> i64 {
+    if win_rate_bp <= 0 || win_rate_bp >= 10_000 {
+        return 125;
+    }
+    let losses_bp = 10_000 - win_rate_bp;
+    // `(1 - p) / p` ON `min_rr_bp`'s OWN SCALE, where 100 is 1.0x -- NOT 10,000.
+    // The first draft multiplied by 10,000 and was a hundred times too large, so
+    // every derived floor exceeded the guard and fell back to the constant it
+    // was written to replace. The test caught it, which is what a direction
+    // assertion is for: at a 50% win rate this must reproduce exactly 125.
+    let breakeven = losses_bp.saturating_mul(100) / win_rate_bp;
+    breakeven.saturating_mul(125) / 100
+}
+
 const fn assurance_floor_bp(min_win_rate_bp: i64) -> i64 {
     /// A coin flip, in basis points. Not a policy about trading — the
     /// definition of chance, and the null a two-sided bound exists to exclude.
@@ -13852,6 +13964,90 @@ mod tests {
             let b = pair.get(1).copied().expect("windows(2) yields two");
             assert!(a > b, "the ladder must descend strictly: {a} then {b}");
         }
+    }
+    /// The win-rate floor is MEASURED from the bars, not chosen.
+    ///
+    /// # What the constant it replaces meant
+    ///
+    /// `Rules::operator` defaults `min_win_rate_bp` to `5_000`, and
+    /// `assurance_floor_bp` twenty lines away says what that is: *"at least 50%
+    /// of trades win IS the null hypothesis of a coin flip and carries no
+    /// evidence on its own."* A coin is also the wrong null -- the question is
+    /// whether a strategy beats entering AT RANDOM on this instrument over this
+    /// span, and an index that drifts upward makes those different numbers.
+    ///
+    /// This drives the derivation with a series whose forward returns are
+    /// overwhelmingly positive, so the derived floor must land far above 50% --
+    /// which a constant cannot do and a measurement must.
+    #[test]
+    fn the_win_rate_floor_is_taken_from_the_series_and_not_from_a_constant() {
+        let _guard = crate::knobs::serially();
+        crate::knobs::clear_all();
+
+        // A rising series: every forward window closes positive.
+        let rising: Vec<indicators::Candle> = runner::synthetic::sessions(6)
+            .into_iter()
+            .enumerate()
+            .map(|(n, mut bar)| {
+                // Rising overall, but not monotonically: every fifth bar dips, so
+                // the win rate lands well above chance and well below certainty --
+                // 100% would make break-even payoff zero, which the guard refuses.
+                // A drift with real pullbacks: a slow rise, and every third bar
+                // a drop deep enough that a fifteen-bar window starting near it
+                // closes negative. That puts the win rate strictly between chance
+                // and certainty, which is the only range where break-even payoff
+                // is defined -- at 100% it is zero and the guard falls back.
+                let step = i64::try_from(n).unwrap_or(0);
+                let saw = if step % 3 == 0 { -4_000 } else { 0 };
+                let lift = step.saturating_mul(60).saturating_add(saw);
+                bar.open = bar.open.saturating_add(lift);
+                bar.high = bar.high.saturating_add(lift);
+                bar.low = bar.low.saturating_add(lift);
+                bar.close = bar.close.saturating_add(lift);
+                bar
+            })
+            .collect();
+
+        let stated = crate::Rules::operator();
+        let derived = crate::Rules::derived(&rising, Horizon::DEFAULT);
+        crate::knobs::clear_all();
+
+        assert_eq!(
+            stated.min_win_rate_bp, 5_000,
+            "the constant this replaces is a coin flip"
+        );
+        assert!(
+            derived.min_win_rate_bp > stated.min_win_rate_bp,
+            "on a series where nearly every forward window closes positive the \
+             floor must rise above the coin flip, or a strategy that loses to \
+             buying at random still passes. derived {} vs stated {}",
+            derived.min_win_rate_bp,
+            stated.min_win_rate_bp
+        );
+
+        // AND THE REWARD-TO-RISK FLOOR FOLLOWS FROM IT rather than standing
+        // beside it. Break-even at win rate p is (1-p)/p, so a HIGHER win rate
+        // demands a LOWER payoff -- the two can no longer disagree because one
+        // is computed from the other.
+        assert!(
+            derived.min_rr_bp < stated.min_rr_bp,
+            "a floor above chance needs less payoff per trade to break even: \
+             derived rr {} vs stated {} (derived win rate {} bp)",
+            derived.min_rr_bp,
+            stated.min_rr_bp,
+            derived.min_win_rate_bp
+        );
+
+        // AN EXPLICIT KNOB STILL WINS. A derived floor is a better default, not
+        // a policy the operator may not override.
+        crate::knobs::set("BRUTEX_MIN_WIN_RATE_BP", "7000");
+        let asked = crate::Rules::derived(&rising, Horizon::DEFAULT);
+        crate::knobs::clear_all();
+        assert_eq!(
+            asked.min_win_rate_bp, 7_000,
+            "a stated floor is used verbatim; the derivation fills the gap where \
+             a constant used to sit"
+        );
     }
 
     /// A ceiling already at or below the floor is one rung, not an empty walk.
