@@ -26989,3 +26989,59 @@ average was 72 with a `cli` sweep at 1213% CPU, and a saturated machine
 invalidates every timing. Gate 8 measures it on CI. What WAS verified locally:
 0 unused CSS selectors in this file, and 0 svelte-check errors in it (42 of the
 61 ceiling, every one in `routes/backtest`).
+
+### D-0370
+
+**The two census failure events are gated, and the first fixture failed for a
+reason worth recording.**
+
+D-0368 took the storing path's gated `note_*` helpers from three to five and
+named five that were not, each needing "a store that fails in a specific way".
+Two of those are now driven. **7 of 10.**
+
+**`note_census_degraded` — one good header slot beside one bad one.** The census
+is double-buffered: two 64-byte headers `SLOT_STRIDE` apart. When one will not
+validate the census still LOADS, from the generation that survived, so every
+count is right, every bar is filed and the run succeeds. The only signal that a
+generation was stepped over is this line — and without it an operator learns at
+the NEXT write, against a file that has been half-readable for however many runs
+happened in between.
+
+**The obvious corruption does not work, and the format is right.** The first
+fixture filled the second slot with `0xA5` and the row read back an empty file.
+`is_specific` excludes `ManifestError::NotAManifest` deliberately: **an
+unwritten slot is a legal state and must never read as damage.** Garbage without
+a magic is indistinguishable from a slot nothing has reached, so it is skipped
+in silence.
+
+So the header stays valid and is put in the WRONG PLACE: slot 0's bytes copied
+over slot 1. It decodes, its checksum holds, and its `generation % SLOT_COUNT`
+says slot 0 while it sits at index 1 — `SlotPositionMismatch`, which IS
+specific. Nothing is forged and no checksum is recomputed; every byte was
+written by the writer itself, one slot over.
+
+**`note_census_unpublished` — bars on disk and nothing counting them.** The
+slices land first and the census publishes after, so a census that refuses the
+write leaves bars filed, correct and invisible. **They cannot be un-written:**
+the store is append-only and `Header::advance` refuses a batch beginning at or
+before what is committed. This line is the only record that the two ever
+disagreed.
+
+Driven at mode `0o444`, following `pull/tests/pipeline.rs` — readable so
+`read_census` still succeeds and the run reaches something to publish,
+unwritable so the install fails. Over a DIFFERENT month, because
+`install_census` returns early when there is nothing to publish and a re-run of
+the same month reaches no write at all: a fixture that re-ran `BODY` would have
+proven the census never refuses because it was never asked.
+
+**`slices` is asserted as `Positive`, not as a literal, and the measurement is
+why.** One member answered **8** — the rung it pulled plus the seven
+`derived_from` computes from `Timeframe::KNOWN`. Pinning 8 would make a rung
+added to the store fail this row for doing exactly what it was added to do,
+while zero-or-more would let a run that lost nothing pass a site about loss.
+
+**Three remain.** `note_derived_shortfall` and `note_not_derived` need a store
+that accepts one rung and refuses another; `note_bars_not_counted` needs a count
+that disagrees with what landed. Stated rather than implied, per §3 rule 6.
+
+715 `pull` tests green, `clippy -D warnings` clean.

@@ -167,6 +167,17 @@ const SPANNING: &str = "\
 20221101,10:00:00,38600.00,0,0
 ";
 
+/// One row in the month AFTER [`BODY`]'s, so a second run has an entry to
+/// append.
+///
+/// `install_census` returns early when there is nothing to publish and no
+/// repair to make, so a re-run of the same month reaches no write at all — and
+/// a fixture that re-ran `BODY` would prove the census never refuses because it
+/// was never asked.
+const NEXT_MONTH: &str = "\
+20221101,10:00:00,38600.00,0,0
+";
+
 /// A credential configuration whose four segments are nonsense by
 /// construction.
 ///
@@ -205,6 +216,15 @@ fn window() -> Window {
 }
 
 /// A window wide enough to hold both of [`SPANNING`]'s rows.
+/// A window holding [`NEXT_MONTH`]'s single row and nothing of [`BODY`]'s.
+fn november() -> Window {
+    Window::new(
+        Day::new(2022, 11, 1).expect("a real day"),
+        Day::new(2022, 11, 3).expect("a real day"),
+    )
+    .expect("a forward window")
+}
+
 fn crossing() -> Window {
     Window::new(
         Day::new(2022, 10, 3).expect("a real day"),
@@ -460,6 +480,55 @@ static SITES: &[Site] = &[
         message: "not filed",
         says: ("stage", Says::Holds("address")),
         drive: drive_not_filed,
+    },
+    Site {
+        // A CENSUS THAT LOADED FROM THE OTHER GENERATION, WHICH IS THE QUIETEST
+        // WAY THIS STORE CAN BE DAMAGED.
+        //
+        // The census is double-buffered. One good header slot beside one that
+        // will not validate still LOADS — from the generation that survived —
+        // so every count is right, every bar is filed, and the run succeeds. The
+        // only signal that a generation was stepped over is this line.
+        //
+        // Without it an operator learns at the NEXT write, against a file that
+        // has been half-readable for however many runs happened in between.
+        //
+        // Asserting `census` rather than the reason: the reason is a
+        // `ManifestError`'s own words and would pin this row to that enum's
+        // phrasing, while WHICH FILE is what an operator has to go and look at.
+        at: "crates/pull/src/ingest.rs — note_census_degraded",
+        target: "pull.census",
+        message: "loaded degraded",
+        says: ("census", Says::Holds("groww")),
+        drive: drive_census_degraded,
+    },
+    Site {
+        // BARS ON DISK AND NOTHING COUNTING THEM — the worst state on the
+        // storing path, and the one with no way back.
+        //
+        // The slices land first and the census is published after, so a census
+        // that refuses the write leaves bars that are filed, correct, and
+        // invisible. They cannot be un-written: the store is append-only and
+        // `Header::advance` refuses a batch beginning at or before what is
+        // committed. This line is the only record that the two ever disagreed.
+        //
+        // `slices` is the asserted field because it is the SIZE of the
+        // disagreement — how many entries went uncounted. "The census did not
+        // publish" without a number cannot tell one lost slice from a whole
+        // run's worth.
+        //
+        // `Positive` rather than a literal, and the measurement is why: one
+        // member answered **8**, because a one-minute member writes the rung it
+        // pulled plus the seven `ingest::derived_from` computes from
+        // `Timeframe::KNOWN`. Pinning that to 8 would make a rung added to the
+        // store fail this row for having done exactly what it was added to do,
+        // while zero-or-more would let a run that lost NOTHING pass a site
+        // about loss.
+        at: "crates/pull/src/ingest.rs — note_census_unpublished",
+        target: "pull.census",
+        message: "not published",
+        says: ("slices", Says::Positive),
+        drive: drive_census_unpublished,
     },
     Site {
         at: "crates/pull/src/http.rs:1483",
@@ -1271,5 +1340,136 @@ fn drive_not_filed(scratch: &Scratch) {
     assert_eq!(
         done.bars_stored, 0,
         "nothing was filed, so nothing may be reported as stored"
+    );
+}
+
+/// A census whose SECOND header slot will not validate.
+///
+/// # Why a corrupt slot rather than a corrupt file
+///
+/// The census is double-buffered: two 64-byte headers at
+/// [`store::format::SLOT_STRIDE`] apart, and `Manifest::open` validates both.
+/// One good slot beside one bad one is the state this event exists for — the
+/// census still LOADS, from the generation that survived, and reports
+/// `degraded_reason()` so an operator learns that a generation was stepped
+/// over rather than discovering it when the next write lands on a file it
+/// cannot read.
+///
+/// Corrupting the whole file would produce a different event entirely: nothing
+/// loads, and the run refuses. That is `pull.census` "not published", not this
+/// one, and the two must not be driven by one fixture.
+///
+/// # Scribbling on the slot does NOT work, and the reason is the format's
+///
+/// The first draft filled the second slot with `0xA5` and the row read back an
+/// empty file. That is the format behaving correctly: `is_specific` excludes
+/// `ManifestError::NotAManifest`, because **an unwritten slot is a legal state
+/// and must never read as damage.** Garbage without a magic is
+/// indistinguishable from a slot nothing has reached yet, so it is skipped in
+/// silence — which is right, and which no amount of scribbling will get past.
+///
+/// So the header stays VALID and is put in the WRONG PLACE: slot 0's bytes are
+/// copied over slot 1. A header decodes there, its checksum holds, and its
+/// `generation % SLOT_COUNT` says slot 0 while it is sitting at index 1 —
+/// `SlotPositionMismatch`, which IS specific, sets `fault`, and surfaces as
+/// `stepped_over`.
+///
+/// Nothing here forges a header or recomputes a checksum: every byte written
+/// was produced by the writer itself, one slot over.
+fn degrade_second_slot(store: &Path) {
+    let census = crate::manifest::manifest_path(store, Vendor::Groww);
+    let mut image = fs::read(&census).expect("the census this run just wrote");
+    let at = usize::try_from(store::format::SLOT_STRIDE).expect("16,384 fits a usize");
+    assert!(
+        image.len() > at + store::format::SLOT_LEN,
+        "the census file reaches its second slot, or this fixture corrupts \
+         nothing and the row would pass for the wrong reason"
+    );
+    let first: Vec<u8> = image
+        .get(..store::format::SLOT_LEN)
+        .expect("the first slot's header")
+        .to_vec();
+    image
+        .get_mut(at..at.saturating_add(store::format::SLOT_LEN))
+        .expect("the second slot's header")
+        .copy_from_slice(&first);
+    fs::write(&census, &image).expect("the misplaced census header");
+}
+
+/// One ingest over a census whose second generation will not read.
+fn drive_census_degraded(scratch: &Scratch) {
+    // A FIRST RUN, so there is a real census to damage. Writing one by hand
+    // would be a second opinion about the format.
+    let done = ingest_body(scratch);
+    assert_eq!(
+        done.failures,
+        Vec::new(),
+        "the run that BUILDS the census is clean; the damage comes after"
+    );
+    degrade_second_slot(&scratch.store());
+
+    // AND A SECOND RUN, which opens the damaged census.
+    let archive = scratch.archive(&[(INSTRUMENT, BODY)]);
+    let store = scratch.store();
+    let request = request_over(window());
+    let after = crate::ingest::from_dir(&archive, &store, plan_over(&request))
+        .expect("the folder is still readable");
+    assert!(
+        after
+            .failures
+            .iter()
+            .any(|f| f.why.contains("DEGRADED") || f.why.contains("degraded")),
+        "a census that stepped over a generation is a named failure, not a \
+         silent one: {:?}",
+        after.failures
+    );
+}
+
+/// One run whose slices land and whose census cannot be written back.
+///
+/// # The state this exists for, and why it is the worst one
+///
+/// `write_appends` opens the census `read(true).write(true)` and appends in
+/// place. Take that write away and the run has already put **bars on disk** —
+/// they are filed, they are correct, and nothing counts them. A later reader
+/// asks the census what the store holds and is told less than the truth.
+///
+/// The bars cannot be un-written: the store is append-only and `Header::advance`
+/// refuses a batch beginning at or before what is committed. So this line is
+/// the only record that the two ever disagreed, and `slices` is the number of
+/// entries that went uncounted.
+///
+/// # Mode `0o444`, following `pull/tests/pipeline.rs`
+///
+/// Readable so `read_census` still succeeds — the run must get far enough to
+/// have something to publish — and unwritable so the install fails. The file is
+/// reopened afterwards so `Scratch`'s `Drop` can remove it.
+fn drive_census_unpublished(scratch: &Scratch) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    // A FIRST RUN, so a real census exists to be made unwritable.
+    let done = ingest_body(scratch);
+    assert_eq!(done.failures, Vec::new(), "the run that builds it is clean");
+
+    let store = scratch.store();
+    let census = crate::manifest::manifest_path(&store, Vendor::Groww);
+    fs::set_permissions(&census, fs::Permissions::from_mode(0o444))
+        .expect("close the census to writing");
+
+    // A SECOND RUN over a DIFFERENT month, so it has entries to append rather
+    // than a re-run's empty set — `install_census` returns early when there is
+    // nothing to publish and no repair to make.
+    let archive = scratch.archive(&[(INSTRUMENT, NEXT_MONTH)]);
+    let request = request_over(november());
+    let after = crate::ingest::from_dir(&archive, &store, plan_over(&request))
+        .expect("the folder is readable; the census is what refuses");
+
+    fs::set_permissions(&census, fs::Permissions::from_mode(0o644))
+        .expect("reopen it, so Drop can remove the tree");
+
+    assert!(
+        after.failures.iter().any(|f| f.why.contains("census")),
+        "a census that will not take the write is a named failure: {:?}",
+        after.failures
     );
 }
