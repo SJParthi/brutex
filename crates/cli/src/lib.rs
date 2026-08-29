@@ -5682,7 +5682,7 @@ fn policy_of(
         // construction that does refuses first, before any bar is read.
         // `u64::MAX` marks that unreadable case distinctly rather than folding
         // it to the default's key. D-0305.
-        ceiling_from_env().map_or(u64::MAX, |ceiling| ceiling as u64),
+        ceiling_asked().map_or(u64::MAX, |ceiling| ceiling as u64),
         // ---- APPENDED BELOW THIS LINE. Nothing above it may move. ----
         //
         // THE SEVENTH THROUGH THIRTEENTH: the rest of `Rules`. Each changes
@@ -8963,19 +8963,6 @@ impl Drop for SharedBy {
 const REFERENCE_CORES: usize = 14;
 
 fn derived_ceiling() -> usize {
-    let cores =
-        std::thread::available_parallelism().map_or(REFERENCE_CORES, std::num::NonZero::get);
-    // PER-CORE FIRST, so the multiply cannot overflow on a machine with many:
-    // `DEFAULT_CEILING` is `2^27` and `2^27 / 10` is about 13.4 million, which
-    // needs 2^38 cores to leave `usize` on a 64-bit target. Saturating anyway,
-    // because a bound that wraps is not a bound.
-    let whole_machine = (engine::DEFAULT_CEILING / REFERENCE_CORES)
-        .saturating_mul(cores)
-        // NEVER ZERO AND NEVER BELOW THE FLOOR A SINGLE CORE EARNS. A ceiling of
-        // zero halts before the first candidate, which would report extinction
-        // where the truth is that nothing was allowed to run.
-        .max(engine::DEFAULT_CEILING / REFERENCE_CORES);
-
     // DIVIDED AMONG WHOEVER IS ACTUALLY RUNNING. See
     // [`SWEEPS_SHARING_THIS_MACHINE`]: the figure above is a MEMORY budget for
     // the machine, and `range_over` runs eight sweeps at once. Handing each of
@@ -8995,7 +8982,35 @@ fn derived_ceiling() -> usize {
     // explicit `BRUTEX_CEILING` was returned verbatim and multiplied by however
     // many rungs were running, which is how one `range-all` was SIGKILLed asking
     // for 157 GB of 48. Two call sites, one rule, and now literally one function.
-    shared_out(whole_machine)
+    shared_out(whole_machine_ceiling())
+}
+
+/// This machine's whole candidate budget, BEFORE any sharing.
+///
+/// Split out from [`derived_ceiling`] so [`ceiling_asked`] can name the same
+/// figure without the process-global division -- the identity must describe the
+/// search and not the scheduling.
+///
+/// # The floor does not scale down, and on a small machine that shows
+///
+/// `whole_machine` is `per_core * cores`, so `whole_machine / sharing` falls
+/// below [`shared_out`]'s floor exactly when `cores < sharing`. On the reference
+/// machine -- 14 logical cores against eight or nine rungs -- the division wins
+/// and the budget holds. On a four-core machine running nine rungs the floor
+/// wins on every rung and the total reaches about **2.25x** the machine budget.
+///
+/// That is stated rather than repaired because the alternative is worse: a floor
+/// that scaled with the share count would, at a high enough count, hand a rung a
+/// ceiling too small to finish its first level -- reporting extinction where the
+/// truth is that nothing was allowed to run. Over-allocating on a machine
+/// narrower than the rung count is the safer direction, and an operator on one
+/// should run fewer rungs at a time.
+fn whole_machine_ceiling() -> usize {
+    let cores =
+        std::thread::available_parallelism().map_or(REFERENCE_CORES, std::num::NonZero::get);
+    (engine::DEFAULT_CEILING / REFERENCE_CORES)
+        .saturating_mul(cores)
+        .max(engine::DEFAULT_CEILING / REFERENCE_CORES)
 }
 
 /// The ceiling for THIS sweep: the operator's, or the machine's, divided the
@@ -9025,8 +9040,33 @@ fn derived_ceiling() -> usize {
 /// who wants one rung to have the whole machine runs one rung, which is the
 /// request that actually says so.
 fn ceiling_from_env() -> Result<usize, String> {
+    Ok(shared_out(ceiling_asked()?))
+}
+
+/// The ceiling BEFORE it is divided among concurrent sweeps.
+///
+/// # Why the identity uses this one and the ladder uses the other
+///
+/// [`policy_of`] folds the ceiling into the run identity, because a halted
+/// search and an exhaustive one over the same span are different answers and
+/// must not collide in the ledger. [`shared_out`] reads
+/// [`SWEEPS_SHARING_THIS_MACHINE`], which is a property of THIS PROCESS at THIS
+/// MOMENT and not of the run -- `range_over` raises it while its eight rungs are
+/// in flight and drops it after.
+///
+/// Folding the shared value into the identity therefore made one logical run key
+/// two different ways: `audit-range 60min` alone resolved 134,217,720 while the
+/// same rung inside `range-all` resolved 14,913,080, so the ledger's duplicate
+/// refusal stopped recognising them as the same run and the same work could be
+/// recorded twice. That is a regression introduced by the sharing fix and caught
+/// by an adversarial pass over it.
+///
+/// The identity names what the OPERATOR ASKED FOR. What the ladder is given is
+/// that figure divided by however many sweeps are sharing the machine, which is
+/// a scheduling fact rather than a description of the search.
+fn ceiling_asked() -> Result<usize, String> {
     match crate::knobs::var("BRUTEX_CEILING") {
-        None => Ok(derived_ceiling()),
+        None => Ok(whole_machine_ceiling()),
         Some(raw) => {
             let text = raw;
             match text.trim().parse::<usize>() {
@@ -9036,9 +9076,9 @@ fn ceiling_from_env() -> Result<usize, String> {
                      by 146. Unset it and this machine derives {} from its own \
                      core count, which is a proxy for memory and not a \
                      measurement of it -- see docs/06-limits.md §93.",
-                    derived_ceiling()
+                    whole_machine_ceiling()
                 )),
-                Ok(n) => Ok(shared_out(n)),
+                Ok(n) => Ok(n),
             }
         }
     }
@@ -9054,10 +9094,26 @@ fn ceiling_from_env() -> Result<usize, String> {
 /// where the truth is that nothing was allowed to run.
 fn shared_out(whole_machine: usize) -> usize {
     let sharing = crate::SWEEPS_SHARING_THIS_MACHINE.load(std::sync::atomic::Ordering::Relaxed);
-    whole_machine
+    let share = whole_machine
         .checked_div(sharing.max(1))
-        .unwrap_or(whole_machine)
-        .max(engine::DEFAULT_CEILING / REFERENCE_CORES)
+        .unwrap_or(whole_machine);
+    // THE FLOOR MAY NEVER RAISE A CEILING ABOVE WHAT WAS ASKED FOR, and the
+    // first version of this function did exactly that.
+    //
+    // `.max(FLOOR)` alone turned `BRUTEX_CEILING=1000` into 9,586,980 -- the
+    // operator asked for about 146 KB of candidates by this module's own
+    // bytes-per-candidate figure and silently got 1.4 GB. That is the same
+    // defect this function was written to fix, in the opposite direction:
+    // operator asks for X, gets something else, nothing says so. The test added
+    // beside it asserted `got <= asked` and passed only because it exercised a
+    // value far above the floor.
+    //
+    // Clamping the floor to the input keeps what the floor is FOR -- a
+    // pathological share count must not produce a ceiling that halts before the
+    // first level and reports extinction where nothing was allowed to run -- and
+    // removes the only case where it could inflate.
+    let floor = (engine::DEFAULT_CEILING / REFERENCE_CORES).min(whole_machine);
+    share.max(floor)
 }
 
 /// The ladder for this run: the operator's threshold and the machine's ceiling.
@@ -9420,15 +9476,96 @@ fn not_recorded_reason(report: &str) -> Option<String> {
 /// held up out of sample"* when the real reason is that nothing could be
 /// measured. `CLAUDE.md` §4 bans a fallback that hides a failure; naming it is
 /// what is left until the fix lands.
+/// The ranked sweep, with a per-level event on the way.
+///
+/// Extracted so [`audit_bars`] stays inside its line budget: threading a
+/// reporter through turned one call into four statements, and this keeps the
+/// wiring in one named place rather than spending three lines of the caller on
+/// it. The reporter is [`emit_ladder_level`] and never anything else -- there is
+/// one sweep path and one place that says where it has got to.
+fn ranked_with_progress(
+    ladder: engine::Ladder,
+    bars: &[indicators::Candle],
+    ev: &mut Evaluator,
+    horizon: Horizon,
+    lens: runner::rank::Lens,
+) -> runner::RankedRun {
+    Sweeper::new(ladder).run_ranked_by_reporting(
+        bars,
+        ev,
+        horizon,
+        audit_keep(),
+        lens,
+        &emit_ladder_level,
+    )
+}
+
+/// One event per ladder level, and this is where it is affordable.
+///
+/// # The hole this fills, measured
+///
+/// `~/.brutex/store/logs/cli/events.ndjson` holds a **71-minute window** in
+/// which eight rungs announced themselves within 55 seconds and not one ever
+/// wrote a finish -- the next line in the file is a different run's span load.
+/// Everything inside that window was `Ladder::walk`, and an operator could not
+/// tell a run making progress from a run that had already died.
+///
+/// # Why it is affordable, against the rule that forbids it one crate deeper
+///
+/// CI gate 17 silences `vocab`, `engine`, `indicators` and `runner` because
+/// those hold the per-bar and per-candidate loops. `cli` is not on that list,
+/// and this fires at the LEVEL boundary: eight times on a depth-eight walk, not
+/// once per candidate and not once per bar. That is the granularity gate 17's
+/// own remedy text prescribes.
+///
+/// # What it reports
+///
+/// `admitted` and `pairs` are the two quantities the ladder's budgets are
+/// measured against, so a reader watching them can see a walk approaching a
+/// refusal while there is still time to act -- rather than learning about it
+/// from a REFUSED verdict an hour later. `reconciles` is carried because a level
+/// whose buckets do not sum to `generated` has lost a candidate, and that is
+/// worth seeing at the moment it happens rather than at the end.
+fn emit_ladder_level(level: &engine::Frontier, admitted: usize, pairs: u64) {
+    note(
+        &telemetry::Event::info("cli.audit", "ladder level")
+            .with("k", u64::from(level.k))
+            .with("generated", level.generated)
+            .with("pruned", level.pruned)
+            .with("infrequent", level.infrequent)
+            .with(
+                "frequent",
+                u64::try_from(level.frequent.len()).unwrap_or(u64::MAX),
+            )
+            .with("admitted", u64::try_from(admitted).unwrap_or(u64::MAX))
+            .with("pairs", pairs)
+            .with("reconciles", u64::from(level.reconciles())),
+    );
+}
+
 fn walk_forward_caveat(has_execution: bool, decided: usize) -> &'static str {
+    // THIS DESCRIBED A MECHANISM THAT NO LONGER RUNS, and it fired on every run
+    // that has an execution series.
+    //
+    // It was written when the walk-forward SWEPT AND TRADED the signal series
+    // anyway and merely decided nothing; the text explains why the zero was
+    // about the series rather than the strategy. Since the walk refuses
+    // outright, `decided()` is unconditionally 0 whenever `has_execution`, so
+    // this printed on every `audit-range` and `range-all` run -- above a
+    // `REFUSED` block giving a different and correct explanation for the same
+    // zero. Two contradictory accounts of one number is the shape `CLAUDE.md`
+    // §4 bans, arrived at by a fix for a different instance of it.
+    //
+    // The refusal's own text is now the only account, and it is printed by
+    // `audit::walk_forward` from `Validated::refused` -- one place, one wording,
+    // and it moves when the refusal moves. What is left here is the pointer to
+    // the stages that DID run, which the refusal names but the reader meets
+    // first at the top of the report.
     if has_execution && decided == 0 {
-        "  WALK-FORWARD MEASURED NOTHING, AND THAT IS NOT THE SAME AS FAILING.\n  \
-         It runs on the SIGNAL series while this run trades on the 1-minute one. \
-         On a rung whose bars are a whole session each, every forward return is \
-         refused because a position cannot open and close inside one bar -- so \
-         `that chose a combination` above is 0 for a reason about the SERIES and \
-         not about the strategy. Read the EXIT GRID and the bootstrap instead; \
-         both run on the execution series.\n\n"
+        "  WALK-FORWARD DID NOT RUN, AND THAT IS NOT THE SAME AS FAILING.\n  \
+         The WALK-FORWARD block below names why. Read the EXIT GRID and the \
+         bootstrap instead; both run on the execution series and are \
+         unaffected.\n\n"
     } else {
         ""
     }
@@ -9757,7 +9894,7 @@ fn audit_bars(
         Ok(l) => l,
         Err(why) => return format!("refused: {why}\n"),
     };
-    let run = Sweeper::new(ladder).run_ranked_by(&bars, &mut ev, horizon, audit_keep(), lens);
+    let run = ranked_with_progress(ladder, &bars, &mut ev, horizon, lens);
     let (outcome, ranked, column) = (run.outcome, run.ranked, run.column);
 
     // THE POSITION MOVES TO THE EXECUTION SERIES; THE SEARCH DOES NOT.
@@ -10260,7 +10397,20 @@ fn decay_block(
     let _ = writeln!(
         out,
         "\n  {}",
-        if anchored.folds.is_empty() || rolling.folds.is_empty() {
+        // A REFUSAL IS NOT A SHORT SLICE, AND THIS BLOCK SAID IT WAS.
+        //
+        // `Validated::refused` was added precisely so those two stop rendering
+        // as one sentence, `audit::walk_forward` was taught to print the reason
+        // -- and this sibling fifty lines away was left saying "the slice was
+        // too short to split" on every run that declined to validate. That is
+        // the same one-call-site-corrected-and-its-sibling-left-behind shape
+        // that put the signal series into the walk-forward in the first place,
+        // committed by the change that fixed it. Found by an adversarial pass.
+        if anchored.refused.is_some() || rolling.refused.is_some() {
+            "No comparison: the walk-forward refused to run. The reason is \
+             printed in the WALK-FORWARD block above, and it is not that the \
+             span was too short."
+        } else if anchored.folds.is_empty() || rolling.folds.is_empty() {
             "One shape produced no folds, so the two cannot be compared. The \
              slice was too short to split."
         } else if anchored_positive > rolling_positive {
@@ -11383,15 +11533,75 @@ mod tests {
             "sharing may only ever LOWER a sweep's ceiling, never raise it"
         );
 
-        // AND THE FLOOR STILL APPLIES, so a pathological share count cannot
-        // produce a ceiling that halts before the first level -- which would
-        // report extinction where the truth is that nothing was allowed to run.
-        crate::knobs::set("BRUTEX_CEILING", "1");
-        let tiny = crate::ceiling_from_env().expect("one parses");
+        // A SMALL EXPLICIT CEILING IS HONOURED, NOT RAISED TO THE FLOOR.
+        //
+        // The first version of `shared_out` ended `.max(FLOOR)` unconditionally,
+        // so `BRUTEX_CEILING=1000` returned 9,586,980 -- the operator asked for
+        // roughly 146 KB of candidates and silently got 1.4 GB. That is the same
+        // defect this whole function exists to catch, running the other way, and
+        // the assertion above did not see it because it only ever exercised a
+        // value far ABOVE the floor. An adversarial pass found it.
+        //
+        // The floor still does its job: it is clamped to the input, so it can
+        // stop a pathological share count from producing a ceiling that halts
+        // before the first level, and it can never inflate one.
+        for asked_small in ["1", "1000", "500000"] {
+            crate::knobs::set("BRUTEX_CEILING", asked_small);
+            let got_small = crate::ceiling_from_env().expect("a positive integer parses");
+            crate::knobs::clear_all();
+            let wanted: usize = asked_small.parse().expect("the literal parses");
+            assert!(
+                got_small <= wanted,
+                "BRUTEX_CEILING={asked_small} resolved to {got_small}, which is \
+                 MORE than was asked for. Sharing and the floor may only ever \
+                 lower a ceiling."
+            );
+            assert!(
+                got_small >= 1,
+                "and it must never reach zero, which halts before the first \
+                 candidate and reports extinction where nothing ran"
+            );
+        }
+    }
+
+    /// The run identity names what the OPERATOR asked for, not what the process
+    /// happened to be sharing.
+    ///
+    /// # The regression this pins
+    ///
+    /// `policy_of` folds the ceiling into the `RunId` so a halted search and an
+    /// exhaustive one over the same span cannot collide in the ledger. When the
+    /// sharing division was added, that fold read the DIVIDED value -- and the
+    /// divisor is `SWEEPS_SHARING_THIS_MACHINE`, a property of this process at
+    /// this moment rather than of the run.
+    ///
+    /// So one logical run keyed two ways: `audit-range 60min` alone resolved the
+    /// whole machine, while the same rung inside `range-all` resolved an eighth
+    /// of it. The ledger's duplicate refusal stopped recognising them as the same
+    /// run, and the same work became recordable twice. Caught by an adversarial
+    /// pass over the fix that introduced it.
+    #[test]
+    fn the_identity_ceiling_does_not_move_when_sweeps_share_the_machine() {
+        let _guard = crate::knobs::serially();
         crate::knobs::clear_all();
-        assert!(
-            tiny >= floor,
-            "an explicit 1 must still floor at {floor}, not halt before k=1"
+        crate::knobs::set("BRUTEX_CEILING", "134217720");
+
+        let alone = crate::ceiling_asked().expect("a positive integer parses");
+        let shared_view = {
+            let _many = crate::SharedBy::these(8);
+            crate::ceiling_asked().expect("a positive integer parses")
+        };
+        crate::knobs::clear_all();
+
+        assert_eq!(
+            alone, shared_view,
+            "the identity's ceiling must not depend on how many rungs happen to \
+             be in flight -- otherwise one run keys two ways and the ledger \
+             records the same work twice"
+        );
+        assert_eq!(
+            alone, 134_217_720,
+            "and it is the operator's own figure, undivided"
         );
     }
 
@@ -11575,7 +11785,7 @@ mod tests {
         // the last term to be the ceiling the ladder would actually be built
         // with. A knob hashed as a constant would pass every `assert_ne` above
         // and fail here.
-        let expected = crate::ceiling_from_env().map_or(u64::MAX, |ceiling| ceiling as u64);
+        let expected = crate::ceiling_asked().map_or(u64::MAX, |ceiling| ceiling as u64);
         assert_eq!(
             start[5], expected,
             "the ceiling must reach the identity as the value the ladder uses, \

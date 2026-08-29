@@ -179,13 +179,37 @@ impl Sweeper {
     /// obligation. One body means one place to change and one sentence to keep
     /// true.
     fn fold_and_walk(&self, bars: &[Candle], evaluator: &mut Evaluator) -> (Column, Sweep) {
+        self.fold_and_walk_reporting(bars, evaluator, &|_, _, _| {})
+    }
+
+    /// [`Self::fold_and_walk`], forwarding a per-level reporter to the ladder.
+    ///
+    /// # Why the forwarding is a separate method rather than a field
+    ///
+    /// [`Sweeper`] is constructed by a `const fn` and stored by value in several
+    /// callers; a reporter is a borrow with a lifetime, and putting one on the
+    /// struct would put that lifetime on every type holding a `Sweeper`. The
+    /// reporter is also per-CALL rather than per-sweeper -- `cli` walks eight
+    /// rungs concurrently and each wants its own rung's identity captured.
+    ///
+    /// This crate is on CI gate 17's silence list and stays compliant: the gate
+    /// greps for `telemetry::`, `log::`, `println!` and `eprintln!`, and a
+    /// closure parameter is none of those. Nothing is emitted here. The reporter
+    /// is called at the ladder's level boundary and whatever the CALLER does with
+    /// it happens in the caller's crate, which is where gate 17 stops.
+    fn fold_and_walk_reporting(
+        &self,
+        bars: &[Candle],
+        evaluator: &mut Evaluator,
+        on_level: &dyn Fn(&engine::Frontier, usize, u64),
+    ) -> (Column, Sweep) {
         let column = Column::build(bars, evaluator);
         // The live position list is `Evaluator::positions` — every bit this
         // vocabulary can actually compute — rather than every live bit in the
         // table, so the ladder is never handed a position that would measure as
         // permanently false because nothing computes it.
         let live = live_positions();
-        let sweep = self.ladder.walk(column.bits(), &live);
+        let sweep = self.ladder.walk_reporting(column.bits(), &live, on_level);
         (column, sweep)
     }
 
@@ -271,7 +295,32 @@ impl Sweeper {
         keep: usize,
         lens: crate::rank::Lens,
     ) -> RankedRun {
-        let (column, sweep) = self.fold_and_walk(bars, evaluator);
+        self.run_ranked_by_reporting(bars, evaluator, horizon, keep, lens, &|_, _, _| {})
+    }
+
+    /// [`Self::run_ranked_by`], reporting each ladder level as it completes.
+    ///
+    /// # The window this opens
+    ///
+    /// This is the call `cli` makes on the sweep path, and everything between
+    /// entering it and returning was previously silent -- a measured 71 minutes
+    /// on a real eight-rung run, during which the only evidence any rung existed
+    /// was the span-load line it printed before starting.
+    ///
+    /// The reporter is handed the completed level, the cumulative distinct
+    /// candidates admitted and the cumulative pairs walked: the two quantities
+    /// the ladder's budgets are measured against, so a caller can see how close a
+    /// walk is to refusing while there is still time to act on it.
+    pub fn run_ranked_by_reporting(
+        &self,
+        bars: &[Candle],
+        evaluator: &mut Evaluator,
+        horizon: crate::outcome::Horizon,
+        keep: usize,
+        lens: crate::rank::Lens,
+        on_level: &dyn Fn(&engine::Frontier, usize, u64),
+    ) -> RankedRun {
+        let (column, sweep) = self.fold_and_walk_reporting(bars, evaluator, on_level);
         // THE SAME SLICE THE COLUMN WAS BUILT FROM, and that is the whole point
         // of computing it here rather than leaving it to the caller.
         let forward = crate::outcome::forward(bars, horizon);
