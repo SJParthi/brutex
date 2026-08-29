@@ -1133,16 +1133,35 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
     // that noise alone decided between `t = 0` and `t` in the hundreds of
     // millions.
     //
-    // REPORTED, AND NOT REPRODUCED HERE, which is stated rather than assumed.
-    // An adversarial pass measured, over strictly-increasing irregular
-    // sources, 15% of constant-return masks exceeding |t| = 1e6 at n=3 and
-    // 48.8% at n=600 with a maximum of 1.09e9 -- no middle ground, exactly 0
-    // or astronomically large. On an EVENLY spaced fixture the three cross-sums
-    // cancel exactly and the old guard caught the case on its own; the test
-    // beside this one passes with this check disabled, and says so.
+    // REPRODUCED, against the real `edge` and on this crate's own default bars.
+    // The first version of this comment said the artefact was reported and not
+    // reproduced, and that the guard was therefore kept as a stricter question
+    // rather than a demonstrated repair. Both halves were wrong, and the reason
+    // the earlier attempt missed it is worth more than the correction: it used
+    // `Horizon::bars(1)`, and at a one-bar horizon the drain
+    // `source - older >= horizon_bars` empties `recent` BEFORE the pair loop, so
+    // no cross term is ever formed. The cross-sums did not cancel -- they were
+    // never accumulated. Overlap is the precondition, not irregular spacing.
     //
-    // So this is kept as the stricter and exact form of a question the code
-    // already meant to ask, not as a demonstrated repair. §3 rule 6.
+    // MEASURED, at `Horizon::DEFAULT` over a ramp with every truncated window
+    // excluded, n = 1016 identical observations of 15 paisa:
+    //
+    //   m2 = 0x0 exactly | A = 1.575e6 | B = 2.1e5 | C = 7.000000000000009e3
+    //   long_run_sum_squares = 3.725290298461914e-9  (2^-28, four ulp)
+    //   t with this check removed = 2.4956924974889034e8
+    //
+    // The sign is the whole outcome and it is not stable: over `step` in 1..=60
+    // at eight sessions every case came out POSITIVE and scored |t| above 1e8;
+    // at twelve sessions every case came out NEGATIVE, `sqrt` gave `NaN` and
+    // `is_finite` sent it to zero. 60 huge and 60 zero, maximum 2.6116e8.
+    //
+    // And it needs no contrived fixture. On plain `synthetic::sessions(12)`,
+    // 170 of the 466 measuring two-bit masks have zero spread and 71 of those
+    // report |t| > 1e5 with this check removed, the largest 4.0710e8. Zero
+    // masks with genuine spread are affected either way.
+    // `a_constant_sample_whose_windows_overlap_is_still_no_evidence` and
+    // `no_zero_spread_mask_reports_a_finding_on_the_ordinary_fixture` are those
+    // two measurements, and both FAIL when this check is removed.
     //
     // AND `rank::walk` ORDERS ON `edge.t.abs()`, so those artefacts sorted
     // ABOVE every genuine finding and occupied the head of `Ranked::top`, where
@@ -1669,25 +1688,21 @@ mod tests {
     /// direction.
     ///
     /// **It does not discriminate against the previous implementation, and that
-    /// is stated rather than left to be assumed.** The guard used to read
-    /// `standard_error > 0.0`, computed from `long_run_sum_squares`, which is
-    /// UNCENTERED — `m2 + 2(A - m·B + m²·C)`. An adversarial pass reported that
-    /// on irregularly spaced hits the bracket is rounding noise in the
-    /// cancellation of three large terms, so its SIGN alone decided between
-    /// `t = 0` and `t` in the hundreds of millions, and measured 15% of
-    /// constant-return masks over |t| = 1e6 at n=3, rising to 48.8% at n=600.
+    /// is stated rather than left to be assumed.** This test passes with the
+    /// `m2 <= 0.0` check disabled, and the reason is `h(1)`: at a one-bar
+    /// horizon the drain `source - older >= horizon_bars` empties `recent`
+    /// before the pair loop runs, so `cross_a`, `cross_b` and `cross_c` all stay
+    /// exactly zero and `long_run_sum_squares` returns `m2` untouched. There is
+    /// no cancellation here to be inexact — there is no cross term at all.
     ///
-    /// **I could not reproduce that here.** On this fixture — evenly spaced
-    /// hits, one bar apart — the three cross-sums cancel exactly and the old
-    /// guard caught the case on its own. Verified both ways: the test passes
-    /// with the `m2` check disabled. Reproducing it needs a mask firing on
-    /// IRREGULARLY spaced bars while its forward moves stay identical, and a
-    /// ramp is exactly the shape on which no named condition fires at all.
-    ///
-    /// So the `m2 <= 0.0` check is kept as the STRICTER and exact form of a
-    /// question the code already meant to ask — Welford makes `m2` exactly zero
-    /// for identical observations, with no epsilon — and this test pins the
-    /// property. Neither is evidence that the artefact is gone. §3 rule 6.
+    /// The earlier note in this place said the artefact could not be reproduced
+    /// and blamed the fixture's EVEN spacing. That was the wrong diagnosis. The
+    /// precondition is OVERLAP, not irregularity, and
+    /// `a_constant_sample_whose_windows_overlap_is_still_no_evidence` reaches it
+    /// by running the same shape of ramp at `Horizon::DEFAULT`: it fails without
+    /// the guard with `t = 2.4956924974889034e8` on 1,016 identical
+    /// observations. `no_zero_spread_mask_reports_a_finding_on_the_ordinary_fixture`
+    /// shows 71 of `synthetic::sessions(12)`'s own two-bit masks doing the same.
     ///
     /// # Why the fixture is shaped the way it is
     ///
@@ -2040,6 +2055,255 @@ mod tests {
              inside it must not"
         );
         assert!(in_tail > 0, "the fixture must actually have a tail");
+    }
+
+    /// A ramp whose every FULL-horizon window moves by exactly `step * H`.
+    ///
+    /// The bar stamped 15:09 of each session — offset 354 of 375, the
+    /// [`LAST_FILL_MINUTE`] bar and therefore every session's forced close — is
+    /// built with `high` below `low`, so `Candle::check` refuses it and
+    /// [`priced`] will not let it settle an exit. Every entry whose window would
+    /// otherwise have been TRUNCATED at the forced close is dropped instead of
+    /// measured short, and truncation is the one thing that puts genuine
+    /// dispersion into a ramp: a window cut from fifteen bars to four is a
+    /// smaller move, not the same one.
+    ///
+    /// What is left is the sample this file's guard is about — every observation
+    /// identical, arrived at from a real column over real session stamps rather
+    /// than asserted.
+    fn ramp_with_no_truncated_window(sessions: i64, step: i64) -> Vec<Candle> {
+        crate::synthetic::sessions(sessions)
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let close = 2_500_000 + i64::try_from(i).unwrap_or(0).saturating_mul(step);
+                if i % 375 == 354 {
+                    Candle::new(
+                        c.ts_micros,
+                        close,
+                        close - 10,
+                        close + 10,
+                        close,
+                        100,
+                        OI_NULL,
+                    )
+                } else {
+                    Candle::new(
+                        c.ts_micros,
+                        close,
+                        close + 10,
+                        close - 10,
+                        close,
+                        100,
+                        OI_NULL,
+                    )
+                }
+            })
+            .collect()
+    }
+
+    /// The distinct forward moves `mask` was measured over.
+    fn distinct_moves(column: &Column, f: &super::Forward, mask: &ConditionMask) -> Vec<i64> {
+        let mut seen: Vec<i64> = column
+            .bits()
+            .iter()
+            .zip(column.sources())
+            .filter(|(bits, _)| bits.hits(mask))
+            .filter_map(|(_, &s)| f.at(s))
+            .collect();
+        seen.sort_unstable();
+        seen.dedup();
+        seen
+    }
+
+    /// THE ARTEFACT, REPRODUCED. This is the test the `m2 <= 0.0` guard exists
+    /// for, and unlike its neighbour it FAILS when that guard is removed.
+    ///
+    /// # Why the neighbouring test could not reach it
+    ///
+    /// `a_sample_with_no_dispersion_is_no_evidence_and_not_certainty` uses
+    /// `h(1)`, and at a one-bar horizon the drain
+    /// `source - older >= horizon_bars` empties `recent` before the pair loop
+    /// runs. **No pair is ever formed**, so `cross_a`, `cross_b` and `cross_c`
+    /// all stay exactly zero, `long_run_sum_squares` returns `m2` untouched, and
+    /// the old `standard_error > 0.0` guard caught the case on its own. That
+    /// fixture proves the property and discriminates against nothing.
+    ///
+    /// The correction only has arithmetic to get wrong when hits fall CLOSER
+    /// together than the horizon. This fixture runs at `Horizon::DEFAULT`, where
+    /// consecutive hits are one bar apart and every observation pairs with the
+    /// fourteen before it at weights `14/15 .. 1/15`.
+    ///
+    /// # The algebra, and why the residue is not zero
+    ///
+    /// With every observation equal to `x`, Welford makes `mean` exactly `x` and
+    /// `m2` exactly `+0.0` — measured, `m2.to_bits() == 0x0`. The three
+    /// uncentered sums are then `A = Σ w x²`, `B = Σ 2 w x`, `C = Σ w`, and
+    /// `A − x·B + x²·C` is algebraically zero. It is not zero in `f64`, because
+    /// each is a DIFFERENT sequential summation at a different magnitude:
+    /// `A` accumulates near `x²·ΣW`, `C` near `ΣW`, and their rounding errors do
+    /// not correspond. What survives is a few ulp of `2 x² ΣW`.
+    ///
+    /// MEASURED on this fixture at `step = 1`, `n = 1016`:
+    ///
+    /// | | |
+    /// |---|---|
+    /// | `m2` | `0x0` — exactly zero |
+    /// | `A` | 1.575e6 |
+    /// | `B` | 2.1e5 |
+    /// | `C` | 7.000000000000009e3 |
+    /// | `long_run_sum_squares` | **3.725290298461914e-9** = 2⁻²⁸, four ulp |
+    /// | `t` with the guard removed | **2.4956924974889034e8** |
+    ///
+    /// The SIGN of that residue is the whole outcome and it is not stable: over
+    /// `step` in `1..=60` at eight sessions every case came out POSITIVE and
+    /// scored `|t|` above 1e8; at twelve sessions (`n = 2372`) every case came
+    /// out NEGATIVE, `sqrt` returned `NaN`, and `is_finite` sent them to zero.
+    /// 60 huge and 60 zero out of 120, maximum `|t|` 2.611610832622043e8. There
+    /// is no middle: a degenerate sample scores either nothing or a `t` that
+    /// `rank::walk` sorts above every real finding and that `p_value` clamps to
+    /// exactly zero.
+    #[test]
+    fn a_constant_sample_whose_windows_overlap_is_still_no_evidence() {
+        let bars = ramp_with_no_truncated_window(8, 1);
+        let column = Column::build(&bars, &mut evaluator());
+        let f = forward(&bars, Horizon::DEFAULT);
+        let all = ConditionMask::default();
+        let e = edge(&column, &f, &all);
+
+        // THE FIXTURE MUST BE THE ONE THIS IS ABOUT, and each clause is a way it
+        // has already failed to be.
+        assert!(e.n >= 2, "an empty column proves nothing -- n={}", e.n);
+        assert_eq!(
+            distinct_moves(&column, &f, &all).len(),
+            1,
+            "every measured window must move by the SAME amount, or the sample \
+             has genuine dispersion and a large t is arithmetic rather than an \
+             artefact"
+        );
+        // AND THE WINDOWS MUST ACTUALLY OVERLAP, which is what the `h(1)`
+        // fixture next door cannot do: with no pair closer than the horizon
+        // every cross-sum stays zero and the correction has no arithmetic to
+        // get wrong.
+        let horizon = usize::try_from(Horizon::DEFAULT.as_bars()).unwrap_or(usize::MAX);
+        let measured: Vec<usize> = column
+            .bits()
+            .iter()
+            .zip(column.sources())
+            .filter(|(bits, _)| bits.hits(&all))
+            .filter_map(|(_, &s)| f.at(s).map(|_| s))
+            .collect();
+        let overlapping = measured
+            .iter()
+            .zip(measured.iter().skip(1))
+            .filter(|(a, b)| b.saturating_sub(**a) < horizon)
+            .count();
+        assert!(
+            overlapping > 0,
+            "no two hits are closer than the horizon, so no cross term is \
+             formed and this fixture cannot reach the defect"
+        );
+
+        assert!(
+            e.t == 0.0,
+            "{} identical forward moves over OVERLAPPING windows scored a t of \
+             {} -- the rounding residue of an exact cancellation, reported as \
+             the strongest finding in the run",
+            e.n,
+            e.t
+        );
+        assert!(
+            e.mean_paisa > 0.0,
+            "and the mean is still carried: no spread is not no direction"
+        );
+    }
+
+    /// The same artefact WITHOUT a hand-shaped price series, on the fixture the
+    /// rest of this crate already sweeps.
+    ///
+    /// `synthetic::sessions` carries a period-seven wobble on a linear drift, so
+    /// a sparse mask routinely fires on bars whose fifteen-bar forward move is
+    /// identical — nothing has to be constructed for it. Over the 466 two-bit
+    /// masks that measure at least two bars on twelve sessions, **170 have zero
+    /// spread**, and with the `m2 <= 0.0` guard removed **71 of them report
+    /// `|t| > 1e5`**, the largest 4.0710201489847726e8. With the guard in place
+    /// none does, and no mask with genuine spread is suppressed — measured:
+    /// zero of the 71 had more than one distinct move.
+    ///
+    /// So the defect is not a property of a contrived fixture. It is reachable
+    /// from the bars this crate generates by default, on ordinary pairs.
+    #[test]
+    fn no_zero_spread_mask_reports_a_finding_on_the_ordinary_fixture() {
+        let bars = crate::synthetic::sessions(12);
+        let column = Column::build(&bars, &mut evaluator());
+        let f = forward(&bars, Horizon::DEFAULT);
+        let mut zero_spread = 0_u32;
+        for a in 0..64_u32 {
+            let one = ConditionMask::default().with_bit(a);
+            for b in (a + 1)..64_u32 {
+                let mask = one.with_bit(b);
+                let e = edge(&column, &f, &mask);
+                if e.n < 2 || distinct_moves(&column, &f, &mask).len() != 1 {
+                    continue;
+                }
+                zero_spread = zero_spread.saturating_add(1);
+                assert!(
+                    e.t == 0.0,
+                    "bits {a},{b}: {} identical forward moves scored t={}",
+                    e.n,
+                    e.t
+                );
+            }
+        }
+        assert!(
+            zero_spread > 100,
+            "the scan must actually find zero-spread masks or it asserts \
+             nothing -- found {zero_spread}"
+        );
+    }
+
+    /// AND THE GUARD IS NOT A CLIFF THE REAL CASES FALL OFF.
+    ///
+    /// `m2 <= 0.0` is exact, with no epsilon, so the question is whether a
+    /// sample with GENUINE but minimal dispersion still measures. Forward moves
+    /// are `i64` paisa, so the smallest non-zero `m2` any sample can carry is
+    /// one observation differing by one paisa from the rest — `1 − 1/n`, at
+    /// least 0.5 for `n >= 2`. That is thirteen orders of magnitude above the
+    /// rounding residue this file's guard is about (3.7e-9 at `n = 1016`), which
+    /// is why the exact test separates them rather than merely happening to.
+    ///
+    /// Measured here: one paisa of dispersion in 1,016 observations produces a
+    /// finite, non-zero `t` — the guard does not fire.
+    #[test]
+    fn one_paisa_of_genuine_dispersion_still_measures() {
+        let mut bars = ramp_with_no_truncated_window(8, 1);
+        // One bar lifted by a single paisa, which moves the two windows that
+        // end on it and nothing else.
+        if let Some(b) = bars.get_mut(2_000) {
+            *b = Candle::new(
+                b.ts_micros,
+                b.close + 1,
+                b.close + 11,
+                b.close - 9,
+                b.close + 1,
+                100,
+                OI_NULL,
+            );
+        }
+        let column = Column::build(&bars, &mut evaluator());
+        let f = forward(&bars, Horizon::DEFAULT);
+        let all = ConditionMask::default();
+        let e = edge(&column, &f, &all);
+        assert!(
+            distinct_moves(&column, &f, &all).len() > 1,
+            "the fixture must carry genuine dispersion, or it proves nothing"
+        );
+        assert!(
+            e.t != 0.0 && e.t.is_finite(),
+            "one paisa of real spread must still be measured, not swallowed by \
+             the guard -- t={}",
+            e.t
+        );
     }
 }
 
