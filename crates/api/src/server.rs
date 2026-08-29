@@ -3019,15 +3019,96 @@ fn render_window(window: &bars::Window, scanned: bool) -> String {
 /// this is for the ones that must be current.
 /// `pub(crate)` so `/audit.json` reads the same fresh census this does, rather
 /// than growing a second spelling of "read the manifests now, not at startup".
+/// The census, the manifest stamps it was read at, and the entries it yielded.
+///
+/// A named type because clippy refuses the inline one, and because the three
+/// parts travel together by necessity: the stamps are what makes the other two
+/// trustworthy, and a reader holding the censuses without them cannot tell a
+/// current answer from one taken before the last pull.
+pub type CensusCache = std::sync::Mutex<
+    Option<(
+        Vec<Option<std::time::SystemTime>>,
+        Vec<crate::census::VendorCensus>,
+        Vec<(crate::census::Series, store::path::YearMonth)>,
+    )>,
+>;
+
 pub(crate) fn census_now(
     site: &Site,
 ) -> (
     Vec<census::VendorCensus>,
     Vec<(census::Series, store::path::YearMonth)>,
 ) {
+    // CACHED ON THE MANIFESTS' OWN STAMPS, because this is FIVE per-request
+    // paths and it reads the whole store on every one of them.
+    //
+    // `census::read_all` does `std::fs::read` of every vendor's entire manifest
+    // -- capped at 256 MiB each -- and `held_entries` then sorts and dedups
+    // every entry it found. `census.rs` says so against itself: "O(entries log
+    // entries), ON FOUR PER-REQUEST PATHS", and names them. `/calendar.json`
+    // reaches the same work by its own `read_all`, which makes five.
+    //
+    // MEASURED consequence, recorded in `store_json`'s own doc: 377,735 bytes
+    // for one feed, on a page the console polls every five seconds.
+    //
+    // THE INVALIDATION IS THE SAME ONE `calendar_of::cached` ALREADY USES: a
+    // manifest is the only thing that can change what a census says, so the
+    // modified-time of each vendor's manifest is exactly the key. A pull
+    // rewrites them and the next request rebuilds; nothing else can go stale.
+    //
+    // The lock is released BEFORE `read_all`, so a rebuild never serialises the
+    // other requests -- the mistake that would turn a cache into a global
+    // bottleneck, and the reason `calendar_of` scopes its guard the same way.
+    let stamps = manifest_stamps(&site.store_root);
+    {
+        // READ THROUGH A POISONED LOCK rather than around it: a panic while
+        // holding it means another request died, the map is still readable, and
+        // refusing to look would make one panicked request cost every later one
+        // a full store read for the life of the process.
+        let held = site
+            .census
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((at, censuses, entries)) = held.as_ref()
+            && *at == stamps
+        {
+            return (censuses.clone(), entries.clone());
+        }
+    }
+
     let censuses = census::read_all(&site.store_root);
     let entries = census::held_entries(&censuses);
+    {
+        let mut held = site
+            .census
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *held = Some((stamps, censuses.clone(), entries.clone()));
+    }
     (censuses, entries)
+}
+
+/// Every vendor manifest's modified time, in a fixed order.
+///
+/// # Why a vector and not one stamp
+///
+/// A census is over ALL vendors, so any one of them being rewritten makes it
+/// stale. `calendar_of::manifest_stamp` takes a single vendor because a calendar
+/// is derived per vendor; this is the same idea over the set.
+///
+/// A vendor whose manifest does not exist contributes `None` rather than being
+/// skipped, so a manifest APPEARING changes the key. Skipping it would make the
+/// first pull for a new vendor invisible to every cached page.
+fn manifest_stamps(store_root: &std::path::Path) -> Vec<Option<std::time::SystemTime>> {
+    let dir = store_root.join("manifest");
+    brutex_core::vendor::Vendor::ALL
+        .iter()
+        .map(|vendor| {
+            std::fs::metadata(dir.join(format!("{}.man", vendor.as_str())))
+                .ok()
+                .and_then(|meta| meta.modified().ok())
+        })
+        .collect()
 }
 
 /// Why one percentage is not a number.
@@ -4056,6 +4137,22 @@ pub struct Site {
     /// seconds — which is the whole reason this field exists rather than the
     /// route calling `derive` directly.
     pub calendars: crate::calendar_of::Cache,
+    /// The last census read, and the manifest stamps it was read at.
+    ///
+    /// # Why this exists: five per-request paths read the whole store
+    ///
+    /// `census_now` calls `census::read_all`, which reads every vendor's entire
+    /// manifest, and `held_entries`, which sorts and dedups every entry in it.
+    /// `census.rs` records the shape against itself -- "O(entries log entries),
+    /// ON FOUR PER-REQUEST PATHS" -- and `/calendar.json` makes a fifth by its
+    /// own `read_all`. `store_json`'s doc measures the result at 377,735 bytes
+    /// for one feed, on a page the console polls every five seconds.
+    ///
+    /// Keyed on the manifests' modified times, exactly as `calendars` is keyed
+    /// on one manifest's: a manifest is the only thing that can change what a
+    /// census says, so a pull rewrites them and the next request rebuilds.
+    /// Nothing else can make this stale.
+    pub census: CensusCache,
     /// The run the operator started, if one is in flight or has just ended.
     ///
     /// # Why it is state on the site and not a global
@@ -4286,6 +4383,7 @@ impl Site {
         let entries = census::held_entries(&censuses);
         Self {
             calendars: std::sync::Mutex::new(std::collections::HashMap::new()),
+            census: std::sync::Mutex::new(None),
             budgets: std::sync::Mutex::new(feed_budgets()),
             // NO RUN UNTIL SOMEBODY PRESSES PULL. A site that started life
             // holding one would answer `/pull/run.json` for a run nobody asked
@@ -15126,6 +15224,82 @@ mod tests {
     /// A site over the given masters and an empty store.
     fn site(name: &str, dir: &Path) -> Site {
         Site::load(dir, &store_root(name))
+    }
+
+    /// The census is read once per manifest change, not once per request.
+    ///
+    /// # What this bounds
+    ///
+    /// `census_now` is on FIVE per-request paths — `/instruments.json`,
+    /// `/verify.json`, `/store.json`, `/audit.json`, and `/calendar.json` by its
+    /// own `read_all`. Uncached it does `std::fs::read` of every vendor's whole
+    /// manifest and then sorts and dedups every entry, on a page the console
+    /// polls every five seconds. `census.rs` names the shape against itself:
+    /// "O(entries log entries), ON FOUR PER-REQUEST PATHS".
+    ///
+    /// # It asserts INVALIDATION as well as caching, and that is the harder half
+    ///
+    /// A cache that never rebuilds passes a hit test perfectly and serves a
+    /// pre-pull answer forever. The stamp is each manifest's modified time, so
+    /// rewriting one must be visible on the next call — and that is the property
+    /// that makes the cache safe rather than merely fast.
+    #[test]
+    fn the_census_is_cached_on_the_manifests_and_rebuilt_when_one_changes() {
+        let dir = crate::scratch::path("census-cache-assets");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let site = site("census-cache", &dir);
+
+        // Nothing cached yet: the slot starts empty, so a hit here would be a
+        // hit on a cache that was never filled.
+        assert!(
+            site.census
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none(),
+            "a fresh Site holds no census"
+        );
+
+        let (first_censuses, first_entries) = census_now(&site);
+        let stamped_after_first = site
+            .census
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|(stamps, _, _)| stamps.clone());
+        assert!(
+            stamped_after_first.is_some(),
+            "the first call fills the cache"
+        );
+
+        let (second_censuses, second_entries) = census_now(&site);
+        assert_eq!(
+            first_censuses.len(),
+            second_censuses.len(),
+            "a cached read answers the same census"
+        );
+        assert_eq!(
+            first_entries, second_entries,
+            "and the same entries, which is what every page keys off"
+        );
+
+        // A MANIFEST CHANGES AND THE NEXT CALL REBUILDS. Written with a real
+        // vendor name so the stamp vector's own slot moves -- a file the stamp
+        // function does not look at would prove nothing.
+        let manifest = site.store_root.join("manifest").join("zerodha.man");
+        std::fs::write(&manifest, b"not a manifest, but it has an mtime").expect("writable");
+        let _ = census_now(&site);
+        let stamped_after_write = site
+            .census
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|(stamps, _, _)| stamps.clone());
+        assert_ne!(
+            stamped_after_first, stamped_after_write,
+            "writing a manifest must move the key the cache is held on, or a \
+             pull would be invisible to every cached page for the life of the \
+             process"
+        );
     }
 
     /// A fixed moment, so a recorded run is the same record on every run.
