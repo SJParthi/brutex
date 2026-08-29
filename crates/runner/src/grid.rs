@@ -2346,26 +2346,40 @@ fn levelled(
         // which is why the guard skips the tally rather than the block.
         .collect();
 
-    // EVERY path refused is not "no trades" -- it is a measurement that could
-    // not be taken, and returning `None` says so with the same voice the
-    // emptiness check above uses rather than reporting a clean zero.
-    //
-    // ASKED OF THE PRICEABLE ONES, not of the vector. The vector no longer
-    // drops a refused path -- `one_variant` needs it to block -- so an empty
-    // vector now means only "no signal fired", and the case this guard exists
-    // for would have slipped past it into a `Cell` with `trades: 0`. Same
-    // question, asked where the answer moved to.
-    if candidates.iter().all(|c| c.cross.refused() > 0) {
-        return None;
-    }
-
     let Chosen {
         stop,
         target,
         tsl,
         ttp,
     } = variant;
-    Some(one_variant(
+
+    // EVERY path refused is not "no trades" -- it is a measurement that could
+    // not be taken, and returning `None` says so with the same voice the
+    // emptiness check above uses rather than reporting a clean zero.
+    //
+    // ASKED OF THE RESULT, NOT OF THE INPUT, AND THE FIRST ATTEMPT AT THIS WAS
+    // WRONG. It read `candidates.iter().all(|c| c.cross.refused() > 0)`, which
+    // is exactly the old `is_empty()` question and catches only the
+    // ALL-refused case. It misses the one the change introduced: ONE refused
+    // path that blocks every clean candidate behind it.
+    //
+    //   A  signal 0,  time_exit 41,  REFUSED   -- blocks to 41, never tallied
+    //   B  signal 10, time_exit 51,  clean     -- 10 < 41, refused by rule 4
+    //   => Some(Cell { trades: 0, pessimistic: 0 })
+    //
+    // Before the filter was removed that was impossible: `candidates` was
+    // non-empty and its first entry could never be blocked, so every `Some`
+    // from this function carried at least one trade. Now it can carry none, and
+    // `crate::validate` maps it straight to `chosen_exit_total` and
+    // `out_of_sample_exit` -- whose own doc says, in these words, *"A fold that
+    // never traded is not a fold that scored zero."* `held_up`'s hand-check
+    // then reads `Some(total) => total > 0` and counts a measurement nobody
+    // took as a measured loss.
+    //
+    // Asking the walk how many trades it actually took answers both cases at
+    // once and cannot drift from them, because it IS the quantity the contract
+    // is about. Found by an adversarial pass over the change that introduced it.
+    let cell = one_variant(
         bars,
         &candidates,
         (
@@ -2381,7 +2395,8 @@ fn levelled(
         },
         side,
         trades,
-    ))
+    );
+    (cell.trades > 0).then_some(cell)
 }
 
 /// One exit setting, named rather than positional.
@@ -5963,11 +5978,6 @@ mod rewalk_tests {
     /// next signal only if that signal is in the candidate list, and rule 4 had
     /// removed it. An adversarial fleet measured `one_variant`'s `open_until`
     /// guard firing **zero times across 168,892 cells**: every one of the 625
-    /// exit variants measured the time-exit baseline's trade set.
-    ///
-    /// So the whole exit grid compared 625 ways of pricing ONE sequence of
-    /// trades, while claiming to compare 625 sequences.
-    ///
     /// # The property, not a number
     ///
     /// A tightest-stop cell must take **at least as many** round trips as the
@@ -5975,6 +5985,33 @@ mod rewalk_tests {
     /// more. Asserting a specific count would pin this fixture; asserting the
     /// ordering fails the moment the candidate list goes back to being
     /// pre-excluded, whatever the fixture.
+    ///
+    /// # AND IT HOLDS ONLY ON A SLICE WITH NO REFUSED PATH, which is stated
+    /// # here because this fixture is one and every shipped bench is one too
+    ///
+    /// A candidate whose path cannot be priced blocks to its `time_exit` —
+    /// see [`blocks_without_pricing`] — and that extent is the same in every
+    /// cell, because there is no priced path to shorten it. Every OTHER block
+    /// shrinks as the exit tightens. So on a slice that carries a refused bar,
+    /// a tight-exit cell can reach a refused candidate that the baseline's
+    /// longer block hid, take its fixed
+    /// `time_exit` block, and lose a later signal the baseline kept:
+    ///
+    /// ```text
+    ///   A  signal 0,  exit 41, clean, stop fires at offset 1
+    ///   B  signal 3,  exit 44, REFUSED
+    ///   C  signal 42, exit 83, clean
+    ///
+    ///   baseline    A blocks to 41 · B hidden at 3 < 41 · C taken at 42  -> 2
+    ///   tight stop  A blocks to  2 · B reached, blocks to 44 · C hidden  -> 1
+    /// ```
+    ///
+    /// `synthetic::sessions` produces no corrupt bar, so no fixture in this
+    /// crate can reach it and this test cannot see it. The ordering above is
+    /// therefore asserted OF SOUND SLICES, which is what every caller has when
+    /// `Grid::refused_paths` is zero — and that count is exactly the operator's
+    /// signal that the property is in question. Found by an adversarial pass
+    /// over the change that introduced it; §3 rule 6.
     #[test]
     fn a_tighter_exit_can_take_a_trade_the_baseline_had_no_room_for() {
         let bars = crate::synthetic::sessions(8);

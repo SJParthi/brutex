@@ -339,20 +339,23 @@ fn grid_header(out: &mut String, g: &Grid) {
     //
     // `Grid::refused_paths` is zero on every sound slice, so a non-zero here
     // means the store handed this run a record the engine refused -- and the
-    // whole point of dropping rather than skipping is that the operator sees a
-    // smaller sample instead of a moved answer. A count kept and not rendered
+    // whole point of pricing nothing rather than pricing a guess is that the
+    // operator sees a smaller sample instead of an invented path. The position
+    // is still HELD -- see `grid::blocks_without_pricing` -- so the sequence is
+    // unchanged and only the tally is short. A count kept and not rendered
     // would put it back to being invisible.
     if g.refused_paths > 0 {
         row(
             out,
-            "PATHS DROPPED, refused bar",
+            "PATHS UNPRICED, refused bar",
             &g.refused_paths.to_string(),
             "a bar between entry and exit failed the engine's own bar check, so \
-             the whole round trip was dropped rather than priced. Every figure \
-             below is over a SMALLER sample, not a corrected one.",
+             the round trip could not be priced. It STILL HELD THE POSITION and \
+             blocked the next signal, so the sample below is smaller by these \
+             and the sequence is unchanged. A tighter exit can lose a later \
+             signal to one of these that a looser exit hid.",
         );
     }
-    // THE EXIT COLUMN IS FIVE FIELDS AND WOULD BE UNREADABLE UNNAMED.
     //
     // `2/3/1+0@0` is a stop, a target, a trailing STOP LOSS, and then a trailing
     // TAKE PROFIT with its own arming and trailing rungs. A TSL and a TTP are

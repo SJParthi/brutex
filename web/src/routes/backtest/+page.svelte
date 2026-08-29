@@ -182,9 +182,16 @@
    * still running has no answer for it, and a default of `false` would claim
    * one.
    *
+   * `phase` is the coarse state the table renders, and it exists because
+   * `done` was the only one: a rung four hours into its exit grid and one that
+   * had just loaded its span were the same boolean. The grid is 87.6% of a
+   * run's wall clock, so that covered the overwhelming majority of every run.
+   * `loading` → `pricing` → `priced` → `done`.
+   *
    * @typedef {{
    *   rung: string, bars: number, minHits: number,
-   *   done: boolean, why: string, recorded?: boolean
+   *   done: boolean, why: string, recorded?: boolean,
+   *   phase: string, candidates: number, priced: number
    * }} LiveRung
    */
   /* THE CAST IS INSIDE `$state(...)`, AND THAT PLACEMENT IS THE WHOLE FIX.
@@ -1577,11 +1584,33 @@
         if (record.target !== 'cli.audit') continue;
         const f = record.fields ?? {};
         if (!f.rung) continue;
-        const held = byRung.get(f.rung) ?? { rung: f.rung, bars: 0, minHits: 0, done: false, why: '' };
+        const held = byRung.get(f.rung) ?? {
+          rung: f.rung,
+          bars: 0,
+          minHits: 0,
+          done: false,
+          why: '',
+          // THE PHASE, because "loaded" and "finished" were the only two states
+          // this reducer could reach and the exit grid sits between them for
+          // 87.6% of the runtime. A rung four hours into its grid read exactly
+          // like one that had just loaded its span.
+          phase: 'loading',
+          candidates: 0,
+          priced: 0
+        };
         if (f.bars) held.bars = f.bars;
         if (f.min_hits) held.minHits = f.min_hits;
+        if (f.candidates) held.candidates = f.candidates;
+        if (record.message === 'exit grid entered') {
+          held.phase = 'pricing';
+        }
+        if (record.message === 'exit grid finished') {
+          held.phase = 'priced';
+          held.priced = f.priced ?? 0;
+        }
         if (record.message === 'rung finished') {
           held.done = true;
+          held.phase = 'done';
           held.why = f.why ?? '';
           held.recorded = f.recorded === 1;
         }
@@ -5331,7 +5360,7 @@
       <div class="tt-tblwrap">
         <table class="tt-tbl rungprog">
           <thead>
-            <tr><th>timeframe</th><th class="num">bars</th><th class="num">needs</th><th class="num">support</th><th>state</th></tr>
+            <tr><th>timeframe</th><th class="num">bars</th><th class="num">needs</th><th class="num">support</th><th class="num">candidates</th><th>state</th></tr>
           </thead>
           <tbody>
             {#each live.rungs as r (r.rung)}
@@ -5342,9 +5371,22 @@
                 <td class="num">
                   {r.bars && r.minHits ? `${((r.minHits / r.bars) * 100).toFixed(2)}%` : '—'}
                 </td>
+                <td class="num">{r.candidates ? r.candidates.toLocaleString() : '—'}</td>
                 <td>
+                  <!--
+                    FIVE STATES, NOT TWO. This read `recorded / refused /
+                    sweeping…`, so a rung four hours into its exit grid rendered
+                    "sweeping…" — identical to one that had just loaded its span.
+                    The grid is 87.6% of a run's wall clock, measured, so that
+                    one word covered the overwhelming majority of every run and
+                    said nothing about it.
+                  -->
                   {#if r.done && r.recorded}<span class="ok">recorded</span>
                   {:else if r.done}<span class="warnish">refused — {r.why || 'no reason given'}</span>
+                  {:else if r.phase === 'priced'}<span class="dim"
+                      >priced {r.priced.toLocaleString()} — validating…</span
+                    >
+                  {:else if r.phase === 'pricing'}<span class="dim">pricing the exit grid…</span>
                   {:else}<span class="dim">sweeping…</span>{/if}
                 </td>
               </tr>

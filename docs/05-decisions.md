@@ -27925,3 +27925,92 @@ the old filter is reproduced inline and gives **one trade** where the fix gives
 
 **`Crossings::refused` is a field read**, so the per-candidate branch this adds
 inside the 625-variant walk is O(1) and data-independent.
+
+### D-0391
+
+**Six defects an adversarial fleet found in the same session's own commits, and
+five of them were in code written hours earlier.**
+
+**`Grain::Hour` was computed on every screened row and thrown away.**
+`stability::GRAINS` became `[Grain; 7]`; `Consistency::shares_bp` stayed
+`[i64; 6]`, filled through `if let Some(share) = shares_bp.get_mut(slot)`.
+`get_mut(6)` is `None`, so the `if let` skipped without a word — while
+`stability::at(&rows, Grain::Hour)` still ran a full pass over every trade row
+to produce the answer that was discarded. `weakest_bp()` minimised over six, so
+`row.steady` never saw the hour and the grain added specifically to catch a
+combination whose whole edge sits between 09:15 and 10:15 caught nothing.
+
+The array is `[i64; GRAINS.len()]` now, so an eighth grain widens it in the same
+commit or the code does not compile. **Two independent agents found this.** The
+test that shipped with it proved `Grain::Hour.bucket()` partitions correctly —
+true, and irrelevant: it never asserted that anything read the answer.
+
+**The consistency table had five labels over seven values, and that is older.**
+`share_bp(0..=4)` printed under `yearly quarterly monthly weekly daily` while
+carrying Year, HALF, Quarter, Month, Week — so every column after the first was
+labelled with the wrong grain, "daily" printed the WEEK, and Day never appeared.
+Seven columns now, each under its own name, with a `const` assert tying the
+count to `GRAINS.len()`.
+
+**`hold_return_over_drawdown_bp` truncated to zero on real spans, and zero is
+not a loose rule.** `Rules::admits` reads `cell.return_over_drawdown() >=
+min_ret_over_dd_bp`, and `return_over_drawdown` returns 0 when `pessimistic <=
+0` — so a floor of zero **admits every losing variant on that leg**. Measured
+across 8 rungs × 61 months of NIFTY: three real spans truncate to zero, NIFTY
+5min 2024-11 among them (gain 840 paisa against a worst fall of 124,485). This
+is the exact trap `breakeven_rr_bp` was given a guard for in the same commit, in
+those words, and this function shipped with the identical truncation and none.
+
+**The exit-grid events were dropped twice over by the surface they were added
+for.** They went out on `cli.grid` without a rung; the console does
+`if (record.target !== 'cli.audit') continue` and then `if (!f.rung) continue`.
+They are on `cli.audit` with the rung now — `Recording` is the only thing on
+that path that knows it — and the reducer and table carry five states instead of
+two, because `done` was the only one and a rung four hours into its grid read
+exactly like one that had just loaded its span.
+
+**Frontier version 4 bricked `cli top` against the operator's own store.** The
+v3 refusal is right and stays; aborting the WHOLE report was not. The ledger row
+is already in hand and is the half that names the run, the span and the totals.
+Measured the moment v4 landed: one `refused:` line and nothing else, and
+`/engine/top.json` at HTTP 400, until the file was deleted by hand. The reason
+is carried into the report now.
+
+**`Results::open_read` made a fresh store answer `refused:`.** Its refusal is
+correct for a caller opening a ledger; `top_at` is not that caller — it asks
+"what is the best run", and on a store that has never recorded one the answer is
+a sentence, not a refusal. The result was a line labelled `refused:` whose own
+text says *"this is not an error"*. The frontier half of the same function got
+that fold ten lines down; the ledger half did not.
+
+### D-0392
+
+**A refused path blocks for a fixed span while every priced block shrinks, so a
+tighter exit can take FEWER trades. Stated, not fixed.**
+
+`blocks_without_pricing` blocks to `time_exit`, and there is no priced path to
+shorten it. Every other block is `entry + pess_off`, which contracts as the exit
+tightens. So on a slice carrying a refused bar, a tight-exit cell can reach a
+refused candidate the baseline's longer block hid, take its fixed block, and
+lose a later signal the baseline kept:
+
+```text
+  A  signal 0,  exit 41, clean, stop fires at offset 1
+  B  signal 3,  exit 44, REFUSED
+  C  signal 42, exit 83, clean
+
+  baseline    A blocks to 41 · B hidden at 3 < 41 · C taken at 42  -> 2 trades
+  tight stop  A blocks to  2 · B reached, blocks to 44 · C hidden  -> 1 trade
+```
+
+That contradicts `a_tighter_exit_can_take_a_trade_the_baseline_had_no_room_for`
+in writing. **It is not fixable without inventing the path that was just
+declared unpriceable** — any per-variant block for a refused candidate is a
+guess at where a stop would have fired on a bar nobody could read.
+
+So the property is restated rather than repaired: it holds **on a slice with no
+refused path**, which is every caller for whom `Grid::refused_paths` is zero —
+and that count is exactly the operator's signal that the property is in
+question. The test's doc carries the worked example above, because a fixture
+built from `synthetic::sessions` produces no corrupt bar and cannot reach it.
+§3 rule 6.

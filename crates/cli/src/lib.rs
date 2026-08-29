@@ -4278,6 +4278,34 @@ pub fn top_list(feed: Option<&str>, underlying: Option<&str>) -> String {
     }
 }
 
+/// What `top_at` prints when there is no frontier to print, and which absence
+/// it is.
+///
+/// Two different facts, and only one of them is about the run. A MISSING
+/// frontier is this run's state — an older run has a ledger row and no ranked
+/// list. An UNREADABLE one is the STORE's state, and it must not cost the
+/// ledger half of the report: version 4 refuses a version-3 file by name, which
+/// is right, and that refusal used to abort the whole thing. Measured on the
+/// operator's own store the moment version 4 landed: `cli top` printed one
+/// `refused:` line and nothing else, and `/engine/top.json` answered HTTP 400,
+/// until the file was deleted by hand.
+///
+/// Split out because `top_at` is at its hundred-line ceiling, which this
+/// workspace answers by splitting.
+fn no_frontier(unreadable: &str) -> String {
+    if unreadable.is_empty() {
+        return "\n  This run recorded NO frontier. Rows are written by runs made \
+                after `cli frontier` landed; an older run has a ledger row and no \
+                ranked list, which is a gap in the record rather than an empty \
+                result. Re-run it to fill one in.\n"
+            .to_owned();
+    }
+    format!(
+        "\n  THE FRONTIER FILE COULD NOT BE READ, so the ranked list is missing \
+         from this report and everything above it is not. The ledger row is what \
+         you are reading.\n  {unreadable}\n"
+    )
+}
 /// [`top_list`], against a root the caller names.
 ///
 /// Split out so the rendering can be tested against a scratch store. The env
@@ -4286,6 +4314,29 @@ pub fn top_list(feed: Option<&str>, underlying: Option<&str>) -> String {
 pub fn top_at(root: &std::path::Path, feed: Option<&str>, underlying: Option<&str>) -> String {
     let rows = match newest_complete(root, feed, underlying) {
         Ok(Some(record)) => record,
+        // AN ABSENT LEDGER IS THE SAME ANSWER AS AN EMPTY ONE, and it took the
+        // other arm. `newest_complete` moved to `Results::open_read` so a GET
+        // could stop creating files, and `open_read` refuses an absent or empty
+        // ledger by NAME -- correctly, since that is what a reader asked to
+        // open one should hear. But this caller is not opening a ledger; it is
+        // asking "what is the best run", and on a store that has never recorded
+        // one the answer is the sentence below, not a refusal.
+        //
+        // The result was a line beginning `refused:` whose own text says *"this
+        // is not an error"*, and `/engine/top.json` answering HTTP 400 for a
+        // fresh store. The frontier half of this function got exactly this fold
+        // ten lines down; the ledger half did not.
+        //
+        // Matched on the phrase both refusals end with rather than on either
+        // one's full text, so a reworded message keeps the fold. Every other
+        // refusal -- wrong magic, an unknown version, a ragged tail -- still
+        // refuses, because those are about a ledger that EXISTS and is not one
+        // this build can read.
+        Err(why) if why.contains("nothing was created") || why.contains("nothing was written") => {
+            return "  NO RUN HAS BEEN RECORDED YET. The ledger does not exist \
+                    or holds nothing — sweep something and it appears here.\n"
+                .to_owned();
+        }
         Ok(None) => {
             return "  NO COMPLETE RUN matches. Every matching row halted on a \
                     budget, or nothing has been recorded yet — `cli results` \
@@ -4310,13 +4361,30 @@ pub fn top_at(root: &std::path::Path, feed: Option<&str>, underlying: Option<&st
     // because those are about a file that EXISTS and is not this one.
     // The shape `of_run` returns for a run with no rows and nothing damaged.
     let empty = (Vec::new(), None);
+    let mut unreadable = String::new();
     let (found, damaged) = match crate::frontier::Frontier::open_read(root) {
         Ok(mut store) => match store.of_run(&rows.identity) {
             Ok(pair) => pair,
             Err(why) => return format!("refused: {why}\n"),
         },
         Err(why) if why.contains("does not exist yet") => empty,
-        Err(why) => return format!("refused: {why}\n"),
+        // A FRONTIER THIS BUILD CANNOT READ DOES NOT COST THE LEDGER HALF.
+        //
+        // Version 4 refuses a version-3 file by name and that refusal is right
+        // -- widening one would hand every row a rule set of all-zero floors,
+        // which every priced row passes. What was wrong is that it aborted the
+        // WHOLE report: the ledger row above is already in hand, and it is the
+        // half that names the run, the span and the totals.
+        //
+        // Measured on the operator's own store the moment version 4 landed:
+        // `cli top` printed one `refused:` line and nothing else, and
+        // `/engine/top.json` answered HTTP 400, until the file was deleted by
+        // hand. The reason is carried into the report instead, so the operator
+        // reads what is knowable and is told exactly what is not and why.
+        Err(why) => {
+            unreadable = why;
+            empty
+        }
     };
 
     let mut out = String::from(STORED_PROVENANCE);
@@ -4335,13 +4403,7 @@ pub fn top_at(root: &std::path::Path, feed: Option<&str>, underlying: Option<&st
     );
 
     if found.is_empty() {
-        let _ = writeln!(
-            out,
-            "\n  This run recorded NO frontier. Rows are written by runs made \
-             after `cli frontier` landed; an older run has a ledger row and no \
-             ranked list, which is a gap in the record rather than an empty \
-             result. Re-run it to fill one in."
-        );
+        out.push_str(&no_frontier(&unreadable));
         return out;
     }
 
@@ -4638,8 +4700,22 @@ pub const EVERY_RUNG: [&str; 8] = [
 /// report that run on the EXECUTION series rather than the signal one, and
 /// keeping them in one function makes that boundary visible instead of
 /// scattered.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "eight, and the eighth is the RUNG -- which this function needs \
+              only to name itself in the two events that bracket it. The exit \
+              grid is 87.6% of a run's wall clock and emitted nothing, so an \
+              operator watching `/logs` saw the first 12% of a run and then \
+              silence. `Recording` is the only thing that knows the rung and it \
+              does not reach here; passing the label is smaller than passing \
+              the whole record, and a run without one is synthetic and names \
+              the empty string. The other seven were already here."
+)]
 fn trade_and_screen(
     bars: &[indicators::Candle],
+    // The rung this phase is pricing, for its own two events. Empty on a
+    // synthetic run, which has no rung to name.
+    rung: &str,
     column: &indicators::column::Column,
     first: &runner::rank::Scored,
     by_evidence: &[&runner::rank::Scored],
@@ -4690,36 +4766,7 @@ fn trade_and_screen(
     // on a `Cell`, and until now `screen` computed one per candidate and
     // returned only the rendered table -- so the frontier could store the
     // sweep's statistics and nothing about the money.
-    // THE PHASE THAT IS 87.6% OF THE RUNTIME, AND IT EMITTED NOTHING.
-    //
-    // Measured by sampling a real `range-all`: 18,068 samples in the exit grid
-    // against 1,403 in the sweep and 887 everywhere else. `emit_ladder_level`
-    // reports every k-level of the ladder, so an operator watching `/logs` sees
-    // the first 12% of a run in detail and then silence for the rest -- and a
-    // five-hour sweep that has been in the grid for four of them looks
-    // identical to one that hung.
-    //
-    // GATE 17 PERMITS THIS AND `cli` IS WHY. The gate silences `vocab engine
-    // indicators runner` because those hold the innermost loops, and its own
-    // remedy prescribes the shape: "plain integer counters ... emitted ONCE at
-    // a structural boundary -- per k-level, per instrument, per run". This
-    // function is called ONCE per rung and holds no loop over bars or over
-    // candidates; `screen_cascade` below it does, and must never emit.
-    //
-    // Entry and exit, so the pair brackets the phase and a run that died inside
-    // it leaves the entry alone -- which is itself the reading an operator
-    // needs.
-    note(
-        &telemetry::Event::info("cli.grid", "exit grid entered")
-            .with("bars", u64::try_from(bars.len()).unwrap_or(u64::MAX))
-            .with(
-                "candidates",
-                u64::try_from(by_evidence.len()).unwrap_or(u64::MAX),
-            )
-            .with("rungs", u64::try_from(grid_rungs(bars)).unwrap_or(u64::MAX))
-            .with("cap", u64::try_from(screen_cap()).unwrap_or(u64::MAX))
-            .with("validate", u64::from(validate)),
-    );
+    note_grid_entered(rung, bars.len(), by_evidence.len(), screen_cap(), validate);
     let mut priced: std::collections::HashMap<[u64; 6], grid::Cell> =
         std::collections::HashMap::with_capacity(by_evidence.len().min(screen_cap()));
     let screened = screen_cascade(
@@ -4731,25 +4778,7 @@ fn trade_and_screen(
         validate,
         &mut priced,
     );
-    // AND WHAT IT PRICED, which is the number the live view could not carry:
-    // `Summary::priced` is written once, before this phase, so it is a
-    // structural zero for the whole of it. This is where the real count exists.
-    note(
-        &telemetry::Event::info("cli.grid", "exit grid finished")
-            .with("priced", u64::try_from(priced.len()).unwrap_or(u64::MAX))
-            .with(
-                "candidates",
-                u64::try_from(by_evidence.len()).unwrap_or(u64::MAX),
-            )
-            .with(
-                "trades",
-                u64::try_from(taken.trades.len()).unwrap_or(u64::MAX),
-            )
-            .with(
-                "report_bytes",
-                u64::try_from(screened.len()).unwrap_or(u64::MAX),
-            ),
-    );
+    note_grid_finished(rung, priced.len(), by_evidence.len(), taken.trades.len());
     (taken, exits, screened, priced)
 }
 
@@ -6302,7 +6331,27 @@ fn hold_return_over_drawdown_bp(bars: &[indicators::Candle]) -> Option<i64> {
         return None;
     }
     // Hundredths, the scale `min_ret_over_dd_bp` is held on: 500 is 5.0x.
-    gain.checked_mul(100)?.checked_div(worst_fall)
+    let ratio = gain.checked_mul(100)?.checked_div(worst_fall)?;
+    // A FLOOR THAT ROUNDS TO ZERO IS NOT A LOOSE RULE. IT IS NO RULE.
+    //
+    // `Rules::admits` reads `cell.return_over_drawdown() >= min_ret_over_dd_bp`
+    // and `return_over_drawdown` returns 0 when `pessimistic <= 0` -- so a
+    // floor of zero admits every LOSING variant on that leg. This is the exact
+    // trap `breakeven_rr_bp` was given a guard for in the same commit, in these
+    // words, and this function shipped with the identical truncation and none.
+    //
+    // MEASURED ON THE OPERATOR'S OWN STORE, not argued: across 8 rungs x 61
+    // months of NIFTY, three real spans truncate to zero -- 5min 2024-11 (gain
+    // 840 paisa against a worst fall of 124,485), 15min 2024-01 and 30min
+    // 2024-01. A span that barely rose while falling hard in the middle is not
+    // a span with no drawdown rule; it is a span where holding the index was
+    // close to worthless, and the honest floor is the smallest one that is
+    // still a rule.
+    //
+    // One, for the reason the payoff guard gives: the arithmetic really does
+    // say "buy-and-hold returned almost nothing per unit of pain here", and
+    // falling back to the 500 constant would be a number nothing derived.
+    Some(if ratio <= 0 { 1 } else { ratio })
 }
 
 /// Break-even reward-to-risk at a win rate, plus a quarter for margin.
@@ -6950,7 +6999,18 @@ fn screen_cascade(
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Consistency {
     /// Positive share per grain, in the order of [`crate::stability::GRAINS`].
-    shares_bp: [i64; 6],
+    ///
+    /// SIZED FROM `GRAINS`, NOT TYPED, because typing it silently dropped a
+    /// grain. This was `[i64; 6]` against a six-grain ladder; adding
+    /// `Grain::Hour` made the ladder seven and the array stayed six, so
+    /// `shares_bp.get_mut(6)` returned `None`, the `if let` skipped it without
+    /// a word, and the finest grain — the one added specifically to catch a
+    /// combination whose whole edge sits in the first hour — was computed on
+    /// every row and thrown away. `weakest_bp` then minimised over six.
+    ///
+    /// A `[i64; GRAINS.len()]` cannot drift from the ladder: adding an eighth
+    /// grain widens this array in the same commit or the code does not compile.
+    shares_bp: [i64; crate::stability::GRAINS.len()],
     /// The worst single period's net, in paisa, at the FINEST grain.
     ///
     /// The finest grain is the honest one to report: a strategy positive in
@@ -7021,7 +7081,8 @@ fn consistency_of(
     if rows.is_empty() {
         return None;
     }
-    let mut shares_bp = [0_i64; 6];
+    // Sized from the ladder, so a new grain cannot be silently discarded.
+    let mut shares_bp = [0_i64; crate::stability::GRAINS.len()];
     let mut worst_day = 0_i64;
     let mut years = 0_usize;
     for (slot, grain) in crate::stability::GRAINS.iter().enumerate() {
@@ -7382,6 +7443,18 @@ fn measure_top(
     }
 }
 
+/// The consistency table writes one column per grain by hand, because the
+/// widths differ and a loop would need a parallel table of them — the same
+/// drift in another shape. This is what stops a grain being added without one.
+///
+/// It exists because the opposite already happened: `Consistency::shares_bp`
+/// was typed `[i64; 6]` against a six-grain ladder, `Grain::Hour` made the
+/// ladder seven, and the seventh share was computed on every row and silently
+/// discarded by an `if let` on `get_mut(6)`.
+const _: () = assert!(
+    crate::stability::GRAINS.len() == 7,
+    "a grain was added or removed without a column beneath it in `append_consistency`"
+);
 /// The consistency table, appended to a screen.
 ///
 /// # Why it is its own function
@@ -7428,16 +7501,31 @@ fn append_consistency(out: &mut String, rows: &[Screened<'_>], top: usize) {
          A total cannot answer this: one great quarter and six flat years \
          reports the same net as steady earning."
     );
+    // EVERY GRAIN GETS ITS OWN COLUMN, AND FIVE LABELS SAT OVER SEVEN VALUES.
+    //
+    // The header read `yearly quarterly monthly weekly daily` and the row under
+    // it printed `share_bp(0..=4)` -- which in `GRAINS` order is Year, HALF,
+    // Quarter, Month, Week. So every column after the first was labelled with
+    // the wrong grain: "quarterly" printed the half-year, "daily" printed the
+    // WEEK, and Day never appeared at all. A reader checking whether a
+    // combination held up daily was reading its weekly figure.
+    //
+    // Written out rather than looped because the widths differ and a loop would
+    // need a parallel table of them -- which is the same drift in another shape.
+    // `GRAINS.len()` is asserted against the count below so a new grain cannot
+    // be added without a column.
     let _ = writeln!(
         out,
-        "  {:<5}{:>8}{:>8}{:>10}{:>8}{:>7}{:>7}{:>9}{:>14}",
+        "  {:<5}{:>6}{:>8}{:>7}{:>10}{:>8}{:>7}{:>7}{:>8}{:>9}{:>14}",
         "rank",
         "years",
         "yearly",
+        "half",
         "quarterly",
         "monthly",
         "weekly",
         "daily",
+        "hourly",
         "WEAKEST",
         "worst day"
     );
@@ -7448,24 +7536,27 @@ fn append_consistency(out: &mut String, rows: &[Screened<'_>], top: usize) {
         };
         let _ = writeln!(
             out,
-            "  {:<5}{:>8}{:>8}{:>10}{:>8}{:>7}{:>7}{:>9}{:>14}",
+            "  {:<5}{:>6}{:>8}{:>7}{:>10}{:>8}{:>7}{:>7}{:>8}{:>9}{:>14}",
             row.rank,
             c.years,
+            // `GRAINS` order: year, half, quarter, month, week, day, hour.
             c.share_bp(0),
             c.share_bp(1),
             c.share_bp(2),
             c.share_bp(3),
             c.share_bp(4),
+            c.share_bp(5),
+            c.share_bp(6),
             // THE COLUMN THE OPERATOR'S RULE ACTUALLY READS. His requirement is
             // every grain at once, so the weakest one is the whole answer and
-            // the five before it are the evidence for it.
+            // the seven before it are the evidence for it.
             c.weakest_bp(),
             rupees(c.worst_day),
         );
     }
     let _ = writeln!(
         out,
-        "\n  WEAKEST is the minimum across all six grains, and it is the column \
+        "\n  WEAKEST is the minimum across all seven grains, and it is the column \
          the rule reads.\n  The minimum and not the mean: positive in every year \
          and negative in half its months\n  is not consistent, and averaging the \
          two hides exactly that.\n  \
@@ -10597,6 +10688,57 @@ fn signal_spacing_minutes(bars: &[indicators::Candle]) -> u32 {
     u32::try_from(smallest / MICROS_PER_MINUTE).unwrap_or(0)
 }
 
+/// The exit grid's two boundary events, and why they are on `cli.audit`.
+///
+/// The phase is 87.6% of a run's wall clock, measured by sampling a real
+/// `range-all`: 18,068 samples in the grid against 1,403 in the sweep and 887
+/// everywhere else. `emit_ladder_level` reports every k-level, so an operator
+/// watching `/logs` saw the first 12% of a run in detail and then silence — and
+/// a five-hour sweep four hours into its grid looked identical to one that hung.
+///
+/// # `cli.audit`, not `cli.grid`, and that is not cosmetic
+///
+/// These went out on their own target first. The console does
+/// `if (record.target !== 'cli.audit') continue` and then `if (!f.rung)
+/// continue`, so events on a new target without a rung were dropped twice over
+/// and the instrumentation was invisible on the surface it was added for. The
+/// rung comes from `Recording`, which is the only thing on that path that knows
+/// it; a run without one is a synthetic sweep with no rung to name.
+///
+/// # Gate 17
+///
+/// The gate silences `vocab engine indicators runner` because those hold the
+/// innermost loops, and its own remedy prescribes the shape: *"plain integer
+/// counters … emitted ONCE at a structural boundary"*. This is `cli`, called
+/// once per rung, holding no loop over bars and none over candidates.
+fn note_grid_entered(rung: &str, bars: usize, candidates: usize, cap: usize, validate: bool) {
+    note(
+        &telemetry::Event::info("cli.audit", "exit grid entered")
+            .with("rung", rung)
+            .with("bars", u64::try_from(bars).unwrap_or(u64::MAX))
+            .with("candidates", u64::try_from(candidates).unwrap_or(u64::MAX))
+            .with("cap", u64::try_from(cap).unwrap_or(u64::MAX))
+            .with("validate", u64::from(validate)),
+    );
+}
+
+/// The other half of the bracket, and the count the live view cannot carry.
+///
+/// `live::Summary::priced` is written once, BEFORE this phase, so it is a
+/// structural zero for the whole of it. This is where the real count exists.
+///
+/// Emitted as a pair with [`note_grid_entered`] so a run that died inside the
+/// phase leaves the entry unmatched — which is itself the reading an operator
+/// needs, and is not available from a single line.
+fn note_grid_finished(rung: &str, priced: usize, candidates: usize, trades: usize) {
+    note(
+        &telemetry::Event::info("cli.audit", "exit grid finished")
+            .with("rung", rung)
+            .with("priced", u64::try_from(priced).unwrap_or(u64::MAX))
+            .with("candidates", u64::try_from(candidates).unwrap_or(u64::MAX))
+            .with("grid_trades", u64::try_from(trades).unwrap_or(u64::MAX)),
+    );
+}
 #[allow(
     clippy::needless_pass_by_value,
     clippy::large_types_passed_by_value,
@@ -10797,6 +10939,7 @@ fn audit_bars(
     // the better the ranker got, the more often the side was wrong.
     let (taken, exits, screened, priced) = trade_and_screen(
         &trade_bars,
+        recording.as_ref().map_or("", |into| into.timeframe),
         &trade_column,
         first,
         &by_evidence,
@@ -10804,8 +10947,8 @@ fn audit_bars(
         rules,
         validate,
     );
-    out.push_str(&screened);
-    out.push('\n');
+    // The screened block and the blank line under it are one act.
+    let _ = writeln!(out, "{screened}");
     // THE WALK-FORWARD, WHICH USED TO BE A `None`.
     //
     // `validate::walk_forward` was built, tested and never called: this report
@@ -14685,7 +14828,7 @@ mod tests {
     #[test]
     fn the_weakest_grain_is_the_minimum_and_never_the_mean() {
         let uneven = Consistency {
-            shares_bp: [10_000, 10_000, 5_000, 10_000, 10_000, 10_000],
+            shares_bp: [10_000, 10_000, 5_000, 10_000, 10_000, 10_000, 10_000],
             worst_day: -50_000,
             years: 7,
         };
@@ -14702,14 +14845,25 @@ mod tests {
     }
 
     /// A grain past the list reads zero rather than panicking on an index.
+    ///
+    /// THE INDEX IS TAKEN FROM THE LADDER, NOT TYPED. This asserted
+    /// `share_bp(6) == 0` while six grains existed, so adding `Grain::Hour`
+    /// made six a REAL grain and the test failed for the right reason — but a
+    /// typed seven would go stale the same way at the eighth. `GRAINS.len()` is
+    /// the first index past the end by definition.
     #[test]
     fn a_grain_past_the_list_reads_zero_rather_than_panicking() {
         let c = Consistency {
-            shares_bp: [10_000; 6],
+            shares_bp: [10_000; crate::stability::GRAINS.len()],
             worst_day: 0,
             years: 1,
         };
-        assert_eq!(c.share_bp(6), 0);
+        assert_eq!(
+            c.share_bp(crate::stability::GRAINS.len() - 1),
+            10_000,
+            "the LAST grain is in the list and must read its share"
+        );
+        assert_eq!(c.share_bp(crate::stability::GRAINS.len()), 0);
         assert_eq!(c.share_bp(usize::MAX), 0);
     }
 

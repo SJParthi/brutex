@@ -1170,8 +1170,8 @@ fn check_header(file: &mut File, path: &Path, len: u64) -> Result<(), Refusal> {
     if version != VERSION {
         return Err(format!(
             "{} is frontier format version {version}; this build writes and reads \
-             version {VERSION}. A format version is never mutated in place — \
-             CLAUDE.md §8. The file is REGENERABLE -- re-run the \
+             version {VERSION}. A format version is never mutated in place — §3 \
+             rule 8. The file is REGENERABLE -- re-run the \
              sweep and it is written afresh -- and it is not widened in place \
              because a row read with zeroes in the new fields would carry a rule \
              set of all-zero floors, which every priced row passes. That is the \
