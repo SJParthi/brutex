@@ -6962,9 +6962,44 @@ fn one_rung(
     // clear its own confidence bound? Under that, NO combination can pass
     // however good it looks — and stopping anywhere above it discards reachable
     // answers. D-0303.
+    // THE OPERATOR'S OWN SUPPORT, IF THEY NAME ONE, AND NOTHING IF THEY DO NOT.
+    //
+    // D-0303 removed the typed threshold because "whatever figure an operator
+    // types, they have already decided how often the answer may fire, before
+    // anything is measured" -- and that argument is about the DEFAULT, which is
+    // still derived. What it left the operator without is any way to search
+    // deeper than the derivation chose, and the first real results made the
+    // cost of that concrete.
+    //
+    // MEASURED, 2026-08-29, zerodha NIFTY over 81 months: the affordability
+    // probe settled every rung near 22% support, seven runs completed to depth
+    // 15, and every one of them LOST under worst-case fills -- 1,758 trades at
+    // 60min for -Rs 5,847, 13,266 trades at 3min for -Rs 84,053, the loss
+    // scaling with trade count across all six rungs. That is the signature of
+    // frequent setups being arbitraged into the spread, and 22% support is
+    // frequent BY DEFINITION: a pattern firing on one bar in five. The rare
+    // setup the operator is hunting -- once a week over seven years -- sits
+    // near 0.3% and was never enumerated, so it was never counted, ranked or
+    // priced.
+    //
+    // Expressed in ppm of the rung's OWN bars rather than as a hit count, for
+    // the reason `range_over`'s banner gives: 81 months holds 1,671 daily bars
+    // and 618,296 one-minute ones, so one absolute threshold would ask eight
+    // different questions and the table would compare nothing. `BRUTEX_SUPPORT_PPM=100000`
+    // is 10% on every rung; `50000` is 5%.
+    //
+    // Refused at zero and at a million: zero makes every combination frequent
+    // so the frontier never empties and the walk has no end, and a million
+    // demands a pattern present on every bar, which D-0080 excludes as
+    // `AlwaysTrue` before k=1. Both are the same refusal `screen` already makes.
+    let operator_ppm = std::env::var_os("BRUTEX_SUPPORT_PPM")
+        .and_then(|raw| raw.to_string_lossy().trim().parse::<u64>().ok())
+        .filter(|&ppm| ppm > 0 && ppm < 1_000_000);
+
+    let named_ppm = support_ppm.or(operator_ppm);
     let statistical = min_hits_for(
         bars,
-        support_ppm
+        named_ppm
             .unwrap_or_else(|| statistical_support_floor(u64::try_from(bars).unwrap_or(u64::MAX))),
     );
 
@@ -7001,7 +7036,7 @@ fn one_rung(
     // An operator who NAMES a support still gets exactly what they named --
     // `Some(_)` skips this entirely. The probe exists because `None` means
     // "derive it", and deriving it from the data alone was half an answer.
-    let min_hits = match support_ppm {
+    let min_hits = match named_ppm {
         Some(_) => statistical,
         None => affordable_min_hits(&span.bars).map_or(statistical, |a| a.max(statistical)),
     };
