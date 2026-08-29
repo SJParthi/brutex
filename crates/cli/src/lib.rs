@@ -8929,52 +8929,40 @@ impl Drop for SharedBy {
 /// A machine that will not answer keeps the reference rather than guessing
 /// downward: an unknown machine is not a small one, and halving the ladder on a
 /// failed query would be a silent narrowing of the search. D-0306.
-fn derived_ceiling() -> usize {
-    /// What [`std::thread::available_parallelism`] answers on the machine
-    /// `engine::DEFAULT_CEILING` was sized against.
-    ///
-    /// # It was 10 and that was a UNIT ERROR, measured on the reference machine
-    /// itself
-    ///
-    /// `range_all`'s comment says *"A MACHINE WITH TEN PERFORMANCE CORES"*, and
-    /// ten is what this constant first held. But the quantity multiplied below
-    /// is not performance cores — it is `available_parallelism`, and that
-    /// machine is an **Apple M4 Pro: 14 logical, 10 performance + 4
-    /// efficiency, 48 GB**. It answers **14**.
-    ///
-    /// Dividing a ceiling calibrated for 14-core behaviour by 10 and
-    /// multiplying it back by 14 inflates it by 1.4x — `187,904,808` candidates
-    /// where the calibration says `134,217,728`. At the ~146 bytes per
-    /// candidate `ceiling_from_env`'s own refusal quotes, that is **27 GB of
-    /// 48**, and `engine::DEFAULT_CEILING`'s table says `2^28` — 39.2 GB —
-    /// *"swaps on a 48 GB machine"*. The reference machine would have been
-    /// pushed most of the way there **by the code meant to protect it**.
-    ///
-    /// The reference must be in the unit of the measurement. It is 14, so the
-    /// reference machine now derives exactly `DEFAULT_CEILING` — the shipped
-    /// value, unchanged where it was calibrated — and every other machine
-    /// scales from there. Same class of defect as the paisa/points slip
-    /// `reference_price` records: not a wrong number, a right number in the
-    /// wrong unit. D-0307.
-    ///
-    /// # NO TEST CAN VERIFY THIS NUMBER, and pretending otherwise is worse than
-    /// saying so
-    ///
-    /// It is a MEASURED PROPERTY of a machine that is not present at test time:
-    /// `sysctl -n hw.logicalcpu` on the reference hardware. A test asserting it
-    /// would either hardcode 14 — proving only that two copies of one guess
-    /// agree — or read the machine it runs on, which is a different machine and
-    /// answers a different number.
-    ///
-    /// So it is treated as `CLAUDE.md` §3 rule 1 treats a vendor fact: recorded
-    /// with its source rather than derived. The source is
-    /// `docs/06-limits.md` §93, which names the hardware and the command.
-    /// `the_ceiling_is_derived_from_this_machine_and_not_from_an_assumed_one`
-    /// bounds the CONSEQUENCE — bytes per core — but that guard is loose enough
-    /// that the old value of 10 passed it at 1.96 GB against a 2 GB cap. It did
-    /// not catch this and is not claimed to.
-    const REFERENCE_CORES: usize = 14;
+/// What [`std::thread::available_parallelism`] answers on the machine
+/// `engine::DEFAULT_CEILING` was sized against.
+///
+/// # It was 10 and that was a UNIT ERROR, measured on the reference machine
+///
+/// `range_all`'s comment says *"A MACHINE WITH TEN PERFORMANCE CORES"*, and ten
+/// is what this constant first held. But the quantity multiplied below is not
+/// performance cores -- it is `available_parallelism`, and that machine is an
+/// **Apple M4 Pro: 14 logical, 10 performance + 4 efficiency, 48 GB**. It
+/// answers **14**. Dividing a ceiling calibrated for 14-core behaviour by 10 and
+/// multiplying it back by 14 inflates it by 1.4x. Same class of defect as the
+/// paisa/points slip `reference_price` records: not a wrong number, a right
+/// number in the wrong unit. D-0307.
+///
+/// # NO TEST CAN VERIFY THIS NUMBER, and pretending otherwise is worse than
+/// saying so
+///
+/// It is a MEASURED PROPERTY of a machine that is not present at test time:
+/// `sysctl -n hw.logicalcpu` on the reference hardware. A test asserting it
+/// would either hardcode 14 -- proving only that two copies of one guess agree
+/// -- or read the machine it runs on, which is a different machine and answers a
+/// different number. So it is treated as `CLAUDE.md` §3 rule 1 treats a vendor
+/// fact: recorded with its source rather than derived. The source is
+/// `docs/06-limits.md` §93, which names the hardware and the command.
+///
+/// # It is at module scope because TWO functions need it
+///
+/// It was declared inside [`derived_ceiling`], which is why [`shared_out`] could
+/// not apply the same floor and why the sharing division existed on one ceiling
+/// path and not the other. A constant only one function can see is a constant
+/// the other function will re-derive differently.
+const REFERENCE_CORES: usize = 14;
 
+fn derived_ceiling() -> usize {
     let cores =
         std::thread::available_parallelism().map_or(REFERENCE_CORES, std::num::NonZero::get);
     // PER-CORE FIRST, so the multiply cannot overflow on a machine with many:
@@ -8997,18 +8985,45 @@ fn derived_ceiling() -> usize {
     // Dividing rather than serialising keeps the parallelism that makes eight
     // rungs finish in one rung's wall clock; what changes is only how deep each
     // is allowed to go before it must stop and say so.
-    let sharing = crate::SWEEPS_SHARING_THIS_MACHINE.load(std::sync::atomic::Ordering::Relaxed);
-    whole_machine
-        .checked_div(sharing.max(1))
-        .unwrap_or(whole_machine)
-        // A SHARE IS STILL A SEARCH. Eight ways of a machine budget is millions
-        // of candidates, but the floor keeps a pathological share count from
-        // producing a ceiling that halts before the first level -- which reports
-        // extinction where the truth is that nothing was allowed to run, the
-        // same failure the `max` above refuses.
-        .max(engine::DEFAULT_CEILING / REFERENCE_CORES)
+    // A SHARE IS STILL A SEARCH. Eight ways of a machine budget is millions of
+    // candidates, but `shared_out`'s floor keeps a pathological share count from
+    // producing a ceiling that halts before the first level -- which reports
+    // extinction where the truth is that nothing was allowed to run, the same
+    // failure the `max` above refuses.
+    //
+    // EXTRACTED so that `ceiling_from_env` divides identically. It did not: an
+    // explicit `BRUTEX_CEILING` was returned verbatim and multiplied by however
+    // many rungs were running, which is how one `range-all` was SIGKILLed asking
+    // for 157 GB of 48. Two call sites, one rule, and now literally one function.
+    shared_out(whole_machine)
 }
 
+/// The ceiling for THIS sweep: the operator's, or the machine's, divided the
+/// same way.
+///
+/// # The division applied to one path and not the other, and it cost a run
+///
+/// [`derived_ceiling`] ends by dividing a WHOLE-MACHINE budget by
+/// [`SWEEPS_SHARING_THIS_MACHINE`], because `range_over` runs eight rungs at
+/// once and its own comment records what happens otherwise: *"Handing each of
+/// them the whole machine claimed 157 GB of 48 -- the guard against swapping
+/// oversubscribing the thing it guards."*
+///
+/// An explicit `BRUTEX_CEILING` skipped that division entirely and was returned
+/// verbatim. So the two paths did not mean the same thing: unset, the knob named
+/// a machine budget to be shared; set, it named a per-sweep budget to be
+/// multiplied by however many rungs were running.
+///
+/// **MEASURED, 2026-08-29.** A `range-all` over `zerodha NIFTY 2019-12..2026-08`
+/// was launched with `BRUTEX_CEILING=134217720` -- the single-rung derived
+/// default, about 19.6 GB by the engine's own table. Eight rungs took it each.
+/// The process was **killed by the kernel after six minutes and 0 bytes of output**
+/// (`exit=137`), which is the kernel's answer and not the loud refusal
+/// `CLAUDE.md` §4 requires. The operator asked for 19.6 GB and was given 157.
+///
+/// The knob now means what the derived value means, on both paths. An operator
+/// who wants one rung to have the whole machine runs one rung, which is the
+/// request that actually says so.
 fn ceiling_from_env() -> Result<usize, String> {
     match crate::knobs::var("BRUTEX_CEILING") {
         None => Ok(derived_ceiling()),
@@ -9023,10 +9038,26 @@ fn ceiling_from_env() -> Result<usize, String> {
                      measurement of it -- see docs/06-limits.md §93.",
                     derived_ceiling()
                 )),
-                Ok(n) => Ok(n),
+                Ok(n) => Ok(shared_out(n)),
             }
         }
     }
+}
+
+/// A whole-machine candidate budget, divided among the sweeps actually running.
+///
+/// Shared by [`derived_ceiling`] and [`ceiling_from_env`] so the two cannot
+/// drift again -- they had drifted, and the drift is what let one `range-all`
+/// claim 157 GB of 48. The floor is the same one `derived_ceiling` applies and
+/// exists for the same reason: a pathological share count must not produce a
+/// ceiling that halts before the first level, which would report extinction
+/// where the truth is that nothing was allowed to run.
+fn shared_out(whole_machine: usize) -> usize {
+    let sharing = crate::SWEEPS_SHARING_THIS_MACHINE.load(std::sync::atomic::Ordering::Relaxed);
+    whole_machine
+        .checked_div(sharing.max(1))
+        .unwrap_or(whole_machine)
+        .max(engine::DEFAULT_CEILING / REFERENCE_CORES)
 }
 
 /// The ladder for this run: the operator's threshold and the machine's ceiling.
@@ -11242,6 +11273,70 @@ mod tests {
             per_core.saturating_mul(cores).max(per_core),
             "the ceiling must be the per-core allowance scaled by THIS machine's \
              {cores} core(s)"
+        );
+    }
+
+    /// AN EXPLICIT CEILING IS SHARED THE SAME WAY A DERIVED ONE IS.
+    ///
+    /// # What this would have caught
+    ///
+    /// `derived_ceiling` divides a whole-machine budget by
+    /// [`SWEEPS_SHARING_THIS_MACHINE`] because `range_over` runs eight rungs at
+    /// once -- its own comment records that handing each of them the whole
+    /// machine *"claimed 157 GB of 48"*. `ceiling_from_env` returned an explicit
+    /// `BRUTEX_CEILING` verbatim and skipped that division entirely, so the knob
+    /// meant a machine budget when unset and a per-rung budget when set.
+    ///
+    /// MEASURED, 2026-08-29: a `range-all` launched with
+    /// `BRUTEX_CEILING=134217720` -- the single-rung derived default, about
+    /// 19.6 GB -- gave each of eight rungs that figure. The process was killed by
+    /// the kernel after six minutes with 0 bytes of output (`exit=137`). The
+    /// operator asked for 19.6 GB and was given 157, and the answer came from the
+    /// kernel rather than as the loud refusal `CLAUDE.md` §4 requires.
+    ///
+    /// # It asserts the RATIO, not a number
+    ///
+    /// A share count is process-global and other tests in this binary raise it,
+    /// so pinning either side to a literal would pass alone and fail in the
+    /// suite -- which is exactly the trap the test above documents having fallen
+    /// into. What holds on every machine and at every share count is that the two
+    /// paths divide identically.
+    #[test]
+    fn an_explicit_ceiling_is_divided_among_sweeps_like_a_derived_one() {
+        let _guard = crate::knobs::serially();
+        crate::knobs::clear_all();
+
+        let sharing = crate::SWEEPS_SHARING_THIS_MACHINE.load(std::sync::atomic::Ordering::Relaxed);
+        let floor = engine::DEFAULT_CEILING / crate::REFERENCE_CORES;
+
+        // A value far above the floor, so the division is what decides the
+        // answer rather than the floor clamping both sides to the same number.
+        let asked = floor.saturating_mul(sharing.max(1)).saturating_mul(64);
+        crate::knobs::set("BRUTEX_CEILING", &asked.to_string());
+        let got = crate::ceiling_from_env().expect("a positive integer parses");
+        crate::knobs::clear_all();
+
+        assert_eq!(
+            got,
+            asked / sharing.max(1),
+            "an explicit ceiling of {asked} at a share of {sharing} must become \
+             each sweep's slice of it, exactly as a derived ceiling does. \
+             Returning it verbatim is how eight rungs each took a whole machine."
+        );
+        assert!(
+            got <= asked,
+            "sharing may only ever LOWER a sweep's ceiling, never raise it"
+        );
+
+        // AND THE FLOOR STILL APPLIES, so a pathological share count cannot
+        // produce a ceiling that halts before the first level -- which would
+        // report extinction where the truth is that nothing was allowed to run.
+        crate::knobs::set("BRUTEX_CEILING", "1");
+        let tiny = crate::ceiling_from_env().expect("one parses");
+        crate::knobs::clear_all();
+        assert!(
+            tiny >= floor,
+            "an explicit 1 must still floor at {floor}, not halt before k=1"
         );
     }
 

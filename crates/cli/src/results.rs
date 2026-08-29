@@ -1933,12 +1933,11 @@ mod tests {
         // the message that names the cause -- with a generic flush failure that
         // names a symptom. `a_ledger_that_does_not_keep_what_it_is_given_is_refused`
         // is what fails when this order is reversed; this assertion says why.
-        let header_fn = shipping
+        let (_, after_refusal) = shipping
             .split_once("accepted a header and did not keep it")
-            .map(|(before, after)| (before, after))
             .expect("the header refusal must still exist");
         assert!(
-            header_fn.1.contains(".sync_all()"),
+            after_refusal.contains(".sync_all()"),
             "the fresh-header `sync_all` must come AFTER the read-back refusal, \
              so a device that cannot fsync still reaches the refusal that names \
              what is actually wrong with the operator's store"
