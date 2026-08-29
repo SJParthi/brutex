@@ -24,7 +24,7 @@
 //!
 //! # What is derived here and what is not
 //!
-//! `frontier::Row` v2 stores six RAW money fields and no derived ones. The
+//! `frontier::Row` v3 stores eight RAW money fields and no derived ones. The
 //! derived quantities — win rate, reward-to-risk, return over drawdown, average
 //! win, average loss — are NOT computed here either. `cli::frontier::Row::derived`
 //! rebuilds a `grid::Cell` from the six stored fields and asks IT, so there is
@@ -33,6 +33,28 @@
 //! `api -> cli` — which is what forced the right shape rather than merely
 //! suggesting it. That is the same argument `/vocab.json` makes for
 //! serving the condition table once rather than copying it into the page.
+//!
+//! # The verdict, and the one rule it refuses to answer
+//!
+//! `cli::record_frontier` writes `by_evidence.iter().take(top)` and consults NO
+//! rule at all, so every row arrived here looking like a candidate when the list
+//! is really *"the top `top` by ranking lens"*. Each row therefore carries
+//! `meets`, from `cli::frontier::Row::verdict`, and the envelope echoes the
+//! `rules` those verdicts were taken against.
+//!
+//! `meets` has no `stop` field. `Rules::max_mae_ppm` is checked against
+//! `grid::Cell::worst_mae`, which a row does not store — calling `Rules::admits`
+//! here would have reported the stop rule PASSED on every row on the strength of
+//! a defaulted zero. `stop_unchecked` is `true` and the threshold is echoed, so
+//! the page can say *"not checked"* where a tick would have been a lie.
+//!
+//! # `mask_words` are decimal STRINGS
+//!
+//! They were bare JSON numbers, and a `u64` above 2^53 does not survive
+//! `JSON.parse` — the browser would decode a DIFFERENT condition set, silently.
+//! `/backtest.json` already quotes them for exactly this reason and its own
+//! comment says so; this route now matches it, and the page reads both with
+//! `BigInt`.
 //!
 //! # Cost
 //!
@@ -94,11 +116,40 @@ fn respond(
         Err(why) => return refuse(json, &why),
     };
 
-    let mut out = String::with_capacity(rows.len().saturating_mul(320).saturating_add(96));
+    // THE RULES ARE READ ONCE, FROM THE CRATE THAT DEFINES THEM. `Rules::operator`
+    // resolves its six numbers from the environment at call time, so a run
+    // launched with `BRUTEX_MIN_WIN_RATE_BP=9000` is judged against 9,000 and not
+    // against a threshold copied into this file or into JavaScript. That copy is
+    // the failure `CLAUDE.md` §5 refuses -- two definitions of one fact, correct
+    // the day they are written.
+    let rules = cli::Rules::operator();
+
+    let mut out = String::with_capacity(rows.len().saturating_mul(420).saturating_add(320));
     out.push_str(r#"{"rows":["#);
+    let admitted = write_rows(&mut out, &rows, &rules);
+    envelope(&mut out, rows.len(), admitted, &rules, partial);
+    (axum::http::StatusCode::OK, json, out)
+}
+
+/// Every row of one run, and how many of them met the rules.
+///
+/// Split out of [`respond`] because that function crossed the hundred-line bar
+/// clippy holds it to, and the loop is the half with one job.
+fn write_rows(out: &mut String, rows: &[cli::frontier::Row], rules: &cli::Rules) -> usize {
+    let mut admitted = 0_usize;
     for (at, row) in rows.iter().enumerate() {
         if at > 0 {
             out.push(',');
+        }
+        // WHICH OF THE OPERATOR'S RULES THIS ROW MEETS, asked of `cli` rather
+        // than decided here. `record_frontier` writes the top `top` by ranking
+        // lens and consults NO rule, so without this every row arrived looking
+        // like a candidate. The verdict does not remove rows -- it labels them,
+        // and a run where nothing passes now says so instead of rendering a
+        // table that looks like a working answer.
+        let v = row.verdict(rules);
+        if v.admitted {
+            admitted = admitted.saturating_add(1);
         }
         // ASKED OF THE ENGINE, NOT RECOMPUTED HERE. `Row::derived` rebuilds a
         // `grid::Cell` from the six stored fields and asks IT for the five
@@ -107,9 +158,9 @@ fn respond(
         // the arrow is `api -> cli` -- which is what forced the right shape.
         let d = row.derived();
         let _ = std::fmt::Write::write_fmt(
-            &mut out,
+            &mut *out,
             format_args!(
-                r#"{{"rank":{},"mask_words":[{},{},{},{},{},{}],"hits":{},"n":{},"mean_milli_paisa":{},"t_milli":{},"payoff_bp":{},"edge_wins":{},"priced":{},"trades":{},"wins":{},"losses":{},"pessimistic":{},"worst_trade":{},"max_drawdown":{},"min_win":{},"win_rate_bp":{},"reward_to_risk_bp":{},"return_over_drawdown":{},"avg_win":{},"avg_loss":{},"gross_win":{},"gross_loss":{}}}"#,
+                r#"{{"rank":{},"mask_words":["{}","{}","{}","{}","{}","{}"],"hits":{},"n":{},"mean_milli_paisa":{},"t_milli":{},"payoff_bp":{},"edge_wins":{},"priced":{},"trades":{},"wins":{},"losses":{},"pessimistic":{},"worst_trade":{},"max_drawdown":{},"min_win":{},"win_rate_bp":{},"reward_to_risk_bp":{},"return_over_drawdown":{},"avg_win":{},"avg_loss":{},"gross_win":{},"gross_loss":{},"meets":{{"win_rate":{},"reward_to_risk":{},"return_over_drawdown":{},"trades":{},"assurance":{},"all":{},"stop_unchecked":{}}}}}"#,
                 row.rank,
                 row.mask_words[0],
                 row.mask_words[1],
@@ -138,21 +189,58 @@ fn respond(
                 d.avg_loss,
                 row.gross_win,
                 row.gross_loss,
+                v.win_rate,
+                v.reward_to_risk,
+                v.return_over_drawdown,
+                v.trades,
+                v.assurance,
+                v.admitted,
+                v.stop_unchecked,
             ),
         );
     }
-    // A PARTIAL READ IS REPORTED, NOT ROUNDED OFF. `of_run` returns the rows it
-    // could read AND why it stopped; dropping the second would turn a torn tail
-    // into a shorter answer that looks complete.
+    admitted
+}
+
+/// The envelope: how many rows, how many passed, what they were judged against.
+///
+/// A PARTIAL READ IS REPORTED, NOT ROUNDED OFF. `of_run` returns the rows it
+/// could read AND why it stopped; dropping the second would turn a torn tail
+/// into a shorter answer that looks complete.
+///
+/// THE THRESHOLDS TRAVEL WITH THE ANSWER. A `PASS` means nothing without the
+/// bar it cleared, and an operator who set `BRUTEX_MIN_WIN_RATE_BP` on the
+/// request needs to see the number the rows were actually judged against
+/// rather than the one the form's placeholder claims -- two of those
+/// placeholders were measured wrong, one of them by a factor of a hundred.
+///
+/// `max_mae_ppm` is echoed and is deliberately NOT in any row's verdict:
+/// `Cell::worst_mae` is not a stored field, so the stop rule cannot be
+/// answered from a row. Sending the threshold while sending no verdict for it
+/// is what lets the page say "not checked" instead of drawing a tick.
+fn envelope(
+    out: &mut String,
+    count: usize,
+    admitted: usize,
+    rules: &cli::Rules,
+    partial: Option<String>,
+) {
     let _ = std::fmt::Write::write_fmt(
-        &mut out,
+        &mut *out,
         format_args!(
-            r#"],"count":{},"refusal":{}}}"#,
-            rows.len(),
+            r#"],"count":{},"admitted":{},"rules":{{"min_win_rate_bp":{},"min_rr_bp":{},"min_ret_over_dd_bp":{},"min_trades":{},"min_assurance_bp":{},"max_mae_ppm":{},"top":{}}},"refusal":{}}}"#,
+            count,
+            admitted,
+            rules.min_win_rate_bp,
+            rules.min_rr_bp,
+            rules.min_ret_over_dd_bp,
+            rules.min_trades,
+            rules.min_assurance_bp,
+            rules.max_mae_ppm,
+            rules.top,
             partial.map_or_else(|| "null".to_owned(), |why| crate::render::json_string(&why))
         ),
     );
-    (axum::http::StatusCode::OK, json, out)
 }
 
 /// A ratio the data could not settle, as `null` rather than as `i64::MAX`.
@@ -217,6 +305,90 @@ mod tests {
             "names the shape: {body}"
         );
         assert!(body.contains(r#""rows":null"#), "null, not empty: {body}");
+    }
+
+    /// A ranked row carries its verdict, and the envelope carries the bar.
+    ///
+    /// # What this is guarding
+    ///
+    /// `cli::record_frontier` writes `by_evidence.iter().take(top)` and reads no
+    /// rule at all, so every row reaching the browser looked like a candidate.
+    /// The row seeded here is the one this operator's store actually held at
+    /// rank 1 — 868 trades, 3 won, smallest win 295 paisa against a worst loss
+    /// of 3,035 — and the assertion is that the wire now says FAIL on it.
+    ///
+    /// The envelope's `rules` matters as much as the verdict: a `PASS` with no
+    /// threshold beside it is unreadable, and the form's own placeholder for one
+    /// of these was wrong by a factor of a hundred.
+    #[test]
+    fn a_ranked_row_carries_its_verdict_and_the_rules_it_was_judged_against() {
+        let dir = std::env::temp_dir().join(format!(
+            "brutex-api-frontier-verdict-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let identity = [0x5a_u8; 32];
+        let mut store = cli::frontier::Frontier::open(&dir).expect("a fresh frontier opens");
+        store
+            .append_all(&[cli::frontier::Row {
+                identity,
+                rank: 1,
+                mask_words: [3, 0, 0, 0, 0, 0],
+                hits: 1_194,
+                n: 868,
+                mean_milli_paisa: 345_939,
+                t_milli: 2_706,
+                payoff_bp: 129,
+                wins: 445,
+                trades: 868,
+                cell_wins: 3,
+                pessimistic: -272_749,
+                worst_trade: -3_035,
+                max_drawdown: 329_165,
+                min_win: 295,
+                gross_win: 900,
+                gross_loss: -273_649,
+            }])
+            .expect("one row appends");
+
+        let query = format!("identity={}", "5a".repeat(32));
+        let (status, _, body) = respond(Ok(dir.clone()), &query);
+        assert_eq!(status, axum::http::StatusCode::OK);
+
+        assert!(
+            body.contains(r#""meets":{"#),
+            "the verdict is on the row: {body}"
+        );
+        assert!(
+            body.contains(r#""win_rate":false"#),
+            "3 wins in 868 does not clear the floor: {body}"
+        );
+        assert!(
+            body.contains(r#""reward_to_risk":false"#),
+            "295 over 3,035 is 0.09x: {body}"
+        );
+        assert!(
+            body.contains(r#""all":false"#),
+            "so the row is not admitted: {body}"
+        );
+        assert!(
+            body.contains(r#""stop_unchecked":true"#),
+            "and the stop rule is named as unchecked, never as passed: {body}"
+        );
+        assert!(body.contains(r#""admitted":0"#), "none passed: {body}");
+        assert!(
+            body.contains(r#""rules":{"min_win_rate_bp":"#),
+            "the thresholds travel with the answer: {body}"
+        );
+        // 64-BIT SAFE ON THE WIRE. A bare JSON number above 2^53 does not
+        // survive `JSON.parse`, and a mask decoded from a rounded word names the
+        // WRONG conditions while looking exactly like an answer.
+        assert!(
+            body.contains(r#""mask_words":["3","0""#),
+            "mask words are decimal strings: {body}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// An unswept store answers empty AND says why, so "nothing recorded" and

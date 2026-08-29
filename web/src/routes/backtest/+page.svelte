@@ -238,9 +238,10 @@
   /* Same placement, same reason as `tradeList` above: inside `$state(...)`, and
      `any[]` because these are the ledger's own rows. */
   let combos = $state(
-    /** @type {{ phase: string, rows: any[], why: string }} */ ({
+    /** @type {{ phase: string, rows: any[], rules: any, why: string }} */ ({
       phase: 'idle',
       rows: [],
+      rules: null,
       why: ''
     })
   );
@@ -266,6 +267,7 @@
     worstTrade: 1, // less is better  (the "max stop loss" clause)
     losingPct: 1, // less is better
     losingTrades: 1, // less is better
+    lossRatio: 1, // less is better (gross loss over gross win — the 11th)
     profit: 1, // more is better
     winningTrades: 1, // more is better
     winRate: 1, // more is better
@@ -296,6 +298,7 @@
     ['worstTrade', 'less max stop loss'],
     ['losingPct', 'less losing %'],
     ['losingTrades', 'less losing trades'],
+    ['lossRatio', 'less losing ratio'],
     ['profit', 'more max profit'],
     ['winningTrades', 'more winning trades'],
     ['winRate', 'higher win %'],
@@ -306,6 +309,37 @@
 
   /** How many rows to show per run. The operator asked for ten. */
   let topN = $state(10);
+
+  /**
+   * `topN` as a count that `Array.prototype.slice` can be trusted with.
+   *
+   * # What the bare binding did
+   *
+   * `min="1" max="100"` on a number input bounds the SPINNER ARROWS and nothing
+   * else. The field is not inside a `<form>`, nothing calls `checkValidity`, and
+   * Svelte's own coercion is `value === '' ? null : +value`. Measured:
+   *
+   * | typed | `topN` | `slice(0, n)` did |
+   * |---|---|---|
+   * | cleared | `null` | returned nothing, on every rung at once |
+   * | `0` | `0` | the same |
+   * | `-5` | `-5` | dropped the LAST five and showed the rest |
+   * | `2.5` | `2.5` | truncated to two |
+   * | `1e999` | `Infinity` | every row |
+   *
+   * The first two replaced all eight timeframes with *"No priced combination
+   * was recorded for this rung"* — a sentence about the DATA, printed because of
+   * a keystroke. The third is worse than useless: it is a top-N list that
+   * silently drops the top rows.
+   *
+   * Clamped to `1..=100` — the bounds the input already claimed — with a
+   * non-number reading as the operator's stated ten rather than as zero.
+   */
+  const topShown = $derived.by(() => {
+    const n = Math.floor(Number(topN));
+    if (!Number.isFinite(n)) return 10;
+    return Math.min(100, Math.max(1, n));
+  });
 
   /**
    * The engine knobs this page can set on a sweep, with what each does and what
@@ -387,10 +421,23 @@
       fallback: '7,500',
       note: 'Must sit above the 5,000 bp coin-flip line and below 10,000.'
     },
-    { key: 'min_rr_bp', label: 'minimum reward:risk (bp)', fallback: '12,500 (1.25×)', note: '' },
+    // MEASURED WRONG BY A FACTOR OF A HUNDRED. `Rules::operator` is
+    // `at("BRUTEX_MIN_RR_BP", 125)` and 125 hundredths IS 1.25x -- the label
+    // said "12,500 (1.25x)", so an operator reading it and typing 12,500 to
+    // "keep the default" would have demanded a 125x reward-to-risk and screened
+    // out everything. A placeholder is a claim about the server.
+    { key: 'min_rr_bp', label: 'minimum reward:risk (bp)', fallback: '125 (1.25×)', note: '' },
     { key: 'min_win_rate_bp', label: 'minimum win rate (bp)', fallback: '5,000 (50%)', note: '' },
     { key: 'min_trades', label: 'minimum trades', fallback: '0', note: '' },
-    { key: 'min_ret_over_dd_bp', label: 'minimum return over drawdown (bp)', fallback: '0', note: '' },
+    // `0` CLAIMED THE RULE WAS OFF. It is `at("BRUTEX_MIN_RET_OVER_DD_BP", 500)`
+    // -- a live 5x floor -- so the form told the operator a rule was disabled
+    // while it was filtering every cell they got back.
+    {
+      key: 'min_ret_over_dd_bp',
+      label: 'minimum return over drawdown (bp)',
+      fallback: '500 (5×)',
+      note: ''
+    },
     { key: 'min_weakest_bp', label: 'minimum weakest fold (bp)', fallback: '0', note: '' },
     {
       key: 'max_mae_ppm',
@@ -443,22 +490,26 @@
   /** @param {string|undefined} identity */
   async function fetchCombos(identity) {
     if (!identity) {
-      combos = { phase: 'idle', rows: [], why: '' };
+      combos = { phase: 'idle', rows: [], rules: null, why: '' };
       return;
     }
-    combos = { phase: 'loading', rows: [], why: '' };
+    combos = { phase: 'loading', rows: [], rules: null, why: '' };
     try {
       const response = await ask_(`/frontier.json?identity=${encodeURIComponent(identity)}`);
       const body = await response.json();
       combos = {
         phase: response.ok ? 'ready' : 'failed',
         rows: Array.isArray(body.rows) ? body.rows : [],
+        // THE THRESHOLDS THIS RUN'S ROWS WERE JUDGED AGAINST, carried so a PASS
+        // is never shown without the bar it cleared.
+        rules: body.rules ?? null,
         why: body.refusal ?? (response.ok ? '' : `/frontier.json answered ${response.status}`)
       };
     } catch (why) {
       combos = {
         phase: 'failed',
         rows: [],
+        rules: null,
         why: `The combinations could not be fetched: ${why instanceof Error ? why.message : String(why)}`
       };
     }
@@ -497,8 +548,122 @@
    * @param {any} w the operator's weights
    * @param {number} n how many to keep
    */
-  function rankRows(rows, w, n) {
+  /**
+   * Share of round trips that lost. Less is better.
+   *
+   * A row with no trades is scored as wholly losing rather than as unmeasurable,
+   * because an unpriced row is filtered out before this is ever reached — the
+   * guard is here so the function is total, not because the branch is expected.
+   *
+   * @param {any} r
+   */
+  const losingPct = (r) => (r.trades > 0 ? r.losses / r.trades : 1);
+
+  /**
+   * THE ELEVENTH CRITERION, and it was the missing one.
+   *
+   * The operator's ranking names eleven quantities; this file carried ten. The
+   * absentee is *"less losing ratio"*, which sits in the list directly after
+   * *"less losing percentage"* and *"less losing trades"* — so it is a third,
+   * distinct loss-side measurement and not a restatement of either.
+   *
+   * It is **total lost over total won** — the reciprocal of the profit factor.
+   * `gross_loss` is negative, so the negation makes a positive ratio where less
+   * is better: `0.5` means the winners paid for the losers twice over, `2.0`
+   * means the reverse.
+   *
+   * # Why not `1 / reward_to_risk_bp`
+   *
+   * That was the tempting reading, and it is wrong: `reward_to_risk_bp` is
+   * `min_win / -worst_trade`, two EXTREMES, so its reciprocal is perfectly
+   * anti-correlated with the "winning ratio" slider. Adding it would have
+   * doubled one criterion's weight while appearing to add a new one — a slider
+   * that silently amplifies its neighbour is worse than the missing slider it
+   * replaced.
+   *
+   * `gross_win` and `gross_loss` are the two sums `/frontier.json` began sending
+   * when v3 stored them; before that this criterion was not computable at all.
+   * `null` when nothing was won, because a ratio with no base is undefined —
+   * never `0`, which `norm` would read as "measured, and best".
+   *
+   * @param {any} r
+   */
+  const lossRatio = (r) => (r.gross_win > 0 ? -r.gross_loss / r.gross_win : null);
+
+  /**
+   * Which measurements separate nothing across this set of rows.
+   *
+   * # Why the operator has to be told
+   *
+   * When every row agrees on a measurement, `norm` returns `0.5` for all of
+   * them and the term becomes `w * 0.5` — an ADDITIVE CONSTANT, identical for
+   * every row, which cannot change the sort no matter how far the slider moves.
+   *
+   * MEASURED, 2026-08-29: `avg_win` and `avg_loss` were `0` on all seventeen
+   * rows in this operator's store, because v2 of the frontier did not store the
+   * two sums they derive from. So two of the eleven sliders moved a visible
+   * score number and changed the order of nothing, and the page said so
+   * nowhere. A control that appears to work and does not is the failure
+   * `CLAUDE.md` §4 bans — degrade loudly, or refuse, never both silently.
+   *
+   * Returns the KEYS of the collapsed criteria, so the slider row can mark them
+   * rather than the page quietly rendering ten live controls.
+   *
+   * @param {any[]} rows
+   * @returns {Set<string>}
+   */
+  function inertCriteria(rows) {
     const priced = rows.filter((r) => r.priced);
+    const dead = new Set();
+    if (priced.length < 2) return dead;
+    /** @param {(row: any) => number|null} pick */
+    const flat = (pick) => {
+      let lo = Infinity;
+      let hi = -Infinity;
+      for (const r of priced) {
+        const v = pick(r);
+        if (v === null || v === undefined || !Number.isFinite(v)) continue;
+        if (v < lo) lo = v;
+        if (v > hi) hi = v;
+      }
+      return !Number.isFinite(lo) || lo === hi;
+    };
+    /** @type {[string, (row: any) => number|null][]} */
+    const probes = [
+      ['drawdown', (r) => r.max_drawdown],
+      ['worstTrade', (r) => r.worst_trade],
+      ['losingPct', losingPct],
+      ['losingTrades', (r) => r.losses],
+      ['lossRatio', lossRatio],
+      ['profit', (r) => r.pessimistic],
+      ['winningTrades', (r) => r.wins],
+      ['winRate', (r) => r.win_rate_bp],
+      ['rewardRisk', (r) => r.reward_to_risk_bp],
+      ['avgWin', (r) => r.avg_win],
+      ['avgLoss', (r) => r.avg_loss]
+    ];
+    for (const [key, pick] of probes) {
+      if (flat(pick)) dead.add(key);
+    }
+    return dead;
+  }
+
+  /**
+   * The operator's eleven criteria, weighted, applied to one run's rows.
+   *
+   * Each measurement is normalised to its own range ACROSS THIS SET and
+   * multiplied by its weight, so the score answers *"best of these"* and never
+   * *"good in absolute terms"* — which is why the PASS/FAIL verdict is rendered
+   * beside it rather than folded into it. A score of 9.8 on a set where nothing
+   * meets a single rule is still the best of a bad set.
+   *
+   * @param {any[]} rows the run's recorded combinations
+   * @param {typeof weights} w the operator's current weights
+   * @param {number} n how many to return, already clamped
+   * @returns {any[]}
+   */
+  function rankRows(rows, w, n) {
+    const priced = rows.filter((/** @type {any} */ r) => r.priced);
     if (priced.length === 0) return [];
 
     // One pass per measurement to learn its range, so the normalisation below is
@@ -513,7 +678,12 @@
      * comment, which TypeScript does not read at all: the annotation was
      * present, correct, and invisible, and the ten errors did not move.
      *
-     * @param {(row: any) => number} pick
+     * `number|null` AND NOT `number`. `lossRatio` returns `null` when nothing
+     * was won — a ratio with no base — and the body already skips every
+     * non-finite value, so the narrower signature was a promise the callers
+     * could not keep rather than a guarantee the body relied on.
+     *
+     * @param {(row: any) => number|null} pick
      * @returns {{ lo: number, hi: number }}
      */
     // `null` IS EXCLUDED FROM THE RANGE, NOT COERCED INTO IT.
@@ -548,13 +718,12 @@
       return (v - lo) / (hi - lo);
     };
 
-    /** @param {any} r */
-    const losingPct = (r) => (r.trades > 0 ? r.losses / r.trades : 1);
     const ranges = {
       drawdown: span((r) => r.max_drawdown),
       worstTrade: span((r) => r.worst_trade),
       losingPct: span(losingPct),
       losingTrades: span((r) => r.losses),
+      lossRatio: span(lossRatio),
       profit: span((r) => r.pessimistic),
       winningTrades: span((r) => r.wins),
       winRate: span((r) => r.win_rate_bp),
@@ -573,6 +742,7 @@
         w.worstTrade * norm(r.worst_trade, ranges.worstTrade) +
         w.losingPct * (1 - norm(losingPct(r), ranges.losingPct)) +
         w.losingTrades * (1 - norm(r.losses, ranges.losingTrades)) +
+        w.lossRatio * (1 - norm(lossRatio(r), ranges.lossRatio)) +
         w.profit * norm(r.pessimistic, ranges.profit) +
         w.winningTrades * norm(r.wins, ranges.winningTrades) +
         w.winRate * norm(r.win_rate_bp, ranges.winRate) +
@@ -588,7 +758,7 @@
     return scored.slice(0, n);
   }
 
-  const ranked = $derived.by(() => rankRows(combos.rows, weights, topN));
+  const ranked = $derived.by(() => rankRows(combos.rows, weights, topShown));
 
   /**
    * Every timeframe's frontier at once, so "the top ten per timeframe" is one
@@ -607,7 +777,11 @@
    * `any` deliberately: nothing in this tree declares that shape, and inventing
    * a type for it here would be a claim about a payload this file does not own.
    *
-   * @typedef {{ rung: string, run: any, rows: any[], why: string }} BoardGroup
+   * `rules` is the threshold set `/frontier.json` judged this rung's rows
+   * against, echoed so a PASS is shown beside the bar it cleared. `null` when
+   * the route refused before it could read them.
+   *
+   * @typedef {{ rung: string, run: any, rows: any[], rules: any, admitted: number, why: string }} BoardGroup
    */
   /* INSIDE `$state(...)`, for the same reason `live` is — see its comment. */
   let board = $state(
@@ -632,35 +806,78 @@
       board = { phase: 'ready', groups: [], why: 'No completed run is in view.' };
       return;
     }
+    // ONE SEQUENCE NUMBER, THE SHAPE THE OTHER THREE LOADERS ON THIS PAGE
+    // ALREADY USE. `loadSeries`, `loadRungs` and the benchmark load each guard
+    // their write with a counter; this one did not, and it is the loader most
+    // likely to race — `runs` is a filtered derived, so switching feed rebuilds
+    // the ARRAY IDENTITY and refires the effect even when the contents are
+    // unchanged. Two batches in flight, last writer wins, and the loser was
+    // whichever the network happened to favour. The phase still read `ready`,
+    // so a board showing the previous feed's numbers was indistinguishable from
+    // a correct one.
+    boardSeq += 1;
+    const mine = boardSeq;
     board = { phase: 'loading', groups: [], why: '' };
-    try {
-      // FETCHED IN PARALLEL because the eight are independent: eight sequential
-      // round trips would make the board eight times slower for no reason.
-      const groups = await Promise.all(
-        [...newest.values()].map(async (run) => {
-          const response = await ask_(
-            `/frontier.json?identity=${encodeURIComponent(run.identity)}`
-          );
-          const body = await response.json();
+
+    // FETCHED IN PARALLEL because the eight are independent: eight sequential
+    // round trips would make the board eight times slower for no reason.
+    //
+    // `allSettled` AND NOT `all`. `Promise.all` rejects on the FIRST failure and
+    // discards every sibling result, so one rung answering 502 replaced all
+    // eight tables with a single sentence naming one URL. A rung that fails now
+    // fails alone and says so in its own section.
+    const settled = await Promise.allSettled(
+      [...newest.values()].map(async (run) => {
+        const response = await ask_(`/frontier.json?identity=${encodeURIComponent(run.identity)}`);
+        // `ok` IS CHECKED BEFORE THE BODY IS PARSED. Reading `.json()` first
+        // turned a clean 502 with an HTML body into `Unexpected token '<'`,
+        // which names the parser instead of the failure.
+        if (!response.ok && response.status !== 200) {
           return {
             rung: run.timeframe,
             run,
-            rows: Array.isArray(body.rows) ? body.rows : [],
-            why: body.refusal ?? (response.ok ? '' : `/frontier.json answered ${response.status}`)
+            rows: [],
+            rules: null,
+            admitted: 0,
+            why: `/frontier.json answered ${response.status} for ${run.timeframe}`
           };
-        })
-      );
-      // Ordered by the rung's own minutes, so the board reads 1min → 60min
-      // rather than in whatever order the ledger happened to hold.
-      groups.sort((a, b) => minutesOf(a.rung) - minutesOf(b.rung));
-      board = { phase: 'ready', groups, why: '' };
-    } catch (why) {
-      board = {
-        phase: 'failed',
-        groups: [],
-        why: `The board could not be fetched: ${why instanceof Error ? why.message : String(why)}`
-      };
-    }
+        }
+        const body = await response.json();
+        return {
+          rung: run.timeframe,
+          run,
+          rows: Array.isArray(body.rows) ? body.rows : [],
+          rules: body.rules ?? null,
+          admitted: Number(body.admitted ?? 0),
+          why: body.refusal ?? ''
+        };
+      })
+    );
+    if (mine !== boardSeq) return; // a newer board started; this answer is stale
+
+    const groups = settled.map((s, i) =>
+      s.status === 'fulfilled'
+        ? s.value
+        : {
+            rung: [...newest.values()][i]?.timeframe ?? '?',
+            run: [...newest.values()][i],
+            rows: [],
+            rules: null,
+            admitted: 0,
+            why: `This rung could not be fetched: ${
+              s.reason instanceof Error ? s.reason.message : String(s.reason)
+            }`
+          }
+    );
+    // Ordered by the rung's own minutes, so the board reads 1min → 60min
+    // rather than in whatever order the ledger happened to hold.
+    groups.sort((a, b) => minutesOf(a.rung) - minutesOf(b.rung));
+    const allFailed = groups.every((g) => g.rows.length === 0 && g.why);
+    board = {
+      phase: 'ready',
+      groups,
+      why: allFailed ? 'No rung answered with rows. Each section names its own reason.' : ''
+    };
   }
 
   /** @param {string} rung e.g. "15min" */
@@ -669,13 +886,49 @@
     return digits ? Number(digits[0]) : Number.MAX_SAFE_INTEGER;
   }
 
+  /**
+   * One monotonic counter for the board's fetches, so a slow batch cannot
+   * overwrite a fast one. Module-scope rather than `$state` because nothing
+   * renders it — writing it must not invalidate anything.
+   */
+  let boardSeq = 0;
+
   const board10 = $derived.by(() =>
-    board.groups.map((g) => ({
-      ...g,
-      priced: g.rows.filter((r) => r.priced).length,
-      top: rankRows(g.rows, weights, topN)
-    }))
+    board.groups.map((g) => {
+      const top = rankRows(g.rows, weights, topShown);
+      return {
+        ...g,
+        priced: g.rows.filter((r) => r.priced).length,
+        top,
+        // COUNTED OVER THE ROWS ON SCREEN, not over the whole response. The
+        // envelope's `admitted` counts every recorded row; the sentence beneath
+        // the table is about the ones the operator can see, and quoting the
+        // larger number under a shorter table would be the wrong answer to
+        // "how many of these pass".
+        admittedShown: top.filter((r) => r.meets?.all).length,
+        inert: inertCriteria(g.rows)
+      };
+    })
   );
+
+  /**
+   * The criteria that separate nothing anywhere on the board.
+   *
+   * A slider is called dead only when EVERY rung with rows agrees on that
+   * measurement. Inert on one rung and live on another is a real difference
+   * between timeframes, not a broken control, and greying it would hide the
+   * finding rather than report it.
+   */
+  const inertAll = $derived.by(() => {
+    const withRows = board10.filter((g) => g.rows.length > 0);
+    if (withRows.length === 0) return new Set();
+    /** @type {Set<string>} */
+    const dead = new Set(withRows[0].inert);
+    for (const g of withRows.slice(1)) {
+      for (const key of [...dead]) if (!g.inert.has(key)) dead.delete(key);
+    }
+    return dead;
+  });
 
   // FETCHED WHEN THE LEDGER CHANGES, NOT WHEN A WEIGHT MOVES. The effect reads
   // `runs` and nothing else, so dragging a weight re-ranks in the browser
@@ -3596,6 +3849,70 @@
      and never will until the sweep writes one.
      ============================================================ -->
 
+<!-- ══ THE COMBINATION'S NAMES, ON EVERY RANKED ROW ══
+     This is the thing the operator asked for more times than anything else on
+     this page — "no name has been given as i asked you what's the combination
+     topped" — and the thing neither ranked table showed. `/frontier.json` has
+     always sent `mask_words` on every row; nothing read them. The single
+     winning mask was decoded, in the Properties tab, two clicks from the
+     default view, which is why the answer existed and was never seen.
+
+     Retired bits are shown rather than filtered: the mask CARRIES them, and a
+     combination that reads as three conditions when it was recorded on four is
+     a different claim about what won. -->
+{#snippet conditionNames(/** @type {any} */ words)}
+  {@const bits = positionsIn(words)}
+  {#if vocab.phase === 'failed'}
+    <span class="cnames dim">Shown as raw positions — {vocab.why}: {bits.join(' · ')}</span>
+  {:else if bits.length === 0}
+    <span class="cnames dim">No condition bits are set on this row.</span>
+  {:else}
+    <span class="cnames">
+      {#each bits as position, i (position)}{#if i > 0}<span class="cdot"> · </span>{/if}{@const bit =
+          vocab.bits.get(position)}{#if !bit}<span class="cunk"
+            >position {position} — not named by this vocabulary</span
+          >{:else if !bit.live}<span class="cret">{bit.name} <i>retired</i></span>{:else}<span
+            class="cname">{bit.name}</span
+          >{/if}{/each}
+    </span>
+  {/if}
+{/snippet}
+
+<!-- ══ DOES THIS ROW MEET THE OPERATOR'S RULES ══
+     `record_frontier` writes the top `top` by ranking lens and consults NO rule,
+     so every row arrived looking like a candidate. The verdict is computed in
+     `cli` and served on the row — it is not recomputed here, because a
+     threshold copied into JavaScript is the second definition CLAUDE.md §5
+     refuses.
+
+     `stop` is shown as UNCHECKED rather than as a pass. `Rules::max_mae_ppm` is
+     judged on `Cell::worst_mae`, which a row does not store; drawing a tick for
+     it would be a claim about a number nobody wrote down. -->
+{#snippet verdictPill(/** @type {any} */ meets)}
+  {#if !meets}
+    <span class="vp vp-none" title="This server does not send a verdict. Rebuild and restart it."
+      >—</span
+    >
+  {:else if !meets.priced && meets.priced !== undefined}
+    <span class="vp vp-unpriced" title="Never met an exit grid — screen_cap cut it before pricing."
+      >unpriced</span
+    >
+  {:else if meets.all}
+    <span class="vp vp-pass" title="Every checkable rule met. The stop rule is not checked.">PASS</span>
+  {:else}
+    {@const failed = [
+      !meets.win_rate && 'win rate',
+      !meets.reward_to_risk && 'reward:risk',
+      !meets.return_over_drawdown && 'return/drawdown',
+      !meets.trades && 'trade count',
+      !meets.assurance && 'assurance'
+    ].filter(Boolean)}
+    <span class="vp vp-fail" title="Fails: {failed.join(', ')}. The stop rule is not checked."
+      >FAIL <i>{failed.length}</i></span
+    >
+  {/if}
+{/snippet}
+
 <!-- THE DATA PARAMETERS BIND TO THE TYPE OF WHAT IS PASSED, with `typeof`,
      rather than to a shape restated here. A snippet is called from one place
      with one series; a second spelling of that series' shape is a second
@@ -4882,7 +5199,7 @@
            ============================================================ -->
       <section class="block rise">
         <div class="bh-row">
-          <h2 class="bh">Top {topN} of every timeframe</h2>
+          <h2 class="bh">Top {topShown} of every timeframe</h2>
           <span class="count">
             {#if board.phase === 'loading'}reading…{:else}{exact(board10.length)} timeframes{/if}
           </span>
@@ -4893,15 +5210,23 @@
             show top
             <input class="wnum" type="number" min="1" max="100" bind:value={topN} />
           </label>
-          <!-- THE TEN PAIRS MOVED INTO THE SCRIPT as `WEIGHT_FIELDS`. Inline,
-               the array's element type widened to `string[]`, so `key` was a
-               `string` indexing an object with ten literal keys and both
-               `weights[key]` bindings fell back to `any` — a slider bound to a
-               weight the compiler could not name. The typed const is the same
-               ten pairs with their keys tied to `weights`' own. -->
+          <!-- ELEVEN PAIRS, and the eleventh is the one that was missing. The
+               operator's ranking names eleven quantities; this row carried ten,
+               and the absentee was "less losing ratio".
+
+               A SLIDER THAT CANNOT MOVE THE ORDER SAYS SO. When every row on
+               every rung agrees on a measurement, its normalised term is the
+               same constant for all of them and the sort cannot see it — the
+               control still moves a visible score and changes nothing. Measured
+               on this operator's store: `avg_win` and `avg_loss` were zero on
+               all seventeen rows, so two of these were dead and the page said
+               it nowhere. -->
           {#each WEIGHT_FIELDS as [key, label] (key)}
-            <label class="wlab">
-              {label}
+            <label class="wlab" class:winert={inertAll.has(key)}>
+              {label}{#if inertAll.has(key)}<span
+                  class="wdead"
+                  title="Every row on every rung reports the same value here, so this weight cannot change the order.">inert</span
+                >{/if}
               <input
                 class="wrange"
                 type="range"
@@ -4914,6 +5239,18 @@
             </label>
           {/each}
         </div>
+        <!-- ALL ZERO IS NOT A RANKING. Every weight at zero makes every score
+             zero, the sort falls through to the tie-break, and the table shows
+             the ENGINE's own payoff order under a heading that says it is the
+             operator's. Saying so is the difference between a control and a
+             trap. -->
+        {#if WEIGHT_FIELDS.every(([key]) => Number(weights[key]) === 0)}
+          <p class="inline-note">
+            <b>Every weight is zero, so this is not your ranking.</b> With no criterion carrying any
+            weight the rows fall back to the sweep's own order — ranked on unstopped forward payoff,
+            which is the ordering these sliders exist to replace.
+          </p>
+        {/if}
 
         {#if board.phase === 'failed' || board.why}
           <p class="inline-note">{board.why}</p>
@@ -4937,44 +5274,63 @@
                 <table class="tt-tbl rungprog">
                   <thead>
                     <tr>
-                      <th>#</th><th class="n">score</th><th class="n">trades</th>
+                      <th>#</th><th>rules</th><th class="n">score</th><th class="n">trades</th>
                       <th class="n">win %</th><th class="n">win / loss</th>
-                      <th class="n">worst fills</th><th class="n">best fills</th>
+                      <th class="n">worst fills</th>
                       <th class="n">max drawdown</th><th class="n">worst trade</th>
+                      <th class="n">smallest win</th>
                       <th class="n">avg win</th><th class="n">avg loss</th>
                       <th class="n">reward:risk</th>
                     </tr>
                   </thead>
                   <tbody>
+                    <!-- TWO ROWS PER COMBINATION. The second carries the condition
+                         NAMES, which is the one thing the operator asked for more
+                         often than anything else on this page and the one thing
+                         neither ranked table showed: `/frontier.json` sends
+                         `mask_words` on every row and nothing here read them. -->
                     {#each g.top as c, i (c.rank)}
-                      <tr>
+                      <tr class="cmbrow">
                         <td><b>{i + 1}</b></td>
+                        <td>{@render verdictPill(c.meets)}</td>
                         <td class="n">{c.score.toFixed(2)}</td>
                         <td class="n">{exact(c.trades)}</td>
                         <td class="n">{(c.win_rate_bp / 100).toFixed(1)}%</td>
                         <td class="n"><span class="up">{exact(c.wins)}</span> / <span class="down">{exact(c.losses)}</span></td>
                         <td class="n {c.pessimistic < 0 ? 'down' : 'up'}">{money(c.pessimistic)}</td>
-                        <td class="n {c.optimistic < 0 ? 'down' : 'up'}">{money(c.optimistic)}</td>
                         <td class="n down">{money(c.max_drawdown)}</td>
                         <td class="n down">{money(c.worst_trade)}</td>
+                        <td class="n up">{money(c.min_win)}</td>
                         <td class="n up">{money(c.avg_win)}</td>
                         <td class="n down">{money(c.avg_loss)}</td>
                         <td class="n">{c.reward_to_risk_bp === null ? "—" : (c.reward_to_risk_bp / 100).toFixed(2) + "×"}</td>
+                      </tr>
+                      <tr class="namerow">
+                        <td colspan="13">{@render conditionNames(c.mask_words)}</td>
                       </tr>
                     {/each}
                   </tbody>
                 </table>
               </div>
-              <!-- BOTH READINGS, SIDE BY SIDE, ALWAYS. `worst fills` enters at the
-                   worst price the execution bar printed and resolves every
-                   ambiguous bar as the STOP; `best fills` enters at the open and
-                   resolves it as the TARGET. The truth is between them, and a
-                   table showing only one of the two would be picking a side the
-                   data cannot settle. -->
+              <!-- `best fills` IS GONE, AND ITS REMOVAL IS THE HONEST FIX.
+                   The column rendered `c.optimistic`, and `/frontier.json` has
+                   never sent that field — `money(undefined)` is an em dash, and
+                   `undefined < 0` is false, so every cell on every rung drew an
+                   empty value wearing the profit colour. The note that used to
+                   sit here explained at length why both fill models must be
+                   shown side by side, above a column that showed nothing.
+                   `smallest win` takes its place: it IS sent, and it is the
+                   numerator of the reward-to-risk rule beside it. -->
               <p class="tt-note2 dim">
                 {exact(g.priced)} of {exact(g.rows.length)} recorded combinations were priced
                 against the exit grid; the rest store zeros and are excluded, because a zero
                 drawdown outranks every real one.
+                {#if g.rules}
+                  <b>{exact(g.admittedShown)} of {exact(g.top.length)} shown meet your rules</b>
+                  — win rate ≥ {(g.rules.min_win_rate_bp / 100).toFixed(0)}%, reward:risk ≥
+                  {(g.rules.min_rr_bp / 100).toFixed(2)}×, return over drawdown ≥
+                  {(g.rules.min_ret_over_dd_bp / 100).toFixed(2)}×.
+                {/if}
               </p>
             {:else}
               <p class="tt-note2">
@@ -5981,14 +6337,14 @@
                    is one more number nobody can see. -->
               <div class="tt-sec">
                 <div class="tt-hrow">
-                  <h4 class="tt-h">Top {topN} combinations — ranked on your criteria</h4>
+                  <h4 class="tt-h">Top {topShown} combinations — ranked on your criteria</h4>
                 </div>
                 {#if combos.phase === 'ready' && ranked.length > 0}
                   <div class="tt-tblwrap">
                     <table class="tt-tbl rungprog">
                       <thead>
                         <tr>
-                          <th>#</th><th class="n">score</th><th class="n">trades</th>
+                          <th>#</th><th>rules</th><th class="n">score</th><th class="n">trades</th>
                           <th class="n">win %</th><th class="n">losses</th>
                           <th class="n">worst fills</th><th class="n">max drawdown</th>
                           <th class="n">worst trade</th><th class="n">smallest win</th>
@@ -5998,8 +6354,9 @@
                       </thead>
                       <tbody>
                         {#each ranked as c, i (c.rank)}
-                          <tr>
+                          <tr class="cmbrow">
                             <td><b>{i + 1}</b><span class="dim"> (rank {c.rank})</span></td>
+                            <td>{@render verdictPill(c.meets)}</td>
                             <td class="n">{c.score.toFixed(2)}</td>
                             <td class="n">{exact(c.trades)}</td>
                             <td class="n">{(c.win_rate_bp / 100).toFixed(1)}%</td>
@@ -6012,6 +6369,9 @@
                             <td class="n down">{money(c.avg_loss)}</td>
                             <td class="n">{c.reward_to_risk_bp === null ? "—" : (c.reward_to_risk_bp / 100).toFixed(2) + "×"}</td>
                           </tr>
+                          <tr class="namerow">
+                            <td colspan="13">{@render conditionNames(c.mask_words)}</td>
+                          </tr>
                         {/each}
                       </tbody>
                     </table>
@@ -6020,6 +6380,17 @@
                        table above is a finding or an artefact. -->
                   <p class="tt-note2">
                     {ranked.length} of {combos.rows.length} shown.
+                    {#if combos.rules}
+                      <b
+                        >{ranked.filter((r) => r.meets?.all).length} of {ranked.length} meet your rules</b
+                      >
+                      — win rate ≥ {(combos.rules.min_win_rate_bp / 100).toFixed(0)}%, reward:risk ≥
+                      {(combos.rules.min_rr_bp / 100).toFixed(2)}×, return over drawdown ≥
+                      {(combos.rules.min_ret_over_dd_bp / 100).toFixed(2)}×, at least
+                      {exact(combos.rules.min_trades)} trades.
+                      <b>The stop rule is not checked here</b> — it is judged on the worst adverse
+                      excursion across every trade, and a ranked row does not store that.
+                    {/if}
                     {#if combos.rows.filter((r) => !r.priced).length > 0}
                       <b>{combos.rows.filter((r) => !r.priced).length} excluded as never priced</b> —
                       the screen prices only the strongest few hundred of the hundreds of thousands
@@ -10631,6 +11002,92 @@
     min-width: 1.6rem;
     font-variant-numeric: tabular-nums;
     color: var(--n11);
+  }
+
+  /* ══ A CONTROL THAT CANNOT MOVE THE ORDER LOOKS DIFFERENT ══
+     Dimmed rather than disabled: the weight is still settable, and the reason
+     it does nothing is a property of TODAY'S DATA, not of the control. Disabling
+     it would claim the page had removed a criterion. */
+  .wlab.winert {
+    opacity: 0.55;
+  }
+  .wdead {
+    font-size: 0.6rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 0.05rem 0.25rem;
+    border-radius: 3px;
+    background: var(--n4);
+    color: var(--n8);
+    cursor: help;
+  }
+
+  /* ══ THE VERDICT PILL ══ */
+  .vp {
+    display: inline-block;
+    font-size: 0.62rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    padding: 0.1rem 0.32rem;
+    border-radius: 3px;
+    white-space: nowrap;
+    cursor: help;
+  }
+  .vp i {
+    font-style: normal;
+    opacity: 0.75;
+  }
+  .vp-pass {
+    background: color-mix(in srgb, var(--up) 18%, transparent);
+    color: var(--up);
+  }
+  .vp-fail {
+    background: color-mix(in srgb, var(--down) 16%, transparent);
+    color: var(--down);
+  }
+  .vp-unpriced,
+  .vp-none {
+    background: var(--n4);
+    color: var(--n8);
+  }
+
+  /* ══ THE CONDITION NAMES ROW ══
+     A second row per combination rather than a column, because a mask can carry
+     a dozen conditions and a twelfth column would push every number off screen.
+     The row is unpadded at the top so it reads as a continuation of the row
+     above it rather than as a separate record. */
+  tr.namerow > td {
+    padding: 0 0.55rem 0.45rem;
+    border-top: 0;
+  }
+  tr.cmbrow > td {
+    padding-bottom: 0.2rem;
+  }
+  .cnames {
+    display: block;
+    font-size: 0.68rem;
+    line-height: 1.5;
+    color: var(--n9);
+    white-space: normal;
+  }
+  .cname {
+    color: var(--n10);
+  }
+  .cdot {
+    color: var(--n7);
+  }
+  .cret {
+    color: var(--n8);
+  }
+  .cret i {
+    font-style: normal;
+    font-size: 0.58rem;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    opacity: 0.8;
+  }
+  .cunk {
+    color: var(--warn);
   }
 
   /* ---- the engine's own knobs -------------------------------------------

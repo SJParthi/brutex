@@ -1067,6 +1067,94 @@ mod tests {
         }
     }
 
+    /// The row this operator's own store actually holds, top-ranked.
+    ///
+    /// MEASURED from `/frontier.json` on 2026-08-29: rank 1 of the newest run
+    /// took 868 trades, won 3 of them, and its smallest win was 295 paisa
+    /// against a worst loss of 3,035. It sat at the TOP of a table headed
+    /// "ranked on your criteria".
+    fn measured_rank_one() -> Row {
+        Row {
+            trades: 868,
+            cell_wins: 3,
+            pessimistic: -272_749,
+            worst_trade: -3_035,
+            max_drawdown: 329_165,
+            min_win: 295,
+            gross_win: 900,
+            gross_loss: -273_649,
+            ..row(1, 1)
+        }
+    }
+
+    /// The row the operator has been shown at rank 1 fails four of five rules.
+    ///
+    /// This is the test that would have caught it. `record_frontier` writes the
+    /// top `top` by ranking lens and consults no rule at all, so nothing between
+    /// the sweep and the browser ever asked whether the best row was any good.
+    #[test]
+    fn the_top_ranked_row_fails_the_operators_rules() {
+        let v = measured_rank_one().verdict(&crate::Rules::operator());
+        assert!(v.priced, "868 trades is priced");
+        assert!(!v.win_rate, "3 wins in 868 is 0.34%, against a 50% floor");
+        assert!(
+            !v.reward_to_risk,
+            "295 over 3,035 is 0.09x, against a 1.25x floor"
+        );
+        assert!(
+            !v.return_over_drawdown,
+            "a negative total cannot clear a 5x floor"
+        );
+        assert!(!v.admitted, "and so it is not admitted");
+        assert!(
+            v.stop_unchecked,
+            "the stop rule is NOT claimed as passed -- the row has no worst_mae"
+        );
+    }
+
+    /// A row that meets every checkable rule says so, and still reports the gap.
+    ///
+    /// Without this the verdict could be a function that returns `false`, and
+    /// the table would read FAIL forever while looking exactly as correct.
+    #[test]
+    fn a_row_that_meets_every_rule_is_admitted_and_still_names_the_unchecked_stop() {
+        let good = Row {
+            trades: 100,
+            cell_wins: 95,
+            pessimistic: 500_000,
+            worst_trade: -100,
+            max_drawdown: 1_000,
+            min_win: 400,
+            gross_win: 505_000,
+            gross_loss: -5_000,
+            ..row(2, 1)
+        };
+        let v = good.verdict(&crate::Rules::operator());
+        assert!(v.win_rate, "95% clears 50%");
+        assert!(v.reward_to_risk, "400 over 100 is 4.00x, clears 1.25x");
+        assert!(v.return_over_drawdown, "500,000 over 1,000 clears 5x");
+        assert!(v.admitted, "every checkable rule is met");
+        assert!(
+            v.stop_unchecked,
+            "and the stop is STILL unchecked -- passing the others does not \
+             turn an unmeasured rule into a passed one"
+        );
+    }
+
+    /// An unpriced row is not a perfect row, and the two must never render alike.
+    ///
+    /// `screen_cap` means most ranked combinations never meet an exit grid and
+    /// store zeros. A zero drawdown is a spectacular result, so a reader that
+    /// cannot tell "never priced" from "priced and lost nothing" reads the rows
+    /// nobody measured as the best in the file.
+    #[test]
+    fn an_unpriced_row_fails_every_rule_and_is_marked_unpriced() {
+        let v = row(3, 1).verdict(&crate::Rules::operator());
+        assert!(!v.priced, "trades == 0 is the only value that says so");
+        assert!(!v.admitted, "and it is not admitted on a zero drawdown");
+        assert!(!v.win_rate && !v.reward_to_risk && !v.return_over_drawdown);
+    }
+
     /// The stride is what the writer writes, not what a comment claims.
     ///
     /// Version 2 added six money fields — `trades`, `cell_wins`, `pessimistic`,
@@ -1509,6 +1597,121 @@ impl Row {
             avg_loss: cell.avg_loss(),
             losses: self.trades.saturating_sub(self.cell_wins),
             priced: self.trades > 0,
+        }
+    }
+}
+
+/// Which of the operator's rules a ranked row meets, and the one it cannot answer.
+///
+/// # Why this exists
+///
+/// [`crate::record_frontier`] writes `by_evidence.iter().take(top)` — the top
+/// `top` combinations by the ranking lens — and reads NONE of
+/// [`crate::Rules`]. Not `min_win_rate_bp`, not `min_rr_bp`, not `min_trades`,
+/// not `min_ret_over_dd_bp`. The only knob that reaches the ledger is `top`, as
+/// a count.
+///
+/// That is deliberate and it is correct: the frontier is the RANKING, and a
+/// ranking that silently dropped everything failing a rule would answer *"what
+/// did the sweep find"* with *"nothing"* and give the operator no way to see how
+/// near the misses were. The defect was never that the rows are unfiltered — it
+/// is that **nothing on the row said whether it passed**, so a list ranked on
+/// unstopped forward payoff was read as a list of candidates.
+///
+/// So the verdict travels beside the row rather than deciding whether the row
+/// exists. `PASS` and `FAIL` are shown, the operator sorts on them, and a run
+/// where nothing passes says so out loud instead of rendering an empty table
+/// that looks like a missing feature.
+///
+/// # The rule that is ABSENT rather than passing, and why that distinction is the point
+///
+/// `Rules::max_mae_ppm` is checked against [`runner::grid::Cell::worst_mae`] —
+/// the maximum adverse excursion across every trade. **A row does not store
+/// it.** [`Row::derived`] rebuilds its `Cell` with `..Default::default()`, which
+/// sets `worst_mae` to `0`, and `Rules::admits` opens with
+/// `self.max_mae_ppm == 0 || cell.worst_mae <= self.max_mae_ppm` — so calling
+/// `admits` here would report the stop rule as PASSED on every row in the file,
+/// on the strength of a zero nobody measured.
+///
+/// That is the failure `CLAUDE.md` §4 bans by name: a fallback that hides a
+/// failure. The field is therefore not a `bool`. It is absent, and
+/// [`Self::stop_unchecked`] says so, because "we did not measure this" and "this
+/// passed" are the two things that must never render the same.
+/// # Why six booleans rather than the enum clippy asks for
+///
+/// `struct_excessive_bools` fires at three, and its remedy — split the type into
+/// variants — is right when the flags are a STATE that only some combinations of
+/// which are legal. These are not a state. They are five independent rules and
+/// their conjunction, every one of the thirty-two combinations is reachable, and
+/// an operator reading `FAIL` needs to know WHICH rules failed. Collapsing them
+/// into variants would either enumerate thirty-two names or throw away the
+/// detail that makes the verdict worth showing.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "five independent rule outcomes and their conjunction; every \
+              combination is reachable and the page renders which ones failed"
+)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Verdict {
+    /// `win_rate_bp >= Rules::min_win_rate_bp`.
+    pub win_rate: bool,
+    /// `reward_to_risk_bp >= Rules::min_rr_bp` — smallest win over largest loss.
+    pub reward_to_risk: bool,
+    /// `return_over_drawdown >= Rules::min_ret_over_dd_bp`.
+    pub return_over_drawdown: bool,
+    /// `trades >= Rules::min_trades` — is the rate evidence of anything.
+    pub trades: bool,
+    /// `assurance_bp >= Rules::min_assurance_bp` — the 95% lower bound on the
+    /// rate, not the observed rate.
+    pub assurance: bool,
+    /// Every rule above holds. **Not "every rule holds"** — see
+    /// [`Self::stop_unchecked`].
+    pub admitted: bool,
+    /// Always `true`. The stop rule was not evaluated because the row does not
+    /// carry `worst_mae`, and a reader must be told that rather than shown a
+    /// pass.
+    pub stop_unchecked: bool,
+    /// Whether this combination was ever priced. An unpriced row fails every
+    /// rule on zeros, which is honest but is not the same claim as "priced and
+    /// it failed" — the reader needs both.
+    pub priced: bool,
+}
+
+impl Row {
+    /// This row judged against one rule set, with the unanswerable rule named.
+    ///
+    /// An UNPRICED row (`trades == 0`) returns every rule `false` and
+    /// `priced: false`. It is not admitted, and the reason is that it never met
+    /// an exit grid — `screen_cap` cut it — rather than that it was measured and
+    /// found wanting.
+    #[must_use]
+    pub fn verdict(&self, rules: &crate::Rules) -> Verdict {
+        let d = self.derived();
+        if !d.priced {
+            return Verdict {
+                stop_unchecked: true,
+                ..Verdict::default()
+            };
+        }
+        let cell = runner::grid::Cell {
+            trades: self.trades,
+            wins: self.cell_wins,
+            ..Default::default()
+        };
+        let win_rate = d.win_rate_bp >= rules.min_win_rate_bp;
+        let reward_to_risk = d.reward_to_risk_bp >= rules.min_rr_bp;
+        let return_over_drawdown = d.return_over_drawdown >= rules.min_ret_over_dd_bp;
+        let trades = self.trades >= rules.min_trades;
+        let assurance = cell.assurance_bp() >= rules.min_assurance_bp;
+        Verdict {
+            win_rate,
+            reward_to_risk,
+            return_over_drawdown,
+            trades,
+            assurance,
+            admitted: win_rate && reward_to_risk && return_over_drawdown && trades && assurance,
+            stop_unchecked: true,
+            priced: true,
         }
     }
 }
