@@ -818,6 +818,7 @@ impl BarFile {
             timeframe_secs,
             // THE SAME ANSWER CREATION USED, from the same function.
             table_of(path.file()),
+            Access::Write,
         )
     }
 
@@ -909,6 +910,7 @@ impl BarFile {
             // WHICH TABLE, DECIDED BY THE FILE KIND rather than assumed, and by
             // the same function the creating door uses.
             table_of(path.file()),
+            Access::Read,
         )
     }
 
@@ -929,6 +931,26 @@ impl BarFile {
     fn validated(
         bars: File,
         bars_path: PathBuf,
+        // WHETHER THIS DOOR MAY CREATE THE SIDECAR, and it is the only thing
+        // that keeps `open_existing`'s promise.
+        //
+        // `open_existing` says "**without creating anything**" and its own doc
+        // records what happened when a reader went through the writer's path: a
+        // `GET /bars` created six directories, a 32 KiB bar file and a `.lock`,
+        // then rendered "this month is empty" about the file the request had
+        // just made. That was fixed for the BAR file and the sidecar was opened
+        // `create(true)` two lines further down, so the promise held for the
+        // artefact anyone looked at and not for the one beside it.
+        //
+        // It was invisible while `FLAG_CHECKSUMS` was clear in every file this
+        // module wrote — which is what the module header still claims. It is no
+        // longer true: `initialise` sets the flag, so the branch is taken on
+        // EVERY open and the read door creates on every miss.
+        //
+        // Two consequences, both live. A month whose `.crc` is absent gets a
+        // ZERO-BYTE sidecar from a GET, and a zero sum read back against a real
+        // block reports a healthy month as corrupt. And a store on a read-only
+        // mount refuses the read outright, because it tried to write.
         // WHERE THE CHECKSUM SIDECAR WOULD BE, composed by `crate::path` and
         // never by this function. `path` documents itself as the only way a
         // store path is built, and a second speller here would be the copy that
@@ -949,6 +971,7 @@ impl BarFile {
         // CRC, and then reads every field from the wrong offset. The table is a
         // parameter so that cannot happen by omission.
         table: &[Layout],
+        access: Access,
     ) -> Result<Self, StoreError> {
         let (header, claimed) = read_header(&bars, &bars_path, len)?;
         let layout = refused(Layout::resolve(table, header.format_version), &bars_path)?;
@@ -1112,7 +1135,20 @@ impl BarFile {
             let at = crc_path.ok_or(StoreError::NotABarPath {
                 found: FileKind::Checksums,
             })?;
-            Some(fault(open_rw(&at), &at, Action::Open)?)
+            // A READ DOOR OPENS IT READ-ONLY, AND AN ABSENT SIDECAR IS AN
+            // ANSWER RATHER THAN A THING TO MAKE.
+            //
+            // `open_read` has no `create`, so a month with no `.crc` yields
+            // `None` here and verification reports that it cannot check rather
+            // than checking against zeros it just wrote.
+            match access {
+                Access::Write => Some(fault(open_rw(&at), &at, Action::Open)?),
+                Access::Read => match open_read(&at) {
+                    Ok(file) => Some(file),
+                    Err(why) if why.kind() == io::ErrorKind::NotFound => None,
+                    Err(why) => return Err(classify(&at, Action::Open, &why)),
+                },
+            }
         };
         Ok(Self {
             bars,
@@ -2435,6 +2471,7 @@ mod tests {
             SYMBOL,
             60,
             Layout::KNOWN,
+            super::Access::Write,
         )
     }
 
@@ -2681,4 +2718,27 @@ mod tests {
             "the read's refusal travels, and is not flattened into None"
         );
     }
+}
+
+/// Open an existing file for reading, creating nothing.
+///
+/// The counterpart to [`open_rw`], and the reason it exists is that `open_rw`
+/// carries `create(true)`: any door that used it turned a read into a write the
+/// moment its target was absent.
+fn open_read(path: &Path) -> io::Result<File> {
+    fs::OpenOptions::new().read(true).open(path)
+}
+
+/// Whether a door may create what it opens.
+///
+/// Two variants and no third: a caller either intends to write, in which case a
+/// missing sidecar is something to make, or it does not, in which case a
+/// missing sidecar is a fact to report. There is no honest middle — "create it
+/// if convenient" is how `open_existing` came to create on a `GET`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Access {
+    /// `open_or_create`: the writer's door.
+    Write,
+    /// `open_existing`: the reader's door, which creates nothing.
+    Read,
 }

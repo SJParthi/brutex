@@ -27150,3 +27150,73 @@ files with problems; 0 unused CSS selectors workspace-wide; `node --test
 web/tests/*.test.js` 152 pass, 0 fail. W3's ceiling is `CEILING=0` and its
 failure message now names the root cause and both placement traps, because a
 gate that says only "you went up" makes the reader find this entry first.
+
+### D-0372
+
+**The read-only door created a file on every miss, and it had been invisible
+because the module header describes a flag that changed under it.**
+
+`BarFile::open_existing` opens with *"Open a month that already exists,
+**without creating anything**"*, and its own doc records what happened when a
+reader went through the writer's path: a `GET /bars` created six directories, a
+32 KiB bar file and a `.lock`, then rendered *"this month is empty"* about the
+file the request had just made.
+
+That was fixed for the bar file. **Two lines below the fix, the checksum sidecar
+was opened `open_rw`** — `.read(true).write(true).create(true)`. So the promise
+held for the artefacts anyone looked at and not for the one beside them.
+
+**It was unreachable when it was written and is reachable now.** `file.rs`'s
+module header still states: *"`FLAG_CHECKSUMS` is clear in every file this
+module creates, and the `Checksums` sidecar is not created."* `initialise`
+passes `crate::format::FLAG_CHECKSUMS`. The flag is set on every file this build
+writes, so the branch is taken on **every** open and the read door creates on
+every miss.
+
+**Two live consequences.** A month whose `.crc` is absent gets a **zero-byte
+sidecar from a GET**, and a zero sum read back against a real block reports a
+healthy month as CORRUPT — which §3 rule 8 then forbids rewriting away. And a
+store on a read-only mount refuses the read outright, because it tried to write.
+
+Every documented-read caller went through it: `api::bars` (*"This is a GET"*),
+`api::server`'s bar route (*"This is a read"*), `cli::stored`, `pull::scrub` —
+and `/gaps.json`, added this session, which opens a file per month across a
+whole span.
+
+**What ships:** an `Access` enum with two variants and no third, passed by each
+door. `Write` keeps `open_rw`. `Read` uses a new `open_read` — `.read(true)`
+and nothing else — and treats `NotFound` as `None` rather than as a thing to
+make. A month with no sidecar still reads; verification reports that it cannot
+check, instead of checking against zeros it just wrote.
+
+**The test asserts the sidecar EXISTED first.** A negative assertion over a path
+that was never right passes for free, which is exactly the vacuity this session
+audited for elsewhere: the test now proves the writer put a `.crc` there,
+removes it, reads the month, and asserts it is still absent.
+
+170 `store` tests green, `clippy -D warnings` clean.
+
+### D-0373
+
+**The seventh idempotence test, where the audit that fixed the other six counted
+to six.**
+
+`crates/indicators` holds seven `assert_eq!(run(), run())` sites. Six carry a
+guard and a comment reading *"an audit applied exactly that mutation and it
+survived **ALL SIX** of these idempotence tests"*. There are seven.
+
+Measured — `grep -c "later != earlier"`:
+
+| module | guard |
+|---|---|
+| `daily`, `orb`, `fib`, `session`, `vwap`, `pattern` | 1 each |
+| **`lib.rs`** (`CurDayFib`) | **0** |
+
+The equality holds for ANY deterministic body — including
+`bits() -> ConditionMask::ZERO` and any constant — so on its own it cannot see
+the one mutation that matters. The six that got the fix live in named modules;
+the seventh lives in `lib.rs`, which is how the census missed it.
+
+The same guard now stands there: the fixture varies its bars by `(k * 11) % 61`,
+so a body that ignores its input emits the same words on every bar, and the run
+must not be constant.

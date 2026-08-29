@@ -888,6 +888,34 @@ mod tests {
             out
         };
         assert_eq!(run(), run(), "two identical runs disagreed");
+        // THE SEVENTH SITE, AND THE AUDIT THAT FIXED THE OTHERS SAID "ALL SIX".
+        //
+        // The equality above holds for ANY deterministic body -- including
+        // `bits() -> ConditionMask::ZERO` and any constant -- so it cannot see
+        // the one mutation that matters. That was found once and repaired in
+        // `daily`, `orb`, `fib`, `session`, `vwap` and `pattern`, each of which
+        // carries this guard and a comment counting SIX. There are seven:
+        // `assert_eq!(run(), run()` appears once more, here, and this is the
+        // module the census missed -- the other six live in named modules and
+        // `CurDayFib` sits in `lib.rs`.
+        //
+        // Measured: `grep -c "later != earlier"` answered 1 in each of the six
+        // and 0 here.
+        //
+        // This closes it without needing to know what the bits SHOULD be, which
+        // is what the sibling tests are for. A body that ignores its input emits
+        // the same value on every bar, and the fixture above deliberately varies
+        // them by `(k * 11) % 61`. So: the run must not be constant.
+        let observed = run();
+        assert!(
+            observed
+                .iter()
+                .skip(1)
+                .zip(observed.iter())
+                .any(|(later, earlier)| later != earlier),
+            "every bar produced the same words, so a body ignoring its input \
+             would pass the equality above"
+        );
     }
 
     /// Every bit this crate sets is a current-day rung and nothing else. A stray

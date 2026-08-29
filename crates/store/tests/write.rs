@@ -1302,6 +1302,47 @@ fn the_reader_door_opens_what_the_writer_wrote_and_refuses_exactly_what_it_refus
     assert_eq!(reader.layout(), Layout::V2);
     drop(reader);
 
+    // ─── AND THE READER CREATES NO SIDECAR, WHICH IS THE HALF THAT WAS FALSE
+    //
+    // "creates no directory, no bar file and no lock" held for all three, and
+    // the CHECKSUM SIDECAR was opened `create(true)` two lines below the check
+    // — so the promise covered the artefacts anyone looked at and not the one
+    // beside them.
+    //
+    // It was invisible while `FLAG_CHECKSUMS` was clear in every file this
+    // module wrote, which the module header still claimed. `initialise` sets
+    // the flag, so the branch is taken on EVERY open and the read door created
+    // on every miss. Two live consequences: a GET against a month whose `.crc`
+    // is absent left a ZERO-BYTE sidecar, and a zero sum read back against a
+    // real block reports a healthy month as CORRUPT; and a store on a read-only
+    // mount refused the read outright, because it tried to write.
+    let sidecar = bars_path().with_file(FileKind::Checksums).to_path_buf(root);
+    // IT MUST HAVE EXISTED FIRST, or the path below is wrong and every
+    // assertion after it passes for free — a file that was never there cannot
+    // be created again. This is the vacuity the negative assertion invites.
+    assert!(
+        sidecar.exists(),
+        "the writer's append seals a block, so the sidecar is on disk here: {}",
+        sidecar.display()
+    );
+    std::fs::remove_file(&sidecar).expect("take the sidecar away");
+    assert!(!sidecar.exists(), "and it is gone before the read");
+    let after = BarFile::open_existing(root, bars_path(), SYMBOL).expect("still opens");
+    assert_eq!(
+        after.records(),
+        3,
+        "the month still reads without its sidecar — an absent checksum file is \
+         a fact to report, not a reason to refuse the bars"
+    );
+    drop(after);
+    assert!(
+        !sidecar.exists(),
+        "THE READ DOOR CREATED THE SIDECAR. A GET that makes a zero-byte \
+         checksum file turns the next verification into a false CORRUPT, and \
+         §3 rule 8 forbids rewriting the month to clear it: {}",
+        sidecar.display()
+    );
+
     // THE SHARED VALIDATION, WHICH IS THE WHOLE POINT. A month whose stored
     // symbol is not the one asked for must be refused by BOTH doors, with the
     // SAME error — that is the sentence, expressed as an assertion. Compared as
