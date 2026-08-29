@@ -2225,10 +2225,33 @@ async fn bars_json(
     // an empty day is a legal thing to ask for and the page renders it.
     let to_micros = ist_midnight_micros(&param(query, "to")).map(|at| at + 86_400 * 1_000_000);
 
-    // THE WHOLE MONTH, in one pass. `page` reads by index, so this is
-    // `n_valid` seeks of fixed length and nothing scans.
+    // THE WINDOW IS ADDRESSED, NOT FILTERED, and it used to be filtered.
+    //
+    // This read the WHOLE month — `page(&file, 0, n_valid)` — and handed the
+    // day bounds to `bars_array` afterwards. So a one-day query against a
+    // one-minute month read ~8,250 records, one `pread` each, to return ~375.
+    // An O(1) audit measured the shape as "reads every bar, filters after", on
+    // an endpoint `/db` calls once per instrument-month.
+    //
+    // Bars in a file are strictly increasing by timestamp — the writer refuses
+    // otherwise — so the start of the window is addressable by bisection in
+    // `log2(n_valid)` reads. At 8,250 bars that is fourteen instead of 8,250.
+    //
+    // The END is still found by reading forward and stopping, rather than by a
+    // second bisection: the rows have to be read to be returned, so a second
+    // search would buy nothing. What it saves is everything BEFORE the window.
+    //
+    // A bisection that refuses falls back to the whole month rather than to an
+    // error. The window is an optional narrowing on a request that is already
+    // valid without it, and the surrounding code makes the same choice for a
+    // malformed date — refusing the month over a failed optimisation would be
+    // the louder wrong answer.
     let held = usize::try_from(file.header().n_valid).unwrap_or(usize::MAX);
-    let (rows, faults) = bars::page(&file, 0, held);
+    let begins = from_micros
+        .and_then(|at| file.first_at_or_after(at).ok())
+        .and_then(|index| usize::try_from(index).ok())
+        .unwrap_or(0);
+    let (rows, faults) = bars::page(&file, begins, held.saturating_sub(begins));
 
     let out = bars_array(&rows, from_micros, to_micros);
 

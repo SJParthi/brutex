@@ -1490,6 +1490,32 @@ impl BarFile {
         self.read_row::<Bar>(index)
     }
 
+    /// The index of the first committed bar stamped at or after `ts`.
+    ///
+    /// `n_valid` when every bar is older, which is the correct answer for a
+    /// window starting past the end of the month rather than an error.
+    ///
+    /// # Why this is public now
+    ///
+    /// The bisection has existed since the append path needed it, privately.
+    /// `/bars.json` meanwhile read THE WHOLE MONTH and applied the day window
+    /// afterwards — an O(1) audit measured the shape as "reads every bar,
+    /// filters after", so a one-day query against a one-minute month read
+    /// ~8,250 records, one `pread` each, to return ~375.
+    ///
+    /// Bars in a file are strictly increasing by timestamp — the writer refuses
+    /// otherwise, which is what the bisection has always rested on — so the
+    /// window start is addressable in `log2(n_valid)` reads rather than found by
+    /// walking. At 8,250 bars that is fourteen.
+    ///
+    /// # Errors
+    ///
+    /// Anything a record read can fail with. A refusal means the file could not
+    /// be addressed, not that the window is empty.
+    pub fn first_at_or_after(&self, ts: i64) -> Result<u64, StoreError> {
+        first_at_or_after::<Bar, _>(self.header.n_valid, ts, |index| self.read_record(index))
+    }
+
     /// One record of whatever kind this file holds.
     ///
     /// # Why the width comes from the RECORD and the offset from the FILE
