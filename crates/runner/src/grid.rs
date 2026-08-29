@@ -2971,6 +2971,7 @@ fn realised(
                 };
             };
             let (exit, gapped) = level_fill(bar, resting);
+            let exit = stop_slippage(exit, bar, side, level.kind, pessimistic);
             let paisa = match side {
                 Side::Long => exit.saturating_sub(fills.charged),
                 Side::Short => fills.charged.saturating_sub(exit),
@@ -3043,6 +3044,8 @@ fn realised(
                 };
             };
             let (exit, gapped) = level_fill(bar, resting);
+            // A TRAIL IS A STOP, so it slips like one. Same arm, same reason.
+            let exit = stop_slippage(exit, bar, side, Resting::Stop, pessimistic);
             let paisa = match side {
                 Side::Long => exit.saturating_sub(fills.charged),
                 Side::Short => fills.charged.saturating_sub(exit),
@@ -3540,6 +3543,80 @@ fn level_price(level: Level, anchor: i64, side: Side) -> i64 {
 /// open exactly once per trip. What is missing is a SHIPPED test that can see it
 /// move — the only one naming the field asserts `cell.gapped == 0`, which passes
 /// whether the arm works or not.
+/// A stop's worst-case fill, and it is one of the bar's OWN four numbers.
+///
+/// # `level_fill` answers with a price that never printed
+///
+/// It returns the resting level whenever the bar's range contains it, and that
+/// level is `anchor ± paisa_of(level.ppm, anchor)` — pure arithmetic at
+/// one-paisa granularity. Nothing says the market traded there. Every other fill
+/// on this path is one of the four printed numbers: `crate::trade` states it
+/// outright — *"NO TICK. THE FOUR NUMBERS OF THE BAR ARE THE WHOLE OF WHAT IS
+/// KNOWN"* — and [`exit_fill`] prices a market exit at the open or the printed
+/// extreme. The level arms were the exception, and the operator's standing rule
+/// is that there are none.
+///
+/// # A stop is a stop-MARKET order, and that is why only stops move
+///
+/// A stop triggers at its level and then fills at whatever the book offers
+/// next, which can be worse and frequently is. Booking it AT the trigger assumes
+/// zero slippage on the one order type that carries no price guarantee at all.
+/// The worst it could have filled is the bar's own adverse extreme — a number
+/// that printed.
+///
+/// **A target is a LIMIT order.** It fills at its price or better and never
+/// worse, so the level is already the conservative answer and no printed price
+/// improves on it. Forcing the adverse extreme there would book a long's
+/// profit-take at the bar's LOW, which is not a worst case but a different
+/// trade. The asymmetry is the content of this function, and applying one rule
+/// to both would be the invention §3 rule 1 forbids.
+///
+/// # Pessimistic only
+///
+/// The optimistic reading keeps the level, because a stop CAN fill at its
+/// trigger and the bracket exists to hold both readings. Collapsing them would
+/// hide the range the data genuinely carries, which is the defect
+/// [`Cell::pessimistic`] and [`Cell::optimistic`] were split to end.
+///
+/// # What this costs, measured
+///
+/// `the_entry_spread_is_the_whole_fill_cost_of_a_level_exit` used to assert
+/// that a level exit carried NO exit-side spread. It now carries one on the
+/// stop side, and that test says so. Two more tests moved with it. D-0378.
+///
+/// O(1): one compare and a branch, on a path that has already read the bar.
+const fn stop_slippage(
+    exit: i64,
+    bar: &Candle,
+    side: Side,
+    kind: Resting,
+    pessimistic: bool,
+) -> i64 {
+    if !pessimistic || !matches!(kind, Resting::Stop) {
+        return exit;
+    }
+    match side {
+        // A long exits by SELLING, so its adverse extreme is the low; a short
+        // exits by buying, so it is the high. Compared rather than assigned,
+        // because a GAP already answered with the open and the open can sit on
+        // the far side of the extreme.
+        Side::Long => {
+            if bar.low < exit {
+                bar.low
+            } else {
+                exit
+            }
+        }
+        Side::Short => {
+            if bar.high > exit {
+                bar.high
+            } else {
+                exit
+            }
+        }
+    }
+}
+
 fn level_fill(bar: &Candle, resting: i64) -> (i64, bool) {
     if resting >= bar.low && resting <= bar.high {
         return (resting, false);
@@ -4740,9 +4817,11 @@ mod tests {
         // the peak. The old figures pinned the wrong basis: a fill for an order
         // that, on the basis the rung was tested in, was never touched.
         assert_eq!(
-            priced_pess, 1_000,
-            "105,000 peak less 4,000 (40,000 ppm of the 100,000 ENTRY), less \
-             that entry"
+            priced_pess, 500,
+            "the trail level is 101,000 -- 105,000 peak less 4,000, which is \
+             40,000 ppm of the 100,000 ENTRY -- but a TRAIL IS A STOP and fills \
+             at the bar's low of 100,500 under the pessimistic reading. 500 from \
+             the entry, not the 1,000 a fill at the trigger claimed. D-0378"
         );
         assert_eq!(
             priced_opt, 3_000,
@@ -4867,13 +4946,25 @@ mod tests {
         assert_eq!(a.stopped, 1, "the loser must have ended ON the stop");
 
         // 1_003_000 target level, entered at 1_000_200; 999_000 stop level,
-        // entered at 1_000_600. Both fills are inside their bar's range.
+        // entered at 1_000_600. Both levels are inside their bar's range.
+        //
+        // THE TARGET FILLS AT ITS LEVEL AND THE STOP DOES NOT, which is D-0378.
+        // A target is a LIMIT order: it fills at its price or better, so the
+        // level is already its worst case. A stop is a stop-MARKET order: it
+        // triggers at the level and fills at whatever comes next, so its worst
+        // case is the bar's own low -- 998,500 here, five hundred paisa through
+        // the trigger. `min_win` is unchanged; `worst_trade` carries the
+        // slippage that a fill AT the trigger assumed away.
         assert_eq!(a.min_win, 2_800, "the target level less the WORSE entry");
-        assert_eq!(a.worst_trade, -1_600, "the stop level less the WORSE entry");
+        assert_eq!(
+            a.worst_trade, -2_100,
+            "the stop bar's LOW less the worse entry -- 998,500 - 1,000,600. It \
+             was -1,600 while a stop-market order was booked at its trigger"
+        );
         assert_eq!(
             a.reward_to_risk_bp(),
-            175,
-            "2,800 over 1,600. The defect reported 300 -- the ladder's own axis"
+            133,
+            "2,800 over 2,100. The defect reported 300 -- the ladder's own axis"
         );
         assert!(
             a.reward_to_risk_bp() < 300,
@@ -4889,19 +4980,30 @@ mod tests {
         );
     }
 
-    /// The entry spread is the whole fill cost of a level exit.
+    /// A level exit's fill cost is the entry spread PLUS the stop's own slippage.
     ///
-    /// Before the fix this was identically ZERO on the level path: the spread
-    /// reached `fill_cost` only through `paisa_of(ppm, entry_pess) -
+    /// # This test asserted the opposite, and its name still records that
+    ///
+    /// It was `the_entry_spread_is_the_whole_fill_cost_of_a_level_exit`, and
+    /// the claim held only while a stop was booked AT its trigger — which
+    /// assumed zero slippage on the one order type that carries no price
+    /// guarantee. D-0378 prices a stop at the bar's adverse extreme under the
+    /// pessimistic reading, so a level exit now carries an exit-side spread too,
+    /// and it is exactly the distance the market ran through the trigger.
+    ///
+    /// Before an earlier fix this column was identically ZERO on the level path:
+    /// the spread reached `fill_cost` only through `paisa_of(ppm, entry_pess) -
     /// paisa_of(ppm, entry_opt)`, which truncates to nothing at every rung the
     /// engine ships. A column documented as *"the whole knowable spread"*, on
-    /// 45% of trades, that could not move.
+    /// 45% of trades, that could not move. It moves twice now.
     #[test]
-    fn the_entry_spread_is_the_whole_fill_cost_of_a_level_exit() {
+    fn a_level_exit_carries_the_entry_spread_and_the_stop_s_slippage() {
         let cell = one_to_three_cell(200, 600);
         assert_eq!(
-            cell.fill_cost, 800,
-            "200 on the target's entry bar and 600 on the stop's, and nothing else"
+            cell.fill_cost, 1_300,
+            "200 on the target's entry bar, 600 on the stop's, and 500 more \
+             where the stop bar's low ran through the trigger. It was 800 while \
+             the exit side was assumed free"
         );
         assert_eq!(
             cell.gapped, 0,

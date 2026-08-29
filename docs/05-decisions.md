@@ -27431,3 +27431,76 @@ genuinely sequence and no sort control exists.
 **Verified:** `vite build` wrote the site, `svelte-check` 0 errors 0 warnings,
 `npm test` 152 pass 0 fail. No timing is claimed — the host carried another
 session's suite at ~320 % CPU per process, load average 229, throughout.
+
+### D-0378 — a stop was booked at its trigger, which assumed away the slippage of the one order that has none
+
+**2026-08-29.** The operator's rule, stated three times: *"even in exit grids
+also always use either OHLC ... nowhere we will use any ticks or fake or
+hallucination or illusion, always we will use real OHLCV."*
+
+`grid::level_fill` answered with the RESTING LEVEL whenever the exit bar's range
+contained it:
+
+```rust
+if resting >= bar.low && resting <= bar.high { return (resting, false); }
+(bar.open, true)
+```
+
+`resting` is `anchor ± paisa_of(level.ppm, anchor)` — pure arithmetic at
+one-paisa granularity. Nothing says the market traded there. The gap branch is
+honest; the in-range branch was the last place in the engine that priced a fill
+at a number which never printed. `crate::trade` had already been corrected and
+says so outright — *"NO TICK. THE FOUR NUMBERS OF THE BAR ARE THE WHOLE OF WHAT
+IS KNOWN"* — and `exit_fill` prices a market exit at the open or the printed
+extreme. The level arms were the exception.
+
+**Only stops move, and the asymmetry is the whole decision.** A stop is a
+stop-MARKET order: it triggers at the level and then fills at whatever the book
+offers next, which can be worse and frequently is. Booking it AT the trigger
+assumes zero slippage on the one order type that carries no price guarantee at
+all. Its worst case is the bar's own adverse extreme — a printed number.
+
+A target is a LIMIT order. It fills at its price or better and never worse, so
+the level is ALREADY its conservative reading and no printed price improves on
+it. Forcing the adverse extreme there would book a long's profit-take at the
+bar's low, which is not a worst case but a different trade. Applying one rule to
+both would be the invention §3 rule 1 forbids, so `stop_slippage` refuses to.
+
+A TRAIL IS A STOP and takes the same arm.
+
+**Pessimistic only.** The optimistic reading keeps the level, because a stop CAN
+fill at its trigger. Collapsing the two would hide the range the data genuinely
+carries, which is the defect `Cell::pessimistic` and `Cell::optimistic` were
+split to end.
+
+**This changes the economics of every recorded result, and three named tests
+said so.** All three moved by exactly the distance the fixture's stop bar ran
+through its trigger — 500 paisa:
+
+| test | was | now |
+|---|---|---|
+| `a_one_to_three_cell_does_not_report_three` — `worst_trade` | −1,600 | **−2,100** |
+| same test — `reward_to_risk_bp` | 175 | **133** |
+| `a_trailing_fill_is_priced_off_the_pre_bar_peak_pessimistically` | 1,000 | **500** |
+| `the_entry_spread_is_the_whole_fill_cost_of_a_level_exit` — `fill_cost` | 800 | **1,300** |
+
+The third is renamed to `a_level_exit_carries_the_entry_spread_and_the_stop_s_slippage`,
+because its old name asserted a property this entry withdraws: a level exit no
+longer has a free exit side. Its doc keeps the old claim and records why it fell.
+
+**Every ledger row written before this is on the old model** and its
+`pessimistic`, `worst_trade` and `max_drawdown` are optimistic by the distance
+each stop ran through its trigger. Nothing rewrites them — §3 rule 8 is
+append-only — so a row's model is identified by its `commit`, which run identity
+already carries.
+
+**Held back once before being applied.** The change was written, three tests
+failed, and it was REVERTED rather than landed, because a modelling change that
+contradicts a named invariant is a §3 rule 2 scope change and the operator's
+call rather than the author's. It landed only after he reaffirmed it a third
+time. Recording the hesitation because the next reader should know this was a
+decision and not a cleanup.
+
+`runner` 302 passed, 0 failed. `clippy --workspace --all-targets -D warnings`
+clean. O(1) per exit: one compare and a branch, on a path that has already read
+the bar.
