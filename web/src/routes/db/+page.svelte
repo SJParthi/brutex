@@ -10168,12 +10168,19 @@
      its metrics, not its behaviour. Copying six declarations is cheaper than a
      second mode on a shared component, and this comment is the link between
      them. */
-  /* A FULL-WIDTH BASIS, WHICH IS THE SAME TRICK `.field.wide` USES ONE LEVEL
-     UP. `1 / -1` there and `100%` here both say "start your own line at every
-     width", and both exist because the thing they wrap is a GROUP whose parts
-     stop meaning anything apart. */
+  /* ONE ROW WITH THE DATES WHERE THERE IS ROOM, AND STILL A GROUP WHERE THERE
+     IS NOT.
+     A first version forced `flex-basis: 100%` — always its own line — because
+     with the three loose among the DayFields the wrap fell between FROM TIME
+     and TO TIME, and a pair split across rows reads as two unrelated controls.
+     That fixed the split by spending a whole row on it, which is the wrong
+     trade on a window that is one thought: a day AND a minute.
+     `1 1 auto` puts them beside TO DATE and keeps the grouping, because the
+     wrapper is still a flex container: the three can only break INSIDE it, and
+     the group moves as one when the row runs out. The `.dates` gap is reused
+     rather than restated so the six controls sit on a single rhythm. */
   .times {
-    flex: 1 0 100%;
+    flex: 1 1 auto;
     display: flex;
     align-items: flex-start;
     flex-wrap: wrap;

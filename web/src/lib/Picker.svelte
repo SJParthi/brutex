@@ -168,10 +168,41 @@
    */
   let flip = $state(false);
 
+  /**
+   * THE SAME QUESTION DOWNWARD, WHICH NOBODY HAD ASKED.
+   *
+   * `flip` has always handled the RIGHT edge. There was no vertical case at
+   * all: the panel is anchored `top: calc(100% + 7px)` and opened downward
+   * from wherever the button sat. Reported from the pager at the bottom of
+   * `/db` — the rows-per-page control opened a menu that began below the fold,
+   * so choosing a page size meant scrolling to a list you could not see while
+   * the button that opened it scrolled away.
+   *
+   * UP ONLY WHEN UP IS BETTER. A menu taller than the whole viewport fits
+   * nowhere, and flipping it then would trade a clipped bottom for a clipped
+   * top — worse, because the filter box and the bulk actions live at the top.
+   * So it rises only when below genuinely cannot hold it AND above holds more.
+   *
+   * `--pmax` IS THE OTHER HALF AND IS NOT OPTIONAL. `max-height: 380px` is a
+   * constant, and neither direction is guaranteed 380px of room; without a
+   * measured ceiling the flip just moves the clipping. The panel is capped to
+   * the space it actually has, floored at 180px so a very short viewport still
+   * shows a usable list and scrolls it rather than collapsing to a sliver.
+   */
+  let up = $state(false);
+  let pmax = $state(380);
+
   $effect(() => {
     if (!open || !menu || !btn) return;
     const b = btn.getBoundingClientRect();
     flip = b.left + menu.offsetWidth > window.innerWidth - 12;
+    /* THE GAP AND THE MARGIN ARE THE SAME 7 AND 12 THE RULES USE, read from
+       here rather than re-guessed: 7px is the anchor offset in `.pmenu`, 12px
+       the breathing room the horizontal test above already keeps. */
+    const room = { below: window.innerHeight - b.bottom - 7 - 12, above: b.top - 7 - 12 };
+    const want = menu.scrollHeight;
+    up = room.below < want && room.above > room.below;
+    pmax = Math.max(180, Math.min(380, up ? room.above : room.below));
   });
 
   /**
@@ -362,7 +393,15 @@
   >
 
   {#if open}
-    <div class="pmenu" class:flip class:wide={filter} bind:this={menu} role="group">
+    <div
+      class="pmenu"
+      class:flip
+      class:up
+      class:wide={filter}
+      style="--pmax:{pmax}px"
+      bind:this={menu}
+      role="group"
+    >
       {#if hasHead}
         <div class="phead">
           {#if filter}
@@ -518,7 +557,10 @@
     width: max-content;
     min-width: 100%;
     max-width: min(92vw, 560px);
-    max-height: 380px;
+    /* MEASURED WHERE IT OPENS, with the 380 that used to be hardcoded as the
+       ceiling. See `pmax`: a fixed height clips in whichever direction has
+       less room, and flipping without this only changes which end is cut. */
+    max-height: var(--pmax, 380px);
     overflow-y: auto;
     background: var(--raise, #243046);
     border: 1px solid var(--line, #26334a);
@@ -556,6 +598,22 @@
   .pmenu.flip {
     left: auto;
     right: 0;
+  }
+  /* RISING, NOT DROPPING — and the motion turns over with it. The block above
+     says the animation exists "to show WHERE the panel came from", so a panel
+     that arrives from below the button while travelling downward contradicts
+     the one thing it is for. Origin and travel both invert. */
+  .pmenu.up {
+    top: auto;
+    bottom: calc(100% + 7px);
+    transform-origin: bottom center;
+    animation-name: pop-up;
+  }
+  @keyframes pop-up {
+    from {
+      opacity: 0;
+      transform: translateY(4px) scale(0.985);
+    }
   }
   /* Pinned, so the controls are reachable at row 1 and at row 750 alike. */
   .phead {
