@@ -26516,3 +26516,53 @@ refuse, so a ranged form is the next step and is not claimed to be here. It is
 also not yet on a page: `CLAUDE.md`'s own record of `/logs` shipping reachable
 only by typing its URL applies, and this is the second half of that debt, not
 its repayment.
+
+### D-0362
+
+**`/gaps.json` audits a RANGE, because a missing month is the finding and
+asking one month at a time makes it a `400`.**
+
+D-0361 shipped the single-month form and named the ranged one as not-yet-done.
+This is it, and the reason it could not stay single-month is not convenience.
+
+Across a range, **a month with no file at all is the loudest thing an audit can
+find** — a backfill that stopped in March 2021 leaves exactly that. The obvious
+implementation folds the open into the parse, which turns the finding into a
+`400` and **ends the walk at the first hole**: every month after it goes
+unlooked-at and unmentioned, which reads as no news. So `Addressed::parse`
+answers once, `Addressed::open` is asked per month, and an absent file becomes
+`absent_file` beside its month rather than an error instead of one.
+
+`to` is optional and defaults to `month`, so the single-month question stays a
+single-month question. An unreadable `to` **refuses** rather than collapsing to
+one month: a range that silently narrows answers a different question and
+reports the months it never opened as simply absent from the answer.
+
+**`2024-1` is January, and that is deliberate.** `month_param` splits on the
+hyphen and parses each side as a number, so a missing leading zero is a legal
+spelling — the same one `/bars.json` and the ranged bars route have always
+accepted. Making this route stricter than its neighbours would refuse links
+they still write. The test asserts this rather than leaving it to be
+rediscovered.
+
+`MAX_AUDIT_MONTHS` is 240 — twenty years, against an operator store spanning
+121 months — so it is not a ceiling anyone meets by accident. It exists so a
+hand-typed `to=9999-12` cannot walk a hundred thousand months holding a request
+open, and it is **never a silent `take(N)`**: `truncated` is in the answer,
+because a ceiling that stopped quietly would report the months it never reached
+as no news, which is the direction that reads as health.
+
+The roll-up is a SUM of the per-month rows, not a second computation over them.
+A total that can disagree with the rows beneath it is a total nobody can act
+on.
+
+**A doc repair came with it, and it was four items deep.** `/bars.json`'s
+paragraph, `timeframe_param`'s, `empty_bars_page`'s and `BarsAddress`'s own
+were all concatenated above `struct BarsAddress` — four items' documentation
+attached to one of them, with the other three undocumented and one of the four
+a stale duplicate of a paragraph `timeframe_param` still carries. It compiled
+and it passed clippy, because a run of `///` lines with no blank between them
+is one comment. Found only because repairing a severed sentence introduced the
+blank line that made `clippy::empty_line_after_doc_comment` speak. Each
+paragraph is back on its item and the duplicate is deleted. This is the same
+defect P-66 records for `param_or`, hit for the third time in one file.

@@ -1835,58 +1835,6 @@ async fn feeds_json(
     )
 }
 
-/// One instrument-month of bars, as JSON, for the chart.
-///
-/// `?feed=<wire>&exchange=NSE&segment=INDEX&symbol=NIFTY&month=YYYY-MM`
-///
-/// # Paisa all the way out
-///
-/// Prices leave here as the `i64` paisa they are stored as. The browser divides
-/// by 100 exactly once, where a canvas needs a number to draw — `CLAUDE.md` §7
-/// says a float has no business near a price, and this endpoint keeps that true
-/// right up to the pixel.
-///
-/// # A positional read per bar, and the whole month is one pass
-///
-/// `BarFile::read_record` reaches bar N by arithmetic — the header length plus
-/// `N × record_stride`, one multiply and one add — and then reads exactly one
-/// record's bytes. The records before it are not touched, so the *work* of
-/// reaching the last bar of a month is the work of reaching the first.
-/// `store::geometry::addressing_is_arithmetic_and_flat` asserts that across a
-/// long walk: every index's offset is exactly one stride past the one before
-/// it, at index 0 and at 400,000 alike.
-///
-/// This heading read **"O(1) per bar"** and the sentence under it said "the
-/// cost of the last bar equals the cost of the first". The arithmetic is
-/// constant and that is what is named above. The `pread` under it has never
-/// been timed here, and a page cache is not a bound — so the claim is the
-/// shape, not the nanoseconds, and it says which.
-///
-/// A month is at most 375 × ~22 bars and is sent whole: the chart pans and
-/// zooms locally after that, with no request per viewport change.
-///
-/// `open_interest` is `i64::MIN` when the vendor sent none — the null sentinel
-/// §7 reserves. It becomes JSON `null` rather than a number, because zero means
-/// The rung a bars request names, defaulting to the one-minute grid.
-///
-/// # Why a default at all, and why THIS one
-///
-/// `?timeframe=` is absent on every link written before the store held a
-/// second rung, so refusing an absent value would break bookmarks and the
-/// chart's own range strip. One minute is the rung the store has always held
-/// and the only one those callers could have meant.
-///
-/// A value that is PRESENT and unknown is refused by name rather than
-/// defaulted: `?timeframe=1hour` is a question about a rung this store has no
-/// directory for, and answering it with one-minute bars would file the answer
-/// under a length nobody asked for. `CLAUDE.md` §4.
-///
-/// The bars page with no rows and a named trouble, at a given status.
-///
-/// Extracted so the handler stays inside the workspace's 100-line ceiling: the
-/// refusal arms all render the SAME page shape and differ only in the sentence
-/// and the status, and repeating the eleven-field literal per arm is how two of
-/// them drift apart.
 /// The six parts that address one bar file, as the page renders them.
 ///
 /// Grouped because they travel together and are meaningless apart: a refusal
@@ -1906,6 +1854,12 @@ struct BarsAddress<'a> {
     timeframe: &'a str,
 }
 
+/// The bars page with no rows and a named trouble, at a given status.
+///
+/// Extracted so the handler stays inside the workspace's 100-line ceiling: the
+/// refusal arms all render the SAME page shape and differ only in the sentence
+/// and the status, and repeating the eleven-field literal per arm is how two of
+/// them drift apart.
 fn empty_bars_page(
     status: axum::http::StatusCode,
     site: &Site,
@@ -2038,7 +1992,6 @@ fn timeframe_param(query: &str) -> Result<store::path::Timeframe, String> {
         })
 }
 
-/// zero and writing 0 for "not sent" is a lie in the data.
 /// Open the one instrument-month a query addresses, or say why it cannot be.
 ///
 /// # The five parameters, and why they are read in one place
@@ -2064,60 +2017,162 @@ fn open_addressed(
     site: &Loaded,
     query: &str,
 ) -> Result<(store::file::BarFile, store::path::YearMonth), String> {
-    let Some(vendor) = ingest::parse_vendor(&param(query, "feed")) else {
-        return Err(format!(
-            "{:?} is not a feed this build can read",
-            param(query, "feed")
-        ));
-    };
-    // `YYYY-MM`, the same spelling every other route uses.
-    let raw_month = param(query, "month");
-    let Some(month) = raw_month
-        .split_once('-')
-        .and_then(|(y, m)| store::path::YearMonth::new(y.parse().ok()?, m.parse().ok()?).ok())
-    else {
-        return Err(format!("{raw_month:?} is not a YYYY-MM month"));
-    };
-    let timeframe = timeframe_param(query)?;
-    // THE CONTRACT IS ITS OWN PARAMETER, and absent is a real answer.
-    //
-    // A spot series has no contract segment and its path is one level
-    // shallower; an option's bars live under `symbol/contract/`. Before this,
-    // the route took only `symbol` and `bars::open` passed `None`, so the page
-    // concatenated the two — `BANKNIFTY-2026-07-28-5410000-CE` — and the store
-    // refused it at 31 bytes against a 24-byte cap. Present-but-unparseable
-    // refuses by name rather than falling back to `None`: falling back would
-    // read the UNDERLYING's month and answer with a different instrument's
-    // bars, which is the one failure worse than a 400.
-    let raw_contract = param(query, "contract");
-    let contract = if raw_contract.is_empty() {
-        None
-    } else {
-        match brutex_core::instrument::Contract::parse(&raw_contract) {
-            Some(contract) => Some(contract),
-            None => {
-                return Err(format!(
-                    "{raw_contract:?} is not a contract segment this store can \
-                     name. It is the part BELOW the symbol — `2026-07-28-5410000-CE`, \
-                     not `BANKNIFTY-2026-07-28-5410000-CE` — and it takes only \
-                     uppercase letters, digits and hyphens."
-                ));
-            }
-        }
-    };
-    let file = bars::open(
-        &site.store_root,
-        vendor,
-        &param(query, "exchange"),
-        &param(query, "segment"),
-        &param(query, "symbol"),
-        timeframe,
-        month,
-        contract,
-    )?;
-    Ok((file, month))
+    let asked = Addressed::parse(query)?;
+    let file = asked.open(site, asked.month)?;
+    Ok((file, asked.month))
 }
 
+/// A `YYYY-MM` parameter, or the first thing wrong with it.
+///
+/// One spelling of one parse, so `month` and the range's `to` cannot disagree
+/// about what a month looks like.
+fn month_param(query: &str, key: &str) -> Result<store::path::YearMonth, String> {
+    let raw = param(query, key);
+    raw.split_once('-')
+        .and_then(|(y, m)| store::path::YearMonth::new(y.parse().ok()?, m.parse().ok()?).ok())
+        .ok_or_else(|| format!("{raw:?} is not a YYYY-MM month for {key:?}"))
+}
+
+/// Everything but the month that addresses a bar file, parsed once.
+///
+/// # Why the parse is separate from the open
+///
+/// `/gaps.json` audits a RANGE of months for one series, and across a range **a
+/// missing month file is the loudest finding there is** — a backfill that never
+/// reached March 2021 leaves no file at all, which is the very thing an operator
+/// is looking for. Folding the open into the parse makes that a `400` and ends
+/// the walk at the first hole, reporting the absence as a malformed request.
+///
+/// So the parse answers once and the open is asked per month, and an absent
+/// file becomes a verdict beside its month rather than an error instead of one.
+struct Addressed {
+    /// Whose copy of the data.
+    vendor: Vendor,
+    /// The first month asked for — and the only one, on the single-month path.
+    month: store::path::YearMonth,
+    /// The rung.
+    timeframe: store::path::Timeframe,
+    /// The contract segment below the symbol, absent for a spot series.
+    contract: Option<brutex_core::instrument::Contract>,
+    /// The three path words, kept as owned text because `query` outlives
+    /// neither the request nor the borrow checker's patience.
+    exchange: String,
+    /// See [`Self::exchange`].
+    segment: String,
+    /// See [`Self::exchange`].
+    symbol: String,
+}
+
+impl Addressed {
+    /// Read every addressing parameter, or name the first one that is wrong.
+    ///
+    /// # Errors
+    ///
+    /// The refusal sentence, ready to render.
+    fn parse(query: &str) -> Result<Self, String> {
+        let Some(vendor) = ingest::parse_vendor(&param(query, "feed")) else {
+            return Err(format!(
+                "{:?} is not a feed this build can read",
+                param(query, "feed")
+            ));
+        };
+        // `YYYY-MM`, the same spelling every other route uses.
+        let month = month_param(query, "month")?;
+        let timeframe = timeframe_param(query)?;
+        // THE CONTRACT IS ITS OWN PARAMETER, and absent is a real answer.
+        //
+        // A spot series has no contract segment and its path is one level
+        // shallower; an option's bars live under `symbol/contract/`. Before this,
+        // the route took only `symbol` and `bars::open` passed `None`, so the page
+        // concatenated the two — `BANKNIFTY-2026-07-28-5410000-CE` — and the store
+        // refused it at 31 bytes against a 24-byte cap. Present-but-unparseable
+        // refuses by name rather than falling back to `None`: falling back would
+        // read the UNDERLYING's month and answer with a different instrument's
+        // bars, which is the one failure worse than a 400.
+        let raw_contract = param(query, "contract");
+        let contract = if raw_contract.is_empty() {
+            None
+        } else {
+            match brutex_core::instrument::Contract::parse(&raw_contract) {
+                Some(contract) => Some(contract),
+                None => {
+                    return Err(format!(
+                        "{raw_contract:?} is not a contract segment this store can \
+                         name. It is the part BELOW the symbol — `2026-07-28-5410000-CE`, \
+                         not `BANKNIFTY-2026-07-28-5410000-CE` — and it takes only \
+                         uppercase letters, digits and hyphens."
+                    ));
+                }
+            }
+        };
+        Ok(Self {
+            vendor,
+            month,
+            timeframe,
+            contract,
+            exchange: param(query, "exchange"),
+            segment: param(query, "segment"),
+            symbol: param(query, "symbol"),
+        })
+    }
+
+    /// Open one month of this series, or say why it could not be.
+    ///
+    /// # Errors
+    ///
+    /// `bars::open`'s own sentence — an absent file among them, which on the
+    /// ranged path is a finding rather than a failure.
+    fn open(
+        &self,
+        site: &Loaded,
+        month: store::path::YearMonth,
+    ) -> Result<store::file::BarFile, String> {
+        bars::open(
+            &site.store_root,
+            self.vendor,
+            &self.exchange,
+            &self.segment,
+            &self.symbol,
+            self.timeframe,
+            month,
+            self.contract,
+        )
+    }
+}
+
+/// One instrument-month of bars, as JSON, for the chart.
+///
+/// `?feed=<wire>&exchange=NSE&segment=INDEX&symbol=NIFTY&month=YYYY-MM`
+///
+/// # Paisa all the way out
+///
+/// Prices leave here as the `i64` paisa they are stored as. The browser divides
+/// by 100 exactly once, where a canvas needs a number to draw — `CLAUDE.md` §7
+/// says a float has no business near a price, and this endpoint keeps that true
+/// right up to the pixel.
+///
+/// # A positional read per bar, and the whole month is one pass
+///
+/// `BarFile::read_record` reaches bar N by arithmetic — the header length plus
+/// `N × record_stride`, one multiply and one add — and then reads exactly one
+/// record's bytes. The records before it are not touched, so the *work* of
+/// reaching the last bar of a month is the work of reaching the first.
+/// `store::geometry::addressing_is_arithmetic_and_flat` asserts that across a
+/// long walk: every index's offset is exactly one stride past the one before
+/// it, at index 0 and at 400,000 alike.
+///
+/// This heading read **"O(1) per bar"** and the sentence under it said "the
+/// cost of the last bar equals the cost of the first". The arithmetic is
+/// constant and that is what is named above. The `pread` under it has never
+/// been timed here, and a page cache is not a bound — so the claim is the
+/// shape, not the nanoseconds, and it says which.
+///
+/// A month is at most 375 × ~22 bars and is sent whole: the chart pans and
+/// zooms locally after that, with no request per viewport change.
+///
+/// `open_interest` is `i64::MIN` when the vendor sent none — the null sentinel
+/// §7 reserves. It becomes JSON `null` rather than a number, because zero means
+/// zero and writing 0 for "not sent" is a lie in the data.
 async fn bars_json(
     axum::extract::State(site): axum::extract::State<Loaded>,
     uri: axum::http::Uri,
@@ -2256,31 +2311,181 @@ async fn gaps_json(
         )
     };
 
-    let (file, month) = match open_addressed(&site, query) {
-        Ok(open) => open,
+    let asked = match Addressed::parse(query) {
+        Ok(asked) => asked,
         Err(why) => return refuse(why),
     };
-
-    // THE RANGE COMES FROM THE MONTH, NOT FROM THE BARS. Deriving it from the
-    // first and last stored bar is the mistake that makes this endpoint agree
-    // with itself and disagree with the store: a month whose first four
-    // trading days never landed would report a clean interior and a perfect
-    // score, because the missing days would be outside a range they defined.
-    let Ok(first_day) = pull::session::Day::new(month.year(), month.month(), 1) else {
+    // `to` IS OPTIONAL AND DEFAULTS TO `month`, so the single-month question
+    // stays a single-month question and the range is opt-in. An unparseable
+    // `to` REFUSES rather than collapsing to one month: a range that silently
+    // becomes narrower answers a different question than the one asked, and
+    // reports the months it never looked at as absent from the answer.
+    let last_month = if param(query, "to").is_empty() {
+        asked.month
+    } else {
+        match month_param(query, "to") {
+            Ok(month) => month,
+            Err(why) => return refuse(why),
+        }
+    };
+    if last_month < asked.month {
         return refuse(format!(
+            "the range runs backwards: {} is before {}",
+            last_month, asked.month
+        ));
+    }
+
+    let mut months = Vec::new();
+    let mut walked = 0_usize;
+    let mut truncated_range = false;
+    let mut cursor = asked.month;
+    loop {
+        if walked >= MAX_AUDIT_MONTHS {
+            // NEVER A SILENT `take(N)`. A ceiling that stopped quietly would
+            // report the months it never reached as no news, which is the
+            // direction that reads as health.
+            truncated_range = true;
+            break;
+        }
+        months.push(audit_one(&site, &asked, cursor));
+        walked = walked.saturating_add(1);
+        if cursor >= last_month {
+            break;
+        }
+        let Some(next) = next_month(cursor) else {
+            break;
+        };
+        cursor = next;
+    }
+
+    // THE ROLL-UP IS A SUM OF THE MONTHS, not a second computation over them. A
+    // total that could disagree with the rows below it is a total nobody can
+    // act on.
+    let expected: u64 = months.iter().map(|m| u64::from(m.expected)).sum();
+    let held: u64 = months.iter().map(|m| u64::from(m.held)).sum();
+    let lost: u64 = months.iter().map(|m| u64::from(m.lost)).sum();
+    let absent_files = months.iter().filter(|m| m.absent_file.is_some()).count();
+    let rows = months
+        .iter()
+        .map(AuditedMonth::render)
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let body = format!(
+        r#"{{"expected":{expected},"held":{held},"lost_minutes":{lost},"months":{},"months_absent":{absent_files},"truncated":{truncated_range},"month":[{rows}]}}"#,
+        months.len(),
+    );
+    (axum::http::StatusCode::OK, json(), body)
+}
+
+/// How many months one audit request will walk before it stops and says so.
+///
+/// Twenty years at the store's own granularity. The operator's store spans 121
+/// months, so this is not a limit anyone reaches by accident — it exists so a
+/// hand-typed `to=9999-12` cannot walk a hundred thousand months while holding
+/// a request open.
+const MAX_AUDIT_MONTHS: usize = 240;
+
+/// The month after this one, or `None` at the end of the representable range.
+///
+/// `YearMonth::new` is the only judge of what is representable, so December
+/// rolls by asking rather than by a bound written here that could disagree
+/// with it.
+fn next_month(month: store::path::YearMonth) -> Option<store::path::YearMonth> {
+    if month.month() >= 12 {
+        store::path::YearMonth::new(month.year().checked_add(1)?, 1).ok()
+    } else {
+        store::path::YearMonth::new(month.year(), month.month().checked_add(1)?).ok()
+    }
+}
+
+/// One month's verdict, before it is rendered.
+struct AuditedMonth {
+    /// Which month.
+    month: store::path::YearMonth,
+    /// Bars the calendar says this month owed. Zero when the file is absent —
+    /// the calendar still owed them, and [`Self::absent`] is why none are held.
+    expected: u32,
+    /// Bars the store actually held.
+    held: u32,
+    /// Minutes absent for a reason that is a real loss.
+    lost: u32,
+    /// Every absent minute, loss or not.
+    absent: u32,
+    /// Why this month could not be opened at all, if it could not be.
+    ///
+    /// **A finding, not a failure.** Across a range, a month with no file is
+    /// the loudest thing an audit can find: a backfill that never reached it
+    /// leaves exactly this. Returning it as a `400` would end the walk at the
+    /// first hole and report the absence as a malformed request.
+    absent_file: Option<String>,
+    /// Records `bars::page` could not read.
+    unreadable: usize,
+    /// Whether `MAX_GAPS` stopped this month's walk.
+    truncated: bool,
+    /// The runs, already rendered.
+    runs: String,
+}
+
+impl AuditedMonth {
+    /// This month as one JSON object.
+    fn render(&self) -> String {
+        format!(
+            r#"{{"month":{},"expected":{},"held":{},"lost_minutes":{},"absent_minutes":{},"truncated":{},"unreadable_records":{},"absent_file":{},"gaps":[{}]}}"#,
+            render::json_string(&self.month.to_string()),
+            self.expected,
+            self.held,
+            self.lost,
+            self.absent,
+            self.truncated,
+            self.unreadable,
+            self.absent_file
+                .as_ref()
+                .map_or_else(|| "null".to_owned(), |why| render::json_string(why)),
+            self.runs,
+        )
+    }
+}
+
+/// Audit one month of one series.
+///
+/// # The range comes from the MONTH, not from the bars
+///
+/// Deriving it from the first and last stored bar is the mistake that makes
+/// this agree with itself and disagree with the store: a month whose first four
+/// trading days never landed would report a clean interior and a perfect score,
+/// because the missing days would fall outside a range they themselves defined.
+fn audit_one(site: &Loaded, asked: &Addressed, month: store::path::YearMonth) -> AuditedMonth {
+    let empty = |absent_file: Option<String>| AuditedMonth {
+        month,
+        expected: 0,
+        held: 0,
+        lost: 0,
+        absent: 0,
+        absent_file,
+        unreadable: 0,
+        truncated: false,
+        runs: String::new(),
+    };
+
+    let Ok(first_day) = pull::session::Day::new(month.year(), month.month(), 1) else {
+        return empty(Some(format!(
             "{month} is a month this build's calendar cannot name a first day \
              for, so there is no range to audit against"
-        ));
+        )));
+    };
+    let file = match asked.open(site, month) {
+        Ok(file) => file,
+        Err(why) => return empty(Some(why)),
     };
     let first = i64::from(first_day.days_from_epoch());
     let last = i64::from(first_day.end_of_month().days_from_epoch());
 
     // THE WHOLE MONTH, by index. `page` reads at a fixed stride, so this is
     // `n_valid` seeks of known length and nothing scans.
-    let held = usize::try_from(file.header().n_valid).unwrap_or(usize::MAX);
-    let (rows, faults) = bars::page(&file, 0, held);
+    let n = usize::try_from(file.header().n_valid).unwrap_or(usize::MAX);
+    let (rows, faults) = bars::page(&file, 0, n);
     let stamps: Vec<i64> = rows.iter().map(|bar| bar.ts_micros).collect();
-
     let ledger = pull::gaps::classify(&stamps, first, last);
 
     // RUNS, NOT MINUTES, and the reason travels with each one. 1,176 of 1,204
@@ -2302,22 +2507,22 @@ async fn gaps_json(
         .collect::<Vec<_>>()
         .join(",");
 
-    // A FAULTY RECORD IS NOT SILENTLY SKIPPED, and here it matters more than it
-    // does on the drawing route: a bar `page` could not read is a bar this
-    // audit did not see, so it would be counted as a HOLE. Reporting the count
-    // beside the verdict is what stops "the file is damaged" from being read as
-    // "the vendor is missing minutes" — opposite faults wanting opposite fixes.
-    let body = format!(
-        r#"{{"expected":{},"held":{},"lost_minutes":{},"absent_minutes":{},"truncated":{},"unreadable_records":{},"faults":{},"gaps":[{runs}]}}"#,
-        ledger.expected,
-        ledger.held,
-        ledger.lost_minutes(),
-        ledger.absent_minutes(),
-        ledger.truncated,
-        faults.len(),
-        render::json_string(&faults.join("; ")),
-    );
-    (axum::http::StatusCode::OK, json(), body)
+    AuditedMonth {
+        month,
+        expected: ledger.expected,
+        held: ledger.held,
+        lost: ledger.lost_minutes(),
+        absent: ledger.absent_minutes(),
+        // A FAULTY RECORD IS NOT SILENTLY SKIPPED, and here it matters more
+        // than on the drawing route: a bar `page` could not read is a bar this
+        // audit did not see, so it is scored as a HOLE. Reported beside the
+        // verdict so "the file is damaged" cannot be read as "the vendor is
+        // missing minutes" — opposite faults wanting opposite fixes.
+        absent_file: None,
+        unreadable: faults.len(),
+        truncated: ledger.truncated,
+        runs,
+    }
 }
 
 /// One page of bars across a RANGE of months, answered in ONE request.
@@ -18607,6 +18812,133 @@ mod tests {
                 && holed_body.contains(&format!(r#""expected":{}"#, owed.len())),
             "the calendar owes the same either way — that is the fixed point a \
              hole is measured against: {whole_body} / {holed_body}"
+        );
+    }
+
+    /// **AN ABSENT MONTH IS A FINDING, AND THE WALK DOES NOT STOP AT IT.**
+    ///
+    /// This is the assertion the ranged form exists for. A backfill that never
+    /// reached March 2021 leaves no file at all, so across a range the absence
+    /// IS the thing an operator is looking for — and the obvious implementation
+    /// makes it a `400`, which ends the walk at the first hole and reports the
+    /// finding as a malformed request. Every month after it then goes unlooked
+    /// at and unmentioned, which reads as no news.
+    ///
+    /// Also pins the two refusals that must NOT be silent, because both fail in
+    /// the direction that looks like health: a range running backwards, and an
+    /// unparseable `to` collapsing to a single month. The second is the subtler
+    /// one — a narrowed range answers a different question and reports the
+    /// months it never opened as simply absent from the answer.
+    #[tokio::test]
+    async fn a_month_with_no_file_is_reported_and_the_range_walks_past_it() {
+        let root = store_root("gapsrange");
+        // ONE MONTH ON DISK, THREE ASKED FOR. February and March were never
+        // pulled, which is exactly the state a stopped backfill leaves.
+        let month = store::path::YearMonth::new(2024, 1).expect("a legal month");
+        let day = i64::from(
+            pull::session::Day::new(2024, 1, 1)
+                .expect("a legal day")
+                .days_from_epoch(),
+        );
+        let path = store::path::StorePath::new(store::path::PathParts {
+            vendor: Vendor::Dhan,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: store::path::Timeframe::MINUTE_1,
+            month,
+            file: store::path::FileKind::Bars,
+        })
+        .expect("a legal path");
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the id is the cross-check `open` folds; any 32 bits serve"
+        )]
+        let symbol_id = brutex_core::universe::fnv1a("NIFTY") as u32;
+        let mut file =
+            store::file::BarFile::open_or_create(&root, path, symbol_id).expect("a bar file");
+        file.append(&[store::format::Bar {
+            ts_micros: (day * 86_400 - 19_800 + 570 * 60) * 1_000_000,
+            open: 100,
+            high: 110,
+            low: 90,
+            close: 105,
+            volume: 1,
+            open_interest: i64::MIN,
+        }])
+        .expect("one bar");
+        drop(file);
+
+        let site = std::sync::Arc::new(Site::serving(&masters("gapsrange", None, None), &root));
+        let ask = |q: &str| {
+            let site = std::sync::Arc::clone(&site);
+            let uri: axum::http::Uri = format!(
+                "/gaps.json?feed=dhan&exchange=NSE&segment=INDEX&symbol=NIFTY\
+                 &timeframe=1min&month=2024-01{q}"
+            )
+            .parse()
+            .expect("a uri");
+            async move { gaps_json(axum::extract::State(site), uri).await }
+        };
+
+        let (code, _, three) = ask("&to=2024-03").await;
+        assert_eq!(code, axum::http::StatusCode::OK, "{three}");
+        assert!(
+            three.contains(r#""months":3"#) && three.contains(r#""months_absent":2"#),
+            "all three months are looked at and the two with no file are \
+             COUNTED — a walk that stopped at the first would report one: {three}"
+        );
+        assert!(
+            three.contains(r#""month":"2024-03""#),
+            "the walk reached the far end rather than ending at the hole: {three}"
+        );
+        assert!(
+            three.contains(r#""month":"2024-01","expected":"#),
+            "and the month that IS on disk still carries a real verdict: {three}"
+        );
+
+        // WITHOUT `to`, THE RANGE IS ONE MONTH. The single-month question must
+        // stay a single-month question, or every existing caller silently
+        // starts auditing a range it never asked for.
+        let (_, _, one) = ask("").await;
+        assert!(
+            one.contains(r#""months":1"#) && one.contains(r#""months_absent":0"#),
+            "an absent `to` is not a range: {one}"
+        );
+
+        // BACKWARDS REFUSES rather than answering an empty walk, which would be
+        // indistinguishable from a clean store.
+        let (back_code, _, back) = ask("&to=2023-12").await;
+        assert_eq!(back_code, axum::http::StatusCode::BAD_REQUEST, "{back}");
+        assert!(back.contains("backwards"), "and it says why: {back}");
+
+        // AND AN UNREADABLE `to` REFUSES rather than collapsing to one month.
+        // This is the failure that looks like success: eleven months would go
+        // unopened and unmentioned, and the answer would read as complete.
+        //
+        // `notamonth` rather than `2024-1`, and the difference is worth
+        // recording because it caught this test out: **`2024-1` IS January**.
+        // `month_param` splits on the hyphen and parses each side as a number,
+        // so a missing leading zero is a legal spelling — the same one
+        // `/bars.json` and the ranged bars route have always accepted. Making
+        // this route stricter than its neighbours would refuse links they
+        // still write.
+        let (typo_code, _, typo) = ask("&to=notamonth").await;
+        assert_eq!(typo_code, axum::http::StatusCode::BAD_REQUEST, "{typo}");
+        assert!(
+            typo.contains("YYYY-MM") && typo.contains("to"),
+            "naming both the shape it wanted and WHICH parameter: {typo}"
+        );
+        let (short_code, _, short) = ask("&to=2024-1").await;
+        assert_eq!(
+            short_code,
+            axum::http::StatusCode::OK,
+            "an unpadded month is the same month: {short}"
+        );
+        assert!(
+            short.contains(r#""months":1"#),
+            "2024-1 is January, so the range is one month long: {short}"
         );
     }
 
