@@ -27667,3 +27667,51 @@ ledger row's `pessimistic` is the chosen exit cell — measured at -24,605 again
 "total". Changing what is recorded is an append-only format decision and is not
 made here; every surface now names the basis it is priced on.
 
+
+### D-0383 — nothing bound a bar file's contents to its name
+
+`BarFile::validated` cross-checked `symbol_id` and `timeframe_secs`, the two
+header fields that identify a SERIES. The third coordinate — which SLICE of that
+series — is the month, it lives only in the path, and `Header` carries no field
+for it. So `2024-06.bin` renamed to `2024-07.bin` opened cleanly and served
+June's bars as July's, through `/bars.json` and through the calendar derivation
+alike. A bad `rsync --relative`, a hand-moved backfill or a restore from the
+wrong directory all produce exactly that.
+
+The evidence was already in the header and simply unread: `first_ts_micros` and
+`last_ts_micros` say when the bars are from.
+
+**A DAY OF SLACK, and it is the IST boundary rather than a fudge.** Bars are
+stamped UTC and the store's months are IST months, so 2024-06-01 09:15 IST is
+2024-05-31 03:45 UTC — the first bars of a month legitimately carry the previous
+month's UTC date, and a strict containment test would refuse every correctly
+placed file in the store. One day covers that 5.5-hour skew with room to spare
+and is nowhere near wide enough to admit the failure being caught: a file
+renamed into the wrong month is off by at least twenty-eight days.
+
+`days_from_civil` is written out here rather than pulled in because `store`
+depends on `core` alone (§5) and neither carries calendar arithmetic;
+`indicators` does, and depending on it would add an arrow gate 9 exists to keep
+out.
+
+**MEASURED, both halves, on a copy of the operator's own store.** All 2,707 bar
+files were copied to an isolated directory and opened through the real path:
+`1day` 81 of 81 via `cli verify`, then `60min`, `15min`, `5min` and `1min` each
+81 of 81 months through `audit-range` — no refusal anywhere, so the check admits
+every file actually on disk. Then June's bytes were copied over
+`zerodha/.../60min/2024-07.bin` and the same command reported **2 of 3 months and
+280 bars** where the untampered store reports 3 of 3 and 434. Before this it
+reported 3 of 3 and counted June's bars twice.
+
+`n_valid == 0` is skipped rather than refused: a freshly initialised month has
+no timestamps to judge. A stem that is not `yyyy-mm` is declined rather than
+refused, which is what keeps the ledger files — `runs.bin`, `frontier.bin`,
+`trades.bin` — and the test harness's own paths working.
+
+The three checks moved into `cross_check` together, because adding the third
+took `validated` to 110 lines against a hundred-line cap and because they are
+one thing: the identity cross-check, where a fourth coordinate should land.
+
+Workspace 2,648 tests pass. `fmt --check` and
+`clippy --workspace --all-targets -D warnings` clean.
+

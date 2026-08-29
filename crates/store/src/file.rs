@@ -384,6 +384,30 @@ pub enum StoreError {
         /// Seconds per bar the path names.
         asked: u32,
     },
+    /// The bars inside do not belong to the month the path names.
+    ///
+    /// # Nothing bound a file's CONTENTS to its NAME
+    ///
+    /// [`Self::SymbolMismatch`] and [`Self::TimeframeMismatch`] cross-check the
+    /// two header fields that identify a series, and the third coordinate — the
+    /// MONTH — had no check at all. `Header` carries no month, so renaming
+    /// `2024-06.bin` to `2024-07.bin` produced a file that opened cleanly and
+    /// reported June's bars as July's, through `/bars.json` and through the
+    /// calendar derivation alike. A bad `rsync --relative`, a hand-moved
+    /// backfill or a restore from the wrong directory all do exactly that.
+    ///
+    /// The evidence was already in the header and simply unread:
+    /// `first_ts_micros` and `last_ts_micros` say when these bars are from.
+    MonthMismatch {
+        /// The bar file.
+        path: PathBuf,
+        /// The first and last timestamps the header carries.
+        ///
+        /// One field rather than two so the `Display` arm fits on a single
+        /// line: that impl is one arm per variant against a hundred-line cap,
+        /// and a five-line destructure took it over.
+        span: (i64, i64),
+    },
     /// A record index at or past the commit counter.
     ///
     /// Bytes past `n_valid` are not "empty", they are **not there**: they may
@@ -452,6 +476,25 @@ fn write_impossible_count(
         "batch record {at} has an impossible count: volume {volume}, open \
          interest {open_interest}. A count is never negative — zero means \
          zero, and the only legal negative is the open-interest null sentinel"
+    )
+}
+
+/// [`StoreError::MonthMismatch`]'s sentence, lifted out.
+///
+/// The `Display` impl is a match arm per variant against a hundred-line cap, so
+/// a variant whose message runs to four lines has to say them somewhere else.
+fn month_mismatch_message(
+    f: &mut fmt::Formatter<'_>,
+    path: &Path,
+    span: (i64, i64),
+) -> fmt::Result {
+    let (first, last) = span;
+    write!(
+        f,
+        "{} holds bars stamped {first}..={last}, which is \
+         not the month the path names — the file has been renamed or copied \
+         into the wrong place",
+        path.display()
     )
 }
 
@@ -540,6 +583,7 @@ impl fmt::Display for StoreError {
                 "{} holds {stored}-second bars, not {asked}",
                 path.display()
             ),
+            Self::MonthMismatch { path, span } => month_mismatch_message(f, path, *span),
             Self::NotCommitted { index, n_valid } => {
                 write!(f, "record {index} is past the {n_valid} committed")
             }
@@ -680,6 +724,123 @@ const fn table_of(kind: FileKind) -> &'static [Layout] {
         FileKind::Greeks => GREEKS_TABLE,
         _ => Layout::KNOWN,
     }
+}
+
+/// Days since 1970-01-01 for a civil date, by Howard Hinnant's `days_from_civil`.
+///
+/// # Why this is written out rather than pulled in
+///
+/// `store` depends on `core` alone (§5), and neither carries any calendar
+/// arithmetic — `indicators` does, and depending on it would add an arrow the
+/// crate graph does not have and gate 9 exists to keep out. This is the whole
+/// of what is needed: the shift-the-year-to-March algorithm, exact for every
+/// date in the proleptic Gregorian calendar, no table and no allocation.
+const fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// Micros since the epoch at midnight UTC on the first of `(year, month)`, and
+/// again on the first of the month after.
+const fn month_bounds_micros(year: i64, month: i64) -> (i64, i64) {
+    const DAY: i64 = 86_400 * 1_000_000;
+    let (ny, nm) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+    (
+        days_from_civil(year, month, 1) * DAY,
+        days_from_civil(ny, nm, 1) * DAY,
+    )
+}
+
+/// The `yyyy-mm` a bar path names, or `None` when the stem is not one.
+///
+/// `None` is not a failure: the test harness opens files at paths it composes
+/// itself, and a stem this cannot read is a file the month check declines to
+/// judge rather than one it refuses.
+fn month_of_path(path: &Path) -> Option<(i64, i64)> {
+    let stem = path.file_stem()?.to_str()?;
+    let (year, month) = stem.split_once('-')?;
+    if year.len() != 4 || month.len() != 2 {
+        return None;
+    }
+    Some((year.parse().ok()?, month.parse().ok()?))
+}
+
+/// Every check that asks "is this file the one the caller asked for".
+///
+/// # All three coordinates, in one place
+///
+/// A series is identified by symbol, bar length and MONTH. The first two are
+/// header fields and were checked inline; the third lives only in the path and
+/// was checked nowhere, so a file moved or renamed between months opened
+/// cleanly and served its bars under the new name.
+///
+/// Lifted out of `validated` because adding the third check took that function
+/// to 110 lines against a hundred-line cap, and because these three belong
+/// together: they are the identity cross-check, and the next coordinate added
+/// should land here rather than as a fourth `if` somewhere in a long function.
+fn cross_check(
+    header: &Header,
+    bars_path: &Path,
+    symbol_id: u32,
+    timeframe_secs: u32,
+) -> Result<(), StoreError> {
+    if header.symbol_id != symbol_id {
+        return Err(StoreError::SymbolMismatch {
+            path: bars_path.to_path_buf(),
+            stored: header.symbol_id,
+            asked: symbol_id,
+        });
+    }
+    if header.timeframe_secs != timeframe_secs {
+        return Err(StoreError::TimeframeMismatch {
+            path: bars_path.to_path_buf(),
+            stored: header.timeframe_secs,
+            asked: timeframe_secs,
+        });
+    }
+    // `n_valid == 0` IS SKIPPED RATHER THAN REFUSED. A freshly initialised month
+    // has no timestamps to judge and `first_ts_micros` is whatever `initialise`
+    // left there, so judging it would refuse every empty month in the store.
+    if header.n_valid > 0 && !month_agrees(bars_path, header.first_ts_micros, header.last_ts_micros)
+    {
+        return Err(StoreError::MonthMismatch {
+            span: (header.first_ts_micros, header.last_ts_micros),
+            path: bars_path.to_path_buf(),
+        });
+    }
+    Ok(())
+}
+
+/// Whether the header's timestamps sit inside the month the path names.
+///
+/// # A DAY OF SLACK, and it is the IST boundary rather than a fudge
+///
+/// Bars are stamped in UTC and the store's months are IST months: 2024-06-01
+/// 09:15 IST is 2024-05-31 03:45 UTC, so the first bars of a month legitimately
+/// carry the previous month's UTC date. A strict comparison would refuse every
+/// correctly-placed file in the store.
+///
+/// One day covers that 5.5-hour skew with room to spare, and it is nowhere near
+/// wide enough to admit the failure being caught: a file renamed into the wrong
+/// month is off by at least twenty-eight days.
+fn month_agrees(path: &Path, first_ts_micros: i64, last_ts_micros: i64) -> bool {
+    const SLACK: i64 = 86_400 * 1_000_000;
+    let Some((year, month)) = month_of_path(path) else {
+        return true;
+    };
+    let (from, to) = month_bounds_micros(year, month);
+    let lo = from.saturating_sub(SLACK);
+    let hi = to.saturating_add(SLACK);
+    first_ts_micros >= lo && last_ts_micros < hi
 }
 
 impl BarFile {
@@ -1101,20 +1262,7 @@ impl BarFile {
             note_tail_past_the_commit(&bars_path, len, header.n_valid, discarded);
         }
 
-        if header.symbol_id != symbol_id {
-            return Err(StoreError::SymbolMismatch {
-                path: bars_path,
-                stored: header.symbol_id,
-                asked: symbol_id,
-            });
-        }
-        if header.timeframe_secs != timeframe_secs {
-            return Err(StoreError::TimeframeMismatch {
-                path: bars_path,
-                stored: header.timeframe_secs,
-                asked: timeframe_secs,
-            });
-        }
+        cross_check(&header, &bars_path, symbol_id, timeframe_secs)?;
         // THE SIDECAR IS OPENED ONLY IF THE HEADER SAYS THERE IS ONE.
         //
         // Asked of the FLAG and never of the filesystem: a `.crc` that exists
@@ -2135,10 +2283,76 @@ mod tests {
         already_stored, bytes_past_the_counter, classify, first_at_or_after, initialise, len_u64,
         lock_fault, open_rw, read_fully, write_fully,
     };
+    use super::{days_from_civil, month_agrees};
     use crate::format::OI_NULL;
     use std::fs::TryLockError;
     use std::io::{self, ErrorKind};
     use std::path::{Path, PathBuf};
+
+    /// The civil-date helper agrees with dates whose epoch day is known.
+    ///
+    /// Written out here because `store` cannot reach `indicators`, so nothing
+    /// else in this crate can corroborate it. Four anchors, each independently
+    /// checkable: the epoch itself, a leap day, a century that is NOT a leap
+    /// year, and one that is.
+    #[test]
+    fn the_civil_date_helper_lands_on_days_that_can_be_checked_by_hand() {
+        assert_eq!(days_from_civil(1970, 1, 1), 0, "the epoch is day zero");
+        assert_eq!(days_from_civil(1969, 12, 31), -1, "the day before is -1");
+        assert_eq!(days_from_civil(2000, 3, 1), 11_017, "2000 IS a leap year");
+        assert_eq!(days_from_civil(2024, 2, 29), 19_782, "a leap day exists");
+        // 1900 is divisible by 4 and by 100 and NOT by 400, so it is not a leap
+        // year — the case a naive `% 4` gets wrong.
+        assert_eq!(
+            days_from_civil(1900, 3, 1) - days_from_civil(1900, 2, 28),
+            1,
+            "1900 has no 29th of February"
+        );
+    }
+
+    /// A file renamed into another month is caught, and a correctly-placed one
+    /// at the IST boundary is not.
+    ///
+    /// # Both halves matter
+    ///
+    /// The refusal is the point, but the acceptance is what makes the check
+    /// shippable: bars are stamped UTC and the store's months are IST months,
+    /// so 2024-06-01 09:15 IST is 2024-05-31 03:45 UTC and the first bar of
+    /// every month legitimately carries the PREVIOUS month's UTC date. A strict
+    /// containment test would refuse the whole store.
+    #[test]
+    fn a_month_a_file_was_renamed_into_is_refused_and_the_ist_boundary_is_not() {
+        const DAY: i64 = 86_400 * 1_000_000;
+        let june = days_from_civil(2024, 6, 1) * DAY;
+
+        // 2024-06-01 09:15 IST == 2024-05-31 03:45 UTC, five and a half hours
+        // BEFORE the month starts in UTC. This is what the store actually holds.
+        let first = june - (5 * 3_600 + 30 * 60) * 1_000_000 + (9 * 3_600 + 15 * 60) * 1_000_000;
+        let last = june + 29 * DAY;
+        assert!(
+            month_agrees(Path::new("/s/2024-06.bin"), first, last),
+            "a correctly-placed June file opens, IST skew and all"
+        );
+
+        // The same bytes under July's name: off by a month, which is what a bad
+        // `rsync --relative` or a hand-moved backfill produces.
+        assert!(
+            !month_agrees(Path::new("/s/2024-07.bin"), first, last),
+            "JUNE'S BARS UNDER JULY'S NAME MUST BE REFUSED — this opened cleanly \
+             and served June as July"
+        );
+        assert!(
+            !month_agrees(Path::new("/s/2024-05.bin"), first, last),
+            "and the month before is refused too, not only the month after"
+        );
+
+        // A stem this cannot read is declined rather than refused: the harness
+        // composes its own paths and a month check must not brick them.
+        assert!(
+            month_agrees(Path::new("/s/scratch.bin"), first, last),
+            "an unparseable stem is not judged"
+        );
+    }
 
     /// What the fake host should do on the next call.
     #[derive(Debug, Clone, Copy)]
