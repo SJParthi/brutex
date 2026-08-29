@@ -2902,3 +2902,74 @@ a downloader.
 | MR-37 | **And a hole INSIDE the span still refuses.** Narrowing the question must not weaken it: excusing an interior gap would let the minute pass run over a day pass that genuinely failed, which is what the gate exists to prevent. An instrument holding nothing at all keeps every month owed, because that is a day pass that has not run | the same test asserts both arms | ✓ |
 | MR-38 | **The fetch is chunked to the vendor's cap, not to the store's file boundary.** `split_window` clamped every chunk to a month end because `ingest::one` refused a cross-month batch, which turned a 2,460-day window into 81 requests where Zerodha's documented 2,000-day `day` cap needs 2 — measured at 0.35 s per instrument-month against a 0.33 s ceiling, 94 minutes against 2.3. `months_in` splits a decoded batch into one run per month and `one` writes each to its own file | `pull::session::a_chunk_fills_the_cap_and_the_chunks_tile_the_window` · `the_documented_caps_turn_a_seven_year_window_into_a_handful_of_requests` | ✓ |
 | MR-39 | **And the bars reach the right month.** A splitter that filed July's bars under August would be worse than the refusal it replaced — the requests saved and the store silently wrong until a backtest read the wrong window. The split is over DECODED bars, so the month comes from the same `TimestampEncoding` dispatch that `land` uses, never a second implementation of it | `pull::broker::a_batch_spanning_two_months_lands_in_both_and_the_bars_go_to_the_right_one` | ✓ |
+
+## Every rule floor is measured, and the one that was blind set itself to zero — D-0378, D-0379
+
+`Rules::operator()` shipped four constants that decided which combinations an
+operator is shown. These rows are about their replacements, and about three
+adjacent defects that each switched a rule off without saying so.
+
+| ID | Invariant | Proof | ✓ |
+|---|---|---|---|
+| RF-01 | **A series and its mirror derive the SAME floor.** The mirror is the same market seen from the other side, every forward delta negated, so a null that gates both directions cannot differ between them. Under the long-only reading they were complements and could not both be right — on a falling span it returned near zero, and `min_win_rate_bp`, `min_assurance_bp` and `min_weakest_bp` all became floors every combination clears | `cli::derived_floor_tests::the_base_rate_is_the_same_for_a_series_and_its_mirror` — fails on the old code with left 10000, right 0 | ✓ |
+| RF-02 | **A flat forward window is a win for NEITHER side.** A window that closed exactly where it opened pays for no position in either direction, and awarding it to one would make the two rates sum past 10,000 and stop them being complementary. Measured: on `ADANIENT` one-minute bars at a one-bar horizon, 6.98% of decided windows are flat and reading them as "not up" moves the rate 698 bp — across the coin flip, 4592 to 5290 | the `else if delta < 0` arm; `indicators/src/session.rs` records the identical defect it had to fix | ✓ |
+| RF-03 | **A reward-to-risk floor never rounds to zero.** `admits` reads `min_rr_bp == 0 \|\| …`, so zero DROPS the rule. The guard refused rates at or above 100% because they "would divide by a break-even of zero", but the quotient hit zero ninety-nine basis points earlier and every rate in `9901..=9999` disabled the rule silently | `cli::derived_floor_tests::a_break_even_floor_never_switches_its_own_rule_off`, asserted across all 9,999 inputs rather than at three edges — the defect was a band, not a boundary | ✓ |
+| RF-04 | **At a coin flip the arithmetic reproduces the constant it replaced, exactly.** 125, and a lower win rate must demand a LARGER payoff. A direction assertion rather than a value one, because the first draft was a hundred times too large and every derived floor exceeded the guard and fell back to the constant it was written to replace | same test's final two assertions | ✓ |
+| RF-05 | **An unusable knob is not a stated floor.** `operator` parsed and fell back; `derived` asked whether the variable was PRESENT, and `knobs::var` returns `Some("")` for one exported and empty. A bare `BRUTEX_MIN_WIN_RATE_BP=` in a shell profile handed back the coin flip with no message and no refusal — §4's banned fallback. Both callers read one `Rules::stated` | `cli::derived_floor_tests::an_unusable_knob_is_not_a_stated_floor`, driving five unusable spellings and one usable one | ✓ |
+| RF-06 | **A knob is APPENDED to `policy_of`, never inserted, and the position is asserted by index.** The length check cannot see an insert — sixteen is sixteen wherever the term sits — and an insert shifts every term below it, silently re-keying every run identity ever recorded | `every_knob_that_moves_the_answer_moves_the_identity` pins `start[15]`; `every_operator_rule_moves_the_identity` pins `start[5]`. The second caught the real one, failing with `left: 1` — `u64::from(validate)` standing where the ceiling belongs | ✓ |
+
+**The four floors, and what each replaced:** `min_win_rate_bp` was 5,000 (a coin
+flip), `min_rr_bp` 125 chosen separately, `min_weakest_bp` **0 — no per-period
+floor at all**, `min_ret_over_dd_bp` 500. Each still falls back to its stated
+default when the benchmark is undefined, and each reaches the run identity, so a
+derived-floor run and a stated-floor run are different runs and are recorded as
+such.
+
+**Not claimed:** that the derived floors are *harder*. `breakeven_rr_bp` is
+looser than 125 for every rate above a coin flip — that is what the arithmetic
+says, and it is applied to `min_win / -worst_trade`, which is smaller than the
+average ratio the formula assumes, so the gate errs strict in a way the number
+does not show.
+
+## The side reaches the operator — D-0380, D-0382
+
+The engine's pricing layer is symmetric about direction everywhere — `fills_at`,
+`BarMoves::of`, `level_price` and `peak` each resolve both cases with a comment
+explaining why. Its selection and reporting layers were not. These rows are about
+closing that.
+
+| ID | Invariant | Proof | ✓ |
+|---|---|---|---|
+| SD-01 | **A setup and its mirror are worth the same payoff.** `payoff_bp` took the positive moves as the wins always, so for a short it returned the exact reciprocal and `ByPayoff` ordered shorts by inverse merit. `Lens::Payoff` is what `audit_range_inner` selects | `runner::outcome::tests::negating_every_move_leaves_the_payoff_where_it_was` | ✓ |
+| SD-02 | **The ideal short is worth the same as the ideal long.** A combination whose forward move is ALWAYS down has `wins == 0` and scored ZERO — the minimum — so `keep`, a hard cut, discarded the best short in the run before it met an exit grid | `runner::outcome::tests::the_perfect_short_and_the_perfect_long_are_worth_the_same` | ✓ |
+| SD-03 | **The side travels with the row and is never re-derived from the mean's sign.** Two of the three surfaces an operator selects from carry no mean at all, so there it is not a copy — it is unrecoverable. The test row is written SHORT with a POSITIVE mean, so anything re-deriving it answers long | `api::frontierjson::tests::a_ranked_row_carries_its_verdict_and_the_rules_it_was_judged_against` | ✓ |
+| SD-04 | **The column shows the side the cell was PRICED with, not a second reading of the evidence.** `Screened::side` takes the same value handed to `grid::evaluate`, so the column cannot describe a different trade from the one measured | `Screened { side: direction_of(side), .. }`, four lines below the `evaluate` call | ✓ |
+
+**Where the side now appears:** `frontier::Row::direction` (one byte, taken from
+the reserve), `/frontier.json`'s `"direction"` key, the SCREENED table's second
+column, and `traded_line`. `costs::fill::Direction::as_str` — documented *"for a
+refusal or a breakdown line"* and until now without a production caller — is what
+names it.
+
+**Still open, and stated because §3 rule 6 asks:** `walk_forward` takes ONE
+direction, from the top row of a rank over the whole span including the test
+folds, and applies it to every candidate in every fold. That is look-ahead on the
+side, and it means PBO is computed on a ranking in which every short-edged
+candidate was priced as a long. Not fixed here.
+
+## A verdict is computed from the rules the run applied — D-0382
+
+| ID | Invariant | Proof | ✓ |
+|---|---|---|---|
+| RJ-01 | **The rules on the wire are the run's own.** `api::frontierjson` read `Rules::operator()` at REQUEST time while the run swept at `Rules::derived` or `Rules::elite`. A row the run REFUSED rendered PASS and a row it ADMITTED rendered FAIL, with the wrong threshold printed beside it | reverting the handler to `Rules::operator()` fails the test with `"min_win_rate_bp":5000,"min_rr_bp":125` for a row written under elite's 8000/300 | ✓ |
+| RJ-02 | **A version this build does not write is REFUSED, never widened.** A v3 row read with zeroes in the new fields carries all-zero floors, and `admits` treats zero as *rule off* for `min_rr_bp` and `max_mae_ppm` — so every priced row would pass. The refusal names the remedy: the file is regenerable | `frontier::check_header`'s version arm, and its own message | ✓ |
+| RJ-03 | **Reading creates nothing.** `/engine/top.json` called the creating openers, so asking it a question MADE `results/`, `runs.bin` and `frontier.bin` — and it then read the files it had just made and reported no run was recorded | `results::tests::opening_to_read_creates_neither_the_file_nor_its_directory`, asserted on the filesystem after the call rather than on the refusal text | ✓ |
+| RJ-04 | **An absent frontier is not a refusal at `top_at`.** A run with no frontier file recorded no frontier, which is a different fact from "this run found nothing" and is the one the page already states. Every other refusal — wrong magic, wrong version, a ragged tail — still refuses, because those are about a file that EXISTS and is not this one | `cli::tests::a_run_with_no_frontier_says_so_rather_than_looking_empty` | ✓ |
+
+## Both runs are measured, and the grains reach one hour — D-0384
+
+| ID | Invariant | Proof | ✓ |
+|---|---|---|---|
+| ST-01 | **Both streaks are measured and each one ends the other.** `max_losing_streak` shipped alone, so a reader learned what to sit through and never what to sit through it for. The test sequence puts the four-win run AFTER the three-loss run, so a counter the losses did not clear would read seven | `runner::grid::tests::both_streaks_are_measured_and_each_one_ends_the_other` | ✓ |
+| ST-02 | **A flat round trip breaks the winning run and extends the losing one.** `pess > 0` is the only win `tally_trade` knows. That is the rule `max_losing_streak` already carried; it is stated now because two counters side by side look like they partition and these do not | same test's second half | ✓ |
+| ST-03 | **The hour grain SEPARATES what every coarser grain joins.** A combination whose whole edge sits between 09:15 and 10:15 is positive in all six of year, half, quarter, month, week and day, and `weakest_bp` — their minimum — reports it steady. That is the one-regime-carrying-four shape at a resolution the ladder could not resolve | `cli::stability::tests::the_hour_grain_separates_two_times_of_one_trading_day`, on two stamps five hours apart in one IST session | ✓ |

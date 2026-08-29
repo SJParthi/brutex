@@ -116,7 +116,7 @@ const MAGIC: [u8; 8] = *b"BRUTEXLV";
 /// version this build does not know is DELETED rather than decoded — see
 /// [`Live::open`] — which is safe here and would be a §3 rule 8 violation
 /// anywhere else in this directory.
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 /// Magic, version, and four bytes that stay zero. The same sixteen the other
 /// three stores use, so one reader can identify any file in this directory.
@@ -563,6 +563,8 @@ mod tests {
         Row {
             identity,
             rank,
+            direction: costs::fill::Direction::Long,
+            rules: crate::Rules::elite(400, 25),
             mask_words: [1, 0, 0, 0, 0, 0],
             hits: 250,
             n: 177,

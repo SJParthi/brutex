@@ -2790,9 +2790,17 @@ const fn direction_of(side: Side) -> Direction {
 /// and until it was printed the report gave the reader no way to learn which.
 fn traded_line(scored: &runner::rank::Scored) -> String {
     let mut out = String::with_capacity(256);
+    // THE SIDE IS THE FIRST THING, because without it none of the rest is
+    // actionable. This function exists on the stated ground that *"a number
+    // whose subject is unstated is a number that cannot be checked"*, and it
+    // printed hits, n, mean and t with no word about which way the trade goes.
+    // `side_of_evidence` had already decided it two calls up.
     let _ = writeln!(
         out,
-        "\nTRADED COMBINATION\n  {}\n  hits {} · n {} · mean {} paisa · t {:.2}",
+        "\nTRADED COMBINATION\n  {} — {}\n  hits {} · n {} · mean {} paisa · t {:.2}",
+        direction_of(side_of_evidence(scored))
+            .as_str()
+            .to_uppercase(),
         runner::report::condition_names(&scored.mask).join(" · "),
         scored.hits,
         scored.edge.n,
@@ -4287,12 +4295,27 @@ pub fn top_at(root: &std::path::Path, feed: Option<&str>, underlying: Option<&st
         Err(why) => return format!("refused: {why}\n"),
     };
 
-    let mut store = match crate::frontier::Frontier::open(root) {
-        Ok(store) => store,
-        Err(why) => return format!("refused: {why}\n"),
-    };
-    let (found, damaged) = match store.of_run(&rows.identity) {
-        Ok(pair) => pair,
+    // OPEN_READ, and an ABSENT file is not a refusal here.
+    //
+    // This took the creating opener, so `/engine/top.json` made
+    // `results/frontier.bin` as a side effect of being asked a question -- and
+    // then read the file it had just made and reported the run kept no frontier.
+    // The answer was right by accident.
+    //
+    // With `open_read` the absence surfaces as a refusal, and folding it into
+    // the empty case is not papering over it: a run with no frontier file
+    // recorded no frontier, which is the exact fact the message below states,
+    // and it is a different fact from "this run found nothing". Every other
+    // refusal -- wrong magic, wrong version, a ragged tail -- still refuses,
+    // because those are about a file that EXISTS and is not this one.
+    // The shape `of_run` returns for a run with no rows and nothing damaged.
+    let empty = (Vec::new(), None);
+    let (found, damaged) = match crate::frontier::Frontier::open_read(root) {
+        Ok(mut store) => match store.of_run(&rows.identity) {
+            Ok(pair) => pair,
+            Err(why) => return format!("refused: {why}\n"),
+        },
+        Err(why) if why.contains("does not exist yet") => empty,
         Err(why) => return format!("refused: {why}\n"),
     };
 
@@ -4374,7 +4397,11 @@ fn newest_complete(
     feed: Option<&str>,
     underlying: Option<&str>,
 ) -> Result<Option<crate::results::Record>, crate::results::Refusal> {
-    let mut store = crate::results::Results::open(root)?;
+    // OPEN_READ, BECAUSE THIS IS A GET. `Results::open` calls `create_dir_all`
+    // and opens with `.create(true)`, so asking `/engine/top.json` a question
+    // MADE the file that answers it -- and an empty store then reported "no
+    // runs" having just been handed the file that says so.
+    let mut store = crate::results::Results::open_read(root)?;
     let count = store.len()?;
     let mut best: Option<crate::results::Record> = None;
     for index in 0..count {
@@ -4705,7 +4732,7 @@ fn traded_preamble(
 /// see it from the flag. These three are the opposite case — they encode a
 /// TRADING POLICY the engine has no way to derive, so they must be stated, and
 /// a default would be the engine inventing a risk appetite it cannot know.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rules {
     /// No single trade may run more than this against entry, in ppm.
     ///
@@ -6042,6 +6069,15 @@ fn policy_of(
 
 /// One screened combination, priced in full and judged.
 struct Screened<'a> {
+    /// Which way this combination is traded.
+    ///
+    /// The loop that builds these rows called `side_of_evidence` and used the
+    /// answer to price the cell, and then had nowhere to put it — so every
+    /// figure in the rendered table described a trade whose direction the
+    /// reader could not recover. Kept now, and printed as the column right
+    /// after the rank, because it is the one fact the rest is meaningless
+    /// without.
+    side: Direction,
     /// The combination this row measured, kept so the chosen variant can be
     /// re-walked AFTER the sort rather than during the screen.
     ///
@@ -7084,6 +7120,11 @@ fn screen(
             }
             Some(Screened {
                 rank: rank.saturating_add(1),
+                // THE SIDE THE CELL WAS PRICED WITH, not a second reading of
+                // the evidence. `side` is the value handed to `grid::evaluate`
+                // four lines up, so the column cannot describe a different
+                // trade from the one measured.
+                side: direction_of(side),
                 tightest: g.tightest_containment().copied(),
                 admitted: within.is_some(),
                 names: runner::report::condition_names(&scored.mask).join(" · "),
@@ -7137,8 +7178,11 @@ fn screen(
     let mut out = rules_banner(rules, passed, rows.len());
     let _ = writeln!(
         out,
-        "  {:<5}{:>8}{:>6}{:>10}{:>11}{:>6}{:>13}{:>13}{:>6}  conditions",
-        "rank", "trades", "win%", "worstMAE", "TIGHTEST", "PF", "net", "exit", "rule"
+        // SIDE IS THE SECOND COLUMN, before any measurement. Every figure in
+        // this table is unactionable without it, and `struct Screened`
+        // computed the side and had no field to keep it in.
+        "  {:<5}{:>7}{:>8}{:>6}{:>10}{:>11}{:>6}{:>13}{:>13}{:>6}  conditions",
+        "rank", "side", "trades", "win%", "worstMAE", "TIGHTEST", "PF", "net", "exit", "rule"
     );
     for row in rows.iter().take(rules.top) {
         let pf = row.cell.profit_factor_bp();
@@ -7147,8 +7191,9 @@ fn screen(
         let _ = row.cell.reward_to_risk_bp();
         let _ = writeln!(
             out,
-            "  {:<5}{:>8}{:>6}{:>10}{:>11}{:>6}{:>13}{:>13}{:>6}  {}",
+            "  {:<5}{:>7}{:>8}{:>6}{:>10}{:>11}{:>6}{:>13}{:>13}{:>6}  {}",
             row.rank,
+            row.side.as_str().to_uppercase(),
             row.cell.trades,
             format!("{}%", row.cell.win_rate_bp() / 100),
             ppm_as_percent(row.cell.worst_mae),
@@ -7212,7 +7257,7 @@ fn rules_banner(rules: Rules, passed: usize, considered: usize) -> String {
          4. at least {} round trips, and the 95% LOWER BOUND on the win rate must \
          still reach {}\n    \
          5. at least {} of periods must close POSITIVE at EVERY grain -- year, \
-         half, quarter, month, week, day\n    \
+         half, quarter, month, week, day and HOUR\n    \
          6. report the top {}\n\n  \
          {passed} of {} priced combinations satisfy every rule.{}\n",
         ppm_as_percent(rules.max_mae_ppm),
@@ -9784,7 +9829,11 @@ fn record_frontier(
     root: &std::path::Path,
     id: &runner::identity::RunId,
     by_evidence: &[&runner::rank::Scored],
-    top: usize,
+    // THE WHOLE RULE SET, not just `top`. `top` is one of its eight fields, and
+    // the other seven are what `api::frontierjson` was missing when it judged
+    // these rows against `Rules::operator()` instead of against the run that
+    // wrote them. See `frontier::Row::rules`.
+    rules: Rules,
     // THE CELL EACH ROW WAS PRICED WITH, keyed by mask words.
     //
     // A row is ranked by the SWEEP and priced by the SCREEN, and those are two
@@ -9795,6 +9844,7 @@ fn record_frontier(
     // it lost nothing".
     priced: &std::collections::HashMap<[u64; 6], grid::Cell>,
 ) -> String {
+    let top = rules.top;
     let kept = by_evidence.len().min(top);
     let rows: Vec<frontier::Row> = by_evidence
         .iter()
@@ -9807,7 +9857,13 @@ fn record_frontier(
             // truncated to a wrong rank, and the count below says how many
             // landed.
             u16::try_from(at.saturating_add(1)).ok().map(|rank| {
-                frontier::Row::of(id.bytes(), rank, scored, priced.get(&scored.mask.words()))
+                frontier::Row::of(
+                    id.bytes(),
+                    rank,
+                    scored,
+                    priced.get(&scored.mask.words()),
+                    rules,
+                )
             })
         })
         .collect();
@@ -10038,9 +10094,10 @@ fn live_view(
     id: Option<&runner::identity::RunId>,
     by_evidence: &[&runner::rank::Scored],
     sweep: &engine::Sweep,
+    rules: crate::Rules,
 ) -> (Option<crate::live::Live>, String) {
     match (recording, id) {
-        (Some(into), Some(run_id)) => publish_ranked(into.root, run_id, by_evidence, sweep),
+        (Some(into), Some(run_id)) => publish_ranked(into.root, run_id, by_evidence, sweep, rules),
         _ => (None, String::new()),
     }
 }
@@ -10078,6 +10135,7 @@ fn publish_ranked(
     id: &runner::identity::RunId,
     by_evidence: &[&runner::rank::Scored],
     sweep: &engine::Sweep,
+    rules: crate::Rules,
 ) -> (Option<crate::live::Live>, String) {
     let identity = id.bytes();
     let rows: Vec<crate::frontier::Row> = by_evidence
@@ -10086,7 +10144,7 @@ fn publish_ranked(
         .enumerate()
         .map(|(nth, scored)| {
             let rank = u16::try_from(nth.saturating_add(1)).unwrap_or(u16::MAX);
-            crate::frontier::Row::of(identity, rank, scored, None)
+            crate::frontier::Row::of(identity, rank, scored, None, rules)
         })
         .collect();
 
@@ -10643,7 +10701,7 @@ fn audit_bars(
     // THE LIVE VIEW OPENS HERE, before the exit grid spends 87.6% of the run.
     // See `publish_ranked`: the ranking is finished and the grid has not
     // started, so this is the earliest moment a real answer exists.
-    let (live, live_note) = live_view(recording.as_ref(), id, &by_evidence, &outcome.sweep);
+    let (live, live_note) = live_view(recording.as_ref(), id, &by_evidence, &outcome.sweep, rules);
     out.push_str(&live_note);
     // THE SCREEN, before the single-combination report below. 0.20% is 20
     // basis points -- about fifty points on a 25,000 index -- and is a stated
@@ -10813,7 +10871,7 @@ fn audit_bars(
         min_hits,
         mask_words: first.mask.words(),
         by_evidence: &by_evidence,
-        top: rules.top,
+        rules,
         priced: &priced,
         taken: &taken,
         candles: &trade_bars,
@@ -11076,7 +11134,8 @@ struct Recorded<'a> {
     min_hits: u64,
     mask_words: [u64; 6],
     by_evidence: &'a [&'a runner::rank::Scored],
-    top: usize,
+    /// The rules this run judged by, which travel onto every frontier row.
+    rules: Rules,
     priced: &'a std::collections::HashMap<[u64; 6], grid::Cell>,
     taken: &'a runner::trade::Trades,
     /// THE SERIES THE TRADE INDICES INDEX INTO, and it is `trade_bars` rather
@@ -11122,7 +11181,7 @@ fn record_all(
         into.root,
         run_id,
         what.by_evidence,
-        what.top,
+        what.rules,
         what.priced,
     ));
     out.push_str(&record_trades(into.root, run_id, what.taken, what.candles));
@@ -12044,6 +12103,17 @@ mod tests {
         const BYTES_PER_CANDIDATE: usize = 146;
         /// What one core can be assumed to back, on any machine.
         const MAX_BYTES_PER_CORE: usize = 2 * 1024 * 1024 * 1024;
+        // THE KNOB GUARD, BECAUSE THIS READS A KNOB. `derived_ceiling` divides
+        // by `SWEEPS_SHARING_THIS_MACHINE`, which `knobs::var` answers -- so a
+        // sibling test calling `knobs::set` or `clear_all` between this call and
+        // the expectation built from it changes the answer underneath both.
+        //
+        // It was racy from the day it was written and fired rarely, because
+        // nothing else touched knobs in a tight loop. A test added beside it
+        // that sets five values and clears them made it fire most runs, which is
+        // the useful kind of luck: an intermittent gate is a gate nobody can
+        // read, and the fix is the guard the rest of this module already takes.
+        let _serial = crate::knobs::serially();
 
         // `engine::DEFAULT_CEILING` is sized in that crate's own table against
         // "a 48 GB machine" -- a static fact about somebody else's hardware
@@ -13450,6 +13520,8 @@ mod tests {
         store
             .append_all(&[
                 crate::frontier::Row {
+                    direction: costs::fill::Direction::Long,
+                    rules: crate::Rules::elite(400, 25),
                     identity: [11; 32],
                     rank: 2,
                     mask_words: mask,
@@ -13469,6 +13541,8 @@ mod tests {
                     gross_loss: 0,
                 },
                 crate::frontier::Row {
+                    direction: costs::fill::Direction::Long,
+                    rules: crate::Rules::elite(400, 25),
                     identity: [11; 32],
                     rank: 1,
                     mask_words: mask,

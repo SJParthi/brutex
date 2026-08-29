@@ -93,6 +93,10 @@ use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 
 use crate::results::Refusal;
+/// Re-exported so `api` can NAME the direction it is served without gaining a
+/// `costs` arrow the crate graph does not draw. `cli` already depends on
+/// `costs`; `api` depends on `cli`. One arrow, not two.
+pub use costs::fill::Direction;
 
 /// `BRUTEXFR`, so a file that is not this one is refused before it is parsed.
 ///
@@ -131,7 +135,7 @@ const MAGIC: [u8; 8] = *b"BRUTEXFR";
 /// zeros in the new fields — a zero drawdown is a spectacular result, and
 /// inventing one for every historical row is the failure §4 bans. The file is
 /// regenerable by re-running the sweep, which is the cheap half of this trade.
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 
 /// Bytes before the first row.
 ///
@@ -154,10 +158,10 @@ const _: () = assert!(HEADER_BYTES as u64 == HEADER);
 /// 144, and the last eight are the seal. The layout is in [`Row::to_bytes`], and
 /// `the_stride_is_exactly_what_the_writer_writes` asserts this constant against
 /// what that function actually fills rather than against a hand count.
-pub const STRIDE: u64 = 208;
+pub const STRIDE: u64 = 272;
 
 /// [`STRIDE`] as a `usize`. Same reason as [`HEADER_BYTES`].
-pub const STRIDE_BYTES: usize = 208;
+pub const STRIDE_BYTES: usize = 272;
 
 const _: () = assert!(STRIDE_BYTES as u64 == STRIDE);
 
@@ -251,6 +255,72 @@ pub struct Row {
     pub gross_win: i64,
     /// Total paisa of every LOSING round trip in the chosen cell. Negative.
     pub gross_loss: i64,
+    /// WHICH WAY TO TRADE THIS COMBINATION.
+    ///
+    /// # It was computed on every path and reached no surface at all
+    ///
+    /// `side_of_evidence` picks a side for every row the screen prices, and the
+    /// engine's whole pricing layer is symmetric about it — `fills_at`,
+    /// `BarMoves::of`, `level_price` and `peak` each resolve the two cases with
+    /// a comment explaining why. Then the sign was DROPPED: `struct Screened`
+    /// computes a side and has no field for it, `report.rs` and `audit.rs` have
+    /// no column, no `api` endpoint carries the key, the ledger has no byte for
+    /// it, and the browser's Long/Short columns are every one a padlock.
+    ///
+    /// So an operator could read a ranked combination, its win rate, its payoff
+    /// and its drawdown — and could not act on ANY of it, because nothing said
+    /// which way round the trade goes. `traded_line` exists in this crate
+    /// precisely because *"a number whose subject is unstated is a number that
+    /// cannot be checked"*, and it printed hits, n, mean and t without the side.
+    ///
+    /// # Why it is stored rather than re-derived
+    ///
+    /// It IS derivable — `mean_paisa < 0.0` is the whole rule — and the sign of
+    /// the mean does reach `/frontier.json`. But re-deriving it in the browser
+    /// would be the second definition of one fact that `CLAUDE.md` §5 refuses,
+    /// correct the day it is written and silently wrong the first time the rule
+    /// gains a tie-break. Two of the three surfaces an operator selects from
+    /// (the screened table and the results ledger) carry no mean at all, so
+    /// there it is not merely a copy — it is unrecoverable.
+    ///
+    /// One byte, taken from the six-byte reserve rather than by widening the
+    /// stride, which is exactly what that reserve was written for: *"so the next
+    /// field does not need a new version for a small addition."*
+    pub direction: Direction,
+    /// The rules THIS RUN judged by.
+    ///
+    /// # A verdict computed from rules no run applied
+    ///
+    /// `api::frontierjson` read `cli::Rules::operator()` at REQUEST time and
+    /// compared these rows against it, while the run that WROTE them swept at
+    /// `Rules::derived(&span.bars, horizon)` or at `Rules::elite(..)`. Three
+    /// separate mechanisms guaranteed the two differed:
+    ///
+    /// * `derived` MEASURES four of its floors off the bars, and the handler has
+    ///   an identity and a row, not a span — so they are unrecoverable there;
+    /// * `sweeprun::Applied::drop` calls `knobs::clear_all`, so a floor the
+    ///   operator typed into the form steers the sweep and is GONE before the
+    ///   browser fetches the result;
+    /// * `elite` differs from `operator` on three of the five rules `verdict`
+    ///   checks, unconditionally, on every descend-produced run.
+    ///
+    /// Both directions were reachable. A row the run REFUSED rendered PASS and a
+    /// row it ADMITTED rendered FAIL, with the wrong threshold printed beside
+    /// it — a fallback that hides a failure, which `CLAUDE.md` §4 bans by name.
+    ///
+    /// # Why per row and not once per run
+    ///
+    /// The tidier home is `results::Record`, and it was rejected for a reason
+    /// that is not tidiness: `record_all` calls `record_frontier` even when
+    /// `record_run`'s ledger append refuses a duplicate, so a per-run lookup can
+    /// legitimately MISS and the handler would be back to guessing. A row cannot
+    /// miss. `identity` is already duplicated per row for the same reason.
+    ///
+    /// `append_all` writes a run's whole frontier in one call under one lock
+    /// from one `Rules` value, so every row of a block carries the same set —
+    /// and `policy_of` folds all eight into the run identity, so two runs
+    /// sharing an identity necessarily shared their rules.
+    pub rules: crate::Rules,
 }
 
 impl Row {
@@ -293,9 +363,45 @@ impl Row {
         put(&self.min_win.to_le_bytes(), &mut at); // 170   8
         put(&self.gross_win.to_le_bytes(), &mut at); // 178   8
         put(&self.gross_loss.to_le_bytes(), &mut at); // 186   8 -> ends at 194
-        // 130..136 stay zero: six bytes of reserve so the next field does not
+        // WHICH WAY TO TRADE IT, one byte, taken from the reserve below rather
+        // than by widening the stride -- which is what that reserve was
+        // written for. Zero is long and one is short, and the two are named by
+        // `Direction::as_str`, which until now had no production caller at all.
+        put(
+            &[match self.direction {
+                Direction::Long => 0_u8,
+                Direction::Short => 1,
+            }],
+            &mut at,
+        ); // 194   1 -> 195
+        // 194..200 stay zero: six bytes of reserve so the next field does not
         // need a new version for a small addition. Covered by the seal, so a
         // reserve byte that is not zero is a torn write rather than a surprise.
+        //
+        // Advanced over EXPLICITLY now that something follows it. While the
+        // reserve was the last thing on the row, leaving `at` short of it was
+        // the same as skipping it; with the rules after it, a missing advance
+        // would silently write them six bytes early.
+        put(&[0_u8; 5], &mut at); // 195   5 -> 200
+        // THE RULES THIS RUN JUDGED BY, so nothing downstream can judge by
+        // others. Eight fields in declaration order, which is the order
+        // `from_bytes` reads them back in.
+        put(&self.rules.max_mae_ppm.to_le_bytes(), &mut at); // 200   8
+        put(&self.rules.min_rr_bp.to_le_bytes(), &mut at); // 208   8
+        put(&self.rules.min_win_rate_bp.to_le_bytes(), &mut at); // 216   8
+        put(&self.rules.min_assurance_bp.to_le_bytes(), &mut at); // 224   8
+        put(&self.rules.min_weakest_bp.to_le_bytes(), &mut at); // 232   8
+        put(&self.rules.min_ret_over_dd_bp.to_le_bytes(), &mut at); // 240   8
+        put(&self.rules.min_trades.to_le_bytes(), &mut at); // 248   8
+        // `top` is a `usize`, which is not a width the disk can carry. Saturated
+        // rather than truncated: a `top` past `u64` is not a number an operator
+        // typed, and wrapping it would record a small one.
+        put(
+            &u64::try_from(self.rules.top)
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+            &mut at,
+        ); // 256   8 -> ends at 264
         let seal = seal_of(&out);
         out[PAYLOAD_BYTES..].copy_from_slice(&seal);
         out
@@ -347,6 +453,46 @@ impl Row {
             min_win: i64::from_le_bytes(take(8, &mut at).try_into().unwrap_or([0; 8])),
             gross_win: i64::from_le_bytes(take(8, &mut at).try_into().unwrap_or([0; 8])),
             gross_loss: i64::from_le_bytes(take(8, &mut at).try_into().unwrap_or([0; 8])),
+            // THE DIRECTION BYTE, then the reserve. Anything that is not zero or
+            // one is a row this build did not write, and it reads as LONG --
+            // the same value a v3 row would have carried had one been widened,
+            // which is why v3 is refused outright rather than widened.
+            direction: if take(1, &mut at).first() == Some(&1) {
+                Direction::Short
+            } else {
+                Direction::Long
+            },
+            rules: {
+                // THE FIVE REMAINING RESERVE BYTES, in step with `to_bytes`.
+                // Read and discarded rather than skipped by arithmetic, so the
+                // two directions stay one sequence of `take` calls and a field
+                // cannot be added to one without the other.
+                take(5, &mut at);
+                crate::Rules {
+                    max_mae_ppm: i64::from_le_bytes(take(8, &mut at).try_into().unwrap_or([0; 8])),
+                    min_rr_bp: i64::from_le_bytes(take(8, &mut at).try_into().unwrap_or([0; 8])),
+                    min_win_rate_bp: i64::from_le_bytes(
+                        take(8, &mut at).try_into().unwrap_or([0; 8]),
+                    ),
+                    min_assurance_bp: i64::from_le_bytes(
+                        take(8, &mut at).try_into().unwrap_or([0; 8]),
+                    ),
+                    min_weakest_bp: i64::from_le_bytes(
+                        take(8, &mut at).try_into().unwrap_or([0; 8]),
+                    ),
+                    min_ret_over_dd_bp: i64::from_le_bytes(
+                        take(8, &mut at).try_into().unwrap_or([0; 8]),
+                    ),
+                    min_trades: u64::from_le_bytes(take(8, &mut at).try_into().unwrap_or([0; 8])),
+                    // Saturated back, matching the write. A stored `u64::MAX`
+                    // means "past what a `usize` holds", which on this target it
+                    // also is.
+                    top: usize::try_from(u64::from_le_bytes(
+                        take(8, &mut at).try_into().unwrap_or([0; 8]),
+                    ))
+                    .unwrap_or(usize::MAX),
+                }
+            },
         }
     }
 
@@ -372,6 +518,7 @@ impl Row {
         rank: u16,
         scored: &runner::rank::Scored,
         cell: Option<&runner::grid::Cell>,
+        rules: crate::Rules,
     ) -> Self {
         Self {
             identity,
@@ -399,6 +546,11 @@ impl Row {
             min_win: cell.map_or(0, |c| c.min_win),
             gross_win: cell.map_or(0, |c| c.gross_win),
             gross_loss: cell.map_or(0, |c| c.gross_loss),
+            // FROM THE SAME `Scored` THIS ROW IS. `side_of_evidence` is the one
+            // definition of the rule and it lives at the crate root, so this
+            // cannot drift from what the screen actually traded.
+            direction: crate::direction_of(crate::side_of_evidence(scored)),
+            rules,
         }
     }
 }
@@ -1019,7 +1171,12 @@ fn check_header(file: &mut File, path: &Path, len: u64) -> Result<(), Refusal> {
         return Err(format!(
             "{} is frontier format version {version}; this build writes and reads \
              version {VERSION}. A format version is never mutated in place — \
-             CLAUDE.md §8. Nothing was written.",
+             CLAUDE.md §8. The file is REGENERABLE -- re-run the \
+             sweep and it is written afresh -- and it is not widened in place \
+             because a row read with zeroes in the new fields would carry a rule \
+             set of all-zero floors, which every priced row passes. That is the \
+             fallback that hides a failure §4 bans, wearing a migration's \
+             clothes. Nothing was written.",
             path.display()
         ));
     }
@@ -1064,6 +1221,8 @@ mod tests {
         Row {
             identity: [identity; 32],
             rank,
+            direction: costs::fill::Direction::Long,
+            rules: crate::Rules::elite(400, 25),
             mask_words: [u64::from(rank), 2, 3, 4, 5, 6],
             hits: 1_000 + u64::from(rank),
             n: 900 + u64::from(rank),
@@ -1194,10 +1353,15 @@ mod tests {
         let v2_added = 6 * 8;
         //  gross_win, gross_loss -- without which avg_win and avg_loss are zero
         let v3_added = 2 * 8;
+        //  THE EIGHT `Rules` FIELDS, so a reader judges these rows by the rules
+        //  the run that wrote them applied and not by whatever the environment
+        //  says at request time. `top` is written as a `u64` because a `usize`
+        //  is not a width the disk can carry.
+        let v4_added = 8 * 8;
         assert_eq!(
-            v1 + v2_added + v3_added + 6 + SEAL_BYTES,
+            v1 + v2_added + v3_added + 6 + v4_added + SEAL_BYTES,
             STRIDE_BYTES,
-            "fields + six reserved + seal must be the stride"
+            "fields + six reserved + the rules + seal must be the stride"
         );
         assert_eq!(STRIDE_BYTES as u64, STRIDE);
     }

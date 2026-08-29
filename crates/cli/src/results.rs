@@ -673,6 +673,26 @@ fn write_fresh_header(file: &mut File, path: &Path) -> Result<(), Refusal> {
 }
 
 impl Results {
+    /// Opens the results file beneath `root` for READING, and creates nothing.
+    ///
+    /// # Reading must never create
+    ///
+    /// [`Self::open`] calls `create_dir_all` and opens with `.create(true)`, so
+    /// every caller of it on a GET path made a file appear as a side effect of
+    /// being asked a question. `cli::top_at` — reached from `/engine/top.json` —
+    /// did exactly that for both `results/runs.bin` and `results/frontier.bin`,
+    /// and an empty store then answered "no runs" while having just been given
+    /// the two files that say so. `frontier` and `trades` both grew an
+    /// `open_read` for this; this is the third and last.
+    ///
+    /// # Errors
+    ///
+    /// An absent file, named as an absence rather than as a failure, plus every
+    /// refusal [`Self::open`] makes about a file that exists.
+    pub fn open_read(root: &Path) -> Result<Self, Refusal> {
+        Self::open_with(root, false)
+    }
+
     /// Opens, or creates, the results file beneath `root`.
     ///
     /// # Errors
@@ -681,17 +701,39 @@ impl Results {
     /// version this build does not know. Each refuses rather than being
     /// repaired: a file that is not this one must not be appended to.
     pub fn open(root: &Path) -> Result<Self, Refusal> {
+        Self::open_with(root, true)
+    }
+
+    /// Both openers, because the header, version and scan logic is one hundred
+    /// and forty lines and two copies of it would be two readers of one format —
+    /// which is what `CLAUDE.md` §5 exists to refuse. `writable` gates only the
+    /// three places the two genuinely differ: whether the directory is made,
+    /// whether the file may be created, and whether an empty file is given a
+    /// fresh header or reported as the absence it is.
+    fn open_with(root: &Path, writable: bool) -> Result<Self, Refusal> {
         let dir = root.join("results");
-        std::fs::create_dir_all(&dir)
-            .map_err(|why| format!("the results directory could not be made: {why}"))?;
+        if writable {
+            std::fs::create_dir_all(&dir)
+                .map_err(|why| format!("the results directory could not be made: {why}"))?;
+        }
         let path = Self::path(root);
         let mut file = OpenOptions::new()
             .read(true)
-            .write(true)
-            .create(true)
+            .write(writable)
+            .create(writable)
             .truncate(false)
             .open(&path)
-            .map_err(|why| format!("{} could not be opened: {why}", path.display()))?;
+            .map_err(|why| {
+                if why.kind() == std::io::ErrorKind::NotFound {
+                    format!(
+                        "{} does not exist yet. No run has been recorded — this \
+                         is not an error, and nothing was created.",
+                        path.display()
+                    )
+                } else {
+                    format!("{} could not be opened: {why}", path.display())
+                }
+            })?;
 
         let len = file
             .metadata()
@@ -701,6 +743,16 @@ impl Results {
         // a fresh file is the version this build writes, and an existing one is
         // whatever its header says. Every read below is scoped to that answer.
         let version = if len == 0 {
+            if !writable {
+                // AN EMPTY FILE IS AN ABSENCE ON THE READ PATH. Writing a
+                // header here would make a GET create content, which is the
+                // whole reason `open_read` exists.
+                return Err(format!(
+                    "{} is empty. No run has been recorded — this is not an \
+                     error, and nothing was written.",
+                    path.display()
+                ));
+            }
             write_fresh_header(&mut file, &path)?;
             VERSION
         } else {
@@ -1263,8 +1315,89 @@ mod tests {
         STRIDE, STRIDE_BYTES, STRIDE_V2, VERSION_V2, field, read_field,
     };
 
+    /// READING CREATES NOTHING, and the whole point is the DIRECTORY.
+    ///
+    /// `Results::open` calls `create_dir_all` before it opens, so a GET that
+    /// reached it made `results/` and `runs.bin` appear as a side effect of
+    /// being asked a question — and then answered "no runs are recorded" while
+    /// having just written the file that says so. `cli::top_at`, behind
+    /// `/engine/top.json`, did exactly that.
+    ///
+    /// Asserted on the filesystem after the call rather than on the refusal
+    /// text, because the refusal was never the defect: it is the two artefacts
+    /// that must not be there.
+    #[test]
+    fn opening_to_read_creates_neither_the_file_nor_its_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "brutex-results-openread-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a temp root");
+
+        let refusal = Results::open_read(&root).expect_err("an absent ledger refuses");
+        assert!(
+            refusal.contains("nothing was created"),
+            "the absence is named as an absence: {refusal}"
+        );
+        assert!(
+            !root.join("results").exists(),
+            "reading must not make the directory"
+        );
+        assert!(
+            !Results::path(&root).exists(),
+            "and must not make the file either"
+        );
+
+        // AND AN EMPTY FILE IS STILL AN ABSENCE. `open` writes a fresh header
+        // into a zero-length file, which on a read path would be the same defect
+        // arriving one step later.
+        std::fs::create_dir_all(root.join("results")).expect("the directory");
+        std::fs::write(Results::path(&root), b"").expect("an empty ledger");
+        let empty = Results::open_read(&root).expect_err("an empty ledger refuses");
+        assert!(
+            empty.contains("nothing was written"),
+            "and it says nothing was written: {empty}"
+        );
+        assert_eq!(
+            std::fs::metadata(Results::path(&root))
+                .expect("the file is still there")
+                .len(),
+            0,
+            "the empty file is left empty rather than given a header"
+        );
+
+        // The writing opener still does what it always did.
+        Results::open(&root).expect("open creates and initialises");
+        assert!(
+            std::fs::metadata(Results::path(&root))
+                .expect("the file")
+                .len()
+                > 0,
+            "open writes the header open_read refused to"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A fresh temp root, unique to this PROCESS as well as to this test.
+    ///
+    /// # The process id is not decoration
+    ///
+    /// This was `brutex-results-{tag}` and every other test root in the crate
+    /// carries `std::process::id()` — `frontier`, `live`, `stored` and the four
+    /// in `lib.rs` all do. This one did not, so two `cli` test binaries running
+    /// at once shared a directory, and the `remove_dir_all` on the next line
+    /// deleted the other one's fixture MID-TEST.
+    ///
+    /// Two binaries at once is not a contrived case: `cargo test` and
+    /// `cargo llvm-cov` overlap, and a second `cargo test` started before the
+    /// first finished does it every time. Measured: a stacked run reported four
+    /// failures that a single run does not have, and each was a store the other
+    /// process had just deleted. A gate that fails only when something else is
+    /// running is a gate nobody can read.
     fn root(tag: &str) -> std::path::PathBuf {
-        let p = std::env::temp_dir().join(format!("brutex-results-{tag}"));
+        let p = std::env::temp_dir().join(format!("brutex-results-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).expect("a temp root");
         p

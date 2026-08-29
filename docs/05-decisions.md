@@ -27431,3 +27431,323 @@ genuinely sequence and no sort control exists.
 **Verified:** `vite build` wrote the site, `svelte-check` 0 errors 0 warnings,
 `npm test` 152 pass 0 fail. No timing is claimed — the host carried another
 session's suite at ~320 % CPU per process, load average 229, throughout.
+
+### D-0378
+
+**Every rule floor is measured from the bars, and the direction-blind one was
+setting itself to zero on a falling span.**
+
+`Rules::operator()` shipped four constants that decided which combinations an
+operator is shown: `min_win_rate_bp: 5_000`, `min_rr_bp: 125`,
+`min_weakest_bp: 0`, `min_ret_over_dd_bp: 500`. The operator's standing
+instruction is that nothing be a chosen number, so each is now derived —
+`base_win_rate_bp`, `breakeven_rr_bp`, the same base rate, and
+`hold_return_over_drawdown_bp`. Each still falls back to the stated default when
+its benchmark is undefined, and each reaches the run identity through
+`policy_of`, so a derived-floor run and a stated-floor run are different runs and
+are recorded as such.
+
+**`min_weakest_bp: 0` was the quietest and the worst.** No per-period floor at
+all: a combination whose worst year lost money passed on the strength of its
+best, which is the "one regime carrying four" shape the whole screen exists to
+refuse, sitting in the default rule set.
+
+**`base_win_rate_bp` counted `delta > 0` alone, and that is a LONG's null.** The
+engine trades both sides — `side_of_evidence` picks `Direction::Short` whenever
+the edge is negative, and `audit_range_inner` records `RunDirection::Undirected`
+precisely because the direction is chosen per combination, AFTER this floor is
+fixed for the whole rung. One direction-blind number gated both, wrong by
+`2 × base − 10_000` basis points and largest exactly where the drift is
+strongest — the case it exists to handle.
+
+Measured on the operator's store, NIFTY 60min: 2020-10..2020-12 gives a long null
+of 6967 against a short null of 3033, so shorts were held **39.3 points too
+strict**; 2024-10..2024-12 gives 4032 against 5968, **19.4 points too lax**. And
+on a monotonically falling span the long-only reading returns near ZERO, so
+`min_win_rate_bp`, `min_assurance_bp` and `min_weakest_bp` all became floors
+every combination clears.
+
+Both counts are taken now and the **larger** is the floor: strict on the easier
+side, never lax on either. A flat window counts for neither, because a window
+that closed where it opened pays for no position in either direction — on
+`ADANIENT` one-minute bars at a one-bar horizon 6.98% of decided windows are
+flat, and reading them as "not up" moves the rate 698 bp, across the coin flip.
+`indicators/src/session.rs` records the identical defect in its own words as one
+it had to fix.
+
+**Verified:** `the_base_rate_is_the_same_for_a_series_and_its_mirror` fails on
+the old code with left 10000, right 0.
+
+### D-0379
+
+**Three defects adjacent to those floors, each of which switched a rule off
+without saying so.**
+
+**A knob was INSERTED into `policy_of`, not appended.** `BRUTEX_SCREEN_BUDGET_MS`
+was written at position four, above the line reading *"APPENDED BELOW THIS LINE.
+Nothing above it may move"* — shifting `validate` from four to five and the
+ceiling from five to six, silently re-keying every run identity ever recorded.
+The length assertion passed, because sixteen is sixteen wherever the term sits;
+only the sibling test's `start[5]` caught it, failing with `left: 1` — that is
+`u64::from(validate)` standing where the ceiling belongs. Both tests now pin the
+POSITION, not just the count.
+
+**`breakeven_rr_bp` returned zero for every rate in `9901..=9999`.** `admits`
+reads `min_rr_bp == 0 || …`, so zero DROPS the reward-to-risk check. The guard
+refuses a rate at or above 100% on the stated ground that it *"would divide by a
+break-even of zero"* — but the quotient hit zero ninety-nine basis points
+earlier: `brr(9900)` was 1, `brr(9901)` was 0, `brr(10_000)` was 125,
+discontinuous across its own guard. The margin is also folded in before the
+divide now, one truncation instead of two, which erred lax at every step (5001
+gave 123 against an exact 124.95).
+
+**An exported-but-empty environment variable disabled the whole derivation.**
+`Rules::operator` parsed and fell back; `Rules::derived` asked whether the
+variable was PRESENT, and `knobs::var` returns `Some("")` for one that is
+exported and empty. A bare `BRUTEX_MIN_WIN_RATE_BP=` in a shell profile handed
+back the coin flip with no message and no `refused:` line — §4's banned fallback.
+Both callers read one `Rules::stated` now.
+
+**Verified:** `a_break_even_floor_never_switches_its_own_rule_off` asserts across
+all 9,999 inputs; `an_unusable_knob_is_not_a_stated_floor` drives five unusable
+spellings and one usable one.
+
+### D-0380
+
+**`Edge::payoff_bp` ranked every short combination in reverse order of merit.**
+
+It took the positive forward moves as the gains and the negative ones as the
+give-back — a LONG's payoff — computed for every combination including the ones
+the engine goes on to trade SHORT. For a short the negative move IS the win, so
+the value returned was the exact reciprocal of the real payoff.
+
+This is not a dead path. `ByPayoff::cmp` sorts on it first and `rank_by` selects
+it for `Lens::Payoff`, which is what `audit_range_inner` uses and what is
+re-applied after execution-series reprojection.
+
+| combination | forward moves | true short payoff | old reading |
+|---|---|---|---|
+| an excellent short | 90 down 100, 10 up 10 | 10.00× | 0.10×, ranked last |
+| a terrible short | 5 up 1000, 95 down 60 | 0.06× | 16.66×, ranked first |
+
+The degenerate case is sharper: a combination whose forward move is ALWAYS down
+is the ideal short, has `wins == 0`, and scored ZERO — the minimum. `keep` is a
+hard cut, so it never met an exit grid at all.
+
+`rank.rs`'s own header states the property this restores: *"Ranking by `t` signed
+would discard every short setup, so the order is on |t|"*. `Lens::Detectability`
+honoured it; `Lens::Payoff` silently undid it.
+
+The side is read inside `Edge` rather than passed in, because
+`cli::side_of_evidence` reads `mean_paisa < 0.0` and that is the whole rule —
+`runner` cannot name `cli`, and two copies of one rule is what §5 refuses. Every
+existing test still asserts the long reading, because `Edge::default()` has
+`mean_paisa: 0.0`.
+
+**Verified:** three tests, including one asserting that negating every move
+leaves the payoff where it was.
+
+### D-0381
+
+**A unit test swept 618,296 real bars and appended a row to the operator's
+ledger, and `cargo test --workspace` could not finish.**
+
+`a_well_formed_range_refuses_at_the_identity_gate_and_says_so` was written on the
+premise, stated in its own doc, that *"an unstamped test build refuses at the
+identity gate before the store is touched"*. `crates/cli/build.rs` has stamped
+`BRUTEX_COMMIT` from `.git/HEAD` at compile time since `086149d5` — and it stamps
+the TEST HARNESS as well as the binary. The premise was true when written and was
+invalidated six days later, 120 commits away, by a file that never mentions this
+test.
+
+So the gate passed and the call loaded 2019-12..2026-08: **over eighty minutes at
+665% CPU and 3.1 GB** before it was killed, with `record_run` appending to
+`~/.brutex/store/results/runs.bin`. §9's own definition of done was unreachable.
+On a runner with no store it fails in 0.01 s instead, naming the store rather
+than the stamp — so CI was red on four jobs, and gate 1e reports it first, where
+its message blames the front-end PATH stub for something unrelated.
+
+**Bounded by HISTORY rather than by the machine.** `1970-01` keeps every parse arm
+passing and the dispatch arm reached — which is what the test is for — while
+making the load unsatisfiable by construction: NIFTY did not exist, so no pull can
+ever put that month in the store. A store-root trick would bound it against
+today's disk; this bounds it against any. Eighty minutes to 0.00 s. The assertion
+branches on `commit_stamp()`, a compile-time constant the test can read, so both
+builds are ordinary rather than one being a configuration the suite cannot reach.
+
+`the_threshold_search_is_reachable_on_stored_bars_and_discoverable` had the same
+latent shape and passed only because 60min/2024-01 holds 154 bars — below the
+1,876-bar warm-up. Same treatment.
+
+**The general lesson, recorded on `stamp_refusal`:** every reader of the commit
+stamp should TAKE it as an argument, never read it, or a file in another crate can
+change what a test does without touching the test. `api` already did this;
+`cli` did not.
+
+### D-0382
+
+**Frontier format version 4: the rules and the direction travel on the row.**
+
+`api::frontierjson` read `cli::Rules::operator()` at REQUEST time and judged
+stored rows against it, while the run that WROTE them swept at
+`Rules::derived(&span.bars, horizon)` or at `Rules::elite(..)`. Three separate
+mechanisms guaranteed divergence: `derived` MEASURES four floors off the bars and
+the handler has an identity and a row rather than a span; `sweeprun::Applied::drop`
+calls `knobs::clear_all`, so a floor typed into the form steered the sweep and was
+gone before the browser fetched; and `elite` differs from `operator` on three of
+the five rules `verdict` checks, unconditionally.
+
+Both directions were reachable. A row the run REFUSED rendered PASS and a row it
+ADMITTED rendered FAIL, with the wrong threshold printed beside it in the same
+response — §4's banned fallback.
+
+**Per row, not per run,** and not for tidiness: `record_all` calls
+`record_frontier` even when `record_run`'s ledger append refuses a duplicate, so a
+per-run lookup can legitimately MISS. A row cannot. `identity` is already
+duplicated per row for the same reason.
+
+**The direction was computed on every path and reached no surface at all.**
+`side_of_evidence` picks a side for every priced row and the pricing layer is
+symmetric about it, and then the sign was dropped: `struct Screened` computed a
+side with no field to keep it in, `report.rs` and `audit.rs` had no column, no
+`api` endpoint carried the key, the ledger had no byte, and the browser's
+Long/Short columns were every one a padlock. An operator could read a rank, a win
+rate, a payoff and a drawdown and could not act on any of it. One byte, taken from
+the six-byte reserve rather than by widening the stride — which is exactly what
+that reserve was written for. `costs::fill::Direction::as_str`, documented *"for a
+refusal or a breakdown line"* and until now without a production caller, is what
+names it. `Direction` is re-exported from `cli::frontier` so `api` can name the
+type without gaining a `costs` arrow §5 does not draw.
+
+**No migration, deliberately.** A v3 row read with zeroes in the new fields
+carries a rule set of all-zero floors, and `admits` treats zero as *rule off* for
+`min_rr_bp` and `max_mae_ppm` — so every priced row would pass. That is the
+failure wearing a success's clothes, arriving dressed as a helpful migration. The
+version check refuses v3 by name and the refusal states the remedy: the file is
+regenerable by re-running the sweep. Stride 208 → 272; `live.rs` reuses this `Row`
+so its own version moves to 2.
+
+**Verified:** reverting the handler to `Rules::operator()` fails the test with the
+response body showing `"min_win_rate_bp":5000,"min_rr_bp":125` for a row written
+under elite's 8000/300, and a row written SHORT with a positive mean is served as
+`"direction":"short"` — which a surface re-deriving the side from the mean's sign
+would get wrong.
+
+### D-0383
+
+**Reading must never create, and `/engine/top.json` created two files.**
+
+`cli::top_at` called `Results::open` and `Frontier::open`, both of which
+`create_dir_all` and open with `.create(true)`. Asking the route a question MADE
+`results/`, `runs.bin` and `frontier.bin`, and it then read the files it had just
+made and reported that no run was recorded. The answer was right by accident.
+
+`frontier` and `trades` already had an `open_read`; `results` did not, and now
+does — split on a flag rather than duplicated, because the header, version and
+scan logic is a hundred and forty lines and two copies of it would be two readers
+of one format, which is what §5 exists to refuse. `writable` gates only the three
+places the openers genuinely differ: whether the directory is made, whether the
+file may be created, and whether an empty file is given a fresh header or reported
+as the absence it is.
+
+**An absent frontier is not a refusal at this call site.** A run with no frontier
+file recorded no frontier, which is the exact fact the page already states, and it
+is a different fact from "this run found nothing". Every other refusal — wrong
+magic, wrong version, a ragged tail — still refuses, because those are about a
+file that EXISTS and is not this one.
+
+**Verified:** `opening_to_read_creates_neither_the_file_nor_its_directory` asserts
+on the filesystem after the call, not on the refusal text — the refusal was never
+the defect; the two artefacts are.
+
+### D-0384
+
+**The winning streak, and a seventh calendar grain.**
+
+`Cell::max_losing_streak` shipped alone — what an operator has to sit through —
+with no counterpart, so a reader learned what to endure and never what to endure
+it FOR. Two variants with one win rate and one longest-losing-run are still
+different instruments: a strategy whose wins arrive in long runs is
+trend-following and one whose wins are scattered is not, and nothing separated
+them. `max_winning_streak` sits beside it now, each counter cleared by the
+OTHER'S outcome. The two are carried as one `Streaks` value rather than two
+locals, because they are one fact — the shape of the sequence — and passing them
+apart invites a caller to reset one and forget the other. A flat round trip breaks
+the winning run and extends the losing one, which is the rule `max_losing_streak`
+already carried and is now stated because two counters side by side look like they
+partition and these do not.
+
+**`stability::GRAINS` stopped at one day.** Year, half, quarter, month, week, day
+— so a combination whose whole edge sits between 09:15 and 10:15 is positive in
+every one of the six, and `weakest_bp`, which is their minimum, reports it as
+steady. That is the one-regime-carrying-four shape at a resolution the ladder
+could not resolve, and it is exactly the shape `min_weakest_bp` was just derived
+to catch. `Grain::Hour` is the seventh and finest: a rolling clock hour rather
+than an hour-OF-day bucket, so it stays a division like every other grain and
+partitions the series instead of folding it. Hour-of-day is a different question
+and would need its own type. The IST offset is folded in before the division for
+the same reason `Day` folds it.
+
+**Verified:** the winning run is measured from a sequence where a counter that
+failed to reset would read seven instead of four; the hour grain is asserted to
+SEPARATE two stamps five hours apart that every coarser grain joins.
+
+### D-0385
+
+**Two documentation blocks were orphaned and Rust said nothing.**
+
+`screen_cascade` — the function that decides which combinations an operator is
+SHOWN — carried no documentation at all. Both halves of it sat five hundred lines
+away, immediately above `base_win_rate_bp`, because later insertions landed
+between a doc block and its item. Rust concatenates adjacent `///` lines onto
+whatever item comes next, so it compiled, `cargo doc` rendered three unrelated
+bodies as one, and nothing in the build could see it. `assurance_floor_bp` had
+lost its doc and its `#[must_use]` the same way.
+
+Recorded because it is a class, not an incident: it happened five times in one
+session's editing, it is invisible to `cargo build`, `cargo clippy` and
+`cargo test`, and the only thing that catches it is reading. A gate is possible —
+refuse a doc block whose next non-blank line is another doc block's summary — but
+it would need to distinguish that from a legitimately long doc, and no such gate
+is written here.
+
+**The `# Cost` claim on `Rules::derived` was also false.** It said the forward
+returns were *"already computed"*. They are not: `base_win_rate_bp` computes a
+`Forward` in `audit_range_inner` and `run_ranked_by_reporting` computes an
+identical one inside `audit_bars` — same slice, same horizon. About 30 MB
+allocated, walked and freed twice on the one-minute rung, times eight rungs under
+`par_iter`. Reuse needs `RankedRun` to return the `Forward` it built, which is a
+signature change across a crate boundary, so it is recorded rather than claimed
+away. §3 rule 6.
+
+### D-0386
+
+**A test root without a process id, and a test that read a knob without the
+knob guard. Two ways for a suite to fail only when something else is running.**
+
+`results.rs`'s `root(tag)` built `brutex-results-{tag}` while every other test
+root in the crate carries `std::process::id()` — `frontier`, `live`, `stored` and
+all four in `lib.rs` do. So two `cli` test binaries running at once shared a
+directory, and the `remove_dir_all` on the next line deleted the other one's
+fixture mid-test. Two binaries at once is not contrived: `cargo test` and
+`cargo llvm-cov` overlap, and a second `cargo test` started before the first
+finished does it every time.
+
+`the_ceiling_is_derived_from_this_machine_and_not_from_an_assumed_one` called
+`derived_ceiling()`, which divides by `SWEEPS_SHARING_THIS_MACHINE` — a knob —
+without taking `knobs::serially()`. A sibling calling `knobs::set` or
+`clear_all` between that call and the expectation built from it changes the
+answer underneath both halves of the assertion. It was racy from the day it was
+written and fired rarely, because nothing else touched knobs in a tight loop; a
+test added beside it that sets five values and clears them made it fire most
+runs.
+
+**Measured:** a stacked run reported four failures a single clean run does not
+have, and each was a store the other process had just deleted or a divisor the
+other test had just changed.
+
+**Stated as a rule rather than as two fixes:** a gate that fails only when
+something else is running is a gate nobody can read, and the two shapes it takes
+here are the only two this crate has — a shared path, and a shared global. Both
+already had a convention (`process::id()` in the path, `serially()` around the
+knob) and both defects were a single site that had not taken it.

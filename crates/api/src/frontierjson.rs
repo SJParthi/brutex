@@ -116,18 +116,42 @@ fn respond(
         Err(why) => return refuse(json, &why),
     };
 
-    // THE RULES ARE READ ONCE, FROM THE CRATE THAT DEFINES THEM. `Rules::operator`
-    // resolves its six numbers from the environment at call time, so a run
-    // launched with `BRUTEX_MIN_WIN_RATE_BP=9000` is judged against 9,000 and not
-    // against a threshold copied into this file or into JavaScript. That copy is
-    // the failure `CLAUDE.md` §5 refuses -- two definitions of one fact, correct
-    // the day they are written.
-    let rules = cli::Rules::operator();
+    // THE RULES ARE THE RUN'S OWN, READ OFF THE ROW IT WROTE THEM ON.
+    //
+    // This read `cli::Rules::operator()` -- resolved from the environment AT
+    // REQUEST TIME -- and the comment above it argued that this avoided a copied
+    // threshold. It did avoid that. What it did instead was judge these rows
+    // against a rule set NO RUN EVER APPLIED, and three separate mechanisms
+    // guaranteed the two differed:
+    //
+    // * the run swept at `Rules::derived(&span.bars, horizon)`, which MEASURES
+    //   four of its floors off the bars -- and this handler has an identity and
+    //   a row, not a span, so they were unrecoverable here;
+    // * `sweeprun::Applied::drop` calls `knobs::clear_all`, so a floor the
+    //   operator typed into the form steered the sweep and was GONE before the
+    //   browser fetched the result, leaving `operator()` reading its built-in
+    //   defaults;
+    // * `/backtest/descend` reaches `screen_range_inner`, which uses
+    //   `Rules::elite(..)` -- differing from `operator()` on THREE of the five
+    //   rules `verdict` checks, unconditionally, on every run it produces.
+    //
+    // Both directions were reachable. A row the run REFUSED rendered PASS and a
+    // row it ADMITTED rendered FAIL, with the wrong threshold printed beside it
+    // in the same response -- a fallback that hides a failure, §4's ban.
+    //
+    // ONE `Rules` PER RUN AND NOT PER ROW, even though the field is per row:
+    // `append_all` writes a run's whole frontier in one call under one lock from
+    // one value, so every row of a block carries the same set, and `policy_of`
+    // folds all eight into the run identity, so two runs sharing an identity
+    // shared their rules. `None` when there are no rows, which is the only case
+    // where there is nothing to read it from and also the only case where
+    // nothing needs judging.
+    let rules = rows.first().map(|row| row.rules);
 
     let mut out = String::with_capacity(rows.len().saturating_mul(420).saturating_add(320));
     out.push_str(r#"{"rows":["#);
-    let admitted = write_rows(&mut out, &rows, &rules);
-    envelope(&mut out, rows.len(), admitted, &rules, partial);
+    let admitted = rules.map_or(0, |set| write_rows(&mut out, &rows, &set));
+    envelope(&mut out, rows.len(), admitted, rules.as_ref(), partial);
     (axum::http::StatusCode::OK, json, out)
 }
 
@@ -160,8 +184,9 @@ fn write_rows(out: &mut String, rows: &[cli::frontier::Row], rules: &cli::Rules)
         let _ = std::fmt::Write::write_fmt(
             &mut *out,
             format_args!(
-                r#"{{"rank":{},"mask_words":["{}","{}","{}","{}","{}","{}"],"hits":{},"n":{},"mean_milli_paisa":{},"t_milli":{},"payoff_bp":{},"edge_wins":{},"priced":{},"trades":{},"wins":{},"losses":{},"pessimistic":{},"worst_trade":{},"max_drawdown":{},"min_win":{},"win_rate_bp":{},"reward_to_risk_bp":{},"return_over_drawdown":{},"avg_win":{},"avg_loss":{},"gross_win":{},"gross_loss":{},"meets":{{"win_rate":{},"reward_to_risk":{},"return_over_drawdown":{},"trades":{},"assurance":{},"all":{},"stop_unchecked":{}}}}}"#,
+                r#"{{"rank":{},"direction":"{}","mask_words":["{}","{}","{}","{}","{}","{}"],"hits":{},"n":{},"mean_milli_paisa":{},"t_milli":{},"payoff_bp":{},"edge_wins":{},"priced":{},"trades":{},"wins":{},"losses":{},"pessimistic":{},"worst_trade":{},"max_drawdown":{},"min_win":{},"win_rate_bp":{},"reward_to_risk_bp":{},"return_over_drawdown":{},"avg_win":{},"avg_loss":{},"gross_win":{},"gross_loss":{},"meets":{{"win_rate":{},"reward_to_risk":{},"return_over_drawdown":{},"trades":{},"assurance":{},"all":{},"stop_unchecked":{}}}}}"#,
                 row.rank,
+                row.direction.as_str(),
                 row.mask_words[0],
                 row.mask_words[1],
                 row.mask_words[2],
@@ -222,9 +247,26 @@ fn envelope(
     out: &mut String,
     count: usize,
     admitted: usize,
-    rules: &cli::Rules,
+    // `None` ONLY when there are no rows, because the rules are read off a row.
+    // Served as `"rules":null` rather than as `operator()`'s defaults: a page
+    // that printed thresholds for a run it has no rows from would be stating a
+    // policy nothing applied, which is the defect this whole field exists to
+    // close. Both render sites in `web/` are already guarded on the key.
+    rules: Option<&cli::Rules>,
     partial: Option<String>,
 ) {
+    let Some(rules) = rules else {
+        let _ = std::fmt::Write::write_fmt(
+            &mut *out,
+            format_args!(
+                r#"],"count":{},"admitted":{},"rules":null,"refusal":{}}}"#,
+                count,
+                admitted,
+                partial.map_or_else(|| "null".to_owned(), |why| crate::render::json_string(&why))
+            ),
+        );
+        return;
+    };
     let _ = std::fmt::Write::write_fmt(
         &mut *out,
         format_args!(
@@ -334,6 +376,16 @@ mod tests {
             .append_all(&[cli::frontier::Row {
                 identity,
                 rank: 1,
+                // THE RUN'S OWN RULES, and deliberately NOT `operator()`
+                // -- `elite` differs from it on three of the five rules
+                // `verdict` checks, so a handler that read the environment
+                // instead of the row answers with the wrong ones and the
+                // assertion below catches it.
+                // A SHORT, deliberately: the sign of `mean_paisa` below is
+                // positive, so a surface re-deriving the side from the mean
+                // answers LONG and disagrees with the row that was written.
+                direction: cli::frontier::Direction::Short,
+                rules: cli::Rules::elite(400, 25),
                 mask_words: [3, 0, 0, 0, 0, 0],
                 hits: 1_194,
                 n: 868,
@@ -360,6 +412,18 @@ mod tests {
             body.contains(r#""meets":{"#),
             "the verdict is on the row: {body}"
         );
+        // THE DIRECTION IS ON THE WIRE, AND IT IS THE ROW'S OWN.
+        //
+        // This row's `mean_milli_paisa` is POSITIVE, so anything re-deriving the
+        // side from the sign of the mean answers "long". The row was written
+        // short. A surface that carries no direction at all -- which every one
+        // of them did -- leaves an operator a win rate, a payoff and a drawdown
+        // for a trade whose direction they cannot recover.
+        assert!(
+            body.contains(r#""direction":"short""#),
+            "the side travels with the row and is not re-derived from the \
+             mean's sign: {body}"
+        );
         assert!(
             body.contains(r#""win_rate":false"#),
             "3 wins in 868 does not clear the floor: {body}"
@@ -380,6 +444,28 @@ mod tests {
         assert!(
             body.contains(r#""rules":{"min_win_rate_bp":"#),
             "the thresholds travel with the answer: {body}"
+        );
+        // THE RULES ON THE WIRE ARE THE RUN'S, NOT THE ENVIRONMENT'S, AND THIS
+        // IS THE ASSERTION THAT SEPARATES THEM.
+        //
+        // The row above was written under `Rules::elite(400, 25)`, whose win
+        // rate floor is 8,000. `Rules::operator()` -- what this handler read
+        // until the rules travelled on the row -- defaults to 5,000. A handler
+        // that resolves them at request time answers 5,000 here and every
+        // verdict beside it is computed against a policy no run applied.
+        //
+        // Asserted on the JSON text rather than through a parse, for the same
+        // reason the mask-word assertion below is: the wire format is the
+        // contract, and a number that reaches the browser as the wrong value is
+        // wrong however cleanly it parses.
+        assert!(
+            body.contains(r#""rules":{"min_win_rate_bp":8000"#),
+            "the run swept at elite's 8,000; a handler reading the environment \
+             answers 5,000 and judges every row by it: {body}"
+        );
+        assert!(
+            body.contains(r#""min_rr_bp":300"#),
+            "and elite's payoff floor, not operator's 125: {body}"
         );
         // 64-BIT SAFE ON THE WIRE. A bare JSON number above 2^53 does not
         // survive `JSON.parse`, and a mask decoded from a rounded word names the
