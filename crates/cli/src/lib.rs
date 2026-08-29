@@ -8995,11 +8995,25 @@ fn record_trades(
     root: &std::path::Path,
     id: &runner::identity::RunId,
     taken: &runner::trade::Trades,
+    bars: &[indicators::Candle],
 ) -> String {
     if taken.trades.is_empty() {
         return String::new();
     }
     let identity = id.bytes();
+    // THE CLOCK ON EVERY ROW, READ OFF THE BAR IT HAPPENED ON.
+    //
+    // `Trade` carries bar INDICES, and a reader of `trades.bin` does not have
+    // the span those index into — so without this the file cannot answer the
+    // operator's actual question: *"which days especially which particular time
+    // period made this massive success and profit"*.
+    //
+    // `bars.get(index)` and not `bars[index]`: the indices come from a walk over
+    // THESE bars so they are in range, but an out-of-range index must not panic
+    // a run whose ledger row is already written. Zero is the honest answer for
+    // an index that is not there — it is not a plausible 1970 trade, it is a
+    // value the page can and does test for.
+    let stamp = |index: usize| bars.get(index).map_or(0, |b: &indicators::Candle| b.ts_micros);
     let rows: Vec<trades::Row> = taken
         .trades
         .iter()
@@ -9012,6 +9026,8 @@ fn record_trades(
             exit_bar: u64::try_from(t.exit_bar).unwrap_or(u64::MAX),
             best: t.best,
             worst: t.worst,
+            entry_micros: stamp(t.entry_bar),
+            exit_micros: stamp(t.exit_bar),
         })
         .collect();
 
@@ -9734,6 +9750,7 @@ fn audit_bars(
         top: rules.top,
         priced: &priced,
         taken: &taken,
+        candles: &trade_bars,
     };
     if let (Some(into), Some(run_id)) = (recording, id) {
         out.push_str(&record_all(into, run_id, &recorded));
@@ -9934,6 +9951,18 @@ struct Recorded<'a> {
     top: usize,
     priced: &'a std::collections::HashMap<[u64; 6], grid::Cell>,
     taken: &'a runner::trade::Trades,
+    /// THE SERIES THE TRADE INDICES INDEX INTO, and it is `trade_bars` rather
+    /// than `bars`.
+    ///
+    /// `taken` comes from `trade_and_screen(&trade_bars, ..)`, and `trade_bars`
+    /// is `project_onto_execution(&bars, ..)` -- a DIFFERENT series whenever an
+    /// execution timeframe is named. Stamping a trade with `bars[entry_bar]`
+    /// would then read a bar that is not the one the position was entered on,
+    /// and the result would be a plausible timestamp rather than an error: the
+    /// right shape, the right decade, the wrong minute. Carried on the struct
+    /// so the slice and the indices travel together and cannot be paired up
+    /// wrongly at the call site.
+    candles: &'a [indicators::Candle],
 }
 
 /// The three files a run leaves behind, in the order they must be written.
@@ -9968,7 +9997,7 @@ fn record_all(
         what.top,
         what.priced,
     ));
-    out.push_str(&record_trades(into.root, run_id, what.taken));
+    out.push_str(&record_trades(into.root, run_id, what.taken, what.candles));
     out
 }
 

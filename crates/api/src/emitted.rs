@@ -202,7 +202,14 @@ struct Case {
 ///
 /// Twenty-one since D-0297 added the commit gate's refusal — the arm every
 /// server built without `BRUTEX_COMMIT` takes on every press.
-const ROWS: usize = 26;
+///
+/// 26 -> 27 when the sweep request gained its own knobs: `api.sweep knobs set
+/// for this run` names, before a multi-hour run starts, every setting that run
+/// was steered by. Driven through `apply_knobs` rather than `conduct`, because
+/// `conduct` calls `cli::range_over` on the real store two lines later -- a
+/// census that can only be satisfied by launching a sweep from `cargo test` is
+/// a census people route around.
+const ROWS: usize = 27;
 
 /// How many distinct production emit sites those rows cover.
 ///

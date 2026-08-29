@@ -112,7 +112,7 @@ fn respond(
         let _ = std::fmt::Write::write_fmt(
             &mut out,
             format_args!(
-                r#"{{"seq":{},"signal_bar":{},"entry_bar":{},"exit_bar":{},"best":{},"worst":{},"bars_held":{}}}"#,
+                r#"{{"seq":{},"signal_bar":{},"entry_bar":{},"exit_bar":{},"best":{},"worst":{},"bars_held":{},"entry_micros":{},"exit_micros":{}}}"#,
                 row.seq,
                 row.signal_bar,
                 row.entry_bar,
@@ -120,12 +120,58 @@ fn respond(
                 row.best,
                 row.worst,
                 row.exit_bar.saturating_sub(row.entry_bar),
+                row.entry_micros,
+                row.exit_micros,
             ),
         );
     }
+    out.push_str(r#"],"periods":{"#);
+    // EVERY CALENDAR PERIOD, BUILT IN ONE PASS AND SERVED WITH THE ROWS.
+    //
+    // The operator's question: *"every day how many wins how many loss every
+    // week every month every quarter every half every year ... we need to always
+    // know whether this combination made how much of all these"*.
+    //
+    // Served ALONGSIDE the rows rather than behind a second route, because the
+    // page needs both together and two routes would let them disagree — a
+    // reader could hold last week's buckets beside this week's trades and have
+    // no way to tell. One response, one pass, one run.
+    //
+    // The aggregation lives in `cli::trades::by_period` rather than here for the
+    // reason `/frontier.json` gives about `Row::derived`: `api` must not become
+    // a second place that decides what a "win" is.
+    for (at, (period, buckets)) in cli::trades::by_period(&rows).iter().enumerate() {
+        if at > 0 {
+            out.push(',');
+        }
+        let _ = std::fmt::Write::write_fmt(
+            &mut out,
+            format_args!(r#""{}":["#, period.name()),
+        );
+        for (n, b) in buckets.iter().enumerate() {
+            if n > 0 {
+                out.push(',');
+            }
+            let _ = std::fmt::Write::write_fmt(
+                &mut out,
+                format_args!(
+                    r#"{{"key":{},"trades":{},"wins":{},"worst_wins":{},"best_paisa":{},"worst_paisa":{},"largest_win":{},"largest_loss":{}}}"#,
+                    b.key,
+                    b.trades,
+                    b.wins,
+                    b.worst_wins,
+                    b.best_paisa,
+                    b.worst_paisa,
+                    b.largest_win,
+                    b.largest_loss,
+                ),
+            );
+        }
+        out.push(']');
+    }
     let _ = std::fmt::Write::write_fmt(
         &mut out,
-        format_args!(r#"],"count":{},"refusal":null}}"#, rows.len()),
+        format_args!(r#"}},"count":{},"refusal":null}}"#, rows.len()),
     );
     (axum::http::StatusCode::OK, json, out)
 }

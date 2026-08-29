@@ -65,7 +65,7 @@ const MAGIC: [u8; 8] = *b"BRUTEXTD";
 
 /// The layout below. A reader that does not know this number refuses rather
 /// than guessing at a stride it cannot verify.
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 /// Magic, version and a reserved word.
 const HEADER: u64 = 16;
@@ -74,11 +74,11 @@ const _: () = assert!(HEADER_BYTES as u64 == HEADER);
 
 /// One row. Fixed, so `index -> byte offset` is a multiply and the lookup is
 /// O(1) — `CLAUDE.md` §3 rule 4.
-const STRIDE: u64 = 88;
-const STRIDE_BYTES: usize = 88;
+const STRIDE: u64 = 104;
+const STRIDE_BYTES: usize = 104;
 const _: () = assert!(STRIDE_BYTES as u64 == STRIDE);
 
-/// The last eight bytes of a row are a seal over the first eighty.
+/// The last eight bytes of a row are a seal over the first ninety-six.
 const SEAL_BYTES: usize = 8;
 const PAYLOAD_BYTES: usize = STRIDE_BYTES - SEAL_BYTES;
 
@@ -90,8 +90,8 @@ const PAYLOAD_BYTES: usize = STRIDE_BYTES - SEAL_BYTES;
 /// would have skipped every row it had just written. A file that indexes to
 /// nothing looks exactly like a file nobody wrote to.
 ///
-/// `32 + 4 + 4 + 8 + 8 + 8 + 8 + 8`.
-const _: () = assert!(PAYLOAD_BYTES == 32 + 4 + 4 + 8 + 8 + 8 + 8 + 8);
+/// `32 + 4 + 4 + 8 + 8 + 8 + 8 + 8 + 8 + 8`.
+const _: () = assert!(PAYLOAD_BYTES == 32 + 4 + 4 + 8 + 8 + 8 + 8 + 8 + 8 + 8);
 
 /// One round trip, with the run it belongs to.
 ///
@@ -113,10 +113,50 @@ pub struct Row {
     pub entry_bar: u64,
     /// The bar the position was closed on.
     pub exit_bar: u64,
-    /// The most favourable excursion reached, in paisa.
+    /// Paisa per unit with both legs filled at the bar OPEN -- the BEST-CASE
+    /// realised P&L of this round trip, not an excursion.
+    ///
+    /// THIS DOC SAID "the most favourable excursion reached" AND THAT WAS WRONG.
+    /// `runner::trade::Trade::best` is a completed round trip priced at the most
+    /// favourable fill that could have happened, and the companion field said
+    /// "Negative or zero", which is false of a worst-case P&L on a winning
+    /// trade. A reader trusting either sentence would have filtered on
+    /// `worst <= 0` and found nothing, or read an excursion where a result was.
     pub best: i64,
-    /// The most adverse excursion reached, in paisa. Negative or zero.
+    /// Paisa per unit with both legs filled at the bar PRINTED EXTREME -- the
+    /// WORST-CASE realised P&L, and the figure selection actually ranks on.
+    ///
+    /// Never better than [`Self::best`], and the gap between them is the whole
+    /// range a real fill can land in. Positive on a trade that wins even at the
+    /// worst fill, which is the only kind worth having.
     pub worst: i64,
+    /// When the position was ENTERED, in microseconds since the epoch, copied
+    /// straight off `Candle::ts_micros` of the entry bar.
+    ///
+    /// # Why this is stored and not derived
+    ///
+    /// Because the three `*_bar` fields above are INDICES INTO A SPAN, and a
+    /// reader of this file does not have the span. `/trades.json` would have to
+    /// reopen the right instrument-month, seek to the right stride and read the
+    /// bar back — which is possible, and O(1) per trade, and still the wrong
+    /// shape: it makes the answer to *"which weekday made the money"* depend on
+    /// the bar files still being there, unchanged, months later.
+    ///
+    /// The operator's question is exactly that one: *"as per this combination
+    /// which days especially which particular time period made this massive
+    /// success and profit"*. With the epoch on the row it is one pass over the
+    /// run's own block and no lookup at all — weekday is
+    /// `(days_since_epoch + 4) % 7` and the minute of the session is a divide.
+    /// Without it the question could not be asked of this file.
+    pub entry_micros: i64,
+    /// When the position was CLOSED, same units and same reason.
+    ///
+    /// Kept alongside the entry rather than derived from `exit_bar - entry_bar`,
+    /// because the two bars can sit either side of a weekend or a holiday and
+    /// the difference in BARS is not the difference in TIME. A holding period
+    /// measured in bars would call a Friday-to-Monday trade the same length as
+    /// a Monday-to-Tuesday one.
+    pub exit_micros: i64,
 }
 
 impl Row {
@@ -125,7 +165,7 @@ impl Row {
     #[allow(
         clippy::indexing_slicing,
         reason = "every write is at a compile-time offset into an array whose \
-                  length is asserted above; `PAYLOAD_BYTES` is checked to be 72 \
+                  length is asserted above; `PAYLOAD_BYTES` is checked to be 96 \
                   and the writes below sum to exactly that."
     )]
     pub fn to_bytes(&self) -> [u8; STRIDE_BYTES] {
@@ -142,7 +182,9 @@ impl Row {
         put(&self.entry_bar.to_le_bytes(), &mut at); // 48   8
         put(&self.exit_bar.to_le_bytes(), &mut at); // 56   8
         put(&self.best.to_le_bytes(), &mut at); // 64   8
-        put(&self.worst.to_le_bytes(), &mut at); // 72   8  -> payload ends at 80
+        put(&self.worst.to_le_bytes(), &mut at); // 72   8
+        put(&self.entry_micros.to_le_bytes(), &mut at); // 80   8
+        put(&self.exit_micros.to_le_bytes(), &mut at); // 88   8  -> payload ends at 96
         debug_assert_eq!(at, PAYLOAD_BYTES, "the fields must fill the payload");
         let seal = seal_of(&out);
         out[PAYLOAD_BYTES..].copy_from_slice(&seal);
@@ -184,6 +226,10 @@ impl Row {
         let best = i64::from_le_bytes(eight);
         eight.copy_from_slice(&raw[72..80]);
         let worst = i64::from_le_bytes(eight);
+        eight.copy_from_slice(&raw[80..88]);
+        let entry_micros = i64::from_le_bytes(eight);
+        eight.copy_from_slice(&raw[88..96]);
+        let exit_micros = i64::from_le_bytes(eight);
         Self {
             identity,
             seq,
@@ -192,6 +238,8 @@ impl Row {
             exit_bar,
             best,
             worst,
+            entry_micros,
+            exit_micros,
         }
     }
 }
@@ -517,6 +565,10 @@ mod tests {
             exit_bar: 40,
             best: 4_250,
             worst: -1_375,
+            // 2024-01-15 09:20 IST as UTC micros -- a Monday, so the weekday
+            // arithmetic below has a known answer to be wrong about.
+            entry_micros: 1_705_290_600_000_000,
+            exit_micros: 1_705_292_400_000_000,
         }
     }
 
@@ -648,5 +700,359 @@ mod tests {
     fn the_stride_is_what_the_layout_says() {
         assert_eq!(STRIDE_BYTES, 88);
         assert_eq!(row([0_u8; 32], 0).to_bytes().len(), STRIDE_BYTES);
+    }
+}
+
+/// One calendar bucket's result, under both fill readings at once.
+///
+/// # Why both readings live in one bucket
+///
+/// Because the operator's standing requirement is that *"in all these both
+/// worst and best case will be always covered"*, and a bucket carrying one of
+/// them would force the page to ask twice and hope the two answers were built
+/// from the same trades. They are built from the same pass here.
+///
+/// A "win" is a round trip that ended above water UNDER THAT READING, so a
+/// trade can be a win at the best fill and a loss at the worst — and the gap
+/// between `wins` and `worst_wins` is exactly the number of trades whose
+/// outcome the data cannot settle.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Bucket {
+    /// Which bucket this is, in the units [`Period`] defines.
+    pub key: i64,
+    /// Round trips that started in this bucket.
+    pub trades: u64,
+    /// Of those, the ones that ended above water at the BEST fill.
+    pub wins: u64,
+    /// And at the WORST fill — never more than [`Self::wins`].
+    pub worst_wins: u64,
+    /// Total paisa per unit at the best fill.
+    pub best_paisa: i64,
+    /// Total paisa per unit at the worst fill.
+    pub worst_paisa: i64,
+    /// The single best round trip in this bucket, at the worst fill.
+    pub largest_win: i64,
+    /// The single worst round trip in this bucket, at the worst fill.
+    pub largest_loss: i64,
+}
+
+impl Bucket {
+    /// Fold one trade in. Every field is a compare or an add, so this is O(1)
+    /// and the whole aggregation is one pass — `CLAUDE.md` §3 rule 4.
+    fn take(&mut self, row: &Row) {
+        self.trades = self.trades.saturating_add(1);
+        if row.best > 0 {
+            self.wins = self.wins.saturating_add(1);
+        }
+        if row.worst > 0 {
+            self.worst_wins = self.worst_wins.saturating_add(1);
+        }
+        self.best_paisa = self.best_paisa.saturating_add(row.best);
+        self.worst_paisa = self.worst_paisa.saturating_add(row.worst);
+        // SEEDED FROM THE FIRST TRADE, not from zero. A bucket whose every trade
+        // lost would report a `largest_win` of 0 if this started at zero, and
+        // zero is a better result than every trade it actually holds -- the
+        // operator's own rule is `min(win) >= 3x max(loss)`, which a phantom
+        // zero would silently satisfy on the losing side and fail on the winning
+        // one. `trades == 1` is the seed test because `take` has already
+        // incremented it.
+        if self.trades == 1 {
+            self.largest_win = row.worst;
+            self.largest_loss = row.worst;
+        } else {
+            self.largest_win = self.largest_win.max(row.worst);
+            self.largest_loss = self.largest_loss.min(row.worst);
+        }
+    }
+}
+
+/// The calendar periods a run's trades can be grouped by.
+///
+/// # Why these six and why they are integers
+///
+/// The operator asked for *"every day how many wins how many loss every week
+/// every month every quarter every half every year"*. Each is a pure integer
+/// function of the entry timestamp — no date library, no allocation, no
+/// formatting — so bucketing a trade is a handful of divides and one hash
+/// probe, and the whole aggregation is one pass over the run's own block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Period {
+    /// Days since 1970-01-01.
+    Day,
+    /// Seven-day blocks since 1970-01-01. **Not ISO weeks**: the epoch was a
+    /// Thursday, so block boundaries fall on Thursdays. Stated rather than
+    /// hidden, because a reader comparing these to a broker's Monday-start
+    /// weekly statement would otherwise find them mysteriously off by three
+    /// days. `Weekday` below is what answers "which day of the week".
+    Week,
+    /// `year * 12 + (month - 1)`, so consecutive months are consecutive keys
+    /// across a year boundary.
+    Month,
+    /// `year * 4 + (month - 1) / 3`.
+    Quarter,
+    /// `year * 2 + (month - 1) / 6`.
+    Half,
+    /// The civil year.
+    Year,
+    /// 0 = Monday through 6 = Sunday, across the whole span.
+    ///
+    /// This is the one that answers *"which days made this massive success"* —
+    /// [`Self::Day`] says *which dates*, and with eighty-one months of data that
+    /// is 1,700 rows nobody can read. Seven rows can be read at a glance.
+    Weekday,
+    /// Minutes from midnight UTC, rounded down to the hour.
+    ///
+    /// Answers *"which particular time period"*. UTC and not IST, deliberately:
+    /// the bars carry UTC and converting here would put a second timezone
+    /// opinion in the engine. The page adds the 5.5-hour offset once, where it
+    /// is visible.
+    Hour,
+}
+
+impl Period {
+    /// Every period, so a caller can build the whole board without naming them.
+    pub const ALL: [Self; 8] = [
+        Self::Day,
+        Self::Week,
+        Self::Month,
+        Self::Quarter,
+        Self::Half,
+        Self::Year,
+        Self::Weekday,
+        Self::Hour,
+    ];
+
+    /// The name this period answers to over HTTP and on the page.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Day => "day",
+            Self::Week => "week",
+            Self::Month => "month",
+            Self::Quarter => "quarter",
+            Self::Half => "half",
+            Self::Year => "year",
+            Self::Weekday => "weekday",
+            Self::Hour => "hour",
+        }
+    }
+
+    /// Which bucket a microsecond timestamp falls in.
+    ///
+    /// # Why the division is floored rather than truncated
+    ///
+    /// Rust's `/` truncates towards zero, so `-1 / 86_400_000_000` is 0 — which
+    /// would put 1969-12-31 in the same bucket as 1970-01-01. No bar in this
+    /// store predates 1970, so it cannot bite today; it is written correctly
+    /// anyway because the alternative is a comment promising it will not.
+    #[must_use]
+    pub fn bucket(self, micros: i64) -> i64 {
+        const DAY: i64 = 86_400_000_000;
+        let days = micros.div_euclid(DAY);
+        let (year, month, _day) = telemetry::civil_from_days(days);
+        match self {
+            Self::Day => days,
+            Self::Week => days.div_euclid(7),
+            Self::Month => year.saturating_mul(12).saturating_add(month - 1),
+            Self::Quarter => year.saturating_mul(4).saturating_add((month - 1) / 3),
+            Self::Half => year.saturating_mul(2).saturating_add((month - 1) / 6),
+            Self::Year => year,
+            // 1970-01-01 was a THURSDAY, so shifting by 3 puts Monday at 0.
+            // `rem_euclid` and not `%`, for the negative side.
+            Self::Weekday => days.saturating_add(3).rem_euclid(7),
+            Self::Hour => micros.rem_euclid(DAY) / 3_600_000_000,
+        }
+    }
+}
+
+/// Group one run's trades into every calendar period at once.
+///
+/// # Cost
+///
+/// One pass over the rows, and for each row eight hash probes — one per period.
+/// Every probe and every fold is O(1), so this is O(trades) overall with a
+/// constant of eight, and it allocates one map per period rather than one per
+/// trade. `CLAUDE.md` §3 rule 4.
+///
+/// Buckets come back SORTED BY KEY, because a calendar read out of order is not
+/// a calendar, and because §3 rule 5 requires two runs over the same bytes to
+/// produce the same output — a `HashMap` iteration would not.
+#[must_use]
+pub fn by_period(rows: &[Row]) -> Vec<(Period, Vec<Bucket>)> {
+    Period::ALL
+        .iter()
+        .map(|&period| {
+            let mut held: std::collections::HashMap<i64, Bucket> =
+                std::collections::HashMap::with_capacity(rows.len().min(512));
+            for row in rows {
+                // A ROW WITH NO TIMESTAMP IS SKIPPED AND NOT BUCKETED AT ZERO.
+                // `record_trades` writes 0 when a bar index is out of range, and
+                // 0 micros is 1970-01-01 -- a bucket that would sit fifty years
+                // before every real one and drag every "first trade" readout
+                // with it.
+                if row.entry_micros == 0 {
+                    continue;
+                }
+                let key = period.bucket(row.entry_micros);
+                held.entry(key).or_insert(Bucket { key, ..Bucket::default() }).take(row);
+            }
+            let mut out: Vec<Bucket> = held.into_values().collect();
+            out.sort_unstable_by_key(|b| b.key);
+            (period, out)
+        })
+        .collect()
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "the same exception every test module in this workspace takes: a \
+              test that cannot panic cannot fail."
+)]
+mod period_tests {
+    use super::{Bucket, Period, Row, by_period};
+
+    /// 2024-01-15 09:20 UTC. A **Monday**, chosen because a weekday
+    /// calculation off by one still lands on a real day and looks fine.
+    const MONDAY: i64 = 1_705_310_400_000_000;
+    const DAY: i64 = 86_400_000_000;
+
+    fn trade(entry: i64, best: i64, worst: i64) -> Row {
+        Row {
+            identity: [7_u8; 32],
+            seq: 0,
+            signal_bar: 0,
+            entry_bar: 1,
+            exit_bar: 2,
+            best,
+            worst,
+            entry_micros: entry,
+            exit_micros: entry + 3_600_000_000,
+        }
+    }
+
+    fn of(rows: &[Row], want: Period) -> Vec<Bucket> {
+        by_period(rows)
+            .into_iter()
+            .find(|(p, _)| *p == want)
+            .map(|(_, b)| b)
+            .expect("every period is present")
+    }
+
+    /// Monday is 0 and Sunday is 6, across the whole week.
+    ///
+    /// The epoch was a THURSDAY, so the `+3` shift is the entire content of
+    /// this calculation and an off-by-one is invisible without a fixed date.
+    #[test]
+    fn the_weekday_of_a_known_monday_is_zero_and_the_week_runs_to_six() {
+        for (offset, expect) in (0..7).map(|d| (d, d)) {
+            let rows = [trade(MONDAY + offset * DAY, 100, 50)];
+            let got = of(&rows, Period::Weekday);
+            assert_eq!(got.len(), 1);
+            assert_eq!(
+                got[0].key, expect,
+                "{offset} days after a Monday must be weekday {expect}"
+            );
+        }
+    }
+
+    /// A win at the best fill can be a loss at the worst, and the two counts
+    /// must disagree when the data cannot settle the trade.
+    #[test]
+    fn a_trade_can_win_on_one_reading_and_lose_on_the_other() {
+        let rows = [
+            trade(MONDAY, 500, 200),   // wins on both
+            trade(MONDAY, 300, -100),  // wins best, loses worst
+            trade(MONDAY, -400, -900), // loses on both
+        ];
+        let got = of(&rows, Period::Day);
+        assert_eq!(got.len(), 1, "all three are the same day");
+        assert_eq!(got[0].trades, 3);
+        assert_eq!(got[0].wins, 2, "two end above water at the best fill");
+        assert_eq!(got[0].worst_wins, 1, "only one survives the worst fill");
+        assert_eq!(got[0].best_paisa, 400);
+        assert_eq!(got[0].worst_paisa, -800);
+    }
+
+    /// The extremes are seeded from the first trade, not from zero.
+    ///
+    /// A bucket where everything lost must not report a `largest_win` of zero —
+    /// zero is better than every trade it holds, and the operator's rule is
+    /// `min(win) >= 3x max(loss)`, which a phantom zero would quietly pass.
+    #[test]
+    fn a_bucket_where_everything_lost_reports_no_phantom_zero_win() {
+        let rows = [trade(MONDAY, -100, -300), trade(MONDAY, -50, -700)];
+        let got = of(&rows, Period::Day);
+        assert_eq!(got[0].largest_win, -300, "the least bad loss, not zero");
+        assert_eq!(got[0].largest_loss, -700);
+        assert_eq!(got[0].worst_wins, 0);
+    }
+
+    /// Consecutive months are consecutive keys ACROSS a year boundary, which
+    /// `month` alone would not give: December then January would go 12 -> 1.
+    #[test]
+    fn december_and_january_are_adjacent_month_keys() {
+        // 2024-12-15 and 2025-01-15.
+        let december = 1_734_220_800_000_000;
+        let january = 1_736_899_200_000_000;
+        let rows = [trade(december, 1, 1), trade(january, 1, 1)];
+        let got = of(&rows, Period::Month);
+        assert_eq!(got.len(), 2);
+        assert_eq!(
+            got[1].key - got[0].key,
+            1,
+            "one month apart must be one key apart: {:?}",
+            got.iter().map(|b| b.key).collect::<Vec<_>>()
+        );
+        // And the same for the quarter and the half.
+        assert_eq!(of(&rows, Period::Quarter)[1].key - of(&rows, Period::Quarter)[0].key, 1);
+        assert_eq!(of(&rows, Period::Half)[1].key - of(&rows, Period::Half)[0].key, 1);
+        assert_eq!(of(&rows, Period::Year)[1].key - of(&rows, Period::Year)[0].key, 1);
+    }
+
+    /// A row whose bar index was out of range carries 0 micros, and 1970 must
+    /// not appear as a bucket fifty years before every real trade.
+    #[test]
+    fn a_trade_with_no_timestamp_is_skipped_rather_than_filed_under_1970() {
+        let rows = [trade(0, 100, 100), trade(MONDAY, 100, 100)];
+        let got = of(&rows, Period::Day);
+        assert_eq!(got.len(), 1, "only the stamped trade is bucketed: {got:?}");
+        assert_eq!(got[0].trades, 1);
+    }
+
+    /// Sorted by key, so a calendar reads as a calendar and two runs over the
+    /// same bytes list the same buckets in the same order — §3 rule 5.
+    #[test]
+    fn buckets_come_back_in_calendar_order() {
+        let rows = [
+            trade(MONDAY + 5 * DAY, 1, 1),
+            trade(MONDAY, 1, 1),
+            trade(MONDAY + 2 * DAY, 1, 1),
+        ];
+        let keys: Vec<i64> = of(&rows, Period::Day).iter().map(|b| b.key).collect();
+        let mut sorted = keys.clone();
+        sorted.sort_unstable();
+        assert_eq!(keys, sorted, "insertion order must not reach the output");
+    }
+
+    /// Every period is answered, so a page asking for all eight gets all eight
+    /// rather than silently missing one.
+    #[test]
+    fn all_eight_periods_come_back_even_when_a_run_has_one_trade() {
+        let got = by_period(&[trade(MONDAY, 1, 1)]);
+        assert_eq!(got.len(), Period::ALL.len());
+        for (period, buckets) in &got {
+            assert_eq!(buckets.len(), 1, "{} held nothing", period.name());
+        }
+    }
+
+    /// No trades is an empty board, not a panic and not a phantom bucket.
+    #[test]
+    fn a_run_with_no_trades_answers_empty_for_every_period() {
+        for (period, buckets) in by_period(&[]) {
+            assert!(buckets.is_empty(), "{} invented a bucket", period.name());
+        }
     }
 }

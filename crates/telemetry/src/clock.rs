@@ -59,7 +59,8 @@ pub(crate) fn millis_of(span: &Duration, before_epoch: bool) -> i64 {
 /// Howard Hinnant's `civil_from_days`, shifted to an era starting 0000-03-01
 /// so that the leap day is the last day of the era and needs no special case.
 /// Exact for every `i64` day this crate can produce.
-pub(crate) fn civil_from_days(days: i64) -> (i64, i64, i64) {
+#[must_use]
+pub fn civil_from_days(days: i64) -> (i64, i64, i64) {
     // 719_468 = days from 0000-03-01 to 1970-01-01.
     let shifted = days.saturating_add(719_468);
     // Floor division towards the era start, which is what makes the negative

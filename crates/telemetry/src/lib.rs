@@ -121,7 +121,7 @@ mod sink;
 mod tail;
 mod value;
 
-pub use crate::clock::now_millis;
+pub use crate::clock::{civil_from_days, now_millis};
 pub use crate::event::{
     Event, MAX_FIELDS, MAX_KEY_BYTES, MAX_MESSAGE_BYTES, MAX_STR_VALUE_BYTES, MAX_TARGET_BYTES,
 };

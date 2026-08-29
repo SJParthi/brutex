@@ -925,6 +925,21 @@ pub fn apply_knobs(asked: &Asked) {
     );
 }
 
+/// Runs the sweep and records what it produced.
+///
+/// **Blocking on purpose.** `cli::range_over` is CPU-bound over millions of
+/// bars; running it directly on a tokio worker would hold that thread for the
+/// whole sweep and starve every other request on it. The handler puts this on a
+/// blocking thread.
+///
+/// The text `cli` returns is kept whole, whichever field [`settle`] files it
+/// under. It is the same text `cli range-all` prints in a terminal, including
+/// the `STORED_PROVENANCE` banner that says the bars were REAL — `CLAUDE.md` §5
+/// makes that banner the only thing separating a real sweep from a generated
+/// one, so it travels with the report rather than being stripped for the page.
+///
+/// [`apply_knobs`] runs first and its `clear_all` runs last, so this request's
+/// settings cannot outlive it.
 #[must_use]
 pub fn conduct(asked: &Asked, now_micros: i64) -> Progress {
     let mut progress = Progress::started(
