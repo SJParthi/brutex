@@ -289,11 +289,27 @@ impl Refusal {
 ///
 /// # Why it takes the stamp rather than reading it
 ///
-/// `cargo test` is an unstamped build — `crates/runner`'s own doc records that
+/// `cargo test` WAS an unstamped build — `crates/runner`'s own doc records that
 /// this is why `run_ranked` shipped with zero coverage. A guard that called
 /// `commit_stamp()` directly would therefore have one arm the suite can never
 /// reach, which is the 100% floor §9 sets. Taking the value makes both arms
 /// ordinary.
+///
+/// # That premise is no longer true, and the design outlives it
+///
+/// `crates/cli/build.rs` has stamped `BRUTEX_COMMIT` from `.git/HEAD` at compile
+/// time since `086149d5`, and it stamps the TEST HARNESS as well as the binary,
+/// so on any machine with a `.git` both this crate's tests and `cli`'s are
+/// stamped. The unreachable arm is now the OTHER one.
+///
+/// Taking the stamp as an argument is still right, and more clearly so: it is
+/// the only way either arm is reachable, whichever way the build happens to be
+/// stamped, and it does not depend on a fact about the toolchain that a file in
+/// another crate can change without touching this one. It did exactly that —
+/// `cli`'s `a_well_formed_range_refuses_at_the_identity_gate_and_says_so` read
+/// the stamp implicitly, and when `build.rs` landed 120 commits later that test
+/// silently began sweeping 618,296 real bars and appending to the operator's
+/// ledger. Every reader of the stamp should take it, not read it.
 fn stamp_refusal(stamp: Option<&str>) -> Option<Refusal> {
     if stamp.is_some() {
         return None;
@@ -1280,7 +1296,9 @@ pub async fn descend(
 /// [`descend`], with the build's commit stamp passed in.
 ///
 /// Split for the reason [`run_with`] gives, and it applies identically here:
-/// `cargo test` is an unstamped build, so a handler reading the stamp itself
+/// A handler reading the stamp itself would have an arm the suite cannot reach
+/// whichever way the build is stamped -- see [`stamp_refusal`], which records
+/// that `build.rs` moved WHICH arm that is,
 /// would take one arm forever and make the other unreachable.
 pub(crate) fn descend_with(
     site: &crate::server::Loaded,
@@ -1767,7 +1785,7 @@ pub async fn command(
 
 /// [`command`], with the build's commit stamp passed in.
 ///
-/// Split for the reason [`run_with`] gives: `cargo test` is an unstamped build.
+/// Split for the reason [`run_with`] gives, and see [`stamp_refusal`] for why/// that reason survived `build.rs` changing which arm is the reachable one.
 pub(crate) fn command_with(
     site: &crate::server::Loaded,
     body: &str,

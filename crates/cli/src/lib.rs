@@ -3114,7 +3114,11 @@ fn audit_stored_inner(
     // over bars and no loop over candidates reaches this line.
     //
     // NOT REACHED BY `cargo test`, AND THAT IS STATED RATHER THAN PAPERED OVER.
-    // `commit_stamp()` is `option_env!`, so an unstamped test build refuses at
+    // `commit_stamp()` was `option_env!` with nothing setting it, so an unstamped
+    // test build refused at the gate above before the store was touched. THAT IS
+    // NO LONGER SO -- `build.rs` stamps the harness since `086149d5` -- and the
+    // reachability claim here is stale in the safe direction: the line is now
+    // reachable, not less so. Kept and corrected rather than deleted, because
     // the gate above before the store is touched --
     // `the_stored_audit_refuses_for_the_same_cause_and_names_itself` documents
     // the same limit for the refusal path, and `sweep_stored`'s two events sit
@@ -11854,9 +11858,17 @@ mod tests {
                 "zerodha",
                 "NIFTY",
                 "60min",
-                "2024",
+                // 1970, NOT 2024-01, AND FOR THE REASON ITS SIBLING RECORDS.
+                // `build.rs` stamps `BRUTEX_COMMIT`, so the identity gate no
+                // longer stops this before the store, and `auto_stored_inner`
+                // carries no span ceiling. This passed in 0.00s only because
+                // 60min/2024-01 happens to hold 154 bars -- below the 1,876-bar
+                // warm-up. A wider span or a finer rung and it is the same
+                // eighty-minute defect. NIFTY did not exist in 1970, so no pull
+                // can change that, and the arm this test is FOR is still reached.
+                "1970",
                 "1",
-                "2024",
+                "1970",
                 "1",
             ]),
             &mut out,
@@ -12621,13 +12633,44 @@ mod tests {
         }
     }
 
-    /// A well-formed range still refuses, and for the identity reason.
+    /// A well-formed range still refuses, and WHICH gate refuses depends on the
+    /// build.
     ///
-    /// This is the pair to the test above: the arguments are all valid, so the
-    /// parse arms pass and the call reaches `audit_range`, which refuses at the
-    /// commit gate before touching the store. That gate is §3 rule 3 and it must
-    /// come FIRST — a computation whose identity cannot be recorded may not run,
-    /// so the refusal here is the correct behaviour and not a gap.
+    /// # Why the span is 1970 and not the operator's own
+    ///
+    /// This asked for `2019-12..2026-08`, on the premise stated here in as many
+    /// words: *"the call reaches `audit_range`, which refuses at the commit gate
+    /// before touching the store"*. `crates/cli/build.rs` has stamped
+    /// `BRUTEX_COMMIT` from `.git/HEAD` at COMPILE time since `086149d5`, and it
+    /// stamps the test harness as well as the binary — so on any machine with a
+    /// `.git` the gate PASSES and the call goes on to load the span. The premise
+    /// was true when it was written and was invalidated six days later, 120
+    /// commits away, by a file that never mentions this test.
+    ///
+    /// MEASURED, both ways. On the operator's machine that span is 618,296
+    /// one-minute bars, a full sweep, a 625-cell exit grid per candidate — and
+    /// then `record_run` APPENDS A ROW TO THE REAL LEDGER. Over eighty minutes
+    /// at 665% CPU and 3.1 GB before it was killed, which is why
+    /// `cargo test --workspace` could not finish at all. On a runner with no
+    /// store it fails in 0.01 s instead, naming the store rather than the stamp
+    /// — so CI has been red on four jobs since that commit, and gate 1e reports
+    /// it first, where its message blames the front-end PATH stub for a failure
+    /// that has nothing to do with it.
+    ///
+    /// A unit test that writes into production data is the sharper half of this.
+    /// `1970-01` keeps every parse arm passing and the dispatch arm reached —
+    /// which is what this test is for — while making the load unsatisfiable BY
+    /// CONSTRUCTION: NIFTY did not exist, so no pull can ever put that month in
+    /// the store and no machine's contents can change the answer. A store-root
+    /// trick would bound it against today's disk; history bounds it against any.
+    ///
+    /// # Why the assertion branches on `commit_stamp()`
+    ///
+    /// It is a compile-time constant this test can read, so both builds are
+    /// ordinary rather than one being a configuration the suite cannot reach.
+    /// The same split `the_stored_audit_refuses_for_the_same_cause_and_names_itself`
+    /// already makes, and the same reason `api::sweeprun::stamp_refusal` takes
+    /// the stamp as an argument instead of reading it.
     #[test]
     fn a_well_formed_range_refuses_at_the_identity_gate_and_says_so() {
         let mut out = String::new();
@@ -12637,24 +12680,53 @@ mod tests {
                 "zerodha",
                 "NIFTY",
                 "1min",
-                "2019",
-                "12",
-                "2026",
-                "8",
+                "1970",
+                "1",
+                "1970",
+                "1",
                 "500",
             ]),
             &mut out,
         );
-        assert_eq!(code, MISUSED);
-        assert!(
-            out.contains("commit stamp"),
-            "an unstamped build must refuse by naming the stamp, not by \
-             failing to find a file: {out}"
+        assert_eq!(
+            code, MISUSED,
+            "a range that cannot be run is a misuse: {out}"
         );
         assert!(
-            out.contains("the audit will not run"),
-            "and it must say which command it refused: {out}"
+            out.starts_with("refused: "),
+            "the arm was reached rather than falling through to the usage \
+             refusal: {out}"
         );
+
+        if crate::commit_stamp().is_none() {
+            // §3 RULE 3 COMES FIRST. A computation whose identity cannot be
+            // recorded may not run, so the stamp is refused before a bar is
+            // read, and that ordering is the property this half asserts.
+            assert!(
+                out.contains("commit stamp"),
+                "an unstamped build must refuse by naming the stamp, not by \
+                 failing to find a file: {out}"
+            );
+            assert!(
+                out.contains("the audit will not run"),
+                "and it must say which command it refused: {out}"
+            );
+        } else {
+            // A STAMPED BUILD PASSES THAT GATE and reaches the store, which is
+            // the second refusal and the one an operator actually sees. Asserted
+            // on the month echoed back rather than on the refusal's prose: §4
+            // requires it to name what was wrong, and the argument is the part
+            // that cannot drift when the wording is improved.
+            assert!(
+                out.contains("1970-01"),
+                "a stamped build must get past the identity gate and refuse for \
+                 the month it could not read: {out}"
+            );
+            assert!(
+                !out.contains("commit stamp"),
+                "and it must not claim to lack a stamp it has: {out}"
+            );
+        }
     }
 
     /// The usage text lists the range command, so an operator can find it.
@@ -12669,10 +12741,13 @@ mod tests {
 
     /// A COMPLETED RANGE RUN LEAVES A ROW, and a rerun does not leave a second.
     ///
-    /// # What this can reach under `cargo test`, stated because it bounds the
-    /// # assertion
-    ///
-    /// `commit_stamp()` is `option_env!`, so an unstamped test build refuses at
+    /// `commit_stamp()` WAS `option_env!` with nothing setting it, so an
+    /// unstamped test build refused at the identity gate before the store was
+    /// touched -- the limit
+    /// `the_stored_audit_refuses_for_the_same_cause_and_names_itself` documents.
+    /// `crates/cli/build.rs` stamps the harness from `.git/HEAD` since
+    /// `086149d5`, so that is no longer the bound; what still bounds this test is
+    /// that it never asks for a span the store can serve.
     /// the identity gate before the store is touched -- the limit
     /// `the_stored_audit_refuses_for_the_same_cause_and_names_itself` documents.
     /// So this cannot drive `audit-range` end to end.

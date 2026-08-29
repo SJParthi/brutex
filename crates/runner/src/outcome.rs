@@ -664,19 +664,56 @@ impl Edge {
         // cast cannot represent.
         const UNBOUNDED: f64 = 9.0e18;
 
-        if self.n < 2 || self.wins == 0 {
-            return 0;
-        }
+        // WHICH MOVES ARE THE WINS DEPENDS ON THE SIDE, AND THIS READ ONLY ONE.
+        //
+        // The positive forward moves were taken as the gains and the negative
+        // ones as the give-back — a LONG's payoff, computed for every
+        // combination including the ones the engine goes on to trade SHORT. For
+        // a short the negative move IS the win, so the ratio returned was the
+        // exact reciprocal of the real one, and `ByPayoff` ranked shorts in
+        // reverse order of merit:
+        //
+        // | combination | forward moves | true short payoff | old reading |
+        // |---|---|---|---|
+        // | an excellent short | 90 down 100, 10 up 10 | 10.00x | 0.10x, ranked last |
+        // | a terrible short | 5 up 1000, 95 down 60 | 0.06x | 16.66x, ranked first |
+        //
+        // The degenerate case is sharper. A combination whose forward move is
+        // ALWAYS down is the ideal short; it has `wins == 0` and scored ZERO,
+        // the minimum, so `keep` cut it before it ever met an exit grid.
+        //
+        // The side is read here rather than passed in because `Edge` is what
+        // `cli::side_of_evidence` reads to decide it — `mean_paisa < 0.0` is
+        // that whole rule — and `runner` cannot name `cli`. One definition, in
+        // the crate that owns the evidence.
+        //
+        // `rank.rs`'s own header states the property this restores: *"Ranking by
+        // `t` signed would discard every short setup, so the order is on |t|"*.
+        // `Lens::Detectability` honoured it. `Lens::Payoff` — the lens
+        // `audit_range_inner` actually uses — silently undid it.
+        let short = self.mean_paisa < 0.0;
         // COUNTED, NOT SUBTRACTED. `n - wins` is losers PLUS FLATS, and
         // `loss_sum` holds losers only, so dividing one by the other shrank the
         // mean loss and inflated this ratio by `(losses + flats) / losses` --
         // on every mask with a single zero forward move, which on one-minute
         // index bars is most of them. `Sides::losses` carries the real count.
-        let losses = self.losses;
-        // Losses are counted as observations that were strictly negative, so a
-        // sample of wins and flats has none — unbounded, and named rather than
-        // divided by zero.
-        if losses == 0 || self.loss_sum >= 0.0 {
+        //
+        // `loss_sum` is negative, so negating it gives a magnitude; both
+        // `gain_sum` and `back_sum` are magnitudes below whichever side is up.
+        let (gain_sum, gains, back_sum, backs) = if short {
+            (-self.loss_sum, self.losses, self.win_sum, self.wins)
+        } else {
+            (self.win_sum, self.wins, -self.loss_sum, self.losses)
+        };
+
+        if self.n < 2 || gains == 0 {
+            return 0;
+        }
+        // Nothing ever went against the position — unbounded, and named rather
+        // than divided by zero. [`i64::MAX`], the same answer
+        // [`crate::grid::Cell::return_over_drawdown`] gives for a variant that
+        // never gave anything back, and for the same reason.
+        if backs == 0 || back_sum <= 0.0 {
             return i64::MAX;
         }
         #[allow(
@@ -684,14 +721,13 @@ impl Edge {
             reason = "both counts are bounded by the column, which is bounded by \
                       the bars a month holds."
         )]
-        let (wins, losses) = (self.wins as f64, losses as f64);
-        let mean_win = self.win_sum / wins;
-        // `loss_sum` is negative, so this is the magnitude of the average loss.
-        let mean_loss = -(self.loss_sum / losses);
-        if !(mean_win.is_finite() && mean_loss.is_finite()) || mean_loss <= 0.0 {
+        let (gains, backs) = (gains as f64, backs as f64);
+        let mean_gain = gain_sum / gains;
+        let mean_back = back_sum / backs;
+        if !(mean_gain.is_finite() && mean_back.is_finite()) || mean_back <= 0.0 {
             return 0;
         }
-        let ratio = mean_win / mean_loss * 100.0;
+        let ratio = mean_gain / mean_back * 100.0;
         if !ratio.is_finite() || ratio >= UNBOUNDED {
             return i64::MAX;
         }
@@ -1309,6 +1345,107 @@ mod tests {
             0,
             "nothing measured is not a finding"
         );
+    }
+
+    /// A SHORT IS PAID ON THE MOVES THAT GO ITS WAY, AND IT WAS PAID ON THE
+    /// OTHERS.
+    ///
+    /// `payoff_bp` took the positive forward moves as the gains and the negative
+    /// ones as the give-back — a LONG's payoff — and `ByPayoff` then ranked
+    /// every short-edged combination by the exact reciprocal of its real merit.
+    /// `Lens::Payoff` is the lens `audit_range_inner` uses, so this was the live
+    /// order on the operator's own runs.
+    ///
+    /// The two cases here are the pair that makes the inversion unmistakable:
+    /// under the old reading the terrible short scored 1,666 and the excellent
+    /// one scored 10, so the terrible one led the ranking and the excellent one
+    /// was cut by `keep`.
+    #[test]
+    fn a_short_is_paid_on_the_moves_that_go_its_way() {
+        // Ninety moves down a hundred paisa, ten moves up ten. Mean −89.
+        let excellent = Edge {
+            mean_paisa: -89.0,
+            ..sided(100, 10, 100.0, 90, -9_000.0)
+        };
+        // Five moves up a thousand, ninety-five down sixty. Mean −7.
+        let terrible = Edge {
+            mean_paisa: -7.0,
+            ..sided(100, 5, 5_000.0, 95, -5_700.0)
+        };
+
+        assert_eq!(excellent.payoff_bp(), 1_000, "ten to one, the short's way");
+        assert_eq!(
+            terrible.payoff_bp(),
+            6,
+            "sixty paisa won against a thousand lost"
+        );
+        assert!(
+            excellent.payoff_bp() > terrible.payoff_bp(),
+            "the old reading ranked these the other way round: 10 against 1,666"
+        );
+    }
+
+    /// THE IDEAL SHORT SCORED THE MINIMUM.
+    ///
+    /// A combination whose forward move is ALWAYS down is the perfect short and
+    /// has `wins == 0`, which returned zero — the floor. `keep` is a hard cut,
+    /// so it never reached an exit grid at all. Its mirror, always up, is the
+    /// perfect long and correctly returned [`i64::MAX`]; the two must now agree,
+    /// because they are the same setup seen from the two sides.
+    #[test]
+    fn the_perfect_short_and_the_perfect_long_are_worth_the_same() {
+        let always_down = Edge {
+            mean_paisa: -50.0,
+            ..sided(50, 0, 0.0, 50, -2_500.0)
+        };
+        let always_up = Edge {
+            mean_paisa: 50.0,
+            ..sided(50, 50, 2_500.0, 0, 0.0)
+        };
+
+        assert_eq!(
+            always_down.payoff_bp(),
+            i64::MAX,
+            "nothing ever went against it; the old reading scored it ZERO and \
+             `keep` cut the best short in the run"
+        );
+        assert_eq!(
+            always_up.payoff_bp(),
+            always_down.payoff_bp(),
+            "one setup, two sides, one payoff"
+        );
+    }
+
+    /// AND THE MIRROR HOLDS IN GENERAL, not only at the two extremes.
+    ///
+    /// Negating every forward move turns a long setup into the identical short
+    /// setup. A payoff that reads the side cannot change; one that does not
+    /// returns the reciprocal, which is what made the ranking wrong.
+    #[test]
+    fn negating_every_move_leaves_the_payoff_where_it_was() {
+        // The mean is stated rather than divided out, because `n as f64` is a
+        // `cast_precision_loss` this workspace denies -- and the mean is the
+        // field that picks the branch, so it is the one thing a mirror must
+        // negate deliberately rather than derive.
+        for (n, wins, win_sum, losses, loss_sum, mean) in [
+            (100_u64, 40_u64, 4_000.0_f64, 60_u64, -3_000.0_f64, 10.0_f64),
+            (50, 40, 1_200.0, 10, -900.0, 6.0),
+            (10, 3, 33.0, 4, -11.0, 2.2),
+        ] {
+            let long = Edge {
+                mean_paisa: mean,
+                ..sided(n, wins, win_sum, losses, loss_sum)
+            };
+            let short = Edge {
+                mean_paisa: -mean,
+                ..sided(n, losses, -loss_sum, wins, -win_sum)
+            };
+            assert_eq!(
+                long.payoff_bp(),
+                short.payoff_bp(),
+                "the mirror of a long IS a short and must be worth the same"
+            );
+        }
     }
 
     /// A flat forward move is charged to neither side.

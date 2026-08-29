@@ -712,7 +712,10 @@ mod tests {
     ///
     /// `run_ranked` shipped with **zero** coverage: its one production call site
     /// is inside `cli::sweep_stored_inner`, which refuses at the commit gate on
-    /// any build without `BRUTEX_COMMIT` — and `cargo test` is such a build. So
+    /// any build without `BRUTEX_COMMIT` -- and `cargo test` WAS such a build.
+    /// `crates/cli/build.rs` has stamped one from `.git/HEAD` since `086149d5`
+    /// and stamps the test harness too, so that hole would close itself today.
+    /// It is recorded because the argument for the split does not rest on it. So
     /// the whole body, `Column::build` through `rank::rank`, never executed in
     /// the suite. `CLAUDE.md` §9 asks for 100% on a touched crate and this was a
     /// hole straight through the middle of the change.
