@@ -177,3 +177,85 @@ that calls the builder in a non-`const` context.
 **A collision branch needs a real collision.** Filling a small table does not
 necessarily collide; the probe branch then stays unentered while the test
 passes. The colliding pair is computed against the actual hash, not hoped for.
+
+---
+
+## Layer 12's other half — the browser
+
+Everything above is the engine and `crates/api`'s server-rendered page. Layer
+12's bench is `cargo bench -p api`. **The SvelteKit console is a second
+rendering surface, and until now this document said nothing about it** — so its
+bounds were neither claimed nor refused, which is worse than either.
+
+Measured 2026-08-29 against the running server: `/db`, Zerodha NIFTY 1min,
+618,296 matched bars, at load average ~194 with three `cli` test binaries
+holding ~430 % CPU each. Every figure is a browser measurement, taken with
+`performance.now()` around the state change and read back off the DOM.
+
+| Operation | Measured | Bound |
+|---|---|---|
+| Sequential page (next) | **17, 18, 17, 17 ms** | O(1) |
+| Jump to page 12,345 · 33,333 · 41,000 | **67 · 90 · 69 ms, ONE request each** | O(1) in distance |
+| Jump to an already-read month | **105 ms, zero requests** | O(1) |
+| Price line over the window | **240 samples** at 7,500 rows and at 618,296 | O(1) in window |
+| Price position mark, per cell | walks `barPage` — **12 rows at `Fit`, 250 at most** | O(1) in store |
+
+**Why the paging figure is O(1) and not merely fast.** The page number maps to a
+month file by arithmetic — layer 5's rule applied in the browser — so a jump
+opens exactly one file whatever its distance. 12,345 and 41,000 cost the same
+because neither is *searched* for. The first measurement of this was **1.16 s,
+2.3 s and 9.1 s** across three jumps in quick succession, which looked like O(n)
+and was three cold reads queueing on a saturated host. **Both are recorded**:
+the slow one is what a reader will sometimes see, and a table showing only the
+fast one would be the same class of dishonesty as a row cap hiding a fold.
+
+**Why the price line is O(1) where a fold would not be.** It reaches the i-th
+sample with `src[((i * n) / take) | 0]` — layer 4's rule, no search — so the
+cost is `SPARK_N` reads whatever `n` is. Its `lo`/`hi` come from the samples for
+the same reason, and the control says "sampled at 240 points of 618,296 bars"
+rather than implying a true extreme. A spike between two samples is one the line
+never drew, and saying otherwise would be a measurement nobody took.
+
+### Not O(1) in the browser, and not claimed to be
+
+Three derived values walk every row **currently loaded** — not the store, but
+not a constant either. At today's read budget that is ~7,500 rows.
+
+| What | Cost | Why it is not yet fixed |
+|---|---|---|
+| `barWindowed` | O(loaded) filter per window change | The day and time bounds are applied after the fetch, because `/bars/window.json` takes no time parameter |
+| `timeOptions` | O(loaded) fold on `barRows` change | Builds the minute list the Go-to picker offers |
+| `csvRows` / export | O(loaded) walk on press | Writes what is in memory; the button states the shortfall |
+
+Each is a **maintain-incrementally** problem — law 3, "never scan to answer a
+question" — and none of them does. They are listed so the table above cannot be
+read as covering them.
+
+### O(1) space is not achievable and is not offered
+
+**Per-operation space is constant. Total space is not, and cannot be.** 618,296
+bars cannot be held in constant memory; the store is on disk precisely because
+of that, and layer 7 exists because a bar read past RAM costs 616× more.
+
+What IS constant in the browser, which is the honest form of the claim:
+
+- **DOM nodes per screen** — bounded by the page size, not the match count. A
+  618,296-row query and a 12-row one draw the same twelve rows.
+- **Memory per page** — the window route returns a slice; the exact-plan path
+  holds whole month files, bounded by months read rather than by the query.
+
+The distinction `docs/06-limits.md` §1 draws for the engine — per-operation
+constant, total not — holds here word for word, and a browser claim that omits
+the second sentence is false in the same way.
+
+### What has no bound at all yet
+
+Stated because an absent bound is worse than a slow one.
+
+- **No browser bench exists.** Every figure above was taken by hand in a
+  console. Nothing re-measures them, so a regression of the kind D-0042 found on
+  layer 12 — a fold hidden behind a row cap — would be caught here by nobody.
+  Layer 12 earned its `◐` when a sentence was replaced by a bench; this half has
+  only the sentence.
+- **Substring filtering in the browser** is the same O(universe) hole
+  `docs/06-limits.md` §24 records for the server, arriving by the other route.
