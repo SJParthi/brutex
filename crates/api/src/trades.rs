@@ -146,6 +146,11 @@ fn refuse(json: JsonHeaders, why: &str) -> (axum::http::StatusCode, JsonHeaders,
 ///
 /// Shared with `crate::frontierjson`, which keys on the same identity: two hex
 /// decoders would be two chances to disagree about what a run is called.
+///
+/// `#[must_use]` because the whole value is the answer: this has no side
+/// effect, so a call whose result is dropped decoded a run identity and threw
+/// it away — which is a bug at every call site rather than a style preference.
+#[must_use]
 pub fn from_hex_public(text: &str) -> Option<[u8; 32]> {
     from_hex(text)
 }
