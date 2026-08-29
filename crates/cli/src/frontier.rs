@@ -101,9 +101,37 @@ use crate::results::Refusal;
 /// otherwise get a stride mismatch rather than a name.
 const MAGIC: [u8; 8] = *b"BRUTEXFR";
 
-/// Version ONE. A new field is a new version at its own stride, never a mutated
-/// one — `CLAUDE.md` §8 forbids mutating a format in place.
-const VERSION: u32 = 1;
+/// # Version 2 — the money a row was ranked on
+///
+/// Version 1 held nine fields and its own doc said *"There is no P&L here and
+/// that is deliberate. A frontier row records what the SWEEP found."* That was
+/// coherent while the ranking was a sweep statistic. It stopped being coherent
+/// the moment the operator's ranking became a question about money:
+///
+/// > *"top 10 ranking should be calculated based on very less max drawdown,
+/// > less max stop loss, less losing percentage, less losing trades, less
+/// > losing ratio, and on the win side massive max profit, higher winning
+/// > trades, higher winning percentage, higher winning ratio, average maximum
+/// > profit, average less loss."*
+///
+/// Every one of those is on `grid::Cell` — `trades`, `wins`, `pessimistic`,
+/// `worst_trade`, `max_drawdown`, `min_win`, and `win_rate_bp`,
+/// `reward_to_risk_bp`, `return_over_drawdown`, `avg_win`, `avg_loss` derived
+/// from them in O(1). `screen` computes a `Cell` for EVERY candidate and then
+/// returns `-> String`: the numbers exist for microseconds and are rendered as
+/// text. Nothing could rank on them because nothing kept them.
+///
+/// The six raw fields are stored and the derived ones are NOT, so the reader
+/// computes them from the same numbers the engine did — one definition of "win
+/// rate", not two. That is the same argument `vocab` makes for serving the
+/// condition table once rather than copying it into JavaScript.
+///
+/// A version is never mutated in place (`CLAUDE.md` §8), so this is a new one at
+/// its own stride. A version-1 file is REFUSED and named rather than read with
+/// zeros in the new fields — a zero drawdown is a spectacular result, and
+/// inventing one for every historical row is the failure §4 bans. The file is
+/// regenerable by re-running the sweep, which is the cheap half of this trade.
+const VERSION: u32 = 2;
 
 /// Bytes before the first row.
 ///
@@ -126,10 +154,10 @@ const _: () = assert!(HEADER_BYTES as u64 == HEADER);
 /// 144, and the last eight are the seal. The layout is in [`Row::to_bytes`], and
 /// `the_stride_is_exactly_what_the_writer_writes` asserts this constant against
 /// what that function actually fills rather than against a hand count.
-pub const STRIDE: u64 = 144;
+pub const STRIDE: u64 = 192;
 
 /// [`STRIDE`] as a `usize`. Same reason as [`HEADER_BYTES`].
-pub const STRIDE_BYTES: usize = 144;
+pub const STRIDE_BYTES: usize = 192;
 
 const _: () = assert!(STRIDE_BYTES as u64 == STRIDE);
 
@@ -182,8 +210,26 @@ pub struct Row {
     /// [`i64::MAX`] where the combination never lost, which is the answer that
     /// method gives and is a fact rather than an error.
     pub payoff_bp: i64,
-    /// Observations that moved strictly in favour.
+    /// Observations the EDGE counted as wins -- strictly positive forward moves,
+    /// before any exit level. Distinct from `cell_wins` below, which counts
+    /// priced round trips.
     pub wins: u64,
+    /// Observations that moved strictly in favour.
+    /// Round trips the chosen exit variant took. `Self::wins` above is the
+    /// EDGE's win count over forward moves; this is the CELL's, over priced
+    /// trades, and the two answer different questions.
+    pub trades: u64,
+    /// Of those, how many the cell won.
+    pub cell_wins: u64,
+    /// Total under worst-case fills, in paisa. Negative or positive.
+    pub pessimistic: i64,
+    /// The single worst round trip, in paisa. Negative or zero.
+    pub worst_trade: i64,
+    /// The deepest peak-to-trough fall, in paisa.
+    pub max_drawdown: i64,
+    /// The SMALLEST winning trade, in paisa -- the numerator of the operator's
+    /// "smallest win over largest loss" rule.
+    pub min_win: i64,
 }
 
 impl Row {
@@ -218,6 +264,12 @@ impl Row {
         put(&self.t_milli.to_le_bytes(), &mut at); // 106   8
         put(&self.payoff_bp.to_le_bytes(), &mut at); // 114   8
         put(&self.wins.to_le_bytes(), &mut at); // 122   8
+        put(&self.trades.to_le_bytes(), &mut at); // 130   8
+        put(&self.cell_wins.to_le_bytes(), &mut at); // 138   8
+        put(&self.pessimistic.to_le_bytes(), &mut at); // 146   8
+        put(&self.worst_trade.to_le_bytes(), &mut at); // 154   8
+        put(&self.max_drawdown.to_le_bytes(), &mut at); // 162   8
+        put(&self.min_win.to_le_bytes(), &mut at); // 170   8 -> ends at 178
         // 130..136 stay zero: six bytes of reserve so the next field does not
         // need a new version for a small addition. Covered by the seal, so a
         // reserve byte that is not zero is a torn write rather than a surprise.
@@ -264,6 +316,12 @@ impl Row {
             t_milli: i64::from_le_bytes(take(8, &mut at).try_into().unwrap_or([0; 8])),
             payoff_bp: i64::from_le_bytes(take(8, &mut at).try_into().unwrap_or([0; 8])),
             wins: u64::from_le_bytes(take(8, &mut at).try_into().unwrap_or([0; 8])),
+            trades: u64::from_le_bytes(take(8, &mut at).try_into().unwrap_or([0; 8])),
+            cell_wins: u64::from_le_bytes(take(8, &mut at).try_into().unwrap_or([0; 8])),
+            pessimistic: i64::from_le_bytes(take(8, &mut at).try_into().unwrap_or([0; 8])),
+            worst_trade: i64::from_le_bytes(take(8, &mut at).try_into().unwrap_or([0; 8])),
+            max_drawdown: i64::from_le_bytes(take(8, &mut at).try_into().unwrap_or([0; 8])),
+            min_win: i64::from_le_bytes(take(8, &mut at).try_into().unwrap_or([0; 8])),
         }
     }
 
@@ -275,8 +333,21 @@ impl Row {
     /// strongest finding in the sweep. A NaN — which `Edge::t` documents itself
     /// as returning zero for, but which a future caller could hand in — becomes
     /// zero, because an undefined statistic must not read as a strong one.
+    /// # The cell is optional, and its absence is a real state
+    ///
+    /// A combination is ranked by the sweep before it is priced, and
+    /// `screen_cap` means most ranked combinations never meet an exit grid at
+    /// all. `None` says exactly that — swept and ranked, never priced — and it
+    /// is stored as zeros that the reader must read through the `trades` count,
+    /// which is zero only in that case. Writing a plausible drawdown for a
+    /// combination nobody priced would be the failure `CLAUDE.md` §4 bans.
     #[must_use]
-    pub fn of(identity: [u8; 32], rank: u16, scored: &runner::rank::Scored) -> Self {
+    pub fn of(
+        identity: [u8; 32],
+        rank: u16,
+        scored: &runner::rank::Scored,
+        cell: Option<&runner::grid::Cell>,
+    ) -> Self {
         Self {
             identity,
             rank,
@@ -291,6 +362,16 @@ impl Row {
             t_milli: scored.edge.t_milli(),
             payoff_bp: scored.edge.payoff_bp(),
             wins: scored.edge.wins,
+            // THE MONEY THE OPERATOR RANKS ON. Six raw fields, and the derived
+            // ones -- win rate, reward-to-risk, return over drawdown, average
+            // win, average loss -- are NOT stored: the reader computes them
+            // from these, so there is one definition of each and not two.
+            trades: cell.map_or(0, |c| c.trades),
+            cell_wins: cell.map_or(0, |c| c.wins),
+            pessimistic: cell.map_or(0, |c| c.pessimistic),
+            worst_trade: cell.map_or(0, |c| c.worst_trade),
+            max_drawdown: cell.map_or(0, |c| c.max_drawdown),
+            min_win: cell.map_or(0, |c| c.min_win),
         }
     }
 }
@@ -948,15 +1029,31 @@ mod tests {
             t_milli: 4_007,
             payoff_bp: 900,
             wins: 700,
+            trades: 0,
+            cell_wins: 0,
+            pessimistic: 0,
+            worst_trade: 0,
+            max_drawdown: 0,
+            min_win: 0,
         }
     }
 
     /// The stride is what the writer writes, not what a comment claims.
+    ///
+    /// Version 2 added six money fields — `trades`, `cell_wins`, `pessimistic`,
+    /// `worst_trade`, `max_drawdown`, `min_win` — because the operator's ranking
+    /// is a question about money and version 1 stored none of it. The stride
+    /// moved from 144 to 192, and this assertion is what made that a decision
+    /// rather than an accident: it failed the moment the fields were added and
+    /// the number was not.
     #[test]
     fn the_stride_is_exactly_what_the_writer_writes() {
-        let written = 32 + 2 + 6 * 8 + 8 + 8 + 8 + 8 + 8 + 8;
+        //           identity  rank  mask      hits/n/mean/t/payoff/wins
+        let v1 = 32 + 2 + 6 * 8 + 8 + 8 + 8 + 8 + 8 + 8;
+        //  trades, cell_wins, pessimistic, worst_trade, max_drawdown, min_win
+        let v2_added = 6 * 8;
         assert_eq!(
-            written + 6 + SEAL_BYTES,
+            v1 + v2_added + 6 + SEAL_BYTES,
             STRIDE_BYTES,
             "fields + six reserved + seal must be the stride"
         );

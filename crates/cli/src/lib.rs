@@ -4593,7 +4593,12 @@ fn trade_and_screen(
     rules: Rules,
     // Forwarded to `screen_cascade`: a search step must not price 960 tiers.
     validate: bool,
-) -> (runner::trade::Trades, grid::Grid, String) {
+) -> (
+    runner::trade::Trades,
+    grid::Grid,
+    String,
+    std::collections::HashMap<[u64; 6], grid::Cell>,
+) {
     let side = side_of_evidence(first);
     let taken = trade::walk(bars, column, &first.mask, horizon, direction_of(side));
     // The same forced rung the screen uses, so the headline grid and the screened
@@ -4627,8 +4632,22 @@ fn trade_and_screen(
     // THE OPERATOR'S RULES, not just their `top`. This passed `rules.top`
     // alone, so the policy an operator stated reached nothing and a generated
     // tier judged the rows instead.
-    let screened = screen_cascade(bars, column, by_evidence, horizon, rules, validate);
-    (taken, exits, screened)
+    // THE CELLS COME BACK WITH THE TEXT. Every metric the operator ranks on is
+    // on a `Cell`, and until now `screen` computed one per candidate and
+    // returned only the rendered table -- so the frontier could store the
+    // sweep's statistics and nothing about the money.
+    let mut priced: std::collections::HashMap<[u64; 6], grid::Cell> =
+        std::collections::HashMap::with_capacity(by_evidence.len().min(screen_cap()));
+    let screened = screen_cascade(
+        bars,
+        column,
+        by_evidence,
+        horizon,
+        rules,
+        validate,
+        &mut priced,
+    );
+    (taken, exits, screened, priced)
 }
 
 /// The three lines that precede the trade figures: which combination was taken,
@@ -6098,6 +6117,10 @@ fn screen_cascade(
     // Whether to walk the tier ladder when the stated rules find nothing. A
     // SEARCH step passes false: it needs one bit, not 960 priced tiers.
     validate: bool,
+    // FORWARDED, NOT OWNED. See `screen`: the cells it prices are what the
+    // operator ranks on, and this function is only a stop on the way to
+    // `record_frontier`.
+    priced: &mut std::collections::HashMap<[u64; 6], grid::Cell>,
 ) -> String {
     let top = rules.top;
     let mut out = String::with_capacity(4_096);
@@ -6114,7 +6137,7 @@ fn screen_cascade(
     // So the stated policy is tried first and named in the output. The tier
     // ladder below it is the fallback — the "what IS there" answer — and not a
     // replacement for the question that was asked.
-    let yours = screen(bars, column, by_evidence, horizon, rules);
+    let yours = screen(bars, column, by_evidence, horizon, rules, priced);
     if yours.contains("NOTHING PASSED") {
         // A SEARCH STEP STOPS HERE, AND THAT IS THE WHOLE COST.
         //
@@ -6212,7 +6235,7 @@ fn screen_cascade(
 
     for (rank, tier) in ladder.iter().enumerate() {
         let rules = tier.rules(top);
-        let body = screen(bars, column, by_evidence, horizon, rules);
+        let body = screen(bars, column, by_evidence, horizon, rules, priced);
         // `screen` prints "0 of N ... NOTHING PASSED" when the rules admit
         // nothing. Read back off the rendered text rather than recomputing the
         // predicate, so the cascade can never disagree with the table an
@@ -6246,6 +6269,7 @@ fn screen_cascade(
             by_evidence,
             horizon,
             mildest.rules(top),
+            priced,
         ));
     }
     out
@@ -6367,6 +6391,13 @@ fn screen(
     by_evidence: &[&runner::rank::Scored],
     horizon: Horizon,
     rules: Rules,
+    // THE CELLS THIS SCREEN PRICED, HANDED BACK RATHER THAN RENDERED AND
+    // DROPPED. Every metric the operator ranks on -- drawdown, losing trades,
+    // win rate, smallest win, worst trade -- is on a `Cell`, and this function
+    // computed one for every candidate and returned only text. An out-parameter
+    // rather than a wider return type, because three callers up the chain would
+    // otherwise each need their tuple widened for a value only the last one uses.
+    priced: &mut std::collections::HashMap<[u64; 6], grid::Cell>,
 ) -> String {
     // Built ONCE for the whole screen: the same ladder judges every combination,
     // and `Levels` only borrows it.
@@ -6485,6 +6516,14 @@ fn screen(
     // measures what this ordering put in the top `rules.top`, and the gate
     // below can demote some of them -- so the final order has to be taken after
     // the demotions, or a refused row sits above a passing one.
+    // RECORDED BEFORE THE SORT IS USED FOR ANYTHING, so the map holds every
+    // candidate this screen priced and not merely the ones that survived the
+    // top cut below. `record_frontier` writes `rules.top` rows and needs a cell
+    // for each; which ones those are is decided after this point.
+    for row in &rows {
+        priced.insert(row.scored.mask.words(), row.cell);
+    }
+
     rows.sort_by_key(|r| (!r.admitted, core::cmp::Reverse(r.cell.pessimistic)));
 
     measure_top(&mut rows, bars, column, horizon, rules);
@@ -8956,6 +8995,15 @@ fn record_frontier(
     id: &runner::identity::RunId,
     by_evidence: &[&runner::rank::Scored],
     top: usize,
+    // THE CELL EACH ROW WAS PRICED WITH, keyed by mask words.
+    //
+    // A row is ranked by the SWEEP and priced by the SCREEN, and those are two
+    // different passes over two different questions. `screen_cap` means most
+    // ranked combinations are never priced at all, so a lookup here misses for
+    // exactly those -- and `Row::of` stores zeros with a `trades` of zero, which
+    // is the only value that says "swept, never priced" rather than "priced and
+    // it lost nothing".
+    priced: &std::collections::HashMap<[u64; 6], grid::Cell>,
 ) -> String {
     let kept = by_evidence.len().min(top);
     let rows: Vec<frontier::Row> = by_evidence
@@ -8968,9 +9016,9 @@ fn record_frontier(
             // asked for something this file does not carry. Dropped rather than
             // truncated to a wrong rank, and the count below says how many
             // landed.
-            u16::try_from(at.saturating_add(1))
-                .ok()
-                .map(|rank| frontier::Row::of(id.bytes(), rank, scored))
+            u16::try_from(at.saturating_add(1)).ok().map(|rank| {
+                frontier::Row::of(id.bytes(), rank, scored, priced.get(&scored.mask.words()))
+            })
         })
         .collect();
 
@@ -9507,7 +9555,7 @@ fn audit_bars(
     // canonical mask order, so its sign was incidental. Selecting for the
     // largest |t| selects precisely the strongest signals of EITHER sign — so
     // the better the ranker got, the more often the side was wrong.
-    let (taken, exits, screened) = trade_and_screen(
+    let (taken, exits, screened, priced) = trade_and_screen(
         &trade_bars,
         &trade_column,
         first,
@@ -9635,38 +9683,19 @@ fn audit_bars(
     // RECORDED BEFORE IT IS RENDERED, so a process killed while formatting a
     // large report still leaves its row. The same ordering `cli.audit`'s
     // `audit rendered` event uses, and for the same reason.
+    let recorded = Recorded {
+        outcome: &outcome,
+        exits: &exits,
+        bars: u64::try_from(bars.len()).unwrap_or(u64::MAX),
+        min_hits,
+        mask_words: first.mask.words(),
+        by_evidence: &by_evidence,
+        top: rules.top,
+        priced: &priced,
+        taken: &taken,
+    };
     if let (Some(into), Some(run_id)) = (recording, id) {
-        out.push_str(&record_run(
-            into,
-            run_id,
-            &outcome,
-            &exits,
-            u64::try_from(bars.len()).unwrap_or(u64::MAX),
-            min_hits,
-            first.mask.words(),
-        ));
-        // AND THE FRONTIER, which the ledger has no room for.
-        //
-        // `record_run` writes ONE row holding the ONE combination the exit grid
-        // chose, because a run has one identity and the ledger refuses a
-        // duplicate. Everything else the ladder found was folded into `depth`
-        // and `combinations` and dropped -- so "show me the top ten" could be
-        // answered on screen and nowhere else, and two runs a month apart could
-        // not be compared beyond their single winners.
-        //
-        // Written AFTER the ledger row on purpose. The ledger is the record that
-        // a run happened; the frontier is detail about it. A frontier row whose
-        // run has no ledger row is an orphan, and this ordering makes that
-        // unreachable rather than merely unlikely.
-        out.push_str(&record_frontier(into.root, run_id, &by_evidence, rules.top));
-        // AND THE ROUND TRIPS THEMSELVES, last of the three.
-        //
-        // The ledger says a run happened, the frontier says which combinations
-        // it ranked, and this says what the chosen one actually DID — the rows
-        // the page has been drawing padlocks into since it was written. Ordered
-        // last for the same reason the frontier is ordered after the ledger: a
-        // detail file whose run has no row above it is an orphan.
-        out.push_str(&record_trades(into.root, run_id, &taken));
+        out.push_str(&record_all(into, run_id, &recorded));
     }
     out.push_str(walk_forward_caveat(execution.is_some(), folds.decided()));
     out.push_str(&audit::render(
@@ -9846,6 +9875,59 @@ fn decay_block(
          bars build state and are not\n  swept. That makes it a harsher test \
          than the anchored shape, not a laxer one."
     );
+    out
+}
+
+/// Everything one recorded run writes, gathered so `audit_bars` states it once.
+///
+/// A struct rather than nine parameters, because the workspace bounds argument
+/// counts and because these nine belong together: they are one run's durable
+/// output, and a caller passing eight of them has not recorded a run.
+struct Recorded<'a> {
+    outcome: &'a runner::Outcome,
+    exits: &'a grid::Grid,
+    bars: u64,
+    min_hits: u64,
+    mask_words: [u64; 6],
+    by_evidence: &'a [&'a runner::rank::Scored],
+    top: usize,
+    priced: &'a std::collections::HashMap<[u64; 6], grid::Cell>,
+    taken: &'a runner::trade::Trades,
+}
+
+/// The three files a run leaves behind, in the order they must be written.
+///
+/// LEDGER, then FRONTIER, then TRADES, and the order carries a rule rather than
+/// a preference: the ledger row is the record that a run happened at all, and a
+/// detail row whose run has no ledger row is an orphan. Writing the ledger first
+/// makes that unreachable rather than merely unlikely.
+///
+/// Returns a report and never a `Result`. Detail about a completed run must not
+/// turn that run into a failure — each of the three names its own refusal in the
+/// text and the run stands.
+fn record_all(
+    into: Recording<'_>,
+    run_id: &runner::identity::RunId,
+    what: &Recorded<'_>,
+) -> String {
+    let mut out = String::with_capacity(256);
+    out.push_str(&record_run(
+        into,
+        run_id,
+        what.outcome,
+        what.exits,
+        what.bars,
+        what.min_hits,
+        what.mask_words,
+    ));
+    out.push_str(&record_frontier(
+        into.root,
+        run_id,
+        what.by_evidence,
+        what.top,
+        what.priced,
+    ));
+    out.push_str(&record_trades(into.root, run_id, what.taken));
     out
 }
 
@@ -11891,6 +11973,12 @@ mod tests {
                     t_milli: 2_100,
                     payoff_bp: 150,
                     wins: 200,
+                    trades: 0,
+                    cell_wins: 0,
+                    pessimistic: 0,
+                    worst_trade: 0,
+                    max_drawdown: 0,
+                    min_win: 0,
                 },
                 crate::frontier::Row {
                     identity: [11; 32],
@@ -11902,6 +11990,12 @@ mod tests {
                     t_milli: 4_007,
                     payoff_bp: i64::MAX,
                     wins: 880,
+                    trades: 0,
+                    cell_wins: 0,
+                    pessimistic: 0,
+                    worst_trade: 0,
+                    max_drawdown: 0,
+                    min_win: 0,
                 },
             ])
             .expect("both rows append");
