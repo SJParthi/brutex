@@ -5079,6 +5079,30 @@ impl Rules {
         if crate::knobs::var("BRUTEX_MIN_RR_BP").is_none() {
             rules.min_rr_bp = breakeven_rr_bp(rules.min_win_rate_bp);
         }
+        // THE WEAKEST PERIOD IS HELD TO THE SAME STANDARD AS THE WHOLE.
+        //
+        // `min_weakest_bp` defaulted to ZERO -- no per-period floor at all -- so
+        // a combination whose worst year lost money passed on the strength of
+        // its best. That is precisely the shape a lucky run takes: one regime
+        // carrying four. Holding the weakest period to the SAME base rate the
+        // whole span is held to says "this worked in every regime, not on
+        // average", and it costs nothing to state because the rate is already
+        // measured.
+        if crate::knobs::var("BRUTEX_MIN_WEAKEST_BP").is_none() {
+            rules.min_weakest_bp = base_bp;
+        }
+        // AND THE RETURN-OVER-DRAWDOWN FLOOR IS BUY-AND-HOLD'S OWN.
+        //
+        // `500` asked for five rupees per rupee of drawdown -- easy on a decade
+        // that rose in a line, near-impossible on one that did not, so one
+        // constant asked a different question of every span. The alternative the
+        // operator actually has is to hold the index, and its own ratio on these
+        // bars is the honest bar to clear.
+        if crate::knobs::var("BRUTEX_MIN_RET_OVER_DD_BP").is_none()
+            && let Some(hold) = hold_return_over_drawdown_bp(bars)
+        {
+            rules.min_ret_over_dd_bp = hold;
+        }
         rules
     }
 
@@ -6121,6 +6145,59 @@ fn base_win_rate_bp(bars: &[indicators::Candle], horizon: Horizon) -> Option<i64
         return None;
     }
     positive.checked_mul(10_000)?.checked_div(decided)
+}
+
+/// Buy-and-hold's own return over its own worst fall, on these bars, in
+/// hundredths.
+///
+/// # The benchmark a strategy has to beat is DOING NOTHING
+///
+/// `min_ret_over_dd_bp` defaulted to `500` — "make five rupees for every one
+/// you were ever down". A reasonable-sounding number, and nobody derived it. It
+/// is also the wrong SHAPE of question: five-to-one is easy on a decade that
+/// rose in a straight line and near-impossible on one that did not, so one
+/// constant asks a different question of every span it is applied to.
+///
+/// What does not move with the span is the alternative the operator actually
+/// has: hold the index and do nothing. Its return over its own worst peak-to-
+/// trough fall is measurable on the same bars, in one pass, and a strategy that
+/// cannot beat it is not worth the trades.
+///
+/// # `None` when the comparison is meaningless
+///
+/// A span whose buy-and-hold return is negative, or which never fell at all,
+/// gives a ratio that is not a standard: the first would let any strategy that
+/// merely loses less than the index pass, and the second divides by nothing.
+/// Both fall back to the stated default rather than inventing a floor — a
+/// benchmark that cannot be computed is absent, not zero.
+///
+/// # Cost
+///
+/// One pass over the closes, tracking a running peak. O(bars), once per rung,
+/// off every per-candidate path.
+fn hold_return_over_drawdown_bp(bars: &[indicators::Candle]) -> Option<i64> {
+    let first = bars.first()?.close;
+    let last = bars.last()?.close;
+    let gain = last.checked_sub(first)?;
+    if gain <= 0 {
+        return None;
+    }
+    let mut peak = first;
+    let mut worst_fall = 0_i64;
+    for bar in bars {
+        if bar.close > peak {
+            peak = bar.close;
+        }
+        let fall = peak.saturating_sub(bar.close);
+        if fall > worst_fall {
+            worst_fall = fall;
+        }
+    }
+    if worst_fall <= 0 {
+        return None;
+    }
+    // Hundredths, the scale `min_ret_over_dd_bp` is held on: 500 is 5.0x.
+    gain.checked_mul(100)?.checked_div(worst_fall)
 }
 
 /// Break-even reward-to-risk at a win rate, plus a quarter for margin.
@@ -13965,6 +14042,87 @@ mod tests {
             assert!(a > b, "the ladder must descend strictly: {a} then {b}");
         }
     }
+    /// The return-over-drawdown floor is buy-and-hold's own, on these bars.
+    ///
+    /// # What the constant asked
+    ///
+    /// `500` means "make five rupees for every one you were ever down". Nobody
+    /// derived it, and it is the wrong SHAPE of question: five-to-one is easy on
+    /// a decade that rose in a line and near-impossible on one that did not, so
+    /// one constant asks a different question of every span.
+    ///
+    /// The alternative the operator actually has is to hold the index. Its own
+    /// return over its own worst fall is measurable on the same bars, and a
+    /// strategy that cannot beat it is not worth the trades.
+    #[test]
+    fn the_drawdown_floor_is_what_holding_the_index_would_have_paid() {
+        let _guard = crate::knobs::serially();
+        crate::knobs::clear_all();
+
+        // A series that rises overall and has one real fall on the way, so both
+        // halves of the ratio are defined.
+        let bars: Vec<indicators::Candle> = runner::synthetic::sessions(6)
+            .into_iter()
+            .enumerate()
+            .map(|(n, mut bar)| {
+                let step = i64::try_from(n).unwrap_or(0);
+                let dip = if (300..380).contains(&step) {
+                    -8_000
+                } else {
+                    0
+                };
+                let lift = step.saturating_mul(50).saturating_add(dip);
+                bar.open = bar.open.saturating_add(lift);
+                bar.high = bar.high.saturating_add(lift);
+                bar.low = bar.low.saturating_add(lift);
+                bar.close = bar.close.saturating_add(lift);
+                bar
+            })
+            .collect();
+
+        let hold = crate::hold_return_over_drawdown_bp(&bars)
+            .expect("a rising series with a real fall has a ratio");
+        let derived = crate::Rules::derived(&bars, Horizon::DEFAULT);
+        crate::knobs::clear_all();
+
+        assert_eq!(
+            derived.min_ret_over_dd_bp, hold,
+            "the floor IS the benchmark, not a number beside it"
+        );
+        assert_ne!(
+            derived.min_ret_over_dd_bp, 500,
+            "and it is measured rather than the constant it replaces"
+        );
+
+        // A SERIES THAT ONLY FELL HAS NO BENCHMARK, and inventing one would let
+        // a strategy that merely loses less than the index pass. Absent, not zero.
+        let falling: Vec<indicators::Candle> = runner::synthetic::sessions(2)
+            .into_iter()
+            .enumerate()
+            .map(|(n, mut bar)| {
+                let drop = i64::try_from(n).unwrap_or(0).saturating_mul(-40);
+                bar.open = bar.open.saturating_add(drop);
+                bar.high = bar.high.saturating_add(drop);
+                bar.low = bar.low.saturating_add(drop);
+                bar.close = bar.close.saturating_add(drop);
+                bar
+            })
+            .collect();
+        assert!(
+            crate::hold_return_over_drawdown_bp(&falling).is_none(),
+            "a span the index lost money on is not a standard to clear"
+        );
+        assert_eq!(
+            crate::Rules::derived(&falling, Horizon::DEFAULT).min_ret_over_dd_bp,
+            500,
+            "so it falls back to the stated default rather than inventing a floor"
+        );
+        crate::knobs::clear_all();
+
+        // AN EMPTY SPAN ANSWERS RATHER THAN PANICKING.
+        assert!(crate::hold_return_over_drawdown_bp(&[]).is_none());
+    }
+
     /// The win-rate floor is MEASURED from the bars, not chosen.
     ///
     /// # What the constant it replaces meant
