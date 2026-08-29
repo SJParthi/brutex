@@ -174,6 +174,38 @@ pub struct Ranked {
     /// are excluded from `best_complete` for the same reason. A refusal an
     /// operator can see beats a plausible answer they cannot check.
     pub halted: Option<u64>,
+    /// The `|t|` a row must reach to be distinguishable from luck, given how
+    /// many hypotheses THIS run tested.
+    ///
+    /// `significance::bonferroni_t(significance::effective_trials(sweep))`,
+    /// computed once per walk from the run's own counters. No literal enters:
+    /// the only constant behind it is `significance::FWER`, a stated convention
+    /// that was already there.
+    ///
+    /// # `effective_trials` and not `considered`, and they are not the same
+    ///
+    /// [`Self::considered`], `Sweep::all_frequent().count()` and the ledger's
+    /// `combinations` are three spellings of ONE number — the survivors. A
+    /// multiple-comparison correction must charge for every hypothesis that had
+    /// a chance to look good, and a combination that came back INFREQUENT still
+    /// had its support measured against the bars. `significance::trials` sums
+    /// `infrequent + frequent` per level for exactly that reason, and
+    /// `effective_trials` then subtracts the exact-duplicate support sets, which
+    /// are one hypothesis counted twice.
+    ///
+    /// # Reported as well as applied, because the two answer different questions
+    ///
+    /// [`Self::top`] is ordered so a row clearing this bar outranks one that
+    /// does not — that decides what a run trades. This field says WHAT THE BAR
+    /// WAS, which is the only way a reader tells "nothing cleared a bar of 6.1"
+    /// from "nothing cleared a bar of 2.0". `crate::report` recomputed it
+    /// independently and could therefore disagree with the ordering it was
+    /// describing.
+    ///
+    /// **Zero when the sweep counted no trials**, which is not a bar of zero
+    /// dressed up: `bonferroni_t` returns `0.0` for `n < 1`, and a run with no
+    /// hypotheses has nothing to correct for.
+    pub bar: f64,
 }
 
 /// The best `keep` combinations by |t|, in memory proportional to `keep`.
@@ -273,7 +305,17 @@ pub enum Lens {
 /// literally the same code it always was and cannot drift while the new one is
 /// edited.
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct ByPayoff(Scored);
+struct ByPayoff {
+    /// The row.
+    scored: Scored,
+    /// Whether this row's `|t|` clears the multiple-comparison bar this run's
+    /// own counters demand.
+    ///
+    /// Computed once at [`Ranked1::wrap`] rather than at every comparison,
+    /// because a heap compares each admitted row `log(keep)` times and the bar
+    /// does not change between them.
+    clears: bool,
+}
 
 impl Eq for ByPayoff {}
 
@@ -283,25 +325,71 @@ impl PartialOrd for ByPayoff {
     }
 }
 
+/// # THE SIGNIFICANCE BAR IS THE FIRST KEY, AND IT USED TO BE NO KEY AT ALL
+///
+/// `crate::significance` computes what `t` must clear given how many hypotheses
+/// a run tested, and on a sweep of forty-two million that bar is above six.
+/// Nothing acted on it. `bonferroni_t` was computed in `crate::report` and used
+/// to select a **string** — `"clears"` against `"BELOW THE BAR —
+/// indistinguishable from luck"` — while every row printed regardless and
+/// `by_evidence.first()` took the head of this ordering whatever it said.
+/// `benjamini_hochberg` had zero call sites outside its own tests.
+///
+/// So a run could report, as its single best combination, a row its own report
+/// had just labelled indistinguishable from luck. At 42,195,920 tested
+/// combinations the expected count of such rows at α = 0.05 is over two million.
+///
+/// # Ordered and not filtered, deliberately
+///
+/// Promoting the clearing rows keeps every row in `top` and keeps
+/// [`Ranked::considered`] honest. Dropping them instead would empty `top` on a
+/// run where nothing clears, and the caller's empty-set message names a
+/// different cause entirely — *"none of the strongest by |t| is closed … raise
+/// `BRUTEX_SCREEN_CAP`, or raise `min_hits`"* — which would be a lie about why.
+/// A refusal that misnames its reason is worse than the silence it replaces.
+///
+/// # Why this lens and not [`Scored`]
+///
+/// The bar is a threshold on `|t|` and `Scored` already orders by `|t|`, so
+/// promoting clearing rows there is a no-op: whatever clears is already at the
+/// head. This lens orders by PAYOFF, where the highest-payoff row and the
+/// bar-clearing row are different rows — which is exactly the case the gate
+/// exists for, and it is the lens the shipped audit path uses.
 impl Ord for ByPayoff {
     fn cmp(&self, other: &Self) -> Ordering {
-        let (mine, theirs) = (self.0.edge.payoff_bp(), other.0.edge.payoff_bp());
-        // Then `|t|`, on the same finite-first total order `Scored` uses, so two
-        // equal payoffs are separated by evidence rather than by mask bytes --
-        // and the mask still breaks a true tie, which is what keeps §3 rule 5's
-        // byte-for-byte reproducibility.
-        mine.cmp(&theirs).then_with(|| self.0.cmp(&other.0))
+        // `false < true`, so a row that clears sorts ABOVE one that does not,
+        // and the ordering stays total: two rows on the same side of the bar
+        // fall through to payoff, then to `Scored`'s own finite-first `|t|`, then
+        // to the mask — which is what keeps §3 rule 5's byte-for-byte
+        // reproducibility.
+        let (mine, theirs) = (self.scored.edge.payoff_bp(), other.scored.edge.payoff_bp());
+        self.clears
+            .cmp(&other.clears)
+            .then_with(|| mine.cmp(&theirs))
+            .then_with(|| self.scored.cmp(&other.scored))
     }
 }
 
 /// What a heap of some ordering needs to hold and hand back a [`Scored`].
 trait Ranked1: Ord + Sized {
-    fn wrap(scored: Scored) -> Self;
+    /// Wrap one scored row, told the significance bar its run demands.
+    ///
+    /// The bar is passed to every lens even though only [`ByPayoff`] keeps it,
+    /// because a lens that silently ignored it would be indistinguishable at the
+    /// call site from one that honoured it — and the next lens added to this
+    /// trait would inherit the ambiguity rather than a decision.
+    fn wrap(scored: Scored, bar: f64) -> Self;
     fn unwrap(self) -> Scored;
 }
 
 impl Ranked1 for Scored {
-    fn wrap(scored: Scored) -> Self {
+    /// IGNORES THE BAR, AND THAT IS CORRECT RATHER THAN AN OMISSION.
+    ///
+    /// This lens orders by `|t|` and the bar is a threshold ON `|t|`, so
+    /// promoting the rows that clear it cannot move anything: whatever clears
+    /// already sits at the head by construction. Storing the flag would cost a
+    /// byte per row and change no answer.
+    fn wrap(scored: Scored, _bar: f64) -> Self {
         scored
     }
     fn unwrap(self) -> Scored {
@@ -310,11 +398,21 @@ impl Ranked1 for Scored {
 }
 
 impl Ranked1 for ByPayoff {
-    fn wrap(scored: Scored) -> Self {
-        Self(scored)
+    fn wrap(scored: Scored, bar: f64) -> Self {
+        // `>=` and not `>`: a `t` exactly at the bar clears it, which is how
+        // `crate::report` has always phrased the same test.
+        //
+        // A NON-FINITE `t` NEVER CLEARS. `NaN >= bar` is false for every bar,
+        // so a degenerate sample is demoted here as well as by `Scored`'s own
+        // finite-first key — two independent demotions of the same pathology,
+        // which is deliberate: `outcome::edge` only returns `t = 0` for it
+        // because every comparison against NaN is false, and that protection is
+        // incidental rather than intended.
+        let clears = scored.edge.t.abs() >= bar;
+        Self { scored, clears }
     }
     fn unwrap(self) -> Scored {
-        self.0
+        self.scored
     }
 }
 
@@ -384,6 +482,7 @@ fn top_of<K: Ranked1>(
     column: &Column,
     forward: &Forward,
     keep: usize,
+    bar: f64,
 ) -> Vec<K> {
     // `keep.min(part.len())` AND NOT `keep`, WHICH WAS A REAL COST.
     //
@@ -403,11 +502,14 @@ fn top_of<K: Ranked1>(
         admit(
             &mut heap,
             keep,
-            K::wrap(Scored {
-                mask: itemset.mask,
-                hits: itemset.hits,
-                edge: edge(column, forward, &itemset.mask),
-            }),
+            K::wrap(
+                Scored {
+                    mask: itemset.mask,
+                    hits: itemset.hits,
+                    edge: edge(column, forward, &itemset.mask),
+                },
+                bar,
+            ),
         );
     }
     heap.into_iter().map(|core::cmp::Reverse(s)| s).collect()
@@ -465,6 +567,13 @@ fn walk<K: Ranked1 + Send>(
     let total: usize = sweep.levels.iter().map(|l| l.frequent.len()).sum();
     let considered = u64::try_from(total).unwrap_or(u64::MAX);
 
+    // THE BAR THIS RUN'S OWN COUNTERS DEMAND, COMPUTED ONCE.
+    //
+    // `effective_trials` is O(|F|) through `closed::redundant_count`, paid once
+    // per walk and never inside the scoring loop -- gate 17's rule is that the
+    // innermost loop calls nothing at all, and this sits two levels above it.
+    let bar = crate::significance::bonferroni_t(crate::significance::effective_trials(sweep));
+
     // KEEP ZERO STILL COUNTS. The caller asked how many candidates survived and
     // that answer does not depend on how many of them are returned.
     if keep == 0 {
@@ -472,6 +581,7 @@ fn walk<K: Ranked1 + Send>(
             top: Vec::new(),
             considered,
             halted: None,
+            bar,
         };
     }
 
@@ -493,6 +603,7 @@ fn walk<K: Ranked1 + Send>(
             top: Vec::new(),
             considered,
             halted: budget,
+            bar,
         };
     }
 
@@ -501,7 +612,7 @@ fn walk<K: Ranked1 + Send>(
         .levels
         .par_iter()
         .flat_map(|level| level.frequent.par_chunks(width))
-        .map(|part| top_of::<K>(part, column, forward, keep))
+        .map(|part| top_of::<K>(part, column, forward, keep, bar))
         .collect();
 
     // THE MERGE IS SEQUENTIAL AND THAT IS NOT A BOTTLENECK: it walks
@@ -521,6 +632,7 @@ fn walk<K: Ranked1 + Send>(
         top: top.into_iter().map(Ranked1::unwrap).collect(),
         considered,
         halted: None,
+        bar,
     }
 }
 
@@ -530,8 +642,19 @@ fn walk<K: Ranked1 + Send>(
     reason = "the exception every test module in this workspace takes."
 )]
 mod tests {
-    use super::{Lens, Scored, rank, rank_by_within, rank_within};
+    use super::{ByPayoff, Lens, Ranked1, Scored, rank, rank_by_within, rank_within};
     use crate::outcome::{Edge, Horizon, forward};
+
+    /// One row under the payoff lens, at a bar EVERY row clears.
+    ///
+    /// The two tests below are about the payoff key and the evidence tiebreak,
+    /// so both rows must sit on the same side of the significance clause or the
+    /// clause — not the key under test — would decide them. A bar of `0.0` puts
+    /// them both above it, which is also what `bonferroni_t` returns for a run
+    /// that counted no trials.
+    fn lens(scored: Scored) -> ByPayoff {
+        ByPayoff::wrap(scored, 0.0)
+    }
     use crate::{Sweeper, synthetic};
     use engine::Ladder;
     use indicators::column::Column;
@@ -607,8 +730,125 @@ mod tests {
             "under Detectability the grinder wins -- t 9.0 against 0.0"
         );
         assert!(
-            super::ByPayoff(sniper) > super::ByPayoff(grinder),
+            lens(sniper) > lens(grinder),
             "under Payoff the sniper wins -- 9.00 against 0.11"
+        );
+    }
+
+    /// THE SIGNIFICANCE BAR OUTRANKS PAYOFF, WHICH IS THE WHOLE GATE.
+    ///
+    /// Reuses the same two rows: the sniper has the better payoff (9.00 against
+    /// 0.11) and a `t` of 0.0; the grinder has the worse payoff and a `t` of
+    /// 9.0. Under the payoff key alone the sniper wins, and
+    /// `the_two_lenses_keep_different_combinations_at_the_cut` asserts exactly
+    /// that. Put a bar between them and the answer must flip — otherwise the bar
+    /// is the decoration it was before this landed, computed and printed and
+    /// acted on by nothing.
+    #[test]
+    fn a_row_that_clears_the_bar_outranks_a_better_payoff_that_does_not() {
+        let sniper = Scored {
+            mask: ConditionMask::default().with_bit(1),
+            hits: 10,
+            edge: Edge {
+                n: 10,
+                wins: 1,
+                win_sum: 90.0,
+                losses: 9,
+                loss_sum: -90.0,
+                t: 0.0,
+                ..Edge::default()
+            },
+        };
+        let grinder = Scored {
+            mask: ConditionMask::default().with_bit(2),
+            hits: 10,
+            edge: Edge {
+                n: 10,
+                wins: 9,
+                win_sum: 90.0,
+                losses: 1,
+                loss_sum: -90.0,
+                t: 9.0,
+                ..Edge::default()
+            },
+        };
+
+        // A bar of 4.0 sits between them: the grinder's 9.0 clears, the sniper's
+        // 0.0 does not.
+        let bar = 4.0;
+        assert!(
+            ByPayoff::wrap(grinder, bar) > ByPayoff::wrap(sniper, bar),
+            "a row indistinguishable from luck must not outrank one that is not, \
+             however much better its payoff looks"
+        );
+        // And with NO bar the payoff key decides, unchanged -- so this is a gate
+        // and not a new permanent ordering.
+        assert!(
+            ByPayoff::wrap(sniper, 0.0) > ByPayoff::wrap(grinder, 0.0),
+            "below any bar the payoff lens is what it always was"
+        );
+    }
+
+    /// A bar exactly equal to `|t|` CLEARS it, and a non-finite `t` never does.
+    ///
+    /// `>=` is how `crate::report` has always phrased this test, so the boundary
+    /// must agree with the sentence printed beside it. And a NaN clears no bar at
+    /// all: every comparison against NaN is false, which demotes a degenerate
+    /// sample here as well as in `Scored`'s own finite-first key.
+    #[test]
+    fn the_bar_is_inclusive_and_a_non_finite_t_never_clears_it() {
+        let at = |t: f64| Scored {
+            mask: ConditionMask::default().with_bit(3),
+            hits: 10,
+            edge: Edge {
+                n: 10,
+                t,
+                ..Edge::default()
+            },
+        };
+        // Exactly at the bar clears, so it outranks an identical row below it.
+        assert!(
+            ByPayoff::wrap(at(4.0), 4.0) > ByPayoff::wrap(at(3.9), 4.0),
+            "a t exactly at the bar clears it"
+        );
+        // NaN does not clear, so a real row below the bar still outranks it.
+        assert!(
+            ByPayoff::wrap(at(0.1), 4.0) > ByPayoff::wrap(at(f64::NAN), 4.0),
+            "a degenerate sample is the absence of a result, not a strong one"
+        );
+    }
+
+    /// The bar reaches [`Ranked`] and is the run's own, not a constant.
+    ///
+    /// Two sweeps at different thresholds test different numbers of hypotheses,
+    /// so they must not report the same bar — a fixed figure would pass a test
+    /// that only ever looked at one run.
+    #[test]
+    fn the_reported_bar_is_derived_from_the_run_and_moves_with_it() {
+        let bars = synthetic::sessions(8);
+        let column = Column::build(&bars, &mut evaluator());
+        let f = forward(&bars, Horizon::DEFAULT);
+
+        let wide = Sweeper::new(Ladder::with_min_hits(300).with_ceiling(50_000))
+            .run(&bars, &mut evaluator());
+        let narrow = Sweeper::new(Ladder::with_min_hits(900).with_ceiling(50_000))
+            .run(&bars, &mut evaluator());
+
+        let a = rank(&wide.sweep, &column, &f, 10);
+        let b = rank(&narrow.sweep, &column, &f, 10);
+
+        assert!(
+            a.bar > 0.0,
+            "a run that tested hypotheses has a bar: {}",
+            a.bar
+        );
+        assert!(b.bar > 0.0, "and so does the narrower one: {}", b.bar);
+        assert!(
+            a.bar > b.bar,
+            "the wider search tested more hypotheses so its bar must be HIGHER: \
+             {} against {}",
+            a.bar,
+            b.bar
         );
     }
 
@@ -648,7 +888,7 @@ mod tests {
             "both never lost, so both are unbounded and the payoffs tie"
         );
         assert!(
-            super::ByPayoff(thick) > super::ByPayoff(thin),
+            lens(thick) > lens(thin),
             "a tie on payoff is settled by evidence, or two winning trades would \
              outrank nine hundred"
         );

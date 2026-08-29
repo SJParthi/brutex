@@ -1302,6 +1302,7 @@ mod tests {
             top: vec![weak],
             considered: 3_689,
             halted: None,
+            bar: 0.0,
         };
         let text = crate::report::render_findings(&ranked, &out.sweep);
 
@@ -1370,6 +1371,7 @@ mod tests {
             top: vec![thin],
             considered: 3_689,
             halted: None,
+            bar: 0.0,
         };
         let text = crate::report::render_findings(&ranked, &out.sweep);
         assert!(
