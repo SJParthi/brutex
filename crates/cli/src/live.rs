@@ -27,15 +27,31 @@
 //!
 //! | candidates weighed | expected rewrites |
 //! |---|---|
-//! | 10,000 | 149 |
-//! | 1,000,000 | 264 |
-//! | 84,000,000 | **375** |
+//! | 10,000 | 174 |
+//! | 1,000,000 | 289 |
+//! | 84,000,000 | **400** |
 //!
 //! So an eighty-four-million-candidate run rewrites this file a few hundred
-//! times, and each rewrite is `keep` rows of 208 bytes — under 2 MB of writes
+//! times, and each rewrite is `keep` rows of 208 bytes — about 2 MB of writes
 //! for the whole run. The cost is logarithmic in the search and the heap settles
 //! early, which is why this is affordable at a granularity that would be absurd
 //! per candidate.
+//!
+//! Those figures include the `keep` rewrites that FILL the heap. The first table
+//! here omitted them and read 149 / 264 / 375; the trigger is "the top-N moved",
+//! and it moves on each of the first `keep` arrivals too.
+//!
+//! # It is written by RENAME, and the first version's ordering argument was wrong
+//!
+//! [`Live::publish`] writes a temp file and renames it over the real one.
+//! It used to rewrite in place with the row count written last, arguing that a
+//! reader arriving mid-write saw a whole older answer. **An adversarial pass
+//! produced the interleaving that breaks it**: the reader walks the file in the
+//! same direction the writer writes it, so a reader that had read the OLD
+//! summary and was descheduled came back and read the NEW rows — rendering a
+//! `|t|` against a bar it was no longer judged by, which is the fabricated
+//! finding the summary block exists to prevent. `rename` is atomic, so a reader
+//! gets one whole answer or the other and there is no third outcome.
 //!
 //! # It is TRANSIENT, and that is the whole reason it is a separate file
 //!
@@ -46,7 +62,7 @@
 //! exactly that orphan — every partial run leaving detail rows whose parent
 //! never arrives — and it would do it by the one route the ordering cannot see.
 //!
-//! So this is not history. It is **overwritten in place**, it is not appended
+//! So this is not history. It is **replaced whole by rename**, it is not appended
 //! to, and a run that completes leaves its permanent record through the ordinary
 //! path unchanged. A file here is a statement about a run that is happening, not
 //! a record of one that happened, and [`Live::finish`] removes it when the real
@@ -110,9 +126,6 @@ const COUNT_AT: usize = 12;
 /// itself.
 const SUMMARY_BYTES: usize = 24;
 
-/// Where the summary block starts.
-const SUMMARY_AT: usize = HEADER_BYTES;
-
 /// Where row zero starts.
 const ROWS_AT: usize = HEADER_BYTES + SUMMARY_BYTES;
 
@@ -163,7 +176,6 @@ impl Summary {
 
 /// One run's live top-N, on disk.
 pub struct Live {
-    file: File,
     path: PathBuf,
 }
 
@@ -205,24 +217,20 @@ impl Live {
         let dir = Self::dir(root);
         std::fs::create_dir_all(&dir)
             .map_err(|why| format!("the live directory could not be made: {why}"))?;
-        let path = Self::path(root, identity);
-        let mut file = File::options()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&path)
-            .map_err(|why| format!("{} could not be opened: {why}", path.display()))?;
-        let mut header = [0_u8; HEADER_BYTES];
-        header[0..8].copy_from_slice(&MAGIC);
-        header[8..12].copy_from_slice(&VERSION.to_le_bytes());
-        file.write_all(&header)
-            .and_then(|()| file.write_all(&Summary::default().to_bytes()))
-            .map_err(|why| format!("{} could not be started: {why}", path.display()))?;
-        Ok(Self { file, path })
+        let mut live = Self {
+            path: Self::path(root, identity),
+        };
+        // AN EMPTY PUBLISH RATHER THAN A HAND-WRITTEN HEADER, so the file is
+        // born through the same atomic path every later update takes. The first
+        // version wrote the header and the summary as two separate `write_all`s
+        // with no barrier between them, so a reader landing in the gap saw a
+        // valid 16-byte file with no summary and dropped the run from the
+        // listing for that instant.
+        live.publish(&[], Summary::default())?;
+        Ok(live)
     }
 
-    /// Replaces the whole file with `rows` and `summary`.
+    /// Replaces the whole file with `rows` and `summary`, ATOMICALLY.
     ///
     /// # Why the whole file and not an append
     ///
@@ -233,43 +241,78 @@ impl Live {
     /// to find the current answer. `keep` rows is 5.2 KB at 25, so rewriting is
     /// cheaper than the bookkeeping that would avoid it.
     ///
-    /// The COUNT is written LAST, after the rows are down and synced. A reader
-    /// arriving mid-write sees the previous count and therefore the previous
-    /// rows — stale, never torn. That ordering is the whole durability argument
-    /// for this file, and it is why the count lives in the header rather than
-    /// being derived from the file length.
+    /// # Why a temp file and a rename, and what the first version got wrong
+    ///
+    /// This wrote in place and put the row COUNT down last, arguing that a
+    /// reader arriving mid-write would see the previous count and therefore the
+    /// previous rows — "stale, never torn". **That was false, and an adversarial
+    /// pass produced the interleaving.** The reader walks the file in the SAME
+    /// direction the writer writes it — summary first, then rows — so a reader
+    /// that had already read the OLD summary and was then descheduled came back
+    /// and read the NEW rows. It rendered a `|t|` of 5.000 against the bar of
+    /// 4.560 it was no longer being judged by, and the row read as CLEARING a
+    /// bar it does not clear. That is exactly the fabricated finding the summary
+    /// block exists to prevent.
+    ///
+    /// Two further holes in the same scheme: a partial `write_all` on a full
+    /// filesystem left a well-formed 25-row list spliced from two different
+    /// walks, with ranks 1..25 intact and nothing downstream able to detect it;
+    /// and the count-last ordering did no work anyway, because `read_one` clamps
+    /// to the bytes actually present and that clamp decided every case.
+    ///
+    /// `rename` is atomic within a filesystem. A reader either opens the old
+    /// inode and reads a complete old answer, or opens the new one and reads a
+    /// complete new answer. There is no third outcome, no lock, and no ordering
+    /// for a future change to get subtly wrong. The temp file carries the
+    /// process id so two writers cannot collide on it.
     ///
     /// # Errors
     ///
-    /// A write that fails, which leaves the previous count in place so the file
-    /// still reads as whatever it last held.
+    /// A write or rename that fails, which leaves the PREVIOUS file exactly as
+    /// it was — the temp file is discarded and nothing partial is ever visible
+    /// under the real name.
     pub fn publish(&mut self, rows: &[Row], summary: Summary) -> Result<(), Refusal> {
-        let mut body = Vec::with_capacity(SUMMARY_BYTES + rows.len() * STRIDE_BYTES);
+        let mut body = Vec::with_capacity(ROWS_AT + rows.len() * STRIDE_BYTES);
+        let mut header = [0_u8; HEADER_BYTES];
+        header[0..8].copy_from_slice(&MAGIC);
+        header[8..12].copy_from_slice(&VERSION.to_le_bytes());
+        // The count is still written, and is still checked against the bytes
+        // present on read. It is no longer load-bearing for consistency -- the
+        // rename is -- but it lets a reader refuse a file whose length disagrees
+        // with its own header rather than trusting the length alone.
+        let count = u32::try_from(rows.len()).unwrap_or(u32::MAX);
+        header[COUNT_AT..COUNT_AT + 4].copy_from_slice(&count.to_le_bytes());
+        body.extend_from_slice(&header);
         body.extend_from_slice(&summary.to_bytes());
         for row in rows {
             body.extend_from_slice(&row.to_bytes());
         }
-        self.file
-            .seek(SeekFrom::Start(SUMMARY_AT as u64))
-            .and_then(|_| self.file.write_all(&body))
-            .and_then(|()| {
-                self.file
-                    .set_len((ROWS_AT + rows.len() * STRIDE_BYTES) as u64)
-            })
+
+        let temp = self
+            .path
+            .with_extension(format!("{}.tmp", std::process::id()));
+        let write = || -> std::io::Result<()> {
+            let mut file = File::create(&temp)?;
+            file.write_all(&body)?;
             // `sync_data` and not `sync_all`: this file is not history, and a
             // torn live view costs a poll rather than a run. The ledger's own
-            // barrier is `sync_all` for the opposite reason.
-            .and_then(|()| self.file.sync_data())
-            .map_err(|why| format!("{} could not be updated: {why}", self.path.display()))?;
-        // THE COUNT GOES DOWN LAST. Until this write lands the header still says
-        // how many rows the PREVIOUS publish left, so a concurrent reader gets a
-        // whole older answer instead of half a newer one.
-        let count = u32::try_from(rows.len()).unwrap_or(u32::MAX);
-        self.file
-            .seek(SeekFrom::Start(COUNT_AT as u64))
-            .and_then(|_| self.file.write_all(&count.to_le_bytes()))
-            .and_then(|()| self.file.sync_data())
-            .map_err(|why| format!("{} count could not be written: {why}", self.path.display()))
+            // barrier is `sync_all` for the opposite reason. Synced BEFORE the
+            // rename so the name never points at bytes that are not down.
+            file.sync_data()
+        };
+        if let Err(why) = write() {
+            let _ = std::fs::remove_file(&temp);
+            return Err(format!("{} could not be written: {why}", temp.display()));
+        }
+        std::fs::rename(&temp, &self.path).map_err(|why| {
+            let _ = std::fs::remove_file(&temp);
+            format!(
+                "{} could not replace {}: {why}. The previous answer is still \
+                 there and is still whole.",
+                temp.display(),
+                self.path.display()
+            )
+        })
     }
 
     /// Removes this run's live file, because the permanent rows now exist.
@@ -298,7 +341,13 @@ impl Live {
     }
 }
 
-/// Every run with a live file right now, newest activity first.
+/// Every run with a live file right now, in identity order.
+///
+/// NOT "newest activity first", which this said while sorting by identity. The
+/// format carries no timestamp, no pid and no heartbeat, so there is nothing an
+/// activity order could be computed from -- and a caller trusting that wording
+/// would render a three-week-old abandoned file at the top because its identity
+/// happens to start with a zero byte.
 ///
 /// # Errors
 ///
@@ -367,6 +416,24 @@ fn read_one(path: &Path) -> Option<([u8; 32], Summary, Vec<Row>)> {
         {
             break;
         }
+        // THE SEAL IS CHECKED, AND THIS MODULE WAS THE ONE READER THAT SKIPPED
+        // IT.
+        //
+        // `Row::from_bytes`'s own doc says "The caller checks `seal_matches`
+        // first", and `frontier.rs` and `trades.rs` both do at every read site.
+        // This module declined -- while reading a file that is rewritten IN
+        // PLACE by a live process, which is the single place in this store where
+        // a torn row is most likely rather than least. A row torn mid-stride
+        // decodes into an arbitrary `t_milli` and would be published to a
+        // browser as a finding.
+        //
+        // A failed seal ends the read rather than skipping one row: rows are
+        // ranked, so a gap in the middle would renumber everything after it and
+        // the page would show rank 3 where rank 4 is. Stopping gives a shorter
+        // but honest prefix of the ranking.
+        if !Row::seal_matches(&raw) {
+            break;
+        }
         let row = Row::from_bytes(&raw);
         if nth == 0 {
             identity = row.identity;
@@ -386,6 +453,25 @@ fn read_one(path: &Path) -> Option<([u8; 32], Summary, Vec<Row>)> {
 fn identity_from_name(path: &Path) -> Option<[u8; 32]> {
     let stem = path.file_stem()?.to_str()?;
     if stem.len() != 64 {
+        return None;
+    }
+    // EVERY CHARACTER MUST BE A HEX DIGIT, and `from_str_radix` is not that
+    // check.
+    //
+    // `u8::from_str_radix` accepts a leading `+` on an unsigned type -- the
+    // parser's `[b'+', rest @ ..]` arm carries no signedness guard -- so
+    // `from_str_radix("+1", 16)` is `Ok(1)`. A file named `+1` sixty-four times
+    // over therefore parsed to `[1u8; 32]`, which is a real identity another run
+    // can legitimately own. Two different files would then report the SAME run,
+    // and `sort_by_key` being stable means their order came from `read_dir` and
+    // could change between two polls of one page -- defeating the determinism
+    // the sort exists for.
+    //
+    // Found by an adversarial pass. Rejecting the name outright is right rather
+    // than normalising it: this directory's filenames are written by
+    // `Live::path` and nothing else, so a name that is not lowercase hex was not
+    // written by this program.
+    if !stem.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
     let mut out = [0_u8; 32];
@@ -408,9 +494,32 @@ fn identity_from_name(path: &Path) -> Option<[u8; 32]> {
 /// check the figures rather than repeating them.
 #[must_use]
 pub fn expected_rewrites(keep: u64, weighed: u64) -> u64 {
-    if keep == 0 || weighed <= keep {
+    // KEEPING NOTHING REWRITES NOTHING. This returned `weighed`, and a test
+    // asserted that under the words "degenerate inputs answer rather than divide
+    // by zero" -- conflating "do not divide by zero" with "return the input". A
+    // top-0 is always empty and can never move, so the answer is zero.
+    if keep == 0 {
+        return 0;
+    }
+    // FILLING THE HEAP IS `keep` REWRITES, and they are counted here rather than
+    // waved at. The formula below counts DISPLACEMENTS once the heap is full;
+    // the trigger this function models is "the top-N moved", and it also moves
+    // on each of the first `keep` arrivals.
+    //
+    // Omitting them made the function non-monotonic at the seam: the old guard
+    // returned `weighed` for `weighed <= keep`, while the formula at
+    // `weighed == keep` gives `keep * ln(1) == 0`. So `f(25, 25)` was 25 and
+    // `f(25, 26)` was 0 -- weighing one MORE candidate reported fewer rewrites --
+    // and it stayed below 25 for every input up to about `25e`. The old test
+    // stepped from `(25, 10)` straight to `(25, 10_000)` and over the whole
+    // broken interval.
+    if weighed <= keep {
         return weighed;
     }
+    // The ratio is computed in f64 while the guard above compares in u64, so a
+    // `weighed` too large to be represented exactly could round down to `keep`
+    // and give `ln(1) == 0`. `max(1)` on the tail keeps the result at least the
+    // fill cost, which is the floor the guard above establishes.
     #[expect(
         clippy::cast_precision_loss,
         clippy::cast_possible_truncation,
@@ -422,8 +531,8 @@ pub fn expected_rewrites(keep: u64, weighed: u64) -> u64 {
                   the last place of a logarithm does not move that argument, and \
                   the inputs are counts that cannot be negative."
     )]
-    let out = (keep as f64 * (weighed as f64 / keep as f64).ln()) as u64;
-    out
+    let displacements = (keep as f64 * (weighed as f64 / keep as f64).ln()) as u64;
+    keep.saturating_add(displacements)
 }
 
 #[cfg(test)]
@@ -436,8 +545,9 @@ pub fn expected_rewrites(keep: u64, weighed: u64) -> u64 {
               state the same fact twice."
 )]
 mod tests {
-    use super::{Live, Summary, current, expected_rewrites};
+    use super::{Live, MAGIC, ROWS_AT, Summary, VERSION, current, expected_rewrites};
     use crate::frontier::Row;
+    use crate::frontier::STRIDE_BYTES;
 
     /// A row with every field named, because `Row` has no `Default` -- it is
     /// built from a `Scored` and a grid `Cell` in production, and a test that
@@ -606,13 +716,98 @@ mod tests {
         assert_eq!(seen[0].2[0].t_milli, 4_000);
     }
 
+    /// A row that does not seal is not decoded, and a hex-looking name is not
+    /// trusted.
+    ///
+    /// # Two defects an adversarial pass found, both latent
+    ///
+    /// This module was the ONLY reader in the workspace that skipped
+    /// `Row::seal_matches`, whose own doc says the caller must check it first --
+    /// while reading the one file in this store that is rewritten by a live
+    /// process. A row torn mid-stride decodes to an arbitrary `t_milli` and
+    /// would have been published to a browser as a finding.
+    ///
+    /// And `u8::from_str_radix` accepts a leading `+` on an unsigned type, so a
+    /// file named `+1` thirty-two times over parsed to `[1u8; 32]` -- a real
+    /// identity another run can own. Two files would then report one run, and
+    /// the stable sort would order them by `read_dir`, which is what the sort
+    /// exists to avoid.
+    #[test]
+    fn a_torn_row_and_a_forged_name_are_both_refused() {
+        let root = tempdir();
+        let identity = [3_u8; 32];
+        let mut live = Live::open(root.path(), &identity).expect("writable");
+        live.publish(
+            &[row(identity, 1, 4_000), row(identity, 2, 3_000)],
+            Summary::default(),
+        )
+        .expect("writable");
+
+        // CORRUPT THE SECOND ROW'S PAYLOAD, leaving its seal stale. Byte 3 of
+        // the row is inside `identity`, well clear of the seal's own eight.
+        let path = Live::path(root.path(), &identity);
+        let mut raw = std::fs::read(&path).expect("readable");
+        let second = ROWS_AT + STRIDE_BYTES;
+        raw[second + 3] ^= 0xFF;
+        std::fs::write(&path, &raw).expect("writable");
+
+        let seen = current(root.path());
+        assert_eq!(seen.len(), 1);
+        assert_eq!(
+            seen[0].2.len(),
+            1,
+            "the torn row is refused by its seal and the read stops there -- a \
+             skipped middle row would renumber the ranking and show rank 3 where \
+             rank 4 is"
+        );
+        assert_eq!(seen[0].2[0].t_milli, 4_000, "the intact row still reads");
+
+        // A NAME THAT PARSES BUT IS NOT HEX. `+1` x32 is 64 characters and
+        // `from_str_radix` accepts every pair, yielding [1u8; 32].
+        let forged = Live::dir(root.path()).join(format!("{}.bin", "+1".repeat(32)));
+        let mut body = Vec::from(MAGIC);
+        body.extend_from_slice(&VERSION.to_le_bytes());
+        body.extend_from_slice(&[0_u8; 4]);
+        body.extend_from_slice(&Summary::default().to_bytes());
+        std::fs::write(&forged, &body).expect("writable");
+
+        let after = current(root.path());
+        assert_eq!(
+            after.len(),
+            1,
+            "a filename that is not lowercase hex is not an identity, however \
+             willingly `from_str_radix` parses it"
+        );
+    }
+
     /// The affordability claim is arithmetic, not a table to trust.
     #[test]
     fn the_rewrite_count_is_logarithmic_in_the_search() {
-        // The figures this module's header quotes, recomputed.
-        assert_eq!(expected_rewrites(25, 10_000), 149);
-        assert_eq!(expected_rewrites(25, 1_000_000), 264);
-        assert_eq!(expected_rewrites(25, 84_000_000), 375);
+        // The figures this module's header quotes, recomputed. They include the
+        // `keep` rewrites that FILL the heap: the trigger this models is "the
+        // top-N moved", and it moves on each of the first `keep` arrivals too.
+        // Omitting them understated the count by 25 and made the function
+        // non-monotonic at the seam -- see `expected_rewrites`.
+        assert_eq!(expected_rewrites(25, 10_000), 174);
+        assert_eq!(expected_rewrites(25, 1_000_000), 289);
+        assert_eq!(expected_rewrites(25, 84_000_000), 400);
+
+        // MONOTONIC EVERYWHERE, which it was not. `f(25, 25)` was 25 and
+        // `f(25, 26)` was 0 -- one more candidate reporting fewer rewrites --
+        // and it stayed below 25 until about `25e`. The old test jumped from
+        // `(25, 10)` to `(25, 10_000)` and stepped over the entire broken range,
+        // so it passed while the function was wrong across sixty inputs.
+        let mut previous = 0;
+        for weighed in 0..200_u64 {
+            let now = expected_rewrites(25, weighed);
+            assert!(
+                now >= previous,
+                "weighing {weighed} candidates cannot need fewer rewrites than \
+                 {} did: {previous} -> {now}",
+                weighed.saturating_sub(1)
+            );
+            previous = now;
+        }
 
         // GROWTH IS LOGARITHMIC: eight thousand times the candidates costs
         // roughly two and a half times the writes. That ratio is the whole
@@ -624,8 +819,11 @@ mod tests {
             "8,400x the search must not cost 3x the writes: {small} -> {huge}"
         );
 
-        // Degenerate inputs answer rather than divide by zero.
-        assert_eq!(expected_rewrites(0, 500), 500);
+        // KEEPING NOTHING REWRITES NOTHING. This asserted 500 under the words
+        // "degenerate inputs answer rather than divide by zero", which confused
+        // not-dividing-by-zero with returning the input. A top-0 is always empty
+        // and can never move.
+        assert_eq!(expected_rewrites(0, 500), 0);
         assert_eq!(
             expected_rewrites(25, 10),
             10,

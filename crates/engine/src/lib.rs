@@ -982,6 +982,20 @@ impl Ladder {
             infrequent,
         };
 
+        // k=1 IS REPORTED TOO, AND IT WAS NOT.
+        //
+        // The reporter's only call site was inside the loop below, which starts
+        // at k=2 -- so a depth-eight walk made SEVEN calls, not the eight the
+        // comment there claimed, and k=1 was silent. That is the wrong level to
+        // miss: k=1 measures every live position against the whole column and
+        // produces the D-0080 exclusion set, so on a 618,296-bar rung it is the
+        // first long stretch of exactly the silence the reporter exists to end.
+        //
+        // Found by an adversarial pass, which also caught the test's own doc
+        // saying "a walk of depth d makes exactly d calls" while its assertion
+        // said `levels.len() - 1`. The assertion was right about the code and
+        // the code was wrong about the intent; both now say `d`.
+        on_level(&current, 0, 0);
         // ── k=2 upward, until a level produces nothing ───────────────────────
         // `current` is held by value rather than read back out of `sweep.levels`,
         // so the level is moved into the record exactly once and no clone is
@@ -1016,7 +1030,8 @@ impl Ladder {
             // THE LEVEL BOUNDARY. Reached exactly once per k, and the only point
             // in this crate that is: everything per-candidate is inside
             // `next_level` and everything per-bar is below that in `column.rs`.
-            // A walk of depth eight makes eight calls here, which is the
+            // A walk of depth eight makes eight calls here (k=1 is reported just
+            // before this loop), which is the
             // granularity gate 17's own remedy text prescribes.
             //
             // BEFORE the halt test, deliberately -- see the method doc. A caller
@@ -3635,11 +3650,19 @@ mod tests {
         let reported = seen.borrow().clone();
         assert_eq!(
             reported.len(),
-            complete.levels.len().saturating_sub(1),
-            "one call per level the LOOP built. k=1 is built before the loop and \
-             is not reported, so the count is levels minus that first one -- \
-             asserted against the walk's own output rather than a literal, \
-             because a literal would pass while the loop reported one level twice."
+            complete.levels.len(),
+            "ONE CALL PER LEVEL, INCLUDING k=1. The reporter's only call site was \
+             once inside the loop, which starts at k=2, so a depth-eight walk \
+             made seven calls while three comments and two commit messages said \
+             eight -- and the level it missed is the one that measures every \
+             position against the whole column. Asserted against the walk's own \
+             output rather than a literal, because a literal would pass while the \
+             loop reported one level twice."
+        );
+        assert_eq!(
+            reported.first().map(|&(k, _, _)| k),
+            Some(1),
+            "and the FIRST report is k=1, which is where the long silence starts"
         );
         // The levels arrive in ascending k, once each: a reporter that fired
         // inside `next_level` would repeat a k or skip one.

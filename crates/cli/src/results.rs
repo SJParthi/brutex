@@ -984,11 +984,23 @@ impl Results {
             // orphan the ordering exists to make unreachable, arriving by the one
             // route the ordering cannot see.
             //
-            // `sync_all` rather than `sync_data`: a record extends the file, so
-            // the length is part of what has to survive. `trades.rs` may use
-            // `sync_data` because a torn length there costs a detail row; a torn
-            // length here costs the run those rows belong to.
-            .and_then(|()| self.file.sync_all())
+            // THE SYNC IS **NOT** CHAINED HERE, AND CHAINING IT DESTROYED DATA.
+            //
+            // It was `.and_then(|()| self.file.sync_all())` on this line, which
+            // put the barrier INSIDE the rollback's error path below. A
+            // `write_all` that fully succeeded followed by a `sync_all` that
+            // failed -- `ENOTSUP` on a device that cannot fsync, `EIO` on one
+            // that can and did not -- then truncated back to `at`, DELETING A
+            // RECORD THAT WAS COMPLETELY AND SUCCESSFULLY WRITTEN, and reported
+            // "the record could not be written", which was untrue.
+            //
+            // The rollback exists for a partial `write_all` and only for that.
+            // Its own comment below is precise about the reasoning and the
+            // chaining silently widened it to a case the reasoning does not
+            // cover. The sync therefore happens AFTER the rollback arm, on its
+            // own, where its failure cannot truncate anything.
+            //
+            // Found by an adversarial pass over the commit that introduced it.
             // A FAILED WRITE IS ROLLED BACK, AND THIS IS THE ONE PLACE THAT IS
             // NOT A SILENT REPAIR.
             //
@@ -1022,6 +1034,29 @@ impl Results {
                      back to byte {at}."
                 ),
             })?;
+        // THE DURABILITY BARRIER, AFTER THE ROLLBACK ARM AND NOT INSIDE IT.
+        //
+        // `sync_all` rather than `sync_data`: a record extends the file, so the
+        // length is part of what has to survive. `trades.rs` may use `sync_data`
+        // because a torn length there costs a detail row; a torn length here
+        // costs the run those rows belong to.
+        //
+        // A FAILURE HERE DOES NOT TRUNCATE. The bytes are down and complete --
+        // `write_all` returned `Ok` -- so the record exists and will very likely
+        // reach the platter; on Linux a failed `fsync` also clears the dirty-page
+        // error state, which makes this the worst possible moment to discard it.
+        // What is unknown is whether it SURVIVES a power loss, and that is what
+        // the refusal says. The caller sees an error, the ledger keeps the row,
+        // and the two facts are reported separately because they are separate.
+        self.file.sync_all().map_err(|why| {
+            format!(
+                "the record was written but could not be flushed to disk: {why}. \
+                 It IS in the ledger and readable now; what is not guaranteed is \
+                 that it survives a power loss. Nothing was rolled back -- \
+                 discarding a record that was written completely would lose work \
+                 over a barrier that failed, which is the larger harm."
+            )
+        })?;
         self.seen.insert(record.identity);
         self.scanned = at.saturating_add(STRIDE);
         Ok(at.saturating_sub(HEADER) / STRIDE)
@@ -1933,6 +1968,44 @@ mod tests {
         // the message that names the cause -- with a generic flush failure that
         // names a symptom. `a_ledger_that_does_not_keep_what_it_is_given_is_refused`
         // is what fails when this order is reversed; this assertion says why.
+        // THE APPEND'S SYNC MUST NOT SIT INSIDE THE ROLLBACK CHAIN, and this is
+        // the assertion that would have caught a real data-loss defect.
+        //
+        // It was written `.and_then(|()| self.file.sync_all())` immediately
+        // above the `.map_err(|why| match self.file.set_len(at)` rollback, which
+        // put the barrier inside the error path: a `write_all` that fully
+        // succeeded followed by a `sync_all` that failed truncated back to `at`,
+        // DELETING A COMPLETE RECORD, and reported that it could not be written.
+        //
+        // The first version of this guard counted `.sync_all()` occurrences and
+        // said nothing about where they sit, so it passed on the broken code.
+        // Counting is not ordering.
+        // OVER THE COMMENT-STRIPPED LINES, not the raw source. The first draft
+        // of this assertion searched `shipping` and failed on the fixed code,
+        // because the comment ABOVE the rollback quotes the broken spelling in
+        // order to explain it -- the same "text in a comment is text" defect
+        // several guards in this workspace have already been caught by, found
+        // here by the guard catching itself.
+        let stripped = code.join("\n");
+        let append = stripped
+            .split_once("fn append_locked")
+            .map(|(_, after)| after)
+            .expect("the append path must still exist");
+        let rollback_at = append
+            .find("match self.file.set_len(at)")
+            .expect("the rollback must still exist");
+        let sync_at = append
+            .find(".sync_all()")
+            .expect("the append must still have a durability barrier");
+        assert!(
+            sync_at > rollback_at,
+            "`append_locked`'s `sync_all` must come AFTER the rollback arm, not \
+             be chained into it. Chained, a failed sync truncates a record that \
+             `write_all` had already written in full -- losing work over a \
+             barrier that failed, and reporting a write failure that did not \
+             happen."
+        );
+
         let (_, after_refusal) = shipping
             .split_once("accepted a header and did not keep it")
             .expect("the header refusal must still exist");
