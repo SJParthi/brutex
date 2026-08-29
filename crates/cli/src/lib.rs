@@ -9501,6 +9501,134 @@ fn ranked_with_progress(
     )
 }
 
+/// The permanent rows, then the live file's removal, IN THAT ORDER.
+///
+/// # The order carries a rule, exactly as `record_all`'s own does
+///
+/// Until `record_all` returns, the ledger, the frontier and the trades are not
+/// on disk and the live file is the only thing that can answer for this run. A
+/// run that dies between the two therefore keeps its top-N rather than losing
+/// both, which is the whole reason the live file exists. Removing it first would
+/// open a window where a killed run has no record anywhere -- the same shape as
+/// the orphan `record_all`'s ledger-first ordering exists to make unreachable,
+/// one layer out.
+///
+/// Neither half can fail the run. `record_all` returns text and never a
+/// `Result`, and [`crate::live::Live::finish`] does the same, because detail
+/// about a completed run must not turn that run into a failure.
+fn record_and_finish(
+    recording: Option<Recording<'_>>,
+    id: Option<&runner::identity::RunId>,
+    recorded: &Recorded<'_>,
+    live: Option<crate::live::Live>,
+) -> String {
+    let mut out = String::new();
+    if let (Some(into), Some(run_id)) = (recording, id) {
+        out.push_str(&record_all(into, run_id, recorded));
+    }
+    out.push_str(&live.map_or_else(String::new, crate::live::Live::finish));
+    out
+}
+
+/// [`publish_ranked`] when this run is recording, and nothing when it is not.
+///
+/// A run with no `Recording` writes no permanent rows either -- `audit-stored`
+/// and the synthetic path both pass `None` -- so a live file for one would
+/// promise a result that is never going to land anywhere. Split out so
+/// [`audit_bars`] spends one line on the whole question rather than six.
+fn live_view(
+    recording: Option<&Recording<'_>>,
+    id: Option<&runner::identity::RunId>,
+    by_evidence: &[&runner::rank::Scored],
+    sweep: &engine::Sweep,
+) -> (Option<crate::live::Live>, String) {
+    match (recording, id) {
+        (Some(into), Some(run_id)) => publish_ranked(into.root, run_id, by_evidence, sweep),
+        _ => (None, String::new()),
+    }
+}
+
+/// Publishes the ranked top-N before the run's slowest phase begins.
+///
+/// # Why here, and not at the end
+///
+/// MEASURED: a 60-minute `audit-range` ran 48 minutes and wrote nothing, and a
+/// live profile of it put **87.6% of samples in the exit grid** -- 18,068
+/// against 1,403 in `trade` and 887 in `rank`. So the ranking is finished and
+/// sitting in memory for the overwhelming majority of a run's wall clock, while
+/// the operator is shown the PREVIOUS run's answer.
+///
+/// `by_evidence` is already ordered by `|t|` at this point. Publishing it here
+/// costs one file write and moves the first visible answer from minute 48 to
+/// roughly minute 3.
+///
+/// # The rows carry no exit cell yet, and that is honest rather than partial
+///
+/// [`crate::frontier::Row::of`] takes `Option<&Cell>` and every field it fills
+/// from the cell is zero when there is none. That is the true state: these
+/// combinations have been ranked and not yet priced, and the grid is exactly
+/// what the next three quarters of an hour are spent doing. A row that invented
+/// a cell would be the fallback `CLAUDE.md` §4 bans; a zeroed one paired with
+/// `Summary::priced` says which stage the run has reached.
+///
+/// # Errors
+///
+/// Never. A live view that cannot be written must not fail the run it is
+/// describing -- the same rule `record_all` follows. The refusal is returned as
+/// text and the caller appends it to the report.
+fn publish_ranked(
+    root: &std::path::Path,
+    id: &runner::identity::RunId,
+    by_evidence: &[&runner::rank::Scored],
+    sweep: &engine::Sweep,
+) -> (Option<crate::live::Live>, String) {
+    let identity = id.bytes();
+    let rows: Vec<crate::frontier::Row> = by_evidence
+        .iter()
+        .take(STORED_KEEP)
+        .enumerate()
+        .map(|(nth, scored)| {
+            let rank = u16::try_from(nth.saturating_add(1)).unwrap_or(u16::MAX);
+            crate::frontier::Row::of(identity, rank, scored, None)
+        })
+        .collect();
+
+    // THE BAR TRAVELS WITH THE ROWS, and it is the run's OWN trial count that
+    // sets it. A `|t|` shown without the threshold it is judged against is the
+    // reading §4 bans -- a figure that looks like a finding because nothing
+    // beside it says otherwise.
+    let trials = runner::significance::effective_trials(sweep);
+    let bar = runner::significance::bonferroni_t(trials);
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::float_arithmetic,
+        reason = "the bar is carried in thousandths so a reader compares it to \
+                  `Row::t_milli` as one integer against another. Both are \
+                  statistics rather than money, which is the half of §7 that \
+                  keeps full precision, and a unit in the last place of a \
+                  threshold does not move a verdict that is 3.42 against 6.19. The
+                  multiply is the only arithmetic and it touches no price: gate
+                  11 counts the float TYPE NAME and this line writes
+                  none."
+    )]
+    let bar_milli = (bar * 1_000.0) as i64;
+    let summary = crate::live::Summary {
+        trials,
+        bar_milli,
+        // NOTHING IS PRICED YET, and saying zero is the point: it is what
+        // separates "ranked, grid still running" from "finished".
+        priced: 0,
+    };
+
+    match crate::live::Live::open(root, &identity) {
+        Ok(mut live) => match live.publish(&rows, summary) {
+            Ok(()) => (Some(live), String::new()),
+            Err(why) => (None, format!("the live view could not be written: {why}\n")),
+        },
+        Err(why) => (None, format!("the live view could not be started: {why}\n")),
+    }
+}
+
 /// One event per ladder level, and this is where it is affordable.
 ///
 /// # The hole this fills, measured
@@ -10015,6 +10143,11 @@ fn audit_bars(
         out.push_str(&nothing_to_trade(outcome.sweep.all_frequent().count()));
         return out;
     };
+    // THE LIVE VIEW OPENS HERE, before the exit grid spends 87.6% of the run.
+    // See `publish_ranked`: the ranking is finished and the grid has not
+    // started, so this is the earliest moment a real answer exists.
+    let (live, live_note) = live_view(recording.as_ref(), id, &by_evidence, &outcome.sweep);
+    out.push_str(&live_note);
     // THE SCREEN, before the single-combination report below. 0.20% is 20
     // basis points -- about fifty points on a 25,000 index -- and is a stated
     // default rather than a derived one: no document defines the right stop and
@@ -10188,9 +10321,7 @@ fn audit_bars(
         taken: &taken,
         candles: &trade_bars,
     };
-    if let (Some(into), Some(run_id)) = (recording, id) {
-        out.push_str(&record_all(into, run_id, &recorded));
-    }
+    out.push_str(&record_and_finish(recording, id, &recorded, live));
     out.push_str(walk_forward_caveat(execution.is_some(), folds.decided()));
     out.push_str(&audit::render(
         Some(&taken),
