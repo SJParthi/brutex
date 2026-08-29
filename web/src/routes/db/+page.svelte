@@ -89,6 +89,9 @@
   import { denominators, denomKey, isSole, rollUpMonths } from '$lib/completeness.js';
   import { basisPoints, bpsText, dirOf } from '$lib/bps.js';
   import { exact } from '$lib/money.js';
+  /* THE PRICE LINE'S SAMPLER AND ITS GEOMETRY. Extracted so `node --test` can
+     assert the O(1) read bound as a number — see `spark.test.js`. */
+  import { sampleSeries, sparkPath } from '$lib/spark.js';
   // A REQUEST THAT CANNOT END IS A SPINNER THAT LIES. `ask` is `fetch` with a
   // ceiling; see `$lib/ask.js` for why the wrapper exists rather than a signal
   // threaded through every call site.
@@ -5096,41 +5099,23 @@
    * springing to full height on noise. That is the truthful picture of the
    * newest minutes of this store, which really are flat.
    */
+  /* THE SAMPLER AND THE GEOMETRY LIVE IN `$lib/spark.js` NOW, and the reason is
+     the one `docs/07-o1-architecture.md` gives for every layer: "A layer is not
+     built because the code looks right. It is built when a test asserts the
+     bound as a NUMBER." This was thirty lines inside a `.svelte` file, which
+     `node --test` cannot import, so the O(1) claim made for it was a sentence
+     and a hand measurement — the same standing layer 12 had when its row cap
+     was hiding a fold that measured 124.916 ms at 50,000 instruments.
+     `spark.test.js` now asserts the read count is `min(n, 240)` at n = 100
+     through 1,000,000, and `sampleSeries` returns that count for it to check
+     rather than being trusted. Writing the test also found a real fault in the
+     first version of it — see the reversal case there. */
   const SPARK_N = 240;
   const spark = $derived.by(() => {
-    const src = barWindowed;
-    const n = src.length;
-    if (n < 2) return null;
-    const take = Math.min(n, SPARK_N);
-    /** @type {{x: number, c: number}[]} */
-    const pts = [];
-    let lo = Infinity;
-    let hi = -Infinity;
-    for (let i = 0; i < take; i++) {
-      const r = src[((i * n) / take) | 0];
-      const c = r && typeof r.c === 'number' ? r.c : null;
-      if (c === null) continue;
-      if (c < lo) lo = c;
-      if (c > hi) hi = c;
-      pts.push({ x: i / (take - 1), c });
-    }
-    if (pts.length < 2) return null;
-    /* TIME RUNS LEFT TO RIGHT WHATEVER THE GRID IS SORTED BY. The table opens
-       newest-first, so the samples arrive newest-first too, and a chart that
-       ran backwards would read as a fall where the series rose. */
-    if (barDesc) pts.reverse().forEach((p, i) => (p.x = i / (pts.length - 1)));
-    const span = hi - lo;
-    const y = (/** @type {number} */ c) => (span === 0 ? 50 : 96 - ((c - lo) / span) * 92);
-    const d = pts.map((p, i) => `${i ? 'L' : 'M'}${(p.x * 1000).toFixed(1)} ${y(p.c).toFixed(1)}`).join('');
-    return {
-      d,
-      fill: `${d}L1000 100L0 100Z`,
-      up: pts[pts.length - 1].c >= pts[0].c,
-      lo,
-      hi,
-      n: pts.length,
-      of: n
-    };
+    const s = sampleSeries(barWindowed, (r) => /** @type {any} */ (r)?.c ?? null, SPARK_N, barDesc);
+    if (s === null) return null;
+    const { line, area } = sparkPath(s);
+    return { d: line, fill: area, up: s.up, lo: s.lo, hi: s.hi, n: s.pts.length, of: s.of };
   });
 
   /**
