@@ -3325,6 +3325,17 @@ fn audit_range_inner(
             .with("min_hits", min_hits),
     );
 
+    // BOUND ONCE, USED TWICE: by the run identity below and by the
+    // `AuditOptions` this function goes on to build.
+    //
+    // They were written apart -- the identity taking the ladder alone, the
+    // options constructing their policy inline further down -- so there was
+    // no single place holding what this run's policy IS, and the identity
+    // simply did not carry it. Naming them here makes the two physically the
+    // same values rather than two spellings that happen to agree.
+    let rules = Rules::operator();
+    let lens = runner::rank::Lens::Payoff;
+    let validate = validate_from_env();
     let ladder = ladder_for(min_hits)?;
     let id = identity(&Run {
         #[expect(
@@ -3337,7 +3348,29 @@ fn audit_range_inner(
         direction: RunDirection::Undirected,
         instrument: &span.key,
         timeframe: span.timeframe,
-        params: Params::of(ladder),
+        // THE POLICY IS PART OF THE IDENTITY, AND ON THIS PATH IT WAS NOT.
+        //
+        // This read `Params::of(ladder)` — the threshold and the two budgets,
+        // and nothing about what was DONE with the sweep's output.
+        // `screen_range_inner` has folded the policy in since D-0294, on the
+        // principle its doc states: *"an identity two different results can
+        // share is not an identity."* This function is the one that RECORDS,
+        // and it was the one without it.
+        //
+        // The gap became a trap the moment `validate` stopped being hardcoded.
+        // The `UNVALIDATED` banner instructs the reader to *"Unset
+        // BRUTEX_VALIDATE to price them in full"* — and following that
+        // instruction produced the identical nine terms, so
+        // `Results::append_locked` refused the validated run as a duplicate
+        // with *"this run has nothing new to add"*. That justification was
+        // false: the inputs differed and so did the outputs. The candidate row
+        // could never be replaced by the finding row, and `one_rung` reported
+        // the rung as a failure.
+        //
+        // Same `policy_of` and the same argument order as
+        // `screen_range_inner`'s call, so the two paths key identically and a
+        // knob added to one cannot be missed by the other.
+        params: Params::of(ladder).with_policy(&policy_of(&span.bars, rules, lens, validate)),
         // THE DIGEST IS OVER THE WHOLE SPAN, which is what makes this identity
         // correct without a new field. `Run` carries no year or month, so a
         // span and any single month inside it hash differently purely because
@@ -3407,7 +3440,7 @@ fn audit_range_inner(
                 months_asked: span.asked,
                 months_found: span.found,
             }),
-            rules: Rules::operator(),
+            rules,
             // The environment's ceiling: an operator-facing command must not
             // silently narrow its own search.
             ceiling: None,
@@ -3429,7 +3462,7 @@ fn audit_range_inner(
             // operator sets `BRUTEX_VALIDATE=0` — and a run taken that way
             // carries the `UNVALIDATED` banner `CLAUDE.md` §5 requires, so a
             // candidate can never be mistaken for a finding.
-            validate: validate_from_env(),
+            validate,
             // THE LENS THAT DECIDES WHICH COMBINATIONS ARE EVER PRICED, AND IT
             // WAS ANSWERING A DIFFERENT QUESTION FROM THE ONE BEING ASKED.
             //
@@ -3469,7 +3502,7 @@ fn audit_range_inner(
             // that `payoff_bp` was inflated by every flat bar until the same
             // day this changed: ranking by it before that fix would have
             // ordered by a wrong number, so the two changes belong together.
-            lens: runner::rank::Lens::Payoff,
+            lens,
         },
     ))
 }
@@ -7028,10 +7061,7 @@ fn one_rung(
             .with("bars", u64::try_from(bars).unwrap_or(u64::MAX))
             .with("min_hits", min_hits)
             .with("recorded", u64::from(outcome.is_ok()))
-            .with(
-                "why",
-                outcome.as_ref().err().map_or("", String::as_str),
-            ),
+            .with("why", outcome.as_ref().err().map_or("", String::as_str)),
     );
 
     RungRow { rung, outcome }
