@@ -915,14 +915,21 @@ pub fn walk_forward(out: &mut String, v: &Validated) {
     let _ = writeln!(out);
     let _ = writeln!(
         out,
-        "  {:<6}{:>10}{:>10}{:>12}{:>14}{:>14}{:>15}",
-        "fold", "train", "test", "candidates", "in-sample", "oos no exit", "oos with exit"
+        // THE SIDE EACH FOLD CHOSE, and it is a column because the fold now
+        // CHOOSES it. It used to be handed one direction for every candidate,
+        // taken from a rank over the whole span -- so there was nothing per
+        // fold to report. Each fold reads its winner's side off its own
+        // training window now, and a fold that decides something and does not
+        // say what it decided leaves a reader unable to check it.
+        "  {:<6}{:>7}{:>10}{:>10}{:>12}{:>14}{:>14}{:>15}",
+        "fold", "side", "train", "test", "candidates", "in-sample", "oos no exit", "oos with exit"
     );
     for f in &v.folds {
         let _ = writeln!(
             out,
-            "  {:<6}{:>10}{:>10}{:>12}{:>14}{:>14}{:>15}",
+            "  {:<6}{:>7}{:>10}{:>10}{:>12}{:>14}{:>14}{:>15}",
             f.index,
+            f.chosen_side.map_or("-", |d| d.as_str()),
             f.train_bars,
             f.test_bars,
             f.considered,

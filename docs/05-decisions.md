@@ -27751,3 +27751,62 @@ something else is running is a gate nobody can read, and the two shapes it takes
 here are the only two this crate has — a shared path, and a shared global. Both
 already had a convention (`process::id()` in the path, `serially()` around the
 knob) and both defects were a single site that had not taken it.
+
+### D-0387
+
+**The walk-forward fitted its side to the window it was testing, and then
+applied that side to every candidate whose evidence pointed the other way.**
+
+`both_shapes` computed `direction_of(side_of_evidence(first))` and handed it to
+`walk_forward_shaped`, which spent it at three places: the in-sample grid for
+every candidate, the out-of-sample `with_levels` for every candidate, and the
+chosen candidate's own test-window pricing.
+
+`first` is the top row of a rank over the **whole span, test folds included**.
+So the side was fitted to the data it is meant to be tested on — which is the
+identical look-ahead this function's own doc argues against at length for the
+STOP: *"a stop fitted to the test window is the same look-ahead as a combination
+fitted to it, and worse, because a stop fitted to the future looks spectacular
+and is trivially findable."* The side is not different in kind.
+
+**And the second half is worse than the first.** One direction was applied to
+every OTHER candidate in the fold. `best` is selected by `pessimistic >
+held.pessimistic`, so a short-edged candidate priced as a long has roughly the
+negation of its true total and can never be chosen by any fold. `crate::pbo`
+ranks `in_sample_all` against `oos_all` positionally, and both vectors were
+mis-signed for every short-edged candidate — so the reported
+probability-of-backtest-overfitting was computed on a corrupted ranking.
+
+`bootstrap_family` already does this correctly, per candidate, with a comment
+naming exactly this hazard; `screen` does too. The walk-forward was the one
+caller that did not.
+
+**Each candidate now reads its own side off the TRAINING window** — the same
+rule `cli::side_of_evidence` applies in production, the sign of the mean forward
+return, evaluated on `train` alone. The winner's side then travels into the test
+window unchanged, exactly as its exit rungs already do. `crate::outcome::edge`
+supplies it; `outcome::forward(train, horizon)` is hoisted above the `par_iter`
+for the reason `forced_exits` above it is.
+
+**The fold reports what it decided.** `FoldResult::chosen_side` is `Some` exactly
+when `chosen` is, and the walk-forward table carries a `side` column. A fold that
+DECIDES something and does not say what it decided leaves a reader unable to
+check it — the same argument `chosen_exit` was added under.
+
+**The caller's `direction` parameter survives as a fallback and nothing else.**
+It reaches only the arm where a fold assessed no candidate at all, where there is
+none to derive a side from and nothing is priced with it either. Kept rather than
+removed because `walk_forward` and `walk_forward_shaped` are public with eight
+call sites, and an API break buys nothing here.
+
+**The test that caught this was right, and its assertion inverts.**
+`a_short_walk_forward_runs_and_is_not_the_long_one` asserted that a Long caller
+and a Short caller produce DIFFERENT folds — correct while the caller's direction
+reached the pricing, and now the definition of the defect. It is
+`the_fold_decides_the_side_and_the_caller_cannot`, asserting the two walks are
+IDENTICAL fold for fold. The mutant it was written to kill — a `panic!` in
+`side_of`'s Short arm — is still killed, because the short arm is now reached on
+evidence rather than on instruction, and `chosen_side` makes that observable.
+
+**Not fixed here:** `Validated`'s summary rows still do not name a side, and
+`cli`'s walk-forward banner does not either. Only the per-fold table does.

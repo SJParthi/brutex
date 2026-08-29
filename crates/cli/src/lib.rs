@@ -11014,6 +11014,16 @@ fn both_shapes(
     trades_here: &runner::validate::TradesOnTheseBars,
 ) -> (runner::validate::Validated, runner::validate::Validated) {
     let splits = walk_forward_splits(bars.len());
+    // A FALLBACK NOW, NOT THE PRICING SIDE, and that is the whole of the
+    // look-ahead fix. `side_of_evidence(first)` reads the top row of a rank over
+    // the WHOLE span -- test folds included -- so handing it to the fold fitted
+    // the side to the window it is meant to be tested on, and then applied it to
+    // every OTHER candidate, pricing short-edged combinations as longs in the
+    // vector `pbo` ranks.
+    //
+    // Each candidate reads its own side off the TRAINING window now. This value
+    // reaches only the arm where a fold assessed nothing at all, where there is
+    // no candidate to derive one from and nothing is priced with it either.
     let side = direction_of(side_of_evidence(first));
     let sweeper = Sweeper::new(ladder);
     let anchored = runner::validate::walk_forward_shaped(

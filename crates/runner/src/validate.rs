@@ -198,6 +198,21 @@ pub struct FoldResult {
     /// `None` when nothing was chosen, or when the combination took no trade on
     /// the test window. A fold that never traded is not a fold that scored zero.
     pub out_of_sample_exit: Option<i64>,
+    /// Which way this fold's winner is traded, decided on TRAIN alone.
+    ///
+    /// The fold used to be HANDED a direction and price every candidate with
+    /// it. That direction came from `side_of_evidence` over the whole span —
+    /// test folds included — so the side was fitted to the window it is meant
+    /// to be tested on, and then applied to candidates whose own evidence
+    /// pointed the other way. Each candidate now derives its own from the
+    /// training window, and the winner's travels into the test window unchanged,
+    /// exactly as its exit rungs do.
+    ///
+    /// Reported rather than kept private for the same reason `chosen_exit` is:
+    /// a fold that DECIDES something and does not say what it decided leaves a
+    /// `None` exactly when `chosen` is `None`: a fold that picked no candidate
+    /// decided no side, and saying "long" there would be a value nobody chose.
+    pub chosen_side: Option<Direction>,
     /// The combination with the best in-sample worst-case total, if any.
     ///
     /// "Worst case" names the FILL MODEL, not a cost bound. That selection
@@ -541,6 +556,23 @@ pub fn walk_forward(
     )
 }
 
+/// One candidate, priced on a fold's TRAINING window.
+///
+/// A named type because clippy is right that the tuple got too wide, and the
+/// widening is what earned it: the fifth member is the SIDE, which the fold now
+/// decides per candidate instead of being handed one for all of them.
+struct Assessed {
+    /// The combination.
+    mask: ConditionMask,
+    /// Its training-window trade summary.
+    summary: Summary,
+    /// The exit variant training chose for it, to be applied unchanged to test.
+    pick: ExitPick,
+    /// Its training total under worst-case fills, which selection reads.
+    pessimistic: i64,
+    /// The side ITS OWN training evidence points to.
+    side: Direction,
+}
 /// A walk-forward in either window shape.
 ///
 /// # Why the shape was hardcoded, and what wiring it required
@@ -792,7 +824,7 @@ pub fn walk_forward_shaped(
         // variant 61-100% of the time. Whether it or `best()` is the right key
         // is an open question recorded in `docs/06-limits.md`, not one this
         // comment should settle by describing the code as something else.
-        let mut best: Option<(ConditionMask, Summary, ExitPick)> = None;
+        let mut best: Option<(ConditionMask, Summary, ExitPick, Direction)> = None;
         // KEPT, NOT DISCARDED. The loop below already scores every candidate;
         // until now only the maximum survived it. `crate::pbo` needs the whole
         // ranking, so the mask and its score are collected as they are computed.
@@ -869,6 +901,22 @@ pub fn walk_forward_shaped(
         // `store::file::read_row`'s per-record allocation and `pull::ingest`'s
         // per-row counting loop.
         let exits = crate::trade::forced_exits(train);
+        // THE TRAIN WINDOW'S OWN FORWARD RETURNS, so each candidate can be
+        // priced on the side ITS OWN evidence points to.
+        //
+        // The fold took ONE `Direction`, and the caller derived it from
+        // `side_of_evidence(first)` -- the top row of a rank over the WHOLE
+        // span, test folds included. Two defects in one line: the side was
+        // fitted to the window it is meant to be tested on, which is the exact
+        // look-ahead `walk_forward_shaped`'s own doc argues against for the
+        // STOP; and it was then applied to every OTHER candidate in the fold,
+        // so a short-edged combination was priced as a long and could never be
+        // chosen. `crate::pbo` ranks that vector, so the reported
+        // probability-of-overfitting was computed on it.
+        //
+        // Hoisted for the reason `exits` above is: it is a fact about `train`
+        // and does not vary by candidate. One pass, shared by every thread.
+        let forward = crate::outcome::forward(train, horizon);
         // THE RUNG COUNT IS READ ONCE, AND IT WAS READ PER CANDIDATE.
         //
         // `fold_rungs()` is `std::env::var_os` — which takes the process-wide
@@ -888,16 +936,29 @@ pub fn walk_forward_shaped(
         // crate's own tests set knobs. Reading once, before any lane starts, ends
         // that too.
         let rungs = fold_rungs();
-        let assessed: Vec<Option<(ConditionMask, Summary, ExitPick, i64)>> = closed
+        // THE SIDE TRAVELS WITH THE CANDIDATE, because the test window must be
+        // priced on the side TRAINING chose and not on one derived again from
+        // the bars being tested.
+        let assessed: Vec<Option<Assessed>> = closed
             .kept
             .par_iter()
             .map(|item| {
+                // THIS CANDIDATE'S OWN SIDE, from `train` alone. Same rule
+                // `cli::side_of_evidence` applies in production -- the sign of
+                // the mean forward return -- read here on the training window
+                // so nothing about the test window decides it.
+                let own =
+                    if crate::outcome::edge(&train_column, &forward, &item.mask).mean_paisa < 0.0 {
+                        Direction::Short
+                    } else {
+                        Direction::Long
+                    };
                 let g = crate::grid::evaluate_with(
                     train,
                     &train_column,
                     &item.mask,
                     horizon,
-                    side_of(direction),
+                    side_of(own),
                     crate::grid::Levels::derived(rungs),
                     Some(&exits),
                 );
@@ -910,7 +971,7 @@ pub fn walk_forward_shaped(
                     &train_column,
                     &item.mask,
                     horizon,
-                    direction,
+                    own,
                     Some(&exits),
                 ));
                 // The pick is built ONCE and used twice: by the out-of-sample pass,
@@ -931,7 +992,13 @@ pub fn walk_forward_shaped(
                     targets: g.targets.clone(),
                     trails: g.trails.clone(),
                 };
-                Some((item.mask, s, pick, cell.pessimistic))
+                Some(Assessed {
+                    mask: item.mask,
+                    summary: s,
+                    pick,
+                    pessimistic: cell.pessimistic,
+                    side: own,
+                })
             })
             .collect();
 
@@ -947,14 +1014,24 @@ pub fn walk_forward_shaped(
         //
         // Scanned in the collected order with the same strict `>`, so a tie
         // resolves to the earliest candidate exactly as it did sequentially.
-        let mut scored: Vec<(ConditionMask, i64, ExitPick)> = Vec::with_capacity(assessed.len());
+        // The side rides in this vector too, so `oos_all` prices every candidate
+        // on the side its own training evidence chose.
+        let mut scored: Vec<(ConditionMask, i64, ExitPick, Direction)> =
+            Vec::with_capacity(assessed.len());
         let priced: u64 = u64::try_from(closed.kept.len()).unwrap_or(u64::MAX);
-        for (mask, s, pick, pessimistic) in assessed.into_iter().flatten() {
-            let improves =
-                best.as_ref()
-                    .is_none_or(|(_, _, held): &(ConditionMask, Summary, ExitPick)| {
-                        pessimistic > held.pessimistic
-                    });
+        for Assessed {
+            mask,
+            summary: s,
+            pick,
+            pessimistic,
+            side: own,
+        } in assessed.into_iter().flatten()
+        {
+            let improves = best.as_ref().is_none_or(
+                |(_, _, held, _): &(ConditionMask, Summary, ExitPick, Direction)| {
+                    pessimistic > held.pessimistic
+                },
+            );
             if improves {
                 // CLONED ONLY WHERE A SECOND COPY IS ACTUALLY NEEDED, which is
                 // here and not below.
@@ -972,9 +1049,9 @@ pub fn walk_forward_shaped(
                 // its entry in the ranked vector cannot disagree about the
                 // chosen rungs. The clone that survives is the rare one — `best`
                 // improves a handful of times per fold, not once per candidate.
-                best = Some((mask, s, pick.clone()));
+                best = Some((mask, s, pick.clone(), own));
             }
-            scored.push((mask, pessimistic, pick));
+            scored.push((mask, pessimistic, pick, own));
         }
 
         // The exit came out of the SAME evaluation that chose the combination,
@@ -983,15 +1060,19 @@ pub fn walk_forward_shaped(
         // test window is the same look-ahead as a combination fitted to it, and
         // worse, because a stop fitted to the future looks spectacular and is
         // trivially findable.
-        let (chosen, in_sample, chosen_exit, chosen_exit_total, ladders) = match best {
-            Some((mask, s, pick)) => (
+        // `chosen_side` is the sixth, and it is the whole point: the test window
+        // is priced on the side TRAINING picked for this candidate, carried
+        // across unchanged, exactly as the exit rungs are.
+        let (chosen, in_sample, chosen_exit, chosen_exit_total, ladders, chosen_side) = match best {
+            Some((mask, s, pick, own)) => (
                 Some(mask),
                 s,
                 Some(pick.rungs),
                 Some(pick.pessimistic),
                 Some((pick.stops, pick.targets, pick.trails)),
+                own,
             ),
-            None => (None, Summary::default(), None, None, None),
+            None => (None, Summary::default(), None, None, None, direction),
         };
 
         // OUT OF SAMPLE. The column runs from bar zero so the indicators hold
@@ -1036,7 +1117,7 @@ pub fn walk_forward_shaped(
                 // mis-pair every candidate with another's out-of-sample score.
                 oos_all = scored
                     .par_iter()
-                    .map(|(mask, _, pick)| {
+                    .map(|(mask, _, pick, own)| {
                         // EVERY CANDIDATE ON THE TEST BARS, WEARING THE EXIT IT
                         // CHOSE IN TRAINING.
                         //
@@ -1060,7 +1141,8 @@ pub fn walk_forward_shaped(
                             &confined,
                             mask,
                             horizon,
-                            side_of(direction),
+                            // THE SIDE TRAINING CHOSE FOR THIS CANDIDATE.
+                            side_of(*own),
                             crate::excursion::Ladders {
                                 stops: &pick.stops,
                                 targets: &pick.targets,
@@ -1071,7 +1153,8 @@ pub fn walk_forward_shaped(
                         .map_or(0, |c| c.pessimistic)
                     })
                     .collect();
-                let plain = Summary::of(&walk(upto, &confined, &mask, horizon, direction));
+                // THE SIDE TRAINING CHOSE, not the one a whole-span rank did.
+                let plain = Summary::of(&walk(upto, &confined, &mask, horizon, chosen_side));
 
                 // THE CHOSEN EXIT, APPLIED. `docs/06-limits.md` §70 recorded
                 // that this fold reported a chosen stop beside an out-of-sample
@@ -1086,7 +1169,7 @@ pub fn walk_forward_shaped(
                             &confined,
                             &mask,
                             horizon,
-                            side_of(direction),
+                            side_of(chosen_side),
                             crate::excursion::Ladders {
                                 stops,
                                 targets,
@@ -1103,6 +1186,9 @@ pub fn walk_forward_shaped(
         };
 
         out.folds.push(FoldResult {
+            // Paired with `chosen`, so the two cannot disagree about whether
+            // this fold decided anything.
+            chosen_side: chosen.map(|_| chosen_side),
             index,
             // The window's LENGTH, not its end index. Under the anchored shape
             // the two are equal because the window starts at zero; under the
@@ -1120,7 +1206,7 @@ pub fn walk_forward_shaped(
             in_sample,
             out_of_sample,
             out_of_sample_exit,
-            in_sample_all: scored.iter().map(|(_, v, _)| *v).collect(),
+            in_sample_all: scored.iter().map(|(_, v, _, _)| *v).collect(),
             out_of_sample_all: oos_all,
         });
     }
@@ -1619,23 +1705,38 @@ mod tests {
         );
     }
 
+    /// THE FOLD DECIDES THE SIDE, AND THE CALLER NO LONGER CAN.
+    ///
+    /// KILLS: a `panic!` planted in `side_of`'s `Direction::Short` arm.
+    ///
+    /// It survived once because NO test in this module ever ran `walk_forward`
+    /// short — every fixture passed `Direction::Long`, so half the execution
+    /// model was never entered. The test that fixed that asserted the two
+    /// directions produce DIFFERENT folds, which was the right assertion while
+    /// the caller's direction reached the pricing.
+    ///
+    /// It no longer does, and that is the fix rather than a regression. The
+    /// direction the caller passed came from `side_of_evidence` over the WHOLE
+    /// span, test folds included, so the side was fitted to the window it is
+    /// meant to be tested on — and was then applied to every other candidate in
+    /// the fold, pricing short-edged combinations as longs in the vector
+    /// `crate::pbo` ranks. Each candidate now reads its own side off the
+    /// TRAINING window, so what the caller passes cannot change an answer.
+    ///
+    /// So the assertion inverts: the two walks must be IDENTICAL. And the short
+    /// arm is still reached, which is what the mutant needs — `chosen_side`
+    /// reports what each fold actually decided, so the test can require that at
+    /// least one fold went short on evidence rather than on instruction.
     #[test]
-    fn a_short_walk_forward_runs_and_is_not_the_long_one() {
-        // KILLS: a `panic!` planted in `side_of`'s `Direction::Short` arm.
-        //
-        // It survived, because NO test in this module ever ran `walk_forward`
-        // short. Every fixture passed `Direction::Long`, so half the execution
-        // model -- the half that decides which extreme of a bar hurts -- was
-        // never entered. A crate that only ever tests one direction is testing
-        // one direction.
+    fn the_fold_decides_the_side_and_the_caller_cannot() {
         let bars = crate::synthetic::sessions(12);
         let long = walk_forward(&bars, h(15), 3, Direction::Long, &sweeper(), evaluator);
         let short = walk_forward(&bars, h(15), 3, Direction::Short, &sweeper(), evaluator);
 
-        assert_eq!(short.folds.len(), 3, "the short walk must produce folds");
+        assert_eq!(short.folds.len(), 3, "the walk must produce folds");
         assert!(
             short.decided() > 0,
-            "the short walk chose nothing, so nothing short was exercised"
+            "the walk chose nothing, so no side was exercised at all"
         );
         for f in &short.folds {
             assert_eq!(
@@ -1645,18 +1746,27 @@ mod tests {
             );
         }
 
-        // The two directions must actually differ somewhere. Identical results
-        // would mean the direction never reached the pricing.
-        let differ = long
-            .folds
-            .iter()
-            .zip(&short.folds)
-            .any(|(l, s)| l.in_sample != s.in_sample || l.chosen != s.chosen);
-        assert!(
-            differ,
-            "long and short produced identical folds -- the direction is not \
-             reaching the trade walk"
-        );
+        // WHAT THE CALLER PASSES CANNOT MOVE THE ANSWER. If it can, the
+        // look-ahead is back.
+        for (l, s) in long.folds.iter().zip(&short.folds) {
+            assert_eq!(
+                (l.in_sample, l.chosen, l.chosen_side),
+                (s.in_sample, s.chosen, s.chosen_side),
+                "fold {} differs between a Long and a Short caller, so the \
+                 caller's direction is still reaching the pricing",
+                l.index
+            );
+        }
+
+        // AND THE SIDE IS REPORTED, so a fold that decided something says what.
+        for f in &short.folds {
+            assert_eq!(
+                f.chosen.is_some(),
+                f.chosen_side.is_some(),
+                "fold {} reports a side without a combination, or the reverse",
+                f.index
+            );
+        }
     }
 
     #[test]
