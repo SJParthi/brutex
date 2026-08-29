@@ -144,10 +144,7 @@ fn respond(
         if at > 0 {
             out.push(',');
         }
-        let _ = std::fmt::Write::write_fmt(
-            &mut out,
-            format_args!(r#""{}":["#, period.name()),
-        );
+        let _ = std::fmt::Write::write_fmt(&mut out, format_args!(r#""{}":["#, period.name()));
         for (n, b) in buckets.iter().enumerate() {
             if n > 0 {
                 out.push(',');

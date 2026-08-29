@@ -109,7 +109,7 @@ fn respond(
         let _ = std::fmt::Write::write_fmt(
             &mut out,
             format_args!(
-                r#"{{"rank":{},"mask_words":[{},{},{},{},{},{}],"hits":{},"n":{},"mean_milli_paisa":{},"t_milli":{},"payoff_bp":{},"edge_wins":{},"priced":{},"trades":{},"wins":{},"losses":{},"pessimistic":{},"worst_trade":{},"max_drawdown":{},"min_win":{},"win_rate_bp":{},"reward_to_risk_bp":{},"return_over_drawdown":{},"avg_win":{},"avg_loss":{}}}"#,
+                r#"{{"rank":{},"mask_words":[{},{},{},{},{},{}],"hits":{},"n":{},"mean_milli_paisa":{},"t_milli":{},"payoff_bp":{},"edge_wins":{},"priced":{},"trades":{},"wins":{},"losses":{},"pessimistic":{},"worst_trade":{},"max_drawdown":{},"min_win":{},"win_rate_bp":{},"reward_to_risk_bp":{},"return_over_drawdown":{},"avg_win":{},"avg_loss":{},"gross_win":{},"gross_loss":{}}}"#,
                 row.rank,
                 row.mask_words[0],
                 row.mask_words[1],
@@ -132,10 +132,12 @@ fn respond(
                 row.max_drawdown,
                 row.min_win,
                 d.win_rate_bp,
-                d.reward_to_risk_bp,
-                d.return_over_drawdown,
+                measurable(d.reward_to_risk_bp),
+                measurable(d.return_over_drawdown),
                 d.avg_win,
                 d.avg_loss,
+                row.gross_win,
+                row.gross_loss,
             ),
         );
     }
@@ -151,6 +153,35 @@ fn respond(
         ),
     );
     (axum::http::StatusCode::OK, json, out)
+}
+
+/// A ratio the data could not settle, as `null` rather than as `i64::MAX`.
+///
+/// # Why this exists, and what it was doing before
+///
+/// `Cell::reward_to_risk_bp` returns `i64::MAX` when `worst_trade` is zero —
+/// **a combination that never lost a trade** — and `return_over_drawdown` does
+/// the same when there was no drawdown. Both are honest answers to "divide by
+/// nothing". Both were being written into the JSON as the bare literal
+/// `9223372036854775807`.
+///
+/// MEASURED against the page this route exists to feed: the browser ranks by
+/// normalising each measurement to its position within the set, which needs the
+/// set's range. ONE unbeaten row sets that range to 9.2e18, every other row's
+/// term collapses to approximately zero, and the criterion silently leaves the
+/// ranking. The operator can move the weight all they like; the term is already
+/// gone. The same row also rendered as `92233720368547758.00x`.
+///
+/// `null` is the shape this repository already uses for exactly this: the
+/// `/store.json` change ratio is `null` beside a reason code, and its own doc
+/// says *"a ratio with no base is undefined, never `0`, never `∞`"*. Zero would
+/// have been worse than the sentinel — it reads as "measured, and bad".
+fn measurable(value: i64) -> String {
+    if value == i64::MAX {
+        "null".to_owned()
+    } else {
+        value.to_string()
+    }
 }
 
 /// A refusal that names its cause, in the shape every other route here uses.

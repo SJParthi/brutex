@@ -908,7 +908,7 @@ fn settle(progress: &mut Progress, text: String, finished_micros: i64) {
 ///
 /// `clear_all` first, so a previous request that set a knob cannot leak into this
 /// one through a path that returned early.
-pub fn apply_knobs(asked: &Asked) {
+pub fn apply_knobs(asked: &Asked) -> Applied {
     cli::knobs::clear_all();
     for (name, value) in &asked.knobs {
         cli::knobs::set(name, value);
@@ -923,6 +923,31 @@ pub fn apply_knobs(asked: &Asked) {
             )
             .with("knobs", cli::knobs::describe().as_str()),
     );
+    Applied
+}
+
+/// Clears every knob when it is dropped, however the run ends.
+///
+/// # Why a guard and not a call after the sweep
+///
+/// Because `conduct` used to clear them on the line AFTER `cli::range_over`
+/// returned, and that line does not run when `range_over` panics.
+///
+/// MEASURED by attacking the route: a panic there left every knob set for the
+/// LIFE OF THE PROCESS, so the next request -- including a descent or a command,
+/// neither of which sets knobs at all -- silently inherited a dead request's
+/// screen cap, support floor and validation setting. A run steered by settings
+/// nobody chose, with an audit line naming a different request's.
+///
+/// `Drop` runs during unwinding, so this holds on every exit: normal return,
+/// early return, and panic.
+#[must_use = "the guard must be held for the run, not dropped immediately"]
+pub struct Applied;
+
+impl Drop for Applied {
+    fn drop(&mut self) {
+        cli::knobs::clear_all();
+    }
 }
 
 /// Runs the sweep and records what it produced.
@@ -961,7 +986,9 @@ pub fn conduct(asked: &Asked, now_micros: i64) -> Progress {
     // Safe as process-wide state because a sweep is already one-at-a-time:
     // `holding` refuses a second run while `in_flight`, in three places, so
     // there is never a moment when two runs want different values for one knob.
-    apply_knobs(asked);
+    // HELD FOR THE WHOLE RUN. The guard clears on drop, so a panic inside
+    // `range_over` cannot leave this request's settings behind for the next one.
+    let _knobs = apply_knobs(asked);
 
     // `range_over` AND NOT `range_all`, because the request can now name the
     // rungs. A body with no `rungs` field parses to `EVERY_RUNG`, so this is
@@ -976,12 +1003,6 @@ pub fn conduct(asked: &Asked, now_micros: i64) -> Progress {
         asked.to,
         None,
     );
-    // CLEARED AFTER THE RUN, so the next one starts from the environment again
-    // and a request cannot leave its settings behind for a request that named
-    // none. Placed after `range_over` returns rather than in a guard, because
-    // `range_over` returns a refusal string rather than panicking on every path
-    // this route can reach.
-    cli::knobs::clear_all();
     settle(&mut progress, text, now_micros);
     progress
 }

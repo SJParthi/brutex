@@ -176,7 +176,29 @@
    * Polled on the same 2-second tick as the sweep status, so it costs one extra
    * request per tick and stops the moment the run does.
    */
-  let live = $state({ phase: 'idle', rungs: [], why: '' });
+  /**
+   * ONE RUNG'S STATE, as `fetchLive` folds it out of `/logs.json`. `recorded`
+   * is optional because it is only written when the rung FINISHES — a rung
+   * still running has no answer for it, and a default of `false` would claim
+   * one.
+   *
+   * @typedef {{
+   *   rung: string, bars: number, minHits: number,
+   *   done: boolean, why: string, recorded?: boolean
+   * }} LiveRung
+   */
+  /* THE CAST IS INSIDE `$state(...)`, AND THAT PLACEMENT IS THE WHOLE FIX.
+     A `@type` written ABOVE the declaration is ignored here, so `rungs: []`
+     inferred as `never[]` and every downstream read of `.rung`, `.bars`,
+     `.minHits`, `.done`, `.recorded` and `.why` became "does not exist on type
+     'never'". One untyped empty array, fifteen errors. */
+  let live = $state(
+    /** @type {{ phase: string, rungs: LiveRung[], why: string }} */ ({
+      phase: 'idle',
+      rungs: [],
+      why: ''
+    })
+  );
 
   /**
    * One run's round trips — the rows the trade table below has been drawing
@@ -190,7 +212,20 @@
    * Fetched when a run is OPENED rather than with the ledger: a run can hold
    * tens of thousands of trades and only one run is ever looked at.
    */
-  let tradeList = $state({ phase: 'idle', rows: [], why: '' });
+  /* THE CAST GOES INSIDE `$state(...)`, as it does for `live` and `board`.
+     `rows: []` inferred as `never[]`, so `t.worst` and `{ ...t }` in
+     `tradeRows` were both errors about a type nothing had declared.
+     `any[]` IS THE HONEST ELEMENT TYPE HERE: these are `/trades.json`'s own
+     rows and no type in this tree declares that payload. Naming a shape would
+     be a claim about a document this file does not own — the same reason
+     `BoardGroup.rows` is `any[]`. */
+  let tradeList = $state(
+    /** @type {{ phase: string, rows: any[], why: string }} */ ({
+      phase: 'idle',
+      rows: [],
+      why: ''
+    })
+  );
 
   /**
    * One run's ranked combinations, with every measurement they were priced on.
@@ -200,7 +235,15 @@
    * re-sorted, and the operator's ranking is a weighted ordering over eleven
    * quantities whose weights are theirs to move.
    */
-  let combos = $state({ phase: 'idle', rows: [], why: '' });
+  /* Same placement, same reason as `tradeList` above: inside `$state(...)`, and
+     `any[]` because these are the ledger's own rows. */
+  let combos = $state(
+    /** @type {{ phase: string, rows: any[], why: string }} */ ({
+      phase: 'idle',
+      rows: [],
+      why: ''
+    })
+  );
 
   /**
    * How much each measurement counts toward the ranking.
@@ -231,6 +274,36 @@
     avgLoss: 1 // less is better (avg_loss is negative, so nearer zero wins)
   });
 
+  /**
+   * THE SLIDER ROW, AND ITS KEYS ARE `weights`' OWN.
+   *
+   * These ten pairs were written inline in the `{#each}` that draws the
+   * sliders, where the array's element type widened to `string[]` — so `key`
+   * was a bare `string` indexing an object with ten literal keys, and both
+   * `bind:value={weights[key]}` bindings resolved to `any`. A two-way binding
+   * the compiler cannot name is the one place an `any` actually costs
+   * something: a typo in a key would have bound a slider to a property that
+   * does not exist, silently, and the ranking would have ignored it.
+   *
+   * `keyof typeof weights` rather than a repeated union, for the reason
+   * `KNOB_FIELDS` gives: two copies of one list drift, and the drift is
+   * invisible.
+   *
+   * @type {[keyof typeof weights, string][]}
+   */
+  const WEIGHT_FIELDS = [
+    ['drawdown', 'less max drawdown'],
+    ['worstTrade', 'less max stop loss'],
+    ['losingPct', 'less losing %'],
+    ['losingTrades', 'less losing trades'],
+    ['profit', 'more max profit'],
+    ['winningTrades', 'more winning trades'],
+    ['winRate', 'higher win %'],
+    ['rewardRisk', 'higher win:loss ratio'],
+    ['avgWin', 'higher average win'],
+    ['avgLoss', 'smaller average loss']
+  ];
+
   /** How many rows to show per run. The operator asked for ten. */
   let topN = $state(10);
 
@@ -251,6 +324,19 @@
    * `default` is the SERVER's fallback, read from the Rust rather than guessed:
    * `screen_cap` is `DEFAULT: usize = 10_000`, `top` is `at("BRUTEX_TOP", 25)`,
    * and `validate` is `raw.is_none_or(|v| v.trim() != "0")` — unset means ON.
+   */
+  /**
+   * `keyof typeof engine` AND NOT A REPEATED LIST OF NAMES. The knobs and the
+   * state they write are declared side by side and nothing checked that they
+   * agreed; spelling the fourteen names again here would be a second copy of
+   * one fact, correct the day it is written and silently wrong the first time a
+   * knob is added to one and forgotten in the other.
+   *
+   * Tying the key to `engine`'s own keys makes that mismatch a COMPILE ERROR
+   * rather than an `any` — which is what both `engine[k.key]` sites had been
+   * falling back to.
+   *
+   * @type {{ key: keyof typeof engine, label: string, fallback?: string, note?: string }[]}
    */
   const KNOB_FIELDS = [
     {
@@ -417,11 +503,34 @@
 
     // One pass per measurement to learn its range, so the normalisation below is
     // O(rows) overall rather than O(rows) per row.
+    /**
+     * TYPING `pick` IS WHAT TYPES THE TEN CALLERS BELOW. Each `span((r) => ...)`
+     * takes its parameter from this signature, so with `pick` untyped every one
+     * of those `r`s was an implicit `any` — one missing annotation, ten errors,
+     * and none of them at the line that caused it.
+     *
+     * `/**` AND NOT `/*`. The first attempt at this wrote the block as a plain
+     * comment, which TypeScript does not read at all: the annotation was
+     * present, correct, and invisible, and the ten errors did not move.
+     *
+     * @param {(row: any) => number} pick
+     * @returns {{ lo: number, hi: number }}
+     */
+    // `null` IS EXCLUDED FROM THE RANGE, NOT COERCED INTO IT.
+    //
+    // `/frontier.json` sends `null` for a ratio the data could not settle —
+    // reward-to-risk on a combination that never lost a trade, return-over-
+    // drawdown on one that never drew down. `Math.min(null, x)` is 0 and
+    // `Number(null)` is 0, so leaving them in would put "could not be measured"
+    // at the bottom of a range where 0 means "measured, and worst". That is the
+    // same conflation the route stopped making when it stopped sending
+    // `i64::MAX`, and undoing it here would make the fix pointless.
     const span = (pick) => {
       let lo = Infinity;
       let hi = -Infinity;
       for (const r of priced) {
         const v = pick(r);
+        if (v === null || v === undefined || !Number.isFinite(v)) continue;
         if (v < lo) lo = v;
         if (v > hi) hi = v;
       }
@@ -429,8 +538,17 @@
     };
     // `hi === lo` means every row agrees on this measurement, so it separates
     // nothing and contributes 0.5 to all of them rather than dividing by zero.
-    const norm = (v, { lo, hi }) => (hi === lo ? 0.5 : (v - lo) / (hi - lo));
+    // An unmeasurable value takes the same 0.5: it is neither evidence for the
+    // row nor against it, and any other number would be an opinion the data
+    // does not support. `lo === Infinity` means NOTHING was measurable.
+    /** @param {number|null|undefined} v @param {{ lo: number, hi: number }} range */
+    const norm = (v, { lo, hi }) => {
+      if (v === null || v === undefined || !Number.isFinite(v)) return 0.5;
+      if (!Number.isFinite(lo) || hi === lo) return 0.5;
+      return (v - lo) / (hi - lo);
+    };
 
+    /** @param {any} r */
     const losingPct = (r) => (r.trades > 0 ? r.losses / r.trades : 1);
     const ranges = {
       drawdown: span((r) => r.max_drawdown),
@@ -484,7 +602,21 @@
    * not: support decides which combinations were ENUMERATED AT ALL. One run per
    * rung, the newest, and the support each was run at is printed beside it.
    */
-  let board = $state({ phase: 'idle', groups: [], why: '' });
+  /**
+   * ONE RUNG'S BOARD ROW. `run` and `rows` are the ledger's own JSON and are
+   * `any` deliberately: nothing in this tree declares that shape, and inventing
+   * a type for it here would be a claim about a payload this file does not own.
+   *
+   * @typedef {{ rung: string, run: any, rows: any[], why: string }} BoardGroup
+   */
+  /* INSIDE `$state(...)`, for the same reason `live` is — see its comment. */
+  let board = $state(
+    /** @type {{ phase: string, groups: BoardGroup[], why: string }} */ ({
+      phase: 'idle',
+      groups: [],
+      why: ''
+    })
+  );
 
   /** @param {any[]} rowsIn the ledger rows currently in view */
   async function fetchBoard(rowsIn) {
@@ -4761,7 +4893,13 @@
             show top
             <input class="wnum" type="number" min="1" max="100" bind:value={topN} />
           </label>
-          {#each [['drawdown', 'less max drawdown'], ['worstTrade', 'less max stop loss'], ['losingPct', 'less losing %'], ['losingTrades', 'less losing trades'], ['profit', 'more max profit'], ['winningTrades', 'more winning trades'], ['winRate', 'higher win %'], ['rewardRisk', 'higher win:loss ratio'], ['avgWin', 'higher average win'], ['avgLoss', 'smaller average loss']] as [key, label] (key)}
+          <!-- THE TEN PAIRS MOVED INTO THE SCRIPT as `WEIGHT_FIELDS`. Inline,
+               the array's element type widened to `string[]`, so `key` was a
+               `string` indexing an object with ten literal keys and both
+               `weights[key]` bindings fell back to `any` — a slider bound to a
+               weight the compiler could not name. The typed const is the same
+               ten pairs with their keys tied to `weights`' own. -->
+          {#each WEIGHT_FIELDS as [key, label] (key)}
             <label class="wlab">
               {label}
               <input
@@ -4821,7 +4959,7 @@
                         <td class="n down">{money(c.worst_trade)}</td>
                         <td class="n up">{money(c.avg_win)}</td>
                         <td class="n down">{money(c.avg_loss)}</td>
-                        <td class="n">{(c.reward_to_risk_bp / 100).toFixed(2)}×</td>
+                        <td class="n">{c.reward_to_risk_bp === null ? "—" : (c.reward_to_risk_bp / 100).toFixed(2) + "×"}</td>
                       </tr>
                     {/each}
                   </tbody>
@@ -5872,7 +6010,7 @@
                             <td class="n up">{money(c.min_win)}</td>
                             <td class="n up">{money(c.avg_win)}</td>
                             <td class="n down">{money(c.avg_loss)}</td>
-                            <td class="n">{(c.reward_to_risk_bp / 100).toFixed(2)}×</td>
+                            <td class="n">{c.reward_to_risk_bp === null ? "—" : (c.reward_to_risk_bp / 100).toFixed(2) + "×"}</td>
                           </tr>
                         {/each}
                       </tbody>
@@ -5969,6 +6107,7 @@
                           </td>
                         </tr>
                       {/if}
+                    </tbody>
                   </table>
                 </div>
               </div>
@@ -10078,12 +10217,16 @@
     color: var(--n8);
     opacity: 0.75;
   }
-  .tt-tbl tr.lockrow:hover {
-    background: transparent;
-  }
-  .tt-tbl tr.lockrow td {
-    padding: 1.2rem 1rem;
-  }
+  /* ══ THE PADLOCK'S RULES GO WITH THE PADLOCK ══
+     `4b3220b` — "the trade table shows trades, not padlocks" — deleted
+     `<tr class="lockrow">`, `<div class="tt-lockbig">` and `<p class="tt-fix">`
+     from the markup and left six rules behind styling nothing. Gate W4 is a
+     FLOOR AT ZERO on orphaned CSS, not a ratchet, so this was a red build
+     waiting to be noticed rather than untidiness.
+
+     Removed by exact text and verified by the compiler, not by line number: it
+     reports one line per SELECTOR and a rule may list several, which is how an
+     earlier line-based deletion took 375 lines and broke a build. */
 
   /* ---- locked panels ---- */
   .tt-lockpanel {
@@ -10101,25 +10244,6 @@
   }
   .tt-lockpanel b {
     color: var(--n11);
-  }
-  .tt-lockbig {
-    display: flex;
-    align-items: flex-start;
-    gap: 0.85rem;
-    max-width: 92ch;
-  }
-  .tt-lockbig b {
-    color: var(--n11);
-    font-size: 0.86rem;
-  }
-  .tt-lockbig p {
-    margin: 0.4rem 0 0;
-    font-size: 0.78rem;
-    color: var(--n9);
-  }
-  .tt-fix {
-    border-left: 2px solid var(--acc);
-    padding-left: 0.7rem;
   }
   .tt-ident {
     margin: 0.6rem 0 0;

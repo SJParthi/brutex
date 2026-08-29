@@ -7202,18 +7202,31 @@ jobs:
       # ----------------------------------------------------------------------
       # GATE W3 — TYPES DO NOT GET WORSE.
       #
-      # A RATCHET, NOT A FLOOR, and the distinction is the honest part. The
-      # tree carries 64 errors today. Demanding zero would mean either fixing
-      # 64 errors in the commit that adds this gate -- unrelated work, badly
-      # scoped -- or shipping a gate that is red from birth, which is a gate
-      # nobody reads. Demanding "no worse than today" is enforceable now and
-      # gets stricter every time somebody lowers the number.
+      # IT IS A FLOOR AT ZERO NOW, AND IT ARRIVED THERE THE WAY A RATCHET IS
+      # MEANT TO. It began as a ratchet at 64, and this comment used to explain
+      # why: demanding zero would have meant either fixing 64 errors in the
+      # commit that added the gate -- unrelated work, badly scoped -- or
+      # shipping a gate that was red from birth, which is a gate nobody reads.
+      # "No worse than today" was enforceable then and got stricter each time
+      # somebody lowered the number: 64, then 61, and now 0.
       #
-      # `docs/06-limits.md` is where the fact that this is not zero belongs.
+      # THE LAST 42 CAME OUT IN ONE PASS BECAUSE THEY WERE FOUR ROOTS, NOT 42
+      # FAULTS. `live`, `board`, `tradeList` and `combos` each declared
+      # `rungs: []` / `groups: []` / `rows: []` inside `$state(...)` with no
+      # type; TypeScript inferred `never[]`, and every downstream read of a
+      # property became its own error. One untyped `span(pick)` accounted for
+      # ten more the same way. That is the shape of this whole class -- the
+      # error is never reported at the line that causes it -- and it is exactly
+      # why a ratchet that only ever counts is worth keeping.
+      #
+      # A rise is now a refusal. If a legitimate change genuinely cannot reach
+      # zero, RAISE THIS NUMBER IN THIS FILE and say why in
+      # `docs/06-limits.md` -- do not delete the gate, and do not silence the
+      # file it is about.
       # ----------------------------------------------------------------------
       - name: Gate W3 — svelte-check does not regress
         run: |
-          CEILING=61
+          CEILING=0
           npm --prefix web run check 2>&1 | tee /tmp/check.log || true
           # BOTH OF SVELTE-CHECK'S SUMMARY FORMATS, because it does not always
           # pick the same one and this gate reported the difference as "it did
@@ -7238,7 +7251,20 @@ jobs:
           fi
           echo "svelte-check errors: $FOUND (ceiling $CEILING)"
           if [ "$FOUND" -gt "$CEILING" ]; then
-            echo "That is more than the tree carried when this gate was written."
+            echo "The tree types clean at $CEILING and this change does not."
+            echo
+            echo "Look for the ROOT, not the reported line. Every error this"
+            echo "gate has ever counted in bulk came from a handful of untyped"
+            echo "declarations — an empty array inside \$state(...) inferring"
+            echo "never[], or a callback parameter with no annotation — and"
+            echo "the errors surface at the READERS, never at the cause."
+            echo
+            echo "A JSDoc cast belongs INSIDE \$state(...), not above it:"
+            echo "  let x = \$state(/** @type {{ rows: any[] }} */ ({ rows: [] }));"
+            echo "and the block must open with /** — a plain /* is not read."
+            echo
+            echo "If this genuinely cannot reach zero, raise CEILING in this"
+            echo "file and say why in docs/06-limits.md."
             exit 1
           fi
           if [ "$FOUND" -lt "$CEILING" ]; then

@@ -131,7 +131,7 @@ const MAGIC: [u8; 8] = *b"BRUTEXFR";
 /// zeros in the new fields — a zero drawdown is a spectacular result, and
 /// inventing one for every historical row is the failure §4 bans. The file is
 /// regenerable by re-running the sweep, which is the cheap half of this trade.
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 
 /// Bytes before the first row.
 ///
@@ -154,10 +154,10 @@ const _: () = assert!(HEADER_BYTES as u64 == HEADER);
 /// 144, and the last eight are the seal. The layout is in [`Row::to_bytes`], and
 /// `the_stride_is_exactly_what_the_writer_writes` asserts this constant against
 /// what that function actually fills rather than against a hand count.
-pub const STRIDE: u64 = 192;
+pub const STRIDE: u64 = 208;
 
 /// [`STRIDE`] as a `usize`. Same reason as [`HEADER_BYTES`].
-pub const STRIDE_BYTES: usize = 192;
+pub const STRIDE_BYTES: usize = 208;
 
 const _: () = assert!(STRIDE_BYTES as u64 == STRIDE);
 
@@ -230,6 +230,27 @@ pub struct Row {
     /// The SMALLEST winning trade, in paisa -- the numerator of the operator's
     /// "smallest win over largest loss" rule.
     pub min_win: i64,
+    /// Total paisa of every WINNING round trip in the chosen cell.
+    ///
+    /// # Why this is stored when `avg_win` could have been
+    ///
+    /// MEASURED, 2026-08-29: `Row::derived` rebuilt a `grid::Cell` from the six
+    /// v2 fields and asked it for `avg_win` and `avg_loss`. `Cell::avg_win` is
+    /// `gross_win / wins` and `Cell::avg_loss` is `gross_loss / losers`, and
+    /// NEITHER sum was stored -- `..Default::default()` set both to zero, so
+    /// both figures were **structurally always 0**. Two of the eleven criteria
+    /// the operator ranks on were dead weight in every score, and a zero average
+    /// loss is the BEST possible value, so the ranking was quietly rewarding
+    /// rows for a number nobody had measured.
+    ///
+    /// The SUM and not the average, because an average cannot be re-derived
+    /// into anything else while a sum can: `gross_win / wins` gives the average
+    /// back, and the sum also answers "how much did the winners make in total",
+    /// which an average alone cannot. §5's argument against storing a derived
+    /// figure where the raw one fits.
+    pub gross_win: i64,
+    /// Total paisa of every LOSING round trip in the chosen cell. Negative.
+    pub gross_loss: i64,
 }
 
 impl Row {
@@ -269,7 +290,9 @@ impl Row {
         put(&self.pessimistic.to_le_bytes(), &mut at); // 146   8
         put(&self.worst_trade.to_le_bytes(), &mut at); // 154   8
         put(&self.max_drawdown.to_le_bytes(), &mut at); // 162   8
-        put(&self.min_win.to_le_bytes(), &mut at); // 170   8 -> ends at 178
+        put(&self.min_win.to_le_bytes(), &mut at); // 170   8
+        put(&self.gross_win.to_le_bytes(), &mut at); // 178   8
+        put(&self.gross_loss.to_le_bytes(), &mut at); // 186   8 -> ends at 194
         // 130..136 stay zero: six bytes of reserve so the next field does not
         // need a new version for a small addition. Covered by the seal, so a
         // reserve byte that is not zero is a torn write rather than a surprise.
@@ -322,6 +345,8 @@ impl Row {
             worst_trade: i64::from_le_bytes(take(8, &mut at).try_into().unwrap_or([0; 8])),
             max_drawdown: i64::from_le_bytes(take(8, &mut at).try_into().unwrap_or([0; 8])),
             min_win: i64::from_le_bytes(take(8, &mut at).try_into().unwrap_or([0; 8])),
+            gross_win: i64::from_le_bytes(take(8, &mut at).try_into().unwrap_or([0; 8])),
+            gross_loss: i64::from_le_bytes(take(8, &mut at).try_into().unwrap_or([0; 8])),
         }
     }
 
@@ -372,6 +397,8 @@ impl Row {
             worst_trade: cell.map_or(0, |c| c.worst_trade),
             max_drawdown: cell.map_or(0, |c| c.max_drawdown),
             min_win: cell.map_or(0, |c| c.min_win),
+            gross_win: cell.map_or(0, |c| c.gross_win),
+            gross_loss: cell.map_or(0, |c| c.gross_loss),
         }
     }
 }
@@ -1035,6 +1062,8 @@ mod tests {
             worst_trade: 0,
             max_drawdown: 0,
             min_win: 0,
+            gross_win: 0,
+            gross_loss: 0,
         }
     }
 
@@ -1046,14 +1075,24 @@ mod tests {
     /// moved from 144 to 192, and this assertion is what made that a decision
     /// rather than an accident: it failed the moment the fields were added and
     /// the number was not.
+    ///
+    /// IT DID IT AGAIN AT VERSION 3, which is the whole justification for keeping
+    /// it. `gross_win` and `gross_loss` were appended and `STRIDE` was moved to
+    /// 208 in the same edit; this line failed on the next `cargo test` because
+    /// the SUM below had not been told. Two of the operator's eleven ranking
+    /// criteria — average win and average loss — were structurally always zero
+    /// without those two sums, since `Cell::avg_win` is `gross_win / wins` and
+    /// `..Default::default()` had been supplying a zero for it.
     #[test]
     fn the_stride_is_exactly_what_the_writer_writes() {
         //           identity  rank  mask      hits/n/mean/t/payoff/wins
         let v1 = 32 + 2 + 6 * 8 + 8 + 8 + 8 + 8 + 8 + 8;
         //  trades, cell_wins, pessimistic, worst_trade, max_drawdown, min_win
         let v2_added = 6 * 8;
+        //  gross_win, gross_loss -- without which avg_win and avg_loss are zero
+        let v3_added = 2 * 8;
         assert_eq!(
-            v1 + v2_added + 6 + SEAL_BYTES,
+            v1 + v2_added + v3_added + 6 + SEAL_BYTES,
             STRIDE_BYTES,
             "fields + six reserved + seal must be the stride"
         );
@@ -1458,6 +1497,8 @@ impl Row {
             worst_trade: self.worst_trade,
             max_drawdown: self.max_drawdown,
             min_win: self.min_win,
+            gross_win: self.gross_win,
+            gross_loss: self.gross_loss,
             ..Default::default()
         };
         Derived {

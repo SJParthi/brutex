@@ -2409,12 +2409,28 @@ fn grid_rungs(bars: &[indicators::Candle]) -> usize {
     // `BRUTEX_GRID_RUNGS` sets the count outright for an operator who wants a
     // deeper grid than the cap implies -- the cost table on `Levels::rungs`
     // says what that buys and what it costs. Absent it, nothing here is chosen.
+    // BOUNDED BY THE SAME BUDGET AS THE DERIVED VALUE, and this used to `return`
+    // straight past it.
+    //
+    // MEASURED by attacking this function once the knob became settable over
+    // HTTP: the early return jumped over `rungs_within_cell_budget()` — the
+    // guard written for exactly this blow-up, whose own doc says a grid at 40
+    // rungs is 4.2 GB PER CANDIDATE. `variants` is QUADRATIC in the rung count
+    // and `thin_to_budget` thins only the target axis, so the trail axis stays
+    // at whatever was asked for. A single unauthenticated POST of
+    // `{"grid_rungs":10000}` reserves 6,151,845,123 cells — 935 GB — and
+    // `handle_alloc_error` calls `abort()`, which is not a panic and cannot be
+    // caught. The server does not refuse; it dies.
+    //
+    // An operator may still ask for a DEEPER grid than the data suggests, which
+    // is the whole point of the knob. They may not ask for one this machine
+    // cannot hold, which was never the point of anything.
     if let Some(n) = crate::knobs::var("BRUTEX_GRID_RUNGS")
         // `knobs::var` already answers `Option`, so there is no `Result` to unwrap.
         .and_then(|raw| raw.parse::<usize>().ok())
         .filter(|&n| n > 0)
     {
-        return n;
+        return n.min(rungs_within_cell_budget()).max(2);
     }
     let reference = reference_price(bars);
     let step_points = ppm_to_points_at(grid_step_ppm(bars), reference).max(1);
@@ -9013,7 +9029,10 @@ fn record_trades(
     // a run whose ledger row is already written. Zero is the honest answer for
     // an index that is not there — it is not a plausible 1970 trade, it is a
     // value the page can and does test for.
-    let stamp = |index: usize| bars.get(index).map_or(0, |b: &indicators::Candle| b.ts_micros);
+    let stamp = |index: usize| {
+        bars.get(index)
+            .map_or(0, |b: &indicators::Candle| b.ts_micros)
+    };
     let rows: Vec<trades::Row> = taken
         .trades
         .iter()
@@ -12065,6 +12084,8 @@ mod tests {
                     worst_trade: 0,
                     max_drawdown: 0,
                     min_win: 0,
+                    gross_win: 0,
+                    gross_loss: 0,
                 },
                 crate::frontier::Row {
                     identity: [11; 32],
@@ -12082,6 +12103,8 @@ mod tests {
                     worst_trade: 0,
                     max_drawdown: 0,
                     min_win: 0,
+                    gross_win: 0,
+                    gross_loss: 0,
                 },
             ])
             .expect("both rows append");

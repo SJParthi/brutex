@@ -698,7 +698,7 @@ mod tests {
     /// The stride is what makes a lookup a multiply, so it is pinned.
     #[test]
     fn the_stride_is_what_the_layout_says() {
-        assert_eq!(STRIDE_BYTES, 88);
+        assert_eq!(STRIDE_BYTES, 104);
         assert_eq!(row([0_u8; 32], 0).to_bytes().len(), STRIDE_BYTES);
     }
 }
@@ -894,7 +894,12 @@ pub fn by_period(rows: &[Row]) -> Vec<(Period, Vec<Bucket>)> {
                     continue;
                 }
                 let key = period.bucket(row.entry_micros);
-                held.entry(key).or_insert(Bucket { key, ..Bucket::default() }).take(row);
+                held.entry(key)
+                    .or_insert(Bucket {
+                        key,
+                        ..Bucket::default()
+                    })
+                    .take(row);
             }
             let mut out: Vec<Bucket> = held.into_values().collect();
             out.sort_unstable_by_key(|b| b.key);
@@ -908,8 +913,10 @@ pub fn by_period(rows: &[Row]) -> Vec<(Period, Vec<Bucket>)> {
     clippy::expect_used,
     clippy::unwrap_used,
     clippy::panic,
+    clippy::indexing_slicing,
     reason = "the same exception every test module in this workspace takes: a \
-              test that cannot panic cannot fail."
+              test that cannot panic cannot fail, and an index that is out of \
+              range in a fixture IS the failure."
 )]
 mod period_tests {
     use super::{Bucket, Period, Row, by_period};
@@ -1007,9 +1014,18 @@ mod period_tests {
             got.iter().map(|b| b.key).collect::<Vec<_>>()
         );
         // And the same for the quarter and the half.
-        assert_eq!(of(&rows, Period::Quarter)[1].key - of(&rows, Period::Quarter)[0].key, 1);
-        assert_eq!(of(&rows, Period::Half)[1].key - of(&rows, Period::Half)[0].key, 1);
-        assert_eq!(of(&rows, Period::Year)[1].key - of(&rows, Period::Year)[0].key, 1);
+        assert_eq!(
+            of(&rows, Period::Quarter)[1].key - of(&rows, Period::Quarter)[0].key,
+            1
+        );
+        assert_eq!(
+            of(&rows, Period::Half)[1].key - of(&rows, Period::Half)[0].key,
+            1
+        );
+        assert_eq!(
+            of(&rows, Period::Year)[1].key - of(&rows, Period::Year)[0].key,
+            1
+        );
     }
 
     /// A row whose bar index was out of range carries 0 micros, and 1970 must

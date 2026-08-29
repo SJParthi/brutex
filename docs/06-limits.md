@@ -4691,15 +4691,32 @@ tree that produced the bundle. The digest covers `web/src`, `package-lock.json`,
 rather than an `npm ci` — could change the output without changing the
 fingerprint. The gate itself uses `npm ci`; a developer's machine may not.
 
-**Gate W3 is a RATCHET, pinned at 61 today and lowered whenever the count
-falls; not a floor at zero, and this is the
-honest part.** `svelte-check` reported **122** errors on the tree before this
-work and had never run in CI. Adding `@types/node` cleared 68 of them; the
-remaining **64** are real and unfixed. Demanding zero would mean either fixing
-64 unrelated errors inside the commit that adds the gate, or shipping a gate
-that is red from birth — and a gate nobody can read green is a gate nobody
-reads. "No worse than today" is enforceable now and tightens whenever the
-number is lowered.
+**Gate W3 is a FLOOR AT ZERO now — and the ratchet is how it got there, which
+is the part worth keeping.** `svelte-check` reported **122** errors on the tree
+before this work and had never run in CI. Adding `@types/node` cleared 68; the
+remaining **64** were real and unfixed, so the gate shipped as a ratchet rather
+than a floor. Demanding zero then would have meant either fixing 64 unrelated
+errors inside the commit that added the gate, or shipping a gate that was red
+from birth — and a gate nobody can read green is a gate nobody reads. "No worse
+than today" was enforceable, and it tightened: 64, then 61, and on 2026-08-29
+to **0**. `CEILING=0` in `.github/workflows/ci.yml`.
+
+**The last 42 were four roots, not 42 faults, and that is the finding.** Every
+one was in `routes/backtest`. `live`, `board`, `tradeList` and `combos` each
+declared `rungs: []` / `groups: []` / `rows: []` inside `$state(...)` with no
+type; TypeScript inferred `never[]`, and each downstream property read became
+its own error — twenty of them. One untyped `span(pick)` parameter accounted
+for ten more, because the ten `span((r) => ...)` callers took `r` from that one
+signature. **The error is never reported at the line that causes it**, which is
+precisely why a counting ratchet earns its place: the count fell 42 → 22 → 8 →
+0 on four annotations, a `keyof typeof` on two key lists, and one missing
+`</tbody>`.
+
+Two placement traps are recorded because both cost a full measure-and-retry
+cycle: a `@type` written **above** a `$state(...)` declaration is ignored — it
+must wrap the value **inside** the call — and a JSDoc block must open with
+`/**`, since a plain `/*` is not read at all and leaves the annotation present,
+correct and invisible.
 
 **Front-end line coverage is ~1% and there is no mutation testing.** 294 of
 31,517 lines in `web/src` are driven by a test — `bps.js`, `ask.js`,
@@ -4708,8 +4725,14 @@ no-surviving-mutant rule apply to **crates**, and nothing equivalent exists for
 the browser. Gate W2 proves the tests that exist run; it proves nothing about
 how much they cover.
 
-**35 distinct CSS selectors are styled for markup that does not exist**, down
-from 86. Gate W4 pins the number and prints a new ceiling whenever it falls.
+**Orphaned CSS is at zero and Gate W4 is a floor there**, down from 86 and then
+35. The last six went on 2026-08-29: `4b3220b` ("the trade table shows trades,
+not padlocks") had deleted `<tr class="lockrow">`, `<div class="tt-lockbig">`
+and `<p class="tt-fix">` from `routes/backtest` and left their rules behind, so
+the tree was carrying a red W4 nobody had run. **The compiler is the authority
+on which rules those are, not a grep**: it reports one line per SELECTOR and a
+single rule may list several, which is how an earlier line-based deletion
+removed 375 lines and broke a build.
 
 What came out of `/db` was a whole inline calendar superseded by `DayField`, an
 entire earlier generation of the view bar — `.viewbar`, `.vtab`, `.vbudget`,
