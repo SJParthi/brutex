@@ -220,10 +220,12 @@
      be a claim about a document this file does not own — the same reason
      `BoardGroup.rows` is `any[]`. */
   let tradeList = $state(
-    /** @type {{ phase: string, rows: any[], periods: any, why: string }} */ ({
+    /** @type {{ phase: string, rows: any[], periods: any, consistency: any, robustness: any, why: string }} */ ({
       phase: 'idle',
       rows: [],
       periods: null,
+      consistency: null,
+      robustness: null,
       why: ''
     })
   );
@@ -943,10 +945,10 @@
   /** @param {string|undefined} identity */
   async function fetchTrades(identity) {
     if (!identity) {
-      tradeList = { phase: 'idle', rows: [], periods: null, why: '' };
+      tradeList = { phase: 'idle', rows: [], periods: null, consistency: null, robustness: null, why: '' };
       return;
     }
-    tradeList = { phase: 'loading', rows: [], periods: null, why: '' };
+    tradeList = { phase: 'loading', rows: [], periods: null, consistency: null, robustness: null, why: '' };
     try {
       const response = await ask_(`/trades.json?identity=${encodeURIComponent(identity)}`);
       const body = await response.json();
@@ -962,6 +964,16 @@
         // `largest_loss`. Four metrics this page renders as "not recorded"
         // are sums of that object.
         periods: body.periods ?? null,
+        // THE TWO THAT DECIDE WHETHER ANY OF THE ABOVE IS WORTH READING.
+        //
+        // `robustness.without_best` is this run's total with its single largest
+        // winner struck out, and `consistency.year.positive_ppm` is the share of
+        // calendar years that made money at all. Neither is a nicety: on the
+        // 60-minute run this page was built against, the headline was POSITIVE
+        // while six of seven years were negative and one 2020-03-13 trade was
+        // 30% of every paisa ever won.
+        consistency: body.consistency ?? null,
+        robustness: body.robustness ?? null,
         why: body.refusal ?? (response.ok ? '' : `/trades.json answered ${response.status}`)
       };
     } catch (why) {
@@ -969,10 +981,67 @@
         phase: 'failed',
         rows: [],
         periods: null,
+        consistency: null,
+        robustness: null,
         why: `The trades could not be fetched: ${why instanceof Error ? why.message : String(why)}`
       };
     }
   }
+
+  /**
+   * Whether this run is a strategy or one lucky bar.
+   *
+   * # Why a verdict and not a chart
+   *
+   * The engine measures and refuses to judge — `Robustness::survives` takes its
+   * bar as an argument and `/trades.json` supplies none, deliberately, so that
+   * no threshold is baked into a binary nobody can see. That leaves the
+   * judgement here, which is the right place for it: a bar on a page is one the
+   * operator can move.
+   *
+   * # The two clauses, and why neither implies the other
+   *
+   * A run whose best trade is a small share of winnings but which turns negative
+   * without it is still an anecdote. A run whose best trade is a large share but
+   * which stays positive without it is concentrated and real. Reporting one
+   * would be the fallback that hides a failure.
+   *
+   * `SURVIVES_BAR_PPM` is the page's own dial and not the engine's: 300,000 ppm
+   * means no single trade may be more than 30% of everything won. Stated here in
+   * one place so moving it is one edit and is visible in the diff.
+   */
+  const SURVIVES_BAR_PPM = 300_000;
+
+  const robustnessVerdict = $derived.by(() => {
+    const r = tradeList.robustness;
+    if (!r || !r.trades) return null;
+    const years = tradeList.consistency?.year ?? null;
+    const keptSign = (r.without_best ?? 0) > 0;
+    const spread = (r.top_share_ppm ?? 1_000_000) <= SURVIVES_BAR_PPM;
+    return {
+      trades: r.trades ?? 0,
+      total: r.total ?? 0,
+      bestTrade: r.best_trade ?? 0,
+      withoutBest: r.without_best ?? 0,
+      topSharePct: Math.round((r.top_share_ppm ?? 0) / 10_000),
+      concentrationPct: Math.round((r.concentration_ppm ?? 0) / 10_000),
+      keptSign,
+      spread,
+      // BOTH CLAUSES, AND THE RUN MUST CLEAR BOTH.
+      survives: keptSign && spread,
+      years: years
+        ? {
+            buckets: years.buckets ?? 0,
+            positive: years.positive ?? 0,
+            positivePct: Math.round((years.positive_ppm ?? 0) / 10_000),
+            worst: years.worst_bucket ?? 0,
+            worstKey: years.worst_bucket_key ?? 0,
+            best: years.best_bucket ?? 0,
+            bestKey: years.best_bucket_key ?? 0
+          }
+        : null
+    };
+  });
 
   /**
    * Everything the reference's tester reports, from the per-trade results.
@@ -7253,6 +7322,67 @@
                        column per bucket with winners below and losers above —
                        NOT a table. A column chart answers "which bucket" at a
                        glance, which is the whole question. -->
+                  <!-- IS THIS A STRATEGY, OR ONE LUCKY BAR?
+                       Placed FIRST in this pane and not last, because every
+                       figure below it is a description of a run whose worth this
+                       decides. `without_best` is the run's total with its single
+                       largest winner struck out; a sign change there means one
+                       bar carried everything. Measured on the 60-minute run this
+                       pane was built against: headline +Rs 152.91, six of seven
+                       years negative, and one 2020-03-13 trade worth 30% of all
+                       winnings.
+                       Reuses `tt-quad`/`tt-q` rather than introducing a panel of
+                       its own -- a local override here would be the structural
+                       mismatch that costs five token passes to chase. -->
+                  {#if robustnessVerdict}
+                    <div class="tt-quad">
+                      <div class="tt-q">
+                        <span class="tt-k">Survives losing its best trade</span>
+                        <span class="tt-qv"
+                          >{#if robustnessVerdict.survives}Yes<em class="tt-unit2"
+                              >both tests clear</em
+                            >{:else}No<em class="tt-unit2"
+                              >{#if !robustnessVerdict.keptSign}turns negative without it{:else}one trade is {robustnessVerdict.topSharePct}% of winnings{/if}</em
+                            >{/if}</span
+                        >
+                      </div>
+                      <div class="tt-q">
+                        <span class="tt-k">Total without the best trade</span>
+                        <span class="tt-qv"
+                          >{money(robustnessVerdict.withoutBest)}<em class="tt-unit2"
+                            >from {money(robustnessVerdict.total)} over {exact(
+                              robustnessVerdict.trades
+                            )} trades</em
+                          ></span
+                        >
+                      </div>
+                      <div class="tt-q">
+                        <span class="tt-k">Largest single winner</span>
+                        <span class="tt-qv"
+                          >{money(robustnessVerdict.bestTrade)}<em class="tt-unit2"
+                            >{robustnessVerdict.topSharePct}% of all winnings, {robustnessVerdict.concentrationPct}%
+                            concentration</em
+                          ></span
+                        >
+                      </div>
+                      <div class="tt-q">
+                        <span class="tt-k">Years that made money</span>
+                        <span class="tt-qv"
+                          >{#if robustnessVerdict.years}{exact(robustnessVerdict.years.positive)} of {exact(
+                              robustnessVerdict.years.buckets
+                            )}<em class="tt-unit2"
+                              >worst {robustnessVerdict.years.worstKey} at {money(
+                                robustnessVerdict.years.worst
+                              )}</em
+                            >{:else}<Lock
+                              small
+                              why="No calendar-year buckets were served for this run."
+                            />{/if}</span
+                        >
+                      </div>
+                    </div>
+                  {/if}
+
                   {#if timePatterns}
                     <div class="tt-quad">
                       <div class="tt-q">
