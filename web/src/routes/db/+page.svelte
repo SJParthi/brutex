@@ -7311,61 +7311,15 @@
 <svelte:window onkeydown={onWindowKey} onpointerdown={onWindowDown} />
 
 <div class="pane db">
-  <div class="pane-head">
-    <!-- THE TITLE SAID WHAT TWO OTHER CONTROLS ALREADY SAY. `DB` is the lit tab
-         in the nav directly above it and `{feedName}` is the BROKER FEED
-         picker directly below it, so the line was a third statement of a fact
-         the reader had on screen twice, holding a row of the fold open to make
-         it.
-         THE BAR ITSELF STAYS, AND SO DOES WHAT IS IN IT. `as of …` is the read
-         stamp — the only thing on the page that says how old these numbers are
-         — and `Refresh` is a control. Deleting a label is not the same act as
-         deleting either of those, and `.pane-head` is shared with /ingest,
-         /autopilot and /audit: dropping the bar here alone would make this the
-         one page in the console without a head. -->
-    <span class="spacer"></span>
-
-    <!-- FRESHNESS IS A CLAIM, AND A FAILED READ CANNOT MAKE IT.
-         This line sits ABOVE the error panel and outside it, so it renders on
-         every state including the failed one. `fetchedAt` is cleared on a FEED
-         CHANGE and nowhere else — the `catch` deliberately leaves it, because
-         "when did this feed's store last answer" is the one fact a failed
-         refresh must not destroy. What it must NOT do is state that fact as
-         CURRENT: `as of 15:29` over `The store manifest could not be read` is
-         the page reporting a freshness it does not have, which is exactly the
-         fallback that hides a failure `CLAUDE.md` §4 bans — and it is worse
-         than a blank because the minute is real, just not this read's.
-
-         So the stamp survives and the WORD changes. `last good` names it as
-         the previous SUCCESSFUL read; when there has never been one there is
-         no minute to name and the line says that instead of printing the
-         epoch. `clock` already refuses `0`. -->
-    <span
-      class="asof"
-      title={error
-        ? 'The last SUCCESSFUL read of /store.json for this feed. The read below it failed — nothing on this page was counted from it.'
-        : 'When /store.json was last read for this feed'}
-    >
-      {#if loading && rows.length}
-        <span class="dot acc live"></span> refreshing…
-      {:else if error}
-        <span class="stale"
-          >{#if fetchedAt}last good: {clock(fetchedAt)}{:else}— never read successfully{/if}</span
-        >
-      {:else}
-        as of {clock(fetchedAt)}
-      {/if}
-    </span>
-    <button
-      class="btn ghost sm"
-      type="button"
-      onclick={() => refreshStore()}
-      disabled={loading}
-      title="Re-read /store.json. The store grows while a pull runs."
-    >
-      Refresh
-    </button>
-  </div>
+  <!-- THE PANE HEAD IS GONE FROM THIS PAGE, ON THE OPERATORS CALL. It carried
+       DB-Zerodha (already the lit nav tab plus the BROKER FEED picker), the
+       as-of read stamp, and Refresh — a CONVENIENCE not a capability, since a
+       page reload performs the same read and the error panel keeps its own
+       Try again, which is the one place a retry is not optional.
+       ACCEPTED IN RETURN: this is the only one of the four pages using
+       .pane-head, so /db no longer states when its numbers were read. That was
+       the argument for keeping it and it was overruled deliberately; recorded
+       here because the next reader will notice the asymmetry. -->
 
   {#if error}
     <!-- LOUD, AND NAMED. The actual failure, and the way to retry it. -->
@@ -8209,14 +8163,23 @@
          181px of a 960px viewport (measured) to explain that there was nothing
          to configure. The sentence stays and says the same thing; only the
          panel around it stops behaving like a panel of rungs. -->
-    <section class="strip sub rise" class:bare={!contractRungs.expiry} aria-label="Contract">
-      <span class="lead">Contract</span>
-      {#if !contractRungs.expiry}
-        <span class="note quiet"
-          >Spot is a continuous series — no expiry, strike, ladder or side to narrow. Choose Expired
-          futures or Expired options above and the rungs those contracts have appear here.</span
-        >
-      {/if}
+    <!-- THE STRIP DOES NOT RENDER WITHOUT RUNGS, AND THE LEAD GOES WITH THE
+         SENTENCE THAT STOOD IN FOR THEM.
+         It drew on every load: a `CONTRACT` heading over one line saying spot
+         has no expiry, strike, ladder or side — a whole strip of the fold
+         spent announcing that a section is empty, in the state this page opens
+         in, because spot is the default.
+         THIS DEPARTS FROM §4 AND IS THE OPERATOR'S CALL, RECORDED HERE.
+         "A rung that cannot be used is drawn and disabled, never hidden — 'why
+         is there no segment control' is a question an absence answers badly"
+         is the rule this file states and follows everywhere else, and the
+         removed sentence was that rule's answer for this strip. Nothing
+         replaces it: picking Expired futures or Expired options in SEGMENT
+         above brings the rungs back, and a reader who has not is no longer
+         told why they are missing.
+         `aria-label` stays for the state where it does render. -->
+    {#if contractRungs.expiry}
+      <section class="strip sub rise" aria-label="Contract">
 
       <!-- THE EXPIRY, AND IT IS THE STRIP'S FIRST CELL BECAUSE IT IS ITS
            COARSEST RUNG: a strike belongs to a contract, and a contract is an
@@ -8429,7 +8392,8 @@
           </span>
         </div>
       {/if}
-    </section>
+      </section>
+    {/if}
 
 
     <!-- ==================================================================
@@ -9679,6 +9643,21 @@
            across as its `why` rather than an `<option title>` no reader hovers. -->
       <div class="pgsize">
         <span>Rows per page</span>
+        <!-- `why` MOVED TO `title`, AND THE MENU STOPPED COVERING THE PAGE.
+             Every one of the five rows carried a three-line paragraph, so each
+             row stood about 120px and the panel wanted 600 — capped to 380 and,
+             opening upward from a control at the foot of the page, it
+             blanketed the entire query strip. Reported exactly that way: the
+             sections above were hidden.
+             `why` IS FOR A REFUSAL, WHICH NONE OF THESE ARE. `Picker`'s own
+             header says it is the visible sentence on a row that "exists and
+             you cannot have it" — a row drawn dead in its own place carrying
+             its reason. `Fit`, `25`, `50`, `100` and `250` are all choosable,
+             and four of them are a number that explains itself.
+             The sentences are not deleted: each is on its row's `title`, which
+             is where an explanation of a WORKING control belongs. `Fit` keeps
+             its measured count as `detail`, because that is the row's value
+             rather than a note about it. -->
         <Picker
           single
           label="page sizes"
@@ -9689,13 +9668,13 @@
               key: 'fit',
               name: 'Fit',
               detail: `${fmt(rowsThatFit)} row(s)`,
-              why: `As many rows as this window can SHOW — measured now at ${fmt(rowsThatFit)}. The grid then holds nothing the screen cannot, so the table does not scroll and the page is one surface rather than two. Re-measured when the window changes.`
+              title: `As many rows as this window can SHOW — measured now at ${fmt(rowsThatFit)}. The grid then holds nothing the screen cannot, so the table does not scroll and the page is one surface rather than two. Re-measured when the window changes.`
             },
             ...PAGE_SIZES.map((n) => ({
               key: String(n),
               name: fmt(n),
               detail: n >= 1000 ? `${fmt(n * BAR_COLS.length)} cells` : undefined,
-              why:
+              title:
                 n >= 1000
                   ? `${fmt(n)} rows in one document. On the bar grid that is ${fmt(n * BAR_COLS.length)} cells — legible, and slow to lay out.`
                   : n > rowsThatFit
@@ -10356,26 +10335,6 @@
     background: var(--down);
   }
 
-  /* A STRIP WITH NO RUNGS IS A SENTENCE, NOT A PANEL.
-     `.strip` is a grid with a label row and a control row, which is right when
-     it holds controls and pure cost when it holds none. `display: flex`
-     overrides the grid and the row template together, so the heading and the
-     note sit on one line and the whole thing is the height of its text.
-     THE NOTE IS NOT HIDDEN. It is the answer to "why is there nothing here",
-     and a reader who cannot see it would reasonably think the page was broken
-     rather than that Spot has no contract to narrow. */
-  .strip.bare {
-    display: flex;
-    align-items: baseline;
-    flex-wrap: wrap;
-    gap: var(--s1) var(--s3);
-    padding-top: var(--s3);
-    padding-bottom: var(--s3);
-  }
-  .strip.bare .note {
-    margin: 0;
-    flex: 1 1 30ch;
-  }
 
   /* ---------------------------------------------------------------------
      THE FOUR FACTS. A row of cells, each one number over one label.
@@ -11244,26 +11203,6 @@
     border-top: 1px solid var(--line);
     font-size: var(--fs-xs);
     color: var(--faint);
-  }
-
-  .asof {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--s3);
-    font-size: var(--fs-xs);
-    color: var(--faint);
-    font-variant-numeric: tabular-nums;
-    white-space: nowrap;
-  }
-
-  /* A STAMP THAT IS NOT CURRENT WEARS THE SEVERITY HUE, not the faint one.
-     `--faint` is the colour of an incidental fact; `last good:` is a warning
-     that the newest read failed, and at a glance the two must not look the
-     same. Amber and not `--down`, for the reason stated under `.risk`: red on
-     this page means a price fell, and a stale read is a severity, not a
-     direction. */
-  .asof .stale {
-    color: var(--warn);
   }
 
   .btn.sm {
