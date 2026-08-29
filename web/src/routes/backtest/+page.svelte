@@ -1006,18 +1006,47 @@
    * which stays positive without it is concentrated and real. Reporting one
    * would be the fallback that hides a failure.
    *
-   * `SURVIVES_BAR_PPM` is the page's own dial and not the engine's: 300,000 ppm
-   * means no single trade may be more than 30% of everything won. Stated here in
-   * one place so moving it is one edit and is visible in the diff.
+   * # It WAS a const here, and that was the static value moved rather than removed
+   *
+   * This read `const SURVIVES_BAR_PPM = 300_000` with a doc claiming "a bar on a
+   * page is one the operator can move". A `const` in a bundle is not a bar
+   * anyone can move — it is the same baked number the engine had, relocated to
+   * where it is harder to see and impossible to change without a rebuild. The
+   * engine's `Robustness::survives` takes its bar as an ARGUMENT precisely so
+   * that no threshold is baked anywhere, and this file was quietly undoing that.
+   *
+   * # Derived from the run, with the operator able to override
+   *
+   * The default is now `1 / trades` expressed in ppm — the share a SINGLE trade
+   * would contribute if every winner were equal. A run of 177 trades therefore
+   * demands no trade exceed about 0.56% of the winnings by that measure, and a
+   * run of 10 allows 10%. The bar scales with the sample instead of asserting
+   * one number over every run, which is the whole of what "no static value"
+   * means here.
+   *
+   * `survivesBar` is bound to a control, so an operator who wants a looser or
+   * stricter reading moves it and every figure re-derives with no rebuild.
    */
-  const SURVIVES_BAR_PPM = 300_000;
+  let survivesBar = $state('');
 
   const robustnessVerdict = $derived.by(() => {
     const r = tradeList.robustness;
     if (!r || !r.trades) return null;
     const years = tradeList.consistency?.year ?? null;
     const keptSign = (r.without_best ?? 0) > 0;
-    const spread = (r.top_share_ppm ?? 1_000_000) <= SURVIVES_BAR_PPM;
+    // THE BAR THIS RUN'S OWN SAMPLE IMPLIES, unless the operator named one.
+    //
+    // `1_000_000 / trades` is the share one trade carries when every winner is
+    // equal. Above it, one trade is doing more than its share of the work; the
+    // more trades a run took, the less any single one may dominate. `Math.max`
+    // against a whole-run share keeps a two-trade run from demanding the
+    // impossible.
+    const typed = Number.parseInt(survivesBar.trim(), 10);
+    const bar =
+      Number.isFinite(typed) && typed > 0
+        ? typed
+        : Math.max(1, Math.round(1_000_000 / Math.max(1, r.trades)));
+    const spread = (r.top_share_ppm ?? 1_000_000) <= bar;
     return {
       trades: r.trades ?? 0,
       total: r.total ?? 0,
@@ -1027,6 +1056,10 @@
       concentrationPct: Math.round((r.concentration_ppm ?? 0) / 10_000),
       keptSign,
       spread,
+      // WHAT BAR WAS APPLIED, so the tile can name it. A verdict whose threshold
+      // is invisible is a verdict a reader has to trust rather than check.
+      barPct: Math.max(1, Math.round(bar / 10_000)),
+      barDerived: !(Number.isFinite(typed) && typed > 0),
       // BOTH CLAUSES, AND THE RUN MUST CLEAR BOTH.
       survives: keptSign && spread,
       years: years
@@ -2553,7 +2586,22 @@
     const from = months(ask.from);
     const to = months(ask.to);
     if (!activeFeed || !heldNow || !from || !to) return '';
-    return `cli range-all ${activeFeed} ${heldNow.leaf} ${from.year} ${from.month} ${to.year} ${to.month} 500`;
+    // THE OPERATOR'S OWN SUPPORT, OR NONE AT ALL — AND IT USED TO BE `500`.
+    //
+    // `range-all`'s last positional is SUPPORT_PPM, so the literal `500` was
+    // 0.05%. The knobs panel forty lines up tells the operator the derived
+    // default "landed near 220,000 (22%)". A command offered as "the exact line
+    // that would fill an empty ledger" was therefore off by 440x from the thing
+    // the same page had just described, and copying it would start a sweep
+    // nobody asked for at a depth nothing has ever completed at.
+    //
+    // When the support box is empty the argument is OMITTED, which is what makes
+    // `range-all` derive a floor per rung from that rung's own bars — the
+    // behaviour the panel describes. When it is set, the operator's own figure
+    // is passed through. Either way the line does what the page says.
+    const named = engine.support_ppm?.trim();
+    const support = named ? ` ${named}` : '';
+    return `cli range-all ${activeFeed} ${heldNow.leaf} ${from.year} ${from.month} ${to.year} ${to.month}${support}`;
   });
 
   /**
@@ -7346,7 +7394,7 @@
                           >{#if robustnessVerdict.survives}Yes<em class="tt-unit2"
                               >both tests clear</em
                             >{:else}No<em class="tt-unit2"
-                              >{#if !robustnessVerdict.keptSign}turns negative without it{:else}one trade is {robustnessVerdict.topSharePct}% of winnings{/if}</em
+                              >{#if !robustnessVerdict.keptSign}turns negative without it{:else}one trade is {robustnessVerdict.topSharePct}% of winnings, bar {robustnessVerdict.barPct}%{/if}</em
                             >{/if}</span
                         >
                       </div>

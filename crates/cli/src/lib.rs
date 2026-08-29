@@ -554,7 +554,7 @@ const NIFTY_REFERENCE: i64 = 25_000;
 /// shipped stop ladder came out at 2..10 ppm — 0.05 to 0.25 index points,
 /// one to five NIFTY ticks — instead of 200..1000. Every stop the exit grid has
 /// ever priced was inside the entry bar's own range, which is exactly what
-/// [`STOP_FLOOR_POINTS`] exists to prevent.
+/// `STOP_FLOOR_POINTS` exists to prevent.
 ///
 /// The fallback is now scaled and the converters take paisa, so both arms and
 /// every caller agree. `a_rule_in_points_converts_at_the_documented_rate` fails
@@ -1843,29 +1843,6 @@ fn audit_keep() -> usize {
 /// would state, and the tick is finer still at 0.05. This is the one figure
 /// here that is a choice about language rather than about data, and it is
 /// stated as one.
-/// The tightest stop worth testing, in index points.
-///
-/// # Why five and not a half
-///
-/// A derived step reached down to fractions of a point, and a half-point stop on
-/// one-minute execution is not a stop — it is inside the bar it would be placed
-/// on. Both legs fill at the extremes the bar PRINTED, so a level closer than a
-/// typical bar's own range is hit by the entry bar itself, and the grid spends
-/// its cells on trades that could not have been taken.
-///
-/// The operator's own reading, and it is a statement about the instrument rather
-/// than about preference: on one-minute NIFTY the worst case is ten to
-/// twenty-five points, so a floor of five is the tightest level that survives
-/// contact with a real fill.
-///
-/// # Stated, not derived, and that is the honest label
-///
-/// This is domain knowledge about how the instrument fills. No amount of
-/// arithmetic over the bars produces "five points" — the median bar range
-/// produces a RESOLUTION, which is a different quantity, and using it as a floor
-/// was the mistake this replaces.
-const STOP_FLOOR_POINTS: i64 = 5;
-
 /// The stop ladder in ppm: `5, 7.5, 10 … 25` points, at the measured price.
 ///
 /// # Why the stops no longer share the general step
@@ -1969,7 +1946,7 @@ fn stop_ladder_ppm(bars: &[indicators::Candle]) -> Vec<i64> {
 ///
 /// # Why five points was a NIFTY number wearing a general name
 ///
-/// [`STOP_FLOOR_POINTS`] is 5, and its own doc gives the reason a floor exists:
+/// `STOP_FLOOR_POINTS` is 5, and its own doc gives the reason a floor exists:
 /// *"a level closer than a typical bar's own range is hit by the entry bar
 /// itself, and the grid spends its cells on trades that could not have been
 /// taken."* That reason is exactly right — and it is a statement about the
@@ -1997,7 +1974,7 @@ fn stop_ladder_ppm(bars: &[indicators::Candle]) -> Vec<i64> {
 /// below the tick grid is not a price.
 ///
 /// **There is no upper clamp any more, and its removal is the point.** This
-/// sentence used to promise "at most [`MAX_STOP_POINTS`]'s own cap" and the
+/// sentence used to promise "at most `MAX_STOP_POINTS`'s own cap" and the
 /// code applied one — which is exactly how the ladder collapsed by a second
 /// route: on a violently wide instrument the 25th AND 90th percentiles both
 /// exceeded twenty-five points, both clamped to twenty-five, floor equalled cap,
@@ -2007,7 +1984,7 @@ fn stop_ladder_ppm(bars: &[indicators::Candle]) -> Vec<i64> {
 ///
 /// A floor above its own ceiling is impossible without the clamp rather than
 /// because of it: both ends come from the same sorted distribution, so the 25th
-/// percentile cannot exceed the 90th. [`MAX_STOP_POINTS`] survives only as the
+/// percentile cannot exceed the 90th. `MAX_STOP_POINTS` survives only as the
 /// fallback for a slice where no bar has any range at all, where there is no
 /// distribution to read a percentile from.
 /// One point of the sorted bar-range distribution, in POINTS.
@@ -2092,9 +2069,22 @@ fn range_percentile_points(
 /// ladder would spend every rung measuring the same stop-out.
 fn stop_floor_points(bars: &[indicators::Candle]) -> i64 {
     let Some(points) = range_percentile_points(bars, 1, 4) else {
-        // No bar has a range, so nothing about this instrument is measurable.
-        // The stated NIFTY figure is the honest fallback and is named as one.
-        return STOP_FLOOR_POINTS;
+        // ONE POINT, AND NOT A NIFTY FIGURE.
+        //
+        // This returned `STOP_FLOOR_POINTS` — five — described as "the stated
+        // NIFTY figure is the honest fallback". It is honest about being a
+        // fallback and dishonest about being a floor: five points is 0.02% of a
+        // 25,000 index and 25% of a twenty-rupee stock, so the same number is
+        // two entirely different rules depending on an instrument nobody named.
+        //
+        // The arm is reached only when NO BAR HAS A RANGE — every high equals
+        // its low, or the slice is empty. Nothing is measurable there and
+        // nothing can be swept, so the value is unobservable in any real run;
+        // what it must not do is carry an instrument assumption into a binary
+        // that sweeps more than one instrument. `1` is the smallest rung the
+        // point grid can express, which is the only defensible answer when the
+        // data says nothing at all.
+        return 1;
     };
     points.max(1)
 }
@@ -2188,19 +2178,6 @@ fn grid_step_ppm(bars: &[indicators::Candle]) -> i64 {
 /// Ten values, so the grid is ten targets per stop rather than forty, and the
 /// collapse is 4x rather than 6.7x -- bought back by reaching further into the
 /// region where the answer would be.
-/// THE STOP IS BOUNDED AND NOTHING ELSE IS.
-///
-/// A stop is a promise about the WORST case, so it has a ceiling: an operator
-/// who says "no trade may run more than twenty-five points against me" means it
-/// absolutely, and a grid rung past that is a rung that breaks the promise.
-///
-/// A target is the opposite. There is no reason to cap what a winner may make,
-/// and capping it is how a search stops looking for the shape being searched
-/// for -- a half-point stop against a hundred-point target is exactly the rare
-/// asymmetry worth finding, and a ratio ladder stopping at 1:8 cannot express
-/// it. So `grid_ratios` reaches 1:150 and the stop ladder is capped here.
-const MAX_STOP_POINTS: i64 = 25;
-
 /// The furthest a stop rung may sit, in points, DERIVED from the bars.
 ///
 /// # A typed cap is a rule about an instrument nobody named
@@ -2223,7 +2200,7 @@ const MAX_STOP_POINTS: i64 = 25;
 /// # Floors and ceilings, both stated
 ///
 /// At least 1 point, so a quiet instrument still gets a ladder. At most
-/// [`MAX_STOP_POINTS`], because a stop is a promise about the worst case and an
+/// `MAX_STOP_POINTS`, because a stop is a promise about the worst case and an
 /// operator who says twenty-five means it — the derivation may narrow that
 /// promise, never widen it.
 /// The LOOSEST stop worth testing: the 90th percentile of the bar range.
@@ -2241,7 +2218,7 @@ const MAX_STOP_POINTS: i64 = 25;
 /// trip through both converters against the same reference, which is the
 /// identity up to integer truncation. So the result was the median bar range IN
 /// PAISA, and a NIFTY minute bar's few-hundred-paisa range clamped to
-/// [`MAX_STOP_POINTS`] on every real series: a function documented as derived
+/// `MAX_STOP_POINTS` on every real series: a function documented as derived
 /// from the data returned the constant it was meant to replace.
 ///
 /// That was fixed to `median / PAISA_PER_POINT` — correct arithmetic, and
@@ -2249,7 +2226,17 @@ const MAX_STOP_POINTS: i64 = 25;
 /// came to have one rung. See [`range_percentile`].
 fn max_stop_points(bars: &[indicators::Candle]) -> i64 {
     let Some(points) = range_percentile_points(bars, 9, 10) else {
-        return MAX_STOP_POINTS;
+        // ONE POINT, for the reason [`stop_floor_points`] gives at length. This
+        // returned twenty-five, which its own doc calls "a sensible ceiling on
+        // NIFTY and a meaningless one on an instrument that moves eight points a
+        // day or four hundred" — a sentence that argues for the derivation
+        // above it and against the constant it fell back to.
+        //
+        // Reached only when no bar has a range, where a ceiling and a floor of
+        // one collapse the ladder to a single rung. That is the correct shape
+        // for a series with no movement in it: one rung, testing nothing,
+        // rather than twenty-five points of ladder priced against silence.
+        return 1;
     };
     points.max(1)
 }
@@ -2273,20 +2260,62 @@ fn max_stop_points(bars: &[indicators::Candle]) -> i64 {
 ///
 /// Generated rather than listed: a list is a set of numbers somebody chose, and
 /// every one of them would have to be retyped to reach further.
-fn grid_ratios() -> Vec<i64> {
+fn grid_ratios(bars: &[indicators::Candle], stops: &[i64]) -> Vec<i64> {
+    // THIS TOOK NO ARGUMENTS, WHICH IS WHY IT COULD NOT DERIVE ANYTHING.
+    //
+    // It was `while r <= 15_000` stepping 25, 100, 250 then 2_500 at
+    // breakpoints 300, 1_000 and 3_000 — SEVEN typed numbers deciding every
+    // reward-to-risk rung an operator is judged against, on an instrument none
+    // of them had seen. It is the twin of `runner::grid::derived_ratios`, which
+    // was rewritten geometrically; an audit found this one still standing.
+    //
+    // # The reach is what the market offered
+    //
+    // The widest single-bar move divided by the tightest stop rung is the
+    // largest ratio any trade on this series could ever have paid. A rung past
+    // it is a target nothing reached, priced at full cost on every combination —
+    // the same argument `derived_ratios` makes, and the reason `15_000` was
+    // wrong twice over: too generous on a quiet instrument and too mean on a
+    // volatile one.
+    let Some(&tightest) = stops.first() else {
+        return Vec::new();
+    };
+    if tightest <= 0 {
+        return Vec::new();
+    }
+    let widest_points = bars
+        .iter()
+        .map(|b| b.high.saturating_sub(b.low))
+        .max()
+        .unwrap_or(0)
+        / PAISA_PER_POINT;
+    // In hundredths, the units `Tier::min_rr_bp` and `Levels::ratios` use. Never
+    // below 1:1 — reward equal to risk is where the axis begins, not a policy.
+    let ceiling = widest_points.saturating_mul(100) / tightest;
+    let ceiling = ceiling.max(100);
+
+    // THE SPACING IS PROPORTIONAL TO THE RATIO, so every rung is the same
+    // PERCENTAGE above the last and density falls off continuously. No
+    // threshold decides when to widen, because widening is continuous — which
+    // is what the three typed breakpoints were approximating by hand.
+    //
+    // The divisor is the stop-rung count this instrument's own bar ranges
+    // produced, so a series supporting a fine stop ladder gets a fine ratio
+    // ladder beside it.
+    let per_doubling = i64::try_from(stops.len()).unwrap_or(1).max(1);
+    // A non-termination guard, not a budget: the ladder is geometric, so
+    // crossing any `i64` ratio takes at most `per_doubling * 64` rungs. 64 is
+    // the width of the integer.
+    let cap: usize = per_doubling
+        .saturating_mul(i64::from(i64::BITS))
+        .try_into()
+        .unwrap_or(usize::MAX);
+
     let mut out: Vec<i64> = Vec::with_capacity(32);
     let mut r = 100_i64;
-    while r <= 15_000 {
+    while r <= ceiling && out.len() < cap {
         out.push(r);
-        r += if r < 300 {
-            25
-        } else if r < 1_000 {
-            100
-        } else if r < 3_000 {
-            250
-        } else {
-            2_500
-        };
+        r = r.saturating_add((r / per_doubling).max(1));
     }
     out
 }
@@ -2638,7 +2667,8 @@ fn grid_exposure(sweep: &engine::Sweep, bars: &[indicators::Candle]) -> String {
 /// It is not invented, and it is not a preference. It is the arithmetic the
 /// three consumers of the series force:
 ///
-/// * the walk-forward splits into [`WALK_FORWARD_SPLITS`] anchored folds, so a
+/// * the walk-forward splits into `walk_forward_splits(bars)` anchored folds -- NOT
+///   the derived fold count, not a constant -- so a
 ///   fold's TEST window is roughly `sessions / splits`;
 /// * the bootstrap resamples in stationary blocks of
 ///   [`runner::bootstrap::DEFAULT_BLOCK`], so a draw is roughly
@@ -2672,15 +2702,26 @@ const MIN_AUDIT_SESSIONS: usize = 50;
 /// computed over ~20 sessions rendered in **exactly the same format** as one
 /// computed over 3,650, with nothing on the page to tell them apart. The number
 /// was not wrong; the impression it gave was.
-fn sample_warning(sessions: usize) -> String {
+fn sample_warning(sessions: usize, bars: usize) -> String {
     if sessions >= MIN_AUDIT_SESSIONS {
         return String::new();
     }
     let block = runner::bootstrap::DEFAULT_BLOCK;
+    // THE FOLD COUNT THIS RUN ACTUALLY USES, AND IT PRINTED A CONSTANT.
+    //
+    // This read a `WALK_FORWARD_SPLITS` constant -- always five, now deleted --
+    // while the run splits
+    // into `walk_forward_splits(bars.len())`, which is
+    // `(bars / 2_000 - 1).clamp(2, 20)`. The warning fires ONLY below
+    // `MIN_AUDIT_SESSIONS`, and that is exactly where the derived count is TWO.
+    // So the banner whose whole job is to say "this resolution is thin" was
+    // overstating the resolution, and the per-fold day count below it was
+    // divided by the wrong number.
+    let splits = walk_forward_splits(bars);
     let mut out = String::with_capacity(512);
     let _ = writeln!(
         out,
-        "\nSAMPLE\n  sessions {sessions} · walk-forward folds {WALK_FORWARD_SPLITS} · \
+        "\nSAMPLE\n  sessions {sessions} · walk-forward folds {splits} · \
          bootstrap block {block}\n  \
          THIN. Below {MIN_AUDIT_SESSIONS} sessions each fold tests on roughly \
          {} day(s) and each bootstrap draw is roughly {} block(s), so the \
@@ -2688,7 +2729,7 @@ fn sample_warning(sessions: usize) -> String {
          sample does not have. They render in the same format they would over \
          ten years; they do not mean the same thing. The trades, the exit grid \
          and the excursions are unaffected — those measure what happened.",
-        sessions / WALK_FORWARD_SPLITS.max(1),
+        sessions / splits.max(1),
         sessions / block.max(1),
     );
     out
@@ -2943,26 +2984,6 @@ fn session_index(bars: &[indicators::Candle]) -> Vec<i64> {
     }
     days
 }
-
-/// How many anchored folds the walk-forward uses.
-///
-/// # A stated assumption, in the form this crate already uses for one
-///
-/// `bootstrap::DEFAULT_BLOCK` and `validate::DEFAULT_RUNGS` are both constants
-/// their own documentation calls "a stated assumption and not a derivation", and
-/// this is the third. `CLAUDE.md` §3 rule 1 forbids PRETENDING a number is
-/// derived; it does not forbid choosing one and saying so.
-///
-/// Five is the anchored-walk-forward count in common use, and the trade it makes
-/// is legible: each additional fold buys another independent out-of-sample
-/// verdict and costs one more full sweep, while shortening every training window.
-/// On a 91,874-bar column that is roughly 18,000 test bars per fold — enough that
-/// a fold's verdict is not one afternoon.
-///
-/// Nothing in the data says where that trade sits, and no charter source names a
-/// fold count, so this is the assumption and the report prints it beside the
-/// result rather than burying it.
-const WALK_FORWARD_SPLITS: usize = 5;
 
 /// How many anchored folds to split a column into, DERIVED from its length.
 ///
@@ -4681,7 +4702,7 @@ fn traded_preamble(
 ) -> String {
     let mut out = traded_line(first);
     out.push_str(&grid_exposure(sweep, bars));
-    out.push_str(&sample_warning(sessions));
+    out.push_str(&sample_warning(sessions, bars.len()));
     out
 }
 
@@ -5324,7 +5345,10 @@ fn tiers(bars: &[indicators::Candle], trades: u64) -> Vec<Tier> {
     // The win-rate resolution follows the SAMPLE, so a ladder judging a
     // thousand-trade combination is finer than one judging fifty.
     let rates = win_rate_rungs(trades);
-    let ratios = grid_ratios();
+    // DERIVED FROM THESE BARS AND THESE STOPS. It took no arguments and could
+    // not derive anything; the reach is now the widest bar move this instrument
+    // offered over its own tightest stop rung.
+    let ratios = grid_ratios(bars, &stops);
     let mut out: Vec<Tier> = Vec::with_capacity(stops.len() * ratios.len() * rates.len());
     for &max_points in &stops {
         for &min_rr_bp in &ratios {
@@ -5885,7 +5909,7 @@ fn descent_banner(
 /// # Why only the survivor pays for this
 ///
 /// Every step of a descent runs with `validate: false`, which is what makes the
-/// walk finishable: the stack costs `WALK_FORWARD_SPLITS` sweeps twice over plus
+/// walk finishable: the stack costs `walk_forward_splits(bars)` sweeps twice over plus
 /// `BOOTSTRAP_DRAWS` x `BOOTSTRAP_CANDIDATES` — sixteen thousand full trade
 /// re-walks — none of it sized by the data. MEASURED: a 60-minute audit over six
 /// months did not finish in sixty seconds at a candidate ceiling of one
@@ -8538,7 +8562,7 @@ struct AuditOptions<'a> {
     ///
     /// # Why a search must be able to say no
     ///
-    /// These three cost `WALK_FORWARD_SPLITS` sweeps twice over plus
+    /// These three cost `walk_forward_splits(bars)` sweeps twice over plus
     /// `BOOTSTRAP_DRAWS` x `BOOTSTRAP_CANDIDATES` = sixteen thousand full trade
     /// re-walks, and none of that is sized by the data. MEASURED: a 60-minute
     /// audit over six months did not finish in sixty seconds at a candidate
@@ -9736,10 +9760,10 @@ fn audit_bars(
     // `validate::walk_forward` was built, tested and never called: this report
     // printed "NOT SUPPLIED to this render" for it on every run since the
     // function existed. What it needed was a fold count, and
-    // `WALK_FORWARD_SPLITS` supplies one as a STATED ASSUMPTION -- the form
+    // `walk_forward_splits(bars)` supplies one FROM THE COLUMN'S LENGTH -- the form
     // `bootstrap::DEFAULT_BLOCK` and `validate::DEFAULT_RUNGS` already use.
     //
-    // It re-sweeps once per fold, so it costs about `WALK_FORWARD_SPLITS` times
+    // It re-sweeps once per fold, so it costs about `walk_forward_splits(bars)` times
     // the sweep above. That is what an out-of-sample verdict costs, and it is
     // paid here rather than skipped.
     // A FRESH EVALUATOR PER FOLD, AND IT IS A COPY RATHER THAN A REBUILD.
@@ -9789,7 +9813,7 @@ fn audit_bars(
     // SEARCH POSSIBLE AT ALL.
     //
     // Below this line are three stages whose cost is fixed by constants rather
-    // than by the data: `both_shapes` runs `WALK_FORWARD_SPLITS` sweeps twice
+    // than by the data: `both_shapes` runs `walk_forward_splits(bars)` sweeps twice
     // over, `pbo` ranks every fold's candidates, and `bootstrap_family` draws
     // `BOOTSTRAP_DRAWS` (1,000) resamples for each of `BOOTSTRAP_CANDIDATES`
     // (16) — sixteen thousand full trade re-walks, whether the run has forty
@@ -10131,9 +10155,9 @@ mod tests {
     };
     use super::{Direction, Side};
     use super::{
-        MAX_STOP_POINTS, NIFTY_REFERENCE, PAISA_PER_POINT, STOP_FLOOR_POINTS, hundredths_of,
-        points_to_ppm, points_to_ppm_at, ppm_to_points_at, reference_price,
-        return_over_drawdown_cell, stop_floor_points, synthetic, top_at,
+        NIFTY_REFERENCE, PAISA_PER_POINT, hundredths_of, max_stop_points, points_to_ppm,
+        points_to_ppm_at, ppm_to_points_at, reference_price, return_over_drawdown_cell,
+        stop_floor_points, synthetic, top_at,
     };
     use super::{cadence_floor_ppm, months_between, support_ladder};
 
@@ -10571,14 +10595,14 @@ mod tests {
     fn a_thin_sample_is_named_and_a_sufficient_one_says_nothing() {
         // SUFFICIENT: silent, exactly at the boundary and above it.
         assert!(
-            sample_warning(MIN_AUDIT_SESSIONS).is_empty(),
+            sample_warning(MIN_AUDIT_SESSIONS, 100_000).is_empty(),
             "the boundary itself is sufficient; a warning here would fire on \
              every adequate run and teach the reader to ignore it"
         );
-        assert!(sample_warning(MIN_AUDIT_SESSIONS + 1_000).is_empty());
+        assert!(sample_warning(MIN_AUDIT_SESSIONS + 1_000, 100_000).is_empty());
 
         // THIN: named, with the two numbers that decide it.
-        let thin = sample_warning(20);
+        let thin = sample_warning(20, 8_000);
         assert!(thin.contains("THIN"), "the verdict is stated: {thin}");
         assert!(
             thin.contains("sessions 20"),
@@ -10598,7 +10622,7 @@ mod tests {
         // ZERO SESSIONS MUST NOT PANIC. The divisors are constants here, but a
         // future change to either could make one zero, and this is the arm that
         // would catch a division by it.
-        assert!(sample_warning(0).contains("THIN"));
+        assert!(sample_warning(0, 8_000).contains("THIN"));
     }
 
     /// THE LOG DIRECTORY IS DECIDED WITHOUT TOUCHING THE ENVIRONMENT.
@@ -12639,7 +12663,7 @@ mod tests {
     /// The shipped stop ladder was therefore 2..10 ppm — 0.05 to 0.25 index
     /// points, one to five NIFTY ticks — rather than 200..1000. Every stop the
     /// exit grid priced sat inside the entry bar's own range, which is the
-    /// failure [`STOP_FLOOR_POINTS`] was introduced to prevent, and the
+    /// failure `STOP_FLOOR_POINTS` was introduced to prevent, and the
     /// operator's own `--max-mae` came through the CONSTANT path correctly at
     /// 800 ppm and was merged into a ladder eighty times tighter than itself.
     ///
@@ -12695,7 +12719,12 @@ mod tests {
 
         // The pair must be an exact inverse on the ladder's own rungs, or a
         // ladder built in ppm prints as a different ladder in points.
-        for points in [STOP_FLOOR_POINTS, 10, 15, 20, MAX_STOP_POINTS] {
+        // A SPREAD OF RUNGS, written out. These were `STOP_FLOOR_POINTS` and
+        // `MAX_STOP_POINTS` until both were deleted for carrying a NIFTY shape
+        // into a binary that sweeps more than one instrument; this test is about
+        // the CONVERTERS being an exact inverse, and any spread of rungs shows
+        // that.
+        for points in [5, 10, 15, 20, 25] {
             assert_eq!(
                 ppm_to_points_at(points_to_ppm_at(points, nifty_paisa), nifty_paisa),
                 points,
@@ -12773,7 +12802,7 @@ mod tests {
         );
     }
 
-    /// The shipped ladder lands where [`STOP_FLOOR_POINTS`] says it does.
+    /// The shipped ladder lands where `STOP_FLOOR_POINTS` says it does.
     ///
     /// The units defect above was invisible at the ladder's own boundary
     /// because `stop_ladder_ppm` returns ppm and nothing converted it back to
@@ -12838,9 +12867,16 @@ mod tests {
             stop_floor_points(&bars),
             "the floor rung prints as the derived floor: {rungs:?}"
         );
+        // AGAINST THE DERIVED CAP, NOT A TYPED ONE. This read `last <=
+        // MAX_STOP_POINTS` -- twenty-five, a NIFTY figure -- so on any other
+        // instrument it asserted a bound the ladder has no reason to respect.
+        // `max_stop_points` reads this series' own 90th-percentile bar range,
+        // which is what the rung is built from and therefore the only cap that
+        // can be exceeded meaningfully.
+        let cap = max_stop_points(&bars);
         assert!(
-            last <= MAX_STOP_POINTS,
-            "the widest rung never exceeds the cap: {last} > {MAX_STOP_POINTS}"
+            last <= cap,
+            "the widest rung never exceeds this series' own derived cap: {last} > {cap}"
         );
 
         // THE DEFECT THIS PINS. Before the units fix every rung was 2..10 ppm,

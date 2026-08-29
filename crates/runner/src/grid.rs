@@ -1532,19 +1532,62 @@ fn derived_ratios(favourable: &[Ppm], stops: &[Ppm]) -> Vec<i64> {
     let ceiling = i64::try_from(ceiling).unwrap_or(i64::MAX).max(100);
 
     let mut out: Vec<i64> = Vec::with_capacity(64);
+    // 1:1 -- reward equal to risk. NOT a tunable: it is where the ratio axis
+    // begins, the same way zero is where a number line does. Below it a "target"
+    // is nearer than its own stop, which is not a strategy with a small ratio,
+    // it is a cell that cannot be traded.
     let mut r = 100_i64;
-    // A quarter of the way up, and a tenth: the two places the step widens.
-    let (near, mid) = (ceiling / 10, ceiling / 4);
-    while r <= ceiling && out.len() < 512 {
+
+    // THE SPACING IS PROPORTIONAL TO THE RATIO, AND IT USED TO BE THREE TYPED
+    // TIERS.
+    //
+    // This read: step 25 below `max(ceiling/10, 300)`, step 100 below
+    // `max(ceiling/4, 1_000)`, then `ceiling/20`. Six numbers -- 25, 100, 300,
+    // 1_000, 20 and the 512 below -- deciding where the ladder is dense. The
+    // surrounding doc argued, correctly, that steps must widen with the ratio
+    // because "between 1:1 and 1:3 a quarter-step is a different strategy, and
+    // between 1:100 and 1:110 no combination behaves differently". It then
+    // hard-coded WHERE that transition happens, three times, against floors that
+    // are themselves ratios nobody derived.
+    //
+    // A step proportional to the current ratio has that property by
+    // construction: the ladder is geometric, so every rung is the same
+    // PERCENTAGE apart rather than the same absolute distance, and the density
+    // falls off exactly where distinctions stop existing. No threshold decides
+    // when to widen, because widening is continuous.
+    //
+    // The divisor is `stops.len()` -- the rung count this instrument's own bar
+    // ranges produced through `stop_ladder_ppm`. A series that supports a fine
+    // stop ladder gets a fine ratio ladder beside it; one that supports two
+    // stops gets two-ish ratios per doubling. Nothing here is typed, and the
+    // ladder now scales with the instrument in both axes rather than one.
+    //
+    // `.max(1)` is arithmetic, not a policy: a step of zero never terminates.
+    let per_doubling = i64::try_from(stops.len()).unwrap_or(1).max(1);
+
+    // THE LOOP BOUND IS ARITHMETIC, NOT A BUDGET, AND IT USED TO BE 512.
+    //
+    // The old cap was typed and its doc called it "the one bound here that is
+    // not derived". It no longer has to be: the ladder is geometric at rate
+    // `1 + 1/per_doubling`, so reaching a ceiling that is `2^d` times the start
+    // takes about `per_doubling * d` rungs, and `d` cannot exceed the 63 value
+    // bits of the `i64` the ratio is held in. `per_doubling * 64` therefore
+    // cannot be reached by a terminating walk and can only be reached by a
+    // non-terminating one -- which is what a loop bound is for.
+    //
+    // 64 is the width of the integer, not a choice about ladders. The real
+    // sizing happens downstream in `thin_to_budget`, which thins the targets
+    // until `variants(stops, targets, trails)` fits the cell budget, so a
+    // second budget here would be a second opinion about the same limit.
+    let cap = per_doubling
+        .saturating_mul(i64::from(i64::BITS))
+        .try_into()
+        .unwrap_or(usize::MAX);
+
+    while r <= ceiling && out.len() < cap {
         out.push(r);
-        let step = if r < near.max(300) {
-            25
-        } else if r < mid.max(1_000) {
-            100
-        } else {
-            ceiling / 20
-        };
-        r = r.saturating_add(step.max(25));
+        let step = (r / per_doubling).max(1);
+        r = r.saturating_add(step);
     }
     out
 }
@@ -4969,6 +5012,65 @@ mod tests {
             Side::Long,
             None,
         )
+    }
+
+    /// THE RATIO LADDER IS GEOMETRIC AND ITS DENSITY COMES FROM THE STOPS.
+    ///
+    /// It was three typed tiers — step 25, then 100, then `ceiling/20`, with the
+    /// transitions at `max(ceiling/10, 300)` and `max(ceiling/4, 1_000)`, capped
+    /// at 512. Six numbers deciding where the ladder is dense on an instrument
+    /// none of them had seen.
+    ///
+    /// The property that replaces them: every rung is the same PERCENTAGE above
+    /// the last, so density falls off continuously and no threshold decides when
+    /// to widen. This asserts the SHAPE rather than any figure, because the
+    /// figures are now the instrument's.
+    #[test]
+    fn the_ratio_ladder_widens_geometrically_and_scales_with_the_stop_count() {
+        // Reach is `best favourable / tightest stop`, so this pair fixes the
+        // ceiling at 1:50 while letting the stop COUNT vary independently.
+        let favourable = [50_000_i64];
+        let coarse = super::derived_ratios(&favourable, &[1_000, 2_000]);
+        let fine = super::derived_ratios(&favourable, &[1_000_i64; 12]);
+
+        assert!(coarse.len() >= 2, "even two stops give a usable ladder");
+        assert!(
+            fine.len() > coarse.len(),
+            "more stop rungs must buy more ratio rungs: {} against {}",
+            fine.len(),
+            coarse.len()
+        );
+
+        for ladder in [&coarse, &fine] {
+            assert_eq!(
+                ladder.first().copied(),
+                Some(100),
+                "every ladder starts at 1:1"
+            );
+            assert!(
+                ladder.windows(2).all(|w| matches!(w, [a, b] if b > a)),
+                "strictly increasing: {ladder:?}"
+            );
+            // GEOMETRIC: each gap is at least as wide as the one before it,
+            // because the step is a fraction of the CURRENT ratio. A typed-tier
+            // ladder is flat inside a tier and jumps between them; this one
+            // cannot narrow anywhere.
+            let gaps: Vec<i64> = ladder
+                .windows(2)
+                .filter_map(|w| match w {
+                    [a, b] => Some(b - a),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                gaps.windows(2).all(|g| matches!(g, [a, b] if b >= a)),
+                "steps must never narrow as the ratio grows: {gaps:?}"
+            );
+            assert!(
+                ladder.last().is_some_and(|&last| last <= 5_000),
+                "and none reaches past what the market offered: {ladder:?}"
+            );
+        }
     }
 
     /// A 1:3 stop:target cell must not report a 3:1 reward-to-risk.
