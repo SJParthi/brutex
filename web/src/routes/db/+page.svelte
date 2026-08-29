@@ -9105,23 +9105,23 @@
 
          Nothing that narrows the query is inside this block. -->
     {#if view === 'bars' && coverBand.cells.length > 0 && !compact}
+      <!-- TWO OF THE FOUR FACTS WERE ALREADY ON SCREEN, ONE LINE ABOVE.
+           `BARS HELD 6,18,296` and `81 MONTHS COVERED` are the counts printed
+           on the `Bars` and `Coverage` TABS in the anchor directly above this
+           row — same numbers, same moment, from the same `coverBand`, drawn
+           twice within about forty pixels of each other. A reader asking "why
+           is this row here" was right: half of it was a second rendering of
+           the line above it.
+           THE TWO THAT STAY ARE THE TWO THAT ARE NOWHERE ELSE. `RANGE ON DISK`
+           is the oldest and newest month the selection covers, and
+           `NEWEST CLOSE ON THIS PAGE` is a price — the only price on the page
+           outside the grid, and the one figure that moves as you page. Neither
+           is on a tab, so neither is a repeat.
+           THE FLASH GOES WITH THE COUNTS IT ANIMATED. `factFlash` still drives
+           the close, which is the value a reader watches change; a bar total
+           that flashes when a month finishes loading was motion on a number
+           nobody is tracking. -->
       <div class="facts" bind:this={factsEl}>
-        <div class="fact">
-          <span
-            class="fv"
-            class:flash-up={factFlash.get('bars') === 'up'}
-            class:flash-down={factFlash.get('bars') === 'down'}>{fmt(coverBand.bars)}</span
-          >
-          <span class="fl">bars held</span>
-        </div>
-        <div class="fact">
-          <span
-            class="fv"
-            class:flash-up={factFlash.get('months') === 'up'}
-            class:flash-down={factFlash.get('months') === 'down'}>{coverBand.months}</span
-          >
-          <span class="fl">month{coverBand.months === 1 ? '' : 's'} covered</span>
-        </div>
         <div class="fact wide">
           <span class="fv sm"
             >{coverBand.cells[0].month} <span class="arw">→</span>
@@ -10213,31 +10213,20 @@
      wrapper is still a flex container: the three can only break INSIDE it, and
      the group moves as one when the row runs out. The `.dates` gap is reused
      rather than restated so the six controls sit on a single rhythm. */
+  /* NO LAYOUT OF ITS OWN — its children are the grid items. The wrapper stays
+     because it is the group `{#if !dayRung}` hangs off, and `display: contents`
+     says exactly what its relationship to the row is: this box is not a box,
+     these three belong to my parent's tracks. Every flex rule it carried —
+     `nowrap`, a basis, a gap — was arithmetic standing in for a grid that was
+     one declaration away. */
   .times {
-    /* `0 0 auto` AND `nowrap` — THE TRIO IS ONE THING OR IT IS NOWHERE.
-       Wrapping INSIDE this group is what put GO TO on its own line under FROM
-       and TO: the three had room between them to break, so they broke. With
-       `nowrap` the only break available is the one in `.dates`, which moves
-       the whole group at once — the grouping is then a property of the
-       structure rather than of whether the arithmetic happened to hold.
-       `0 0` because the pickers have a natural size and no reason to leave it;
-       the slack under the cap belongs to the two day fields, which had it
-       before this row existed. */
-    flex: 0 0 auto;
-    display: flex;
-    align-items: flex-start;
-    flex-wrap: nowrap;
-    gap: var(--s5);
+    display: contents;
   }
   .tcell {
-    flex: 0 0 auto;
     min-width: 0;
     display: flex;
     flex-direction: column;
     gap: var(--s2);
-  }
-  .gocell {
-    flex: 0 1 190px;
   }
   /* `.dlbl`, declaration for declaration. */
   .tlbl {
@@ -11037,26 +11026,39 @@
   .strip .field.wide {
     grid-column: 1 / -1;
   }
-  /* 1042px, AND THE NUMBER IS ARITHMETIC RATHER THAN TASTE — the same way the
-     216px track above is.
-     This was 560, which is exactly `274 + 12 + 274`: two day fields at the
-     width they settle to, and the gap between them. It was right when two was
-     all there was. Three time controls later it was the reason they could not
-     sit beside the dates — the cap, not the flex — because 560 is filled by
-     the dates alone and everything after them wrapped.
-     THE SUM, MEASURED ON THE RUNNING PAGE:
-       two day fields          274 + 274 = 548
-       the time group          128 + 12 + 128 + 12 + 190 = 470
-       two gaps between three  12 + 12 = 24
-                                       = 1042
-     `.times` is `flex: 0 1 auto` so it does NOT take a share of the slack;
-     only the two day fields grow, which lands them back on 274 apiece and
-     leaves this identical to what it drew before at every width below the cap.
-     KEPT AS A CAP RATHER THAN REMOVED. Without one the window stretches to the
-     full 1342 of a wide strip, and a date field 346px wide holding
-     `01 Jan 2015` is mostly empty box. */
+  /* THE WINDOW JOINS THE STRIP'S GRID INSTEAD OF INVENTING A WIDTH.
+     MEASURED, and it is why every attempt to align this row by tuning numbers
+     failed: the strip is `repeat(auto-fit, minmax(216px, 1fr))`, which at this
+     width resolves to SIX TRACKS OF 247px, and the five controls in its top
+     row are 247px each because of that. This row was a flex line under a
+     hand-computed 1042px cap, so its children measured 327, 327, 83, 81 and
+     177 — five widths, none of them 247, in a strip whose whole first row is
+     one number.
+     A CAP IS AN ANSWER TO THE WRONG QUESTION. Every version of it — 560, then
+     1042 — was arithmetic reproducing what the grid already computes, and each
+     was correct only until a control was added. Declaring the same template
+     here makes the row a continuation of the one above it: the day and time
+     fields land in the same six tracks, on the same 247px, and adding a sixth
+     control needs no new number.
+     `.times` BECOMES `display: contents` SO ITS CHILDREN ARE THE GRID ITEMS.
+     Kept as an element rather than deleted because it is still the group the
+     `{#if !dayRung}` hangs off, and because `display: contents` is precisely
+     "this box has no layout of its own, its children belong to my parent" —
+     which is the relationship it has. */
   .strip .field.wide .dates {
-    max-width: 1042px;
+    display: grid;
+    /* `auto-fill` AND NOT `auto-fit`, WHICH IS THE WHOLE DIFFERENCE BETWEEN
+       247 AND 299. `auto-fit` COLLAPSES the tracks it has no item for and
+       divides the width among the survivors, so five controls in a six-track
+       row came out 299px each — uniform, and uniformly wrong against the 247
+       above. The strip resolves to six tracks because it has six children: its
+       five rungs plus this full-width row. This row has five, so it must be
+       told to keep the sixth track empty rather than absorb it.
+       MEASURED BOTH WAYS: `auto-fit` 299, `auto-fill` 247, against a top row
+       of 247. */
+    grid-template-columns: repeat(auto-fill, minmax(216px, 1fr));
+    gap: var(--s5);
+    max-width: none;
   }
   .dates {
     display: flex;
