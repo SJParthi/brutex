@@ -1205,9 +1205,27 @@
     }
     const mean = (/** @type {number[]} */ xs) =>
       xs.length === 0 ? null : xs.reduce((a, b) => a + b, 0) / xs.length;
-    const maxRunUp = runUps.length > 0 ? Math.max(...runUps) : 0;
-    // The stretch still open at the end, signed by its direction.
-    const currentRunUp = curve[curve.length - 1] - anchor;
+    // REDUCE AND NOT `Math.max(...xs)`. The spread pushes every element onto the
+    // argument stack, and this operator has just re-pulled the whole store — a
+    // sweep over seven years of one-minute bars can record tens of thousands of
+    // trades, where the spread throws `Maximum call stack size exceeded` and
+    // takes the whole drill-in down. A reduce is O(n) either way and has no
+    // such ceiling.
+    const maxOf = (/** @type {number[]} */ xs) =>
+      xs.reduce((a, b) => (b > a ? b : a), Number.NEGATIVE_INFINITY);
+    const minOf = (/** @type {number[]} */ xs) =>
+      xs.reduce((a, b) => (b < a ? b : a), Number.POSITIVE_INFINITY);
+    const maxRunUp = runUps.length > 0 ? maxOf(runUps) : 0;
+
+    // THE OPEN STRETCH IS SIGNED, AND ITS SIGN IS THE WHOLE POINT.
+    //
+    // The curve ends mid-swing, and that last stretch is a run-up only if it is
+    // rising. `last - anchor` is negative when the run finished while falling —
+    // which on this operator's data is the common case — and rendering a
+    // negative under a green heading reading "Run-up · Current" states the
+    // opposite of what happened. It travels with its direction so the row can
+    // say which of the two it is.
+    const openStretch = curve[curve.length - 1] - anchor;
 
     // ── Sharpe and Sortino on per-trade returns ──
     const base = Number(bench.open);
@@ -1242,15 +1260,17 @@
       points: rows.map((t, i) => ({ t: Math.round((t.exit_micros ?? 0) / 1e6), v: curve[i] })),
       maxRunUp: maxRunUp || null,
       avgRunUp: mean(runUps),
-      currentRunUp,
+      openStretch,
+      openIsRunUp: openStretch >= 0,
       maxDrawdown,
       avgDrawdown: mean(drawdowns),
       avgRunUpDuration: mean(runUpLens),
       avgDrawdownDuration: mean(drawdownLens),
       sharpe,
       sortino,
-      low: Math.min(0, ...curve),
-      high: Math.max(0, ...curve),
+      // Reduce, not spread — same stack-overflow reason as `maxOf` above.
+      low: Math.min(0, minOf(curve)),
+      high: Math.max(0, maxOf(curve)),
       // How many turns the curve made, which is what makes the averages above
       // readable: an average over four hundred swings is a different claim from
       // an average over two.
@@ -6969,20 +6989,26 @@
                       1,
                       equity.maxRunUp ?? 0,
                       equity.avgRunUp ?? 0,
-                      Math.abs(equity.currentRunUp),
+                      Math.abs(equity.openStretch),
                       equity.maxDrawdown,
                       equity.avgDrawdown ?? 0
                     )}
                     <div class="tt-cmp">
                       <span class="tt-cmpgrp">Run-up</span>
-                      {#each [{ k: 'Maximum', v: equity.maxRunUp }, { k: 'Average', v: equity.avgRunUp }, { k: 'Current', v: equity.currentRunUp }] as r (r.k)}
+                      <!-- `Current` CARRIES ITS DIRECTION. The curve ends
+                           mid-swing, and that open stretch is a run-up only if it
+                           is rising — on this data it usually is not. A negative
+                           under a green "Run-up · Current" would state the
+                           opposite of what happened, so the row says which it is
+                           and takes the matching colour. -->
+                      {#each [{ k: 'Maximum', v: equity.maxRunUp, down: false }, { k: 'Average', v: equity.avgRunUp, down: false }, { k: equity.openIsRunUp ? 'Current' : 'Current — falling', v: Math.abs(equity.openStretch), down: !equity.openIsRunUp }] as r (r.k)}
                         <div class="tt-cmprow">
                           <span class="tt-cmplab">{r.k}</span>
                           <span class="tt-cmpbar"
-                            >{#if r.v !== null}<span class="tt-cmpfill up" style="width:{(Math.abs(r.v) / reach) * 100}%"></span>{/if}</span
+                            >{#if r.v !== null}<span class="tt-cmpfill" class:up={!r.down} class:down={r.down} style="width:{(Math.abs(r.v) / reach) * 100}%"></span>{/if}</span
                           >
-                          <span class="tt-cmpval up"
-                            >{#if r.v === null}<Lock small why="The curve never made a new high, so there is no run-up to measure." />{:else}{money(r.v)}{/if}</span
+                          <span class="tt-cmpval" class:up={!r.down} class:down={r.down}
+                            >{#if r.v === null}<Lock small why="This run has no completed rising stretch — the curve turned fewer than twice." />{:else}{money(r.v)}{/if}</span
                           >
                         </div>
                       {/each}
