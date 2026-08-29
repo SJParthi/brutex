@@ -6159,10 +6159,23 @@
                     {#if openRun.trades === 0}
                       <span class="tt-qv big dim">none</span>
                       <span class="tt-note">no trade was opened, so there is nothing to divide</span>
+                    {:else if tradeTotals}
+                      <!-- REAL, AND THE PADLOCK BESIDE IT WAS THE STALE HALF.
+                           This read "No win count is recorded" while the details
+                           table three sections below printed that very count from
+                           `/trades.json`'s period buckets. One page cannot say a
+                           number is unrecorded and then show it. -->
+                      <span class="tt-qv big">
+                        {pct(tradeTotals.rateBp)}
+                        <em class="tt-frac">{exact(tradeTotals.worstWins)}/{exact(tradeTotals.trades)}</em>
+                      </span>
+                      <span class="tt-note"
+                        >at worst-case fills · {pct(tradeTotals.bestRateBp)} at best</span
+                      >
                     {:else}
                       <span class="tt-qv big">
-                        <Lock why="No win count is recorded. A net total cannot be split into winners and losers after the fact." />
-                        <em class="tt-frac"><Lock small why="The numerator — how many of these trades won — is not recorded." />/{exact(openRun.trades)}</em>
+                        <Lock why="This run recorded no trade file, so there is nothing to count. The results ledger keeps a net total, and a net cannot be split into winners and losers after the fact." />
+                        <em class="tt-frac"><Lock small why="The numerator — how many of these trades won — needs the trade file." />/{exact(openRun.trades)}</em>
                       </span>
                       <span class="tt-note">of {exact(openRun.trades)} closed</span>
                     {/if}
