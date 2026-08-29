@@ -1302,10 +1302,32 @@ button.status.bad:hover {
   color: var(--ink);
   background: var(--panel-2);
 }
+/* THE SELECTED MODE WEARS THE FILLED PILL EVERY OTHER SELECTED THING HERE
+   WEARS. This was `background: var(--panel); color: var(--acc)` — a white chip
+   with a teal 13px glyph — while the console's own selected treatment, the one
+   a chosen tab takes, is `background: var(--acc); color: var(--on-acc)`. One
+   control disagreeing with that makes a reader learn a second vocabulary for
+   "this one is on".
+
+   REPORTED AS "THIS IS NOT CHANGING ANYTHING", AND THAT WAS A FAIR READING.
+   Pressing `Force the light theme` on a machine whose OS is already light
+   changes the MODE and not one pixel of the page: `data-theme` goes from
+   absent to `light` and every colour resolves identically. All the press had
+   to show for itself was a 24x22 chip swapping a grey glyph for a teal one, in
+   the far corner. Filled, it is unmistakable — and that chip is the only
+   feedback that particular press can ever have. */
 .themer button[aria-pressed='true'] {
-  background: var(--panel);
-  color: var(--acc);
+  background: var(--acc);
+  color: var(--on-acc);
   box-shadow: var(--e1);
+}
+/* HOVER MUST NOT OUTRANK SELECTED. `.themer button:hover` above sets
+   `--panel-2` at the same specificity, and the LATER rule wins — so hovering
+   the active mode repainted it as an inactive one: the selected state
+   vanishing under the pointer that came to check it. */
+.themer button[aria-pressed='true']:hover {
+  background: var(--acc);
+  color: var(--on-acc);
 }
 .themer svg {
   width: 13px;
