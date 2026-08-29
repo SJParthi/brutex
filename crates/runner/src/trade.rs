@@ -266,7 +266,50 @@ pub fn walk(
     horizon: Horizon,
     direction: Direction,
 ) -> Trades {
-    let exits = forced_exits(bars);
+    walk_with(bars, column, mask, horizon, direction, None)
+}
+
+/// [`walk`], over a square-off table the caller already built.
+///
+/// # Why this exists, and it is the same table every time
+///
+/// [`forced_exits`] is a **pure function of `bars`** — the mask, the direction
+/// and the horizon never reach it — and `walk` rebuilt it on entry. `walk` is
+/// the per-CANDIDATE entry point, so a sweep paid, for every survivor:
+///
+/// * one `Vec<(i64, i64)>` of `bars.len()`,
+/// * one `vec![None; bars.len()]`,
+/// * and a reverse pass calling `ist_day` and `minute_of_day` on every bar.
+///
+/// `crates/runner/src/validate.rs` calls it **twice** per candidate — once
+/// directly and once inside `grid::evaluate` — from a `par_iter` over the
+/// closed frequent set. `crate::rank` cites a real run at **17.8 million
+/// survivors** against a 91,874-bar column.
+///
+/// Constant per candidate, so no ratio gate could see it: work that scales
+/// uniformly does not change a ratio. The same shape as `read_row`'s
+/// per-record allocation and `ingest`'s per-row counting loop.
+///
+/// `None` keeps every existing caller — including `crates/cli`'s four — on the
+/// old behaviour with no signature change; a hot loop passes `Some`.
+#[must_use]
+pub fn walk_with(
+    bars: &[Candle],
+    column: &Column,
+    mask: &ConditionMask,
+    horizon: Horizon,
+    direction: Direction,
+    exits: Option<&[Option<SquareOff>]>,
+) -> Trades {
+    // BORROWED WHERE THE CALLER HOISTED, BUILT WHERE IT DID NOT. `owned` holds
+    // the fallback alive for the borrow below and is untouched otherwise.
+    let owned;
+    let exits: &[Option<SquareOff>] = if let Some(table) = exits {
+        table
+    } else {
+        owned = forced_exits(bars);
+        &owned
+    };
     let h = horizon.as_bars() as usize;
     let mut out = Trades::default();
     // The bar the open position exits on. Until the first entry there is none,
@@ -607,7 +650,7 @@ fn paisa(raw: i64) -> brutex_core::price::Paisa {
 // gone rather than carried. The tests below read `bar` and `real` as fields for
 // the same reason. Add either back WITH the code that uses it.
 #[derive(Clone, Copy)]
-struct SquareOff {
+pub struct SquareOff {
     /// The last bar of this bar's own session a fill can still land in.
     bar: usize,
     /// True when [`is_window_end`] holds at [`Self::bar`]: a bar after it exists
@@ -644,7 +687,8 @@ struct SquareOff {
 /// share a day, so nothing re-walks a session. A forward search per bar would be
 /// O(H) with `H` caller-supplied — constant only by accident, which is the kind
 /// of bound `CLAUDE.md` §3 rule 6 asks to be labelled rather than asserted.
-fn forced_exits(bars: &[Candle]) -> Vec<Option<SquareOff>> {
+#[must_use]
+pub fn forced_exits(bars: &[Candle]) -> Vec<Option<SquareOff>> {
     let stamps: Vec<(i64, i64)> = bars
         .iter()
         .map(|b| (indicators::ist_day(b.ts_micros), minute_of_day(b.ts_micros)))

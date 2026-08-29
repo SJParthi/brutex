@@ -1779,6 +1779,39 @@ pub fn evaluate(
     side: Side,
     levels: Levels<'_>,
 ) -> Grid {
+    evaluate_with(bars, column, mask, horizon, side, levels, None)
+}
+
+/// [`evaluate`], over a square-off table the caller already built.
+///
+/// # Why the extra door rather than a changed signature
+///
+/// `crate::trade::forced_exits` is a pure function of `bars`, and `evaluate` is
+/// called once per CANDIDATE — so a sweep rebuilt the same table for every
+/// survivor. `crate::validate` pays it twice per candidate, here and again in
+/// its own direct `walk`, from a `par_iter` over the closed frequent set;
+/// `crate::rank` cites a real run at 17.8 million survivors.
+///
+/// `evaluate` has seven callers and **four of them are in `crates/cli`**, which
+/// is outside this crate. Changing its signature would edit a file this change
+/// has no business touching, so the old door stays exactly as it was and passes
+/// `None`. Only the hot loop in `crate::validate` passes `Some`.
+#[must_use]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the four passes are one procedure and splitting them would hide \
+              that the ladders are derived from the same trades the grid is \
+              then measured against."
+)]
+pub fn evaluate_with(
+    bars: &[Candle],
+    column: &Column,
+    mask: &ConditionMask,
+    horizon: Horizon,
+    side: Side,
+    levels: Levels<'_>,
+    exits: Option<&[Option<crate::trade::SquareOff>]>,
+) -> Grid {
     let Levels {
         rungs,
         step_ppm,
@@ -1793,7 +1826,7 @@ pub fn evaluate(
         Side::Long => costs::fill::Direction::Long,
         Side::Short => costs::fill::Direction::Short,
     };
-    let timed = crate::trade::walk(bars, column, mask, horizon, direction);
+    let timed = crate::trade::walk_with(bars, column, mask, horizon, direction, exits);
     if timed.trades.is_empty() {
         return Grid {
             signals: timed.signals,

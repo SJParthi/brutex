@@ -27326,3 +27326,51 @@ in the month fell to `OpenLengthUnmeasured` with nothing saying why.
 beside the rows and the caller reports the gap.
 
 781 `api` tests green, `clippy -D warnings` clean.
+
+### D-0376
+
+**Three pieces of constant work nobody needed, and one bare `+=` that panics.**
+
+None is a complexity defect and gate 8 could not see any of them: work that
+scales *uniformly* with the input does not change a ratio. Same class as D-0366
+and D-0369.
+
+**A `for` loop used to add four numbers.** `from_members_inner` folded each
+member's drop census into the run's by walking the four reasons and then
+counting **one at a time** — `for _ in 0..landed.census.of(reason)`. Per MEMBER.
+A one-second archive file covering 00:00–23:59, filtered to a 22,500-second
+session, leaves ~290,000 drops per contract, and a GDFL day is ~12,132
+contracts: **~3.5 billion loop iterations to compute four sums**.
+`DropCensus::absorb` already expressed it in four instructions.
+
+**`absorb` used bare `+=` where its own neighbours saturate.** `count` beside it
+uses `saturating_add` with the reason written out — *"a census that wrapped
+would report a smaller number than the truth"* — and `total` saturates too.
+`overflow-checks` is on in both profiles, so bare `+=` **panics** rather than
+wrapping, and the panic lands **after the bars are on disk and before the census
+is published** — the one window where a crash loses the most. Saturating
+reports a number that is too small and says so; panicking reports nothing and
+strands the run.
+
+**`trade::forced_exits` was rebuilt for every candidate, twice.** It is a pure
+function of `bars` — no mask, no direction, no horizon — and `walk` called it on
+entry. `walk` is the per-CANDIDATE door, so each survivor paid one
+`Vec<(i64, i64)>` of `bars.len()`, one `vec![None; bars.len()]`, and a reverse
+pass calling `ist_day` and `minute_of_day` on every bar. `validate` pays it
+**twice** per candidate — once directly and once inside `grid::evaluate` — from
+a `par_iter` over the closed frequent set, which `crate::rank` cites at a real
+run of **17.8 million survivors** against a 91,874-bar column.
+
+**The signature is added beside the old one, not changed.** `evaluate` has seven
+callers and **four are in `crates/cli`**, a crate outside this change with
+uncommitted work in it. `walk_with` and `evaluate_with` take
+`Option<&[Option<SquareOff>]>`; `walk` and `evaluate` pass `None` and behave
+exactly as before. Only `validate`'s hot loop hoists, above the `par_iter`, so
+one table is shared by every thread.
+
+715 `pull` and 300 `runner` tests green, `clippy -D warnings` clean on both.
+
+**What is NOT claimed.** No timing was taken. The machine has carried another
+session's test suite at 400–580% CPU throughout, and `docs/06-limits.md` §4
+records that a saturated machine invalidates measurement. Every figure above is
+a count of operations from the code's own shape, not a stopwatch reading.

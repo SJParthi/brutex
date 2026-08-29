@@ -852,16 +852,24 @@ fn from_members_inner(members: &[Member], store_root: &Path, plan: Plan<'_>) -> 
                 // The census is folded so the totals describe the RUN. A
                 // per-member census would answer "why did this contract drop
                 // rows" and the operator is asking "why did this window".
-                for reason in [
-                    crate::session::DropReason::BeforeSessionOpen,
-                    crate::session::DropReason::AtOrAfterSessionClose,
-                    crate::session::DropReason::BeforeWindow,
-                    crate::session::DropReason::AfterWindow,
-                ] {
-                    for _ in 0..landed.census.of(reason) {
-                        done.census.count(reason);
-                    }
-                }
+                // FOUR ADDS, AND THIS WAS A LOOP PER DROPPED ROW.
+                //
+                // It walked the four reasons and then counted **one at a time**
+                // — `for _ in 0..landed.census.of(reason)` — to compute four
+                // sums that `DropCensus::absorb` expresses in four
+                // instructions.
+                //
+                // Per MEMBER, and the multiplier is the whole point: a
+                // one-second archive file covering 00:00–23:59 filtered to a
+                // 22,500-second session leaves ~290,000 drops per contract, and
+                // a GDFL day is ~12,132 contracts. **~3.5 billion loop
+                // iterations to add four numbers.**
+                //
+                // Constant per dropped row, so no ratio gate could see it —
+                // work that scales uniformly with the input does not change a
+                // ratio. Same shape as `month_at` above and `read_row` in
+                // `store`: constant work nobody needed.
+                done.census.absorb(landed.census);
                 // ONE COUNT PER FILE THIS MEMBER WROTE — the rung that was
                 // pulled and every rung derived from it. A derived bar with no
                 // census row is a bar `/store.json` cannot see, which is the

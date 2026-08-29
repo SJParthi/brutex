@@ -894,11 +894,24 @@ impl DropCensus {
     /// reporting only the last chunk's drops would make eighty of eighty-one
     /// chunks' declined rows vanish from a page whose entire purpose is that
     /// they do not.
+    /// # Saturating, like every other counter in this type
+    ///
+    /// These four were bare `+=` while `count` beside them used
+    /// `saturating_add` with the reason written out — *"a census that wrapped
+    /// would report a smaller number than the truth"* — and `total` saturates
+    /// too, with its own paragraph arguing the bound is honest.
+    ///
+    /// `overflow-checks` is on in both profiles, so a bare `+=` here **panics**
+    /// rather than wrapping: an archive run whose out-of-session drops summed
+    /// past `u32::MAX` would abort **after the bars were on disk and before the
+    /// census was published**, which is the one window where a crash loses the
+    /// most. Saturating reports a number that is too small and says so;
+    /// panicking reports nothing and strands the run.
     pub const fn absorb(&mut self, other: Self) {
-        self.before_open += other.before_open;
-        self.after_close += other.after_close;
-        self.before_window += other.before_window;
-        self.after_window += other.after_window;
+        self.before_open = self.before_open.saturating_add(other.before_open);
+        self.after_close = self.after_close.saturating_add(other.after_close);
+        self.before_window = self.before_window.saturating_add(other.before_window);
+        self.after_window = self.after_window.saturating_add(other.after_window);
     }
 
     /// Counts one drop. Saturating, because a census that wrapped would report

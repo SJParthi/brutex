@@ -756,23 +756,50 @@ pub fn walk_forward_shaped(
         // scanning that ordered vector with the same strict `>` the sequential
         // version used, so ties resolve to the same earliest candidate and the
         // winner is the same mask. Byte-identical output, on any core count.
+        // THE SQUARE-OFF TABLE IS A FACT ABOUT `train`, SO IT IS BUILT ONCE.
+        //
+        // `trade::forced_exits` takes only the bars — no mask, no direction, no
+        // horizon — and every candidate below was rebuilding it TWICE: once
+        // inside `grid::evaluate` and once for the direct `walk`. Per candidate
+        // that is two `Vec`s of `train.len()` and two reverse passes calling
+        // `ist_day` and `minute_of_day` on every bar, for a table that is
+        // identical every time.
+        //
+        // `closed.kept` is the closed frequent set of a whole sweep —
+        // `crate::rank` cites a real run at **17.8 million survivors** against a
+        // 91,874-bar column — so this is the multiplier that matters, and it is
+        // hoisted above the `par_iter` rather than into it: one table, shared by
+        // every thread, borrowed immutably.
+        //
+        // Constant per candidate, so gate 8 could not see it. Same shape as
+        // `store::file::read_row`'s per-record allocation and `pull::ingest`'s
+        // per-row counting loop.
+        let exits = crate::trade::forced_exits(train);
         let assessed: Vec<Option<(ConditionMask, Summary, ExitPick, i64)>> = closed
             .kept
             .par_iter()
             .map(|item| {
-                let g = crate::grid::evaluate(
+                let g = crate::grid::evaluate_with(
                     train,
                     &train_column,
                     &item.mask,
                     horizon,
                     side_of(direction),
                     crate::grid::Levels::derived(fold_rungs()),
+                    Some(&exits),
                 );
                 let cell = g.sharpest().or_else(|| g.best())?;
                 if cell.trades == 0 {
                     return None;
                 }
-                let s = Summary::of(&walk(train, &train_column, &item.mask, horizon, direction));
+                let s = Summary::of(&crate::trade::walk_with(
+                    train,
+                    &train_column,
+                    &item.mask,
+                    horizon,
+                    direction,
+                    Some(&exits),
+                ));
                 // The pick is built ONCE and used twice: by the out-of-sample pass,
                 // so it can apply this candidate's TRAINING exit to the test bars,
                 // and by the fold's own winner. Built before the `best` comparison
