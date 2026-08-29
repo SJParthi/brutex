@@ -1912,12 +1912,44 @@ pub fn evaluate(
     } else {
         ratio_targets(stops.rungs(), &ratio_set).unwrap_or_else(|| ladder_of(&favourable))
     };
+    // THINNED TO WHAT THE CELL COUNT CAN AFFORD, AND THIS IS THE WALL EVERY
+    // OTHER BOUND MISSED.
+    //
+    // [`variants`] is quadratic in targets, and the target ladder is not a
+    // "rung count" -- it is the deduped union of every stop times every ratio,
+    // and `derived_ratios` yields up to 512 ratios. Measured on the operator's
+    // own run, with the rung count already forced down to three:
+    //
+    // | targets | cells |
+    // |---:|---:|
+    // | 26 | 11,070 |
+    // | 512 | 3,950,100 |
+    // | 2,048 | **62,986,260** |
+    //
+    // So bounding the RUNG count -- which `cli::rungs_within_cell_budget` does,
+    // and which `BRUTEX_GRID_RUNGS` overrides -- cannot bound this grid: it
+    // constrains stops and trails while the targets multiply independently.
+    // MEASURED: one rung over ONE YEAR of 60-minute bars, about 1,700 bars,
+    // with `BRUTEX_GRID_RUNGS=3` and a 250-candidate screen, spent 99.7% of
+    // every sample inside a single `evaluate` and never returned. D-0258
+    // completed 5,249 bars in 4.26 seconds.
+    //
+    // Solved for T rather than clamped at a constant: with `variants` about
+    // `(S+1)(T²/2)(R²/2)` once T dominates, the affordable T is
+    // `2·sqrt(BUDGET / ((S+1)·R²))`. Every term is the grid's own shape, so a
+    // wider stop ladder or a deeper trail ladder thins the targets instead of
+    // multiplying with them.
+    //
+    // Thinned by EVEN STRIDE, not truncated: taking the first N would keep only
+    // the tightest targets and silently delete the whole profitable end of the
+    // ladder, which is the half the operator's rule is about.
     // THE TRAILING LADDER IS SCALED ON THE FAVOURABLE MOVE, not the adverse one.
     // A trailing stop is a give-back FROM A PROFIT, so the distance that makes
     // sense is a fraction of what the move actually offered -- deriving it from
     // the adverse excursion would size "how much of my gain will I return" by
     // "how much did it hurt on the way in", which are different quantities.
     let trails = ladder_of(&favourable);
+    let targets = thin_to_budget(targets, stops.rungs().len(), trails.rungs().len());
 
     // PASS THREE: each candidate's path measured ONCE against both ladders.
     //
@@ -5732,4 +5764,55 @@ mod rewalk_tests {
             "trades + blocked + too-late must still equal signals"
         );
     }
+}
+
+/// The target ladder, thinned so the grid fits a bounded cell count.
+///
+/// See the call site for the measurement that made this necessary. Solves
+/// `variants(S, T, R) <= BUDGET` for `T` rather than clamping at a constant, so
+/// the bound moves with the grid's own shape instead of being another number
+/// somebody chose.
+///
+/// Thinning is by EVEN STRIDE across the sorted ladder, never by truncation:
+/// the ladder ascends, so keeping a prefix would keep only the tightest targets
+/// and delete every wide one — the half an operator asking for "massive winning
+/// side" is actually looking for.
+fn thin_to_budget(targets: Ladder, stops: usize, trails: usize) -> Ladder {
+    /// Cells one grid may reserve. `Cell` is about 152 bytes, so this is a few
+    /// megabytes per candidate — affordable on every core at once, which is
+    /// what `screen` and the walk-forward now do.
+    const BUDGET: usize = 24_000;
+
+    let have = targets.rungs().len();
+    if have <= 2 || variants(stops, have, trails) <= BUDGET {
+        return targets;
+    }
+    // variants ~= (S+1)(T+1)(R+1) + (S+1)(T(T+1)/2)(R(R+1)/2); the quadratic
+    // term dominates once T is large, so solve that and floor at two.
+    let s1 = stops.saturating_add(1).max(1);
+    let r_term = trails.saturating_add(1).saturating_mul(trails).max(2) / 2;
+    let denom = s1.saturating_mul(r_term).max(1);
+    let want = (BUDGET / denom).max(1);
+    // THE LARGEST T WITH T(T+1)/2 <= want, WALKED IN INTEGERS.
+    //
+    // The closed form is `(sqrt(8·want + 1) − 1) / 2`, and `sqrt` is float
+    // arithmetic, which `[workspace.lints.clippy]` denies across this
+    // workspace — the same rule `CLAUDE.md` §7 states for prices. Walking is
+    // exact, needs no cast, and is bounded twice over: by `have`, the ladder it
+    // is thinning, and by the triangular sum crossing `want`. No iteration can
+    // exceed the number of rungs that already exist.
+    let mut keep = 2_usize;
+    while keep < have {
+        let next = keep.saturating_add(1);
+        if next.saturating_mul(next.saturating_add(1)) / 2 > want {
+            break;
+        }
+        keep = next;
+    }
+    if keep >= have {
+        return targets;
+    }
+    let stride = have.div_ceil(keep).max(1);
+    let thinned: Vec<Ppm> = targets.rungs().iter().step_by(stride).copied().collect();
+    Ladder::new(thinned).unwrap_or(targets)
 }

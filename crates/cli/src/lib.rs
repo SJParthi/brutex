@@ -3161,8 +3161,25 @@ fn audit_stored_inner(
             // The environment's ceiling: an operator-facing command must not
             // silently narrow its own search.
             ceiling: None,
-            // The full stack, unchanged: every operator-facing command validates.
-            validate: true,
+            // THE FULL STACK, UNLESS THE OPERATOR SAYS OTHERWISE.
+            //
+            // This was `true`, hardcoded, under a comment reading "every
+            // operator-facing command validates" — so walk-forward, PBO and the
+            // bootstrap ran on EVERY browser sweep and `BRUTEX_VALIDATE` could
+            // not reach the one path the operator actually uses.
+            //
+            // MEASURED, and it is why nothing has ever completed: one rung over
+            // ONE YEAR of 60-minute bars — about 1,700 bars, against D-0258
+            // completing 5,249 bars in 4.26 seconds — ran twelve minutes and
+            // recorded nothing, with the sampler in `grid::realised` and
+            // `one_variant` throughout. `screen_cap`'s own doc already recorded
+            // this stack returning "nothing at all after fifty minutes, twice".
+            //
+            // `validate_from_env` defaults to ON, so nothing changes unless the
+            // operator sets `BRUTEX_VALIDATE=0` — and a run taken that way
+            // carries the `UNVALIDATED` banner `CLAUDE.md` §5 requires, so a
+            // candidate can never be mistaken for a finding.
+            validate: validate_from_env(),
             lens: runner::rank::Lens::Detectability,
         },
     );
@@ -3394,8 +3411,25 @@ fn audit_range_inner(
             // The environment's ceiling: an operator-facing command must not
             // silently narrow its own search.
             ceiling: None,
-            // The full stack, unchanged: every operator-facing command validates.
-            validate: true,
+            // THE FULL STACK, UNLESS THE OPERATOR SAYS OTHERWISE.
+            //
+            // This was `true`, hardcoded, under a comment reading "every
+            // operator-facing command validates" — so walk-forward, PBO and the
+            // bootstrap ran on EVERY browser sweep and `BRUTEX_VALIDATE` could
+            // not reach the one path the operator actually uses.
+            //
+            // MEASURED, and it is why nothing has ever completed: one rung over
+            // ONE YEAR of 60-minute bars — about 1,700 bars, against D-0258
+            // completing 5,249 bars in 4.26 seconds — ran twelve minutes and
+            // recorded nothing, with the sampler in `grid::realised` and
+            // `one_variant` throughout. `screen_cap`'s own doc already recorded
+            // this stack returning "nothing at all after fifty minutes, twice".
+            //
+            // `validate_from_env` defaults to ON, so nothing changes unless the
+            // operator sets `BRUTEX_VALIDATE=0` — and a run taken that way
+            // carries the `UNVALIDATED` banner `CLAUDE.md` §5 requires, so a
+            // candidate can never be mistaken for a finding.
+            validate: validate_from_env(),
             // THE LENS THAT DECIDES WHICH COMBINATIONS ARE EVER PRICED, AND IT
             // WAS ANSWERING A DIFFERENT QUESTION FROM THE ONE BEING ASKED.
             //
@@ -3817,8 +3851,25 @@ pub fn verify(vendor_word: &str, underlying: &str) -> String {
             // The environment's ceiling: an operator-facing command must not
             // silently narrow its own search.
             ceiling: None,
-            // The full stack, unchanged: every operator-facing command validates.
-            validate: true,
+            // THE FULL STACK, UNLESS THE OPERATOR SAYS OTHERWISE.
+            //
+            // This was `true`, hardcoded, under a comment reading "every
+            // operator-facing command validates" — so walk-forward, PBO and the
+            // bootstrap ran on EVERY browser sweep and `BRUTEX_VALIDATE` could
+            // not reach the one path the operator actually uses.
+            //
+            // MEASURED, and it is why nothing has ever completed: one rung over
+            // ONE YEAR of 60-minute bars — about 1,700 bars, against D-0258
+            // completing 5,249 bars in 4.26 seconds — ran twelve minutes and
+            // recorded nothing, with the sampler in `grid::realised` and
+            // `one_variant` throughout. `screen_cap`'s own doc already recorded
+            // this stack returning "nothing at all after fifty minutes, twice".
+            //
+            // `validate_from_env` defaults to ON, so nothing changes unless the
+            // operator sets `BRUTEX_VALIDATE=0` — and a run taken that way
+            // carries the `UNVALIDATED` banner `CLAUDE.md` §5 requires, so a
+            // candidate can never be mistaken for a finding.
+            validate: validate_from_env(),
             lens: runner::rank::Lens::Detectability,
         };
         let first = audit_bars(evaluator(), short.clone(), "", 120, None, plain);
@@ -6799,8 +6850,30 @@ struct RungRow {
 /// completion flag, instead of silently reporting extinction it never reached.
 fn affordable_min_hits(bars: &[indicators::Candle]) -> Option<u64> {
     let mut ev = evaluator().ok()?;
-    let ceiling = ceiling_from_env().ok()?;
-    Sweeper::new(Ladder::with_min_hits(1).with_ceiling(ceiling))
+    // [`SEARCH_CEILING`], NOT THE RUN'S OWN CEILING. A PROBE IS NOT A SWEEP.
+    //
+    // This passed `ceiling_from_env()` — the full 134,217,720 candidates the
+    // machine can hold, about 19.6 GB at 146 bytes each — to a walk whose only
+    // job is to ESTIMATE a threshold. `Sweeper::auto` brackets downward, so its
+    // cheap probes are at high thresholds and its expensive ones are at low
+    // thresholds where almost everything is frequent; handed the whole budget,
+    // the low probes are free to allocate the whole budget.
+    //
+    // MEASURED, and it is why nothing finished: one rung over ONE YEAR of
+    // 60-minute bars — about 1,700 bars, against `docs/05-decisions.md` D-0258
+    // completing 5,249 bars in 4.26 seconds — sat at 10.24 GB resident and
+    // 95.8% CPU, a single core, with the sampler showing `auto` and `walk`. The
+    // affordability probe added to make runs finish was itself the thing that
+    // did not finish, and it was invisible because it runs BEFORE the first
+    // event `one_rung` emits.
+    //
+    // `SEARCH_CEILING` is 500,000 — about 73 MB — and `cli auto` has always
+    // used it for precisely this call, with a compile-time assertion beside it
+    // that it is at least a hundred times smaller than `DEFAULT_CEILING`. The
+    // answer a probe returns is a THRESHOLD, and a threshold found under a
+    // smaller budget is conservative in the safe direction: it may sit higher
+    // than strictly necessary, which prunes more, never less.
+    Sweeper::new(Ladder::with_min_hits(1).with_ceiling(SEARCH_CEILING))
         .auto(bars, &mut ev)
         .min_hits
 }
