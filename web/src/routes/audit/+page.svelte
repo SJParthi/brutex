@@ -697,6 +697,23 @@
       .trim();
   }
 
+  /* WHETHER THIS SERVER LABELS ITS RECORDS AT ALL.
+     `kind` arrived with `audit::Kind::MemberFailure`. A binary older than it
+     sends no such key, and on THAT journal there really is one record per run
+     and one reason per run — so the arithmetic below is right for the old
+     payload and wrong for this one. Testing for the KEY rather than for the
+     word keeps both correct instead of applying the new rule to an old file. */
+  const labelled = $derived(runs.some((/** @type {any} */ r) => r.kind !== undefined));
+
+  /* RUN RECORDS ONLY. `recorded_with_failures` appends one `kind:"run"` and
+     then one `kind:"member"` per failure, so counting records counted 1 + N
+     records as 1 + N runs — inflating "N run(s) read", all three tab badges
+     and the loud tally by one per failed member. The member rows stay in
+     `runs` and are still drawn in the log below; they are just not runs. */
+  const runOnly = $derived(
+    labelled ? runs.filter((/** @type {any} */ r) => r.kind !== 'member') : runs
+  );
+
   const faults = $derived.by(() => {
     /** @type {Map<string, {cause:string, runs:any[], members:number, first:number, last:number, cut:boolean, examples:Set<string>}>} */
     const by = new Map();
@@ -706,21 +723,43 @@
       if (r.fault) continue;
       const loud = r.loud;
       if (!loud && r.failures === 0) continue;
-      membersFailed += r.failures ?? 0;
-      if (r.note) reasonsKept += r.failures > 0 ? 1 : 0;
-      const cause = fold(r.note ?? '');
+      /* ONE FAILURE COUNTED ONCE. The run record carries `failures: N` and each
+         member record carries `failures: 1`, and `Outcome::Failed.is_loud()` is
+         true so the guard above never excluded them — so a run that refused 409
+         members reported 818. A labelled journal is counted on its MEMBER rows,
+         because those are the rows that carry one reason each; an unlabelled
+         one has no such rows, so its run records are the only count there is. */
+      const member = r.kind === 'member';
+      const weight = labelled ? (member ? 1 : 0) : (r.failures ?? 0);
+      membersFailed += weight;
+      /* AND THE REASON BESIDE IT. `reasonsLost` was reporting 408 reasons
+         missing from a journal that held all 409 — a red alert block, with
+         `role="alert"`, about a loss that had not happened. `Kind::MemberFailure`
+         was added precisely so every reason reaches disk. */
+      if (r.note) reasonsKept += weight;
+      /* THE TWO WRITERS SPELL ONE CAUSE TWO WAYS. `Record::of_run` writes
+         "{instrument} — {why}" into `note`; `Record::member_failure` writes the
+         bare `why` and puts the instrument in `source`. `fold` strips a leading
+         "SYMBOL — ", so one fault folded to two keys and split across two rows,
+         inflating the group count as well. Re-joining them folds both spellings
+         to one string. */
+      const cause = fold(member && r.source ? `${r.source} — ${r.note ?? ''}` : (r.note ?? ''));
       let g = by.get(cause);
       if (!g) {
         g = { cause, runs: [], members: 0, first: r.at, last: r.at, cut: false, examples: new Set() };
         by.set(cause, g);
       }
       g.runs.push(r);
-      g.members += r.failures ?? 0;
+      g.members += weight;
       g.first = Math.min(g.first, r.at);
       g.last = Math.max(g.last, r.at);
       if (r.note_bytes > NOTE_BYTES) g.cut = true;
       const dash = (r.note ?? '').indexOf(' — ');
       if (dash > 0 && dash <= 24) g.examples.add(r.note.slice(0, dash));
+      /* A MEMBER ROW NAMES ITS INSTRUMENT IN `source`, NOT IN `note`, so the
+         dash test above finds nothing on exactly the records that carry the
+         per-instrument fact and the examples list stayed empty. */
+      else if (member && r.source) g.examples.add(r.source);
     }
     const groups = [...by.values()].sort(
       (a, b) => b.members - a.members || b.runs.length - a.runs.length
@@ -728,7 +767,8 @@
     return {
       groups,
       membersFailed,
-      // WHAT IS NOT HERE. One reason per run reaches disk; the rest are gone.
+      // WHAT IS NOT HERE. On a labelled journal this is zero, and that is the
+      // truth: every member failure writes its own reason.
       reasonsLost: Math.max(0, membersFailed - reasonsKept),
       reasonsKept
     };
@@ -805,8 +845,12 @@
 
   const counts = $derived.by(() => {
     /** @type {Record<string, number>} */
-    const c = { all: runs.length, loud: 0 };
-    for (const r of runs) {
+    // RUN RECORDS ONLY. `recorded_with_failures` appends one `kind:"run"` and
+    // then one `kind:"member"` per failure, so this counted 1 + N records as
+    // 1 + N runs -- a single run that refused 409 members reported 410 runs
+    // read, in the headline, in all three tab badges and in the loud tally.
+    const c = { all: runOnly.length, loud: 0 };
+    for (const r of runOnly) {
       const key = r.fault ? 'DAMAGED' : r.outcome;
       c[key] = (c[key] ?? 0) + 1;
       if (r.fault || r.loud) c.loud += 1;
@@ -817,7 +861,10 @@
   /* ── priority 4: outcomes over time ──────────────────────────────────── */
 
   const timeline = $derived.by(() => {
-    const rows = runs.filter((r) => !r.fault);
+    // RUN RECORDS ONLY, for the reason `runOnly` gives: a member row is not a
+    // run, and counting it as one made every column of this chart taller than
+    // the truth by one per failed member.
+    const rows = runOnly.filter((r) => !r.fault);
     if (rows.length === 0) return null;
     const from = Math.min(...rows.map((r) => r.at));
     const to = Math.max(...rows.map((r) => r.at));

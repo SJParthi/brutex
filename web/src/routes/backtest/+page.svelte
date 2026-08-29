@@ -1809,6 +1809,9 @@
     // neither waits for the other — and a failed table still leaves a readable
     // page, which is why it is not awaited here.
     untrack(() => fetchVocab());
+    // AND WHETHER ONE IS ALREADY RUNNING. See `adoptRunning`: without this the
+    // in-flight view survived exactly one browser reload, which is none.
+    untrack(() => adoptRunning());
   });
 
   /* ====================================================================
@@ -1853,6 +1856,57 @@
     return month >= 1 && month <= 12 ? { year, month } : null;
   }
 
+
+  /**
+   * A SWEEP THIS PAGE DID NOT START IS STILL A SWEEP THIS PAGE IS FOR.
+   *
+   * `pollSweep` was reachable from exactly one place — `startSweep` — so the
+   * in-flight banner, the rung table and the started stamp existed only for the
+   * tab that pressed Run. A reload, a second tab, or a sweep launched from a
+   * terminal left `sweep.phase` at `idle` for the whole run, and
+   * `/backtest/run.json` was never asked at all.
+   *
+   * Measured: the exit grid is 87.6% of a run's wall clock, and a `range-all`
+   * over eight rungs ran five hours on this machine. For all of it the page
+   * would render the PREVIOUS run's ledger and say nothing about the one
+   * actually happening — the same "cannot tell a working sweep from a hung one"
+   * the rung table was written to end, arriving through the one door that table
+   * cannot cover.
+   *
+   * IT ADOPTS ONLY A RUNNING SWEEP. `sweepOutcome` is total over the payload,
+   * so `done` and `failed` are reachable here too — and printing either on load
+   * would be a claim about something that ended before this page was open, over
+   * a ledger it has only just read. `idle` is what a fresh console should show.
+   */
+  let adoptWhy = $state('');
+
+  async function adoptRunning() {
+    try {
+      const response = await ask_('/backtest/run.json', { cache: 'no-store' });
+      if (!response.ok) {
+        adoptWhy =
+          `/backtest/run.json answered ${response.status}, so this page cannot say whether a ` +
+          `sweep is running. The idle console below is what this build shows when it could not ` +
+          `ask — not a claim that nothing is in flight.`;
+        return;
+      }
+      const body = await response.json();
+      const next = sweepOutcome(body.running);
+      if (next.phase !== 'running') return;
+      sweep = next;
+      // THE EVENT FEED ON THE SAME TICK, exactly as `pollSweep` does it: the
+      // status payload carries no progress and the rungs live in the log.
+      fetchLive();
+      pollAt = setTimeout(pollSweep, 2000);
+    } catch (error) {
+      // NAMED, NOT SWALLOWED. A page that could not ask is not a page with no
+      // run, and rendering the idle state over a live sweep is the fallback
+      // that hides a failure §4 bans.
+      adoptWhy =
+        `Could not ask whether a sweep is already running: ` +
+        `${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
   async function pollSweep() {
     try {
       const response = await ask_(`/backtest/run.json`, { cache: 'no-store' });
@@ -5348,6 +5402,11 @@
     </div>
   {/if}
 
+  <!-- A PAGE THAT COULD NOT ASK IS NOT A PAGE WITH NO RUN. Rendering the idle
+       console silently over a live sweep is the fallback §4 bans. -->
+  {#if adoptWhy && sweep.phase === "idle"}
+    <p class="inline-note bad runstate">{adoptWhy}</p>
+  {/if}
   {#if sweep.phase === 'running'}
     <!-- IT IS NO LONGER INDETERMINATE, AND THIS TABLE IS WHY.
          The note below still says the TOTAL is unknowable, which is true — the
@@ -6615,11 +6674,32 @@
                   </div>
                   <div class="tt-q">
                     <span class="tt-k">Max drawdown</span>
-                    <span class="tt-qv big down">
-                      {money(Math.abs(openRun.max_drawdown))}<em class="tt-unit">POINTS</em>
-                      <em class="tt-pc">{drawdownBps === null ? '' : `${(drawdownBps / 100).toFixed(2)}%`}</em>
-                    </span>
-                    <span class="tt-note">worst peak-to-trough</span>
+                    <!-- ZERO HERE IS A PHASE THAT DID NOT RUN, NOT A RUN THAT
+                         NEVER LOST. `publish_ranked` writes before the exit
+                         grid, so a run the grid never priced carries
+                         `max_drawdown: 0` — which this rendered as
+                         "0.00 POINTS · 0.00% · worst peak-to-trough", the best
+                         reading available anywhere on this page.
+                         `crates/api/src/livejson.rs` names those eight fields
+                         as structural zeros and refuses to judge them for
+                         exactly this reason: figures nobody measured wearing
+                         the shape of figures somebody did. The two tiles to the
+                         right already guard on this same `noTrades`; this one
+                         did not. -->
+                    {#if noTrades}
+                      <span class="tt-qv big dim">none</span>
+                      <span class="tt-note"
+                        >no position was opened, so there is no peak and no trough</span
+                      >
+                    {:else}
+                      <span class="tt-qv big down">
+                        {money(Math.abs(openRun.max_drawdown))}<em class="tt-unit">POINTS</em>
+                        <em class="tt-pc"
+                          >{drawdownBps === null ? '' : `${(drawdownBps / 100).toFixed(2)}%`}</em
+                        >
+                      </span>
+                      <span class="tt-note">worst peak-to-trough</span>
+                    {/if}
                   </div>
                   <!-- TWO VALUES SIDE BY SIDE, as TradingView sets this one:
                        the percentage and the fraction it came from. The

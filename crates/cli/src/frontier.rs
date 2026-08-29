@@ -1168,16 +1168,42 @@ fn check_header(file: &mut File, path: &Path, len: u64) -> Result<(), Refusal> {
             .unwrap_or([0; 4]),
     );
     if version != VERSION {
+        // THE REMEDY IS THE OPERATOR'S OWN HAND, AND SAYING "RE-RUN THE SWEEP"
+        // WAS A NO-OP DRESSED AS AN INSTRUCTION.
+        //
+        // This message used to end "The file is REGENERABLE -- re-run the sweep
+        // and it is written afresh". Nothing in the tree renames or removes
+        // this file: `grep remove_file|rename` across `crates/` finds one hit
+        // and it is `live.rs`. So `open` refuses, the sweep never reaches a
+        // write, and re-running produces the identical refusal FOREVER. The
+        // operator was handed an action that cannot work, which is worse than
+        // being handed none -- §4's banned fallback wearing an instruction's
+        // clothes.
+        //
+        // It is not repaired automatically either, and that is deliberate: this
+        // is the operator's recorded history, §3 rule 8 keeps it, and a build
+        // that silently deletes a file it cannot read is a different and worse
+        // failure. The path and the exact command are named instead, so the
+        // action is one line and the decision stays theirs.
+        let aside = path.with_extension(format!("v{version}.bin"));
         return Err(format!(
             "{} is frontier format version {version}; this build writes and reads \
              version {VERSION}. A format version is never mutated in place — §3 \
-             rule 8. The file is REGENERABLE -- re-run the \
-             sweep and it is written afresh -- and it is not widened in place \
-             because a row read with zeroes in the new fields would carry a rule \
-             set of all-zero floors, which every priced row passes. That is the \
-             fallback that hides a failure §4 bans, wearing a migration's \
-             clothes. Nothing was written.",
-            path.display()
+             rule 8, and it is not widened in place either: a row read with \
+             zeroes in the new fields would carry a rule set of all-zero floors, \
+             which every priced row passes — the fallback that hides a failure \
+             §4 bans, wearing a migration's clothes.\n\
+             \n\
+             THIS BUILD WILL NOT WRITE A FRONTIER UNTIL THE FILE IS MOVED ASIDE, \
+             and it does not move it for you. Run:\n\
+             \n\
+             \x20   mv {} {}\n\
+             \n\
+             then sweep again — the rows are regenerable from the bars, which is \
+             why moving it is safe. Nothing was written.",
+            path.display(),
+            path.display(),
+            aside.display()
         ));
     }
     // A RAGGED TAIL IS NAMED RATHER THAN ABSORBED. Bytes past the last whole row

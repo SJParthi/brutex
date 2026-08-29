@@ -273,6 +273,12 @@ pub struct Trades {
     file: File,
     path: PathBuf,
     blocks: std::collections::HashMap<[u8; 32], Block>,
+    /// How far the block index has read, in bytes from the start of the file.
+    ///
+    /// `absorb_new_rows` resumes here rather than rescanning, so a writer that
+    /// takes the lock and finds another process has appended pays only for what
+    /// arrived since. Zero on the one-writer path, which is every path today.
+    scanned: u64,
 }
 
 impl Trades {
@@ -304,7 +310,17 @@ impl Trades {
             .len();
         check_header(&mut file, &path, len)?;
         let blocks = index_of(&mut file, len)?;
-        Ok(Self { file, path, blocks })
+        // `index_of` walks every WHOLE row, so the cursor sits at the end of the
+        // last one -- and a ragged tail cannot reach here, `check_header`
+        // refuses it.
+        let scanned =
+            HEADER.saturating_add((len.saturating_sub(HEADER) / STRIDE).saturating_mul(STRIDE));
+        Ok(Self {
+            file,
+            path,
+            blocks,
+            scanned,
+        })
     }
 
     /// Opens for append, creating the file and its header if absent.
@@ -335,11 +351,24 @@ impl Trades {
                 file,
                 path,
                 blocks: std::collections::HashMap::new(),
+                // A FRESH FILE HOLDS ONLY ITS HEADER, so the index has read
+                // everything there is.
+                scanned: HEADER,
             });
         }
         check_header(&mut file, &path, len)?;
         let blocks = index_of(&mut file, len)?;
-        Ok(Self { file, path, blocks })
+        // `index_of` walks every WHOLE row, so the cursor sits at the end of the
+        // last one -- and a ragged tail cannot reach here, `check_header`
+        // refuses it.
+        let scanned =
+            HEADER.saturating_add((len.saturating_sub(HEADER) / STRIDE).saturating_mul(STRIDE));
+        Ok(Self {
+            file,
+            path,
+            blocks,
+            scanned,
+        })
     }
 
     /// Where a run's rows are, or `None`. **O(1)** — one hash probe.
@@ -371,22 +400,64 @@ impl Trades {
         let Some(first_row) = rows.first() else {
             return Ok(0);
         };
-        if self.holds(&first_row.identity) {
+        // AN EXCLUSIVE FILE LOCK, AND THIS FILE WAS THE ONE OF THE THREE
+        // WITHOUT ONE.
+        //
+        // `results::append` takes `lock()` and explains why at length; this
+        // measured the end with a bare `metadata()` and seeked to it. Two
+        // processes — two `cli` sweeps, or a sweep beside the server — both
+        // measure the same length, both seek there, and the SECOND WRITE LANDS
+        // ON TOP OF THE FIRST. Both blocks seal correctly, the count still
+        // reads as one, and the losing process has already printed "N trade(s)
+        // recorded for this run". Nothing downstream can see it.
+        //
+        // The `LEDGER` mutex above serialises the three record calls WITHIN one
+        // process and does nothing across two, which is exactly the case this
+        // store is reachable in: `range_over` runs eight rungs and the operator
+        // runs the server alongside.
+        self.file
+            .lock()
+            .map_err(|why| format!("{} could not be locked: {why}", self.path.display()))?;
+        let out = self.append_locked(rows, first_row.identity);
+        // RELEASED WHETHER OR NOT THE WRITE SUCCEEDED, and the two failures are
+        // reported separately rather than one hiding the other — the same shape
+        // `results::append` uses.
+        let released = self
+            .file
+            .unlock()
+            .map_err(|why| format!("{} could not be unlocked: {why}", self.path.display()));
+        match (out, released) {
+            (Ok(count), Ok(())) => Ok(count),
+            (Err(why), _) | (Ok(_), Err(why)) => Err(why),
+        }
+    }
+
+    /// [`Self::append_all`]'s body, with the file lock already held.
+    ///
+    /// Split out for the reason `results::append_locked` is: an early `return`
+    /// inside the locked region would strand the lock until the process exits.
+    fn append_locked(&mut self, rows: &[Row], identity: [u8; 32]) -> Result<u64, Refusal> {
+        // THE DUPLICATE TEST NEEDS THE LOCK, and it was made before it.
+        // `blocks` is built once at open and knows nothing about a block
+        // another process appended since. Two processes both passed, and
+        // `index_of`'s `and_modify` then made the FIRST block span every row
+        // written between the two — so `of_run` returned both runs' trades as
+        // one run's.
+        self.absorb_new_rows()?;
+        if self.holds(&identity) {
             return Err(format!(
                 "the trades for run {} are already recorded, so this write has \
-                 nothing to add",
-                hex32(&first_row.identity)
+                 nothing to add -- and a second block would make the first span \
+                 every row written between them.",
+                hex32(&identity)
             ));
         }
-        let len = self
+        // FROM THE FILE UNDER THE LOCK, not from a length measured before it.
+        let at = self
             .file
-            .metadata()
-            .map_err(|why| format!("{} could not be measured: {why}", self.path.display()))?
-            .len();
-        let first = len.saturating_sub(HEADER) / STRIDE;
-        self.file
-            .seek(SeekFrom::Start(len))
-            .map_err(|why| format!("{} could not be seeked: {why}", self.path.display()))?;
+            .seek(SeekFrom::End(0))
+            .map_err(|why| format!("{} could not be extended: {why}", self.path.display()))?;
+        let first = at.saturating_sub(HEADER) / STRIDE;
         // ONE WRITE, NOT ONE PER ROW. A run with fifty thousand trades is fifty
         // thousand syscalls otherwise, which is the shape `frontier::of_run`'s
         // doc records having removed elsewhere.
@@ -394,20 +465,76 @@ impl Trades {
         for row in rows {
             buffer.extend_from_slice(&row.to_bytes());
         }
+        // A PARTIAL WRITE IS ROLLED BACK. `write_all` on a full filesystem can
+        // put some bytes down before it fails, and those bytes are not a row --
+        // leaving them ragged is what makes every LATER run's trades unreadable,
+        // because `first` floors while the seek does not. The cause is known
+        // here and `at` is where the file ended, so this removes only what this
+        // call wrote.
         self.file
             .write_all(&buffer)
-            .map_err(|why| format!("{} could not be written: {why}", self.path.display()))?;
+            .map_err(|why| match self.file.set_len(at) {
+                Ok(()) => format!(
+                    "{} could not be written: {why}. The partial write was rolled \
+                     back, so the file still ends on a whole row.",
+                    self.path.display()
+                ),
+                Err(and) => format!(
+                    "{} could not be written: {why}. Rolling the partial write \
+                     back ALSO failed: {and}. The file now ends mid-row and is \
+                     refused on the next open until its tail is cut back to byte \
+                     {at}.",
+                    self.path.display()
+                ),
+            })?;
+        // `sync_all`, NOT `sync_data`: this write EXTENDS the file, so the
+        // LENGTH is part of what has to survive. A torn length here does not
+        // cost "a detail row" -- it misaligns every run recorded afterwards.
         self.file
-            .sync_data()
+            .sync_all()
             .map_err(|why| format!("{} could not be synced: {why}", self.path.display()))?;
         self.blocks.insert(
-            first_row.identity,
+            identity,
             Block {
                 first,
                 count: rows.len() as u64,
             },
         );
+        self.scanned = at.saturating_add(buffer.len() as u64);
         Ok(rows.len() as u64)
+    }
+
+    /// Absorbs blocks another writer has appended since this handle last looked.
+    ///
+    /// O(rows appended by others), which is zero on the one-writer path.
+    fn absorb_new_rows(&mut self) -> Result<(), Refusal> {
+        let len = self
+            .file
+            .metadata()
+            .map_err(|why| format!("{} could not be measured: {why}", self.path.display()))?
+            .len();
+        let mut raw = [0_u8; STRIDE_BYTES];
+        while self.scanned.saturating_add(STRIDE) <= len {
+            let at = self.scanned;
+            self.file
+                .seek(SeekFrom::Start(at))
+                .and_then(|_| self.file.read_exact(&mut raw))
+                .map_err(|why| format!("the trade row at byte {at} could not be read: {why}"))?;
+            if Row::seal_matches(&raw) {
+                let index = at.saturating_sub(HEADER) / STRIDE;
+                self.blocks
+                    .entry(Row::from_bytes(&raw).identity)
+                    .and_modify(|held| {
+                        held.count = index.saturating_add(1).saturating_sub(held.first);
+                    })
+                    .or_insert(Block {
+                        first: index,
+                        count: 1,
+                    });
+            }
+            self.scanned = at.saturating_add(STRIDE);
+        }
+        Ok(())
     }
 
     /// Every row of one run, in order. **O(count)** after an O(1) lookup.
@@ -427,13 +554,53 @@ impl Trades {
             .map_err(|why| format!("{} could not be seeked: {why}", self.path.display()))?;
         let mut out = Vec::with_capacity(usize::try_from(block.count).unwrap_or(0));
         let mut raw = [0_u8; STRIDE_BYTES];
+        let mut foreign = 0_u64;
         for _ in 0..block.count {
             self.file
                 .read_exact(&mut raw)
                 .map_err(|why| format!("a trade row could not be read: {why}"))?;
             if Row::seal_matches(&raw) {
-                out.push(Row::from_bytes(&raw));
+                // A ROW THAT IS NOT THIS RUN'S IS NOT THIS RUN'S, HOWEVER
+                // CORRECTLY IT IS SEALED.
+                //
+                // The seal answers *were these bytes written whole*. It says
+                // nothing about WHOSE they are, and this loop treated the two
+                // as one question — so any block whose `first`/`count` is wrong
+                // returned whatever sealed correctly at those offsets, under
+                // this run's banner. `/trades.json` then feeds them to the
+                // weekday and hour attribution, so another run's P&L is
+                // reported as this one's shape.
+                //
+                // A wrong span is reachable: `index_of`'s `and_modify` sets
+                // `count = last + 1 - first`, so a second block for one
+                // identity makes the first SPAN every row written between them.
+                // §3 rule 8 keeps such a file as it is, which is why the READ
+                // filters rather than the file being repaired.
+                //
+                // `frontier::of_run` has made this check since it was written
+                // and says the same thing; this file did not.
+                let row = Row::from_bytes(&raw);
+                if row.identity == *identity {
+                    out.push(row);
+                } else {
+                    foreign = foreign.saturating_add(1);
+                }
             }
+        }
+        if foreign > 0 {
+            // NAMED, NOT SILENTLY SHORTENED. A list that is shorter than the
+            // block claimed is a fact the reader needs; dropping the rows and
+            // saying nothing is the same silence this whole guard exists to
+            // end.
+            return Err(format!(
+                "the block for run {} spans {foreign} row(s) belonging to \
+                 another run, so its recorded span is wrong. {} row(s) that are \
+                 genuinely this run's were kept and are not returned here, \
+                 because a partial answer under a whole answer's name is what \
+                 §4 refuses. The file is unchanged.",
+                hex32(identity),
+                out.len()
+            ));
         }
         Ok(out)
     }
@@ -468,6 +635,38 @@ fn check_header(file: &mut File, path: &Path, len: u64) -> Result<(), Refusal> {
             "{} is version {found} and this build writes {VERSION}. Store format \
              versions are never mutated in place, so a reader that does not know \
              a version refuses rather than guessing at its stride",
+            path.display()
+        ));
+    }
+    // A RAGGED TAIL IS NAMED RATHER THAN ABSORBED, and this file was the only
+    // one of the three without the check.
+    //
+    // `append_all` computes `first = (len - HEADER) / STRIDE`, which FLOORS,
+    // and then seeks to `len`. On a whole-row file those agree. After an
+    // interrupted write they do not: the index names one offset and the write
+    // goes to another, so every row of the new block seals against a window it
+    // does not occupy, `of_run` finds no valid seal at the offsets its block
+    // names, and `/trades.json` answers `{"trades":[],"count":0}` for a run
+    // whose rows are physically on disk. Every run recorded afterwards inherits
+    // the same shift.
+    //
+    // That is the plausible wrong answer §4 bans, and it is silent: the seals
+    // are individually valid, so nothing downstream can see the misalignment.
+    // `frontier::check_header` and `results::open_with` have both refused this
+    // since they were written; the wording here is theirs.
+    //
+    // The remainder is left alone rather than truncated. Cutting a file back is
+    // a decision about the operator's history and belongs to them — §3 rule 8 —
+    // and the whole rows before the tear are still readable and still counted.
+    let body = len.saturating_sub(HEADER);
+    if !body.is_multiple_of(STRIDE) {
+        let whole = body / STRIDE;
+        let spare = body % STRIDE;
+        return Err(format!(
+            "{} has {spare} bytes past its last whole row — an append was \
+             interrupted. {whole} whole rows are intact; the remainder is left \
+             alone, because truncating it is a decision about your own history. \
+             Nothing was written.",
             path.display()
         ));
     }

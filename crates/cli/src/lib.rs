@@ -11375,6 +11375,21 @@ struct Recorded<'a> {
 /// detail row whose run has no ledger row is an orphan. Writing the ledger first
 /// makes that unreachable rather than merely unlikely.
 ///
+/// # The order was kept and the RULE was not, until now
+///
+/// All three used to be called unconditionally and none inspected the one
+/// before it, so a ledger refusal — a version-2 file, a duplicate identity, a
+/// rolled-back write on a full disk — still wrote twenty-five judged frontier
+/// rows and every trade. `/frontier.json?identity=…` then served a full ranked
+/// list for a run `/backtest.json` had never heard of, which is precisely the
+/// orphan the paragraph above calls unreachable. The order was necessary and
+/// was never sufficient.
+///
+/// The ledger's own text is the signal: `record_run` writes `NOT_RECORDED` when
+/// it refuses, and `range_over` already scans for that marker, so this reads
+/// the same fact the operator is shown rather than inventing a second channel
+/// for it.
+///
 /// Returns a report and never a `Result`. Detail about a completed run must not
 /// turn that run into a failure — each of the three names its own refusal in the
 /// text and the run stands.
@@ -11393,6 +11408,17 @@ fn record_all(
         what.min_hits,
         what.mask_words,
     ));
+    // THE DETAIL ROWS FOLLOW THE LEDGER OR THEY DO NOT GO AT ALL.
+    if out.contains(NOT_RECORDED) {
+        out.push_str(
+            "  The frontier and the trades were NOT written either, because a \
+             detail row whose run has no ledger row is an orphan: nothing can \
+             find it, nothing can date it, and `/frontier.json` would serve a \
+             judged list for a run `/backtest.json` has never heard of. Fix the \
+             ledger and re-run — the rows are regenerable from the bars.\n\n",
+        );
+        return out;
+    }
     out.push_str(&record_frontier(
         into.root,
         run_id,
