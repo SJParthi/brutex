@@ -197,8 +197,6 @@ holding ~430 % CPU each. Every figure is a browser measurement, taken with
 | Sequential page (next) | **17, 18, 17, 17 ms** | O(1) |
 | Jump to page 12,345 · 33,333 · 41,000 | **67 · 90 · 69 ms, ONE request each** | O(1) in distance |
 | Jump to an already-read month | **105 ms, zero requests** | O(1) |
-| Price line over the window | **240 samples** at 7,500 rows and at 618,296 | O(1) in window |
-| Price position mark, per cell | walks `barPage` — **12 rows at `Fit`, 250 at most** | O(1) in store |
 
 **Why the paging figure is O(1) and not merely fast.** The page number maps to a
 month file by arithmetic — layer 5's rule applied in the browser — so a jump
@@ -209,12 +207,15 @@ and was three cold reads queueing on a saturated host. **Both are recorded**:
 the slow one is what a reader will sometimes see, and a table showing only the
 fast one would be the same class of dishonesty as a row cap hiding a fold.
 
-**Why the price line is O(1) where a fold would not be.** It reaches the i-th
-sample with `src[((i * n) / take) | 0]` — layer 4's rule, no search — so the
-cost is `SPARK_N` reads whatever `n` is. Its `lo`/`hi` come from the samples for
-the same reason, and the control says "sampled at 240 points of 618,296 bars"
-rather than implying a true extreme. A spike between two samples is one the line
-never drew, and saying otherwise would be a measurement nobody took.
+**Both price marks this section used to measure are gone, and the rows are
+struck rather than quietly dropped.** The table above once carried *"Price line
+over the window — 240 samples at 7,500 rows and at 618,296"* and *"Price
+position mark, per cell — walks `barPage`, 12 rows at `Fit`"*. Both bounds were
+real and both features were removed for reasons that had nothing to do with
+cost: the per-cell mark resolved to two distinct positions across twenty drawn
+dots — one bit of information per cell — and the price line drew a monotone ramp
+whenever the grid was sorted by close, which is D-0377. A correct measurement of
+a thing that no longer exists is still a false row in a table a reader trusts.
 
 ### Not O(1) in the browser, and not claimed to be
 

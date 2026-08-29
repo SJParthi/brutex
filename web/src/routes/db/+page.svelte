@@ -89,9 +89,6 @@
   import { denominators, denomKey, isSole, rollUpMonths } from '$lib/completeness.js';
   import { basisPoints, bpsText, dirOf } from '$lib/bps.js';
   import { exact } from '$lib/money.js';
-  /* THE PRICE LINE'S SAMPLER AND ITS GEOMETRY. Extracted so `node --test` can
-     assert the O(1) read bound as a number — see `spark.test.js`. */
-  import { sampleSeries, sparkPath } from '$lib/spark.js';
   // A REQUEST THAT CANNOT END IS A SPINNER THAT LIES. `ask` is `fetch` with a
   // ceiling; see `$lib/ask.js` for why the wrapper exists rather than a signal
   // threaded through every call site.
@@ -5071,52 +5068,6 @@
     return [lo, hi];
   });
 
-  /**
-   * THE SHAPE OF THE LOADED WINDOW, AS ONE LINE.
-   *
-   * This page had no picture of a PRICE anywhere. The coverage band it used to
-   * carry drew month COVERAGE — how many bars each month holds — which is
-   * metadata about the store, not the series, and at 81 months it was 81
-   * slivers. It was removed. What a person opening a market-data browser wants
-   * to see first is what the numbers DO, and thirteen rows of a six-lakh
-   * window cannot show that.
-   *
-   * IT IS SAMPLED BY INDEX, NOT SCANNED, WHICH IS THE WHOLE POINT.
-   * `rows[(i * n / N) | 0]` reaches the i-th sample in one step, so the cost is
-   * `SPARK_N` reads whatever the window holds — 240 for seven thousand rows and
-   * 240 for six lakh. An `O(rows)` fold to find the same shape would grow with
-   * the store and is exactly the cost this page refuses everywhere else: the
-   * path IS the index, here as much as on disk.
-   *
-   * `lo`/`hi` COME FROM THE SAMPLES AND NOT FROM THE WINDOW. Scanning every row
-   * for a true min and max would be the `O(rows)` walk this avoids, and it
-   * would buy nothing a reader can see: a spike between two samples is a spike
-   * this line was never going to draw. The scale is therefore honest about
-   * being the SAMPLES' range, and the label says "sampled" for that reason.
-   *
-   * A FLAT WINDOW IS DRAWN FLAT. When `hi === lo` every point maps to the same
-   * y — a straight line down the middle — rather than dividing by zero or
-   * springing to full height on noise. That is the truthful picture of the
-   * newest minutes of this store, which really are flat.
-   */
-  /* THE SAMPLER AND THE GEOMETRY LIVE IN `$lib/spark.js` NOW, and the reason is
-     the one `docs/07-o1-architecture.md` gives for every layer: "A layer is not
-     built because the code looks right. It is built when a test asserts the
-     bound as a NUMBER." This was thirty lines inside a `.svelte` file, which
-     `node --test` cannot import, so the O(1) claim made for it was a sentence
-     and a hand measurement — the same standing layer 12 had when its row cap
-     was hiding a fold that measured 124.916 ms at 50,000 instruments.
-     `spark.test.js` now asserts the read count is `min(n, 240)` at n = 100
-     through 1,000,000, and `sampleSeries` returns that count for it to check
-     rather than being trusted. Writing the test also found a real fault in the
-     first version of it — see the reversal case there. */
-  const SPARK_N = 240;
-  const spark = $derived.by(() => {
-    const s = sampleSeries(barWindowed, (r) => /** @type {any} */ (r)?.c ?? null, SPARK_N, barDesc);
-    if (s === null) return null;
-    const { line, area } = sparkPath(s);
-    return { d: line, fill: area, up: s.up, lo: s.lo, hi: s.hi, n: s.pts.length, of: s.of };
-  });
 
   const barSorted = $derived.by(() => {
     const k = barSortKey;
@@ -9209,38 +9160,13 @@
          THREE rows, and this rail plus its heading and legend was the tallest
          thing between the query and the data. A picture that is only a picture
          does not outrank the rows on a page whose whole job is the rows.
-         `coverBand` itself stays: `.facts` above reads its totals. -->
+         `coverBand` ITSELF STAYS AND IS STILL READ — the anchor prints the
+         first and last month of the selection out of its cells, and `factSeen`
+         folds its bar and month totals. Only the rail was removed.
+         This line used to say `.facts` reads those totals. That row moved to
+         the anchor in the same sequence, so the sentence outlived its subject;
+         it is corrected here rather than left to be believed. -->
 
-    <!-- WHAT REPLACES IT IS A PICTURE OF THE PRICE, WHICH IS WHAT WAS MISSING.
-         The band drew month COVERAGE — a fact about the store. This draws the
-         SERIES: the close across the whole loaded window, so the shape of six
-         lakh bars is on screen above thirteen of them. It is 34px, one line,
-         and it is the only thing on this page that can be read at a glance
-         rather than parsed.
-         SAMPLED BY INDEX — 240 reads whatever the window holds. See `spark`.
-         `role="img"` WITH THE WHOLE SENTENCE, because a path is nothing to a
-         reader who is not looking at it, and the direction and the range are
-         the two facts the picture carries. -->
-    {#if view === 'bars' && spark}
-      <div
-        class="spark"
-        class:up={spark.up}
-        role="img"
-        aria-label="Close across the loaded window: {spark.up
-          ? 'higher'
-          : 'lower'} at the end than the start, between {paisaText(spark.lo)} and {paisaText(
-          spark.hi
-        )}, sampled at {fmt(spark.n)} points of {fmt(spark.of)} bars."
-        title="The CLOSE across every bar loaded for this query — {fmt(spark.of)} of them, sampled at {fmt(spark.n)} evenly spaced points so the cost does not grow with the window. Low {paisaText(spark.lo)}, high {paisaText(spark.hi)}, taken from the samples rather than from a scan of all {fmt(spark.of)}. Time runs left to right whichever way the grid is sorted."
-      >
-        <svg viewBox="0 0 1000 100" preserveAspectRatio="none" aria-hidden="true">
-          <path class="sfill" d={spark.fill} />
-          <path class="sline" d={spark.d} />
-        </svg>
-        <span class="shi">{paisaText(spark.hi)}</span>
-        <span class="slo">{paisaText(spark.lo)}</span>
-      </div>
-    {/if}
 
     <div class="tbl">
         <!-- THE FIT IS PUBLISHED ON THE ELEMENT, AND IT IS KEPT RATHER THAN
@@ -10422,96 +10348,6 @@
     opacity: 0.9;
     border-radius: 2px;
     pointer-events: none;
-  }
-  /* ---- the price line ---------------------------------------------------
-     34px, WHICH IS THE HEIGHT THE COVERAGE BAND USED TO SPEND ON LESS. Tall
-     enough to carry a shape, short enough that it never competes with the rows
-     it introduces. `preserveAspectRatio="none"` lets one 1000x100 viewBox
-     stretch to any width without re-deriving a path per resize — the geometry
-     is computed once in `spark` and the browser does the scaling. */
-  .spark {
-    position: relative;
-    height: 34px;
-    margin: 0 var(--s2);
-    border-radius: var(--r1);
-    overflow: hidden;
-    background: var(--panel);
-    border: 1px solid var(--line-soft, var(--line));
-    /* THE DIRECTION IS THE COLOUR, and it is set on the container so the fill,
-       the line and both labels take it from one place. `--down` by default and
-       `--up` on the modifier: red on this page means the price fell, which is
-       the rule `.risk` states and the row spines already follow. */
-    color: var(--down);
-  }
-  .spark.up {
-    color: var(--up);
-  }
-  .spark svg {
-    display: block;
-    width: 100%;
-    height: 100%;
-  }
-  .sline {
-    fill: none;
-    stroke: currentColor;
-    stroke-width: 2;
-    /* IN USER UNITS THE VIEWBOX IS 1000 WIDE AND 100 TALL, so an unscaled
-       stroke would be drawn ten times thicker vertically than horizontally by
-       the same non-uniform scale that lets the path stretch. This keeps it a
-       line rather than a wedge. */
-    vector-effect: non-scaling-stroke;
-    stroke-linejoin: round;
-    stroke-linecap: round;
-  }
-  .sfill {
-    fill: currentColor;
-    opacity: 0.1;
-    stroke: none;
-  }
-  /* THE TWO EXTREMES, ON THE PICTURE RATHER THAN UNDER IT. A line with no
-     numbers on it is a shape nobody can price; these are the only two values
-     that make the vertical axis mean anything, and they cost no height because
-     they sit inside it. */
-  .shi,
-  .slo {
-    position: absolute;
-    right: var(--s3);
-    font-family: var(--mono);
-    font-variant-numeric: tabular-nums;
-    font-size: var(--fs-micro);
-    color: var(--faint);
-    pointer-events: none;
-    background: color-mix(in srgb, var(--panel) 78%, transparent);
-    padding: 0 3px;
-    border-radius: 2px;
-  }
-  .shi {
-    top: 1px;
-  }
-  .slo {
-    bottom: 1px;
-  }
-  /* THE LINE DRAWS ITSELF IN, ONCE, AND ONLY WHERE MOTION MEANS SOMETHING: it
-     is the one element on this page whose shape IS the information, so showing
-     it arrive left-to-right is showing the series being read in time order.
-     `stroke-dasharray` in user units — 1400 comfortably exceeds the longest
-     path across a 1000x100 box. */
-  @media (prefers-reduced-motion: no-preference) {
-    .sline {
-      stroke-dasharray: 1400;
-      animation: spark-draw 520ms cubic-bezier(0.22, 0.75, 0.3, 1) both;
-    }
-    .sfill {
-      animation: bx-fade-in 520ms 160ms both;
-    }
-  }
-  @keyframes spark-draw {
-    from {
-      stroke-dashoffset: 1400;
-    }
-    to {
-      stroke-dashoffset: 0;
-    }
   }
 
   .brow[data-dir='up'] > td:first-child::before {

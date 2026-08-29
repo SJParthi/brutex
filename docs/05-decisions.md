@@ -27374,3 +27374,60 @@ one table is shared by every thread.
 session's test suite at 400–580% CPU throughout, and `docs/06-limits.md` §4
 records that a saturated machine invalidates measurement. Every figure above is
 a count of operations from the code's own shape, not a stopwatch reading.
+
+### D-0377
+
+**The `/db` price line is removed. Sorted by close it drew a flawless uptrend
+that was a picture of the sort.**
+
+It sampled the loaded window at 240 evenly spaced indices and drew the close as
+one 34px line above the grid. The sampling was sound and its bound was real —
+`min(n, 240)` index reads whatever the window holds, asserted as a number by a
+test at n = 100 through 1,000,000.
+
+**The bound was never the problem. The x-axis was.** The line was drawn over
+`barWindowed`, which is the page's CURRENT PAGE in the grid's CURRENT SORT
+ORDER, and `/bars/window.json` sorts on any of seven stored columns. Measured
+against `NSE-INDEX-NIFTY` `1min` `2026-08`, one page of 250 rows, 240 samples:
+
+| grid sorted by | steps that rise | span drawn |
+|---|---|---|
+| `ts` (time) | 56.5 % | 97.90 pts |
+| `c` (close) | **100.0 %** | 139.30 pts |
+| `h` (high) | 56.1 % | 171.85 pts |
+| `v` (volume) | 50.6 % | 616.25 pts |
+
+On a close sort every one of the 239 steps rises, because the rows arrive
+sorted by the very number being plotted. The picture is a monotone ramp — the
+most confident possible statement about a market — and it is a statement about
+`ORDER BY`.
+
+**Its own tooltip made the claim that fails.** The element's title read *"Time
+runs left to right whichever way the grid is sorted."* On six of the seven
+sortable columns the horizontal axis is rank, not time. `CLAUDE.md` §3 rule 1
+bans invention and §4 bans a fallback that hides a failure; this was a control
+asserting a fact about the data that the data did not carry, in the one place a
+reader cannot check it.
+
+**Why it is deleted rather than gated to the time sort.** A chart that appears
+on one of seven sort orders is a chart whose absence needs explaining, and the
+window it summarises is a PAGE — 250 rows of a 7,500-row month, or of a
+6,23,498-row store — so even on `ts` it draws an arbitrary slice rather than
+the series. The honest version of this feature reads a whole series, which is
+the `O(rows)` walk this page refuses everywhere else, or a new server-side
+endpoint that returns a pre-sampled curve. Neither is this change.
+
+Related in principle, not in code: the `/backtest` note above refusing an
+equity sparkline built from four scalars. Same rule, different artefact.
+
+**Removed:** the markup, the `spark` derived and its `SPARK_N`, 90 lines of
+CSS including the `spark-draw` keyframe, `web/src/lib/spark.js` and
+`web/tests/spark.test.js`. The module had no other caller; keeping a proven
+bound on code nothing runs is dead weight, and the bound it proved is no longer
+claimed anywhere. `/audit`'s two sparklines are untouched and independent —
+they plot probe round-trips and measured bars-per-minute, where the x-axis is
+genuinely sequence and no sort control exists.
+
+**Verified:** `vite build` wrote the site, `svelte-check` 0 errors 0 warnings,
+`npm test` 152 pass 0 fail. No timing is claimed — the host carried another
+session's suite at ~320 % CPU per process, load average 229, throughout.
