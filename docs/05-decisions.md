@@ -27095,3 +27095,58 @@ that gap and it is unchanged by this entry.
 
 715 `pull` tests green, `clippy -D warnings` clean. Every new row falsified
 before landing.
+
+---
+
+### D-0372
+
+**Gates W3 and W4 are floors at zero: the browser tree types clean and styles
+nothing it does not draw.**
+
+Both were ratchets carrying a number nobody had driven down, and one of them
+was already red.
+
+**W4 was failing and had not been run.** `4b3220b` — "the trade table shows
+trades, not padlocks" — deleted `<tr class="lockrow">`, `<div
+class="tt-lockbig">` and `<p class="tt-fix">` from `routes/backtest` and left
+six rules behind styling nothing. W4 is a FLOOR at zero, not a ratchet, so that
+was a build waiting to be noticed rather than untidiness. Removed by exact text
+and verified by the compiler: it reports one line per SELECTOR and a single
+rule may list several, which is how an earlier line-based deletion took 375
+lines and broke a build.
+
+**W3 went 42 → 0, and the interesting part is that 42 errors were four roots.**
+Every one was in `routes/backtest`. `live`, `board`, `tradeList` and `combos`
+each declared `rungs: []` / `groups: []` / `rows: []` inside `$state(...)` with
+no type; TypeScript inferred `never[]` and every downstream property read
+became its own error — twenty of them. One untyped `span(pick)` parameter
+accounted for ten more, because the ten `span((r) => ...)` callers took `r`
+from that one signature. **The error is never reported at the line that causes
+it**, which is exactly why a gate that only counts is still worth keeping.
+
+The rest: `keyof typeof engine` on `KNOB_FIELDS` and `keyof typeof weights` on
+a new `WEIGHT_FIELDS` const — tying each key list to the state it indexes
+rather than repeating fourteen and ten names, so a knob added to one and
+forgotten in the other is a compile error instead of an `any`. `WEIGHT_FIELDS`
+also came out of the markup, where an inline array widened to `string[]` and
+left both `bind:value={weights[key]}` sliders bound to a property the compiler
+could not name. And one missing `</tbody>` in the trade table, which was the
+last warning.
+
+**Two placement traps cost a full measure-and-retry cycle each, and are
+recorded so the next reader does not pay them again.** A `@type` written ABOVE
+a `$state(...)` declaration is ignored — it must wrap the value INSIDE the
+call. And a JSDoc block must open with `/**`: a plain `/*` is not read at all,
+which left a correct annotation present and invisible while the ten errors it
+was meant to fix did not move.
+
+**`any[]` where the payload is not this file's.** `BoardGroup.rows`,
+`tradeList.rows` and `combos.rows` are the ledger's and `/trades.json`'s own
+rows. Nothing in this tree declares those shapes, and naming one here would be
+a claim about a document this file does not own — §3 rule 1.
+
+**Measured, not assumed:** `svelte-check` 342 files, 0 errors, 0 warnings, 0
+files with problems; 0 unused CSS selectors workspace-wide; `node --test
+web/tests/*.test.js` 152 pass, 0 fail. W3's ceiling is `CEILING=0` and its
+failure message now names the root cause and both placement traps, because a
+gate that says only "you went up" makes the reader find this entry first.
