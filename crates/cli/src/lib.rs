@@ -46,6 +46,7 @@
 /// to a ranked result.
 pub mod batch;
 pub mod frontier;
+pub mod knobs;
 pub mod results;
 pub mod stability;
 pub mod stored;
@@ -2156,8 +2157,8 @@ fn grid_step_ppm(bars: &[indicators::Candle]) -> i64 {
     // Refused at zero because a zero divisor is a panic, and refused below one
     // for the same reason `.max(1)` guards the result: a step of zero is an
     // infinite ladder, not a fine one.
-    let resolution = std::env::var_os("BRUTEX_GRID_RESOLUTION")
-        .and_then(|raw| raw.to_string_lossy().trim().parse::<i64>().ok())
+    let resolution = crate::knobs::var("BRUTEX_GRID_RESOLUTION")
+        .and_then(|raw| raw.trim().parse::<i64>().ok())
         .filter(|&n| n >= 1)
         .unwrap_or(20);
     median.checked_div(resolution).unwrap_or(median).max(1)
@@ -2408,8 +2409,8 @@ fn grid_rungs(bars: &[indicators::Candle]) -> usize {
     // `BRUTEX_GRID_RUNGS` sets the count outright for an operator who wants a
     // deeper grid than the cap implies -- the cost table on `Levels::rungs`
     // says what that buys and what it costs. Absent it, nothing here is chosen.
-    if let Some(n) = std::env::var("BRUTEX_GRID_RUNGS")
-        .ok()
+    if let Some(n) = crate::knobs::var("BRUTEX_GRID_RUNGS")
+        // `knobs::var` already answers `Option`, so there is no `Result` to unwrap.
         .and_then(|raw| raw.parse::<usize>().ok())
         .filter(|&n| n > 0)
     {
@@ -4978,8 +4979,8 @@ impl Rules {
         /// every run, and halting a sweep over a typo in an optional variable
         /// would be a worse failure than using the documented figure.
         fn at(name: &str, default: i64) -> i64 {
-            std::env::var_os(name)
-                .and_then(|raw| raw.to_string_lossy().trim().parse::<i64>().ok())
+            crate::knobs::var(name)
+                .and_then(|raw| raw.trim().parse::<i64>().ok())
                 .filter(|&v| v >= 0)
                 .unwrap_or(default)
         }
@@ -5483,8 +5484,8 @@ fn screen_cap() -> usize {
     // past the 60 it replaces, and still seconds rather than hours. It is a
     // starting point an operator raises, not a ceiling anybody derived.
     const DEFAULT: usize = 10_000;
-    std::env::var("BRUTEX_SCREEN_CAP")
-        .ok()
+    crate::knobs::var("BRUTEX_SCREEN_CAP")
+        // `knobs::var` already answers `Option`, so there is no `Result` to unwrap.
         .and_then(|raw| raw.parse::<usize>().ok())
         .filter(|&n| n > 0)
         .unwrap_or(DEFAULT)
@@ -5513,7 +5514,7 @@ fn screen_cap() -> usize {
 /// `validate: false` and only the rung that lands is re-run with the stack. This
 /// gives the same choice to the command an operator reaches for first.
 fn validate_from_env() -> bool {
-    validates(std::env::var("BRUTEX_VALIDATE").ok().as_deref())
+    validates(crate::knobs::var("BRUTEX_VALIDATE").as_deref())
 }
 
 /// The rule itself, over the raw value, so it can be tested without touching the
@@ -5979,8 +5980,8 @@ pub fn sizing_rate_bp() -> i64 {
     /// A coin flip. Below this there is no bound to clear.
     const CHANCE: i64 = 5_000;
 
-    std::env::var_os("BRUTEX_SIZING_RATE_BP")
-        .and_then(|raw| raw.to_string_lossy().trim().parse::<i64>().ok())
+    crate::knobs::var("BRUTEX_SIZING_RATE_BP")
+        .and_then(|raw| raw.trim().parse::<i64>().ok())
         .filter(|&bp| bp > CHANCE && bp < 10_000)
         .unwrap_or(DEFAULT)
 }
@@ -7038,8 +7039,8 @@ fn one_rung(
     // so the frontier never empties and the walk has no end, and a million
     // demands a pattern present on every bar, which D-0080 excludes as
     // `AlwaysTrue` before k=1. Both are the same refusal `screen` already makes.
-    let operator_ppm = std::env::var_os("BRUTEX_SUPPORT_PPM")
-        .and_then(|raw| raw.to_string_lossy().trim().parse::<u64>().ok())
+    let operator_ppm = crate::knobs::var("BRUTEX_SUPPORT_PPM")
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
         .filter(|&ppm| ppm > 0 && ppm < 1_000_000);
 
     let named_ppm = support_ppm.or(operator_ppm);
@@ -7086,6 +7087,46 @@ fn one_rung(
         Some(_) => statistical,
         None => affordable_min_hits(&span.bars).map_or(statistical, |a| a.max(statistical)),
     };
+
+    // ENTERING THE SWEEP IS ALSO AN EVENT, AND THE SILENCE BELOW IT IS THE LONG
+    // ONE.
+    //
+    // "rung finished" closed the BACK half of the gap. The front half is the
+    // half that hurts: `audit_range` on the next line holds the ladder walk and
+    // the screen, and between the span load and its return NOTHING is emitted.
+    //
+    // MEASURED, 2026-08-29, on the operator's own 10% run: sixty-two minutes,
+    // eleven of fourteen cores, 9.2 GB resident, eight rungs dispatched in
+    // parallel by `par_iter` — and the last event of any kind was a span load
+    // FIVE SECONDS after the start. There was no way to tell from outside which
+    // of the eight were still running, which had finished, or at what support
+    // any of them was searching. `ps` said the process was busy; nothing said
+    // what it was busy with.
+    //
+    // `min_hits` is carried as a COUNT and as PPM OF THIS RUNG'S OWN BARS,
+    // because the count alone compares nothing across rungs: 61,829 on the
+    // 1-minute rung and 1,154 on the 60-minute one are the same question asked
+    // of 618,296 bars and 11,545, and only the ppm says so.
+    //
+    // Same granularity as "rung finished" — one event per rung per run — so
+    // gate 17's rule is untouched: this is `cli`, at the rung boundary, and no
+    // loop over bars or candidates can reach it.
+    crate::note(
+        &telemetry::Event::info("cli.audit", "rung sweeping")
+            .with("feed", vendor_word)
+            .with("underlying", underlying)
+            .with("rung", rung)
+            .with("bars", u64::try_from(bars).unwrap_or(u64::MAX))
+            .with("min_hits", min_hits)
+            .with(
+                "support_ppm",
+                min_hits
+                    .saturating_mul(1_000_000)
+                    .checked_div(u64::try_from(bars).unwrap_or(u64::MAX))
+                    .unwrap_or(0),
+            )
+            .with("named", u64::from(named_ppm.is_some())),
+    );
 
     // The long report is DISCARDED on purpose: nine of them is six thousand
     // lines. The row is read back from the store, which is the point of having
@@ -8824,10 +8865,10 @@ fn derived_ceiling() -> usize {
 }
 
 fn ceiling_from_env() -> Result<usize, String> {
-    match std::env::var_os("BRUTEX_CEILING") {
+    match crate::knobs::var("BRUTEX_CEILING") {
         None => Ok(derived_ceiling()),
         Some(raw) => {
-            let text = raw.to_string_lossy().into_owned();
+            let text = raw;
             match text.trim().parse::<usize>() {
                 Ok(0) | Err(_) => Err(format!(
                     "BRUTEX_CEILING is `{text}`, which is not a candidate count \

@@ -674,6 +674,37 @@ fn cases() -> Vec<Case> {
     // named in `UNREACHABLE`, because reaching them means running a real
     // sweep over stored bars.
     {
+        let site = json_site("emit-sweep-knobs");
+        cases.push(Case {
+            site: "sweeprun.rs api.sweep knobs set for this run",
+            target: "api.sweep",
+            message: "knobs set for this run",
+            level: telemetry::Level::Info,
+            drive: {
+                let _unused = std::sync::Arc::clone(&site);
+                Box::new(move || {
+                    // DRIVEN THROUGH `apply_knobs` AND NOT `conduct`, because
+                    // `conduct` calls `cli::range_over` on the real store two
+                    // lines later -- which on this machine is eighty-one months
+                    // of one-minute bars. A census that can only be satisfied by
+                    // launching a multi-hour sweep from `cargo test` is a census
+                    // people route around.
+                    crate::sweeprun::apply_knobs(&crate::sweeprun::Asked {
+                        feed: "zerodha".to_owned(),
+                        underlying: "NIFTY".to_owned(),
+                        from: (2019, 12),
+                        to: (2026, 8),
+                        rungs: vec!["60min"],
+                        knobs: vec![("BRUTEX_TOP", "500".to_owned())],
+                    });
+                    // Left clean for every test that runs after this one.
+                    cli::knobs::clear_all();
+                })
+            },
+            mine: Box::new(|record| says(record, "knobs", "BRUTEX_TOP=500")),
+        });
+    }
+    {
         let site = json_site("emit-sweep-malformed");
         cases.push(Case {
             site: "sweeprun.rs api.sweep a sweep was refused before it started",
@@ -1462,7 +1493,7 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     /// `pull.fno discovery refused`, the three named before it and the seven
     /// named here, which are the sites no test in this binary can drive.
     const UNREACHABLE: usize = 11;
-    // COUNTED FROM THE SOURCE, not declared. A thirty-NINTH emit added
+    // COUNTED FROM THE SOURCE, not declared. A FIFTIETH emit added
     // anywhere under `crates/api/src` fails this test until somebody decides
     // which of the three columns it belongs in, which is the whole point of
     // the accounting.
@@ -1472,7 +1503,7 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // exactly what `cargo test` is and the row costs nothing to reach.
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 48,
+        lib_sites, 49,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"

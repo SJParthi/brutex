@@ -320,6 +320,107 @@ pub struct Asked {
     pub from: (u16, u8),
     /// Last month of the span.
     pub to: (u16, u8),
+    /// The rungs to sweep, in `cli::EVERY_RUNG`'s own order.
+    ///
+    /// # Why this is a `Vec` and not an `Option`
+    ///
+    /// It is never empty. An absent `rungs` field means every rung, which is
+    /// what this route did before it could be asked anything else, so an old
+    /// client keeps its exact behaviour — and a body that names an empty list
+    /// is refused at the parse rather than being quietly widened back to all
+    /// eight. `None` and `[]` would otherwise both have to mean "all", and one
+    /// of them would be a caller who asked for nothing and got everything.
+    ///
+    /// The entries are `&'static str` borrowed from [`cli::EVERY_RUNG`],
+    /// because `cli::one_rung` stores the name in the row it returns. That
+    /// makes an unknown rung unrepresentable here rather than checked later:
+    /// a name that does not match the table cannot be put in this field at
+    /// all.
+    pub rungs: Vec<&'static str>,
+    /// The engine knobs this request sets, as `(BRUTEX_NAME, value)`.
+    ///
+    /// # Why the request carries them at all
+    ///
+    /// Because otherwise they live in the PROCESS ENVIRONMENT, and a knob in
+    /// the environment can only be changed by restarting the process.
+    ///
+    /// MEASURED, 2026-08-29: the operator's server was started from their IDE
+    /// with no `BRUTEX_` variables whatsoever, so every knob took its built-in
+    /// default — and two of those defaults compose into a run that cannot
+    /// finish. `screen_cap` defaults to 10,000 and `validate` defaults to ON
+    /// (`raw.is_none_or(|v| v.trim() != "0")` — *unset means true*), so the
+    /// page's own Run Sweep button would have priced twenty times more
+    /// combinations than the previous run and put walk-forward, PBO and the
+    /// bootstrap on every one. The button was reachable. The configuration was
+    /// not.
+    ///
+    /// # The table below IS the allowlist
+    ///
+    /// [`KNOBS`] maps a request field to a `BRUTEX_` name, and a name absent
+    /// from it cannot be set however the body is written. `BRUTEX_STORE` and
+    /// `BRUTEX_LOG_DIR` are deliberately absent: they name the process's own
+    /// files rather than this run's parameters, and an HTTP request must not be
+    /// able to move where this engine reads bars from or writes its log.
+    pub knobs: Vec<(&'static str, String)>,
+}
+
+/// Every knob a sweep request may set, as `(request field, BRUTEX name)`.
+///
+/// Named in the request in the page's own vocabulary rather than by their
+/// environment spelling, so the browser sends `"support_ppm": 100000` and not a
+/// shell variable. The mapping is one array index per field — `CLAUDE.md` §3
+/// rule 4's constant cost, with fourteen as the bound.
+///
+/// Ordered as an operator reads them: what to search, how much of it to price,
+/// how much to keep, then the admission rules.
+const KNOBS: [(&str, &str); 14] = [
+    ("support_ppm", "BRUTEX_SUPPORT_PPM"),
+    ("ceiling", "BRUTEX_CEILING"),
+    ("screen_cap", "BRUTEX_SCREEN_CAP"),
+    ("top", "BRUTEX_TOP"),
+    ("validate", "BRUTEX_VALIDATE"),
+    ("grid_rungs", "BRUTEX_GRID_RUNGS"),
+    ("grid_resolution", "BRUTEX_GRID_RESOLUTION"),
+    ("sizing_rate_bp", "BRUTEX_SIZING_RATE_BP"),
+    ("min_rr_bp", "BRUTEX_MIN_RR_BP"),
+    ("min_win_rate_bp", "BRUTEX_MIN_WIN_RATE_BP"),
+    ("min_trades", "BRUTEX_MIN_TRADES"),
+    ("min_ret_over_dd_bp", "BRUTEX_MIN_RET_OVER_DD_BP"),
+    ("min_weakest_bp", "BRUTEX_MIN_WEAKEST_BP"),
+    ("max_mae_ppm", "BRUTEX_MAX_MAE_PPM"),
+];
+
+/// Read every knob the body names, in [`KNOBS`] order.
+///
+/// # Why `validate` is normalised and the rest are not
+///
+/// `cli::validates` is `raw.is_none_or(|v| v.trim() != "0")`, so **any** string
+/// that is not exactly `"0"` means ON — and JSON's own `false` is the string
+/// `"false"`, which is not `"0"`. A page sending `"validate": false` would
+/// therefore turn validation ON, which is the precise opposite of what it
+/// asked. Every other knob is a number whose text parses the same on both
+/// sides, so only this one needs the translation.
+fn knobs_in(body: &str) -> Vec<(&'static str, String)> {
+    let mut out: Vec<(&'static str, String)> = Vec::with_capacity(KNOBS.len());
+    for (asked, name) in KNOBS {
+        let Some(raw) = field(body, asked) else {
+            continue;
+        };
+        let value = if name == "BRUTEX_VALIDATE" {
+            match raw.trim().to_ascii_lowercase().as_str() {
+                "0" | "false" | "off" | "no" => "0".to_owned(),
+                other => other.to_owned(),
+            }
+        } else {
+            raw.trim().to_owned()
+        };
+        // An empty value is ABSENCE. `cli::knobs::set` makes the same reading,
+        // and this skips the round trip rather than relying on it.
+        if !value.is_empty() {
+            out.push((name, value));
+        }
+    }
+    out
 }
 
 /// What one `POST /backtest/descend` body asked for.
@@ -449,12 +550,51 @@ fn field(body: &str, name: &str) -> Option<String> {
     Some(rest.get(..end)?.trim().to_owned())
 }
 
+/// One field out of a flat JSON object, as a list of strings.
+///
+/// [`field`]'s sibling, and a hand parser for the same stated reason: this
+/// body has one array in it and nothing nested.
+///
+/// `None` means the key is absent, which callers read as "not asked for".
+/// `Some(vec![])` means the key is present and empty — a DIFFERENT fact, and
+/// the one the rung parser refuses rather than widening back to everything.
+///
+/// Only the strings inside the brackets are taken, so `["1min","5min"]` and
+/// `[ "1min" , "5min" ]` parse the same. A malformed array — no closing
+/// bracket — reads as absent rather than as empty, because a body that was cut
+/// off did not ask for nothing, it failed to ask.
+fn list_field(body: &str, name: &str) -> Option<Vec<String>> {
+    let key = format!("\"{name}\"");
+    let at = body.find(&key)? + key.len();
+    let rest = body.get(at..)?.trim_start();
+    let rest = rest.strip_prefix(':')?.trim_start();
+    let inner = rest.strip_prefix('[')?;
+    let end = inner.find(']')?;
+    let inner = inner.get(..end)?;
+    let mut out = Vec::new();
+    let mut chars = inner.char_indices();
+    while let Some((i, c)) = chars.next() {
+        if c != '"' {
+            continue;
+        }
+        let after = inner.get(i + 1..)?;
+        let close = after.find('"')?;
+        out.push(after.get(..close)?.to_owned());
+        // Skip past the closing quote so the next scan starts after it and a
+        // two-item list cannot be read as one item plus the gap between them.
+        for _ in 0..=close {
+            let _ = chars.next();
+        }
+    }
+    Some(out)
+}
+
 /// The request body, or the first thing wrong with it.
 ///
 /// # Errors
 ///
 /// A missing or unparseable field, a month outside `1..=12`, a `to` before its
-/// `from`, or a support threshold of zero.
+/// `from`, a support threshold of zero, or a rung the engine does not sweep.
 pub fn asked_from(body: &str) -> Result<Asked, Refusal> {
     let feed = field(body, "feed")
         .filter(|s| !s.is_empty())
@@ -536,25 +676,85 @@ pub fn asked_from(body: &str) -> Result<Asked, Refusal> {
     // ordering buys and why the bound does not appear here any more.
     let month = |m: u64| -> u8 { u8::try_from(m).unwrap_or(1) };
 
+    // THE RUNGS, RESOLVED AGAINST THE ENGINE'S OWN TABLE.
+    //
+    // Absent means every rung, which is what this route did before it could be
+    // asked anything else — an older client keeps its exact behaviour. Present
+    // and EMPTY is a refusal: a sweep over no timeframe is not a sweep, and
+    // widening `[]` back to all eight would answer a caller who asked for
+    // nothing by giving them everything.
+    //
+    // Each name is resolved to the `&'static str` in `EVERY_RUNG` rather than
+    // kept as the caller's `String`, so an unknown rung cannot reach `Asked`
+    // at all. `cli::one_rung` needs `&'static str` for the row it returns, and
+    // this is where that requirement is satisfied honestly instead of by an
+    // allocation that outlives the request.
+    let rungs = match list_field(body, "rungs") {
+        None => EVERY_RUNG.to_vec(),
+        Some(asked) if asked.is_empty() => {
+            return Err(Refusal::Malformed(
+                "`rungs` is present and empty. A sweep over no timeframe is not a sweep; \
+                 omit the field to sweep every rung."
+                    .to_owned(),
+            ));
+        }
+        Some(asked) => {
+            let mut out: Vec<&'static str> = Vec::with_capacity(asked.len());
+            for name in &asked {
+                let Some(known) = EVERY_RUNG.iter().copied().find(|k| *k == name.as_str()) else {
+                    return Err(Refusal::Malformed(format!(
+                        "`{name}` is not a rung this engine sweeps. The eight are: {}.",
+                        EVERY_RUNG.join(", ")
+                    )));
+                };
+                if !out.contains(&known) {
+                    out.push(known);
+                }
+            }
+            out
+        }
+    };
+
     Ok(Asked {
         feed,
         underlying,
         from: (from_y, month(from_month)),
         to: (to_y, month(to_month)),
+        rungs,
+        knobs: knobs_in(body),
     })
 }
 
-/// The eight rungs a descent may walk.
+/// The eight rungs a descent may walk — **the engine's own list**.
 ///
-/// Held here rather than read from `cli`, because `cli::EVERY_RUNG` is private
-/// and making it public to save eight strings would widen that crate's surface
-/// for one caller. `cli::elite_descend_in_points` validates the rung again and
-/// refuses by name, so this list being stale would produce a refusal naming the
-/// eight it accepts — a wrong sentence, never a wrong sweep. The test below
-/// pins it against a refusal from `cli` itself.
-const EVERY_RUNG: [&str; 8] = [
-    "1min", "2min", "3min", "5min", "10min", "15min", "60min", "1day",
-];
+/// # This was a copy, and the copy had drifted
+///
+/// It read, here, as its own `const`:
+///
+/// ```text
+/// api : 1min, 2min, 3min, 5min, 10min, 15min, 60min, 1day
+/// cli : 1min, 2min, 3min, 5min, 10min, 15min, 30min, 60min
+/// ```
+///
+/// **Missing `30min`, and accepting `1day`** — a rung the engine never sweeps,
+/// which is on disk to feed `indicators::daily` with the previous session's
+/// OHLC. So `POST /backtest/descend` refused a rung the engine walks and
+/// accepted one it does not, which is the likeliest route by which a `1day`
+/// record reached the results ledger at all.
+///
+/// The old comment justified the copy: "`cli::EVERY_RUNG` is private and making
+/// it public to save eight strings would widen that crate's surface for one
+/// caller", and promised "the test below pins it against a refusal from `cli`
+/// itself". It did not. `cli::elite_descend_in_points` never checks the rung
+/// against `EVERY_RUNG` — it hands the name to `stored::load_span`, whose
+/// refusal names the STORE's nine timeframes. So the test asserted that api's
+/// eight appear among the store's nine: `1day` is a store timeframe and passed,
+/// and a missing `30min` was invisible because the check ran in one direction
+/// only.
+///
+/// That is the two-vocabularies failure `CLAUDE.md` §5 exists to refuse, with
+/// its own justification written above it. There is one list now.
+pub use cli::EVERY_RUNG;
 
 /// The descent request body, or the first thing wrong with it.
 ///
@@ -682,6 +882,49 @@ fn settle(progress: &mut Progress, text: String, finished_micros: i64) {
 /// §5 makes that banner the only thing separating a real sweep from a
 /// generated one, so it travels with the report rather than being stripped for
 /// the page.
+/// Set this request's knobs for the run about to happen, and say so.
+///
+/// # Why this is its own function
+///
+/// So a test can drive it WITHOUT starting a sweep. The emit-site census in
+/// `emitted.rs` requires every telemetry line in this binary to be either driven
+/// by a test or listed as unreachable, and the only other way to reach this one
+/// was through [`conduct`] — which calls `cli::range_over` on the real store two
+/// lines later. On the operator's own machine that store holds eighty-one months
+/// of one-minute bars, so a test that drove this emit through `conduct` would
+/// have launched a multi-hour sweep from `cargo test`.
+///
+/// A census that can only be satisfied by an expensive test is a census people
+/// route around, which is how a row ends up on the unreachable list for a reason
+/// that is really "it was awkward".
+///
+/// # Ordering
+///
+/// Set BEFORE the run and reported before it too, because the run is the thing
+/// that might take hours and the settings are what an operator watching it needs
+/// to see. The run's identity already covers the knobs that move the answer, but
+/// reading an identity back into settings means recomputing a blake3 hash, which
+/// is not something a person can do from a log page.
+///
+/// `clear_all` first, so a previous request that set a knob cannot leak into this
+/// one through a path that returned early.
+pub fn apply_knobs(asked: &Asked) {
+    cli::knobs::clear_all();
+    for (name, value) in &asked.knobs {
+        cli::knobs::set(name, value);
+    }
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::info("api.sweep", "knobs set for this run")
+            .with("feed", asked.feed.as_str())
+            .with("underlying", asked.underlying.as_str())
+            .with(
+                "rungs",
+                u64::try_from(asked.rungs.len()).unwrap_or(u64::MAX),
+            )
+            .with("knobs", cli::knobs::describe().as_str()),
+    );
+}
+
 #[must_use]
 pub fn conduct(asked: &Asked, now_micros: i64) -> Progress {
     let mut progress = Progress::started(
@@ -692,7 +935,38 @@ pub fn conduct(asked: &Asked, now_micros: i64) -> Progress {
         None,
         now_micros,
     );
-    let text = cli::range_all(&asked.feed, &asked.underlying, asked.from, asked.to, None);
+    // THE REQUEST'S OWN KNOBS, SET FOR THIS RUN AND CLEARED AFTER IT.
+    //
+    // Set here rather than at parse time because parsing a body must not change
+    // how this process behaves — a malformed request that is refused three lines
+    // later would otherwise have already moved the screen cap for whatever runs
+    // next. By the time control reaches this function the request is whole and
+    // a run is definitely about to happen.
+    //
+    // Safe as process-wide state because a sweep is already one-at-a-time:
+    // `holding` refuses a second run while `in_flight`, in three places, so
+    // there is never a moment when two runs want different values for one knob.
+    apply_knobs(asked);
+
+    // `range_over` AND NOT `range_all`, because the request can now name the
+    // rungs. A body with no `rungs` field parses to `EVERY_RUNG`, so this is
+    // byte-identical to the old call for every existing client — `range_all`
+    // is itself `range_over(&EVERY_RUNG, ..)` now, so there is one code path
+    // rather than two that must be kept agreeing.
+    let text = cli::range_over(
+        &asked.feed,
+        &asked.underlying,
+        &asked.rungs,
+        asked.from,
+        asked.to,
+        None,
+    );
+    // CLEARED AFTER THE RUN, so the next one starts from the environment again
+    // and a request cannot leave its settings behind for a request that named
+    // none. Placed after `range_over` returns rather than in a guard, because
+    // `range_over` returns a refusal string rather than panicking on every path
+    // this route can reach.
+    cli::knobs::clear_all();
     settle(&mut progress, text, now_micros);
     progress
 }
@@ -1608,12 +1882,20 @@ pub async fn top_json(uri: axum::http::Uri) -> (axum::http::StatusCode, JsonHead
 )]
 mod tests {
     use super::{
-        Asked, AskedDescent, EVERY_COMMAND, EVERY_RUNG, Kind, Progress, Refusal, asked_from,
+        Asked, AskedDescent, EVERY_COMMAND, EVERY_RUNG, KNOBS, Kind, Progress, Refusal, asked_from,
         command_from, conduct_command, descent_from, field, now_micros, settle, stamp_refusal,
     };
 
     fn body(feed: &str, span: &str) -> String {
         format!(r#"{{"feed":"{feed}","underlying":"NIFTY",{span}}}"#)
+    }
+
+    /// [`body`] with extra JSON spliced in before the closing brace.
+    ///
+    /// The `extra` carries its own leading comma, so a caller can add one
+    /// field or none without this helper guessing which.
+    fn body_with(feed: &str, span: &str, extra: &str) -> String {
+        format!(r#"{{"feed":"{feed}","underlying":"NIFTY",{span}{extra}}}"#)
     }
 
     const SPAN: &str = r#""from_year":2019,"from_month":12,"to_year":2026,"to_month":8"#;
@@ -1630,7 +1912,65 @@ mod tests {
                 underlying: "NIFTY".to_owned(),
                 from: (2019, 12),
                 to: (2026, 8),
+                // A BODY WITH NO `rungs` SWEEPS EVERY RUNG, which is what this
+                // route did before it could be asked anything else. Pinned in
+                // the parser's own equality test so the compatibility is a
+                // property under test rather than a claim in a comment.
+                rungs: EVERY_RUNG.to_vec(),
+                knobs: Vec::new(),
             }
+        );
+    }
+
+    #[test]
+    fn a_named_rung_subset_is_resolved_against_the_engines_table() {
+        let asked = asked_from(&body_with(
+            "zerodha",
+            SPAN,
+            r#","rungs":["15min","1min","15min"]"#,
+        ))
+        .expect("a good body");
+        // ORDER IS THE CALLER'S AND DUPLICATES COLLAPSE. `range_over` maps over
+        // an indexed parallel iterator, so the rows come out in this order --
+        // and a rung asked for twice must be swept once, not twice into the
+        // same ledger.
+        assert_eq!(asked.rungs, vec!["15min", "1min"]);
+    }
+
+    #[test]
+    fn a_rung_the_engine_does_not_sweep_is_refused_by_name() {
+        // `1day` IS THE ONE THAT MATTERS. It is a real store timeframe, so a
+        // check written against the store would accept it; the engine does not
+        // sweep it, and a `1day` record in the results ledger is how this was
+        // noticed at all.
+        let why = asked_from(&body_with("zerodha", SPAN, r#","rungs":["1day"]"#))
+            .expect_err("1day is not swept");
+        assert!(why.why().contains("1day"), "{}", why.why());
+        assert!(
+            why.why().contains("30min"),
+            "the eight are named: {}",
+            why.why()
+        );
+
+        let bad = asked_from(&body_with("zerodha", SPAN, r#","rungs":["7min"]"#))
+            .expect_err("7min is not a rung");
+        assert!(bad.why().contains("7min"), "{}", bad.why());
+    }
+
+    #[test]
+    fn an_empty_rung_list_is_refused_rather_than_widened_to_all_eight() {
+        // PRESENT-AND-EMPTY IS NOT ABSENT. Widening `[]` back to every rung
+        // would answer a caller who asked for nothing by giving them
+        // everything, which is the silent-default shape §6 objects to.
+        let why = asked_from(&body_with("zerodha", SPAN, r#","rungs":[]"#))
+            .expect_err("an empty list is not a sweep");
+        assert!(why.why().contains("rungs"), "{}", why.why());
+        // And absent still means all eight, which is the other half of the rule.
+        assert_eq!(
+            asked_from(&body("zerodha", SPAN))
+                .expect("absent is fine")
+                .rungs,
+            EVERY_RUNG.to_vec()
         );
     }
 
@@ -1695,23 +2035,136 @@ mod tests {
     }
 
     #[test]
-    fn a_support_field_in_the_body_is_ignored_rather_than_obeyed() {
-        // THE OLD PAGE IS STILL OUT THERE, and so is anyone's curl. A body
-        // that still carries `support_ppm` must not fail -- it names a field
-        // this route no longer has, which is not the same as being malformed.
+    fn a_support_field_in_the_body_is_now_obeyed_and_named() {
+        // THIS TEST USED TO PIN THE OPPOSITE, and the argument it made was
+        // right: *"a hidden settable parameter is worse than a visible one:
+        // nothing on the page would show it was in play."*
         //
-        // It must ALSO not take effect. A request that could still set the
-        // threshold would mean the parameter had merely been hidden from the
-        // form rather than removed, and a hidden settable parameter is worse
-        // than a visible one: nothing on the page would show it was in play.
+        // What changed is not the argument but the answer to it. The parameter
+        // is no longer hidden. It is one of `KNOBS`, the page renders a control
+        // for it, `conduct` logs every knob it set under `api.sweep` before the
+        // run starts, and the run's own identity covers it. The condition the
+        // old test demanded — that nothing steer the engine invisibly — is met
+        // by making it VISIBLE rather than by making it inert.
+        //
+        // The alternative it was defending against is what the operator's
+        // machine actually did on 2026-08-29: a server started with no
+        // `BRUTEX_` variables, every knob at a default nobody chose, and two of
+        // those defaults composing into a run that could not finish. That is
+        // the same invisibility, one level down.
         let with =
             format!(r#"{{"feed":"zerodha","underlying":"NIFTY",{SPAN},"support_ppm":999999}}"#);
-        let without = asked_from(&body("zerodha", SPAN)).expect("a good body");
+        let asked = asked_from(&with).expect("a body naming a knob is a good body");
         assert_eq!(
-            asked_from(&with).expect("a body with a stale field is still good"),
+            asked.knobs,
+            vec![("BRUTEX_SUPPORT_PPM", "999999".to_owned())],
+            "the field must reach the engine under its own name"
+        );
+
+        // AND A BODY THAT NAMES NONE SETS NONE, so every existing client keeps
+        // its exact behaviour and the environment still decides for them.
+        let without = asked_from(&body("zerodha", SPAN)).expect("a good body");
+        assert!(
+            without.knobs.is_empty(),
+            "a body with no knobs must set no knobs"
+        );
+        assert_eq!(
+            Asked {
+                knobs: Vec::new(),
+                ..asked
+            },
             without,
             "the extra field must change nothing about what was asked"
         );
+    }
+
+    /// THE TABLE IS THE ALLOWLIST, and this is what makes that a property
+    /// rather than a claim.
+    ///
+    /// `BRUTEX_STORE` names where this engine reads bars from and
+    /// `BRUTEX_LOG_DIR` where it writes its audit trail. Neither is a parameter
+    /// of a run, and an HTTP body must not be able to move either — a request
+    /// that could repoint the store would make every provenance banner on the
+    /// page a claim about a directory the operator did not choose.
+    ///
+    /// They are absent from `KNOBS`, and `cli` reads both through
+    /// `std::env::var_os` rather than through the knob store, so there are two
+    /// independent reasons this cannot happen. This test pins the first.
+    #[test]
+    fn a_body_cannot_move_the_store_or_the_log_directory() {
+        let hostile = format!(
+            r#"{{"feed":"zerodha","underlying":"NIFTY",{SPAN},"store":"/tmp/evil",
+               "BRUTEX_STORE":"/tmp/evil","log_dir":"/tmp/evil","BRUTEX_LOG_DIR":"/tmp/evil"}}"#
+        );
+        let asked = asked_from(&hostile).expect("unknown fields are ignored, not refused");
+        assert!(
+            asked.knobs.is_empty(),
+            "no field outside KNOBS may set anything: {:?}",
+            asked.knobs
+        );
+        for (_, name) in KNOBS {
+            assert!(
+                name != "BRUTEX_STORE" && name != "BRUTEX_LOG_DIR",
+                "{name} names the process's own files and must never be settable"
+            );
+        }
+    }
+
+    /// `cli::validates` is `raw.is_none_or(|v| v.trim() != "0")`, so ANY string
+    /// that is not exactly `"0"` means validation is ON — and JSON's own
+    /// `false` is the string `"false"`.
+    ///
+    /// A page sending `"validate": false` would therefore have turned
+    /// validation ON, which is the exact opposite of what it asked, and the
+    /// symptom would have been a run that never finished rather than an error.
+    /// That is the failure §4 bans, so the translation is tested rather than
+    /// commented.
+    #[test]
+    fn a_json_false_for_validate_becomes_the_off_the_engine_recognises() {
+        for written in ["false", "\"false\"", "0", "\"off\"", "\"NO\""] {
+            let raw =
+                format!(r#"{{"feed":"zerodha","underlying":"NIFTY",{SPAN},"validate":{written}}}"#);
+            let asked = asked_from(&raw).expect("a good body");
+            assert_eq!(
+                asked.knobs,
+                vec![("BRUTEX_VALIDATE", "0".to_owned())],
+                "`{written}` must reach the engine as the only string it reads as off"
+            );
+        }
+    }
+
+    /// Every knob in the table is reachable from a body, so a control the page
+    /// renders cannot be one the parser silently drops.
+    #[test]
+    fn every_knob_in_the_table_can_be_set_from_a_body() {
+        for (asked_name, env_name) in KNOBS {
+            let raw =
+                format!(r#"{{"feed":"zerodha","underlying":"NIFTY",{SPAN},"{asked_name}":"7"}}"#);
+            let asked = asked_from(&raw).expect("a good body");
+            assert_eq!(
+                asked.knobs,
+                vec![(env_name, "7".to_owned())],
+                "`{asked_name}` must reach the engine as `{env_name}`"
+            );
+        }
+    }
+
+    /// An empty value is ABSENCE. A browser field the operator cleared arrives
+    /// as `""`, and setting a knob to the empty string would have every parse
+    /// of it fail into a default — a silent fallback wearing a setting's
+    /// clothes.
+    #[test]
+    fn an_empty_knob_value_sets_nothing() {
+        for written in ["\"\"", "\"   \""] {
+            let raw =
+                format!(r#"{{"feed":"zerodha","underlying":"NIFTY",{SPAN},"top":{written}}}"#);
+            let asked = asked_from(&raw).expect("a good body");
+            assert!(
+                asked.knobs.is_empty(),
+                "`{written}` is nothing, not a value: {:?}",
+                asked.knobs
+            );
+        }
     }
 
     #[test]
@@ -2190,7 +2643,7 @@ mod tests {
         // free, because this parser delegates rather than re-deriving.
         let body = r#"{"feed":"zerodha","underlying":"NIFTY","from_year":18446744073709551615,
                        "from_month":1,"to_year":2026,"to_month":8,
-                       "rung":"1day","max_points":20,"top":25}"#;
+                       "rung":"15min","max_points":20,"top":25}"#;
         assert!(
             descent_from(body).is_err(),
             "the span bound must still bite"
@@ -2199,7 +2652,7 @@ mod tests {
         // And a backwards span, which is the sweep's other span refusal.
         let backwards = r#"{"feed":"zerodha","underlying":"NIFTY","from_year":2026,
                             "from_month":8,"to_year":2019,"to_month":12,
-                            "rung":"1day","max_points":20,"top":25}"#;
+                            "rung":"15min","max_points":20,"top":25}"#;
         assert!(descent_from(backwards).is_err());
     }
 
@@ -2209,13 +2662,23 @@ mod tests {
             .expect_err("a descent walks ONE rung, so it must be told which");
 
         assert!(why.why().contains("rung"), "{}", why.why());
-        for rung in ["1min", "15min", "1day"] {
+        // `30min` REPLACES `1day` IN THIS LIST, and the swap is the bug this
+        // test used to encode. It asserted the refusal named `1day` — so when
+        // api's copy of the rung table drifted to include `1day` and drop
+        // `30min`, this test AGREED with the drift instead of catching it.
+        // An assertion written against the wrong list defends the wrong list.
+        for rung in ["1min", "15min", "30min", "60min"] {
             assert!(
                 why.why().contains(rung),
                 "the operator cannot pick from a list they are not shown: {}",
                 why.why()
             );
         }
+        assert!(
+            !why.why().contains("1day"),
+            "`1day` is not swept and must not be offered as a choice: {}",
+            why.why()
+        );
     }
 
     #[test]
@@ -2230,45 +2693,71 @@ mod tests {
     fn a_stop_ceiling_of_zero_or_less_is_refused_rather_than_swept_with() {
         for points in ["0", "-20"] {
             let why = descent_from(&descent_body(&format!(
-                r#""rung":"1day","max_points":{points},"top":25"#
+                r#""rung":"15min","max_points":{points},"top":25"#
             )))
             .expect_err("a ceiling of zero admits no trade");
             assert!(why.why().contains("max_points"), "{}", why.why());
         }
         // AND A MISSING ONE IS NOT ZERO. Defaulting it would pick the
         // operator's risk for them, silently.
-        assert!(descent_from(&descent_body(r#""rung":"1day","top":25"#)).is_err());
+        assert!(descent_from(&descent_body(r#""rung":"15min","top":25"#)).is_err());
     }
 
     #[test]
     fn a_listing_bound_of_zero_is_refused() {
-        let why = descent_from(&descent_body(r#""rung":"1day","max_points":20,"top":0"#))
+        let why = descent_from(&descent_body(r#""rung":"15min","max_points":20,"top":0"#))
             .expect_err("zero rows is no answer");
         assert!(why.why().contains("top"), "{}", why.why());
-        assert!(descent_from(&descent_body(r#""rung":"1day","max_points":20"#)).is_err());
+        assert!(descent_from(&descent_body(r#""rung":"15min","max_points":20"#)).is_err());
     }
 
     #[test]
-    fn the_rung_list_here_agrees_with_the_one_cli_refuses_by() {
-        // THIS LIST IS A COPY AND COPIES DRIFT. `cli` holds the authority and
-        // its refusal names the eight it accepts, so asking it about a rung it
-        // cannot sweep gives the real list to compare against -- and it refuses
-        // BEFORE opening any span, so this costs no bars.
-        let refusal = cli::elite_descend_in_points(
-            "zerodha",
-            "NIFTY",
-            "no-such-rung",
-            (2026, 8),
-            (2026, 8),
-            20,
-            25,
+    fn the_rung_list_here_is_the_one_cli_sweeps_by_and_not_a_copy_of_it() {
+        // THIS TEST REPLACES ONE THAT PASSED WHILE THE LIST WAS WRONG, and how
+        // it passed is the point.
+        //
+        // The old version asked `cli::elite_descend_in_points` about
+        // `no-such-rung` and asserted that every name in api's own copy
+        // appeared in the refusal. Two things defeated it:
+        //
+        //   * `elite_descend_in_points` does NOT validate against `EVERY_RUNG`.
+        //     It hands the name to `stored::load_span`, whose refusal lists the
+        //     STORE's nine timeframes. So the assertion compared api's list to
+        //     the store's, not to the engine's.
+        //   * It ran in ONE DIRECTION -- api ⊆ refusal. A name the engine
+        //     sweeps and api omitted was invisible.
+        //
+        // Both together let the copy sit at
+        //     1min 2min 3min 5min 10min 15min 60min 1day
+        // against the engine's
+        //     1min 2min 3min 5min 10min 15min 30min 60min
+        // -- missing `30min`, accepting `1day` -- while the suite stayed green.
+        //
+        // There is no copy now: `EVERY_RUNG` is re-exported from `cli`. This
+        // asserts THAT, so the day someone reintroduces a local array to avoid
+        // the dependency, this fails rather than measuring the wrong thing.
+        assert_eq!(
+            EVERY_RUNG,
+            cli::EVERY_RUNG,
+            "the rung table must BE cli's, not agree with it"
         );
-        for rung in EVERY_RUNG {
-            assert!(
-                refusal.contains(rung),
-                "`{rung}` is offered here and `cli` does not list it: {refusal}"
-            );
-        }
+
+        // And the engine's own list is the eight intraday rungs. `1day` is on
+        // disk to define the previous session's OHLC for them and is never
+        // swept; if it ever appears here, a `1day` run can reach the ledger
+        // through this route again.
+        assert!(
+            !EVERY_RUNG.contains(&"1day"),
+            "`1day` is not a signal timeframe and must not be offered: {EVERY_RUNG:?}"
+        );
+        assert!(
+            EVERY_RUNG.contains(&"30min"),
+            "`30min` is a rung the engine sweeps: {EVERY_RUNG:?}"
+        );
+        assert!(
+            EVERY_RUNG.iter().all(|r| r.ends_with("min")),
+            "every swept rung is intraday: {EVERY_RUNG:?}"
+        );
     }
 
     #[test]
@@ -2299,7 +2788,7 @@ mod tests {
     #[test]
     fn every_stored_command_parses_into_its_own_shape() {
         let audit = command_from(&command_body(
-            r#""command":"audit-range","rung":"1day","min_hits":500"#,
+            r#""command":"audit-range","rung":"15min","min_hits":500"#,
         ))
         .expect("audit-range");
         assert_eq!(audit.word(), "audit-range");
@@ -2317,7 +2806,7 @@ mod tests {
         assert_eq!(auto.word(), "auto-stored");
 
         let batch = command_from(&command_body(
-            r#""command":"sweep-all","rung":"1day","min_hits":500"#,
+            r#""command":"sweep-all","rung":"15min","min_hits":500"#,
         ))
         .expect("sweep-all");
         assert_eq!(batch.word(), "sweep-all");
@@ -2356,7 +2845,7 @@ mod tests {
             assert!(why.why().contains(word), "{} omits {word}", why.why());
         }
         assert!(
-            command_from(&command_body(r#""rung":"1day""#)).is_err(),
+            command_from(&command_body(r#""rung":"15min""#)).is_err(),
             "no command word"
         );
     }
@@ -2367,7 +2856,7 @@ mod tests {
         // the opening month and recording it under a request that named eighty
         // would be a shorter answer wearing the request's identity.
         let asked = command_from(&command_body(
-            r#""command":"sweep-stored","rung":"1day","min_hits":500"#,
+            r#""command":"sweep-stored","rung":"15min","min_hits":500"#,
         ))
         .expect("parses");
         let progress = conduct_command(&asked, 1);
@@ -2379,10 +2868,10 @@ mod tests {
     #[test]
     fn a_screen_without_a_support_or_a_ceiling_is_refused() {
         for extra in [
-            r#""command":"screen","rung":"1day","max_points":20,"top":25"#,
-            r#""command":"screen","rung":"1day","support_ppm":0,"max_points":20,"top":25"#,
-            r#""command":"screen","rung":"1day","support_ppm":50000,"max_points":0,"top":25"#,
-            r#""command":"screen","rung":"1day","support_ppm":50000,"max_points":20,"top":0"#,
+            r#""command":"screen","rung":"15min","max_points":20,"top":25"#,
+            r#""command":"screen","rung":"15min","support_ppm":0,"max_points":20,"top":25"#,
+            r#""command":"screen","rung":"15min","support_ppm":50000,"max_points":0,"top":25"#,
+            r#""command":"screen","rung":"15min","support_ppm":50000,"max_points":20,"top":0"#,
         ] {
             assert!(
                 command_from(&command_body(extra)).is_err(),
@@ -2406,20 +2895,20 @@ mod tests {
     fn a_command_needing_a_hit_floor_is_refused_without_one() {
         for word in ["audit-range", "sweep-stored", "sweep-all"] {
             let why = command_from(&command_body(&format!(
-                r#""command":"{word}","rung":"1day""#
+                r#""command":"{word}","rung":"15min""#
             )))
             .expect_err("needs min_hits");
             assert!(why.why().contains("min_hits"), "{}", why.why());
         }
         // AND `auto-stored` NEEDS NONE — it searches for the threshold, which
         // is the whole reason it exists.
-        assert!(command_from(&command_body(r#""command":"auto-stored","rung":"1day""#)).is_ok());
+        assert!(command_from(&command_body(r#""command":"auto-stored","rung":"15min""#)).is_ok());
     }
 
     #[test]
     fn a_command_run_is_marked_as_one_on_the_wire() {
         let asked = command_from(&command_body(
-            r#""command":"audit-range","rung":"1day","min_hits":500"#,
+            r#""command":"audit-range","rung":"15min","min_hits":500"#,
         ))
         .expect("parses");
         let (from, to) = asked.window();
