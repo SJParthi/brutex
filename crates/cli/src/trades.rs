@@ -777,13 +777,27 @@ impl Bucket {
 /// probe, and the whole aggregation is one pass over the run's own block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Period {
-    /// Days since 1970-01-01.
+    /// IST days since 1970-01-01.
+    ///
+    /// The **exchange's** date, not Greenwich's — `indicators::ist_day`, the
+    /// same boundary `outcome::forward` and `trade::walk` use to decide which
+    /// session a bar belongs to.
     Day,
-    /// Seven-day blocks since 1970-01-01. **Not ISO weeks**: the epoch was a
-    /// Thursday, so block boundaries fall on Thursdays. Stated rather than
-    /// hidden, because a reader comparing these to a broker's Monday-start
-    /// weekly statement would otherwise find them mysteriously off by three
-    /// days. `Weekday` below is what answers "which day of the week".
+    /// Seven-day blocks anchored on **Monday**.
+    ///
+    /// # It anchored on Thursday, and the doc asked the reader to live with it
+    ///
+    /// This was `days.div_euclid(7)` — blocks from the epoch, and 1970-01-01
+    /// was a Thursday, so a "week" ran Thursday to Wednesday. Every real trading
+    /// week was split across two buckets, and this paragraph used to say so and
+    /// call it stated-rather-than-hidden. Stating a defect is not fixing one:
+    /// the operator's question is *"every week how many wins how many loss"*,
+    /// and a bucket that cuts Wednesday from Thursday cannot answer it however
+    /// clearly the cut is documented.
+    ///
+    /// The `+3` shift that [`Self::Weekday`] already uses to put Monday at 0 is
+    /// applied before the divide instead of after. Same fact, same spelling,
+    /// and a week a broker's Monday-start statement can be laid beside.
     Week,
     /// `year * 12 + (month - 1)`, so consecutive months are consecutive keys
     /// across a year boundary.
@@ -800,12 +814,37 @@ pub enum Period {
     /// [`Self::Day`] says *which dates*, and with eighty-one months of data that
     /// is 1,700 rows nobody can read. Seven rows can be read at a glance.
     Weekday,
-    /// Minutes from midnight UTC, rounded down to the hour.
+    /// Whole hours since the session opened: `0` is 09:15–10:14 IST, `1` is
+    /// 10:15–11:14, and `-1` is anything before the bell.
     ///
-    /// Answers *"which particular time period"*. UTC and not IST, deliberately:
-    /// the bars carry UTC and converting here would put a second timezone
-    /// opinion in the engine. The page adds the 5.5-hour offset once, where it
-    /// is visible.
+    /// # It was hours from midnight UTC, and that bucketed nothing
+    ///
+    /// India is UTC+05:30, so **no UTC hour lines up with anything**. UTC hour 4
+    /// spans IST 09:30–10:30 — thirty minutes after the open, straddling two IST
+    /// hours and cutting the first sixty-minute bar in half. The operator read
+    /// "09:30–10:30" as a trade time and asked why a 60-minute signal at 09:15
+    /// was filling at 09:30. It was not: it fills at 10:15, and the LABEL was an
+    /// artefact of bucketing an Indian session on a Greenwich clock.
+    ///
+    /// The old doc defended it as keeping "a second timezone opinion" out of the
+    /// engine. That reasoning does not survive contact with the question this
+    /// grain exists to answer — *"which particular time period made this massive
+    /// success"* — because a bucket boundary that falls mid-bar cannot answer it
+    /// at any offset the page applies afterwards. The offset was never the
+    /// problem; the ANCHOR was.
+    ///
+    /// # Anchored at the open, which is where every rung is anchored
+    ///
+    /// `pull::fold` anchors every intraday rung at 09:15, so the 60-minute bars
+    /// of a day are 09:15, 10:15 … 15:15. Bucketing on the same anchor makes
+    /// this grain and that rung the SAME partition of the day: bucket 0 holds
+    /// exactly the trades whose entry fell in the first hourly bar. On any finer
+    /// rung it is still a clean hour of session time rather than a slice of two.
+    ///
+    /// No constant is added here. `indicators::orb::minutes_since_open` already
+    /// holds the open minute and the IST offset, and is already the spelling the
+    /// opening-range conditions use — a second copy of 09:15 in this file is the
+    /// drift `reference_price` and D-0307 both record.
     Hour,
 }
 
@@ -847,12 +886,42 @@ impl Period {
     /// anyway because the alternative is a comment promising it will not.
     #[must_use]
     pub fn bucket(self, micros: i64) -> i64 {
-        const DAY: i64 = 86_400_000_000;
-        let days = micros.div_euclid(DAY);
+        // EVERY GRAIN IS ON THE EXCHANGE'S CALENDAR, AND SEVEN OF THEM WERE NOT.
+        //
+        // This read `micros.div_euclid(DAY)` -- days since the UTC epoch -- and
+        // `Day`, `Week`, `Month`, `Quarter`, `Half`, `Year` and `Weekday` all
+        // derived from it. Only `Hour` was ever corrected.
+        //
+        // ON TODAY'S DATA IT CHANGES NO NUMBER, and saying so is the point
+        // rather than a reason to leave it. The NSE session is 09:15-15:30 IST,
+        // which is 03:45-10:00 UTC, so every intraday stamp falls on the same
+        // UTC date as its IST date and the two calendars agree by ARITHMETIC
+        // ACCIDENT of where the session sits. Nothing in the code said that, no
+        // test pinned it, and the accident stops holding the moment a stamp
+        // lands after 18:30 IST -- an after-hours session, a vendor sending a
+        // settlement bar, or a rung that ever covers one.
+        //
+        // `indicators::ist_day` already exists, already saturates rather than
+        // wrapping near `i64::MAX`, and is the spelling `outcome::forward` and
+        // `trade::walk` use to decide which session a bar belongs to. Using it
+        // here makes this file agree with the engine's own day boundary by
+        // construction instead of by coincidence.
+        let days = indicators::ist_day(micros);
         let (year, month, _day) = telemetry::civil_from_days(days);
         match self {
             Self::Day => days,
-            Self::Week => days.div_euclid(7),
+            // ANCHORED TO MONDAY, AND IT USED TO ANCHOR TO THURSDAY.
+            //
+            // `days.div_euclid(7)` blocks from the epoch, and 1970-01-01 was a
+            // THURSDAY -- so a "week" ran Thursday to Wednesday and split every
+            // real trading week across two buckets. The doc admitted it and
+            // asked the reader to live with it.
+            //
+            // `+3` is the same shift `Weekday` below already uses to put Monday
+            // at 0, applied before the divide instead of after. One fact, one
+            // spelling, and a week that a broker's Monday-start statement can be
+            // laid beside.
+            Self::Week => days.saturating_add(3).div_euclid(7),
             Self::Month => year.saturating_mul(12).saturating_add(month - 1),
             Self::Quarter => year.saturating_mul(4).saturating_add((month - 1) / 3),
             Self::Half => year.saturating_mul(2).saturating_add((month - 1) / 6),
@@ -860,7 +929,16 @@ impl Period {
             // 1970-01-01 was a THURSDAY, so shifting by 3 puts Monday at 0.
             // `rem_euclid` and not `%`, for the negative side.
             Self::Weekday => days.saturating_add(3).rem_euclid(7),
-            Self::Hour => micros.rem_euclid(DAY) / 3_600_000_000,
+            // `-1` FOR A STAMP BEFORE THE BELL, and it is a real bucket rather
+            // than a discard. `minutes_since_open` returns `None` only for a
+            // minute-of-day earlier than 09:15, which for an intraday engine
+            // means a pre-open stamp that should be VISIBLE as one. Folding it
+            // into bucket 0 would put it in the first hourly bar it was never
+            // part of, and dropping it would make the grain's counts disagree
+            // with every other grain's for no reason a reader could see.
+            Self::Hour => indicators::orb::minutes_since_open(micros)
+                .unwrap_or(-1)
+                .div_euclid(60),
         }
     }
 }
@@ -1364,6 +1442,143 @@ mod period_tests {
             .find(|(p, _)| *p == want)
             .map(|(_, b)| b)
             .expect("every period is present")
+    }
+
+    /// EVERY GRAIN IS ON THE IST CALENDAR, AND THE 05:30 WINDOW IS WHERE IT
+    /// SHOWS.
+    ///
+    /// India is UTC+05:30, so a stamp between 00:00 and 05:29 IST belongs to the
+    /// PREVIOUS UTC date. Nothing in the NSE session lands there today, which is
+    /// exactly why the old UTC bucketing agreed with the right answer and no
+    /// test caught it. This drives the window directly rather than waiting for a
+    /// vendor to send a bar into it.
+    #[test]
+    fn a_stamp_in_the_first_ist_hours_buckets_on_the_ist_date_not_the_utc_one() {
+        const DAY: i64 = 86_400_000_000;
+        const IST_OFFSET_MICROS: i64 = 19_800 * 1_000_000;
+        // 00:30 IST on IST-day 20_000 == 19:00 UTC on UTC-day 19_999.
+        let ist_day = 20_000_i64;
+        let stamp = (ist_day * 1_440 + 30) * 60_000_000 - IST_OFFSET_MICROS;
+
+        assert_eq!(
+            stamp.div_euclid(DAY),
+            ist_day - 1,
+            "the premise: this stamp really is on the PREVIOUS utc date"
+        );
+        assert_eq!(
+            Period::Day.bucket(stamp),
+            ist_day,
+            "and the day grain must answer with the exchange's date"
+        );
+        assert_eq!(
+            Period::Year.bucket(stamp),
+            Period::Year.bucket(stamp + DAY / 4),
+            "a grain derived from the same days must move with it"
+        );
+    }
+
+    /// A WEEK RUNS MONDAY TO SUNDAY, AND IT USED TO RUN THURSDAY TO WEDNESDAY.
+    ///
+    /// The epoch was a Thursday, so `days / 7` cut every trading week in two.
+    /// This walks a full fourteen days from a known Monday and asserts the
+    /// block changes exactly once, on the second Monday.
+    #[test]
+    fn a_week_block_turns_over_on_monday_and_holds_the_whole_trading_week() {
+        const IST_OFFSET_MICROS: i64 = 19_800 * 1_000_000;
+        // Pick an IST day that is a Monday under the shipped weekday rule.
+        let monday = (0..7)
+            .map(|d| 20_000_i64 + d)
+            .find(|d| d.saturating_add(3).rem_euclid(7) == 0)
+            .expect("one of any seven consecutive days is a Monday");
+        let at = |day: i64| (day * 1_440 + 600) * 60_000_000 - IST_OFFSET_MICROS;
+
+        let first = Period::Week.bucket(at(monday));
+        for offset in 0..7 {
+            assert_eq!(
+                Period::Week.bucket(at(monday + offset)),
+                first,
+                "day {offset} of the week must stay in its own block"
+            );
+        }
+        assert_eq!(
+            Period::Week.bucket(at(monday + 7)),
+            first + 1,
+            "and the next Monday opens the next block"
+        );
+        assert_eq!(
+            Period::Week.bucket(at(monday - 1)),
+            first - 1,
+            "while the Sunday before it belongs to the previous one"
+        );
+        // The weekday grain must agree about which day is Monday, or the two
+        // would disagree about the same instant.
+        assert_eq!(Period::Weekday.bucket(at(monday)), 0, "Monday is 0");
+        assert_eq!(Period::Weekday.bucket(at(monday + 6)), 6, "Sunday is 6");
+    }
+
+    /// THE HOUR GRAIN IS THE SESSION'S, AND IT IS THE SAME PARTITION THE
+    /// 60-MINUTE RUNG USES.
+    ///
+    /// Every stamp is built as an IST minute-of-day so the assertion reads as
+    /// the clock does. The six live buckets are the six 60-minute bars a trade
+    /// can be entered on; `15:15` is the seventh bar and is where a fill would
+    /// land only if it could, which the 15:09 last-fill rule refuses.
+    ///
+    /// This is the test that would have caught the old reading: under hours-from-
+    /// UTC-midnight, 09:15 and 10:15 both fall in bucket 3, and 09:30 opens a new
+    /// one — a boundary a third of the way into the first bar.
+    #[test]
+    fn the_hour_grain_counts_whole_hours_from_the_opening_bell() {
+        /// Micros in one day, for the old-reading comparison at the end.
+        const DAY: i64 = 86_400_000_000;
+        /// UTC micros for a given IST minute-of-day on an arbitrary day.
+        fn at(ist_minute: i64) -> i64 {
+            const IST_OFFSET_MICROS: i64 = 19_800 * 1_000_000;
+            (20_000 * 1_440 + ist_minute) * 60_000_000 - IST_OFFSET_MICROS
+        }
+        let h = |m: i64| Period::Hour.bucket(at(m));
+
+        for (minute, want, clock) in [
+            (9 * 60 + 15, 0, "09:15 — the bell itself"),
+            (9 * 60 + 59, 0, "09:59 — still the first bar"),
+            (10 * 60 + 14, 0, "10:14 — its last minute"),
+            (10 * 60 + 15, 1, "10:15 — the second bar opens"),
+            (11 * 60 + 15, 2, "11:15"),
+            (14 * 60 + 15, 5, "14:15 — the last bar a fill can reach"),
+            (15 * 60 + 15, 6, "15:15 — the short closing bar"),
+            (9 * 60 + 14, -1, "09:14 — one minute before the bell"),
+            (0, -1, "midnight IST"),
+        ] {
+            assert_eq!(h(minute), want, "{clock} must bucket to {want}");
+        }
+
+        // AND HERE IS WHAT THE OLD READING ACTUALLY DID, measured rather than
+        // asserted from memory.
+        //
+        // A first draft of this test claimed hours-from-UTC-midnight COLLAPSED
+        // 09:15 and 10:15 into one bucket. It does not: 09:15 IST is 03:45 UTC
+        // and 10:15 IST is 04:45 UTC, two different hours. The test failed and
+        // the claim was wrong.
+        //
+        // The real defect is the opposite shape. A UTC hour STRADDLES the
+        // boundary between two hourly bars, so two trades in DIFFERENT
+        // sixty-minute bars share a bucket while the bar they belong to does
+        // not. UTC hour 4 spans IST 09:30-10:30: it holds the tail of bar 0 and
+        // the head of bar 1, and no offset applied afterwards can separate them.
+        let utc_hour = |m: i64| at(m).rem_euclid(DAY) / 3_600_000_000;
+        let (late_in_first, early_in_second) = (9 * 60 + 45, 10 * 60 + 20);
+        assert_ne!(
+            h(late_in_first),
+            h(early_in_second),
+            "09:45 and 10:20 are in different hourly bars, and this grain says so"
+        );
+        assert_eq!(
+            utc_hour(late_in_first),
+            utc_hour(early_in_second),
+            "the reading this replaced put them in ONE bucket -- a boundary a \
+             third of the way into a bar, which is why it could not answer \
+             'which time period made the money'"
+        );
     }
 
     /// Monday is 0 and Sunday is 6, across the whole week.

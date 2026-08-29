@@ -1351,29 +1351,33 @@
   const WEEKDAY_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
   /**
-   * One UTC hour bucket, labelled in the exchange's own clock.
+   * One session-hour bucket, labelled on the exchange's own clock.
    *
-   * # IST IS NOT A WHOLE NUMBER OF HOURS, and that is the whole comment
+   * # THIS USED TO CONVERT A UTC HOUR, AND THE CONVERSION WAS NOT THE PROBLEM
    *
-   * `Period::bucket` keys the hour grain by the **UTC** hour index. India is
-   * UTC+5:30, so a UTC hour does not line up with an IST hour: UTC 04 spans IST
-   * **09:30–10:30**, straddling two IST hours. Adding five and calling it an
-   * hour would be wrong by thirty minutes on every row, in the direction that
-   * makes the opening bucket look like it starts at the bell when it starts an
-   * hour later.
+   * `Period::Hour` keyed on hours from midnight UTC, and this function added
+   * 5.5 hours to render "09:30–10:30". The arithmetic was right and the answer
+   * was still useless: India is UTC+05:30, so a UTC hour straddles two IST
+   * hours and cuts the first sixty-minute bar a third of the way in. The
+   * operator read that label as a trade time and asked why a 60-minute signal at
+   * 09:15 was filling at 09:30. It fills at 10:15. The label was an artefact of
+   * bucketing an Indian session on a Greenwich clock.
    *
-   * So the label is the half-open IST range the bucket actually covers, and the
-   * UTC key it came from rides along in the title.
+   * The engine now buckets whole hours from the 09:15 bell, so bucket 0 is
+   * exactly the first hourly bar. The label is that range, and no offset is
+   * applied here at all — a second timezone opinion on the page was the other
+   * half of the same defect.
    *
-   * @param {number} utcHour
+   * @param {number} sessionHour hours since the open; -1 is before the bell
    */
-  function istHourLabel(utcHour) {
-    const start = (utcHour * 60 + 330) % 1440;
-    const end = (start + 60) % 1440;
+  function istHourLabel(sessionHour) {
+    if (sessionHour < 0) return 'before the bell';
+    const OPEN_MINUTE = 9 * 60 + 15;
+    const start = OPEN_MINUTE + sessionHour * 60;
     /** @param {number} m */
     const hhmm = (m) =>
-      `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
-    return `${hhmm(start)}–${hhmm(end)}`;
+      `${String(Math.floor(m / 60) % 24).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+    return `${hhmm(start)}–${hhmm(start + 60)}`;
   }
 
   /**
