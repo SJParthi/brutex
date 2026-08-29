@@ -40,10 +40,36 @@
 //!
 //! | operation | cost | why |
 //! |---|---|---|
-//! | mask evaluation | O(1) | [`vocab::ConditionMask::hits`] — 6 ANDs, 6 XORs, 5 ORs, 1 compare, branchless |
+//! | mask evaluation | O(1) per bar in [`vocab::ConditionMask::hits`]; **Θ(k) per bar in [`column::Column::support`], which is what the sweep calls** | see below |
 //! | condition lookup | O(1) | direct index into `vocab`'s fixed table |
-//! | duplicate rejection | O(1) | one `HashSet` probe on a `Hash + Eq` mask |
+//! | duplicate rejection | **none at k≥2 — the set was deleted** | see below |
 //! | result append | O(1) amortised | `Vec::push`. Reserved at k=1; not above it |
+//!
+//! **TWO OF THOSE ROWS WERE FALSE AND ARE CORRECTED HERE.** An O(1) audit read
+//! the table against the code and found both; neither was caught by a test,
+//! because neither describes something a test asserts.
+//!
+//! *Mask evaluation.* `hits` is genuinely constant and genuinely branchless, and
+//! the sweep has not called it since 7461f57. [`column::Column::support`] ANDs
+//! one bitmap per named position, so its per-bar cost is Θ(k) by construction --
+//! `crates/engine/benches/ratio.rs` measured **7.307x from k=1 to k=8 against a
+//! 3.0x ceiling** and says so in its own comment. What IS constant, and is the
+//! property that matters for budgeting, is the cost per BITMAP READ, and that
+//! the per-bar cost does not depend on the DATA: the short-circuit was
+//! deliberately removed so a candidate that misses early costs what one that
+//! matches everywhere costs. `C-E-09` measures the honest quantity; `C-E-02`
+//! measures the free `support` function, which has no production caller.
+//!
+//! *Duplicate rejection.* The `seen` set is gone -- see the block where
+//! `emitted` is declared. The prefix join is injective, so it rejected nothing,
+//! not rarely but NEVER, and removing it was correct. What the row cannot say
+//! any more is that the operation happens: at k≥2 there is no dedup because
+//! there are no duplicates. k=1 still probes an `offered` set once per position.
+//!
+//! `CLAUDE.md` §3 rule 4 names both operations and has not been updated. That is
+//! a documentation defect rather than a code one, and it is recorded here rather
+//! than silently left, because §3 rule 6 asks for honest limits and a rule that
+//! names a deleted operation cannot be enforced by anything.
 //!
 //! The reservation detail is stated because the row used to claim "capacity reserved per
 //! level" and only k=1 reserves: `next_level` builds `out` and `seen` with `Vec::new` and
