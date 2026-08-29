@@ -5564,6 +5564,7 @@ fn cap_for_budget(
     column: &indicators::column::Column,
     horizon: Horizon,
     by_evidence: &[&runner::rank::Scored],
+    levels: &grid::Levels<'_>,
 ) -> usize {
     let Some(budget) = screen_budget_ms() else {
         return screen_cap();
@@ -5574,6 +5575,28 @@ fn cap_for_budget(
         .par_iter()
         .take(sample)
         .map(|scored| {
+            // THE SAME `Levels` THE REAL PASS USES, AND THE FIRST DRAFT BUILT A
+            // DIFFERENT ONE.
+            //
+            // It called `grid::Levels::derived(grid_rungs(bars))`, which is a
+            // quantile ladder of `rungs` variants with `ratios: false` and no
+            // stop ladder. The pass this cap BOUNDS uses the point-stepped ratio
+            // product that `screen_cap`'s own doc sizes at 625 variants. So the
+            // calibration timed one computation and the cap was spent on
+            // another, and `cap_within_budget` divided by a per-candidate cost
+            // that was not the per-candidate cost of the thing being capped.
+            //
+            // Worse, `grid_rungs(bars)` was INSIDE this closure. It reads a knob
+            // -- an `RwLock` and a `getenv` -- and when unset falls through to
+            // `reference_price`, `grid_step_ppm` and `max_stop_points`, each of
+            // which allocates a `Vec<i64>` of one entry per bar and sorts it. At
+            // 617,921 bars that is ~15 MB and three sorts PER CANDIDATE, in a
+            // `par_iter`, across eight concurrent rungs -- the exact defect
+            // hoisted out of `validate.rs` one commit earlier, reintroduced one
+            // function away. Found by an adversarial pass, not by review.
+            //
+            // `levels` is borrowed from the caller's own hoisted values, so this
+            // closure now allocates nothing and reads no knob.
             usize::from(
                 grid::evaluate(
                     bars,
@@ -5581,7 +5604,7 @@ fn cap_for_budget(
                     &scored.mask,
                     horizon,
                     side_of_evidence(scored),
-                    grid::Levels::derived(grid_rungs(bars)),
+                    *levels,
                 )
                 .best()
                 .is_some(),
@@ -5768,7 +5791,7 @@ fn policy_of(
     lens: runner::rank::Lens,
     validate: bool,
     horizon: Horizon,
-) -> [u64; 15] {
+) -> [u64; 16] {
     [
         // Negative is not expected and is not silently folded to zero: the cast
         // is saturating so a negative rule still differs from an absent one.
@@ -5798,6 +5821,26 @@ fn policy_of(
         },
         grid_rungs(bars) as u64,
         screen_cap() as u64,
+        // THE BUDGET IS THE SIXTEENTH, AND WITHOUT IT THE CAP MOVES SILENTLY.
+        //
+        // `BRUTEX_SCREEN_BUDGET_MS` decides `priced_cap`, which is what actually
+        // bounds `by_evidence.par_iter().take(..)` -- the term above is
+        // `screen_cap()`, the STATED cap, which the budget overrides. So two
+        // runs at different budgets priced different candidate sets, produced
+        // different top-25s and different `pessimistic` figures, and keyed
+        // IDENTICALLY. `Results::append` then refused the second with "run is
+        // already recorded. Same inputs give same outputs", which was untrue,
+        // and `/backtest.json` served whichever landed first.
+        //
+        // That is the same defect D-0294 fixed for four knobs and D-0305 for
+        // `BRUTEX_CEILING`, and the horizon term above records why it is worse
+        // than an overwrite: "a silent REFUSAL, which is worse because it looks
+        // like a working guard". Found by an adversarial pass over the commit
+        // that added the knob.
+        //
+        // Unset is `0`, which cannot collide with any budget an operator names
+        // -- `screen_budget_ms` filters `n > 0`.
+        screen_budget_ms().unwrap_or(0),
         u64::from(validate),
         // THE SIXTH, AND IT MOVES MORE THAN THE OTHER FIVE.
         //
@@ -6684,7 +6727,16 @@ fn screen(
     // measures the thing it is bounding rather than a constant from somebody
     // else's hardware. The prefix is a fixed size, so what is timed does not
     // itself depend on the timing.
-    let priced_cap = cap_for_budget(bars, column, horizon, by_evidence);
+    // THE SAME LEVELS THE PASS BELOW USES, so the calibration times the work it
+    // is bounding. See `cap_for_budget`.
+    let levels = grid::Levels {
+        rungs,
+        step_ppm: Some(step_ppm),
+        forced: (rules.max_mae_ppm > 0).then_some(rules.max_mae_ppm),
+        ratios: true,
+        stops_ppm: &stop_rungs,
+    };
+    let priced_cap = cap_for_budget(bars, column, horizon, by_evidence, &levels);
     let mut rows: Vec<Screened<'_>> = by_evidence
         .par_iter()
         .take(priced_cap)
@@ -6710,20 +6762,7 @@ fn screen(
             // that could pair with a derived stop can pair with this one, and a
             // combination that is mediocre on its own quantiles but strong under the
             // operator's stop can now be found rather than filtered out unseen.
-            let g = grid::evaluate(
-                bars,
-                column,
-                &scored.mask,
-                horizon,
-                side,
-                grid::Levels {
-                    rungs,
-                    step_ppm: Some(step_ppm),
-                    forced: (rules.max_mae_ppm > 0).then_some(rules.max_mae_ppm),
-                    ratios: true,
-                    stops_ppm: &stop_rungs,
-                },
-            );
+            let g = grid::evaluate(bars, column, &scored.mask, horizon, side, levels);
             // THE BEST VARIANT THAT SATISFIES THE RULES, falling back to the best
             // overall only so a failing combination can still be SHOWN with the rule
             // it broke. Asking `best()` first and judging that was the error: the

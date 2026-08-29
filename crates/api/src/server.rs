@@ -2247,11 +2247,50 @@ async fn bars_json(
     // malformed date — refusing the month over a failed optimisation would be
     // the louder wrong answer.
     let held = usize::try_from(file.header().n_valid).unwrap_or(usize::MAX);
+    // A BISECTION THAT LANDS PAST THE END FALLS BACK TO THE WHOLE MONTH.
+    //
+    // `first_at_or_after` bisects on each record's stamp and assumes the file is
+    // strictly increasing -- which the writer enforces, and which `file.rs`'s own
+    // `initialise` doc records ONE exception to: a header can name records whose
+    // bytes are zeros from a newly allocated extent, and "nothing in the record
+    // can detect it. An all-zero `Bar` satisfies `ohlc_is_sane`."
+    //
+    // An all-zero bar stamps at 0, which is below every real `from`, so the
+    // bisection walks upward THROUGH the zero region and returns `n_valid`. That
+    // gave `take = 0`, `page` read nothing, `faults` was empty, and the endpoint
+    // answered **200 with `[]`** for a day that has 375 bars -- turning a correct
+    // answer into a silent empty one, with the fault-reporting path unable to
+    // fire because no record was read. The code this replaced did not depend on
+    // monotonicity and was correct on such a file.
+    //
+    // Landing at or past the end is therefore treated as "the bisection could
+    // not help" rather than as "the window is empty": read the month and let
+    // `bars_array` filter, which is exactly the previous behaviour. A window
+    // genuinely past the last bar costs one wasted pass and still answers `[]`
+    // -- the same answer, arrived at by reading rather than by assuming.
     let begins = from_micros
         .and_then(|at| file.first_at_or_after(at).ok())
         .and_then(|index| usize::try_from(index).ok())
+        .filter(|&index| index < held)
         .unwrap_or(0);
-    let (rows, faults) = bars::page(&file, begins, held.saturating_sub(begins));
+    // THE END IS BISECTED TOO, and the first version said it did not need to be.
+    //
+    // That commit argued "those rows have to be read to be returned, so a second
+    // bisection would buy nothing". Both halves are wrong: nothing stopped at
+    // `to`, and `bars_array` DISCARDS every row past it. So a one-day query
+    // still read from the window's start to the end of the month -- the whole
+    // month for day 1, half of it on average. An adversarial pass measured it:
+    // 8,250 records read to return 375 on the first day, unchanged from before.
+    //
+    // A second bisection is the same fourteen reads and it bounds what the first
+    // one only started. Same failure rule as the start: a bisection that cannot
+    // answer leaves the bound where it was, because the window is an optional
+    // narrowing and `bars_array` filters correctly either way.
+    let ends = to_micros
+        .and_then(|at| file.first_at_or_after(at).ok())
+        .and_then(|index| usize::try_from(index).ok())
+        .map_or(held, |index| index.clamp(begins, held));
+    let (rows, faults) = bars::page(&file, begins, ends.saturating_sub(begins));
 
     let out = bars_array(&rows, from_micros, to_micros);
 

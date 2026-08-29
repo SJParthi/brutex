@@ -421,6 +421,41 @@ fn paisa(mean: f64) -> i64 {
 /// the mistake every part of this module exists to prevent.
 #[must_use]
 pub fn render_findings(ranked: &Ranked, sweep: &Sweep) -> String {
+    let rows: Vec<&crate::rank::Scored> = ranked.top.iter().collect();
+    render_findings_of(&rows, ranked.considered, sweep)
+}
+
+/// [`render_findings`] over a list a caller has already filtered.
+///
+/// # Why this exists: the closure filter ran and the page did not use it
+///
+/// `crate::closed` removes an itemset that a superset one bit larger matches on
+/// exactly the same bars — losslessly, because the smaller one's support is
+/// recoverable from the larger. `cli::closed_by_evidence` intersects the ranking
+/// with that set, and the result feeds the traded combination, the bootstrap
+/// family and the live view.
+///
+/// **The printed FINDINGS table did not use it.** It rendered `ranked.top`, the
+/// raw ranking, so the ten thousand rows an operator reads had bypassed one of
+/// the three defences the report is built on — while the two above it, the
+/// Bonferroni bar and the halt verdict, both applied correctly.
+///
+/// MEASURED on the 60min zerodha NIFTY run: ranks 5 and 10 of that table are
+/// `249 hits, 177 trades, 965 mean, t = 2.24` — identical — and rank 10's six
+/// conditions are a strict SUBSET of rank 5's seven. Adding
+/// `close_below_pivot_r3_band` removed not one bar. That is exactly what
+/// `closed` refuses, and it reached the page because this function was handed
+/// the wrong list. Ranks 6, 7, 8 and 9 are the same six conditions with `r2`,
+/// `r1`, `r5` and `r4`: five rows, one strategy.
+///
+/// # `considered` is passed separately and is NOT the filtered length
+///
+/// It answers "how many did the sweep weigh", which the filter does not change.
+/// Recomputing it from the rows would make the report say the search found as
+/// many combinations as it kept, which is the distinction `Ranked::considered`
+/// exists to protect.
+#[must_use]
+pub fn render_findings_of(rows: &[&crate::rank::Scored], considered: u64, sweep: &Sweep) -> String {
     let mut out = String::with_capacity(1_024);
     // THE SAME BAR THE SIGNIFICANCE SECTION PRINTS. It used `trials` while that
     // section used `effective_trials`, so one report carried two different
@@ -433,15 +468,10 @@ pub fn render_findings(ranked: &Ranked, sweep: &Sweep) -> String {
     row(
         &mut out,
         "combinations weighed",
-        &ranked.considered.to_string(),
+        &considered.to_string(),
         "",
     );
-    row(
-        &mut out,
-        "kept",
-        &ranked.top.len().to_string(),
-        "best by |t|",
-    );
+    row(&mut out, "kept", &rows.len().to_string(), "best by |t|");
     row(
         &mut out,
         "bar every row must clear",
@@ -450,7 +480,7 @@ pub fn render_findings(ranked: &Ranked, sweep: &Sweep) -> String {
     );
     let _ = writeln!(out);
 
-    if ranked.top.is_empty() {
+    if rows.is_empty() {
         let _ = writeln!(out, "  nothing kept — the sweep produced no combination");
         let _ = writeln!(out);
         return out;
@@ -461,7 +491,7 @@ pub fn render_findings(ranked: &Ranked, sweep: &Sweep) -> String {
         "  {:<6}{:>10}{:>10}{:>14}{:>9}  verdict",
         "rank", "hits", "n", "mean paisa", "t"
     );
-    for (index, s) in ranked.top.iter().enumerate() {
+    for (index, s) in rows.iter().enumerate() {
         // A t-statistic from n observations is Student-t, and the bar is a
         // NORMAL quantile. The two converge as n grows and diverge sharply
         // below about thirty -- an audit measured the bar understated by 4.89
@@ -520,7 +550,7 @@ pub fn render_findings(ranked: &Ranked, sweep: &Sweep) -> String {
     // AND SAID ONCE MORE, IN A LINE OF ITS OWN. A per-row tag is easy to miss
     // in a table an operator scans for `clears`; a mispairing is a fault in the
     // RUN, not a property of one combination, and it is reported as one.
-    let mispaired = ranked.top.iter().filter(|s| s.edge.mismatched > 0).count();
+    let mispaired = rows.iter().filter(|s| s.edge.mismatched > 0).count();
     if mispaired > 0 {
         let _ = writeln!(out);
         let _ = writeln!(
@@ -529,7 +559,7 @@ pub fn render_findings(ranked: &Ranked, sweep: &Sweep) -> String {
              forward built from a different slice. Nothing in this section is \
              trustworthy. Rebuild the forward from the same bars the column \
              was built from.",
-            ranked.top.len()
+            rows.len()
         );
     }
     // AND THE OTHER REASON A SAMPLE IS SMALLER, WHICH HAD NO LINE AT ALL.
@@ -542,8 +572,7 @@ pub fn render_findings(ranked: &Ranked, sweep: &Sweep) -> String {
     //
     // Reported per RUN and not per row, like the mispairing above: it is a fault
     // in the DATA, and every row measured on that data carries it.
-    let dropped: u64 = ranked
-        .top
+    let dropped: u64 = rows
         .iter()
         .fold(0_u64, |a, s| a.saturating_add(s.edge.refused));
     if dropped > 0 {
