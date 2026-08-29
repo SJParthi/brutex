@@ -8761,6 +8761,32 @@
 
         {#if verdictTotal > 0}
           <div class="tally">
+            <!-- ══ THE HEADLINE THIS BAND NEVER HAD ══
+                 The partition and its legend were both correct and both SMALL:
+                 a 7px rule and a row of 12px chips, under a grey provenance
+                 line. Three bands of quiet text between a white form and a
+                 dense table, with no focal point anywhere — so the one number
+                 that answers "where does this feed stand" was the same size as
+                 the footnote explaining how it was measured.
+                 It is a figure now, at display scale, with the feed and the
+                 scope it belongs to beside it. Nothing new is computed:
+                 `verdictSettled` and `verdictTotal` are the same two values the
+                 chip row already ends with. -->
+            <div class="state-head">
+              <span class="state-who">
+                <b class="state-feed">{feedName(feeds.active)}</b>
+                <span class="state-scope">{universeSpec.label} · {n(verdictTotal)} series in this window</span>
+              </span>
+              <span class="spacer"></span>
+              <span
+                class="state-num"
+                class:allset={verdictSettled === verdictTotal}
+                title="Settled means verified or out of reach — the two verdicts no pull would change."
+              >
+                <b>{n(verdictSettled)}</b><span class="state-of">/{n(verdictTotal)}</span>
+                <span class="state-lab">settled</span>
+              </span>
+            </div>
             <div
               class="tallybar"
               role="img"
@@ -8789,10 +8815,12 @@
                   <span class="tword"><b>{n(seg.n)}</b> {seg.label}</span>
                 </span>
               {/each}
-              <span class="spacer"></span>
-              <span class="tsum" title="Settled means verified or out of reach — the two verdicts no pull would change. Everything else is work this window still owes.">
-                <b>{n(verdictSettled)}</b> of {n(verdictTotal)} settled
-              </span>
+              <!-- `.tsum` IS GONE, AND ITS SENTENCE IS NOT. It ended this row
+                   with "N of M settled" — the same two counts the headline
+                   above now states at display scale. One fact said twice, once
+                   large and once small, is the reader asking which one to
+                   believe. The clause it carried, "everything else is work this
+                   window still owes", is on the headline's own title. -->
             </div>
           </div>
         {/if}
@@ -11512,15 +11540,76 @@
     font-weight: var(--w-bold);
     color: var(--ink);
   }
-  .tsum {
+  /* ---- the headline over the partition ----
+     THE ONE FIGURE THIS BAND WAS MISSING. Everything here was `--fs-micro`
+     under a 7px rule, so the answer to "where does this feed stand" was set at
+     the same size as the footnote saying how it was measured. A page needs
+     somewhere for the eye to land, and on a page whose job is "what does this
+     window still owe" that place is the settled fraction.
+
+     `--fs-lg` and NOT a display face: this is a figure to be read, not a
+     banner. The denominator and the word beside it stay small on purpose —
+     they are the units, and units at the same weight as the value is how a
+     number stops reading as a number. */
+  .state-head {
+    display: flex;
+    align-items: flex-end;
+    flex-wrap: wrap;
+    gap: var(--s2) var(--s4);
+    min-width: 0;
+  }
+  .state-who {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+  .state-feed {
+    font-family: var(--mono);
+    font-size: var(--fs-md);
+    font-weight: var(--w-bold);
+    color: var(--ink-hi);
+    letter-spacing: -0.01em;
+  }
+  .state-scope {
     font-size: var(--fs-micro);
     color: var(--faint);
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .tsum b {
+  .state-num {
+    display: flex;
+    align-items: baseline;
+    gap: 4px;
+    white-space: nowrap;
     font-family: var(--num);
     font-variant-numeric: tabular-nums;
-    color: var(--ink-2, var(--ink));
+  }
+  .state-num b {
+    font-size: var(--fs-lg);
+    font-weight: var(--w-bold);
+    line-height: 1;
+    color: var(--warn);
+  }
+  /* NOTHING LEFT TO DO IS THE ONLY GREEN STATE, and it is the only one that
+     earns the up tone. A partly-settled window is not a partial success to be
+     congratulated; it is work outstanding, which is what `--warn` says. */
+  .state-num.allset b {
+    color: var(--up);
+  }
+  .state-of {
+    font-size: var(--fs-mini);
+    color: var(--faint);
+  }
+  .state-lab {
+    font-family: var(--sans);
+    font-size: var(--fs-micro);
+    color: var(--faint);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    margin-left: 2px;
   }
 
   /* ---- the reach lanes ----
