@@ -82,6 +82,15 @@ const ROUTES = [
 	// route served it. `cli::trades` writes it now and `/trades.json` serves it,
 	// keyed on the identity `/backtest.json` already prints on every row.
 	'/trades.json',
+	// THE RANKED COMBINATIONS AS MEASUREMENTS, not as a rendered table.
+	//
+	// `/engine/top.json` serves a `<pre>` block — right for reading, and nothing
+	// in a picture of a table can be re-sorted. The operator ranks on eleven
+	// weighted quantities (drawdown, losing trades, win rate, reward-to-risk,
+	// average win and loss, and the rest), and the weights are theirs to move.
+	// Serving the numbers and ordering them here is what makes that a slider
+	// rather than a rebuild.
+	'/frontier.json',
 	// THE EVENT FEED, WHICH IS THE ONLY LIVE PROGRESS THAT EXISTS.
 	//
 	// `GET /backtest/run.json` reads a struct written exactly twice — once when

@@ -192,6 +192,152 @@
    */
   let tradeList = $state({ phase: 'idle', rows: [], why: '' });
 
+  /**
+   * One run's ranked combinations, with every measurement they were priced on.
+   *
+   * `/engine/top.json` serves a rendered table and this serves the numbers, for
+   * the reason the route's own doc gives: nothing in a picture of a table can be
+   * re-sorted, and the operator's ranking is a weighted ordering over eleven
+   * quantities whose weights are theirs to move.
+   */
+  let combos = $state({ phase: 'idle', rows: [], why: '' });
+
+  /**
+   * How much each measurement counts toward the ranking.
+   *
+   * These are the operator's own words, one weight per clause:
+   *
+   *   "very less max drawdown, less max stop loss, less losing percentage,
+   *    less losing trades, less losing ratio, and on the win side massive max
+   *    profit, higher winning trades, higher winning percentage, higher winning
+   *    ratio, average maximum profit, average less loss."
+   *
+   * They live here rather than in Rust deliberately. A score compiled into the
+   * binary is one more number nobody can see — the failure this whole console
+   * exists to avoid — and a weight the reader can move is a question they can
+   * ask twice. Every entry is a plain multiplier: raise one and that measurement
+   * matters more, set it to zero and it drops out of the ranking entirely.
+   */
+  let weights = $state({
+    drawdown: 1, // less is better
+    worstTrade: 1, // less is better  (the "max stop loss" clause)
+    losingPct: 1, // less is better
+    losingTrades: 1, // less is better
+    profit: 1, // more is better
+    winningTrades: 1, // more is better
+    winRate: 1, // more is better
+    rewardRisk: 1, // more is better
+    avgWin: 1, // more is better
+    avgLoss: 1 // less is better (avg_loss is negative, so nearer zero wins)
+  });
+
+  /** How many rows to show per run. The operator asked for ten. */
+  let topN = $state(10);
+
+  /** @param {string|undefined} identity */
+  async function fetchCombos(identity) {
+    if (!identity) {
+      combos = { phase: 'idle', rows: [], why: '' };
+      return;
+    }
+    combos = { phase: 'loading', rows: [], why: '' };
+    try {
+      const response = await ask_(`/frontier.json?identity=${encodeURIComponent(identity)}`);
+      const body = await response.json();
+      combos = {
+        phase: response.ok ? 'ready' : 'failed',
+        rows: Array.isArray(body.rows) ? body.rows : [],
+        why: body.refusal ?? (response.ok ? '' : `/frontier.json answered ${response.status}`)
+      };
+    } catch (why) {
+      combos = {
+        phase: 'failed',
+        rows: [],
+        why: `The combinations could not be fetched: ${why instanceof Error ? why.message : String(why)}`
+      };
+    }
+  }
+
+  /**
+   * The top N by the operator's weighted criteria.
+   *
+   * # Scored on RANK WITHIN THE SET, not on raw magnitude
+   *
+   * The eleven measurements are in different units — paisa, basis points, plain
+   * counts — and adding them directly would let drawdown in paisa drown a win
+   * rate in basis points purely because paisa are numerically larger. Each
+   * measurement is therefore turned into its position among the rows being
+   * compared, 0 for the worst and 1 for the best, and the weights combine those.
+   * The ordering a weight produces is then about the measurement and not about
+   * its unit.
+   *
+   * # Unpriced rows are excluded, and that is not a detail
+   *
+   * `screen_cap` means most ranked combinations never meet an exit grid, and
+   * those store zeros. A zero drawdown is a SPECTACULAR result — so ranking
+   * "smallest drawdown" over a set that includes them puts the combinations
+   * nobody measured at the very top, looking perfect. `priced` is the field that
+   * separates the two facts and this is where it earns its place.
+   */
+  const ranked = $derived.by(() => {
+    const priced = combos.rows.filter((r) => r.priced);
+    if (priced.length === 0) return [];
+
+    // One pass per measurement to learn its range, so the normalisation below is
+    // O(rows) overall rather than O(rows) per row.
+    const span = (pick) => {
+      let lo = Infinity;
+      let hi = -Infinity;
+      for (const r of priced) {
+        const v = pick(r);
+        if (v < lo) lo = v;
+        if (v > hi) hi = v;
+      }
+      return { lo, hi };
+    };
+    // `hi === lo` means every row agrees on this measurement, so it separates
+    // nothing and contributes 0.5 to all of them rather than dividing by zero.
+    const norm = (v, { lo, hi }) => (hi === lo ? 0.5 : (v - lo) / (hi - lo));
+
+    const losingPct = (r) => (r.trades > 0 ? r.losses / r.trades : 1);
+    const ranges = {
+      drawdown: span((r) => r.max_drawdown),
+      worstTrade: span((r) => r.worst_trade),
+      losingPct: span(losingPct),
+      losingTrades: span((r) => r.losses),
+      profit: span((r) => r.pessimistic),
+      winningTrades: span((r) => r.wins),
+      winRate: span((r) => r.win_rate_bp),
+      rewardRisk: span((r) => r.reward_to_risk_bp),
+      avgWin: span((r) => r.avg_win),
+      avgLoss: span((r) => r.avg_loss)
+    };
+
+    const scored = priced.map((r) => {
+      // LESS IS BETTER for the first four, so their normalised value is
+      // inverted. `worst_trade` and `avg_loss` are negative or zero, so a LARGER
+      // value is already the better one and they are not inverted — reading them
+      // as "less is better" on the raw number would rank the worst rows first.
+      const score =
+        weights.drawdown * (1 - norm(r.max_drawdown, ranges.drawdown)) +
+        weights.worstTrade * norm(r.worst_trade, ranges.worstTrade) +
+        weights.losingPct * (1 - norm(losingPct(r), ranges.losingPct)) +
+        weights.losingTrades * (1 - norm(r.losses, ranges.losingTrades)) +
+        weights.profit * norm(r.pessimistic, ranges.profit) +
+        weights.winningTrades * norm(r.wins, ranges.winningTrades) +
+        weights.winRate * norm(r.win_rate_bp, ranges.winRate) +
+        weights.rewardRisk * norm(r.reward_to_risk_bp, ranges.rewardRisk) +
+        weights.avgWin * norm(r.avg_win, ranges.avgWin) +
+        weights.avgLoss * norm(r.avg_loss, ranges.avgLoss);
+      return { ...r, score };
+    });
+
+    // Sorted on score, ties broken by the sweep's own rank so the order is
+    // total and two runs of the same data list the same rows in the same order.
+    scored.sort((a, b) => b.score - a.score || a.rank - b.rank);
+    return scored.slice(0, topN);
+  });
+
   /** @param {string|undefined} identity */
   async function fetchTrades(identity) {
     if (!identity) {
@@ -1743,6 +1889,10 @@
     // row in the ledger. A run can hold tens of thousands of them and the list
     // is only ever looked at one run at a time.
     fetchTrades(run.identity);
+    // AND THE RANKED COMBINATIONS. The ledger row is the ONE the exit grid
+    // chose; these are the twenty-five behind it, with every measurement the
+    // operator ranks on.
+    fetchCombos(run.identity);
     await tick();
     const page = document.querySelector('.page');
     if (!page) return;
@@ -5282,6 +5432,72 @@
               {/key}
               </div>
             {:else if testerView === 'trades'}
+              <!-- ============ TOP COMBINATIONS, RANKED ON THE OPERATOR'S OWN CRITERIA ============
+                   The ledger row above is the ONE combination the exit grid
+                   chose. These are the rest of the frontier, ranked by the
+                   eleven measurements the operator named -- and ranked HERE
+                   rather than in Rust, because a score compiled into the binary
+                   is one more number nobody can see. -->
+              <div class="tt-sec">
+                <div class="tt-hrow">
+                  <h4 class="tt-h">Top {topN} combinations — ranked on your criteria</h4>
+                </div>
+                {#if combos.phase === 'ready' && ranked.length > 0}
+                  <div class="tt-tblwrap">
+                    <table class="tt-tbl rungprog">
+                      <thead>
+                        <tr>
+                          <th>#</th><th class="n">score</th><th class="n">trades</th>
+                          <th class="n">win %</th><th class="n">losses</th>
+                          <th class="n">worst fills</th><th class="n">max drawdown</th>
+                          <th class="n">worst trade</th><th class="n">smallest win</th>
+                          <th class="n">avg win</th><th class="n">avg loss</th>
+                          <th class="n">reward:risk</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {#each ranked as c, i (c.rank)}
+                          <tr>
+                            <td><b>{i + 1}</b><span class="dim"> (rank {c.rank})</span></td>
+                            <td class="n">{c.score.toFixed(2)}</td>
+                            <td class="n">{exact(c.trades)}</td>
+                            <td class="n">{(c.win_rate_bp / 100).toFixed(1)}%</td>
+                            <td class="n">{exact(c.losses)}</td>
+                            <td class="n {c.pessimistic < 0 ? 'down' : 'up'}">{money(c.pessimistic)}</td>
+                            <td class="n down">{money(c.max_drawdown)}</td>
+                            <td class="n down">{money(c.worst_trade)}</td>
+                            <td class="n up">{money(c.min_win)}</td>
+                            <td class="n up">{money(c.avg_win)}</td>
+                            <td class="n down">{money(c.avg_loss)}</td>
+                            <td class="n">{(c.reward_to_risk_bp / 100).toFixed(2)}×</td>
+                          </tr>
+                        {/each}
+                      </tbody>
+                    </table>
+                  </div>
+                  <!-- SAID OUT LOUD, because the difference decides whether the
+                       table above is a finding or an artefact. -->
+                  <p class="tt-note2">
+                    {ranked.length} of {combos.rows.length} shown.
+                    {#if combos.rows.filter((r) => !r.priced).length > 0}
+                      <b>{combos.rows.filter((r) => !r.priced).length} excluded as never priced</b> —
+                      the screen prices only the strongest few hundred of the hundreds of thousands
+                      the sweep enumerates, and an unpriced row stores zeros. A zero drawdown is a
+                      spectacular result, so including them would put the combinations nobody
+                      measured at the top of this table.
+                    {/if}
+                  </p>
+                {:else if combos.phase === 'loading'}
+                  <p class="tt-note2 dim">Reading this run's combinations…</p>
+                {:else}
+                  <p class="tt-note2">
+                    {#if combos.why}{combos.why}
+                    {:else if combos.phase === 'ready'}No priced combinations were recorded for this run.
+                    {:else}Open a run to rank its combinations.{/if}
+                  </p>
+                {/if}
+              </div>
+
               <!-- ================= LIST OF TRADES ================= -->
               <div class="tt-sec">
                 <div class="tt-hrow">
