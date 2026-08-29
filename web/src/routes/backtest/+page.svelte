@@ -178,6 +178,67 @@
    */
   let live = $state({ phase: 'idle', rungs: [], why: '' });
 
+  /**
+   * One run's round trips — the rows the trade table below has been drawing
+   * padlocks into since it was written.
+   *
+   * The table, its columns and its two-rows-per-trade shape were all built; the
+   * file it reads was never written and no route ever served it. `cli::trades`
+   * writes it now and `GET /trades.json?identity=…` serves it, keyed on the same
+   * identity the ledger already prints on every row.
+   *
+   * Fetched when a run is OPENED rather than with the ledger: a run can hold
+   * tens of thousands of trades and only one run is ever looked at.
+   */
+  let tradeList = $state({ phase: 'idle', rows: [], why: '' });
+
+  /** @param {string|undefined} identity */
+  async function fetchTrades(identity) {
+    if (!identity) {
+      tradeList = { phase: 'idle', rows: [], why: '' };
+      return;
+    }
+    tradeList = { phase: 'loading', rows: [], why: '' };
+    try {
+      const response = await ask_(`/trades.json?identity=${encodeURIComponent(identity)}`);
+      const body = await response.json();
+      // THE ROUTE ANSWERS 200 WITH AN EMPTY LIST AND A REASON when the file is
+      // absent, so an empty store and a broken server never look alike. Both
+      // are carried: the rows if any, the reason if any.
+      tradeList = {
+        phase: response.ok ? 'ready' : 'failed',
+        rows: Array.isArray(body.trades) ? body.trades : [],
+        why: body.refusal ?? (response.ok ? '' : `/trades.json answered ${response.status}`)
+      };
+    } catch (why) {
+      tradeList = {
+        phase: 'failed',
+        rows: [],
+        why: `The trades could not be fetched: ${why instanceof Error ? why.message : String(why)}`
+      };
+    }
+  }
+
+  /**
+   * The running total, so the table can show a cumulative column.
+   *
+   * Computed here and not on the wire: it is derived from the rows the server
+   * already sent, and sending it too would be a second copy of one fact.
+   * Excursions are paisa, so this is paisa.
+   */
+  const tradeRows = $derived.by(() => {
+    let running = 0;
+    return tradeList.rows.map((t) => {
+      // `worst` is the adverse excursion and is negative or zero; `best` the
+      // favourable one. The realised result of a time-exited trade is neither —
+      // it is what the bar closed at — and this file does not carry it, so the
+      // cumulative column sums the ADVERSE excursion and says so in its header
+      // rather than implying a P&L the store never recorded.
+      running += t.worst ?? 0;
+      return { ...t, cumulative: running };
+    });
+  });
+
   /** Rungs seen so far, newest first, as `{rung, bars, minHits, done, why}`. */
   async function fetchLive() {
     try {
@@ -1678,6 +1739,10 @@
     const opening = openIndex !== run.index;
     openIndex = opening ? run.index : null;
     if (!opening) return;
+    // THE TRADES OF THIS RUN, fetched when it is opened rather than for every
+    // row in the ledger. A run can hold tens of thousands of them and the list
+    // is only ever looked at one run at a time.
+    fetchTrades(run.identity);
     await tick();
     const page = document.querySelector('.page');
     if (!page) return;
@@ -5241,51 +5306,50 @@
                            bordered block, with the per-TRADE columns spanning
                            both and the per-LEG columns differing. That shape is
                            the whole reason this table reads as trades rather
-                           than as a log, so it is drawn even though every leg
-                           is a padlock. The columns to the right of Price
-                           belong to the trade and are set with rowspan. -->
-                      <tr class="lot-a">
-                        <td rowspan="2" class="lot-num"><Lock small why="No trade number — no trade list is recorded." /></td>
-                        <td>Exit</td>
-                        <td><Lock small why="No exit timestamp is recorded." /></td>
-                        <td><Lock small why="No exit signal is recorded." /></td>
-                        <td class="n"><Lock small why="No exit price is recorded." /></td>
-                        <td rowspan="2" class="n"><Lock small why="Position size is not modelled — the engine computes index points, not contracts." /></td>
-                        <td rowspan="2" class="n"><Lock small why="Per-trade PnL is not recorded, only the run's net." /></td>
-                        <td rowspan="2" class="n"><Lock small why="Needs per-trade PnL and its entry price." /></td>
-                        <td rowspan="2" class="n"><Lock small why="Favourable excursion is recorded as a fold over winners, not per trade." /></td>
-                        <td rowspan="2" class="n"><Lock small why="Adverse excursion is recorded as a fold, not per trade." /></td>
-                        <td rowspan="2" class="n"><Lock small why="A cumulative series needs every trade in order." /></td>
-                        <td rowspan="2" class="n"><Lock small why="Needs the entry and exit bar of each trade." /></td>
-                      </tr>
-                      <tr class="lot-b">
-                        <td>Entry</td>
-                        <td><Lock small why="No entry timestamp is recorded." /></td>
-                        <td><Lock small why="No entry signal is recorded." /></td>
-                        <td class="n"><Lock small why="No entry price is recorded." /></td>
-                      </tr>
-                      <tr class="lockrow">
-                        <td colspan="12">
-                          <div class="tt-lockbig">
-                            <Lock big />
-                            <div>
-                              <b>No trade list is recorded, so no row here can be filled.</b>
-                              <p>
-                                The sweep took <b>{exact(openRun.trades)}</b> round trips and wrote that number and nothing
-                                else about them — no entry, no exit, no timestamp, no per-trade result. Twelve columns of
-                                plausible rows could be generated from the totals; none of them would be a trade that
-                                happened, and that is the one thing this console must never print.
-                              </p>
-                              <p class="tt-fix">
-                                <b>What closes it:</b> a second append-only file beside <code>runs.bin</code>, at a fixed
-                                stride, one record per trade. That is <code>cli</code>'s file to write — the same change that
-                                unlocks percent profitable, profit factor, the streaks, the distribution and the equity curve.
-                              </p>
-                            </div>
-                          </div>
-                        </td>
-                      </tr>
-                    </tbody>
+                           than as a log, and it is now drawn with real rows.
+                           Every cell here was a padlock until `cli::trades`
+                           wrote the file and `/trades.json` served it. -->
+                      {#if tradeList.phase === 'ready' && tradeRows.length > 0}
+                        {#each tradeRows as t (t.seq)}
+                          <tr class="lot-a">
+                            <td rowspan="2" class="lot-num">{t.seq + 1}</td>
+                            <td>Exit</td>
+                            <td>bar {exact(t.exit_bar)}</td>
+                            <td><Lock small why="The exit signal is not stored per trade — the run's chosen exit variant is on the record above." /></td>
+                            <td class="n"><Lock small why="Prices are not repeated per trade; the bar index above indexes the stored bars." /></td>
+                            <td class="n"><Lock small why="Position size is not part of a sweep — the engine measures one unit of the index." /></td>
+                            <td rowspan="2" class="n"><Lock small why="Realised net P&L per trade is not stored; the excursions beside it are." /></td>
+                            <td rowspan="2" class="n"><Lock small why="Return needs a realised result, which is not stored per trade." /></td>
+                            <td rowspan="2" class="n up">{money(t.best)}</td>
+                            <td rowspan="2" class="n down">{money(t.worst)}</td>
+                            <td rowspan="2" class="n {t.cumulative < 0 ? 'down' : 'up'}">{money(t.cumulative)}</td>
+                            <td rowspan="2" class="n">{exact(t.bars_held)}</td>
+                          </tr>
+                          <tr class="lot-b">
+                            <td>Entry</td>
+                            <td>bar {exact(t.entry_bar)}</td>
+                            <td>signal at bar {exact(t.signal_bar)}</td>
+                            <td class="n"><Lock small why="Prices are not repeated per trade; the bar index beside it indexes the stored bars." /></td>
+                            <td class="n"><Lock small why="Position size is not part of a sweep — the engine measures one unit of the index." /></td>
+                          </tr>
+                        {/each}
+                      {:else if tradeList.phase === 'loading'}
+                        <tr><td colspan="12" class="dim">Reading this run's trades…</td></tr>
+                      {:else}
+                        <!-- NAMED, NOT BLANK. An empty table and a failed fetch
+                             look identical unless one of them says so, and the
+                             route answers 200-with-a-reason precisely so the
+                             two can be told apart here. -->
+                        <tr>
+                          <td colspan="12">
+                            <p class="tt-note2">
+                              {#if tradeList.why}{tradeList.why}
+                              {:else if tradeList.phase === 'ready'}This run recorded no round trips.
+                              {:else}Open a run to read its trades.{/if}
+                            </p>
+                          </td>
+                        </tr>
+                      {/if}
                   </table>
                 </div>
               </div>

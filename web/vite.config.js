@@ -77,6 +77,11 @@ const ROUTES = [
 	// reason `/backtest/run` is: `/engine/command` is a POST that no page calls
 	// and proxying the whole prefix would claim it too.
 	'/engine/top.json',
+	// ONE RUN'S ROUND TRIPS. The per-trade table on the backtest page rendered
+	// a padlock in every cell, because nothing wrote the file it reads and no
+	// route served it. `cli::trades` writes it now and `/trades.json` serves it,
+	// keyed on the identity `/backtest.json` already prints on every row.
+	'/trades.json',
 	// THE EVENT FEED, WHICH IS THE ONLY LIVE PROGRESS THAT EXISTS.
 	//
 	// `GET /backtest/run.json` reads a struct written exactly twice — once when
