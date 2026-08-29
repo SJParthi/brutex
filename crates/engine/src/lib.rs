@@ -2778,14 +2778,27 @@ mod tests {
         let column_src = include_str!("column.rs");
         let column_exits = count_exits(column_src.split("#[cfg(test)]").next().unwrap_or(""));
         assert_eq!(
-            column_exits, 2,
-            "crates/engine/src/column.rs may leave early in exactly two places: \
+            column_exits, 3,
+            "crates/engine/src/column.rs may leave early in exactly three places: \
              `set_positions`' iterator returning `None` when a word is exhausted, \
-             which is how an iterator ends, and `support`'s `popcount == 0` short \
-             answer for the empty mask. Any THIRD exit truncates a support count, \
-             which silently changes every hit total the ladder reads and which no \
-             behavioural test can see -- the two layouts are answer-equivalent by \
-             construction."
+             which is how an iterator ends, and the `popcount == 0` short answer \
+             for the empty mask in EACH of `support` and `support_fingerprinted`. \
+             Any FOURTH exit truncates a support count, which silently changes \
+             every hit total the ladder reads and which no behavioural test can \
+             see -- the two layouts are answer-equivalent by construction. \
+             \
+             THE THIRD IS ARGUED FOR, which this test requires before it compiles. \
+             `support_fingerprinted` answers the same question `support` answers \
+             and adds the identity of the bars it counted, so it inherits the same \
+             empty-mask case for the same reason: a candidate requiring nothing is \
+             matched by every bar, and `popcount == 0` is how both functions say so \
+             without entering a loop that assumes at least one AND. It is not a \
+             new KIND of exit -- it is the existing one, in the parallel function, \
+             and removing it would not tighten the guard but would break the \
+             padding argument the loop below it rests on. It cannot truncate a \
+             count: it returns `self.bars`, the maximum any candidate can score, \
+             and `the_fingerprinted_count_is_the_plain_count` holds the two \
+             functions to the same answer on over a thousand candidates."
         );
         assert_eq!(
             exits, 10,

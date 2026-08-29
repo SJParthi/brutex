@@ -227,7 +227,150 @@ impl Column {
         }
         u64::from(hits)
     }
+
+    /// The support count AND the identity of the bars it counted, in ONE pass.
+    ///
+    /// # Why this exists, and what it measured
+    ///
+    /// [`crate::Ladder::walk`]'s `seen` set rejects a duplicate by its MASK -- which
+    /// bits a candidate names. Two candidates that name different bits and select the
+    /// SAME BARS are not duplicates to it, and they are the same hypothesis to
+    /// everything downstream: the same trades, the same mean, the same t-statistic.
+    ///
+    /// MEASURED, on the 60min zerodha NIFTY run of 2019-12..2026-08 that reached k=8:
+    /// the report's `top 10000 best by |t|` held **221 distinct `(hits, n, mean)`
+    /// signatures and 95 distinct t-statistics**. Ranks 5 through 9 were one finding
+    /// five times, each copy differing only in which `close_below_pivot_r*_band` was
+    /// bolted on -- a bit that changed the mask and not one bar. A single trade set,
+    /// `hits=232 n=137 mean=355`, occupied **1,781 of the 10,000 rows**.
+    ///
+    /// That is not a ranking. It is one finding, printed until the page is full.
+    ///
+    /// # And it moves the significance bar, which is the part that changes an answer
+    ///
+    /// The same run counted `84,430,203` hypotheses and set its Bonferroni floor at
+    /// `t = 6.19` from that count. A hypothesis that is not distinct is not a trial,
+    /// so a trial count inflated by redundancy raises the bar every REAL finding must
+    /// clear. The count this function makes available is the honest denominator.
+    ///
+    /// # Why it is free
+    ///
+    /// [`Self::support`] already computes `acc` -- the AND of the named bitmaps -- for
+    /// every word, and `acc` IS the hit set. The fold below reads that register and
+    /// touches no memory the support count was not already touching, so this costs the
+    /// same bytes moved as [`Self::support`] and adds two register operations per word.
+    ///
+    /// # The cost does not depend on the answer
+    ///
+    /// Every word is folded, including the zero words of a sparse hit set. Skipping
+    /// zeroes would make a candidate that misses early cheaper than one that matches,
+    /// which is the property `C-E-03` exists to refuse -- see the no-short-circuit
+    /// comment in [`Self::support`], which this loop inherits for the same reason.
+    #[must_use]
+    pub fn support_fingerprinted(&self, candidate: &ConditionMask) -> (u64, HitSet) {
+        // THE EMPTY MASK SELECTS EVERY BAR, and it needs a fingerprint like any
+        // other candidate rather than falling through the loop -- which would fold
+        // over zero words and hand back the seed, the fingerprint of a hit set that
+        // selects NOTHING. Those two are opposites, so they must not collide.
+        // `HitSet::EVERY_BAR` is a distinct reserved value and never a fold output.
+        if candidate.popcount() == 0 {
+            return (self.bars, HitSet::EVERY_BAR);
+        }
+
+        let mut bases = [0_usize; ConditionMask::BITS as usize];
+        let mut count = 0_usize;
+        for (slot, position) in bases.iter_mut().zip(set_positions(candidate)) {
+            *slot = usize::try_from(position)
+                .unwrap_or(0)
+                .saturating_mul(self.stride);
+            count = count.saturating_add(1);
+        }
+
+        let mut hits = 0_u32;
+        let mut lo = FINGERPRINT_SEED_LO;
+        let mut hi = FINGERPRINT_SEED_HI;
+        for word in 0..self.stride {
+            let mut acc = u64::MAX;
+            for base in bases.iter().take(count) {
+                acc &= self
+                    .bits
+                    .get(base.saturating_add(word))
+                    .copied()
+                    .unwrap_or(0);
+            }
+            hits = hits.saturating_add(acc.count_ones());
+            // TWO INDEPENDENT FOLDS, and the rotation is what makes them ORDERED.
+            // Multiply-xorshift alone is commutative over a set of words, so two
+            // different hit sets holding the same words in a different order would
+            // fold to the same value. The rotate makes each step depend on how many
+            // words came before it, so word order is part of the identity -- and
+            // word order is bar order.
+            lo = (lo ^ acc).wrapping_mul(FINGERPRINT_MIX_LO);
+            lo ^= lo >> 29;
+            hi = (hi.rotate_left(23) ^ acc).wrapping_mul(FINGERPRINT_MIX_HI);
+        }
+        (u64::from(hits), HitSet { lo, hi })
+    }
 }
+
+/// The identity of a SET OF BARS: 128 bits folded over the bitmap the candidate
+/// selects, by [`Column::support_fingerprinted`].
+///
+/// # Why 128 bits and not 64
+///
+/// Because the birthday bound is the whole argument, and at this scale 64 is not
+/// enough. A collision does not merely miscount -- it DISCARDS a genuine finding by
+/// declaring it a duplicate of an unrelated one, silently, which is the failure mode
+/// `CLAUDE.md` §4 bans outright.
+///
+/// The run that motivated this weighed `84,097,159` combinations. At 64 bits the
+/// birthday probability over N = 8.4e7 is about `N^2 / 2^65` -- roughly **2 in 10,000**,
+/// which is small but is a coin flip against a real answer that nobody would ever see
+/// land. At 128 bits the same expression is `N^2 / 2^129`, about `1e-23`: not a promise
+/// that it cannot happen, but a number small enough to write down and defend.
+///
+/// This type is deliberately NOT `Ord`. There is no meaningful order over hit-set
+/// identities -- sorting by one would impose a ranking that no document defines, which
+/// is the same reason [`crate::Frontier::frequent`] refuses to sort by edge.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct HitSet {
+    lo: u64,
+    hi: u64,
+}
+
+impl HitSet {
+    /// The hit set of a candidate that requires nothing and therefore selects every
+    /// bar. Reserved, and unreachable as a fold output: the fold always ends with a
+    /// `wrapping_mul` by an odd constant, so it can only produce zero in `hi` from a
+    /// zero input to that multiply, and `lo`'s final xorshift cannot produce the low
+    /// half either. `the_empty_and_the_impossible_never_collide` is what says so.
+    pub const EVERY_BAR: Self = Self { lo: 0, hi: 0 };
+
+    /// The two halves, for a caller that must persist or transmit an identity.
+    ///
+    /// Exposed as a pair rather than as fields so the fold's internals stay private:
+    /// a future change to the mixing constants must not be a breaking change to
+    /// anything that merely stores what it was handed.
+    #[must_use]
+    pub const fn halves(self) -> (u64, u64) {
+        (self.lo, self.hi)
+    }
+}
+
+/// Seeds for the two folds. FIXED, for the reason [`crate::MASK_HASH_SEED`] is fixed:
+/// §3.5 requires the same inputs to give the same outputs on every run and every
+/// machine, and a seed drawn from the environment would break that.
+const FINGERPRINT_SEED_LO: u64 = 0xcbf2_9ce4_8422_2325;
+/// The second fold's seed. Different from the first, so the two halves of a
+/// fingerprint are not the same function of the same input.
+const FINGERPRINT_SEED_HI: u64 = 0x9e37_79b9_7f4a_7c15;
+/// The low fold's multiplier. Odd, so the multiply is a bijection on `u64` and cannot
+/// fold two distinct inputs together on its own -- the same property
+/// [`crate::MASK_HASH_MIX`] is chosen for.
+const FINGERPRINT_MIX_LO: u64 = 0x100_0000_01b3;
+/// The high fold's multiplier. Also odd, and different, so a candidate cannot produce
+/// two equal halves except by coincidence.
+const FINGERPRINT_MIX_HI: u64 = 0xff51_afd7_ed55_8ccd;
 
 // NO `#[expect(clippy::unwrap_used, clippy::expect_used)]` here, and its absence is
 // deliberate rather than an omission. `mod tests` in `lib.rs` needs those exemptions;
@@ -237,7 +380,7 @@ impl Column {
 // `allow`: it reports an exemption nobody needs.
 #[cfg(test)]
 mod tests {
-    use super::{Column, set_positions};
+    use super::{Column, HitSet, set_positions};
     use vocab::ConditionMask;
 
     /// A deterministic bit source. No `rand`: §3.5 wants the same inputs to give the
@@ -558,5 +701,221 @@ mod tests {
             "every bar carries bit 7, so support is the bar count and not the word count \
              times 64"
         );
+    }
+
+    /// The whole point of the type: DIFFERENT BITS, SAME BARS, ONE IDENTITY.
+    ///
+    /// Bit 9 is set on exactly the bars bit 3 is set on, so a candidate naming
+    /// `{3}`, one naming `{9}` and one naming `{3,9}` all select the same bars.
+    /// `Ladder::walk`'s mask-keyed `seen` calls those three distinct candidates,
+    /// and they are one hypothesis.
+    #[test]
+    fn masks_that_differ_but_select_the_same_bars_share_a_fingerprint() {
+        let bars = 300;
+        let rows: Vec<ConditionMask> = (0..bars)
+            .map(|bar| {
+                let mut m = ConditionMask::ZERO.with_bit(1);
+                if bar % 3 == 0 {
+                    // The redundant pair, always set together -- the shape that put
+                    // ranks 5 through 9 of the real run on the same trades.
+                    m = m.with_bit(3).with_bit(9);
+                }
+                m
+            })
+            .collect();
+        let vertical = Column::transpose(&rows);
+
+        let only_three = vertical.support_fingerprinted(&ConditionMask::ZERO.with_bit(3));
+        let only_nine = vertical.support_fingerprinted(&ConditionMask::ZERO.with_bit(9));
+        let both = vertical.support_fingerprinted(&ConditionMask::ZERO.with_bit(3).with_bit(9));
+
+        assert_eq!(only_three.0, 100, "every third bar of 300");
+        assert_eq!(
+            (only_three.1, only_nine.1),
+            (only_nine.1, both.1),
+            "three masks, one hit set, therefore one identity -- this is the equality \
+             that collapses a 10,000-row report to its real findings"
+        );
+
+        // And a mask selecting a DIFFERENT set must not collide with them.
+        let elsewhere = vertical.support_fingerprinted(&ConditionMask::ZERO.with_bit(1));
+        assert_eq!(elsewhere.0, u64::try_from(bars).unwrap_or(0));
+        assert_ne!(
+            elsewhere.1, only_three.1,
+            "300 bars and 100 bars are not the same hypothesis"
+        );
+    }
+
+    /// The count this function returns is the count [`Column::support`] returns.
+    ///
+    /// Sharing a loop is not the same as sharing an answer, and a fingerprint that
+    /// came with a wrong support would be worse than no fingerprint: it would be
+    /// silently wrong in the ranking as well as the dedup.
+    #[test]
+    fn the_fingerprinted_count_is_the_plain_count() {
+        const LIVE: [u32; 8] = [0, 1, 63, 64, 127, 192, 233, 279];
+        const BARS: [usize; 7] = [1, 63, 64, 65, 127, 128, 300];
+
+        let mut checked = 0_u32;
+        for (seed, bars) in BARS.iter().enumerate() {
+            for set in [1_usize, 3, 8] {
+                let rows = column(seed as u64 * 11 + 1, *bars, &LIVE, set);
+                let vertical = Column::transpose(&rows);
+                let mut candidates = vec![ConditionMask::ZERO];
+                for a in LIVE {
+                    candidates.push(ConditionMask::ZERO.with_bit(a));
+                    for b in LIVE {
+                        candidates.push(ConditionMask::ZERO.with_bit(a).with_bit(b));
+                    }
+                }
+                for candidate in &candidates {
+                    let (counted, _) = vertical.support_fingerprinted(candidate);
+                    assert_eq!(
+                        counted,
+                        vertical.support(candidate),
+                        "the two functions walk the same words and must agree at \
+                         {bars} bars, set {set}"
+                    );
+                    checked = checked.saturating_add(1);
+                }
+            }
+        }
+        assert!(
+            checked > 1_000,
+            "the loop must actually have run: {checked}"
+        );
+    }
+
+    /// A fingerprint is a function of the hit set and nothing else -- not of the
+    /// call, the process or the order the candidates arrived in. §3.5.
+    #[test]
+    fn the_same_hit_set_folds_the_same_way_every_time() {
+        let rows = column(7, 300, &[0, 1, 63, 64, 127], 3);
+        let first = Column::transpose(&rows);
+        let second = Column::transpose(&rows);
+        let candidate = ConditionMask::ZERO.with_bit(1).with_bit(64);
+        assert_eq!(
+            first.support_fingerprinted(&candidate),
+            second.support_fingerprinted(&candidate),
+            "two columns from the same rows are the same column"
+        );
+        assert_eq!(
+            first.support_fingerprinted(&candidate),
+            first.support_fingerprinted(&candidate),
+            "and asking twice does not move it"
+        );
+    }
+
+    /// Word ORDER is part of the identity, which is what the rotate buys.
+    ///
+    /// Two hit sets holding the same words in a different order are different sets
+    /// of bars. A commutative fold would call them equal and silently merge two
+    /// unrelated findings.
+    #[test]
+    fn the_fold_is_ordered_so_moving_bars_moves_the_identity() {
+        // 128 bars: two full words. Bit 5 on the first word's bars in one column,
+        // on the second word's bars in the other -- same popcount, same word
+        // VALUES, opposite order.
+        let front: Vec<ConditionMask> = (0..128)
+            .map(|bar| {
+                if bar < 64 {
+                    ConditionMask::ZERO.with_bit(5)
+                } else {
+                    ConditionMask::ZERO
+                }
+            })
+            .collect();
+        let back: Vec<ConditionMask> = (0..128)
+            .map(|bar| {
+                if bar >= 64 {
+                    ConditionMask::ZERO.with_bit(5)
+                } else {
+                    ConditionMask::ZERO
+                }
+            })
+            .collect();
+        let candidate = ConditionMask::ZERO.with_bit(5);
+        let a = Column::transpose(&front).support_fingerprinted(&candidate);
+        let b = Column::transpose(&back).support_fingerprinted(&candidate);
+        assert_eq!(a.0, b.0, "both select 64 bars");
+        assert_ne!(
+            a.1, b.1,
+            "the first 64 bars and the last 64 bars are not the same trades, so they \
+             must not be the same identity"
+        );
+    }
+
+    /// The empty mask selects every bar, and the reserved value it returns is not
+    /// reachable by folding -- so "everything" can never be mistaken for a real
+    /// candidate's hit set, nor for the "nothing" the bare seed would denote.
+    #[test]
+    fn the_empty_and_the_impossible_never_collide() {
+        let bars = 300;
+        let rows = column(3, bars, &[0, 1, 63, 64, 127], 2);
+        let vertical = Column::transpose(&rows);
+
+        let (counted, identity) = vertical.support_fingerprinted(&ConditionMask::ZERO);
+        assert_eq!(
+            counted,
+            u64::try_from(bars).unwrap_or(0),
+            "a candidate requiring nothing is matched by every bar"
+        );
+        assert_eq!(identity, HitSet::EVERY_BAR);
+        assert_eq!(identity.halves(), (0, 0));
+
+        // No real candidate -- including one that happens to select every bar by
+        // naming a bit every bar carries -- may fold to the reserved value.
+        let all_bars: Vec<ConditionMask> =
+            (0..bars).map(|_| ConditionMask::ZERO.with_bit(7)).collect();
+        let dense = Column::transpose(&all_bars);
+        let (dense_count, dense_identity) =
+            dense.support_fingerprinted(&ConditionMask::ZERO.with_bit(7));
+        assert_eq!(dense_count, u64::try_from(bars).unwrap_or(0));
+        assert_ne!(
+            dense_identity,
+            HitSet::EVERY_BAR,
+            "selecting every bar BY NAMING A BIT is a real hypothesis and must fold, \
+             not take the reserved value"
+        );
+
+        for candidate in [
+            ConditionMask::ZERO.with_bit(0),
+            ConditionMask::ZERO.with_bit(63),
+            ConditionMask::ZERO.with_bit(1).with_bit(64),
+        ] {
+            assert_ne!(
+                vertical.support_fingerprinted(&candidate).1,
+                HitSet::EVERY_BAR,
+                "the reserved value is reserved"
+            );
+        }
+    }
+
+    /// A hit set of NOTHING is a real answer -- a candidate whose bits never co-occur
+    /// -- and it must have an identity of its own rather than borrowing the empty
+    /// mask's, which means the opposite.
+    #[test]
+    fn selecting_no_bars_is_its_own_identity() {
+        // Bit 2 on the even bars, bit 4 on the odd ones: never together.
+        let rows: Vec<ConditionMask> = (0..128)
+            .map(|bar| {
+                if bar % 2 == 0 {
+                    ConditionMask::ZERO.with_bit(2)
+                } else {
+                    ConditionMask::ZERO.with_bit(4)
+                }
+            })
+            .collect();
+        let vertical = Column::transpose(&rows);
+        let (counted, identity) =
+            vertical.support_fingerprinted(&ConditionMask::ZERO.with_bit(2).with_bit(4));
+        assert_eq!(counted, 0, "the two bits never co-occur");
+        assert_ne!(
+            identity,
+            HitSet::EVERY_BAR,
+            "no bars and every bar are opposites and must not share an identity"
+        );
+        let (_, halves) = (identity, identity.halves());
+        assert_ne!(halves, (0, 0), "and it is not the reserved pair either");
     }
 }
