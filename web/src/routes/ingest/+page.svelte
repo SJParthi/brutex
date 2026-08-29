@@ -4752,51 +4752,60 @@
   }
 
   /**
-   * WHERE IN THE WINDOW THE GAPS ARE — four blocks, oldest on the left.
+   * WHERE IN THE WINDOW THE GAPS ARE — the row's own months, run-length
+   * encoded, oldest on the left.
    *
    * `Months unproved` says 32/32 and `Verdict` says `never pulled`. Neither says
    * WHERE: a series missing its first six months and a series missing its last
    * six read identically in both columns, and they call for opposite actions —
    * one is a floor you have to move, the other is a pull that has not caught up.
-   * This is the column that separates them, and it is the reference's own
-   * (`web/design/ingest.html` draws four blocks per row).
+   * This is the column that separates them.
    *
-   * FOUR BUCKETS OVER THE ROW'S OWN MONTHS, not over a fixed calendar: the
-   * window is whatever the two date fields hold, so quarters of THAT are what a
-   * reader can act on. Fewer than four months gives fewer than four blocks
-   * rather than padding with empties, because an empty block and an unsettled
-   * one look alike at 9px and only one of them is a fact.
+   * WHY THE FOUR BUCKETS ARE GONE. This bucketed the window into quarters and
+   * printed the WORST verdict in each. A row whose months all hold ONE verdict
+   * therefore drew four identical squares — and that is every row of a feed
+   * that has never been pulled. Measured on the live page: NIFTY 50 over a
+   * 140-month window drew 200 squares carrying one bit of information between
+   * them. Four blocks was the reference's drawing, not a measurement, and a
+   * picture that is constant across every row is decoration.
    *
-   * THE WORST VERDICT IN EACH BUCKET, never the best or the most common. A block
-   * showing the majority would hide the single missing month it exists to point
-   * at, and `VORDER` is already worst-first so the comparison is one Map lookup.
+   * RUN-LENGTH ENCODED, AND THAT IS WHAT MAKES THE CELL O(1) TO DRAW.
+   * Consecutive months holding the same verdict collapse into ONE run, and the
+   * runs carry their own start and end as percentages — so the cell is ONE
+   * element with one `linear-gradient` behind it, whatever the window holds.
+   * A month-per-element strip would have been 140 nodes × 25 rows = 3,500 nodes
+   * for one column; this is 25, and it is 25 at any window width.
    *
-   * Cost: O(months) per row, and it is computed once per view in `coverage`
-   * below rather than per render — the lookup at draw time is one `Map.get`.
+   * The runs are also the only honest answer to "where": one band says the
+   * whole window holds one verdict, and two say exactly where it changes.
+   *
+   * Cost: O(months) per row, computed once per view in `cells` below. The read
+   * at draw time is one `Map.get` and one string — see §3 rule 4.
    *
    * @param {CensusRow['months']} months
-   * @returns {{ tone: string, label: string, from: string, to: string, n: number }[]}
+   * @returns {{ k: Verdict, tone: string, label: string, from: string, to: string, n: number, a: number, b: number }[]}
    */
   function coverageOf(months) {
-    if (months.length === 0) return [];
-    const buckets = Math.min(4, months.length);
+    const total = months.length;
+    if (total === 0) return [];
+    /** @type {{ k: Verdict, tone: string, label: string, from: string, to: string, n: number, a: number, b: number }[]} */
     const out = [];
-    for (let i = 0; i < buckets; i += 1) {
-      const slice = months.slice(
-        Math.floor((i * months.length) / buckets),
-        Math.floor(((i + 1) * months.length) / buckets)
-      );
-      let worst = slice[0].k;
-      for (const m of slice) {
-        if ((VRANK.get(m.k) ?? 99) < (VRANK.get(worst) ?? 99)) worst = m.k;
+    let start = 0;
+    for (let i = 1; i <= total; i += 1) {
+      if (i === total || months[i].k !== months[start].k) {
+        const k = months[start].k;
+        out.push({
+          k,
+          tone: VERDICT[k][0],
+          label: VERDICT[k][1],
+          from: months[start].month,
+          to: months[i - 1].month,
+          n: i - start,
+          a: (start / total) * 100,
+          b: (i / total) * 100
+        });
+        start = i;
       }
-      out.push({
-        tone: VERDICT[worst][0],
-        label: VERDICT[worst][1],
-        from: slice[0].month,
-        to: slice[slice.length - 1].month,
-        n: slice.length
-      });
     }
     return out;
   }
@@ -5116,15 +5125,77 @@
   const verdictTotal = $derived(censusRows.length);
 
   /**
-   * THE DRAWN PAGE'S COVERAGE, COMPUTED ONCE PER VIEW.
+   * EVERY VISUAL THE SEVEN CELLS NEED, COMPUTED ONCE PER VIEW.
    *
-   * Keyed by `id` so the table's read is one `Map.get` per row rather than a
-   * walk of that row's months on every render — and it is built over
-   * `censusSlice`, the 25 rows actually on screen, never over all of them.
-   * Paging or sorting rebuilds it; a hover or an unrelated state change does
-   * not. Bound: 25 rows x the months in the window, once.
+   * WHAT THIS REPLACED, AND WHY IT GREW. This was `coverage` — one Map holding
+   * one column's blocks. Six of the seven columns drew bare text beside it, so
+   * a reader comparing two rows was reading and dividing eight-digit numbers by
+   * eye: `0 / 6,18,296` against `6,11,204 / 6,18,296` are the same shape and
+   * opposite facts. Every column now carries the arithmetic it was asking the
+   * reader to do, and every one of those numbers is computed HERE.
+   *
+   * THE RULE THAT MAKES THE TABLE O(1) TO DRAW. Keyed by `id`, so a cell's read
+   * is one `Map.get` and a field — never a walk of that row's months, and never
+   * a division inside the render. It is built over `censusSlice`, the 25 rows
+   * actually on screen, never over all of them. Paging or sorting rebuilds it;
+   * a hover, a poll that changed nothing, or any unrelated state change does
+   * not. Bound: 25 rows × the months in the window, once per view.
+   *
+   * NOTHING HERE IS A CLAIM THE ROW DOES NOT ALREADY CARRY. Each field is a
+   * restatement of `got`, `exp`, `unproved`, `months` or `state` in a form the
+   * eye reads without counting — no field invents a number, and the two that
+   * CANNOT be stated (`ratio` with no bars-per-session) are `null` rather than
+   * a zero that would look like a measurement. §3 rule 6.
+   *
+   * @param {CensusRow} r
    */
-  const coverage = $derived(new Map(censusSlice.map((r) => [r.id, coverageOf(r.months)])));
+  function cellsOf(r) {
+    const total = r.months.length;
+    const runs = coverageOf(r.months);
+
+    /* THE STRIP AS ONE STRING, WHICH IS THE WHOLE POINT. Hard stops — each run
+       names its own start and end — so the bands butt up against each other
+       with no blend. A gradient that faded between two verdicts would draw a
+       colour no verdict has, at a boundary that is exact. */
+    const heat =
+      runs.length === 0
+        ? 'linear-gradient(90deg,var(--well) 0% 100%)'
+        : `linear-gradient(90deg,${runs.map((u) => `var(--${u.tone}) ${u.a}% ${u.b}%`).join(',')})`;
+
+    /* THE RULER, AND IT IS OFF WHERE IT WOULD LIE. Year lines let the eye put a
+       band at a date instead of at a fraction. Below 24 months the lines are
+       further apart than the bands they measure and read as the data; `101%`
+       puts the first one outside the box, which is how this draws none. */
+    const tick = total >= 24 ? `${(12 / total) * 100}%` : '101%';
+
+    /* THE ONE DIVISION THE CELL WAS ASKING THE READER FOR. `null` where the
+       rung states no bars-per-session: a bar against an unknown total is the
+       invented yardstick the `no yardstick` verdict exists to refuse. */
+    const ratio = r.per !== null && r.exp > 0 ? Math.min(1, r.got / r.exp) : null;
+    const settled = total - r.unproved;
+
+    return {
+      runs,
+      heat,
+      tick,
+      /** The row's own verdict tone, once, for the spine and the tag. */
+      tone: VERDICT[r.state][0],
+      label: VERDICT[r.state][1],
+      why: VERDICT[r.state][2],
+      /** 0..1, or null where there is no denominator to divide by. */
+      ratio,
+      /** The same, as a width. `0` stays `0` — an empty track is drawn, not skipped. */
+      pct: ratio === null ? 0 : ratio * 100,
+      /** Whole percent, for the face. Never rounded UP to 100 off a short read. */
+      round: ratio === null ? null : ratio >= 1 ? 100 : Math.min(99, Math.floor(ratio * 100)),
+      full: ratio !== null && r.got >= r.exp,
+      settled,
+      /** 0..1 of the window that is settled — the complement of `unproved`. */
+      proven: total > 0 ? (settled / total) * 100 : 0
+    };
+  }
+
+  const cells = $derived(new Map(censusSlice.map((r) => [r.id, cellsOf(r)])));
 
   /**
    * WHICH ROWS ACTUALLY MOVED — the difference between an animation and a lie.
@@ -8311,6 +8382,93 @@
               {/if}
 
             </div>
+
+            <!-- ══════════════ HOW FAR THROUGH THE RUN IS ══════════════
+
+                 THIS IS THE ARITHMETIC THE PAGE ALREADY DID AND NEVER SHOWED.
+                 `share`, `unitsDone`, `unitsLeft`, `rate` and `etaSecs` are all
+                 `$derived` above and, until this block, had NO reader — they
+                 were computed on every poll and thrown away. The run card that
+                 used to draw them was removed as "narrative about the run", and
+                 the removal took the one non-narrative thing it held: the
+                 answer to "how much of what I asked for is done".
+
+                 A PRESS THAT REPORTS NOTHING FOR TWENTY MINUTES IS THE DEFECT.
+                 Between pressing Pull and the receipt there was an elapsed
+                 clock and a spinner, neither of which is a fraction — so the
+                 operator could not tell a run three quarters through from one
+                 that had written nothing at all.
+
+                 EVERY NUMBER HERE IS MEASURED, AND THE ONES THAT ARE NOT ARE
+                 ABSENT. `share` is the store's own unit count against what this
+                 request asks for, both counted; `rate` is `null` until two
+                 samples five seconds apart actually differ, so no rate is shown
+                 from one point; `etaSecs` exists only where `rate` does. §3
+                 rule 6 — an extrapolation is labelled, and a measurement that
+                 has not been taken is not printed.
+
+                 IT SURVIVES INTO `done` DELIBERATELY. A bar that vanishes at the
+                 moment it completes is a bar nobody sees finish. -->
+            {#if phase !== 'idle' && expectedUnits > 0}
+              <div class="prog" class:stall={stalled}>
+                <div class="prog-h">
+                  <span class="prog-t">
+                    {#if phase === 'running'}
+                      <span class="dot acc live" aria-hidden="true"></span>
+                      {Verb}ing {feedName(feeds.active)}
+                    {:else}
+                      {Verb} of {feedName(feeds.active)} finished
+                    {/if}
+                  </span>
+                  <!-- THE FRACTION IN WORDS, BESIDE THE SAME FRACTION AS A
+                       LENGTH. The bar is read at a glance and the figures are
+                       read when the glance raises a question; neither is
+                       sufficient alone, and they are the same division. -->
+                  <span class="prog-n mono">
+                    <b>{n(Math.round(share * 100))}%</b>
+                    · {n((baseline?.units ?? 0) + unitsDone)} / {n(expectedUnits)} instrument-month(s)
+                  </span>
+                </div>
+                <div
+                  class="meter tall"
+                  role="progressbar"
+                  aria-valuemin="0"
+                  aria-valuemax="100"
+                  aria-valuenow={Math.round(share * 100)}
+                  aria-label={`${Verb} progress: ${n(Math.round(share * 100))} percent of ${n(expectedUnits)} instrument-month(s).`}
+                >
+                  <i class="fill" class:up={share >= 1} style="width:{share * 100}%"></i>
+                </div>
+                <!-- THE FOOT IS ONLY DRAWN WHERE IT HAS A MEASUREMENT.
+                     `everGrew` is the guard that stopped this panel reading
+                     "bars are landing" three seconds into a run that had
+                     written nothing — a claim with no measurement under it. -->
+                <div class="prog-f">
+                  {#if stalled}
+                    <span class="warn"
+                      >Nothing has landed for {n(stalledSecs)}s — the request is still open. That is
+                      what a waiting rate governor looks like from outside, and also what a slow
+                      vendor looks like; this page cannot tell them apart.</span
+                    >
+                  {:else if everGrew}
+                    <span><b class="mono">{n(rowsGained)}</b> bar(s) landed</span>
+                    {#if rate !== null}
+                      <span
+                        title="Measured from the observed samples only — two readings at least five seconds apart that actually differ. It is an average over what has happened, not a promise about what is left."
+                        ><b class="mono">{rate.toFixed(1)}</b> instrument-month(s)/s</span
+                      >
+                    {/if}
+                    {#if etaSecs !== null}
+                      <span title="An extrapolation, and labelled as one: the units still to go divided by the rate measured so far. A vendor that slows down or a governor that backs off makes it wrong.">
+                        about <b class="mono">{clockOf(etaSecs * 1000)}</b> left, at that rate
+                      </span>
+                    {/if}
+                  {:else if phase === 'running'}
+                    <span class="dim">Nothing has landed yet — the first leg is still on the wire.</span>
+                  {/if}
+                </div>
+              </div>
+            {/if}
             <!-- WHAT THE MULTI-PASS RUN DID, AND WHY IT STOPPED.
                  One press is now several passes — a window can be bigger than
                  one sitting at a legal rate, and the operator's requirement is
@@ -8343,7 +8501,35 @@
                     {#each runState.feeds ?? [] as f (f.vendor)}
                       <tr>
                         <td class="rf-v">{feedName(f.vendor)}</td>
-                        <td class="rf-n">{n(f.legsDone)}/{n(f.legs)}</td>
+                        <!-- ══ THE FEED'S OWN PROGRESS, AS A LENGTH ══
+                             `12/140` and `138/140` are the same shape and
+                             opposite news, and this table draws one row per
+                             feed — so the question the operator actually has
+                             ("which feed is holding this up") was being asked
+                             of four pairs of numbers he had to divide himself.
+                             The bar is that division.
+
+                             THE DENOMINATOR IS CHECKED, NOT ASSUMED. `legs` is
+                             0 before the server has planned a feed's work, and
+                             `legsDone / 0` is `Infinity` — which CSS clamps to
+                             a full bar, i.e. a feed that has not started would
+                             draw as finished. `legs > 0` is what stops that,
+                             and the row still prints its two figures either
+                             way. -->
+                        <td class="rf-n">
+                          {n(f.legsDone)}/{n(f.legs)}
+                          {#if (f.legs ?? 0) > 0}
+                            <i
+                              class="meter"
+                              aria-hidden="true"
+                              ><i
+                                class="fill"
+                                class:up={f.finished || (f.legsDone ?? 0) >= (f.legs ?? 0)}
+                                style="width:{Math.min(100, ((f.legsDone ?? 0) / f.legs) * 100)}%"
+                              ></i></i
+                            >
+                          {/if}
+                        </td>
                         <td class="rf-d">{f.finished ? '—' : (f.doing || 'waiting for its turn')}</td>
                         <!-- ══ THE VENDOR'S OWN WORDS, NOT A GUESS ABOUT THEM ══
                              This read `retrying after a failure` for EVERY
@@ -8671,11 +8857,36 @@
               <thead>
                 <tr>
                   <th>
-                    <button class="sort" type="button" onclick={() => sortCensus('sym')}>
+                    <button
+                      class="sort"
+                      type="button"
+                      title="The NSE trading symbol, and the coloured spine beside it is this row's verdict — the same tone the Verdict column names in words, put at the edge so twenty-five rows can be judged down one line instead of across the table."
+                      onclick={() => sortCensus('sym')}
+                    >
                       <span class="hrow"
                         >Instrument{cSort.key === 'sym' ? (cSort.dir > 0 ? ' ▲' : ' ▼') : ''}</span
                       >
-                      <span class="hsub">NSE trading symbol</span>
+                      <!-- ══ FIVE OF THE SEVEN SUB-LABELS ARE GONE, AT THE
+                           OPERATOR'S INSTRUCTION ══
+                           "NSE trading symbol", "bars, from the NSE calendar",
+                           "measured, not reported", "asked, and counted" and
+                           "pull, or nothing" were a second line of prose under
+                           every header on a table whose job is to be READ AT A
+                           GLANCE. Each restated its own header or editorialised
+                           about it, and seven of them together were a paragraph
+                           laid out sideways above the data.
+
+                           THE TWO THAT SURVIVE ARE THE TWO THAT CARRY A FACT
+                           THE HEADER DOES NOT: "of N in the window" is the
+                           DENOMINATOR the cells below are counted against, and
+                           "oldest → newest" is the DIRECTION of the coverage
+                           strip, without which the strip is ambiguous rather
+                           than merely unlabelled.
+
+                           NOTHING IS LOST. Every deleted clause is on the
+                           header's own `title`, which is where the sentence a
+                           reader wants once belongs — not under every column on
+                           every load. -->
                     </button>
                   </th>
                   {#if segmentsReached.length > 1}
@@ -8712,7 +8923,6 @@
                             : ' ▼'
                           : ''}</span
                       >
-                      <span class="hsub">bars, from the NSE calendar</span>
                     </button>
                   </th>
                   <th class="num">
@@ -8729,13 +8939,15 @@
                   </th>
                   <!-- NOT SORTABLE, AND THAT IS NOT AN OMISSION. Every other
                        header here is a button because its column holds ONE
-                       value that a run can be ordered by. This column holds
-                       four, and any single key you sorted it on — worst block,
-                       first bad block, count of bad blocks — would be a
-                       different column from the one being drawn. `Months
-                       unproved` beside it already sorts on the number this
-                       summarises. -->
-                  <th>
+                       value that a run can be ordered by. This column holds a
+                       SEQUENCE — the window's months in order — and any single
+                       key you sorted it on (worst run, first bad run, count of
+                       runs) would be a different column from the one being
+                       drawn. `Months unproved` beside it already sorts on the
+                       number this summarises. -->
+                  <th
+                    title="Every month file in the window, oldest on the left, coloured by its own verdict — so a series missing its FIRST six months and one missing its LAST six can be told apart, which neither Months unproved nor Verdict can do. Consecutive months holding the same verdict are drawn as one band. The faint vertical lines are years."
+                  >
                     <span class="hrow">Coverage</span>
                     <span class="hsub">oldest → newest</span>
                   </th>
@@ -8749,7 +8961,6 @@
                       <span class="hrow"
                         >Verdict{cSort.key === 'state' ? (cSort.dir > 0 ? ' ▲' : ' ▼') : ''}</span
                       >
-                      <span class="hsub">measured, not reported</span>
                     </button>
                   </th>
                   <!-- ══ ATTEMPTS — AND IT IS HONEST ABOUT HAVING ALMOST
@@ -8761,12 +8972,18 @@
                        is on right now — `attempts` / `attempts_max` off
                        /ingest/status.json, which this page already polls.
 
-                       SO THE EMPTY CELL SAYS THE FINDING RATHER THAN A DASH.
-                       "1 · not counted" is the fact: one ask was made and
-                       nothing is keeping score, so a row that came back empty
-                       cannot be told apart from a row that was never reachable.
-                       A bare `—` would read as "no data available", which is
-                       the §4 silence — this is the same absence, named.
+                       SO THE EMPTY CELL SAYS THE FINDING RATHER THAN A DASH,
+                       AND IT SAYS IT AS AN EMPTY LADDER. It used to say it as
+                       the WORDS "1 · not counted" — fifty identical phrases
+                       down a column, in a table where every other column
+                       varies. The words were right and the form was wrong: a
+                       fact that is constant across the page is not something
+                       the eye should have to re-read fifty times. The unfilled
+                       ladder is the same absence in the shape the reader has
+                       already learnt from the one row that IS counting, and the
+                       sentence is kept whole on the cell's `title`. A bare `—`
+                       would read as "no data available", which is the §4
+                       silence; this is that absence, named.
 
                        NOT SORTABLE, deliberately. Every other header here ranks
                        a number that differs per row; this one is the same value
@@ -8775,14 +8992,15 @@
                        lies about what it does. -->
                   <!-- NOT `.num`. `.num` right-aligns a column because a
                        COLUMN OF FIGURES is compared down its last digit —
-                       `0 / 4,500` under `0 / 4,500`. This column holds a
-                       phrase, "1 · not counted", and right-aligning a phrase
-                       between two left-aligned neighbours is what put a band of
-                       air between Verdict and Next step. It reads left, with
-                       the two text columns it belongs to. -->
-                  <th>
+                       `0 / 4,500` under `0 / 4,500`. This column holds a figure
+                       and a ladder, and right-aligning that pair between two
+                       left-aligned neighbours is what put a band of air between
+                       Verdict and Next step. It reads left, with the two text
+                       columns it belongs to. -->
+                  <th
+                    title="How many times this series was asked for. A pull from the form above asks each instrument-month exactly once and keeps no count, so every row draws an EMPTY ladder — there is a scale here and nothing counting on it. Only the sweep counts attempts, and only for the month it is holding; that row fills."
+                  >
                     <span class="hrow">Attempts</span>
-                    <span class="hsub">asked, and counted</span>
                   </th>
                   <th>
                     <button
@@ -8794,7 +9012,6 @@
                       <span class="hrow"
                         >Next step{cSort.key === 'act' ? (cSort.dir > 0 ? ' ▲' : ' ▼') : ''}</span
                       >
-                      <span class="hsub">pull, or nothing</span>
                     </button>
                   </th>
                 </tr>
@@ -8842,6 +9059,23 @@
                        table permanently mid-flight while you type. -->
                   {#key `${cSort.key}${cSort.dir}${censusPage}`}
                     {#each censusSlice as r, i (r.id)}
+                    <!-- ══ ONE `Map.get` FOR THE WHOLE ROW ══
+                         Every cell below reads `c`, and `c` is fetched ONCE
+                         here. Fetching it per cell would be six probes per row
+                         and 150 for a drawn page, to answer a question whose
+                         answer does not change between one cell and the next —
+                         and Svelte requires `{@const}` to be the immediate
+                         child of a block, so the loop head is both the only
+                         legal place for it and the right one.
+
+                         IT MAY BE `undefined`, AND EVERY READ SAYS SO. `cells`
+                         is built over `censusSlice`, so a row being drawn is a
+                         row that has a pack; the optional chaining below is
+                         there because a stale keyed block during a re-sort can
+                         draw one render ahead of the rebuild, and a cell that
+                         invented a zero in that gap would be a measurement with
+                         nothing behind it. -->
+                    {@const c = cells.get(r.id)}
                     <!-- `.flash-up` / `.flash-down` fire on a VERDICT CHANGE and
                          never on a redraw — see `moved`. Green when the row got
                          better, red when it got worse. -->
@@ -8851,7 +9085,15 @@
                       class:flash-down={moved.get(r.id) === 'down'}
                       style="--row-i:{i}"
                     >
-                      <td>
+                      <!-- THE SPINE CARRIES THE VERDICT TO THE LEFT EDGE.
+                           Verdict is the fifth column, so judging twenty-five
+                           rows meant twenty-five saccades across the table and
+                           back. The spine is the same tone the tag five columns
+                           right is about — one verdict, one colour, said at the
+                           edge the eye already runs down. It is `aria-hidden`
+                           because the tag states it in words. -->
+                      <td class="cinst">
+                        <i class="spine {cells.get(r.id)?.tone ?? 'info'}" aria-hidden="true"></i>
                         <b class="mono">{r.sym}</b>
                         <span class="kindtag">{r.kind}</span>
                       </td>
@@ -8875,18 +9117,37 @@
                              LENGTH. `0 / 11,29,875` and `11,04,320 / 11,29,875`
                              are both two long tabular numbers, and telling them
                              apart means reading eight digits and dividing. The
-                             fill is that division, done once, at the width the
+                             meter is that division, done once, at the width the
                              eye reads without counting.
+
+                             THE TRACK IS DRAWN NOW, AND IT IS HATCHED. It was
+                             not, on the reasoning that "an empty track on a row
+                             that has stored nothing draws a line the width of
+                             the column and reads as a full bar at a glance".
+                             That objection is real and it is answered by the
+                             HATCH rather than by drawing nothing: diagonal
+                             stripes at low contrast cannot be mistaken for a
+                             solid fill, and they can be told apart from an
+                             empty CELL. Without a track, `0 / 6,18,296` and a
+                             rung with no yardstick at all drew the identical
+                             nothing — two different facts, one appearance,
+                             which is the §4 silence.
+
                              DRAWN ONLY WHEN THERE IS A DENOMINATOR: `r.per` is
                              null for a rung with no bars-per-session this page
                              can state, and a bar against an unknown total would
                              be inventing the very yardstick the `no yardstick`
-                             verdict exists to refuse. -->
-                        {#if r.per !== null && r.exp > 0}
-                          <i
-                            class="fill"
-                            class:up={r.got >= r.exp}
-                            style="width:{Math.min(100, (r.got / r.exp) * 100)}%"
+                             verdict exists to refuse. That row draws no meter,
+                             and the dash beside it is what says why. -->
+                        <!-- `!= null` AND NOT `!== null`, DELIBERATELY. A row
+                             whose pack is missing yields `undefined`, and
+                             `undefined !== null` is TRUE — which would draw a
+                             zero-width meter for a row nothing was measured
+                             for, exactly the fallback that hides a failure §4
+                             bans. The loose form rejects both absences. -->
+                        {#if c != null && c.ratio != null && r.exp > 0}
+                          <i class="meter" aria-hidden="true"
+                            ><i class="fill" class:up={c.full} style="width:{c.pct}%"></i
                           ></i>
                         {/if}
                       </td>
@@ -8899,32 +9160,77 @@
                           : `All ${n(r.months.length)} month file(s) in the window are settled — matched the calendar, or out of this feed's reach.`}
                       >
                         {n(r.unproved)}/{n(r.months.length)}
+                        <!-- THE COMPLEMENT, AS A LENGTH. `140/140` and `2/140`
+                             are the same shape and opposite news; this is the
+                             SETTLED share, so a full bar is a finished series
+                             and an empty one is a series with everything still
+                             to do. It reads the same direction as the meter one
+                             column left — filled is good, on both. -->
+                        {#if c != null && r.months.length > 0}
+                          <i class="meter" aria-hidden="true"
+                            ><i class="fill" class:up={r.unproved === 0} style="width:{c.proven}%"
+                            ></i></i
+                          >
+                        {/if}
                       </td>
                       <td>
-                        <!-- ONE `Map.get`, NOT A WALK. `coverage` was built for
-                             the drawn page; this cell only reads it. -->
-                        <span
-                          class="cov"
-                          role="img"
-                          aria-label={`Coverage, oldest to newest: ${(coverage.get(r.id) ?? []).map((q) => q.label).join(', ')}.`}
-                        >
-                          {#each coverage.get(r.id) ?? [] as q (q.from)}
-                            <i
-                              class="q {q.tone}"
-                              title={`${monthLabel(q.from)}${q.n > 1 ? ` – ${monthLabel(q.to)}` : ''} — ${q.n} month file(s), worst verdict ${q.label}.`}
-                            ></i>
-                          {/each}
+                        <!-- ONE `Map.get` AND ONE ELEMENT, NOT A WALK AND NOT
+                             140 NODES. `cells` was built for the drawn page;
+                             this cell reads two of its strings and sets them as
+                             custom properties. The bands, their boundaries and
+                             the year ruler are all one `background-image` in
+                             the stylesheet, so this column costs the same at a
+                             12-month window as at a 140-month one.
+
+                             THE WHOLE SENTENCE ON ONE `role="img"`. Read one
+                             band at a time by a screen reader these are
+                             unlabelled boxes; the label carries the same
+                             reading a sighted operator gets, in the same
+                             oldest-first order. -->
+                        {#if c != null && c.runs.length > 0}
+                          <span
+                            class="heat"
+                            role="img"
+                            style="--heat:{c.heat};--tick:{c.tick}"
+                            title={c.runs
+                              .map(
+                                (u) =>
+                                  `${monthLabel(u.from)}${u.n > 1 ? ` – ${monthLabel(u.to)}` : ''} — ${u.n} month file(s), ${u.label}.`
+                              )
+                              .join('\n')}
+                            aria-label={`Coverage of ${n(r.months.length)} month file(s), oldest to newest: ${c.runs
+                              .map(
+                                (u) =>
+                                  `${u.n} ${u.label}${u.n > 1 ? ` from ${monthLabel(u.from)} to ${monthLabel(u.to)}` : ` at ${monthLabel(u.from)}`}`
+                              )
+                              .join('; ')}.`}
+                          ></span>
+                        {:else}
+                          <!-- NO MONTHS IN THE WINDOW IS NOT A COVERAGE OF
+                               NOTHING — it is a window that selects no month
+                               file at all, and a strip drawn for it would be a
+                               picture of a set with no members. -->
+                          <span class="dash" title="This window selects no month file for this series, so there is no coverage to draw.">—</span>
+                        {/if}
+                      </td>
+                      <td>
+                        <!-- ONE LOOKUP, NOT FIVE. This read `VERDICT[r.state]`
+                             four times to decide four `class:` flags and once
+                             more for the title — five table walks per row per
+                             render, 125 for a drawn page, to answer a question
+                             whose answer is one field. `cells` already holds
+                             the tone, so the class is interpolated and the
+                             lookup happens once per view.
+
+                             THE DOT IS NOT DECORATION. `never pulled` and
+                             `no yardstick` are both grey-ish to a reader who is
+                             not comparing them side by side; a saturated dot at
+                             a fixed position gives the tone a constant place to
+                             be read from, which is what makes a column of
+                             verdicts scannable rather than readable. -->
+                        <span class="tag {c?.tone ?? 'info'}" title={c?.why ?? ''}>
+                          <i class="tdot" aria-hidden="true"></i>{c?.label ?? VERDICT[r.state][1]}
                         </span>
-                      </td>
-                      <td>
-                        <span
-                          class="tag"
-                          class:up={VERDICT[r.state][0] === 'up'}
-                          class:down={VERDICT[r.state][0] === 'down'}
-                          class:warn={VERDICT[r.state][0] === 'warn'}
-                          class:info={VERDICT[r.state][0] === 'info'}
-                          title={VERDICT[r.state][2]}>{VERDICT[r.state][1]}</span
-                        >
                       </td>
                       <!-- THE ONLY ROW WITH A REAL COUNT IS THE ONE THE SWEEP IS
                            HOLDING. `r.state === 'retry'` is set from
@@ -8935,16 +9241,46 @@
                            cell says why instead of drawing a dash. -->
                       <td class="mono">
                         {#if r.state === 'retry' && feedLadder}
+                          <!-- THE LADDER, WHERE A LADDER EXISTS. `attempts` of
+                               `attempts_max` is a proportion and it is the one
+                               number on this column that differs per row, so it
+                               is drawn as one — the rungs fill as the sweep
+                               climbs, and a row near its ceiling is visible
+                               without reading either figure. -->
                           <span
-                            class="info"
+                            class="rung info"
+                            role="img"
+                            style="--climb:{feedLadder.attempts_max > 0
+                              ? Math.min(100, (feedLadder.attempts / feedLadder.attempts_max) * 100)
+                              : 0}%"
                             title={`The sweep is on this instrument now — attempt ${n(feedLadder.attempts)} of ${n(feedLadder.attempts_max)} for ${feedLadder.month}. Read from /ingest/status.json.`}
-                            >{n(feedLadder.attempts)} / {n(feedLadder.attempts_max)}</span
+                            aria-label={`Attempt ${n(feedLadder.attempts)} of ${n(feedLadder.attempts_max)}.`}
+                            ><b>{n(feedLadder.attempts)}/{n(feedLadder.attempts_max)}</b></span
                           >
                         {:else}
+                          <!-- ══ THE ABSENCE, DRAWN AS AN ABSENCE ══
+                               This column prints the same value on every row
+                               but the one the sweep is holding, and it printed
+                               it as the WORDS "1 · not counted" — fifty
+                               identical phrases down a column, in a table where
+                               every other column varies. The words were right
+                               and the form was wrong: a fact that is constant
+                               across the page is not something the eye should
+                               have to re-read fifty times.
+                               So it is an EMPTY LADDER — the same object the
+                               retrying row draws, with no rung filled, which
+                               says "there is a scale here and nothing is
+                               counting on it" in the shape the reader has
+                               already learnt one row above. The sentence is
+                               kept whole on the `title`; nothing is denied,
+                               and §4 is satisfied by naming the absence rather
+                               than by printing a dash. -->
                           <span
-                            class="dash"
+                            class="rung off"
+                            role="img"
                             title="One. A pull from the form above asks for each instrument-month exactly once and keeps no attempt count, so a series that came back empty cannot be told apart here from one that was never reached. Only the sweep counts attempts, and only for the month it is holding."
-                            >1 · not counted</span
+                            aria-label="One attempt was made, and nothing is keeping count of attempts for this series."
+                            ><b>1</b></span
                           >
                         {/if}
                       </td>
@@ -11285,16 +11621,63 @@
      `--well` is NOT painted behind it. An empty track on a row that has stored
      nothing draws a line the width of the column and reads as a full bar at a
      glance — the exact opposite of the truth. Zero stored means zero drawn. */
-  .cscroll td .fill {
+  /* ---- the meter: a TRACK, and the fill inside it ----
+     THE TRACK IS NEW AND IT IS HATCHED, which is the whole of the answer to the
+     objection recorded above it. `--well` painted flat behind a zero fill draws
+     a solid line the width of the column and reads as a FULL bar at a glance —
+     the exact opposite of the truth, and the reason no track was drawn at all.
+     Diagonal hairlines cannot be read as a solid fill at any glance, so the
+     track can now be drawn always, and drawing it always is what separates the
+     two facts that previously shared one appearance: `0 / 6,18,296` (a
+     denominator exists and nothing is stored) and a rung with no
+     bars-per-session (no denominator exists at all). The first draws an empty
+     hatched track; the second draws no meter, and the dash beside it says why.
+
+     `right: 0` AND NOT A WIDTH. The track spans the cell, so the fill inside it
+     is a percentage of the same length on every row — two rows are comparable
+     by eye only if their tracks are the same length. */
+  /* THE TRACK IS `/db`'s TRACK, DOWN TO THE TOKENS. `web/src/routes/db` has
+     carried this exact object in production for a while — `--well` behind a
+     135° hatch in `--line-hard`, a `--r-full` radius and an absolutely
+     positioned `.fill` — and a second console page inventing a second dialect
+     for "a proportion" is how one product ends up looking like two. Svelte
+     scopes the class per component, so this is a deliberate MATCH and not a
+     shared rule; the only differences are placement and height, which are this
+     table's, not the language's.
+
+     THE HATCH IS ALSO WHAT ANSWERS THE OBJECTION ABOVE. A flat `--well` track
+     behind a zero fill does read as a full bar at a glance — that is why no
+     track was drawn here before. Hatched, and with the fill in a SATURATED
+     verdict tone against a grey track, the empty and the full state cannot be
+     confused; `/db` has been the proof of that. */
+  .cscroll td .meter,
+  td.rf-n .meter {
     position: absolute;
     left: 0;
+    right: 0;
     bottom: 0;
-    height: 2px;
-    background: var(--warn);
+    height: 3px;
     border-radius: var(--r-full);
+    overflow: hidden;
     pointer-events: none;
+    background-color: var(--well);
+    background-image: repeating-linear-gradient(
+      135deg,
+      transparent 0 3px,
+      var(--line-hard) 3px 4px
+    );
   }
-  .cscroll td .fill.up {
+  .cscroll td .meter .fill,
+  td.rf-n .meter .fill {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    border-radius: var(--r-full);
+    background: var(--warn);
+  }
+  .cscroll td .meter .fill.up,
+  td.rf-n .meter .fill.up {
     background: var(--up);
   }
   /* The cell that holds a fill is its own containing block — see the single
@@ -11304,38 +11687,160 @@
      the same file and within the same hour, the identical-specificity duplicate
      removed from this block earlier today. */
 
-  /* ---- the coverage blocks ----
-     FOUR SQUARES, READ LEFT TO RIGHT AS TIME. Squares and not a bar: a bar
-     would say "this much of the window", which `Months unproved` already says
-     better as a number. Discrete blocks say WHICH PART, and four is the count
-     the reference draws.
-     The same four semantic hues the partition and the verdict tag use, so one
-     verdict is one colour everywhere on this page. */
-  .cov {
+  /* ---- how far through the run is ----
+     ONE BAR, AND IT IS THE SAME OBJECT THE CELLS USE. `.meter` and `.fill` are
+     the census's own track and fill; `.tall` is the only difference, because a
+     bar that answers for the whole run should not be the same 3px as one that
+     answers for a cell. The tokens, the hatch and the radius are identical, so
+     the page teaches "hatched track = a proportion" exactly once. */
+  .prog {
+    margin-top: 12px;
+    padding: 10px 12px;
+    border: 1px solid var(--line);
+    border-radius: var(--r3);
+    background: var(--panel-2);
+  }
+  .prog-h {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 7px;
+  }
+  .prog-t {
     display: inline-flex;
-    gap: 2px;
     align-items: center;
+    gap: 6px;
+    font-weight: var(--w-semi);
   }
-  /* THE WELL IS THE DEFAULT, so a tone that is somehow unset draws as an empty
-     slot rather than inheriting the row's text colour and reading as settled. */
-  .cov i {
-    width: 9px;
-    height: 9px;
-    border-radius: 2px;
-    background: var(--well);
-    flex: none;
+  .prog-n {
+    font-size: var(--fs-mini);
+    color: var(--dim);
+    white-space: nowrap;
   }
-  .cov i.up {
+  .prog-n b {
+    color: var(--ink);
+  }
+  /* THE RUN BAR IS IN FLOW, so it overrides the census meter's absolute
+     placement rather than inheriting it — same track, different job. */
+  .prog .meter.tall {
+    position: relative;
+    left: auto;
+    right: auto;
+    bottom: auto;
+    height: 8px;
+  }
+  .prog-f {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 14px;
+    margin-top: 7px;
+    font-size: var(--fs-mini);
+    color: var(--dim);
+  }
+  /* A STALLED RUN IS NOT A FAILED ONE, so it does not wear `--down`. It is a
+     run that is still open and has stopped growing, which is a thing to watch
+     rather than a thing to act on. */
+  .prog.stall {
+    border-color: var(--warn);
+  }
+  /* ---- the coverage strip ----
+     ONE ELEMENT, TWO BACKGROUND LAYERS, ANY NUMBER OF MONTHS.
+     `--heat` is built in `cellsOf` and is the run-length-encoded verdict of the
+     row's own months as hard gradient stops; `--tick` is the width of one year
+     as a percentage of the window, or `101%` where the window is too short for
+     a year line to mean anything — which puts the first line outside the box
+     and is how this draws no ruler.
+
+     THE RULER GOES ON TOP, in the panel's own colour, so it reads as a scale
+     ruled ONTO the data rather than as data of its own. It is what lets the eye
+     put a band at a date instead of at a fraction of a strip.
+
+     WHY THIS REPLACED FOUR SQUARES: see `coverageOf`. The short of it is that
+     four buckets showing the worst verdict in each drew four identical blocks
+     for every row of a feed that has never been pulled, which is every row an
+     operator most needs to tell apart. */
+  .heat {
+    display: block;
+    width: 100%;
+    min-width: 64px;
+    height: 10px;
+    border-radius: 3px;
+    background-image:
+      repeating-linear-gradient(
+        90deg,
+        transparent 0 calc(var(--tick) - 1px),
+        var(--panel-2) calc(var(--tick) - 1px) var(--tick)
+      ),
+      var(--heat);
+    box-shadow: inset 0 0 0 1px var(--line);
+  }
+  /* ---- the verdict spine ----
+     THE ROW'S VERDICT AT THE EDGE THE EYE ALREADY RUNS DOWN. Verdict is the
+     fifth column; judging twenty-five rows by it meant twenty-five trips across
+     the table and back. `.cinst` is the containing block, and the spine is out
+     of flow so it costs the column no width at all. */
+  .cscroll td.cinst {
+    position: relative;
+  }
+  .cscroll td.cinst .spine {
+    position: absolute;
+    left: 0;
+    top: 4px;
+    bottom: 4px;
+    width: 3px;
+    border-radius: var(--r-full);
+    background: var(--n7);
+  }
+  .cscroll td.cinst .spine.up {
     background: var(--up);
   }
-  .cov i.down {
+  .cscroll td.cinst .spine.down {
     background: var(--down);
   }
-  .cov i.warn {
+  .cscroll td.cinst .spine.warn {
     background: var(--warn);
   }
-  .cov i.info {
+  .cscroll td.cinst .spine.info {
     background: var(--info);
+  }
+  /* ---- the tone dot on the verdict tag ----
+     A CONSTANT PLACE TO READ THE TONE FROM. `.tag` already carries the tone as
+     its own text and background, but those move with the word's length; the dot
+     is at the same offset on every row, which is what makes the column
+     scannable rather than readable. `currentColor` so it can never disagree
+     with the tag it sits in. */
+  .cscroll td .tag .tdot {
+    display: inline-block;
+    width: 5px;
+    height: 5px;
+    margin-right: 5px;
+    border-radius: var(--r-full);
+    background: currentColor;
+    vertical-align: middle;
+  }
+  /* ---- the attempt ladder ----
+     THE SAME OBJECT FILLED AND UNFILLED. A retrying row fills `--climb` of it;
+     every other row draws it empty, which is the page saying "there is a scale
+     here and nothing is counting on it". That is the same fact the words
+     "1 · not counted" carried, in the shape the reader learnt from the row
+     above rather than as fifty identical phrases down a column. */
+  .cscroll td .rung {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .cscroll td .rung::after {
+    content: '';
+    width: 34px;
+    height: 3px;
+    border-radius: var(--r-full);
+    background:
+      linear-gradient(90deg, currentColor 0 var(--climb, 0%), transparent var(--climb, 0%) 100%),
+      repeating-linear-gradient(135deg, var(--n7) 0 1px, transparent 1px 3px);
+  }
+  .cscroll td .rung.off {
+    color: var(--faint);
   }
   /* `h2.sec`, its two children and `.cbar` all go with the markup they drew.
 
@@ -11693,9 +12198,17 @@
        not a control acknowledging a press, and it has to outlast a saccade to
        read as movement rather than as a flicker. It is the same 220ms the
        panels enter on, which is deliberate — one page, one sense of pace. */
+    /* THE CENSUS METERS JOIN THIS RULE FOR THE IDENTICAL REASON, and it is
+       worth saying which rule they did NOT join. A meter's width IS the ratio
+       it stands for: when a pull lands bars, `stored / expected` grows and the
+       fill travels exactly as far as the fact moved. A poll that changed no
+       count transitions to the width it already holds, which is no motion —
+       so this animates on CHANGE and is silent on redraw, which is the test
+       every moving thing on this page has to pass. */
     .tseg,
     .ldead,
-    .llive {
+    .llive,
+    .cscroll td .meter .fill {
       transition: width var(--d-enter) var(--ease-out);
     }
     /* THE STAGGER IS CAPPED AT EIGHT ROWS. `--row-i` counts up the page, so an
@@ -11757,7 +12270,10 @@
   table.runfeeds td { padding: 6px 12px; border-bottom: 1px solid var(--line, #2a333c); }
   table.runfeeds tr:last-child td { border-bottom: 0; }
   td.rf-v { font-weight: 600; white-space: nowrap; }
-  td.rf-n { white-space: nowrap; font-variant-numeric: tabular-nums; opacity: .8; }
+  /* `position: relative` IS THE CONTAINING BLOCK FOR THE FEED'S OWN METER,
+     which is welded to the bottom edge of this cell so the bar costs the
+     column no width and the row no height. */
+  td.rf-n { white-space: nowrap; font-variant-numeric: tabular-nums; opacity: .8; position: relative; }
   td.rf-d { width: 99%; opacity: .8; }
   /* A REFUSAL IS NOT DECORATION AND STOPS BEING DIMMED. This carried
      `opacity: .8` while it printed the same generic sentence on every failure;
