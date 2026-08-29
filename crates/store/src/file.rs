@@ -103,7 +103,33 @@ use std::io::{self, ErrorKind};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
-use crate::format::{Bar, FormatError, HEADER_LEN, MAX_SLOT_COUNT, Row, SLOT_STRIDE};
+use crate::format::{
+    Bar, FormatError, GREEK_LEN, HEADER_LEN, MAX_SLOT_COUNT, OVERLAY_LEN, RECORD_LEN, Row,
+    SLOT_STRIDE,
+};
+
+/// The widest [`Row`] this build ships, so one stack buffer serves them all.
+///
+/// **Derived from the three widths, never typed as a number.** `Bar` is 56
+/// bytes, `Greek` 80 and `Overlay` 24; writing `80` here would be a fourth
+/// place the format is stated and the first to go stale. `read_row`'s inline
+/// `const` assertion turns a `Row` wider than this into a compile error at the
+/// read site rather than a short read at runtime.
+const MAX_ROW_LEN: usize = {
+    let widest = if RECORD_LEN > GREEK_LEN {
+        RECORD_LEN
+    } else {
+        GREEK_LEN
+    };
+    if widest > OVERLAY_LEN {
+        widest
+    } else {
+        OVERLAY_LEN
+    }
+};
+
+/// The three widths, pinned so a format change is seen here.
+const _: () = assert!(MAX_ROW_LEN == 80);
 use crate::header::Header;
 use crate::layout::Layout;
 use crate::path::{FileKind, StorePath};
@@ -1438,14 +1464,43 @@ impl BarFile {
     /// which is the check that stops a 24-byte overlay being decoded at a
     /// 56-byte geometry after its header validated.
     ///
+    /// # The buffer is on the STACK, and it used to be a heap allocation
+    ///
+    /// This read `vec![0u8; W::LEN]`, so **every single bar read allocated** —
+    /// 56 bytes, freed microseconds later, once per record. Constant per
+    /// operation, and constant work nobody needed: a one-minute month is ~8,250
+    /// of them, `/bars.json` does the whole month in one pass, and
+    /// `calendar_of` walks months that fail its counter check. `CLAUDE.md` §3
+    /// rule 4 asks for constant per-operation cost and this was constant; it
+    /// was also a `malloc` and a `free` in the innermost read in the workspace.
+    ///
+    /// [`MAX_ROW_LEN`] is the widest [`Row`] this build ships, and the inline
+    /// `const` below is what makes the substitution safe rather than a latent
+    /// truncation: it is evaluated per monomorphisation, so a new `Row` wider
+    /// than the buffer **fails to compile at this line** instead of silently
+    /// reading a short record. A `debug_assert` would have been the tempting
+    /// shape and is exactly wrong — it disappears in release, which is where
+    /// the store runs.
+    ///
     /// # Errors
     ///
     /// [`StoreError`] for an unreadable offset or a short read.
     fn read_row<W: Row>(&self, index: u64) -> Result<W, StoreError> {
+        const {
+            assert!(
+                W::LEN <= MAX_ROW_LEN,
+                "a Row wider than MAX_ROW_LEN cannot be read into the stack \
+                 buffer; widen MAX_ROW_LEN in crates/store/src/file.rs"
+            );
+        }
         let at = refused(self.layout.offset_of(index), &self.bars_path)?;
-        let mut image = vec![0u8; W::LEN];
-        read_fully(&self.bars, &self.bars_path, at, &mut image)?;
-        refused(W::read_from(&image), &self.bars_path)
+        let mut image = [0u8; MAX_ROW_LEN];
+        let image = image.get_mut(..W::LEN).ok_or(StoreError::NotCommitted {
+            index,
+            n_valid: self.header.n_valid,
+        })?;
+        read_fully(&self.bars, &self.bars_path, at, image)?;
+        refused(W::read_from(image), &self.bars_path)
     }
 
     /// The part of `batch` that follows what is committed, when the part that

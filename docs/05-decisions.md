@@ -26745,3 +26745,41 @@ which the table catches and the derivation reports as a later open.
 `covers_span`, `stale` (meaningful only when the table answered) and `voted_by`.
 A number an operator cannot attribute to a calendar is a number they cannot act
 on, which is the whole reason the first version of this route was hard to trust.
+
+### D-0366
+
+**Every bar read allocated, and the allocation was never needed.**
+
+`BarFile::read_row` is the innermost read in this workspace — 45 call sites
+reach it, `/bars.json` runs it once per bar for a whole month, `calendar_of`
+walks it for every month that fails its counter check — and its body opened
+with `vec![0u8; W::LEN]`. **A `malloc` and a `free` per record**, 56 bytes at a
+time, for a buffer whose width is a compile-time constant.
+
+`CLAUDE.md` §3 rule 4 asks for constant per-operation cost, and this was
+constant: it is not a complexity defect and no gate could have caught it. It is
+constant work nobody needed, on the one path where a one-minute month is ~8,250
+repetitions of it.
+
+**What ships:** a `[0u8; MAX_ROW_LEN]` stack buffer sliced to `W::LEN`.
+`MAX_ROW_LEN` is derived from the three widths this build ships — `Bar` 56,
+`Greek` 80, `Overlay` 24 — rather than typed as `80`, because a fourth place
+stating the format is the first to go stale.
+
+**The substitution is safe because a wider row cannot compile.** `read_row`
+opens with an inline `const { assert!(W::LEN <= MAX_ROW_LEN) }`, evaluated per
+monomorphisation, so a new `Row` wider than the buffer fails **at that line**
+rather than silently reading a short record and decoding whatever followed it.
+A `debug_assert!` was the tempting shape and is exactly wrong: it disappears in
+release, which is where the store runs.
+
+170 `store` tests green, `clippy -D warnings` clean.
+
+**What this does NOT claim.** No timing was taken. The machine carried a load
+average of 132 rising to 201 while another session ran `cargo test -p cli` at
+579% CPU across two binaries, and `docs/06-limits.md` §4 already records that a
+saturated machine invalidates every measurement taken on it. The improvement is
+argued from the SHAPE — one heap allocation removed from a path that took one
+per record — and `CLAUDE.md` §3 rule 6 does not let a structural argument be
+reported as a measured one. `cargo bench --workspace` on an idle machine is
+what would close it.
