@@ -509,9 +509,24 @@ fn index_of(
         );
     file.seek(SeekFrom::Start(HEADER))
         .map_err(|why| format!("the trades file could not be seeked: {why}"))?;
+    // ONE SYSCALL PER 8 KiB, NOT ONE PER 104-BYTE ROW.
+    //
+    // This loop read straight from the `File`, so `read_exact` was one `read(2)`
+    // per row -- and `open_read` runs it on EVERY `/trades.json` request, which
+    // means a request for one run's twenty trades walked every trade ever
+    // recorded, one syscall at a time. An O(1) audit measured the shape as
+    // "O(rows), 1 read_exact syscall/row".
+    //
+    // A `BufReader` does not change the O(rows) walk -- only a persisted or
+    // cached index does that, and it is the right fix -- but it divides the
+    // syscall count by the rows that fit in a buffer: at 104 bytes and the
+    // default 8 KiB that is 78 rows per read. The borrow is scoped so the
+    // `File`'s own cursor is free afterwards, and every later reader seeks
+    // explicitly before it reads.
+    let mut buffered = std::io::BufReader::new(&mut *file);
     let mut raw = [0_u8; STRIDE_BYTES];
     for index in 0..count {
-        if file.read_exact(&mut raw).is_err() {
+        if buffered.read_exact(&mut raw).is_err() {
             // A SHORT TAIL IS A TORN WRITE, NOT A CORRUPT FILE. Everything
             // before it is whole and indexed; stopping here keeps those
             // readable rather than refusing the lot.

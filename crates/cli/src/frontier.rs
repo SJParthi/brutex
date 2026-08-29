@@ -918,9 +918,24 @@ fn index_of(
     file.seek(SeekFrom::Start(HEADER))
         .map_err(|why| format!("the frontier file could not be seeked: {why}"))?;
 
+    // ONE SYSCALL PER 8 KiB, NOT ONE PER 208-BYTE ROW.
+    //
+    // This read straight from the `File`, so `read_exact` was one `read(2)` per
+    // row -- and `open_read` runs it on EVERY `/frontier.json` request, so
+    // asking for one run's twenty-five rows walked every frontier row ever
+    // recorded, one syscall each. An O(1) audit measured the shape as "O(rows),
+    // 1 read_exact syscall/row".
+    //
+    // A `BufReader` does not change the O(rows) walk -- only a persisted or
+    // cached index does that -- but it divides the syscall count by the rows
+    // that fit in a buffer: at 208 bytes and the default 8 KiB, 39 per read.
+    // The borrow is scoped so the `File`'s cursor is free afterwards, and every
+    // later reader seeks explicitly before it reads.
+    let mut buffered = std::io::BufReader::new(&mut *file);
     let mut raw = [0_u8; STRIDE_BYTES];
     for index in 0..count {
-        file.read_exact(&mut raw)
+        buffered
+            .read_exact(&mut raw)
             .map_err(|why| format!("row {index} could not be read while indexing: {why}"))?;
         if !Row::seal_matches(&raw) {
             continue;
