@@ -8811,7 +8811,7 @@ fn derived_ceiling() -> usize {
     // Dividing rather than serialising keeps the parallelism that makes eight
     // rungs finish in one rung's wall clock; what changes is only how deep each
     // is allowed to go before it must stop and say so.
-    let sharing = SWEEPS_SHARING_THIS_MACHINE.load(std::sync::atomic::Ordering::Relaxed);
+    let sharing = crate::SWEEPS_SHARING_THIS_MACHINE.load(std::sync::atomic::Ordering::Relaxed);
     whole_machine
         .checked_div(sharing.max(1))
         .unwrap_or(whole_machine)
@@ -10854,10 +10854,26 @@ mod tests {
         // the reference rather than guessing downward -- an unknown machine is
         // not a small one, and halving the ladder on a failed query would
         // narrow the search silently.
-        let per_core = engine::DEFAULT_CEILING / 14;
+        // THE FLOOR IS PER SWEEP, AND SWEEPS SHARE THE MACHINE.
+        //
+        // `derived_ceiling` divides the machine budget by
+        // `SWEEPS_SHARING_THIS_MACHINE`, which `range_over` raises while its
+        // eight rungs are in flight -- so this assertion is only about a
+        // SINGLE sweep and must say which one it is asking about. It asserted
+        // the whole-machine floor and passed alone while failing in the suite,
+        // because another test in the same binary had a `SharedBy` alive.
+        //
+        // That is not a test defect, it is the test finding a real property:
+        // the divisor is process-global, so any concurrent sweep in one process
+        // lowers every other sweep's ceiling. The server serialises sweeps
+        // behind one busy slot today, which is the only reason production does
+        // not see it.
+        let sharing = crate::SWEEPS_SHARING_THIS_MACHINE.load(std::sync::atomic::Ordering::Relaxed);
+        let per_core = engine::DEFAULT_CEILING / 14 / sharing.max(1);
         assert!(
             derived >= per_core,
-            "derived {derived} is below the single-core floor {per_core}"
+            "derived {derived} is below the single-core floor {per_core} at a \
+             share of {sharing}"
         );
 
         // THE BYTES IT IMPLIES MUST STAY INSIDE WHAT A MACHINE CAN HOLD.

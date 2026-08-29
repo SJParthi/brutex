@@ -144,6 +144,14 @@ fn refuse(json: JsonHeaders, why: &str) -> (axum::http::StatusCode, JsonHeaders,
 
 /// Sixty-four hex characters as thirty-two bytes, or `None`.
 ///
+/// Shared with `crate::frontierjson`, which keys on the same identity: two hex
+/// decoders would be two chances to disagree about what a run is called.
+pub fn from_hex_public(text: &str) -> Option<[u8; 32]> {
+    from_hex(text)
+}
+
+/// Sixty-four hex characters as thirty-two bytes, or `None`.
+///
 /// Length is checked BEFORE the digits, because a short identity is the common
 /// mistake — a truncated copy-paste — and it deserves the same refusal as a
 /// malformed one rather than a partial match against a run it is a prefix of.

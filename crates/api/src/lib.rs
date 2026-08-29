@@ -56,6 +56,12 @@ pub mod census;
 pub mod constituents;
 pub mod coverage;
 pub mod folder;
+/// EVERY TRADE ONE RUN TOOK -- the file that turns seventy-six padlocks
+/// into figures. `runs.bin` records totals; this records the round trips
+/// those totals are a fold over.
+/// One run's ranked combinations as structured JSON, so the page can order
+/// them by the operator's own weights rather than by a score baked in here.
+pub mod frontierjson;
 pub mod indexmap;
 pub mod ingest;
 pub mod ladder;
@@ -77,9 +83,6 @@ pub mod server;
 /// missing, because a page that reports on work it cannot start needs a
 /// terminal beside it to be useful.
 pub mod sweeprun;
-/// EVERY TRADE ONE RUN TOOK -- the file that turns seventy-six padlocks
-/// into figures. `runs.bin` records totals; this records the round trips
-/// those totals are a fold over.
 pub mod trades;
 /// THE SCRUB, over a whole vendor -- the only thing entitled to say a store
 /// is verified rather than merely counted.

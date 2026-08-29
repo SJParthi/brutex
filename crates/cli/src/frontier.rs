@@ -1408,3 +1408,66 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// The five figures a row implies, computed from the six it stores.
+///
+/// # Why these are derived and not stored
+///
+/// A win rate is `wins / trades`, a reward-to-risk is `min_win / -worst_trade`,
+/// and both are already defined once — on [`runner::grid::Cell`], by the code
+/// that priced the combination. Storing them too would put a second definition
+/// on disk, and the two would agree until one of them was changed. That is the
+/// shape `CLAUDE.md` §5 refuses and the shape that has caused four separate
+/// defects in this repository.
+///
+/// So the row carries the raw six and this rebuilds a `Cell` to ask it. The
+/// caller gets the engine's own answer, not a copy of the formula.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Derived {
+    /// Trades that won, in basis points of trades taken.
+    pub win_rate_bp: i64,
+    /// The SMALLEST win over the LARGEST loss, in hundredths. `125` is the
+    /// operator's stated 1.25x.
+    pub reward_to_risk_bp: i64,
+    /// Total made over the deepest fall, in basis points.
+    pub return_over_drawdown: i64,
+    /// Mean winning trade, in paisa.
+    pub avg_win: i64,
+    /// Mean losing trade, in paisa. Negative or zero.
+    pub avg_loss: i64,
+    /// Trades that did not win.
+    pub losses: u64,
+    /// Whether this combination was ever priced.
+    ///
+    /// `screen_cap` means most ranked combinations never meet an exit grid, and
+    /// those store zeros. A zero drawdown is a SPECTACULAR result, so a reader
+    /// that cannot tell "never priced" from "priced and lost nothing" will read
+    /// the best rows in the file as the ones nobody measured. `trades == 0` is
+    /// the only value that separates them.
+    pub priced: bool,
+}
+
+impl Row {
+    /// What this row implies, asked of the engine's own `Cell`.
+    #[must_use]
+    pub fn derived(&self) -> Derived {
+        let cell = runner::grid::Cell {
+            trades: self.trades,
+            wins: self.cell_wins,
+            pessimistic: self.pessimistic,
+            worst_trade: self.worst_trade,
+            max_drawdown: self.max_drawdown,
+            min_win: self.min_win,
+            ..Default::default()
+        };
+        Derived {
+            win_rate_bp: cell.win_rate_bp(),
+            reward_to_risk_bp: cell.reward_to_risk_bp(),
+            return_over_drawdown: cell.return_over_drawdown(),
+            avg_win: cell.avg_win(),
+            avg_loss: cell.avg_loss(),
+            losses: self.trades.saturating_sub(self.cell_wins),
+            priced: self.trades > 0,
+        }
+    }
+}

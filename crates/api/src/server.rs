@@ -12867,6 +12867,14 @@ pub fn router_serving(site: Loaded, assets: std::sync::Arc<assets::Assets>) -> a
             "/trades.json",
             axum::routing::get(crate::trades::trades_json),
         )
+        // THE RANKED COMBINATIONS, STRUCTURED. `/engine/top.json` serves a
+        // rendered table, which reads well and cannot be re-sorted. The
+        // operator ranks on eleven weighted quantities, so the page needs the
+        // measurements rather than a picture of them.
+        .route(
+            "/frontier.json",
+            axum::routing::get(crate::frontierjson::frontier_json),
+        )
         // THE CONSOLE CAN NOW CAUSE A RUN, not only report one.
         //
         // POST, and there is no GET, for the same reason `/universe/resolve`
