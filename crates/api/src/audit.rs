@@ -544,7 +544,20 @@ pub struct Record {
     pub members: u64,
     /// Rows read out of the vendor's files.
     pub rows_read: u64,
-    /// Bars written to the store.
+    /// Bars OFFERED to the store — not necessarily written.
+    ///
+    /// **The caption said "written" and this counts what was offered.** They
+    /// diverge on every re-pull: a second run over a window offers every bar
+    /// and writes none, because the store already holds them byte for byte,
+    /// which `CLAUDE.md` §3 rule 5 requires. Measured on a real store:
+    /// `bars_stored: 1643341, bars_committed: 0` — sixteen lakh offered, zero
+    /// written, under a caption promising they were written.
+    ///
+    /// The FIGURE cannot be corrected here, only the claim: `Record` is a
+    /// 256-byte fixed-stride image whose field map allocates every byte but
+    /// one, and a `u64` needs eight. Carrying the committed count is a new
+    /// `VERSION` at its own stride under §3 rule 8, not a field. The live pull
+    /// receipt shows both numbers because it builds from `Ingested` directly.
     pub bars_stored: u64,
     /// Rows merged into a bar that was already open.
     pub rows_folded: u64,
