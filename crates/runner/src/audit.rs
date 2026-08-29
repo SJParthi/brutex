@@ -575,6 +575,7 @@ fn excursion_block(out: &mut String, cell: &Cell) {
 /// | avg win vs avg loss | is it many small wins or one big one |
 /// | **worst MAE** | **did ANY trade go further against me than my stop** |
 /// | max losing streak | what must a human sit through |
+/// | max winning streak | and what it strings together when it works |
 /// | avg bars held | is this a four-minute trade or a four-hour one |
 /// | largest win / loss | is the total carried by an outlier |
 ///
@@ -651,6 +652,11 @@ pub fn strategy_report(out: &mut String, cell: &Cell, name: &str) {
             "MAX LOSING STREAK",
             cell.max_losing_streak.to_string(),
             "consecutive losers to sit through",
+        ),
+        (
+            "MAX WINNING STREAK",
+            cell.max_winning_streak.to_string(),
+            "consecutive winners it strung together",
         ),
         (
             "avg bars held",

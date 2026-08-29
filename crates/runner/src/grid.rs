@@ -349,6 +349,16 @@ pub struct Cell {
     /// twenty-two-loss streak inside it is not tradeable by a human, and the
     /// win rate alone cannot show that.
     pub max_losing_streak: u32,
+    /// The longest run of consecutive WINNING trades.
+    ///
+    /// The other half of the pair, and it was missing while its opposite
+    /// shipped. Two variants with one win rate and one longest-losing-run are
+    /// still different instruments: a strategy whose wins arrive in long runs is
+    /// trend-following and one whose wins are scattered between the losses is
+    /// not, and only this separates them. It is also the honest counterweight to
+    /// `max_losing_streak` -- a reader shown only the bad run learns what to sit
+    /// through and not what to sit through it FOR.
+    pub max_winning_streak: u32,
     /// The single worst round trip, in paisa, under pessimistic fills.
     ///
     /// **Zero when nothing lost.** The tightest stop that would have been
@@ -2553,8 +2563,7 @@ fn one_variant(
         ..Cell::default()
     };
     let mut open_until: Option<usize> = None;
-    // Reset to zero by every winner, so it measures a RUN and not a total.
-    let mut losing_streak: u32 = 0;
+    let mut streaks = Streaks::default();
     let mut adverse_on_winners: i64 = 0;
     let mut adverse_on_all: i64 = 0;
     let mut gain_on_winners: i64 = 0;
@@ -2654,7 +2663,7 @@ fn one_variant(
         // fixture, which is not the same as being ordered.
         let (pess, opt) = ordered(&mut cell, pess, opt);
 
-        tally_trade(&mut cell, pess, pess_off, &mut losing_streak);
+        tally_trade(&mut cell, pess, pess_off, &mut streaks);
 
         cell.trades = cell.trades.saturating_add(1);
         cell.pessimistic = cell.pessimistic.saturating_add(pess);
@@ -2788,6 +2797,21 @@ const fn count_exit(cell: &mut Cell, ended: Ended) {
     }
 }
 
+/// The two runs in progress, carried by the walk because each measures a RUN.
+///
+/// A per-trade function cannot reset them for itself: a winner ends the losing
+/// run and a loser ends the winning one, so each counter is cleared by the
+/// OTHER'S outcome. Kept as one value rather than two locals because
+/// `one_variant` is at its line ceiling and, more to the point, because they are
+/// one fact -- the shape of the sequence -- and passing them separately invites
+/// a caller to reset one and forget the other.
+#[derive(Clone, Copy, Debug, Default)]
+struct Streaks {
+    /// Consecutive losers so far.
+    losing: u32,
+    /// Consecutive winners so far.
+    winning: u32,
+}
 /// Folds one round trip's result into the strategy-report counters.
 ///
 /// # Why these are separate from the two totals
@@ -2804,9 +2828,10 @@ const fn count_exit(cell: &mut Cell, ended: Ended) {
 /// total taken at the worst would produce a profit factor no single set of fills
 /// ever produced.
 ///
-/// `streak` is carried by the caller because it measures a RUN: it is reset to
-/// zero by every winner, which a per-trade function cannot do for itself.
-const fn tally_trade(cell: &mut Cell, pess: i64, held: usize, streak: &mut u32) {
+/// [`Streaks`] is carried by the caller because each counter measures a RUN and
+/// is cleared by the OTHER'S outcome, which a per-trade function cannot do for
+/// itself. `max_winning_streak` was missing while its opposite shipped.
+const fn tally_trade(cell: &mut Cell, pess: i64, held: usize, streaks: &mut Streaks) {
     if pess > 0 {
         cell.gross_win = cell.gross_win.saturating_add(pess);
         if pess > cell.best_trade {
@@ -2818,12 +2843,23 @@ const fn tally_trade(cell: &mut Cell, pess: i64, held: usize, streak: &mut u32) 
         if cell.min_win == 0 || pess < cell.min_win {
             cell.min_win = pess;
         }
-        *streak = 0;
+        streaks.losing = 0;
+        streaks.winning = streaks.winning.saturating_add(1);
+        if streaks.winning > cell.max_winning_streak {
+            cell.max_winning_streak = streaks.winning;
+        }
     } else {
         cell.gross_loss = cell.gross_loss.saturating_add(pess);
-        *streak = streak.saturating_add(1);
-        if *streak > cell.max_losing_streak {
-            cell.max_losing_streak = *streak;
+        // A FLAT ROUND TRIP BREAKS THE WINNING RUN AND EXTENDS THE LOSING ONE,
+        // because `pess > 0` is the only win this function knows. That is the
+        // rule `max_losing_streak` already shipped with and it is kept rather
+        // than softened: a trade that returned nothing did not carry the run,
+        // and after costs it is a loser. Stated because the two counters now sit
+        // side by side and a reader would otherwise assume they partition.
+        streaks.winning = 0;
+        streaks.losing = streaks.losing.saturating_add(1);
+        if streaks.losing > cell.max_losing_streak {
+            cell.max_losing_streak = streaks.losing;
         }
     }
     // Holding time in EXECUTION bars, so minutes once the one-minute layer is in
@@ -3594,7 +3630,45 @@ fn peak(bars: &[Candle], from: usize, to: usize, entry: i64, side: Side, adverse
     reason = "the exception every test module in this workspace takes."
 )]
 mod tests {
-    use super::{Cell, Grid, Levels, evaluate};
+    use super::{Cell, Grid, Levels, Streaks, evaluate, tally_trade};
+
+    /// BOTH RUNS ARE MEASURED, AND EACH ONE ENDS THE OTHER.
+    ///
+    /// `max_losing_streak` shipped alone. A reader shown only the bad run learns
+    /// what to sit through and never what to sit through it FOR — and two
+    /// variants with one win rate and one longest-losing-run are still different
+    /// instruments, because a strategy whose wins arrive in long runs is
+    /// trend-following and one whose wins are scattered is not.
+    ///
+    /// The sequence here is chosen so a counter that failed to reset would be
+    /// visibly wrong rather than coincidentally right: the four-win run comes
+    /// AFTER the three-loss run, so a winning counter that the losses did not
+    /// clear would read seven.
+    #[test]
+    fn both_streaks_are_measured_and_each_one_ends_the_other() {
+        let mut cell = Cell::default();
+        let mut streaks = Streaks::default();
+        // 2 up, 3 down, 4 up, 1 down, 1 up.
+        for pess in [10_i64, 10, -5, -5, -5, 10, 10, 10, 10, -5, 10] {
+            tally_trade(&mut cell, pess, 1, &mut streaks);
+        }
+        assert_eq!(cell.max_winning_streak, 4, "the longest run of winners");
+        assert_eq!(cell.max_losing_streak, 3, "and the longest run of losers");
+
+        // A FLAT TRADE IS A LOSER TO BOTH COUNTERS, which is the rule
+        // `max_losing_streak` already carried and is now stated because the two
+        // sit side by side. `pess > 0` is the only win this function knows.
+        let mut flat = Cell::default();
+        let mut flats = Streaks::default();
+        for pess in [10_i64, 0, 10] {
+            tally_trade(&mut flat, pess, 1, &mut flats);
+        }
+        assert_eq!(
+            flat.max_winning_streak, 1,
+            "a trade that returned nothing did not carry the run"
+        );
+        assert_eq!(flat.max_losing_streak, 1, "and it extended the other");
+    }
 
     /// A VARIANT CANNOT WIN BY HAVING NO STOP, WHICH IS WHAT IT USED TO DO.
     ///

@@ -43,6 +43,9 @@ use runner::grid::TradeRow;
 /// Microseconds in a day.
 const MICROS_PER_DAY: i64 = 86_400 * 1_000_000;
 
+/// One clock hour, in microseconds.
+const MICROS_PER_HOUR: i64 = 3_600 * 1_000_000;
+
 /// India Standard Time, +05:30 from UTC.
 ///
 /// Applied BEFORE any division, for the reason `indicators::weekday_bit` gives:
@@ -67,16 +70,31 @@ pub enum Grain {
     Week,
     /// One IST trading day.
     Day,
+    /// One clock hour of one IST trading day.
+    ///
+    /// The finest grain, and the one that answers a question the others cannot:
+    /// *does this only work in the first hour?* A combination whose whole edge
+    /// sits between 09:15 and 10:15 is positive in every year, half, quarter,
+    /// month, week and day it traded, and the six coarser grains all report it
+    /// as steady. Only this one separates "worked throughout" from "worked at
+    /// one time of day".
+    ///
+    /// It is a rolling clock hour and not an hour-OF-day bucket, so it stays a
+    /// division like every other grain and partitions the series rather than
+    /// folding it. Hour-of-day is a different question and would need its own
+    /// type.
+    Hour,
 }
 
 /// Every grain, coarsest first, for a report that walks them all.
-pub const GRAINS: [Grain; 6] = [
+pub const GRAINS: [Grain; 7] = [
     Grain::Year,
     Grain::Half,
     Grain::Quarter,
     Grain::Month,
     Grain::Week,
     Grain::Day,
+    Grain::Hour,
 ];
 
 impl Grain {
@@ -90,6 +108,7 @@ impl Grain {
             Self::Month => "month",
             Self::Week => "week",
             Self::Day => "day",
+            Self::Hour => "hour",
         }
     }
 
@@ -114,6 +133,9 @@ impl Grain {
             .saturating_add(IST_OFFSET_MICROS)
             .div_euclid(MICROS_PER_DAY);
         match self {
+            Self::Hour => ts_micros
+                .saturating_add(IST_OFFSET_MICROS)
+                .div_euclid(MICROS_PER_HOUR),
             Self::Day => day,
             Self::Week => day.div_euclid(7),
             Self::Month | Self::Quarter | Self::Half | Self::Year => {
@@ -287,8 +309,51 @@ pub fn at(rows: &[TradeRow], grain: Grain) -> Stability {
               make an expectation unfulfilled and fail the build for tidying."
 )]
 mod tests {
-    use super::{Grain, at, year_month};
+    use super::{GRAINS, Grain, at, year_month};
     use runner::grid::TradeRow;
+
+    /// THE HOUR GRAIN SEPARATES WHAT EVERY OTHER GRAIN JOINS.
+    ///
+    /// A combination whose whole edge sits between 09:15 and 10:15 is positive
+    /// in every year, half, quarter, month, week and day it traded — the six
+    /// coarser grains all report it as steady, and `weakest_bp`, which is the
+    /// minimum across them, reports it as steady too. That is the "one regime
+    /// carrying four" shape at a resolution the ladder could not see.
+    ///
+    /// Two stamps five hours apart on ONE IST trading day: same day bucket, and
+    /// they must not share an hour bucket or the grain measures nothing.
+    #[test]
+    fn the_hour_grain_separates_two_times_of_one_trading_day() {
+        // 09:15 and 14:30 IST on 2024-01-01, in epoch microseconds.
+        let open = 1_704_080_700_000_000_i64;
+        let afternoon = open + 5 * 3_600 * 1_000_000 + 15 * 60 * 1_000_000;
+
+        assert_eq!(
+            Grain::Day.bucket(open),
+            Grain::Day.bucket(afternoon),
+            "one IST trading day, so every coarser grain joins them"
+        );
+        assert_ne!(
+            Grain::Hour.bucket(open),
+            Grain::Hour.bucket(afternoon),
+            "and the hour is the only grain that can tell the open from the close"
+        );
+        assert_eq!(
+            Grain::Hour.bucket(afternoon) - Grain::Hour.bucket(open),
+            5,
+            "five clock hours apart, counted as five"
+        );
+        // A minute either side of an hour boundary lands in different buckets,
+        // and the boundary is IST's, not UTC's -- the offset is folded in before
+        // the division for the same reason `Day` folds it.
+        let ten_fifteen = open + 3_600 * 1_000_000;
+        assert_ne!(
+            Grain::Hour.bucket(open),
+            Grain::Hour.bucket(ten_fifteen),
+            "09:15 and 10:15 IST are an hour apart and must not share a bucket"
+        );
+        assert_eq!(GRAINS.len(), 7, "seven grains, finest last");
+    }
 
     /// Days since the epoch for a civil date, so fixtures read as dates.
     fn day(y: i64, m: u32, d: u32) -> i64 {
