@@ -8396,7 +8396,33 @@ fn landed_answer(
 ) -> (axum::http::StatusCode, String) {
     facts.push(("Members read", done.members.to_string()));
     facts.push(("Rows read", done.rows_read.to_string()));
-    facts.push(("Bars stored", done.bars_stored.to_string()));
+    facts.push(("Bars offered to the store", done.bars_stored.to_string()));
+    // WHAT REACHED THE FILE, BESIDE WHAT WAS OFFERED — and only one of these
+    // was ever on the receipt.
+    //
+    // `bars_stored` counts what the pulled rung OFFERED; `bars_committed`
+    // counts what `Appended::Committed` actually wrote. They diverge on every
+    // re-pull: a second run over a window offers every bar and writes none,
+    // because the file already holds them byte for byte, which `CLAUDE.md` §3
+    // rule 5 requires of it.
+    //
+    // MEASURED on a real store, from the line D-0259 added:
+    // `bars_stored: 1643341, bars_committed: 0`. **Sixteen lakh bars offered,
+    // zero written** — and the receipt printed only the first number. A large
+    // success figure standing over an empty write is the failure wearing a
+    // success's clothes that §4 bans.
+    //
+    // `render.rs` already weakened its caption to "offered" and said the figure
+    // itself *"cannot be corrected here"* — true of the `/audit` page, which
+    // renders from `audit::Record` and that record has one free byte. It was
+    // never true HERE: this receipt is built from the live `Ingested`, which
+    // has carried `bars_committed` the whole time. The number was in hand and
+    // nobody printed it.
+    //
+    // Both are shown rather than one replacing the other, because neither is a
+    // lie. A re-run that writes nothing is CORRECT and its window is complete;
+    // showing only the committed count would call a finished window empty.
+    facts.push(("Bars written to the file", done.bars_committed.to_string()));
     facts.push(("Rows folded into an open bar", done.rows_folded.to_string()));
     facts.push(("Slices the census counted", done.counted.to_string()));
     facts.push(("Rows dropped", done.census.total().to_string()));
@@ -22530,9 +22556,18 @@ mod tests {
             html.contains("<th>Rows read</th><td>2</td>"),
             "both rows were read: {html}"
         );
+        // BOTH COUNTERS, AND HERE THEY AGREE — which is what makes the pair
+        // readable at all. Nothing was offered and nothing was written, so a
+        // reader can tell this from the case they DIVERGE: a re-pull offers
+        // every bar and writes none, and until the second row existed those two
+        // runs printed the same receipt.
         assert!(
-            html.contains("<th>Bars stored</th><td>0</td>"),
-            "and neither was stored: {html}"
+            html.contains("<th>Bars offered to the store</th><td>0</td>"),
+            "and neither was offered: {html}"
+        );
+        assert!(
+            html.contains("<th>Bars written to the file</th><td>0</td>"),
+            "nor written — the number that was in hand and never printed: {html}"
         );
         assert!(
             html.contains("<th>Rows dropped</th><td>2</td>"),
@@ -22674,6 +22709,14 @@ mod tests {
     /// The whole loop in one test: a run happens, a record lands on disk, and
     /// the page renders that record's counters rather than an em dash.
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one store, pulled TWICE, and the second pull is the point: it \
+                  is the only state where offered and written disagree, and a \
+                  separate test would need its own first pull to reach it — at \
+                  which point the two fixtures could drift and the pair would \
+                  stop comparing anything."
+    )]
     async fn a_run_is_recorded_and_the_pull_page_reads_the_record_back() {
         let dir = agreeing("localaudit");
         let site = site("localaudit", &dir);
@@ -22723,7 +22766,17 @@ mod tests {
 
         // 3 rows in, 2 bars out (10:00 and 10:01), 1 folded, 0 dropped.
         assert!(html_fact(&receipt, "Rows read", "3"), "{receipt}");
-        assert!(html_fact(&receipt, "Bars stored", "2"), "{receipt}");
+        assert!(
+            html_fact(&receipt, "Bars offered to the store", "2"),
+            "{receipt}"
+        );
+        // A FIRST PULL WRITES WHAT IT OFFERS, so the two agree here. The
+        // divergence is a re-pull's, and this row is what makes it visible:
+        // measured on a real store, `bars_stored: 1643341, bars_committed: 0`.
+        assert!(
+            html_fact(&receipt, "Bars written to the file", "2"),
+            "{receipt}"
+        );
         assert!(
             html_fact(&receipt, "Rows folded into an open bar", "1"),
             "{receipt}"
@@ -22755,6 +22808,46 @@ mod tests {
         for forbidden in ["<script", "javascript:", "onclick", "onload", "onerror"] {
             assert!(!page.contains(forbidden), "{forbidden} must never appear");
         }
+
+        // ─── THE SECOND PULL, WHICH IS THE WHOLE REASON THE SECOND ROW EXISTS
+        //
+        // Exactly the same folder, the same window, the same store. The bars
+        // are already on disk byte for byte, so `BarFile::append` answers
+        // `AlreadyPresent` and writes nothing — which is CORRECT, and which
+        // `CLAUDE.md` §3 rule 5 requires of it.
+        //
+        // Before this pair of rows the two runs printed the same receipt.
+        // Measured on the operator's real store: `bars_stored: 1643341,
+        // bars_committed: 0` — sixteen lakh bars offered, zero written, under a
+        // single figure captioned as though they were written.
+        let (again_code, again) = spot_answer(
+            &spot_form(&folder, "2022-01-08", "2022-01-08"),
+            day(2026, 8, 7),
+            moment(),
+            &site,
+        )
+        .await;
+        assert_eq!(again_code, axum::http::StatusCode::OK, "{again}");
+        assert!(
+            html_fact(&again, "Bars offered to the store", "2"),
+            "the rung offered both bars again — a re-pull reads the same rows: \
+             {again}"
+        );
+        assert!(
+            html_fact(&again, "Bars written to the file", "0"),
+            "and wrote NEITHER, because the store already holds them. This is \
+             the pair the first receipt could not distinguish from a first \
+             pull: {again}"
+        );
+        // AND IT IS STILL A SUCCESS. A re-run that writes nothing is a complete
+        // window, not an empty one — showing only the committed count would
+        // call a finished month a failure, which is the opposite error.
+        assert!(
+            again.contains("STORED"),
+            "writing nothing is the honest end state for a window already \
+             held, not a refusal: {again}"
+        );
+
         let _ = std::fs::remove_dir_all(&folder);
     }
 

@@ -26783,3 +26783,56 @@ argued from the SHAPE — one heap allocation removed from a path that took one
 per record — and `CLAUDE.md` §3 rule 6 does not let a structural argument be
 reported as a measured one. `cargo bench --workspace` on an idle machine is
 what would close it.
+
+### D-0367
+
+**The ingest receipt had the committed count in hand the whole time and printed
+the other one.**
+
+`landed_answer` builds the receipt an operator reads the moment a pull ends, and
+it pushed one bar figure: `done.bars_stored`, which counts what the pulled rung
+**OFFERED**. What reached the file is `done.bars_committed` — the same
+`Ingested`, the same function, the next field along.
+
+The two diverge on **every re-pull**. A second run over a window offers every
+bar and writes none, because the store already holds them byte for byte, which
+`CLAUDE.md` §3 rule 5 requires of it. Measured on the operator's real store, from
+the line D-0259 added to the rolling log: `bars_stored: 1643341,
+bars_committed: 0`. **Sixteen lakh bars offered, zero written** — and the receipt
+showed only the first number, captioned as though they had been written.
+
+**`render.rs` already knew and could not fix it there.** Its comment reads:
+*"THE FIGURE CANNOT BE CORRECTED HERE, ONLY THE CLAIM: `audit::Record` carries no
+committed count, and adding one is a new file version at its own stride under
+§4, not a field."* That is true of `/audit`, which renders from a 256-byte
+fixed-stride record whose field map allocates every byte but one — byte 119,
+and a `u64` needs eight. So the caption was weakened to "offered" and the number
+left alone.
+
+**It was never true of the live receipt.** `landed_answer` takes
+`&pull::ingest::Ingested`, not an `audit::Record`. The number was three
+characters away.
+
+Both rows ship, and neither replaces the other:
+
+| Row | Counts |
+|---|---|
+| `Bars offered to the store` | what the pulled rung produced |
+| `Bars written to the file` | what `Appended::Committed` actually wrote |
+
+Showing only the committed count would be the opposite error: a re-run that
+writes nothing is a **complete** window, `Outcome::Stored` is its honest end
+state, and a lone zero would call a finished month empty.
+
+**The divergence is now a test, not a comment.** The same folder is pulled
+twice into the same store: the second receipt asserts `offered 2, written 0`
+and asserts the verdict is still `STORED`. Before this pair of rows the two runs
+printed the same receipt, so no test could have told them apart.
+
+**What this does NOT close.** `/audit` still renders from `audit::Record` and
+still shows only the offered figure. Closing that is `VERSION = 2` with a longer
+stride, and it is a real migration: `Log::Held::torn` reports a file whose length
+stops being a multiple of `RECORD_LEN`, so existing 256-byte history would read
+as torn the moment the constant moved. Named here rather than half-done.
+
+781 `api` tests green, `clippy -D warnings` clean.
