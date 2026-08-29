@@ -1794,10 +1794,10 @@ fn months_in(
     let mut start = 0usize;
     while start < bars.len() {
         let Some(first) = bars.get(start) else { break };
-        let ym = month_of(first, first)?;
+        let ym = month_at(first)?;
         let mut end = start;
         while let Some(bar) = bars.get(end) {
-            if month_of(bar, bar)? != ym {
+            if month_at(bar)? != ym {
                 break;
             }
             end = end.saturating_add(1);
@@ -1809,6 +1809,38 @@ fn months_in(
         start = end;
     }
     Ok(out)
+}
+
+/// The month ONE bar falls in.
+///
+/// # Why this is separate from [`month_of`], which takes two
+///
+/// `months_in` groups a batch by month and asked `month_of(bar, bar)` for every
+/// bar in it. That function exists to check a SPAN — it converts both ends and
+/// compares them — so passing one bar twice did **two** `IstMoment`
+/// conversions and two `year_month` calls to answer a question with one end,
+/// and then compared the answer with itself.
+///
+/// Constant per bar either way, and constant work nobody needed: a backfill
+/// that lands 1.6 million bars did 3.2 million conversions to make 1.6 million
+/// decisions. The same shape as the per-record allocation D-0366 removed from
+/// `store::file::read_row`, and invisible to the same gates for the same
+/// reason — a ratio cannot see work that is doubled uniformly.
+///
+/// [`month_of`] keeps the span check, which is a real refusal and has real
+/// callers: a batch straddling a month boundary needs two files and splitting
+/// it is the caller's decision.
+///
+/// # Errors
+///
+/// A timestamp outside the range [`crate::session::IstMoment`] can name, or a
+/// day with no month in the store's addressing.
+fn month_at(bar: &store::format::Bar) -> Result<store::path::YearMonth, String> {
+    crate::session::IstMoment::from_epoch_secs(bar.ts_micros.div_euclid(1_000_000))
+        .map_err(|why| why.to_string())?
+        .day()
+        .year_month()
+        .map_err(|why| why.to_string())
 }
 
 fn month_of(

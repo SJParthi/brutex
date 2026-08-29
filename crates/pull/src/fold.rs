@@ -226,7 +226,40 @@ pub fn fold(snapshots: &[Bar], bucket: Bucket) -> Result<Vec<Bar>, FoldError> {
         OPEN_ANCHOR_MICROS
     };
     let width = i64::from(bucket.secs()) * 1_000_000;
-    let mut out: Vec<Bar> = Vec::new();
+
+    // THE EXACT BUCKET COUNT, RESERVED ONCE — this was a bare `Vec::new()`.
+    //
+    // The output is one bar per BUCKET, and the bucket a snapshot falls in is
+    // `(ts - anchor).div_euclid(width)`. So the number of buckets the batch can
+    // possibly touch is the first and last snapshot's bucket indices,
+    // subtracted — O(1) arithmetic on two values already in hand, because the
+    // loop below refuses anything out of order and the extremes are therefore
+    // the ends.
+    //
+    // Growing from zero instead reallocated as it went: a month of one-minute
+    // bars is ~8,250 pushes, which is roughly thirteen doublings and thirteen
+    // copies of an ever-larger buffer. Amortised O(1) per push is the textbook
+    // guarantee and it holds — this is not a complexity fix, it is the same
+    // "constant work nobody needed" D-0366 removed from `store::file::read_row`
+    // and it is invisible to a ratio gate for the same reason: work that is
+    // doubled uniformly does not change a ratio.
+    //
+    // **Capped at `snapshots.len()`, and that cap is the load-bearing half.**
+    // The span bound alone is wrong in the direction that costs memory: a
+    // one-second archive folded to one minute has 60× more buckets in its span
+    // than it has snapshots to fill them if the day is sparse, and a batch that
+    // straddles a long gap would reserve for every empty bucket between. The
+    // output can never exceed one bar per snapshot, so the smaller of the two
+    // is the true bound and neither over-allocates.
+    let span_buckets = match (snapshots.first(), snapshots.last()) {
+        (Some(first), Some(last)) if width > 0 => {
+            let from = first.ts_micros.saturating_sub(anchor).div_euclid(width);
+            let to = last.ts_micros.saturating_sub(anchor).div_euclid(width);
+            usize::try_from(to.saturating_sub(from).saturating_add(1)).unwrap_or(usize::MAX)
+        }
+        _ => 0,
+    };
+    let mut out: Vec<Bar> = Vec::with_capacity(span_buckets.min(snapshots.len()));
     let mut open_at: Option<i64> = None;
     let mut previous: Option<i64> = None;
 

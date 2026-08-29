@@ -26836,3 +26836,93 @@ stops being a multiple of `RECORD_LEN`, so existing 256-byte history would read
 as torn the moment the constant moved. Named here rather than half-done.
 
 781 `api` tests green, `clippy -D warnings` clean.
+
+### D-0368
+
+**The storing path's audit trail covered its successes and not its failures.**
+
+Measured across `crates/pull/src/ingest.rs`: **ten `note_*` helpers, three of
+them driven by `emit_sites`.** The seven that were not are the failure paths,
+and **four of those are at `Error`** — the level an operator is woken by:
+
+| Helper | Level | Driven before |
+|---|---|---|
+| `note_run`, `note_landed`, `note_not_landed` | info / debug / error | yes |
+| `note_fold` | debug | **no** |
+| `note_not_filed` | **error** | **no** |
+| `note_derived_shortfall` | **error** | **no** |
+| `note_not_derived` | warn | **no** |
+| `note_census_degraded` | warn | **no** |
+| `note_census_unpublished` | **error** | **no** |
+| `note_bars_not_counted` | **error** | **no** |
+
+`emit_sites`'s own header says why that matters: a helper that silently stopped
+emitting — a wrong level, a `return` above the `emit`, a target renamed on one
+side of a filter — leaves every other test in the crate green. It was catching
+that for the events that fire when a run goes WELL.
+
+Two rows close, and both were falsified before landing.
+
+**`note_fold` — the number that would have named D-0070 on the day it landed.**
+`folded` is how many rows the bucket consumed, so `folded = 0` on a `1day` rung
+is that defect's whole signature: the vendor already sent one bar per day and
+the bucket is only re-stamping them. Nothing wrote it down and it took decoding
+bar files by hand to see. Asserted on `folded` rather than `bars`, because
+`bars` was never in doubt.
+
+**`note_not_filed` — and the first drive was on the wrong path.** The helper is
+called from `ingest::from_rows`, the rolling contract path.
+`drive_member_not_landed` runs `from_dir`, where an unnameable member fails
+through a different helper entirely, so the row asserted against it read back an
+**empty file** — which is what a drive on the wrong path looks like, and is
+exactly the failure mode this table exists to make visible. `drive_not_filed`
+runs `from_rows` over two bars either side of a month boundary: the store
+addresses one month per file, so the batch is refused at the `address` stage.
+
+`stage` is the asserted field rather than `instrument`, because `stage` is what
+makes the line actionable — `address` and `bars` are two different faults
+wearing one message, and "not filed" without it cannot separate a name the store
+refuses from a write that failed.
+
+**Five remain undriven and are named rather than left to a coverage report.**
+`note_derived_shortfall`, `note_not_derived`, `note_census_degraded`,
+`note_census_unpublished` and `note_bars_not_counted` each need a store that
+fails in a specific way — an unwritable rung, a contended census lock, a count
+that disagrees with what landed — and inventing those states is more fixture
+than the events are currently worth. `CLAUDE.md` §3 rule 6: the gap is stated,
+not implied.
+
+715 `pull` tests green, `clippy -D warnings` clean.
+
+### D-0369
+
+**Two pieces of constant work on the storing path that nobody needed.**
+
+Neither is a complexity defect and no ratio could have caught either: work that
+is doubled or reallocated *uniformly* does not change a ratio. Both are the same
+shape as D-0366's per-record allocation.
+
+**`months_in` converted every timestamp twice.** It groups a landed batch by
+month and asked `month_of(bar, bar)` for each bar. That function exists to check
+a SPAN — it converts both ends and compares them — so passing one bar twice did
+two `IstMoment::from_epoch_secs` calls and two `year_month` calls to answer a
+question with one end, then compared the answer with itself. A backfill landing
+1.6 million bars did 3.2 million conversions to make 1.6 million decisions.
+`month_at` takes one bar; `month_of` keeps the span check, which is a real
+refusal with real callers.
+
+**`fold` grew its output from zero.** `let mut out: Vec<Bar> = Vec::new()`, then
+one push per bucket — roughly thirteen doublings and thirteen copies of an
+ever-larger buffer for a month of one-minute bars, while its neighbour
+`keep_in_session` correctly reserved `bars.len()` up front.
+
+The reserve is the **exact** bucket count, not a guess: the bucket a snapshot
+falls in is `(ts - anchor).div_euclid(width)`, so the span is the first and last
+snapshot's indices subtracted — O(1) arithmetic on two values already in hand,
+and the loop refuses anything out of order so the ends are the extremes.
+
+**Capped at `snapshots.len()`, and that cap is the load-bearing half.** The span
+bound alone is wrong in the direction that costs memory: a one-second archive
+folded to one minute, or a batch straddling a long gap, has far more buckets in
+its span than snapshots to fill them. The output can never exceed one bar per
+snapshot, so the smaller of the two is the true bound and neither over-allocates.

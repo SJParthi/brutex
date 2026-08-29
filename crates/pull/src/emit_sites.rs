@@ -418,6 +418,50 @@ static SITES: &[Site] = &[
         drive: drive_run_named,
     },
     Site {
+        // THE NUMBER THAT WOULD HAVE NAMED D-0070 ON THE DAY IT LANDED.
+        //
+        // `folded` is how many rows the bucket consumed. A daily pull folding N
+        // rows into N bars means the vendor already sent one bar per day and
+        // the bucket is only ever re-stamping them, so **`folded = 0` on a
+        // `1day` rung is the signature of that whole defect** — and nothing
+        // wrote it down. It took decoding bar files by hand to see it.
+        //
+        // Asserting `folded` rather than `bars`, because `bars` is the number
+        // that was never in doubt. `BODY` holds two rows sharing one minute, so
+        // the fold consumes exactly one of them and this is a value the fixture
+        // can DEMAND rather than observe.
+        //
+        // `Debug`, and that is why the module installs a `Trace` floor: at the
+        // default floor this event is filtered and this row would assert
+        // nothing while appearing to pass.
+        at: "crates/pull/src/ingest.rs — note_fold",
+        target: "pull.fold",
+        message: "folded",
+        says: ("folded", Says::Signs(1)),
+        drive: drive_run_named,
+    },
+    Site {
+        // AN `Error` ON THE STORING PATH, AND IT WAS THE LEAST-PROVEN KIND.
+        //
+        // Measured across `crates/pull/src/ingest.rs`: ten `note_*` helpers,
+        // and before this row **three** were driven here. The seven that were
+        // not are the FAILURE paths — four of them at `Error`, which is the
+        // level an operator is woken by. A helper that silently stopped
+        // emitting would leave every other test in this crate green, which is
+        // the exact defect this module's header exists to catch, and the events
+        // it was catching it for were the successes.
+        //
+        // `stage` rather than `instrument`, because `stage` is what makes this
+        // line actionable: `address` and `bars` are two different faults
+        // wearing one message, and an operator reading "not filed" without it
+        // cannot tell a name the store refuses from a write that failed.
+        at: "crates/pull/src/ingest.rs — note_not_filed",
+        target: "pull.file",
+        message: "not filed",
+        says: ("stage", Says::Holds("address")),
+        drive: drive_not_filed,
+    },
+    Site {
         at: "crates/pull/src/http.rs:1483",
         target: "pull.decode",
         message: "bars carried a negative open interest and were skipped",
@@ -1181,5 +1225,51 @@ fn drive_run_named(scratch: &Scratch) {
     assert_eq!(
         done.members, 1,
         "one member was read, so the run has exactly one subject to name"
+    );
+}
+
+/// One batch that cannot be ADDRESSED, on the rolling path.
+///
+/// **Not the folder path, and the first draft of this drive took that one.**
+/// `note_not_filed` is called from `ingest::from_rows`, which is the rolling
+/// contract path; `drive_member_not_landed` runs `from_dir`, and an unnameable
+/// member there fails in `from_members_inner` through a different helper
+/// entirely. The row asserted against it produced no records at all — an empty
+/// file, which is what a drive on the wrong path looks like.
+///
+/// Two bars either side of a month boundary. The store addresses ONE month per
+/// file, so a batch needing two is refused at the `address` stage — which is a
+/// real refusal with a real caller, not a fault invented to reach a log line.
+fn drive_not_filed(scratch: &Scratch) {
+    let store = scratch.store();
+    let request = request_over(crossing());
+    let at = |secs: i64| store::format::Bar {
+        ts_micros: secs * 1_000_000,
+        open: 100,
+        high: 100,
+        low: 100,
+        close: 100,
+        volume: 1,
+        open_interest: i64::MIN,
+    };
+    // 2022-10-03 and 2022-11-03, both inside `crossing()`, in two months.
+    let bars = [at(1_664_775_000), at(1_667_453_400)];
+    let done = crate::ingest::from_rows(
+        &bars,
+        &[],
+        INSTRUMENT,
+        "emit-sites",
+        &store,
+        plan_over(&request),
+    );
+    assert_eq!(
+        done.failures.len(),
+        1,
+        "a batch spanning two months is one member's refusal, and the store \
+         addresses one month per file"
+    );
+    assert_eq!(
+        done.bars_stored, 0,
+        "nothing was filed, so nothing may be reported as stored"
     );
 }
