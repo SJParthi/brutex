@@ -26926,3 +26926,66 @@ bound alone is wrong in the direction that costs memory: a one-second archive
 folded to one minute, or a batch straddling a long gap, has far more buckets in
 its span than snapshots to fill them. The output can never exceed one bar per
 snapshot, so the smaller of the two is the true bound and neither over-allocates.
+
+---
+
+### D-0370
+
+**The ingest census draws every column's arithmetic, and the four-bucket
+coverage is retired.**
+
+The table drew seven columns and six of them were bare text, so comparing two
+rows meant reading and dividing eight-digit figures by eye — `0 / 6,18,296` and
+`6,11,204 / 6,18,296` are the same shape and opposite facts.
+
+**`coverageOf` no longer buckets.** It bucketed the window into quarters and
+printed the WORST verdict in each, so a row whose months all hold one verdict
+drew four identical squares — and that is every row of a feed that has never
+been pulled. Measured on the live page: NIFTY 50 over a 140-month window drew
+200 squares carrying one bit between them. Four blocks was
+`web/design/ingest.html`'s drawing, not a measurement, and no gate diffs that
+file — checked before this was changed, not assumed.
+
+It is run-length encoded instead: consecutive months holding one verdict
+collapse into one band, and each band carries its own start and end as
+percentages. **The cell is ONE element with one `linear-gradient` at any window
+width.** A month-per-element strip would have been 140 × 25 = 3,500 nodes for
+one column; this is 25, verified in the live DOM.
+
+**`cells` replaces `coverage`,** and the lookup is hoisted to the `{#each}`
+head: one `Map.get` per ROW, shared by all seven cells, rather than one per
+cell. The verdict cell alone had been re-indexing `VERDICT[r.state]` five times
+per row per render — 125 table walks for a drawn page to answer a question
+whose answer is one field.
+
+**The hatched track is `/db`'s track, down to the tokens.** It also answers the
+objection that kept a track off this page: flat `--well` behind a zero fill
+reads as a full bar at a glance, hatched it cannot. Without a track, `0 /
+6,18,296` and a rung with no bars-per-session drew the identical nothing — two
+different facts wearing one appearance, which is the §4 silence.
+
+**`Attempts` says the same thing in a different form.** It printed the words
+"1 · not counted" on fifty rows. The words were right and the form was wrong: a
+fact constant across the page is not something the eye should re-read fifty
+times. It is an empty ladder — the same object the one counting row fills — and
+the sentence is kept whole on the cell's `title`, so nothing is denied.
+
+**The run says how far it is.** `share`, `unitsDone`, `unitsLeft`, `rate` and
+`etaSecs` were all `$derived` and had NO reader: computed on every poll and
+thrown away when the run card was removed as "narrative about the run". The
+removal took the one non-narrative thing it held. Between pressing Pull and the
+receipt there was a spinner and an elapsed clock, neither of which is a
+fraction. They feed a progress bar now, and each feed's `legsDone / legs` draws
+its own. `rate` stays absent until two samples five seconds apart actually
+differ, and the ETA is labelled as the extrapolation it is — §3 rule 6.
+
+**Five of seven header sub-labels are gone,** at the operator's instruction.
+They restated their own header or editorialised about it. The two that survive
+carry a fact the header does not: the denominator, and the coverage strip's
+direction. Every deleted clause is on the header's own `title`.
+
+**Not measured, and not claimed.** No bench was run for this change: load
+average was 72 with a `cli` sweep at 1213% CPU, and a saturated machine
+invalidates every timing. Gate 8 measures it on CI. What WAS verified locally:
+0 unused CSS selectors in this file, and 0 svelte-check errors in it (42 of the
+61 ceiling, every one in `routes/backtest`).
