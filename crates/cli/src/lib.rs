@@ -176,13 +176,16 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    count. A rare setup is pruned by a high
                                    support before it is ever priced, so a fixed
                                    threshold cannot find one -- this walks it.
-       cli range-all    VENDOR UNDERLYING FROM_Y FROM_M TO_Y TO_M SUPPORT_PPM
+       cli range-all    VENDOR UNDERLYING FROM_Y FROM_M TO_Y TO_M [SUPPORT_PPM]
                                    sweep the span on ALL EIGHT INTRADAY RUNGS and
                                    table comparing them. SUPPORT_PPM is parts per
                                    million -- 200000 is 20% -- and each rung's
                                    min_hits comes from its OWN bar count, because
                                    81 months holds 1,671 daily bars and 623,546
                                    one-minute ones. Every rung is recorded.
+                                   OMIT SUPPORT_PPM to derive the floor per rung
+                                   from that rung's own bars instead of holding
+                                   one figure across all eight.
        cli audit-range  VENDOR UNDERLYING RUNG FROM_Y FROM_M TO_Y TO_M MIN_HITS
                                    sweep a CONTIGUOUS SPAN of months as ONE
                                    series -- the seven-year question, not twelve
@@ -654,7 +657,7 @@ fn sweep_all_arm(out: &mut String, vendor: &str, rung: &str, min_hits: &str) -> 
         Err(why) => refuse(out, why),
     }
 }
-/// `descend`'s argument parsing, in the shape [`range_all_arm`] uses.
+/// `descend`'s argument parsing, in the shape [`range_arm`] uses.
 ///
 /// `PER_WEEK` is the operator's cadence and the only argument here that is not
 /// also on `range-all`. It is a whole number of trades per week, refused at
@@ -664,7 +667,7 @@ fn sweep_all_arm(out: &mut String, vendor: &str, rung: &str, min_hits: &str) -> 
     clippy::too_many_arguments,
     reason = "the command takes eight words and each is a separate parse that \
               refuses with its own sentence. Bundling them into a struct would \
-              move the parsing, not remove it, and `range_all_arm` beside it \
+              move the parsing, not remove it, and `range_arm` beside it \
               takes six for the same reason."
 )]
 fn descend_arm(
@@ -723,23 +726,45 @@ fn descend_arm(
 /// The same four number parses and the same four refusals, in the same order,
 /// because two commands taking one shape of argument must reject a bad one
 /// identically or an operator learns two rules.
-fn range_all_arm(
+/// # `SUPPORT_PPM` is OPTIONAL, and omitting it is an instruction
+///
+/// Absent, the floor is DERIVED per rung from that rung's own bar count rather
+/// than defaulted — a 60-minute rung and a 1-minute rung over one month do not
+/// have the same number of bars, so one typed figure means two different
+/// standards. `range_all` has taken `Option<u64>` since it was written, but
+/// until this arm accepted six positionals no CLI arity could reach the `None`
+/// branch: it was live over HTTP and unreachable from the binary.
+///
+/// That gap had a visible consequence. The browser's empty-ledger panel prints
+/// a `range-all` line and OMITS the argument on purpose, to get exactly this
+/// derivation. Against a seven-positional-only dispatch that line matched no
+/// arm and exited `MISUSED`, so the one command the page offers to fill an
+/// empty ledger could not run at all.
+fn range_arm(
     out: &mut String,
     vendor: &str,
     underlying: &str,
     from: (&str, &str),
     to: (&str, &str),
-    support_ppm: &str,
+    tail: &[&str],
 ) -> u8 {
+    // THE ARITY CHECK LIVES HERE, not in the dispatch table, because two arms
+    // for one command cost `run` five lines against a hundred-line cap that is
+    // doing real work. One arm binds the tail and this decides what it means.
+    let support = match tail {
+        [] => Ok(None),
+        [one] => parse_support_ppm(one).map(Some),
+        _ => Err("range-all takes at most one SUPPORT_PPM after TO_M"),
+    };
     match (
         from.0.parse::<u16>(),
         from.1.parse::<u8>(),
         to.0.parse::<u16>(),
         to.1.parse::<u8>(),
-        parse_support_ppm(support_ppm),
+        support,
     ) {
         (Ok(fy), Ok(fm), Ok(ty), Ok(tm), Ok(h)) => {
-            let text = range_all(vendor, underlying, (fy, fm), (ty, tm), Some(h));
+            let text = range_all(vendor, underlying, (fy, fm), (ty, tm), h);
             let refused = text.starts_with("refused: ");
             out.push_str(&text);
             if refused { MISUSED } else { OK }
@@ -883,7 +908,7 @@ pub fn run(args: &[String], out: &mut String) -> u8 {
         ["elite", v, u, r, fy, fm, ty, tm, pts, n] => {
             elite_arm(out, v, u, r, (fy, fm, ty, tm), (pts, n))
         }
-        ["range-all", v, u, fy, fm, ty, tm, mh] => range_all_arm(out, v, u, (fy, fm), (ty, tm), mh),
+        ["range-all", v, u, fy, fm, ty, tm, t @ ..] => range_arm(out, v, u, (fy, fm), (ty, tm), t),
         ["descend", v, u, r, fy, fm, ty, tm, sup, pw] => {
             descend_arm(out, v, u, r, (fy, fm), (ty, tm), sup, pw)
         }
@@ -4943,6 +4968,25 @@ impl Rules {
             && cell.trades >= self.min_trades
             && cell.assurance_bp() >= self.min_assurance_bp
             && cell.return_over_drawdown() >= self.min_ret_over_dd_bp
+            // THE ONLY RULE ON THIS LIST WITH NO TYPED NUMBER BEHIND IT, and
+            // the only one that cannot be switched off.
+            //
+            // Every clause above compares against a FIELD, so an operator who
+            // leaves the environment alone gets whatever was typed as that
+            // field's default, and an operator who sets it to zero switches the
+            // rule off entirely. Both are how a run comes to admit a cell that
+            // loses money: at 0.5x reward-to-risk a 50% win rate is a losing
+            // strategy, and the two floors above pass it.
+            //
+            // This clause has no field. It asks each cell to beat the break-even
+            // win rate implied by ITS OWN measured reward-to-risk, and it asks
+            // that of the 95% LOWER BOUND rather than the raw rate — so a run
+            // clears it by having an edge that survives its own sample size,
+            // not by matching a figure somebody chose.
+            //
+            // Strictly greater: AT break-even the expectancy is exactly zero,
+            // which is not a strategy.
+            && cell.assurance_bp() > break_even_win_rate_bp(cell.reward_to_risk_bp())
     }
 }
 
@@ -5022,10 +5066,24 @@ impl Rules {
                 .unwrap_or(default)
         }
 
-        let min_win_rate_bp = at("BRUTEX_MIN_WIN_RATE_BP", 5_000);
+        // BOTH DEFAULT TO ZERO, WHICH IS "NOT TYPED" RATHER THAN "NOT CHECKED".
+        //
+        // These were `5_000` and `125` — a 50% win rate and a 1.25x ratio, each
+        // read from the environment under a doc claiming nothing was baked. A
+        // default IS baked: with no variable set those two numbers decided every
+        // PASS on every rung, and being the wrong SHAPE they could not be
+        // corrected by moving them. A win rate only means something against the
+        // ratio it is earned at, and one pair of figures is right for exactly
+        // one ratio (see `break_even_win_rate_bp`).
+        //
+        // Zero switches each floor off and leaves the derived break-even clause
+        // in `admits` as the standard, which no run can evade and no operator
+        // has to choose. Naming either variable still layers an extra floor on
+        // top for someone who wants one.
+        let min_win_rate_bp = at("BRUTEX_MIN_WIN_RATE_BP", 0);
         Self {
             max_mae_ppm: at("BRUTEX_MAX_MAE_PPM", 0),
-            min_rr_bp: at("BRUTEX_MIN_RR_BP", 125),
+            min_rr_bp: at("BRUTEX_MIN_RR_BP", 0),
             min_win_rate_bp,
             // DERIVED, NEVER TYPED. See `assurance_floor_bp`: at or below chance
             // it returns the rate itself, which is an unsatisfiable pair — so a
@@ -5753,6 +5811,55 @@ impl Screened<'_> {
     fn steady(&self) -> bool {
         self.steady
     }
+}
+
+/// The win rate at which a cell with this reward-to-risk BREAKS EVEN, in the
+/// hundredths the rest of [`Rules`] uses.
+///
+/// # This exists to delete two typed numbers
+///
+/// `Rules::operator()` shipped `min_win_rate_bp: 5_000` and `min_rr_bp: 125` —
+/// a 50% win rate and a 1.25x ratio, both typed. The doc above them said
+/// "nothing here is baked" because each reads an environment variable, but a
+/// DEFAULT is baked: with no variable set, those two numbers decided every PASS
+/// on every rung of every run.
+///
+/// They are also the wrong SHAPE, because a win rate and a reward-to-risk are
+/// not independent quantities. A strategy makes money when
+/// `w * R > (1 - w) * 1`, so `w > 1 / (1 + R)`. One typed pair can only be
+/// right for one ratio:
+///
+/// | reward-to-risk | breaks even at | a typed 50% floor |
+/// |---|---|---|
+/// | 3.0x | 25.0% | REJECTS a profitable cell |
+/// | 1.25x | 44.4% | rejects a profitable cell |
+/// | 1.0x | 50.0% | admits a coin flip |
+/// | 0.5x | 66.7% | ADMITS A LOSING CELL |
+///
+/// Deriving the floor from the cell's OWN measured ratio needs no typed figure
+/// and is right for all four rows. `Rules::admits` applies it to
+/// `assurance_bp` — the 95% lower confidence bound — rather than to the raw
+/// rate, so the sample size carries its own weight and the statistical guard
+/// and the profitability guard become one test instead of two.
+///
+/// O(1): one compare, one add, one divide.
+#[must_use]
+const fn break_even_win_rate_bp(reward_to_risk_bp: i64) -> i64 {
+    // NO WINNING SIDE TO PAY FOR THE LOSING ONE, so nothing short of every
+    // trade winning clears it. Returning zero here would admit exactly the
+    // cells with no upside.
+    if reward_to_risk_bp <= 0 {
+        return 10_000;
+    }
+    // `w = 1 / (1 + R)` where R is `bp / 100`. In hundredths that is
+    // `10_000 / (1 + bp/100)`, which is `1_000_000 / (100 + bp)`.
+    //
+    // `saturating_add` because `Cell::reward_to_risk_bp` returns `i64::MAX` for
+    // a cell with no losing trade. That saturates the denominator and yields a
+    // floor of zero — correct: a run that never lost has no break-even to
+    // clear, and `min_trades` plus the assurance bound are what keep a
+    // two-trade fluke out.
+    1_000_000_i64 / reward_to_risk_bp.saturating_add(100)
 }
 
 /// The top combinations, priced in full and ranked with the PASSING ones first.
@@ -7667,7 +7774,7 @@ pub fn screen_range_in_points(
     underlying: &str,
     rung: &str,
     // ONE SPAN, ONE ARGUMENT. The two halves are never meaningful apart and the
-    // pair is how `range_all_arm` and `descend`'s own dispatch already carry
+    // pair is how `range_arm` and `descend`'s own dispatch already carry
     // them; splitting them here would also put this function one over the
     // workspace's argument bound, which is the lint noticing the same thing.
     span: ((u16, u8), (u16, u8)),

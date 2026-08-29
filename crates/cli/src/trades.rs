@@ -432,7 +432,29 @@ impl Trades {
                 .read_exact(&mut raw)
                 .map_err(|why| format!("a trade row could not be read: {why}"))?;
             if Row::seal_matches(&raw) {
-                out.push(Row::from_bytes(&raw));
+                // A ROW THAT IS NOT THIS RUN'S IS NOT THIS RUN'S, however
+                // correctly it is sealed. This is the filter `frontier::of_run`
+                // has carried since it was written, and the reason is identical:
+                // the seal proves the bytes are INTACT and says nothing about
+                // WHOSE they are.
+                //
+                // `block` spans `first..first + count` from an index built at
+                // open, and the span widens as rows arrive. The append path
+                // holds only a process-local mutex, so two `cli` processes --
+                // an operator's terminal and the browser's in-process
+                // `range_over` -- can both read the same length and both write
+                // there. Run B's rows then land INSIDE run A's span, and a
+                // seal-only read returns them as A's: a cumulative P&L drawn
+                // over a mixture of two runs, every seal valid and nothing
+                // marking the join.
+                //
+                // Append-only history (§8) means those files are already on
+                // disk and are never rewritten, so the read is where this has
+                // to be caught.
+                let row = Row::from_bytes(&raw);
+                if row.identity == *identity {
+                    out.push(row);
+                }
             }
         }
         Ok(out)
@@ -1047,6 +1069,24 @@ pub struct Robustness {
     /// **The number that settles whether a result is an edge or an anecdote.**
     /// A run whose sign flips here was carried by one bar.
     pub without_best: i64,
+    /// Round trips that ended above water.
+    ///
+    /// # The denominator a concentration bar has to use
+    ///
+    /// [`Self::top_share_ppm`] is a share of [`Self::gross_win`], which sums
+    /// WINNERS ONLY — so with `w` winners it can never fall below
+    /// `1_000_000 / w`, whatever the losers did. A bar derived from
+    /// [`Self::trades`] is therefore unreachable whenever a single trade lost:
+    /// `w <= trades` makes `1_000_000 / w >= 1_000_000 / trades`, so the metric's
+    /// own floor already sits at or above the bar and `survives` is false for
+    /// every real run. A gate that cannot be passed is a constant wearing a
+    /// test's clothes, which is the failure `CLAUDE.md` §4 bans.
+    ///
+    /// This is the count that makes the bar reachable and still meaningful:
+    /// `1_000_000 / wins` is exactly the share each winner carries when all of
+    /// them are equal, so the bar is met at perfect spread and missed the moment
+    /// one winner does more than its share.
+    pub wins: u64,
     /// Sum of every winning round trip, at the worst fill. The denominator the
     /// two ppm figures below are taken against.
     pub gross_win: i64,
@@ -1085,6 +1125,7 @@ impl Robustness {
             out.trades = out.trades.saturating_add(1);
             out.total = out.total.saturating_add(row.worst);
             if row.worst > 0 {
+                out.wins = out.wins.saturating_add(1);
                 out.gross_win = out.gross_win.saturating_add(row.worst);
                 out.best_trade = out.best_trade.max(row.worst);
                 sum_sq = sum_sq
@@ -1336,6 +1377,47 @@ mod robustness_tests {
         assert!(
             nine.concentration_ppm < three.concentration_ppm,
             "spreading the winnings must lower the index"
+        );
+    }
+
+    /// The derived concentration bar is REACHABLE, and a bar taken over trades
+    /// is not.
+    ///
+    /// # The defect this pins
+    ///
+    /// `top_share_ppm` is a share of `gross_win`, which sums winners only, so
+    /// with `w` winners it can never fall below `1_000_000 / w`. A bar of
+    /// `1_000_000 / trades` therefore sits at or below the metric's own floor
+    /// whenever a single trade lost, and `survives` returned false for every run
+    /// that was not 100% winners with every win equal to the paisa.
+    ///
+    /// Ten equal winners and ten losers is the smallest case that shows both
+    /// halves: perfectly spread winnings, and a bar over `trades` that the run
+    /// still cannot meet. A mutant swapping the denominator back fails the
+    /// second assertion.
+    #[test]
+    fn the_concentration_bar_is_reachable_over_winners_and_not_over_trades() {
+        let mut rows: Vec<Row> = vec![trade(100); 10];
+        rows.extend(vec![trade(-50); 10]);
+        let out = Robustness::of(&rows);
+
+        assert_eq!(out.trades, 20, "ten winners and ten losers were counted");
+        assert_eq!(out.wins, 10, "only the winners are wins");
+
+        let over_wins = 1_000_000 / i64::try_from(out.wins).expect("ten fits");
+        assert!(
+            out.survives(over_wins),
+            "ten equal winners are perfectly spread and must clear a bar of \
+             1/wins: top share {} against bar {over_wins}",
+            out.top_share_ppm
+        );
+
+        let over_trades = 1_000_000 / i64::try_from(out.trades).expect("twenty fits");
+        assert!(
+            !out.survives(over_trades),
+            "a bar of 1/trades is below the metric's floor and is UNREACHABLE \
+             here even at perfect spread: top share {} against bar {over_trades}",
+            out.top_share_ppm
         );
     }
 

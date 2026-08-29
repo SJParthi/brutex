@@ -929,14 +929,38 @@ impl Grid {
             .find(|c| c.stop.is_none() && c.target.is_none() && c.tsl.is_none() && c.ttp.is_none())
     }
 
-    /// The variant with the largest pessimistic total.
+    /// The variant with the largest pessimistic total, AMONG THOSE THAT TRADED.
     ///
     /// Pessimistic and not optimistic, for the reason [`crate::validate`] gives
     /// about selection: choosing on the flattering number picks whatever the
     /// flattering assumption helped most.
+    ///
+    /// # Why the `trades > 0` filter is not optional
+    ///
+    /// `evaluate` pushes one `Cell` per variant unconditionally, so a grid over
+    /// a combination with no hits is a FULL grid of `trades: 0, pessimistic: 0`
+    /// cells. Without this filter `max_by_key` happily returns one of them, and
+    /// an empty cell is not a neutral result — it is a FLATTERING one:
+    /// `profit_factor_bp` and `reward_to_risk_bp` both return `i64::MAX` when
+    /// `gross_loss == 0`, which `audit::strategy_report` renders as the words
+    /// "no losing trade".
+    ///
+    /// So a mask that never fired printed a full strategy report claiming a
+    /// perfect profit factor and a flawless reward-to-risk. That is a fabricated
+    /// success wearing the exact shape of a real one, which is the failure
+    /// `CLAUDE.md` §4 bans outright.
+    ///
+    /// Every sibling selector already filtered — `best_within`, `sharpest`,
+    /// `tightest_containment`, `by_reward_to_risk`, `best_clearing` — and two
+    /// callers, `validate.rs` and `cli`, had bolted their own `trades == 0`
+    /// guard on afterwards. `audit.rs` had not, which is where it surfaced. The
+    /// guard belongs here, once, where the other five keep theirs.
     #[must_use]
     pub fn best(&self) -> Option<&Cell> {
-        self.cells.iter().max_by_key(|c| (c.pessimistic, merit(c)))
+        self.cells
+            .iter()
+            .filter(|c| c.trades > 0)
+            .max_by_key(|c| (c.pessimistic, merit(c)))
     }
 
     /// The tightest containment any variant of this combination achieved.

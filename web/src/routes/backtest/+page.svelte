@@ -1024,10 +1024,36 @@
    * one number over every run, which is the whole of what "no static value"
    * means here.
    *
-   * `survivesBar` is bound to a control, so an operator who wants a looser or
-   * stricter reading moves it and every figure re-derives with no rebuild.
+   * `survivesBar` is bound to the input beside the tile, so an operator who
+   * wants a looser or stricter reading moves it and every figure re-derives
+   * with no rebuild. Empty means derived; a positive integer overrides.
    */
   let survivesBar = $state('');
+
+  /**
+   * A ppm share as a percentage, keeping THREE SIGNIFICANT FIGURES rather than
+   * a fixed decimal count.
+   *
+   * `Math.round(ppm / 10_000)` was the previous rendering and it clamped at
+   * `Math.max(1, …)`, so every derived bar from about a hundred trades upward
+   * printed as "1%" whatever it actually was: 0.565% at 177 trades, 0.1% at
+   * 1,000, 0.01% at 10,000. The tile then named a threshold the verdict had
+   * not applied, and a 1.2% top share could render as "one trade is 1% of
+   * winnings, bar 1%" beside the word No — a figure shown AT the bar and
+   * declared to have missed it.
+   *
+   * The decimal count is derived from the magnitude, so the same helper serves
+   * a 30% concentration and a 0.0056% bar without either being told what
+   * precision it deserves.
+   *
+   * @param {number} ppm
+   */
+  function pctText(ppm) {
+    const pct = (Number.isFinite(ppm) ? ppm : 0) / 10_000;
+    if (pct === 0) return '0%';
+    const decimals = Math.min(4, Math.max(0, 2 - Math.floor(Math.log10(Math.abs(pct)))));
+    return `${pct.toFixed(decimals)}%`;
+  }
 
   const robustnessVerdict = $derived.by(() => {
     const r = tradeList.robustness;
@@ -1036,29 +1062,44 @@
     const keptSign = (r.without_best ?? 0) > 0;
     // THE BAR THIS RUN'S OWN SAMPLE IMPLIES, unless the operator named one.
     //
-    // `1_000_000 / trades` is the share one trade carries when every winner is
-    // equal. Above it, one trade is doing more than its share of the work; the
-    // more trades a run took, the less any single one may dominate. `Math.max`
-    // against a whole-run share keeps a two-trade run from demanding the
-    // impossible.
+    // DIVIDED BY WINNERS, NOT BY TRADES, and the difference is the whole test.
+    // `top_share_ppm` is the best trade's share of `gross_win`, which sums
+    // WINNERS ONLY — so with `w` winners it cannot fall below `1_000_000 / w`
+    // no matter how evenly they are spread. A bar of `1_000_000 / trades` is
+    // therefore below the metric's own floor whenever a single trade lost, and
+    // `spread` was false for every run that is not 100% winners with every win
+    // identical to the paisa. It read like a derived threshold and behaved like
+    // the constant `false`.
+    //
+    // `1_000_000 / wins` IS the share each winner carries at perfect spread, so
+    // the bar is met exactly at even distribution and missed the moment one
+    // winner does more than its share. `Math.max(1, …)` keeps a zero-winner run
+    // from dividing by zero.
     const typed = Number.parseInt(survivesBar.trim(), 10);
     const bar =
       Number.isFinite(typed) && typed > 0
         ? typed
-        : Math.max(1, Math.round(1_000_000 / Math.max(1, r.trades)));
-    const spread = (r.top_share_ppm ?? 1_000_000) <= bar;
+        : Math.max(1, Math.round(1_000_000 / Math.max(1, r.wins ?? r.trades)));
+    // ONE DEFAULT FOR BOTH THE VERDICT AND THE DISPLAY. These read `?? 1_000_000`
+    // and `?? 0` respectively, so an absent key would have failed the test as a
+    // whole-run share and then printed itself as "0% of winnings" beside the
+    // failure — a guaranteed contradiction, latent only because the server
+    // always sends the key.
+    const topShare = r.top_share_ppm ?? 1_000_000;
+    const spread = topShare <= bar;
     return {
       trades: r.trades ?? 0,
+      wins: r.wins ?? 0,
       total: r.total ?? 0,
       bestTrade: r.best_trade ?? 0,
       withoutBest: r.without_best ?? 0,
-      topSharePct: Math.round((r.top_share_ppm ?? 0) / 10_000),
-      concentrationPct: Math.round((r.concentration_ppm ?? 0) / 10_000),
+      topSharePct: pctText(topShare),
+      concentrationPct: pctText(r.concentration_ppm ?? 0),
       keptSign,
       spread,
       // WHAT BAR WAS APPLIED, so the tile can name it. A verdict whose threshold
       // is invisible is a verdict a reader has to trust rather than check.
-      barPct: Math.max(1, Math.round(bar / 10_000)),
+      barPct: pctText(bar),
       barDerived: !(Number.isFinite(typed) && typed > 0),
       // BOTH CLAUSES, AND THE RUN MUST CLEAR BOTH.
       survives: keptSign && spread,
@@ -1384,6 +1425,18 @@
   const WEEKDAY_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
   /**
+   * IST is UTC+05:30, and India observes no daylight saving — so this is a
+   * CONSTANT offset, not a timezone lookup, and adding it to an epoch second
+   * before reading `getUTC*` makes those getters return IST fields.
+   *
+   * Every calendar bucket on this page goes through it. The alternative,
+   * `toLocaleString` with a timezone, would read the VIEWER's clock settings
+   * and put a Singapore operator and a London one on different days for the
+   * same trade.
+   */
+  const IST_OFFSET_SECONDS = 5 * 3600 + 30 * 60;
+
+  /**
    * One session-hour bucket, labelled on the exchange's own clock.
    *
    * # THIS USED TO CONVERT A UTC HOUR, AND THE CONVERSION WAS NOT THE PROBLEM
@@ -1406,11 +1459,17 @@
   function istHourLabel(sessionHour) {
     if (sessionHour < 0) return 'before the bell';
     const OPEN_MINUTE = 9 * 60 + 15;
+    // THE CLOSE CLAMPS THE LAST LABEL. Bucket 6 begins at 15:15 and the exchange
+    // shuts at 15:30, so an unclamped `start + 60` printed "15:15–16:15" and
+    // claimed forty-five minutes in which no bar can exist. The window a label
+    // names must be one the session can actually fill.
+    const CLOSE_MINUTE = 15 * 60 + 30;
     const start = OPEN_MINUTE + sessionHour * 60;
+    const end = Math.min(start + 60, CLOSE_MINUTE);
     /** @param {number} m */
     const hhmm = (m) =>
       `${String(Math.floor(m / 60) % 24).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
-    return `${hhmm(start)}–${hhmm(start + 60)}`;
+    return start >= CLOSE_MINUTE ? `after ${hhmm(CLOSE_MINUTE)}` : `${hhmm(start)}–${hhmm(end)}`;
   }
 
   /**
@@ -3723,12 +3782,24 @@
     if (bars.length < 2) return [];
     /** @param {number} t */
     const key = (t) => {
-      const d = new Date(t * 1000);
+      // IST, EXPLICITLY. These getters used to read the bare epoch, which is
+      // UTC, under a comment claiming the key was the bar's IST date. It gave
+      // the right answer only by accident: an NSE session is 09:15-15:30 IST,
+      // which is 03:45-10:00 UTC, so the whole session sits inside one UTC day
+      // and the two calendars agreed for every intraday bar. Nothing enforced
+      // that -- a pre-open bar, an extended session, or any instrument quoted
+      // outside 03:45-18:29 IST would have split one day into two buckets or
+      // merged two into one, silently.
+      //
+      // Shifting the epoch by the offset and THEN reading the UTC getters makes
+      // them read IST fields, so the date, the weekday and the Monday-anchored
+      // week are all IST by construction rather than by coincidence.
+      const d = new Date((t + IST_OFFSET_SECONDS) * 1000);
       const y = d.getUTCFullYear();
       if (periodScale === 'yearly') return `${y}`;
       if (periodScale === 'quarterly') return `Q${Math.floor(d.getUTCMonth() / 3) + 1} '${String(y).slice(2)}`;
       if (periodScale === 'daily') return `${d.getUTCDate()}/${d.getUTCMonth() + 1}`;
-      // Weekly: the Monday that starts the bar's week.
+      // Weekly: the Monday that starts the bar's IST week.
       const monday = new Date(d);
       monday.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7));
       return `${monday.getUTCDate()}/${monday.getUTCMonth() + 1}`;
@@ -7394,9 +7465,27 @@
                           >{#if robustnessVerdict.survives}Yes<em class="tt-unit2"
                               >both tests clear</em
                             >{:else}No<em class="tt-unit2"
-                              >{#if !robustnessVerdict.keptSign}turns negative without it{:else}one trade is {robustnessVerdict.topSharePct}% of winnings, bar {robustnessVerdict.barPct}%{/if}</em
+                              >{#if !robustnessVerdict.keptSign}turns negative without it{:else}one trade is {robustnessVerdict.topSharePct} of winnings, bar {robustnessVerdict.barPct}{#if robustnessVerdict.barDerived}
+                                  (1 of {exact(robustnessVerdict.wins)} winners){:else} (typed){/if}{/if}</em
                             >{/if}</span
                         >
+                        <!-- THE BAR IS AN INPUT, not a constant with a comment claiming
+                             otherwise. Empty derives `1 / trades`; a positive integer in
+                             ppm overrides it and the verdict above re-derives on the
+                             keystroke. This control is what the doc beside `survivesBar`
+                             asserts, and until it existed that assertion was false. -->
+                        <label class="rb-bar">
+                          <span class="rb-bar-k">bar (ppm)</span>
+                          <input
+                            class="rb-bar-i"
+                            type="text"
+                            inputmode="numeric"
+                            placeholder={String(
+                              Math.max(1, Math.round(1_000_000 / Math.max(1, robustnessVerdict.wins)))
+                            )}
+                            bind:value={survivesBar}
+                          />
+                        </label>
                       </div>
                       <div class="tt-q">
                         <span class="tt-k">Total without the best trade</span>
@@ -7412,7 +7501,7 @@
                         <span class="tt-k">Largest single winner</span>
                         <span class="tt-qv"
                           >{money(robustnessVerdict.bestTrade)}<em class="tt-unit2"
-                            >{robustnessVerdict.topSharePct}% of all winnings, {robustnessVerdict.concentrationPct}%
+                            >{robustnessVerdict.topSharePct} of all winnings, {robustnessVerdict.concentrationPct}
                             concentration</em
                           ></span
                         >
@@ -7529,8 +7618,9 @@
                         — a twentieth of the run's {exact(timePatterns.total)} — before it can be
                         named a best one above, so a single lucky trade cannot take the tile.
                         {#if timeGrain === 'hours'}
-                          Buckets are keyed by the <b>UTC</b> hour and IST is UTC+5:30, so each label
-                          is the IST window that hour actually covers rather than a whole IST hour.
+                          Buckets are keyed by the hour <b>since the 09:15 bell</b>, in IST, so each
+                          label is a whole session hour. The last one ends at the 15:30 close rather
+                          than running a full sixty minutes.
                         {/if}
                       </p>
                     {:else}
@@ -11766,6 +11856,34 @@
     flex-direction: column;
     gap: 0.16rem;
     min-width: 0;
+  }
+  /* The concentration bar's override. NEW classes rather than a local override
+     on `.tt-q`/`.tt-qv`: restyling a shared block to fit one tile is the
+     structural mismatch that costs five token passes to chase. */
+  .rb-bar {
+    display: flex;
+    align-items: baseline;
+    gap: 0.36rem;
+    margin-top: 0.3rem;
+  }
+  .rb-bar-k {
+    font-size: var(--fs-mini);
+    color: var(--n8);
+  }
+  .rb-bar-i {
+    width: 6.5ch;
+    padding: 0.1rem 0.3rem;
+    font: inherit;
+    font-size: var(--fs-mini);
+    font-variant-numeric: tabular-nums;
+    color: var(--n12);
+    background: var(--n1);
+    border: 1px solid var(--n4);
+    border-radius: 3px;
+  }
+  .rb-bar-i:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 1px;
   }
   .tt-k {
     font-size: var(--fs-mini);

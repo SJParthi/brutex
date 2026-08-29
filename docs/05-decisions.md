@@ -27504,3 +27504,95 @@ decision and not a cleanup.
 `runner` 302 passed, 0 failed. `clippy --workspace --all-targets -D warnings`
 clean. O(1) per exit: one compare and a branch, on a path that has already read
 the bar.
+
+### D-0379 — the win-rate and reward-to-risk floors were typed, and a typed pair is right for exactly one ratio
+
+`Rules::operator()` shipped `min_win_rate_bp: 5_000` and `min_rr_bp: 125` — a
+50% win rate and a 1.25x ratio. The doc above them said *"nothing here is
+baked"* because each field reads an environment variable, and that reasoning is
+wrong: a DEFAULT is baked. With no variable set those two numbers decided every
+PASS on every rung of every run.
+
+They are also the wrong SHAPE. A win rate only means something against the ratio
+it was earned at, because a strategy makes money when `w * R > (1 - w) * 1`,
+which is `w > 1 / (1 + R)`. One typed pair is right for one ratio and wrong
+either way for every other:
+
+| reward-to-risk | breaks even at | a typed 50% floor does |
+|---|---|---|
+| 3.0x | 25.0% | REJECTS a profitable cell |
+| 1.25x | 44.4% | rejects a profitable cell |
+| 1.0x | 50.0% | admits a coin flip |
+| 0.5x | 66.7% | ADMITS A LOSING CELL |
+
+Both defaults are now `0`, which switches each floor off rather than replacing
+one guess with another, and `break_even_win_rate_bp` derives the floor from the
+cell's OWN measured ratio. `Rules::admits` applies it to `assurance_bp` — the
+95% lower confidence bound — rather than to the raw rate, so the sample size
+carries its own weight and the statistical guard and the profitability guard
+become one test. It is the only clause on that list with no field behind it and
+the only one an operator cannot switch off.
+
+`Verdict` gained `break_even` for the same reason: that struct is what the
+browser renders as the PASS/FAIL columns, and a rule that decides admission
+while being absent from the verdict shows a reader every column green beside a
+row that was refused.
+
+Measured on the row this operator was shown at rank 1 — 868 trades, 3 wins, a
+smallest win of 295 against a worst loss of 3,035. Reward-to-risk 9 bp, so
+break-even needs `1_000_000 / 109 = 9,174` bp = 91.74% of trades to win. The row
+won 0.34%. It fails by a factor of 270 on a bar taken entirely from its own two
+numbers, where the deleted 50% floor missed it by 50x.
+
+O(1): one compare, one saturating add, one divide, per cell already in hand.
+`cli` 173 passed, `runner` 303, `api` 776. `fmt --check` and
+`clippy --workspace --all-targets -D warnings` clean.
+
+### D-0380 — three gates that could not be passed, and one command that could not be run
+
+Four defects found by adversarial audit of D-0378's own commit, all of the same
+family: a check that looks like a test and behaves like a constant.
+
+**The concentration bar was unreachable.** `Robustness::top_share_ppm` is the
+best trade's share of `gross_win`, which sums WINNERS ONLY, so with `w` winners
+it cannot fall below `1_000_000 / w`. The bar was `1_000_000 / trades`, and
+`w <= trades` makes the metric's own floor sit at or above it whenever a single
+trade lost. `survives` was therefore false for every run that is not 100%
+winners with every win equal to the paisa. `Robustness` now counts `wins` and
+the bar is `1_000_000 / wins` — exactly the share each winner carries at perfect
+spread, so it is met at even distribution and missed the moment one winner does
+more than its share. Pinned by
+`the_concentration_bar_is_reachable_over_winners_and_not_over_trades`, whose
+second assertion fails any mutant that puts `trades` back.
+
+**`Grid::best` had no `trades > 0` filter.** `evaluate` pushes one `Cell` per
+variant unconditionally, so a combination with no hits is a full grid of
+`trades: 0, pessimistic: 0` cells, and an empty cell is not neutral — it is
+FLATTERING: `profit_factor_bp` and `reward_to_risk_bp` both return `i64::MAX`
+when `gross_loss == 0`, which `audit::strategy_report` renders as the words *"no
+losing trade"*. A mask that never fired printed a full strategy report claiming
+a perfect profit factor. Every sibling selector already filtered and two callers
+had bolted their own guard on afterwards; the guard now lives once, where the
+other five keep theirs.
+
+**`trades::of_run` filtered on the seal and not on the identity.** The seal
+proves the bytes are intact and says nothing about whose they are. The append
+path holds only a process-local mutex, so two `cli` processes can both read one
+length and both write there, landing run B's rows inside run A's span — a
+cumulative P&L drawn over a mixture of two runs with every seal valid.
+`frontier::of_run` has carried this filter since it was written; `trades.rs` was
+modelled on it and did not copy it.
+
+**`range-all` could not be run in the form the page prints.** The dispatch had
+one arm of eight slice elements, so `SUPPORT_PPM` was mandatory, while
+`range_all` has taken `Option<u64>` since it was written — the derive path was
+live over HTTP and unreachable from the binary. The browser's empty-ledger panel
+omits the argument on purpose, to get exactly that per-rung derivation, so the
+one command offered to fill an empty ledger exited `MISUSED`. `range_arm` now
+binds the tail and decides its meaning, which also keeps `run` inside the
+hundred-line cap that made two arms unaffordable.
+
+Verified by running the binary against an isolated store: six positionals parse
+and reach the sweep, seven pass the operator's figure through, eight are refused
+by name.
+

@@ -1024,6 +1024,11 @@ fn cases() -> Vec<Case> {
             drive: Box::new(move || {
                 crate::trades::note_robustness(&cli::trades::Robustness {
                     trades: 177,
+                    // ONE winner out of 177 trades, which is what makes
+                    // `gross_win == best_trade` and both ppm figures 1,000,000.
+                    // The fixture had no `wins` while `top_share_ppm` already
+                    // asserted a single winner, so the two halves now agree.
+                    wins: 1,
                     total: 15_291,
                     best_trade: 55_120,
                     without_best: -39_829,

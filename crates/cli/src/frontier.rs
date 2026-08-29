@@ -1096,14 +1096,29 @@ mod tests {
     fn the_top_ranked_row_fails_the_operators_rules() {
         let v = measured_rank_one().verdict(&crate::Rules::operator());
         assert!(v.priced, "868 trades is priced");
-        assert!(!v.win_rate, "3 wins in 868 is 0.34%, against a 50% floor");
-        assert!(
-            !v.reward_to_risk,
-            "295 over 3,035 is 0.09x, against a 1.25x floor"
-        );
+        // THE TWO TYPED FLOORS ARE GONE, so these two now pass VACUOUSLY.
+        //
+        // `min_win_rate_bp` and `min_rr_bp` used to default to 5_000 and 125,
+        // and this test read "against a 50% floor" and "against a 1.25x floor".
+        // Both defaults are now zero, because a win rate only means something
+        // against the ratio it was earned at and one typed pair is right for
+        // exactly one ratio. A row at 0.34% wins clears a zero floor.
+        assert!(v.win_rate, "a zero floor is cleared by any rate");
+        assert!(v.reward_to_risk, "a zero floor is cleared by any ratio");
         assert!(
             !v.return_over_drawdown,
             "a negative total cannot clear a 5x floor"
+        );
+        // AND THE ROW IS STILL REFUSED, by the rule nobody typed.
+        //
+        // This is the whole point of removing the two constants. At 295 over
+        // 3,035 the reward-to-risk is 9 bp, so break-even needs
+        // 1_000_000 / 109 = 9,174 bp = 91.74% of trades to win. The row won
+        // 0.34%. It fails by a factor of 270 on a bar derived entirely from its
+        // own two numbers, where the deleted 50% floor missed it by 50x.
+        assert!(
+            !v.break_even,
+            "0.09x reward-to-risk needs 91.74% wins to break even; this won 0.34%"
         );
         assert!(!v.admitted, "and so it is not admitted");
         assert!(
@@ -1664,6 +1679,16 @@ pub struct Verdict {
     /// `assurance_bp >= Rules::min_assurance_bp` — the 95% lower bound on the
     /// rate, not the observed rate.
     pub assurance: bool,
+    /// `assurance_bp > break_even_win_rate_bp(reward_to_risk_bp)` — the ONLY
+    /// rule here with no typed number behind it and the only one an operator
+    /// cannot switch off.
+    ///
+    /// Every other field compares against a `Rules` value, so all of them
+    /// vanish when that value is zero. This one asks the row to beat the
+    /// break-even win rate implied by its OWN reward-to-risk, which is why it
+    /// still rejects a 0.09x row at a 0.34% win rate after both typed floors
+    /// were removed.
+    pub break_even: bool,
     /// Every rule above holds. **Not "every rule holds"** — see
     /// [`Self::stop_unchecked`].
     pub admitted: bool,
@@ -1703,13 +1728,23 @@ impl Row {
         let return_over_drawdown = d.return_over_drawdown >= rules.min_ret_over_dd_bp;
         let trades = self.trades >= rules.min_trades;
         let assurance = cell.assurance_bp() >= rules.min_assurance_bp;
+        // MIRRORS `Rules::admits`. This struct is what the browser renders as
+        // the PASS/FAIL columns, so a rule that decides admission and is absent
+        // here shows a reader every column green beside a row that was refused.
+        let break_even = cell.assurance_bp() > crate::break_even_win_rate_bp(d.reward_to_risk_bp);
         Verdict {
             win_rate,
             reward_to_risk,
             return_over_drawdown,
             trades,
             assurance,
-            admitted: win_rate && reward_to_risk && return_over_drawdown && trades && assurance,
+            break_even,
+            admitted: win_rate
+                && reward_to_risk
+                && return_over_drawdown
+                && trades
+                && assurance
+                && break_even,
             stop_unchecked: true,
             priced: true,
         }

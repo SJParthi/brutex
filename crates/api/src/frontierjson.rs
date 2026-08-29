@@ -160,7 +160,7 @@ fn write_rows(out: &mut String, rows: &[cli::frontier::Row], rules: &cli::Rules)
         let _ = std::fmt::Write::write_fmt(
             &mut *out,
             format_args!(
-                r#"{{"rank":{},"mask_words":["{}","{}","{}","{}","{}","{}"],"hits":{},"n":{},"mean_milli_paisa":{},"t_milli":{},"payoff_bp":{},"edge_wins":{},"priced":{},"trades":{},"wins":{},"losses":{},"pessimistic":{},"worst_trade":{},"max_drawdown":{},"min_win":{},"win_rate_bp":{},"reward_to_risk_bp":{},"return_over_drawdown":{},"avg_win":{},"avg_loss":{},"gross_win":{},"gross_loss":{},"meets":{{"win_rate":{},"reward_to_risk":{},"return_over_drawdown":{},"trades":{},"assurance":{},"all":{},"stop_unchecked":{}}}}}"#,
+                r#"{{"rank":{},"mask_words":["{}","{}","{}","{}","{}","{}"],"hits":{},"n":{},"mean_milli_paisa":{},"t_milli":{},"payoff_bp":{},"edge_wins":{},"priced":{},"trades":{},"wins":{},"losses":{},"pessimistic":{},"worst_trade":{},"max_drawdown":{},"min_win":{},"win_rate_bp":{},"reward_to_risk_bp":{},"return_over_drawdown":{},"avg_win":{},"avg_loss":{},"gross_win":{},"gross_loss":{},"meets":{{"win_rate":{},"reward_to_risk":{},"return_over_drawdown":{},"trades":{},"assurance":{},"break_even":{},"all":{},"stop_unchecked":{}}}}}"#,
                 row.rank,
                 row.mask_words[0],
                 row.mask_words[1],
@@ -194,6 +194,7 @@ fn write_rows(out: &mut String, rows: &[cli::frontier::Row], rules: &cli::Rules)
                 v.return_over_drawdown,
                 v.trades,
                 v.assurance,
+                v.break_even,
                 v.admitted,
                 v.stop_unchecked,
             ),
@@ -360,13 +361,21 @@ mod tests {
             body.contains(r#""meets":{"#),
             "the verdict is on the row: {body}"
         );
+        // THE TWO TYPED FLOORS ARE GONE, so both of these now pass vacuously
+        // against a zero default. The row is still refused, and the clause that
+        // refuses it is the one nobody typed.
         assert!(
-            body.contains(r#""win_rate":false"#),
-            "3 wins in 868 does not clear the floor: {body}"
+            body.contains(r#""win_rate":true"#),
+            "a zero floor is cleared by any rate: {body}"
         );
         assert!(
-            body.contains(r#""reward_to_risk":false"#),
-            "295 over 3,035 is 0.09x: {body}"
+            body.contains(r#""reward_to_risk":true"#),
+            "a zero floor is cleared by any ratio: {body}"
+        );
+        assert!(
+            body.contains(r#""break_even":false"#),
+            "0.09x reward-to-risk needs 91.74% wins to break even; this won \
+             0.34%: {body}"
         );
         assert!(
             body.contains(r#""all":false"#),

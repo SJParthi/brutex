@@ -183,8 +183,13 @@ fn respond(
     let _ = std::fmt::Write::write_fmt(
         &mut out,
         format_args!(
-            r#"}},"robustness":{{"trades":{},"total":{},"best_trade":{},"without_best":{},"gross_win":{},"top_share_ppm":{},"concentration_ppm":{}}},"count":{},"refusal":null}}"#,
+            r#"}},"robustness":{{"trades":{},"wins":{},"total":{},"best_trade":{},"without_best":{},"gross_win":{},"top_share_ppm":{},"concentration_ppm":{}}},"count":{},"refusal":null}}"#,
             r.trades,
+            // WINS IS SERVED BECAUSE THE BROWSER'S BAR NEEDS IT. `top_share_ppm`
+            // is a share of the WINNINGS, so the share one winner carries at
+            // perfect spread is `1/wins` — not `1/trades`, which is unreachable
+            // the moment any trade loses.
+            r.wins,
             r.total,
             r.best_trade,
             r.without_best,
