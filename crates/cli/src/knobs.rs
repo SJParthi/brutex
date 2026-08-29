@@ -135,6 +135,27 @@ pub fn set(name: &str, value: &str) {
     }
 }
 
+/// Serialises every TEST that touches this process-wide store.
+///
+/// # Why it lives here and not in a test module
+///
+/// Because it was in one, and one was not enough. `knobs::tests` had a private
+/// `serially()` and `horizon_tests` grew its own, so the two modules serialised
+/// against themselves and not against EACH OTHER -- and `clear_all` is not
+/// scoped to a name. `horizon_tests::an_explicit_count_is_taken_verbatim` passed
+/// alone and failed in the full suite on the first run after the second module
+/// landed, which is exactly the signal a flaky test is worst at giving.
+///
+/// One lock for the crate. Any test that calls `set` or `clear_all` takes it.
+#[cfg(test)]
+pub(crate) fn serially() -> std::sync::MutexGuard<'static, ()> {
+    static ONE_AT_A_TIME: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
+    ONE_AT_A_TIME
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Forget every knob, so the next run starts from the environment again.
 ///
 /// Called after a run finishes rather than before one starts, so that a run
@@ -201,32 +222,8 @@ fn render(mut pairs: Vec<(&str, &str)>) -> String {
               test that cannot panic cannot fail."
 )]
 mod tests {
+    use super::serially;
     use super::{clear_all, render, resolve, set, set_here, var};
-    use std::sync::{Mutex, MutexGuard, OnceLock};
-
-    /// Serialises every test that touches the process-wide store.
-    ///
-    /// # Why this exists rather than each test using a unique name
-    ///
-    /// Unique names are not enough, because `clear_all` is not scoped to a name:
-    /// it wipes the whole store, which is exactly what it must do after a run.
-    /// One test calling it mid-flight erases another test's knob and the second
-    /// test fails on a value it set correctly.
-    ///
-    /// MEASURED, and this is why the guard is here instead of a comment saying
-    /// to be careful: five consecutive runs of this module gave 7/7, 6/7, 7/7,
-    /// 7/7, 6/7. A test that passes four times in five is not evidence of
-    /// anything, and chasing it later — from a red CI run with no local
-    /// reproduction — costs far more than one mutex.
-    ///
-    /// A poisoned guard is recovered rather than propagated: a panic in one
-    /// store test has already failed that test, and turning every LATER test
-    /// into a poison error would hide which one actually broke.
-    fn serially() -> MutexGuard<'static, ()> {
-        static ONE_AT_A_TIME: OnceLock<Mutex<()>> = OnceLock::new();
-        let lock = ONE_AT_A_TIME.get_or_init(|| Mutex::new(()));
-        lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
 
     /// The whole point: a knob nobody set reads through to the environment, so
     /// every existing caller and every existing test is unaffected.
@@ -325,7 +322,10 @@ mod tests {
             ("BRUTEX_TOP", "500"),
             ("BRUTEX_SCREEN_CAP", "500"),
         ]);
-        assert_eq!(one, "BRUTEX_SCREEN_CAP=500 BRUTEX_TOP=500 BRUTEX_VALIDATE=0");
+        assert_eq!(
+            one,
+            "BRUTEX_SCREEN_CAP=500 BRUTEX_TOP=500 BRUTEX_VALIDATE=0"
+        );
         assert_eq!(one, other, "iteration order must not reach the log");
         assert_eq!(render(Vec::new()), "", "and nothing set renders empty");
     }

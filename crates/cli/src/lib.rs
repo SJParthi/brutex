@@ -437,6 +437,19 @@ fn screen_arm(
             if n == 0 {
                 return refuse(out, "TOP must be 1 or more");
             }
+            // CONVERTED AGAINST THESE BARS, exactly as the `elite` arm above
+            // already does. This read `points_to_ppm(pts)` -- a hardcoded
+            // 25,000 -- so `screen NIFTY 20` and `screen SOMESTOCK 20` printed
+            // the same number and asked for stops 167 times apart.
+            let reference = match reference_of_span(vendor, underlying, rung, ((fy, fm), (ty, tm)))
+            {
+                Ok(price) => price,
+                Err(why) => return refuse(out, why.trim_start_matches("refused: ").trim_end()),
+            };
+            let ceiling_ppm = match ceiling_in_ppm(pts, reference) {
+                Ok(ppm) => ppm,
+                Err(why) => return refuse(out, why.trim_start_matches("refused: ").trim_end()),
+            };
             let text = screen_range(
                 vendor,
                 underlying,
@@ -446,7 +459,7 @@ fn screen_arm(
                 sup,
                 Policy {
                     rules: Rules {
-                        max_mae_ppm: points_to_ppm(pts),
+                        max_mae_ppm: ceiling_ppm,
                         min_rr_bp: rr,
                         // `screen` takes three numbers today, so the two new rules are
                         // off rather than guessed. A win-rate floor an operator did
@@ -624,20 +637,6 @@ const fn ppm_to_points_at(ppm: i64, reference: i64) -> i64 {
     } else {
         (paisa - half) / PAISA_PER_POINT
     }
-}
-
-/// Index points as parts per million against [`NIFTY_REFERENCE`].
-///
-/// **Superseded by [`points_to_ppm_at`].** Kept for the two `const` contexts
-/// that cannot call a function taking a runtime price; every path that has bars
-/// in hand uses the measured reference instead.
-const fn points_to_ppm(points: i64) -> i64 {
-    points.saturating_mul(1_000_000) / NIFTY_REFERENCE
-}
-
-/// Parts per million back to index points, the unit a stop is spoken in.
-const fn ppm_to_points(ppm: i64) -> i64 {
-    ppm.saturating_mul(NIFTY_REFERENCE) / 1_000_000
 }
 
 /// The `sweep-all` arm, lifted out of [`run`] for the reason
@@ -1818,7 +1817,7 @@ fn audit_keep() -> usize {
 ///
 /// # It is derived, not typed
 ///
-/// [`points_to_ppm`] converts against [`NIFTY_REFERENCE`], which is a stated
+/// [`points_to_ppm_at`] converts against [`NIFTY_REFERENCE`], which is a stated
 /// approximation the report names on its own page. No operator supplies this
 /// and no percentage appears in it: `grid_rungs(bars)` alone decides how far the
 /// ladder reaches, so raising the depth extends 1pt…4pt to 1pt…25pt without
@@ -3394,7 +3393,13 @@ fn audit_range_inner(
         // Same `policy_of` and the same argument order as
         // `screen_range_inner`'s call, so the two paths key identically and a
         // knob added to one cannot be missed by the other.
-        params: Params::of(ladder).with_policy(&policy_of(&span.bars, rules, lens, validate)),
+        params: Params::of(ladder).with_policy(&policy_of(
+            &span.bars,
+            rules,
+            lens,
+            validate,
+            horizon_for(&span.bars, rung != EXECUTION_RUNG),
+        )),
         // THE DIGEST IS OVER THE WHOLE SPAN, which is what makes this identity
         // correct without a new field. `Run` carries no year or month, so a
         // span and any single month inside it hash differently purely because
@@ -5364,10 +5369,41 @@ fn tiers(bars: &[indicators::Candle], trades: u64) -> Vec<Tier> {
 
 impl Tier {
     /// This tier as the rules the screen applies.
+    ///
+    /// # Why this takes a reference price
+    ///
+    /// Because `points_to_ppm` divided by a HARDCODED 25,000 and this line was
+    /// its second-largest consumer. `Tier::max_points` comes from
+    /// [`stop_rungs_in_points`], which is instrument-relative — it converts with
+    /// `points_to_ppm_at` against the bars' own midpoint — so the round trip out
+    /// and back used TWO DIFFERENT REFERENCES and only agreed when the
+    /// instrument happened to trade near 25,000.
+    ///
+    /// MEASURED, on the shipped code:
+    ///
+    /// | instrument | ppm per point, correct | as shipped | factor |
+    /// |---|---:|---:|---:|
+    /// | ₹150 stock | 6,666.7 | 40 | **167× too tight** |
+    /// | NIFTY @ 25,000 | 40 | 40 | 1.00 |
+    /// | ₹80,000 stock | 12.5 | 40 | 3.2× too loose |
+    ///
+    /// On a ₹150 stock every generated tier demanded `worst_mae ≤ 40 ppm` — six
+    /// paisa — while the grid's own tightest stop rung is around 3,333 ppm.
+    /// Every tier was structurally unmeetable, and `screen_cascade` prints that
+    /// as *"NO TIER MET, INCLUDING THE MILDEST"* under a comment calling it *"a
+    /// statement about these bars, not a failure of the search"*. It would have
+    /// been a failure of the search.
+    ///
+    /// **This changes NIFTY too, and that is correct rather than incidental.**
+    /// The old conversion was right only where the index sat at 25,000; over a
+    /// span where NIFTY traded near 11,000 a 20-point rule is 1,818 ppm, not
+    /// 800. `max_mae_ppm` is one of the fourteen terms `policy_of` folds into
+    /// the run identity, so runs at the corrected conversion are NEW runs and
+    /// the append-only ledger keeps every old record valid.
     #[must_use]
-    pub fn rules(&self, top: usize) -> Rules {
+    pub fn rules(&self, top: usize, reference_paisa: i64) -> Rules {
         crate::Rules {
-            max_mae_ppm: points_to_ppm(self.max_points),
+            max_mae_ppm: points_to_ppm_at(self.max_points, reference_paisa),
             min_rr_bp: self.min_rr_bp,
             min_win_rate_bp: self.min_win_rate_bp,
             // THE TIER'S WIN RATE, DEMANDED PESSIMISTICALLY.
@@ -5593,7 +5629,8 @@ fn policy_of(
     rules: Rules,
     lens: runner::rank::Lens,
     validate: bool,
-) -> [u64; 14] {
+    horizon: Horizon,
+) -> [u64; 15] {
     [
         // Negative is not expected and is not silently folded to zero: the cast
         // is saturating so a negative rule still differs from an absent one.
@@ -5672,6 +5709,27 @@ fn policy_of(
         // rung count, hold different grids, produce different answers and carry
         // the same `RunId`. The step itself is folded so they cannot.
         u64::try_from(grid_step_ppm(bars)).unwrap_or(u64::MAX),
+        // THE FIFTEENTH: the holding period, and it is the term that was missing
+        // longest -- since before the knob existed.
+        //
+        // `BRUTEX_HORIZON_BARS` decides the exit of EVERY trade, and therefore
+        // `pessimistic`, `optimistic`, `worst_trade`, `max_drawdown`, which exit
+        // variant wins, the walk-forward verdict and all three p-values. It
+        // moved none of the fourteen terms above.
+        //
+        // The consequence was not a silent overwrite -- it was a silent
+        // REFUSAL, which is worse because it looks like a working guard.
+        // `results.rs` refuses a duplicate identity with "run {} is already
+        // recorded. Same inputs give same outputs", so a second run at a
+        // different horizon over the same span was dropped and the operator was
+        // told the inputs had been the same. They had not.
+        //
+        // THE RESOLVED COUNT AND NOT THE KNOB TEXT. `"rung"` and `"60"` on a
+        // 60-minute series are the same computation and must key identically;
+        // folding the raw string would make them two runs, and folding `"rung"`
+        // alone would make a 60-minute and a 5-minute run share a term that
+        // means different things.
+        u64::from(horizon.as_bars()),
     ]
 }
 
@@ -6250,8 +6308,15 @@ fn screen_cascade(
     }
     let _ = writeln!(out);
 
+    // HOISTED, ONE SCAN PER RUN AND NOT ONE PER TIER. `reference_price` walks
+    // the bars once for a min and a max; the ladder below has up to eight tiers
+    // and the mildest fallback after it, so reading it inside the loop would pay
+    // that scan nine times for an answer that cannot change. CLAUDE.md §3 rule 4
+    // bounds the PER-OPERATION cost, and a per-run scan is not one of the five
+    // operations it names — but nine of them would still be eight too many.
+    let reference = reference_price(bars);
     for (rank, tier) in ladder.iter().enumerate() {
-        let rules = tier.rules(top);
+        let rules = tier.rules(top, reference);
         let body = screen(bars, column, by_evidence, horizon, rules, priced);
         // `screen` prints "0 of N ... NOTHING PASSED" when the rules admit
         // nothing. Read back off the rendered text rather than recomputing the
@@ -6285,7 +6350,7 @@ fn screen_cascade(
             column,
             by_evidence,
             horizon,
-            mildest.rules(top),
+            mildest.rules(top, reference),
             priced,
         ));
     }
@@ -6418,6 +6483,15 @@ fn screen(
 ) -> String {
     // Built ONCE for the whole screen: the same ladder judges every combination,
     // and `Levels` only borrows it.
+    // THE INSTRUMENT'S OWN PRICE, hoisted beside the other per-run work.
+    //
+    // The TIGHTEST column below rendered `ppm_to_points(worst_mae)`, which
+    // divides by a hardcoded 25,000. On a 150-rupee stock a real MAE of 1 rupee
+    // printed as `166pt` instead of `1pt`; on an 80,000-rupee stock a real 100
+    // rupees printed as `31pt` instead of `100pt`. That column exists so a
+    // reader learns what is REACHABLE before choosing a threshold, so a wrong
+    // number in it is worse than no column at all.
+    let reference = reference_price(bars);
     let stop_rungs = stop_ladder_ppm(bars);
 
     // AND SO ARE THESE TWO, WHICH WERE NOT, AND THAT WAS THE EXPENSIVE HALF.
@@ -6585,7 +6659,7 @@ fn screen(
             // below this cannot be met by any of the 625 exits.
             row.tightest.map_or_else(
                 || "-".to_owned(),
-                |t| format!("{}pt", ppm_to_points(t.worst_mae)),
+                |t| format!("{}pt", ppm_to_points_at(t.worst_mae, reference)),
             ),
             if pf == i64::MAX {
                 "inf".to_owned()
@@ -7532,7 +7606,7 @@ pub fn elite_descend(
 /// # Why this is not one line in the caller
 ///
 /// Because the obvious one line is wrong, and it has already been wrong here.
-/// [`points_to_ppm`] converts against `NIFTY_REFERENCE`, a stated
+/// [`points_to_ppm_at`] converts against `NIFTY_REFERENCE`, a stated
 /// approximation, and [`reference_price`]'s own doc records what that costs:
 /// *"800 ppm on a 52,000 index is FORTY-ONE points"* — so a NIFTY constant
 /// applied to BANKNIFTY does not approximate the operator's rule, **it doubles
@@ -7619,6 +7693,58 @@ pub fn elite_descend_in_points(
     elite_descend(vendor_word, underlying, rung, from, to, max_mae_ppm, top)
 }
 
+/// A stop ceiling in index points, as ppm of the instrument's own price.
+///
+/// # Why this is a function and not two lines repeated
+///
+/// Because it WAS two lines repeated, and one of the two copies never got
+/// written. `elite` converted against the bars; `screen` converted against
+/// `NIFTY_REFERENCE`, a hardcoded 25,000, whatever instrument the operator
+/// named. The two commands took the same argument, printed the same number, and
+/// meant different stops — 167 times apart on a 150-rupee stock.
+///
+/// The refusal is the point of the return type. A ceiling that converts to zero
+/// or fewer ppm admits nothing, and a screen that admits nothing prints
+/// `NOTHING PASSED` — which reads as a finding about the market rather than as
+/// an argument that could not be honoured. §4 bans exactly that: degrade loudly
+/// and name the reason, or refuse.
+fn ceiling_in_ppm(points: i64, reference_paisa: i64) -> Result<i64, String> {
+    let ppm = points_to_ppm_at(points, reference_paisa);
+    if ppm <= 0 {
+        return Err(format!(
+            "refused: {points} point(s) against a reference of {reference_paisa} \
+             paisa converts to {ppm} ppm, which admits nothing.\n"
+        ));
+    }
+    Ok(ppm)
+}
+
+/// The reference price of one stored span, for a caller that has no bars.
+///
+/// Loads the span, reads the midpoint of its own extremes, and drops it. The
+/// second load is the cost [`elite_descend_in_points`] already documents and
+/// accepts: converting a points rule needs a price, and the only honest price is
+/// the one these bars actually traded at.
+fn reference_of_span(
+    vendor_word: &str,
+    underlying: &str,
+    rung: &str,
+    span: ((u16, u8), (u16, u8)),
+) -> Result<i64, String> {
+    let (from, to) = span;
+    let root = store_root().map_err(|why| format!("refused: {why}\n"))?;
+    let vendor = parse_vendor(vendor_word).map_err(|why| format!("refused: {why}\n"))?;
+    let loaded = stored::load_span(&root, vendor, underlying, rung, from, to).map_err(|why| {
+        format!(
+            "refused before the ceiling could be converted, so nothing was \
+             screened: {why}\n"
+        )
+    })?;
+    let reference = reference_price(&loaded.bars);
+    drop(loaded);
+    Ok(reference)
+}
+
 /// [`screen_range`] with the stop ceiling in POINTS and the policy built here.
 ///
 /// # Why a caller outside this crate cannot build the policy itself
@@ -7685,13 +7811,10 @@ pub fn screen_range_in_points(
     };
     let reference = reference_price(&span.bars);
     drop(span);
-    let max_mae_ppm = points_to_ppm_at(max_points, reference);
-    if max_mae_ppm <= 0 {
-        return format!(
-            "refused: {max_points} point(s) against a reference of {reference} \
-             paisa converts to {max_mae_ppm} ppm, which admits nothing.\n"
-        );
-    }
+    let max_mae_ppm = match ceiling_in_ppm(max_points, reference) {
+        Ok(ppm) => ppm,
+        Err(why) => return why,
+    };
     let policy = Policy {
         rules: Rules::elite(max_mae_ppm, top),
         lens: runner::rank::Lens::Payoff,
@@ -8362,7 +8485,13 @@ fn screen_range_inner(
         direction: RunDirection::Undirected,
         instrument: &span.key,
         timeframe: span.timeframe,
-        params: Params::of(ladder).with_policy(&policy_of(&span.bars, rules, lens, validate)),
+        params: Params::of(ladder).with_policy(&policy_of(
+            &span.bars,
+            rules,
+            lens,
+            validate,
+            horizon_for(&span.bars, rung != EXECUTION_RUNG),
+        )),
         data_digest: data_digest(&span.bars),
         commit,
         feed: span.vendor.as_str(),
@@ -9438,6 +9567,121 @@ fn bootstrap_family(
 /// A synthetic run has no instrument to name, and naming one would be the
 /// invention `CLAUDE.md` §3 rule 1 forbids — so it passes `None` and the report
 /// says NOT RECORDED in place of a digest. A stored run has one and passes it.
+/// The holding period, in EXECUTION bars, for this run.
+///
+/// # Why this exists, and what it replaces
+///
+/// It replaced the literal `Horizon::DEFAULT` — fifteen — which every rung took,
+/// on every run this engine has ever performed. `Horizon` counts EXECUTION bars
+/// and the execution series is always one-minute, so a 1-minute sweep and a
+/// 60-minute sweep both entered on their own signal and both left fifteen
+/// minutes later. **The rung decided WHEN a signal fired and never how long the
+/// position was held.**
+///
+/// MEASURED on the operator's own 60-minute run at 2% support, from the stored
+/// trades: entries at 10:15, 11:15, 12:15, 13:15 and 14:15 IST — correct 60-bar
+/// closes off a 09:15 open — and every one of them exiting fifteen minutes
+/// later, `bars_held: 15`. The signal was hourly. The trade was a quarter of an
+/// hour.
+///
+/// `Horizon::DEFAULT`'s own doc admits the number is a choice rather than a
+/// finding: *"No document defines the right horizon and nothing in the data
+/// implies one, so this is the operator's choice with a default."* It was a
+/// choice nobody could make, because nothing read a knob.
+///
+/// # `rung` derives the answer from the bars themselves
+///
+/// `BRUTEX_HORIZON_BARS=rung` holds for exactly one signal bar: the smallest
+/// positive gap between consecutive signal stamps, in minutes. On a 60-minute
+/// series that is 60, on a 5-minute series 5. Read off the DATA rather than
+/// parsed out of the rung's name, so a series that is not what its label claims
+/// cannot silently disagree with it — and so this needs no rung argument
+/// threaded through five call sites to reach the one place that decides.
+///
+/// The SMALLEST positive gap and not the mean: a session boundary puts a
+/// seventeen-hour hole between Friday's last bar and Monday's first, and a
+/// holiday puts a longer one. The minimum is the bar spacing; the mean is the
+/// bar spacing plus the calendar.
+///
+/// # This is what finally exercises the 15:10 square-off
+///
+/// `runner::trade` squares off compulsorily at 15:10 IST and records which exit
+/// fired. At a fifteen-bar horizon that arm was unreachable from the swept
+/// rungs — a 14:15 entry left at 14:30. At `rung` on the 60-minute ladder a
+/// 14:15 entry would run to 15:15, past the close, so the square-off decides it.
+/// The mechanism was built, tested and never reached by a real run.
+///
+/// # Cost
+///
+/// One pass over the signal bars, once per run — not per bar and not per
+/// candidate. `CLAUDE.md` §3 rule 4 bounds the five per-operation costs and this
+/// is none of them.
+fn horizon_for(bars: &[indicators::Candle], on_execution_series: bool) -> Horizon {
+    let Some(raw) = crate::knobs::var("BRUTEX_HORIZON_BARS") else {
+        return Horizon::DEFAULT;
+    };
+    let asked = raw.trim().to_ascii_lowercase();
+    if asked == "rung" {
+        // ONE SIGNAL BAR, EXPRESSED IN THE BARS THE HORIZON ACTUALLY COUNTS.
+        //
+        // `Horizon` is a bare `u32` indexing whatever slice it is handed; it
+        // carries no series identity, so nothing can catch a caller that means
+        // one series and is spent on another. This function was that caller.
+        //
+        // When an execution series exists it is `EXECUTION_RUNG`, one minute, so
+        // one 60-minute signal bar is sixty of them. When it does not --
+        // `audit-stored` and the synthetic path both pass `execution: None` --
+        // the trade walk runs on the SIGNAL series itself, and one signal bar is
+        // exactly ONE bar.
+        //
+        // Without the distinction, `rung` on `audit-stored` at 60min asked for
+        // sixty SIXTY-MINUTE bars: ten sessions. `forced_exits` caps every hold
+        // at the last bar of its own session, so the horizon would have gone
+        // inert and every single exit become a square-off, while the report went
+        // on printing `horizon 60`. Silent, and wrong in the direction that
+        // looks like a finding.
+        let bars_per_signal = if on_execution_series {
+            signal_spacing_minutes(bars)
+        } else {
+            1
+        };
+        return Horizon::bars(bars_per_signal).unwrap_or(Horizon::DEFAULT);
+    }
+    // A VALUE THAT DOES NOT PARSE FALLS BACK AND SAYS SO IS THE RULE THIS ONE
+    // CANNOT FOLLOW: `audit_bars` returns a report, not a `Result`, and a
+    // refusal here would be a refusal of the whole run over a typo in one knob.
+    // `Horizon::bars` already refuses zero, which is the value that would make
+    // "the return over the next no bars" meaningless.
+    asked
+        .parse::<u32>()
+        .ok()
+        .and_then(Horizon::bars)
+        .unwrap_or(Horizon::DEFAULT)
+}
+
+/// The smallest positive gap between consecutive signal stamps, in minutes.
+///
+/// Zero when there are fewer than two bars or every stamp is equal, which
+/// [`Horizon::bars`] then refuses — so a degenerate series falls back to the
+/// default rather than producing a horizon of nothing.
+fn signal_spacing_minutes(bars: &[indicators::Candle]) -> u32 {
+    const MICROS_PER_MINUTE: i64 = 60_000_000;
+    let mut smallest = i64::MAX;
+    for pair in bars.windows(2) {
+        let (Some(a), Some(b)) = (pair.first(), pair.get(1)) else {
+            continue;
+        };
+        let gap = b.ts_micros.saturating_sub(a.ts_micros);
+        if gap > 0 && gap < smallest {
+            smallest = gap;
+        }
+    }
+    if smallest == i64::MAX {
+        return 0;
+    }
+    u32::try_from(smallest / MICROS_PER_MINUTE).unwrap_or(0)
+}
+
 #[allow(
     clippy::needless_pass_by_value,
     clippy::large_types_passed_by_value,
@@ -9465,7 +9709,7 @@ fn audit_bars(
         Ok(e) => e,
         Err(why) => return format!("refused: {why}\n"),
     };
-    let horizon = Horizon::DEFAULT;
+    let horizon = horizon_for(&bars, execution.is_some());
     // ONE FOLD, NOT TWO, AND ONE EVALUATOR RATHER THAN A CALLER'S PLUS A
     // PRIVATE ONE. This was `Column::build(&bars, &mut ev)` followed by a second
     // `evaluator()` that the sweep used instead — so the `ev` parameter governed
@@ -10043,8 +10287,8 @@ mod tests {
     use super::{Direction, Side};
     use super::{
         MAX_STOP_POINTS, NIFTY_REFERENCE, PAISA_PER_POINT, STOP_FLOOR_POINTS, hundredths_of,
-        points_to_ppm, points_to_ppm_at, ppm_to_points_at, reference_price,
-        return_over_drawdown_cell, stop_floor_points, synthetic, top_at,
+        points_to_ppm_at, ppm_to_points_at, reference_price, return_over_drawdown_cell,
+        stop_floor_points, synthetic, top_at,
     };
     use super::{cadence_floor_ppm, months_between, support_ladder};
 
@@ -11002,27 +11246,71 @@ mod tests {
     }
 
     #[test]
+    fn the_holding_period_moves_the_identity() {
+        let bars = runner::synthetic::sessions(2);
+        let base = crate::Rules::elite(400, 25);
+        let lens = runner::rank::Lens::Detectability;
+        // Bound once. Every call below folds the SAME horizon, so any
+        // difference they show is the knob under test and never this one.
+        let h = Horizon::DEFAULT;
+        let start = policy_of(&bars, base, lens, true, h);
+        // THE HORIZON MOVES THE ANSWER, SO IT MOVES THE IDENTITY.
+        //
+        // This assertion exists because the length check below CANNOT catch a
+        // missing term. It guards against INSERTING one -- a fifteenth knob
+        // that was never added leaves the length at fourteen and the test
+        // passes. `BRUTEX_HORIZON_BARS` shipped exactly that way: it decides
+        // every trade's exit, and therefore `pessimistic`, `worst_trade`,
+        // `max_drawdown`, which exit variant wins and all three p-values -- and
+        // it moved none of the fourteen.
+        //
+        // The symptom was not an overwrite. `results.rs` refuses a duplicate
+        // identity with "Same inputs give same outputs", so the second run was
+        // DROPPED and the operator was told the inputs matched. They did not.
+        assert_ne!(
+            policy_of(
+                &bars,
+                base,
+                lens,
+                true,
+                Horizon::bars(60).expect("60 is a horizon")
+            ),
+            start,
+            "a different holding period is a different run"
+        );
+    }
+
+    #[test]
     fn every_knob_that_moves_the_answer_moves_the_identity() {
         let bars = runner::synthetic::sessions(2);
-        let base = crate::Rules::elite(points_to_ppm(10), 25);
+        let base = crate::Rules::elite(400, 25);
         let lens = runner::rank::Lens::Detectability;
-        let start = policy_of(&bars, base, lens, true);
+        // Bound once. Every call below folds the SAME horizon, so any
+        // difference they show is the knob under test and never this one.
+        let h = Horizon::DEFAULT;
+        let start = policy_of(&bars, base, lens, true, h);
 
         // ONE KNOB AT A TIME, each against the same baseline.
         let mut wider = base;
         wider.max_mae_ppm = base.max_mae_ppm.saturating_add(1);
         assert_ne!(
-            policy_of(&bars, wider, lens, true),
+            policy_of(&bars, wider, lens, true, h),
             start,
             "MAX_POINTS decides which variants the operator's stop admits"
         );
         assert_ne!(
-            policy_of(&bars, base, runner::rank::Lens::Payoff, true),
+            policy_of(
+                &bars,
+                base,
+                runner::rank::Lens::Payoff,
+                true,
+                Horizon::DEFAULT
+            ),
             start,
             "the lens decides which combination is TRADED"
         );
         assert_ne!(
-            policy_of(&bars, base, lens, false),
+            policy_of(&bars, base, lens, false, h),
             start,
             "an unvalidated screen is a different computation from a validated one"
         );
@@ -11032,12 +11320,25 @@ mod tests {
         // length first precisely so adding one re-keys.
         assert_eq!(
             start.len(),
-            14,
-            "fourteen choices are folded in. If this moved, `policy_of`'s doc \
+            15,
+            "fifteen choices are folded in. If this moved, `policy_of`'s doc \
              table and the append-never-insert rule both need reading before the \
              number is changed"
         );
+    }
 
+    /// The eight rules `Rules::operator()` made variable are each folded.
+    ///
+    /// Split from the sibling above to stay under `clippy::too_many_lines`,
+    /// which this repository answers by splitting rather than by allowing —
+    /// `run`, `audit_bars` and two of its helpers all carry that note.
+    #[test]
+    fn every_operator_rule_moves_the_identity() {
+        let bars = runner::synthetic::sessions(2);
+        let base = crate::Rules::elite(400, 25);
+        let lens = runner::rank::Lens::Detectability;
+        let h = Horizon::DEFAULT;
+        let start = policy_of(&bars, base, lens, true, h);
         // EIGHT WERE APPENDED WHEN `Rules::operator()` MADE THEM VARIABLE, and
         // this tripwire is what forced the doc to be read first.
         //
@@ -11106,7 +11407,7 @@ mod tests {
             ),
         ] {
             assert_ne!(
-                policy_of(&bars, moved, lens, true),
+                policy_of(&bars, moved, lens, true, h),
                 start,
                 "{label} changes which cell is admitted, so two runs that differ \
                  in it are two answers and must not share a RunId"
@@ -11890,7 +12191,7 @@ mod tests {
             min_win_rate_bp: 9_500,
             min_trades: 0,
         };
-        let rules = strict.rules(25);
+        let rules = strict.rules(25, NIFTY_REFERENCE * PAISA_PER_POINT);
 
         // The money shape is identical in both cells. ONLY the sample differs,
         // so anything that separates them is separating on evidence alone.
@@ -12305,7 +12606,7 @@ mod tests {
     #[test]
     fn the_elite_profile_refuses_each_shape_it_exists_to_refuse() {
         // 10 points at NIFTY 25,000 is 400 ppm.
-        let rules = crate::Rules::elite(points_to_ppm(10), 25);
+        let rules = crate::Rules::elite(400, 25);
 
         // A cell that satisfies everything: 40 trades, all winners, tight
         // excursion, big average win, and a fall it made back many times over.
@@ -12450,11 +12751,11 @@ mod tests {
 
         let off = crate::Rules {
             min_ret_over_dd_bp: 0,
-            ..crate::Rules::elite(points_to_ppm(10), 25)
+            ..crate::Rules::elite(400, 25)
         };
         assert!(off.admits(&ruinous), "zero drops the rule");
 
-        let on = crate::Rules::elite(points_to_ppm(10), 25);
+        let on = crate::Rules::elite(400, 25);
         assert!(!on.admits(&ruinous), "the profile turns it on");
     }
 
@@ -12476,7 +12777,7 @@ mod tests {
         };
         assert_eq!(flawless.return_over_drawdown(), i64::MAX);
         assert!(
-            crate::Rules::elite(points_to_ppm(10), 25).admits(&flawless),
+            crate::Rules::elite(400, 25).admits(&flawless),
             "a variant with no drawdown at all must clear a drawdown floor"
         );
     }
@@ -12571,7 +12872,7 @@ mod tests {
         );
         assert_eq!(
             points_to_ppm_at(20, nifty_paisa),
-            points_to_ppm(20),
+            800,
             "the measured path and the constant path must agree at the constant's own level"
         );
 
@@ -13182,5 +13483,157 @@ mod tests {
             None
         );
         assert_eq!(crate::not_recorded_reason(""), None);
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "the same exception every test module in this workspace takes: a \
+              test that cannot panic cannot fail."
+)]
+mod horizon_tests {
+    use super::{Horizon, horizon_for, signal_spacing_minutes};
+    use crate::knobs::serially;
+    use indicators::Candle;
+
+    /// A series stamped every `minutes`, as many bars as asked for.
+    fn series(minutes: i64, count: usize) -> Vec<Candle> {
+        (0..count)
+            .map(|i| Candle {
+                ts_micros: 1_700_000_000_000_000
+                    + i64::try_from(i)
+                        .unwrap_or(0)
+                        .saturating_mul(minutes)
+                        .saturating_mul(60_000_000),
+                open: 2_500_000,
+                high: 2_501_000,
+                low: 2_499_000,
+                close: 2_500_500,
+                volume: 1,
+                open_interest: i64::MIN,
+            })
+            .collect()
+    }
+
+    /// The spacing IS the rung, read off the stamps rather than off a label.
+    #[test]
+    fn the_spacing_of_each_rung_is_its_own_minutes() {
+        for minutes in [1_i64, 2, 3, 5, 10, 15, 30, 60] {
+            assert_eq!(
+                signal_spacing_minutes(&series(minutes, 8)),
+                u32::try_from(minutes).unwrap_or(0),
+                "a {minutes}-minute series must measure {minutes}"
+            );
+        }
+    }
+
+    /// THE SESSION BOUNDARY IS WHY THIS IS A MINIMUM AND NOT A MEAN.
+    ///
+    /// Friday 15:15 to Monday 09:15 is a 66-hour hole. A mean gap over one week
+    /// of 60-minute bars is roughly 148 minutes — which would hold a position
+    /// for two and a half hours on a rung whose bar is one.
+    #[test]
+    fn a_weekend_hole_does_not_widen_the_measured_spacing() {
+        let mut bars = series(60, 6);
+        let last = bars.last().map_or(0, |b| b.ts_micros);
+        // The next Monday, 66 hours on.
+        bars.push(Candle {
+            ts_micros: last + 66 * 3_600_000_000,
+            ..bars[0]
+        });
+        bars.push(Candle {
+            ts_micros: last + 67 * 3_600_000_000,
+            ..bars[0]
+        });
+        assert_eq!(
+            signal_spacing_minutes(&bars),
+            60,
+            "the minimum is the bar spacing; the mean is the spacing plus the calendar"
+        );
+    }
+
+    /// A degenerate series measures nothing rather than measuring zero.
+    #[test]
+    fn fewer_than_two_bars_or_equal_stamps_measure_nothing() {
+        assert_eq!(signal_spacing_minutes(&[]), 0);
+        assert_eq!(signal_spacing_minutes(&series(60, 1)), 0);
+        let flat = vec![series(60, 1)[0]; 4];
+        assert_eq!(signal_spacing_minutes(&flat), 0, "equal stamps are no gap");
+    }
+
+    /// Nobody setting the knob keeps the behaviour every existing run had.
+    #[test]
+    fn an_unset_knob_is_the_fifteen_bar_default() {
+        let _serial = serially();
+        crate::knobs::clear_all();
+        assert_eq!(horizon_for(&series(60, 8), true), Horizon::DEFAULT);
+    }
+
+    /// `rung` holds for exactly one signal bar, whatever the rung is.
+    #[test]
+    fn rung_holds_for_one_signal_bar_on_every_rung() {
+        let _serial = serially();
+        for minutes in [5_i64, 15, 60] {
+            crate::knobs::set("BRUTEX_HORIZON_BARS", "rung");
+            assert_eq!(
+                horizon_for(&series(minutes, 8), true).as_bars(),
+                u32::try_from(minutes).unwrap_or(0),
+                "`rung` on a {minutes}-minute series must hold {minutes} execution bars"
+            );
+        }
+        crate::knobs::clear_all();
+    }
+
+    /// An explicit count wins over the rung, because an operator who types a
+    /// number has said something more specific than "match the bar".
+    #[test]
+    fn an_explicit_count_is_taken_verbatim() {
+        let _serial = serially();
+        crate::knobs::set("BRUTEX_HORIZON_BARS", "375");
+        assert_eq!(
+            horizon_for(&series(60, 8), true).as_bars(),
+            375,
+            "a whole session"
+        );
+        crate::knobs::clear_all();
+    }
+
+    /// A value that cannot be a horizon falls back rather than refusing the run.
+    ///
+    /// `audit_bars` returns a report and not a `Result`, so refusing here would
+    /// throw away a completed sweep over a typo in one knob. Zero is refused by
+    /// `Horizon::bars` itself — "the return over the next no bars" is not a
+    /// question.
+    #[test]
+    fn zero_and_nonsense_fall_back_to_the_default() {
+        let _serial = serially();
+        for bad in ["0", "-5", "abc", "", "   ", "60min"] {
+            crate::knobs::set("BRUTEX_HORIZON_BARS", bad);
+            assert_eq!(
+                horizon_for(&series(60, 8), true),
+                Horizon::DEFAULT,
+                "`{bad}` is not a horizon"
+            );
+        }
+        crate::knobs::clear_all();
+    }
+
+    /// Case does not decide the answer: a page sending `Rung` means `rung`.
+    #[test]
+    fn the_rung_token_is_case_insensitive() {
+        let _serial = serially();
+        for spelling in ["rung", "RUNG", "Rung", "  rung  "] {
+            crate::knobs::set("BRUTEX_HORIZON_BARS", spelling);
+            assert_eq!(
+                horizon_for(&series(30, 8), true).as_bars(),
+                30,
+                "{spelling}"
+            );
+        }
+        crate::knobs::clear_all();
     }
 }
