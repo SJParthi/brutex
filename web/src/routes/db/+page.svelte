@@ -3829,12 +3829,86 @@
         !c.none &&
         !(dayRung && c.key === 'tod') &&
         !(!shape.contract && FUTURE_COLS.has(c.key)) &&
-        !(!shape.option && OPTION_COLS.has(c.key))
+        !(!shape.option && OPTION_COLS.has(c.key)) &&
+        /* THE RUNG COLUMN GOES WHEN A RUNG IS CHOSEN, because every row then
+           carries the same value. `.norung` in the stylesheet already hid it;
+           this filter did not know, so `BAR_WIDTH` kept reserving its 68px and
+           the table's `min-width` stayed 68px wider than anything drawn. Two
+           mechanisms for one decision, disagreeing — the exact hazard the note
+           over the hide rules warns about. */
+        !(timeframe !== '' && c.key === 'tf')
     )
   );
   const BAR_HIDDEN = $derived(BAR_COLS.length - BAR_SHOWN.length);
 
   const BAR_WIDTH = $derived(BAR_SHOWN.reduce((a, c) => a + c.w, 0));
+  /* ------------------------------------------------------------------
+     FIVE GROUPS, AND THEY ARE THE SCHEMA'S OWN SHAPE, NOT A DECORATION.
+
+     Twenty-five columns is a wall. Nothing in it says that Open/High/Low/Close
+     are one reading of one bar, or where the contract facts stop and the
+     greeks begin, so every column costs the same amount of looking as every
+     other one. The grouping below invents nothing: each group is a CONTIGUOUS
+     RUN of `BAR_COLS` in the order that list already had —
+
+       When      1..3    ts, tod, tf
+       Price     4..7    o, h, l, c
+       Flow      8..12   vol, premkt, chg, oi, oichg
+       Contract  13..19  exp, dte, side, strike, mny, intr, extr
+       Greeks    20..25  iv, delta, gamma, theta, vega, rho
+
+     — and that contiguity is why a band can be drawn over them at all. A group
+     that had to skip a column could not be one heading.
+
+     THE BAND IS ONE CELL PER COLUMN, NOT `colspan`. Columns are hidden by
+     `display: none` at fixed `nth-child` positions — see the long note over
+     those rules for why hiding beats filtering here — and a `colspan` counts
+     SLOTS, not visible columns, so a spanning cell would drift the moment a
+     group lost a member. One `<th>` per column, carrying the label on the
+     group's first VISIBLE column and nothing on the rest, cannot disagree with
+     the grid. The existing hide rules match `thead > tr > th:nth-child(N)` in
+     ANY row of the head, so they gate this row for free.
+     ------------------------------------------------------------------ */
+  const BAR_GROUPS = [
+    { id: 'when', label: 'When', keys: ['ts', 'tod', 'tf'] },
+    { id: 'price', label: 'Price', keys: ['o', 'h', 'l', 'c'] },
+    { id: 'flow', label: 'Flow', keys: ['vol', 'premkt', 'chg', 'oi', 'oichg'] },
+    {
+      id: 'contract',
+      label: 'Contract',
+      keys: ['exp', 'dte', 'side', 'strike', 'mny', 'intr', 'extr']
+    },
+    { id: 'greeks', label: 'Greeks', keys: ['iv', 'delta', 'gamma', 'theta', 'vega', 'rho'] }
+  ];
+
+
+  /* EVERY COLUMN IS IN EXACTLY ONE GROUP, AND ONE ADDED LATER WITHOUT A GROUP
+     IS FINDABLE RATHER THAN SILENT. A new key nobody grouped would carry no
+     band label, and the band would read as a gap the eye blames on the layout
+     rather than on the column list. The table publishes any such key on
+     `data-ungrouped` — the same debug-attribute convention `data-boxh` and
+     `data-fit` already earned on this grid — so the answer is one inspection
+     away instead of a puzzle. `CLAUDE.md` §4: degrade loudly, name the reason. */
+  const GROUPED_KEYS = new Set(BAR_GROUPS.flatMap((g) => g.keys));
+  const BAR_UNGROUPED = BAR_COLS.filter((c) => !GROUPED_KEYS.has(c.key)).map((c) => c.key);
+
+  /**
+   * The band label for each column that STARTS a visible group.
+   *
+   * O(1) per column: one Set probe. The whole derivation is a single pass over
+   * the five groups, not a scan of the grid.
+   */
+  const GROUP_HEAD = $derived.by(() => {
+    const shown = new Set(BAR_SHOWN.map((c) => c.key));
+    /** @type {Map<string, { label: string, n: number }>} */
+    const head = new Map();
+    for (const g of BAR_GROUPS) {
+      const members = g.keys.filter((k) => shown.has(k));
+      if (members.length > 0) head.set(members[0], { label: g.label, n: members.length });
+    }
+    return head;
+  });
+
 
   /** A PARTITION, AND IT SUMS: sourced + unsourced = every column drawn. */
   const BAR_SOURCED = BAR_COLS.filter((c) => !c.none).length;
@@ -6145,20 +6219,102 @@
    * which since `pagePlan` is the page's own month rather than the whole
    * query. See the change-scale block above for why that trade was taken and
    * what it costs. */
+  /* THE SPAN, NOT THE CEILING — AND THE RULER IS LOGARITHMIC. MEASURED.
+   *
+   * This fold used to keep only the largest volume at each rung and `volMag`
+   * divided by it. Against one real page — NSE-INDEX-NIFTY 1min 2026-08, 250
+   * rows — the volumes run 2,68,832 to 2,65,70,396: a 98.8x spread around a
+   * median of 6,18,458. Divide by the ceiling and the median row gets 2.3% of
+   * 56px, which rounds to ONE PIXEL. Measured across those 250 rows:
+   *
+   *     linear   median  1px   147 of 250 at or under 1px    8 distinct widths
+   *     log      median 10px     6 of 250 at or under 1px   30 distinct widths
+   *
+   * So the bar was drawn on every row and told 59% of them nothing. One
+   * afternoon's spike set the ruler for the whole month. A quantity that moves
+   * over two orders of magnitude has no linear picture.
+   *
+   * WHAT THE LOG RULER COSTS, and it is named on the cell rather than left for
+   * the reader to assume: a bar twice as long is NOT twice the volume. Reading
+   * it as linear is the same error D-0377 deleted a chart for, so the `title`
+   * says "log" and gives both ends of the ruler in figures.
+   *
+   * The floor is the window's own smallest volume rather than zero, because
+   * `log(0)` is not a number and a floor of 1 would spend most of the bar's
+   * length on decades no bar in the window occupies.
+   */
   const volFullByTf = $derived.by(() => {
-    /** @type {Map<string, number>} */
-    const top = new Map();
+    /** @type {Map<string, { lo: number, hi: number }>} */
+    const span = new Map();
     for (const b of barRows) {
       const v = b.vol ?? 0;
-      if (v > (top.get(b.tf) ?? 0)) top.set(b.tf, v);
+      /* ZERO IS OUT OF THE RULER, NOT CLAMPED INTO IT. A zero volume is a real
+         reading — a minute in which nothing traded — and it has no logarithm.
+         It draws no bar, which is the truthful picture of it. */
+      if (!(v > 0)) continue;
+      const s = span.get(b.tf);
+      if (s === undefined) span.set(b.tf, { lo: v, hi: v });
+      else {
+        if (v < s.lo) s.lo = v;
+        if (v > s.hi) s.hi = v;
+      }
     }
-    return top;
+    return span;
   });
 
-  /** @param {number} v @param {string} tf */
+  /**
+   * Where one volume sits on its rung's log ruler, 0..100.
+   *
+   * O(1): one Map probe and two logarithms, whatever the window holds.
+   *
+   * @param {number} v @param {string} tf
+   */
   function volMag(v, tf) {
-    const full = volFullByTf.get(tf) ?? 0;
-    return full <= 0 ? 0 : Math.round((Math.min(v ?? 0, full) / full) * 100);
+    const s = volFullByTf.get(tf);
+    if (s === undefined || !(v > 0)) return 0;
+    /* ONE DISTINCT VOLUME IN THE WINDOW IS A FULL BAR, NOT A DIVISION BY ZERO.
+       Every row carries the same figure, so every row is the largest. */
+    if (s.hi <= s.lo) return 100;
+    const lo = Math.log(s.lo);
+    const x = Math.log(Math.min(Math.max(v, s.lo), s.hi));
+    return Math.round(((x - lo) / (Math.log(s.hi) - lo)) * 100);
+  }
+
+  /**
+   * The volume cell's inline scale, computed ONCE.
+   *
+   * The markup called `volMag` twice for the same number — once for `--vmag`
+   * and once for `--vmagpx`. Two logarithms per cell for one answer.
+   *
+   * @param {number} v @param {string} tf
+   */
+  function volStyle(v, tf) {
+    const m = volMag(v, tf);
+    return `--vmag:${m}%;--vmagpx:${Math.round((m / 100) * 56)}px`;
+  }
+
+  /**
+   * WHAT THE BAR IN THE VOLUME CELL MEANS, IN WORDS, BECAUSE IT IS NOT LINEAR.
+   *
+   * A reader who assumes a linear bar reads every ratio wrong, and a picture
+   * that invites that is the defect D-0377 removed a chart for. This names the
+   * ruler and both its ends, so the bar can be checked rather than trusted.
+   *
+   * @param {number} v @param {string} tf
+   */
+  function volTitle(v, tf) {
+    const s = volFullByTf.get(tf);
+    if (s === undefined || !(v > 0)) {
+      return v === 0
+        ? 'No volume in this bar. Zero has no place on a log ruler, so no bar is drawn — this is a reading, not a gap.'
+        : `${fmt(v)} shares.`;
+    }
+    return (
+      `${fmt(v)} shares. The bar is a LOG scale across every ${tf} row loaded — ` +
+      `${fmt(s.lo)} at no bar to ${fmt(s.hi)} at full width — so a bar twice as ` +
+      `long is far more than twice the volume. Linear was tried and put 147 of ` +
+      `250 rows under one pixel.`
+    );
   }
 
   /* THE BAR'S OWN RANGE, high minus low, as a share of the widest range at that
@@ -9198,6 +9354,7 @@
             class:nooption={!shape.option}
             class:norung={timeframe !== ''}
             data-move={barMove}
+            data-ungrouped={BAR_UNGROUPED.length ? BAR_UNGROUPED.join(',') : undefined}
             style="min-width:{BAR_WIDTH}px"
           >
             <colgroup>
@@ -9206,6 +9363,21 @@
               {/each}
             </colgroup>
             <thead>
+              <!-- THE GROUP BAND. One cell per column so it cannot drift out of
+                   step with the grid — see the note over `BAR_GROUPS` for why
+                   `colspan` is wrong here. `aria-hidden` because the band is a
+                   visual chunking of headings the screen reader already reads
+                   in order; announcing "When" before every date would be noise,
+                   and the column headers below carry the real names. -->
+              <tr class="gband" aria-hidden="true">
+                {#each BAR_COLS as c (c.key)}
+                  <th scope="col">
+                    {#if GROUP_HEAD.has(c.key)}
+                      <span class="glab">{GROUP_HEAD.get(c.key)?.label}</span>
+                    {/if}
+                  </th>
+                {/each}
+              </tr>
               <tr>
                 {#each BAR_COLS as c (c.key)}
                   <th
@@ -9432,7 +9604,12 @@
                       <td class="bn bclose" title="{fmt(b.c)} paisa, as stored"
                         ><span class="pfx">{priceSplit(b.c)[0]}</span>{priceSplit(b.c)[1]}</td
                       >
-                      <td class="bn bvol" style="--vmag:{volMag(b.vol, b.tf)}%;--vmagpx:{Math.round((volMag(b.vol, b.tf) / 100) * 56)}px">{fmt(b.vol)}</td>
+                      <!-- VOLUME. The bar behind the figure is a LOG ruler and
+                           the title says so — see `volMag` for the measurement
+                           that forced it off linear, and D-0377 for what an
+                           unlabelled scale costs. `volStyle` folds what used to
+                           be two identical `volMag` calls into one. -->
+                      <td class="bn bvol" style={volStyle(b.vol, b.tf)} title={volTitle(b.vol, b.tf)}>{fmt(b.vol)}</td>
 
                       <!-- PRE-MARKET %: no source on this wire. -->
                       <td class="bn na"
@@ -12352,6 +12529,77 @@
        of a 9. Already implied by the mono face; stated so a future face change
        cannot quietly break the column. */
     font-feature-settings: 'tnum' 1;
+  }
+
+  /* ------------------------------------------------------------------
+     THE GROUP BAND, AND THE TWO SEPARATORS THAT CARRY IT DOWN THE GRID.
+
+     22px above the column headings. The band is the only place on this grid
+     where a colour is spent on saying WHAT KIND of number a column holds
+     rather than on a value, which is why it is the accent and everything under
+     it stays ink and dim.
+
+     BOTH HEAD ROWS ARE STICKY AND THEY DO NOT OVERLAP: the band pins at 0 and
+     the headings at 22px, which is the band's own height. Writing the heading
+     offset as anything else lets one row slide under the other on scroll, and
+     the seam is invisible until a row is halfway through it.
+     ------------------------------------------------------------------ */
+  .bgrid thead tr.gband > th {
+    top: 0;
+    height: 22px;
+    /* FLAT, NOT THE HEADING ROW'S GRADIENT. Two stacked gradients read as two
+       competing surfaces; one flat band under one shaded heading reads as a
+       label attached to it. */
+    background: var(--panel-2);
+    border-bottom: 1px solid var(--line-soft);
+    box-shadow: none;
+    text-transform: none;
+    letter-spacing: normal;
+    vertical-align: middle;
+  }
+  .bgrid thead tr:not(.gband) > th {
+    top: 22px;
+  }
+  .glab {
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    font-weight: var(--w-bold);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    color: var(--acc);
+  }
+
+  /* THE SEPARATOR RUNS THE FULL HEIGHT OF THE GRID, NOT JUST THE BAND.
+     A label with nothing under it groups the headings and leaves the figures
+     as undifferentiated as before; the point is to chunk the ROWS. One hairline
+     on the first column of each group does that at any row count and costs no
+     height.
+
+     BY POSITION, BECAUSE THE BODY CELLS ARE HAND-AUTHORED — the same reason
+     the hide rules above are positional, and `:nth-child` counts hidden
+     siblings, so 4/8/13/20 stay put whatever is displayed. 4 = Open starts
+     Price, 8 = Volume starts Flow, 13 = Expiry starts Contract, 20 = IV starts
+     Greeks. Column 1 needs none: nothing precedes it.
+
+     WHAT THIS DOES NOT COVER, stated rather than left to be found: if a
+     group's FIRST column is hidden while a later one is not, the separator
+     goes with it. That is reachable only for Contract — expiry and days-to-exp
+     hidden by `.nofuture` while type and strike remain — so that one case has
+     its own rule below. An option store with no expiry is the only shape that
+     reaches it. */
+  .bgrid > thead > tr > th:nth-child(4),
+  .bgrid > thead > tr > th:nth-child(8),
+  .bgrid > thead > tr > th:nth-child(13),
+  .bgrid > thead > tr > th:nth-child(20),
+  .bgrid > tbody > tr > td:nth-child(4),
+  .bgrid > tbody > tr > td:nth-child(8),
+  .bgrid > tbody > tr > td:nth-child(13),
+  .bgrid > tbody > tr > td:nth-child(20) {
+    border-left: 1px solid var(--line);
+  }
+  .bgrid.nofuture > thead > tr > th:nth-child(15),
+  .bgrid.nofuture > tbody > tr > td:nth-child(15) {
+    border-left: 1px solid var(--line);
   }
   .bgrid thead th {
     position: sticky;
