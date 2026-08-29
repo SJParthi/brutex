@@ -4473,6 +4473,16 @@ jobs:
           #     the store and only the STATISTIC over them is a float, which is
           #     exactly the half of §7 that says statistical values keep full
           #     precision. A ratio of two sums has no paisa representation.
+          #
+          #   cli/live.rs 1, added 2026-08-29. One `ln`, in `expected_rewrites`,
+          #   which answers "how many times will a bounded top-N be rewritten
+          #   over N candidates" -- keep * ln(N/keep), the standard record-count
+          #   bound. It touches NO MONEY: the inputs are two counts and the
+          #   output is a count of FILE WRITES, used to argue that a few hundred
+          #   rewrites is affordable against a few hundred million candidates.
+          #   Section 7's ban is about prices and this function cannot see one.
+          #   It exists so that affordability claim is a function anyone can call
+          #   rather than a table anyone must trust.
           allow_float='
           crates/api/src/ingest.rs 1
           crates/api/src/server.rs 4
@@ -4495,7 +4505,8 @@ jobs:
           crates/telemetry/src/value.rs 5
           crates/telemetry/src/encode.rs 1
           crates/telemetry/src/record.rs 1
-          '
+          crates/cli/src/live.rs 1
+          .
 
           # ---- rule 3. docs/07 law 2: pre-size every map. -------------------
           # Only HashMap/HashSet. A BTreeMap has no `with_capacity` — capacity
@@ -4914,6 +4925,32 @@ jobs:
           #     ordered so the refusal list is byte-identical between runs.
           #   runner/grid.rs 2 -- the exit grid's distinct values, bounded by the
           #     rung x stop ladders, both compile-time.
+          # knobs.rs and trades.rs, added 2026-08-29 with the sweep request's own
+          # knobs and the per-combination calendar. Both sorts exist for CLAUDE.md
+          # section 3 rule 5 -- same inputs, same outputs, byte for byte -- and
+          # neither is on a per-bar or per-candidate path.
+          #
+          # knobs::render sorts at most FOURTEEN pairs, once per run, so the audit
+          # line naming a run's settings reads the same whatever order a HashMap
+          # happened to iterate. Without it two identical runs log two different
+          # strings and a reader cannot diff them.
+          #
+          # trades::by_period sorts calendar buckets by key, once per period per
+          # HTTP request. A calendar read out of order is not a calendar, and the
+          # buckets come out of a HashMap. The bound is the number of distinct
+          # days in the span -- 1,671 for the eighty-one months on disk -- not the
+          # number of trades and not the number of bars.
+          #
+          # sweeprun.rs 1 -> 5 for rule 7 below: the four added are the rung
+          # allowlist checks (`EVERY_RUNG.contains`) and the month range guard,
+          # every one against a FIXED EIGHT-ELEMENT static or a range literal.
+          #
+          # live.rs 1, added 2026-08-29. `current` sorts the live files it found
+          # by run identity, once per poll. `read_dir` order is unspecified, so
+          # without it two polls of one page can return the same runs in
+          # different order -- and the bound is the number of runs IN FLIGHT,
+          # which is the eight rungs `range_over` walks, not the number of
+          # candidates and not the number of bars. Section 3 rule 5 again.
           allow_sort='
           crates/runner/src/audit.rs 1
           crates/runner/src/bootstrap.rs 1
@@ -4924,6 +4961,9 @@ jobs:
           crates/api/src/calendar_of.rs 3
           crates/api/src/constituents.rs 2
           crates/cli/src/frontier.rs 1
+          crates/cli/src/knobs.rs 1
+          crates/cli/src/trades.rs 1
+          crates/cli/src/live.rs 1
           crates/api/src/coverage.rs 1
           crates/api/src/indexmap.rs 1
           crates/api/src/pullrun.rs 1
@@ -5433,7 +5473,7 @@ jobs:
           crates/api/src/coverage.rs 1
           crates/api/src/merge.rs 1
           crates/api/src/server.rs 4
-          crates/api/src/sweeprun.rs 1
+          crates/api/src/sweeprun.rs 5
           crates/cli/src/lib.rs 3
           crates/core/src/vendor.rs 2
           crates/costs/src/day.rs 2

@@ -13,9 +13,16 @@
 //!
 //! The ranking that would have answered already existed and was simply never
 //! written down: `runner::rank` keeps a bounded min-heap of the best `keep`
-//! combinations by `|t|`, updated per candidate at `O(log keep)` to admit and
-//! `O(1)` to reject. This module is the other half — it puts that heap on disk
+//! combinations by `|t|`, admitting in `O(log keep)` and rejecting with a single
+//! comparison. This module is the other half — it puts that heap on disk
 //! whenever it changes.
+//!
+//! **UNVERIFIED as a measurement.** Those per-candidate costs are `runner::rank`'s
+//! and are argued from the shape of a bounded heap; that module's own doc marks
+//! them unverified too, and no bench row in this workspace times either. What IS
+//! arithmetic rather than assertion is the rewrite count below, and
+//! [`expected_rewrites`] is that arithmetic as a function so it can be checked
+//! rather than trusted.
 //!
 //! # Why it is cheap, and this is the number that decides it
 //!
