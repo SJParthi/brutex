@@ -48,7 +48,7 @@
 //! `classify` at 1x/10x/100x the minute count, beside the rows that already
 //! exist for the manifest.
 
-use crate::calendar::{self, DayKind};
+use crate::calendar::{self, Calendar, DayKind};
 
 /// The most gaps one classification will report.
 ///
@@ -236,6 +236,42 @@ fn ist(ts_micros: i64) -> (i64, u16) {
 /// Never. Every index is bounds-checked and every arithmetic is saturating.
 #[must_use]
 pub fn classify(stored: &[i64], first: i64, last: i64) -> Ledger {
+    classify_against(stored, first, last, None)
+}
+
+/// [`classify`], against a calendar the caller supplies.
+///
+/// # Why this exists, and it is not a convenience
+///
+/// There are **two calendars in this workspace**, and this module's free
+/// functions read the one that goes stale. `crate::calendar`'s table is typed
+/// and bounded by [`crate::calendar::LAST_DAY`]; `api::calendar_of` DERIVES a
+/// [`Calendar`] from the store's own daily and minute rungs and widens by
+/// itself the moment an earlier month lands. `calendar_of`'s own header names
+/// the hazard outright: *"Three tables of one fact is a drift waiting for a
+/// date. This is the one answer both should read."*
+///
+/// Measured on 2026-08-29, eight days past `LAST_DAY = 2026-08-21`: an audit of
+/// NIFTY at one minute for 2026-08 answered `expected 5,625, held 7,500,
+/// lost 0` — twenty trading days of bars against fifteen the TABLE could vouch
+/// for. Nothing was wrong with the store and nothing was wrong with the
+/// classification; the denominator was reading a calendar that had run out.
+///
+/// So the caller with a derived calendar passes it, and the caller without one
+/// gets the table. `None` is not a default that hides anything: it is the
+/// honest answer for a caller that has no store to derive from, and the
+/// `Unmeasured` runs it produces say so per day.
+///
+/// # Panics
+///
+/// Never. Same bounds as [`classify`].
+#[must_use]
+pub fn classify_against(
+    stored: &[i64],
+    first: i64,
+    last: i64,
+    against: Option<&Calendar>,
+) -> Ledger {
     let mut ledger = Ledger {
         held: u32::try_from(stored.len()).unwrap_or(u32::MAX),
         ..Ledger::default()
@@ -248,7 +284,10 @@ pub fn classify(stored: &[i64], first: i64, last: i64) -> Ledger {
 
     let mut day = first;
     while day <= last {
-        let kind = calendar::kind_of(day);
+        // THE SUPPLIED CALENDAR WINS. A caller with a store to derive from has
+        // a calendar that widens with it; the table is the fallback for one
+        // that does not, and it is bounded by `LAST_DAY`.
+        let kind = against.map_or_else(|| calendar::kind_of(day), |cal| cal.kind_of(day));
         // ADVANCE PAST ANY STORED BAR BEFORE THIS DAY. A bar the caller handed
         // us from outside the range is skipped rather than counted against it.
         while cursor < stored.len() && stored.get(cursor).copied().is_some_and(|t| ist(t).0 < day) {
@@ -582,6 +621,59 @@ mod tests {
             unmeasured.gaps.first().map(|g| g.reason),
             Some(Reason::Unmeasured),
             "and NOT Closed"
+        );
+    }
+
+    /// **A SUPPLIED CALENDAR OVERRIDES THE TABLE, AND THAT IS THE WHOLE POINT
+    /// OF `classify_against`.**
+    ///
+    /// The table is bounded by [`calendar::LAST_DAY`], and on 2026-08-29 — eight
+    /// days past it — an audit of NIFTY at one minute for 2026-08 answered
+    /// `expected 5,625, held 7,500, lost 0`: twenty trading days of bars against
+    /// fifteen the table could vouch for. Nothing was wrong with the store and
+    /// nothing was wrong with the classification; the DENOMINATOR was reading a
+    /// calendar that had run out.
+    ///
+    /// `api::calendar_of` derives this same type from the store's own rungs and
+    /// widens by itself, so a caller with a store passes one. Driven here on a
+    /// day the TABLE calls `Unmeasured`, because that is the case where the two
+    /// sources give different answers and the supplied one must win — a test on
+    /// a day they agree about would pass with the parameter ignored entirely.
+    #[test]
+    fn a_supplied_calendar_answers_for_a_day_the_table_has_never_heard_of() {
+        // One day past the table's last, so the table alone can only shrug.
+        let past = calendar::LAST_DAY + 1;
+        let table_only = classify(&[], past, past);
+        assert_eq!(
+            table_only.gaps.first().map(|g| g.reason),
+            Some(Reason::Unmeasured),
+            "the table has nothing to say about a day it does not cover"
+        );
+        assert_eq!(
+            table_only.expected, 0,
+            "so it owes nothing, which is what makes `held` exceed `expected`"
+        );
+
+        // A derived calendar that DID see that day trade a full session.
+        let observed =
+            calendar::Observed::from_runs(past, &[(calendar::OPEN_MINUTE, calendar::LAST_MINUTE)]);
+        let derived = calendar::Calendar::from_observed(&[observed]);
+        let against = classify_against(&[], past, past, Some(&derived));
+        assert_eq!(
+            against.expected,
+            u32::from(calendar::FULL_BARS),
+            "the supplied calendar owes a full session where the table owed nothing"
+        );
+        assert_eq!(
+            against.lost_minutes(),
+            u32::from(calendar::FULL_BARS),
+            "and an empty store against a day that traded is a real loss, which \
+             the table could not have called"
+        );
+        assert_eq!(
+            against.unmeasured_minutes(),
+            0,
+            "nothing is unclaimed once a calendar can speak for the day"
         );
     }
 
