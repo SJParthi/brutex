@@ -27045,3 +27045,53 @@ that accepts one rung and refuses another; `note_bars_not_counted` needs a count
 that disagrees with what landed. Stated rather than implied, per §3 rule 6.
 
 715 `pull` tests green, `clippy -D warnings` clean.
+
+### D-0371
+
+**Every event the storing path can write is now proven to reach a file — 10 of
+10.**
+
+D-0368 measured three of ten `note_*` helpers driven and named the rest.
+D-0370 took it to seven. This closes it. `SITES` holds **35 rows**.
+
+**One fixture drives two events, because one state produces both.** A
+one-minute member writes the rung it pulled plus the seven `derived_from`
+computes from `Timeframe::KNOWN`. Block exactly one and `derive` reports
+`pull.derive` for that rung, then `derived_shortfall` counts 6 of 7 and reports
+`pull.derived`. Driving them apart would need two runs to reach one state.
+
+**The block is a DIRECTORY where the bar file belongs, not a permission bit.**
+A directory at that path cannot be opened for writing by any user, root
+included, so this fixture does not quietly stop testing anything when the suite
+runs in a container. `pull/tests/pipeline.rs`'s `0o444` is right for the census,
+which must stay READABLE; here nothing needs to be read.
+
+**The pulled rung still lands, and that is the half worth an `Error`.** The run
+stores bars, the census counts them, the instrument-month looks held — until a
+reader asks for two-minute bars and finds nothing beside a full one-minute file.
+The fixture asserts `bars_stored > 0` so it cannot pass by storing nothing.
+
+**`note_bars_not_counted` — the census refusing is CORRECT, and the state it
+leaves is the defect.** A census entry holding 9,999 rows meets a run that lands
+2, and `record_held` answers `RowCountWentBackwards`: a count that goes down is
+a truncated file or a stale write arriving late, and accepting the smaller
+number would make the census forget bars still on disk. So it refuses, and the
+bars are written and uncounted — append-only, so they cannot be withdrawn. This
+line and the `Failure` beside it are the only record that the two disagree.
+
+The seed entry is written through `ingest::record_held`, the shipped writer. A
+census this test forged would be a second opinion about the format.
+
+**Two fields are asserted `Positive` rather than as literals**, and the reason
+is the same in both: `slices` measured 8 — the rung pulled plus seven derived —
+and `bars` is whatever the fixture landed. Pinning either would fail the row the
+day a rung is added to `Timeframe::KNOWN`, while zero-or-more would let an event
+about loss pass with nothing lost.
+
+**What this does NOT claim.** Ten of ten is the storing path — `note_*` helpers
+in `crates/pull/src/ingest.rs`. The crate holds 42 `telemetry::emit` sites in
+total and `SITES` covers 35, so seven remain elsewhere; the module header states
+that gap and it is unchanged by this entry.
+
+715 `pull` tests green, `clippy -D warnings` clean. Every new row falsified
+before landing.

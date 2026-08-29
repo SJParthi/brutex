@@ -531,6 +531,58 @@ static SITES: &[Site] = &[
         drive: drive_census_unpublished,
     },
     Site {
+        // HELD AT ONE TIMEFRAME AND MISSING AT THE REST, which is the shape a
+        // count alone cannot show.
+        //
+        // A one-minute member writes the rung it pulled plus seven derived from
+        // it. When one of the seven cannot be written the PULLED rung still
+        // lands, so the run stores bars, the census counts them, and the
+        // instrument-month looks held — until a reader asks for two-minute bars
+        // and finds nothing beside a full one-minute file.
+        //
+        // Asserting `timeframe`, because WHICH rung is the whole content of
+        // this line: "a rung was not derived" without it cannot be acted on.
+        at: "crates/pull/src/ingest.rs — note_not_derived",
+        target: "pull.derive",
+        message: "rung not derived",
+        says: ("timeframe", Says::Holds("2min")),
+        drive: drive_derived_shortfall,
+    },
+    Site {
+        // THE COUNT THAT STOPS THE RUN REPORTING ITSELF CLEAN.
+        //
+        // `pull.derive` above says which rung failed, one line per rung. This
+        // is the roll-up that reaches `Ingested::failures`, and without it a
+        // run that lost six of seven derived rungs still ends `Stored` — every
+        // individual refusal on the log and nothing raising the total.
+        at: "crates/pull/src/ingest.rs — note_derived_shortfall",
+        target: "pull.derived",
+        message: "a folded rung did not land",
+        says: ("instrument", Says::Holds(INSTRUMENT)),
+        drive: drive_derived_shortfall,
+    },
+    Site {
+        // BARS WRITTEN THAT THE CENSUS WILL NOT COUNT — the tenth and last
+        // `note_*` helper on the storing path, and the one that closes this
+        // table's coverage of it.
+        //
+        // The census refuses when a count goes DOWN, because a smaller number
+        // is either a truncated file or a stale write arriving late and
+        // accepting it would make the census forget bars still on disk. That
+        // refusal is correct, and it leaves the bars written and uncounted —
+        // append-only, so they cannot be withdrawn.
+        //
+        // `bars` is the asserted field, and `Positive` rather than a literal:
+        // it is the entry's own row count, a consequence of what the fixture
+        // landed rather than a constant, and zero-or-more would let an event
+        // about uncounted bars pass with no bars.
+        at: "crates/pull/src/ingest.rs — note_bars_not_counted",
+        target: "pull.census",
+        message: "bars not counted",
+        says: ("bars", Says::Positive),
+        drive: drive_bars_not_counted,
+    },
+    Site {
         at: "crates/pull/src/http.rs:1483",
         target: "pull.decode",
         message: "bars carried a negative open interest and were skipped",
@@ -1471,5 +1523,130 @@ fn drive_census_unpublished(scratch: &Scratch) {
         after.failures.iter().any(|f| f.why.contains("census")),
         "a census that will not take the write is a named failure: {:?}",
         after.failures
+    );
+}
+
+/// One run where a DERIVED rung cannot be written and the pulled one can.
+///
+/// # Why one fixture drives two events
+///
+/// A one-minute member writes the rung it pulled plus the seven
+/// `ingest::derived_from` computes from `Timeframe::KNOWN`. Block exactly one of
+/// the seven and two things happen in order: `derive` fails for that rung and
+/// reports `pull.derive`, then `derived_shortfall` counts 6 of 7 and reports
+/// `pull.derived`. Driving them apart would need two runs to produce one
+/// state.
+///
+/// # The block is a DIRECTORY where a file belongs
+///
+/// Not a permission bit. A directory at the bar file's own path cannot be
+/// opened for writing by any user, including root — so this fixture does not
+/// quietly stop testing anything when the suite runs in a container. The
+/// two-minute rung is chosen because it is the first one `derived_from` yields
+/// and the smallest thing that can be taken away.
+///
+/// **The pulled rung still lands**, which is the half that makes this state
+/// worth an `Error`: the instrument-month reads as held at one timeframe and
+/// missing at the rest, and a reader asking for two-minute bars finds nothing
+/// while one-minute bars sit beside it.
+fn block_the_two_minute_rung(store: &Path) {
+    let path = store::path::StorePath::new(store::path::PathParts {
+        vendor: Vendor::Groww,
+        exchange: "NSE",
+        segment: "INDEX",
+        symbol: INSTRUMENT,
+        contract: None,
+        timeframe: store::path::Timeframe::MINUTE_2,
+        month: store::path::YearMonth::new(2022, 10).expect("a legal month"),
+        file: store::path::FileKind::Bars,
+    })
+    .expect("a legal path")
+    .to_path_buf(store);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("the rung's directory");
+    }
+    fs::create_dir_all(&path).expect("a DIRECTORY where the bar file belongs");
+}
+
+/// One ingest whose two-minute rung has nowhere to go.
+fn drive_derived_shortfall(scratch: &Scratch) {
+    let store = scratch.store();
+    block_the_two_minute_rung(&store);
+    let archive = scratch.archive(&[(INSTRUMENT, BODY)]);
+    let request = request_over(window());
+    let done = crate::ingest::from_dir(&archive, &store, plan_over(&request))
+        .expect("the folder is readable; the rung is what refuses");
+    assert!(
+        done.bars_stored > 0,
+        "the PULLED rung still lands — a fixture where nothing stored would \
+         prove the shortfall event fires when there is no shortfall to report"
+    );
+    assert!(
+        done.failures.iter().any(|f| f.why.contains("derived rung")),
+        "6 of 7 derived rungs landed and the run says so: {:?}",
+        done.failures
+    );
+}
+
+/// One run whose bars land and whose census refuses to count them.
+///
+/// # The state, and why the census is right to refuse
+///
+/// A census entry already holding 9,999 rows meets a run that lands 2.
+/// `Manifest::record_held` answers `RowCountWentBackwards`, because a count that
+/// goes DOWN is either a truncated file or a stale write arriving late, and
+/// silently accepting the smaller number would make the census forget bars that
+/// are still on disk.
+///
+/// So the refusal is correct — and it leaves the exact state this event exists
+/// for: **the bars are written and the census does not count them.** The store
+/// is append-only, so they cannot be withdrawn; the only record that the two
+/// disagree is this line and the `Failure` beside it.
+///
+/// The seeded entry is written through `ingest::record_held`, the shipped
+/// writer, rather than by hand — a census this test forged would be a second
+/// opinion about the format.
+fn drive_bars_not_counted(scratch: &Scratch) {
+    let store = scratch.store();
+    let seeded = crate::manifest::Held::new(
+        crate::manifest::Entry {
+            key: crate::manifest::EntryKey {
+                contract: None,
+                exchange: brutex_core::instrument::Exchange::Nse,
+                segment: brutex_core::instrument::Segment::Index,
+                symbol: brutex_core::symbol::Symbol::new(INSTRUMENT).expect("a legal symbol"),
+                timeframe: store::path::Timeframe::MINUTE_1,
+                month: store::path::YearMonth::new(2022, 10).expect("a legal month"),
+            },
+            // MORE THAN THE RUN CAN POSSIBLY LAND, so the direction is not in
+            // doubt: `BODY` holds three rows and folds to two bars.
+            rows: 9_999,
+            first_ts_micros: 1_664_775_000_000_000,
+            last_ts_micros: 1_664_775_060_000_000,
+        },
+        crate::manifest::Closes::UNKNOWN,
+    );
+    assert_eq!(
+        crate::ingest::record_held(&store, Vendor::Groww, std::slice::from_ref(&seeded)),
+        None,
+        "the seed census is written by the shipped writer, or this fixture is \
+         testing a format it invented"
+    );
+
+    let archive = scratch.archive(&[(INSTRUMENT, BODY)]);
+    let request = request_over(window());
+    let done = crate::ingest::from_dir(&archive, &store, plan_over(&request))
+        .expect("the folder is readable; the census is what refuses");
+    assert!(
+        done.bars_stored > 0,
+        "the bars LANDED — that is the whole point, and a fixture that stored \
+         nothing would report an uncounted-bars event with no uncounted bars"
+    );
+    assert!(
+        done.failures
+            .iter()
+            .any(|f| f.why.contains("the census does not count")),
+        "and the run says which instrument holds bars nothing counts: {:?}",
+        done.failures
     );
 }
