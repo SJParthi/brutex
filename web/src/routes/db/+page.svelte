@@ -5133,6 +5133,49 @@
     };
   });
 
+  /**
+   * THE PAGE'S OWN PRICE RANGE, WHICH IS WHAT EVERY PRICE CELL IS DRAWN
+   * AGAINST.
+   *
+   * A number in a column of numbers says nothing about its own size until you
+   * have read the column. `24,142.45` beside `24,175.65` is a difference a
+   * reader has to compute; the same two as bars are a difference they see. So
+   * each of Open, High, Low and Close carries a rule at its value's position
+   * between the LOW and the HIGH OF THE ROWS ON SCREEN.
+   *
+   * SCOPED TO THE PAGE AND NOT TO THE QUERY, DELIBERATELY. Against the whole
+   * six-lakh window every bar of a quiet minute would sit at the same spot and
+   * the column would be a straight edge. Against the page, the shape of THESE
+   * rows is visible — which is the question a reader looking at these rows is
+   * asking. The header says so, so nobody reads it as a global position.
+   *
+   * O(1) AGAINST THE STORE. It walks `barPage`, which is bounded by the page
+   * size a reader chose — 12 rows at `Fit`, 250 at most — never by the 618,296
+   * the query matched. Paging does not make it slower and neither does the
+   * store growing.
+   */
+  const pageScale = $derived.by(() => {
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (const b of barPage) {
+      if (typeof b.l === 'number' && b.l < lo) lo = b.l;
+      if (typeof b.h === 'number' && b.h > hi) hi = b.h;
+    }
+    return hi > lo ? { lo, hi, span: hi - lo } : null;
+  });
+
+  /**
+   * Where one price sits in the page's range, 0..100.
+   * A page with no spread returns `null` and the cells draw no rule at all —
+   * a bar at a fixed position on every row would be a pattern standing in for
+   * a measurement, which is worse than no bar.
+   * @param {number | null | undefined} v
+   */
+  function pricePos(v) {
+    if (pageScale === null || typeof v !== 'number') return null;
+    return Math.round(((v - pageScale.lo) / pageScale.span) * 100);
+  }
+
   const barSorted = $derived.by(() => {
     const k = barSortKey;
     const dir = barDesc ? -1 : 1;
@@ -9485,13 +9528,25 @@
                            span inside the cell, so the cell's own text is
                            unchanged for a copy, an export, `textContent` and a
                            screen reader — see `pricePfx`. -->
-                      <td class="bn" title="{fmt(b.o)} paisa, as stored"
+                      <td
+                        class="bn bp"
+                        style="--pos:{pricePos(b.o)}%"
+                        data-pos={pricePos(b.o) === null ? undefined : ''}
+                        title="{fmt(b.o)} paisa, as stored"
                         ><span class="pfx">{priceSplit(b.o)[0]}</span>{priceSplit(b.o)[1]}</td
                       >
-                      <td class="bn" title="{fmt(b.h)} paisa, as stored"
+                      <td
+                        class="bn bp hi"
+                        style="--pos:{pricePos(b.h)}%"
+                        data-pos={pricePos(b.h) === null ? undefined : ''}
+                        title="{fmt(b.h)} paisa, as stored"
                         ><span class="pfx">{priceSplit(b.h)[0]}</span>{priceSplit(b.h)[1]}</td
                       >
-                      <td class="bn" title="{fmt(b.l)} paisa, as stored"
+                      <td
+                        class="bn bp lo"
+                        style="--pos:{pricePos(b.l)}%"
+                        data-pos={pricePos(b.l) === null ? undefined : ''}
+                        title="{fmt(b.l)} paisa, as stored"
                         ><span class="pfx">{priceSplit(b.l)[0]}</span>{priceSplit(b.l)[1]}</td
                       >
                       <!-- THE CLOSE IS THE FIGURE THE TABLE IS READ FOR, and it
@@ -9501,7 +9556,11 @@
                            server-side price table, where `td.close` is bold and
                            tinted by `close >= open`. The two surfaces show the
                            same store and disagreed about that. -->
-                      <td class="bn bclose" title="{fmt(b.c)} paisa, as stored"
+                      <td
+                        class="bn bclose bp"
+                        style="--pos:{pricePos(b.c)}%"
+                        data-pos={pricePos(b.c) === null ? undefined : ''}
+                        title="{fmt(b.c)} paisa, as stored"
                         ><span class="pfx">{priceSplit(b.c)[0]}</span>{priceSplit(b.c)[1]}</td
                       >
                       <td class="bn bvol" style="--vmag:{volMag(b.vol, b.tf)}%;--vmagpx:{Math.round((volMag(b.vol, b.tf) / 100) * 56)}px">{fmt(b.vol)}</td>
@@ -10421,6 +10480,67 @@
     border-radius: 2px;
     pointer-events: none;
   }
+  /* ---- a rule under every price ----------------------------------------
+     EACH OF THE FOUR PRICE COLUMNS DRAWS ITS OWN VALUE'S POSITION in the
+     page's low-to-high range. Scanning DOWN a column, the rules are that
+     column's shape; scanning ACROSS a row, the gap between the Low rule and
+     the High rule is that bar's spread. Four numbers become four positions
+     without a fifth column being added.
+
+     `data-pos` GATES IT, NOT A ZERO. A page with no spread — every row the
+     same price, which the newest minutes of this store really are — returns
+     `null` from `pricePos` and the attribute is absent, so no rule is drawn
+     at all. A bar sitting at a fixed spot on every row would be a pattern
+     standing in for a measurement.
+
+     2px, AT THE FOOT OF THE CELL, AND UNDER THE TEXT. It has to be readable
+     as a group down a column of twelve and never compete with the figure it
+     describes — this is a table that is read, with a mark that is glanced. */
+  .bp[data-pos] {
+    position: relative;
+  }
+  .bp[data-pos]::before {
+    content: '';
+    position: absolute;
+    left: var(--s3);
+    right: var(--s3);
+    bottom: 3px;
+    height: 2px;
+    border-radius: 1px;
+    background: var(--line);
+  }
+  .bp[data-pos]::after {
+    content: '';
+    position: absolute;
+    /* THE MARK RIDES THE RAIL RATHER THAN FILLING IT. A bar growing from the
+       left would say "how big", and price is not a magnitude a reader compares
+       to zero — 24,142 is not "twice" 12,071 in any sense this table means.
+       Position is the fact, so it is a tick at a place. */
+    left: calc(var(--s3) + (100% - 2 * var(--s3) - 6px) * var(--pos) / 100%);
+    bottom: 1px;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--acc);
+    opacity: 0.55;
+  }
+  /* THE HIGH AND THE LOW TAKE THE HUES THEY MEAN, so a row's spread reads as
+     a range between two named ends rather than three identical dots. */
+  .bp.hi[data-pos]::after {
+    background: var(--up);
+  }
+  .bp.lo[data-pos]::after {
+    background: var(--down);
+  }
+  .brow[data-dir='up'] .bclose.bp[data-pos]::after {
+    background: var(--up);
+    opacity: 0.8;
+  }
+  .brow[data-dir='down'] .bclose.bp[data-pos]::after {
+    background: var(--down);
+    opacity: 0.8;
+  }
+
   /* ---- the price line ---------------------------------------------------
      34px, WHICH IS THE HEIGHT THE COVERAGE BAND USED TO SPEND ON LESS. Tall
      enough to carry a shape, short enough that it never competes with the rows
