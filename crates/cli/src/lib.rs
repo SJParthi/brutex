@@ -8844,7 +8844,11 @@ fn derived_ceiling() -> usize {
     /// bounds the CONSEQUENCE — bytes per core — but that guard is loose enough
     /// that the old value of 10 passed it at 1.96 GB against a 2 GB cap. It did
     /// not catch this and is not claimed to.
-    const REFERENCE_CORES: usize = 14;
+    /// **The literal now lives in [`reference_cores`] and this is an alias.**
+    /// It was `= 14` here, and `shared_share_of` — which needs the same floor
+    /// from outside this function, where a local `const` is not in scope — would
+    /// have had to spell the number a fourth time. One fact, one spelling.
+    const REFERENCE_CORES: usize = reference_cores();
 
     let cores =
         std::thread::available_parallelism().map_or(REFERENCE_CORES, std::num::NonZero::get);
@@ -8868,16 +8872,14 @@ fn derived_ceiling() -> usize {
     // Dividing rather than serialising keeps the parallelism that makes eight
     // rungs finish in one rung's wall clock; what changes is only how deep each
     // is allowed to go before it must stop and say so.
-    let sharing = crate::SWEEPS_SHARING_THIS_MACHINE.load(std::sync::atomic::Ordering::Relaxed);
-    whole_machine
-        .checked_div(sharing.max(1))
-        .unwrap_or(whole_machine)
-        // A SHARE IS STILL A SEARCH. Eight ways of a machine budget is millions
-        // of candidates, but the floor keeps a pathological share count from
-        // producing a ceiling that halts before the first level -- which reports
-        // extinction where the truth is that nothing was allowed to run, the
-        // same failure the `max` above refuses.
-        .max(engine::DEFAULT_CEILING / REFERENCE_CORES)
+    //
+    // THE DIVISION ITSELF MOVED TO `shared_share_of`, and that is not tidying.
+    // It was written out here and NOT at the one other place that hands a
+    // ceiling to the ladder — `ceiling_from_env`'s named arm returned the
+    // operator's figure whole — so eight rungs each took the full typed budget.
+    // Two call sites, one of them silently missing the division, is exactly the
+    // drift a shared helper makes unrepresentable.
+    shared_share_of(whole_machine)
 }
 
 fn ceiling_from_env() -> Result<usize, String> {
@@ -8894,10 +8896,80 @@ fn ceiling_from_env() -> Result<usize, String> {
                      measurement of it -- see docs/06-limits.md §93.",
                     derived_ceiling()
                 )),
-                Ok(n) => Ok(n),
+                // A NAMED CEILING IS SHARED TOO, AND UNTIL NOW IT WAS NOT.
+                //
+                // This arm read `Ok(n)` — the operator's figure returned whole,
+                // once per rung. `derived_ceiling` divides its budget by
+                // `SWEEPS_SHARING_THIS_MACHINE` precisely because `range_over`
+                // runs eight rungs at once and "handing each of them the whole
+                // machine claimed 157 GB of 48". Typing the number by hand
+                // skipped that division entirely, so `BRUTEX_CEILING=400000000`
+                // on an eight-rung request asked for **eight times** what was
+                // typed — against a budget whose own units are ~146 bytes a
+                // candidate.
+                //
+                // The page has been telling operators the opposite the whole
+                // time. `web/src/routes/backtest/+page.svelte`'s note on this
+                // field says the value is *"divided again among the rungs in
+                // flight"*, which was true of the derived path and false of this
+                // one. A knob whose documented behaviour and actual behaviour
+                // disagree by a factor of the rung count is the shape §4 bans as
+                // a fallback that hides a failure: it does not refuse, it
+                // silently over-commits.
+                //
+                // Dividing here makes the note true rather than editing the note
+                // to match the defect, and it is the direction that cannot hurt:
+                // a single-rung run divides by one and is unchanged, which is
+                // every `descend`, every `screen` and every `audit-range`.
+                Ok(n) => Ok(shared_share_of(n)),
             }
         }
     }
+}
+
+/// The floor no share may fall below: one reference core's worth of candidates.
+///
+/// # Why this is a named floor and not a literal at three call sites
+///
+/// It was a literal at three, all spelled `engine::DEFAULT_CEILING /
+/// REFERENCE_CORES` inside [`derived_ceiling`] — and when [`shared_share_of`]
+/// was added below it needed the same floor from OUTSIDE that function, where
+/// `REFERENCE_CORES` is not in scope. Copying the `14` would have been a fourth
+/// spelling of one fact and the exact defect `reference_price` and D-0307 both
+/// record: a right number in the wrong place, correct the day it is written and
+/// silently wrong the first time the other copy moves.
+///
+/// The rule it carries is the one the two `max` calls in [`derived_ceiling`]
+/// already state: **a share is still a search.** A ceiling small enough to halt
+/// before the first level reports extinction where the truth is that nothing was
+/// allowed to run — which is the silent failure §4 bans, wearing a completed
+/// run's clothes.
+fn one_core_share() -> usize {
+    engine::DEFAULT_CEILING / reference_cores()
+}
+
+/// `available_parallelism` on the machine `engine::DEFAULT_CEILING` was sized
+/// against: an Apple M4 Pro, 14 logical cores, 48 GB.
+///
+/// Recorded rather than derived, for the reason [`derived_ceiling`] gives at
+/// length: it is a MEASURED PROPERTY of a machine that is not present at test
+/// time, so a test asserting it would either hardcode the same guess twice or
+/// read a different machine. Its source is `docs/06-limits.md` §93.
+const fn reference_cores() -> usize {
+    14
+}
+
+/// One rung's share of a whole-machine candidate budget.
+///
+/// Extracted so the derived path and the named path cannot drift into two
+/// readings of one division — they had, and the named one was not dividing at
+/// all.
+fn shared_share_of(whole: usize) -> usize {
+    let sharing = crate::SWEEPS_SHARING_THIS_MACHINE.load(std::sync::atomic::Ordering::Relaxed);
+    whole
+        .checked_div(sharing.max(1))
+        .unwrap_or(whole)
+        .max(one_core_share())
 }
 
 /// The ladder for this run: the operator's threshold and the machine's ceiling.

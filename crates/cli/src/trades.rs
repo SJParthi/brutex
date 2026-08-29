@@ -908,6 +908,424 @@ pub fn by_period(rows: &[Row]) -> Vec<(Period, Vec<Bucket>)> {
         .collect()
 }
 
+/// What one run's trades look like when you refuse to believe the luckiest one.
+///
+/// # The measurement that forced this
+///
+/// The 60-minute run at 1.99% support reports a worst-fill total of `+15_291`
+/// paisa over 177 round trips and reads as the only profitable row in an
+/// eleven-run ledger. Its trades were decoded and grouped by calendar year:
+///
+/// | year | trades | worst-fill paisa |
+/// |---|---|---|
+/// | 2020 | 6 | **+46,145** |
+/// | 2021 | 29 | −13,945 |
+/// | 2022 | 21 | −7,680 |
+/// | 2023 | 28 | −7,805 |
+/// | 2024 | 19 | −15,670 |
+/// | 2025 | 50 | −12,295 |
+/// | 2026 | 24 | −14,565 |
+///
+/// **Every year except 2020 loses**, and the single largest round trip —
+/// `+55_120` paisa — is stamped 2020-03-13, the NSE circuit-breaker session of
+/// the COVID crash. That one trade is 30% of every paisa the run ever won and
+/// 3.6x its entire reported net. Remove it and the run is deeply negative.
+///
+/// None of that was visible anywhere. [`by_period`] had already computed the
+/// per-year buckets and `/trades.json` had already served them; no surface
+/// turned them into a VERDICT, so a run carried by one bar in seven years and a
+/// run with a real edge printed the same headline number.
+///
+/// # Why every field is a ratio and none is a threshold
+///
+/// A threshold here would be a static value, and the operator's standing rule is
+/// that there are none: *"remove all the static values and make everything a
+/// runtime dynamic incremental scalable approach"*. So this type MEASURES and
+/// refuses to judge. [`Robustness::survives`] takes the bar as an argument, and
+/// the caller supplies it — the same division of labour `crates/runner`'s
+/// `rank` module states as *"this module orders candidates; it does not bless
+/// them"*.
+///
+/// # Cost
+///
+/// Four accumulators and one compare per round trip, so **O(1) per trade** and
+/// one pass overall — `CLAUDE.md` §3 rule 4. There is deliberately no top-K
+/// heap: `without_best` needs only the running maximum, and the concentration
+/// index needs only a running sum of squares, so neither costs a `log K` that
+/// a bounded heap would.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Robustness {
+    /// Round trips counted. Rows with no timestamp are still counted here —
+    /// they are real trades whose calendar bucket is unknown, and dropping them
+    /// would flatter every ratio below.
+    pub trades: u64,
+    /// Worst-fill total over every counted trade, in paisa.
+    pub total: i64,
+    /// The single largest winning round trip, at the worst fill. Zero when no
+    /// trade ended above water.
+    pub best_trade: i64,
+    /// [`Self::total`] with that one trade removed.
+    ///
+    /// **The number that settles whether a result is an edge or an anecdote.**
+    /// A run whose sign flips here was carried by one bar.
+    pub without_best: i64,
+    /// Sum of every winning round trip, at the worst fill. The denominator the
+    /// two ppm figures below are taken against.
+    pub gross_win: i64,
+    /// Share of [`Self::gross_win`] contributed by the single best trade, in
+    /// parts per million. `1_000_000` means one trade won everything.
+    pub top_share_ppm: i64,
+    /// Herfindahl index of the winnings, in parts per million: the sum of each
+    /// winner's squared share.
+    ///
+    /// `1_000_000` is one winner carrying everything; `1_000_000 / n` is `n`
+    /// winners of equal size. It differs from [`Self::top_share_ppm`] by seeing
+    /// the WHOLE shape rather than the head — a run with three enormous winners
+    /// and two hundred tiny ones scores low on top-share and high here, and it
+    /// is the second reading that is right about the risk.
+    pub concentration_ppm: i64,
+}
+
+impl Robustness {
+    /// Measure one run's trades.
+    ///
+    /// Rows carrying `entry_micros == 0` are counted, unlike in [`by_period`],
+    /// and the reason is that the two answer different questions: a bucket
+    /// cannot place a trade with no clock, but a total can still add it. Silently
+    /// dropping it here would make [`Self::total`] disagree with the ledger's own
+    /// `pessimistic` for no reason a reader could see.
+    #[must_use]
+    pub fn of(rows: &[Row]) -> Self {
+        let mut out = Self::default();
+        // i128 for the squares alone: a single round trip is bounded by i64, but
+        // the SUM of squares over thousands of them is not, and a wrapped
+        // denominator would print a concentration of nearly zero for a run that
+        // is nearly all one trade -- the exact reading this type exists to
+        // refuse.
+        let mut sum_sq: i128 = 0;
+        for row in rows {
+            out.trades = out.trades.saturating_add(1);
+            out.total = out.total.saturating_add(row.worst);
+            if row.worst > 0 {
+                out.gross_win = out.gross_win.saturating_add(row.worst);
+                out.best_trade = out.best_trade.max(row.worst);
+                sum_sq = sum_sq
+                    .saturating_add(i128::from(row.worst).saturating_mul(i128::from(row.worst)));
+            }
+        }
+        out.without_best = out.total.saturating_sub(out.best_trade);
+        out.top_share_ppm = ratio_ppm(i128::from(out.best_trade), i128::from(out.gross_win));
+        // HERFINDAHL AS ONE DIVISION, NOT TWO.
+        //
+        // The index is `sum(w_i^2) / (sum w_i)^2`, and this line first read
+        // `ratio_ppm(sum_sq, gross * gross / 1_000_000)` — scaling the
+        // denominator down BEFORE the divide. On three equal winners of 100
+        // paisa that is `90_000 / 1_000_000 == 0` in integer arithmetic, so the
+        // denominator vanished and the index reported 0 for a run that is one
+        // third concentrated. Caught by
+        // `concentration_falls_as_the_winners_spread_out`, which is why that
+        // test asserts a BAND around a hand-computed third rather than merely
+        // that nine winners score below three.
+        //
+        // `ratio_ppm` scales the numerator instead, which is exact for every
+        // magnitude this store can hold: the widest run on disk is ~13,000 round
+        // trips, so `sum_sq` stays far inside `i128` even before the multiply.
+        let gross = i128::from(out.gross_win);
+        out.concentration_ppm = ratio_ppm(sum_sq, gross.saturating_mul(gross));
+        out
+    }
+
+    /// Whether the run still stands with its single best trade struck out.
+    ///
+    /// The bar is the caller's, in parts per million of the gross winnings: a
+    /// run passes when the best trade contributes NO MORE than `bar_ppm` of
+    /// everything won, and when removing it leaves the total above water.
+    ///
+    /// Both halves are needed and neither implies the other. A run of two
+    /// hundred trades where the best is 8% of winnings but the total is
+    /// negative without it is still an anecdote; a run whose best trade is 40%
+    /// of winnings but which stays positive without it is concentrated and
+    /// real. Reporting one and calling it robustness would be the fallback that
+    /// hides a failure `CLAUDE.md` §4 bans.
+    #[must_use]
+    pub const fn survives(&self, bar_ppm: i64) -> bool {
+        self.without_best > 0 && self.top_share_ppm <= bar_ppm
+    }
+}
+
+/// How steadily a run earned, at one calendar grain.
+///
+/// # Why this is a COUNT of buckets and not a variance
+///
+/// The operator's rule is stated in whole periods — *"every day how many wins
+/// how many loss every week every month every quarter every half every
+/// year"* — and a variance answers a different question than "how many of the
+/// seven years made money". A standard deviation over six observations is also
+/// a statistic nobody should lean on, while "one of seven years was positive"
+/// needs no distributional assumption at all.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Consistency {
+    /// Buckets this grain held.
+    pub buckets: u64,
+    /// Of those, the ones whose worst-fill total ended above water.
+    pub positive: u64,
+    /// Share of buckets that were positive, in parts per million.
+    pub positive_ppm: i64,
+    /// The worst single bucket's total, in paisa.
+    pub worst_bucket: i64,
+    /// That bucket's key, in the units its [`Period`] defines.
+    pub worst_bucket_key: i64,
+    /// The best single bucket's total, in paisa.
+    pub best_bucket: i64,
+    /// That bucket's key.
+    pub best_bucket_key: i64,
+}
+
+impl Consistency {
+    /// Fold one grain's buckets, as [`by_period`] already produced them.
+    ///
+    /// O(1) per bucket and one pass, and the buckets are already sorted by key,
+    /// so ties on `worst_bucket` resolve to the EARLIEST — deterministic, which
+    /// §3 rule 5 requires of anything a run prints.
+    #[must_use]
+    pub fn of(buckets: &[Bucket]) -> Self {
+        let mut out = Self::default();
+        for (at, bucket) in buckets.iter().enumerate() {
+            out.buckets = out.buckets.saturating_add(1);
+            if bucket.worst_paisa > 0 {
+                out.positive = out.positive.saturating_add(1);
+            }
+            if at == 0 || bucket.worst_paisa < out.worst_bucket {
+                out.worst_bucket = bucket.worst_paisa;
+                out.worst_bucket_key = bucket.key;
+            }
+            if at == 0 || bucket.worst_paisa > out.best_bucket {
+                out.best_bucket = bucket.worst_paisa;
+                out.best_bucket_key = bucket.key;
+            }
+        }
+        out.positive_ppm = ratio_ppm(i128::from(out.positive), i128::from(out.buckets));
+        out
+    }
+
+    /// Whether enough of this grain's buckets were positive.
+    ///
+    /// The bar is the caller's, in parts per million. A grain with no buckets
+    /// does NOT pass: an empty sample is not a satisfied rule, and returning
+    /// true for it is the silent fallback §4 bans.
+    #[must_use]
+    pub const fn survives(&self, bar_ppm: i64) -> bool {
+        self.buckets > 0 && self.positive_ppm >= bar_ppm
+    }
+}
+
+/// `part / whole` in parts per million, saturating, and zero when `whole <= 0`.
+///
+/// Shared by both types above so the two cannot drift into different readings of
+/// the same division — and taken in `i128` because both callers have already
+/// multiplied two `i64`s together before they get here.
+fn ratio_ppm(part: i128, whole: i128) -> i64 {
+    if whole <= 0 {
+        return 0;
+    }
+    let scaled = part.saturating_mul(1_000_000) / whole;
+    i64::try_from(scaled).unwrap_or(i64::MAX)
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "the same exception every test module in this workspace takes: a \
+              test that cannot panic cannot fail, and an index that is out of \
+              range in a fixture IS the failure."
+)]
+mod robustness_tests {
+    use super::{Bucket, Consistency, Robustness, Row};
+
+    fn trade(worst: i64) -> Row {
+        Row {
+            identity: [7_u8; 32],
+            seq: 0,
+            signal_bar: 0,
+            entry_bar: 1,
+            exit_bar: 2,
+            best: worst,
+            worst,
+            entry_micros: 1_705_310_400_000_000,
+            exit_micros: 1_705_314_000_000_000,
+        }
+    }
+
+    fn bucket(key: i64, worst: i64) -> Bucket {
+        Bucket {
+            key,
+            trades: 1,
+            worst_paisa: worst,
+            ..Bucket::default()
+        }
+    }
+
+    /// THE MEASUREMENT THIS TYPE EXISTS FOR, reproduced at its real scale.
+    ///
+    /// The operator's 1.99% 60-minute run: 177 trades, worst-fill total
+    /// −25,815 paisa, one winner of +55,120 on the COVID circuit-breaker day.
+    /// Modelled here as that winner plus a tail that loses the rest, so the
+    /// arithmetic is the same shape as the run and can be checked by hand.
+    #[test]
+    fn one_covid_day_carries_the_run_and_the_share_says_so() {
+        let mut rows = vec![trade(55_120)];
+        // 176 losers summing to -80,935, so the total is -25,815 exactly.
+        rows.push(trade(-80_935));
+        let out = Robustness::of(&rows);
+
+        assert_eq!(
+            out.total, -25_815,
+            "the run loses before anything is struck"
+        );
+        assert_eq!(out.best_trade, 55_120, "the single largest winner");
+        assert_eq!(out.gross_win, 55_120, "it is the only winner");
+        assert_eq!(
+            out.without_best, -80_935,
+            "strike the one bar and what is left is the tail"
+        );
+        assert_eq!(
+            out.top_share_ppm, 1_000_000,
+            "one winner is a hundred percent of the winnings"
+        );
+        assert!(
+            !out.survives(300_000),
+            "a run carried by one trade must not pass a 30% bar"
+        );
+    }
+
+    /// A run that keeps its sign without its best trade passes; one that does
+    /// not, fails — even when the concentration bar alone would let it through.
+    ///
+    /// Both halves of `survives` are exercised in opposite directions here,
+    /// because a mutant that dropped either clause would still satisfy a test
+    /// that only ever saw them agree.
+    #[test]
+    fn both_halves_of_the_bar_can_refuse_a_run_on_their_own() {
+        // Spread winnings evenly: top share is low, but the total goes negative
+        // once the best is struck. The SIGN clause must be what refuses it.
+        let spread = [trade(100), trade(100), trade(100), trade(-260)];
+        let thin = Robustness::of(&spread);
+        assert_eq!(thin.total, 40, "positive as it stands");
+        assert_eq!(thin.without_best, -60, "and negative without its best");
+        assert!(
+            thin.top_share_ppm < 400_000,
+            "no single winner dominates: {} ppm",
+            thin.top_share_ppm
+        );
+        assert!(!thin.survives(400_000), "the sign clause must refuse it");
+
+        // Concentrated but genuinely profitable without its best. The SHARE
+        // clause must be what refuses it.
+        let heavy = [trade(900), trade(50), trade(50), trade(-40)];
+        let lump = Robustness::of(&heavy);
+        assert_eq!(lump.without_best, 60, "still above water without the best");
+        assert!(
+            lump.top_share_ppm > 800_000,
+            "one winner is most of the winnings: {} ppm",
+            lump.top_share_ppm
+        );
+        assert!(!lump.survives(300_000), "the share clause must refuse it");
+        assert!(lump.survives(900_000), "and a looser bar admits it");
+    }
+
+    /// The Herfindahl index sees a shape the top share cannot.
+    ///
+    /// Three equal winners score 1/3 on top-share and 1/3 on concentration;
+    /// nine equal winners score 1/9 on both. The index must move with the
+    /// COUNT, which a mutant returning the top share would not.
+    #[test]
+    fn concentration_falls_as_the_winners_spread_out() {
+        let three = Robustness::of(&[trade(100), trade(100), trade(100)]);
+        let nine = Robustness::of(&vec![trade(100); 9]);
+        assert!(
+            (330_000..=340_000).contains(&three.concentration_ppm),
+            "three equal winners is one third: {}",
+            three.concentration_ppm
+        );
+        assert!(
+            (110_000..=112_000).contains(&nine.concentration_ppm),
+            "nine equal winners is one ninth: {}",
+            nine.concentration_ppm
+        );
+        assert!(
+            nine.concentration_ppm < three.concentration_ppm,
+            "spreading the winnings must lower the index"
+        );
+    }
+
+    /// A run that never won has no denominator, and both ratios must be zero
+    /// rather than a division that panics or a share of nothing that reads 100%.
+    #[test]
+    fn a_run_with_no_winner_reports_zero_rather_than_dividing() {
+        let out = Robustness::of(&[trade(-10), trade(-20)]);
+        assert_eq!(out.gross_win, 0, "nothing was won");
+        assert_eq!(out.best_trade, 0, "so there is no best trade");
+        assert_eq!(out.top_share_ppm, 0, "and no share of it");
+        assert_eq!(out.concentration_ppm, 0, "and no concentration");
+        assert_eq!(out.without_best, -30, "the total is unchanged");
+        assert!(!out.survives(1_000_000), "a losing run passes no bar");
+    }
+
+    /// Every year but one losing is the operator's real case, and the count is
+    /// what says so.
+    #[test]
+    fn six_losing_years_and_one_winner_is_one_seventh_positive() {
+        let years = [
+            bucket(2020, 46_145),
+            bucket(2021, -13_945),
+            bucket(2022, -7_680),
+            bucket(2023, -7_805),
+            bucket(2024, -15_670),
+            bucket(2025, -12_295),
+            bucket(2026, -14_565),
+        ];
+        let out = Consistency::of(&years);
+        assert_eq!(out.buckets, 7);
+        assert_eq!(out.positive, 1, "only 2020 made money");
+        assert_eq!(out.positive_ppm, 142_857, "one in seven");
+        assert_eq!(out.worst_bucket_key, 2024, "the deepest year");
+        assert_eq!(out.worst_bucket, -15_670);
+        assert_eq!(out.best_bucket_key, 2020, "and the one that carried it");
+        assert_eq!(out.best_bucket, 46_145);
+        assert!(
+            !out.survives(500_000),
+            "one positive year in seven must not clear a half bar"
+        );
+    }
+
+    /// An empty grain is not a satisfied rule.
+    ///
+    /// `positive_ppm` of nothing is 0 and would already fail most bars, but a
+    /// bar of 0 would otherwise admit it — so the emptiness is tested
+    /// separately from the ratio.
+    #[test]
+    fn a_grain_with_no_buckets_refuses_even_the_loosest_bar() {
+        let out = Consistency::of(&[]);
+        assert_eq!(out.buckets, 0);
+        assert_eq!(out.positive_ppm, 0);
+        assert!(!out.survives(0), "an empty sample satisfies nothing");
+    }
+
+    /// Ties on the worst bucket resolve to the earliest key, because §3 rule 5
+    /// requires two runs over the same bytes to print the same answer.
+    #[test]
+    fn a_tie_on_the_worst_bucket_takes_the_earlier_key() {
+        let tied = [bucket(2021, -500), bucket(2022, -500), bucket(2023, 100)];
+        let out = Consistency::of(&tied);
+        assert_eq!(out.worst_bucket_key, 2021, "the earlier of two equal lows");
+        assert_eq!(out.best_bucket_key, 2023);
+        assert_eq!(out.positive, 1);
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::expect_used,

@@ -30,9 +30,21 @@
 //!
 //! One hash probe to find the run's block, then one seek and one read per row —
 //! `CLAUDE.md` §3 rule 4's constant per-operation cost, with the row count as
-//! the only linear term and it is the answer itself. The index is rebuilt once
-//! when the file is opened, which is the same open-time pass `results` and
-//! `frontier` pay.
+//! the only linear term and it is the answer itself.
+//!
+//! **This paragraph used to end "the index is rebuilt once when the file is
+//! opened", and the file was opened ONCE PER REQUEST.** So the documented
+//! once-per-process pass was a per-page-load walk of every row in the store —
+//! one `read_exact` and one blake3 seal check each — to build an index used for
+//! a single probe and then dropped. The sentence was true of `open_read` and
+//! false of this route, which is the worst place for a cost claim to be wrong:
+//! it described the primitive and not the caller.
+//!
+//! [`OPEN`] now holds the handle between requests, keyed on the file's path and
+//! LENGTH. The store is append-only by §3 rule 8, so an unchanged length means
+//! unchanged content and the index is rebuilt only when there is something new
+//! in it. The sentence above is now true of the route as well as of the
+//! primitive.
 
 use std::path::PathBuf;
 
@@ -73,16 +85,12 @@ fn respond(
         );
     };
 
-    // OPENED READ-ONLY, AND THAT IS THE POINT. A GET that creates its own empty
-    // file answers "no trades" by MAKING that true, which is the failure §4
-    // bans. `cli::frontier::open_read` exists for the same reason and had no
-    // caller; this one does.
-    let mut file = match cli::trades::Trades::open_read(&root) {
-        Ok(file) => file,
-        Err(why) => {
-            // AN ABSENT FILE IS NOT AN ERROR, IT IS AN ANSWER. Nothing has been
-            // swept yet, or nothing was recorded, and a 500 here would read as a
-            // broken server rather than an empty store.
+    let rows = match fetch(&root, &identity) {
+        Fetched::Rows(rows) => rows,
+        // AN ABSENT FILE IS NOT AN ERROR, IT IS AN ANSWER. Nothing has been
+        // swept yet, or nothing was recorded, and a 500 here would read as a
+        // broken server rather than an empty store.
+        Fetched::NoFile(why) => {
             return (
                 axum::http::StatusCode::OK,
                 json,
@@ -92,11 +100,7 @@ fn respond(
                 ),
             );
         }
-    };
-
-    let rows = match file.of_run(&identity) {
-        Ok(rows) => rows,
-        Err(why) => return refuse(json, &why),
+        Fetched::Unreadable(why) => return refuse(json, &why),
     };
 
     let mut out = String::with_capacity(rows.len().saturating_mul(120).saturating_add(64));
@@ -140,17 +144,186 @@ fn respond(
     // The aggregation lives in `cli::trades::by_period` rather than here for the
     // reason `/frontier.json` gives about `Row::derived`: `api` must not become
     // a second place that decides what a "win" is.
-    for (at, (period, buckets)) in cli::trades::by_period(&rows).iter().enumerate() {
+    // GROUPED ONCE AND READ TWICE. `by_period` is one pass over the rows with
+    // eight maps; the consistency block below folds the buckets it already
+    // produced rather than walking the rows again, so adding that block costs
+    // O(buckets) and not a second O(trades).
+    let grouped = cli::trades::by_period(&rows);
+    write_periods(&mut out, &grouped);
+    // HOW STEADILY IT EARNED, ONE ROW PER GRAIN.
+    //
+    // The buckets above answer "how much in each period"; this answers "how
+    // many of them made money at all", which is the question a single headline
+    // total cannot be asked. On the operator's own 60-minute run the two
+    // readings disagree completely: the total is positive and SIX OF SEVEN
+    // YEARS ARE NEGATIVE.
+    //
+    // A separate key rather than a field inside each period's array, because
+    // that array is a list of buckets and the page already iterates it — adding
+    // an object to a list of objects would change its shape for every existing
+    // reader. This is purely additive.
+    out.push_str(r#"},"consistency":{"#);
+    write_consistency(&mut out, &grouped);
+
+    // WHETHER ONE LUCKY BAR IS THE WHOLE RESULT.
+    //
+    // `without_best` is the field to read first. The operator's rule is that a
+    // lucky trade must never be believed, and until this shipped there was no
+    // number anywhere that could refuse one: a run carried by a single COVID
+    // circuit-breaker session and a run with a real edge printed the same
+    // `pessimistic`.
+    //
+    // NO THRESHOLD IS APPLIED HERE. `Robustness::survives` takes its bar as an
+    // argument and this route does not supply one, because a bar baked into the
+    // response is a static value the operator cannot move — the same objection
+    // §6 makes to a depth parameter, one step earlier. The page compares.
+    let r = cli::trades::Robustness::of(&rows);
+    note_robustness(&r);
+
+    let _ = std::fmt::Write::write_fmt(
+        &mut out,
+        format_args!(
+            r#"}},"robustness":{{"trades":{},"total":{},"best_trade":{},"without_best":{},"gross_win":{},"top_share_ppm":{},"concentration_ppm":{}}},"count":{},"refusal":null}}"#,
+            r.trades,
+            r.total,
+            r.best_trade,
+            r.without_best,
+            r.gross_win,
+            r.top_share_ppm,
+            r.concentration_ppm,
+            rows.len(),
+        ),
+    );
+    (axum::http::StatusCode::OK, json, out)
+}
+
+/// What one lookup found: the rows, an absent file, or a file that refused.
+///
+/// Three outcomes and not two, because the middle one is an ANSWER rather than
+/// a failure and the route already distinguished them — an absent `trades.bin`
+/// means nothing has been swept yet and answers `200` with an empty list, while
+/// a corrupt one is a `400`. Folding them into a single `Result` would lose that
+/// distinction at exactly the point where a reader most needs it.
+enum Fetched {
+    /// The run's round trips, possibly none if the identity is not in the file.
+    Rows(Vec<cli::trades::Row>),
+    /// No `trades.bin` at all, with the reason to echo.
+    NoFile(String),
+    /// The file exists and would not answer.
+    Unreadable(String),
+}
+
+/// The open `trades.bin`, **held between requests**.
+///
+/// # This module's header already claimed it, and the code did the opposite
+///
+/// The header above says *"The index is rebuilt once when the file is opened"*.
+/// `respond` called `Trades::open_read` **per request**, and `open_read` walks
+/// the whole file — one `read_exact` and one blake3 seal check per row — to
+/// build a block index that is then used for exactly one hash probe and thrown
+/// away when the handler returns. So a documented O(1) find was an O(rows)
+/// rebuild on every page load, and the linear term was the whole file rather
+/// than the answer.
+///
+/// At the 3,306 rows on disk today that is invisible. One 81-month run records
+/// **11,209** trades, so a hundred recorded runs is over a million seal checks
+/// per request — and this is the route the backtest page calls on every
+/// selection.
+///
+/// # Invalidated by LENGTH, which is sound only because the file is append-only
+///
+/// `cli::trades` never rewrites a row: `CLAUDE.md` §3 rule 8 makes the store
+/// append-only, and `append_all` seeks to the end. So a file whose length is
+/// unchanged has content that is unchanged, and length is a complete
+/// invalidation key — no mtime granularity to worry about, no hash to compute.
+/// A file that GREW is reopened, which rebuilds the index over the new rows as
+/// well as the old; that is the same cost the old code paid every time, now paid
+/// only when there is something new to learn.
+///
+/// The path is part of the key because `store_dir()` is configurable, and
+/// serving one store's trades under another store's request is the class of
+/// defect `calendar_of::cached` records fixing in its own key.
+static OPEN: std::sync::OnceLock<std::sync::Mutex<Option<Held>>> = std::sync::OnceLock::new();
+
+/// One cached open file, with the two facts that decide whether it is still good.
+struct Held {
+    /// Which `trades.bin` this is.
+    path: PathBuf,
+    /// Its length when the index was built.
+    len: u64,
+    /// The handle, index already rebuilt.
+    file: cli::trades::Trades,
+}
+
+/// One run's rows, reusing the open file when the store has not grown.
+fn fetch(root: &std::path::Path, identity: &[u8; 32]) -> Fetched {
+    let path = cli::trades::Trades::path(root);
+    let len = match std::fs::metadata(&path) {
+        Ok(meta) => meta.len(),
+        Err(why) => return Fetched::NoFile(format!("{} could not be read: {why}", path.display())),
+    };
+
+    let Ok(mut held) = OPEN.get_or_init(|| std::sync::Mutex::new(None)).lock() else {
+        // A POISONED LOCK IS NOT A REASON TO SERVE NOTHING. Some other request
+        // panicked while holding it; this one can still answer by opening its
+        // own handle, which is precisely what the code did before the cache
+        // existed. Falling back loudly-in-the-code and silently-on-the-wire is
+        // acceptable here only because the fallback is the ORIGINAL behaviour
+        // and not a degraded one.
+        return match cli::trades::Trades::open_read(root) {
+            Ok(mut file) => match file.of_run(identity) {
+                Ok(rows) => Fetched::Rows(rows),
+                Err(why) => Fetched::Unreadable(why),
+            },
+            Err(why) => Fetched::NoFile(why),
+        };
+    };
+
+    let stale = held.as_ref().is_none_or(|h| h.len != len || h.path != path);
+    if stale {
+        match cli::trades::Trades::open_read(root) {
+            Ok(file) => {
+                *held = Some(Held {
+                    path: path.clone(),
+                    len,
+                    file,
+                });
+            }
+            Err(why) => return Fetched::NoFile(why),
+        }
+    }
+
+    let Some(h) = held.as_mut() else {
+        return Fetched::NoFile(format!("{} could not be opened", path.display()));
+    };
+    match h.file.of_run(identity) {
+        Ok(rows) => Fetched::Rows(rows),
+        Err(why) => Fetched::Unreadable(why),
+    }
+}
+
+/// Every bucket of every calendar grain, as one JSON array per grain.
+///
+/// Lifted out of [`trades_json`] alongside [`write_consistency`] for the same
+/// reason: the handler crossed the hundred-line lint and a hundred-line handler
+/// is the shape that hides a defect. Extracting the three blocks is what the
+/// lint is asking for; an `allow` would have been the fallback that hides a
+/// failure `CLAUDE.md` §4 bans, applied to the tooling instead of to the data.
+///
+/// The bucket shape is unchanged from when this was inline — a page already
+/// iterating these arrays reads the same bytes.
+fn write_periods(out: &mut String, grouped: &[(cli::trades::Period, Vec<cli::trades::Bucket>)]) {
+    for (at, (period, buckets)) in grouped.iter().enumerate() {
         if at > 0 {
             out.push(',');
         }
-        let _ = std::fmt::Write::write_fmt(&mut out, format_args!(r#""{}":["#, period.name()));
+        let _ = std::fmt::Write::write_fmt(out, format_args!(r#""{}":["#, period.name()));
         for (n, b) in buckets.iter().enumerate() {
             if n > 0 {
                 out.push(',');
             }
             let _ = std::fmt::Write::write_fmt(
-                &mut out,
+                out,
                 format_args!(
                     r#"{{"key":{},"trades":{},"wins":{},"worst_wins":{},"best_paisa":{},"worst_paisa":{},"largest_win":{},"largest_loss":{}}}"#,
                     b.key,
@@ -166,11 +339,91 @@ fn respond(
         }
         out.push(']');
     }
-    let _ = std::fmt::Write::write_fmt(
-        &mut out,
-        format_args!(r#"}},"count":{},"refusal":null}}"#, rows.len()),
+}
+
+/// One object per calendar grain, saying how steadily the run earned at it.
+///
+/// Split out of [`trades_json`] because that handler crossed the hundred-line
+/// lint the moment this and [`note_robustness`] were added to it — and a
+/// hundred-line handler is the shape that hides a defect, which is the lint's
+/// whole point rather than a formality to be silenced with an `allow`.
+///
+/// O(buckets) and no second pass over the trades: the buckets arrive already
+/// folded by `cli::trades::by_period`, and `Consistency::of` is one compare per
+/// bucket.
+fn write_consistency(
+    out: &mut String,
+    grouped: &[(cli::trades::Period, Vec<cli::trades::Bucket>)],
+) {
+    for (at, (period, buckets)) in grouped.iter().enumerate() {
+        if at > 0 {
+            out.push(',');
+        }
+        let c = cli::trades::Consistency::of(buckets);
+        let _ = std::fmt::Write::write_fmt(
+            out,
+            format_args!(
+                r#""{}":{{"buckets":{},"positive":{},"positive_ppm":{},"worst_bucket":{},"worst_bucket_key":{},"best_bucket":{},"best_bucket_key":{}}}"#,
+                period.name(),
+                c.buckets,
+                c.positive,
+                c.positive_ppm,
+                c.worst_bucket,
+                c.worst_bucket_key,
+                c.best_bucket,
+                c.best_bucket_key,
+            ),
+        );
+    }
+}
+
+/// The audit trail for one run's robustness, and **its level is decided by a
+/// sign and not by a number.**
+///
+/// `Warn` when the run is above water as it stands and BELOW it with its single
+/// best trade struck out. That is a sign flip — an objective property of the
+/// series — so there is no threshold anybody chose and no static value here to
+/// be set wrongly and silently the way §6 describes. A run that survives its own
+/// best trade logs at `Info` and reads as ordinary; a run that does not is
+/// exactly the row an operator must never scroll past, and it now appears on
+/// `/logs` beside the pull events.
+///
+/// ONE EVENT PER REQUEST, which is the granularity `note_request` already logs
+/// at and far coarser than gate 17's concern: that gate silences `vocab engine
+/// indicators runner` because they hold the loops, and `api` is on neither list.
+/// Nothing here runs per trade — `Robustness::of` has already finished when this
+/// fires.
+pub(crate) fn note_robustness(r: &cli::trades::Robustness) {
+    let carried_by_one = r.total > 0 && r.without_best <= 0;
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::new(
+            if carried_by_one {
+                telemetry::Level::Warn
+            } else {
+                telemetry::Level::Info
+            },
+            "api.trades",
+            if carried_by_one {
+                "the result rests on a single trade"
+            } else {
+                "robustness measured"
+            },
+        )
+        .with("trades", telemetry::Value::Uint(r.trades))
+        // `paisa` and not `Int` for the three money fields, which is this
+        // workspace's own convention: the constructor exists "so a call site
+        // reads as the thing it is and a reviewer can grep for every place a
+        // price enters the log". The two ppm figures are ratios, not money, and
+        // take `Int`.
+        .with("total", telemetry::Value::paisa(r.total))
+        .with("best_trade", telemetry::Value::paisa(r.best_trade))
+        .with("without_best", telemetry::Value::paisa(r.without_best))
+        .with("top_share_ppm", telemetry::Value::Int(r.top_share_ppm))
+        .with(
+            "concentration_ppm",
+            telemetry::Value::Int(r.concentration_ppm),
+        ),
     );
-    (axum::http::StatusCode::OK, json, out)
 }
 
 /// A refusal that names its cause, in the shape every other route here uses.

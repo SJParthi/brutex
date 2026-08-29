@@ -209,7 +209,17 @@ struct Case {
 /// `conduct` calls `cli::range_over` on the real store two lines later -- a
 /// census that can only be satisfied by launching a sweep from `cargo test` is
 /// a census people route around.
-const ROWS: usize = 27;
+///
+/// 27 -> 28 for `trades.rs api.trades`, the robustness audit line. Driven here
+/// rather than named unreachable because `note_robustness` takes a plain
+/// `cli::trades::Robustness` and needs no store, no socket and no fixture — the
+/// cheapest row in the table to reach, and the only one besides `note_front_end`
+/// whose LEVEL is computed from its own payload rather than fixed at the call
+/// site. It is the `Warn` arm that is driven: `Info` and `Warn` differ by a sign
+/// flip — `total > 0 && without_best <= 0` — so a mutant inverting that
+/// comparison would keep emitting and keep every field, and only the level would
+/// move. The level is therefore the assertion that has to exist.
+const ROWS: usize = 28;
 
 /// How many distinct production emit sites those rows cover.
 ///
@@ -992,6 +1002,42 @@ fn cases() -> Vec<Case> {
         });
     }
 
+    // crates/api/src/trades.rs — a run whose whole result is one trade.
+    //
+    // THE WARN ARM IS THE ONE DRIVEN, because it is the one that matters and
+    // because its level is the only thing here that is DECIDED rather than
+    // fixed: `note_robustness` picks `Warn` over `Info` on a sign flip —
+    // `total > 0 && without_best <= 0` — and no other row in this table has a
+    // level that depends on its own payload. A mutant that inverted the
+    // comparison would keep emitting, keep every field, and change only the
+    // level, so the level is what this row asserts on.
+    //
+    // The figures are the operator's own 60-minute run at 1.99% support,
+    // rounded to the shape of the arithmetic rather than invented: a total that
+    // is positive only because of a single 2020-03-13 winner.
+    {
+        cases.push(Case {
+            site: "trades.rs api.trades rests on a single trade",
+            target: "api.trades",
+            message: "the result rests on a single trade",
+            level: telemetry::Level::Warn,
+            drive: Box::new(move || {
+                crate::trades::note_robustness(&cli::trades::Robustness {
+                    trades: 177,
+                    total: 15_291,
+                    best_trade: 55_120,
+                    without_best: -39_829,
+                    gross_win: 55_120,
+                    top_share_ppm: 1_000_000,
+                    concentration_ppm: 1_000_000,
+                });
+            }),
+            mine: Box::new(|record| {
+                counts(record, "trades", 177) && record.field("without_best").is_some()
+            }),
+        });
+    }
+
     cases
 }
 
@@ -1520,9 +1566,15 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // 37 -> 38 at D-0297: the commit gate's refusal, driven in the table above
     // rather than added to the unreachable list, because an unstamped build is
     // exactly what `cargo test` is and the row costs nothing to reach.
+    //
+    // 49 -> 50: `trades.rs api.trades`, the robustness audit line. Driven in the
+    // table above rather than listed as unreachable, because `note_robustness`
+    // takes a plain value and needs no store, no socket and no fixture -- the
+    // cheapest kind of row to reach, and the one whose LEVEL is computed rather
+    // than fixed.
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 49,
+        lib_sites, 50,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"

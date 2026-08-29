@@ -1301,6 +1301,7 @@ mod tests {
         let ranked = crate::rank::Ranked {
             top: vec![weak],
             considered: 3_689,
+            halted: None,
         };
         let text = crate::report::render_findings(&ranked, &out.sweep);
 
@@ -1368,6 +1369,7 @@ mod tests {
         let ranked = crate::rank::Ranked {
             top: vec![thin],
             considered: 3_689,
+            halted: None,
         };
         let text = crate::report::render_findings(&ranked, &out.sweep);
         assert!(

@@ -143,6 +143,37 @@ pub struct Ranked {
     /// four combinations" from "the sweep found sixty-one million and this is
     /// the best four", and `CLAUDE.md` §4 does not allow those to look alike.
     pub considered: u64,
+    /// `Some(budget)` when ranking refused because [`Self::considered`] exceeded
+    /// it, and [`Self::top`] is therefore EMPTY rather than partial.
+    ///
+    /// # The second wall, and until now nothing measured it
+    ///
+    /// `engine::DEFAULT_CEILING` bounds how many candidates the ladder may
+    /// ENUMERATE, and `engine::Halt` reports when it bites. Nothing bounded what
+    /// happens next. [`walk`] scores every survivor against the whole column, so
+    /// its cost is `considered x bars` — and it had no budget, no cap and no
+    /// breach of any kind, only a `BinaryHeap::with_capacity(keep)` that bounds
+    /// MEMORY.
+    ///
+    /// That asymmetry is why a complete low-support run had never been observed.
+    /// At the shipped ceiling the ladder halts first, so ranking never grows
+    /// large and the wall is invisible. Raise the ceiling — which
+    /// `BRUTEX_CEILING` lets any operator do from the browser — and the ladder
+    /// completes, then this runs unbounded. MEASURED 2026-08-29 on zerodha
+    /// NIFTY 60min, 11,545 bars, `min_hits` 230, ceiling 400,000,000: the walk
+    /// finished and resident memory fell from 10.9 GB, and ranking was still
+    /// running **twenty-seven minutes later** with no output and no way to tell
+    /// from outside whether it ever would.
+    ///
+    /// # Empty and not partial, deliberately
+    ///
+    /// A truncated ranking would be ordered by whatever `par_chunks` reached
+    /// first, which is a memory-layout ordering uncorrelated with |t| or payoff.
+    /// `crates/runner/src/validate.rs` already records what that costs — *"the
+    /// one that used to be here RANKED A PREFIX"* — and `engine`'s halted rows
+    /// are excluded from `best_complete` for the same reason. A refusal an
+    /// operator can see beats a plausible answer they cannot check.
+    pub halted: Option<u64>,
 }
 
 /// The best `keep` combinations by |t|, in memory proportional to `keep`.
@@ -168,7 +199,40 @@ pub struct Ranked {
 /// UNVERIFIED as a measured figure: no bench row covers this yet.
 #[must_use]
 pub fn rank(sweep: &Sweep, column: &Column, forward: &Forward, keep: usize) -> Ranked {
-    walk::<Scored>(sweep, column, forward, keep)
+    walk::<Scored>(sweep, column, forward, keep, None)
+}
+
+/// [`rank`], refusing rather than running when the frontier is wider than
+/// `budget`.
+///
+/// # `None` is the default and this changes no existing run
+///
+/// Every current caller reaches [`rank`] or [`rank_by`], which pass `None`, so
+/// the shipped behaviour is byte-identical to before this existed —
+/// `CLAUDE.md` §3 rule 5. What the parameter buys is that an operator who has
+/// raised `BRUTEX_CEILING` past the point where the ladder completes can now
+/// bound the phase that follows it, instead of discovering by `ps` that a run
+/// has been ranking for half an hour.
+///
+/// # There is no default budget, and its absence is the point
+///
+/// A constant here would be the defect `CLAUDE.md` §6 describes one step
+/// earlier: set once, by whoever wrote it, against a machine and a column
+/// length that are not the caller's. The affordable frontier width depends on
+/// `column`'s own bar count — scoring is `considered x bars` — so a figure that
+/// is generous on 11,545 sixty-minute bars is three orders of magnitude too
+/// generous on 618,296 one-minute ones. The caller knows both numbers; this
+/// function knows neither, and inventing one here would be exactly the
+/// static value the operator's standing rule refuses.
+#[must_use]
+pub fn rank_within(
+    sweep: &Sweep,
+    column: &Column,
+    forward: &Forward,
+    keep: usize,
+    budget: Option<u64>,
+) -> Ranked {
+    walk::<Scored>(sweep, column, forward, keep, budget)
 }
 
 /// Which question decides who survives the cut.
@@ -267,9 +331,28 @@ pub fn rank_by(
     keep: usize,
     lens: Lens,
 ) -> Ranked {
+    rank_by_within(sweep, column, forward, keep, lens, None)
+}
+
+/// [`rank_by`], refusing rather than running when the frontier is wider than
+/// `budget`.
+///
+/// Same contract as [`rank_within`], and the same reason for taking the budget
+/// rather than owning one: the lens decides the ORDER, the budget decides
+/// whether the ordering is affordable at all, and only the caller holds the bar
+/// count that makes the second question answerable.
+#[must_use]
+pub fn rank_by_within(
+    sweep: &Sweep,
+    column: &Column,
+    forward: &Forward,
+    keep: usize,
+    lens: Lens,
+    budget: Option<u64>,
+) -> Ranked {
     match lens {
-        Lens::Detectability => walk::<Scored>(sweep, column, forward, keep),
-        Lens::Payoff => walk::<ByPayoff>(sweep, column, forward, keep),
+        Lens::Detectability => walk::<Scored>(sweep, column, forward, keep, budget),
+        Lens::Payoff => walk::<ByPayoff>(sweep, column, forward, keep, budget),
     }
 }
 
@@ -377,6 +460,7 @@ fn walk<K: Ranked1 + Send>(
     column: &Column,
     forward: &Forward,
     keep: usize,
+    budget: Option<u64>,
 ) -> Ranked {
     let total: usize = sweep.levels.iter().map(|l| l.frequent.len()).sum();
     let considered = u64::try_from(total).unwrap_or(u64::MAX);
@@ -387,6 +471,28 @@ fn walk<K: Ranked1 + Send>(
         return Ranked {
             top: Vec::new(),
             considered,
+            halted: None,
+        };
+    }
+
+    // THE BUDGET IS CHECKED BEFORE ANY SCORING, WHICH IS THE ONLY PLACE IT CAN
+    // BE CHECKED HONESTLY.
+    //
+    // `considered` is known from the frontier alone — one sum over level
+    // lengths, no column reads — so the refusal costs nothing and happens
+    // before the expensive phase rather than partway through it. Checking
+    // inside the parallel map would mean some chunks had already scored, and a
+    // partial answer is the thing [`Ranked::halted`] exists to refuse.
+    //
+    // `>` and not `>=`: a budget of exactly `considered` is a budget that
+    // affords this run, and refusing it would make the boundary value mean
+    // "one too many" on one side of the comparison and "exactly enough" on the
+    // other. `the_budget_admits_a_frontier_of_exactly_its_own_size` pins it.
+    if budget.is_some_and(|bar| considered > bar) {
+        return Ranked {
+            top: Vec::new(),
+            considered,
+            halted: budget,
         };
     }
 
@@ -414,6 +520,7 @@ fn walk<K: Ranked1 + Send>(
     Ranked {
         top: top.into_iter().map(Ranked1::unwrap).collect(),
         considered,
+        halted: None,
     }
 }
 
@@ -423,7 +530,7 @@ fn walk<K: Ranked1 + Send>(
     reason = "the exception every test module in this workspace takes."
 )]
 mod tests {
-    use super::{Scored, rank};
+    use super::{Lens, Scored, rank, rank_by_within, rank_within};
     use crate::outcome::{Edge, Horizon, forward};
     use crate::{Sweeper, synthetic};
     use engine::Ladder;
@@ -621,6 +728,102 @@ mod tests {
         let (a, b) = (scored(f64::NAN, 1), scored(f64::NAN, 2));
         assert_ne!(a.cmp(&b), core::cmp::Ordering::Equal);
         assert_eq!(a.cmp(&a), core::cmp::Ordering::Equal);
+    }
+
+    /// The budget refuses a frontier wider than itself, and says which bar it
+    /// refused against.
+    ///
+    /// `top` must be EMPTY and not short: a partial ranking would be ordered by
+    /// whichever `par_chunks` finished first, which is a memory-layout order
+    /// uncorrelated with |t|. `Ranked::halted`'s doc records why that is refused
+    /// rather than reported as a smaller answer.
+    #[test]
+    fn a_frontier_wider_than_its_budget_is_refused_and_not_truncated() {
+        let bars = synthetic::sessions(8);
+        let out = Sweeper::new(Ladder::with_min_hits(600).with_ceiling(50_000))
+            .run(&bars, &mut evaluator());
+        let column = Column::build(&bars, &mut evaluator());
+        let f = forward(&bars, Horizon::DEFAULT);
+
+        let wide = u64::try_from(out.sweep.all_frequent().count()).unwrap_or(u64::MAX);
+        assert!(wide > 1, "the fixture must produce a frontier to refuse");
+
+        let refused = rank_within(&out.sweep, &column, &f, 10, Some(wide - 1));
+        assert!(refused.top.is_empty(), "a refusal returns no rows at all");
+        assert_eq!(refused.considered, wide, "and still counts what it saw");
+        assert_eq!(
+            refused.halted,
+            Some(wide - 1),
+            "naming the bar it refused against, not merely that it refused"
+        );
+    }
+
+    /// A budget of exactly the frontier's width AFFORDS it.
+    ///
+    /// The comparison is `>` and not `>=`, and the boundary is the only place
+    /// the difference is observable — a mutant flipping it passes every test
+    /// that only ever tries a budget clearly above or clearly below.
+    #[test]
+    fn the_budget_admits_a_frontier_of_exactly_its_own_size() {
+        let bars = synthetic::sessions(8);
+        let out = Sweeper::new(Ladder::with_min_hits(600).with_ceiling(50_000))
+            .run(&bars, &mut evaluator());
+        let column = Column::build(&bars, &mut evaluator());
+        let f = forward(&bars, Horizon::DEFAULT);
+
+        let wide = u64::try_from(out.sweep.all_frequent().count()).unwrap_or(u64::MAX);
+        let exact = rank_within(&out.sweep, &column, &f, 10, Some(wide));
+        assert_eq!(exact.halted, None, "exactly affordable is affordable");
+
+        // And it is the SAME answer an unbudgeted run gives, byte for byte --
+        // §3 rule 5. A budget that changes the result when it does not bite
+        // would be a second ranking rule wearing a bound's clothes.
+        let free = rank(&out.sweep, &column, &f, 10);
+        assert_eq!(exact.considered, free.considered);
+        assert_eq!(exact.top.len(), free.top.len());
+        for (a, b) in exact.top.iter().zip(free.top.iter()) {
+            assert_eq!(a.mask, b.mask, "same rows in the same order");
+            assert_eq!(
+                a.edge.t.to_bits(),
+                b.edge.t.to_bits(),
+                "same bits, not near"
+            );
+        }
+    }
+
+    /// `None` is unbounded, which is what every shipped caller passes.
+    #[test]
+    fn no_budget_never_refuses_however_wide_the_frontier() {
+        let bars = synthetic::sessions(8);
+        let out = Sweeper::new(Ladder::with_min_hits(600).with_ceiling(50_000))
+            .run(&bars, &mut evaluator());
+        let column = Column::build(&bars, &mut evaluator());
+        let f = forward(&bars, Horizon::DEFAULT);
+
+        let r = rank_within(&out.sweep, &column, &f, 10, None);
+        assert_eq!(r.halted, None);
+        assert!(
+            !r.top.is_empty(),
+            "and it ranked, rather than merely not refusing"
+        );
+    }
+
+    /// The budget reaches the payoff lens too, and is not silently dropped by
+    /// the arm that takes a different `K`.
+    #[test]
+    fn the_payoff_lens_honours_the_same_budget() {
+        let bars = synthetic::sessions(8);
+        let out = Sweeper::new(Ladder::with_min_hits(600).with_ceiling(50_000))
+            .run(&bars, &mut evaluator());
+        let column = Column::build(&bars, &mut evaluator());
+        let f = forward(&bars, Horizon::DEFAULT);
+
+        let wide = u64::try_from(out.sweep.all_frequent().count()).unwrap_or(u64::MAX);
+        for lens in [Lens::Detectability, Lens::Payoff] {
+            let r = rank_by_within(&out.sweep, &column, &f, 10, lens, Some(wide - 1));
+            assert_eq!(r.halted, Some(wide - 1), "{lens:?} must refuse too");
+            assert!(r.top.is_empty(), "{lens:?} must return nothing");
+        }
     }
 
     #[test]
