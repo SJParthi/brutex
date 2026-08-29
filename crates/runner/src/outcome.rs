@@ -1120,6 +1120,53 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
     if n < 2 {
         return assemble(0.0);
     }
+    // NO DISPERSION IS NO EVIDENCE, AND IT IS ASKED OF `m2` BEFORE THE
+    // CORRECTION RATHER THAN OF THE STANDARD ERROR AFTER IT.
+    //
+    // The guard below already intends this — its own comment says "Every
+    // observation identical: the mean is exact and its spread is zero" — and it
+    // could not deliver it, because it tests `standard_error > 0.0` and
+    // `standard_error` is computed from `long_run_sum_squares`, which is
+    // UNCENTERED by construction: `m2 + 2(A - m·B + m²·C)`. On a sample whose
+    // every observation is identical, `m2` is exactly zero and that bracket is
+    // pure rounding noise in the cancellation of three large terms. The SIGN of
+    // that noise alone decided between `t = 0` and `t` in the hundreds of
+    // millions.
+    //
+    // REPORTED, AND NOT REPRODUCED HERE, which is stated rather than assumed.
+    // An adversarial pass measured, over strictly-increasing irregular
+    // sources, 15% of constant-return masks exceeding |t| = 1e6 at n=3 and
+    // 48.8% at n=600 with a maximum of 1.09e9 -- no middle ground, exactly 0
+    // or astronomically large. On an EVENLY spaced fixture the three cross-sums
+    // cancel exactly and the old guard caught the case on its own; the test
+    // beside this one passes with this check disabled, and says so.
+    //
+    // So this is kept as the stricter and exact form of a question the code
+    // already meant to ask, not as a demonstrated repair. §3 rule 6.
+    //
+    // AND `rank::walk` ORDERS ON `edge.t.abs()`, so those artefacts sorted
+    // ABOVE every genuine finding and occupied the head of `Ranked::top`, where
+    // `keep` cut the real results out beneath them. `significance::p_value` is
+    // `2(1 - Φ(|t|))`, which clamps to exactly zero at that magnitude, so they
+    // cleared any Bonferroni bar the run could set. `Scored::cmp` deliberately
+    // demotes NON-FINITE scores — the ordering defends against infinity and was
+    // defeated by a large finite artefact.
+    //
+    // `m2` IS THE EXACT TEST AND NEEDS NO EPSILON. Welford increments it by
+    // `delta * delta2`, and on identical observations both factors are exactly
+    // zero, so `m2` is exactly zero — not nearly. A sample with genuine but
+    // tiny dispersion has a genuine tiny `m2` and is unaffected. That is why
+    // the question is asked here, of the centered sum, and not of a quantity
+    // three cancellations later.
+    //
+    // `edge`'s own doc says Welford was chosen to avoid "catastrophic
+    // cancellation ... when the mean is large relative to the spread". Welford
+    // protects `m2`; the three Newey-West cross-sums reintroduced exactly that
+    // defect into the correction term. This keeps the protection Welford was
+    // for.
+    if m2 <= 0.0 {
+        return assemble(0.0);
+    }
     #[allow(
         clippy::cast_precision_loss,
         reason = "the observation count is bounded by the column length."
@@ -1613,6 +1660,111 @@ mod tests {
         assert!(e.t.abs() < f64::EPSILON);
     }
 
+    /// A SAMPLE WITH NO DISPERSION IS NO EVIDENCE.
+    ///
+    /// # What this proves, and what it does NOT
+    ///
+    /// It proves the property: every observation identical gives `t = 0`, and
+    /// the mean is still carried because the sample has no spread, not no
+    /// direction.
+    ///
+    /// **It does not discriminate against the previous implementation, and that
+    /// is stated rather than left to be assumed.** The guard used to read
+    /// `standard_error > 0.0`, computed from `long_run_sum_squares`, which is
+    /// UNCENTERED — `m2 + 2(A - m·B + m²·C)`. An adversarial pass reported that
+    /// on irregularly spaced hits the bracket is rounding noise in the
+    /// cancellation of three large terms, so its SIGN alone decided between
+    /// `t = 0` and `t` in the hundreds of millions, and measured 15% of
+    /// constant-return masks over |t| = 1e6 at n=3, rising to 48.8% at n=600.
+    ///
+    /// **I could not reproduce that here.** On this fixture — evenly spaced
+    /// hits, one bar apart — the three cross-sums cancel exactly and the old
+    /// guard caught the case on its own. Verified both ways: the test passes
+    /// with the `m2` check disabled. Reproducing it needs a mask firing on
+    /// IRREGULARLY spaced bars while its forward moves stay identical, and a
+    /// ramp is exactly the shape on which no named condition fires at all.
+    ///
+    /// So the `m2 <= 0.0` check is kept as the STRICTER and exact form of a
+    /// question the code already meant to ask — Welford makes `m2` exactly zero
+    /// for identical observations, with no epsilon — and this test pins the
+    /// property. Neither is evidence that the artefact is gone. §3 rule 6.
+    ///
+    /// # Why the fixture is shaped the way it is
+    ///
+    /// `Evaluator::warmed_up` needs five completed prior sessions, so a
+    /// two-session slice yields an EMPTY column and every assertion below would
+    /// pass against nothing. `rank::walk` orders on `edge.t.abs()`, which is
+    /// why a large `t` here would sort above every genuine finding, and
+    /// `p_value` is `2(1 - Φ(|t|))`, which clamps to exactly zero at that
+    /// magnitude and clears any Bonferroni bar the run can set.
+    #[test]
+    fn a_sample_with_no_dispersion_is_no_evidence_and_not_certainty() {
+        // REAL SESSION STAMPS WITH RAMPED PRICES. `forward` refuses a window
+        // that runs past a session close, so a fixture stamped from the epoch
+        // decides nothing. Taking `synthetic::sessions`' clock and replacing
+        // only the prices keeps every stamp legal while making every
+        // one-bar forward move exactly one paisa.
+        // EIGHT sessions, not two: `Evaluator::warmed_up` needs five completed
+        // prior sessions before `Column::build` emits a single row, so a
+        // two-session fixture produces an EMPTY column and every assertion
+        // below would pass against nothing.
+        let bars: Vec<Candle> = crate::synthetic::sessions(8)
+            .into_iter()
+            .enumerate()
+            .map(|(i, b)| {
+                let close = 2_500_000 + i64::try_from(i).unwrap_or(0);
+                Candle::new(
+                    b.ts_micros,
+                    close,
+                    close.saturating_add(10),
+                    close.saturating_sub(10),
+                    close,
+                    100,
+                    OI_NULL,
+                )
+            })
+            .collect();
+        let column = Column::build(&bars, &mut evaluator());
+        // A ONE-BAR HORIZON, so every decided window is EXACTLY one step of the
+        // ramp. At fifteen bars a window near the forced close is truncated to
+        // a shorter move, which is genuine dispersion and a genuinely large
+        // `t` -- not the artefact. At one bar a window is either decided in
+        // full or refused, so every observation is exactly one paisa and the
+        // centred sum of squares is exactly zero.
+        let f = forward(&bars, h(1));
+
+        // THE EMPTY MASK, which fires on every bar: `(bits & mask) == mask` is
+        // `0 == 0`. A monotone ramp makes every NAMED condition constant, so no
+        // single-bit mask fires at all on it — and the sample this test is
+        // about is precisely "every observation identical", which the empty
+        // mask over a ramp produces exactly.
+        let e = edge(&column, &f, &ConditionMask::default());
+        assert!(
+            e.n >= 2,
+            "the fixture must produce a measurable sample, or it proves nothing -- n={}, mismatched={}, refused={}, column rows={}",
+            e.n,
+            e.mismatched,
+            e.refused,
+            column.bits().len()
+        );
+        // EXACT ZERO IS THE CLAIM, so the comparison is exact. `assemble(0.0)`
+        // writes the literal, so there is no arithmetic between it and this
+        // assertion for an epsilon to absorb -- and an epsilon here would pass
+        // for the very artefact this is about if it ever shrank.
+        assert!(
+            e.t == 0.0,
+            "{} identical forward moves scored a t of {} -- a degenerate sample \
+             reported as certainty, which `rank::walk` then sorts above every \
+             real finding and `p_value` clamps to zero",
+            e.n,
+            e.t
+        );
+        assert!(
+            e.mean_paisa > 0.0,
+            "and the mean is still carried: the sample has no spread, not no \
+             direction"
+        );
+    }
     #[test]
     fn the_mean_and_t_are_measured_over_the_bars_the_mask_fired_on() {
         // A real column, and the mask of a position that actually varies.
