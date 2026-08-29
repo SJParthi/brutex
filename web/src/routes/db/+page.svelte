@@ -6275,9 +6275,17 @@
     /* ONE DISTINCT VOLUME IN THE WINDOW IS A FULL BAR, NOT A DIVISION BY ZERO.
        Every row carries the same figure, so every row is the largest. */
     if (s.hi <= s.lo) return 100;
+    /* A FLOOR OF 4%, BECAUSE THE SMALLEST VOLUME IN THE WINDOW IS NOT NO
+       VOLUME. Mapping straight onto 0..100 gives the minimum row exactly zero
+       width — the same picture a bar with no trades gets from the early return
+       above. Two different readings, one appearance, which is the collision
+       this whole change exists to remove. 4% of 56px is 2px: visible as a mark,
+       too short to be mistaken for a quantity. Zero still draws nothing, and
+       now that means only zero. */
+    const FLOOR = 4;
     const lo = Math.log(s.lo);
     const x = Math.log(Math.min(Math.max(v, s.lo), s.hi));
-    return Math.round(((x - lo) / (Math.log(s.hi) - lo)) * 100);
+    return FLOOR + Math.round(((x - lo) / (Math.log(s.hi) - lo)) * (100 - FLOOR));
   }
 
   /**
@@ -10783,18 +10791,31 @@
        recorded reason — "a 34px control cannot hold 15px text with a border and
        still look deliberate" — so the height of a control is a decision this
        file does not get to relitigate for a few pixels. */
-    /* STILL 216, AND A 200 WAS TRIED AND REVERTED IN THE SAME COMMIT THAT
-       SHRANK EVERYTHING ELSE ON THIS PAGE. Recorded because the reasoning looks
-       sound and is not: the strip stands two rows tall at 223px, and 200px
-       would fit SEVEN tracks where 216 fits six, which reads like it should
-       close the second row.
-       It cannot. The day window is `grid-column: 1 / -1` — see `.field.wide`,
-       where `-1` over `span 2` is itself a measured decision — so it takes the
-       whole last line at EVERY track count. Five rungs plus a full-width row is
-       two rows at six tracks and two rows at seven. The only thing a narrower
-       minimum changes is that the five rungs get 210px each instead of 247,
-       which is not an improvement anyone asked for. */
-    grid-template-columns: repeat(auto-fit, minmax(216px, 1fr));
+    /* NOW 180, AND THE 200 THE NOTE ABOVE REVERTED WAS REVERTED FOR A REASON
+       THAT NO LONGER HOLDS. That note is kept because its reasoning was sound:
+       a narrower minimum alone changes nothing, because the day window was
+       `grid-column: 1 / -1` and took the whole last line at EVERY track count.
+       Five rungs plus a full-width row is two rows at six tracks and two rows
+       at seven.
+       WHAT CHANGED IS THE PREMISE. `.field.wide` no longer spans; it and its
+       `.dates` child are `display: contents`, so the day window's own controls
+       are grid items of THIS grid rather than a row of their own. Seven tracks
+       then means seven controls on one line, which is what the earlier attempt
+       wanted and could not reach.
+       MEASURED ON THE RUNNING PAGE at a 1440px viewport, 1382px content box:
+       216 gave six tracks of 220px, the strip 189px tall, the first bar row at
+       y=309, `Fit` 10 rows. 180 gives seven tracks of 187px, the strip 105px,
+       the first row at y=225 and `Fit` 12. Eighty-four pixels, two rows.
+       THE NARROW END IS UNCHANGED, which is the whole risk of moving it. The
+       arithmetic above still governs: at a 744px viewport the content box is
+       712px with a 12px gap, three columns need `3 x W + 24 <= 712` so W <= 229,
+       and FOUR would need `4 x W + 36 <= 712` so W <= 169. 180 is above that
+       floor, so four can never appear there — measured at 744: three tracks of
+       221px, the same layout 216 produced. The margin to the four-column edge
+       is 11px rather than 47px, and that is the cost of the change, stated.
+       `--ctl-h` ITSELF IS STILL NOT TOUCHED, for the reason the note above
+       gives: `theme.css` owns it under a recorded decision. */
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
     /* ---- RESET A ROW TEMPLATE THIS FILE DID NOT WRITE ----------------------
      * `theme.css` §8 also styles `.strip`, and it declares
      * `grid-template-rows: var(--lab-h) var(--ctl-h) auto` for a SUBGRID
@@ -11129,7 +11150,18 @@
      including one, where `span 2` grows an implicit second column and pushes
      the panel past its own box. */
   .strip .field.wide {
-    grid-column: 1 / -1;
+    /* `display: contents` AND NOT `grid-column: 1 / -1`, WHICH IS WHAT LET THE
+       STRIP CLOSE TO ONE ROW. Spanning every track meant the day window owned
+       the last line whatever the track count, so the strip could not be
+       shorter than two rows however narrow the tracks got — the note over
+       `grid-template-columns` records a 200px attempt reverted for exactly
+       that. Dissolving this box and its `.dates` child makes the day window's
+       controls grid items of the strip itself, so they flow into the same
+       tracks as the five rungs and the row closes when they fit.
+       BOTH LEVELS HAVE TO GO. `.dates` is between this and the controls, and
+       one `display: contents` short of the bottom leaves a single grid item
+       where the controls should be. */
+    display: contents;
   }
   /* THE WINDOW JOINS THE STRIP'S GRID INSTEAD OF INVENTING A WIDTH.
      MEASURED, and it is why every attempt to align this row by tuning numbers
@@ -11151,19 +11183,21 @@
      "this box has no layout of its own, its children belong to my parent" —
      which is the relationship it has. */
   .strip .field.wide .dates {
-    display: grid;
-    /* `auto-fill` AND NOT `auto-fit`, WHICH IS THE WHOLE DIFFERENCE BETWEEN
-       247 AND 299. `auto-fit` COLLAPSES the tracks it has no item for and
-       divides the width among the survivors, so five controls in a six-track
-       row came out 299px each — uniform, and uniformly wrong against the 247
-       above. The strip resolves to six tracks because it has six children: its
-       five rungs plus this full-width row. This row has five, so it must be
-       told to keep the sixth track empty rather than absorb it.
-       MEASURED BOTH WAYS: `auto-fit` 299, `auto-fill` 247, against a top row
-       of 247. */
-    grid-template-columns: repeat(auto-fill, minmax(216px, 1fr));
-    gap: var(--s5);
-    max-width: none;
+    /* DISSOLVED, LIKE ITS PARENT. This used to be a grid of its own, and the
+       long note it carried was about making its tracks line up with the row
+       above: `auto-fill` and not `auto-fit` because auto-fit collapses the
+       tracks it has no item for and divided the width among the survivors —
+       measured 299px against a top row of 247.
+       That whole problem was self-inflicted. Two grids can only be kept in
+       step by matching their track rules and re-measuring whenever either
+       moves; ONE grid cannot disagree with itself. With both wrappers
+       `display: contents` these controls sit in the strip's own tracks, so
+       they are the same width as the rungs above them by construction rather
+       than by a number copied between two rules.
+       It also fixes what the old arrangement looked like on a day rung: the
+       time controls are hidden there, so this grid drew six tracks for two
+       items and left roughly 950px of empty row under a nearly full one. */
+    display: contents;
   }
   .dates {
     display: flex;
