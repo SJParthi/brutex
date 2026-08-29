@@ -696,7 +696,16 @@ fn cases() -> Vec<Case> {
                     // of one-minute bars. A census that can only be satisfied by
                     // launching a multi-hour sweep from `cargo test` is a census
                     // people route around.
-                    crate::sweeprun::apply_knobs(&crate::sweeprun::Asked {
+                    // BOUND, NOT DISCARDED, AND NOT `let _ =` EITHER.
+                    // `apply_knobs` returns an `Applied` guard whose `Drop`
+                    // calls `knobs::clear_all()`, so discarding the value
+                    // dropped the guard at the end of its own statement --
+                    // `#[must_use]`'s note says it in as many words, "the guard
+                    // must be held for the run, not dropped immediately".
+                    // Clippy's suggested `let _ = ...` is the SAME defect
+                    // spelled differently: `_` binds nothing and drops at once.
+                    // A named binding is what holds it for the body.
+                    let _applied = crate::sweeprun::apply_knobs(&crate::sweeprun::Asked {
                         feed: "zerodha".to_owned(),
                         underlying: "NIFTY".to_owned(),
                         from: (2019, 12),
@@ -704,7 +713,10 @@ fn cases() -> Vec<Case> {
                         rungs: vec!["60min"],
                         knobs: vec![("BRUTEX_TOP", "500".to_owned())],
                     });
-                    // Left clean for every test that runs after this one.
+                    // Left clean for every test that runs after this one. The
+                    // guard above clears them too, when it drops at the end of
+                    // this closure; `clear_all` is idempotent, and the explicit
+                    // call is what makes the intent readable at the call site.
                     cli::knobs::clear_all();
                 })
             },
