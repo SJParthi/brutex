@@ -234,6 +234,126 @@
   /** How many rows to show per run. The operator asked for ten. */
   let topN = $state(10);
 
+  /**
+   * The engine knobs this page can set on a sweep, with what each does and what
+   * the server falls back to when the field is left blank.
+   *
+   * # Why the defaults are printed rather than pre-filled
+   *
+   * A pre-filled field says "this is the value" and a blank one beside a stated
+   * default says "the server decides, and here is what it will decide". Those
+   * are different claims and only the second is true of an empty form.
+   *
+   * Pre-filling would also make every sweep name every knob, which puts fourteen
+   * terms into the run identity that the operator never chose — two runs that
+   * differ in nothing would then differ in everything.
+   *
+   * `default` is the SERVER's fallback, read from the Rust rather than guessed:
+   * `screen_cap` is `DEFAULT: usize = 10_000`, `top` is `at("BRUTEX_TOP", 25)`,
+   * and `validate` is `raw.is_none_or(|v| v.trim() != "0")` — unset means ON.
+   */
+  const KNOB_FIELDS = [
+    {
+      key: 'support_ppm',
+      label: 'support floor (ppm of this rung’s bars)',
+      fallback: 'an affordability probe picks it — landed near 220,000 (22%)',
+      note: 'The single biggest lever. 100000 is 10%, 50000 is 5%. Anything below the floor is never enumerated at all, so this decides what CAN be found, not just how long it takes.'
+    },
+    {
+      key: 'screen_cap',
+      label: 'combinations priced against the exit grid',
+      fallback: '10,000',
+      note: 'Of the ~430,000 enumerated per rung, this many get the 625-variant stop/target/trail grid. Cost scales with it.'
+    },
+    {
+      key: 'top',
+      label: 'combinations recorded to disk',
+      fallback: '25',
+      note: 'What the top-10 board below can rank. At 25 your eleven criteria only re-order a set the exit grid already picked.'
+    },
+    {
+      key: 'validate',
+      label: 'walk-forward, PBO and bootstrap',
+      fallback: 'ON — unset means true',
+      note: 'The expensive half. Off gives CANDIDATES, and the report says so in its own banner. On, with a high screen cap, is what does not finish.'
+    },
+    {
+      key: 'ceiling',
+      label: 'candidate ceiling',
+      fallback: 'derived from this machine’s memory',
+      note: 'Roughly the bytes you can spare divided by 146, and divided again among the rungs in flight.'
+    },
+    {
+      key: 'grid_rungs',
+      label: 'exit grid rungs',
+      fallback: 'derived from the bar ranges',
+      note: 'How many stop / target / trail levels the grid holds. Variants grow QUADRATICALLY in this.'
+    },
+    {
+      key: 'grid_resolution',
+      label: 'exit grid spacing',
+      fallback: '20',
+      note: 'The median bar range divided by this sets the ladder spacing.'
+    },
+    {
+      key: 'sizing_rate_bp',
+      label: 'sizing rate (bp)',
+      fallback: '7,500',
+      note: 'Must sit above the 5,000 bp coin-flip line and below 10,000.'
+    },
+    { key: 'min_rr_bp', label: 'minimum reward:risk (bp)', fallback: '12,500 (1.25×)', note: '' },
+    { key: 'min_win_rate_bp', label: 'minimum win rate (bp)', fallback: '5,000 (50%)', note: '' },
+    { key: 'min_trades', label: 'minimum trades', fallback: '0', note: '' },
+    { key: 'min_ret_over_dd_bp', label: 'minimum return over drawdown (bp)', fallback: '0', note: '' },
+    { key: 'min_weakest_bp', label: 'minimum weakest fold (bp)', fallback: '0', note: '' },
+    {
+      key: 'max_mae_ppm',
+      label: 'maximum adverse excursion (ppm)',
+      fallback: '0, which drops the rule',
+      note: 'The only rule where zero means OFF rather than a floor of zero — it is a `<=` test, so a literal zero would admit nothing.'
+    }
+  ];
+
+  /** What the operator has typed. Blank means "leave it to the server". */
+  let engine = $state({
+    support_ppm: '',
+    screen_cap: '',
+    top: '',
+    validate: '',
+    ceiling: '',
+    grid_rungs: '',
+    grid_resolution: '',
+    sizing_rate_bp: '',
+    min_rr_bp: '',
+    min_win_rate_bp: '',
+    min_trades: '',
+    min_ret_over_dd_bp: '',
+    min_weakest_bp: '',
+    max_mae_ppm: ''
+  });
+
+  /**
+   * Only the knobs the operator actually filled in.
+   *
+   * A blank field is ABSENCE, not a value. Sending `"top": ""` would reach a
+   * server that reads it as SET and then fails every parse of it into a default
+   * — a silent fallback wearing a setting's clothes. `cli::knobs::set` makes the
+   * same reading from the other side, so the two agree, but this skips the round
+   * trip rather than relying on it.
+   */
+  const engineKnobs = $derived.by(() => {
+    /** @type {Record<string, string>} */
+    const out = {};
+    for (const { key } of KNOB_FIELDS) {
+      const typed = String(engine[key] ?? '').trim();
+      if (typed !== '') out[key] = typed;
+    }
+    return out;
+  });
+
+  /** How many knobs this sweep will carry — shown beside the button. */
+  const knobCount = $derived(Object.keys(engineKnobs).length);
+
   /** @param {string|undefined} identity */
   async function fetchCombos(identity) {
     if (!identity) {
@@ -823,7 +943,25 @@
           // the route reads them, it reads them from a client that has been
           // sending them all along.
           underlyings: [...pickedSymbols],
-          rungs: [...pickedRungs]
+          rungs: [...pickedRungs],
+          // THE ENGINE'S OWN KNOBS, FROM THIS FORM.
+          //
+          // Until these travelled, every one of them lived in the server's
+          // PROCESS ENVIRONMENT — which meant the only way to change how a
+          // sweep searched was to restart the server, and the only way to see
+          // how it had searched was to read that process's environment from
+          // outside it.
+          //
+          // MEASURED, 2026-08-29: a server started from the IDE with none of
+          // them set gave `screen_cap` 10,000 and `validate` ON, which composes
+          // into a run that does not finish. The button was reachable and the
+          // configuration was not.
+          //
+          // Spread LAST so a knob can never overwrite the span or the feed:
+          // `engineKnobs` only ever yields names from its own table, but the
+          // ordering makes that a property of the code rather than of the
+          // table's current contents.
+          ...engineKnobs
         })
       });
       const body = await response.json().catch(() => ({}));
@@ -3854,6 +3992,57 @@
     <!-- DISABLED WHEN THE LEDGER CANNOT TAKE THE RESULT. A sweep that cannot
          record is nine rungs of real work thrown away, and the refusal arrives
          AFTER it. `blocked` is the server's own answer -- see `ledgerBlock`. -->
+    <!-- ============ THE ENGINE'S OWN KNOBS ============
+         Every one of these lived in the SERVER'S PROCESS ENVIRONMENT until
+         2026-08-29, which meant the only way to change how a sweep searched was
+         to restart the server, and the only way to see how it HAD searched was
+         to read that process's environment from outside it.
+
+         MEASURED that day: a server started from the IDE with none of them set
+         gave `screen_cap` 10,000 and `validate` ON -- a pair that composes into
+         a run which does not finish. The button below was reachable. The
+         configuration was not.
+
+         Blank means ABSENCE, and the stated fallback is what the server will
+         then decide. Pre-filling would put fourteen terms into the run identity
+         the operator never chose. -->
+    <details class="eng">
+      <summary class="eng-sum">
+        Engine settings
+        <span class="eng-n">
+          {#if knobCount === 0}
+            every knob left to the server
+          {:else}
+            <b>{knobCount}</b> set for this run
+          {/if}
+        </span>
+      </summary>
+      <div class="eng-grid">
+        {#each KNOB_FIELDS as k (k.key)}
+          <label class="eng-row">
+            <span class="eng-lab">{k.label}</span>
+            <input
+              class="eng-in"
+              type="text"
+              inputmode="numeric"
+              placeholder={k.fallback}
+              bind:value={engine[k.key]}
+              aria-label={k.label}
+            />
+            {#if k.note}<span class="eng-note">{k.note}</span>{/if}
+          </label>
+        {/each}
+      </div>
+      <p class="eng-foot">
+        These reach the engine as its own <code>BRUTEX_*</code> names and are written to the audit
+        trail before the run starts, under <code>api.sweep · knobs set for this run</code>. They also
+        enter the run identity, so two runs at different settings are two runs and never overwrite
+        each other. <b>The store root and the log directory are deliberately not settable here</b> —
+        a request that could move them would make every provenance banner on this page a claim about
+        a directory nobody chose.
+      </p>
+    </details>
+
     <button
       class="btn run"
       onclick={startSweep}
@@ -10318,5 +10507,80 @@
     min-width: 1.6rem;
     font-variant-numeric: tabular-nums;
     color: var(--n11);
+  }
+
+  /* ---- the engine's own knobs -------------------------------------------
+     A disclosure rather than an always-open block: fourteen fields above the
+     Run button would bury the button, and the common case is leaving every one
+     of them to the server. */
+  .eng {
+    margin: 0.5rem 0 0.75rem;
+    border: 1px solid var(--n6);
+    border-radius: 8px;
+    background: var(--n2);
+  }
+  .eng-sum {
+    cursor: pointer;
+    padding: 0.55rem 0.75rem;
+    font-size: var(--fs-mini);
+    letter-spacing: 0.02em;
+    color: var(--n11);
+    display: flex;
+    align-items: baseline;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+  }
+  .eng-sum::marker {
+    color: var(--n8);
+  }
+  .eng-n {
+    font-size: var(--fs-micro);
+    color: var(--n9);
+  }
+  .eng-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 0.7rem 1rem;
+    padding: 0.25rem 0.75rem 0.75rem;
+  }
+  .eng-row {
+    display: grid;
+    gap: 0.2rem;
+  }
+  .eng-lab {
+    font-size: var(--fs-micro);
+    color: var(--n9);
+    letter-spacing: 0.02em;
+  }
+  .eng-in {
+    padding: 0.35rem 0.5rem;
+    font: inherit;
+    font-size: 0.8rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--n11);
+    background: var(--n3);
+    border: 1px solid var(--n6);
+    border-radius: 6px;
+  }
+  .eng-in::placeholder {
+    color: var(--n8);
+    font-variant-numeric: normal;
+  }
+  .eng-in:focus,
+  .eng-in:focus-visible {
+    outline: 2px solid var(--acc);
+    outline-offset: 1px;
+  }
+  .eng-note {
+    font-size: var(--fs-micro);
+    line-height: 1.45;
+    color: var(--n8);
+  }
+  .eng-foot {
+    margin: 0;
+    padding: 0 0.75rem 0.8rem;
+    font-size: var(--fs-micro);
+    line-height: 1.5;
+    color: var(--n9);
   }
 </style>
