@@ -2047,7 +2047,11 @@ pub fn evaluate_with(
         .collect();
     let refused_paths =
         u64::try_from(all.iter().filter(|c| c.cross.refused() > 0).count()).unwrap_or(u64::MAX);
-    let candidates: Vec<Candidate> = all.into_iter().filter(|c| c.cross.refused() == 0).collect();
+    // EVERY CANDIDATE REACHES THE WALK, INCLUDING THE ONES THAT CANNOT BE
+    // PRICED. `one_variant` blocks on a refused path and never tallies it --
+    // see the guard there for why removing them here moved the answer instead
+    // of shrinking the sample.
+    let candidates = all;
 
     // PASS FOUR: every variant, each a sequence walk with O(1) exits.
     // THE LOOP IS FOUR DEEP AND THE RESERVATION IS NOT ITS ARITHMETIC REPEATED.
@@ -2334,13 +2338,24 @@ fn levelled(
         // Degrading loudly is `CLAUDE.md` S4's requirement and the count is
         // already carried: `Timed::eligible` minus what survives here is
         // exactly the refused set, and `evaluate` reports it as `refused_paths`.
-        .filter(|c| c.cross.refused() == 0)
+        // AND THE FILTER THAT SAT HERE IS GONE, for the reason `one_variant`'s
+        // guard states: a path that cannot be priced still occupied the
+        // position, and dropping it from the SEQUENCE promoted the next signal
+        // into a trade the exclusivity rule forbids. The measurement above is
+        // about what a refused record does to PRICING, and it still stands --
+        // which is why the guard skips the tally rather than the block.
         .collect();
 
     // EVERY path refused is not "no trades" -- it is a measurement that could
     // not be taken, and returning `None` says so with the same voice the
     // emptiness check above uses rather than reporting a clean zero.
-    if candidates.is_empty() {
+    //
+    // ASKED OF THE PRICEABLE ONES, not of the vector. The vector no longer
+    // drops a refused path -- `one_variant` needs it to block -- so an empty
+    // vector now means only "no signal fired", and the case this guard exists
+    // for would have slipped past it into a `Cell` with `trades: 0`. Same
+    // question, asked where the answer moved to.
+    if candidates.iter().all(|c| c.cross.refused() > 0) {
         return None;
     }
 
@@ -2532,6 +2547,52 @@ fn row_of(bars: &[Candle], c: &Candidate, pnl: i64, adverse: Ppm) -> TradeRow {
     }
 }
 
+/// Whether this candidate is skipped before pricing, and what block it leaves.
+///
+/// # Two reasons, and the second is a fix
+///
+/// A position is already open, or this path cannot be priced. They are not the
+/// same: the second STILL OCCUPIED THE POSITION, so it sets the block on its way
+/// past. That is the whole of the correction, and the reason this decision has a
+/// name.
+///
+/// `evaluate_with` used to `.filter(|c| c.cross.refused() == 0)` before the walk
+/// ever saw the sequence, on a reason that is right about PRICING and wrong
+/// about ORDER: `crossings` cannot say whether a stop was hit on a bar it could
+/// not read, so scoring the trade would be inventing a path. That justifies
+/// excluding it from the TALLY. It does not justify removing it from the
+/// SEQUENCE.
+///
+/// Removed from the sequence, the trade stopped blocking — and the next signal,
+/// which `trade::walk` refuses because a position is open, was promoted into a
+/// round trip the exclusivity rule forbids. `trade::round_trip` inspects only
+/// the entry and exit bars, so `walk` takes the refused trade and blocks the
+/// next one; the grid took the NEXT one and omitted this one. The two walks
+/// disagreed about WHICH signals became trades, not merely about how many.
+///
+/// So the claim beside the drop was false. This file said *"the drop is counted
+/// so a reader sees a smaller sample rather than a moved answer"* and
+/// `audit.rs` repeated it to the operator verbatim. The answer moved, and
+/// `a_refused_path_blocks_the_next_signal_instead_of_vanishing` measures both
+/// readings side by side.
+///
+/// # Why `time_exit` is the block's extent
+///
+/// It is the LATEST this position could have closed. A stop might have released
+/// it sooner, and without the bar that could not be read there is no way to know
+/// which. Blocking to the time exit can only ever refuse a later signal, never
+/// invent one — the direction an unmeasurable case has to err in.
+fn blocks_without_pricing(c: &Candidate, open_until: &mut Option<usize>) -> bool {
+    if open_until.is_some_and(|until| c.signal < until) {
+        return true;
+    }
+    if c.cross.refused() > 0 {
+        *open_until = Some(c.time_exit);
+        return true;
+    }
+    false
+}
+
 fn one_variant(
     bars: &[Candle],
     candidates: &[Candidate],
@@ -2569,7 +2630,9 @@ fn one_variant(
     let mut gain_on_winners: i64 = 0;
 
     for c in candidates {
-        if open_until.is_some_and(|until| c.signal < until) {
+        // TWO REASONS TO SKIP AND THEY ARE DIFFERENT, which is why the decision
+        // is named rather than inlined. See [`blocks_without_pricing`].
+        if blocks_without_pricing(c, &mut open_until) {
             continue;
         }
         let span = c.time_exit.saturating_sub(c.entry);
@@ -4908,6 +4971,137 @@ mod tests {
         )
     }
 
+    /// A PATH THAT CANNOT BE PRICED STILL OCCUPIED THE POSITION.
+    ///
+    /// # The defect, and why nothing caught it
+    ///
+    /// `evaluate_with` filtered `|c| c.cross.refused() == 0` before the walk, on
+    /// a reason that is right about PRICING and wrong about ORDER: `crossings`
+    /// cannot say whether a stop was hit on a bar it could not read, so scoring
+    /// the trade would be inventing a path. That justifies excluding it from the
+    /// tally. It does not justify removing it from the SEQUENCE.
+    ///
+    /// Removed from the sequence, the trade stopped blocking — and the next
+    /// signal, which `trade::walk` refuses because a position is open, was
+    /// promoted into a round trip the exclusivity rule forbids.
+    /// `trade::round_trip` checks only the entry and exit bars, so `walk` takes
+    /// the refused trade and blocks the next one; the grid took the NEXT one and
+    /// omitted this one. The two walks disagreed about WHICH signals became
+    /// trades, not merely about how many.
+    ///
+    /// So the claim beside the drop was false. `grid.rs` said *"the drop is
+    /// counted so a reader sees a smaller sample rather than a moved answer"*
+    /// and `audit.rs` repeated it to the operator verbatim: *"Every figure below
+    /// is over a SMALLER sample, not a corrected one."* The answer moved.
+    ///
+    /// The whole `runner` suite — 301 tests — passed both before and after the
+    /// fix, because no fixture ever put a refused bar inside a candidate's path
+    /// while a later signal sat inside its window. This is that fixture.
+    #[test]
+    fn a_refused_path_blocks_the_next_signal_instead_of_vanishing() {
+        // Bar 1 carries a NEGATIVE VOLUME, which `Candle::check` refuses by name
+        // and `crossings` counts. It sits inside candidate A's path (0..4) and
+        // is neither A's entry bar nor its exit bar — which is exactly the gap:
+        // `trade::round_trip` inspects only those two and would trade it.
+        let bars = vec![
+            candle(0, 1_000_000, 1_001_000, 999_000, 1_000_000),
+            indicators::Candle::new(
+                60_000_000,
+                1_000_000,
+                1_001_000,
+                999_000,
+                1_000_000,
+                -1,
+                indicators::OI_NULL,
+            ),
+            candle(2, 1_000_000, 1_001_000, 999_000, 1_000_000),
+            candle(3, 1_000_000, 1_001_000, 999_000, 1_000_000),
+            candle(4, 1_000_000, 1_001_000, 999_000, 1_000_000),
+            candle(5, 1_000_000, 1_001_000, 999_000, 1_000_000),
+        ];
+        let stops = crate::excursion::Ladder::new(vec![900_000]).expect("an ascending ladder");
+        let targets = crate::excursion::Ladder::new(vec![900_000]).expect("an ascending ladder");
+        let trails = crate::excursion::Ladder::new(vec![900_000]).expect("an ascending ladder");
+
+        // A signals at 0 and holds to 4. B signals at 2 — INSIDE A's window — so
+        // the exclusivity rule refuses it outright.
+        let candidates: Vec<super::Candidate> = [(0_usize, 4_usize), (2, 5)]
+            .into_iter()
+            .map(|(entry, time_exit)| {
+                let (entry_pess, entry_opt) = super::entry_fills(&bars, entry, Side::Long);
+                super::Candidate {
+                    signal: entry,
+                    entry,
+                    time_exit,
+                    entry_pess,
+                    entry_opt,
+                    cross: crate::excursion::crossings(
+                        &bars,
+                        entry,
+                        time_exit,
+                        entry_opt,
+                        Side::Long,
+                        crate::excursion::Ladders {
+                            stops: &stops,
+                            targets: &targets,
+                            trails: &trails,
+                        },
+                    ),
+                }
+            })
+            .collect();
+
+        assert!(
+            candidates.first().is_some_and(|c| c.cross.refused() > 0),
+            "the fixture must actually contain a refused path, or it proves \
+             nothing"
+        );
+        assert_eq!(
+            candidates.get(1).map(|c| c.cross.refused()),
+            Some(0),
+            "and B's own path must be clean, so the only reason it can be \
+             refused is A holding the position"
+        );
+
+        let variant = super::Variant {
+            stop: None,
+            target: None,
+            tsl: None,
+            ttp: None,
+        };
+        let rungs = (stops.rungs(), targets.rungs(), trails.rungs());
+
+        // WHAT THE ENGINE DOES NOW: A blocks and is not tallied, B is refused
+        // because A holds the position, and the cell reports no trade.
+        let whole = super::one_variant(&bars, &candidates, rungs, variant, Side::Long, None);
+        assert_eq!(
+            whole.trades, 0,
+            "A cannot be priced and B cannot open while A holds the position, \
+             so there is nothing to report"
+        );
+
+        // WHAT IT DID BEFORE, reproduced by applying the filter that used to sit
+        // in the builder. B becomes a trade the exclusivity rule forbids.
+        // `Candidate` is not `Clone`, so the old list is rebuilt rather than
+        // copied -- which is closer to what the builder did anyway.
+        let filtered: Vec<super::Candidate> = candidates
+            .into_iter()
+            .filter(|c| c.cross.refused() == 0)
+            .collect();
+        let dropped = super::one_variant(&bars, &filtered, rungs, variant, Side::Long, None);
+        assert_eq!(
+            dropped.trades, 1,
+            "the old filter promoted B into a round trip -- if this is 0 the \
+             fixture no longer reproduces the defect and the test above proves \
+             nothing"
+        );
+
+        assert_ne!(
+            whole.trades, dropped.trades,
+            "dropping a refused path from the SEQUENCE moves the answer; it \
+             does not shrink the sample"
+        );
+    }
     /// A 1:3 stop:target cell must not report a 3:1 reward-to-risk.
     ///
     /// # The defect this exists to keep dead

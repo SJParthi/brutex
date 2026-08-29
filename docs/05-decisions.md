@@ -27875,3 +27875,53 @@ so there is no second publish and no moment at which a real count could be
 written. The real count is emitted at the grid's own boundary, where it exists.
 Making the field live needs a publish per tier inside `screen_cascade` and is
 not done here. §3 rule 6: a limit stated beats a field that looks measured.
+
+### D-0390
+
+**A path that could not be priced stopped blocking, and the next signal was
+promoted into a trade the exclusivity rule forbids.**
+
+`grid::evaluate_with` and the `with_levels`/`per_trade` builder both did
+`.filter(|c| c.cross.refused() == 0)` before the sequence reached `one_variant`.
+The reason is right about PRICING: `excursion::crossings` checks every bar of a
+path and cannot say whether a stop was hit on a bar that fails `Candle::check`,
+so scoring the trade would be inventing a path. That justifies excluding it from
+the TALLY. It does not justify removing it from the SEQUENCE.
+
+`trade::round_trip` inspects only the entry and exit bars, so `trade::walk` TAKES
+such a trade and blocks the next signal through `open_until`. The grid dropped
+it, so it never blocked, and the next signal — which the one-position-at-a-time
+rule refuses — became a round trip. **The two walks disagreed about which signals
+became trades, not merely about how many.**
+
+So the claim beside the drop was false. `grid.rs` said *"the drop is counted so a
+reader sees a smaller sample rather than a moved answer"* and `audit.rs` repeated
+it to the operator verbatim: *"Every figure below is over a SMALLER sample, not a
+corrected one."* The answer moved.
+
+**The fix is `blocks_without_pricing`**: a refused candidate blocks to its
+`time_exit` and is never tallied. `time_exit` is the extent because it is the
+LATEST the position could have closed — a stop might have released it sooner and
+without the unreadable bar there is no way to know which, so blocking to the time
+exit can only ever refuse a later signal, never invent one. That is the direction
+an unmeasurable case has to err in.
+
+Named rather than inlined for two reasons: the two skip conditions are genuinely
+different and one of them is the correction, and `one_variant` is at its
+hundred-line ceiling, which this workspace answers by splitting.
+
+**The emptiness guard moved with it.** `if candidates.is_empty()` meant "every
+path refused" only while the filter ran; it now means "no signal fired". It is
+`candidates.iter().all(|c| c.cross.refused() > 0)`, which returns `true` for an
+empty vector and so preserves the old case exactly while covering the new one.
+
+**Nothing caught this. The whole `runner` suite — 301 tests — passed before and
+after**, because no fixture ever put a refused bar inside a candidate's path
+while a later signal sat inside its window.
+`a_refused_path_blocks_the_next_signal_instead_of_vanishing` is that fixture, and
+it measures BOTH readings in one test rather than asserting only the new one:
+the old filter is reproduced inline and gives **one trade** where the fix gives
+**none**. A test that passes on the code it was written to change proves nothing.
+
+**`Crossings::refused` is a field read**, so the per-candidate branch this adds
+inside the 625-variant walk is O(1) and data-independent.
