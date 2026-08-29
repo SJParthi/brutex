@@ -2371,9 +2371,50 @@ async fn gaps_json(
         .collect::<Vec<_>>()
         .join(",");
 
+    let unmeasured: u64 = months.iter().map(|m| u64::from(m.unmeasured)).sum();
+
+    // THE CALENDAR'S OWN COVERAGE, IN THE ANSWER, BECAUSE IT BOUNDS EVERY
+    // NUMBER ABOVE IT.
+    //
+    // `pull::calendar` knows `FIRST_DAY..=LAST_DAY` and nothing outside it. A
+    // day past the table is `Unmeasured`: it adds nothing to `expected`, it is
+    // not a loss, and no claim is made either way — which is right, and which
+    // makes `held` LARGER than `expected` for any month running past the end.
+    //
+    // Measured on the operator's store the day this shipped: NIFTY at one
+    // minute for 2026-08 answered `expected 5,625, held 7,500, lost 0`. Twenty
+    // trading days of bars against fifteen the calendar could vouch for,
+    // because `LAST_DAY` is 2026-08-21 and the request was made on 2026-08-29.
+    // Read without this block that pair is an arithmetic bug, and an operator
+    // right to distrust it has no way to find out that it is not one.
+    //
+    // **Nothing anywhere else notices the table expiring.** Measured:
+    // `LAST_DAY` appears outside `crates/pull/src/calendar.rs` exactly once,
+    // in that module's own test. The calendar went stale and every surface
+    // stayed silent, because until `/gaps.json` nothing called `gaps` at all.
+    // `CLAUDE.md` §4 bans a fallback that hides a failure — degrade loudly and
+    // name the reason — and reporting `stale: true` beside the bound is that
+    // naming. Extending the table is NOT done here and must not be: a trading
+    // day this build invented would be the §3 rule 1 invention, and the
+    // holiday list is an exchange fact that belongs in `docs/00-charter.md`.
+    let last_known =
+        pull::session::Day::from_days(u32::try_from(pull::calendar::LAST_DAY).unwrap_or(u32::MAX));
+    let first_known =
+        pull::session::Day::from_days(u32::try_from(pull::calendar::FIRST_DAY).unwrap_or(0));
+    let stale = ingest::today_ist()
+        .is_ok_and(|today| i64::from(today.days_from_epoch()) > pull::calendar::LAST_DAY);
+    let day_text = |day: Result<pull::session::Day, _>| {
+        day.map_or_else(
+            |_| "null".to_owned(),
+            |d| format!(r#""{:04}-{:02}-{:02}""#, d.year(), d.month(), d.day()),
+        )
+    };
+
     let body = format!(
-        r#"{{"expected":{expected},"held":{held},"lost_minutes":{lost},"months":{},"months_absent":{absent_files},"truncated":{truncated_range},"month":[{rows}]}}"#,
+        r#"{{"expected":{expected},"held":{held},"lost_minutes":{lost},"unmeasured_minutes":{unmeasured},"months":{},"months_absent":{absent_files},"truncated":{truncated_range},"calendar":{{"first":{},"last":{},"stale":{stale}}},"month":[{rows}]}}"#,
         months.len(),
+        day_text(first_known),
+        day_text(last_known),
     );
     (axum::http::StatusCode::OK, json(), body)
 }
@@ -2412,6 +2453,13 @@ struct AuditedMonth {
     lost: u32,
     /// Every absent minute, loss or not.
     absent: u32,
+    /// Minutes this build makes no claim about — a day past the calendar's
+    /// `LAST_DAY`, or a session whose length it does not know.
+    ///
+    /// **The number that explains a `held` larger than an `expected`.** Without
+    /// it beside them, that pair reads as an arithmetic bug rather than as the
+    /// calendar running out.
+    unmeasured: u32,
     /// Why this month could not be opened at all, if it could not be.
     ///
     /// **A finding, not a failure.** Across a range, a month with no file is
@@ -2431,12 +2479,13 @@ impl AuditedMonth {
     /// This month as one JSON object.
     fn render(&self) -> String {
         format!(
-            r#"{{"month":{},"expected":{},"held":{},"lost_minutes":{},"absent_minutes":{},"truncated":{},"unreadable_records":{},"absent_file":{},"gaps":[{}]}}"#,
+            r#"{{"month":{},"expected":{},"held":{},"lost_minutes":{},"absent_minutes":{},"unmeasured_minutes":{},"truncated":{},"unreadable_records":{},"absent_file":{},"gaps":[{}]}}"#,
             render::json_string(&self.month.to_string()),
             self.expected,
             self.held,
             self.lost,
             self.absent,
+            self.unmeasured,
             self.truncated,
             self.unreadable,
             self.absent_file
@@ -2462,6 +2511,7 @@ fn audit_one(site: &Loaded, asked: &Addressed, month: store::path::YearMonth) ->
         held: 0,
         lost: 0,
         absent: 0,
+        unmeasured: 0,
         absent_file,
         unreadable: 0,
         truncated: false,
@@ -2513,6 +2563,7 @@ fn audit_one(site: &Loaded, asked: &Addressed, month: store::path::YearMonth) ->
         held: ledger.held,
         lost: ledger.lost_minutes(),
         absent: ledger.absent_minutes(),
+        unmeasured: ledger.unmeasured_minutes(),
         // A FAULTY RECORD IS NOT SILENTLY SKIPPED, and here it matters more
         // than on the drawing route: a bar `page` could not read is a bar this
         // audit did not see, so it is scored as a HOLE. Reported beside the
@@ -18929,6 +18980,29 @@ mod tests {
         assert!(
             typo.contains("YYYY-MM") && typo.contains("to"),
             "naming both the shape it wanted and WHICH parameter: {typo}"
+        );
+
+        // THE CALENDAR'S COVERAGE IS IN EVERY ANSWER, because it bounds every
+        // number in one. `expected` counts only days the table can vouch for,
+        // so a month running past `LAST_DAY` reports `held` LARGER than
+        // `expected` — measured on the operator's store the day this shipped:
+        // NIFTY at one minute for 2026-08 answered `expected 5,625, held
+        // 7,500, lost 0`, twenty trading days of bars against fifteen vouched
+        // for, because the table ends 2026-08-21.
+        //
+        // Read without the bound beside it that pair is an arithmetic bug, and
+        // an operator right to distrust it has no way to learn that it is not
+        // one. Asserted rather than left to a reader, because NOTHING ELSE in
+        // this workspace notices the table expiring: `LAST_DAY` appears outside
+        // `pull::calendar` exactly once, in that module's own test.
+        assert!(
+            three.contains(r#""calendar":{"first":"2019-12-02","last":""#),
+            "every answer names the span the calendar can speak for: {three}"
+        );
+        assert!(
+            three.contains(r#""unmeasured_minutes":"#),
+            "and the minutes it makes NO claim about, which is what explains a \
+             held larger than an expected: {three}"
         );
         let (short_code, _, short) = ask("&to=2024-1").await;
         assert_eq!(

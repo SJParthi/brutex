@@ -26626,3 +26626,68 @@ clothes. The 404 arm now names the actual cause and says the store is fine.
 the distinction that made `/audit` unreachable: a page route in that list serves
 the Rust side on a reload and this application on a nav click, so one URL
 renders two different things.
+
+### D-0364
+
+**The calendar expired eight days ago and nothing noticed, because until
+`/gaps.json` nothing called it.**
+
+`pull::calendar::LAST_DAY` is **2026-08-21**. The first audit run against the
+operator's live store was made on **2026-08-29**, and it answered, for NIFTY at
+one minute in 2026-08:
+
+```
+expected 5,625   held 7,500   lost_minutes 0
+```
+
+Twenty trading days of bars against fifteen the calendar could vouch for. Every
+day past the table is `Reason::Unmeasured` — correctly, and by that variant's
+own design: *"the exchange was shut" and "nobody has looked" are different
+facts.* It adds nothing to `expected` while its bars still count in `held`.
+
+**The behaviour is right and the presentation was a defect.** `held` larger than
+`expected` beside `lost 0` reads as an arithmetic bug, and an operator right to
+distrust it had no way to learn that it was not one. Three things were added,
+none of which changes a classification:
+
+- `Ledger::unmeasured_minutes()` — the count that explains the pair.
+- `"unmeasured_minutes"` on every month and on the roll-up.
+- `"calendar":{"first","last","stale"}` on every answer, where `stale` compares
+  `LAST_DAY` against `ingest::today_ist()`.
+
+**Nothing else in the workspace notices.** Measured: `LAST_DAY` appears outside
+`crates/pull/src/calendar.rs` exactly once, in that module's own test. The table
+went stale and every surface stayed silent — `/db`, `/audit`, `/store.json`,
+the autopilot — because a completeness question was never asked anywhere.
+`CLAUDE.md` §4 bans a fallback that hides a failure: degrade loudly and name
+the reason. `stale: true` beside the bound is that naming.
+
+**The table is NOT extended here, and must not be by this repository.** A
+trading day this build invented would be the §3 rule 1 invention outright: the
+holiday list is an exchange fact and belongs in `docs/00-charter.md` with a
+source beside it. The endpoint's job is to say the claim cannot be made, which
+it now does.
+
+**What the first live audit measured, recorded because it is the answer the
+endpoint was built for.** NIFTY, one minute, whole span, per feed:
+
+| Feed | Months | Months with a loss | Minutes lost | Excluding the feed's first month |
+|---|---|---|---|---|
+| Dhan | 61 (2021-08 →) | 11 | 7,141 | **10 months, 16 minutes** |
+| Groww | 80 (2020-01 →) | 7 | 573 | 7 months, 573 minutes |
+| Zerodha | 81 (2019-12 →) | 11 | 7,153 | **10 months, 28 minutes** |
+
+**The first month of Dhan and of Zerodha is the vendor's history floor, not a
+hole.** Both hold 750 bars where the calendar owed 7,875, and both begin on the
+**30th** — Dhan's earliest bar is 2021-08-30 09:15 IST, Zerodha's 2019-12-30
+09:15 IST. Those 7,125 minutes were never offered by the vendor, so the audit
+is right that they are absent and wrong-sounding when it calls them lost. This
+is stated rather than suppressed: a rule that silently forgave the first month
+would forgive a genuinely empty one.
+
+**One real gap, and it is repairable.** Groww is missing **2025-10-10 entirely**
+— 09:15 to 15:29, all 375 minutes — plus 2025-09-26 from 14:36. **Dhan and
+Zerodha both hold 2025-10 complete, 7,560 of 7,560.** That is exactly the case
+`Reason::VendorHole` documents: it cannot be repaired from the same vendor,
+because a re-run returns the same nothing, and the route to zero is another
+feed's copy of the same minute.

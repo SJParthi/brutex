@@ -173,6 +173,31 @@ impl Ledger {
             .map(|gap| gap.minutes())
             .fold(0_u32, u32::saturating_add)
     }
+
+    /// Minutes this build makes **no claim** about, either way.
+    ///
+    /// [`Reason::Unmeasured`] alone: a day outside `FIRST_DAY..=LAST_DAY`, or a
+    /// Muhurat whose length the minute series does not reach. Neither a loss
+    /// nor a clean bill.
+    ///
+    /// # Why this needed its own accessor
+    ///
+    /// It is the number that explains a `held` LARGER than an `expected`, and
+    /// without it that pair reads as an arithmetic bug. Measured on the
+    /// operator's store: NIFTY at one minute for 2026-08 answered
+    /// `expected 5,625, held 7,500, lost 0` — twenty trading days of bars
+    /// against fifteen the calendar could vouch for, because `LAST_DAY` is
+    /// 2026-08-21 and the run was read on 2026-08-29. Every day past the
+    /// table is `Unmeasured` and adds nothing to `expected`, which is correct
+    /// and looks exactly like a defect until this number is beside it.
+    #[must_use]
+    pub fn unmeasured_minutes(&self) -> u32 {
+        self.gaps
+            .iter()
+            .filter(|g| matches!(g.reason, Reason::Unmeasured))
+            .map(|gap| gap.minutes())
+            .fold(0_u32, u32::saturating_add)
+    }
 }
 
 /// Minutes since IST midnight for a micros-since-epoch stamp, and its day.
