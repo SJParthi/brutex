@@ -3310,8 +3310,6 @@
   let boardEl = $state(null);
   /** How much the page overflows its own scroller. Zero is the target state. */
   let pageOver = $state(0);
-  /** @type {HTMLElement | null} */
-  let factsEl = $state(null);
   /* ---------------------------------------------------------------------
      WHAT TRIGGERS THE MEASUREMENT IS THE WHOLE PROBLEM, AND TWO OBVIOUS
      ANSWERS WERE BUILT AND MEASURED FAILING BEFORE THIS ONE.
@@ -3416,14 +3414,16 @@
        decision they cannot see clearly. */
     const measure = () => {
       barBoxH = el.clientHeight;
-      const f = factsEl?.getBoundingClientRect().height ?? 0;
-      /* ONE PANEL FOLDS NOW, NOT TWO. The coverage band was the other term: it
-         STAYED and shed only its heading and legend, so it was priced at the
-         difference between its full and its slim height. It has left the page,
-         so there is nothing left to price and the `CBAND_SLIM_H` term goes with
-         it. The counted line still LEAVES outright, so it is still worth its
-         whole height plus the column gap that went with it. */
-      if (f) foldPx = f + BOARD_GAP;
+      /* NOTHING FOLDS ANY MORE, SO THE FOLD IS WORTH NOTHING.
+         This summed two terms. The coverage band was one and left the page; the
+         counted line was the other and its last two readouts are now inline on
+         the anchor, which is always drawn. `foldPx` stays 0, `foldRows` with
+         it, and the Compact button — whose entire job was to trade those two
+         panels for grid rows — is hidden rather than left as a control that
+         presses and changes nothing.
+         THE MEASUREMENT ITSELF STAYS. `barBoxH` is what `rowsThatFit` is
+         computed from, and that is the whole of `Fit`. Only the fold term
+         went. */
     };
     measure();
     const settle = setTimeout(measure, 0);
@@ -8520,7 +8520,7 @@
              the label says what it is worth — "+4 rows" — measured from the two
              panels as they stand, not written here. A toggle whose effect you
              have to try in order to learn is a toggle nobody presses twice. -->
-        {#if view === 'bars'}
+        {#if view === 'bars' && foldRows > 0}
           <button
             class="btn ghost sm"
             type="button"
@@ -8545,6 +8545,41 @@
           >
         {/if}
       </span>
+
+      <!-- THE LAST TWO READOUTS MOVE ONTO THIS LINE, AND THE ROW UNDER IT GOES.
+           MEASURED: the counted line was 62px tall and held two items, each
+           stretched to 787px — the range hard against the left edge and the
+           close hard against the right, with half a screen of nothing between
+           them. Two facts cannot fill a row that wide, and stretching them to
+           try is what made it read as two stranded things rather than one
+           readout. The anchor had 852px of unused width on the same line as
+           the instrument and its tabs.
+           SO THEY SIT WHERE THEY ARE READ FROM. The range describes the
+           selection the tabs above count; the close is the newest row of the
+           grid below. Both belong beside them, not in a band of their own. -->
+      {#if view === 'bars' && coverBand.cells.length > 0}
+        <span class="afacts">
+          <span class="af">
+            <b>{coverBand.cells[0].month}</b><span class="arw">→</span><b
+              >{coverBand.cells[coverBand.cells.length - 1].month}</b
+            >
+            <i>on disk</i>
+          </span>
+          {#if barPage.length > 0 && barSortKey === 'ts'}
+            <span class="af">
+              <b
+                class="num"
+                data-dir={barPage[0].c > barPage[0].o
+                  ? 'up'
+                  : barPage[0].c < barPage[0].o
+                    ? 'down'
+                    : 'flat'}>{paisaText(barPage[0].c)}</b
+              >
+              <i>{barDesc ? 'newest' : 'oldest'} close</i>
+            </span>
+          {/if}
+        </span>
+      {/if}
 
       <!-- ==============================================================
            THE COUNTED LINE, AND IT IS WHAT THE SIX TILES WERE. Bars,
@@ -9104,41 +9139,13 @@
          and the rail its per-cell titles.
 
          Nothing that narrows the query is inside this block. -->
-    {#if view === 'bars' && coverBand.cells.length > 0 && !compact}
-      <!-- TWO OF THE FOUR FACTS WERE ALREADY ON SCREEN, ONE LINE ABOVE.
-           `BARS HELD 6,18,296` and `81 MONTHS COVERED` are the counts printed
-           on the `Bars` and `Coverage` TABS in the anchor directly above this
-           row — same numbers, same moment, from the same `coverBand`, drawn
-           twice within about forty pixels of each other. A reader asking "why
-           is this row here" was right: half of it was a second rendering of
-           the line above it.
-           THE TWO THAT STAY ARE THE TWO THAT ARE NOWHERE ELSE. `RANGE ON DISK`
-           is the oldest and newest month the selection covers, and
-           `NEWEST CLOSE ON THIS PAGE` is a price — the only price on the page
-           outside the grid, and the one figure that moves as you page. Neither
-           is on a tab, so neither is a repeat.
-           THE FLASH GOES WITH THE COUNTS IT ANIMATED. `factFlash` still drives
-           the close, which is the value a reader watches change; a bar total
-           that flashes when a month finishes loading was motion on a number
-           nobody is tracking. -->
-      <div class="facts" bind:this={factsEl}>
-        <div class="fact wide">
-          <span class="fv sm"
-            >{coverBand.cells[0].month} <span class="arw">→</span>
-            {coverBand.cells[coverBand.cells.length - 1].month}</span
-          >
-          <span class="fl">range on disk</span>
-        </div>
-        {#if barPage.length > 0 && barSortKey === 'ts'}
-          <div class="fact">
-            <span class="fv num" data-dir={barPage[0].c > barPage[0].o ? 'up' : barPage[0].c < barPage[0].o ? 'down' : 'flat'}
-              >{paisaText(barPage[0].c)}</span
-            >
-            <span class="fl">{barDesc ? 'newest close' : 'oldest close'} on this page</span>
-          </div>
-        {/if}
-      </div>
-    {/if}
+
+    <!-- THE COUNTED LINE IS GONE; ITS LAST TWO READOUTS ARE ON THE ANCHOR.
+         It began as six tiles, became four facts, and this sequence removed
+         the two that were the anchor tabs said twice. What was left could not
+         fill a 1576px row: two items stretched to 787px each, one at each
+         edge. They are inline on the anchor now, beside the tabs they
+         describe, and the row and its 62px are gone. -->
 
     <!-- THE COVERAGE BAND IS GONE.
          It drew one bar per month, scaled against the fullest month in the
@@ -10325,110 +10332,6 @@
     background: var(--down);
   }
 
-
-  /* ---------------------------------------------------------------------
-     THE FOUR FACTS. A row of cells, each one number over one label.
-
-     THE SIZE IS THE HIERARCHY AND IT IS THE WHOLE POINT. Every figure on this
-     page was 14px — the close, the open, the volume, the counts — so a reader's
-     eye had nowhere to land and the page read as one undifferentiated block.
-     These are clamp()ed up to 30px, which is not decoration: it is the
-     difference between a page you scan and a page you read.
-
-     `tabular-nums` on the values so the four cells stay aligned as the numbers
-     change under a poll, and `text-wrap: balance` nowhere — these are numbers,
-     not prose, and a balanced number is a wrapped number.
-     --------------------------------------------------------------------- */
-  .facts {
-    /* `flex: none`, AND THE FILE ALREADY WARNED ABOUT THIS ONE.
-       `.board` is a flex COLUMN and this is one of its children, so the default
-       `flex-shrink: 1` lets it be compressed below its content the moment the
-       column overflows — which a table of fifty rows guarantees. Measured
-       without it: the row rendered, all four cells present with a 26px figure
-       in each, at a container height of 2px. Invisible, and not because
-       anything failed.
-       `.strip` carries the identical line under the identical reason. This is
-       the second time that trap has been hit in this file; it is written here
-       as well so the next block added to this column inherits the answer. */
-    flex: none;
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-    gap: 1px;
-    margin: var(--s3) 0 var(--s2);
-    border: 1px solid var(--line);
-    border-radius: var(--r2);
-    background: var(--line);
-    overflow: hidden;
-  }
-  /* THE 1px GAP IS THE RULE BETWEEN CELLS. The container's background shows
-     through it, so four cells share three hairlines and none of them needs a
-     border of its own — which is what stops the ends doubling up. */
-  .fact {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    /* `--s2` (4px) VERTICALLY RATHER THAN `--s3` (6px). Four pixels off a row
-       whose tallest content is a 30px figure over a micro caption; the cell
-       keeps `--s4` horizontally because the figures sit beside each other and
-       side padding is what separates them. Same reason as `.cband-rail`: small
-       change here, twenty-five rows there. */
-    padding: var(--s2) var(--s4);
-    background: var(--bg-2);
-    min-width: 0;
-  }
-  .fv {
-    font-family: var(--mono);
-    font-size: clamp(20px, 3.4vw, 30px);
-    font-weight: var(--w-semi);
-    line-height: 1.05;
-    letter-spacing: -0.02em;
-    color: var(--ink-hi);
-    font-variant-numeric: tabular-nums;
-    overflow-wrap: anywhere;
-  }
-  /* THE RANGE IS TWO DATES AND A GLYPH, so it takes a smaller step — at 30px it
-     would wrap on a narrow column and a wrapped range reads as two ranges.
-
-     AND IT MUST NOT WRAP AT ALL. Measured at the smaller step it still broke as
-     `2019-12 → 2026-` / `08`, which reads as three dates rather than two: the
-     hyphen inside an ISO month is a legal break point and the browser took it.
-     `nowrap` refuses that, and the cell is given room to ask for instead. */
-  .fv.sm {
-    font-size: clamp(15px, 2.1vw, 19px);
-    letter-spacing: 0;
-    white-space: nowrap;
-    overflow-wrap: normal;
-  }
-  /* THE RANGE CELL IS NOT SPANNED, AND THE FIRST ATTEMPT THAT SPANNED IT WAS
-     WORSE THAN THE WRAP IT FIXED.
-     `grid-column: span 2` did stop the break, and took two of the four tracks
-     with it — so the fourth fact fell to a second row with an empty half beside
-     it. A row of four facts that draws as three-plus-one with a hole is a
-     worse answer than a wrapped date.
-     The track minimum carries it instead: at 170px the widest cell (two ISO
-     months, a glyph, at the 19px step) fits on one line, and four of them fit
-     the 776px board in a single row. `1fr` still shares the slack equally, so
-     the cells stay the same width as each other. */
-  .fv .arw {
-    color: var(--dim);
-    padding: 0 0.15em;
-  }
-  /* THE CLOSE CARRIES ITS DIRECTION HERE TOO, from the same tokens the grid's
-     own close uses. One encoding, two places, no second vocabulary. */
-  .fv.num[data-dir='up'] {
-    color: var(--up);
-  }
-  .fv.num[data-dir='down'] {
-    color: var(--down);
-  }
-  .fl {
-    font-size: var(--fs-micro);
-    letter-spacing: 0.09em;
-    text-transform: uppercase;
-    color: var(--dim);
-  }
-
-
   /* THE HAND-ROLLED FEED MENU IS GONE, and with it the last place this page
      drew a control of its own. `.mnyb`, `.menu`, `.opt` and their tick/name/
      count children styled ONE dropdown — the broker feed — while every other
@@ -11128,6 +11031,52 @@
     flex-wrap: wrap;
     gap: var(--s3) var(--s5);
     padding: 0 var(--s2);
+  }
+  /* THE TWO READOUTS THAT WERE A ROW. `margin-left: auto` puts them at the far
+     end of the anchor rather than in a band of their own — the 852px this line
+     was already carrying empty. They do NOT stretch: a fact is as wide as its
+     figure, and the 787px each was given in the old row is what made two
+     readouts look like two unrelated things at opposite ends of the page. */
+  .afacts {
+    margin-left: auto;
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: var(--s3) var(--s5);
+    min-width: 0;
+  }
+  .af {
+    display: inline-flex;
+    align-items: baseline;
+    gap: var(--s2);
+    white-space: nowrap;
+  }
+  .af b {
+    font-family: var(--mono);
+    font-variant-numeric: tabular-nums;
+    font-weight: var(--w-semi);
+    color: var(--ink);
+  }
+  /* THE CLOSE IS THE ONE PRICE OUTSIDE THE GRID, so it takes the same up/down
+     hues the grid's own closes take — one meaning, one colour, wherever it is
+     drawn. */
+  .af b.num[data-dir='up'] {
+    color: var(--up);
+  }
+  .af b.num[data-dir='down'] {
+    color: var(--down);
+  }
+  /* The label is the quiet half: what the figure IS, never competing with it. */
+  .af i {
+    font-style: normal;
+    font-size: var(--fs-micro);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+  .af .arw {
+    color: var(--faint);
+    padding: 0 var(--s1);
   }
   .sym {
     margin: 0;
