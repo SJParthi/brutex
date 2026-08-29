@@ -1115,6 +1115,120 @@
     };
   });
 
+  /** Which performance plot is drawn. `equity` is the strategy's own curve. */
+  let plot = $state('equity');
+
+  /**
+   * The equity curve, and everything that is a property of its SHAPE.
+   *
+   * # What this unlocks, and why it was locked
+   *
+   * Nine rows across three tabs carried a padlock reading some form of *"needs
+   * an equity series"* — `Sharpe ratio`, `Sortino ratio`, `Average run-up
+   * duration`, `Average drawdown duration`, the three `Run-up` rows, `Drawdown
+   * Average`, and the `Cumulative PnL` plot. Every one of those sentences was
+   * true of the RESULTS LEDGER, which keeps four scalars per run and no series.
+   *
+   * The trade file is a series. `worst` is each round trip's realised worst-case
+   * result in `seq` order, so the running sum IS the curve and one walk of it
+   * yields every shape statistic above.
+   *
+   * # Annualisation, and the assumption under it
+   *
+   * Sharpe and Sortino are ratios per unit of time, so they need a period count:
+   * trades over the span's length in years. **The risk-free rate is taken as
+   * ZERO**, and the page says so rather than leaving it here — a Sharpe quoted
+   * without its convention is how two correct numbers end up disagreeing.
+   */
+  const equity = $derived.by(() => {
+    if (!tradeStats || tradeStats.curve.length < 2) return null;
+    const curve = tradeStats.curve;
+    const rows = [...tradeList.rows].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
+
+    // ── run-ups and drawdowns as alternating segments of the curve ──
+    // Measured in TRADES, because the curve advances one point per trade; a
+    // duration in bars would need the gaps between them, which it does not hold.
+    let peak = 0;
+    let peakAt = 0;
+    let trough = 0;
+    let troughAt = 0;
+    let maxRunUp = 0;
+    let maxDrawdown = 0;
+    /** @type {number[]} */ const runUps = [];
+    /** @type {number[]} */ const runUpLens = [];
+    /** @type {number[]} */ const drawdowns = [];
+    /** @type {number[]} */ const drawdownLens = [];
+    for (let i = 0; i < curve.length; i += 1) {
+      const v = curve[i];
+      if (v > peak) {
+        // A new high closes the drawdown that was open under the old one.
+        if (peak - trough > 0) {
+          drawdowns.push(peak - trough);
+          drawdownLens.push(Math.max(1, i - troughAt));
+        }
+        runUps.push(v - trough);
+        runUpLens.push(Math.max(1, i - troughAt));
+        maxRunUp = Math.max(maxRunUp, v - trough);
+        peak = v;
+        peakAt = i;
+        trough = v;
+        troughAt = i;
+      } else if (v < trough) {
+        trough = v;
+        troughAt = i;
+        maxDrawdown = Math.max(maxDrawdown, peak - trough);
+      }
+    }
+    const mean = (/** @type {number[]} */ xs) =>
+      xs.length === 0 ? null : xs.reduce((a, b) => a + b, 0) / xs.length;
+    const currentRunUp = curve[curve.length - 1] - trough;
+
+    // ── Sharpe and Sortino on per-trade returns ──
+    const base = Number(bench.open);
+    const returns =
+      Number.isFinite(base) && base ? rows.map((t) => (t.worst ?? 0) / base) : [];
+    let sharpe = null;
+    let sortino = null;
+    if (returns.length > 1) {
+      const m = returns.reduce((a, b) => a + b, 0) / returns.length;
+      const sd = Math.sqrt(
+        returns.reduce((a, r) => a + (r - m) * (r - m), 0) / (returns.length - 1)
+      );
+      // DOWNSIDE deviation only — the whole difference between the two ratios is
+      // that Sortino does not punish a strategy for the size of its gains.
+      const down = returns.filter((r) => r < 0);
+      const dsd =
+        down.length > 1
+          ? Math.sqrt(down.reduce((a, r) => a + r * r, 0) / down.length)
+          : null;
+      // `spanYears` counts the months FOUND, not the months asked for — a span
+      // with a hole is a shorter sample, and annualising it against the longer
+      // window would overstate both ratios.
+      const years = spanYears;
+      const scale = years !== null && years > 0 ? Math.sqrt(returns.length / years) : null;
+      if (sd > 0 && scale !== null) sharpe = (m / sd) * scale;
+      if (dsd !== null && dsd > 0 && scale !== null) sortino = (m / dsd) * scale;
+    }
+
+    return {
+      // `{t, v}` is the shape `areaChart` already eats, `t` in SECONDS off each
+      // trade's own exit stamp.
+      points: rows.map((t, i) => ({ t: Math.round((t.exit_micros ?? 0) / 1e6), v: curve[i] })),
+      maxRunUp: maxRunUp || null,
+      avgRunUp: mean(runUps),
+      currentRunUp,
+      maxDrawdown,
+      avgDrawdown: mean(drawdowns),
+      avgRunUpDuration: mean(runUpLens),
+      avgDrawdownDuration: mean(drawdownLens),
+      sharpe,
+      sortino,
+      low: Math.min(0, ...curve),
+      high: Math.max(0, ...curve),
+      peakAt
+    };
+  });
+
   /** Weekday bucket keys, and `0` IS MONDAY. */
   const WEEKDAY_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
@@ -6467,13 +6581,35 @@
                        of the chart, each with an eye that toggles it, and a
                        collapse chevron underneath. No boxes, no bullets. -->
                   <div class="tt-plots">
-                    <div class="tt-plotrow off">
+                    <!-- CUMULATIVE PnL IS DRAWN NOW. Its padlock read "No equity
+                         series is recorded — four scalars cannot make a curve",
+                         which was true of the LEDGER and untrue of the trade
+                         file: `worst` in `seq` order is the series, and its
+                         running sum is the curve. The eye picks which of the two
+                         drawable plots is shown, as the reference's does. -->
+                    <div class="tt-plotrow" class:off={!equity || plot !== 'equity'}>
                       <span>Cumulative PnL</span>
-                      <Lock small why="No equity series is recorded — four scalars cannot make a curve." />
+                      {#if equity}
+                        <button
+                          class="tt-eye"
+                          title={plot === 'equity' ? 'Shown' : 'Show'}
+                          aria-label="Show cumulative PnL"
+                          onclick={() => (plot = 'equity')}
+                        >
+                          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 8s2.4-4 6.5-4 6.5 4 6.5 4-2.4 4-6.5 4S1.5 8 1.5 8z" fill="none" stroke="currentColor" stroke-width="1.3" /><circle cx="8" cy="8" r="1.9" fill="currentColor" /></svg>
+                        </button>
+                      {:else}
+                        <Lock small why="Needs the trade file — the results ledger's four scalars cannot make a curve." />
+                      {/if}
                     </div>
-                    <div class="tt-plotrow">
+                    <div class="tt-plotrow" class:off={equity && plot !== 'hold'}>
                       <span>Buy and hold</span>
-                      <button class="tt-eye" title="Shown" aria-label="Buy and hold is shown">
+                      <button
+                        class="tt-eye"
+                        title={plot === 'hold' || !equity ? 'Shown' : 'Show'}
+                        aria-label="Show buy and hold"
+                        onclick={() => (plot = 'hold')}
+                      >
                         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 8s2.4-4 6.5-4 6.5 4 6.5 4-2.4 4-6.5 4S1.5 8 1.5 8z" fill="none" stroke="currentColor" stroke-width="1.3" /><circle cx="8" cy="8" r="1.9" fill="currentColor" /></svg>
                       </button>
                     </div>
@@ -6490,7 +6626,26 @@
                     </button>
                   </div>
                   <div class="tt-plot">
-                    {#if bench.phase === 'loading'}
+                    {#if equity && plot === 'equity'}
+                      <!-- `equity.points` is `{t, v}` — the shape `areaChart`
+                           already eats — with `t` in seconds off each trade's
+                           own exit stamp, so the axis needs no new formatter. -->
+                      {@render areaChart(
+                        equity.points,
+                        [money(equity.high), money(Math.round((equity.high + equity.low) / 2)), money(equity.low)],
+                        [
+                          istLabel(equity.points[0].t, true),
+                          istLabel(equity.points[equity.points.length - 1].t, true)
+                        ],
+                        ''
+                      )}
+                      <p class="tt-plotnote">
+                        The running sum of each trade's realised <b>worst-case</b> result, in the
+                        order they resolved — the unstopped walk. The ledger's headline walks the
+                        stopped exit grid and ends at <b>{money(openRun.pessimistic)}</b>, which is
+                        why the two do not meet.
+                      </p>
+                    {:else if bench.phase === 'loading'}
                       <div class="tt-empty"><span class="spin sm" aria-hidden="true"></span> Reading the span's opening price…</div>
                     {:else if outperformance && buyHold}
                       <div class="tt-bench">
@@ -6609,8 +6764,23 @@
                   <div class="tt-quad">
                     <div class="tt-q"><span class="tt-k">Annualized return (CAGR)</span><span class="tt-qv" class:up={(cagrBps ?? 0) >= 0} class:down={(cagrBps ?? 0) < 0}>{noTrades ? 'none' : cagrBps === null ? '—' : pct(cagrBps)}</span></div>
                     <div class="tt-q"><span class="tt-k">Total return</span><span class="tt-qv" class:up={!noTrades && (strategyBps ?? 0) >= 0} class:down={!noTrades && (strategyBps ?? 0) < 0}>{noTrades ? "none" : pct(strategyBps)}</span></div>
-                    <div class="tt-q"><span class="tt-k">Sharpe ratio</span><span class="tt-qv"><Lock why="crates/runner computes significance, but no ratio reaches the record." /></span></div>
-                    <div class="tt-q"><span class="tt-k">Sortino ratio</span><span class="tt-qv"><Lock why="Same — not written to the ledger." /></span></div>
+                    <!-- REAL, ON PER-TRADE RETURNS. Both read "no ratio reaches
+                         the record" — true of the ledger's four scalars, untrue
+                         of the trade file, which is a series. Annualised by the
+                         span's own length, risk-free rate zero, and the note
+                         under this row says so. -->
+                    <div class="tt-q">
+                      <span class="tt-k">Sharpe ratio</span>
+                      <span class="tt-qv"
+                        >{#if equity && equity.sharpe !== null}{equity.sharpe.toFixed(3)}{:else}<Lock why="Needs at least two trades and the span's opening price to divide by." />{/if}</span
+                      >
+                    </div>
+                    <div class="tt-q">
+                      <span class="tt-k">Sortino ratio</span>
+                      <span class="tt-qv"
+                        >{#if equity && equity.sortino !== null}{equity.sortino.toFixed(3)}{:else}<Lock why="Needs at least two LOSING trades — Sortino divides by downside deviation, and a run with no losses has none to measure." />{/if}</span
+                      >
+                    </div>
                   </div>
 
                   <div class="tt-hrow tight">
@@ -6717,8 +6887,26 @@
                   )}
                 {:else}
                   <div class="tt-quad">
-                    <div class="tt-q"><span class="tt-k">Average run-up duration</span><span class="tt-qv"><Lock why="Needs a run-up series over time." /></span></div>
-                    <div class="tt-q"><span class="tt-k">Average drawdown duration</span><span class="tt-qv"><Lock why="Needs a drawdown series over time." /></span></div>
+                    <!-- REAL. Durations are in TRADES, not bars: the equity
+                         curve advances one point per trade, so a duration in
+                         bars would need the gaps between them. Naming the unit
+                         is the difference between a measurement and a guess. -->
+                    <div class="tt-q">
+                      <span class="tt-k">Average run-up duration</span>
+                      <span class="tt-qv"
+                        >{#if equity && equity.avgRunUpDuration !== null}{equity.avgRunUpDuration.toFixed(1)}<em
+                            class="tt-unit2">trades</em
+                          >{:else}<Lock why="The curve never made a new high, so no run-up has both ends to measure between." />{/if}</span
+                      >
+                    </div>
+                    <div class="tt-q">
+                      <span class="tt-k">Average drawdown duration</span>
+                      <span class="tt-qv"
+                        >{#if equity && equity.avgDrawdownDuration !== null}{equity.avgDrawdownDuration.toFixed(1)}<em
+                            class="tt-unit2">trades</em
+                          >{:else}<Lock why="No drawdown has closed — the curve never recovered a previous high — so none can be averaged." />{/if}</span
+                      >
+                    </div>
                     <div class="tt-q"><span class="tt-k">Max drawdown</span><span class="tt-qv down">{money(Math.abs(openRun.max_drawdown))}<em class="tt-pc">{drawdownBps === null ? '' : `${(drawdownBps / 100).toFixed(2)}%`}</em></span></div>
                     <div class="tt-q"><span class="tt-k">Max drawdown as % of opening price</span><span class="tt-qv">{drawdownBps === null ? '—' : `${(drawdownBps / 100).toFixed(2)}%`}</span></div>
                   </div>
@@ -6742,27 +6930,78 @@
                        shared scale. The maximum drawdown is the one figure
                        recorded, so it is the one bar drawn. -->
                   <h5 class="tt-h5">Comparison of growth and decline periods</h5>
-                  <div class="tt-cmp">
-                    <span class="tt-cmpgrp">Run-up</span>
-                    {#each ['Maximum', 'Average', 'Current'] as k (k)}
+                  <!-- ALL FIVE REAL. "Run-up needs an equity series to measure a
+                       rise across" — the trade file IS that series. Every bar is
+                       scaled against the largest magnitude in the block, so a
+                       run-up and a drawdown are drawn at ONE scale and can be
+                       compared by eye, which is the only reason to group them. -->
+                  {#if equity}
+                    {@const reach = Math.max(
+                      1,
+                      equity.maxRunUp ?? 0,
+                      equity.avgRunUp ?? 0,
+                      Math.abs(equity.currentRunUp),
+                      equity.maxDrawdown,
+                      equity.avgDrawdown ?? 0
+                    )}
+                    <div class="tt-cmp">
+                      <span class="tt-cmpgrp">Run-up</span>
+                      {#each [{ k: 'Maximum', v: equity.maxRunUp }, { k: 'Average', v: equity.avgRunUp }, { k: 'Current', v: equity.currentRunUp }] as r (r.k)}
+                        <div class="tt-cmprow">
+                          <span class="tt-cmplab">{r.k}</span>
+                          <span class="tt-cmpbar"
+                            >{#if r.v !== null}<span class="tt-cmpfill up" style="width:{(Math.abs(r.v) / reach) * 100}%"></span>{/if}</span
+                          >
+                          <span class="tt-cmpval up"
+                            >{#if r.v === null}<Lock small why="The curve never made a new high, so there is no run-up to measure." />{:else}{money(r.v)}{/if}</span
+                          >
+                        </div>
+                      {/each}
+                      <span class="tt-cmpgrp">Drawdown</span>
+                      {#each [{ k: 'Maximum', v: equity.maxDrawdown }, { k: 'Average', v: equity.avgDrawdown }] as r (r.k)}
+                        <div class="tt-cmprow">
+                          <span class="tt-cmplab">{r.k}</span>
+                          <span class="tt-cmpbar"
+                            >{#if r.v !== null}<span class="tt-cmpfill down" style="width:{(Math.abs(r.v) / reach) * 100}%"></span>{/if}</span
+                          >
+                          <span class="tt-cmpval down"
+                            >{#if r.v === null}<Lock small why="No drawdown has closed — the curve never recovered a previous high — so there is none to average." />{:else}{money(r.v)}{/if}</span
+                          >
+                        </div>
+                      {/each}
+                    </div>
+                    <!-- THE LEDGER'S OWN FIGURE BESIDE THE CURVE'S, because they
+                         are two different walks and this block would otherwise
+                         quietly replace one with the other. -->
+                    <p class="tt-note2 dim">
+                      Measured on the trade file's equity curve, in trades. The ledger records
+                      <b>{money(Math.abs(openRun.max_drawdown))}</b> for the same run — a different
+                      number because it walks the stopped exit grid and this walks the unstopped
+                      trade list.
+                    </p>
+                  {:else}
+                    <div class="tt-cmp">
+                      <span class="tt-cmpgrp">Run-up</span>
+                      {#each ['Maximum', 'Average', 'Current'] as k (k)}
+                        <div class="tt-cmprow">
+                          <span class="tt-cmplab">{k}</span>
+                          <span class="tt-cmpbar"></span>
+                          <span class="tt-cmpval"><Lock small why="Needs the trade file, which this run did not record." /></span>
+                        </div>
+                      {/each}
+                      <span class="tt-cmpgrp">Drawdown</span>
                       <div class="tt-cmprow">
-                        <span class="tt-cmplab">{k}</span>
-                        <span class="tt-cmpbar"></span>
-                        <span class="tt-cmpval"><Lock small why="Run-up needs an equity series to measure a rise across." /></span>
+                        <span class="tt-cmplab">Maximum</span>
+                        <span class="tt-cmpbar"><span class="tt-cmpfill down" style="width:100%"></span></span>
+                        <span class="tt-cmpval down">{drawdownBps === null ? money(Math.abs(openRun.max_drawdown)) : `${(drawdownBps / 100).toFixed(2)}%`}</span>
                       </div>
-                    {/each}
-                    <span class="tt-cmpgrp">Drawdown</span>
-                    <div class="tt-cmprow">
-                      <span class="tt-cmplab">Maximum</span>
-                      <span class="tt-cmpbar"><span class="tt-cmpfill down" style="width:100%"></span></span>
-                      <span class="tt-cmpval down">{drawdownBps === null ? money(Math.abs(openRun.max_drawdown)) : `${(drawdownBps / 100).toFixed(2)}%`}</span>
+                      <div class="tt-cmprow">
+                        <span class="tt-cmplab">Average</span>
+                        <span class="tt-cmpbar"></span>
+                        <span class="tt-cmpval"><Lock small why="Needs the trade file, which this run did not record." /></span>
+                      </div>
                     </div>
-                    <div class="tt-cmprow">
-                      <span class="tt-cmplab">Average</span>
-                      <span class="tt-cmpbar"></span>
-                      <span class="tt-cmpval"><Lock small why="Only the single worst drawdown is recorded, not every one to average." /></span>
-                    </div>
-                  </div>
+                  {/if}
 
                   <h5 class="tt-h5">Excursion <span class="tt-own">brutex</span></h5>
                   <p class="tt-note2">
