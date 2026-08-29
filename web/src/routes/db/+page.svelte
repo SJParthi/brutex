@@ -10180,7 +10180,12 @@
      the group moves as one when the row runs out. The `.dates` gap is reused
      rather than restated so the six controls sit on a single rhythm. */
   .times {
-    flex: 1 1 auto;
+    /* `0 1 auto` — SHRINKS BUT NEVER GROWS. With `1` it took a third of the
+       slack under the cap and pushed the day fields below the 274 they have
+       always drawn at; the times have a natural size and no reason to exceed
+       it, so the growth belongs entirely to the two fields that had it before
+       this row existed. */
+    flex: 0 1 auto;
     display: flex;
     align-items: flex-start;
     flex-wrap: wrap;
@@ -11184,8 +11189,26 @@
   .strip .field.wide {
     grid-column: 1 / -1;
   }
+  /* 1042px, AND THE NUMBER IS ARITHMETIC RATHER THAN TASTE — the same way the
+     216px track above is.
+     This was 560, which is exactly `274 + 12 + 274`: two day fields at the
+     width they settle to, and the gap between them. It was right when two was
+     all there was. Three time controls later it was the reason they could not
+     sit beside the dates — the cap, not the flex — because 560 is filled by
+     the dates alone and everything after them wrapped.
+     THE SUM, MEASURED ON THE RUNNING PAGE:
+       two day fields          274 + 274 = 548
+       the time group          128 + 12 + 128 + 12 + 190 = 470
+       two gaps between three  12 + 12 = 24
+                                       = 1042
+     `.times` is `flex: 0 1 auto` so it does NOT take a share of the slack;
+     only the two day fields grow, which lands them back on 274 apiece and
+     leaves this identical to what it drew before at every width below the cap.
+     KEPT AS A CAP RATHER THAN REMOVED. Without one the window stretches to the
+     full 1342 of a wide strip, and a date field 346px wide holding
+     `01 Jan 2015` is mostly empty box. */
   .strip .field.wide .dates {
-    max-width: 560px;
+    max-width: 1042px;
   }
   .dates {
     display: flex;

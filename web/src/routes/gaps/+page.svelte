@@ -74,6 +74,7 @@
    *   truncated: boolean,
    *   unreadable_records: number,
    *   absent_file: string | null,
+   *   unmeasured_minutes: number,
    *   gaps: Run[]
    * }} MonthVerdict
    */
@@ -82,9 +83,11 @@
    *   expected: number,
    *   held: number,
    *   lost_minutes: number,
+   *   unmeasured_minutes: number,
    *   months: number,
    *   months_absent: number,
    *   truncated: boolean,
+   *   calendar: { first: string | null, last: string | null, stale: boolean },
    *   month: MonthVerdict[]
    * }} Answer
    */
@@ -369,6 +372,35 @@
       </div>
     </div>
 
+    {#if b.calendar?.stale}
+      <div class="refusal">
+        <span class="rlabel">The calendar has run out</span>
+        <p>
+          <code>pull::calendar</code> knows {b.calendar.first} to
+          <b>{b.calendar.last}</b>, and today is past it. Every day after that is
+          <b>unmeasured</b> — not a loss and not a clean bill, because this build has no holiday
+          list for it. Those days add nothing to <em>owed</em> while their bars still count as
+          <em>held</em>, which is why <em>held</em> can exceed <em>owed</em> above.
+        </p>
+        <p class="rhint">
+          {fmt(b.unmeasured_minutes)} minutes in this answer are unclaimed for that reason. Nothing
+          else in the workspace notices this: <code>LAST_DAY</code> appears outside
+          <code>pull::calendar</code> exactly once, in that module's own test. Extending the table
+          is an exchange fact and belongs in <code>docs/00-charter.md</code> — this build will not
+          invent a trading day.
+        </p>
+      </div>
+    {:else if b.unmeasured_minutes > 0}
+      <div class="refusal">
+        <span class="rlabel">Partly unclaimed</span>
+        <p>
+          {fmt(b.unmeasured_minutes)} minutes in this span are <b>unmeasured</b> — outside
+          {b.calendar?.first} to {b.calendar?.last}, or a session whose length this build does not
+          know. They are neither a loss nor a clean bill, and they add nothing to <em>owed</em>.
+        </p>
+      </div>
+    {/if}
+
     {#if b.truncated}
       <div class="refusal">
         <span class="rlabel">Truncated</span>
@@ -532,6 +564,10 @@
     color: var(--n9);
     line-height: 1.55;
     margin: var(--s2) 0 0;
+  }
+  .refusal .rhint {
+    font-size: var(--fs-xs, 11px);
+    color: var(--n8);
   }
   .census {
     display: flex;
