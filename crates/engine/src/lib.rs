@@ -867,13 +867,6 @@ impl Ladder {
         live: &[u32],
         on_level: &dyn Fn(&Frontier, usize, u64),
     ) -> Sweep {
-        let bars = len_u64(bar_bits.len());
-        let mut sweep = Sweep {
-            bars,
-            min_hits: self.min_hits,
-            ..Sweep::default()
-        };
-
         // ── the layout, chosen ONCE for the whole walk ───────────────────────
         //
         // `column.rs` has existed since b4220b6 and NOTHING CALLED IT. This
@@ -895,6 +888,45 @@ impl Ladder {
         // has, and which layout the sweep counts against is this function's
         // business rather than its caller's.
         let column = Column::transpose(bar_bits);
+        self.walk_column(&column, live, on_level)
+    }
+
+    /// [`Self::walk_reporting`] over a column the CALLER already transposed.
+    ///
+    /// # The 58.7 MB this stops rebuilding
+    ///
+    /// [`Self::walk_reporting`] transposes `bar_bits` itself, which is right
+    /// when a caller walks a column once. `runner::Sweeper::auto` does not: it
+    /// bisects for a threshold and walks the SAME bars on every step, roughly
+    /// seventeen halvings and seventeen bisections. Each of those re-entered
+    /// [`Column::transpose`], and a transpose is
+    /// `vec![0_u64; BITS * ceil(bars/64)]` -- **58.7 MB zeroed at 1,222,791
+    /// bars** -- plus a full pass setting one bit per (bar, position).
+    ///
+    /// So an auto-tuned run rebuilt an identical 58.7 MB structure up to
+    /// thirty-four times, having already paid for it once. The doc on
+    /// `walk_reporting` says "The transpose is paid once, before k=1", and that
+    /// is true PER WALK and false per run -- which is exactly the gap an O(1)
+    /// audit is for, because nothing about the per-walk cost is wrong.
+    ///
+    /// The signature takes `&Column` rather than `&[ConditionMask]`, so a caller
+    /// that has one cannot accidentally pay for a second. Invariant V-06 pins
+    /// [`Self::walk`]'s signature as text and is untouched: this is a different
+    /// function, and it still cannot compute a condition bit -- a `Column` is
+    /// already-computed bits, one layout further along than the masks V-06 is
+    /// about.
+    pub fn walk_column(
+        self,
+        column: &Column,
+        live: &[u32],
+        on_level: &dyn Fn(&Frontier, usize, u64),
+    ) -> Sweep {
+        let bars = column.bars();
+        let mut sweep = Sweep {
+            bars,
+            min_hits: self.min_hits,
+            ..Sweep::default()
+        };
 
         // ── k=1, and the D-0080 exclusion guard ──────────────────────────────
         // Every position is measured BEFORE the ladder starts, and one at
@@ -1022,7 +1054,7 @@ impl Ladder {
             // a per-level cap left the peak at `depth * ceiling`, and the process
             // died rather than refused.
             let (next, halt, added, walked) =
-                self.next_level(&column, &current, k, admitted, pairs_walked);
+                self.next_level(column, &current, k, admitted, pairs_walked);
             admitted = admitted.saturating_add(added);
             pairs_walked = pairs_walked.saturating_add(walked);
             sweep.levels.push(current);

@@ -373,10 +373,11 @@ pub struct Asked {
 ///
 /// Ordered as an operator reads them: what to search, how much of it to price,
 /// how much to keep, then the admission rules.
-const KNOBS: [(&str, &str); 15] = [
+const KNOBS: [(&str, &str); 16] = [
     ("support_ppm", "BRUTEX_SUPPORT_PPM"),
     ("ceiling", "BRUTEX_CEILING"),
     ("screen_cap", "BRUTEX_SCREEN_CAP"),
+    ("screen_budget_ms", "BRUTEX_SCREEN_BUDGET_MS"),
     ("top", "BRUTEX_TOP"),
     ("validate", "BRUTEX_VALIDATE"),
     ("horizon_bars", "BRUTEX_HORIZON_BARS"),

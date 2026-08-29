@@ -5544,6 +5544,91 @@ fn screen_cap() -> usize {
         .unwrap_or(DEFAULT)
 }
 
+/// How many candidates the throughput measurement prices before deciding a cap.
+///
+/// # Fixed, and it has to be
+///
+/// The calibration is what the derived cap is computed FROM, so if its own size
+/// varied with the timing the measurement would be measuring itself. 256 is
+/// large enough that per-candidate cost averages over the spread of mask arities
+/// — a k=2 candidate reads two bitmaps and a k=8 reads eight — and small enough
+/// that the calibration is a rounding error against any budget worth naming: at
+/// the 48-minute run's own rate it is under three seconds.
+///
+/// It is NOT wasted work in the sense of being thrown away. These candidates are
+/// priced again in the real pass, which is one more reason to keep the number
+/// small; making the calibration reuse its results would mean threading a
+/// partial answer through the determinism argument for no measurable gain.
+const CALIBRATION_CANDIDATES: usize = 256;
+
+/// The operator's wall-clock target for one rung's exit grid, in milliseconds.
+///
+/// `None` when unset, which keeps [`screen_cap`] exactly as it was -- a stated
+/// count rather than a derived one.
+fn screen_budget_ms() -> Option<u64> {
+    crate::knobs::var("BRUTEX_SCREEN_BUDGET_MS")
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|&n| n > 0)
+}
+
+/// How many candidates a measured throughput says will fit in the budget.
+///
+/// # Why this exists: the grid IS the runtime
+///
+/// MEASURED on 2026-08-29 by sampling the live process: **87.6% of a 48-minute
+/// run was inside the exit grid** -- 18,068 samples against 1,403 in `trade` and
+/// 887 in `rank`. The machine was 98.5% utilised at the time (1,379% of a 1,400%
+/// ceiling on fourteen cores), so the run was not waiting on anything. What it
+/// was doing is `screen_cap` x `variants` grid evaluations, ten thousand times
+/// six hundred and twenty-five, and that product is a POLICY number rather than
+/// a physical one.
+///
+/// # It cannot be a wall-clock cut on the search itself
+///
+/// Stopping the loop when a timer expires would make the answer depend on how
+/// busy the machine was, and §3 rule 5 requires the same inputs to give the same
+/// outputs byte for byte. So the budget decides a CAP, the cap is fixed before
+/// the search starts, and the search is then exactly as deterministic as it was.
+///
+/// # The cap is QUANTISED, and that is not cosmetic
+///
+/// `screen_cap` is folded into the run identity, so a cap that moved with every
+/// millisecond of timing jitter would give the same question a new identity on
+/// every run and fill the ledger with near-duplicates that are not duplicates to
+/// the dedup. Rounding down to a power of two means an idle machine and a busy
+/// one land on the same rung unless they differ by a factor of two -- at which
+/// point they really are different searches and deserve different identities.
+///
+/// # Cost
+///
+/// One multiply and one shift. The measurement it reads is taken once per rung,
+/// from a fixed-size calibration prefix, so nothing here is per candidate.
+fn cap_within_budget(sampled: usize, elapsed_nanos: u128, budget_ms: u64, offered: usize) -> usize {
+    if sampled == 0 || elapsed_nanos == 0 {
+        return offered;
+    }
+    let budget_nanos = u128::from(budget_ms).saturating_mul(1_000_000);
+    // `fits = offered_by_time = budget / per_candidate`, done as one multiply so
+    // the per-candidate cost is never materialised and rounded.
+    let fits = budget_nanos
+        .saturating_mul(sampled as u128)
+        .checked_div(elapsed_nanos)
+        .unwrap_or(u128::MAX);
+    let fits = usize::try_from(fits).unwrap_or(usize::MAX);
+    // QUANTISE DOWN TO A POWER OF TWO. `1 << ilog2` is the largest power of two
+    // at or below the figure, so the ladder is 256, 512, 1024, ... and small
+    // timing differences do not move a run's identity.
+    let quantised = if fits < 2 {
+        1
+    } else {
+        1_usize.checked_shl(fits.ilog2()).unwrap_or(fits)
+    };
+    // NEVER ABOVE WHAT THERE IS, and never below the calibration sample: pricing
+    // fewer than were already priced would throw away measured work and report a
+    // narrower search than actually happened.
+    quantised.clamp(sampled.min(offered), offered)
+}
+
 /// Whether an operator-facing command pays for the full validation stack.
 ///
 /// # The default is ON, and it stays on
@@ -6536,9 +6621,48 @@ fn screen(
     // relative order, so a shuffled input would silently reorder ties and the
     // reported top 25 could differ between runs on the same bytes. Byte-
     // identical output on any core count is the property that makes this safe.
+    // THE CAP, DERIVED FROM A MEASUREMENT WHEN THE OPERATOR NAMES A BUDGET.
+    //
+    // `screen_cap()` alone is a stated count: ten thousand, times 625 grid
+    // variants, is 6.25 million evaluations and was 87.6% of a 48-minute run.
+    // With `BRUTEX_SCREEN_BUDGET_MS` set, a fixed calibration prefix is timed
+    // and `cap_within_budget` turns that throughput into a cap that fits.
+    //
+    // The calibration runs on THIS machine, on THIS rung's own candidates, so it
+    // measures the thing it is bounding rather than a constant from somebody
+    // else's hardware. The prefix is a fixed size, so what is timed does not
+    // itself depend on the timing.
+    let priced_cap = screen_budget_ms().map_or_else(screen_cap, |budget| {
+        let sample = CALIBRATION_CANDIDATES.min(by_evidence.len());
+        let began = std::time::Instant::now();
+        let _warm: usize = by_evidence
+            .par_iter()
+            .take(sample)
+            .map(|scored| {
+                usize::from(
+                    grid::evaluate(
+                        bars,
+                        column,
+                        &scored.mask,
+                        horizon,
+                        side_of_evidence(scored),
+                        grid::Levels::derived(grid_rungs(bars)),
+                    )
+                    .best()
+                    .is_some(),
+                )
+            })
+            .sum();
+        cap_within_budget(
+            sample,
+            began.elapsed().as_nanos(),
+            budget,
+            by_evidence.len().min(screen_cap()),
+        )
+    });
     let mut rows: Vec<Screened<'_>> = by_evidence
         .par_iter()
-        .take(screen_cap())
+        .take(priced_cap)
         .enumerate()
         .filter_map(|(rank, scored)| {
             let side = side_of_evidence(scored);

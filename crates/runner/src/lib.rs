@@ -450,6 +450,20 @@ impl Sweeper {
     pub fn auto(&self, bars: &[Candle], evaluator: &mut Evaluator) -> Auto {
         let column = Column::build(bars, evaluator);
         let live = live_positions();
+        // THE TRANSPOSE IS PAID ONCE TOO, AND IT WAS NOT.
+        //
+        // The doc above says "the column is folded once and every probe walks
+        // the same one". That was true of `Column::build` and FALSE of the
+        // bitmap the ladder actually counts against: `Ladder::walk` transposes
+        // its input itself, so each of the ~17 halvings and ~17 bisections below
+        // re-entered `engine::column::Column::transpose` on identical bars.
+        //
+        // A transpose is `vec![0_u64; BITS * ceil(bars/64)]` -- 58.7 MB zeroed
+        // at 1,222,791 bars -- plus a full pass setting one bit per (bar,
+        // position). So an auto-tuned run rebuilt an identical 58.7 MB structure
+        // up to thirty-four times, having already paid for it once. Found by an
+        // O(1) audit; no per-walk cost was wrong, which is why review missed it.
+        let transposed = engine::column::Column::transpose(column.bits());
         let census = column.census();
         let first_swept = column.first_swept();
 
@@ -480,7 +494,7 @@ impl Sweeper {
             let sweep = Ladder::with_min_hits(threshold)
                 .with_ceiling(self.ladder.ceiling())
                 .with_pair_budget(PROBE_PAIRS)
-                .walk(column.bits(), &live);
+                .walk_column(&transposed, &live, &|_, _, _| {});
             if sweep.completed() {
                 // A PROBE THAT FOUND NOTHING IS NOT AN ANSWER, and this is the
                 // whole of the bug an audit found on a 98,124-bar column.
@@ -599,7 +613,7 @@ impl Sweeper {
                 let sweep = Ladder::with_min_hits(mid)
                     .with_ceiling(self.ladder.ceiling())
                     .with_pair_budget(PROBE_PAIRS)
-                    .walk(column.bits(), &live);
+                    .walk_column(&transposed, &live, &|_, _, _| {});
                 if sweep.completed() {
                     let found = sweep.depth() >= 1;
                     hi = mid;

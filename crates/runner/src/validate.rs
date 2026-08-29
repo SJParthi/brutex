@@ -869,6 +869,25 @@ pub fn walk_forward_shaped(
         // `store::file::read_row`'s per-record allocation and `pull::ingest`'s
         // per-row counting loop.
         let exits = crate::trade::forced_exits(train);
+        // THE RUNG COUNT IS READ ONCE, AND IT WAS READ PER CANDIDATE.
+        //
+        // `fold_rungs()` is `std::env::var_os` — which takes the process-wide
+        // environment lock, walks `environ` linearly, and allocates an
+        // `OsString` — followed by a `to_string_lossy`, a `trim` and a `parse`.
+        // It sat inside the `par_iter` below, so every one of those ran once per
+        // CANDIDATE, on every core at once, for a value that cannot change
+        // during a run.
+        //
+        // The comment directly above hoisted `forced_exits` out of this exact
+        // loop and sized the multiplier from a real run at **17.8 million
+        // survivors** — and left this one inside it. Same loop, same argument,
+        // one line apart. Found by an O(1) audit, not by review.
+        //
+        // Worse than the cost: `var_os` on the environment while another thread
+        // calls `setenv` is a data race in the C library beneath `std`, and this
+        // crate's own tests set knobs. Reading once, before any lane starts, ends
+        // that too.
+        let rungs = fold_rungs();
         let assessed: Vec<Option<(ConditionMask, Summary, ExitPick, i64)>> = closed
             .kept
             .par_iter()
@@ -879,7 +898,7 @@ pub fn walk_forward_shaped(
                     &item.mask,
                     horizon,
                     side_of(direction),
-                    crate::grid::Levels::derived(fold_rungs()),
+                    crate::grid::Levels::derived(rungs),
                     Some(&exits),
                 );
                 let cell = g.sharpest().or_else(|| g.best())?;
