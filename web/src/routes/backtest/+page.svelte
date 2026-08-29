@@ -974,6 +974,147 @@
     }
   }
 
+  /**
+   * Everything the reference's tester reports, from the per-trade results.
+   *
+   * # `best` and `worst` are REALISED P&L, not excursions
+   *
+   * This is the correction the rest of this block hangs on, and it is stated in
+   * `crates/cli/src/trades.rs` in as many words:
+   *
+   * > `best` — *"Paisa per unit with both legs filled at the bar OPEN — the
+   * > BEST-CASE realised P&L of this round trip, **not an excursion**."*
+   * > `worst` — *"Paisa per unit with both legs filled at the bar PRINTED
+   * > EXTREME — the WORST-CASE realised P&L, and the figure selection actually
+   * > ranks on."*
+   *
+   * That doc carries its own correction notice — it once said *"the most
+   * favourable excursion reached"*, and warns that a reader trusting it *"would
+   * have filtered on `worst <= 0` and found nothing, or read an excursion where
+   * a result was."* **This page was that reader.** It rendered the two fields
+   * under `Favorable excursion` / `Adverse excursion`, locked `Net PnL` with
+   * *"Realised net P&L per trade is not stored"*, and summed `worst` as an
+   * adverse excursion.
+   *
+   * It never held together: `/trades.json`'s buckets count `wins` and
+   * `worst_wins` off these same two fields, and a winner cannot be counted from
+   * an excursion.
+   *
+   * # Worst-case is the headline throughout
+   *
+   * The page's own header reads *"ranked on worst-case fills"*, and `worst` is
+   * the figure the engine selects on. Every figure below is therefore computed
+   * on `worst`, with the best-case reading carried beside it rather than
+   * substituted for it.
+   */
+  const tradeStats = $derived.by(() => {
+    const rows = tradeList.rows;
+    if (!Array.isArray(rows) || rows.length === 0) return null;
+
+    let grossProfit = 0;
+    let grossLoss = 0; // kept POSITIVE, as the reference prints it
+    let wins = 0;
+    let losses = 0;
+    let breakevens = 0;
+    let barsWin = 0;
+    let barsLoss = 0;
+    let largestWin = 0;
+    let largestLoss = 0; // positive magnitude
+    let bars = 0;
+    let bestNet = 0;
+    // Streaks need the ORDER trades resolved in, which is `seq`, so the list is
+    // walked in sequence rather than in the display order.
+    const ordered = [...rows].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
+    let runWin = 0;
+    let runLoss = 0;
+    let longestWin = 0;
+    let longestLoss = 0;
+    /** @type {number[]} */ const winRuns = [];
+    /** @type {number[]} */ const lossRuns = [];
+
+    for (const t of ordered) {
+      const net = t.worst ?? 0;
+      bars += t.bars_held ?? 0;
+      bestNet += t.best ?? 0;
+      if (net > 0) {
+        wins += 1;
+        grossProfit += net;
+        barsWin += t.bars_held ?? 0;
+        if (net > largestWin) largestWin = net;
+        runWin += 1;
+        if (runLoss > 0) lossRuns.push(runLoss);
+        longestLoss = Math.max(longestLoss, runLoss);
+        runLoss = 0;
+      } else if (net < 0) {
+        losses += 1;
+        grossLoss += -net;
+        barsLoss += t.bars_held ?? 0;
+        if (-net > largestLoss) largestLoss = -net;
+        runLoss += 1;
+        if (runWin > 0) winRuns.push(runWin);
+        longestWin = Math.max(longestWin, runWin);
+        runWin = 0;
+      } else {
+        // A FLAT TRADE IS ITS OWN OUTCOME. The reference counts `Breakevens` as
+        // a third slice of the donut, and folding them into losers would move
+        // the win rate without any trade having lost anything.
+        breakevens += 1;
+        if (runWin > 0) winRuns.push(runWin);
+        if (runLoss > 0) lossRuns.push(runLoss);
+        longestWin = Math.max(longestWin, runWin);
+        longestLoss = Math.max(longestLoss, runLoss);
+        runWin = 0;
+        runLoss = 0;
+      }
+    }
+    if (runWin > 0) winRuns.push(runWin);
+    if (runLoss > 0) lossRuns.push(runLoss);
+    longestWin = Math.max(longestWin, runWin);
+    longestLoss = Math.max(longestLoss, runLoss);
+
+    const n = ordered.length;
+    const mean = (/** @type {number[]} */ xs) =>
+      xs.length === 0 ? null : xs.reduce((a, b) => a + b, 0) / xs.length;
+    const net = grossProfit - grossLoss;
+    return {
+      trades: n,
+      wins,
+      losses,
+      breakevens,
+      net,
+      bestNet,
+      grossProfit,
+      grossLoss,
+      // A RATIO WITH NO DENOMINATOR IS `null`, NEVER `0` and never `Infinity`.
+      // A run that never lost has no profit factor to quote — that is not a
+      // profit factor of zero, and it is not an infinitely good one.
+      profitFactor: grossLoss > 0 ? grossProfit / grossLoss : null,
+      rateBp: n ? Math.round((wins / n) * 10_000) : 0,
+      avgNet: Math.round(net / n),
+      avgWin: wins ? Math.round(grossProfit / wins) : null,
+      avgLoss: losses ? Math.round(grossLoss / losses) : null,
+      winLossRatio: wins && losses ? grossProfit / wins / (grossLoss / losses) : null,
+      largestWin: largestWin || null,
+      largestLoss: largestLoss || null,
+      avgBars: Math.round(bars / n),
+      avgBarsWin: wins ? Math.round(barsWin / wins) : null,
+      avgBarsLoss: losses ? Math.round(barsLoss / losses) : null,
+      longestWin,
+      longestLoss,
+      avgWinStreak: mean(winRuns),
+      avgLossStreak: mean(lossRuns),
+      // The equity curve the `Performance` plot list has been calling
+      // unrecordable: a running sum of realised worst-case results.
+      curve: (() => {
+        let run = 0;
+        return ordered.map((t) => {
+          run += t.worst ?? 0;
+          return run;
+        });
+      })()
+    };
+  });
+
   /** Weekday bucket keys, and `0` IS MONDAY. */
   const WEEKDAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 
@@ -1233,11 +1374,13 @@
   const tradeRows = $derived.by(() => {
     let running = 0;
     return tradeList.rows.map((t) => {
-      // `worst` is the adverse excursion and is negative or zero; `best` the
-      // favourable one. The realised result of a time-exited trade is neither —
-      // it is what the bar closed at — and this file does not carry it, so the
-      // cumulative column sums the ADVERSE excursion and says so in its header
-      // rather than implying a P&L the store never recorded.
+      // A REAL EQUITY CURVE. This comment used to read "`worst` is the adverse
+      // excursion and is negative or zero" and call the running total an
+      // excursion sum. `crates/cli/src/trades.rs` says `worst` is "the
+      // WORST-CASE realised P&L, and the figure selection actually ranks on",
+      // and that it is "positive on a trade that wins even at the worst fill" —
+      // so it is neither an excursion nor sign-constrained, and the running sum
+      // is the strategy's realised equity under the pessimistic fill model.
       running += t.worst ?? 0;
       return { ...t, cumulative: running };
     });
@@ -4185,6 +4328,37 @@
      Retired bits are shown rather than filtered: the mask CARRIES them, and a
      combination that reads as three conditions when it was recorded on four is
      a different claim about what won. -->
+<!-- ══ TWO WALKS, ONE RUN IDENTITY ══
+     MEASURED, and this is the most consequential thing on the page.
+
+     `crates/cli/src/lib.rs:4619` writes the trade file from
+     `trade::walk(bars, column, mask, horizon, direction)` — which takes NO exit
+     levels. It is the raw walk to the horizon: no stop, no target, no trail.
+     The results ledger's headline stores the winning cell of the 625-cell exit
+     GRID, which has all three.
+
+     Both are correct for what they are. They are not the same walk, and every
+     figure derived from the trade file therefore describes a DIFFERENT strategy
+     from the one the Key stats above describe. On the 2,101-trade 30-minute run:
+
+       worst single trade   trade file −Rs 184.80   ledger −Rs 64.90
+       max drawdown         trade file  Rs 20,949.95   ledger  Rs 7,495.60
+       total, worst fills   trade file −Rs 20,941.50   ledger −Rs 7,495.60
+
+     A worst trade capped at a third of the unstopped one is exactly what a stop
+     does. Showing both sets of numbers on one screen without saying this is the
+     "convincing wrong picture" the old donut comment warned about, and it is
+     why this note exists rather than a footnote. -->
+{#snippet unstoppedWalkNote()}
+  <p class="tt-warnnote">
+    <b>Everything below comes from the UNSTOPPED walk.</b> The trade file is written by
+    <code>trade::walk</code>, which takes no exit levels — no stop, no target, no trail. The
+    <b>Key stats</b> above come from the winning cell of the exit grid, which has all three. They
+    describe two different strategies over the same signals, so a figure here will not reconcile with
+    one there, and the gap is the stop doing its job.
+  </p>
+{/snippet}
+
 {#snippet conditionNames(/** @type {any} */ words)}
   {@const bits = positionsIn(words)}
   {#if vocab.phase === 'failed'}
@@ -6182,8 +6356,14 @@
                   </div>
                   <div class="tt-q">
                     <span class="tt-k">Profit factor</span>
-                    <span class="tt-qv big"><Lock why="Needs gross profit and gross loss separately; the sweep records only the net." /></span>
-                    <span class="tt-note">gross profit ÷ gross loss</span>
+                    <!-- REAL. "the sweep records only the net" was true of the
+                         results ledger; the trade file records each round trip's
+                         realised worst-case result, so both gross halves are
+                         sums over it. -->
+                    <span class="tt-qv big"
+                      >{#if tradeStats?.profitFactor !== null && tradeStats}{tradeStats.profitFactor?.toFixed(3)}{:else}<Lock why="Needs a losing trade to divide by. This run recorded none at worst-case fills, and a ratio with no denominator is undefined rather than infinite." />{/if}</span
+                    >
+                    <span class="tt-note">gross profit ÷ gross loss, at worst-case fills</span>
                   </div>
                 </div>
               </div>
@@ -6265,9 +6445,29 @@
                 <div class="bt-pane">
                   {#if paTab === 'breakdown'}
                   <div class="tt-quad">
-                    <div class="tt-q"><span class="tt-k">Gross profit</span><span class="tt-qv"><Lock why="Only the net total is recorded." /></span></div>
-                    <div class="tt-q"><span class="tt-k">Gross loss</span><span class="tt-qv"><Lock why="Only the net total is recorded." /></span></div>
-                    <div class="tt-q"><span class="tt-k">Profit factor</span><span class="tt-qv"><Lock why="Needs gross profit and gross loss." /></span></div>
+                    <!-- REAL. "Only the net total is recorded" was true of the
+                         results ledger and stopped being true of this page when
+                         the trade file arrived: `worst` is each trade's realised
+                         worst-case result, so the gross halves are two sums over
+                         the list and the factor is their quotient. -->
+                    <div class="tt-q">
+                      <span class="tt-k">Gross profit</span>
+                      <span class="tt-qv up"
+                        >{#if tradeStats}{money(tradeStats.grossProfit)}{:else}<Lock why="Needs the trade file, which this run did not record." />{/if}</span
+                      >
+                    </div>
+                    <div class="tt-q">
+                      <span class="tt-k">Gross loss</span>
+                      <span class="tt-qv"
+                        >{#if tradeStats}{money(tradeStats.grossLoss)}{:else}<Lock why="Needs the trade file, which this run did not record." />{/if}</span
+                      >
+                    </div>
+                    <div class="tt-q">
+                      <span class="tt-k">Profit factor</span>
+                      <span class="tt-qv"
+                        >{#if tradeStats?.profitFactor !== null && tradeStats}{tradeStats.profitFactor?.toFixed(3)}{:else}<Lock why="This run recorded no losing trade at worst-case fills, so gross loss is zero — a profit factor with no denominator is undefined, not infinite." />{/if}</span
+                      >
+                    </div>
                     <!-- THIS LOCK USED TO SAY "crates/costs applies costs inside
                          the sweep", and that is not true. `costs::scope::is_cost_free`
                          returns true for `IndexSpot`, and `crates/runner/src/audit.rs`
@@ -6512,6 +6712,7 @@
               <!-- ================= TRADES ANALYSIS ================= -->
               <div class="tt-sec">
                 <h4 class="tt-h">Trades analysis</h4>
+                {@render unstoppedWalkNote()}
                 <div class="tt-pills" role="group" aria-label="Trades analysis">
                   <!-- `Time patterns` IS THE REFERENCE'S FOURTH PILL, and it was
                        the one missing. Its data has been on the wire the whole
@@ -6533,7 +6734,7 @@
                   <div class="tt-quad">
                     <div class="tt-q"><span class="tt-k">Expected payoff</span><span class="tt-qv">{perTrade ? money(perTrade.worst) : '—'}</span></div>
                     <div class="tt-q"><span class="tt-k">Outliers PnL</span><span class="tt-qv"><Lock why="Needs a per-trade list to find outliers in." /></span></div>
-                    <div class="tt-q"><span class="tt-k">Largest profit</span><span class="tt-qv"><Lock why="Only the worst single trade is kept." /></span></div>
+                    <div class="tt-q"><span class="tt-k">Largest profit</span><span class="tt-qv">{#if tradeStats?.largestWin}{money(tradeStats.largestWin)}{:else}<Lock why="This run recorded no winning trade at worst-case fills." />{/if}</span></div>
                     <div class="tt-q"><span class="tt-k">Largest loss</span><span class="tt-qv down">{money(openRun.worst_trade)}</span></div>
                   </div>
                   <div class="tt-two">
@@ -6548,39 +6749,96 @@
                            the arc is not divided because the winner/loser split
                            is exactly what is not recorded. A guessed split here
                            would be the most convincing wrong picture on the page. -->
+                      <!-- THE RING IS CUT NOW, AND ON DATA. It was undivided
+                           because the split "is the thing that is not recorded"
+                           — true of the results ledger, and untrue since the
+                           trade file. `worst` is each trade's realised
+                           worst-case result, so the three slices are a walk of
+                           the list, not a guess. The arc lengths are
+                           `stroke-dasharray` over a 276.46 circumference
+                           (2*pi*44), offset by the arcs before them. -->
                       <div class="tt-donutwrap">
-                        <svg class="tt-donut" viewBox="0 0 120 120" role="img" aria-label="{exact(openRun.trades)} total trades. The winner and loser split is not recorded.">
-                          <circle cx="60" cy="60" r="44" fill="none" stroke="var(--n5)" stroke-width="16" />
-                          <circle cx="60" cy="60" r="44" fill="none" stroke="var(--n7)" stroke-width="16" stroke-dasharray="4 6" opacity="0.7" />
-                        </svg>
-                        <div class="tt-donutmid">
-                          <b>{exact(openRun.trades)}</b>
-                          <span>Total trades</span>
-                        </div>
-                        <!-- THREE COLUMNS, as TradingView sets it: name,
-                             trade count, share of the total. -->
-                        <ul class="tt-donutleg">
-                          <li>
-                            <span class="sw up"></span><span class="nm">Winners</span>
-                            <span class="ct"><Lock small why="No win count is recorded." /></span>
-                            <span class="pc"><Lock small why="Needs the win count above." /></span>
-                          </li>
-                          <li>
-                            <span class="sw down"></span><span class="nm">Losers</span>
-                            <span class="ct"><Lock small why="No loss count is recorded." /></span>
-                            <span class="pc"><Lock small why="Needs the loss count above." /></span>
-                          </li>
-                          <li>
-                            <span class="sw flat"></span><span class="nm">Breakevens</span>
-                            <span class="ct"><Lock small why="No breakeven count is recorded." /></span>
-                            <span class="pc"><Lock small why="Needs the breakeven count above." /></span>
-                          </li>
-                        </ul>
+                        {#if tradeStats}
+                          {@const C = 2 * Math.PI * 44}
+                          {@const w = (tradeStats.wins / tradeStats.trades) * C}
+                          {@const l = (tradeStats.losses / tradeStats.trades) * C}
+                          {@const b = (tradeStats.breakevens / tradeStats.trades) * C}
+                          <svg
+                            class="tt-donut"
+                            viewBox="0 0 120 120"
+                            role="img"
+                            aria-label="{exact(tradeStats.trades)} trades: {exact(tradeStats.wins)} winners, {exact(tradeStats.losses)} losers, {exact(tradeStats.breakevens)} breakevens, at worst-case fills."
+                          >
+                            <circle cx="60" cy="60" r="44" fill="none" stroke="var(--up)" stroke-width="16" stroke-dasharray="{w} {C - w}" transform="rotate(-90 60 60)" />
+                            <circle cx="60" cy="60" r="44" fill="none" stroke="var(--down)" stroke-width="16" stroke-dasharray="{l} {C - l}" stroke-dashoffset={-w} transform="rotate(-90 60 60)" />
+                            <circle cx="60" cy="60" r="44" fill="none" stroke="var(--n7)" stroke-width="16" stroke-dasharray="{b} {C - b}" stroke-dashoffset={-(w + l)} transform="rotate(-90 60 60)" />
+                          </svg>
+                          <div class="tt-donutmid">
+                            <b>{exact(tradeStats.trades)}</b>
+                            <span>Total trades</span>
+                          </div>
+                          <!-- THREE COLUMNS, as TradingView sets it: name,
+                               trade count, share of the total. -->
+                          <ul class="tt-donutleg">
+                            <li>
+                              <span class="sw up"></span><span class="nm">Winners</span>
+                              <span class="ct">{exact(tradeStats.wins)} trades</span>
+                              <span class="pc">{pct(Math.round((tradeStats.wins / tradeStats.trades) * 10000))}</span>
+                            </li>
+                            <li>
+                              <span class="sw down"></span><span class="nm">Losers</span>
+                              <span class="ct">{exact(tradeStats.losses)} trades</span>
+                              <span class="pc">{pct(Math.round((tradeStats.losses / tradeStats.trades) * 10000))}</span>
+                            </li>
+                            <li>
+                              <span class="sw flat"></span><span class="nm">Breakevens</span>
+                              <span class="ct">{exact(tradeStats.breakevens)} trades</span>
+                              <span class="pc">{pct(Math.round((tradeStats.breakevens / tradeStats.trades) * 10000))}</span>
+                            </li>
+                          </ul>
+                        {:else}
+                          <svg class="tt-donut" viewBox="0 0 120 120" role="img" aria-label="{exact(openRun.trades)} total trades. This run recorded no trade file, so the split is unknown.">
+                            <circle cx="60" cy="60" r="44" fill="none" stroke="var(--n5)" stroke-width="16" />
+                            <circle cx="60" cy="60" r="44" fill="none" stroke="var(--n7)" stroke-width="16" stroke-dasharray="4 6" opacity="0.7" />
+                          </svg>
+                          <div class="tt-donutmid">
+                            <b>{exact(openRun.trades)}</b>
+                            <span>Total trades</span>
+                          </div>
+                          <ul class="tt-donutleg">
+                            <li>
+                              <span class="sw up"></span><span class="nm">Winners</span>
+                              <span class="ct"><Lock small why="This run recorded no trade file, so the split is unknown." /></span>
+                              <span class="pc"><Lock small why="Needs the win count above." /></span>
+                            </li>
+                            <li>
+                              <span class="sw down"></span><span class="nm">Losers</span>
+                              <span class="ct"><Lock small why="This run recorded no trade file, so the split is unknown." /></span>
+                              <span class="pc"><Lock small why="Needs the loss count above." /></span>
+                            </li>
+                            <li>
+                              <span class="sw flat"></span><span class="nm">Breakevens</span>
+                              <span class="ct"><Lock small why="This run recorded no trade file, so the split is unknown." /></span>
+                              <span class="pc"><Lock small why="Needs the breakeven count above." /></span>
+                            </li>
+                          </ul>
+                        {/if}
                       </div>
-                      <p class="tt-note2">
-                        The ring is <b>undivided on purpose</b>. The total is real; the split is the thing that is not
-                        recorded, and a donut cut on a guess would look exactly like one cut on data.
-                      </p>
+                      {#if tradeStats}
+                        <p class="tt-note2 dim">
+                          Cut at <b>worst-case fills</b> — a trade counts as a winner only if it
+                          won with both legs filled at the printed extreme. At best-case fills the
+                          same list holds {exact(tradeTotals ? tradeTotals.wins : tradeStats.wins)}
+                          winners. A breakeven is a trade whose worst-case result was exactly zero;
+                          folding those into the losers would move the win rate without any trade
+                          having lost anything.
+                        </p>
+                      {:else}
+                        <p class="tt-note2">
+                          The ring is <b>undivided</b> because this run recorded no trade file. The
+                          total is real; the split needs the per-trade results.
+                        </p>
+                      {/if}
                     </div>
                   </div>
                 {:else if taTab === 'time'}
@@ -6696,11 +6954,41 @@
                     </p>
                   {/if}
                 {:else if taTab === 'streaks'}
+                  <!-- REAL. These four read "Needs the ordered win/loss outcome
+                       of every trade" — which the trade file IS. `seq` is the
+                       order trades resolved in, and `worst` is each one's
+                       realised result, so the sequence of outcomes is a walk. -->
                   <div class="tt-quad">
-                    <div class="tt-q"><span class="tt-k">Longest winning streak</span><span class="tt-qv"><Lock why="Needs the ordered win/loss outcome of every trade." /></span></div>
-                    <div class="tt-q"><span class="tt-k">Longest losing streak</span><span class="tt-qv"><Lock why="Needs the ordered win/loss outcome of every trade." /></span></div>
-                    <div class="tt-q"><span class="tt-k">Average winning streak</span><span class="tt-qv"><Lock why="Needs the ordered win/loss outcome of every trade." /></span></div>
-                    <div class="tt-q"><span class="tt-k">Average losing streak</span><span class="tt-qv"><Lock why="Needs the ordered win/loss outcome of every trade." /></span></div>
+                    <div class="tt-q">
+                      <span class="tt-k">Longest winning streak</span>
+                      <span class="tt-qv"
+                        >{#if tradeStats}{exact(tradeStats.longestWin)}<em class="tt-pc2">trades</em
+                          >{:else}<Lock why="Needs the trade file, which this run did not record." />{/if}</span
+                      >
+                    </div>
+                    <div class="tt-q">
+                      <span class="tt-k">Longest losing streak</span>
+                      <span class="tt-qv"
+                        >{#if tradeStats}{exact(tradeStats.longestLoss)}<em class="tt-pc2">trades</em
+                          >{:else}<Lock why="Needs the trade file, which this run did not record." />{/if}</span
+                      >
+                    </div>
+                    <div class="tt-q">
+                      <span class="tt-k">Average winning streak</span>
+                      <span class="tt-qv"
+                        >{#if tradeStats?.avgWinStreak !== null && tradeStats}{tradeStats.avgWinStreak?.toFixed(1)}<em
+                            class="tt-pc2">trades</em
+                          >{:else}<Lock why="This run recorded no winning trade, so it has no winning streak." />{/if}</span
+                      >
+                    </div>
+                    <div class="tt-q">
+                      <span class="tt-k">Average losing streak</span>
+                      <span class="tt-qv"
+                        >{#if tradeStats?.avgLossStreak !== null && tradeStats}{tradeStats.avgLossStreak?.toFixed(1)}<em
+                            class="tt-pc2">trades</em
+                          >{:else}<Lock why="This run recorded no losing trade, so it has no losing streak." />{/if}</span
+                      >
+                    </div>
                   </div>
                   <div class="tt-hrow tight">
                     <h5 class="tt-h5">Winning and losing streaks</h5>
@@ -6754,10 +7042,15 @@
                         {/if}
                         <tr><td>Average PnL</td><td class="n"><span class="tv">{perTrade ? money(perTrade.worst) : "—"}</span><span class="tp">{perTrade && bench.open > 0 ? `${((perTrade.worst / bench.open) * 100).toFixed(2)}%` : ""}</span></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         {#if showAllMetrics}
-                        <tr><td>Average profit</td><td class="n"><Lock small why="Needs gross profit and a winner count." /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
-                        <tr><td>Average loss</td><td class="n"><Lock small why="Needs gross loss and a loser count." /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
-                        <tr><td>Average profit / average loss</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
-                        <tr><td>Largest profit</td><td class="n"><Lock small why="Only the worst single trade is kept." /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
+                        <!-- FOUR MORE THE TRADE FILE MAKES REAL. Each needed
+                             "gross profit and a winner count", both of which are
+                             one walk of `worst` — the realised worst-case result
+                             per round trip. The reference prints `Average loss`
+                             as a POSITIVE magnitude, so it is not negated here. -->
+                        <tr><td>Average profit</td><td class="n up">{#if tradeStats?.avgWin !== null && tradeStats}{money(tradeStats.avgWin)}{:else}<Lock small why="No winning trade at worst-case fills." />{/if}</td><td class="n"><Lock small why="Direction is a term of the run identity, not a column on a trade." /></td><td class="n"><Lock small why="Direction is a term of the run identity, not a column on a trade." /></td></tr>
+                        <tr><td>Average loss</td><td class="n">{#if tradeStats?.avgLoss !== null && tradeStats}{money(tradeStats.avgLoss)}{:else}<Lock small why="No losing trade at worst-case fills." />{/if}</td><td class="n"><Lock small why="Direction is a term of the run identity, not a column on a trade." /></td><td class="n"><Lock small why="Direction is a term of the run identity, not a column on a trade." /></td></tr>
+                        <tr><td>Average profit / average loss</td><td class="n">{#if tradeStats?.winLossRatio !== null && tradeStats}{tradeStats.winLossRatio?.toFixed(3)}{:else}<Lock small why="Needs both a winning and a losing trade to form the ratio." />{/if}</td><td class="n"><Lock small why="Direction is a term of the run identity, not a column on a trade." /></td><td class="n"><Lock small why="Direction is a term of the run identity, not a column on a trade." /></td></tr>
+                        <tr><td>Largest profit</td><td class="n up">{#if tradeStats?.largestWin}{money(tradeStats.largestWin)}{:else}<Lock small why="No winning trade at worst-case fills." />{/if}</td><td class="n"><Lock small why="Direction is a term of the run identity, not a column on a trade." /></td><td class="n"><Lock small why="Direction is a term of the run identity, not a column on a trade." /></td></tr>
                         <tr><td>Largest profit %</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         <tr><td>Largest profit as % of gross profit</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         {/if}
@@ -6767,9 +7060,16 @@
                         <tr><td>Largest loss as % of gross loss</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         <tr><td>Outliers</td><td class="n"><Lock small why="Needs a per-trade list." /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         <tr><td>Outliers P&amp;L</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
-                        <tr><td>Average bars in trades</td><td class="n"><Lock small why="bars ÷ trades is the average gap BETWEEN trades, a different quantity. Not shown rather than shown wrong." /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
-                        <tr><td>Average bars in winners</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
-                        <tr><td>Average bars in losers</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
+                        <!-- THE OLD LOCK WAS RIGHT ABOUT THE WRONG ARITHMETIC.
+                             It refused `bars / trades` because that is the mean
+                             gap BETWEEN trades, not the mean length OF one —
+                             correct, and the reason it stayed locked. The trade
+                             file carries `bars_held` per round trip, so the mean
+                             of THAT is the quantity the row names, and the
+                             winners/losers split falls out of the same walk. -->
+                        <tr><td>Average bars in trades</td><td class="n">{#if tradeStats}{exact(tradeStats.avgBars)}{:else}<Lock small why="Needs the trade file's per-trade bar counts." />{/if}</td><td class="n"><Lock small why="Direction is a term of the run identity, not a column on a trade." /></td><td class="n"><Lock small why="Direction is a term of the run identity, not a column on a trade." /></td></tr>
+                        <tr><td>Average bars in winners</td><td class="n">{#if tradeStats?.avgBarsWin !== null && tradeStats}{exact(tradeStats.avgBarsWin)}{:else}<Lock small why="No winning trade at worst-case fills." />{/if}</td><td class="n"><Lock small why="Direction is a term of the run identity, not a column on a trade." /></td><td class="n"><Lock small why="Direction is a term of the run identity, not a column on a trade." /></td></tr>
+                        <tr><td>Average bars in losers</td><td class="n">{#if tradeStats?.avgBarsLoss !== null && tradeStats}{exact(tradeStats.avgBarsLoss)}{:else}<Lock small why="No losing trade at worst-case fills." />{/if}</td><td class="n"><Lock small why="Direction is a term of the run identity, not a column on a trade." /></td><td class="n"><Lock small why="Direction is a term of the run identity, not a column on a trade." /></td></tr>
                         {/if}
                         <tr class="own"><td title="MAE — maximum adverse excursion, winners only">How far a winner fell before it paid <span class="tt-own">brutex</span></td><td class="n">{openRun.trades === 0 ? "none" : ppmPct(openRun.winner_mae)}</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
                         <tr class="own"><td title="MFE — maximum favourable excursion, winners only">How far a winner rose at its best <span class="tt-own">brutex</span></td><td class="n">{openRun.trades === 0 ? "none" : ppmPct(openRun.winner_mfe)}</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
@@ -6898,6 +7198,7 @@
               <div class="tt-sec">
                 <div class="tt-hrow">
                   <h4 class="tt-h">List of trades</h4>
+                  {@render unstoppedWalkNote()}
                   <div class="tt-icons">
                     <button class="tt-iconbtn" title="Download" aria-label="Download"><svg viewBox="0 0 16 16"><path d="M8 2v8m0 0L5 7m3 3l3-3M3 13h10" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" /></svg></button>
                     <button class="tt-iconbtn" title="Columns" aria-label="Columns"><svg viewBox="0 0 16 16"><rect x="2" y="3" width="3.2" height="10" rx="1" fill="none" stroke="currentColor" stroke-width="1.3" /><rect x="6.4" y="3" width="3.2" height="10" rx="1" fill="none" stroke="currentColor" stroke-width="1.3" /><rect x="10.8" y="3" width="3.2" height="10" rx="1" fill="none" stroke="currentColor" stroke-width="1.3" /></svg></button>
@@ -6910,7 +7211,7 @@
                         <th>Trade number <span class="lot-sort">↓</span></th><th>Type</th><th>Date and time</th><th>Signal</th><th class="n">Price</th>
                         <th class="n">Size</th><th class="n">Net PnL</th><th class="n">Return</th>
                         <th class="n" title="crates/costs implements the full statutory stack — brokerage, STT, exchange, SEBI, IPFT, GST, stamp — and costs::scope::is_cost_free returns true for a spot index, so no tick is added on any leg. Every figure in this table is GROSS.">Commission</th><th class="n">Favorable excursion</th><th class="n">Adverse excursion</th>
-                        <th class="n" title="A running sum of the ADVERSE excursion, not of realised profit — the sweep records no realised result per trade. The reference column name is kept; this is what fills it.">Cumulative PnL</th><th class="n">Duration (bars)</th>
+                        <th class="n" title="A running sum of each trade's realised WORST-CASE result — the strategy's equity curve under the pessimistic fill model, which is the reading this page ranks on.">Cumulative PnL</th><th class="n">Duration (bars)</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -6935,21 +7236,36 @@
                             <td><Lock small why="The exit signal is not stored per trade — the run's chosen exit variant is on the record above." /></td>
                             <td class="n"><Lock small why="Prices are not repeated per trade; the bar index above indexes the stored bars." /></td>
                             <td class="n"><Lock small why="Position size is not part of a sweep — the engine measures one unit of the index." /></td>
-                            <td rowspan="2" class="n"><Lock small why="Realised net P&L per trade is not stored; the excursions beside it are." /></td>
-                            <td rowspan="2" class="n"><Lock small why="Return needs a realised result, which is not stored per trade." /></td>
-                            <td rowspan="2" class="n"><Lock small why="No cost is applied. costs::scope::is_cost_free returns true for a spot index and crates/runner adds no tick on any leg, so a commission of 0.00 would be a measurement nobody took." /></td>
-                            <!-- TWO LINES PER MONEY CELL, as the reference draws
-                                 them: the figure, then what share of the span's
-                                 opening price it is. A number in rupees does not
-                                 say whether the move was large. -->
-                            <td rowspan="2" class="n up">
-                              {money(t.best)}
-                              {#if shareOfOpen(t.best)}<em class="lot-pc">{shareOfOpen(t.best)}</em>{/if}
-                            </td>
-                            <td rowspan="2" class="n down">
+                            <!-- REAL, AND THE PADLOCK HERE WAS THE MISREADING.
+                                 It said "Realised net P&L per trade is not
+                                 stored; the excursions beside it are" — and
+                                 `crates/cli/src/trades.rs` says the opposite in
+                                 as many words: `worst` is "the WORST-CASE
+                                 realised P&L, and the figure selection actually
+                                 ranks on", `best` is "the BEST-CASE realised
+                                 P&L of this round trip, NOT an excursion". That
+                                 doc carries its own correction notice warning a
+                                 reader would otherwise "read an excursion where
+                                 a result was". This table was that reader. -->
+                            <td rowspan="2" class="n {t.worst < 0 ? 'down' : 'up'}">
                               {money(t.worst)}
-                              {#if shareOfOpen(t.worst)}<em class="lot-pc">{shareOfOpen(t.worst)}</em>{/if}
+                              <em class="lot-pc">{money(t.best)} at best</em>
                             </td>
+                            <td rowspan="2" class="n {t.worst < 0 ? 'down' : 'up'}">
+                              {shareOfOpen(t.worst) ?? '—'}
+                            </td>
+                            <td rowspan="2" class="n"><Lock small why="No cost is applied. costs::scope::is_cost_free returns true for a spot index and crates/runner adds no tick on any leg, so a commission of 0.00 would be a measurement nobody took." /></td>
+                            <!-- MFE AND MAE ARE NOT PER-TRADE HERE, and these two
+                                 columns used to be filled with `best` and `worst`
+                                 — which are the two FILL MODELS of one result,
+                                 not the excursion the position reached while it
+                                 was open. Only three run-level excursion
+                                 aggregates are recorded, and they are shown under
+                                 Growth and decline. Naming that is the honest
+                                 column; repeating the P&L under an excursion
+                                 header was not. -->
+                            <td rowspan="2" class="n"><Lock small why="Maximum favourable excursion is recorded once per RUN, not once per trade — see Excursion under Growth and decline. The figure that used to sit here was the best-case realised result, which is a different quantity." /></td>
+                            <td rowspan="2" class="n"><Lock small why="Maximum adverse excursion is recorded once per RUN, not once per trade — see Excursion under Growth and decline. The figure that used to sit here was the worst-case realised result, which is a different quantity." /></td>
                             <td rowspan="2" class="n {t.cumulative < 0 ? 'down' : 'up'}">
                               {money(t.cumulative)}
                               {#if shareOfOpen(t.cumulative)}<em class="lot-pc">{shareOfOpen(t.cumulative)}</em>{/if}
@@ -11616,6 +11932,23 @@
      reference draws it. Columns are laid out by the grid rather than by a
      width calculation, so seven weekdays and five session hours both fill the
      plot without a per-grain constant. */
+  /* The two-walks disclosure. Loud enough not to be skimmed past, because a
+     reader who misses it will compare two numbers that cannot be compared. */
+  .tt-warnnote {
+    margin: 0 0 var(--s5);
+    padding: var(--s4) var(--s5);
+    background: var(--warn-soft);
+    border-left: 3px solid var(--warn);
+    border-radius: var(--r1);
+    font-size: 0.78rem;
+    line-height: 1.55;
+    color: var(--n10);
+  }
+  .tt-warnnote code {
+    font-family: var(--mono);
+    font-size: 0.94em;
+  }
+
   .rbt {
     margin: var(--s5) 0 var(--s4);
   }
