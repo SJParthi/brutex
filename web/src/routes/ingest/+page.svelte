@@ -777,10 +777,44 @@
    * unrecognised id, and a fallback that can be `undefined` needs a guard at
    * every reader.
    */
+  /**
+   * THE SWEEP SURFACE, WRITTEN ONCE IN THIS FILE — AND IT SHOULD NOT BE HERE
+   * AT ALL.
+   *
+   * `CLAUDE.md` §1 names two instruments and no others, and this page tests
+   * membership against them. It cannot DERIVE them: every other universe on
+   * this control answers through `membershipTokens(row)`, but `/universes.json`
+   * publishes the swept target with `universe: null` — a `matched` count and a
+   * prose note, and no token any row can carry. Measured on the running server:
+   *
+   *     {"target":"swept","universe":null,"matched":2,
+   *      "note":"NSE-NIFTY and NSE-BANKNIFTY — the only two swept"}
+   *
+   * The names are in that NOTE, as English. Parsing them out of a sentence
+   * would be the invention §3 rule 1 forbids, so they are written here instead
+   * — as a literal, deliberately, with this paragraph attached.
+   *
+   * IT WAS WRITTEN TWICE. The label said `'NSE-NIFTY + NSE-BANKNIFTY'` and
+   * `namedByUniverse` tested `row.key === 'NSE-NIFTY' || row.key ===
+   * 'NSE-BANKNIFTY'` — two copies of one rule in one file, and the label is the
+   * half an operator READS. Change one and the control tells you it is
+   * selecting a set it is not selecting. Now the label is BUILT from the list
+   * the test uses, so the sentence on screen cannot disagree with the filter
+   * behind it.
+   *
+   * WHAT WOULD REMOVE IT: `crates/api` publishing the swept members as data —
+   * a token on the rows, or a `members` array on the target — after which this
+   * arm becomes `membershipTokens(row).includes(...)` like every other, and
+   * this constant goes. That is a Rust change and is not made from here.
+   * `/backtest` states the same refusal for the same endpoint: it will not be
+   * "the fourth copy of that rule", and this is the third.
+   */
+  const SWEPT_KEYS = /** @type {const} */ (['NSE-NIFTY', 'NSE-BANKNIFTY']);
+
   /** @type {Universe} */
   const SWEPT = {
     id: 'swept',
-    label: 'NSE-NIFTY + NSE-BANKNIFTY',
+    label: SWEPT_KEYS.join(' + '),
     field: null,
     token: null,
     target: 'swept'
@@ -3720,8 +3754,10 @@
   function namedByUniverse(row, u) {
     if (!u) return false;
     if (u.id === 'swept') {
-      // `CLAUDE.md` §1 names these two and no others.
-      return row.key === 'NSE-NIFTY' || row.key === 'NSE-BANKNIFTY';
+      /* THE SAME LIST THE LABEL IS BUILT FROM — see `SWEPT_KEYS` for why this
+         one universe is a literal while every other answers through
+         `membershipTokens`, and what would remove it. */
+      return SWEPT_KEYS.includes(/** @type {(typeof SWEPT_KEYS)[number]} */ (row.key));
     }
     if (u.token === '*') return true;
     const want = membershipToken(u);

@@ -229,6 +229,41 @@
   let fromDay = $state('');
   let toDay = $state('');
 
+  /**
+   * THE TIME-OF-DAY HALF OF THE SAME WINDOW.
+   *
+   * The day pair above narrows to a DATE, and at `1min` a date is 375 rows —
+   * so "show me 27 Aug at 14:32" meant setting both dates to that day and then
+   * paging sixty-three times at six rows a page, reading the Time column. The
+   * grid has always HAD the minute; there was no way to ask for one.
+   *
+   * `HH:MM`, zero-padded, which is why these are compared as STRINGS and never
+   * parsed: `'09:15' <= '14:32' <= '15:30'` is already true lexicographically,
+   * so the bound needs no clock arithmetic and no timezone of its own.
+   *
+   * COMPARED AGAINST `timeLabel(row.ts)` — the SAME function that renders the
+   * Time column, not a second one that agrees with it today. A filter that
+   * computes the minute differently from the cell it filters is a filter that
+   * hides the row it is pointing at, and both would look right in isolation.
+   *
+   * Empty means unbounded on that side, exactly like the day pair.
+   */
+  let fromTime = $state('');
+  let toTime = $state('');
+
+  /**
+   * WHERE TO LAND, which is a different question from what to SHOW.
+   *
+   * A window answers "only these rows". This answers "put me at this row" —
+   * it filters nothing, it moves the page to whichever bar is nearest the
+   * moment asked for and marks it, so the rows either side of it stay on
+   * screen. Reading a print needs its neighbours; a filter that returned one
+   * row would take them away.
+   */
+  let goTime = $state('');
+  /** The `rk` of the row a jump landed on, so the grid can mark it. */
+  let landedRk = $state('');
+
   /* THE WINDOW IS ALWAYS DRAWN, AND IT NEVER TOUCHES THE RUNGS ABOVE IT.
    *
    * An earlier draft hid this pair the moment an expiry was chosen. That was a
@@ -4899,11 +4934,35 @@
    * `scoped` and everything above it counts instrument-MONTHS; a day window
    * over those could only ever narrow to whole months. The question is "show me
    * the 12th", so it is answered where days exist, which is here. */
+  /**
+   * IS A TIME BOUND ACTUALLY NARROWING ANYTHING.
+   *
+   * `dayRung` suppresses it rather than testing it: every bar at `1day` opens
+   * at the same minute, so a time window there keeps everything or empties the
+   * grid, and the Time column is already hidden.
+   *
+   * Read by the filter AND by the row count, which is the point of naming it —
+   * see `pageTotal`, where getting these two out of step drew an empty grid
+   * under the words "6,18,296 rows".
+   */
+  const timeNarrows = $derived(!dayRung && Boolean(fromTime || toTime));
+
   const barWindowed = $derived.by(() => {
-    if (!dayWindowApplies || (!fromDay && !toDay)) return barRows;
-    return barRows.filter(
-      (b) => (!fromDay || b.day >= fromDay) && (!toDay || b.day <= toDay)
-    );
+    /* THE TIME PAIR IS PART OF THE SAME WINDOW AND IS APPLIED IN THE SAME
+       PASS. A second `.filter` would walk the rows twice to answer one
+       question, and on a month of one-minute bars that is 6,840 extra
+       comparisons for nothing. */
+    const useTime = timeNarrows;
+    if (!dayWindowApplies || (!fromDay && !toDay && !useTime)) return barRows;
+    return barRows.filter((b) => {
+      if (fromDay && b.day < fromDay) return false;
+      if (toDay && b.day > toDay) return false;
+      if (!useTime) return true;
+      const at = timeLabel(b.ts);
+      if (fromTime && at < fromTime) return false;
+      if (toTime && at > toTime) return false;
+      return true;
+    });
   });
 
   /**
@@ -5057,15 +5116,45 @@
       : null;
   });
 
+  /**
+   * A TIME BOUND IS APPLIED IN THE BROWSER, SO ONLY THE BROWSER CAN COUNT IT.
+   *
+   * MEASURED, and it is why this arm exists: with a time bound of 09:15–09:20
+   * against a page holding 15:26–15:29, the grid drew NOTHING and the line
+   * under it read `1–0 of 6,18,296 rows · page 1 of 1,54,574`. Every one of
+   * those numbers came from the server, which had never heard of the bound.
+   * An empty table under a six-lakh count is the worst reading on this page:
+   * it says the store lost the rows.
+   *
+   * `windowSaid` cannot be made to answer this. It holds the total for the
+   * SLICE the window route returned, and the route has no time parameter —
+   * see `timePartial` for what that costs and what the page says about it.
+   */
   const pageTotal = $derived(
     view === 'bars'
-      ? /* THE WINDOW'S OWN TOTAL WHERE IT RAN. Without it the pager counts the
-           fifty rows in memory and reports "1-50 of 50" over a store of four
-           million — the same defect `barTotalRows` fixes on the seek route,
-           arriving by the other road. */
-        (windowSaid?.total ?? barTotalRows ?? barSorted.length)
+      ? timeNarrows
+        ? barSorted.length
+        : /* THE WINDOW'S OWN TOTAL WHERE IT RAN. Without it the pager counts
+             the fifty rows in memory and reports "1-50 of 50" over a store of
+             four million — the same defect `barTotalRows` fixes on the seek
+             route, arriving by the other road. */
+          (windowSaid?.total ?? barTotalRows ?? barSorted.length)
       : sorted.length
   );
+
+  /**
+   * THE TIME BOUND SAW ONE PAGE, NOT THE QUERY.
+   *
+   * `/bars/window.json` pages by offset and takes no time parameter, so when
+   * it answered, the rows in memory ARE the page — and a bound applied here
+   * filters those and nothing else. That is a real limit, not a bug to hide:
+   * the same bound over a whole-month read is complete, and the difference is
+   * whether the day window is narrow enough to have forced the exact path.
+   *
+   * Naming it lets the control say which of the two it is doing instead of
+   * quietly meaning different things on different days.
+   */
+  const timePartial = $derived(timeNarrows && windowSaid !== null);
   const pageCount = $derived(Math.max(1, Math.ceil(pageTotal / pageSize)));
   const pageNow = $derived(Math.min(Math.max(1, page), pageCount));
   const pageFrom = $derived(pageTotal === 0 ? 0 : (pageNow - 1) * pageSize + 1);
@@ -5159,6 +5248,92 @@
     const start = Math.max(0, first - pagePlan.base);
     return barSorted.slice(start, start + pageSize);
   });
+
+  /**
+   * `HH:MM` to minutes since IST midnight, or `null` if it is not a time.
+   *
+   * VALIDATES THE PARTS, not just the shape: `25:00` and `10:73` both match a
+   * digits-colon-digits pattern and neither is a minute of any day. Returning
+   * `null` for them is what lets the caller say "that is not a time" instead
+   * of landing on a bar chosen by arithmetic on nonsense.
+   *
+   * @param {string | null | undefined} hhmm
+   */
+  function minuteOf(hhmm) {
+    const m = String(hhmm ?? '')
+      .trim()
+      .match(/^(\d{1,2}):(\d{2})$/);
+    if (!m) return null;
+    const h = Number(m[1]);
+    const mi = Number(m[2]);
+    if (h > 23 || mi > 59) return null;
+    return h * 60 + mi;
+  }
+
+  /** What the last jump has to say — a refusal, or how far it had to go. */
+  let jumpWhy = $state('');
+
+  /**
+   * PUT THE PAGE ON THE BAR NEAREST A MOMENT. It filters nothing.
+   *
+   * NEAREST, NOT EXACT, because an exact match is not guaranteed to exist and
+   * the honest failure is not "no rows". A halted session, a rung coarser than
+   * a minute, or a market that simply had no print at 14:32 all mean the same
+   * thing to a reader: show me around there. So it lands on the closest loaded
+   * bar and SAYS how far it moved, rather than returning nothing and letting
+   * the operator conclude the store is missing the day.
+   *
+   * IT CAN ONLY REACH WHAT IS IN MEMORY, and that limit is stated rather than
+   * worked around. The bars view is server-paged: when the window route
+   * answered, `barSorted` IS the page, so there is nothing off-screen to land
+   * on and the note says which control fixes that. When the read was whole
+   * months, every minute in them is reachable and the page is arithmetic —
+   * `pagePlan.base` is the offset of the first loaded row, so the page holding
+   * row N is a division, not a search.
+   */
+  function jumpToTime() {
+    landedRk = '';
+    jumpWhy = '';
+    const want = minuteOf(goTime);
+    if (want === null) {
+      jumpWhy = `“${goTime.trim()}” is not a time. Write it as HH:MM on a 24-hour clock — 14:32.`;
+      return;
+    }
+    if (dayRung) {
+      jumpWhy = `Every bar at ${timeframe} opens at the same minute, so there is no minute to choose between them.`;
+      return;
+    }
+    if (barSorted.length === 0) {
+      jumpWhy = 'No bar is loaded, so there is nothing to land on.';
+      return;
+    }
+    let bestIdx = -1;
+    let bestGap = Infinity;
+    for (let i = 0; i < barSorted.length; i++) {
+      const at = minuteOf(timeLabel(barSorted[i].ts));
+      if (at === null) continue;
+      const gap = Math.abs(at - want);
+      if (gap < bestGap) {
+        bestGap = gap;
+        bestIdx = i;
+      }
+    }
+    if (bestIdx < 0) {
+      jumpWhy = 'No loaded bar carries a minute to compare against.';
+      return;
+    }
+    const hit = barSorted[bestIdx];
+    landedRk = hit.rk;
+    if (windowSaid !== null) {
+      jumpWhy = `The server paged this read, so only the ${fmt(barSorted.length)} row(s) on screen could be searched. Narrow the dates until the day is read whole, and every minute in it becomes reachable.`;
+      return;
+    }
+    page = Math.floor((pagePlan.base + bestIdx) / pageSize) + 1;
+    jumpWhy =
+      bestGap === 0
+        ? ''
+        : `No bar opens at ${goTime.trim()}. Landed on ${timeLabel(hit.ts)} — the nearest loaded, ${fmt(bestGap)} minute(s) away.`;
+  }
 
   /** @param {number} n */
   function goPage(n) {
@@ -7048,6 +7223,17 @@
        span here instead would duplicate that logic and drift from it. */
     fromDay = '';
     toDay = '';
+    /* THE TIME HALF OF THE SAME WINDOW, AND THE LANDING WITH IT. `fromTime`
+       and `toTime` narrow `barWindowed` exactly as the day pair does, so a
+       Reset that left them standing would be the identical lie the block above
+       was written about. `goTime` is not a filter, but the mark it left and
+       the sentence under it both describe a page this button is moving away
+       from, so they go too. */
+    fromTime = '';
+    toTime = '';
+    goTime = '';
+    landedRk = '';
+    jumpWhy = '';
     clearContract();
   }
 
@@ -7671,7 +7857,93 @@
               ? `This store holds ${dayLabel(dayBounds[0])} to ${dayLabel(dayBounds[1])} for the current selection; days outside it are struck through because there is no bar there to show. Only bars on or before this day — spot only, since a contract's window is its expiry.`
               : 'No bar is loaded, so there is no held range to bound this field with. Only bars on or before this day.'}
           />
+
+          <!-- THE MINUTE, WHICH THE DATE FIELDS CANNOT REACH.
+               A date at `1min` is 375 rows, so "27 Aug at 14:32" meant setting
+               both dates to that day and paging sixty-three times at six rows
+               a page. The grid always had the minute in a column; there was no
+               way to ASK for one.
+
+               ABSENT ON A DAILY RUNG rather than disabled. Every bar at `1day`
+               opens at the same minute, so a time bound there keeps everything
+               or empties the grid — and the Time column is already hidden. A
+               control whose only two settings are "all" and "none" is not a
+               control, which is the rule the Contract strip above follows. -->
+          {#if !dayRung}
+            <div class="cell tcell">
+              <span class="lab" id="lab-tfrom">From time</span>
+              <input
+                class="search tin"
+                type="text"
+                inputmode="numeric"
+                placeholder="HH:MM"
+                maxlength="5"
+                aria-labelledby="lab-tfrom"
+                bind:value={fromTime}
+                title="Only bars opening at or after this minute, IST. Compared against the Time column itself, so what you filter and what you read are the same value. Leave it empty for no lower bound."
+              />
+            </div>
+            <div class="cell tcell">
+              <span class="lab" id="lab-tto">To time</span>
+              <input
+                class="search tin"
+                type="text"
+                inputmode="numeric"
+                placeholder="HH:MM"
+                maxlength="5"
+                aria-labelledby="lab-tto"
+                bind:value={toTime}
+                title="Only bars opening at or before this minute, IST. Leave it empty for no upper bound."
+              />
+            </div>
+            <div class="cell tcell">
+              <span class="lab" id="lab-goto">Go to</span>
+              <div class="gorow">
+                <input
+                  class="search tin"
+                  type="text"
+                  inputmode="numeric"
+                  placeholder="HH:MM"
+                  maxlength="5"
+                  aria-labelledby="lab-goto"
+                  bind:value={goTime}
+                  onkeydown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      jumpToTime();
+                    }
+                  }}
+                  title="Move the page to the bar nearest this minute and mark it. This FILTERS NOTHING — the rows either side stay on screen, because a print is read against its neighbours."
+                />
+                <button
+                  class="btn gobtn"
+                  type="button"
+                  onclick={jumpToTime}
+                  disabled={goTime.trim() === ''}
+                  title={goTime.trim() === ''
+                    ? 'Write a time first — HH:MM on a 24-hour clock.'
+                    : `Land on the bar nearest ${goTime.trim()}.`}>Go</button
+                >
+              </div>
+            </div>
+          {/if}
         </div>
+        <!-- THE BOUND'S OWN REACH, SAID BEFORE IT MISLEADS. A time filter over
+             a server-paged read can only see the page in memory, and the
+             visible result of that is an empty grid — which reads as "the
+             store has no bars there" when it means "this read never fetched
+             there". `CLAUDE.md` §4: degrade loudly and name the reason. -->
+        {#if timePartial}
+          <p class="jwhy warn" role="status">
+            This read was paged by the server, so the time bound searched only
+            the <b>{fmt(barRows.length)}</b> row(s) it returned — not the
+            {fmt(windowSaid?.total ?? 0)} the query matches. Narrow the dates until
+            the days are read whole and the bound covers every minute in them.
+          </p>
+        {/if}
+        {#if jumpWhy}
+          <p class="jwhy" role="status">{jumpWhy}</p>
+        {/if}
       </div>
       
 
@@ -9032,6 +9304,7 @@
                     <tr
                       class="brow"
                       class:odd={i % 2 === 1}
+                      class:landed={b.rk === landedRk}
                       class:row-in={barEntering}
                       class:dayfirst={barSortKey === 'ts' &&
                         i > 0 &&
@@ -9856,6 +10129,66 @@
      cell in it carries the top edge. */
   .brow.dayfirst > td {
     box-shadow: inset 0 1px 0 0 var(--line);
+  }
+
+  /* ---- the time window and the landing ---------------------------------
+     THE INPUT IS `.search` AND THE BUTTON IS `.btn`, both from `theme.css`,
+     because both already exist there with a focus ring, a disabled state and a
+     placeholder colour measured against this palette. What is added here is
+     only the DELTA — the width of `HH:MM` and the monospace that makes a
+     column of times line up. Re-implementing a shared control locally is how
+     the Picker once came out 31px tall on one page and 48px on another, and
+     nothing about a text box needed re-deciding. */
+  .tcell {
+    flex: 0 0 auto;
+  }
+  .tin {
+    width: 8.5ch;
+    padding-inline: var(--s3);
+    font-family: var(--mono);
+    font-variant-numeric: tabular-nums;
+    text-align: center;
+  }
+  .gorow {
+    display: flex;
+    align-items: center;
+    gap: var(--s3);
+  }
+  .gobtn {
+    flex: 0 0 auto;
+  }
+  /* Not a refusal and not a success — it reports what the press DID, including
+     "it landed elsewhere, and here is how far". `--dim` rather than `--warn`:
+     nothing has gone wrong when the market had no print at the minute asked
+     for. */
+  .jwhy {
+    margin: var(--s3) 0 0;
+    color: var(--dim);
+    font-size: var(--fs-mini);
+  }
+  /* THE REACH NOTE EARNS `--warn` WHERE THE LANDING NOTE DOES NOT. One reports
+     a press that worked and moved somewhere near; this one reports an answer
+     that is incomplete in a way the grid cannot show, which is the case §4
+     asks to be made loud. */
+  .jwhy.warn {
+    color: var(--warn);
+  }
+  .jwhy b {
+    font-family: var(--mono);
+    font-variant-numeric: tabular-nums;
+    color: var(--ink);
+  }
+
+  /* THE ROW A JUMP LANDED ON — the same tint-and-rail pair the grid already
+     uses to mark a row, so a reader who has seen one recognises the other.
+     IT DOES NOT SCROLL AND DOES NOT TAKE FOCUS. The page already moved to hold
+     this row; moving the viewport as well would push the neighbours off, and
+     the neighbours are the whole reason this lands rather than filters. */
+  .brow.landed > td {
+    background: var(--acc-soft);
+  }
+  .brow.landed > td:first-child {
+    box-shadow: inset 2px 0 0 0 var(--acc);
   }
 
   /* ON THE FIRST CELL, AND IN PIXELS, AND BOTH ARE FORCED.
