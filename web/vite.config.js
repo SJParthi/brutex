@@ -29,6 +29,12 @@ const ROUTES = [
 	'/instruments.json',
 	'/feeds.json',
 	'/bars.json',
+	// WHETHER A STORED MONTH IS WHOLE. `.json` and NOT `/gaps`, which is the
+	// distinction that made `/audit` unreachable: a page route in this list
+	// serves the Rust side on a reload and this application on a nav click, so
+	// one URL renders two different things. `/gaps` is a Svelte route and stays
+	// out; only the endpoint beside it belongs here.
+	'/gaps.json',
 	// THE SORTED/PAGED WINDOW OVER ONE INSTRUMENT'S BARS, and it shipped
 	// missing from this list. `/db` calls it whenever the reader sorts by a
 	// column the census cannot answer from its prefix sums, so the gap was not

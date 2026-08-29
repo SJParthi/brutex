@@ -26566,3 +26566,63 @@ is one comment. Found only because repairing a severed sentence introduced the
 blank line that made `clippy::empty_line_after_doc_comment` speak. Each
 paragraph is back on its item and the duplicate is deleted. This is the same
 defect P-66 records for `param_or`, hit for the third time in one file.
+
+### D-0363
+
+**`/gaps` — the completeness answer reaches a page, and `/db` structurally
+cannot give it.**
+
+D-0361 and D-0362 built the endpoint and stated, in D-0361's own last
+paragraph, that it was not yet on a page. This is that, and the reason it needs
+its own page rather than a column on `/db` is not layout.
+
+**`/db`'s completeness is PEER-RELATIVE.** `web/src/lib/completeness.js` takes
+each row's denominator from `fullest` — the largest row count among instruments
+at the same `(month, rung)`. That is exactly right for the question it answers,
+*"is this instrument short against its neighbours"*, and it is structurally
+unable to answer a different one: **a gap that hit every instrument in the same
+month reads as 100%**, because the denominator moves with the data. One pull
+that failed for the whole universe lowers the bar and the score together, and
+every row agrees with every other row about a store missing the same week. That
+module's own header is already honest about the neighbouring case — a sole row
+at a `(month, rung)` is its own denominator, so "short by zero" is a tautology
+and it prints `unverified` rather than a verdict.
+
+`/gaps` asks the absolute question, and the two measures are kept on two pages
+rather than merged into one column with two meanings.
+
+**The census key is decomposed, NOT looked up in the instrument master.**
+`/store.json` keys a row `NSE-INDEX-NIFTY`, carrying exchange, segment and
+underlying, plus a contract tail for a future or an option. The first draft
+resolved those three through `$lib/place.js` — and `place` answers from the
+master, which lists what is TRADEABLE. **An expired option is by definition not
+tradeable**, so every expired contract, the series an audit is most needed for,
+would have refused with "the master does not say where this sits". `parseKey`
+reads the key the census already wrote.
+
+**The contract tail is SLICED off the key, never re-rendered from the parsed
+parts.** A strike arrives as a paisa integer, and formatting it back into digits
+is a round trip that can lose a trailing zero — at which point the request names
+a contract one hundredth of the one asked for, and the store answers "no such
+month" for a file that is there.
+
+**Every default is read off `/store.json`**, including the span: the form opens
+on the widest month range the census holds for the chosen series. A hardcoded
+span once threw away 40 of 121 months and reported 81/81 with no hole — the
+answer looked complete because the question was small.
+
+**Only `vendor-hole` runs are listed.** A healthy store has tens of thousands of
+absent minutes — every weekend, every night, every holiday — and listing them
+would bury the one absence that is a loss.
+
+**`.text()` then `JSON.parse`, not `.json()`.** Measured against a running
+binary older than the page: the route was not registered, the 404 body was not
+JSON, and `.json()` threw `SyntaxError: Unexpected token '<'`. The operator was
+shown a parser error about a character rather than the fact that their build is
+stale, which is the `CLAUDE.md` §4 shape — a failure wearing another failure's
+clothes. The 404 arm now names the actual cause and says the store is fine.
+
+`/gaps.json` is in `vite.config.js`'s `ROUTES` and **`/gaps` is not**, which is
+the distinction that made `/audit` unreachable: a page route in that list serves
+the Rust side on a reload and this application on a nav click, so one URL
+renders two different things.

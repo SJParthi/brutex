@@ -74,6 +74,32 @@
     { href: '/ingest', label: 'Ingest' },
     { href: '/autopilot', label: 'Autopilot' },
     { href: '/db', label: 'DB' },
+    // IS THE STORE WHOLE — the absolute question, which `/db` structurally
+    // cannot ask.
+    //
+    // `/db`'s completeness column is PEER-RELATIVE: `$lib/completeness.js`
+    // takes each row's denominator from the fullest peer at the same (month,
+    // rung). That is right for "is this instrument short against its
+    // neighbours" and blind to a gap that hit every instrument at once — the
+    // denominator moves with the data, so a systemic loss lowers the bar and
+    // the score together and every row agrees about a store missing the same
+    // week.
+    //
+    // This tab asks `pull::gaps` what the exchange CALENDAR owed, day by day.
+    // The module had zero callers workspace-wide until `/gaps.json`, so the
+    // fact was computable and unreachable; a surface that exists and cannot be
+    // reached is the same as absent, which is the sentence the Logs entry
+    // below was written under and this one exists so it is not written a
+    // fourth time.
+    //
+    // NO `reload`. `src/routes/gaps/` IS a Svelte route and
+    // `crates/api/src/server.rs` registers only `/gaps.json` beside it and no
+    // page, so a click, a reload and a bookmark all render this application.
+    {
+      href: '/gaps',
+      label: 'Whole',
+      why: 'Whether a stored series is complete against the exchange calendar — only a minute inside a window the exchange actually traded counts as a loss.'
+    },
     { href: '/audit', label: 'Audit' },
     // WHAT THE EXCHANGE SAYS ABOUT THE FEED'S OWN SYMBOLS.
     //
