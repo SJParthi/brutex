@@ -5001,10 +5001,7 @@ impl Rules {
         /// every run, and halting a sweep over a typo in an optional variable
         /// would be a worse failure than using the documented figure.
         fn at(name: &str, default: i64) -> i64 {
-            crate::knobs::var(name)
-                .and_then(|raw| raw.trim().parse::<i64>().ok())
-                .filter(|&v| v >= 0)
-                .unwrap_or(default)
+            Rules::stated(name).unwrap_or(default)
         }
 
         let min_win_rate_bp = at("BRUTEX_MIN_WIN_RATE_BP", 5_000);
@@ -5062,21 +5059,35 @@ impl Rules {
     /// already, so a run at a derived floor and one at a stated floor are
     /// different runs and are recorded as such.
     ///
-    /// # Cost
+    /// # Cost, stated as it is and not as it was claimed
     ///
-    /// One pass over the forward returns the run has already computed — O(bars),
-    /// once per rung, off every per-candidate path.
+    /// One pass over the forward returns — O(bars), once per rung, off every
+    /// per-candidate path.
+    ///
+    /// This said "the forward returns the run HAS ALREADY COMPUTED", and that is
+    /// not true. `base_win_rate_bp` calls `runner::outcome::forward(bars,
+    /// horizon)` from inside `audit_range_inner`, BEFORE `audit_bars` is
+    /// entered; `run_ranked_by_reporting` then calls it again on the same slice
+    /// at the same horizon, and the two arguments are identical. The run
+    /// computes the same `Forward` twice and discards one.
+    ///
+    /// Measured on the one-minute rung: 618,296 bars across four parallel
+    /// vectors is about 30 MB allocated, walked and freed, twice — and
+    /// `range_over` runs eight rungs under `par_iter`, so it is eight extra full
+    /// passes concurrently. Reuse needs `RankedRun` to return the `Forward` it
+    /// built, which is a signature change on a crate boundary, so it is recorded
+    /// here rather than claimed away. §3 rule 6.
     #[must_use]
     pub fn derived(bars: &[indicators::Candle], horizon: Horizon) -> Self {
         let mut rules = Self::operator();
         let Some(base_bp) = base_win_rate_bp(bars, horizon) else {
             return rules;
         };
-        if crate::knobs::var("BRUTEX_MIN_WIN_RATE_BP").is_none() {
+        if Self::stated("BRUTEX_MIN_WIN_RATE_BP").is_none() {
             rules.min_win_rate_bp = base_bp;
             rules.min_assurance_bp = assurance_floor_bp(base_bp);
         }
-        if crate::knobs::var("BRUTEX_MIN_RR_BP").is_none() {
+        if Self::stated("BRUTEX_MIN_RR_BP").is_none() {
             rules.min_rr_bp = breakeven_rr_bp(rules.min_win_rate_bp);
         }
         // THE WEAKEST PERIOD IS HELD TO THE SAME STANDARD AS THE WHOLE.
@@ -5088,7 +5099,7 @@ impl Rules {
         // whole span is held to says "this worked in every regime, not on
         // average", and it costs nothing to state because the rate is already
         // measured.
-        if crate::knobs::var("BRUTEX_MIN_WEAKEST_BP").is_none() {
+        if Self::stated("BRUTEX_MIN_WEAKEST_BP").is_none() {
             rules.min_weakest_bp = base_bp;
         }
         // AND THE RETURN-OVER-DRAWDOWN FLOOR IS BUY-AND-HOLD'S OWN.
@@ -5098,12 +5109,43 @@ impl Rules {
         // constant asked a different question of every span. The alternative the
         // operator actually has is to hold the index, and its own ratio on these
         // bars is the honest bar to clear.
-        if crate::knobs::var("BRUTEX_MIN_RET_OVER_DD_BP").is_none()
+        if Self::stated("BRUTEX_MIN_RET_OVER_DD_BP").is_none()
             && let Some(hold) = hold_return_over_drawdown_bp(bars)
         {
             rules.min_ret_over_dd_bp = hold;
         }
         rules
+    }
+
+    /// What the operator STATED for a knob, or `None` when they stated nothing
+    /// this type can use.
+    ///
+    /// # One definition, because two disagreed
+    ///
+    /// [`Self::operator`] read every knob through a nested `at` that parses,
+    /// rejects a negative, and falls back. [`Self::derived`] asked a different
+    /// question — `knobs::var(name).is_none()` — to decide whether the operator
+    /// had spoken at all. Those two agree on a well-formed number and on an
+    /// unset variable, and disagree on everything between:
+    ///
+    /// | `BRUTEX_MIN_WIN_RATE_BP` | `operator` | `derived` saw |
+    /// |---|---|---|
+    /// | unset | 5,000 | nothing stated — derives |
+    /// | `7000` | 7,000 | stated — respects it |
+    /// | *(exported, empty)* | 5,000 | STATED — skips the derivation |
+    /// | `-1` | 5,000 | STATED — skips the derivation |
+    /// | `50%` | 5,000 | STATED — skips the derivation |
+    ///
+    /// `knobs::var` returns `Some("")` for an exported-but-empty variable, so a
+    /// bare `BRUTEX_MIN_WIN_RATE_BP=` left in a shell profile disabled the whole
+    /// derivation and handed back the coin flip, with no message and no
+    /// `refused:` line — a fallback that hides a failure, which `CLAUDE.md` §4
+    /// bans by name. Both callers now ask this one function, so the fallback and
+    /// the presence test cannot drift apart again.
+    fn stated(name: &str) -> Option<i64> {
+        crate::knobs::var(name)
+            .and_then(|raw| raw.trim().parse::<i64>().ok())
+            .filter(|&v| v >= 0)
     }
 
     const BASELINE: Self = Self {
@@ -5901,26 +5943,6 @@ fn policy_of(
         },
         grid_rungs(bars) as u64,
         screen_cap() as u64,
-        // THE BUDGET IS THE SIXTEENTH, AND WITHOUT IT THE CAP MOVES SILENTLY.
-        //
-        // `BRUTEX_SCREEN_BUDGET_MS` decides `priced_cap`, which is what actually
-        // bounds `by_evidence.par_iter().take(..)` -- the term above is
-        // `screen_cap()`, the STATED cap, which the budget overrides. So two
-        // runs at different budgets priced different candidate sets, produced
-        // different top-25s and different `pessimistic` figures, and keyed
-        // IDENTICALLY. `Results::append` then refused the second with "run is
-        // already recorded. Same inputs give same outputs", which was untrue,
-        // and `/backtest.json` served whichever landed first.
-        //
-        // That is the same defect D-0294 fixed for four knobs and D-0305 for
-        // `BRUTEX_CEILING`, and the horizon term above records why it is worse
-        // than an overwrite: "a silent REFUSAL, which is worse because it looks
-        // like a working guard". Found by an adversarial pass over the commit
-        // that added the knob.
-        //
-        // Unset is `0`, which cannot collide with any budget an operator names
-        // -- `screen_budget_ms` filters `n > 0`.
-        screen_budget_ms().unwrap_or(0),
         u64::from(validate),
         // THE SIXTH, AND IT MOVES MORE THAN THE OTHER FIVE.
         //
@@ -5991,6 +6013,26 @@ fn policy_of(
         // alone would make a 60-minute and a 5-minute run share a term that
         // means different things.
         u64::from(horizon.as_bars()),
+        // THE BUDGET IS THE SIXTEENTH, AND WITHOUT IT THE CAP MOVES SILENTLY.
+        //
+        // `BRUTEX_SCREEN_BUDGET_MS` decides `priced_cap`, which is what actually
+        // bounds `by_evidence.par_iter().take(..)` -- the term above is
+        // `screen_cap()`, the STATED cap, which the budget overrides. So two
+        // runs at different budgets priced different candidate sets, produced
+        // different top-25s and different `pessimistic` figures, and keyed
+        // IDENTICALLY. `Results::append` then refused the second with "run is
+        // already recorded. Same inputs give same outputs", which was untrue,
+        // and `/backtest.json` served whichever landed first.
+        //
+        // That is the same defect D-0294 fixed for four knobs and D-0305 for
+        // `BRUTEX_CEILING`, and the horizon term above records why it is worse
+        // than an overwrite: "a silent REFUSAL, which is worse because it looks
+        // like a working guard". Found by an adversarial pass over the commit
+        // that added the knob.
+        //
+        // Unset is `0`, which cannot collide with any budget an operator names
+        // -- `screen_budget_ms` filters `n > 0`.
+        screen_budget_ms().unwrap_or(0),
     ]
 }
 
@@ -6050,78 +6092,50 @@ impl Screened<'_> {
     }
 }
 
-/// The top combinations, priced in full and ranked with the PASSING ones first.
-///
-/// # Ordering is the whole point
-///
-/// The evidence ordering answers *which condition precedes a move most
-/// reliably*. It does not answer *which one can I actually trade*, and those are
-/// different questions: a real run's most-evident combination scored 81%
-/// profitable with a reward-to-risk of 0.41 and a worst trade that ran 1.06%
-/// against — evident, and untradeable under any sane stop.
-///
-/// So the screen re-orders: every combination that satisfies ALL the operator's
-/// rules first, best net first among them; everything that broke a rule after,
-/// with the rule it broke named. A failing combination is never hidden — a
-/// listing that dropped them would leave a reader unable to tell "nothing
-/// passed" from "nothing was tried".
-/// Walk [`TIERS`] from strictest to mildest and report the first that yields
-/// anything, naming every tier that did not.
-///
-/// # What this replaces
-///
-/// One screen against one policy answers `0 of 21 satisfy every rule` and
-/// stops. That is true and nearly useless: it says the operator's standard was
-/// not met without saying what standard WAS, so the next step is always to
-/// guess a looser number by hand and run again.
-///
-/// # Why the grid is built once and the tiers only re-filter
-///
-/// Every tier reads the same [`grid::Cell`] values — `worst_mae`,
-/// `reward_to_risk_bp`, `win_rate_bp`, `trades`. None of them changes what the
-/// grid CONTAINS, so eight tiers cost eight passes over cells already computed
-/// rather than eight sweeps. The one thing a tier does change is the forced
-/// stop merged into the ladder, and that is taken from the STRICTEST tier so
-/// the tightest level an operator might want is present in the grid every tier
-/// then reads.
-///
-/// # It never invents a tier
-///
-/// The ladder is a stated policy, printed in full beside the answer, in index
-/// points and whole percent. A reader sees which rung was met and which were
-/// not — so "nothing passed" becomes "nothing passed S+++ or S++; at S+ there
-/// are four, and here they are".
-/// The 95% lower bound a stated win rate implies, in basis points.
-///
-/// # Why this is derived and not typed
-///
-/// A win rate and a lower bound on a win rate are different quantities, and
-/// giving them the same number makes the second silently override the first. At
-/// forty trades, demanding a bound of 80% refuses a genuine 80% record — it
-/// admits nothing under 92.5%. An operator who typed 80 got 92.5 and was told
-/// nothing.
-///
-/// The bound's job is to answer *is this better than chance*, so the floor is a
-/// coin flip. The operator's standard is carried by `min_win_rate_bp`, which is
-/// checked against the OBSERVED rate where it belongs.
-///
-/// # What is a convention here and what is not
-///
-/// **Half is not a policy about trading, it is the definition of chance** — the
-/// null a two-sided bound is built to exclude. The 95% in the bound itself is a
-/// convention too, and lives in `grid::Cell::assurance_bp` where it is written
-/// out as `Z = 1.959964`.
-///
-/// What is NOT a convention, and therefore is not fixed here, is the stated rate:
-/// that arrives as `min_win_rate_bp` from the caller, and this function reads it
-/// so a caller demanding LESS than a coin flip is not silently raised to one.
-#[must_use]
-/// What fraction of forward windows closed positive, in basis points.
+/// The harder of the two directional base rates, in basis points.
 ///
 /// The null a strategy has to beat: entering at random on this instrument, over
 /// this span, at this horizon. `None` when nothing was measurable — a span with
 /// no bars, or one where every forward window was refused — because a floor
 /// derived from no observations is a number wearing a measurement's clothes.
+///
+/// # Why BOTH directions are counted, and why the floor is the LARGER
+///
+/// This counted `delta > 0` alone, and that is a LONG null. The engine trades
+/// both sides: `side_of_evidence` picks `Direction::Short` whenever the edge is
+/// negative, and `audit_range_inner` records `RunDirection::Undirected`
+/// precisely because the direction is chosen per combination, AFTER this floor
+/// has been fixed for the whole rung. One direction-blind number then gated both
+/// sides — and for a short, a window closing DOWN is the win. The floor was
+/// wrong by `2 * base - 10_000` basis points, largest exactly where the drift is
+/// strongest, which is the case it exists to handle.
+///
+/// Measured on the operator's own store, NIFTY 60min:
+///
+/// | span | long null | short null | one blind floor | error on shorts |
+/// |---|---|---|---|---|
+/// | 2020-10 to 2020-12 | 6967 | 3033 | 6967 | 39.3 points too STRICT |
+/// | 2024-10 to 2024-12 | 4032 | 5968 | 4032 | 19.4 points too LAX |
+///
+/// The LARGER of the two is taken rather than a pair, because the floor is fixed
+/// before any combination exists and one number has to gate both sides. `max`
+/// errs strict on the easier side and is never lax on either — the direction
+/// this repository takes whenever a bound cannot be exact, and the one §4's ban
+/// on a fallback that hides a failure requires.
+///
+/// # A flat window is a win for NEITHER side
+///
+/// `delta == 0` increments neither counter, and that is not the strict-versus-
+/// loose comparison it looks like: a window that closed exactly where it opened
+/// pays for no position in either direction. Awarding it to one side would make
+/// the two rates sum past 10,000 and stop them being complementary.
+///
+/// It is not a rounding concern. On `ADANIENT` one-minute bars at a one-bar
+/// horizon 6.98% of decided windows are flat, and reading them as "not up" moves
+/// the rate 698 basis points — across the coin flip, from 4592 to 5290.
+/// `indicators/src/session.rs` records the identical defect, in its own words —
+/// *"a flat bar was filed as 'not up' and therefore as down"* — as one it had to
+/// fix. This is the same trap one crate over.
 ///
 /// # Why the denominator is DECIDED windows and not bars
 ///
@@ -6131,20 +6145,22 @@ impl Screened<'_> {
 /// close — making the floor easiest exactly where trades are hardest to place.
 fn base_win_rate_bp(bars: &[indicators::Candle], horizon: Horizon) -> Option<i64> {
     let forward = runner::outcome::forward(bars, horizon);
-    let (mut decided, mut positive) = (0_i64, 0_i64);
+    let (mut decided, mut up, mut down) = (0_i64, 0_i64, 0_i64);
     for index in 0..bars.len() {
         let Some(delta) = forward.at(index) else {
             continue;
         };
         decided = decided.saturating_add(1);
         if delta > 0 {
-            positive = positive.saturating_add(1);
+            up = up.saturating_add(1);
+        } else if delta < 0 {
+            down = down.saturating_add(1);
         }
     }
     if decided == 0 {
         return None;
     }
-    positive.checked_mul(10_000)?.checked_div(decided)
+    up.max(down).checked_mul(10_000)?.checked_div(decided)
 }
 
 /// Buy-and-hold's own return over its own worst fall, on these bars, in
@@ -6221,10 +6237,57 @@ const fn breakeven_rr_bp(win_rate_bp: i64) -> i64 {
     // every derived floor exceeded the guard and fell back to the constant it
     // was written to replace. The test caught it, which is what a direction
     // assertion is for: at a 50% win rate this must reproduce exactly 125.
-    let breakeven = losses_bp.saturating_mul(100) / win_rate_bp;
-    breakeven.saturating_mul(125) / 100
+    //
+    // ONE DIVISION, NOT TWO, AND THAT IS A CORRECTION AND NOT A TIDY-UP. This
+    // read `(losses * 100 / w) * 125 / 100`, which truncates twice and errs LAX
+    // at every step: 5001 returned 123 against an exact 124.95, 6000 returned 82
+    // against 83.33, 7000 returned 52 against 53.57. Folding the margin in
+    // before the divide truncates once, and only downward from the exact value.
+    let with_margin = losses_bp.saturating_mul(125) / win_rate_bp;
+    // A FLOOR THAT ROUNDS TO ZERO IS NOT A LOOSE RULE. IT IS NO RULE.
+    //
+    // `Rules::admits` reads `self.min_rr_bp == 0 || cell.reward_to_risk_bp() >=
+    // self.min_rr_bp`, so zero DROPS the reward-to-risk check entirely. The
+    // guard above refuses `>= 10_000` on the stated ground that a 100% rate
+    // "would divide by a break-even of zero" — but the quotient reaches zero
+    // ninety-nine basis points earlier than that: every rate in `9901..=9999`
+    // has `losses * 125 < w`, so it truncated to zero and switched the rule off
+    // with no message. `brr(9900)` was 1, `brr(9901)` was 0, `brr(10_000)` was
+    // 125 — discontinuous across its own guard, and the middle case is the one
+    // that silently stops judging.
+    //
+    // One is the floor here rather than a fallback to 125, because at a 99.5%
+    // win rate the honest break-even payoff really IS 0.006x and 125 would be a
+    // number nothing derived. One keeps the rule ON, satisfied by anything,
+    // which is what the arithmetic says and is visible in the printed policy.
+    if with_margin <= 0 { 1 } else { with_margin }
 }
 
+/// The 95% lower bound a stated win rate implies, in basis points.
+///
+/// # Why this is derived and not typed
+///
+/// A win rate and a lower bound on a win rate are different quantities, and
+/// giving them the same number makes the second silently override the first. At
+/// forty trades, demanding a bound of 80% refuses a genuine 80% record — it
+/// admits nothing under 92.5%. An operator who typed 80 got 92.5 and was told
+/// nothing.
+///
+/// The bound's job is to answer *is this better than chance*, so the floor is a
+/// coin flip. The operator's standard is carried by `min_win_rate_bp`, which is
+/// checked against the OBSERVED rate where it belongs.
+///
+/// # What is a convention here and what is not
+///
+/// **Half is not a policy about trading, it is the definition of chance** — the
+/// null a two-sided bound is built to exclude. The 95% in the bound itself is a
+/// convention too, and lives in `grid::Cell::assurance_bp` where it is written
+/// out as `Z = 1.959964`.
+///
+/// What is NOT a convention, and therefore is not fixed here, is the stated rate:
+/// that arrives as `min_win_rate_bp` from the caller, and this function reads it
+/// so a caller demanding LESS than a coin flip is not silently raised to one.
+#[must_use]
 const fn assurance_floor_bp(min_win_rate_bp: i64) -> i64 {
     /// A coin flip, in basis points. Not a policy about trading — the
     /// definition of chance, and the null a two-sided bound exists to exclude.
@@ -6553,6 +6616,59 @@ pub const YOUR_RULES_MET: &str = "YOUR RULES: MET";
 /// The same, when they are not.
 pub const YOUR_RULES_UNMET: &str = "YOUR RULES: UNMET";
 
+/// Walk [`TIERS`] from strictest to mildest and report the first that yields
+/// anything, naming every tier that did not.
+///
+/// # What this replaces
+///
+/// One screen against one policy answers `0 of 21 satisfy every rule` and
+/// stops. That is true and nearly useless: it says the operator's standard was
+/// not met without saying what standard WAS, so the next step is always to
+/// guess a looser number by hand and run again.
+///
+/// # Ordering is the whole point
+///
+/// What comes back is the top combinations, priced in full and ranked with the
+/// PASSING ones first.
+///
+/// The evidence ordering answers *which condition precedes a move most
+/// reliably*. It does not answer *which one can I actually trade*, and those are
+/// different questions: a real run's most-evident combination scored 81%
+/// profitable with a reward-to-risk of 0.41 and a worst trade that ran 1.06%
+/// against — evident, and untradeable under any sane stop.
+///
+/// So the screen re-orders: every combination that satisfies ALL the operator's
+/// rules first, best net first among them; everything that broke a rule after,
+/// with the rule it broke named. A failing combination is never hidden — a
+/// listing that dropped them would leave a reader unable to tell "nothing
+/// passed" from "nothing was tried".
+///
+/// # Why the grid is built once and the tiers only re-filter
+///
+/// Every tier reads the same [`grid::Cell`] values — `worst_mae`,
+/// `reward_to_risk_bp`, `win_rate_bp`, `trades`. None of them changes what the
+/// grid CONTAINS, so eight tiers cost eight passes over cells already computed
+/// rather than eight sweeps. The one thing a tier does change is the forced
+/// stop merged into the ladder, and that is taken from the STRICTEST tier so
+/// the tightest level an operator might want is present in the grid every tier
+/// then reads.
+///
+/// # It never invents a tier
+///
+/// The ladder is a stated policy, printed in full beside the answer, in index
+/// points and whole percent. A reader sees which rung was met and which were
+/// not — so "nothing passed" becomes "nothing passed S+++ or S++; at S+ there
+/// are four, and here they are".
+///
+/// # Both halves of this doc were orphaned, and Rust said nothing
+///
+/// They sat immediately above `base_win_rate_bp`, five hundred lines from the
+/// function they describe, because later insertions landed between a doc block
+/// and its item. Rust concatenates adjacent `///` lines onto whatever item comes
+/// next, so it compiled, `cargo doc` rendered three unrelated bodies as one, and
+/// `screen_cascade` — the function that decides which combinations an operator
+/// is shown — carried no documentation at all. Nothing in the build can catch
+/// this; it is caught by reading.
 fn screen_cascade(
     bars: &[indicators::Candle],
     column: &indicators::column::Column,
@@ -12189,10 +12305,30 @@ mod tests {
         // length first precisely so adding one re-keys.
         assert_eq!(
             start.len(),
-            15,
-            "fifteen choices are folded in. If this moved, `policy_of`'s doc \
+            16,
+            "sixteen choices are folded in. If this moved, `policy_of`'s doc \
              table and the append-never-insert rule both need reading before the \
              number is changed"
+        );
+
+        // THE LENGTH ALONE IS NOT THE CONTRACT, AND BELIEVING IT WAS COST A
+        // COMMIT. `BRUTEX_SCREEN_BUDGET_MS` was added as the sixteenth term and
+        // written at position FOUR, above the line that says "APPENDED BELOW
+        // THIS LINE. Nothing above it may move." That shifted `validate` from
+        // four to five and the ceiling from five to six, silently re-keying
+        // every identity ever recorded -- the exact failure the array's own
+        // comment predicts for an insert.
+        //
+        // The length assertion above passed: sixteen is sixteen wherever the
+        // term sits. Only the sibling test's `start[5]` caught it, by index, and
+        // it failed with `left: 1` -- `u64::from(validate)` standing where the
+        // ceiling belongs. So the position is asserted HERE too, in the test
+        // that owns the append rule, rather than resting on a neighbour.
+        assert_eq!(
+            start[15],
+            crate::screen_budget_ms().unwrap_or(0),
+            "the screen budget is the SIXTEENTH term and must stay last: it was \
+             written fourth once, and the length check could not see it"
         );
     }
 
@@ -14669,5 +14805,171 @@ mod horizon_tests {
             );
         }
         crate::knobs::clear_all();
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "the same exception every test module in this workspace takes: a \
+              test that cannot panic cannot fail."
+)]
+mod derived_floor_tests {
+    use super::{Horizon, Rules, base_win_rate_bp, breakeven_rr_bp};
+    use crate::knobs::serially;
+    use indicators::Candle;
+
+    /// 09:15 IST on 2024-01-01, in epoch microseconds.
+    ///
+    /// The stamp matters: `runner::outcome::forward` REFUSES a window that would
+    /// run past the session's forced close, so a series stamped outside trading
+    /// hours decides nothing and every assertion below would pass vacuously
+    /// against a `None`. Three hundred one-minute bars from the open end at
+    /// 14:15, and a fifteen-bar horizon off the last of them lands at 14:30 —
+    /// inside `AUTO_CLOSE_MINUTE`, so every window is decided.
+    const OPEN_IST: i64 = 1_704_080_700_000_000;
+
+    /// A series that moves `step` paisa a bar, one bar a minute from the open.
+    fn drifting(count: usize, step: i64) -> Vec<Candle> {
+        (0..count)
+            .map(|i| {
+                let n = i64::try_from(i).unwrap_or(0);
+                let close = 2_500_000 + n * step;
+                Candle {
+                    ts_micros: OPEN_IST + n * 60_000_000,
+                    open: close,
+                    high: close + 500,
+                    low: close - 500,
+                    close,
+                    volume: 1,
+                    open_interest: i64::MIN,
+                }
+            })
+            .collect()
+    }
+
+    /// The same series reflected about its first close, so every forward delta
+    /// flips sign and nothing else changes.
+    fn mirrored(bars: &[Candle]) -> Vec<Candle> {
+        let axis = bars[0].close * 2;
+        bars.iter()
+            .map(|bar| Candle {
+                open: axis - bar.open,
+                high: axis - bar.low,
+                low: axis - bar.high,
+                close: axis - bar.close,
+                ..*bar
+            })
+            .collect()
+    }
+
+    /// THE FLOOR IS THE SAME FOR A SERIES AND ITS MIRROR, AND IT WAS NOT.
+    ///
+    /// `base_win_rate_bp` counted `delta > 0` alone. That is the null for a
+    /// LONG, and the engine trades both sides — `side_of_evidence` picks
+    /// `Direction::Short` whenever the edge is negative, and `audit_range_inner`
+    /// records `RunDirection::Undirected` precisely because the direction is
+    /// chosen per combination, after this floor is already fixed for the rung.
+    ///
+    /// So on a falling span the long-only reading returned a rate near ZERO and
+    /// `Rules::derived` set `min_win_rate_bp` and `min_weakest_bp` to it —
+    /// floors every combination clears, on the span where a short is the trade.
+    /// The rules did not merely lean; they switched off in one direction.
+    ///
+    /// Reflecting the series is the sharpest statement of the fix: the mirror is
+    /// the same market seen from the other side, every delta negated, so a
+    /// direction-blind null must be IDENTICAL on the two. Under the old reading
+    /// they were complements and could not both be right.
+    #[test]
+    fn the_base_rate_is_the_same_for_a_series_and_its_mirror() {
+        let rising = drifting(300, 40);
+        let falling = mirrored(&rising);
+        let h = Horizon::DEFAULT;
+
+        let up = base_win_rate_bp(&rising, h).expect("a drifting series decides windows");
+        let down = base_win_rate_bp(&falling, h).expect("and so does its mirror");
+
+        assert_eq!(
+            up, down,
+            "the mirror is the same market from the other side; a floor that \
+             gates both directions cannot differ between them"
+        );
+        assert!(
+            down > 5_000,
+            "a falling span's null is a SHORT's null and must beat chance; the \
+             long-only reading returned {down} against a coin flip, which is a \
+             floor every combination clears"
+        );
+    }
+
+    /// A FLOOR THAT ROUNDS TO ZERO SWITCHES ITS OWN RULE OFF.
+    ///
+    /// `Rules::admits` reads `min_rr_bp == 0 || cell.reward_to_risk_bp() >=
+    /// min_rr_bp`, so zero DROPS the reward-to-risk check. The guard refuses a
+    /// rate at or above 100% on the stated ground that it "would divide by a
+    /// break-even of zero" — but the quotient hit zero ninety-nine basis points
+    /// earlier, and every rate in that band silently disabled the rule.
+    ///
+    /// Asserted across the whole domain rather than at the three edges, because
+    /// the defect was a band and not a boundary: `brr(9900)` was 1, `brr(9901)`
+    /// was 0, and `brr(10_000)` was 125.
+    #[test]
+    fn a_break_even_floor_never_switches_its_own_rule_off() {
+        for rate in 1..10_000_i64 {
+            assert!(
+                breakeven_rr_bp(rate) > 0,
+                "a reward-to-risk floor of zero is not a loose rule, it is no \
+                 rule at all, and {rate} basis points produced one"
+            );
+        }
+        assert_eq!(
+            breakeven_rr_bp(5_000),
+            125,
+            "at a coin flip the arithmetic must reproduce the constant it \
+             replaced, exactly"
+        );
+        assert!(
+            breakeven_rr_bp(4_000) > breakeven_rr_bp(6_000),
+            "a lower win rate demands a larger payoff; if this inverts the \
+             scale is wrong, which is how the hundred-times error was caught"
+        );
+    }
+
+    /// AN EMPTY KNOB IS NOT A STATED FLOOR.
+    ///
+    /// `Rules::operator` parses and falls back; `Rules::derived` asked whether
+    /// the variable was PRESENT. `knobs::var` returns `Some("")` for an
+    /// exported-but-empty variable, so a bare `BRUTEX_MIN_WIN_RATE_BP=` left in
+    /// a shell profile skipped the derivation and handed back the coin flip,
+    /// with no message and no refusal. Both now read `Rules::stated`.
+    #[test]
+    fn an_unusable_knob_is_not_a_stated_floor() {
+        let _serial = serially();
+        {
+            let bars = drifting(300, 40);
+            let h = Horizon::DEFAULT;
+            let measured = base_win_rate_bp(&bars, h).expect("a decided series");
+
+            for unusable in ["", "   ", "-1", "50%", "not a number"] {
+                crate::knobs::set("BRUTEX_MIN_WIN_RATE_BP", unusable);
+                assert_eq!(
+                    Rules::derived(&bars, h).min_win_rate_bp,
+                    measured,
+                    "{unusable:?} states nothing this type can use, so the floor \
+                     stays derived rather than silently reverting to 5,000"
+                );
+            }
+
+            crate::knobs::set("BRUTEX_MIN_WIN_RATE_BP", "7000");
+            assert_eq!(
+                Rules::derived(&bars, h).min_win_rate_bp,
+                7_000,
+                "and a figure the operator actually stated still wins"
+            );
+            crate::knobs::clear_all();
+        }
     }
 }
