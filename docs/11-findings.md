@@ -9,7 +9,7 @@ cannot be used to check whether anything was missed.
 
 Ten adversarial lenses raised **114** findings. Each lens's output went to a second
 agent instructed to refute it and to default to refuting, because a false finding costs
-a real change to working code. **26 were killed. 99 stood.** Of those, **37 can lose a
+a real change to working code. **26 were killed. 102 stood.** Of those, **37 can lose a
 real combination or invent a false one**, which is the only ranking that matters for a
 brute-force search.
 
@@ -149,6 +149,9 @@ failure D-0104 records for D-0076, D-0077 and D-0078.
 | `F-4DCEC0` | `gap` | docs/04-invariants.md V-02..V-05 name three modules that do not exist, and their `—` glyph rests on a justification that is no longer true | `docs/04-invariants.md:87 (indicators::barrier::no_lookahead), :88 and :90 (indicators::proptest::*), :89…` | OPEN |
 | `F-B40027` | `gap` | inside_day and outside_day are running predicates over the forming day, not day types — but the running form is the only form §3 rule 7 permits, so the defect is the label and the missing completed-day family | `crates/indicators/src/session.rs:376-380 (dh <= ph && dl >= pl over the RUNNING extremes), session.rs:191-197 (the…` | OPEN |
 | `F-255C6F` | `gap` | min_hits == bars is unsatisfiable by construction and reports identically to a satisfiable threshold nothing met | `crates/engine/src/lib.rs:310-318, :905-911 (the one test)` | OPEN |
+| `F-DD700B` | `wrong` | The two NSE disaster-recovery Saturdays were absent from `CHARTER_NON_REGULAR_IST_DAYS`, so a 105-bar drill became the previous-day anchor. Measured on the store: for 2024-03-04 the pivot moved 144.5 index points and the CPR width 6.2x, enough to flip `cpr_class`; `prev5` stayed contaminated five sessions | `crates/indicators/src/evaluator.rs:159` | FIXED — added as days 7 and 8, the two free slots `Calendar` already had; `the_eight_non_regular_days_are_the_charter_dates` recomputes both day numbers from the calendar date; charter row added |
+| `F-A918E3` | `wrong` | `docs/00-charter.md` says 2021-02-24 forces exit at 16:50, implying a 17:00 close; `crates/pull/src/calendar.rs:252` says it "traded 09:15 and stopped at 10:08" and asserts 54 expected bars. The store holds 54. So the gaps audit's denominator was derived from the truncated series it exists to audit, and `GET /gaps` reports `lost_minutes: 0` for 2021-02 on a day the charter says traded seven hours longer — the P-70 tautology | `crates/pull/src/calendar.rs:252` vs `docs/00-charter.md:76` | NEEDS A DECISION — **UNVERIFIED**, per §3 rule 1. Two internal sources disagree and no third exists in the tree; resolving it needs the exchange's own record, which is a human call. Neither was changed |
+| `F-DD1DFC` | `wrong` | `median_step_micros` allocates and sorts `bars.len()-1` inside `walk_with`, so an O(n log n) sort runs PER CANDIDATE — up to 10,000 per rung under `par_iter`, twice per candidate in the walk-forward. Introduced this session by the horizon fix; the sibling `forced_exits` was hoisted out of the same loop for the same reason and this was left behind. Invisible to the ratio gates because it scales uniformly | `crates/runner/src/trade.rs:315` | IN PROGRESS — hoisting it the way `exits` is hoisted |
 | `F-9DD4F6` | `gap` | walk's width check is a dead disjunct: no input can make `p >= ConditionMask::BITS` the deciding condition | `crates/engine/src/lib.rs:290-298, and an_out_of_range_position_is_refused_and_named at :1030-1043` | OPEN |
 
 ---
@@ -200,5 +203,5 @@ It does not claim a `FIXED` row is beyond question. It claims a test exists that
 **shown to fail** against the code before the fix — which is a different and smaller
 claim than correctness, and the only one that can be made mechanically.
 
-<!-- rows-digest: d215823742a90839 -->
-<!-- dispositions: FIXED 17 · IN PROGRESS 0 · NEEDS A DECISION 7 · OPEN 67 · PARTLY FIXED 8 · REFUTED 0 · total 99 -->
+<!-- rows-digest: ad75f77e7a584098 -->
+<!-- dispositions: FIXED 18 · IN PROGRESS 1 · NEEDS A DECISION 8 · OPEN 67 · PARTLY FIXED 8 · REFUTED 0 · total 102 -->

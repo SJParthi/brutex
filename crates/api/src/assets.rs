@@ -74,6 +74,18 @@ const IMMUTABLE_DIR: &str = "_app";
 /// The type-ahead script, which is a source file rather than build output.
 const TYPEAHEAD: &str = "typeahead.js";
 
+/// The masters page's browser code, served from `web/` for the reason
+/// `crate::mastersrun` records at length: 127 lines of it used to live inside a
+/// Rust string literal, which is `CLAUDE.md` §2's "generated source in another
+/// language, checked in".
+///
+/// UNLIKE [`TYPEAHEAD`], THIS ONE IS NOT PROGRESSIVE ENHANCEMENT. The instruments
+/// page renders every row without its script; the masters page renders a table
+/// whose cells are filled in ONLY by this file, so losing it loses the answer
+/// rather than a convenience. The two refusals say different things for that
+/// reason, and §4 is why they must: "degrade loudly and name the reason".
+const MASTERS: &str = "masters.js";
+
 /// The front end's own sources, beside the build rather than inside it.
 ///
 /// Read for one purpose: [`Build::Stale`] compares the bundle's shell against
@@ -648,6 +660,9 @@ pub struct Assets {
     build: Build,
     /// The type-ahead script. A source file beside the build, not inside it.
     typeahead: PathBuf,
+    /// `web/masters.js` -- see [`MASTERS`], which records why it is not embedded
+    /// and why its absence is not the same failure as [`TYPEAHEAD`]'s.
+    masters: PathBuf,
     /// How many requests have named an asset that is not on disk. Held so the
     /// warning in [`Assets::note_missing`] can fire on a doubling rather than
     /// on every request, which is the difference between a diagnostic and a
@@ -680,6 +695,7 @@ impl Assets {
             root,
             build,
             typeahead: web.join(TYPEAHEAD),
+            masters: web.join(MASTERS),
             missing: AtomicU64::new(0),
         }
     }
@@ -828,6 +844,42 @@ impl Assets {
                      type-ahead is progressive enhancement and nothing else \
                      depends on this file.\n",
                     self.typeahead.display()
+                )
+                .into_bytes(),
+            ),
+        }
+    }
+
+    /// `web/masters.js`, read from disk at request time.
+    ///
+    /// # Why this is not [`Self::typeahead`] with a different path
+    ///
+    /// The two files fail differently and the refusals have to say so.
+    /// `/typeahead.js` is progressive enhancement: the instruments page renders
+    /// every row without it, so its 404 correctly tells the reader nothing
+    /// depends on it. `/masters.js` fills the status cells of a table that is
+    /// otherwise empty and drives the verify button, so its absence is the
+    /// difference between an answer and a blank page.
+    ///
+    /// `CLAUDE.md` §4 bans "a fallback that hides a failure" and prescribes the
+    /// alternative in the same row: degrade loudly and name the reason. Naming
+    /// the wrong reason is the same defect one step further on, which is why
+    /// this is a second function rather than a shared one.
+    #[must_use]
+    pub fn masters(&self) -> Response {
+        match std::fs::read(&self.masters) {
+            Ok(bytes) => answer(StatusCode::OK, content_type(&self.masters), bytes),
+            Err(e) => answer(
+                StatusCode::NOT_FOUND,
+                "text/plain; charset=utf-8",
+                format!(
+                    "{} could not be read: {e}\n\
+                     The masters page cannot fill its status cells or run a \
+                     verification without this file. Unlike the type-ahead, it \
+                     is not an enhancement — the table stays empty. The page \
+                     itself still renders, so the nav and the refusal are both \
+                     visible rather than a blank screen.\n",
+                    self.masters.display()
                 )
                 .into_bytes(),
             ),

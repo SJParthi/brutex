@@ -120,11 +120,34 @@ pub fn ist_day(ts_micros: i64) -> i64 {
 /// store holds nothing before 1970, but a `%` here would be correct only by
 /// accident of the data.
 ///
-/// NSE trades Monday to Friday. A Saturday or Sunday bar sets NOTHING rather
-/// than being folded into an adjacent day: a weekend timestamp in an equity
-/// series is a store defect, and silently calling it Friday would hide the one
-/// symptom that could reveal it. `docs/03-vocabulary.md` §4 — an unknowable
-/// condition is unset, not guessed.
+/// NSE trades Monday to Friday, and a Saturday or Sunday bar sets NOTHING
+/// rather than being folded into an adjacent day: `docs/03-vocabulary.md` §4 —
+/// an unknowable condition is unset, not guessed.
+///
+/// # The reason this used to give was false, and the charter says so
+///
+/// It read *"a weekend timestamp in an equity series is a store defect, and
+/// silently calling it Friday would hide the one symptom that could reveal
+/// it."* The behaviour is right and that justification is not. NSE trades on a
+/// weekend more often than the sentence allows, and `docs/00-charter.md` §3
+/// records three of them as VERIFIED full 375-bar sessions — the Budget
+/// Saturdays 2020-02-01 and 2025-02-01 and the Budget Sunday 2026-02-01. Two
+/// more are on disk: the disaster-recovery Saturdays 2024-03-02 and 2024-05-18,
+/// 105 bars each. Five weekend sessions, **1,335 real trading bars**, measured
+/// in the operator's own store — none of them a defect.
+///
+/// # What the behaviour actually costs, stated rather than denied
+///
+/// On those 1,335 bars all five weekday positions are false. That is not
+/// *wrong* under §4 — a session the vocabulary cannot name is honestly unnamed
+/// — but it is not free either: a weekday-conditioned candidate has those bars
+/// in its support DENOMINATOR and never in its numerator, so its measured
+/// support is diluted by 0.21% of the series.
+///
+/// Naming a weekend session would need a sixth and seventh position, and
+/// `CLAUDE.md` §3 rule 8 makes appending bits a decision rather than a tidy-up.
+/// Until that decision is taken this is the honest statement of the limit; what
+/// is fixed here is the claim that there was no limit.
 #[must_use]
 pub const fn weekday_bit(ts_micros: i64) -> Option<u16> {
     // Inlined rather than calling `ist_day`, which is not `const`.

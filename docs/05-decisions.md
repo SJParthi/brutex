@@ -28014,3 +28014,42 @@ and that count is exactly the operator's signal that the property is in
 question. The test's doc carries the worked example above, because a fixture
 built from `synthetic::sessions` produces no corrupt bar and cannot reach it.
 §3 rule 6.
+
+### D-0393
+
+**A horizon counted in BARS is not a duration when the bars are not contiguous.**
+
+`trade::walk` ended a hold at `entry + h`, indexing forward through the bar
+slice. On a contiguous session that is the same thing as "h minutes later", and
+it was written when that was the only case anyone had looked at.
+
+It is not the only case. **2024-03-02** is an NSE disaster-recovery Saturday and
+the store holds 105 one-minute bars for it: 09:15–09:59, then nothing until
+11:30, then 11:30–12:29. A long entered at 09:57 at `Horizon::DEFAULT` exited
+fifteen *bars* later, at 11:41 — **a 104-minute hold billed as fifteen minutes**,
+carried across a 91-minute closure. 2024-05-18 has the same shape.
+
+The mis-stated duration is the smaller half. No bar exists inside the gap, so
+`excursion::crossings` examines none, so no stop, no target and no trail can
+fire there: **every exit order is inert for ninety-one minutes while a position
+is open.** A hold that cannot be stopped out is biased toward the favourable
+side, which is the direction §4 exists to refuse.
+
+**The fix bounds the horizon by the CLOCK as well as by the index.**
+`horizon_bar` takes the median inter-bar step — the median, so that a single
+91-minute gap cannot move it — multiplies it by `h`, and walks forward only
+while the next bar's timestamp is inside that deadline. On contiguous bars the
+answer is exactly `entry + h` and nothing changes.
+
+**It shortens WITHIN a day only, and that restriction is the whole of the
+correctness argument.** An overnight gap is not a defect and already has an
+owner: `forced_exits` squares the position off at the session boundary, and a
+hold that runs past the end of the DATA rather than past the clock is
+`too_late` — a signal counted and not traded. Shortening on a next-day bar
+would convert "the file ran out" into "it exited on the last bar", which is the
+fabricated square-off `a_slice_that_stops_mid_session_fabricates_no_square_off`
+was written to forbid. An **intra-day** gap has no such owner, which is the
+entire reason this exists.
+
+Proved by `a_hold_does_not_run_across_an_intraday_halt`, built from that real
+day's bar count, which also asserts the contiguous case is untouched.

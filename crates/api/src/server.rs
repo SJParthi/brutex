@@ -13523,6 +13523,7 @@ pub fn router(site: Loaded) -> axum::Router {
 )]
 pub fn router_serving(site: Loaded, assets: std::sync::Arc<assets::Assets>) -> axum::Router {
     let typeahead = std::sync::Arc::clone(&assets);
+    let masters_js = std::sync::Arc::clone(&assets);
     axum::Router::new()
         .route("/dashboard", axum::routing::get(home))
         .route("/instruments", axum::routing::get(page))
@@ -13561,6 +13562,13 @@ pub fn router_serving(site: Loaded, assets: std::sync::Arc<assets::Assets>) -> a
         // READ FROM DISK, NOT `include_str!`. It is a file under `web/`, and a
         // crate that reaches into that tree at compile time is the coupling CI
         // gate 1e detaches the tree to find. D-0064.
+        .route(
+            "/masters.js",
+            axum::routing::get(move || {
+                let masters = std::sync::Arc::clone(&masters_js);
+                async move { masters.masters() }
+            }),
+        )
         .route(
             "/typeahead.js",
             axum::routing::get(move || {

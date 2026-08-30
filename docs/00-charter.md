@@ -63,6 +63,21 @@ Sources are Indian exchange publications and the vendor documentation cited in
 | Muhurat (Diwali) session | ~1 hour, an evening session on a date that is
   otherwise a holiday. Verified dates: 2020-11-14, 2021-11-04, 2022-10-24,
   2023-11-12, 2024-11-01, 2025-10-21 |
+| Disaster-recovery sessions | NSE runs a **live-trading DR drill on a
+  Saturday**, out of the secondary site, to prove the site works. Two are in
+  the store: **2024-03-02 (Sat)** and **2024-05-18 (Sat)**, **105 bars each**,
+  09:15–09:59 then 11:30–12:29 with a 90-minute closure between. MEASURED by
+  decoding `zerodha/NSE/INDEX/NIFTY/1min/2024-03.bin` and `2024-05.bin`; also
+  recorded in `crates/pull/src/calendar.rs`. **A drill is not a market day**
+  and its OHLC never becomes the previous-day anchor — it is in
+  `CHARTER_NON_REGULAR_IST_DAYS` for exactly the reason the Muhurats are.
+  Unlike five of the six Muhurats, both land squarely inside the pull's
+  09:15–15:30 window, so nothing keeps them off disk by accident. What this
+  cost while they were absent from that list, measured on the store's own
+  bars: for Monday 2024-03-04 the anchor was the 105-bar Saturday rather than
+  the 375-bar Friday, moving the pivot **144.5 index points** and the CPR width
+  **6.2×** — enough alone to flip `cpr_class`, which is a vocabulary position.
+  See `docs/05-decisions.md` and `docs/11-findings.md`. |
 | Special weekend sessions | Union Budget sessions falling on a weekend, run at
   full regular hours. **2020-02-01 (Sat), 2025-02-01 (Sat), 2026-02-01 (Sun)**
   — 375 bars each, confirmed in the lake. This is the complete set: 1 February

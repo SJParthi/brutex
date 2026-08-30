@@ -156,13 +156,38 @@ fn set_side(mask: ConditionMask, value: i64, level: i64, above: u16, below: u16)
 /// its 60 bars sits inside the pull's window, so it lands, it becomes the previous-day
 /// anchor, and the prohibition is broken on it. Afternoon Muhurats are now the live
 /// pattern, which makes this forward-looking rather than historical.
-pub const CHARTER_NON_REGULAR_IST_DAYS: [i64; 6] = [
+pub const CHARTER_NON_REGULAR_IST_DAYS: [i64; 8] = [
     18_580, // 2020-11-14, 18:15–19:15 IST
     18_935, // 2021-11-04, 18:15–19:15
     19_289, // 2022-10-24, 18:15–19:15
     19_673, // 2023-11-12, 18:00–19:00
     20_028, // 2024-11-01, 18:00–19:00
     20_382, // 2025-10-21, 13:45–14:45 — an AFTERNOON session, and the one that lands
+    // THE TWO DISASTER-RECOVERY SATURDAYS, and they are not Muhurat at all.
+    //
+    // NSE runs a live-trading DR drill on a Saturday: a short session out of the
+    // secondary site, to prove the site works. It is not a market day in any
+    // sense the previous-day anchor means, and both land squarely inside the
+    // pull's 09:15-15:30 window, so neither is saved by the accident that keeps
+    // the evening Muhurats off disk. MEASURED in the operator's own store:
+    // 105 bars each, 09:15-09:59 then 11:30-12:29, with a 90-minute hole.
+    //
+    // WHAT THEY COST WHILE THEY WERE ABSENT FROM THIS LIST, measured by folding
+    // the store's own bars: for Monday 2024-03-04 the anchor was the 105-bar
+    // Saturday rather than the 375-bar Friday, moving the pivot 144.5 index
+    // points (22386.86 against 22242.36) and the CPR width by 6.2x (13.48
+    // against 83.68) -- enough on its own to flip `cpr_class` from wide to
+    // narrow, which is a vocabulary position. All 44 positions `crate::daily`
+    // owns, plus both previous-day Fibonacci ladders, were decided against a
+    // three-hour drill, and `prev5` stayed contaminated for five sessions.
+    //
+    // THE BUDGET SATURDAYS ARE DELIBERATELY NOT HERE. 2020-02-01, 2025-02-01
+    // and 2026-02-01 are full 375-bar sessions that happen to fall on a weekend;
+    // they are regular in every way except the weekday, and excluding them would
+    // discard a real anchor. What disqualifies a day here is being a DRILL or a
+    // ceremony, never its position in the week.
+    19_784, // 2024-03-02 Sat, 09:15–09:59 + 11:30–12:29 — disaster recovery
+    19_861, // 2024-05-18 Sat, same shape — disaster recovery
 ];
 
 /// Which IST days are not regular sessions.
@@ -200,8 +225,10 @@ impl Calendar {
         // equal by the const assertion below, so this cannot silently drift from the
         // documented source.
         Self {
-            days: [18_580, 18_935, 19_289, 19_673, 20_028, 20_382, 0, 0],
-            len: 6,
+            days: [
+                18_580, 18_935, 19_289, 19_673, 20_028, 20_382, 19_784, 19_861,
+            ],
+            len: 8,
         }
     }
 
@@ -230,7 +257,7 @@ impl Calendar {
 /// under this workspace's lints. That duplication is only safe if something compares them,
 /// and a const assertion is the only thing that can compare them before the code runs.
 const _: () = {
-    assert!(CHARTER_NON_REGULAR_IST_DAYS.len() == 6);
+    assert!(CHARTER_NON_REGULAR_IST_DAYS.len() == 8);
     let c = Calendar::charter();
     assert!(c.len == CHARTER_NON_REGULAR_IST_DAYS.len());
     assert!(c.days[0] == CHARTER_NON_REGULAR_IST_DAYS[0]);
@@ -239,6 +266,8 @@ const _: () = {
     assert!(c.days[3] == CHARTER_NON_REGULAR_IST_DAYS[3]);
     assert!(c.days[4] == CHARTER_NON_REGULAR_IST_DAYS[4]);
     assert!(c.days[5] == CHARTER_NON_REGULAR_IST_DAYS[5]);
+    assert!(c.days[6] == CHARTER_NON_REGULAR_IST_DAYS[6]);
+    assert!(c.days[7] == CHARTER_NON_REGULAR_IST_DAYS[7]);
 };
 
 /// Every module, and the session bookkeeping that feeds the ones needing yesterday.
@@ -2604,7 +2633,7 @@ mod tests {
     /// so there is no date library to reach for — which is why this is written out. The
     /// charter's §3 table is the source for the dates themselves.
     #[test]
-    fn the_six_non_regular_days_are_the_charter_dates() {
+    fn the_eight_non_regular_days_are_the_charter_dates() {
         /// Days from 1970-01-01 to the given date, by Howard Hinnant's civil-from-days
         /// inverse. Shares nothing with the constant under test.
         const fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
@@ -2627,13 +2656,20 @@ mod tests {
         );
 
         // docs/00-charter.md §3, "Muhurat (Diwali) session ... Verified dates".
-        let charter: [(i64, i64, i64); 6] = [
+        // SIX MUHURATS, THEN THE TWO DISASTER-RECOVERY SATURDAYS. The list ran to
+        // six while the constant held eight, so the two days added last were
+        // checked by nothing -- and they are the two whose day numbers were
+        // derived by hand rather than read off the charter. `days_from_civil`
+        // recomputing them from the calendar date is the independent check.
+        let charter: [(i64, i64, i64); 8] = [
             (2020, 11, 14),
             (2021, 11, 4),
             (2022, 10, 24),
             (2023, 11, 12),
             (2024, 11, 1),
             (2025, 10, 21),
+            (2024, 3, 2),
+            (2024, 5, 18),
         ];
         for (i, (y, m, d)) in charter.iter().enumerate() {
             let want = days_from_civil(*y, *m, *d);

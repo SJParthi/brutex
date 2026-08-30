@@ -3012,3 +3012,12 @@ candidate was priced as a long. Not fixed here.
 | GR-04 | **An instrumented phase reaches the surface it was instrumented for.** The events were emitted on a target the console filters out, and without the field it then filters on — dropped twice over, and invisible | `cli.audit` with the rung; the reducer's five states and the table's five renders | ✓ |
 | GR-05 | **A file this build cannot read costs only its own half of the report.** A v3 frontier aborted the whole of `cli top`, including the ledger row already in hand, and `/engine/top.json` answered HTTP 400 until the file was deleted by hand | `no_frontier` names which absence it is and the ledger half renders regardless | ✓ |
 | GR-06 | **An absent ledger is an answer, not a refusal.** `open_read`'s refusal is right for a caller opening a ledger; `top_at` asks which run is best, and on a store that never recorded one the answer is a sentence — not a line labelled `refused:` whose own text says it is not an error | `top_at`'s fold on the phrase both absence refusals end with | ✓ |
+
+## A horizon is a duration, not a subscript — D-0393
+
+| ID | Invariant | Proof | ✓ |
+|---|---|---|---|
+| HZ-01 | **A hold ends at the last bar inside the horizon's own DURATION.** `entry + h` is a duration only where the bars are contiguous; across the 91-minute halt of 2024-03-02 a fifteen-bar hold ran 104 minutes | `horizon_bar` walks the timestamps against a deadline, not the index | ✓ |
+| HZ-02 | **The step is the MEDIAN, so one gap cannot redefine the timeframe.** A mean over 105 bars containing a single 91-minute hole reads as a 1.85-minute bar and the deadline stretches with it | `median_step_micros`; asserted at 60,000,000 µs on the real day's fixture | ✓ |
+| HZ-03 | **Contiguous bars are untouched, byte for byte.** A duration bound that also moved the ordinary case would be a behaviour change wearing a bug fix's clothes | the same test asserts `horizon_bar(bars, 0, 15, step) == 15` on the unbroken block | ✓ |
+| HZ-04 | **It shortens within the trading day and never across one.** An overnight gap already has an owner in `forced_exits`; shortening there would turn "the data ran out" into "it exited on the last bar", which is a fabricated square-off | the `ist_day(bar) == entry_day` guard, and `a_slice_that_stops_mid_session_fabricates_no_square_off` still green | ✓ |

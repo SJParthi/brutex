@@ -133,7 +133,7 @@ jobs:
           # is the thing CLAUDE.md section 2 exists to forbid.
           web_allowed='.*'
           # Files with no extension that are still legitimate.
-          allowed_names='LICENSE|CODEOWNERS|.gitignore|.gitattributes'
+          allowed_names='LICENSE|CODEOWNERS|\.gitignore|\.gitattributes'
           bad=0
           while IFS= read -r f; do
             base="${f##*/}"
@@ -325,6 +325,65 @@ jobs:
           fi
           echo "OK."
 
+      - name: Gate 1f — no browser code inside a Rust string literal
+        run: |
+          set -euo pipefail
+          # GATES 1, 13 AND 15 ARE ALL STRUCTURALLY BLIND TO THIS, and a real
+          # violation lived under `crates/` because of it: 127 lines of
+          # JavaScript inside `const SCRIPT: &str = r#"..."#` in
+          # `crates/api/src/mastersrun.rs`, emitted as `<script>{SCRIPT}</script>`
+          # on the live `/masters` route. An extension walk sees a `.rs` file, a
+          # manifest walk sees no dependency, and a one-word walk sees no
+          # forbidden word. Only a gate that reads the CONTENT catches it.
+          #
+          # CLAUDE.md section 2 forbids "any generated source in another
+          # language, checked in", and the `web/` exception is a PATH, not a
+          # licence to write browser code wherever it is convenient.
+          #
+          # `crate::calendar` had already NAMED this attack -- "a `<script>`
+          # block living inside a Rust string literal is another language
+          # smuggled past the gate" -- and pointed at
+          # `render::every_page_carries_the_one_script_this_repository_chose_and_no_other`
+          # as the guard. That test iterates `render::every_page()`, and the
+          # offending page is routed from its own module, so it was never in the
+          # sample. D-0060's lesson, recurring one route later: an invariant is
+          # only as true as its sample. A GATE has no sample to go stale.
+          #
+          # LIMIT, STATED RATHER THAN GLOSSED: each file is read only as far as
+          # its first `#[cfg(test)]`, because tests legitimately name `<script`
+          # to assert its ABSENCE and there is no sound way to find a test
+          # module's end by counting braces -- braces live inside string
+          # literals, which is the very thing this gate exists to read. A
+          # production item placed AFTER a test module is therefore not scanned.
+          # Nothing in the tree does that today; if that changes, this gate is
+          # narrower than it reads.
+          bad=0
+          for f in $(git ls-files 'crates/*.rs' 'crates/**/*.rs'); do
+            body=$(awk '/^#\[cfg\(test\)\]/{exit} {print NR": "$0}' "$f")
+            # A `<script` is allowed ONLY when it carries `src=` -- the external
+            # shape `/typeahead.js` and `/masters.js` both use. Comment lines are
+            # prose about the rule, not the rule being broken.
+            hits=$(printf '%s\n' "$body" \
+                   | grep -vE '^[0-9]+:[[:space:]]*//' \
+                   | grep -E '<script|document\.(getElementById|querySelector|createElement)|await fetch\(|addEventListener|\.innerHTML' \
+                   | grep -v 'src=' || true)
+            if [ -n "$hits" ]; then
+              printf 'BROWSER CODE IN A RUST FILE: %s\n%s\n' "$f" "$hits"
+              bad=1
+            fi
+          done
+          if [ "$bad" = 1 ]; then
+            echo ""
+            echo "Browser code belongs under web/, which CLAUDE.md section 2"
+            echo "makes unrestricted. Serve it the way /typeahead.js and"
+            echo "/masters.js are served: a file on disk, read at REQUEST time by"
+            echo "assets::Assets, referenced as <script src=\"...\" defer>. Never"
+            echo "include_str! and never inline, so no crate depends on the front"
+            echo "end to BUILD -- which is the other half of the same section."
+            exit 1
+          fi
+          echo "OK — no <script> body, no browser API and no inline handler"
+          echo "     appears in any .rs production region under crates/."
       - name: Gate 1c — no literal credential path
         run: |
           set -euo pipefail
@@ -1321,8 +1380,16 @@ jobs:
         run: |
           set -euo pipefail
           bad=0
-          hits=$(git ls-files '*build.rs' | xargs -r grep -ln \
-                 -e 'Command::new' -e 'std::process' || true)
+          # WHITESPACE IS NOT SIGNIFICANT IN A RUST PATH, and the two fixed strings
+          # this used to grep for were therefore trivially evadable: a build
+          # script written `std :: process :: Command :: new("npm")` compiles,
+          # spawns, and matched NEITHER needle. Measured against a real file.
+          # These patterns allow optional whitespace at every separator, and add
+          # the `process::Command` spelling the pair missed on its own.
+          hits=$(git ls-files '*build.rs' | xargs -r grep -lnE \
+                 -e 'Command[[:space:]]*::[[:space:]]*new' \
+                 -e 'std[[:space:]]*::[[:space:]]*process' \
+                 -e 'process[[:space:]]*::[[:space:]]*Command' || true)
           if [ -n "$hits" ]; then
             printf 'BUILD SCRIPT INVOKES AN EXTERNAL PROCESS:\n%s\n' "$hits"
             echo "A build script is Rust, so gate 1 passes it — and then it runs"
@@ -7432,6 +7499,57 @@ jobs:
             console.log("no comment swallows a rule");
           ' $(find web/src -name '"'"'*.svelte'"'"' -o -name '"'"'*.css'"'"' | sort)
 
+      - name: Gate W6 — the masters script spends no vendor request on load
+        run: |
+          set -euo pipefail
+          # THE OTHER HALF OF A PROOF THAT SPLIT, AND IT SPLIT FOR A GOOD REASON.
+          #
+          # `crates/api/src/mastersrun.rs` used to hold this file as 127 lines
+          # inside a Rust string literal — a CLAUDE.md section 2 violation, now
+          # caught by gate 1f. Two tests in that module proved the operator's
+          # standing rule, that opening a page must not spend a vendor request,
+          # by reading the handler bindings out of the rendered HTML.
+          #
+          # They cannot any more, and the fix is NOT to let them read
+          # `web/masters.js`: gate 1e runs the whole workspace with the `web/`
+          # tree DETACHED, precisely to prove no crate depends on the front end.
+          # A Rust test that opened this file would go red in the one job whose
+          # green is that guarantee.
+          #
+          # So the HTML half stayed in Rust — one script tag, external, no
+          # inline handler — and this is the half that only makes sense here.
+          f=web/masters.js
+          if [ ! -f "$f" ]; then
+            echo "$f is missing. /masters loads it by name; without it the page"
+            echo "renders and every status cell stays empty."
+            exit 1
+          fi
+          bad=0
+          for fn in refresh verify; do
+            if ! grep -q "addEventListener('click', $fn)" "$f"; then
+              echo "\`$fn\` is not bound to a press in $f."
+              bad=1
+            fi
+            # A BARE `fn();` AT COLUMN ZERO IS A CALL ON LOAD. `function fn()`
+            # and `const fn = ` are declarations and do not match; an indented
+            # call inside another function is reached only through a press.
+            if grep -qE "^$fn\(\);" "$f"; then
+              echo "\`$fn()\` is INVOKED ON LOAD in $f, which spends work nobody"
+              echo "asked for. Bind it to the press and let the press call it."
+              bad=1
+            fi
+          done
+          # `status()` is the one call on load that IS allowed: it reads
+          # `/masters/status.json`, which stats four files and opens no socket.
+          if ! grep -qE '^status\(\);' "$f"; then
+            echo "NOTE: status() is no longer called on load — the table will be"
+            echo "empty until something presses. If that is deliberate, update"
+            echo "this gate; it is here because the empty table looked like a bug."
+            bad=1
+          fi
+          [ "$bad" = 1 ] && exit 1
+          echo "OK — refresh and verify are bound to a press and called by"
+          echo "     nothing on load; only the socket-free status() runs."
       - name: Gate W4 — unused CSS does not grow
         run: |
           CEILING=0

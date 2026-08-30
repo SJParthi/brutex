@@ -184,7 +184,15 @@ pub async fn logs_json(
     (
         axum::http::StatusCode::OK,
         json,
-        json_over(&dir, &asked, sink_health().as_ref()),
+        json_over(
+            &dir,
+            crate::server::store_dir()
+                .ok()
+                .map(|s| cli_half(&s))
+                .as_deref(),
+            &asked,
+            sink_health().as_ref(),
+        ),
     )
 }
 
@@ -194,9 +202,48 @@ pub async fn logs_json(
 /// REAL file, rather than needing the process-global one installed. The
 /// handler is then the one thing left untested here — resolving the directory
 /// — and that is a single `?` on `telemetry::global()`.
-fn json_over(dir: &std::path::Path, asked: &Asked, health: Option<&telemetry::Health>) -> String {
-    let tail = both_halves(dir, &asked.query);
-    json_of(&tail, asked, health)
+fn json_over(
+    dir: &std::path::Path,
+    cli_dir: Option<&std::path::Path>,
+    asked: &Asked,
+    health: Option<&telemetry::Health>,
+) -> String {
+    let tail = both_halves(dir, cli_dir, &asked.query);
+    json_of(&tail, asked, health, (dir, cli_dir))
+}
+
+/// Where `crates/cli` ACTUALLY writes, resolved from the STORE root.
+///
+/// # The join this replaces was one level off, and it hid 485 events
+///
+/// [`both_halves`] used to build its second half as `dir.join(CLI_SUBDIR)`,
+/// where `dir` is the directory the SERVER's own sink resolved. Under the run
+/// configuration this repository ships — `.claude/launch.json` starts `api`
+/// from the workspace root — `server::log_dir_from` answers `<workspace>/logs`,
+/// so the reader looked in `<workspace>/logs/cli`. That directory does not
+/// exist and never has.
+///
+/// `cli::log_dir_from` resolves `<store>/logs/cli`. Measured on this machine:
+/// `~/.brutex/store/logs/cli/events.ndjson` held **485 `cli.*` records** —
+/// 392 `ladder level`, 42 `stored span loaded`, 32 `rung sweeping`, 12
+/// `threshold search over stored bars`, 7 `exit grid entered` — while the
+/// directory `/logs` was reading held **zero**.
+///
+/// # Why it was silent, and why that is the worse half
+///
+/// `telemetry::tail` is documented never to fail and to render a missing
+/// directory as no records. That is the right behaviour for a store where
+/// nobody has run `cli`, and it is exactly what made this invisible: the page
+/// answered "no `cli` events" in the same words for "none were written" and
+/// "I looked in the wrong place". `CLAUDE.md` §4 bans a fallback that hides a
+/// failure, and an absent-directory default that cannot tell those two apart is
+/// one wearing a legitimate default's clothes.
+///
+/// The two halves are resolved from DIFFERENT roots now, deliberately: the
+/// server's from its own sink, the `cli` half from the store. Deriving one from
+/// the other is what made them able to disagree.
+fn cli_half(store: &std::path::Path) -> std::path::PathBuf {
+    store.join("logs").join(CLI_SUBDIR)
 }
 
 /// The subdirectory `cli` appends to, beside the server's own.
@@ -245,13 +292,18 @@ const CLI_SUBDIR: &str = "cli";
 /// from a half means the question is unanswerable there — under a filter, or
 /// with no directory — and a half that cannot answer contributes nothing rather
 /// than a zero, because zero would read as "none lost".
-fn both_halves(dir: &std::path::Path, query: &telemetry::Query) -> telemetry::Tail {
+fn both_halves(
+    dir: &std::path::Path,
+    cli_dir: Option<&std::path::Path>,
+    query: &telemetry::Query,
+) -> telemetry::Tail {
     let served = telemetry::tail(dir, telemetry::DEFAULT_KEEP_FILES, query);
-    let cli_dir = dir.join(CLI_SUBDIR);
     // AN ABSENT DIRECTORY IS AN EMPTY ANSWER, not an error: `telemetry::tail`
     // is documented never to fail and to render a missing directory as no
     // records. A store where nobody has run `cli` simply has no second half.
-    let ran = telemetry::tail(&cli_dir, telemetry::DEFAULT_KEEP_FILES, query);
+    let ran = cli_dir.map_or_else(telemetry::Tail::default, |d| {
+        telemetry::tail(d, telemetry::DEFAULT_KEEP_FILES, query)
+    });
 
     let mut records = served.records;
     records.extend(ran.records);
@@ -304,7 +356,12 @@ fn both_halves(dir: &std::path::Path, query: &telemetry::Query) -> telemetry::Ta
 /// and `errors` needs an unreadable file — none of them reachable from a unit
 /// test, so every branch that reports one would otherwise render for the first
 /// time in production. `Tail`'s fields are `pub`; the state can be stated.
-fn json_of(tail: &telemetry::Tail, asked: &Asked, health: Option<&telemetry::Health>) -> String {
+fn json_of(
+    tail: &telemetry::Tail,
+    asked: &Asked,
+    health: Option<&telemetry::Health>,
+    read: (&std::path::Path, Option<&std::path::Path>),
+) -> String {
     let mut out = String::from("{\"records\":[");
     for (n, record) in tail.records.iter().enumerate() {
         if n > 0 {
@@ -337,7 +394,12 @@ fn json_of(tail: &telemetry::Tail, asked: &Asked, health: Option<&telemetry::Hea
     // in the four megabytes I happened to read".
     let _ = write!(
         out,
-        r#"],"bytes_read":{},"files_read":{},"malformed":{},"partial_tail":{},"hit_scan_cap":{},"reached_oldest":{},"scan_cap_bytes":{},"limit":{},"missing":{},"errors":["#,
+        r#"],"served_dir":{},"cli_dir":{},"bytes_read":{},"files_read":{},"malformed":{},"partial_tail":{},"hit_scan_cap":{},"reached_oldest":{},"scan_cap_bytes":{},"limit":{},"missing":{},"errors":["#,
+        render::json_string(&read.0.display().to_string()),
+        read.1.map_or_else(
+            || String::from("null"),
+            |p| render::json_string(&p.display().to_string()),
+        ),
         tail.bytes_read,
         tail.files_read,
         tail.malformed,
@@ -949,7 +1011,7 @@ mod tests {
         );
 
         let asked = asked("limit=10");
-        let json = json_over(&dir, &asked, None);
+        let json = json_over(&dir, Some(&dir.join(super::CLI_SUBDIR)), &asked, None);
         assert!(json.contains(r#""target":"pull.member""#), "{json}");
         assert!(json.contains(r#""instrument":"BANKNIFTY""#), "{json}");
         assert!(
@@ -1024,7 +1086,7 @@ mod tests {
 
         // AND THE MACHINE SURFACE IS UNTOUCHED. A consumer parsing this must
         // not have to guess which zone a number is in.
-        let json = json_over(&dir, &asked, None);
+        let json = json_over(&dir, Some(&dir.join(super::CLI_SUBDIR)), &asked, None);
         assert!(
             json.contains(r#""ts":"#),
             "the JSON carries epoch millis, not a rendered string: {json}"
@@ -1060,7 +1122,12 @@ mod tests {
             "the terminal said this",
         ));
 
-        let json = json_over(&dir, &asked("limit=10"), None);
+        let json = json_over(
+            &dir,
+            Some(&dir.join(super::CLI_SUBDIR)),
+            &asked("limit=10"),
+            None,
+        );
         assert!(
             json.contains("the server said this"),
             "the server's half must not be lost to the merge: {json}"
@@ -1081,7 +1148,12 @@ mod tests {
         assert!(!dir.join(super::CLI_SUBDIR).exists(), "no cli half here");
         let _ = served.emit(&telemetry::Event::info("api.serve", "alone"));
 
-        let json = json_over(&dir, &asked("limit=10"), None);
+        let json = json_over(
+            &dir,
+            Some(&dir.join(super::CLI_SUBDIR)),
+            &asked("limit=10"),
+            None,
+        );
         assert!(json.contains("alone"), "{json}");
         assert!(
             !json.contains(r#""reached_oldest":false"#),
@@ -1110,7 +1182,11 @@ mod tests {
         let _ = ran.emit(&telemetry::Event::info("cli.sweep", "second"));
         let _ = served.emit(&telemetry::Event::info("api.serve", "third"));
 
-        let tail = super::both_halves(&dir, &asked("limit=10").query);
+        let tail = super::both_halves(
+            &dir,
+            Some(&dir.join(super::CLI_SUBDIR)),
+            &asked("limit=10").query,
+        );
         let messages: Vec<&str> = tail
             .records
             .iter()
@@ -1155,7 +1231,11 @@ mod tests {
             let _ = index;
         }
 
-        let tail = super::both_halves(&dir, &asked("limit=4").query);
+        let tail = super::both_halves(
+            &dir,
+            Some(&dir.join(super::CLI_SUBDIR)),
+            &asked("limit=4").query,
+        );
         assert_eq!(tail.records.len(), 4, "the union is what the limit bounds");
     }
 
@@ -1165,13 +1245,23 @@ mod tests {
         let _ = sink.emit(&telemetry::Event::debug("pull.member", "landed"));
         let _ = sink.emit(&telemetry::Event::error("pull.member", "did not land"));
 
-        let all = json_over(&dir, &asked("limit=10"), None);
+        let all = json_over(
+            &dir,
+            Some(&dir.join(super::CLI_SUBDIR)),
+            &asked("limit=10"),
+            None,
+        );
         assert!(
             all.contains("landed") && all.contains("did not land"),
             "{all}"
         );
 
-        let loud = json_over(&dir, &asked("limit=10&level=error"), None);
+        let loud = json_over(
+            &dir,
+            Some(&dir.join(super::CLI_SUBDIR)),
+            &asked("limit=10&level=error"),
+            None,
+        );
         assert!(loud.contains("did not land"), "{loud}");
         assert!(
             !loud.contains(r#""message":"landed""#),
@@ -1490,7 +1580,12 @@ mod tests {
             rec(1, telemetry::Level::Error, &[("bars", 806), ("gaps", 2)]),
             rec(2, telemetry::Level::Info, &[("bars", 12)]),
         ]);
-        let json = json_of(&two, &asked("limit=10"), None);
+        let json = json_of(
+            &two,
+            &asked("limit=10"),
+            None,
+            (std::path::Path::new("/served"), None),
+        );
 
         // Two records: exactly one comma between them, none before or after.
         assert!(json.starts_with(r#"{"records":[{"seq":1,"#), "{json}");
@@ -1507,7 +1602,13 @@ mod tests {
         assert!(json.contains(r#""fields":{"bars":12}}"#), "{json}");
         // Empty: neither a stray comma nor a missing brace.
         assert!(
-            json_of(&walk(Vec::new()), &asked(""), None).starts_with(r#"{"records":[],"#),
+            json_of(
+                &walk(Vec::new()),
+                &asked(""),
+                None,
+                (std::path::Path::new("/served"), None)
+            )
+            .starts_with(r#"{"records":[],"#),
             "an empty walk is an empty array"
         );
 
@@ -1515,13 +1616,24 @@ mod tests {
         // — a state no unit test can cause, which is why the walk is stated.
         let mut torn = walk(Vec::new());
         torn.errors = vec!["one.ndjson: bad".to_owned(), "two.ndjson: bad".to_owned()];
-        let json = json_of(&torn, &asked(""), None);
+        let json = json_of(
+            &torn,
+            &asked(""),
+            None,
+            (std::path::Path::new("/served"), None),
+        );
         assert!(
             json.contains(r#""errors":["one.ndjson: bad","two.ndjson: bad"]"#),
             "{json}"
         );
         assert!(
-            json_of(&walk(Vec::new()), &asked(""), None).contains(r#""errors":[]"#),
+            json_of(
+                &walk(Vec::new()),
+                &asked(""),
+                None,
+                (std::path::Path::new("/served"), None)
+            )
+            .contains(r#""errors":[]"#),
             "and no stray comma when there are none"
         );
     }

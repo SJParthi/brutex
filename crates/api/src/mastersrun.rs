@@ -770,7 +770,7 @@ fn page_html() -> String {
          file changes under a running server this page says a restart is required, because \
          saying nothing would leave every other page answering from the boot parse with \
          nothing to indicate it.</p>\
-         <script>{SCRIPT}</script>",
+         <script src=\"/masters.js\" defer></script>",
         // THE REAL NAV, NOT A SECOND COPY OF IT. This page was self-contained
         // following `crate::logs`, and inherited its defect with it: a page
         // that is IN the nav and does not RENDER one, so an operator who
@@ -826,143 +826,30 @@ thead th{font-size:.68rem;letter-spacing:.09em;text-transform:uppercase;color:#5
 .att ol{margin:0;padding-left:1.3rem}.att li{margin:.2rem 0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.76rem}\
 code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.85em}";
 
-/// The page's script.
-///
-/// # Why the ledger is rendered here and not on the server
-///
-/// The server already emits it as JSON, and rendering it twice — once as HTML
-/// for this page and once as JSON for anything else — is two renderings of one
-/// fact that must agree forever. `crate::indexmap`'s own header refuses that
-/// shape for the same reason. This reads the JSON the route already answers.
-const SCRIPT: &str = r#"
-const say = (t) => { document.getElementById('say').textContent = t; };
-const cell = (file, klass) => document.querySelector(`tr[data-file="${file}"] .${klass}`);
-
-const when = (ms) => ms ? new Date(ms).toLocaleString() : '—';
-
-async function status() {
-  try {
-    const r = await fetch('/masters/status.json');
-    const d = await r.json();
-    for (const m of (d.masters || [])) {
-      const c = cell(m.file, 'disk');
-      if (!c) continue;
-      if (!m.present) { c.innerHTML = '<span class="bad">absent</span>'; continue; }
-      const stale = m.newer_than_parse
-        ? '<div class="sub bad">newer than this server’s parse — restart required</div>'
-        : '';
-      c.innerHTML = `<span class="ok">present</span><div class="sub">${m.bytes} bytes</div>`
-        + `<div class="sub">${when(m.modified_unix_millis)}</div>${stale}`;
-    }
-  } catch (e) { say('Could not read what is on disk: ' + e); }
-}
-
-function ledger(rows) {
-  const box = document.getElementById('ledger');
-  box.innerHTML = '';
-  for (const m of rows) {
-    if (!m.attempts || !m.attempts.length) continue;
-    const el = document.createElement('div');
-    el.className = 'att';
-    const steps = m.attempts.map(a => {
-      const status = a.status === null ? 'no answer' : a.status;
-      const waited = a.waited_ms ? ` after waiting ${a.waited_ms} ms` : '';
-      const why = a.detail ? ` — ${a.detail}` : '';
-      return `<li>#${a.number} ${a.got} (${status})${waited}${why}</li>`;
-    }).join('');
-    el.innerHTML = `<h3>${m.file} — ${m.attempts.length} step(s), `
-      + `${m.waited_ms} ms waited</h3><ol>${steps}</ol>`;
-    box.appendChild(el);
-  }
-}
-
-async function refresh() {
-  const go = document.getElementById('go');
-  go.disabled = true;
-  say('Asking four hosts. A refused source is retried on a backoff, so this can take a minute.');
-  for (const m of document.querySelectorAll('.out')) m.textContent = 'asking…';
-  try {
-    const r = await fetch('/masters/refresh', { method: 'POST' });
-    const d = await r.json();
-    if (d.refusal) { say('Refused before anything was asked: ' + d.refusal); go.disabled = false; return; }
-    const rows = d.landed || [];
-    for (const m of rows) {
-      const c = cell(m.file, 'out');
-      if (!c) continue;
-      if (m.written) {
-        c.innerHTML = `<span class="ok">${m.changed ? 'updated' : 'unchanged'}</span>`
-          + `<div class="sub">${m.bytes} bytes</div>`;
-      } else if (m.skipped) {
-        c.innerHTML = `<span class="skip">skipped</span><div class="sub">${m.refusal || ''}</div>`;
-      } else {
-        c.innerHTML = `<span class="bad">refused</span><div class="sub">${m.refusal || ''}</div>`;
-      }
-    }
-    ledger(rows);
-    const missing = d.missing || [];
-    say(missing.length
-      ? `${missing.length} master(s) still missing: ${missing.join(', ')}.`
-      : (d.restart_required
-          ? 'All four are on disk. Restart the server so the new masters are parsed.'
-          : 'All four are on disk.'));
-    await status();
-  } catch (e) {
-    say('The refresh call itself failed: ' + e);
-  } finally {
-    go.disabled = false;
-  }
-}
-
-document.getElementById('go').addEventListener('click', refresh);
-
-// ---- the cross-verification, which is what the four files are FOR ----
+// THE 127 LINES THAT USED TO SIT HERE WERE JAVASCRIPT, AND THEY WERE A `CLAUDE.md`
+// §2 VIOLATION FOR AS LONG AS THEY DID.
 //
-// `/indexmap.json?feed=X` joins the exchange's own index catalogue against
-// one feed's index symbols and reports every row, including the ones it
-// could not resolve — those are the symbols whose bars are being filed under
-// a name no exchange confirms. It had no page and no nav entry, so the only
-// way to see it was to type the URL.
-async function verify() {
-  const box = document.getElementById('xverify');
-  box.innerHTML = '<div class="sub">joining…</div>';
-  const feeds = ['dhan', 'groww', 'zerodha'];
-  const parts = [];
-  for (const feed of feeds) {
-    try {
-      const r = await fetch(`/indexmap.json?feed=${feed}`);
-      const d = await r.json();
-      if (d.error) {
-        parts.push(`<tr><td><b>${feed}</b></td><td colspan="5" class="bad">${d.error}</td></tr>`);
-        continue;
-      }
-      const refused = d.refused || 0;
-      const names = (d.rows || [])
-        .filter(x => x.nse === null || x.nse === undefined)
-        .map(x => x.symbol);
-      parts.push(
-        `<tr><td><b>${feed}</b></td>`
-        + `<td>${d.published}</td><td>${d.listed}</td>`
-        + `<td class="ok">${d.resolved}</td>`
-        + `<td class="${refused ? 'bad' : 'ok'}">${refused}</td>`
-        + `<td class="sub">${names.slice(0, 12).join(', ')}`
-        + `${names.length > 12 ? ` … and ${names.length - 12} more` : ''}</td></tr>`
-      );
-    } catch (e) {
-      parts.push(`<tr><td><b>${feed}</b></td><td colspan="5" class="bad">${e}</td></tr>`);
-    }
-  }
-  box.innerHTML =
-    '<h3>Cross&#8209;verification — every feed’s index symbols against NSE’s own catalogue</h3>'
-    + '<table class="xv"><thead><tr><th>Feed</th><th>NSE publishes</th><th>Feed lists</th>'
-    + '<th>Resolved</th><th>Unconfirmed</th><th>Which ones</th></tr></thead><tbody>'
-    + parts.join('') + '</tbody></table>'
-    + '<div class="sub">An unconfirmed symbol is one whose bars are filed under a name '
-    + 'no exchange confirms. It is never filtered out.</div>';
-}
-
-document.getElementById('verify').addEventListener('click', verify);
-status();
-"#;
+// A `const SCRIPT: &str = r#"..."#` holding `await fetch`, `document.createElement`
+// and template literals is another language checked in under `crates/`, and §2
+// forbids exactly that: "any generated source in another language, checked in".
+// The `web/` exception is a PATH, not a licence to write browser code anywhere.
+//
+// This repository had already named the attack and the countermeasure, in
+// `crate::calendar`'s own words -- "a `<script>` block living inside a Rust
+// string literal is another language smuggled past the gate" -- and pointed at
+// `render::every_page_carries_the_one_script_this_repository_chose_and_no_other`
+// as the guard. That guard iterates `render::every_page()`, and THIS page is
+// routed from its own module, so it was never in the sample. D-0060's lesson,
+// recurring one route later: an invariant is only as true as its sample.
+//
+// Gates 1, 13 and 15 are all structurally blind to it -- an extension walk, a
+// manifest walk and a one-word walk cannot see inside a string literal. Only a
+// gate that reads the CONTENT of `.rs` files can, and gate 1f is now that gate.
+//
+// The script now lives at `web/masters.js` and is served exactly the way
+// `/typeahead.js` is: read from disk at request time by `assets::Assets`, never
+// embedded. That keeps `CLAUDE.md` §2's other half true as well -- no crate
+// depends on the front end's toolchain to BUILD, because nothing is compiled in.
 
 #[cfg(test)]
 #[expect(
@@ -1446,25 +1333,44 @@ mod tests {
     }
 
     #[test]
-    fn the_page_fetches_nothing_until_the_button_is_pressed() {
+    fn the_page_carries_one_external_script_and_no_inline_handler() {
         // THE OPERATOR'S STANDING RULE: opening a page must not spend a vendor
-        // request. The load path reads `status.json`, which stats four files
-        // and opens no socket; `refresh` is bound to a click and to nothing
-        // else.
+        // request. This test used to prove that by reading the handler bindings
+        // out of the HTML, because the 127 lines that bound them were a Rust
+        // string literal in this file -- which is the `CLAUDE.md` §2 violation
+        // recorded above `page_html`.
+        //
+        // THE PROOF SPLIT WHEN THE SCRIPT MOVED, AND SAYING SO IS THE POINT.
+        // Rust cannot read `web/masters.js` here: CI gate 1e runs the whole
+        // workspace with the `web/` tree DETACHED, precisely to prove no crate
+        // depends on the front end. A test that opened that file would go red in
+        // the one job whose green is §2's guarantee.
+        //
+        // So this half proves what the HTML can prove -- exactly one script, it
+        // is external, and no attribute smuggles browser code back in -- and the
+        // other half, that `refresh` and `verify` are bound to a press and
+        // called by nothing on load, is asserted over `web/masters.js` in CI's
+        // `web` job, which is the only place that file is legibly in scope.
         let html = super::page_html();
-        assert!(
-            html.contains("addEventListener('click', refresh)"),
-            "the refresh is bound to a press"
-        );
         assert_eq!(
-            html.matches("refresh();").count(),
-            0,
-            "declared, never invoked on load — `function refresh()` does not match"
+            html.matches("<script").count(),
+            1,
+            "one script tag, so a second could not slip in beside it"
         );
         assert!(
-            html.contains("status();"),
-            "only the disk read runs on load"
+            html.contains("<script src=\"/masters.js\" defer></script>"),
+            "and it is EXTERNAL and deferred -- the sanctioned shape, matching \
+             `/typeahead.js`. An inline `<script>` here is browser code checked \
+             in under `crates/`, which is what this page did for as long as it \
+             held `const SCRIPT`."
         );
+        for smuggled in ["onclick=", "onload=", "onerror=", "javascript:"] {
+            assert!(
+                !html.contains(smuggled),
+                "`{smuggled}` is an inline handler, which is the same violation \
+                 wearing an attribute instead of a tag"
+            );
+        }
     }
 
     #[test]
@@ -1551,22 +1457,6 @@ mod tests {
         assert!(
             html.contains("no exchange confirms"),
             "and the page says what an unconfirmed symbol means"
-        );
-    }
-
-    #[test]
-    fn the_cross_verification_is_also_bound_to_a_press() {
-        // SAME RULE AS THE REFRESH. This one reads only local files, but the
-        // page must not acquire a habit of doing work nobody asked for.
-        let html = super::page_html();
-        assert!(
-            html.contains("addEventListener('click', verify)"),
-            "bound to a press"
-        );
-        assert_eq!(
-            html.matches("verify();").count(),
-            0,
-            "and never invoked on load"
         );
     }
 
