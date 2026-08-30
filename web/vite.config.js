@@ -70,6 +70,19 @@ const ROUTES = [
 	// in development only, which is the trap the `/audit` note above records.
 	'/backtest/run',
 	'/backtest/run.json',
+	// THE SECOND COMMAND, and it needed a third entry rather than being covered
+	// by one of the two above: Vite matches a proxy key by PREFIX, and neither
+	// `/backtest/run` nor `/backtest/run.json` is a prefix of
+	// `/backtest/descend`. Without this the POST is answered by the dev
+	// server's HTML fallback at 200, `body.accepted` is `undefined`, and the
+	// page prints "the server answered 200 and gave no reason" for what is
+	// really a routing gap — dev-only, exactly the shape `/bars/window.json`
+	// and `/indexmap.json` above record. `tests/proxy.test.js` caught it.
+	//
+	// Listed with the slash for the reason the entries above it are: `/backtest`
+	// itself is this application's page, and a prefix that claimed it would hand
+	// the page to Rust, which registers no route for it.
+	'/backtest/descend',
 	// THE RANKED COMBINATIONS OF A FINISHED SWEEP.
 	//
 	// `record_frontier` writes up to `rules.top` rows per rung into

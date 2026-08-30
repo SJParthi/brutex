@@ -1956,6 +1956,11 @@
   }
 
   async function startSweep() {
+    // WHICH COMMAND THIS TAB PRESSED, before anything can be asked about it.
+    // `/backtest/run.json` carries `kind` and is the authority, but it arrives
+    // one poll later — and on a refusal raised HERE it never arrives at all.
+    // See `pressed`.
+    pressed = 'sweep';
     const from = months(ask.from);
     const to = months(ask.to);
     if (!from || !to) {
@@ -2009,6 +2014,255 @@
       });
       const body = await response.json().catch(() => ({}));
       if (!response.ok || body.accepted !== true) {
+        sweep = {
+          phase: 'failed',
+          run: null,
+          why: body.refusal ?? `The server answered ${response.status} and gave no reason.`
+        };
+        return;
+      }
+      sweep = { phase: 'running', run: null, why: '' };
+      pollAt = setTimeout(pollSweep, 1200);
+    } catch (error) {
+      sweep = {
+        phase: 'failed',
+        run: null,
+        why: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+
+  /* ====================================================================
+     DESCENDING ONE RUNG — the second command, and the door it had none of
+     --------------------------------------------------------------------
+     `POST /backtest/descend` has been registered in `crates/api/src/server.rs`
+     and handled by `sweeprun::descend` with NOTHING IN THIS BROWSER CALLING
+     IT. Measured: `grep -rn descend web/src/` matched `aria-activedescendant`
+     and nothing else. Built, routed, tested, unreachable — so the only thing
+     this console could launch was `/backtest/run`.
+
+     WHY THAT MATTERS RATHER THAN BEING A MISSING BUTTON. The bar above sweeps
+     every selected rung at a threshold each one derives from its own bars,
+     which is the right shape for asking *which timeframe carries the edge*:
+     rungs are only comparable on equal terms. `cli::elite_descend`'s own doc
+     records what that shape cannot do — a run launched at a twentieth of
+     200,000 ppm "cannot report a once-a-week setup no matter how long it runs
+     — the setup was pruned in the first level of the ladder, and the report
+     says nothing about it because nothing counted it." A once-a-week cadence
+     is about 3,656 ppm. The descent walks the threshold DOWN on ONE rung
+     instead, which is roughly eight times the effective budget because it is
+     spent on one timeframe rather than spread across eight.
+
+     IT SHARES THE SLOT, BECAUSE IT SHARES THE LEDGER. Both commands append to
+     the same append-only file, so `api::sweeprun` holds ONE `Progress` slot
+     and refuses the second press — "two of them finishing together can
+     interleave two records" — rather than queueing it. That is why the poll,
+     the event feed and the outcome plumbing below are REUSED here and not
+     copied: a second poller would be a second reader of one slot, and the two
+     would disagree about which run they were watching. What the page owes in
+     exchange is saying WHICH command is in that slot, which is what `runKind`
+     is for and why the banners below read off it rather than off a heading.
+
+     A CEILING TRAVELS IN POINTS, NEVER IN PPM. `sweeprun::descent_from` states
+     the rule in its own comment: `cli` converts the ceiling against the
+     midpoint of the span's OWN bars, "and this side never sees a ppm, which is
+     the whole reason that entry point exists". A ppm computed in a browser
+     would be a second answer to a question only the bars can settle — the
+     paisa/points confusion that already ran a stop ladder a hundred times too
+     tight, arriving through a form field.
+     ==================================================================== */
+
+  /**
+   * A whole number above zero, or `null` for anything else.
+   *
+   * THE DIGITS ARE MATCHED FIRST AND CONVERTED SECOND, and the order is the
+   * whole function. `Number('')` is `0`, `Number(' 12 ')` is `12` and
+   * `parseInt('12abc')` is `12` — all three of the obvious readings accept
+   * text the operator did not type a number into, and the third turns a
+   * fat-fingered ceiling into a plausible one.
+   *
+   * ZERO IS REFUSED HERE AS WELL AS ON THE SERVER, and the duplication is
+   * deliberate rather than a second copy of a rule. `descent_from` is the
+   * authority — it refuses `max_points` at zero because "a ceiling of zero
+   * admits no trade and a negative one is not a distance", and `top` at zero
+   * because "a listing of no rows is not a shorter answer, it is no answer" —
+   * and those refusals still arrive if this is wrong. This exists so the
+   * control can name WHICH field is empty while the operator is looking at it,
+   * instead of after a round trip. It never widens what the server accepts and
+   * it never narrows it silently: anything this lets through is still judged
+   * there.
+   *
+   * @param {string} text
+   * @returns {number | null}
+   */
+  function wholeNumber(text) {
+    const digits = (text ?? '').trim();
+    if (!/^\d+$/.test(digits)) return null;
+    const n = Number(digits);
+    return Number.isSafeInteger(n) && n > 0 ? n : null;
+  }
+
+  /**
+   * What a descent sends over and above the feed, instrument and span the bar
+   * above already holds.
+   *
+   * NOTHING IS SEEDED, for the reason `ask` is not seeded either: a rung and a
+   * span are terms in the run's identity, and a figure the operator did not
+   * choose would name a run after something nobody asked for. The stop ceiling
+   * is worse than that — it decides which trades the run is allowed to keep —
+   * so a default here would be a silent parameter, which is the shape §6
+   * refuses for `k` and the reason the support control on the bar above was
+   * deleted rather than given a sensible value.
+   *
+   * The three are STRINGS because they are what was typed. Parsing happens in
+   * `wholeNumber`, once, where the refusal can be named.
+   */
+  let descent = $state({ rung: '', points: '', top: '' });
+
+  /**
+   * WHICH COMMAND THIS PAGE PRESSED, for the window in which nothing else can
+   * say.
+   *
+   * `/backtest/run.json` carries `kind` — `sweeprun::Kind::word()`, one of
+   * `sweep`, `descent` and `command` — and it is the authority. But it only
+   * arrives on the first poll, and both start functions set `phase` to
+   * `starting` and then `running` with `run: null` before that. A banner
+   * reading "Sweeping" over a descent for the first 1.2 seconds is a small
+   * lie; a banner reading it over a LOCAL refusal — a malformed month, a 409
+   * from the slot — is a lasting one, because that state carries no payload at
+   * all and never will.
+   *
+   * So this is the fallback and never the override: `runKind` prefers the
+   * server's word the moment there is one.
+   */
+  let pressed = $state(/** @type {'sweep' | 'descent' | null} */ (null));
+
+  /**
+   * The word the slot's own payload uses for what is in it, or what this tab
+   * pressed when there is no payload yet.
+   *
+   * NOT INFERRED FROM `support_ppm`, and `sweeprun::Kind`'s own doc says why:
+   * a sweep fixes that number and a descent WALKS it, so the field means "the
+   * threshold" in one case and "where the walk began" in the other. Encoding
+   * the difference in a magic value of a numeric field is the shape §4 bans.
+   */
+  const runKind = $derived(
+    typeof sweep.run?.kind === 'string' ? sweep.run.kind : pressed
+  );
+
+  /**
+   * The three words `Kind::word()` can send, as a reader meets them.
+   *
+   * AN UNKNOWN WORD PRINTS ITSELF. A fourth kind added to that enum would
+   * otherwise render as an empty heading, which reads as a run with no command
+   * — and this page has already paid for one absent field looking like an
+   * absent fact.
+   *
+   * @type {Record<string, string>}
+   */
+  const RUN_WORDS = { sweep: 'Sweep', descent: 'Descent', command: 'Command' };
+
+  /** What to call the run in the slot, in a sentence. */
+  const runLabel = $derived(runKind ? (RUN_WORDS[runKind] ?? runKind) : 'Run');
+
+  /**
+   * Whether ANY run holds the slot — this tab pressed one, or another did.
+   *
+   * Both controls read it, because both are refused by the same lock on the
+   * server: "a sweep or descent is already running in this process. Both append
+   * to the same append-only ledger". A button that can only earn a 409 is not a
+   * button, so neither is left pressable.
+   */
+  const inFlight = $derived(sweep.phase === 'starting' || sweep.phase === 'running');
+
+  /**
+   * Start a descent: one rung, the threshold walked down from a ceiling stated
+   * in index points.
+   *
+   * EVERY FIELD IS REFUSED BY NAME, in order, and none of the four checks is a
+   * clamp. "The form is wrong" is not a sentence anybody can act on, and a
+   * silently corrected ceiling is worse than a refused one — it produces a run
+   * whose identity records a number nobody chose.
+   *
+   * THE ENGINE KNOBS ARE NOT SENT, and their absence is not an oversight.
+   * `sweeprun::conduct` calls `apply_knobs` before `range_over`; `conduct_descent`
+   * calls `elite_descend_in_points` and applies nothing. Spreading `engineKnobs`
+   * into this body would put fourteen inert fields on the wire and let the
+   * Engine-settings panel above imply it had configured a run it did not touch
+   * — a control that quietly does something other than what it shows, which is
+   * exactly the failure §4 bans. The note under the button says so instead.
+   */
+  async function startDescent() {
+    pressed = 'descent';
+    const from = months(ask.from);
+    const to = months(ask.to);
+    if (!from || !to) {
+      sweep = {
+        phase: 'failed',
+        run: null,
+        why: 'Both months must be written as YYYY-MM, and the month must be 01 to 12.'
+      };
+      return;
+    }
+    if (!descent.rung) {
+      sweep = {
+        phase: 'failed',
+        run: null,
+        why:
+          'A descent walks ONE rung down, so a timeframe is required rather than defaulted. ' +
+          'The route refuses a body without one and names the rungs it sweeps in the refusal.'
+      };
+      return;
+    }
+    const ceiling = wholeNumber(descent.points);
+    if (ceiling === null) {
+      sweep = {
+        phase: 'failed',
+        run: null,
+        why:
+          'The stop ceiling must be a whole number of INDEX POINTS above zero — the widest ' +
+          'adverse excursion this run may accept. It is never a ppm: the engine converts it ' +
+          'against the midpoint of the span’s own bars, and that conversion is the reason ' +
+          'this command exists.'
+      };
+      return;
+    }
+    const listRows = wholeNumber(descent.top);
+    if (listRows === null) {
+      sweep = {
+        phase: 'failed',
+        run: null,
+        why: 'The list length must be a whole number of rows above zero.'
+      };
+      return;
+    }
+    sweep = { phase: 'starting', run: null, why: '' };
+    try {
+      const response = await ask_('/backtest/descend', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          feed: activeFeed,
+          underlying: sweepSymbol,
+          // ONE RUNG, AND THE FIELD IS SINGULAR ON PURPOSE. `descent_from`
+          // reads `rung`; `asked_from` underneath it reads `rungs`, and a
+          // `rungs` key present and EMPTY is refused outright. This body sends
+          // neither a list nor an empty one.
+          rung: descent.rung,
+          from_year: from.year,
+          from_month: from.month,
+          to_year: to.year,
+          to_month: to.month,
+          max_points: ceiling,
+          top: listRows
+        })
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok || body.accepted !== true) {
+        // THE SERVER'S OWN SENTENCE, NEVER A PARAPHRASE. A refusal here names
+        // the rung it will not sweep, or the span that runs backwards, or that
+        // a run is already in the slot — 400, 409 and 503 all arrive this way,
+        // and each says what to do about it.
         sweep = {
           phase: 'failed',
           run: null,
@@ -2680,6 +2934,47 @@
   const spanShortfall = $derived.by(() => {
     if (!heldNow || askedMonths === null) return 0;
     return heldNow.months - askedMonths;
+  });
+
+
+  /* ---- what stops a descent, named one field at a time ---------------- */
+
+  /**
+   * The ceiling and the listing bound, as numbers, or `null` where the box
+   * does not hold one.
+   *
+   * Derived rather than parsed at press time so the control can say what is
+   * missing BEFORE the press — the same reason `blocked` is read at page load
+   * rather than discovered after a five-hour sweep refuses its append.
+   */
+  const descentPoints = $derived(wholeNumber(descent.points));
+  const descentRows = $derived(wholeNumber(descent.top));
+
+  /**
+   * Why the Descend control cannot be pressed, or `null` when it can.
+   *
+   * ONE REASON AT A TIME, IN THE ORDER THE ANSWERS DEPEND ON EACH OTHER —
+   * feed, then census, then instrument, then span, then the three fields this
+   * command adds. Listing every fault at once would put five sentences under a
+   * button when the operator can only act on the first, and the cascade is
+   * real: which rungs exist is a property of the instrument, which is a
+   * property of the feed.
+   *
+   * IT DISABLES AND SAYS WHY; it never presses anyway and hopes. A control
+   * whose label and behaviour disagree is the failure §4 bans — that is the
+   * lesson `toggle` records above, where a chip that refused to clear itself
+   * looked exactly like one that was broken.
+   */
+  const descentStop = $derived.by(() => {
+    if (blocked !== null) return 'ledger';
+    if (!activeFeed) return 'feed';
+    if (catalog.phase !== 'ready') return 'census';
+    if (pickedSymbols.size === 0) return 'instrument';
+    if (!months(ask.from) || !months(ask.to)) return 'span';
+    if (!descent.rung) return 'rung';
+    if (descentPoints === null) return 'points';
+    if (descentRows === null) return 'rows';
+    return null;
   });
 
   /* ---- the summary ---------------------------------------------------- */
@@ -4958,7 +5253,13 @@
        section here is a different view of ONE run. -->
   <div class="bt-shell">
   <section class="runbar">
-    <span class="runbar-k">New sweep</span>
+    <!-- WHICH OF THE TWO BARS HOLDS THE SLOT. There are two commands below
+         this line now and one `Progress` slot on the server for both, so "a
+         run is going" is no longer enough to know what is going. -->
+    <span class="runbar-k">
+      New sweep
+      {#if inFlight && runKind === 'sweep'}<b class="rk-live">· running</b>{/if}
+    </span>
     <!-- ══ THE FEED, FIRST, AND ON THIS PAGE RATHER THAN IN THE TOP BAR ══
 
          `+layout.svelte`'s `FEED_OWNED` states the protocol: exactly one
@@ -5227,8 +5528,15 @@
          it. A control that quietly does something other than what it shows is
          the failure §4 bans, and this page was showing the wrong thing. -->
     <!-- DISABLED WHEN THE LEDGER CANNOT TAKE THE RESULT. A sweep that cannot
-         record is nine rungs of real work thrown away, and the refusal arrives
-         AFTER it. `blocked` is the server's own answer -- see `ledgerBlock`. -->
+         record is EIGHT rungs of real work thrown away, and the refusal
+         arrives AFTER it. `blocked` is the server's own answer -- see
+         `ledgerBlock`.
+
+         EIGHT AND NOT NINE, because this counts what is SWEPT rather than what
+         is on disk: `cli::EVERY_RUNG` is the eight `*min` rungs and the store
+         holds nine, `1day` among them to feed `indicators::daily`. The line
+         under the button already said eight; this one had not been corrected
+         with it. -->
     <!-- ============ THE ENGINE'S OWN KNOBS ============
          Every one of these lived in the SERVER'S PROCESS ENVIRONMENT until
          2026-08-29, which meant the only way to change how a sweep searched was
@@ -5367,6 +5675,171 @@
     </span>
   </section>
 
+  <!-- ================================================================
+       DESCEND ONE RUNG — the command this console could not reach.
+
+       `POST /backtest/descend` was registered, handled, tested and had no
+       caller in this browser: the only work the operator could start was
+       `/backtest/run`, which sweeps every selected rung at a threshold each
+       one derives from its own bars. That is the right question for *which
+       timeframe carries the edge* and the wrong one for *is there a rare
+       setup here at all* — `cli::elite_descend`'s own doc records that a run
+       launched at a twentieth of 200,000 ppm "cannot report a once-a-week
+       setup no matter how long it runs", and a once-a-week cadence is about
+       3,656 ppm.
+
+       BESIDE THE BAR ABOVE AND NOT INSIDE IT, because they are two commands
+       and not two settings of one. They share the feed, the instrument and
+       the span — those are facts about what is being studied, and one copy of
+       each is the point — and they take the SAME slot, so only one can be in
+       flight. The label says which is running.
+       ================================================================ -->
+  <section class="runbar">
+    <span class="runbar-k">
+      Descend one rung
+      {#if inFlight && runKind === 'descent'}<b class="rk-live">· running</b>{/if}
+    </span>
+
+    <!-- ONE RUNG, FROM THE CENSUS, NEVER FROM A LIST IN THIS FILE.
+         The rows are whatever `/store.json` says this instrument holds, in the
+         census's own order — the same source the TIMEFRAMES menu above reads.
+         `cli::EVERY_RUNG` is the engine's list and it is EIGHT; the store holds
+         nine, and no endpoint publishes the eight. Keeping a copy of them here
+         is the two-vocabularies failure CLAUDE.md §5 exists to refuse: correct
+         the day it is written, silently wrong the first time a rung is added.
+
+         So a rung the engine does not sweep is OFFERED with the fact on it, and
+         the route answers it by name — `descent_from` refuses and lists the
+         eight in the refusal, which is rendered verbatim below. The shape test
+         is `swept`, the same one the ledger table uses, and it is a rule about
+         the NAME rather than a second copy of the const. -->
+    <div class="runf">
+      <span>timeframe</span>
+      {#if heldNow}
+        <Picker
+          single
+          label="timeframe"
+          summary={descent.rung || 'Pick one'}
+          title="The one rung this descent walks. A descent spends its whole budget on a single timeframe, which is what buys the lower threshold — so this is a choice, not a filter."
+          rows={heldNow.rungs.map((r) => ({
+            key: r.name,
+            name: r.name,
+            detail: `${exact(r.months)} months`,
+            why: swept({ timeframe: r.name })
+              ? undefined
+              : 'the engine sweeps the intraday rungs only — this one is on disk to feed the daily indicators. The route will refuse it by name and list the ones it does sweep.',
+            title: `${monthLabel(r.from)} – ${monthLabel(r.to)}`
+          }))}
+          selected={new Set(descent.rung ? [descent.rung] : [])}
+          onchange={(/** @type {Set<string>} */ next) => {
+            const [m] = [...next];
+            if (m) descent.rung = m;
+          }}
+        />
+      {:else}
+        <span class="runf-wait">
+          {catalog.phase === 'loading'
+            ? 'reading census…'
+            : pickedSymbols.size === 0
+              ? 'pick an instrument'
+              : '—'}
+        </span>
+      {/if}
+    </div>
+
+    <!-- POINTS, AND THE UNIT IS ON THE CONTROL BECAUSE IT HAS BEEN GOT WRONG.
+         `descent_from` takes `max_points` and states the rule in its own
+         comment: `cli` converts it against the midpoint of the span's OWN
+         bars, "and this side never sees a ppm, which is the whole reason that
+         entry point exists". A browser that sent a ppm would be answering a
+         question only the bars can settle. -->
+    <div class="runf">
+      <span>stop ceiling</span>
+      <label class="dnum" class:wrong={descent.points !== '' && descentPoints === null}>
+        <input
+          class="dnum-in"
+          type="text"
+          inputmode="numeric"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="whole number"
+          bind:value={descent.points}
+          aria-label="stop ceiling, in whole index points"
+          title="The widest adverse excursion this run may accept, in INDEX POINTS. Never a ppm and never paisa — the engine converts it against the midpoint of this span's own bars."
+        />
+        <span class="dnum-u">pts</span>
+      </label>
+    </div>
+
+    <div class="runf">
+      <span>list top</span>
+      <label class="dnum" class:wrong={descent.top !== '' && descentRows === null}>
+        <input
+          class="dnum-in"
+          type="text"
+          inputmode="numeric"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="whole number"
+          bind:value={descent.top}
+          aria-label="how many ranked rows to list"
+          title="How many ranked rows the report lists. Zero is refused by the route: a listing of no rows is not a shorter answer, it is no answer."
+        />
+        <span class="dnum-u">rows</span>
+      </label>
+    </div>
+
+    <!-- DISABLED FOR ONE NAMED REASON AT A TIME — see `descentStop`. It is
+         disabled while ANY run is in flight, sweep or descent, because both
+         append to the same append-only ledger and the server refuses the
+         second press rather than queueing it. A button that can only earn a
+         409 is not a button. -->
+    <button
+      class="btn run"
+      onclick={startDescent}
+      disabled={inFlight || descentStop !== null}
+    >
+      {#if pressed === 'descent' && sweep.phase === 'starting'}Starting…{:else if pressed === 'descent' && sweep.phase === 'running'}Descending…{:else}Descend{/if}
+    </button>
+
+    <span class="runbar-n">
+      {#if descentStop === 'ledger'}
+        this ledger cannot take a result — see the note above the table
+      {:else if descentStop === 'feed'}
+        choose a feed first — a descent is stamped with the feed its bars came from
+      {:else if descentStop === 'census'}
+        {catalog.phase === 'failed'
+          ? catalog.why
+          : 'reading what is on disk — the rung and the span come from the census, not from this page'}
+      {:else if descentStop === 'instrument'}
+        <b class="warnish">No instrument selected.</b> Pick one above — a descent runs over the same
+        instrument the sweep bar names.
+      {:else if descentStop === 'span'}
+        <b class="warnish">No span chosen.</b> The two month menus above set it, and a descent uses
+        the same one — a span is two of the nine terms in the run's identity.
+      {:else if descentStop === 'rung'}
+        <b class="warnish">No timeframe chosen.</b> A descent walks <b>one</b> rung's threshold
+        down, so this is required rather than defaulted — that single rung is what buys the lower
+        floor.
+      {:else if descentStop === 'points'}
+        <b class="warnish">The stop ceiling is not a whole number of points.</b> It is the widest
+        adverse excursion this run may accept, in <b>index points</b> — not a ppm and not paisa.
+      {:else if descentStop === 'rows'}
+        <b class="warnish">The list length is not a whole number of rows.</b> Zero is refused by the
+        route: a listing of no rows is no answer.
+      {:else}
+        this press descends <b>{sweepSymbol}</b> on <b>{activeFeed}</b> at
+        <b>{descent.rung}</b>, walking the support threshold <b>down</b> from a ceiling of
+        <b>{exact(descentPoints ?? 0)} points</b> and listing the top
+        <b>{exact(descentRows ?? 0)}</b>.
+        <b>The Engine settings above are not sent with it</b> — `conduct_descent` applies no knobs,
+        so spreading them here would let that panel imply it had configured a run it never touched.
+        It appends to the <b>same ledger</b> as the sweep and takes the same slot, so only one of
+        the two can be running.
+      {/if}
+    </span>
+  </section>
+
 
   {#if blocked}
     <!-- ==============================================================
@@ -5461,23 +5934,49 @@
          hours depending on the rung; a percentage bar over the whole run would
          be a guess. The table above is measured; the sentence below is honest
          about what is not. -->
+    <!-- IT NAMES THE COMMAND NOW, AND IT HAD TO. Two controls append to one
+         append-only ledger through one slot, so this banner covers both — and
+         a descent rendered under "Sweeping" would be labelling a hunt for a
+         rare setup as an EIGHT-rung comparison, which is `sweeprun::Kind`'s
+         own stated reason for putting the word on the wire at all — that doc
+         says "nine-rung", and it is counting the store rather than
+         `EVERY_RUNG`, which is eight. `runKind`
+         prefers the payload's `kind` and falls back to what this tab pressed,
+         which is the only reading available in the second before the first
+         poll answers. -->
     <p class="inline-note runstate">
       <span class="spin sm" aria-hidden="true"></span>
-      <b>Sweeping.</b> The ladder walks upward until the frequent frontier empties, so how long
-      it takes is decided by the data rather than by a setting — a one-day span finishes in
-      milliseconds and a fine rung over seven years takes minutes per month. This page is
-      polling and will refresh itself the moment a record lands.
+      {#if runKind === 'descent'}
+        <b>Descending.</b> One rung, with the support threshold walked <b>down</b> from the ceiling
+        given in points — a full screen at each step rather than one, which is why it is slower per
+        rung than the sweep and why it can see a setup the sweep prunes in its first level. How long
+        it takes is decided by the data, not by a setting.
+      {:else}
+        <b>Sweeping.</b> The ladder walks upward until the frequent frontier empties, so how long
+        it takes is decided by the data rather than by a setting — a one-day span finishes in
+        milliseconds and a fine rung over seven years takes minutes per month.
+      {/if}
+      This page is polling and will refresh itself the moment a record lands.
       {#if sweep.run}
         <span class="dim">· started {when(sweep.run.started_micros)}</span>
       {/if}
     </p>
   {:else if sweep.phase === 'done' && sweep.run}
+    <!-- THE COMMAND'S OWN NAME, from the payload's `kind`. This read "Sweep
+         finished" for every ended run, and with a second writer on the same
+         slot that sentence would have printed over a descent — a different
+         question, a different threshold rule, and the same green tick. -->
     <p class="inline-note runstate good">
-      <b>Sweep finished</b> — {sweep.run.underlying} on {sweep.run.feed}, and the ledger below has
-      been re-read.
+      <b>{runLabel} finished</b> — {sweep.run.underlying} on {sweep.run.feed}, and the ledger below
+      has been re-read.
     </p>
-    <!-- THE NINE-RUNG TABLE, WHICH THE SERVER HAS ALWAYS SENT AND THIS PAGE
+    <!-- THE EIGHT-RUNG TABLE, WHICH THE SERVER HAS ALWAYS SENT AND THIS PAGE
          HAS NEVER SHOWN.
+
+         EIGHT, and this line said nine while the paragraph fourteen lines
+         below it already said "the eight-rung SUMMARY". One block, two counts.
+         `range_all` prints one row per rung it swept and `cli::EVERY_RUNG` is
+         eight; the ninth timeframe is on disk, not in the sweep.
 
          `/backtest/run.json` carries `report` — the exact text `cli range-all`
          prints, banner included — and nothing read it. That was not merely a
@@ -5516,8 +6015,13 @@
       </p>
     {/if}
   {:else if sweep.phase === 'failed'}
+    <!-- WHICH COMMAND WAS REFUSED, and this is the arm where the payload most
+         often cannot say: a malformed month, a dead fetch and a 409 from the
+         slot all land here with `sweep.run` null, so `runKind` falls back to
+         what this tab pressed. A refusal attributed to the wrong control is a
+         reason the operator cannot act on. -->
     <p class="inline-note bad runstate">
-      <b>The sweep was refused.</b>
+      <b>The {runLabel.toLowerCase()} was refused.</b>
       {#if !sweep.run}{sweep.why}{/if}
     </p>
     <!-- A SERVER REFUSAL IS MULTI-LINE AND NAMES THE FIRST CAUSE ON ITS OWN
@@ -5886,7 +6390,15 @@
       </section>
 
       <!-- ============================================================
-           LEVEL 2 — NINE RUNGS SIDE BY SIDE
+           LEVEL 2 — EIGHT RUNGS SIDE BY SIDE
+
+           EIGHT IS WHAT IS SWEPT, and this banner said nine. The store holds
+           nine timeframes; `cli::EVERY_RUNG` is the eight `*min` ones, and
+           `1day` is on disk to feed `indicators::daily` rather than to be
+           swept — `swept` a few hundred lines above states the same rule and
+           excludes such a row from ranking. The ROWS here are still whatever
+           the ledger holds for a span, which is the honest count and is
+           printed beside each group; the banner names the ceiling.
            ============================================================ -->
       <section class="block rise">
         <h2
@@ -8302,7 +8814,11 @@
     user-select: all;
   }
 
-  /* The nine-rung table `cli` prints, and the refusal it prints instead.
+  /* The eight-rung table `cli` prints, and the refusal it prints instead.
+     Eight because it is one row per rung SWEPT; the store's ninth timeframe
+     is never among them. It also carries the descent's report now, which is
+     one rung and a threshold ladder rather than eight rungs — same fixed
+     columns, same reason it must not wrap.
      COLUMN-ALIGNED TEXT, so it must not wrap and must not widen the page:
      `range_all` lays its table out in fixed-width columns and a wrap turns
      one row into two that no longer line up under their headings. It scrolls
@@ -11380,6 +11896,98 @@
     font-size: var(--fs-sm);
     font-weight: var(--w-semi);
     border-radius: 9px;
+  }
+
+  /* ---- the descend bar's two typed fields ----------------------------
+     A NUMBER IS TYPED, NOT PICKED, AND THAT IS THE WHOLE DIFFERENCE. Every
+     other control in this bar chooses from a set the store already states —
+     feeds, instruments, rungs, months — so a `Picker` is right for them and
+     wrong for these two: a stop ceiling is a quantity the operator decides,
+     with no list to offer.
+
+     IT MATCHES THE MENU RATHER THAN OVERRIDING IT. `$lib/Picker.svelte`'s own
+     `.pbtn` is 9px radius, `--line` hairline, `--panel` ground, mono at
+     `--fs-base` — and it is a SHARED component, so none of that is reached
+     into from here. These are separate rules that land on the same geometry,
+     which is the only way to sit on one baseline without a local override
+     changing the menu on five other pages. The height is 48px because the
+     grid above pins the control track to 48px.
+
+     THE DIGITS ARE MONO AND TABULAR, the way `/db`'s page-jump box is: a
+     ceiling of 120 and one of 1,200 must be tellable apart at a glance, and a
+     proportional font makes that a reading rather than a look.
+
+     NOT `type="number"`. Its spinner adds a control nobody asked for, its
+     silent coercion accepts `1e3` and `12.5`, and `valueAsNumber` on an
+     unparseable value is `NaN` — three ways for a figure the operator did not
+     type to reach the run's identity. `wholeNumber` is the one reading. ---- */
+  .dnum {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 48px;
+    padding: 0 14px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    min-width: 0;
+  }
+  .dnum:focus-within {
+    outline: 2px solid var(--acc);
+    outline-offset: 2px;
+  }
+  /* TYPED AND NOT YET A NUMBER IS ITS OWN STATE. An empty box is waiting; a
+     box holding `12px` is wrong, and the two must not look alike. The rail
+     says so at the control, the sentence under the button says which field. */
+  .dnum.wrong {
+    border-color: var(--warn);
+  }
+  .dnum-in {
+    flex: 1 1 auto;
+    min-width: 0;
+    width: 100%;
+    background: none;
+    border: 0;
+    padding: 0;
+    color: var(--ink);
+    font: inherit;
+    font-family: var(--mono);
+    font-size: var(--fs-base);
+    font-weight: var(--w-semi);
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+  }
+  .dnum-in:focus,
+  .dnum-in:focus-visible {
+    outline: none;
+  }
+  .dnum-in::placeholder {
+    color: var(--faint);
+    font-family: inherit;
+    font-size: var(--fs-micro);
+    font-weight: 400;
+    font-variant-numeric: normal;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+  .dnum-u {
+    flex: 0 0 auto;
+    font-size: var(--fs-micro);
+    font-weight: var(--w-semi);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--n8);
+  }
+
+  /* WHICH BAR HOLDS THE SLOT. Two controls append to one append-only ledger
+     and the server keeps one `Progress` for both, so "a run is going" is not
+     enough — the operator has to be able to see WHICH command is going, at the
+     control that started it. No keyframe: nothing is moving, a fact is simply
+     stated where it is read. */
+  .rk-live {
+    color: var(--acc);
+    font-weight: var(--w-semi);
+    letter-spacing: 0.06em;
   }
 
   /* ---- the coverage bar ---- */
