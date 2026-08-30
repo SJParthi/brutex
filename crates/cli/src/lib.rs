@@ -1640,13 +1640,57 @@ fn auto_stored_inner(
 
     let mut ev = evaluator().map_err(str::to_owned)?;
     // `min_hits(1)` is the search's FLOOR, not its answer: `Sweeper::auto`
-    // brackets from `swept - 1` downward and reports what it settled on. The
-    // ceiling is `SEARCH_CEILING` because the search's whole job is to find what
-    // fits under it.
-    let found = Sweeper::new(Ladder::with_min_hits(1).with_ceiling(SEARCH_CEILING))
+    // brackets from `swept - 1` downward and reports what it settled on.
+    //
+    // THE CEILING IS THE OPERATOR'S IF THEY NAMED ONE, AND THIS IGNORED THEM.
+    //
+    // `SEARCH_CEILING` is 500,000 -- deliberately at least a hundred times below
+    // `engine::DEFAULT_CEILING`, because a probe budget at or above the answer
+    // budget is not a probe. That reasoning is right for `cli auto`, which is a
+    // quick look at synthetic bars.
+    //
+    // It is WRONG here, silently, and it cost a measurement. This command's own
+    // usage says to run it *"BEFORE sweep-stored or range-all rather than
+    // guessing a number"* -- so its answer is read as "the deepest support this
+    // machine can afford". It was really "the deepest support that fits in five
+    // hundred thousand candidates", which is 268 times smaller than the machine
+    // and 33 times smaller than the share one rung gets under `range-all`. A
+    // probe run with `BRUTEX_CEILING` set to the real per-rung share reported
+    // 22.3% and the truth was 10.65%, and nothing said the knob had been
+    // dropped.
+    //
+    // `ceiling_asked` REFUSES a malformed value rather than falling back, so
+    // silently discarding a well-formed one was the inconsistency worth closing.
+    // Honoured when named, `SEARCH_CEILING` when not -- and the report says
+    // which, because a probe whose budget is invisible is a probe whose answer
+    // cannot be read.
+    let (probe_ceiling, named) = match crate::knobs::var("BRUTEX_CEILING") {
+        None => (SEARCH_CEILING, false),
+        Some(_) => (ceiling_from_env()?, true),
+    };
+    let found = Sweeper::new(Ladder::with_min_hits(1).with_ceiling(probe_ceiling))
         .auto(&span.bars, &mut ev);
 
     let mut out = String::from(STORED_PROVENANCE);
+    // THE BUDGET THE ANSWER WAS FOUND UNDER, because the answer is meaningless
+    // without it. This command's usage tells the operator to run it before
+    // `range-all`, so its threshold is read as "what this machine can afford" --
+    // and under the 500,000-candidate default it means "what fits in a probe",
+    // which is 268 times smaller. A probe reported 22.3% where the machine's own
+    // share was 10.65%, and nothing on the page distinguished the two.
+    let _ = writeln!(
+        out,
+        "  BUDGET  {} candidates{}",
+        probe_ceiling,
+        if named {
+            " -- BRUTEX_CEILING, as you named it"
+        } else {
+            " -- the probe default. It is deliberately far below what a real \
+             sweep gets, so this threshold is the deepest that fits a PROBE and \
+             not the deepest this machine can afford. Set BRUTEX_CEILING to the \
+             budget the real run will have to ask that question."
+        }
+    );
     out.push('\n');
     // The span, before the search, because "which threshold" is unanswerable
     // without "over how many bars" -- and a span with a HOLE gives a threshold

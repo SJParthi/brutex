@@ -636,21 +636,56 @@ impl Sweep {
 /// # 2^27, and the arithmetic is this machine's rather than a preference
 ///
 /// The bound is RAM and nothing else. **Measured on the operator's machine at
-/// `2^25`: k=14, 24 s, 4.9 GB of 48** — so a candidate costs about 146 bytes
-/// once the `seen` set's own overhead is counted, not the 56 the `Itemset`
-/// struct suggests. From that one measurement the ladder is linear:
+/// `2^25`: k=14, 24 s, 4.9 GB of 48** — so a candidate cost about 146 bytes once
+/// the `seen` set's own overhead was counted, not the 56 the `Itemset` struct
+/// suggests.
 ///
-/// | ceiling | candidates | RAM |
-/// |---|---|---|
-/// | `2^25` | 33.5 M | 4.9 GB (measured) |
-/// | `2^26` | 67.1 M | ~9.8 GB |
-/// | **`2^27`** | **134.2 M** | **~19.6 GB** |
-/// | `2^28` | 268.4 M | ~39.2 GB — swaps on a 48 GB machine |
+/// # THAT 146 IS STALE BY ROUGHLY TWO, AND THE SET IT COUNTED IS DELETED
 ///
-/// `2^27` is the largest power of two that leaves the machine room to hold the
-/// bars, the column and the operating system alongside it. `2^28` fits only if
-/// nothing else does.
+/// `seen` was the duplicate-rejection `MaskSet`, and it was removed once the
+/// prefix join was shown to be injective — `duplicates` is a non-`mut` zero
+/// below, so reintroducing one is a compile error. Its overhead was most of the
+/// 146, and nothing re-measured this table afterwards.
 ///
+/// Derived from the level sizes a real run logged (`admitted`, `generated` and
+/// `frequent` per level, over four complete walks on the operator's own store):
+/// the live set at the peak level is
+///
+/// ```text
+///   56·Σ_{j<k} S_j        the retained survivors of every earlier level
+/// + 49·2^ceil(log2(8F/7)) the subset-prune set
+/// + 96·F                  the join's `keyed` vector
+/// + 56·max(F,S)           the level being built
+/// + 11.9 MB               fixed lane buffers
+/// ```
+///
+/// which evaluates to **68–96 bytes per candidate**, not 146. Four walks agree:
+/// 68 B at 10.39% support on 60min, 70 B and 95 B on two rungs of a 10.6% run,
+/// 72 B on 1min.
+///
+/// | ceiling | candidates | RAM at 146 B (claimed) | RAM at 68–96 B (derived) |
+/// |---|---|---|---|
+/// | `2^25` | 33.5 M | 4.9 GB (measured, with `seen`) | — |
+/// | `2^26` | 67.1 M | ~9.8 GB | ~4.6–6.4 GB |
+/// | **`2^27`** | **134.2 M** | **~19.6 GB** | **~9.1–12.8 GB** |
+/// | `2^28` | 268.4 M | ~39.2 GB — "swaps on a 48 GB machine" | **~18–26 GB** |
+///
+/// **So `2^28` fits, and the row calling it a swap is wrong.** Doubling it buys
+/// about one support halving — 7.07% to 6.16% on this machine — which by the
+/// measured depth curve is roughly one more level. It is NOT taken here: this
+/// constant is the engine's, the measurement is the operator's machine, and
+/// raising a shared default on one machine's numbers is the shape §4 refuses.
+/// A caller who wants it says `with_ceiling`, and `cli::whole_machine_ceiling`
+/// is where a machine-specific figure belongs.
+///
+/// **And the ladder is not what exhausted memory on this machine.** Two eight-rung
+/// runs were killed at seven and thirty minutes; every one of their sixteen
+/// ladders had finished or halted within two and a half. Peak across all eight
+/// concurrent ladders was 8.91 GB, 6.35 GB retained. What runs next — ranking
+/// 15–17 M retained survivors per rung, times eight — is where the process
+/// died. The retained term above, `56·Σ S_j`, is the one that matters, and it
+/// exists because `Sweep::levels` keeps every survivor for a ranker that wants
+/// only the top `keep`.
 /// # Raising the PAIR budget instead buys nothing
 ///
 /// The join is prefix-grouped and its own comment states the consequence: *"No
