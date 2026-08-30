@@ -314,7 +314,7 @@ fn the_stated_counts_are_the_real_ones() {
     );
 
     let others = LEDGER
-        .split("## The other 62")
+        .split("## The other 65")
         .nth(1)
         .expect("the remainder section exists under that exact heading");
     let rest = others
@@ -325,8 +325,8 @@ fn the_stated_counts_are_the_real_ones() {
         .filter(|l| l.starts_with("| `F-"))
         .count();
     assert_eq!(
-        rest, 62,
-        "the heading says 62 and the table under it has {rest} rows"
+        rest, 65,
+        "the heading says 65 and the table under it has {rest} rows"
     );
     assert_eq!(
         counted + rest,
