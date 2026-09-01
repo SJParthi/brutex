@@ -3697,7 +3697,7 @@ mod tests {
                     )
                 })?;
             }
-            for (symbol, base_price) in [("NIFTY", 2_000_000), ("BANKNIFTY", 4_000_000)] {
+            for (symbol, base_price) in [("NIFTY", 2_000_000_i64), ("BANKNIFTY", 4_000_000_i64)] {
                 let shifted_price = base_price.checked_add(price_shift).ok_or_else(|| {
                     "stored Step-3 success fixture price shift overflowed".to_owned()
                 })?;

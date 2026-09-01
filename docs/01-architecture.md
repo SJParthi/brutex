@@ -39,7 +39,7 @@ core costs engine indicators pull runner store telemetry <-- cli
 | `pull` | vendor ingest, rate governor, credential read, option pricing | `core`, `store`, `telemetry`, `costs`, `greeks` | ✓ |
 | `api` | the HTTP surface | `core`, `pull`, `store`, `telemetry`, **`cli`**, **`vocab`** | ✓ |
 | `runner` | the sweep driven end to end: trades, the exit grid, walk-forward, PBO, the bootstrap, the audit | `core`, `vocab`, `indicators`, `engine`, `costs` | ✓ |
-| `cli` | the operator entry point for the sweep: generated **or stored** bars in, ladder walked, report out — `sweep` takes `runner::synthetic`, `sweep-stored` takes one real instrument-month off disk, and a different provenance banner leads each | `runner`, `engine`, `indicators`, `costs`, `core`, `pull`, `store`, `telemetry` | ✓ |
+| `cli` | the operator entry point for the sweep: generated **or stored** bars in, ladder walked, report out — `sweep` takes `runner::synthetic`, `sweep-stored` takes one real instrument-month off disk, and a different provenance banner leads each | `runner`, `engine`, `indicators`, `costs`, `core`, `pull`, `store`, `telemetry`, `vocab` | ✓ |
 
 **Thirteen crates, all of them real.** (The sentence said eleven while the table
 held twelve; `cli` makes it thirteen — D-0169.) `web/` is a directory at the
