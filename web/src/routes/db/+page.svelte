@@ -11136,7 +11136,29 @@
      inert the moment `.strip` stopped being a flex container. They asked for a
      larger share of ONE line, and the grid's answer to "this rung needs more
      room" is a whole track — `span 2` where two tracks exist, and nothing
-     where they do not,
+     where they do not, which is what `auto-fit` already handles by wrapping.
+     Left as a no-op they would read as live sizing to the next reader.
+
+     THAT SENTENCE AND THE TERMINATOR AFTER IT WENT WITH `.combo`. `126152af`
+     dropped `.strip .field.combo,` from the selector list below — correctly,
+     the class is gone — and took the two prose lines above it in the same
+     contiguous cut, the closing terminator among them. The comment then ran
+     on to the next terminator it could find, at the end of THE DAY WINDOW's
+     heading below, so the rule here and that whole heading were comment text.
+     The terminator cannot be shown to you inside this sentence: a CSS comment
+     has no escape, and the star-slash pair ends the comment wherever it
+     appears.
+
+     `min-width: 0` IS KEPT, AND THAT IT RESTATES `.strip .field` IS THE POINT
+     OF SAYING SO. The base rule above sets the same property to the same value
+     on every field of the strip, and has done since `e355455b` — the commit
+     that wrote this one — so this has never been the declaration that lets an
+     `.mcell` shrink. Nothing between the two sets `min-width` to anything
+     else, and neither rule sits inside a media query, so the extra specificity
+     buys nothing today. It stays because its selector still matches: `.mcell`
+     is live markup on the two contract rungs and the skeleton that stands in
+     for them, and naming the cells the grid is allowed to squeeze is where a
+     reader will look first when one of them refuses to. */
   .strip .field.mcell {
     min-width: 0;
   }
@@ -11557,64 +11579,43 @@
      re-declared here to "fix" that, because a rule written against a bug this
      page does not have is a rule nobody can later tell from one that matters.
      ---------------------------------------------------------------------- */
-  /* ---- THE MONTH WINDOW'S OWN CONTROL ---------------------------------
-     A value that reads as a value and a button that opens the calendar. The
-     value is monospace and tabular for the same reason every figure on this
-     page is: `Sep 2024` and `Mar 2020` are the same width, so the two ends of
-     the window line up and the arrow between them stays centred. */
-  /* `.dcell` WENT WITH THE MARKUP IT POSITIONED. It was the last rule in this
-     block still matching anything{
-    display: flex;
-    align-items: center;
-    gap: var(--s3);
-  }
-  /* AN UNSET BOUND LOOKS UNSET. `Any earlier` at the ink weight reads as a
-     month called "Any earlier"; at the faint weight it reads as the absence it
-     is{
-    color: var(--faint);
-    font-weight: var(--w-mid);
-  }
+  /* ---- THE MONTH WINDOW'S OWN CONTROL, AND WHY NONE OF IT IS LEFT ------
+     What stood here styled a value that read as a value and a button that
+     opened a calendar. /db has neither. The month control went with the
+     from/to range — see the markup note at THE MONTH WINDOW — and both ends
+     of the day window are `$lib/DayField.svelte` now.
 
-  /* THE CALENDAR. Anchored to the CELL rather than to the field{
-    position: absolute;
-    left: var(--s4);
-    top: calc(100% + var(--s3));
-    z-index: 24;
-    width: 244px;
-    background: var(--panel);
-    border: 1px solid var(--line-hard);
-    border-radius: var(--r4);
-    padding: var(--s4);
-    box-shadow: var(--e3);
-  }
-  /* A MONTH THE STORE HOLDS NOTHING FOR IS STRUCK THROUGH AND REFUSES THE
-     CLICK. It keeps its slot: the shape of a backfill's hole is the most
-     useful thing this panel can show while a bound is being chosen, and it is
-     invisible the moment the empty months are simply left out. Amber{
-    color: var(--faint);
-    opacity: 0.5;
-    cursor: not-allowed;
-    text-decoration: line-through;
-    text-decoration-thickness: 1px;
-    text-decoration-color: color-mix(in srgb, var(--warn) 70%, transparent);
-  }
-  /* THE BOUND IS ON SCREEN — as the month, in this product's own form. It used
-     to be the RAW key here, on the argument that the panel writing the string
-     is the right place to read it back; the string it printed was `2024-09`,
-     which is the store's spelling standing in for a date on a page where every
-     other month reads `Sep 2024`. The key did not go anywhere: the field above
-     and each of the twelve month buttons name it in their own `title`{
-    display: flex;
-    align-items: baseline;
-    flex-wrap: wrap;
-    gap: var(--s3);
-    margin-top: var(--s4);
-    padding-top: var(--s3);
-    border-top: 1px solid var(--line-soft);
-    font-size: var(--fs-mini);
-    color: var(--faint);
-    line-height: 1.5;
-  }
+     `.dcell` WENT WITH THE MARKUP IT POSITIONED. It was the last rule in this
+     block still matching anything, and only because /db's own day inputs
+     borrowed the class; `DayField` owns that element now and carries its own
+     `position: relative`. Its siblings had been dead since the month calendar
+     was removed. That is the sentence `26a45dd0` wrote here — and the
+     sentence `126152af` then deleted, together with the closing terminator
+     that ended it and the `.dwrap` selector line beneath. One contiguous cut —
+     and `126152af` made it NINE times across this file. Eight were still open
+     when this repair began, and Gate W5 could name only three of them, because
+     it prints one finding per comment and seven of the eight are crowded into
+     two comments. The terminator cannot be shown to you inside this sentence:
+     a CSS comment has no escape, and the star-slash pair ends the comment
+     wherever it appears.
+
+     FIVE RULE BODIES WERE ORPHANED, NOT ONE. That cut landed on `.dwrap`,
+     `.dval.unset`, `.cal`, `.cmon:disabled` and `.calft`, so everything from
+     `.dcell`'s note down to the refusal notice below was a single comment
+     body: five rule bodies, thirty-one declarations, emitted by no stylesheet
+     since that commit. Gate W5 prints one finding per comment, which is why
+     it named only the first of them.
+
+     THEY ARE DELETED RATHER THAN GIVEN THEIR SELECTORS BACK. The selectors
+     are recoverable from git; the markup is not. `dwrap`, `dval`, `cal`,
+     `calhd`, `calnav`, `calsel`, `calgrid`, `cmon`, `calft`, `dbtn`, `dcell`
+     and `dright` occur ZERO times in this file outside comment prose — no
+     element, no `class:` directive, no string a class name is built from.
+     Restoring them would bring back styling for a control nothing builds,
+     which is how a removed control returns without anyone deciding to bring
+     it back. Nothing on screen moves: these have painted nothing for as long
+     as the defect has existed.
+     ---------------------------------------------------------------------- */
 
   /* ---- the refusal notice --------------------------------------------- */
   .why {
@@ -12511,50 +12512,41 @@
      ==================================================================== */
 
   /* WHICH GRID IS SHOWING, AND THE SENTENCE THAT SAYS SO, ON ONE ROW. The
-     tab and the sentence are one derived value read twice{
-    flex: none;
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: var(--s3) var(--s5);
-  }
-  .views {
-    display: inline-flex;
-    gap: var(--s2);
-    padding: 3px;
-    border: 1px solid var(--line);
-    border-radius: var(--r4);
-    background: var(--panel-2);
-  }
-  .pgsize select {
-    appearance: none;
-    background: var(--panel);
-    border: 1px solid var(--line);
-    border-radius: var(--r2);
-    color: var(--ink);
-    font: inherit;
-    font-family: var(--mono);
-    font-size: var(--fs-sm);
-    font-weight: var(--w-semi);
-    font-variant-numeric: tabular-nums;
-    padding: var(--s3) var(--s6) var(--s3) var(--s4);
-    cursor: pointer;
-    background-image: linear-gradient(45deg, transparent 50%, var(--acc) 50%),
-      linear-gradient(135deg, var(--acc) 50%, transparent 50%);
-    background-position: calc(100% - 14px) 55%, calc(100% - 9px) 55%;
-    background-size: 5px 5px, 5px 5px;
-    background-repeat: no-repeat;
-  }
-  .pgsize select:focus-visible,
-  .pgjump input:focus-visible {
-    outline: 2px solid var(--focus);
-    outline-offset: 2px;
-  }
-  /* THE PARTITION THAT SUMS. read + over budget = matched{
-    font-size: var(--fs-xs);
-    color: var(--faint);
-    font-variant-numeric: tabular-nums;
-  }
+     tab and the sentence are one derived value read twice, so a pressed tab
+     with a contradicting caption is not a state this page can reach.
+
+     `.viewbar`, `.views` AND `.vsum` ARE GONE WITH THE VIEW SWITCH, and two
+     comments had eaten them. `126152af` deleted each selector line together
+     with the closing terminator of the comment written above it — the same
+     contiguous cut counted at THE MONTH WINDOW'S OWN CONTROL above — so from
+     that commit until now everything between here and THE BAR GRID was one
+     comment body: five rule bodies that no stylesheet emitted. The terminator
+     cannot be shown to you inside this sentence, because a CSS comment has no
+     escape and the star-slash pair ends the comment wherever it appears.
+
+     THE BODIES ARE DELETED RATHER THAN GIVEN THEIR SELECTORS BACK, on the
+     measurement `cb5a24d3` settled this question with: not one of these names
+     is in this file any more. `viewbar`, `views`, `vtab` and `vsum` occur
+     ZERO times outside comment prose — no element, no `class:` directive, no
+     string a class name is built from — so restoring them would put back
+     rules that match nothing and have matched nothing since the switch was
+     removed.
+
+     `.pgsize select` WENT THE SAME WAY AND FOR A SHARPER REASON. There is no
+     `<select>` left in this file at all; the rows-per-page control is a
+     `Picker`, as the markup note at THE LAST OS-DRAWN MENU records. That one
+     is a DESCENDANT selector, so un-swallowing it would not merely restore
+     dead CSS — the compiler reports it, and Gate W4 goes from zero unused
+     selectors to one against a ceiling of zero.
+
+     AND THE FOCUS RULE IS NOT A LOSS, WHICH IS THE HALF WORTH SAYING, because
+     the other half of its selector list DID match: `.pgjump input` is the
+     live "Go to page" number field. Its ring is drawn regardless. `theme.css`
+     sets a global `:focus-visible` to `2px solid var(--focus)` at `2px` of
+     offset — the same two declarations this rule restated, under a heading
+     that says every interactive element gets the ring without a page opting
+     in. No keyboard behaviour changes here. A duplicate stops claiming to be
+     the source of a ring it never drew. */
 
   /* ---- THE BAR GRID. A real table: paged, not windowed, so the browser's
      own column algorithm can do the work. */
