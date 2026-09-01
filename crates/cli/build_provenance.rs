@@ -25,7 +25,7 @@ pub(crate) struct Verification {
     pub(crate) commit: Option<String>,
     pub(crate) watched_files: Vec<PathBuf>,
     pub(crate) watched_directories: Vec<PathBuf>,
-    pub(crate) reason: &'static str,
+    pub(crate) reason: String,
 }
 
 #[derive(Clone, Debug)]
@@ -157,11 +157,15 @@ pub(crate) fn verify(manifest_dir: &Path, explicit: Option<&OsStr>) -> Verificat
             "the working tree does not equal the index",
         );
     }
-    if contains_untracked_input(&repo.root, &index.entries) {
+    if let Some(found) = first_untracked_input(&repo.root, &index.entries) {
+        // NAMED, because the predecessor's unnamed "an untracked file could
+        // affect compilation" was a refusal an operator could not act on: it
+        // fired on a tree `git status` called clean, and finding out which file
+        // meant reading this build script.
         return refusal_with_watch(
             watched_files,
             watched_directories,
-            "an untracked file could affect compilation",
+            &format!("an untracked file could affect compilation: {found}"),
         );
     }
 
@@ -169,29 +173,29 @@ pub(crate) fn verify(manifest_dir: &Path, explicit: Option<&OsStr>) -> Verificat
         commit: Some(head),
         watched_files,
         watched_directories,
-        reason: "verified clean HEAD",
+        reason: String::from("verified clean HEAD"),
     }
 }
 
-fn refused(reason: &'static str) -> Verification {
+fn refused(reason: &str) -> Verification {
     Verification {
         commit: None,
         watched_files: Vec::new(),
         watched_directories: Vec::new(),
-        reason,
+        reason: reason.to_owned(),
     }
 }
 
 fn refusal_with_watch(
     watched_files: Vec<PathBuf>,
     watched_directories: Vec<PathBuf>,
-    reason: &'static str,
+    reason: &str,
 ) -> Verification {
     Verification {
         commit: None,
         watched_files,
         watched_directories,
-        reason,
+        reason: reason.to_owned(),
     }
 }
 
@@ -785,71 +789,191 @@ fn watched_directories<'a>(root: &Path, paths: impl Iterator<Item = &'a String>)
     directories.into_iter().collect()
 }
 
-fn contains_untracked_input(root: &Path, tracked: &BTreeMap<String, Entry>) -> bool {
-    walk_untracked(root, root, tracked)
+/// One parsed `.gitignore` line.
+///
+/// **This type exists because there were two ignore policies and only one of
+/// them was git's.** The predecessor was a hardcoded list matching whole first
+/// path segments, so `.gitignore`'s `/logs.pre-wd-black-*`,
+/// `/mutants.out*.pre-wd-black-*` and `/.claude/*` all slipped past it: `git
+/// status` reported a clean tree while this build script reported "an untracked
+/// file could affect compilation" and disabled run persistence on every build.
+/// A second copy of a policy is correct the day it is written and silently
+/// wrong afterwards, which is the shape `AGENTS.md` §5 exists to refuse.
+struct IgnoreRule {
+    /// A leading `!`: this rule UN-ignores. Last matching rule wins, as in git.
+    negated: bool,
+    /// A trailing `/`: matches directories only.
+    directory_only: bool,
+    /// The pattern contained a `/`, so it is matched against the whole
+    /// repository-relative path rather than against a basename at any depth.
+    anchored: bool,
+    pattern: String,
 }
 
-fn walk_untracked(root: &Path, directory: &Path, tracked: &BTreeMap<String, Entry>) -> bool {
+/// Reads `.gitignore` at the repository root.
+///
+/// A missing or unreadable file yields no rules, which is the conservative
+/// direction: nothing becomes ignored that was not ignored before, so the guard
+/// stays at least as strict as it was.
+fn load_ignore_rules(root: &Path) -> Vec<IgnoreRule> {
+    let Ok(text) = fs::read_to_string(root.join(".gitignore")) else {
+        return Vec::new();
+    };
+    let mut rules = Vec::new();
+    for raw in text.lines() {
+        let line = raw.trim_end();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (negated, rest) = match line.strip_prefix('!') {
+            Some(rest) => (true, rest),
+            None => (false, line),
+        };
+        let (directory_only, rest) = match rest.strip_suffix('/') {
+            Some(rest) => (true, rest),
+            None => (false, rest),
+        };
+        if rest.is_empty() {
+            continue;
+        }
+        let anchored = rest.contains('/');
+        let pattern = rest.strip_prefix('/').unwrap_or(rest);
+        if pattern.is_empty() {
+            continue;
+        }
+        rules.push(IgnoreRule {
+            negated,
+            directory_only,
+            anchored,
+            pattern: pattern.to_owned(),
+        });
+    }
+    rules
+}
+
+/// Whether `path` is ignored, with the last matching rule winning.
+fn ignored(rules: &[IgnoreRule], path: &str, is_directory: bool) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let mut verdict = false;
+    for rule in rules {
+        if rule.directory_only && !is_directory {
+            continue;
+        }
+        let hit = if rule.anchored {
+            glob_matches(&rule.pattern, path)
+        } else {
+            glob_matches(&rule.pattern, name)
+        };
+        if hit {
+            verdict = !rule.negated;
+        }
+    }
+    verdict
+}
+
+/// Glob match over `*`, `?` and `**`, which is the whole of `.gitignore`'s
+/// syntax this repository uses. A single `*` stops at a separator; `**` crosses
+/// them, and a leading `**/` also matches zero directories.
+fn glob_matches(pattern: &str, text: &str) -> bool {
+    glob_at(pattern.as_bytes(), text.as_bytes())
+}
+
+fn glob_at(pattern: &[u8], text: &[u8]) -> bool {
+    let Some(&head) = pattern.first() else {
+        return text.is_empty();
+    };
+    if head == b'*' {
+        if pattern.get(1) == Some(&b'*') {
+            let after = pattern.get(2..).unwrap_or_default();
+            // `**/` matches zero directories as well as many.
+            if after.first() == Some(&b'/') && glob_at(after.get(1..).unwrap_or_default(), text) {
+                return true;
+            }
+            for index in 0..=text.len() {
+                if glob_at(after, text.get(index..).unwrap_or_default()) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        let after = pattern.get(1..).unwrap_or_default();
+        for index in 0..=text.len() {
+            if glob_at(after, text.get(index..).unwrap_or_default()) {
+                return true;
+            }
+            if text.get(index) == Some(&b'/') {
+                break;
+            }
+        }
+        return false;
+    }
+    let Some(&first) = text.first() else {
+        return false;
+    };
+    let rest_pattern = pattern.get(1..).unwrap_or_default();
+    let rest_text = text.get(1..).unwrap_or_default();
+    if head == b'?' {
+        return first != b'/' && glob_at(rest_pattern, rest_text);
+    }
+    head == first && glob_at(rest_pattern, rest_text)
+}
+
+/// The first untracked path that could affect compilation, or `None`.
+///
+/// Returns the path so the refusal can NAME it. The predecessor returned a
+/// bare `bool` and the caller printed "an untracked file could affect
+/// compilation" with no path, which is a true statement an operator cannot act
+/// on — and, once the ignore policies diverged, was not even true.
+fn first_untracked_input(root: &Path, tracked: &BTreeMap<String, Entry>) -> Option<String> {
+    let rules = load_ignore_rules(root);
+    walk_untracked(root, root, tracked, &rules)
+}
+
+fn walk_untracked(
+    root: &Path,
+    directory: &Path,
+    tracked: &BTreeMap<String, Entry>,
+    rules: &[IgnoreRule],
+) -> Option<String> {
     let Ok(read) = fs::read_dir(directory) else {
-        return true;
+        return Some(format!("{} cannot be listed", directory.display()));
     };
     let mut paths = Vec::new();
     for found in read {
         let Ok(entry) = found else {
             // Losing even one directory entry means we cannot prove there is
             // no untracked build input behind that error.
-            return true;
+            return Some(format!("{} has an unreadable entry", directory.display()));
         };
         paths.push(entry.path());
     }
     paths.sort();
     for path in paths {
         let Ok(relative) = path.strip_prefix(root) else {
-            return true;
+            return Some(format!("{} is outside the repository", path.display()));
         };
         let Some(word) = relative.to_str().map(|value| value.replace('\\', "/")) else {
-            return true;
+            return Some(format!("{} is not valid UTF-8", path.display()));
         };
-        if excluded_untracked_path(&word) {
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            return Some(format!("{word} cannot be stat'd"));
+        };
+        let is_directory = metadata.file_type().is_dir();
+        // `.git` is never named in `.gitignore` because git does not list its
+        // own store; every other exclusion now comes from the one file that
+        // decides what git itself ignores.
+        if word == ".git" || ignored(rules, &word, is_directory) {
             continue;
         }
-        let Ok(metadata) = fs::symlink_metadata(&path) else {
-            return true;
-        };
-        if metadata.file_type().is_dir() {
-            if walk_untracked(root, &path, tracked) {
-                return true;
+        if is_directory {
+            if let Some(found) = walk_untracked(root, &path, tracked, rules) {
+                return Some(found);
             }
         } else if !tracked.contains_key(&word) {
-            return true;
+            return Some(word);
         }
     }
-    false
-}
-
-fn excluded_untracked_path(path: &str) -> bool {
-    let first = path.split('/').next().unwrap_or(path);
-    if matches!(
-        first,
-        ".git" | "target" | "web" | "mutants.out" | "mutants.out.old" | "logs" | ".idea"
-    ) {
-        return true;
-    }
-    if path.starts_with(".claude/worktrees/") || path == ".claude/settings.local.json" {
-        return true;
-    }
-    if matches!(
-        path,
-        "credentials.toml" | ".brutex-credentials.toml" | ".env" | "server.log" | ".DS_Store"
-    ) {
-        return true;
-    }
-    let name = path.rsplit('/').next().unwrap_or(path);
-    let extension = Path::new(name).extension();
-    name == ".DS_Store"
-        || extension.is_some_and(|value| value.eq_ignore_ascii_case("log"))
-        || name.ends_with(".rs.bk")
-        || (!path.contains('/') && extension.is_some_and(|value| value.eq_ignore_ascii_case("txt")))
+    None
 }
 
 fn object_kind(value: &str) -> Option<&'static str> {
@@ -962,7 +1086,22 @@ mod tests {
             fs::create_dir_all(root.join(".git/objects")).expect("objects");
             fs::create_dir_all(root.join(".git/refs/heads")).expect("refs");
 
+            // `.gitignore` is TRACKED here because it is tracked in the real
+            // repository -- `AGENTS.md` §2 admits it by name. It has to be: the
+            // walker now takes its exclusions from this file and nowhere else,
+            // so an untracked copy would be an untracked file that decides
+            // which untracked files count. The patterns below are the SHAPES
+            // the real file uses, and the three `*`-bearing ones are exactly
+            // the shapes the predecessor's first-segment equality could not
+            // match.
+            const IGNORE: &[u8] = b"/target\n\
+                /.claude/*\n\
+                !/.claude/launch.json\n\
+                /logs.pre-wd-black-*\n\
+                /mutants.out*.pre-wd-black-*\n\
+                **/*.log\n";
             let files = [
+                (".gitignore", IGNORE),
                 ("Cargo.toml", b"[workspace]\n".as_slice()),
                 (
                     "crates/cli/src/lib.rs",
@@ -989,9 +1128,14 @@ mod tests {
             let cli_tree = write_tree(&root, &[(0o40000, "src", source_tree)]);
             let crates_tree = write_tree(&root, &[(0o40000, "cli", cli_tree)]);
             let manifest = entries["Cargo.toml"].oid;
+            let ignore = entries[".gitignore"].oid;
+            // Git orders tree entries by name in byte order: `.` (0x2E) before
+            // `C` (0x43) before `c` (0x63). `write_tree` writes what it is
+            // given, so the order is the caller's to get right.
             let root_tree = write_tree(
                 &root,
                 &[
+                    (0o100_644, ".gitignore", ignore),
                     (0o100_644, "Cargo.toml", manifest),
                     (0o40000, "crates", crates_tree),
                 ],
@@ -1407,6 +1551,121 @@ mod tests {
         fs::create_dir_all(path.parent().expect("target parent")).expect("target");
         fs::write(path, b"generated\n").expect("generated output");
         assert_eq!(fixture.verify(None).commit.as_deref(), Some(&*fixture.head));
+    }
+
+    /// **The regression test for the defect this walker was rewritten to fix.**
+    ///
+    /// All three of these directories are ignored by `.gitignore`, so `git
+    /// status` calls the tree clean -- and the predecessor still refused,
+    /// because it matched whole first path segments against a hardcoded list
+    /// and `logs.pre-wd-black-20260831` is not `logs`. On the real repository
+    /// that disabled run persistence on every single build, and the reason it
+    /// printed named no file, so the operator had a clean `git status` and an
+    /// unstamped binary with nothing connecting them.
+    #[test]
+    fn gitignored_scratch_beside_a_matching_name_does_not_disable_persistence() {
+        let fixture = Fixture::new();
+        for directory in [
+            ".claude/worktrees.pre-wd-black-20260831",
+            "logs.pre-wd-black-20260831",
+            "mutants.out.pre-wd-black-20260831",
+            "mutants.out.old.pre-wd-black-20260831",
+        ] {
+            let path = fixture.root.join(directory);
+            fs::create_dir_all(&path).expect("scratch directory");
+            fs::write(path.join("held.rs"), b"scratch\n").expect("scratch file");
+        }
+        assert_eq!(
+            fixture.verify(None).commit.as_deref(),
+            Some(&*fixture.head),
+            "a directory git ignores cannot affect compilation"
+        );
+    }
+
+    /// A negation re-admits the path, and a re-admitted path is an ordinary
+    /// untracked file again. Proves the `!` rule is read rather than skipped.
+    #[test]
+    fn a_negated_ignore_rule_puts_the_file_back_under_the_guard() {
+        let fixture = Fixture::new();
+        let claude = fixture.root.join(".claude");
+        fs::create_dir_all(&claude).expect(".claude");
+        fs::write(claude.join("settings.local.json"), b"{}\n").expect("ignored sibling");
+        assert_eq!(
+            fixture.verify(None).commit.as_deref(),
+            Some(&*fixture.head),
+            "/.claude/* covers the sibling"
+        );
+        fs::write(claude.join("launch.json"), b"{}\n").expect("negated file");
+        assert!(
+            fixture.verify(None).commit.is_none(),
+            "!/.claude/launch.json un-ignores it, so untracked it must refuse"
+        );
+    }
+
+    /// §4 asks a refusal to name its reason. The predecessor said only "an
+    /// untracked file could affect compilation", which is a true sentence an
+    /// operator cannot act on.
+    #[test]
+    fn the_refusal_names_the_untracked_file() {
+        let fixture = Fixture::new();
+        fs::write(
+            fixture.root.join("crates/cli/src/stray.rs"),
+            b"pub const STRAY: bool = true;\n",
+        )
+        .expect("stray source");
+        let verification = fixture.verify(None);
+        assert!(verification.commit.is_none());
+        assert!(
+            verification.reason.contains("crates/cli/src/stray.rs"),
+            "the reason must name the file, not merely its existence: {}",
+            verification.reason
+        );
+    }
+
+    #[test]
+    fn a_single_star_stops_at_a_separator_and_a_double_star_crosses_it() {
+        assert!(glob_matches(
+            "logs.pre-wd-black-*",
+            "logs.pre-wd-black-20260831"
+        ));
+        assert!(glob_matches(
+            "mutants.out*.pre-wd-black-*",
+            "mutants.out.old.pre-wd-black-1"
+        ));
+        assert!(glob_matches(".claude/*", ".claude/settings.local.json"));
+        // A single `*` must not swallow a separator, or `/.claude/*` would
+        // match everything beneath a nested directory as well.
+        assert!(!glob_matches(".claude/*", ".claude/worktrees/held.rs"));
+        assert!(glob_matches("**/*.log", "deep/inside/here.log"));
+        // `**/` matches zero directories too.
+        assert!(glob_matches("**/*.log", "here.log"));
+        assert!(!glob_matches("**/*.log", "here.txt"));
+        assert!(glob_matches("?arget", "target"));
+        assert!(!glob_matches("?arget", "/target"));
+        assert!(glob_matches("target", "target"));
+        assert!(!glob_matches("target", "targets"));
+    }
+
+    #[test]
+    fn an_unanchored_rule_matches_a_basename_at_any_depth_and_an_anchored_one_does_not() {
+        let rules = load_ignore_rules(Path::new("/does/not/exist"));
+        assert!(rules.is_empty(), "a missing .gitignore ignores nothing");
+
+        let fixture = Fixture::new();
+        let rules = load_ignore_rules(&fixture.root);
+        assert!(ignored(&rules, "target", true), "/target is anchored");
+        assert!(
+            !ignored(&rules, "crates/cli/target", true),
+            "an anchored rule must not match deeper"
+        );
+        assert!(
+            ignored(&rules, "crates/pull/session.log", false),
+            "**/*.log reaches any depth"
+        );
+        assert!(
+            !ignored(&rules, "crates/cli/src/lib.rs", false),
+            "real source is never ignored"
+        );
     }
 
     #[test]
