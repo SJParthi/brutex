@@ -789,6 +789,7 @@ fn watched_directories<'a>(root: &Path, paths: impl Iterator<Item = &'a String>)
     directories.into_iter().collect()
 }
 
+#[derive(Clone)]
 /// One parsed `.gitignore` line.
 ///
 /// **This type exists because there were two ignore policies and only one of
@@ -804,19 +805,28 @@ struct IgnoreRule {
     negated: bool,
     /// A trailing `/`: matches directories only.
     directory_only: bool,
-    /// The pattern contained a `/`, so it is matched against the whole
-    /// repository-relative path rather than against a basename at any depth.
+    /// The pattern contained a `/`, so it is matched against the path relative
+    /// to [`Self::base`] rather than against a basename at any depth.
     anchored: bool,
     pattern: String,
+    /// The repository-relative directory of the `.gitignore` this rule came
+    /// from, with a trailing `/`, or empty for the root file.
+    ///
+    /// **Git reads a `.gitignore` in EVERY directory**, and its patterns are
+    /// relative to that directory. Reading only the root file made
+    /// `web/.gitignore`'s `.svelte-kit/` invisible, so a SvelteKit build
+    /// directory that `git status` correctly ignores refused the stamp.
+    base: String,
 }
 
-/// Reads `.gitignore` at the repository root.
+/// Reads the `.gitignore` in `directory`, whose repository-relative path is
+/// `base` (empty for the root, otherwise ending in `/`).
 ///
 /// A missing or unreadable file yields no rules, which is the conservative
 /// direction: nothing becomes ignored that was not ignored before, so the guard
 /// stays at least as strict as it was.
-fn load_ignore_rules(root: &Path) -> Vec<IgnoreRule> {
-    let Ok(text) = fs::read_to_string(root.join(".gitignore")) else {
+fn load_ignore_rules(directory: &Path, base: &str) -> Vec<IgnoreRule> {
+    let Ok(text) = fs::read_to_string(directory.join(".gitignore")) else {
         return Vec::new();
     };
     let mut rules = Vec::new();
@@ -846,21 +856,30 @@ fn load_ignore_rules(root: &Path) -> Vec<IgnoreRule> {
             directory_only,
             anchored,
             pattern: pattern.to_owned(),
+            base: base.to_owned(),
         });
     }
     rules
 }
 
 /// Whether `path` is ignored, with the last matching rule winning.
+///
+/// Rules arrive root-first, so a nested `.gitignore` is appended after the
+/// rules it may override -- which is git's own precedence, expressed as
+/// ordering rather than as a special case.
 fn ignored(rules: &[IgnoreRule], path: &str, is_directory: bool) -> bool {
-    let name = path.rsplit('/').next().unwrap_or(path);
     let mut verdict = false;
     for rule in rules {
         if rule.directory_only && !is_directory {
             continue;
         }
+        // A rule reaches only paths beneath its own `.gitignore`.
+        let Some(relative) = path.strip_prefix(rule.base.as_str()) else {
+            continue;
+        };
+        let name = relative.rsplit('/').next().unwrap_or(relative);
         let hit = if rule.anchored {
-            glob_matches(&rule.pattern, path)
+            glob_matches(&rule.pattern, relative)
         } else {
             glob_matches(&rule.pattern, name)
         };
@@ -925,16 +944,33 @@ fn glob_at(pattern: &[u8], text: &[u8]) -> bool {
 /// compilation" with no path, which is a true statement an operator cannot act
 /// on — and, once the ignore policies diverged, was not even true.
 fn first_untracked_input(root: &Path, tracked: &BTreeMap<String, Entry>) -> Option<String> {
-    let rules = load_ignore_rules(root);
-    walk_untracked(root, root, tracked, &rules)
+    let rules = load_ignore_rules(root, "");
+    walk_untracked(root, root, "", tracked, &rules)
 }
 
 fn walk_untracked(
     root: &Path,
     directory: &Path,
+    base: &str,
     tracked: &BTreeMap<String, Entry>,
-    rules: &[IgnoreRule],
+    inherited: &[IgnoreRule],
 ) -> Option<String> {
+    // This directory's own `.gitignore`, appended so it overrides what it
+    // inherits. The root's rules are loaded by the caller, so this only adds
+    // rules on the way down and never re-reads the same file.
+    let local = if base.is_empty() {
+        Vec::new()
+    } else {
+        load_ignore_rules(directory, base)
+    };
+    let mut merged;
+    let rules: &[IgnoreRule] = if local.is_empty() {
+        inherited
+    } else {
+        merged = inherited.to_vec();
+        merged.extend(local);
+        &merged
+    };
     let Ok(read) = fs::read_dir(directory) else {
         return Some(format!("{} cannot be listed", directory.display()));
     };
@@ -966,7 +1002,8 @@ fn walk_untracked(
             continue;
         }
         if is_directory {
-            if let Some(found) = walk_untracked(root, &path, tracked, rules) {
+            let child_base = format!("{word}/");
+            if let Some(found) = walk_untracked(root, &path, &child_base, tracked, rules) {
                 return Some(found);
             }
         } else if !tracked.contains_key(&word) {
@@ -1103,6 +1140,11 @@ mod tests {
             let files = [
                 (".gitignore", IGNORE),
                 ("Cargo.toml", b"[workspace]\n".as_slice()),
+                // A NESTED `.gitignore`, tracked, exactly as `web/.gitignore` is.
+                // Git reads one in every directory and applies its patterns
+                // relative to that directory; reading only the root file made
+                // `web/.gitignore`'s `.svelte-kit/` invisible.
+                ("crates/cli/.gitignore", b"scratch/\n*.tmp\n".as_slice()),
                 (
                     "crates/cli/src/lib.rs",
                     b"pub fn fixture() -> u8 { 1 }\n".as_slice(),
@@ -1125,7 +1167,14 @@ mod tests {
 
             let lib = entries["crates/cli/src/lib.rs"].oid;
             let source_tree = write_tree(&root, &[(0o100_644, "lib.rs", lib)]);
-            let cli_tree = write_tree(&root, &[(0o40000, "src", source_tree)]);
+            let nested = entries["crates/cli/.gitignore"].oid;
+            let cli_tree = write_tree(
+                &root,
+                &[
+                    (0o100_644, ".gitignore", nested),
+                    (0o40000, "src", source_tree),
+                ],
+            );
             let crates_tree = write_tree(&root, &[(0o40000, "cli", cli_tree)]);
             let manifest = entries["Cargo.toml"].oid;
             let ignore = entries[".gitignore"].oid;
@@ -1582,6 +1631,43 @@ mod tests {
         );
     }
 
+    /// **Git reads a `.gitignore` in every directory, and this once did not.**
+    ///
+    /// Found by the naming this commit added: on a clean tree the refusal read
+    /// `an untracked file could affect compilation: web/.svelte-kit/ambient.d.ts`,
+    /// a SvelteKit build directory ignored by `web/.gitignore:2` and therefore
+    /// invisible to `git status`. Reading only the root file is a third ignore
+    /// policy, one directory further down.
+    #[test]
+    fn a_nested_gitignore_is_read_and_is_scoped_to_its_own_directory() {
+        let fixture = Fixture::new();
+        let nested = fixture.root.join("crates/cli/scratch");
+        fs::create_dir_all(&nested).expect("nested scratch");
+        fs::write(nested.join("held.rs"), b"scratch\n").expect("scratch file");
+        fs::write(fixture.root.join("crates/cli/work.tmp"), b"tmp\n").expect("tmp file");
+        assert_eq!(
+            fixture.verify(None).commit.as_deref(),
+            Some(&*fixture.head),
+            "crates/cli/.gitignore covers scratch/ and *.tmp"
+        );
+
+        // AND IT REACHES NO FURTHER. The same two names at the repository root
+        // are outside that file's directory, so the root's rules alone decide,
+        // and the root ignores neither.
+        fs::create_dir_all(fixture.root.join("scratch")).expect("root scratch");
+        fs::write(fixture.root.join("scratch/held.rs"), b"scratch\n").expect("root scratch file");
+        let verification = fixture.verify(None);
+        assert!(
+            verification.commit.is_none(),
+            "a nested rule must not leak upward"
+        );
+        assert!(
+            verification.reason.contains("scratch/held.rs"),
+            "and the refusal names it: {}",
+            verification.reason
+        );
+    }
+
     /// A negation re-admits the path, and a re-admitted path is an ordinary
     /// untracked file again. Proves the `!` rule is read rather than skipped.
     #[test]
@@ -1648,11 +1734,11 @@ mod tests {
 
     #[test]
     fn an_unanchored_rule_matches_a_basename_at_any_depth_and_an_anchored_one_does_not() {
-        let rules = load_ignore_rules(Path::new("/does/not/exist"));
+        let rules = load_ignore_rules(Path::new("/does/not/exist"), "");
         assert!(rules.is_empty(), "a missing .gitignore ignores nothing");
 
         let fixture = Fixture::new();
-        let rules = load_ignore_rules(&fixture.root);
+        let rules = load_ignore_rules(&fixture.root, "");
         assert!(ignored(&rules, "target", true), "/target is anchored");
         assert!(
             !ignored(&rules, "crates/cli/target", true),
