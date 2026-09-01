@@ -11234,23 +11234,51 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  /* SHOWN AND REFUSED, which is right on a page that has one search and wrong in a
-     row of borderless faces, so the box is taken off HERE — three class names
-     deep, which is what beats a single-class theme rule without touching it. */
-  /* THE DAY AND MONTH FIELDS TAKE /INGEST'S BOX, for the same reason the
-     Picker face does: this de-styled them to the bar's borderless 19px line, radius and face, which is what makes a row of
-     dropdowns and a pair of dates read as one strip. The focus outline is
-     restored with them: suppressing it was only defensible while the CELL drew
-     a focus underline for the whole group{
+  /* ---- THE DAY FIELDS TAKE /INGEST'S BOX ------------------------------
+     A COMMENT ATE THIS RULE, AND A RULE INSIDE A COMMENT IS EMITTED NOWHERE.
+     The terminator that should have closed the sentence below went missing —
+     and it cannot be written here either, because a CSS comment has no escape
+     and the star-slash pair ends this one wherever it appears. So the
+     selector, five declarations and closing brace were all comment text:
+     shipped by no stylesheet, and invisible on a page that still rendered.
+     Measured before the repair: `max-width: none` occurred exactly ONCE in
+     this file, inside the comment. It is restored here, outside it.
+
+     WHY THE RULE EXISTS, which is the Picker face's reason: an earlier strip
+     de-styled these fields to a borderless 19px line to match hand-rolled
+     neighbours that are gone. /ingest's day field is `font-size:
+     var(--fs-base); padding: 11px 13px; border-radius: 9px`, and restating
+     that here is what makes a row of dropdowns and a pair of dates read as
+     ONE strip instead of two kinds of control in one bar.
+
+     THOSE THREE CHANGE NOTHING, AND SAYING SO IS THE POINT. They are
+     `$lib/DayField.svelte`'s own values, declaration for declaration, so this
+     page does not move a shared component's metrics — it only refuses to let
+     them drift. `width: 100%` is the one that does work: `.din` is
+     `flex: 1 1 auto`, so its flex basis is its width, and this is what makes
+     it fill the grid track the strip hands it rather than size to its text.
+     `max-width: none` is a reset with nothing to reset today — kept because
+     it is the shared theme's bordered-box rules this field must outrank if it
+     is ever given one, and it costs a line to say so.
+
+     `:global()` IS LOAD-BEARING. `.din` is DayField's class, not this file's,
+     so a bare `.strip .field .din` compiles to a scoped selector that matches
+     no element in this component — dead in the stylesheet and reported by the
+     compiler as an unused selector. The Picker clip twenty lines up is the
+     same shape for the same reason.
+
+     THE MONTH HALF OF THIS RULE'S OLD HEADING IS GONE. /db carried a month
+     field that was a button rather than a text box; the control was removed
+     with the from/to range (see the markup note at `THE MONTH WINDOW`), so
+     the `.dbtn` and `.dval` overrides that stood here went with it and only
+     the two `DayField`s remain to box. */
+  .strip .field :global(.din) {
     width: 100%;
     max-width: none;
     font-size: var(--fs-base);
     padding: 11px 13px;
     border-radius: 9px;
   }
-  /* The month field is the same face at the same height — it is a button rather
-     than a text box, for the reason stated at the snippet, but nothing about
-     that should be visible in the row. */
   /* ---- THE ANCHOR -----------------------------------------------------
      What the query is looking at, the one headline figure, the two presses that
      are actions rather than filters, and the counted line under all three.
