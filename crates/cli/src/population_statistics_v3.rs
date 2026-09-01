@@ -3447,6 +3447,20 @@ mod tests {
         PopulationStatisticsV3Bounds::new(16, 16, 2 * 1_024 * 1_024)
     }
 
+    /// Bounds for a two-family (E/E) audit.
+    ///
+    /// `candidates_per_audit` bounds the WHOLE audit, and an E/E audit carries
+    /// both families' rows. D-0498 made a Candidate row `mask x direction x
+    /// exit`, so one closed mask yields at least two and the E/E fixture
+    /// produces 20 per family, 40 in the audit. `bounds()`'s 16 was sized
+    /// before that correction and refuses the pair by 24 rows -- which is what
+    /// `Statistics V3 append exceeds explicit bounds` was reporting, correctly.
+    /// The ceiling here is 64 rather than 40 so the bound is a bound and not a
+    /// second copy of the fixture's arithmetic.
+    fn pair_bounds() -> Result<PopulationStatisticsV3Bounds, String> {
+        PopulationStatisticsV3Bounds::new(16, 64, 2 * 1_024 * 1_024)
+    }
+
     #[test]
     fn terminals_refuse_missing_or_fabricated_evidence_and_cover_both_orientations()
     -> Result<(), String> {
@@ -3627,9 +3641,19 @@ mod tests {
                 .checked_add(produced.banknifty.candidate_count)
                 .ok_or_else(|| "test E/E Candidate count overflowed".to_owned())?
         );
+        // Exact, and therefore loud. The `>= 2` assertions above are the
+        // SEMANTIC claim from D-0498 -- both directions expand, so a nonempty
+        // production is at least two rows -- and they hold for 2 as well as for
+        // 20, which is how a fixture can grow past its own bound in silence.
+        // These three pin what the fixture actually produces, so the next
+        // change to it fails here, naming the number, instead of failing inside
+        // `append` with a bound that reads like a defect.
+        assert_eq!(produced.nifty.candidate_count, 20, "E/E NIFTY rows");
+        assert_eq!(produced.banknifty.candidate_count, 20, "E/E BANKNIFTY rows");
+        assert_eq!(produced.manifest.candidate_count, 40, "E/E audit rows");
 
         let root = TestDir::new()?;
-        let commit = produced.append_and_reopen(root.path(), bounds()?)?;
+        let commit = produced.append_and_reopen(root.path(), pair_bounds()?)?;
         let source = produced.authenticated_admission_source(commit)?;
         assert_eq!(
             source.nifty_family().terminal(),
@@ -3663,7 +3687,15 @@ mod tests {
             procedure,
         )
         .expect_err("crosswired Pre-Admission audits must refuse");
-        assert!(crosswired.contains("binding differs"));
+        // The production refusal names the family AND the mismatched authority:
+        // "population-statistics Nifty Observation source differs from reopened
+        // Pre-Admission authority". The expectation here read "binding differs",
+        // which no code path emits -- so this assertion could only ever fail,
+        // and it was masked by the bound refusal firing three statements earlier.
+        assert!(
+            crosswired.contains("Observation source differs from reopened Pre-Admission authority"),
+            "crosswire must name the mismatched authority: {crosswired}"
+        );
 
         let stale =
             crate::step3_orchestrator::statistics_v3_evaluated_pair_fixture_with_price_shift(
@@ -3677,7 +3709,15 @@ mod tests {
             procedure,
         )
         .expect_err("foreign same-family Pre-Admission audit must refuse");
-        assert!(stale_refusal.contains("binding differs"));
+        // Same refusal text as the crosswire above, and correctly so: both are
+        // "the Observation source is not the one the reopened Pre-Admission
+        // authority was built from". A price-shifted fixture and a swapped
+        // family are two ways to reach one condition, not two conditions.
+        assert!(
+            stale_refusal
+                .contains("Observation source differs from reopened Pre-Admission authority"),
+            "a stale audit must name the mismatched authority: {stale_refusal}"
+        );
         Ok(())
     }
 

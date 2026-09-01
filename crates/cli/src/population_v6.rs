@@ -458,29 +458,39 @@ impl FamilyRecordV6 {
             row_id: [0; 32],
         };
         result.row_id = derive_family_row_id(&result);
-        result.validate(source)?;
+        result.validate(source, family_sequence)?;
         Ok(result)
     }
 
-    fn validate(&self, source: &SourceRecordV6) -> Result<(), PopulationV6Refusal> {
-        let (expected_sequence, expected_family, expected_terminal, expected_count) =
-            if self.family_sequence == 0 {
-                (
-                    0,
-                    AdmissionV4Family::Nifty,
-                    source.nifty_terminal,
-                    source.nifty_candidate_count,
-                )
-            } else {
-                (
-                    1,
-                    AdmissionV4Family::BankNifty,
-                    source.banknifty_terminal,
-                    source.banknifty_candidate_count,
-                )
-            };
+    /// Validates against the slot the CALLER read this record from.
+    ///
+    /// **`ordinal` is a parameter because it used to be `self.family_sequence`,
+    /// and that made every expectation below a restatement of the record's own
+    /// claim.** A BANKNIFTY record declaring `family_sequence: 1` validated
+    /// perfectly while sitting in slot 0: the branch that chose "expect
+    /// BANKNIFTY" was chosen BY the field the branch then went on to check. A
+    /// complete block still caught the swap, but only downstream, through
+    /// `ordered_family_digest` against the Completion record -- and a trailing
+    /// PREFIX has no Completion, so `validate_prefix` caught nothing at all and
+    /// `open_write` accepted a file whose second record was the wrong record.
+    fn validate(&self, source: &SourceRecordV6, ordinal: u64) -> Result<(), PopulationV6Refusal> {
+        let (expected_family, expected_terminal, expected_count) = if ordinal == 0 {
+            (
+                AdmissionV4Family::Nifty,
+                source.nifty_terminal,
+                source.nifty_candidate_count,
+            )
+        } else if ordinal == 1 {
+            (
+                AdmissionV4Family::BankNifty,
+                source.banknifty_terminal,
+                source.banknifty_candidate_count,
+            )
+        } else {
+            return Err("Population V6 Family slot is neither NIFTY nor BANKNIFTY".to_owned());
+        };
         if self.population_id != source.population_id
-            || self.family_sequence != expected_sequence
+            || self.family_sequence != ordinal
             || self.family != expected_family
             || self.terminal != expected_terminal
             || self.candidate_count != expected_count
@@ -984,8 +994,12 @@ impl PreparedPopulationV6 {
                 "Population V6 identity does not reproduce from its exact Families".to_owned(),
             );
         }
-        for family in &self.families {
-            family.validate(&self.source)?;
+        // Enumerated, not iterated: the slot is the authority for which family
+        // belongs here, and the record's own `family_sequence` is not.
+        for (ordinal, family) in self.families.iter().enumerate() {
+            let ordinal = u64::try_from(ordinal)
+                .map_err(|_| "Population V6 Family ordinal does not fit u64".to_owned())?;
+            family.validate(&self.source, ordinal)?;
         }
         let count = u64::try_from(self.candidates.len())
             .map_err(|_| "Population V6 Candidate length does not fit u64".to_owned())?;
@@ -2222,7 +2236,7 @@ fn validate_prefix(
         if sequence != data.sequence {
             return Err("Population V6 trailing NIFTY Family moved".to_owned());
         }
-        family.validate(&data.source)?;
+        family.validate(&data.source, 0)?;
         families[0] = Some(family);
     }
     if count >= 3 {
@@ -2230,7 +2244,7 @@ fn validate_prefix(
         if sequence != data.sequence {
             return Err("Population V6 trailing BANKNIFTY Family moved".to_owned());
         }
-        family.validate(&data.source)?;
+        family.validate(&data.source, 1)?;
         families[1] = Some(family);
     }
     let available = count.saturating_sub(3).min(data.source.candidate_count);
