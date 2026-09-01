@@ -1324,6 +1324,116 @@ jobs:
           bare_number='001 100 200 250 50 6 7030 8 800 803 804 805 806 807 808
           809 810 811 812 813 814 815 901 nifty-50'
 
+          # ---- group 27: FOUR TELEMETRY FIELD KEYS AND ONE FAILURE-KIND VALUE,
+          # and these are the only entries below that are in PRODUCTION code.
+          # Every one was read at its call site before it was written down.
+          #
+          #   kind             `crates/pull/src/capture.rs:162`, the LEFT side of
+          #     `.with("kind", ...)` on the `pull.capture` refusal event, and the
+          #     name of the `&str` parameter `note_refused` takes. That event
+          #     deliberately carries no URL, no body and no header — the URL and
+          #     body ARE the evidence that failed to land, and a header can carry
+          #     the credential — so feed, kind and the local I/O reason are all
+          #     that is left of it. Four letters naming a field on a log line.
+          #     §8's shape is `/<org>/<env>/<vendor>/<field>` and has no `kind`.
+          #   rung             `ingest.rs:529`, the LEFT side of
+          #     `.with("rung", ...)` on the once-per-target `pull.run` event. Its
+          #     right side is `Timeframe::as_str`, one of the words already in
+          #     the `timeframe` group. Same case as `timeframe` itself, which the
+          #     sixth batch above argues at length.
+          #   corrected        `http.rs:964` and `csv.rs:464`, both LEFT sides
+          #   negative_volume  and both COUNTS on the right — how many bars
+          #     carried a negative volume and were recorded as zero, and how many
+          #     rows were skipped outright. CLAUDE.md §4 permits the degrade and
+          #     forbids it being silent; these two are what stop it being silent,
+          #     exactly as `unreadable_volume` and `unreadable_oi` already do.
+          #
+          # `unreadable` is the one VALUE here rather than a key:
+          # `capture.rs:444` and `http.rs:2744` pass it as the `kind` argument
+          # above, so it names a CLASS OF FAILURE — the captured body could not
+          # be written — and `capture.rs:550` reuses the word for that test's
+          # scratch directory. It names no account, no environment, no vendor and
+          # no field, and the crate joins it into no path.
+          capture_field='kind rung corrected negative_volume unreadable'
+
+          # ---- group 28: SCRATCH ROOTS AND ONE TEMPORARY FILE STEM. Every word
+          # is the argument to `scratch(...)`, `Scratch::new(...)` or `tmp(...)`
+          # in a test, and every one is named for the case it arranges rather
+          # than for anything a vendor or an account is called. Same class as
+          # `dir-is-a-file` and `pull_scratch` above and read the same way:
+          #
+          #   restart-collision concurrent-names all-names-held   capture.rs
+          #     — a writer restarted onto an occupied name, several writers
+          #     racing for names at once, and every bounded name already taken.
+          #   short-body not-csv json-body index-lands no-partial              masters.rs
+          #   same-source-lock lock-names json-will-not-convert no-comma
+          #   wrong-shape
+          #     — a truncated answer, a body that is not CSV, one that is JSON,
+          #     a landing that reaches the index, a landing that leaves no
+          #     `.partial`, two landings contending for one source's lock, the
+          #     names a lock takes, JSON that will not convert, a row with no
+          #     comma, and a document of the wrong shape.
+          #   partialcount     ingest.rs, the partial-batch counter's own test.
+          #   spanning-months  tests/broker.rs, a batch that crosses a month end.
+          #   identity         tests/unit.rs:121-122, the STEM handed to `tmp`
+          #     twice by the test that proves two calls never collide. It is a
+          #     temporary file name in the OS temp directory, carrying the pid
+          #     and a serial; nothing joins it into a Parameter Store path.
+          #
+          # None is an org, an env, a vendor or a field. They are listed because
+          # the scanner is SHAPE-based and a short lower-case word has a path
+          # segment's shape whatever it means.
+          pull_scratch_2='
+          restart-collision concurrent-names all-names-held
+          short-body not-csv json-body index-lands no-partial
+          same-source-lock lock-names json-will-not-convert no-comma
+          wrong-shape partialcount spanning-months identity
+          '
+
+          # ---- group 29: ASSERTION LABELS, A FILENAME PREFIX AND TWO
+          # DELIBERATELY MALFORMED FIXTURES.
+          #
+          #   zerodha-unreadable-0  `capture.rs:727`, the PREFIX a test builds
+          #     capture filenames from while it occupies every bounded name. It
+          #     is `<feed wire name>-<failure kind>-<index>` — `zerodha` is
+          #     already declared in group 25 and `unreadable` in group 27 — and
+          #     it names a file on the operator's own disk, never a segment of a
+          #     parameter path.
+          #   partial      `masters.rs:1770`, matched as a FILENAME SUBSTRING:
+          #     the test reads the directory and asserts no `.partial` survived
+          #     a landing. The English adjective, not a path component.
+          #   splittable   `session.rs`, an `expect()` message on three calls.
+          #   untouched    `http.rs:4176`, an `assert_eq!` label.
+          #   emit-sites   `emit_sites.rs:1412`, the `origin` argument of
+          #     `ingest::from_rows` — a label folded into a refusal message as
+          #     "(from {origin})", and here it is that test module's own name.
+          #   novalue      `masters.rs:2474` and `:2489`, two of the four
+          #   not-a-pair     deliberately malformed `Set-Cookie` values the
+          #     cookie jar must skip. They are invented nonsense whose whole
+          #     purpose is to not parse.
+          pull_assert='zerodha-unreadable-0 partial splittable untouched
+          emit-sites novalue not-a-pair'
+
+          # ---- group 30: TWO YEAR-MONTHS AND TWO BARE NUMBERS, all four
+          # asserted rather than emitted.
+          #
+          # `2025-07` and `2025-08` are `store::path::YearMonth` renderings read
+          # back off disk by `tests/broker.rs:1270,1274` — the test that proves a
+          # batch spanning a month end lands one bar in each file. Same case as
+          # `year_month` above, and they are scanned rather than excluded because
+          # the `YYYY-MM-DD` exclusion is anchored to that one spelling on
+          # purpose: a `YYYY-MM` is two characters short of it.
+          #
+          # `401` is an HTTP status asserted to appear IN a refusal, the same
+          # device `302` and `403` already are: a credentialed source offered a
+          # transport that sends no token must name the cause rather than let the
+          # vendor answer it. `42` is asserted NOT to appear — it is the value of
+          # a JSON key that is not a list, and the test proves a number does not
+          # become an index name. A three-digit RFC 9110 status and a two-digit
+          # counter-example name no account, no environment, no vendor and no
+          # field.
+          pull_asserted_number='2025-07 2025-08 401 42'
+
           allowed="${seg_shape} ${vendor_wire} ${claim_standing} ${config_fixture}
           ${secret_fixture} ${scaffold} ${timeframe} ${governor}
           ${record_field} ${header_name} ${bound_number}
@@ -1333,7 +1443,8 @@ jobs:
           ${telemetry_field} ${year_month} ${nse_published} ${join_verdict} ${nav_word} ${http_status} ${withdrawn_index} ${zerodha_row}
           ${rolling_word} ${rolling_scaffold} ${pull_fixture}
           ${ssm_leak_fixture}
-          ${vendor_error} ${event_field} ${pull_scratch} ${bare_number}"
+          ${vendor_error} ${event_field} ${pull_scratch} ${bare_number}
+          ${capture_field} ${pull_scratch_2} ${pull_assert} ${pull_asserted_number}"
           bad=0
           while IFS= read -r word; do
             if [ -z "$word" ]; then continue; fi
@@ -1380,21 +1491,99 @@ jobs:
         run: |
           set -euo pipefail
           bad=0
-          # WHITESPACE IS NOT SIGNIFICANT IN A RUST PATH, and the two fixed strings
-          # this used to grep for were therefore trivially evadable: a build
-          # script written `std :: process :: Command :: new("npm")` compiles,
-          # spawns, and matched NEITHER needle. Measured against a real file.
-          # These patterns allow optional whitespace at every separator, and add
-          # the `process::Command` spelling the pair missed on its own.
-          hits=$(git ls-files '*build.rs' | xargs -r grep -lnE \
-                 -e 'Command[[:space:]]*::[[:space:]]*new' \
-                 -e 'std[[:space:]]*::[[:space:]]*process' \
-                 -e 'process[[:space:]]*::[[:space:]]*Command' || true)
-          if [ -n "$hits" ]; then
-            printf 'BUILD SCRIPT INVOKES AN EXTERNAL PROCESS:\n%s\n' "$hits"
-            echo "A build script is Rust, so gate 1 passes it — and then it runs"
-            echo "something else. That is the side door. See CLAUDE.md section 2."
-            bad=1
+          # THE GLOB READ ONE FILE OUT OF THREE, AND THE OTHER TWO ARE THE SAME
+          # BUILD SCRIPT. `crates/cli/build.rs` is 5,200 bytes and the two lines
+          # under its doc comment are `mod build_provenance;` and
+          # `mod commit_stamp;`. Both files sit beside it, both are compiled
+          # INTO the build script cargo runs, and `git ls-files '*build.rs'`
+          # names neither — so roughly nine tenths of the bytes that execute
+          # before this workspace compiles were never read by this gate. A
+          # `Command::new("npm")` placed in `build_provenance.rs` passed it
+          # silently. Measured, not inferred.
+          #
+          # The file set is now the CLOSURE: every tracked `build.rs`, plus
+          # every module it declares with `mod NAME;`, plus every module those
+          # declare, to a fixed point. Four resolutions are tried per name --
+          # `<dir>/NAME.rs` and `<dir>/NAME/mod.rs`, which is where rustc looks
+          # from a crate root, and the same pair under the declaring file's own
+          # stem, which is where it looks from anywhere else. Only TRACKED
+          # candidates join: an untracked file is not what CI compiles.
+          #
+          # A `build = "gen.rs"` key would rename the ROOT out of the seed list,
+          # and that is not this clause's job to catch — the manifest scan below
+          # refuses the key outright, which is the complementary half.
+          bs=""
+          queue="$( { git ls-files '*build.rs' || true; } )"
+          while [ -n "$queue" ]; do
+            next=""
+            for f in $queue; do
+              case " $bs " in *" $f "*) continue ;; esac
+              bs="$bs $f"
+              d="$(dirname "$f")"
+              stem="${f%.rs}"
+              mods=$( { grep -hoE '^[[:space:]]*(pub[[:space:]]+)?mod[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*;' "$f" || true; } \
+                      | sed -E 's/^.*mod[[:space:]]+([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*;.*$/\1/' )
+              for m in $mods; do
+                for cand in "$d/$m.rs" "$d/$m/mod.rs" "$stem/$m.rs" "$stem/$m/mod.rs"; do
+                  if [ -n "$( { git ls-files -- "$cand" || true; } )" ]; then
+                    next="$next $cand"
+                  fi
+                done
+              done
+            done
+            queue="$next"
+          done
+          echo "every file compiled into a build script:"
+          if [ -z "$bs" ]; then
+            echo "  none — no tracked build.rs"
+          else
+            printf '  %s\n' $bs
+
+            # WHITESPACE IS NOT SIGNIFICANT IN A RUST PATH, and the two fixed
+            # strings this used to grep for were therefore trivially evadable: a
+            # build script written `std :: process :: Command :: new("npm")`
+            # compiles, spawns, and matched NEITHER needle. Measured against a
+            # real file. These patterns allow optional whitespace at every
+            # separator. `::[[:space:]]*Command` is the third spelling and it is
+            # there for the alias: `use std::process as p;` then
+            # `p::Command::new(...)` defeats a pattern anchored on the word
+            # `process`, and nothing defeats the type's own name. The three
+            # verbs are the calls that actually start the child.
+            hits=$( { printf '%s\n' $bs | xargs grep -HnE \
+                     -e 'Command[[:space:]]*::[[:space:]]*new' \
+                     -e '::[[:space:]]*Command' \
+                     -e 'process[[:space:]]*::[[:space:]]*Command' \
+                     -e '\.[[:space:]]*(spawn|output|status)[[:space:]]*\(' || true; } )
+
+            # AND `std::process` ON ITS OWN IS NOT ONE OF THEM ANY MORE, because
+            # widening the file set turned that pattern into a false refusal.
+            # `crates/cli/build_provenance.rs` calls `std::process::id()` inside
+            # its `#[cfg(test)]` module, to put a unique number in a temp
+            # directory name. It returns THIS process's pid. It starts nothing,
+            # and the old pattern refused it.
+            #
+            # So the exemption is a NAMED LIST of `std::process` members that
+            # cannot start a child — the pid, the two ways this process ends,
+            # and the three types a `main` returns — and EVERY OTHER member of
+            # that module is still a refusal, `Command` above all. That is the
+            # opposite of loosening the rule: before this, `std::process`
+            # matched as a prefix and said nothing about which member was used.
+            #
+            # `grep -o` extracts each `std::process::<member>` occurrence on its
+            # own line, so the filter drops OCCURRENCES and not lines: a line
+            # carrying `std::process::id()` and a real spawn beside it is still
+            # refused.
+            pm=$( { printf '%s\n' $bs | xargs grep -HonE \
+                    'std[[:space:]]*::[[:space:]]*process[[:space:]]*::[[:space:]]*[A-Za-z_][A-Za-z0-9_]*' || true; } \
+                  | { grep -vE '::[[:space:]]*(id|exit|abort|ExitCode|ExitStatus|Termination)$' || true; } )
+
+            found=$( { printf '%s\n%s\n' "$hits" "$pm" | grep . || true; } )
+            if [ -n "$found" ]; then
+              printf 'BUILD SCRIPT INVOKES AN EXTERNAL PROCESS:\n%s\n' "$found"
+              echo "A build script is Rust, so gate 1 passes it — and then it runs"
+              echo "something else. That is the side door. See CLAUDE.md section 2."
+              bad=1
+            fi
           fi
 
           # THE GLOB ABOVE KEYS ON A FILENAME, AND THE FILENAME IS ONLY A
@@ -1858,7 +2047,21 @@ jobs:
           # also untouched, and this script is picked up from the DEFAULT path so
           # no manifest names it. A second build script, or this one growing a
           # process, is still a red build.
-          allow_build='crates/cli/build.rs 1'
+          #
+          # THREE ENTRIES, AND THEY ARE ONE BUILD SCRIPT. `crates/cli/build.rs`
+          # declares `mod build_provenance;` and `mod commit_stamp;`; both files
+          # sit beside it and both are compiled into the script cargo runs.
+          # Layer 3 used to see only the root, so the two modules were 61,259 of
+          # the 66,459 bytes that execute before this workspace compiles and no
+          # allowlist accounted for a byte of them. They are named here for the
+          # same reason the root is: this list is what a reader consults to
+          # learn what the one permitted build script consists of, and a FOURTH
+          # file joining it is now a red build that someone has to justify. That
+          # is the whole point of the entry — D-0348 permitted a build script,
+          # not an open-ended set of files.
+          allow_build='crates/cli/build.rs 1
+          crates/cli/build_provenance.rs 1
+          crates/cli/commit_stamp.rs 1'
 
           work=$(mktemp -d)
           bad=0
@@ -2003,6 +2206,54 @@ jobs:
           # allowlist below is the escape, and taking it should come with a
           # decisions entry.
           bh=$( { git ls-files | awk -F/ '$NF == "build.rs" { print $0 ":1:a build script exists" }'; } || true )
+
+          # AND A BUILD SCRIPT IS NOT ONE FILE. `$NF == "build.rs"` reports the
+          # ROOT of the script and nothing the root declares.
+          # `crates/cli/build.rs` says `mod build_provenance;` and
+          # `mod commit_stamp;` on two consecutive lines; both files sit beside
+          # it and both are compiled into the script cargo runs, and neither has
+          # ever been reported by this layer or accounted for by its allowlist.
+          # Layer 3's rule is that the script EXISTS, so the files it is MADE OF
+          # are this layer's subject exactly as its root is — otherwise a third
+          # module joins the one permitted build script and nothing here notices.
+          # Gate 2's `*build.rs` glob had the identical hole and is widened the
+          # same way in the same commit.
+          #
+          # Four resolutions are tried per `mod NAME;` — `<dir>/NAME.rs` and
+          # `<dir>/NAME/mod.rs`, which is where rustc looks from a crate root,
+          # and the same pair under the declaring file's own stem, which is where
+          # it looks from anywhere else. Only TRACKED candidates join: an
+          # untracked file is not what CI compiles.
+          bs=""
+          roots="$( { git ls-files | awk -F/ '$NF == "build.rs" { print $0 }'; } || true )"
+          queue="$roots"
+          while [ -n "$queue" ]; do
+            next=""
+            for f in $queue; do
+              case " $bs " in *" $f "*) continue ;; esac
+              bs="$bs $f"
+              bd="$(dirname "$f")"
+              bstem="${f%.rs}"
+              bmods=$( { grep -hoE '^[[:space:]]*(pub[[:space:]]+)?mod[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*;' "$f" || true; } \
+                       | sed -E 's/^.*mod[[:space:]]+([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*;.*$/\1/' )
+              for m in $bmods; do
+                for cand in "$bd/$m.rs" "$bd/$m/mod.rs" "$bstem/$m.rs" "$bstem/$m/mod.rs"; do
+                  if [ -n "$( { git ls-files -- "$cand" || true; } )" ]; then
+                    next="$next $cand"
+                  fi
+                done
+              done
+            done
+            queue="$next"
+          done
+          rootset=" $( printf '%s ' $roots ) "
+          for f in $bs; do
+            case "$rootset" in
+              *" $f "*) ;;
+              *) bh=$( { printf '%s\n%s\n' "$bh" "$f:1:a module compiled into a build script" | grep . || true; } ) ;;
+            esac
+          done
+
           # AND THE SCRIPT NEED NOT BE CALLED `build.rs`. `$NF == "build.rs"`
           # reads the DEFAULT filename; a manifest that says `build = "gen.rs"`
           # renames the script straight out of this layer, and the file it names
@@ -7509,14 +7760,54 @@ jobs:
       # count it, because to every tool involved the text is prose. 36 lines in
       # /db and a whole `.foothold` block in /ingest were inert this way.
       #
-      # Two checks, because either alone misses cases. The count catches an
-      # unterminated comment anywhere; the shape catches a fused one whose
-      # imbalance happens to cancel out against another. Neither can be fooled
-      # by a comment that merely CONTAINS a brace, because the test is that the
-      # comment's own first line ENDS in one.
+      # The shape test is that SOME LINE OF THE COMMENT BODY ends in a brace,
+      # and it used to be that the comment's FIRST line did. That narrower
+      # reading was measured and it misses the common case: the fusion happens
+      # wherever the `*/` was deleted, and a comment three prose lines long
+      # loses its closer on the THIRD line, not the first --
+      #
+      #     /* THE DAY AND MONTH FIELDS TAKE /INGEST BOX, for the same reason
+      #        ... two more lines of prose ...
+      #        a focus underline for the whole group{
+      #
+      # -- so the first line ends in a word and the gate walked past a rule
+      # that had been inert ever since. Widening it to any line found four such
+      # fusions in `web/src/routes/db/+page.svelte` on the day it was widened
+      # and NOTHING in the other twelve files, which is the discrimination the
+      # narrow test was claiming and did not have. A comment that merely
+      # CONTAINS a brace still cannot fool it: the test is that a line ENDS in
+      # one, which is what a selector does and what prose about a brace does
+      # not. Counting every `{` instead was measured too and it is not usable
+      # -- it fires on a dozen comments across four files that quote a brace
+      # mid-sentence.
+      #
+      # The `/*` against `*/` count below is printed and is NOT a failure, and
+      # it says so in the line it prints. It cannot be one: several of the `/*`
+      # in `/db` sit inside other comments, where CSS gives them no meaning, so
+      # that file is short of balanced with zero unterminated comments. No
+      # number is pinned here on purpose -- `web/` is edited by its own lane
+      # and the counts move under this file. The scan above is the check; the
+      # count is context printed beside it.
       # ----------------------------------------------------------------------
       - name: Gate W5 — no comment swallows a CSS rule
         run: |
+          set -euo pipefail
+          # THE FILE LIST BELOW WAS EMPTY FOR THE WHOLE LIFE OF THIS GATE.
+          #
+          # The quote-escape idiom the file list used -- quote, double-quote,
+          # quote, double-quote, quote -- is how a single quote is written
+          # INSIDE a single-quoted string. The `node -e` quote has already
+          # CLOSED by the time the `$( ... )` is reached, so the shell was in
+          # ordinary context and the idiom collapsed to twelve LITERAL
+          # characters: a double quote, a single quote, the glob, a single
+          # quote, a double quote. No file is named that. `find` matched
+          # nothing, node was handed argc 0 against 13 real files, the `for`
+          # loop ran zero times, and the gate printed its success line on every
+          # run since it was written. Measured with a node argc probe, not
+          # inferred.
+          #
+          # Plain single quotes are correct here and always were: this is the
+          # shell, not a nested string.
           node -e '
             const fs = require("fs");
             const files = process.argv.slice(1);
@@ -7529,30 +7820,71 @@ jobs:
               // has no directory between `routes/` and the filename. A gate
               // that names its inputs by hand misses the ones nobody thought
               // of, so this walks the tree instead.
-              const css = f.endsWith(".css")
-                ? src
-                : src.split("<style>")[1]?.split("</style>")[0];
-              if (!css) continue;
+              //
+              // THE SPLIT THIS REPLACES READ THE WRONG BLOCK ON A REAL FILE.
+              // `split("<style>")[1]` takes whatever follows the FIRST of that
+              // eight-character string, and on `routes/+page.svelte` the second
+              // occurrence is PROSE -- six lines into the style block a comment
+              // reads "A literal in a page <style> is a second theme the toggle
+              // cannot reach". So the split handed 387 characters to a scanner
+              // owed 35,472, and the fragment ends inside a comment, so the
+              // gate reported an unterminated comment that is not there.
+              //
+              // The opening tag is matched at COLUMN ZERO and the closing tag
+              // is required to start a line, which is where a Svelte component
+              // puts its one top-level style element and where prose about the
+              // tag never sits. Attributes are allowed: `<style lang="scss">`
+              // is the same element.
+              let css = null;
+              let base = 0;
+              if (f.endsWith(".css")) {
+                css = src;
+              } else {
+                const open = /^<style(?:[^>\n]*)?>/m.exec(src);
+                if (open) {
+                  base = open.index + open[0].length;
+                  const rest = src.slice(base);
+                  const shut = rest.indexOf("\n</style>");
+                  if (shut !== -1) css = rest.slice(0, shut);
+                }
+                // A FILE THAT CARRIES THE TAG AND NO READABLE BLOCK IS LOUD.
+                // Falling quietly through is how the version of this gate that
+                // was handed ZERO filenames printed its success line every run.
+                if (css === null && src.includes("<style")) {
+                  console.log(`${f}: carries a <style tag but no top-level <style> ... </style> block this gate can read`);
+                  bad++;
+                }
+              }
+              if (css === null) continue;
               const opens = (css.match(/\/\*/g) || []).length;
               const closes = (css.match(/\*\//g) || []).length;
+              // 1-based line number in the ORIGINAL file, so a finding can be
+              // opened rather than searched for.
+              const at = (k) => src.slice(0, base + k).split("\n").length;
               let i = 0;
               while (true) {
                 const a = css.indexOf("/*", i);
                 if (a === -1) break;
                 const b = css.indexOf("*/", a + 2);
-                const line = css.slice(a, b === -1 ? undefined : b).split("\n")[0];
+                const body = css.slice(a, b === -1 ? undefined : b).split("\n");
                 if (b === -1) {
-                  console.log(`${f}: UNTERMINATED comment: ${line.slice(0, 70)}`);
+                  console.log(`${f}:${at(a)}: UNTERMINATED comment: ${body[0].slice(0, 70)}`);
                   bad++;
                   break;
                 }
-                if (line.trimEnd().endsWith("{")) {
-                  console.log(`${f}: comment swallows the rule under it: ${line.slice(0, 70)}`);
+                // ANY line of the body, not just the first: the `*/` is deleted
+                // wherever the prose happened to end, which on a three-line
+                // comment is the third line.
+                const k = body.findIndex((l) => l.trimEnd().endsWith("{"));
+                if (k !== -1) {
+                  console.log(`${f}:${at(a) + k}: comment swallows the rule under it: ${body[k].trim().slice(0, 70)}`);
                   bad++;
                 }
                 i = b + 2;
               }
-              if (opens !== closes) console.log(`${f}: ${opens} "/*" against ${closes} "*/"`);
+              if (opens !== closes) {
+                console.log(`${f}: note, not a failure: ${opens} "/*" against ${closes} "*/" -- a nested opener has no meaning to CSS and is counted anyway`);
+              }
             }
             if (bad) {
               console.log("");
@@ -7562,7 +7894,7 @@ jobs:
               process.exit(1);
             }
             console.log("no comment swallows a rule");
-          ' $(find web/src -name '"'"'*.svelte'"'"' -o -name '"'"'*.css'"'"' | sort)
+          ' $(find web/src -name '*.svelte' -o -name '*.css' | sort)
 
       - name: Gate W6 — the masters script spends no vendor request on load
         run: |

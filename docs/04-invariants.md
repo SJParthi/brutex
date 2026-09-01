@@ -3474,10 +3474,33 @@ MAE and MFE are now durable chosen-grid facts.
 
 ## Pre-Admission Data V1 binds measured streams; stored authoring is owned by D-0475 — D-0471, D-0475
 
+**This family is `PAD-`, and it was `PA-` for one commit.** `PA-01` was
+assigned twice in the same commit — once to the outer-parallel-sweep
+support-worker bound above, and once to the row below — so gates 10b and 27
+were both red and neither id resolved to anything. The evidence rule D-0045
+set and D-0215 reapplied gives the letter to whichever side is cited from
+OUTSIDE this document: the parallel-sweep row is cited by
+`docs/05-decisions.md` D-0439 and by `docs/06-limits.md` §129, so it keeps
+`PA-01`, and this family moved to the free prefix `PAD-`. `PAD` was checked
+against every prefix in this document and against every tracked file before it
+was chosen; it collided with nothing.
+
+`PA-02` and `PA-03` ARE RETIRED and must never be reassigned — CLAUDE.md §3
+rule 8 forbids reusing an identifier, and both were live for the length of one
+commit. The `PA-` family now has exactly one member.
+
+**The one citation outside this document was carried with the rename.**
+`docs/02-store-format.md:1320` (the bounded-file paragraph closing the
+Pre-Admission Data V1 section) read "D-0471, PA-01/PA-02 and limits §153 define
+the boundary", and both ids there mean THIS family; it now reads
+`PAD-01/PAD-02`. The two surviving `PA-01` citations —
+`docs/05-decisions.md:29638` and `docs/06-limits.md:6759` — mean the
+parallel-sweep row and are correct as written.
+
 | ID | Invariant | Proof | ✓ |
 |---|---|---|---|
-| PA-01 | **One Pre-Admission Data V1 record binds the exact Candidate completion to measured signal, complete one-minute context, an exact contiguous execution subslice, prior-day daily records/eligibility, both full-span calendars, feed/commit/policies and explicit nonzero load ceilings.** No public constructor accepts caller-authored stream or policy digests; the private measurement path recomputes the composite data identity and both calendar receipts | `cli::pre_admission_data::tests::exact_740_byte_data_and_completion_codecs_bind_every_semantic_field`; `exact_contiguous_execution_and_daily_eligibility_are_measured_not_claimed` | ✓ |
-| PA-02 | **A Pre-Admission entry is visible only when adjacent sealed Data and Completion records repeat every semantic field exactly.** Exact retry reuses bytes; one exact tail orphan may receive its receipt. Ragged, corrupt, foreign, stale, over-bound or path-replaced history refuses, and allocation is fallible before persistence. The writable ledger also requires an already-existing directory and cannot manufacture a disappeared external-volume root. The ledger still exposes no public source/digest constructor; D-0475's owning stored orchestrator is the only public production authoring path | `cli::pre_admission_data::tests::ledger_is_receipt_last_reopenable_paged_bounded_and_idempotent`; `exact_trailing_data_orphan_resumes_and_foreign_retry_refuses`; `ragged_corrupt_and_foreign_completion_pairs_fail_closed`; `stale_same_length_mutation_and_nonzero_bounds_fail_closed`; `replaced_lock_and_data_paths_refuse_cached_audits`; `writer_refuses_missing_or_non_directory_root_without_creating_it`; `cli::step3_orchestrator::tests::exact_reopened_join_is_the_only_success_shape`; focused suite **8/8** green on 2026-08-31 | ✓ |
+| PAD-01 | **One Pre-Admission Data V1 record binds the exact Candidate completion to measured signal, complete one-minute context, an exact contiguous execution subslice, prior-day daily records/eligibility, both full-span calendars, feed/commit/policies and explicit nonzero load ceilings.** No public constructor accepts caller-authored stream or policy digests; the private measurement path recomputes the composite data identity and both calendar receipts | `cli::pre_admission_data::tests::exact_740_byte_data_and_completion_codecs_bind_every_semantic_field`; `exact_contiguous_execution_and_daily_eligibility_are_measured_not_claimed` | ✓ |
+| PAD-02 | **A Pre-Admission entry is visible only when adjacent sealed Data and Completion records repeat every semantic field exactly.** Exact retry reuses bytes; one exact tail orphan may receive its receipt. Ragged, corrupt, foreign, stale, over-bound or path-replaced history refuses, and allocation is fallible before persistence. The writable ledger also requires an already-existing directory and cannot manufacture a disappeared external-volume root. The ledger still exposes no public source/digest constructor; D-0475's owning stored orchestrator is the only public production authoring path | `cli::pre_admission_data::tests::ledger_is_receipt_last_reopenable_paged_bounded_and_idempotent`; `exact_trailing_data_orphan_resumes_and_foreign_retry_refuses`; `ragged_corrupt_and_foreign_completion_pairs_fail_closed`; `stale_same_length_mutation_and_nonzero_bounds_fail_closed`; `replaced_lock_and_data_paths_refuse_cached_audits`; `writer_refuses_missing_or_non_directory_root_without_creating_it`; `cli::step3_orchestrator::tests::exact_reopened_join_is_the_only_success_shape`; focused suite **8/8** green on 2026-08-31 | ✓ |
 
 ## Population Statistics V2 recomputes evidence; its writer cannot mint it — D-0472, D-0474
 
@@ -3602,9 +3625,9 @@ other repository-boundary rule.
 
 | ID | Invariant | Proof | ✓ |
 |---|---|---|---|
-| PA-03 | **A zero-row Pre-Admission Data V2 value can be produced only from the exact authenticated Candidate Universe V1 production result whose sealed Completion proves natural extinction, complete closure, nonzero extinction depth, no unknown closure and exact zero-row reconciliation.** V2 is a separate 812-byte receipt-last format and retains every V1 source, family, stream, calendar, policy and load-bound identity; V1 remains byte-for-byte separate and continues to reject zero rows. Bare zero, removal of one proof term, semantic resealing, foreign/torn/ragged/corrupt history, stale same-length mutation and lock/data path replacement refuse; exact reuse and one exact receipt-less tail retry preserve bytes | `cli::pre_admission_data::tests::v2_zero_family_codec_requires_every_extinction_proof_term`; `v2_zero_family_ledger_is_receipt_last_reopenable_and_exactly_idempotent`; `v2_corrupt_resealed_ragged_and_stale_files_fail_closed`; `v2_replaced_lock_and_data_paths_refuse_cached_zero_family_audits`; complete focused V1+V2 module suite **13/13** green on 2026-09-01 | ✓ |
+| PAD-03 | **A zero-row Pre-Admission Data V2 value can be produced only from the exact authenticated Candidate Universe V1 production result whose sealed Completion proves natural extinction, complete closure, nonzero extinction depth, no unknown closure and exact zero-row reconciliation.** V2 is a separate 812-byte receipt-last format and retains every V1 source, family, stream, calendar, policy and load-bound identity; V1 remains byte-for-byte separate and continues to reject zero rows. Bare zero, removal of one proof term, semantic resealing, foreign/torn/ragged/corrupt history, stale same-length mutation and lock/data path replacement refuse; exact reuse and one exact receipt-less tail retry preserve bytes | `cli::pre_admission_data::tests::v2_zero_family_codec_requires_every_extinction_proof_term`; `v2_zero_family_ledger_is_receipt_last_reopenable_and_exactly_idempotent`; `v2_corrupt_resealed_ragged_and_stale_files_fail_closed`; `v2_replaced_lock_and_data_paths_refuse_cached_zero_family_audits`; complete focused V1+V2 module suite **13/13** green on 2026-09-01 | ✓ |
 
-PA-03 proves only this versioned Candidate-to-Pre-Admission component. No
+PAD-03 proves only this versioned Candidate-to-Pre-Admission component. No
 Statistics, Admission, Population, Execution, Selection or Replay zero-family
 successor consumes it. Observation V2 now authenticates the exact zero-family
 production result under OZ-01; that narrow receipt is not a statistic, a real

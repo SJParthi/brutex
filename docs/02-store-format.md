@@ -1317,7 +1317,7 @@ device/inode, length, high-resolution modification/change times and a complete
 content hash, with metadata checked before and after hashing. One validated
 fixed-record seek is worst-case O(1) in record count; open is O(file bytes), a
 page is O(returned rows), and source preparation, hashing, locking, sync and
-filesystem latency remain input/system dependent. D-0471, PA-01/PA-02 and
+filesystem latency remain input/system dependent. D-0471, PAD-01/PAD-02 and
 limits §153 define the boundary.
 
 ## 25. Population Statistics audit ledger — version 2
