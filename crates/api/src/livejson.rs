@@ -71,12 +71,15 @@ fn respond(root: Result<PathBuf, String>) -> (axum::http::StatusCode, JsonHeader
         }
     };
 
-    // NO REFUSAL PATH BEYOND THE ROOT ITSELF. `live::current` returns an empty
-    // vector for a missing directory and SKIPS any file whose magic, version,
-    // header or count does not read -- because this directory is transient by
-    // design and a half-written file is an ordinary state, not a corruption to
-    // report. A stale file from a previous format is skipped by the same rule.
-    let runs = cli::live::current(&root);
+    // SKIPPING IS STILL RIGHT, AND IT IS NOW COUNTED. This directory is
+    // transient by design and a half-written file is an ordinary state, not a
+    // corruption to report -- but reporting `count: 0` for a machine whose
+    // three live files are one version old told the operator the sweep was not
+    // running. `skipped` and `listed` are the two facts that were folded into
+    // an empty list: `listed: false` is "I could not look", and any nonzero
+    // `skipped` beside `count: 0` is "something is there and I cannot read it".
+    let census = cli::live::census(&root);
+    let runs = &census.runs;
 
     let mut out = String::with_capacity(runs.len().saturating_mul(2_400).saturating_add(64));
     out.push_str(r#"{"runs":["#);
@@ -88,7 +91,12 @@ fn respond(root: Result<PathBuf, String>) -> (axum::http::StatusCode, JsonHeader
     }
     let _ = std::fmt::Write::write_fmt(
         &mut out,
-        format_args!(r#"],"count":{},"refusal":null}}"#, runs.len()),
+        format_args!(
+            r#"],"count":{},"skipped":{},"listed":{},"refusal":null}}"#,
+            runs.len(),
+            census.skipped,
+            census.listed
+        ),
     );
     (axum::http::StatusCode::OK, json, out)
 }
@@ -180,8 +188,10 @@ mod tests {
         let (status, _, body) = respond(Ok(root.clone()));
         assert_eq!(status, axum::http::StatusCode::OK);
         assert_eq!(
-            body, r#"{"runs":[],"count":0,"refusal":null}"#,
-            "nothing in flight is an empty list, not a refusal: {body}"
+            body, r#"{"runs":[],"count":0,"skipped":0,"listed":true,"refusal":null}"#,
+            "nothing in flight is an empty list, not a refusal, and a live \
+             directory that was never created is LISTED and empty rather than \
+             unreadable: {body}"
         );
         assert!(
             !root.join("results").exists(),

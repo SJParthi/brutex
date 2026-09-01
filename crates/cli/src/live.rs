@@ -358,24 +358,82 @@ impl Live {
 ///
 /// # Errors
 ///
-/// Never. A directory that cannot be listed reads as no live runs, which is
-/// the truth a reader can act on: there is nothing to show.
+/// Never. A directory that cannot be listed reads as no live runs -- which is
+/// NOT "the truth a reader can act on", as this sentence used to claim: it is
+/// one of two very different facts rendered identically. Callers that need to
+/// tell them apart, and any surface an operator watches during a run must,
+/// should use [`census`] instead.
 #[must_use]
 pub fn current(root: &Path) -> Vec<([u8; 32], Summary, Vec<Row>)> {
-    let Ok(entries) = std::fs::read_dir(Live::dir(root)) else {
-        return Vec::new();
+    census(root).runs
+}
+
+/// What could be read, and what could not.
+///
+/// **`current` returns only what it could decode, and an empty vector from it
+/// is indistinguishable from a machine with nothing running.** That is the
+/// shape §4 bans: a five-hour sweep whose live file is one version behind
+/// reports an idle machine, and the operator watching `/live.json` has no way
+/// to tell "nothing is running" from "I could not read three files".
+///
+/// Skipping is still right -- this directory is transient by design and a
+/// half-written file is an ordinary state -- but it must be COUNTED. A
+/// directory that cannot be listed is likewise not a directory that is empty.
+#[derive(Clone, Debug, Default)]
+pub struct Census {
+    /// Every live file that decoded, in identity order.
+    pub runs: Vec<([u8; 32], Summary, Vec<Row>)>,
+    /// Files present that did not decode as a live file of this version:
+    /// wrong magic, unknown version, short header, or an unreadable count.
+    pub skipped: u32,
+    /// False when the live directory itself could not be listed. Distinct from
+    /// an empty directory, which lists fine and yields no runs.
+    pub listed: bool,
+}
+
+/// Reads the live directory, counting what it could not show.
+#[must_use]
+pub fn census(root: &Path) -> Census {
+    let entries = match std::fs::read_dir(Live::dir(root)) {
+        Ok(entries) => entries,
+        // A live directory that does not exist is a store where nothing has
+        // ever run, and that IS "nothing in flight" -- it is listed, and it is
+        // empty. Every other error is "I could not look", which is the fact
+        // this type exists to keep separate: permissions, a broken symlink, a
+        // volume that went away mid-sweep.
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => {
+            return Census {
+                runs: Vec::new(),
+                skipped: 0,
+                listed: true,
+            };
+        }
+        Err(_) => {
+            return Census {
+                runs: Vec::new(),
+                skipped: 0,
+                listed: false,
+            };
+        }
     };
-    let mut out = Vec::new();
+    let mut runs = Vec::new();
+    let mut skipped: u32 = 0;
     for entry in entries.flatten() {
         if let Some(one) = read_one(&entry.path()) {
-            out.push(one);
+            runs.push(one);
+        } else {
+            skipped = skipped.saturating_add(1);
         }
     }
     // Deterministic order, because two runs finishing in the same millisecond
     // must not swap places between two polls of the same page. The identity is
     // the key nothing else shares.
-    out.sort_by_key(|(identity, _, _)| *identity);
-    out
+    runs.sort_by_key(|(identity, _, _)| *identity);
+    Census {
+        runs,
+        skipped,
+        listed: true,
+    }
 }
 
 /// One live file, or `None` if it is not one.
