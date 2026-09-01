@@ -44,6 +44,7 @@ description  = "The operator entry point for the sweep: bars in, ladder walked, 
 runner     = { path = "../runner", version = "0.1.0" }
 engine     = { path = "../engine", version = "0.1.0" }
 indicators = { path = "../indicators", version = "0.1.0" }
+vocab      = { path = "../vocab", version = "0.1.0" }
 # THE FILL DIRECTION, and nothing else. `trade::walk` takes a
 # `costs::fill::Direction`, so a caller cannot name a long or a short without
 # this arrow. It adds no capability -- `costs` declares `brutex_core` alone --
@@ -70,6 +71,13 @@ costs      = { path = "../costs", version = "0.1.0" }
 # cli -> runner -> costs -> core.
 store      = { path = "../store", version = "0.1.0" }
 brutex_core = { path = "../core", package = "core", version = "0.1.0" }
+
+# THE CALENDAR ATTESTATION EDGE. `sweep-stored` already owns the stored-bar
+# boundary; this direct dependency lets that boundary classify each supplied
+# IST day through `pull::calendar` and bind the resulting complete,
+# incomplete, or unmeasured receipt. It does not move a network call into the
+# sweep and it does not let `runner` depend on vendor/calendar policy.
+pull       = { path = "../pull", version = "0.1.0" }
 
 # THE LOG THE SWEEP NEVER HAD.
 #
@@ -115,6 +123,20 @@ telemetry  = { path = "../telemetry", version = "0.1.0" }
 # rather than mutated from the workers -- so no result depends on which thread
 # finished first. See `batch::sweep_under`.
 rayon      = { workspace = true }
+
+[build-dependencies]
+# `build.rs` proves that the bytes being compiled are the bytes at HEAD without
+# starting another process. Git's object store is SHA-1 addressed and its loose
+# and packed objects are zlib streams, so these are format readers rather than
+# application dependencies.
+sha1 = { workspace = true }
+flate2 = { workspace = true }
+
+[dev-dependencies]
+# The build-time verifier is included directly by its adversarial integration
+# test. Keeping these test-only avoids adding either crate to the CLI binary.
+sha1 = { workspace = true }
+flate2 = { workspace = true }
 
 [lints]
 workspace = true

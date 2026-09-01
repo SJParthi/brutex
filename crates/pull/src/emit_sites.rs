@@ -3,12 +3,12 @@
 //!
 //! # What was unproven, and it was all of it
 //!
-//! `crates/pull` holds **42** `telemetry::emit` call sites — the largest
+//! `crates/pull` holds **43** `telemetry::emit` call sites — the largest
 //! concentration in the workspace — and **not one of them had a test that drove
 //! the production helper and then found the record in a file.**
 //!
 //! **THE COUNT IS MEASURED AND THE TABLE DOES NOT COVER ALL OF IT.** This header
-//! said 21 while the crate held 36, and `SITES` holds 27 rows, so the rest
+//! said 21 while the crate held 36, and `SITES` holds 36 rows, so the rest
 //! are driven by nothing here. Nothing pins either number -- there is no gate
 //! comparing the table to the crate -- so re-measure rather than trusting this
 //! sentence: `grep -c "telemetry::emit(" crates/pull/src/*.rs`. The gap is
@@ -381,6 +381,19 @@ struct Site {
 /// Every `telemetry::emit` under `crates/pull/src` except the one the module
 /// header names, one row each.
 static SITES: &[Site] = &[
+    Site {
+        // A CAPTURE FAILURE IS DELIBERATELY NOT THE PULL'S FAILURE. That makes
+        // the event its only durable voice: the caller receives the vendor
+        // body normally, while this line and the process counter say its raw
+        // evidence did not land. Drive the shipped recorder against a file
+        // where its directory must be; constructing an event here would prove
+        // only that telemetry works.
+        at: "crates/pull/src/capture.rs — note_refused",
+        target: "pull.capture",
+        message: "vendor capture could not be written",
+        says: ("feed", Says::Holds("truedata")),
+        drive: drive_capture_refused,
+    },
     Site {
         // THE CORRECTION D-0332 MAKES, PROVEN TO REACH A FILE.
         //
@@ -773,6 +786,23 @@ static SITES: &[Site] = &[
 // ===========================================================================
 // The drivers — one shipped call each
 // ===========================================================================
+
+/// A real capture attempt against a path that cannot become a directory.
+fn drive_capture_refused(scratch: &Scratch) {
+    let blocker = scratch.root.join("captures");
+    fs::write(&blocker, b"not a directory").expect("the blocker");
+    assert!(
+        crate::capture::record(
+            &scratch.root,
+            crate::vendor::Feed::TrueData,
+            crate::capture::Method::Post,
+            "https://example.invalid/evidence",
+            "{}",
+        )
+        .is_none(),
+        "the vendor answer survives, but its diagnostic could not be written"
+    );
+}
 
 /// A multiplicative decrease, through the governor's own public method.
 /// One index bar whose volume column carries noise, decoded through the shipped

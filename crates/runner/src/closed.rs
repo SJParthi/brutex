@@ -85,6 +85,31 @@ fn frequent_total(sweep: &Sweep) -> usize {
         .fold(0_usize, |n, l| n.saturating_add(l.frequent.len()))
 }
 
+/// Masks in `lower` made redundant by an immediate superset in `upper` with
+/// identical support.
+///
+/// Immediate supersets are sufficient by the theorem in this module's header.
+/// Keeping the operation at one adjacent pair is what lets the streamed ranker
+/// perform it at retirement, while both frontiers are borrowed and before the
+/// lower one is dropped.
+pub(crate) fn redundant_between(
+    lower: &engine::Frontier,
+    upper: &engine::Frontier,
+) -> HashSet<ConditionMask> {
+    let below: HashMap<ConditionMask, u64> =
+        lower.frequent.iter().map(|i| (i.mask, i.hits)).collect();
+    let mut redundant = HashSet::with_capacity(lower.frequent.len());
+    for larger in &upper.frequent {
+        for bit in set_positions(&larger.mask) {
+            let smaller = larger.mask.without_bit(bit);
+            if below.get(&smaller) == Some(&larger.hits) {
+                redundant.insert(smaller);
+            }
+        }
+    }
+    redundant
+}
+
 /// How many frequent itemsets are redundant, WITHOUT building the kept list.
 ///
 /// [`crate::significance::effective_trials`] needs only this count, and calling
@@ -98,16 +123,7 @@ fn frequent_total(sweep: &Sweep) -> usize {
 pub fn redundant_count(sweep: &Sweep) -> u64 {
     let mut redundant: HashSet<ConditionMask> = HashSet::with_capacity(frequent_total(sweep));
     for (lower, upper) in sweep.levels.iter().zip(sweep.levels.iter().skip(1)) {
-        let below: HashMap<ConditionMask, u64> =
-            lower.frequent.iter().map(|i| (i.mask, i.hits)).collect();
-        for larger in &upper.frequent {
-            for bit in set_positions(&larger.mask) {
-                let smaller = larger.mask.without_bit(bit);
-                if below.get(&smaller) == Some(&larger.hits) {
-                    redundant.insert(smaller);
-                }
-            }
-        }
+        redundant.extend(redundant_between(lower, upper));
     }
     u64::try_from(redundant.len()).unwrap_or(u64::MAX)
 }
@@ -135,18 +151,7 @@ pub fn closed(sweep: &Sweep) -> Closed {
     // pattern's else arm cannot fire, and an arm no run reaches is the coverage
     // hole §9 refuses.
     for (lower, upper) in sweep.levels.iter().zip(sweep.levels.iter().skip(1)) {
-        let below: HashMap<ConditionMask, u64> =
-            lower.frequent.iter().map(|i| (i.mask, i.hits)).collect();
-        for larger in &upper.frequent {
-            for bit in set_positions(&larger.mask) {
-                let smaller = larger.mask.without_bit(bit);
-                // Equal support means the extra condition costs nothing: every
-                // bar the smaller one fires on, the larger one fires on too.
-                if below.get(&smaller) == Some(&larger.hits) {
-                    redundant.insert(smaller);
-                }
-            }
-        }
+        redundant.extend(redundant_between(lower, upper));
     }
 
     let kept: Vec<Itemset> = sweep

@@ -53,9 +53,11 @@
 //! loaded bar** — not a sample, not a count-and-endpoints fingerprint. One
 //! differing bar re-keys the identity. That is the point."*
 //!
-//! [`data_digest`] hashes all seven fields of every candle in order. It is O(1)
-//! per bar and allocates nothing. It is **not** a digest of a file: this crate
-//! cannot open one, and the candles it is given are generated in-process.
+//! [`data_digest`] hashes all seven fields of every candle in order.
+//! [`data_digest_with_execution`] domain-separates and binds the signal digest
+//! plus an optional execution-series digest when two slices decide the answer.
+//! Both are O(1) per bar. Neither is a digest of a file: this crate cannot open
+//! one, and only hashes the candles its caller supplies.
 //!
 //! # Cost
 //!
@@ -282,7 +284,9 @@ pub struct Run<'a> {
     pub timeframe: &'a str,
     /// The thresholds actually applied.
     pub params: Params,
-    /// [`data_digest`] over every bar loaded.
+    /// The digest of every bar that decides the answer: [`data_digest`] for one
+    /// series, or [`data_digest_with_execution`] when a second execution series
+    /// supplies fills.
     pub data_digest: [u8; OUT_LEN],
     /// The commit this ran at.
     pub commit: &'a str,
@@ -343,6 +347,226 @@ pub fn data_digest(bars: &[Candle]) -> [u8; OUT_LEN] {
         hasher.update(&bar.open_interest.to_le_bytes());
     }
     hasher.finalize()
+}
+
+/// The data term for a run whose signals and fills may use different series.
+///
+/// This strengthens [`Run::data_digest`]; it does not add a tenth identity term.
+/// The signal digest is always present. The execution digest is tagged as either
+/// absent or present. A native one-series run returns [`data_digest`] byte for
+/// byte, preserving every already-recorded identity; a coarse-rung run also
+/// binds every one-minute bar that can change its entries, exits, stops,
+/// targets, trails, and therefore its recorded answer.
+///
+/// # Domain separation
+///
+/// The component digests are not concatenated as an anonymous pair. A fixed
+/// versioned domain leads the outer BLAKE3 input, and signal, absent execution,
+/// and present execution have different tags. `None` does not enter that new
+/// domain at all: it retains the historical one-series digest. `Some(signal)`
+/// is a two-role computation and therefore has a distinct encoding even when
+/// both roles happen to carry the same bytes. The tags are append-only for the
+/// same reason the nine identity-term tags are: changing one re-keys historical
+/// runs.
+///
+/// # Cost
+///
+/// One [`data_digest`] pass per supplied series, then one fixed-size outer hash.
+/// Native one-minute execution supplies `None`, so its dataset is digested once
+/// through the unchanged historical function. A projected coarse run is
+/// O(signal bars + execution bars), with O(1) work per bar and no data-sized
+/// allocation.
+#[must_use]
+pub fn data_digest_with_execution(
+    signal: &[Candle],
+    execution: Option<&[Candle]>,
+) -> [u8; OUT_LEN] {
+    /// A versioned namespace for composing already-domain-specific bar digests.
+    const DOMAIN: &[u8] = b"brutex.runner.identity.data-with-execution.v1";
+    /// The signal-series component, which every run has.
+    const SIGNAL: u8 = 1;
+    /// A separately loaded series controls execution.
+    const EXECUTION_PRESENT: u8 = 3;
+
+    // NO SECOND SERIES MEANS NO IDENTITY MIGRATION. Results already persist
+    // `RunId`; wrapping the old digest in a new domain would make an unchanged
+    // native run look new and append a duplicate result. Only the computation
+    // whose answer actually acquired a second dataset is re-keyed.
+    let Some(execution) = execution else {
+        return data_digest(signal);
+    };
+
+    let mut hasher = Hasher::new();
+    hasher.update(
+        &u32::try_from(DOMAIN.len())
+            .unwrap_or(u32::MAX)
+            .to_le_bytes(),
+    );
+    hasher.update(DOMAIN);
+    term(&mut hasher, SIGNAL, &data_digest(signal));
+    term(&mut hasher, EXECUTION_PRESENT, &data_digest(execution));
+    hasher.finalize()
+}
+
+/// The integrity evidence available for a stored daily-reference stream.
+///
+/// This is an append-only byte vocabulary.  A committed bar-file record is not
+/// automatically a checksum-scrubbed record: the store's ordinary read door
+/// deliberately does not perform the O(file) scrub pass.  The only state this
+/// build can therefore attest at the CLI boundary is [`Self::UnverifiedNoReceipt`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReferenceIntegrity {
+    /// No independently persisted scrub receipt was supplied for these bytes.
+    UnverifiedNoReceipt,
+}
+
+impl ReferenceIntegrity {
+    /// The append-only identity byte for this evidence state.
+    #[must_use]
+    pub const fn byte(self) -> u8 {
+        match self {
+            Self::UnverifiedNoReceipt => 0,
+        }
+    }
+}
+
+/// Everything outside the signal and one-minute streams that fixes a stored
+/// previous-day reference computation.
+///
+/// `eligibility[i]` is `1` when `daily_bars[i]` may become a previous-day
+/// anchor and `0` when the explicit calendar excludes it.  The exact calendar
+/// day list is bound as well as the per-record decisions: changing a policy
+/// version re-keys even when a particular span happens not to contain one of
+/// the excluded dates.
+#[derive(Clone, Copy, Debug)]
+pub struct DailyReferenceBinding<'a> {
+    /// The one-day OHLCV records offered to the causal join, in store order.
+    pub daily_bars: &'a [Candle],
+    /// One explicit `0`/`1` admission decision per daily record.
+    pub eligibility: &'a [u8],
+    /// Version of the daily-reference payload and join schema.
+    pub schema: u32,
+    /// Version of the rule that maps calendar days to eligibility.
+    pub eligibility_policy: u32,
+    /// Version of the exact-minute `GapFib` close-alignment/overlay rule.
+    pub gap_overlay_policy: u32,
+    /// Every IST day the policy excludes, in its canonical order.
+    pub excluded_ist_days: &'a [i64],
+    /// Whether an independent integrity receipt accompanied the daily records.
+    pub daily_integrity: ReferenceIntegrity,
+    /// Whether an independent integrity receipt accompanied the minute records.
+    pub minute_integrity: ReferenceIntegrity,
+}
+
+/// Why a three-stream data identity could not be formed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DailyBindingRefusal {
+    /// There must be exactly one eligibility decision per daily record.
+    EligibilityLengthMismatch {
+        /// Number of daily records.
+        daily: usize,
+        /// Number of eligibility bytes.
+        eligibility: usize,
+    },
+    /// Eligibility has an append-only two-value encoding; another byte has no
+    /// meaning in this schema.
+    UnknownEligibility {
+        /// Position of the unknown byte.
+        index: usize,
+        /// The byte that has no declared meaning.
+        byte: u8,
+    },
+}
+
+/// Bind the signal rung, exact one-minute path, stored one-day references,
+/// calendar/eligibility policy, and integrity evidence into one data term.
+///
+/// Unlike [`data_digest_with_execution`], execution is mandatory here even
+/// when the signal rung is itself one minute.  The two roles are tagged
+/// separately, so the identity proves that the exact one-minute path was
+/// supplied rather than inferring that role from the signal timeframe.
+///
+/// # Errors
+///
+/// [`DailyBindingRefusal::EligibilityLengthMismatch`] when the admission bytes
+/// are not parallel to the daily bars, or
+/// [`DailyBindingRefusal::UnknownEligibility`] for a byte other than `0` or `1`.
+pub fn data_digest_with_daily_reference(
+    signal: &[Candle],
+    execution_minute: &[Candle],
+    reference: DailyReferenceBinding<'_>,
+) -> Result<[u8; OUT_LEN], DailyBindingRefusal> {
+    const DOMAIN: &[u8] = b"brutex.runner.identity.signal-execution-daily.v2";
+    const SIGNAL: u8 = 1;
+    const EXECUTION_MINUTE: u8 = 2;
+    const DAILY: u8 = 3;
+    const ELIGIBILITY: u8 = 4;
+    const SCHEMA: u8 = 5;
+    const POLICY: u8 = 6;
+    const GAP_OVERLAY_POLICY: u8 = 7;
+    const EXCLUDED_DAYS: u8 = 8;
+    const DAILY_INTEGRITY: u8 = 9;
+    const MINUTE_INTEGRITY: u8 = 10;
+
+    if reference.daily_bars.len() != reference.eligibility.len() {
+        return Err(DailyBindingRefusal::EligibilityLengthMismatch {
+            daily: reference.daily_bars.len(),
+            eligibility: reference.eligibility.len(),
+        });
+    }
+    for (index, byte) in reference.eligibility.iter().copied().enumerate() {
+        if byte > 1 {
+            return Err(DailyBindingRefusal::UnknownEligibility { index, byte });
+        }
+    }
+
+    let mut hasher = Hasher::new();
+    hasher.update(
+        &u32::try_from(DOMAIN.len())
+            .unwrap_or(u32::MAX)
+            .to_le_bytes(),
+    );
+    hasher.update(DOMAIN);
+    term(&mut hasher, SIGNAL, &data_digest(signal));
+    term(
+        &mut hasher,
+        EXECUTION_MINUTE,
+        &data_digest(execution_minute),
+    );
+    term(&mut hasher, DAILY, &data_digest(reference.daily_bars));
+    term(&mut hasher, ELIGIBILITY, reference.eligibility);
+    term(&mut hasher, SCHEMA, &reference.schema.to_le_bytes());
+    term(
+        &mut hasher,
+        POLICY,
+        &reference.eligibility_policy.to_le_bytes(),
+    );
+    term(
+        &mut hasher,
+        GAP_OVERLAY_POLICY,
+        &reference.gap_overlay_policy.to_le_bytes(),
+    );
+    let mut calendar = Hasher::new();
+    calendar.update(
+        &u64::try_from(reference.excluded_ist_days.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    for day in reference.excluded_ist_days {
+        calendar.update(&day.to_le_bytes());
+    }
+    term(&mut hasher, EXCLUDED_DAYS, &calendar.finalize());
+    term(
+        &mut hasher,
+        DAILY_INTEGRITY,
+        &[reference.daily_integrity.byte()],
+    );
+    term(
+        &mut hasher,
+        MINUTE_INTEGRITY,
+        &[reference.minute_integrity.byte()],
+    );
+    Ok(hasher.finalize())
 }
 
 /// One expiry, little-endian, at fixed width: year, month, day.
@@ -492,7 +716,10 @@ pub fn identity(run: &Run<'_>) -> RunId {
               instrumented, so it leaves no uncoverable region behind."
 )]
 mod tests {
-    use super::{Direction, Params, Run, RunId, data_digest, identity};
+    use super::{
+        DailyBindingRefusal, DailyReferenceBinding, Direction, Params, ReferenceIntegrity, Run,
+        RunId, data_digest, data_digest_with_daily_reference, data_digest_with_execution, identity,
+    };
     use crate::synthetic;
     use brutex_core::instrument::{Exchange, Expiry, InstrumentKey, Kind, OptionSide};
     use brutex_core::price::Paisa;
@@ -647,6 +874,276 @@ mod tests {
         let d = data_digest(&synthetic::sessions(2));
         let m = ConditionMask::default().with_bit(3);
         assert_eq!(identity(&run_over(&k, d, m)), identity(&run_over(&k, d, m)));
+    }
+
+    /// IDENTICAL COARSE SIGNALS WITH DIFFERENT INTERIOR PATHS ARE DIFFERENT RUNS.
+    ///
+    /// A coarse bar can stay byte-identical while one of the one-minute bars it
+    /// hides changes. Stops, targets and trailing exits can then produce a
+    /// different trade from the same signal. Hashing only the coarse slice gave
+    /// both answers one `RunId`; the execution digest is the missing evidence.
+    #[test]
+    fn a_coarse_run_identity_binds_the_interior_execution_path() {
+        let path_a = synthetic::sessions(2);
+        let path_b: Vec<_> = path_a
+            .iter()
+            .enumerate()
+            .map(|(index, bar)| {
+                let mut changed = *bar;
+                if index == 1 {
+                    changed.close = changed.close.saturating_add(1);
+                }
+                changed
+            })
+            .collect();
+        let period = crate::resample::Period::minutes(15).expect("a coarse period");
+        let coarse_a = crate::resample::resample(&path_a, period);
+        let coarse_b = crate::resample::resample(&path_b, period);
+        assert_eq!(
+            coarse_a, coarse_b,
+            "the signal bars must be byte-identical or this test does not isolate the hidden one-minute path"
+        );
+
+        let instrument = key();
+        let mask = ConditionMask::default().with_bit(3);
+        let mut run_a = run_over(
+            &instrument,
+            data_digest_with_execution(&coarse_a, Some(&path_a)),
+            mask,
+        );
+        run_a.timeframe = "15min";
+        let mut run_b = run_over(
+            &instrument,
+            data_digest_with_execution(&coarse_b, Some(&path_b)),
+            mask,
+        );
+        run_b.timeframe = "15min";
+
+        assert_ne!(
+            identity(&run_a),
+            identity(&run_b),
+            "different one-minute paths can produce different trades and must not share a RunId"
+        );
+    }
+
+    #[test]
+    fn execution_data_binding_is_deterministic_and_presence_is_explicit() {
+        let bars = synthetic::sessions(1);
+        let absent = data_digest_with_execution(&bars, None);
+        assert_eq!(
+            absent,
+            data_digest(&bars),
+            "a one-series run keeps its historical identity bytes rather than appending a duplicate result"
+        );
+        assert_eq!(
+            absent,
+            data_digest_with_execution(&bars, None),
+            "the same native one-minute input must reproduce byte for byte"
+        );
+
+        let present = data_digest_with_execution(&bars, Some(&bars));
+        assert_eq!(
+            present,
+            data_digest_with_execution(&bars, Some(&bars)),
+            "the same two-series input must reproduce byte for byte"
+        );
+        assert_ne!(
+            absent, present,
+            "absence means the one dataset is bound once; presence means a second execution role is bound even when its bytes match"
+        );
+
+        let instrument = key();
+        let mask = ConditionMask::default().with_bit(3);
+        let present_id = identity(&run_over(&instrument, present, mask));
+        assert_eq!(
+            present_id,
+            identity(&run_over(
+                &instrument,
+                data_digest_with_execution(&bars, Some(&bars)),
+                mask,
+            )),
+            "the complete RunId must also reproduce for the same two-series input"
+        );
+        assert_ne!(
+            identity(&run_over(&instrument, absent, mask)),
+            present_id,
+            "the absence/presence distinction must reach the RunId, not stop at an unused helper result"
+        );
+    }
+
+    fn daily_binding<'a>(
+        bars: &'a [indicators::Candle],
+        eligibility: &'a [u8],
+        excluded_ist_days: &'a [i64],
+    ) -> DailyReferenceBinding<'a> {
+        DailyReferenceBinding {
+            daily_bars: bars,
+            eligibility,
+            schema: 1,
+            eligibility_policy: 1,
+            gap_overlay_policy: 1,
+            excluded_ist_days,
+            daily_integrity: ReferenceIntegrity::UnverifiedNoReceipt,
+            minute_integrity: ReferenceIntegrity::UnverifiedNoReceipt,
+        }
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one adversarial identity matrix changes each bound term independently"
+    )]
+    fn the_three_stream_identity_binds_every_reference_choice() {
+        let signal = synthetic::sessions(1);
+        let execution = synthetic::sessions(2);
+        let daily = synthetic::sessions(1)
+            .into_iter()
+            .take(2)
+            .collect::<Vec<_>>();
+        let eligibility = [1_u8, 0];
+        let excluded = [20_382_i64, 19_784];
+        let base = data_digest_with_daily_reference(
+            &signal,
+            &execution,
+            daily_binding(&daily, &eligibility, &excluded),
+        )
+        .expect("parallel declared reference input");
+        assert_eq!(
+            base,
+            data_digest_with_daily_reference(
+                &signal,
+                &execution,
+                daily_binding(&daily, &eligibility, &excluded),
+            )
+            .expect("same input"),
+            "the complete binding is deterministic"
+        );
+
+        let changed_signal = signal
+            .iter()
+            .enumerate()
+            .map(|(index, bar)| {
+                let mut changed = *bar;
+                if index == 0 {
+                    changed.close = changed.close.saturating_add(1);
+                }
+                changed
+            })
+            .collect::<Vec<_>>();
+        assert_ne!(
+            base,
+            data_digest_with_daily_reference(
+                &changed_signal,
+                &execution,
+                daily_binding(&daily, &eligibility, &excluded),
+            )
+            .expect("same reference shape"),
+            "signal role"
+        );
+        let changed_execution = execution
+            .iter()
+            .enumerate()
+            .map(|(index, bar)| {
+                let mut changed = *bar;
+                if index == 0 {
+                    changed.close = changed.close.saturating_add(1);
+                }
+                changed
+            })
+            .collect::<Vec<_>>();
+        assert_ne!(
+            base,
+            data_digest_with_daily_reference(
+                &signal,
+                &changed_execution,
+                daily_binding(&daily, &eligibility, &excluded),
+            )
+            .expect("same reference shape"),
+            "execution role"
+        );
+        let changed_daily = daily
+            .iter()
+            .enumerate()
+            .map(|(index, bar)| {
+                let mut changed = *bar;
+                if index == 0 {
+                    changed.close = changed.close.saturating_add(1);
+                }
+                changed
+            })
+            .collect::<Vec<_>>();
+        assert_ne!(
+            base,
+            data_digest_with_daily_reference(
+                &signal,
+                &execution,
+                daily_binding(&changed_daily, &eligibility, &excluded),
+            )
+            .expect("same reference shape"),
+            "daily role"
+        );
+        assert_ne!(
+            base,
+            data_digest_with_daily_reference(
+                &signal,
+                &execution,
+                daily_binding(&daily, &[0, 1], &excluded),
+            )
+            .expect("same reference shape"),
+            "per-record eligibility"
+        );
+        let mut changed_schema = daily_binding(&daily, &eligibility, &excluded);
+        changed_schema.schema = 2;
+        assert_ne!(
+            base,
+            data_digest_with_daily_reference(&signal, &execution, changed_schema)
+                .expect("same reference shape"),
+            "schema version"
+        );
+        let mut changed_policy = daily_binding(&daily, &eligibility, &excluded);
+        changed_policy.eligibility_policy = 2;
+        assert_ne!(
+            base,
+            data_digest_with_daily_reference(&signal, &execution, changed_policy)
+                .expect("same reference shape"),
+            "eligibility-policy version"
+        );
+        let mut changed_gap_policy = daily_binding(&daily, &eligibility, &excluded);
+        changed_gap_policy.gap_overlay_policy = 2;
+        assert_ne!(
+            base,
+            data_digest_with_daily_reference(&signal, &execution, changed_gap_policy)
+                .expect("same reference shape"),
+            "exact-minute GapFib overlay-policy version"
+        );
+        assert_ne!(
+            base,
+            data_digest_with_daily_reference(
+                &signal,
+                &execution,
+                daily_binding(&daily, &eligibility, &[20_382]),
+            )
+            .expect("same reference shape"),
+            "exact excluded-day calendar"
+        );
+    }
+
+    #[test]
+    fn malformed_daily_eligibility_refuses_instead_of_hashing_an_ambiguous_policy() {
+        let bars = synthetic::sessions(1);
+        let one = bars.get(..1).unwrap_or(&[]);
+        assert_eq!(
+            data_digest_with_daily_reference(&bars, &bars, daily_binding(one, &[], &[20_382]),),
+            Err(DailyBindingRefusal::EligibilityLengthMismatch {
+                daily: 1,
+                eligibility: 0,
+            })
+        );
+        assert_eq!(
+            data_digest_with_daily_reference(&bars, &bars, daily_binding(one, &[2], &[20_382]),),
+            Err(DailyBindingRefusal::UnknownEligibility { index: 0, byte: 2 })
+        );
+        assert_eq!(ReferenceIntegrity::UnverifiedNoReceipt.byte(), 0);
     }
 
     #[test]

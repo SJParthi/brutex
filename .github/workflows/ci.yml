@@ -1801,12 +1801,12 @@ jobs:
           #     `js-sys` on the host does not change a lock count that already
           #     reads one.
           #
-          #     The check that WOULD guard it is `cargo tree -i` over the host
-          #     graph, and it cannot live here: this job installs no toolchain
-          #     on purpose -- "no toolchain, no cache, seconds". Moving gate 13
-          #     into a toolchain job to gain it is a real option and a decision,
-          #     not a tidy-up, so it is recorded in `docs/06-limits.md` instead
-          #     of taken here.
+          #     The check that guards it is Gate 13a in the `build` job:
+          #     `cargo tree -i` over the current host graph. It cannot live in
+          #     THIS job because this job deliberately installs no toolchain --
+          #     "no toolchain, no cache, seconds". Gate 13a keeps lock-only,
+          #     target-gated entries legal while refusing any of the three that
+          #     becomes reachable by a host build. D-0486.
           #   * `cpp`, `inline-c`, `tcl`. The family rule below also matches
           #     `<name>-*` and `<name>_*`, and `cpp_demangle` is a pure-Rust
           #     symbol demangler that arrives transitively behind `addr2line`.
@@ -4665,6 +4665,23 @@ jobs:
           #     for; reserving would need the answer first. Bounded by one HTTP
           #     response, never by bars, months or instruments.
           #
+          #   cli/population.rs 10 -- these are deliberately allocation-free
+          #     constructors, not ten unreserved insertion paths. Four belong
+          #     to `FactsBuilder`; `reserve_one` calls `try_reserve(1)` on every
+          #     map/set before `observe` inserts a row. Five build scan/reconcile
+          #     indexes: the three streamed indexes call fallible `reserve_map`
+          #     before each insert, and the two reconciled indexes reserve the
+          #     exact receipt count before their loops. The last is the empty V3
+          #     index when that optional legacy-read file is absent; every later
+          #     growth path also calls `reserve_map` before insertion. Replacing
+          #     any of these with `with_capacity` would discard the explicit
+          #     allocation-refusal path that returns `PopulationRefusal`.
+          #   cli/selection.rs 2 -- `SelectionIndexes::with_capacity` knows the
+          #     caller-bounded receipt count, but both maps start allocation-free
+          #     and immediately `try_reserve(capacity)` before the scan inserts.
+          #     The spelling preserves a reported `SelectionRefusal` if the
+          #     reservation fails; no insert can precede either reservation.
+          #
           # This is the same shape `manifest.rs::genesis` is listed for, and its
           # doc comment makes the same argument pointing at docs/06-limits.md §17.
           allow_unsized='
@@ -4674,6 +4691,8 @@ jobs:
           crates/api/src/server.rs 1
           crates/api/src/trades.rs 2
           crates/cli/src/frontier.rs 1
+          crates/cli/src/population.rs 10
+          crates/cli/src/selection.rs 2
           crates/pull/src/nse.rs 1
           '
 
@@ -5032,6 +5051,14 @@ jobs:
           # different order -- and the bound is the number of runs IN FLIGHT,
           # which is the eight rungs `range_over` walks, not the number of
           # candidates and not the number of bars. Section 3 rule 5 again.
+          #
+          # exit_grid_policy.rs 3, added 2026-08-30. Resolution sorts the three
+          # TRAINING-derived integer axes: adverse stop, favourable target and
+          # full-range trailing samples. Nearest-rank percentiles require that
+          # exact order and must return an observed member, not an interpolated
+          # or approximate rung. This is the named O(T) resolution boundary in
+          # docs/06-limits.md section 133, before any later coordinate lookup;
+          # none of the three sorts is inside a bar, candidate or cell loop.
           allow_sort='
           crates/runner/src/audit.rs 1
           crates/runner/src/bootstrap.rs 1
@@ -5053,6 +5080,7 @@ jobs:
           crates/engine/src/lib.rs 2
           crates/pull/src/nseindex.rs 1
           crates/runner/src/grid.rs 2
+          crates/runner/src/exit_grid_policy.rs 3
           crates/runner/src/rank.rs 3
           crates/runner/src/significance.rs 1
           crates/indicators/src/evaluator.rs 1
@@ -5441,9 +5469,11 @@ jobs:
           # Every one was opened and classified before it was written down here.
           #
           # ---- rule 6: the explicit linear search --------------------------
-          # Unambiguous -- `.iter().find`/`.position` IS a scan. Every occurrence
-          # below is bounded by something fixed at COMPILE TIME, never by the
-          # number of bars, instruments, contracts, expiries or months:
+          # Unambiguous -- `.iter().find`/`.position` IS a scan. The historical
+          # occurrences below are bounded by something fixed at COMPILE TIME.
+          # One separately named preprocessing boundary is data-sized and is
+          # admitted only because its O(M) cost is recorded in section 134; no
+          # exception is a per-bar, per-candidate or per-cell lookup:
           #
           #   api/{server,autopilot,audit_json}.rs -- 9 of these are
           #     `censuses.iter().find(|c| c.vendor == feed)`, bounded by
@@ -5477,6 +5507,13 @@ jobs:
           #     The independent decode is deliberate -- see the `STRIDE_BYTES`
           #     assertion in that file for why this crate does not import the
           #     other's reader.
+          #   runner/src/exit_grid_policy.rs -- one exact-subslice attestation
+          #     locates the requested execution slice's first candle inside the
+          #     complete daily-reference minute context, then byte-compares the
+          #     whole contiguous candidate. It runs once while sealing the
+          #     three-stream execution identity, is O(M) in that context, and is
+          #     the honest preprocessing limit recorded by section 134 -- never
+          #     a fallback lookup in evaluation or replay.
           allow_scan='
           crates/api/src/audit_json.rs 1
           crates/api/src/autopilot.rs 1
@@ -5490,6 +5527,7 @@ jobs:
           crates/pull/src/resolve.rs 1
           crates/pull/src/ssm.rs 1
           crates/pull/src/vendor.rs 3
+          crates/runner/src/exit_grid_policy.rs 1
           '
 
           # ---- rule 7: the ambiguous membership test -----------------------
@@ -5547,6 +5585,12 @@ jobs:
           #     `kept.contains(&scored.mask)`: one probe per candidate, and the
           #     cost does not move when either side grows. The other two are a
           #     `const` command table and a `(1..=3650)` range.
+          #   cli/src/population.rs 3 -- two `RangeInclusive` checks validate
+          #     year/month with two comparisons; the third scans the literal
+          #     eight-element canonical rung array. None grows with data.
+          #   cli/src/selection.rs 1 -- the same literal eight-element canonical
+          #     rung array validates a receipt timeframe. The linear bound is
+          #     eight at the source site, independent of receipt count.
           allow_member='
           crates/api/src/assets.rs 1
           crates/api/src/calendar_of.rs 1
@@ -5556,6 +5600,8 @@ jobs:
           crates/api/src/server.rs 4
           crates/api/src/sweeprun.rs 5
           crates/cli/src/lib.rs 3
+          crates/cli/src/population.rs 3
+          crates/cli/src/selection.rs 1
           crates/core/src/vendor.rs 2
           crates/costs/src/day.rs 2
           crates/engine/src/lib.rs 1
@@ -6679,6 +6725,25 @@ jobs:
         if: steps.probe.outputs.has_crates == 'true'
         run: cargo fetch --locked
 
+      - name: Gate 13a — browser bindings are unreachable on the host graph
+        if: steps.probe.outputs.has_crates == 'true'
+        run: |
+          set -euo pipefail
+          # Cargo.lock intentionally contains target-gated browser bindings.
+          # Their presence in the lock is legal; reachability from the current
+          # host workspace graph is not. `cargo tree` prints no inverse tree
+          # when a named package is unreachable for this target.
+          for binding in wasm-bindgen js-sys web-sys; do
+            host_tree=$(cargo tree --workspace --locked -i "$binding" --prefix none)
+            if [ -n "$host_tree" ]; then
+              echo "FORBIDDEN HOST-REACHABLE BINDING: $binding"
+              printf '%s\n' "$host_tree"
+              echo "Lock-only target-gated entries are allowed; a host path is not."
+              exit 1
+            fi
+          done
+          echo "OK — wasm-bindgen, js-sys and web-sys are unreachable on the host graph."
+
       - name: Gate 4 — locked, offline
         if: steps.probe.outputs.has_crates == 'true'
         run: cargo build --workspace --locked --offline --all-targets
@@ -7539,6 +7604,16 @@ jobs:
               bad=1
             fi
           done
+          for fact in '/indexmap.json?feed=' 'Unconfirmed' 'Which ones' 'no exchange confirms'; do
+            if ! grep -Fq "$fact" "$f"; then
+              echo "The cross-verification script no longer carries: $fact"
+              bad=1
+            fi
+          done
+          if ! grep -Fq 'Restart the server' "$f"; then
+            echo "A successful refresh no longer says the running parse is stale."
+            bad=1
+          fi
           # `status()` is the one call on load that IS allowed: it reads
           # `/masters/status.json`, which stats four files and opens no socket.
           if ! grep -qE '^status\(\);' "$f"; then

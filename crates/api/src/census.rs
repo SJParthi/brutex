@@ -354,11 +354,56 @@ fn sized(path: &Path) -> std::io::Result<Result<Vec<u8>, String>> {
 }
 
 /// Every vendor's manifest, read off disk once.
+///
+/// The configured root itself is admitted before an absent manifest can mean
+/// "fresh store". A detached removable volume leaves every manifest path
+/// absent too, but that is a systems outage, not four empty vendors. Treating
+/// those states alike would let the pull planner offer the whole history to a
+/// different directory that later appeared at the same spelling.
 #[must_use]
 pub fn read_all(root: &Path) -> Vec<VendorCensus> {
+    match std::fs::metadata(root) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => {
+            return unreadable_root(
+                root,
+                format!(
+                    "configured store root {} is not a directory",
+                    root.display()
+                ),
+            );
+        }
+        Err(error) => {
+            return unreadable_root(
+                root,
+                format!(
+                    "configured store root {} is unavailable: {error}",
+                    root.display()
+                ),
+            );
+        }
+    }
     Vendor::ALL
         .into_iter()
         .map(|v| read_vendor(root, v))
+        .collect()
+}
+
+/// One root-level refusal projected across the fixed vendor set.
+///
+/// `Vendor::ALL` is a compile-time-bounded set, so this is constant work with
+/// respect to store size. Keeping the manifest paths in each row preserves the
+/// existing operator surface while making the shared root failure explicit.
+fn unreadable_root(root: &Path, reason: String) -> Vec<VendorCensus> {
+    Vendor::ALL
+        .into_iter()
+        .map(|vendor| VendorCensus {
+            vendor,
+            path: manifest_path(root, vendor),
+            state: Census::Unreadable {
+                reason: reason.clone(),
+            },
+        })
         .collect()
 }
 
@@ -1248,6 +1293,53 @@ mod tests {
                 .to_string(),
             "1970-01"
         );
+    }
+
+    /// **A DETACHED ROOT IS NOT FOUR FRESH VENDORS.**
+    ///
+    /// A removable volume disappearing makes the manifest paths return
+    /// `NotFound`, exactly like a brand-new store. The shared root admission is
+    /// what distinguishes those states, and it must not manufacture a
+    /// replacement directory on the internal disk while doing so.
+    #[test]
+    fn a_missing_or_non_directory_root_is_loud_and_never_manufactured() {
+        let missing = crate::scratch::path("census-missing-root");
+        let _ = std::fs::remove_dir_all(&missing);
+        let _ = std::fs::remove_file(&missing);
+
+        let absent = read_all(&missing);
+        assert_eq!(absent.len(), Vendor::ALL.len());
+        assert!(
+            absent
+                .iter()
+                .all(|census| matches!(census.state, Census::Unreadable { .. })),
+            "one unavailable root is a systems refusal for every vendor"
+        );
+        assert!(
+            absent
+                .iter()
+                .all(|census| census.note().contains("configured store root")),
+            "every rendered row names the shared cause"
+        );
+        assert!(
+            !missing.exists(),
+            "reading a detached root must not recreate its mount path"
+        );
+
+        let file = crate::scratch::path("census-root-is-file");
+        let _ = std::fs::remove_file(&file);
+        std::fs::write(&file, b"not a store root").expect("fixture file");
+        let blocked = read_all(&file);
+        assert!(blocked.iter().all(|census| {
+            matches!(census.state, Census::Unreadable { .. })
+                && census.note().contains("not a directory")
+        }));
+        assert_eq!(
+            std::fs::read(&file).expect("the fixture remains"),
+            b"not a store root",
+            "the admission check never replaces the blocker"
+        );
+        std::fs::remove_file(file).expect("cleanup");
     }
 
     #[test]

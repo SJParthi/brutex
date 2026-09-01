@@ -61,15 +61,16 @@
 //! difference is impossible to miss.
 
 use core::cmp::Ordering;
-use std::collections::BinaryHeap;
-
 use rayon::prelude::*;
 
-use engine::Sweep;
+use engine::{Frontier, Sweep};
 use indicators::column::Column;
 use vocab::ConditionMask;
 
 use crate::outcome::{Edge, Forward, edge};
+
+/// The one bounded heap shape used by retained and streamed ranking alike.
+type Heap<K> = std::collections::BinaryHeap<core::cmp::Reverse<K>>;
 
 /// One combination and what it did.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -133,16 +134,170 @@ impl PartialOrd for Scored {
 impl Eq for Scored {}
 
 /// The kept combinations, and how many were weighed to find them.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Ranked {
-    /// Best first, by |t|.
+    /// Best first under [`Self::lens`].
     pub top: Vec<Scored>,
-    /// Every combination the sweep produced — the number this kept `top` out of.
+    /// The closed members of [`Self::top`], in the same order.
     ///
-    /// Reported because `top.len()` alone cannot distinguish "the sweep found
-    /// four combinations" from "the sweep found sixty-one million and this is
-    /// the best four", and `CLAUDE.md` §4 does not allow those to look alike.
+    /// This is deliberately rank-all, cut to top-N, then filter; it does not
+    /// backfill from below the cut and therefore preserves the historical CLI
+    /// selection exactly.
+    pub closed_top: Vec<Scored>,
+    /// Every combination the sweep produced — the number this kept `top` out of.
     pub considered: u64,
+    /// The ordering that made the hard cut.
+    pub lens: Lens,
+    /// Frequent masks proved redundant by an equal-support immediate superset.
+    pub(crate) redundant: u64,
+    /// Whether every non-empty level had a successor that decided closure.
+    pub(crate) closure_complete: bool,
+}
+
+impl Default for Ranked {
+    fn default() -> Self {
+        Self {
+            top: Vec::new(),
+            closed_top: Vec::new(),
+            considered: 0,
+            lens: Lens::Detectability,
+            redundant: 0,
+            closure_complete: true,
+        }
+    }
+}
+
+/// One ranked value beside the closure verdict known at its retirement.
+#[derive(Clone, Copy, Debug)]
+struct Marked<K> {
+    ranked: K,
+    closed: bool,
+}
+
+impl<K: Ord> Ord for Marked<K> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.ranked.cmp(&other.ranked)
+    }
+}
+
+impl<K: Ord> PartialOrd for Marked<K> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<K: Ord> PartialEq for Marked<K> {
+    fn eq(&self, other: &Self) -> bool {
+        self.ranked == other.ranked
+    }
+}
+
+impl<K: Ord> Eq for Marked<K> {}
+
+/// A bounded edge ranker fed at the instant each frontier retires.
+pub struct Accumulator {
+    keep: usize,
+    considered: u64,
+    lens: Lens,
+    redundant: u64,
+    closure_complete: bool,
+    held: Held,
+}
+
+/// The ordering chosen for one [`Accumulator`].
+enum Held {
+    Detectability(Heap<Marked<Scored>>),
+    Payoff(Heap<Marked<ByPayoff>>),
+}
+
+impl Accumulator {
+    /// An empty ranker under `lens`, retaining at most `keep` rows.
+    #[must_use]
+    pub fn new(keep: usize, lens: Lens) -> Self {
+        let held = match lens {
+            Lens::Detectability => Held::Detectability(Heap::with_capacity(keep)),
+            Lens::Payoff => Held::Payoff(Heap::with_capacity(keep)),
+        };
+        Self {
+            keep,
+            considered: 0,
+            lens,
+            redundant: 0,
+            closure_complete: true,
+            held,
+        }
+    }
+
+    /// Score a retired level after its immediate successor is known.
+    ///
+    /// `Some(empty)` proves normal extinction. `None` on a non-empty level is
+    /// a halted partial frontier: it is still scored for honest partial-run
+    /// reporting, but none of its masks is called closed because an unbuilt
+    /// successor could change that statement.
+    pub(crate) fn offer_retired(
+        &mut self,
+        level: &Frontier,
+        next: Option<&Frontier>,
+        column: &Column,
+        forward: &Forward,
+    ) {
+        self.considered = self
+            .considered
+            .saturating_add(u64::try_from(level.frequent.len()).unwrap_or(u64::MAX));
+        if level.frequent.is_empty() {
+            return;
+        }
+        let (redundant, closure_known) = if let Some(next) = next {
+            let redundant = crate::closed::redundant_between(level, next);
+            self.redundant = self
+                .redundant
+                .saturating_add(u64::try_from(redundant.len()).unwrap_or(u64::MAX));
+            (redundant, true)
+        } else {
+            self.closure_complete = false;
+            (std::collections::HashSet::with_capacity(0), false)
+        };
+        if self.keep == 0 {
+            return;
+        }
+        match &mut self.held {
+            Held::Detectability(heap) => offer_part::<Scored>(
+                heap,
+                &level.frequent,
+                column,
+                forward,
+                self.keep,
+                &redundant,
+                closure_known,
+            ),
+            Held::Payoff(heap) => offer_part::<ByPayoff>(
+                heap,
+                &level.frequent,
+                column,
+                forward,
+                self.keep,
+                &redundant,
+                closure_known,
+            ),
+        }
+    }
+
+    /// Finish the ranking, strongest first, with the full considered count.
+    #[must_use]
+    pub fn finish(self) -> Ranked {
+        let (top, closed_top) = match self.held {
+            Held::Detectability(heap) => ordered(heap),
+            Held::Payoff(heap) => ordered(heap),
+        };
+        Ranked {
+            top,
+            closed_top,
+            considered: self.considered,
+            lens: self.lens,
+            redundant: self.redundant,
+            closure_complete: self.closure_complete,
+        }
+    }
 }
 
 /// The best `keep` combinations by |t|, in memory proportional to `keep`.
@@ -168,7 +323,7 @@ pub struct Ranked {
 /// UNVERIFIED as a measured figure: no bench row covers this yet.
 #[must_use]
 pub fn rank(sweep: &Sweep, column: &Column, forward: &Forward, keep: usize) -> Ranked {
-    walk::<Scored>(sweep, column, forward, keep)
+    rank_by(sweep, column, forward, keep, Lens::Detectability)
 }
 
 /// Which question decides who survives the cut.
@@ -267,10 +422,16 @@ pub fn rank_by(
     keep: usize,
     lens: Lens,
 ) -> Ranked {
-    match lens {
-        Lens::Detectability => walk::<Scored>(sweep, column, forward, keep),
-        Lens::Payoff => walk::<ByPayoff>(sweep, column, forward, keep),
+    let mut ranked = Accumulator::new(keep, lens);
+    for (index, level) in sweep.levels.iter().enumerate() {
+        ranked.offer_retired(
+            level,
+            sweep.levels.get(index.saturating_add(1)),
+            column,
+            forward,
+        );
     }
+    ranked.finish()
 }
 
 /// Admit one scored value into a heap already holding at most `keep`.
@@ -279,7 +440,7 @@ pub fn rank_by(
 /// is what keeps the heap at `keep` rather than letting it grow and trimming
 /// afterwards -- the trim-after form allocates the whole result set, which is
 /// the thing this module refuses to do.
-fn admit<K: Ranked1>(heap: &mut BinaryHeap<core::cmp::Reverse<K>>, keep: usize, scored: K) {
+fn admit<K: Ord>(heap: &mut Heap<K>, keep: usize, scored: K) {
     if heap.len() < keep {
         heap.push(core::cmp::Reverse(scored));
         return;
@@ -301,7 +462,9 @@ fn top_of<K: Ranked1>(
     column: &Column,
     forward: &Forward,
     keep: usize,
-) -> Vec<K> {
+    redundant: &std::collections::HashSet<ConditionMask>,
+    closure_known: bool,
+) -> Vec<Marked<K>> {
     // `keep.min(part.len())` AND NOT `keep`, WHICH WAS A REAL COST.
     //
     // A chunk cannot yield more rows than it holds, so reserving `keep` on a
@@ -314,17 +477,19 @@ fn top_of<K: Ranked1>(
     // fourteen cores is FORTY chunks. At `keep = 10_000` and 120 bytes a
     // `Scored`, reserving `keep` each was 48 MB to rank forty rows, against the
     // 1.2 MB the single heap this replaced would have used.
-    let mut heap: BinaryHeap<core::cmp::Reverse<K>> =
-        BinaryHeap::with_capacity(keep.min(part.len()));
+    let mut heap: Heap<Marked<K>> = Heap::with_capacity(keep.min(part.len()));
     for itemset in part {
         admit(
             &mut heap,
             keep,
-            K::wrap(Scored {
-                mask: itemset.mask,
-                hits: itemset.hits,
-                edge: edge(column, forward, &itemset.mask),
-            }),
+            Marked {
+                ranked: K::wrap(Scored {
+                    mask: itemset.mask,
+                    hits: itemset.hits,
+                    edge: edge(column, forward, &itemset.mask),
+                }),
+                closed: closure_known && !redundant.contains(&itemset.mask),
+            },
         );
     }
     heap.into_iter().map(|core::cmp::Reverse(s)| s).collect()
@@ -353,6 +518,45 @@ fn chunk_size(total: usize) -> usize {
     total.div_ceil(want).max(1)
 }
 
+/// Score one frontier in parallel and merge its bounded chunk heaps into `heap`.
+fn offer_part<K: Ranked1 + Send>(
+    heap: &mut Heap<Marked<K>>,
+    itemsets: &[engine::Itemset],
+    column: &Column,
+    forward: &Forward,
+    keep: usize,
+    redundant: &std::collections::HashSet<ConditionMask>,
+    closure_known: bool,
+) {
+    let width = chunk_size(itemsets.len());
+    let parts: Vec<Vec<Marked<K>>> = itemsets
+        .par_chunks(width)
+        .map(|part| top_of::<K>(part, column, forward, keep, redundant, closure_known))
+        .collect();
+    for scored in parts.into_iter().flatten() {
+        admit(heap, keep, scored);
+    }
+}
+
+/// Drain one bounded heap into the public best-first order.
+fn ordered<K: Ranked1>(heap: Heap<Marked<K>>) -> (Vec<Scored>, Vec<Scored>) {
+    let mut top: Vec<Marked<K>> = heap
+        .into_iter()
+        .map(|core::cmp::Reverse(scored)| scored)
+        .collect();
+    top.sort_unstable_by(|a, b| b.cmp(a));
+    let mut all = Vec::with_capacity(top.len());
+    let mut closed = Vec::with_capacity(top.len());
+    for marked in top {
+        let scored = marked.ranked.unwrap();
+        all.push(scored);
+        if marked.closed {
+            closed.push(scored);
+        }
+    }
+    (all, closed)
+}
+
 /// One pass over the frequent set, keeping the best `keep` under `K`'s ordering.
 ///
 /// # Spread across every core, and byte-identical to the pass it replaces
@@ -372,58 +576,13 @@ fn chunk_size(total: usize) -> usize {
 /// The argument is not trusted on its own:
 /// `a_parallel_walk_is_byte_identical_to_a_sequential_one` runs both forms over
 /// the same sweep and compares every field of every row.
-fn walk<K: Ranked1 + Send>(
-    sweep: &Sweep,
-    column: &Column,
-    forward: &Forward,
-    keep: usize,
-) -> Ranked {
-    let total: usize = sweep.levels.iter().map(|l| l.frequent.len()).sum();
-    let considered = u64::try_from(total).unwrap_or(u64::MAX);
-
-    // KEEP ZERO STILL COUNTS. The caller asked how many candidates survived and
-    // that answer does not depend on how many of them are returned.
-    if keep == 0 {
-        return Ranked {
-            top: Vec::new(),
-            considered,
-        };
-    }
-
-    let width = chunk_size(total);
-    let parts: Vec<Vec<K>> = sweep
-        .levels
-        .par_iter()
-        .flat_map(|level| level.frequent.par_chunks(width))
-        .map(|part| top_of::<K>(part, column, forward, keep))
-        .collect();
-
-    // THE MERGE IS SEQUENTIAL AND THAT IS NOT A BOTTLENECK: it walks
-    // `chunks x keep` values doing one comparison each, against a parallel phase
-    // that walked `|frequent| x bars`.
-    let mut heap: BinaryHeap<core::cmp::Reverse<K>> = BinaryHeap::with_capacity(keep);
-    for scored in parts.into_iter().flatten() {
-        admit(&mut heap, keep, scored);
-    }
-
-    let mut top: Vec<K> = heap.into_iter().map(|core::cmp::Reverse(s)| s).collect();
-    // Best first. `sort_unstable_by` with the same total order the heap used, so
-    // the output is identical across processes -- a `HashSet`-derived order
-    // would not be, and §3 rule 5 forbids that reaching the output.
-    top.sort_unstable_by(|a, b| b.cmp(a));
-    Ranked {
-        top: top.into_iter().map(Ranked1::unwrap).collect(),
-        considered,
-    }
-}
-
 #[cfg(test)]
 #[allow(
     clippy::expect_used,
     reason = "the exception every test module in this workspace takes."
 )]
 mod tests {
-    use super::{Scored, rank};
+    use super::{Accumulator, Lens, Scored, rank, rank_by};
     use crate::outcome::{Edge, Horizon, forward};
     use crate::{Sweeper, synthetic};
     use engine::Ladder;
@@ -629,7 +788,7 @@ mod tests {
         let out = Sweeper::new(Ladder::with_min_hits(600).with_ceiling(50_000))
             .run(&bars, &mut evaluator());
         let column = Column::build(&bars, &mut evaluator());
-        let f = forward(&bars, Horizon::DEFAULT);
+        let f = forward(&bars, &column, Horizon::DEFAULT);
 
         let r = rank(&out.sweep, &column, &f, 0);
         assert!(r.top.is_empty());
@@ -639,6 +798,41 @@ mod tests {
             "every combination is still counted, because 'kept none of four' and \
              'kept none of sixty-one million' are different facts"
         );
+    }
+
+    /// Feeding levels as the engine retires them is the same EDGE cut as
+    /// ranking a retained sweep afterwards, under both public lenses.
+    #[test]
+    fn an_incremental_ranker_matches_the_retained_ranker_under_both_lenses() {
+        let bars = synthetic::sessions(8);
+        let out = Sweeper::new(Ladder::with_min_hits(600).with_ceiling(50_000))
+            .run(&bars, &mut evaluator());
+        let column = Column::build(&bars, &mut evaluator());
+        let f = forward(&bars, &column, Horizon::DEFAULT);
+
+        for lens in [Lens::Detectability, Lens::Payoff] {
+            for keep in [0_usize, 25] {
+                let expected = rank_by(&out.sweep, &column, &f, keep, lens);
+                let mut incremental = Accumulator::new(keep, lens);
+                for (index, level) in out.sweep.levels.iter().enumerate() {
+                    incremental.offer_retired(
+                        level,
+                        out.sweep.levels.get(index.saturating_add(1)),
+                        &column,
+                        &f,
+                    );
+                }
+                let got = incremental.finish();
+                assert_eq!(got.considered, expected.considered);
+                assert_eq!(
+                    got.top, expected.top,
+                    "lens {lens:?} at keep {keep} must make one global cut, not one per level"
+                );
+                assert_eq!(got.closed_top, expected.closed_top);
+                assert_eq!(got.redundant, expected.redundant);
+                assert_eq!(got.closure_complete, expected.closure_complete);
+            }
+        }
     }
 
     /// §3 rule 5, measured rather than argued.
@@ -658,7 +852,7 @@ mod tests {
         let out = Sweeper::new(Ladder::with_min_hits(400).with_ceiling(200_000))
             .run(&bars, &mut evaluator());
         let column = Column::build(&bars, &mut evaluator());
-        let f = forward(&bars, Horizon::DEFAULT);
+        let f = forward(&bars, &column, Horizon::DEFAULT);
         let keep = 40;
 
         let parallel = rank(&out.sweep, &column, &f, keep);
@@ -735,7 +929,7 @@ mod tests {
         let out = Sweeper::new(Ladder::with_min_hits(600).with_ceiling(50_000))
             .run(&bars, &mut evaluator());
         let column = Column::build(&bars, &mut evaluator());
-        let f = forward(&bars, Horizon::DEFAULT);
+        let f = forward(&bars, &column, Horizon::DEFAULT);
         let total = out.sweep.all_frequent().count();
         assert!(total > 100, "the fixture must produce enough to rank");
 
@@ -792,7 +986,7 @@ mod tests {
         let out = Sweeper::new(Ladder::with_min_hits(600).with_ceiling(50_000))
             .run(&bars, &mut evaluator());
         let column = Column::build(&bars, &mut evaluator());
-        let f = forward(&bars, Horizon::DEFAULT);
+        let f = forward(&bars, &column, Horizon::DEFAULT);
         let total = out.sweep.all_frequent().count();
 
         let r = rank(&out.sweep, &column, &f, total.saturating_mul(2));
@@ -808,7 +1002,7 @@ mod tests {
         let out = Sweeper::new(Ladder::with_min_hits(600).with_ceiling(50_000))
             .run(&bars, &mut evaluator());
         let column = Column::build(&bars, &mut evaluator());
-        let f = forward(&bars, Horizon::DEFAULT);
+        let f = forward(&bars, &column, Horizon::DEFAULT);
 
         let first = rank(&out.sweep, &column, &f, 20);
         for _ in 0..4 {

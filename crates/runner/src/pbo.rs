@@ -1,41 +1,29 @@
-//! The Probability of Backtest Overfitting — how often the best in-sample
-//! choice is below median out of sample.
+//! An anchored walk-forward bottom-half diagnostic.
 //!
-//! # What a walk-forward cannot tell you on its own
+//! # This is not CSCV and it is not authoritative PBO
 //!
-//! [`crate::validate`] chooses a combination on the training bars and measures
-//! it on bars it never saw. One fold answers "did this hold once". It cannot
-//! answer "would a selection procedure like mine hold in general", because a
-//! single positive fold is one draw and a run of them can be luck.
+//! [`crate::validate`] produces anchored expanding walk-forward folds. This
+//! module can place each fold's in-sample winner in that fold's out-of-sample
+//! ranking and count placements strictly below the midpoint. That is exactly
+//! what [`AnchoredWalkForwardBottomHalfRateV1`] names.
 //!
-//! Bailey, Borwein, López de Prado and Zhu's PBO asks the second question. It
-//! is deliberately a property of the **procedure**, not of any combination: it
-//! measures how often *the thing you picked* turns out to be below average once
-//! it is out of sample.
+//! The repository does not construct combinatorially symmetric train/test
+//! partitions, complementary out-of-sample sets, or a stable candidate family
+//! shared by all such partitions. Those are absent inputs, not defaults this
+//! module may invent. Consequently no value produced here is a genuine CSCV
+//! probability of backtest overfitting, and it must never satisfy an
+//! authoritative statistics field.
 //!
-//! # The rank, and why it is the whole statistic
+//! # The exact placement
 //!
-//! For each fold: rank every candidate by its in-sample result, take the one
-//! that won, then find where that same candidate sits in the OUT-OF-SAMPLE
-//! ranking. If selection carried real information, the in-sample winner should
-//! land in the upper half out of sample. If it were pure overfitting, it would
-//! land anywhere — and its expected position would be the middle.
+//! Validation chooses the first in-sample maximum by scanning in canonical
+//! order with strict `>`. [`place_v1`] performs the same scan. Out-of-sample
+//! ties use an exact midrank represented as `rank * 2` over
+//! `(candidate_count - 1) * 2`; an even tied block therefore retains its half
+//! rank instead of being rounded toward the better half before classification.
 //!
-//! So the logit of its relative rank is the per-fold evidence, and **PBO is the
-//! fraction of folds where the winner landed in the bottom half**. A PBO near
-//! 0.5 says the selection procedure is a coin flip. A PBO near 0 says it
-//! carries information.
-//!
-//! # What it does NOT say, and this is the part people misread
-//!
-//! A low PBO does **not** mean the strategy is profitable. It means the
-//! *selection* is not pure noise-fitting. A procedure can reliably pick the
-//! best of a hundred equally worthless combinations and score a perfect PBO
-//! while losing money on every one of them.
-//!
-//! PBO answers "am I fooling myself by searching". Profitability is
-//! [`crate::grid`]'s pessimistic total, and the two are independent. Reporting
-//! one without the other is how a backtest gets believed.
+//! A low bottom-half rate does not prove profitability, generalisation or lack
+//! of overfitting. It describes only the supplied anchored folds.
 //!
 //! # Nothing here reads a bar
 //!
@@ -44,7 +32,199 @@
 //! can be tested exhaustively against hand-built rankings, and why its tests
 //! carry no fixture at all.
 
-/// One fold's contribution: where the in-sample winner landed out of sample.
+/// One exact anchored-fold placement.
+///
+/// The rank is stored doubled, so a midrank at `2.5` is the integer `5` rather
+/// than the lossy integer `2`. The matching denominator is also doubled and is
+/// exposed by [`Self::relative_twice`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlacementV1 {
+    candidates: usize,
+    winner_rank_twice: usize,
+}
+
+impl PlacementV1 {
+    /// An explicitly unrankable zero- or one-candidate fold.
+    ///
+    /// A fold containing a choice is not accepted here because assigning it a
+    /// rank without the measured scores would invent evidence.
+    #[must_use]
+    pub const fn unrankable(candidates: usize) -> Option<Self> {
+        if candidates < 2 {
+            Some(Self {
+                candidates,
+                winner_rank_twice: 0,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Number of aligned candidates supplied for this fold.
+    #[must_use]
+    pub const fn candidates(&self) -> usize {
+        self.candidates
+    }
+
+    /// Exact doubled midrank, where zero is best.
+    #[must_use]
+    pub const fn winner_rank_twice(&self) -> usize {
+        self.winner_rank_twice
+    }
+
+    /// Exact `(rank * 2, last_rank * 2)` relative-placement terms.
+    ///
+    /// `None` means fewer than two candidates or a malformed rank outside the
+    /// candidate family. The pair is deliberately not reduced: both `* 2`
+    /// terms make the retained half-rank visible to a caller and to a receipt.
+    #[must_use]
+    pub fn relative_twice(&self) -> Option<(usize, usize)> {
+        let last = self.candidates.checked_sub(1)?.checked_mul(2)?;
+        if last == 0 || self.winner_rank_twice > last {
+            return None;
+        }
+        Some((self.winner_rank_twice, last))
+    }
+
+    /// Display projection of the exact relative placement, in parts per
+    /// million.
+    ///
+    /// Classification never uses this rounded projection; [`Self::bottom_half`]
+    /// compares the exact integer ratio.
+    #[must_use]
+    pub fn relative_ppm(&self) -> Option<i64> {
+        let (rank, last) = self.relative_twice()?;
+        let rank = u128::try_from(rank).ok()?;
+        let last = u128::try_from(last).ok()?;
+        let scaled = rank.checked_mul(1_000_000)? / last;
+        i64::try_from(scaled).ok()
+    }
+
+    /// Whether this exact midrank is strictly below the midpoint.
+    #[must_use]
+    pub fn bottom_half(&self) -> bool {
+        self.relative_twice()
+            .is_some_and(|(rank, last)| rank > last / 2)
+    }
+}
+
+/// The non-authoritative rate over supplied anchored walk-forward folds.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AnchoredWalkForwardBottomHalfRateV1 {
+    /// Folds with a valid relative placement.
+    pub folds: usize,
+    /// Folds whose exact midrank is strictly below the midpoint.
+    pub bottom_half_folds: usize,
+    /// Folds with fewer than two candidates or an invalid supplied placement.
+    pub unrankable: usize,
+    /// Median display projection across rankable folds, in parts per million.
+    ///
+    /// This presentation field is not a statistical authority. Each fold's
+    /// load-bearing midpoint classification uses its exact doubled ratio.
+    pub median_placement_ppm: i64,
+}
+
+impl AnchoredWalkForwardBottomHalfRateV1 {
+    /// Bottom-half rate in parts per million.
+    #[must_use]
+    pub fn rate_ppm(&self) -> Option<i64> {
+        if self.folds == 0 || self.bottom_half_folds > self.folds {
+            return None;
+        }
+        let folds = u128::try_from(self.folds).ok()?;
+        let bottom = u128::try_from(self.bottom_half_folds).ok()?;
+        let scaled = bottom.checked_mul(1_000_000)? / folds;
+        i64::try_from(scaled).ok()
+    }
+
+    /// Whether at least half the contributing anchored folds landed below the
+    /// midpoint.
+    #[must_use]
+    pub fn at_or_above_half(&self) -> bool {
+        self.folds > 0
+            && self.bottom_half_folds <= self.folds
+            && self.bottom_half_folds >= self.folds.saturating_sub(self.folds / 2)
+    }
+}
+
+/// Aggregate exact placements from supplied anchored walk-forward folds.
+///
+/// This is a diagnostic over those folds only. It is not CSCV/PBO and cannot
+/// authorize `PopulationStatisticsV2`.
+///
+/// # Cost
+///
+/// One pass plus one sort of display projections: `O(folds log folds)` time
+/// and `O(folds)` temporary space. No bench row measures it yet.
+#[must_use]
+pub fn anchored_walk_forward_bottom_half_rate_v1(
+    placements: &[PlacementV1],
+) -> AnchoredWalkForwardBottomHalfRateV1 {
+    let mut relatives = Vec::with_capacity(placements.len());
+    let mut bottom_half = 0_usize;
+    let mut unrankable = 0_usize;
+
+    for placement in placements {
+        match placement.relative_ppm() {
+            Some(relative) => {
+                relatives.push(relative);
+                if placement.bottom_half() {
+                    bottom_half = bottom_half.saturating_add(1);
+                }
+            }
+            None => unrankable = unrankable.saturating_add(1),
+        }
+    }
+
+    relatives.sort_unstable();
+    AnchoredWalkForwardBottomHalfRateV1 {
+        folds: relatives.len(),
+        bottom_half_folds: bottom_half,
+        unrankable,
+        median_placement_ppm: median_of(&relatives),
+    }
+}
+
+/// Exact placement of the first strict in-sample maximum out of sample.
+#[must_use]
+pub fn place_v1(in_sample: &[i64], out_of_sample: &[i64]) -> Option<PlacementV1> {
+    if in_sample.is_empty() || in_sample.len() != out_of_sample.len() {
+        return None;
+    }
+    if in_sample.len() == 1 {
+        return PlacementV1::unrankable(1);
+    }
+    let winner = first_strict_max(in_sample)?;
+    let winner_score = out_of_sample.get(winner).copied()?;
+    let better = out_of_sample.iter().filter(|&&s| s > winner_score).count();
+    let tied = out_of_sample.iter().filter(|&&s| s == winner_score).count();
+    let winner_rank_twice = better.checked_mul(2)?.checked_add(tied.checked_sub(1)?)?;
+    let placement = PlacementV1 {
+        candidates: in_sample.len(),
+        winner_rank_twice,
+    };
+    placement.relative_twice()?;
+    Some(placement)
+}
+
+/// Index of the first maximum under the same strict scan as validation.
+fn first_strict_max(scores: &[i64]) -> Option<usize> {
+    let mut winner = 0_usize;
+    let mut best = *scores.first()?;
+    for (index, &score) in scores.iter().enumerate().skip(1) {
+        if score > best {
+            best = score;
+            winner = index;
+        }
+    }
+    Some(winner)
+}
+
+/// Compatibility-only legacy placement.
+///
+/// New code must use [`PlacementV1`]. This public two-field shape remains while
+/// current CLI callers construct it directly. It cannot retain half-ranks and
+/// therefore cannot become statistical authority.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Placement {
     /// How many candidates were ranked in this fold.
@@ -94,7 +274,11 @@ impl Placement {
     }
 }
 
-/// The probability of backtest overfitting, and what it was computed from.
+/// Compatibility-only legacy summary.
+///
+/// Despite the historical name, this is not a genuine PBO record. New code
+/// must use [`AnchoredWalkForwardBottomHalfRateV1`], and authoritative
+/// statistics must remain absent until a separate CSCV design exists.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Pbo {
     /// Folds that contributed a placement.
@@ -143,7 +327,7 @@ impl Pbo {
     }
 }
 
-/// PBO over a set of folds.
+/// Compatibility-only aggregation over supplied anchored folds.
 ///
 /// # Cost
 ///
@@ -201,7 +385,7 @@ fn median_of(sorted: &[i64]) -> i64 {
     a.saturating_add(b) / 2
 }
 
-/// Where a candidate that won in sample landed out of sample.
+/// Compatibility-only lossy placement.
 ///
 /// `in_sample` and `out_of_sample` are scores for the SAME candidates in the
 /// SAME order — index `i` is one combination in both. Higher is better.
@@ -212,35 +396,14 @@ fn median_of(sorted: &[i64]) -> i64 {
 /// the resulting PBO would be a number about nothing.
 #[must_use]
 pub fn place(in_sample: &[i64], out_of_sample: &[i64]) -> Option<Placement> {
-    if in_sample.is_empty() || in_sample.len() != out_of_sample.len() {
-        return None;
-    }
-    // The in-sample winner. `enumerate().max_by_key` keeps the FIRST maximum on
-    // a tie, which is deterministic and therefore reproducible -- §3 rule 5.
-    let winner = in_sample
-        .iter()
-        .enumerate()
-        .max_by_key(|&(_, &s)| s)
-        .map(|(i, _)| i)?;
-    let winner_score = out_of_sample.get(winner).copied()?;
-    // Its out-of-sample rank, by MIDRANK on ties.
-    //
-    // This counted only strictly-better scores, which hands the winner the BEST
-    // rank among every candidate tied with it. Order-independent, which was the
-    // stated reason — and biased, in the direction that under-reports
-    // overfitting. Measured against a known-0.5 null on grids with 2, 3, 4 and 8
-    // distinct out-of-sample values: 0.249, 0.329, 0.372, 0.434 where the truth
-    // is 0.5. The coarser the grid, the more ties, the further it under-reports.
-    //
-    // The midrank — better + (tied − 1) / 2 — puts the winner at the centre of
-    // its tied block, which is the standard treatment and is equally
-    // order-independent. `tied` counts the winner itself, so it is at least one
-    // and the subtraction cannot underflow.
-    let better = out_of_sample.iter().filter(|&&s| s > winner_score).count();
-    let tied = out_of_sample.iter().filter(|&&s| s == winner_score).count();
+    let exact = place_v1(in_sample, out_of_sample)?;
     Some(Placement {
-        candidates: in_sample.len(),
-        winner_rank: better.saturating_add(tied.saturating_sub(1) / 2),
+        candidates: exact.candidates(),
+        // Compatibility freezes the old integer field. An exact half-rank is
+        // rounded toward the better half here, which is why this adapter is
+        // explicitly forbidden as statistical authority. The exact API above
+        // keeps the bit this division discards.
+        winner_rank: exact.winner_rank_twice() / 2,
     })
 }
 
@@ -250,7 +413,51 @@ pub fn place(in_sample: &[i64], out_of_sample: &[i64]) -> Option<Placement> {
     reason = "the exception every test module in this workspace takes."
 )]
 mod tests {
-    use super::{Placement, place, probability_of_overfitting};
+    use super::{
+        Placement, anchored_walk_forward_bottom_half_rate_v1, place, place_v1,
+        probability_of_overfitting,
+    };
+
+    #[test]
+    fn exact_v1_uses_the_same_first_strict_maximum_as_validation() {
+        // `validate` scans canonical order with strict `>`, so index 0 wins an
+        // equal in-sample tie. Index 0 is best out of sample while index 1 is
+        // worst; choosing the last maximum would therefore reverse the result.
+        let exact = place_v1(&[10, 10, 1], &[100, 0, 50]).expect("exact placement");
+        assert_eq!(exact.winner_rank_twice(), 0);
+        assert_eq!(exact.relative_twice(), Some((0, 4)));
+
+        let legacy = place(&[10, 10, 1], &[100, 0, 50]).expect("compat placement");
+        assert_eq!(
+            legacy.winner_rank, 0,
+            "the compatibility path must share the strict-first winner"
+        );
+    }
+
+    #[test]
+    fn exact_v1_preserves_an_even_tied_block_across_the_midpoint() {
+        // The winner has two candidates above it and ties one other candidate:
+        // exact midrank = 2 + (2 - 1) / 2 = 2.5. Across five candidates the
+        // midpoint is rank 2, so this placement is strictly in the bottom half.
+        // The legacy integer rank truncates to 2 and misclassifies it as exactly
+        // the midpoint; the V1 doubled representation retains 5/8 exactly.
+        let exact =
+            place_v1(&[10, 4, 3, 2, 1], &[5, 9, 8, 5, 1]).expect("exact half-rank placement");
+        assert_eq!(exact.winner_rank_twice(), 5);
+        assert_eq!(exact.relative_twice(), Some((5, 8)));
+        assert_eq!(exact.relative_ppm(), Some(625_000));
+        assert!(exact.bottom_half());
+
+        let summary = anchored_walk_forward_bottom_half_rate_v1(&[exact]);
+        assert_eq!(summary.folds, 1);
+        assert_eq!(summary.bottom_half_folds, 1);
+        assert_eq!(summary.rate_ppm(), Some(1_000_000));
+        assert_eq!(summary.median_placement_ppm, 625_000);
+
+        let legacy = place(&[10, 4, 3, 2, 1], &[5, 9, 8, 5, 1]).expect("compat placement");
+        assert_eq!(legacy.winner_rank, 2);
+        assert!(!legacy.overfit(), "the old lossy adapter is not authority");
+    }
 
     #[test]
     fn a_procedure_that_always_picks_the_out_of_sample_best_scores_zero() {

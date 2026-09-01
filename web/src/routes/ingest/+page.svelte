@@ -87,6 +87,7 @@
   // THE SELECTION LIVES IN THE ADDRESS BAR. See `$lib/urlstate.js` for why,
   // and for the measurement of what used to reset on every reload.
   import { encode as encodeSel, decode as decodeSel, same as sameSel } from '$lib/urlstate.js';
+  import { foldMinuteOwed } from '$lib/calendar-owed.js';
 
   // ─────────────────────── WHAT AN ANSWER LOOKS LIKE ───────────────────────
   //
@@ -1027,10 +1028,19 @@
    * @type {{
    *   first: string, last: string,
    *   owed: Map<string, number|null>,
+   *   indexOwed: Map<string, number|null>,
    *   from: string[], clashes: number, why: string
    * }}
    */
-  let calendar = $state({ first: '', last: '', owed: new Map(), from: [], clashes: 0, why: '' });
+  let calendar = $state({
+    first: '',
+    last: '',
+    owed: new Map(),
+    indexOwed: new Map(),
+    from: [],
+    clashes: 0,
+    why: ''
+  });
 
   /** An epoch day as `YYYY-MM-DD`. UTC midnight, like every other date here. */
   /** @param {number} day */
@@ -1050,6 +1060,7 @@
           first: '',
           last: '',
           owed: new Map(),
+          indexOwed: new Map(),
           from: [],
           clashes: 0,
           why: `/calendar.json answered ${response.status}`
@@ -1059,13 +1070,22 @@
       const body = await response.json();
       /** @type {Map<string, number|null>} */
       const owed = new Map();
+      /** @type {Map<string, number|null>} */
+      const indexOwed = new Map();
       for (const entry of body?.days ?? []) {
-        owed.set(isoOfEpochDay(entry.day), entry.owed ?? null);
+        const day = isoOfEpochDay(entry.day);
+        owed.set(day, entry.owed ?? null);
+        // MISSING IS UNKNOWN, NEVER "SAME AS EXCHANGE". An older API does not
+        // carry the index-specific field and therefore cannot prove a common
+        // index denominator on the systems-outage day. Falling back to `owed`
+        // would silently restore the false 166-hole claim D-0420 refuses.
+        indexOwed.set(day, entry.indexOwed ?? null);
       }
       calendar = {
         first: owed.size ? isoOfEpochDay(body.firstDay) : '',
         last: owed.size ? isoOfEpochDay(body.lastDay) : '',
         owed,
+        indexOwed,
         from: body?.derivedFrom ?? [],
         clashes: (body?.disagreements ?? []).length,
         why: owed.size ? '' : 'the store holds no bars for this feed'
@@ -1075,6 +1095,7 @@
         first: '',
         last: '',
         owed: new Map(),
+        indexOwed: new Map(),
         from: [],
         clashes: 0,
         why:
@@ -4629,18 +4650,16 @@
   /**
    * Minute bars each month's sessions actually owe — **summed, never multiplied**.
    *
-   * `sessions × 375` is right for 1,662 of the window's 1,671 days and wrong for
-   * nine of them, and the nine are exactly the ones an operator notices. Measured
-   * against the store: multiplying claims **626,625** bars where the exchange
-   * offered **623,574**, so all three one-minute series read SHORT by ~3,100 when
-   * every one of them was complete but for 28 minutes.
-   *
-   * The 3,051 difference is not mysterious and is not one bug:
-   *   1,176 — four sessions that were never 375 minutes
-   *   1,875 — five Muhurat days the minute series does not reach, 375 apiece
+   * `sessions × 375` is wrong for special sessions. The former store-derived
+   * calendar claimed **623,574** minute bars and called all three index series
+   * complete but for 28. D-0420 superseded that claim with primary evidence:
+   * 2021-02-24 had 220 normal-market minutes, 166 more than the shared stored
+   * prefix implied, while the exact spot-index publication count remains
+   * unproved. Exchange and index denominators therefore travel separately.
    *
    * **THE NUMBERS ARE NO LONGER THIS PAGE'S TO KNOW.** They used to come from
-   * two tables typed in above; they now come from `owed` on `/calendar.json`,
+   * two tables typed in above; they now come from `owed` and `indexOwed` on
+   * `/calendar.json`,
    * which the store derived from the bars themselves. A short session is simply
    * a smaller `owed`, and a day whose length was never measured arrives as
    * `null` — which contributes **nothing**, deliberately, and is not the same as
@@ -4652,18 +4671,8 @@
    * and nothing is invented — the same silence `holidaysKnownFor` reports.
    */
   const minuteBarsByMonth = $derived.by(() => {
-    const m = new Map();
-    if (!windowOk) return m;
-    let d = from;
-    while (d <= to) {
-      const owed = calendar.owed.get(d);
-      if (typeof owed === 'number') {
-        const ym = d.slice(0, 7);
-        m.set(ym, (m.get(ym) ?? 0) + owed);
-      }
-      d = addDays(d, 1);
-    }
-    return m;
+    if (!windowOk) return foldMinuteOwed('', '', new Map(), new Map(), addDays);
+    return foldMinuteOwed(from, to, calendar.owed, calendar.indexOwed, addDays);
   });
 
   /**
@@ -4864,11 +4873,11 @@
             //
             // A day owes exactly one daily bar however long its session ran, so
             // `sessions × 1` is exact there. A day owes 375 minute bars only if
-            // it traded 09:15–15:29, and nine days in this window did not —
-            // four short sessions and five Muhurats the minute series never
-            // reached. Multiplying claimed 626,625 where the exchange offered
-            // 623,574, and every one-minute series read SHORT by ~3,100 while
-            // being complete but for 28 minutes. See `minuteBarsByMonth`.
+            // it traded 09:15–15:29. The old store-derived total of 623,574
+            // self-validated the outage day's shared 54-bar index prefix.
+            // D-0420 replaces the exchange timetable from SEBI and withholds
+            // the unproved index denominator for that month. See
+            // `minuteBarsByMonth`.
             /* `!calendarCoversMonth(ym)` -> null, AND IT GUARDS BOTH RUNGS.
                Both denominators come out of `calendar.owed`: the minute rung
                reads `minuteBarsByMonth`, the day rung multiplies `sessions`,
@@ -4880,7 +4889,12 @@
               r.per === null || !derivable || !calendarCoversMonth(ym)
                 ? null
                 : r.dir === '1min'
-                  ? (minuteBarsByMonth.get(ym) ?? 0)
+                  ? m.kind === 'Index' && minuteBarsByMonth.indexUnknown.has(ym)
+                    ? null
+                    : ((m.kind === 'Index'
+                        ? minuteBarsByMonth.index
+                        : minuteBarsByMonth.exchange
+                      ).get(ym) ?? 0)
                   : sessions * r.per;
             // WITH `s.key` IN IT. Without the segment this probe answered
             // the same number for every segment in the loop.
@@ -12497,4 +12511,3 @@
     margin-right: var(--s3);
   }
 </style>
-

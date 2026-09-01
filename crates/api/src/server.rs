@@ -27,9 +27,9 @@ use std::path::{Path, PathBuf};
 
 /// The default listen address when none is given.
 ///
-/// Loopback, not `0.0.0.0`: this page is an operator's window onto a local
-/// store, and a default that listens on every interface is a decision nobody
-/// took.
+/// Loopback, not `0.0.0.0`: this page is an unauthenticated operator window
+/// onto a local store. Every accepted explicit address is loopback too; see
+/// [`loopback_serve_addr`].
 pub const DEFAULT_ADDR: SocketAddr =
     SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 8080);
 
@@ -84,16 +84,31 @@ impl Command {
             // No command at all serves, because that is what the operator has
             // always typed. A WRONG command does not: see the last arm.
             (None, _) | (Some("serve"), None) => Ok(Self::Serve(DEFAULT_ADDR)),
-            (Some("serve"), Some(addr)) => addr
-                .parse()
-                .map(Self::Serve)
-                .map_err(|e| format!("not a socket address: {addr:?} ({e})")),
+            (Some("serve"), Some(addr)) => loopback_serve_addr(addr).map(Self::Serve),
             (Some("report"), None) => Ok(Self::Report),
             (Some(other), _) => Err(format!(
                 "unknown argument {other:?}; usage: api [serve [ADDR] | report]"
             )),
         }
     }
+}
+
+/// One listening address this unauthenticated server may expose.
+///
+/// `IpAddr::is_loopback` admits the complete IPv4 loopback block and IPv6
+/// `::1`. Unspecified, private-LAN, public and IPv4-mapped IPv6 addresses are
+/// refused rather than guessed safe. There is no override: adding a non-loopback
+/// mode first requires an authentication design, not a more alarming flag.
+fn loopback_serve_addr(raw: &str) -> Result<SocketAddr, String> {
+    let addr = raw
+        .parse::<SocketAddr>()
+        .map_err(|why| format!("not a socket address: {raw:?} ({why})"))?;
+    if !addr.ip().is_loopback() {
+        return Err(format!(
+            "REFUSED — {addr} is not a loopback listening address. This HTTP surface has no authentication and may serve only 127.0.0.0/8 or [::1]; no socket was opened."
+        ));
+    }
+    Ok(addr)
 }
 
 /// Where each vendor's master is expected.
@@ -2782,7 +2797,17 @@ fn audit_one(
     let n = usize::try_from(file.header().n_valid).unwrap_or(usize::MAX);
     let (rows, faults) = bars::page(&file, 0, n);
     let stamps: Vec<i64> = rows.iter().map(|bar| bar.ts_micros).collect();
-    let ledger = pull::gaps::classify_against(&stamps, first, last, calendar);
+    // A MARKET SESSION AND AN INDEX-PUBLICATION WINDOW ARE NOT THE SAME FACT.
+    // On 2021-02-24 SEBI proves 220 normal-market minutes, but also records
+    // NIFTY computation unavailable during part of the still-trading morning
+    // and gives no common interval for every stored index. The index-specific
+    // door therefore refuses to turn that day into invented vendor holes;
+    // CASH and derivative series keep the verified exchange-session calendar.
+    let ledger = if asked.segment == "INDEX" {
+        pull::gaps::classify_spot_index_against(&stamps, first, last, calendar)
+    } else {
+        pull::gaps::classify_against(&stamps, first, last, calendar)
+    };
 
     // RUNS, NOT MINUTES, and the reason travels with each one. 1,176 of 1,204
     // measured absences were four contiguous events; a per-minute list is the
@@ -4235,7 +4260,9 @@ pub struct Site {
     /// the same reasons: one slot per `Site` so concurrent tests do not refuse
     /// each other, `Some` with no `finished_micros` as the one reading of "in
     /// flight", and a finished run LEFT in the slot so the page can read its
-    /// report after it ends.
+    /// report after it ends. `sweeprun::TaskFinisher` turns every abnormal task
+    /// exit into a finished refusal, including a panic and a queued blocking
+    /// task dropped during shutdown, so no dead task can leave this slot busy.
     ///
     /// Separate from [`Self::run`] rather than sharing it, because a pull and
     /// a sweep are independent work: a sweep reads bars off disk and a pull
@@ -13503,6 +13530,7 @@ pub fn router(site: Loaded) -> axum::Router {
     router_serving(
         site,
         std::sync::Arc::new(assets::Assets::new(&assets::web_dir())),
+        DEFAULT_ADDR,
     )
 }
 
@@ -13521,7 +13549,11 @@ pub fn router(site: Loaded) -> axum::Router {
               build serves — and shortening the comments to fit would delete \
               the reasons rather than the length."
 )]
-pub fn router_serving(site: Loaded, assets: std::sync::Arc<assets::Assets>) -> axum::Router {
+pub fn router_serving(
+    site: Loaded,
+    assets: std::sync::Arc<assets::Assets>,
+    local_addr: SocketAddr,
+) -> axum::Router {
     let typeahead = std::sync::Arc::clone(&assets);
     let masters_js = std::sync::Arc::clone(&assets);
     axum::Router::new()
@@ -13744,10 +13776,14 @@ pub fn router_serving(site: Loaded, assets: std::sync::Arc<assets::Assets>) -> a
         // WHO ASKED, NOT ONLY WHICH VERB. `post` stops a crawler; it does not
         // stop the other tab in the operator's browser. Registered INSIDE
         // `note_request` — a later `.layer` on an `axum::Router` wraps the
-        // earlier one, so the log sees the 403 — and inside the body limit, so
-        // an oversized body is still refused by length first. See
+        // earlier one, so the log sees the 403. `DefaultBodyLimit` is enforced
+        // when a handler extracts its `String`; this middleware may therefore
+        // answer a cross-origin request before body extraction. An otherwise
+        // admitted oversized body still answers 413 before its parser. See
         // [`same_origin_writes_only`] for what this stops and what it does not.
-        .layer(axum::middleware::from_fn(same_origin_writes_only))
+        .layer(axum::middleware::from_fn(move |request, next| {
+            same_origin_writes_only(local_addr, request, next)
+        }))
         .layer(axum::middleware::from_fn(crate::logs::note_request))
         .layer(axum::extract::DefaultBodyLimit::max(MAX_FORM_BYTES))
         .with_state(site)
@@ -13762,6 +13798,20 @@ const SEC_FETCH_SITE: &str = "sec-fetch-site";
 
 /// The one `Sec-Fetch-Site` value that is this server's own page.
 const SEC_FETCH_SAME_ORIGIN: &str = "same-origin";
+
+/// Proxy assertions this direct-loopback server never trusts.
+///
+/// There is no configured trusted proxy in front of this listener. Accepting
+/// one of these would therefore let the requester choose the authority the
+/// admission check reasons about. A browser does not add them to an ordinary
+/// request, so their absence is the only admitted shape.
+const FORWARDED_AUTHORITY_HEADERS: [&str; 5] = [
+    "forwarded",
+    "x-forwarded-for",
+    "x-forwarded-host",
+    "x-forwarded-port",
+    "x-forwarded-proto",
+];
 
 /// Refuses a state-changing request that did not come from this server's own
 /// page.
@@ -13793,37 +13843,30 @@ const SEC_FETCH_SAME_ORIGIN: &str = "same-origin";
 /// `GET` and `HEAD` pass untouched. They change nothing, and refusing them
 /// would take down every page and every JSON route on the site.
 ///
-/// Anything else is decided by `Sec-Fetch-Site`, which the **user agent** sets
-/// and page script cannot write — which is the only reason it is worth reading.
-/// `same-origin` passes. `cross-site`, `same-site`, `none` and any token this
-/// build has never heard of are refused: a value nobody here recognises is not
-/// evidence of anything, and defaulting it open is the fallback `CLAUDE.md` §4
-/// bans.
+/// Anything else needs **both** a local authority and browser same-origin
+/// evidence. `Host` must be exactly `localhost` or the bound loopback IP
+/// literal, with the bound port. This half is load-bearing: a hostile page can resolve its
+/// own name to `127.0.0.1`, and its browser will truthfully stamp
+/// `Sec-Fetch-Site: same-origin` while sending `Host: hostile.example`. Trusting
+/// the fetch token alone is therefore a DNS-rebinding bypass.
 ///
-/// # An ABSENT `Sec-Fetch-Site` is allowed, deliberately, and here is the cost
+/// The local host must carry the listener's bound port, and every write must
+/// carry an exact `http` `Origin` authority match. This listener has no TLS, so
+/// an `https` origin is never its own page. If
+/// `Sec-Fetch-Site` is present it must additionally say `same-origin`; it may
+/// be absent for compatible non-browser clients. Missing, repeated, unreadable
+/// or unknown evidence refuses; a bare `curl` must opt in by sending a matching
+/// `Origin`. Forwarded authority metadata always refuses because this direct-
+/// loopback deployment has no trusted proxy whose assertions could safely
+/// replace the wire host.
 ///
-/// `curl` sends none. Every socket test in this crate sends none. A client that
-/// is not a browser has no origin to compare in the first place. So an absent
-/// header falls through to `Origin` against `Host`, and a request carrying
-/// neither passes.
-///
-/// Stated plainly, because a guard that is not honest about its hole is worse
-/// than none: **a browser that sends neither header on a cross-origin form POST
-/// is not stopped by this.** Every engine shipping today sends `Origin` on such
-/// a POST and all three send `Sec-Fetch-Site`; that is read from the
-/// specifications and NOTHING HERE MEASURES IT, so it is a claim about the
-/// world and not about this code. This defends against the browser an operator
-/// already has open. It does not defend against a hand-written client, and it
-/// cannot: such a client can reach this port directly and needs no page's help.
-///
-/// The `Origin`/`Host` fallback compares **authorities** and cannot compare
-/// schemes, because `Host` carries none — `http://t` and `https://t` are one
-/// origin to this check. That is the blind spot a plain-HTTP loopback
-/// deployment already has, and this does not widen it. An HTTP/2 request
-/// carries its authority in the URI rather than in a `Host` header; one that
-/// also carries an `Origin` is therefore refused, which is the safe direction
-/// and is not a state `axum::serve` over plain TCP reaches from a browser.
+/// This is origin admission, not authentication. A hand-written local client
+/// can supply the admitted headers, and another local process can call the port
+/// directly. The listener restriction and this middleware close remote bind,
+/// browser CSRF and DNS-rebinding paths; they do not establish an operator
+/// identity.
 async fn same_origin_writes_only(
+    local_addr: SocketAddr,
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
@@ -13832,7 +13875,7 @@ async fn same_origin_writes_only(
     // DECIDED WHILE THE BORROW IS LIVE. `Next::run` takes the request by value,
     // so the verdict is an owned `String` and nothing of the request is held
     // across the move.
-    let Some(why) = cross_origin_refusal(request.method(), request.headers()) else {
+    let Some(why) = cross_origin_refusal(local_addr, request.method(), request.headers()) else {
         return next.run(request).await;
     };
     (
@@ -13852,6 +13895,7 @@ async fn same_origin_writes_only(
 /// without a socket — the argument [`store_body`] makes about the same split,
 /// and the reason the middleware above holds no logic of its own.
 fn cross_origin_refusal(
+    local_addr: SocketAddr,
     method: &axum::http::Method,
     headers: &axum::http::HeaderMap,
 ) -> Option<String> {
@@ -13860,39 +13904,112 @@ fn cross_origin_refusal(
     if method == axum::http::Method::GET || method == axum::http::Method::HEAD {
         return None;
     }
-    // A header value that is not visible ASCII reads as NO value, not as a
-    // pass: `to_str` refusing tells us nothing about where the request came
-    // from, so it falls to the `Origin` comparison below.
-    if let Some(site) = headers.get(SEC_FETCH_SITE).and_then(|v| v.to_str().ok()) {
-        if site == SEC_FETCH_SAME_ORIGIN {
-            return None;
+    for name in FORWARDED_AUTHORITY_HEADERS {
+        if headers.contains_key(name) {
+            let value = sole_visible_header(headers, name)
+                .ok()
+                .flatten()
+                .unwrap_or("<malformed-or-repeated>");
+            return Some(cross_origin_sentence(method, name, value));
         }
+    }
+
+    let host = match sole_visible_header(headers, axum::http::header::HOST.as_str()) {
+        Ok(Some(host)) if local_host_authority(host, local_addr) => host,
+        Ok(Some(host)) => return Some(cross_origin_sentence(method, "Host", host)),
+        Ok(None) => return Some(cross_origin_sentence(method, "Host", "<missing>")),
+        Err(()) => {
+            return Some(cross_origin_sentence(
+                method,
+                "Host",
+                "<malformed-or-repeated>",
+            ));
+        }
+    };
+
+    let Ok(site) = sole_visible_header(headers, SEC_FETCH_SITE) else {
+        return Some(cross_origin_sentence(
+            method,
+            "Sec-Fetch-Site",
+            "<malformed-or-repeated>",
+        ));
+    };
+    if let Some(site) = site
+        && site != SEC_FETCH_SAME_ORIGIN
+    {
         return Some(cross_origin_sentence(method, "Sec-Fetch-Site", site));
     }
-    let Some(origin) = headers
-        .get(axum::http::header::ORIGIN)
-        .and_then(|v| v.to_str().ok())
-    else {
-        // NO FETCH METADATA AND NO ORIGIN. This is `curl`, this crate's own
-        // socket tests, and any non-browser client. See the doc block for why
-        // this is a pass and what it costs.
-        return None;
+
+    let origin = match sole_visible_header(headers, axum::http::header::ORIGIN.as_str()) {
+        Ok(Some(origin)) => origin,
+        Ok(None) => return Some(cross_origin_sentence(method, "Origin", "<missing>")),
+        Err(()) => {
+            return Some(cross_origin_sentence(
+                method,
+                "Origin",
+                "<malformed-or-repeated>",
+            ));
+        }
     };
-    let host = headers
-        .get(axum::http::header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or_default();
-    // The scheme is dropped because `Host` has none to compare against.
-    // `Origin: null` — a sandboxed frame's opaque origin — carries no `://`,
-    // so it stays `null`, matches no host, and is refused. An empty authority
-    // is refused for the same reason rather than matching an absent `Host`.
-    let authority = origin
-        .split_once("://")
-        .map_or(origin, |(_scheme, rest)| rest);
-    if !authority.is_empty() && authority == host {
-        return None;
+    if !origin_matches_host(origin, host) {
+        return Some(cross_origin_sentence(method, "Origin", origin));
     }
-    Some(cross_origin_sentence(method, "Origin", origin))
+    None
+}
+
+/// The one visible value for a security header.
+///
+/// Repetition is ambiguity, not a list: neither `Host`, `Origin` nor
+/// `Sec-Fetch-Site` has a merge rule that can safely choose one authority.
+fn sole_visible_header<'a>(
+    headers: &'a axum::http::HeaderMap,
+    name: &'static str,
+) -> Result<Option<&'a str>, ()> {
+    let mut values = headers.get_all(name).iter();
+    let Some(first) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(());
+    }
+    first.to_str().map(Some).map_err(|_| ())
+}
+
+/// Whether one HTTP `Host` authority can name this loopback-only listener.
+fn local_host_authority(raw: &str, local_addr: SocketAddr) -> bool {
+    if !local_addr.ip().is_loopback() {
+        return false;
+    }
+    let Ok(authority) = raw.parse::<axum::http::uri::Authority>() else {
+        return false;
+    };
+    if raw.contains('@') || authority.port_u16() != Some(local_addr.port()) {
+        return false;
+    }
+    let host = authority.host();
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    let ip_word = host
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .unwrap_or(host);
+    ip_word
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip == local_addr.ip())
+}
+
+/// Whether a browser `Origin` is the exact `Host` authority on plain HTTP.
+fn origin_matches_host(origin: &str, host: &str) -> bool {
+    let Some((scheme, authority)) = origin.split_once("://") else {
+        return false;
+    };
+    if scheme != "http" {
+        return false;
+    }
+    authority
+        .parse::<axum::http::uri::Authority>()
+        .is_ok_and(|parsed| !authority.contains('@') && parsed.as_str().eq_ignore_ascii_case(host))
 }
 
 /// The `403` body: which header decided, and what it actually said.
@@ -14084,17 +14201,39 @@ const SERVE_LOCK: &str = "serve.lock";
 /// a state to degrade through: `CLAUDE.md` §4 — degrade loudly and name the
 /// reason, or refuse.
 fn take_serve_lock(store_root: &Path, addr: std::net::SocketAddr) -> Result<ServeLock, String> {
-    let path = store_root.join(SERVE_LOCK);
-    if let Err(why) = std::fs::create_dir_all(store_root) {
+    // THE CONFIGURED ROOT MUST ALREADY EXIST. IT IS NEVER STARTUP SCRATCH.
+    //
+    // Recreating it is unsafe for an external-volume path: after hot unplug,
+    // `create_dir_all` can create the missing `/Volumes/<name>/...` hierarchy
+    // on the internal filesystem. That turns absence into a second, empty
+    // store with the same spelling. Refuse before opening logs, masters, the
+    // browser, or any data writer; remounting and restarting is the only
+    // recovery that can re-establish this startup boundary honestly.
+    let metadata = std::fs::metadata(store_root).map_err(|why| {
+        format!(
+            "REFUSED: the configured store root {} does not exist or cannot be read, so the one-server lock cannot be taken there and nothing will be created — {why}",
+            store_root.display()
+        )
+    })?;
+    if !metadata.is_dir() {
         return Err(format!(
-            "REFUSED: the store root {} cannot be created, so the one-server lock \
-             cannot be taken there — {why}",
+            "REFUSED: the configured store root {} is not a directory, so the one-server lock cannot be taken there and nothing will be created",
             store_root.display()
         ));
     }
     // CANONICAL, so `~/.brutex/store` and `~/.brutex/store/` and a path through
     // a symlink are one key rather than three.
-    let key = std::fs::canonicalize(store_root).unwrap_or_else(|_| store_root.to_path_buf());
+    let key = std::fs::canonicalize(store_root).map_err(|why| {
+        format!(
+            "REFUSED: the configured store root {} could not be resolved to its existing physical path, so no fallback identity will be used — {why}",
+            store_root.display()
+        )
+    })?;
+    // OPEN THROUGH THE ADMITTED CANONICAL ROOT, not through the configured
+    // spelling that produced it. A configured symlink can be retargeted after
+    // canonicalization; reopening through that spelling would put the lock on
+    // a different filesystem while `root` still names the first one.
+    let path = key.join(SERVE_LOCK);
     match serving_roots().lock() {
         // A POISONED MUTEX IS NOT A LICENCE TO SKIP THE CHECK. It means another
         // thread panicked holding it; the set is still readable and the lock
@@ -14470,6 +14609,36 @@ fn open_in_browser(url: &str) -> Result<(), String> {
     open_unless_suppressed(url, std::env::var_os(NO_OPEN_ENV).as_deref())
 }
 
+/// The URL launcher available on one supported host family.
+///
+/// Kept as data rather than hidden inside conditional compilation so every
+/// platform choice is testable on every host without actually opening a
+/// browser. In particular, Windows uses Explorer's native URL dispatch and
+/// never routes operator-controlled text through a command interpreter.
+#[derive(Clone, Copy)]
+enum BrowserHost {
+    MacOs,
+    Windows,
+    Other,
+}
+
+const CURRENT_BROWSER_HOST: BrowserHost = if cfg!(target_os = "macos") {
+    BrowserHost::MacOs
+} else if cfg!(target_os = "windows") {
+    BrowserHost::Windows
+} else {
+    BrowserHost::Other
+};
+
+/// The operating-system URL handler and its fixed arguments.
+const fn browser_handler(host: BrowserHost) -> (&'static str, &'static [&'static str]) {
+    match host {
+        BrowserHost::MacOs => ("open", &[]),
+        BrowserHost::Windows => ("explorer.exe", &[]),
+        BrowserHost::Other => ("xdg-open", &[]),
+    }
+}
+
 /// [`open_in_browser`] with the opt-out as an argument, so a test owns it.
 ///
 /// Split out because the workspace denies `unsafe_code` and `std::env::set_var`
@@ -14485,13 +14654,7 @@ fn open_unless_suppressed(url: &str, suppressed: Option<&std::ffi::OsStr>) -> Re
     // THE HANDLER IS THE PLATFORM'S, NEVER A BROWSER BY NAME. Naming a browser
     // picks one the operator may not use and may not have; the OS already knows
     // which one they chose.
-    let (program, args): (&str, &[&str]) = if cfg!(target_os = "macos") {
-        ("open", &[])
-    } else if cfg!(target_os = "windows") {
-        ("cmd", &["/C", "start", ""])
-    } else {
-        ("xdg-open", &[])
-    };
+    let (program, args) = browser_handler(CURRENT_BROWSER_HOST);
     std::process::Command::new(program)
         .args(args)
         .arg(url)
@@ -14644,6 +14807,12 @@ async fn run_in(dir: &Path, args: &[String], shutdown: Shutdown) -> u8 {
 /// reachable on a machine with no `HOME` and no `BRUTEX_STORE`. A test cannot
 /// make one — `set_var` is `unsafe` and this crate forbids `unsafe` — so the
 /// value is taken as an argument and both arms are drivable.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the serve arm is one ordered resource-acquisition and shutdown sequence; \
+              keeping the listener, store lock, telemetry, site, browser and task lifecycle \
+              together makes its before-serving guarantees auditable"
+)]
 async fn run_in_over(
     dir: &Path,
     store: Result<PathBuf, String>,
@@ -14654,6 +14823,15 @@ async fn run_in_over(
         Ok(Command::Report) => reported(dir),
         Ok(Command::Serve(addr)) => match tokio::net::TcpListener::bind(addr).await {
             Ok(listener) => {
+                let bound_addr = match listener.local_addr() {
+                    Ok(bound) => bound,
+                    Err(why) => {
+                        eprintln!(
+                            "REFUSED — the bound listener's local address could not be read: {why}. No request was served."
+                        );
+                        return FAILED;
+                    }
+                };
                 // BEFORE ANYTHING IS OPENED OR CREATED. A store root the
                 // environment could not name is a refusal, not a `.`, and the
                 // listener is dropped unserved rather than bound over a tree
@@ -14683,10 +14861,15 @@ async fn run_in_over(
                 // ONE SERVER PER STORE, PROVED BEFORE ANYTHING IS OPENED.
                 // The listener above is dropped unserved if this refuses. See
                 // `take_serve_lock`.
-                let _one_server = match sole_server(&store_root, addr) {
+                let one_server = match sole_server(&store_root, addr) {
                     Ok(lock) => lock,
                     Err(code) => return code,
                 };
+                // EVERY SERVER CHILD STARTS FROM THE SAME CANONICAL ROOT THAT
+                // OWNS `serve.lock`. Keeping the configured symlink here would
+                // let a retarget after admission send later writers elsewhere
+                // while this process still held the old store's lock.
+                let store_root = one_server.root.clone();
                 let log_dir = served_log_dir(&store_root);
                 // The ENV DECIDES THE LEVELS AND THE CALLER DECIDES THE
                 // DIRECTORY. `served_log_level` builds a template it cannot
@@ -14821,7 +15004,7 @@ async fn run_in_over(
                 // status it publishes are the ones the routes read.
                 let flying = tokio::spawn(autopilot::fly(Loaded::clone(&site)));
                 let code = stopped_over(
-                    serve(listener, router_serving(site, front), shutdown).await,
+                    serve(listener, router_serving(site, front, bound_addr), shutdown).await,
                     clean,
                 );
                 // Ctrl-C stopped the HTTP surface; stop the backfill too. A
@@ -15460,10 +15643,24 @@ mod tests {
         };
         assert_eq!(parse(&[]), Ok(Command::Serve(DEFAULT_ADDR)));
         assert_eq!(parse(&["serve"]), Ok(Command::Serve(DEFAULT_ADDR)));
-        assert_eq!(
-            parse(&["serve", "0.0.0.0:9100"]),
-            Ok(Command::Serve("0.0.0.0:9100".parse().expect("valid")))
-        );
+        for address in ["127.0.0.1:9100", "127.255.255.254:9100", "[::1]:9100"] {
+            assert_eq!(
+                parse(&["serve", address]),
+                Ok(Command::Serve(address.parse().expect("valid loopback")))
+            );
+        }
+        for address in [
+            "0.0.0.0:9100",
+            "[::]:9100",
+            "192.0.2.1:9100",
+            "[2001:db8::1]:9100",
+            "[::ffff:127.0.0.1]:9100",
+        ] {
+            let why = parse(&["serve", address]).expect_err("non-loopback must refuse");
+            assert!(why.contains("REFUSED"), "{why}");
+            assert!(why.contains("no authentication"), "{why}");
+            assert!(why.contains("no socket was opened"), "{why}");
+        }
         assert_eq!(parse(&["report"]), Ok(Command::Report));
 
         // A typo that silently started a server is a typo nobody finds.
@@ -15662,6 +15859,67 @@ mod tests {
         let taken = take_serve_lock(&root, "127.0.0.1:9999".parse().expect("an address"))
             .expect("the store is free once the other instance is gone");
         drop(taken);
+    }
+
+    /// A configured store is an existing capability, never a directory the
+    /// server is allowed to invent. This is the hot-unplug regression: the old
+    /// `create_dir_all` made a missing external mount path on the internal
+    /// filesystem before taking the lock, then served that empty replacement.
+    #[test]
+    fn a_missing_store_root_is_refused_without_manufacturing_a_replacement() {
+        let root = crate::scratch::path("serve-lock-missing-root");
+        let _ = std::fs::remove_dir_all(&root);
+
+        let why = take_serve_lock(&root, "127.0.0.1:9999".parse().expect("an address"))
+            .expect_err("a missing configured store cannot be created at startup");
+        assert!(why.starts_with("REFUSED:"), "{why}");
+        assert!(why.contains("nothing will be created"), "{why}");
+        assert!(
+            !root.exists(),
+            "startup manufactured a replacement store at {}",
+            root.display()
+        );
+
+        std::fs::write(&root, b"not a directory").expect("a regular-file root");
+        let why = take_serve_lock(&root, "127.0.0.1:9999".parse().expect("an address"))
+            .expect_err("a regular file cannot become a store root");
+        assert!(why.contains("is not a directory"), "{why}");
+    }
+
+    /// A symlink is configuration, not a storage capability. Once admitted,
+    /// the lock and the server must keep using the canonical target that was
+    /// actually inspected rather than resolving that configurable spelling a
+    /// second time.
+    #[cfg(unix)]
+    #[test]
+    fn a_retargeted_store_symlink_cannot_move_the_admitted_server_lock() {
+        let base = crate::scratch::path("serve-lock-retargeted-symlink");
+        let first = base.join("first");
+        let replacement = base.join("replacement");
+        let configured = base.join("configured");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&first).expect("first store");
+        std::fs::create_dir_all(&replacement).expect("replacement store");
+        std::os::unix::fs::symlink(&first, &configured).expect("configured store symlink");
+
+        let lock = take_serve_lock(&configured, "127.0.0.1:9999".parse().expect("an address"))
+            .expect("the first target is admitted");
+        std::fs::remove_file(&configured).expect("remove the configured symlink");
+        std::os::unix::fs::symlink(&replacement, &configured).expect("retarget the symlink");
+
+        assert_eq!(
+            lock.root,
+            std::fs::canonicalize(&first).expect("canonical first store"),
+            "the admitted root remains the target that was inspected"
+        );
+        assert!(
+            first.join(SERVE_LOCK).is_file(),
+            "the lock belongs to the admitted store"
+        );
+        assert!(
+            !replacement.join(SERVE_LOCK).exists(),
+            "retargeting configuration did not move the lock"
+        );
     }
 
     /// **A refusal that could not be journalled says so on its own page.**
@@ -16499,6 +16757,7 @@ mod tests {
             router_serving(
                 Loaded::new(Site::load(&dir, &store_root("serve"))),
                 front("serve"),
+                addr,
             ),
             Box::pin(async move { stopper.accept().await.map(|_| ()) }),
         ));
@@ -16652,6 +16911,7 @@ mod tests {
             router_serving(
                 Loaded::new(Site::load(&dir, &store_root("static"))),
                 front("static"),
+                addr,
             ),
             Box::pin(async move { stopper.accept().await.map(|_| ()) }),
         ));
@@ -16748,8 +17008,15 @@ mod tests {
 
     /// Sends one form POST and reads the whole response.
     async fn post(addr: SocketAddr, path: &str, form: &str) -> String {
+        let host = format!("localhost:{}", addr.port());
+        let metadata = format!("Origin: http://{host}\r\nSec-Fetch-Site: same-origin\r\n");
+        post_as(addr, path, form, &host, &metadata).await
+    }
+
+    /// One form POST with an explicit authority and browser metadata.
+    async fn post_as(addr: SocketAddr, path: &str, form: &str, host: &str, extra: &str) -> String {
         let request = format!(
-            "POST {path} HTTP/1.1\r\nHost: t\r\n\
+            "POST {path} HTTP/1.1\r\nHost: {host}\r\n{extra}\
              Content-Type: application/x-www-form-urlencoded\r\n\
              Content-Length: {}\r\nConnection: close\r\n\r\n{form}",
             form.len()
@@ -16783,7 +17050,7 @@ mod tests {
         let stop_addr = stopper.local_addr().expect("addr");
         let served = tokio::spawn(serve(
             listener,
-            router_serving(Loaded::new(site(name, &dir)), front(name)),
+            router_serving(Loaded::new(site(name, &dir)), front(name), addr),
             Box::pin(async move { stopper.accept().await.map(|_| ()) }),
         ));
         body(addr).await;
@@ -16792,33 +17059,6 @@ mod tests {
             .await
             .expect("task")
             .expect("a graceful shutdown is not a failure");
-    }
-
-    /// One form POST carrying whatever a browser would have stamped on it.
-    ///
-    /// [`post`] sends no fetch metadata and no `Origin`, which is what `curl`
-    /// does and is the case `same_origin_writes_only` deliberately lets
-    /// through. Proving the refusal needs a request that says where it came
-    /// from, so this one lets the caller say it. `extra` carries its own
-    /// trailing CRLF, because a header list that is sometimes empty cannot own
-    /// a separator.
-    async fn post_as(addr: SocketAddr, path: &str, form: &str, extra: &str) -> String {
-        let request = format!(
-            "POST {path} HTTP/1.1\r\nHost: t\r\n{extra}\
-             Content-Type: application/x-www-form-urlencoded\r\n\
-             Content-Length: {}\r\nConnection: close\r\n\r\n{form}",
-            form.len()
-        );
-        tokio::task::spawn_blocking(move || {
-            use std::io::Read as _;
-            let mut s = std::net::TcpStream::connect(addr).expect("connect");
-            s.write_all(request.as_bytes()).expect("write");
-            let mut buf = String::new();
-            s.read_to_string(&mut buf).expect("read");
-            buf
-        })
-        .await
-        .expect("the client thread must not panic")
     }
 
     /// **A WRITE FROM ANOTHER ORIGIN IS REFUSED, OVER A REAL SOCKET.**
@@ -16837,8 +17077,17 @@ mod tests {
     async fn a_cross_origin_write_is_refused_and_this_page_s_own_is_not() {
         with_server("csrf", |addr| async move {
             let form = "target=nifty&from=2024-01-01&to=2024-01-02";
+            let local_host = format!("localhost:{}", addr.port());
+            let local_origin = format!("Origin: http://{local_host}\r\n");
 
-            let hostile = post_as(addr, "/pull/spot", form, "Sec-Fetch-Site: cross-site\r\n").await;
+            let hostile = post_as(
+                addr,
+                "/pull/spot",
+                form,
+                &local_host,
+                &format!("{local_origin}Sec-Fetch-Site: cross-site\r\n"),
+            )
+            .await;
             assert!(hostile.contains("403 Forbidden"), "{hostile}");
             assert!(hostile.contains("REFUSED"), "{hostile}");
             assert!(
@@ -16850,26 +17099,62 @@ mod tests {
                 "it must not reach the ingest parser at all: {hostile}"
             );
 
+            // ORIGIN REJECTION PRECEDES BODY EXTRACTION. `DefaultBodyLimit`
+            // configures the handler's `String` extractor; it is not a socket-
+            // layer pre-read. A hostile oversized body therefore answers 403,
+            // while the no-metadata case in the dedicated body-limit test below
+            // reaches extraction and answers 413. Both paths stop before a form
+            // or engine parser, but promising one universal status/order would
+            // be false.
+            let huge = format!("pad={}", "x".repeat(MAX_FORM_BYTES + 1));
+            let hostile_huge = post_as(
+                addr,
+                "/ingest/queue",
+                &huge,
+                &local_host,
+                &format!("{local_origin}Sec-Fetch-Site: cross-site\r\n"),
+            )
+            .await;
+            assert!(hostile_huge.contains("403 Forbidden"), "{hostile_huge}");
+            assert!(!hostile_huge.contains("413"), "{hostile_huge}");
+            assert!(!hostile_huge.contains("NOT STARTED"), "{hostile_huge}");
+
             // AND THE OLDER SIGNAL, for a client that sends no fetch metadata.
-            let elsewhere =
-                post_as(addr, "/pull/spot", form, "Origin: http://evil.example\r\n").await;
+            let elsewhere = post_as(
+                addr,
+                "/pull/spot",
+                form,
+                &local_host,
+                "Origin: http://evil.example\r\n",
+            )
+            .await;
             assert!(elsewhere.contains("403 Forbidden"), "{elsewhere}");
             assert!(elsewhere.contains("evil.example"), "{elsewhere}");
 
-            // THE THREE THAT MUST STILL WORK. `Host` is `t`, so `http://t` IS
-            // this origin; a browser posting this server's own form says
-            // `same-origin`; and a client that says neither is `curl`.
+            // THE TWO THAT MUST STILL WORK. A browser's fetch token or a
+            // matching explicit Origin can independently prove this local
+            // authority. A metadata-free client is refused below.
             for extra in [
-                "Sec-Fetch-Site: same-origin\r\n",
-                "Origin: http://t\r\n",
-                "",
+                format!("{local_origin}Sec-Fetch-Site: same-origin\r\n"),
+                local_origin.clone(),
             ] {
-                let ours = post_as(addr, "/ingest/queue", form, extra).await;
+                let ours = post_as(addr, "/ingest/queue", form, &local_host, &extra).await;
                 assert!(
                     !ours.contains("403 Forbidden"),
                     "[{extra}] this server's own page still posts: {ours}"
                 );
             }
+
+            let bare = post_as(
+                addr,
+                "/ingest/queue",
+                form,
+                &local_host,
+                "Sec-Fetch-Site: same-origin\r\n",
+            )
+            .await;
+            assert!(bare.contains("403 Forbidden"), "{bare}");
+            assert!(bare.contains("Origin"), "{bare}");
 
             // AND A READ IS NEVER REFUSED, whoever asked for it. A page that
             // could not be fetched cross-origin would break nothing an attacker
@@ -16882,12 +17167,14 @@ mod tests {
 
     /// **THE SAME-ORIGIN RULE, ARM BY ARM, WITHOUT A SOCKET.**
     ///
-    /// Every branch of [`cross_origin_refusal`] is here, including the two that
-    /// deliberately PASS: a request with no fetch metadata and no `Origin` at
-    /// all, which is `curl` and is every other socket test in this file. That
-    /// hole is documented on the function and it is asserted here, so it cannot
-    /// be closed or widened without this test saying so.
+    /// Every branch of [`cross_origin_refusal`] is here, including absent,
+    /// repeated, unreadable, forwarded and DNS-rebinding-prone authorities.
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one same-origin decision table whose passing and refusing cases must stay \
+                  together so every authority branch is checked against the same setup"
+    )]
     fn only_a_same_origin_write_passes_and_a_read_always_does() {
         let head = |pairs: &[(&str, &str)]| {
             let mut headers = axum::http::HeaderMap::new();
@@ -16904,7 +17191,12 @@ mod tests {
         // A READ IS NEVER REFUSED, whatever it says about itself.
         for method in [axum::http::Method::GET, axum::http::Method::HEAD] {
             assert!(
-                cross_origin_refusal(&method, &head(&[("sec-fetch-site", "cross-site")])).is_none(),
+                cross_origin_refusal(
+                    DEFAULT_ADDR,
+                    &method,
+                    &head(&[("sec-fetch-site", "cross-site")]),
+                )
+                .is_none(),
                 "{method} changes nothing and must not be gated"
             );
         }
@@ -16912,57 +17204,290 @@ mod tests {
         // THE BROWSER'S OWN WORD. One value passes and every other refuses,
         // including a token this build has never heard of.
         assert!(
-            cross_origin_refusal(&post, &head(&[("sec-fetch-site", "same-origin")])).is_none(),
+            cross_origin_refusal(
+                DEFAULT_ADDR,
+                &post,
+                &head(&[
+                    ("host", "localhost:8080"),
+                    ("origin", "http://localhost:8080"),
+                    ("sec-fetch-site", "same-origin"),
+                ])
+            )
+            .is_none(),
             "this server's own form is the only thing this check exists to admit"
         );
         for hostile in ["cross-site", "same-site", "none", "nonsense"] {
-            let why = cross_origin_refusal(&post, &head(&[("sec-fetch-site", hostile)]))
-                .expect("a write that is not from this origin is refused");
+            let why = cross_origin_refusal(
+                DEFAULT_ADDR,
+                &post,
+                &head(&[
+                    ("host", "localhost:8080"),
+                    ("origin", "http://localhost:8080"),
+                    ("sec-fetch-site", hostile),
+                ]),
+            )
+            .expect("a write that is not from this origin is refused");
             assert!(why.contains("Sec-Fetch-Site"), "{why}");
             assert!(why.contains(hostile), "it names what arrived: {why}");
             assert!(why.contains("REFUSED"), "{why}");
         }
 
-        // NO METADATA AT ALL PASSES, and that is the documented cost: curl
-        // sends none, and neither does `post` above.
-        assert!(cross_origin_refusal(&post, &head(&[])).is_none());
-        assert!(cross_origin_refusal(&post, &head(&[("host", "t")])).is_none());
+        // NO HOST OR NO ORIGIN EVIDENCE REFUSES. A CLI can supply a matching
+        // Origin explicitly; guessing from its TCP destination is not this
+        // middleware's job.
+        for headers in [head(&[]), head(&[("host", "localhost:8080")])] {
+            assert!(cross_origin_refusal(DEFAULT_ADDR, &post, &headers).is_some());
+        }
+        let missing_origin = cross_origin_refusal(
+            DEFAULT_ADDR,
+            &post,
+            &head(&[
+                ("host", "localhost:8080"),
+                ("sec-fetch-site", "same-origin"),
+            ]),
+        )
+        .expect("fetch metadata alone is not an Origin");
+        assert!(missing_origin.contains("Origin"), "{missing_origin}");
 
-        // ORIGIN AGAINST HOST IS THE FALLBACK, on authority alone.
+        // ORIGIN AGAINST A LOCAL HOST IS THE FALLBACK, on exact authority.
         for (host, origin) in [
-            ("t", "http://t"),
+            ("localhost:8080", "http://localhost:8080"),
             ("127.0.0.1:8080", "http://127.0.0.1:8080"),
         ] {
             assert!(
-                cross_origin_refusal(&post, &head(&[("host", host), ("origin", origin)])).is_none(),
+                cross_origin_refusal(
+                    DEFAULT_ADDR,
+                    &post,
+                    &head(&[("host", host), ("origin", origin)]),
+                )
+                .is_none(),
                 "{origin} IS {host}"
             );
         }
-        for hostile in ["http://evil.example", "http://t.evil.example", "null", ""] {
-            let why = cross_origin_refusal(&post, &head(&[("host", "t"), ("origin", hostile)]))
-                .expect("an Origin that is not this host is refused");
+        for (bound, host, origin) in [
+            (
+                SocketAddr::new(std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST), 8080),
+                "[::1]:8080",
+                "http://[::1]:8080",
+            ),
+            (
+                SocketAddr::new(
+                    std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 77, 66, 55)),
+                    8080,
+                ),
+                "127.77.66.55:8080",
+                "http://127.77.66.55:8080",
+            ),
+        ] {
+            assert!(
+                cross_origin_refusal(bound, &post, &head(&[("host", host), ("origin", origin)]),)
+                    .is_none(),
+                "the exact bound loopback spelling is admitted: {origin}"
+            );
+        }
+        for hostile in [
+            "http://evil.example",
+            "http://localhost.evil.example",
+            "https://localhost:8080",
+            "null",
+            "",
+            "file://localhost",
+            "http://user@localhost",
+        ] {
+            let why = cross_origin_refusal(
+                DEFAULT_ADDR,
+                &post,
+                &head(&[("host", "localhost:8080"), ("origin", hostile)]),
+            )
+            .expect("an Origin that is not this host is refused");
             assert!(why.contains("Origin"), "{why}");
         }
         assert!(
-            cross_origin_refusal(&post, &head(&[("origin", "http://t")])).is_some(),
-            "an Origin with no Host to compare it against decides nothing, and \
-             deciding nothing is a refusal here"
+            cross_origin_refusal(
+                DEFAULT_ADDR,
+                &post,
+                &head(&[("origin", "http://localhost:8080")]),
+            )
+            .is_some(),
+            "an Origin with no Host to compare it against refuses"
         );
 
-        // A HEADER VALUE THAT IS NOT TEXT IS NO VALUE. `to_str` refusing says
-        // nothing about where the request came from, so it falls to `Origin`
-        // rather than passing.
-        let mut opaque = head(&[("host", "t"), ("origin", "http://evil.example")]);
+        // FETCH METADATA DESCRIBES THE REQUEST RELATIVE TO THE PAGE; it does
+        // not prove that the wire Host is local. This is the DNS-rebinding
+        // case: the hostile origin resolves its own name to this socket.
+        for host in [
+            "evil.example:8080",
+            "127.0.0.1.evil.example:8080",
+            "2130706433:8080",
+            "0.0.0.0:8080",
+            "[::ffff:127.0.0.1]:8080",
+            "127.77.66.55:8080",
+        ] {
+            let why = cross_origin_refusal(
+                DEFAULT_ADDR,
+                &post,
+                &head(&[
+                    ("host", host),
+                    ("origin", "http://localhost:8080"),
+                    ("sec-fetch-site", "same-origin"),
+                ]),
+            )
+            .expect("same-origin metadata never turns a foreign Host local");
+            assert!(why.contains("Host"), "{host}: {why}");
+        }
+        for host in [
+            "",
+            "localhost:bad",
+            "user@localhost:8080",
+            "localhost:8080/path",
+        ] {
+            let why = cross_origin_refusal(
+                DEFAULT_ADDR,
+                &post,
+                &head(&[("host", host), ("origin", "http://localhost:8080")]),
+            )
+            .expect("a malformed Host never reaches Origin admission");
+            assert!(why.contains("Host"), "{host:?}: {why}");
+        }
+
+        // A LOCAL NAME ON THE WRONG OR OMITTED PORT IS ANOTHER SERVICE, not
+        // this listener. The Origin agrees with the lie in both cases; the
+        // bound-port check is what refuses it.
+        for (host, origin) in [
+            ("localhost", "http://localhost"),
+            ("localhost:8081", "http://localhost:8081"),
+            ("127.0.0.1:80", "http://127.0.0.1:80"),
+        ] {
+            let why = cross_origin_refusal(
+                DEFAULT_ADDR,
+                &post,
+                &head(&[("host", host), ("origin", origin)]),
+            )
+            .expect("only the bound port is this service");
+            assert!(why.contains("Host"), "{host}: {why}");
+        }
+
+        // THIS SERVER HAS NO TRUSTED PROXY. Every conventional forwarded
+        // authority assertion is refused even when all direct headers agree.
+        for forwarded in FORWARDED_AUTHORITY_HEADERS {
+            let why = cross_origin_refusal(
+                DEFAULT_ADDR,
+                &post,
+                &head(&[
+                    ("host", "localhost:8080"),
+                    ("origin", "http://localhost:8080"),
+                    ("sec-fetch-site", "same-origin"),
+                    (forwarded, "localhost"),
+                ]),
+            )
+            .expect("an untrusted forwarded assertion refuses");
+            assert!(why.contains(forwarded), "{why}");
+        }
+
+        // TWO OTHERWISE VALID SIGNALS MAY NOT CONTRADICT ONE ANOTHER.
+        let contradiction = cross_origin_refusal(
+            DEFAULT_ADDR,
+            &post,
+            &head(&[
+                ("host", "localhost:8080"),
+                ("sec-fetch-site", "same-origin"),
+                ("origin", "http://evil.example"),
+            ]),
+        )
+        .expect("a foreign Origin cannot hide behind same-origin metadata");
+        assert!(contradiction.contains("Origin"), "{contradiction}");
+
+        // A HEADER VALUE THAT IS NOT TEXT is a refusal rather than an absent
+        // optional hint or a fall-through to another signal.
+        let mut opaque = head(&[
+            ("host", "localhost:8080"),
+            ("origin", "http://localhost:8080"),
+        ]);
         opaque.insert(
             axum::http::HeaderName::from_static("sec-fetch-site"),
             axum::http::HeaderValue::from_bytes(&[0xff_u8]).expect("an opaque header value"),
         );
-        let why = cross_origin_refusal(&post, &opaque)
+        let why = cross_origin_refusal(DEFAULT_ADDR, &post, &opaque)
             .expect("an unreadable fetch-site header is not a pass");
         assert!(
-            why.contains("Origin"),
-            "the unreadable header is skipped and Origin decides: {why}"
+            why.contains("Sec-Fetch-Site"),
+            "the unreadable security header refuses rather than falling through: {why}"
         );
+
+        // Repetition is ambiguity. Even two byte-equal Origins are not one
+        // browser assertion, so no first/last selection can become a bypass.
+        let mut repeated = head(&[
+            ("host", "localhost:8080"),
+            ("sec-fetch-site", "same-origin"),
+        ]);
+        repeated.append(
+            axum::http::header::ORIGIN,
+            axum::http::HeaderValue::from_static("http://localhost:8080"),
+        );
+        repeated.append(
+            axum::http::header::ORIGIN,
+            axum::http::HeaderValue::from_static("http://localhost:8080"),
+        );
+        let why = cross_origin_refusal(DEFAULT_ADDR, &post, &repeated)
+            .expect("a repeated Origin is not one authority");
+        assert!(why.contains("malformed-or-repeated"), "{why}");
+
+        let mut repeated_host = head(&[("origin", "http://localhost:8080")]);
+        repeated_host.append(
+            axum::http::header::HOST,
+            axum::http::HeaderValue::from_static("localhost:8080"),
+        );
+        repeated_host.append(
+            axum::http::header::HOST,
+            axum::http::HeaderValue::from_static("localhost:8080"),
+        );
+        let why = cross_origin_refusal(DEFAULT_ADDR, &post, &repeated_host)
+            .expect("a repeated Host is not one authority");
+        assert!(why.contains("malformed-or-repeated"), "{why}");
+    }
+
+    /// **DNS REBINDING CANNOT REACH ANY ENGINE WRITER.**
+    ///
+    /// The hostile page and request have the same attacker-controlled origin,
+    /// so `Sec-Fetch-Site: same-origin` is truthful. Its DNS answer points this
+    /// TCP connection at loopback. Only checking that fetch token used to admit
+    /// all three writes below; checking the wire Host refuses before any engine
+    /// parser, run slot or append path is reached.
+    #[tokio::test]
+    async fn a_rebound_foreign_host_is_refused_on_every_engine_post_route() {
+        with_server("engine-rebind", |addr| async move {
+            let port = addr.port();
+            let hostile_host = format!("rebind.evil.example:{port}");
+            let metadata =
+                format!("Sec-Fetch-Site: same-origin\r\nOrigin: http://{hostile_host}\r\n");
+            for (path, body) in [
+                ("/backtest/run", ""),
+                ("/backtest/descend", ""),
+                ("/engine/command", "command=top"),
+            ] {
+                let out = post_as(addr, path, body, &hostile_host, &metadata).await;
+                assert!(out.contains("403 Forbidden"), "{path}: {out}");
+                assert!(
+                    out.contains("Host says this one came from somewhere else"),
+                    "the shared admission layer, not a route parser, refuses {path}: {out}"
+                );
+            }
+
+            // A real browser POST to the actual loopback authority remains
+            // admissible. The inert queue route proves it crosses middleware
+            // without starting a sweep or contacting a vendor.
+            let local_host = format!("127.0.0.1:{port}");
+            let local = post_as(
+                addr,
+                "/ingest/queue",
+                "",
+                &local_host,
+                &format!("Sec-Fetch-Site: same-origin\r\nOrigin: http://{local_host}\r\n"),
+            )
+            .await;
+            assert!(!local.contains("403 Forbidden"), "{local}");
+        })
+        .await;
     }
 
     /// **AN UNKNOWN FEED IS REFUSED BY NAME, ON BOTH STORE SURFACES.**
@@ -17866,6 +18391,20 @@ mod tests {
         );
     }
 
+    /// The Windows row is the regression proof: the URL is appended later as
+    /// one opaque argument, and there are no fixed interpreter tokens ahead of
+    /// it. The other two assertions pin their existing launchers while making
+    /// the full platform table reviewable on any test host.
+    #[test]
+    fn windows_browser_handler_has_no_interpreter_arguments() {
+        assert_eq!(browser_handler(BrowserHost::MacOs), ("open", &[][..]));
+        assert_eq!(
+            browser_handler(BrowserHost::Windows),
+            ("explorer.exe", &[][..])
+        );
+        assert_eq!(browser_handler(BrowserHost::Other), ("xdg-open", &[][..]));
+    }
+
     #[test]
     fn the_store_root_comes_from_the_environment_or_defaults_under_home() {
         assert_eq!(
@@ -18097,7 +18636,7 @@ mod tests {
         let stop_addr = stopper.local_addr().expect("addr");
         let served = tokio::spawn(serve(
             listener,
-            router_serving(Loaded::new(built), front("pill")),
+            router_serving(Loaded::new(built), front("pill"), addr),
             Box::pin(async move { stopper.accept().await.map(|_| ()) }),
         ));
 
@@ -18258,6 +18797,7 @@ mod tests {
             router_serving(
                 Loaded::new(Site::load(&dir, &store_root("hatchhttp"))),
                 front("hatchhttp"),
+                addr,
             ),
             Box::pin(async move { stopper.accept().await.map(|_| ()) }),
         ));
@@ -19040,7 +19580,7 @@ mod tests {
         let stop_addr = stopper.local_addr().expect("addr");
         let served = tokio::spawn(serve(
             listener,
-            router_serving(built, front(name)),
+            router_serving(built, front(name), addr),
             Box::pin(async move { stopper.accept().await.map(|_| ()) }),
         ));
         body(addr).await;
@@ -19617,6 +20157,79 @@ mod tests {
             )),
             "named to the minute: {body}"
         );
+    }
+
+    /// **THE INDEX AUDIT DOES NOT TURN A KNOWN SYSTEMS OUTAGE INTO VENDOR LOSS.**
+    ///
+    /// The shared calendar knows SEBI's 220 normal-market minutes on
+    /// 2021-02-24. The same primary record says NIFTY computation was
+    /// unavailable during part of the still-trading morning and does not give
+    /// one exact publication window for every stored index. `audit_one` must
+    /// therefore select the spot-index refusal door, not the equity-session
+    /// classifier that would report 166 invented vendor holes beside the
+    /// store's 54-bar prefix.
+    #[test]
+    fn an_index_audit_keeps_the_outage_day_unmeasured() {
+        let root = store_root("gaps-index-outage");
+        let month = store::path::YearMonth::new(2021, 2).expect("a legal month");
+        let day = pull::calendar::SYSTEMS_OUTAGE_DAY;
+        let at = |minute: u16| (day * 86_400 - 19_800 + i64::from(minute) * 60) * 1_000_000;
+        let rows: Vec<store::format::Bar> = (555..=608)
+            .map(|minute| store::format::Bar {
+                ts_micros: at(minute),
+                open: 100,
+                high: 110,
+                low: 90,
+                close: 105,
+                volume: 0,
+                open_interest: i64::MIN,
+            })
+            .collect();
+        let path = store::path::StorePath::new(store::path::PathParts {
+            vendor: Vendor::Dhan,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: store::path::Timeframe::MINUTE_1,
+            month,
+            file: store::path::FileKind::Bars,
+        })
+        .expect("a legal path");
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the store cross-check accepts the stable low 32 bits"
+        )]
+        let symbol_id = brutex_core::universe::fnv1a("NIFTY") as u32;
+        let mut file =
+            store::file::BarFile::open_or_create(&root, path, symbol_id).expect("a file");
+        file.append(&rows).expect("the observed prefix");
+        drop(file);
+
+        let site = std::sync::Arc::new(Site::serving(
+            &masters("gaps-index-outage", None, None),
+            &root,
+        ));
+        let asked = Addressed::parse(
+            "feed=dhan&exchange=NSE&segment=INDEX&symbol=NIFTY&timeframe=1min&month=2021-02",
+        )
+        .expect("an index address");
+        let calendar =
+            pull::calendar::Calendar::from_observed(&[pull::calendar::Observed::from_runs(
+                day,
+                &[(555, 608)],
+            )]);
+        assert_eq!(calendar.expected_bars(day), Some(220));
+
+        let verdict = audit_one(&site, &asked, month, Some(&calendar));
+        assert_eq!(verdict.held, 54, "stored evidence remains visible");
+        assert_eq!(verdict.expected, 0, "no invented index denominator");
+        assert_eq!(verdict.lost, 0, "no invented vendor loss");
+        assert!(
+            verdict.unmeasured >= 1_440,
+            "the outage day is explicitly unmeasured"
+        );
+        assert!(verdict.runs.contains(r#""reason":"unmeasured""#));
     }
 
     /// **AN ABSENT MONTH IS A FINDING, AND THE WALK DOES NOT STOP AT IT.**
@@ -24476,6 +25089,7 @@ mod tests {
             router_serving(
                 Loaded::new(Site::load(&empty, &store_root("emit-request"))),
                 front("emit-request"),
+                addr,
             ),
             Box::pin(async move { stopper.accept().await.map(|_| ()) }),
         ));

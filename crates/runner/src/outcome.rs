@@ -55,53 +55,223 @@ use indicators::Candle;
 use indicators::column::Column;
 use vocab::ConditionMask;
 
-/// The minute of the IST day at which every position is force-closed: 15:10.
+/// The product's fixed intraday liquidation deadline: **15:10 IST**.
 ///
-/// # This is the TRADE's deadline, not the exchange's
+/// Bars are left-labelled, so the accepted one-minute bar stamped 15:09 covers
+/// `[15:09, 15:10)` and is the only stored OHLCV record that can price this
+/// deadline. The 15:10 bar contains post-deadline prices and is never used.
+/// Missing, refused, duplicated, or otherwise ambiguous 15:09 data cannot be
+/// replaced by 15:08, 15:10, interpolation, or a fabricated tick.
 ///
-/// The NSE regular session runs to 15:30 (`SESSION_CLOSE_MINUTE = 930`). This is
-/// **910**, twenty minutes earlier, and the two are different facts. The
-/// exchange closing is a property of the venue; this is the operator's rule
-/// about a POSITION: every trade this engine models is intraday, entry may
-/// happen from 09:15 onward, and the position is squared off automatically at
-/// 15:10 whether it is long or short and whether or not the horizon has run out.
-///
-/// Nothing is ever held overnight, so no outcome may be measured across one.
-///
-/// # What it was before
-///
-/// [`forward`] computed `close[i + H] - close[i]` over the slice as one
-/// unbroken run, with no notion of a day at all. A signal fired before the close
-/// measured its "next fifteen bars" straight through the overnight gap and into
-/// the following morning's open — an overnight hold priced as a quarter of an
-/// hour of intraday movement, and gapping risk is not the same risk. Two
-/// independent audit agents confirmed it at high severity.
-///
-/// The last twenty bars of every session are the ones this changes: at 15:10 a
-/// position is closed, so 15:10 onward cannot be an ENTRY, and any entry between
-/// 14:55 and 15:10 exits early at 15:10 rather than running its full horizon.
-pub const AUTO_CLOSE_MINUTE: i64 = 15 * 60 + 10;
+/// This deliberately supersedes the former `session_close - 10` policy. A
+/// non-regular session without an accepted unique 15:09 bar has no forced-close
+/// price; ordinary exact-horizon trades that finish earlier may still exist,
+/// but any hold needing liquidation is dropped.
+pub const FORCED_EXIT_MINUTE: i64 = 15 * 60 + 10;
 
-/// The last bar whose interval ENDS at or before the square-off: the one
-/// stamped 15:09.
+/// One bar's place in its own session.
+#[derive(Clone, Copy)]
+struct BarBound {
+    /// IST day, from [`indicators::ist_day`].
+    day: i64,
+    /// The only opening minute whose one-minute close prices the fixed forced
+    /// exit: 15:09 IST.
+    last_fill: i64,
+    /// The last bar in this session whose interval ends at or before the
+    /// fixed deadline, or `None` when no observed accepted row ends before it.
+    last_fill_bar: Option<usize>,
+    /// Whether this bar's own interval ends at or before the square-off.
+    fillable: bool,
+    /// Does this day contain exactly one accepted one-minute bar stamped 15:09?
+    /// A missing, refused, or duplicated required bar proves no forced fill.
+    day_ended: bool,
+}
+
+/// Where every bar sits relative to the fixed 15:10 IST liquidation deadline.
 ///
-/// # A bar is stamped at its OPEN, so the stamp is one minute early
+/// The boundary is fixed by [`FORCED_EXIT_MINUTE`], but its PRICE is not a
+/// constant. Only a unique accepted one-minute 15:09 bar can supply the stored
+/// OHLCV whose close reaches that instant. The table therefore carries two
+/// separate facts per day: entry geometry (`open + step <= 15:10`) and whether
+/// the exact forced-close record exists. An earlier observed bar can bound an
+/// ordinary exact-horizon trade but has `day_ended == false`, so it can never be
+/// promoted into a forced fill.
 ///
-/// `docs/00-charter.md` §3 stamps a bar at the open of its interval, so the bar
-/// stamped `m` covers `[m, m+1)` and its close prints at `m+1`. The bar stamped
-/// 15:10 therefore closes at **15:11**, a minute AFTER the position was squared
-/// off, and using it as the exit reads a price the trade never saw.
+/// Non-regular sessions are intentionally governed by the same clock. If they
+/// do not contain 15:09, an overrun is unpriceable and is dropped. This is the
+/// stated consequence of the fixed policy, not an inferred exchange rule.
 ///
-/// This was wrong in the first version of this rule and the error was measured
-/// rather than reasoned about: an entry at 14:55 came out as 105 paisa against
-/// the 15:10-stamped bar's close and 77 paisa against the correct one — **36% on
-/// fourteen observations per session**. The stamp looked right, reconciled with
-/// every neighbouring number, and was measured against the wrong instant.
+/// # Cost
 ///
-/// So the last fill bar is 909, and [`AUTO_CLOSE_MINUTE`] stays 910 because 910
-/// is the INSTANT the position closes. The two are different facts and both are
-/// needed: one is a deadline, the other is the last bar that fits inside it.
-const LAST_FILL_MINUTE: i64 = AUTO_CLOSE_MINUTE - 1;
+/// The median step is derived once. Given it, one forward pass proves each
+/// day's exact required record and one reverse pass carries the usable boundary
+/// to every earlier bar. Every lookup afterwards is one
+/// bounds-checked read. `CLAUDE.md` §3 rule 4.
+pub struct SessionBounds {
+    /// One entry per bar of the slice this was built from, in the same order.
+    bars: Vec<BarBound>,
+}
+
+impl SessionBounds {
+    /// Derive the session geometry of `bars`.
+    #[must_use]
+    pub fn of(bars: &[Candle]) -> Self {
+        Self::with_step(bars, median_step_micros(bars), None)
+    }
+
+    /// Derive the session geometry with the slice's median step already known.
+    ///
+    /// This is the constructor [`crate::trade::SliceFacts`] uses so its horizon
+    /// clock and its session boundaries share one measurement and no candidate
+    /// loop can allocate the median sample again.
+    #[must_use]
+    pub(crate) fn with_step(bars: &[Candle], step_micros: i64, accepted: Option<&[bool]>) -> Self {
+        struct ReverseSession {
+            day: i64,
+            square_off: i64,
+            last_fill: i64,
+            last_fill_bar: Option<usize>,
+            day_ended: bool,
+        }
+
+        let step = step_micros.max(0);
+        let is_accepted = |index: usize| {
+            accepted.is_none_or(|verdict| verdict.get(index).copied().unwrap_or(false))
+        };
+
+        // EXACTLY ONE RAW 15:09 RECORD, AND IT MUST BE ACCEPTED. Counting raw
+        // rows as well as verdicts makes a duplicate timestamp ambiguous even
+        // when the evaluator accepts the first and rejects the second.
+        let required_open = FORCED_EXIT_MINUTE.saturating_sub(1);
+        let mut required: std::collections::HashMap<i64, (u64, Option<usize>)> =
+            std::collections::HashMap::new();
+        for (index, bar) in bars.iter().enumerate() {
+            if ist_minute_of_day(bar.ts_micros) != required_open {
+                continue;
+            }
+            let day = indicators::ist_day(bar.ts_micros);
+            required
+                .entry(day)
+                .and_modify(|seen| {
+                    seen.0 = seen.0.saturating_add(1);
+                    if is_accepted(index) {
+                        seen.1 = Some(index);
+                    }
+                })
+                .or_insert((1, is_accepted(index).then_some(index)));
+        }
+        let proved: std::collections::HashSet<i64> = required
+            .iter()
+            .filter_map(|(&day, &(count, accepted_index))| {
+                (step == 60_000_000 && count == 1 && accepted_index.is_some()).then_some(day)
+            })
+            .collect();
+        let mut stamped: Vec<BarBound> = Vec::with_capacity(bars.len());
+        let mut current: Option<ReverseSession> = None;
+
+        // ONE REVERSE TRAVERSAL. The first bar visited for a day initializes
+        // that day's fixed 15:10 timestamp; the same absolute instant is then
+        // carried through every earlier row on the day.
+        for (index, bar) in bars.iter().enumerate().rev() {
+            let day = indicators::ist_day(bar.ts_micros);
+            if !is_accepted(index) {
+                stamped.push(BarBound {
+                    day,
+                    last_fill: 0,
+                    last_fill_bar: None,
+                    fillable: false,
+                    day_ended: false,
+                });
+                continue;
+            }
+            let mut session = match current.take() {
+                Some(session) if session.day == day => session,
+                _ => {
+                    let minute = ist_minute_of_day(bar.ts_micros);
+                    let square_off = bar
+                        .ts_micros
+                        .saturating_sub(minute.saturating_mul(60_000_000))
+                        .saturating_add(FORCED_EXIT_MINUTE.saturating_mul(60_000_000));
+                    ReverseSession {
+                        day,
+                        square_off,
+                        last_fill: required_open,
+                        last_fill_bar: None,
+                        day_ended: proved.contains(&day),
+                    }
+                }
+            };
+
+            // A non-positive step cannot prove that even this bar's interval
+            // completed. Refusing is the only answer that does not invent a
+            // timeframe for an empty or one-bar slice.
+            let fillable = step > 0 && bar.ts_micros.saturating_add(step) <= session.square_off;
+            if fillable && session.last_fill_bar.is_none() {
+                session.last_fill_bar = Some(index);
+            }
+            stamped.push(BarBound {
+                day,
+                last_fill: session.last_fill,
+                last_fill_bar: session.last_fill_bar,
+                fillable,
+                day_ended: session.day_ended,
+            });
+            current = Some(session);
+        }
+        stamped.reverse();
+        Self { bars: stamped }
+    }
+
+    /// May a fill land on bar `i`?
+    ///
+    /// `false` for a bar past its own session's forced exit, and for an index
+    /// the slice does not hold.
+    #[must_use]
+    pub fn fillable(&self, i: usize) -> bool {
+        self.bars.get(i).is_some_and(|b| b.fillable)
+    }
+
+    /// Did the slice prove the exact fixed forced-close record for this day?
+    ///
+    /// `true` only for exactly one accepted one-minute bar stamped 15:09.
+    /// Missing, corrupt, duplicated and coarse-only paths return `false`.
+    #[must_use]
+    pub fn day_ended(&self, i: usize) -> bool {
+        self.bars.get(i).is_some_and(|b| b.day_ended)
+    }
+
+    /// Do bars `i` and `j` belong to the same IST day?
+    ///
+    /// `false` when either index is outside the slice — two bars that do not
+    /// both exist share no day.
+    #[must_use]
+    pub fn same_day(&self, i: usize, j: usize) -> bool {
+        match (self.bars.get(i), self.bars.get(j)) {
+            (Some(a), Some(b)) => a.day == b.day,
+            _ => false,
+        }
+    }
+
+    /// The last fillable bar of bar `i`'s own session.
+    ///
+    /// This is precomputed with the boundary, so outcome measurement and trade
+    /// execution use the same O(1) lookup rather than rebuilding parallel
+    /// reverse tables.
+    #[must_use]
+    pub fn last_fill_bar(&self, i: usize) -> Option<usize> {
+        self.bars.get(i).and_then(|b| b.last_fill_bar)
+    }
+
+    /// The last opening minute of bar `i`'s own session at which a fill may
+    /// land, or `None` for an index the slice does not hold.
+    ///
+    /// Exposed for the tests that pin the derivation against the charter's
+    /// worked sessions; [`Self::fillable`] is what the engine asks.
+    #[must_use]
+    pub fn last_fill_minute(&self, i: usize) -> Option<i64> {
+        self.bars.get(i).map(|b| b.last_fill)
+    }
+}
 
 /// How many bars ahead an outcome looks.
 ///
@@ -208,9 +378,10 @@ impl Forward {
     ///
     /// Not `ret.len()` any more, and the difference is the whole intraday rule.
     /// `ret` is now one slot per OFFERED bar, holding `None` wherever no trade
-    /// could be entered and measured: a bar at or after [`AUTO_CLOSE_MINUTE`],
-    /// or the forced-close bar itself, or the tail of the slice. Counting slots
-    /// would count those as measurements.
+    /// could be entered and measured: a bar its own session's forced exit
+    /// refuses — [`SessionBounds::fillable`] — or the forced-close bar itself,
+    /// or the tail of the slice. Counting slots would count those as
+    /// measurements.
     #[must_use]
     pub fn measured(&self) -> usize {
         self.ret.iter().filter(|r| r.is_some()).count()
@@ -274,57 +445,9 @@ impl Forward {
 /// not a trade's profit, and conflating them would put a cost model inside a
 /// measurement.
 #[must_use]
-pub fn forward(bars: &[Candle], horizon: Horizon) -> Forward {
+pub fn forward(bars: &[Candle], column: &Column, horizon: Horizon) -> Forward {
     let h = horizon.as_bars() as usize;
-
-    // PASS ONE: the IST day and minute of every bar. `ist_day` is monotone even
-    // at `i64::MAX` (it saturates rather than wraps), which is the only property
-    // the boundary test below depends on -- `day[j] != day[i]` must mean the day
-    // genuinely changed.
-    let stamps: Vec<(i64, i64)> = bars
-        .iter()
-        .map(|b| {
-            (
-                indicators::ist_day(b.ts_micros),
-                ist_minute_of_day(b.ts_micros),
-            )
-        })
-        .collect();
-
-    // PASS TWO, BACKWARD: for each bar, the index of the last bar in ITS OWN
-    // session at or before the forced close. This is the bar the position is
-    // auto-closed on, and no hold may reach past it.
-    //
-    // Backward and not a scan per bar: the answer for `i` is the answer for
-    // `i + 1` whenever they share a day, so one reverse pass gives every bar its
-    // exit in O(1) amortised. A forward search per bar would be O(H) and H is
-    // caller-supplied, so it would be O(1) only by accident.
-    let mut close_at: Vec<Option<usize>> = vec![None; bars.len()];
-    for i in (0..bars.len()).rev() {
-        let Some(&(day, minute)) = stamps.get(i) else {
-            continue;
-        };
-        let same_day_next = i
-            .checked_add(1)
-            .and_then(|j| stamps.get(j).map(|&(d, _)| d == day))
-            .unwrap_or(false);
-        let inherited = if same_day_next {
-            i.checked_add(1)
-                .and_then(|j| close_at.get(j).copied().flatten())
-        } else {
-            None
-        };
-        let mine = if minute <= LAST_FILL_MINUTE {
-            Some(i)
-        } else {
-            None
-        };
-        // The later bar wins: the auto-close is the LAST tradeable bar of the
-        // session, not the first one that qualifies.
-        if let Some(slot) = close_at.get_mut(i) {
-            *slot = inherited.or(mine);
-        }
-    }
+    let facts = crate::trade::SliceFacts::of(bars, column);
 
     // PASS THREE: the return, from entry to the earlier of the horizon and the
     // forced close.
@@ -334,39 +457,57 @@ pub fn forward(bars: &[Candle], horizon: Horizon) -> Forward {
     // sized once rather than grown.
     let mut refused: Vec<bool> = Vec::with_capacity(bars.len());
     for i in 0..bars.len() {
-        let Some(&(_, minute)) = stamps.get(i) else {
+        if !facts.accepts(i) {
             ret.push(None);
-            refused.push(false);
-            continue;
-        };
-        // NO ENTRY AT OR AFTER THE FORCED CLOSE. At 15:10 the position is being
-        // closed, so it cannot also be opened; `<` and not `<=`.
-        if minute > LAST_FILL_MINUTE {
-            ret.push(None);
-            refused.push(false);
+            refused.push(true);
             continue;
         }
-        let Some(forced) = close_at.get(i).copied().flatten() else {
+        // NO ENTRY ON A FORCED-EXIT BAR. At the square-off the position is being
+        // CLOSED, so it cannot also be opened, and a bar whose own interval ends
+        // after that instant is a forced-exit bar -- `docs/00-charter.md`'s
+        // `bar_open + tf > forced_minute`, which [`SessionBounds::fillable`]
+        // answers per day rather than against a fixed minute.
+        let Some(square_off) = facts.exits().get(i).copied().flatten() else {
             ret.push(None);
             refused.push(false);
             continue;
         };
-        let want = i.saturating_add(h);
+        let Some(start) = bars.get(i).map(|bar| bar.ts_micros) else {
+            ret.push(None);
+            refused.push(true);
+            continue;
+        };
+        let span = i64::try_from(h).unwrap_or(i64::MAX);
+        let deadline = start.saturating_add(facts.step_micros().saturating_mul(span));
+        let forced_stamp = bars
+            .get(square_off.bar)
+            .map_or(i64::MIN, |bar| bar.ts_micros);
         // THE HOLD ENDS AT THE HORIZON OR AT THE FORCED CLOSE, WHICHEVER COMES
         // FIRST -- but "the data ran out" is neither, and conflating the two
         // would invent a measurement.
         //
         // If the horizon fits inside the tradeable window, it is an ordinary
-        // outcome. If it does not, the trade was squared off early at 15:10, and
-        // THAT is a real measured outcome -- but only if `forced` is genuinely
-        // the end of the window rather than the end of the file. A day whose
-        // bars simply stop at 11:00 because the slice was cut there has no
-        // 15:10 price, and measuring to 11:00 would report a forced exit that
-        // never happened.
-        let exit = if want <= forced {
+        // outcome. If it does not, the trade was squared off early, and THAT is
+        // a real measured outcome -- but only if the session genuinely ENDED,
+        // rather than the file ending on it. A day whose bars simply stop at
+        // 11:00 because the slice was cut there has no square-off price at all,
+        // and measuring to 10:50 would report a forced exit that never happened.
+        //
+        // A verified square-off wins before the exact-deadline lookup. The
+        // deadline bar need not exist when the exchange closed first; requiring
+        // it would refuse the very early exit this branch has proved. When the
+        // deadline is inside the tradeable window, however, only a bar stamped
+        // at that exact instant can price it -- a prior bar is not a fill at a
+        // future time. An unproved session end cannot price either case.
+        let exit = if deadline > forced_stamp && square_off.real {
+            square_off.bar
+        } else if deadline <= forced_stamp {
+            let Some(want) = facts.at_timestamp(deadline) else {
+                ret.push(None);
+                refused.push(true);
+                continue;
+            };
             want
-        } else if is_window_end(&stamps, forced) {
-            forced
         } else {
             ret.push(None);
             refused.push(false);
@@ -403,9 +544,10 @@ pub fn forward(bars: &[Candle], horizon: Horizon) -> Forward {
         // failure, and the failure it hid could change which way a strategy
         // trades.
         //
-        // `Candle::check` is the same predicate `Column::build` applies, so this
-        // agrees with the census by construction rather than by a second copy of
-        // the rule.
+        // `path_accepts` reads the exact `Evaluator::step` verdict retained by
+        // the column. That includes timestamp ordering and VWAP accumulator
+        // state, so no second local predicate can drift or silently cover only
+        // four of the six refusal variants.
         //
         // MARKED, NOT MERELY ABSENT. The first version of this fix pushed a bare
         // `None` and its own comment claimed the drop was "visible in
@@ -415,7 +557,16 @@ pub fn forward(bars: &[Candle], horizon: Horizon) -> Forward {
         // there. Measured: `n` fell 234 to 230 with `mismatched == 0` in both
         // runs and nothing said why. A silent smaller sample is a quieter version
         // of the same §4 failure.
-        let (Some(later), Some(now)) = (priced(bars, exit), priced(bars, i)) else {
+        if !facts.path_accepts(i, exit) {
+            ret.push(None);
+            refused.push(true);
+            continue;
+        }
+        let Some((later, now)) = bars
+            .get(exit)
+            .zip(bars.get(i))
+            .map(|(later, now)| (later.close, now.close))
+        else {
             ret.push(None);
             refused.push(true);
             continue;
@@ -432,6 +583,41 @@ pub fn forward(bars: &[Candle], horizon: Horizon) -> Forward {
     }
 }
 
+/// The median positive same-session gap between consecutive bars, in
+/// microseconds.
+///
+/// Overnight gaps are excluded outright; median and not mean keeps an intraday
+/// closure from redefining the timeframe. Zero means the slice contains no
+/// positive observed step; callers then refuse to invent one.
+pub(crate) fn median_step_micros(bars: &[Candle]) -> i64 {
+    median_step_micros_over(bars, None)
+}
+
+/// [`median_step_micros`], excluding every record the execution evaluator
+/// refused. A duplicate timestamp or overflowing accumulator record may not
+/// define another trade's clock.
+pub(crate) fn median_step_micros_over(bars: &[Candle], accepted: Option<&[bool]>) -> i64 {
+    let mut steps: Vec<i64> = bars
+        .iter()
+        .enumerate()
+        .zip(bars.iter().enumerate().skip(1))
+        .filter(|((a_index, a), (b_index, b))| {
+            accepted.is_none_or(|verdict| {
+                verdict.get(*a_index).copied().unwrap_or(false)
+                    && verdict.get(*b_index).copied().unwrap_or(false)
+            }) && indicators::ist_day(a.ts_micros) == indicators::ist_day(b.ts_micros)
+        })
+        .map(|((_, a), (_, b))| b.ts_micros.saturating_sub(a.ts_micros))
+        .filter(|&step| step > 0)
+        .collect();
+    if steps.is_empty() {
+        return 0;
+    }
+    let middle = steps.len() / 2;
+    let (_, median, _) = steps.select_nth_unstable(middle);
+    *median
+}
+
 /// Minute of the IST day, `0..1440`.
 ///
 /// `div_euclid` and `rem_euclid`, never `/` and `%`: both truncate toward zero,
@@ -444,76 +630,15 @@ pub fn forward(bars: &[Candle], horizon: Horizon) -> Forward {
 /// The same computation [`indicators::orb::minutes_since_open`] makes, without
 /// its subtraction: that one answers "how far into the session", this one
 /// answers "what time is it", and the forced close is a time.
-/// Is bar `j` the genuine last tradeable bar of its window, or just the last bar
-/// in the slice?
 ///
-/// The difference is a measurement that happened against one that did not. A
-/// position squared off at 15:10 has a real exit price and a real return; a
-/// slice that simply stops at 11:00 has neither, and treating its final bar as a
-/// forced close would report an exit the market never gave.
-///
-/// `j` ends the window when the bar after it belongs to another day, or is at or
-/// past the forced close. When there is no bar after it, the data ran out and
-/// the answer is no.
-/// The close at `index`, or `None` if that record is not a bar.
-///
-/// # The one place a price may come from
-///
-/// `Candle::check` is the predicate `indicators::column::Column::build` applies
-/// to a record ON ITS OWN, so a record refused for a BAR-LOCAL reason is refused
-/// here too and the two cannot disagree about it. That agreement is the point:
-/// the census and the pricing were reading the same slice under different rules,
-/// which let a record counted as `refused` still supply a close.
-///
-/// # FOUR OF THE SIX REFUSALS, AND THE OTHER TWO ARE NOT CLOSED
-///
-/// `Corrupt` has six variants. `check` tests `HighBelowLow`, `RangeOverflows`,
-/// `PriceOutsideRange` and `NegativeVolume` — every one a property of the record
-/// alone. It cannot test `TimestampNotIncreasing`, which needs the PREVIOUS
-/// bar, or `AccumulatorTooLarge`, which needs the VWAP accumulator: both are
-/// facts about a SEQUENCE, and this function is handed one record.
-///
-/// So a bar the column refused for a stateful reason is not swept, never becomes
-/// a signal, and **can still be read here as an exit price**, because the exit
-/// indexes the raw slice by position. An adversarial fleet demonstrated it: a
-/// trade entered and exited on a bar charged to
-/// `Census::timestamp_not_increasing`, with `Grid::refused_paths` at zero.
-///
-/// Closing it needs a swept-membership map built once per run from
-/// `Column::sources`, which is O(bars) once and O(1) per lookup — affordable,
-/// and not built. `CLAUDE.md` §3 rule 6 asks for the bound to be stated when it
-/// cannot be met, and
-/// `refused_bar_tests::the_stateful_refusals_are_not_covered_and_this_says_so`
-/// pins the gap so it cannot be forgotten.
-///
-/// `map_or(0, ..)` is what stood here, and zero is a price. A missing index and
-/// a corrupt record both became "the close was 0 paisa", so an exit priced
-/// against either produced a move of the full entry price with nothing marking
-/// it. `None` propagates instead, and the caller drops the outcome.
-///
-/// Const-callable and index-only: one bounds check and one `check`, no
-/// allocation and no scan.
-///
-/// **UNVERIFIED as a measurement.** The bound is argued from the
-/// shape of the code and no bench in this workspace times it.
-/// `CLAUDE.md` §3 rule 6: a structural argument is not a
-/// measurement, however sound it is.
-fn priced(bars: &[Candle], index: usize) -> Option<i64> {
-    let bar = bars.get(index)?;
-    bar.check().ok()?;
-    Some(bar.close)
-}
-
-fn is_window_end(stamps: &[(i64, i64)], j: usize) -> bool {
-    let Some(&(day, _)) = stamps.get(j) else {
-        return false;
-    };
-    j.checked_add(1)
-        .and_then(|k| stamps.get(k))
-        .is_some_and(|&(next_day, next_minute)| next_day != day || next_minute > LAST_FILL_MINUTE)
-}
-
-/// Minute of the IST day, `0..1440`.
+/// **This doc block, and `is_window_end`'s beside it, had come adrift.** Both
+/// sat ABOVE `priced` with no blank line between them and its own doc, so
+/// rustdoc attached all three to `priced` and the two functions they describe
+/// carried a one-line summary or none at all. That is the trap a new `/// doc`
+/// inserted between an existing block and its item sets, and it compiles
+/// silently. `is_window_end` is gone -- [`SessionBounds::day_ended`] answers its
+/// question without the circularity a derived boundary gave it -- and this block
+/// is back on the function it was written for.
 const fn ist_minute_of_day(ts_micros: i64) -> i64 {
     ts_micros
         .saturating_add(indicators::IST_OFFSET_MICROS)
@@ -1225,7 +1350,8 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
 )]
 mod tests {
     use super::{
-        Edge, Horizon, LAST_FILL_MINUTE, Sides, edge, forward, long_run_sum_squares, milli,
+        Edge, FORCED_EXIT_MINUTE, Horizon, SessionBounds, Sides, edge, forward,
+        long_run_sum_squares, median_step_micros, milli,
     };
     use indicators::column::Column;
     use indicators::evaluator::{Evaluator, Widths};
@@ -1256,6 +1382,12 @@ mod tests {
 
     fn h(n: u32) -> Horizon {
         Horizon::bars(n).expect("a positive horizon")
+    }
+
+    /// Build the evaluator-produced acceptance map beside a test forward.
+    fn forward_of(bars: &[Candle], horizon: Horizon) -> super::Forward {
+        let column = Column::build(bars, &mut evaluator());
+        forward(bars, &column, horizon)
     }
 
     /// An `Edge` with only the payoff fields set, for arithmetic tests.
@@ -1551,12 +1683,15 @@ mod tests {
     #[test]
     fn the_return_is_close_to_close_and_the_tail_has_none() {
         // Closes 100, 110, 130, 125, 140. At H=2 the measurable bars are 0..3.
+        // These bars are far before the fixed 15:10 IST deadline, so every
+        // complete two-bar horizon is priceable even though this deliberately
+        // tiny arithmetic fixture cannot prove a forced exit.
         let bars: Vec<Candle> = [100, 110, 130, 125, 140]
             .iter()
             .enumerate()
             .map(|(i, &c)| candle(i64::try_from(i).unwrap_or(0), c))
             .collect();
-        let f = forward(&bars, h(2));
+        let f = forward_of(&bars, h(2));
 
         assert_eq!(f.measured(), 3, "five bars at H=2 leaves three measurable");
         assert_eq!(f.at(0), Some(30), "130 - 100");
@@ -1575,9 +1710,9 @@ mod tests {
     #[test]
     fn a_horizon_at_or_past_the_input_length_measures_nothing() {
         let bars: Vec<Candle> = (0..3).map(|i| candle(i, 100)).collect();
-        assert_eq!(forward(&bars, h(3)).measured(), 0);
-        assert_eq!(forward(&bars, h(99)).measured(), 0);
-        assert_eq!(forward(&[], h(1)).measured(), 0);
+        assert_eq!(forward_of(&bars, h(3)).measured(), 0);
+        assert_eq!(forward_of(&bars, h(99)).measured(), 0);
+        assert_eq!(forward_of(&[], h(1)).measured(), 0);
     }
 
     /// With nothing overlapping, the correction is not merely small -- it is the
@@ -1746,7 +1881,7 @@ mod tests {
         // `t` -- not the artefact. At one bar a window is either decided in
         // full or refused, so every observation is exactly one paisa and the
         // centred sum of squares is exactly zero.
-        let f = forward(&bars, h(1));
+        let f = forward_of(&bars, h(1));
 
         // THE EMPTY MASK, which fires on every bar: `(bits & mask) == mask` is
         // `0 == 0`. A monotone ramp makes every NAMED condition constant, so no
@@ -1785,7 +1920,7 @@ mod tests {
         // A real column, and the mask of a position that actually varies.
         let bars = crate::synthetic::sessions(8);
         let column = Column::build(&bars, &mut evaluator());
-        let f = forward(&bars, Horizon::DEFAULT);
+        let f = forward_of(&bars, Horizon::DEFAULT);
 
         // Every live position that fires on at least two measurable bars must
         // produce a finite t, and `n` must never exceed the column length.
@@ -1812,16 +1947,17 @@ mod tests {
     #[test]
     fn no_outcome_is_ever_measured_across_the_forced_close_or_into_another_day() {
         // THE INTRADAY RULE, ASSERTED DIRECTLY. Every trade is intraday: entry
-        // from 09:15, and the position is squared off automatically at 15:10
-        // whether long or short. So no measured return may span two trading
-        // days, and none may run past 15:10 on its own day.
+        // from 09:15, and a position is squared off at the fixed 15:10 IST
+        // deadline, long or short. So no measured return may span two trading
+        // days, and none may run past that deadline.
         //
         // `synthetic::bar` stamps minute 0 at the IST open, so bar `m` is IST
-        // minute 555 + m and the forced close at minute 910 is bar 355. The
-        // constants are DERIVED here rather than written down, so a change to
-        // the fixture cannot quietly make this test vacuous.
+        // minute 555 + m. With left-edge stamps, the bar at 15:09 represents
+        // [15:09, 15:10), making offset 354 the last admissible fill. The
+        // constants are derived here rather than written down, so a fixture
+        // change cannot quietly make this test vacuous.
         let bars = crate::synthetic::sessions(3);
-        let f = forward(&bars, h(15));
+        let f = forward_of(&bars, h(15));
 
         let minute_of = |i: usize| -> i64 {
             let ts = bars.get(i).map_or(0, |b| b.ts_micros);
@@ -1829,14 +1965,16 @@ mod tests {
                 .div_euclid(60_000_000)
                 .rem_euclid(1_440)
         };
+        // The exact stored one-minute interval that closes at the policy
+        // deadline. A 15:10-stamped bar contains post-deadline prices.
+        let last_fill_minute = FORCED_EXIT_MINUTE - 1;
         let close_bar = (0..375)
-            .find(|&i| minute_of(i) == LAST_FILL_MINUTE)
+            .find(|&i| minute_of(i) == last_fill_minute)
             .expect("the fixture must contain a 15:09 bar");
         assert_eq!(
             close_bar, 354,
-            "bar 354 is STAMPED 15:09 and CLOSES at 15:10, so it is the last \
-             fill that fits inside the square-off. The bar stamped 15:10 closes \
-             at 15:11 -- a minute after the position is already gone."
+            "09:15 + 354 minutes is the 15:09 bar whose interval closes at the \
+             fixed 15:10 deadline"
         );
 
         // ONE: the forced-close bar cannot itself be an entry (entering at the
@@ -1851,7 +1989,7 @@ mod tests {
             );
         }
 
-        // TWO: the last legal entry is 15:09, and it exits at 15:10 -- one bar,
+        // TWO: the last legal entry is 15:08, and it exits at 15:09 -- one bar,
         // not the full fifteen.
         let last_entry = close_bar.saturating_sub(1);
         let expected = bars.get(close_bar).map_or(0, |b| b.close)
@@ -1859,19 +1997,23 @@ mod tests {
         assert_eq!(
             f.at(last_entry),
             Some(expected),
-            "an entry at 15:09 is squared off at 15:10, so its return is one \
+            "an entry at 15:08 is squared off at 15:10, so its return is one \
              bar of movement and not fifteen"
         );
 
-        // THREE: an entry whose horizon would run past 15:10 exits AT 15:10.
-        // Before the rule existed this measured close[365] - close[350], which
+        // THREE: an entry whose horizon would run past the square-off exits AT
+        // it. Before the rule existed this measured close[365] - close[350], which
         // is a price from after the position was already closed.
         let early = close_bar.saturating_sub(5);
         let forced =
             bars.get(close_bar).map_or(0, |b| b.close) - bars.get(early).map_or(0, |b| b.close);
         let unforced = bars.get(early.saturating_add(15)).map_or(0, |b| b.close)
             - bars.get(early).map_or(0, |b| b.close);
-        assert_eq!(f.at(early), Some(forced), "the exit is the 15:10 close");
+        assert_eq!(
+            f.at(early),
+            Some(forced),
+            "the exit is the proved 15:10 square-off"
+        );
         assert_ne!(
             forced, unforced,
             "the fixture must make the two answers differ, or this proves \
@@ -1881,24 +2023,309 @@ mod tests {
         // FOUR, AND IT IS THE RULE ITSELF: no measured outcome anywhere in the
         // slice crosses a day boundary. Checked over every bar rather than a
         // sample, because "usually intraday" is not the promise.
+        //
+        // THE EXIT IS RECONSTRUCTED, NOT GUESSED AT. This read
+        // `ist_day(bars[i + 15])` and called that the exit day, which was true
+        // only while no enterable bar was within fifteen bars of the session's
+        // end. A proxy that fails on correct output is not a check of the rule,
+        // so this recomputes `min(i + H, that day's exact 15:09 bar)` and
+        // asserts against the actual move.
+        let day_of = |i: usize| indicators::ist_day(bars.get(i).map_or(0, |b| b.ts_micros));
+        let forced_bar_of = |day: i64| -> usize {
+            (0..bars.len())
+                .find(|&j| day_of(j) == day && minute_of(j) == FORCED_EXIT_MINUTE.saturating_sub(1))
+                .unwrap_or(0)
+        };
+        let mut checked = 0_usize;
         for i in 0..bars.len() {
-            if f.at(i).is_none() {
+            let Some(moved) = f.at(i) else {
                 continue;
-            }
-            let entry_day = indicators::ist_day(bars.get(i).map_or(0, |b| b.ts_micros));
-            // The exit is at or before the forced close of the entry's own day, so
-            // the last bar this outcome could have read is that day's 15:10 --
-            // which is why the horizon bar, clamped to the slice, is still the
-            // same day. An outcome that left its day would show here.
-            let exit_day = indicators::ist_day(
-                bars.get(i.saturating_add(15).min(bars.len().saturating_sub(1)))
-                    .map_or(0, |b| b.ts_micros),
-            );
-            assert!(
-                entry_day == exit_day,
+            };
+            let day = day_of(i);
+            let exit = i.saturating_add(15).min(forced_bar_of(day));
+            assert_eq!(
+                day_of(exit),
+                day,
                 "bar {i} measured an outcome whose exit is on another day"
             );
+            assert_eq!(
+                moved,
+                bars.get(exit).map_or(0, |b| b.close) - bars.get(i).map_or(0, |b| b.close),
+                "bar {i} must be measured to `min(i + H, its own session's \
+                 forced bar)` and to nothing else"
+            );
+            checked = checked.saturating_add(1);
         }
+        assert!(
+            checked > 1_000,
+            "the loop must have measured most of the fixture, or it proves \
+             nothing: {checked} of {} bars",
+            bars.len()
+        );
+    }
+
+    /// The UTC microsecond stamp of IST minute `minute` on IST day `day`.
+    fn ist_stamp(day: i64, minute: i64) -> i64 {
+        (day * 1_440 + minute) * 60_000_000 - indicators::IST_OFFSET_MICROS
+    }
+
+    /// One bar per minute in `minutes`, on IST day `day`, at a flat price.
+    fn day_of_bars(day: i64, minutes: impl IntoIterator<Item = i64>) -> Vec<Candle> {
+        minutes
+            .into_iter()
+            .map(|m| {
+                Candle::new(
+                    ist_stamp(day, m),
+                    2_500_000,
+                    2_500_010,
+                    2_499_990,
+                    2_500_000,
+                    1,
+                    OI_NULL,
+                )
+            })
+            .collect()
+    }
+
+    /// THE PRODUCT CLOCK IS FIXED EVEN WHEN THE OBSERVED SESSION SHAPE DIFFERS.
+    ///
+    /// Regular and extended sessions both contain 15:09 and therefore expose
+    /// the exact left-labelled minute whose close reaches 15:10. The Muhurat
+    /// fixture ends before it and must refuse an overrun. This is a locked
+    /// product policy, not a claim that every NSE session closes at one time.
+    #[test]
+    fn every_session_uses_fixed_1510_and_only_exact_1509_prices_it() {
+        let mut bars = day_of_bars(0, 9 * 60 + 15..=15 * 60 + 29);
+        bars.extend(day_of_bars(1, 13 * 60 + 45..=14 * 60 + 44));
+        bars.extend(day_of_bars(2, 9 * 60 + 15..=16 * 60 + 59));
+        // A fourth day demonstrates that "tomorrow exists" still does not
+        // certify either non-regular shape.
+        bars.extend(day_of_bars(3, 9 * 60 + 15..=9 * 60 + 15));
+
+        let session = SessionBounds::of(&bars);
+        assert_eq!(FORCED_EXIT_MINUTE, 15 * 60 + 10);
+
+        // Both shapes that contain the exact accepted minute prove the same
+        // forced fill. The short shape does not, even though a later day follows.
+        let expected: [(usize, &str, i64); 2] = [
+            (
+                0,
+                "a regular session containing the fixed deadline",
+                FORCED_EXIT_MINUTE,
+            ),
+            (
+                475,
+                "an extended session still using the fixed deadline",
+                FORCED_EXIT_MINUTE,
+            ),
+        ];
+        for (index, what, forced_minute) in expected {
+            assert_eq!(
+                session.last_fill_minute(index),
+                Some(forced_minute - 1),
+                "{what}: a one-minute bar is forced iff `bar_open + 1 > \
+                 {forced_minute}`, so the last fill is stamped {}",
+                forced_minute - 1
+            );
+        }
+        assert!(session.day_ended(0));
+        assert!(!session.day_ended(375));
+        assert!(session.day_ended(475));
+
+        // AND THE RULE REACHES `forward`, not only the table. Every measured
+        // outcome for the certified regular session ends at or before its own
+        // forced exit, and the last measured entry is stamped a minute before
+        // its last possible exit.
+        let f = forward_of(&bars, h(15));
+        let minute_of = |i: usize| -> i64 {
+            (bars.get(i).map_or(0, |b| b.ts_micros) + indicators::IST_OFFSET_MICROS)
+                .div_euclid(60_000_000)
+                .rem_euclid(1_440)
+        };
+        let day_of = |i: usize| indicators::ist_day(bars.get(i).map_or(0, |b| b.ts_micros));
+        for (index, what, forced_minute) in expected {
+            let day = day_of(index);
+            let last_measured = (0..bars.len())
+                .filter(|&i| day_of(i) == day && f.at(i).is_some())
+                .max()
+                .expect("a session containing 15:09 must measure something");
+            assert_eq!(
+                minute_of(last_measured),
+                forced_minute - 2,
+                "{what}: the last bar that can be ENTERED is one before the last \
+                 bar that can be EXITED on, because a hold of zero bars is not a \
+                 hold. The last fill is {}, so the last entry is {}.",
+                forced_minute - 1,
+                forced_minute - 2
+            );
+        }
+        let overruns = forward_of(&bars, h(400));
+        let short_end = 375_usize.saturating_add(60);
+        assert!(
+            (375..short_end).all(|index| overruns.at(index).is_none()),
+            "an unknown short-session shape cannot manufacture a forced close"
+        );
+    }
+
+    /// A forced fill is evidence from one exact raw record, not a nearest-row
+    /// lookup. Missing, evaluator-refused, and duplicated 15:09 rows all refuse;
+    /// neither the valid 15:08 nor the valid 15:10 neighbour substitutes.
+    #[test]
+    fn missing_corrupt_or_ambiguous_1509_never_fabricates_a_forced_exit() {
+        let complete = day_of_bars(0, 9 * 60 + 15..=15 * 60 + 29);
+        let required = usize::try_from(15 * 60 + 9 - (9 * 60 + 15))
+            .expect("15:09 lies inside the regular fixture");
+
+        let mut missing = complete.clone();
+        let removed = missing.remove(required);
+        let missing_bounds = SessionBounds::with_step(&missing, 60_000_000, None);
+        assert!(!missing_bounds.day_ended(0));
+        assert_eq!(
+            missing_bounds.last_fill_bar(0),
+            Some(required.saturating_sub(1)),
+            "15:08 may bound an ordinary observed horizon but is not proof of liquidation"
+        );
+        assert!(
+            forward_of(&missing, h(400)).at(0).is_none(),
+            "a later 15:10 row must not become the missing forced price"
+        );
+
+        let mut accepted = vec![true; complete.len()];
+        *accepted
+            .get_mut(required)
+            .expect("the required row is inside the acceptance fixture") = false;
+        let corrupt_bounds = SessionBounds::with_step(&complete, 60_000_000, Some(&accepted));
+        assert!(!corrupt_bounds.day_ended(0));
+        assert_eq!(
+            corrupt_bounds.last_fill_bar(0),
+            Some(required.saturating_sub(1)),
+            "an evaluator-refused 15:09 row is absence, not a usable print"
+        );
+
+        let mut duplicated = complete;
+        duplicated.insert(required, removed);
+        let duplicate_acceptance = vec![true; duplicated.len()];
+        let duplicate_bounds =
+            SessionBounds::with_step(&duplicated, 60_000_000, Some(&duplicate_acceptance));
+        assert!(!duplicate_bounds.day_ended(0));
+        assert_eq!(
+            duplicate_bounds.last_fill_minute(0),
+            Some(FORCED_EXIT_MINUTE - 1),
+            "the policy timestamp remains named, but two raw rows make its price ambiguous"
+        );
+    }
+
+    /// A boundary needs an observed timeframe as well as an observed last bar.
+    /// Two bars with the same stamp provide no positive step, so choosing one
+    /// minute here would be an invented fact and manufacture a square-off.
+    #[test]
+    fn a_slice_without_an_observed_timeframe_invents_no_session_boundary() {
+        let bars = [candle(600, 10_000), candle(600, 10_010)];
+        assert_eq!(median_step_micros(&bars), 0);
+
+        let session = SessionBounds::of(&bars);
+        assert!(!session.fillable(0));
+        assert!(session.last_fill_bar(0).is_none());
+        assert!(forward_of(&bars, h(1)).at(0).is_none());
+    }
+
+    /// A SLICE THAT STOPS MID-SESSION MEASURES NO FORCED OUTCOME.
+    ///
+    /// The `crate::trade` twin of this is
+    /// `a_slice_that_stops_mid_session_fabricates_no_square_off`, and the two
+    /// modules have to agree: `outcome` measures the return and `trade` fills
+    /// it, so one of them refusing while the other traded is the disagreement
+    /// RULE 1c was written about.
+    ///
+    /// The required record is the accepted row stamped 15:09. A slice cut at
+    /// 14:14 does not have it, and a later day cannot fill the missing minute.
+    #[test]
+    fn a_session_the_slice_never_saw_end_measures_no_square_off() {
+        // Day 0 whole, day 1 cut at 14:14. H is longer than either session, so
+        // NOTHING can reach its horizon and every outcome that exists at all is
+        // a square-off.
+        let mut bars = day_of_bars(0, 9 * 60 + 15..=15 * 60 + 29);
+        let cut = day_of_bars(1, 9 * 60 + 15..=14 * 60 + 14);
+        let first_of_cut = bars.len();
+        bars.extend(cut);
+        let f = forward_of(&bars, h(400));
+
+        assert!(
+            (0..first_of_cut).any(|i| f.at(i).is_some()),
+            "the session that genuinely ended must still be measured, or this \
+             test would pass over an empty answer"
+        );
+        for i in first_of_cut..bars.len() {
+            assert!(
+                f.at(i).is_none(),
+                "bar {i} is in the session the file cut short: no bar in the \
+                 slice proves where it closed, so no forced exit may be measured \
+                 there"
+            );
+            assert!(
+                !f.was_refused(i),
+                "and the absence is the missing session end, not a corrupt bar"
+            );
+        }
+
+        // A HOLD THAT FITS INSIDE THE CUT IS STILL MEASURED, because only the
+        // OVERRUN has nowhere to go. Refusing the whole truncated session would
+        // be a second wrong answer -- the same distinction
+        // `a_horizon_that_fits_inside_the_truncated_session_is_still_traded`
+        // pins on the trade side.
+        let short = forward_of(&bars, h(5));
+        assert!(
+            (first_of_cut..bars.len()).any(|i| short.at(i).is_some()),
+            "a five-bar hold inside a session the slice cut short completed, \
+             and both its prices printed"
+        );
+    }
+
+    /// A COARSE-ONLY SLICE CANNOT SUPPLY THE FIXED MINUTE'S OHLCV.
+    ///
+    /// # `forward` runs on the SIGNAL series, which is not always one minute
+    ///
+    /// `crate::resample` buckets on the IST clock, so the sixty-minute rung of a
+    /// regular session is seven bars stamped 09:00 … 15:00. None is the exact
+    /// 15:09 one-minute record, so no coarse bar may be promoted into a forced
+    /// fill. Exact coarse horizons observed before 15:10 remain usable only for
+    /// this legacy same-series runner surface; stored operator paths reproject
+    /// onto explicit one-minute OHLCV before reaching money.
+    #[test]
+    fn a_coarse_rung_prices_exact_horizons_but_not_an_unproved_square_off() {
+        let minutes: Vec<i64> = (0..7).map(|k| 9 * 60 + k * 60).collect();
+        let mut bars = day_of_bars(0, minutes.clone());
+        bars.extend(day_of_bars(1, minutes));
+        let session = SessionBounds::of(&bars);
+
+        assert_eq!(
+            session.last_fill_minute(0),
+            Some(FORCED_EXIT_MINUTE - 1),
+            "the product deadline stays fixed at 15:10 even though a coarse-only \
+             compatibility slice cannot supply its required 15:09 price"
+        );
+        assert!(
+            session.fillable(5) && !session.fillable(6),
+            "the 14:00 bar may be entered and the 15:00 bar may not: `open + tf` \
+             is 15:00 for one and 16:00 for the other, against a forced exit the \
+             same `tf` cancels out of"
+        );
+
+        // These seven coarse buckets do not prove the required one-minute row.
+        let f = forward_of(&bars, h(400));
+        assert!(
+            f.at(0).is_none(),
+            "a later day does not prove the coarse prior session reached a known close"
+        );
+        assert!(
+            forward_of(&bars, h(1)).at(0).is_some(),
+            "an exact timestamp one rung ahead remains an observed outcome"
+        );
+        assert!(
+            f.at(6).is_none(),
+            "and the 15:00 bar carries no outcome at all: it is the forced-exit \
+             bar, so nothing may be opened on it"
+        );
     }
 
     #[test]
@@ -1925,7 +2352,7 @@ mod tests {
             !column.is_empty(),
             "the fixture must sweep bars, or this test proves nothing"
         );
-        let from_long = forward(&long, h(1));
+        let from_long = forward_of(&long, h(1));
         let all = ConditionMask::default();
 
         let wrong = edge(&column, &from_long, &all);
@@ -1940,7 +2367,7 @@ mod tests {
         );
 
         // And the same column against its OWN forward still measures.
-        let from_short = forward(&short, h(1));
+        let from_short = forward_of(&short, h(1));
         let right = edge(&column, &from_short, &all);
         assert_eq!(right.mismatched, 0, "the matching pair must not be refused");
         assert!(
@@ -1989,7 +2416,7 @@ mod tests {
              nothing: an empty column yields t = 0 and `is_finite` passes on a \
              measurement that never happened"
         );
-        let f = forward(&bars, h(1));
+        let f = forward_of(&bars, h(1));
         // Every step is +10, so any mask that fires twice has zero spread.
         let all = ConditionMask::default();
         let e = edge(&column, &f, &all);
@@ -2016,7 +2443,7 @@ mod tests {
             "the coarse slice must be shorter, or this proves nothing"
         );
 
-        let wrong = forward(&coarse, Horizon::DEFAULT);
+        let wrong = forward_of(&coarse, Horizon::DEFAULT);
         let e = edge(&column, &wrong, &ConditionMask::default());
         assert!(
             e.mismatched > 0,
@@ -2026,7 +2453,7 @@ mod tests {
 
         // And the correct pairing reports zero, so a non-zero value means what
         // it says rather than being background noise.
-        let right = forward(&minute, Horizon::DEFAULT);
+        let right = forward_of(&minute, Horizon::DEFAULT);
         assert_eq!(
             edge(&column, &right, &ConditionMask::default()).mismatched,
             0,
@@ -2040,7 +2467,7 @@ mod tests {
         // everything -- which makes it the exact test of the tail exclusion.
         let bars = crate::synthetic::sessions(8);
         let column = Column::build(&bars, &mut evaluator());
-        let f = forward(&bars, Horizon::DEFAULT);
+        let f = forward_of(&bars, Horizon::DEFAULT);
         let e = edge(&column, &f, &ConditionMask::default());
 
         let in_tail = column
@@ -2059,9 +2486,9 @@ mod tests {
 
     /// A ramp whose every FULL-horizon window moves by exactly `step * H`.
     ///
-    /// The bar stamped 15:09 of each session — offset 354 of 375, the
-    /// [`LAST_FILL_MINUTE`] bar and therefore every session's forced close — is
-    /// built with `high` below `low`, so `Candle::check` refuses it and
+    /// The bar stamped 15:09 of each session — offset 354 of 375, the last bar
+    /// [`SessionBounds::fillable`] admits and therefore every session's forced
+    /// close — is built with `high` below `low`, so `Candle::check` refuses it and
     /// [`priced`] will not let it settle an exit. Every entry whose window would
     /// otherwise have been TRUNCATED at the forced close is dropped instead of
     /// measured short, and truncation is the one thing that puts genuine
@@ -2167,7 +2594,7 @@ mod tests {
     fn a_constant_sample_whose_windows_overlap_is_still_no_evidence() {
         let bars = ramp_with_no_truncated_window(8, 1);
         let column = Column::build(&bars, &mut evaluator());
-        let f = forward(&bars, Horizon::DEFAULT);
+        let f = forward_of(&bars, Horizon::DEFAULT);
         let all = ConditionMask::default();
         let e = edge(&column, &f, &all);
 
@@ -2236,7 +2663,7 @@ mod tests {
     fn no_zero_spread_mask_reports_a_finding_on_the_ordinary_fixture() {
         let bars = crate::synthetic::sessions(12);
         let column = Column::build(&bars, &mut evaluator());
-        let f = forward(&bars, Horizon::DEFAULT);
+        let f = forward_of(&bars, Horizon::DEFAULT);
         let mut zero_spread = 0_u32;
         for a in 0..64_u32 {
             let one = ConditionMask::default().with_bit(a);
@@ -2291,7 +2718,7 @@ mod tests {
             );
         }
         let column = Column::build(&bars, &mut evaluator());
-        let f = forward(&bars, Horizon::DEFAULT);
+        let f = forward_of(&bars, Horizon::DEFAULT);
         let all = ConditionMask::default();
         let e = edge(&column, &f, &all);
         assert!(
@@ -2314,7 +2741,21 @@ mod tests {
 )]
 mod refused_bar_tests {
     use super::{Horizon, forward};
+    use indicators::column::Column;
+    use indicators::evaluator::{Evaluator, Widths};
+    use indicators::pattern::Thresholds;
+    use indicators::vwap::Availability;
     use indicators::{Candle, OI_NULL};
+
+    fn forward_of(bars: &[Candle], horizon: Horizon) -> super::Forward {
+        let mut evaluator = Evaluator::new(
+            Widths::pinned().expect("pinned widths are valid"),
+            Availability::Absent,
+            Thresholds::CLASSICAL,
+        );
+        let column = Column::build(bars, &mut evaluator);
+        forward(bars, &column, horizon)
+    }
 
     /// ONE REFUSED BAR USED TO REWRITE EVERY STATISTIC IN THE RUN.
     ///
@@ -2378,13 +2819,15 @@ mod refused_bar_tests {
              asserts nothing"
         );
 
+        // Every complete two-minute horizon here ends long before 15:10, so the
+        // tiny fixture needs no synthetic session tail.
         let bars = vec![
             ok(0, 2_600_000),
             ok(1, 2_600_100),
             poisoned,
             ok(3, 2_600_200),
         ];
-        let f = forward(&bars, Horizon::bars(2).expect("a non-zero horizon"));
+        let f = forward_of(&bars, Horizon::bars(2).expect("a non-zero horizon"));
 
         assert_eq!(
             f.at(0),
@@ -2395,9 +2838,9 @@ mod refused_bar_tests {
         );
         assert_eq!(
             f.at(1),
-            Some(100),
-            "bar 1's outcome is priced against bar 3, which is sound, so the \
-             refusal must not spread further than the bar it names"
+            None,
+            "bar 1's path crosses refused bar 2, so the interior record cannot \
+             move extrema or fire orders and the entire path is refused"
         );
 
         // AND THE SAME SLICE WITH A SOUND BAR IN THAT SLOT STILL ANSWERS. A fix
@@ -2407,7 +2850,7 @@ mod refused_bar_tests {
         if let Some(slot) = healthy.get_mut(2) {
             *slot = ok(2, 2_600_150);
         }
-        let g = forward(&healthy, Horizon::bars(2).expect("a non-zero horizon"));
+        let g = forward_of(&healthy, Horizon::bars(2).expect("a non-zero horizon"));
         assert_eq!(
             g.at(0),
             Some(150),
@@ -2448,7 +2891,10 @@ mod refused_bar_tests {
             )
         };
 
-        let clean: Vec<Candle> = (0..6).map(|m| ok(m, 2_600_000 + m * 100)).collect();
+        // Six bars, then the ten that hold the square-off window off them --
+        // see the neighbouring test for why a hand-made session needs them.
+        let mut clean: Vec<Candle> = (0..6).map(|m| ok(m, 2_600_000 + m * 100)).collect();
+        clean.extend((6..16).map(|m| ok(m, 2_600_500)));
         let mut dirty = clean.clone();
         if let Some(slot) = dirty.get_mut(3) {
             *slot = bad(3);
@@ -2456,7 +2902,7 @@ mod refused_bar_tests {
 
         let h = Horizon::bars(1).expect("a non-zero horizon");
         let measured = |bs: &[Candle]| {
-            let f = forward(bs, h);
+            let f = forward_of(bs, h);
             (0..bs.len()).filter(|&i| f.at(i).is_some()).count()
         };
         let before = measured(&clean);
@@ -2471,84 +2917,98 @@ mod refused_bar_tests {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "the exception every test module in this workspace takes."
+)]
 mod refusal_coverage {
-    use indicators::Corrupt;
+    use super::{Horizon, forward};
+    use indicators::column::Column;
+    use indicators::evaluator::{Evaluator, Widths};
+    use indicators::pattern::Thresholds;
+    use indicators::vwap::Availability;
+    use indicators::{Candle, OI_NULL};
 
-    /// FOUR OF SIX, AND THE GAP IS PINNED RATHER THAN IMPLIED.
-    ///
-    /// # What this exists to stop being forgotten
-    ///
-    /// Four sites in this crate refuse to price a bar `Candle::check` rejects,
-    /// and three of them originally claimed `check` is "the SAME predicate
-    /// `Column::build` applies". It is the same predicate for a record ON ITS
-    /// OWN. `Corrupt` has six variants and two of them are facts about a
-    /// SEQUENCE:
-    ///
-    /// * `TimestampNotIncreasing` needs the previous bar,
-    /// * `AccumulatorTooLarge` needs the VWAP accumulator.
-    ///
-    /// A bar refused for either is not swept and never becomes a signal — and it
-    /// can still be read as an EXIT price, because the exit indexes the raw
-    /// slice by position. An adversarial fleet demonstrated it: a trade entered
-    /// and exited on a bar charged to `Census::timestamp_not_increasing`, with
-    /// `Grid::refused_paths` at zero.
-    ///
-    /// # Why a test and not a fix
-    ///
-    /// The fix is a swept-membership map built once per run from
-    /// `Column::sources` — O(bars) once, O(1) per lookup. It is affordable and
-    /// it is not built. `CLAUDE.md` §3 rule 6 asks for the bound to be STATED
-    /// when it cannot be met, and a sentence in a doc comment is a bound nobody
-    /// runs. This is the runnable form: it fails the moment a seventh variant
-    /// appears, forcing whoever adds it to decide which side of the line it is
-    /// on.
-    ///
-    /// **UNVERIFIED as a measurement.** The bound is argued from the
-    /// shape of the code and no bench in this workspace times it.
-    /// `CLAUDE.md` §3 rule 6: a structural argument is not a
-    /// measurement, however sound it is.
+    fn evaluator(availability: Availability) -> Evaluator {
+        Evaluator::new(
+            Widths::pinned().expect("pinned widths are valid"),
+            availability,
+            Thresholds::CLASSICAL,
+        )
+    }
+
+    fn assert_forward_refuses_the_path(
+        clean: &[Candle],
+        dirty: &[Candle],
+        availability: Availability,
+        victim: usize,
+    ) {
+        let horizon = Horizon::bars(2).expect("a non-zero horizon");
+        let clean_column = Column::build(clean, &mut evaluator(availability));
+        let dirty_column = Column::build(dirty, &mut evaluator(availability));
+        let clean_forward = forward(clean, &clean_column, horizon);
+        let dirty_forward = forward(dirty, &dirty_column, horizon);
+
+        assert!(clean_forward.at(victim.saturating_sub(2)).is_some());
+        assert!(!dirty_column.accepts(victim));
+        assert!(
+            dirty_forward.at(victim).is_none(),
+            "a refused entry has no outcome"
+        );
+        assert!(
+            dirty_forward.at(victim.saturating_sub(2)).is_none(),
+            "a refused exit cannot price a return"
+        );
+        assert!(
+            dirty_forward.at(victim.saturating_sub(1)).is_none(),
+            "a refused interior bar invalidates the path rather than silently \
+             shortening its extrema"
+        );
+        assert!(dirty_forward.was_refused(victim.saturating_sub(2)));
+    }
+
+    /// Duplicate time is locally a valid candle and statefully refused. The
+    /// evaluator's stored membership, not a second predicate, gates entries,
+    /// exits and interior forward paths.
     #[test]
-    fn the_stateful_refusals_are_not_covered_and_this_says_so() {
-        // Every variant, split by whether one record alone can decide it.
-        let bar_local = [
-            Corrupt::HighBelowLow,
-            Corrupt::RangeOverflows,
-            Corrupt::PriceOutsideRange,
-            Corrupt::NegativeVolume,
-        ];
-        let stateful = [
-            Corrupt::TimestampNotIncreasing,
-            Corrupt::AccumulatorTooLarge,
-        ];
+    fn duplicate_timestamp_never_prices_a_forward_entry_exit_or_interior() {
+        let clean = crate::synthetic::sessions(8);
+        let mut dirty = clean.clone();
+        let victim = dirty.len().saturating_sub(100);
+        let prior = dirty
+            .get(victim.saturating_sub(1))
+            .map_or(0, |bar| bar.ts_micros);
+        if let Some(bar) = dirty.get_mut(victim) {
+            bar.ts_micros = prior;
+        }
+        assert!(dirty.get(victim).is_some_and(|bar| bar.check().is_ok()));
+        let column = Column::build(&dirty, &mut evaluator(Availability::Absent));
+        assert_eq!(column.acceptance_census().timestamp_not_increasing, 1);
+        assert_forward_refuses_the_path(&clean, &dirty, Availability::Absent, victim);
+    }
 
-        assert_eq!(
-            bar_local.len() + stateful.len(),
-            6,
-            "`Corrupt` has six variants. If this fails a seventh was added, and \
-             whoever added it must decide whether `Candle::check` can see it -- \
-             which is exactly the decision that was skipped when the refusal \
-             guards were written"
-        );
-        assert_eq!(
-            bar_local.len(),
-            4,
-            "`Candle::check` covers the four a single record decides"
-        );
-        assert_eq!(
-            stateful.len(),
-            2,
-            "and cannot cover the two that need a sequence: a trade can still \
-             enter and exit on a bar the column refused for one of these, with \
-             `Grid::refused_paths` reporting zero"
-        );
-
-        // AND THE TWO SETS ARE DISJOINT, so a variant cannot be quietly counted
-        // on both sides to make the arithmetic work.
-        for s in stateful {
-            assert!(
-                !bar_local.contains(&s),
-                "{s:?} is listed as both bar-local and stateful"
+    /// A VWAP accumulator overflow is also locally valid and stateful. Its
+    /// extreme price cannot leak into a forward return.
+    #[test]
+    fn oversized_accumulator_never_prices_a_forward_entry_exit_or_interior() {
+        let clean = crate::synthetic::sessions(8);
+        let mut dirty = clean.clone();
+        let victim = dirty.len().saturating_sub(100);
+        let stamp = dirty.get(victim).map_or(0, |bar| bar.ts_micros);
+        if let Some(bar) = dirty.get_mut(victim) {
+            *bar = Candle::new(
+                stamp,
+                5_000_000_000_000_000_000,
+                5_000_000_000_000_000_000,
+                5_000_000_000_000_000_000,
+                5_000_000_000_000_000_000,
+                1,
+                OI_NULL,
             );
         }
+        assert!(dirty.get(victim).is_some_and(|bar| bar.check().is_ok()));
+        let column = Column::build(&dirty, &mut evaluator(Availability::Present));
+        assert_eq!(column.acceptance_census().accumulator_too_large, 1);
+        assert_forward_refuses_the_path(&clean, &dirty, Availability::Present, victim);
     }
 }

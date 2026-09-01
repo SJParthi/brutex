@@ -23,6 +23,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashSet, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use brutex_core::instrument::{Exchange, Segment};
 use brutex_core::symbol::Symbol;
@@ -103,11 +104,28 @@ fn config_without(line: &str, replacement: &str) -> String {
 
 /// A file under the temp directory holding `body`, named after the test.
 fn tmp(name: &str, body: &[u8]) -> std::path::PathBuf {
+    static SERIAL: AtomicU64 = AtomicU64::new(0);
     let dir = std::env::temp_dir().join("brutex-pull");
     std::fs::create_dir_all(&dir).expect("mkdir");
-    let path = dir.join(format!("{name}.toml"));
+    let serial = SERIAL.fetch_add(1, Ordering::Relaxed);
+    let path = dir.join(format!("{name}-{}-{serial}.toml", std::process::id()));
     std::fs::write(&path, body).expect("write");
     path
+}
+
+/// Parallel test processes and parallel tests in one process never share a
+/// credential fixture path. A shared `big.toml` once let one test replace the
+/// file after another had measured it but before it read it.
+#[test]
+fn temporary_configuration_paths_are_process_local_and_unique() {
+    let first = tmp("identity", CONFIG.as_bytes());
+    let second = tmp("identity", CONFIG.as_bytes());
+    assert_ne!(first, second, "the serial separates calls in one process");
+    let pid = std::process::id().to_string();
+    assert!(
+        first.to_string_lossy().contains(&pid) && second.to_string_lossy().contains(&pid),
+        "the process id separates simultaneous test binaries"
+    );
 }
 
 /// P-07 — a missing or unreadable configuration halts, and never defaults.

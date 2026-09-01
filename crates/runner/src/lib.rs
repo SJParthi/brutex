@@ -49,22 +49,27 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod admission;
 pub mod align;
 pub mod audit;
 pub mod bootstrap;
 pub mod bound;
 pub mod closed;
 pub mod excursion;
+pub mod exit_grid_policy;
 pub mod grid;
 pub mod identity;
 pub mod outcome;
 pub mod pbo;
+pub mod portfolio;
 pub mod rank;
+pub mod replay_mask;
 pub mod report;
 pub mod resample;
 pub mod significance;
 pub mod split;
 pub mod synthetic;
+pub mod topn;
 pub mod trade;
 pub mod validate;
 
@@ -91,6 +96,11 @@ pub struct Outcome {
     /// The ladder's result. Check [`Sweep::completed`] before reading it as a
     /// complete answer.
     pub sweep: Sweep,
+}
+
+/// The completion identity shared by retained and streamed outcomes.
+fn complete(census: &Census, first_swept: Option<usize>, bars: u64, extinct: bool) -> bool {
+    first_swept.is_some() && bars == census.swept && extinct && census.reconciles()
 }
 
 impl Outcome {
@@ -122,10 +132,12 @@ impl Outcome {
     /// because it hands `Ladder::walk` the very column it took the census from.
     #[must_use]
     pub fn is_complete(&self) -> bool {
-        self.first_swept.is_some()
-            && self.sweep.bars == self.census.swept
-            && self.sweep.completed()
-            && self.census.reconciles()
+        complete(
+            &self.census,
+            self.first_swept,
+            self.sweep.bars,
+            self.sweep.completed(),
+        )
     }
 }
 
@@ -163,21 +175,30 @@ impl Sweeper {
         Self::outcome_of(&column, sweep)
     }
 
+    /// Walk a caller-built column without rebuilding its evaluator state.
+    ///
+    /// This is the retained-result counterpart of
+    /// [`Self::run_prepared_ranked_by_reporting`].  It exists for a column whose
+    /// masks require a borrowed external dataset, such as the stored one-day
+    /// causal reference stream; rebuilding it through [`Evaluator`] would
+    /// silently discard that dataset.
+    #[must_use]
+    pub fn run_prepared(&self, column: &Column) -> Outcome {
+        let live = live_positions();
+        let sweep = self.ladder.walk(column.bits(), &live);
+        Self::outcome_of(column, sweep)
+    }
+
     /// One fold over the bars, then one walk of the ladder over the result.
     ///
-    /// # Why this is extracted rather than written twice
+    /// # Why the retained path stays separate
     ///
-    /// [`Self::run`] and [`Self::run_ranked`] both need exactly this, and for a
-    /// while they both *contained* it — four identical lines in two places, of
-    /// which only one had a test. Nothing bound the copies together, so a change
-    /// to one could not be caught diverging from the other by anything.
-    ///
-    /// That is not hypothetical here: [`Outcome::is_complete`]'s own doc reasons
-    /// about its invariant in terms of `Sweeper::run` alone — *"because it hands
-    /// `Ladder::walk` the very column it took the census from"* — and that
-    /// sentence was not updated when a second method acquired the same
-    /// obligation. One body means one place to change and one sentence to keep
-    /// true.
+    /// [`Self::run`] promises a full [`Sweep`] and therefore retains every
+    /// survivor. [`Self::run_ranked`] deliberately cannot call this helper: it
+    /// feeds each frontier to a bounded edge ranker and returns exact tallies
+    /// instead, so calling the retained body would restore the OOM this split
+    /// exists to remove. The agreement test below compares the two walks level
+    /// by level rather than making retention share an implementation.
     fn fold_and_walk(&self, bars: &[Candle], evaluator: &mut Evaluator) -> (Column, Sweep) {
         self.fold_and_walk_reporting(bars, evaluator, &|_, _, _| {})
     }
@@ -249,11 +270,11 @@ impl Sweeper {
     /// # Cost
     ///
     /// One `Column::build` (O(bars), unchanged from `run`), one
-    /// [`crate::outcome::forward`] pass (O(bars)), then [`crate::rank::rank`],
-    /// which is one edge pass per surviving combination and O(log keep) to
-    /// admit. Memory is O(keep) and independent of how many combinations the
-    /// sweep produced — the whole reason `rank` is a bounded heap and not a
-    /// sort.
+    /// [`crate::outcome::forward`] pass (O(bars)), then one edge pass per
+    /// surviving combination and O(log keep) to admit. Ranking memory is
+    /// O(keep × worker chunks), while engine result retention is O(depth): every
+    /// frontier becomes a fixed-size tally after its callback returns. Neither
+    /// term grows with the total number of combinations produced.
     pub fn run_ranked(
         &self,
         bars: &[Candle],
@@ -320,16 +341,273 @@ impl Sweeper {
         lens: crate::rank::Lens,
         on_level: &dyn Fn(&engine::Frontier, usize, u64),
     ) -> RankedRun {
-        let (column, sweep) = self.fold_and_walk_reporting(bars, evaluator, on_level);
+        let column = Column::build(bars, evaluator);
         // THE SAME SLICE THE COLUMN WAS BUILT FROM, and that is the whole point
-        // of computing it here rather than leaving it to the caller.
-        let forward = crate::outcome::forward(bars, horizon);
-        let ranked = crate::rank::rank_by(&sweep, &column, &forward, keep, lens);
+        // of computing it here rather than leaving it to the caller. It is built
+        // before the walk because each completed level is scored while the
+        // engine is lending it to the callback, then dropped.
+        let forward = crate::outcome::forward(bars, &column, horizon);
+        self.rank_prepared(column, None, &forward, keep, lens, on_level)
+    }
+
+    /// Walk an already-built signal column while scoring every retired
+    /// frontier on a caller-supplied execution column and forward series.
+    ///
+    /// Frequency still comes from `column`; only the edge score that makes the
+    /// hard top-N cut comes from `scoring_column` and `forward`. This is the
+    /// prepared form needed when signals are found on a coarse rung but entries
+    /// and exits fill on one-minute bars. Scoring after the stream returned
+    /// would be too late: every candidate below the signal-series top-N would
+    /// already be gone.
+    pub fn run_prepared_ranked_by_reporting(
+        &self,
+        column: Column,
+        scoring_column: &Column,
+        forward: &crate::outcome::Forward,
+        keep: usize,
+        lens: crate::rank::Lens,
+        on_level: &dyn Fn(&engine::Frontier, usize, u64),
+    ) -> RankedRun {
+        self.rank_prepared(column, Some(scoring_column), forward, keep, lens, on_level)
+    }
+
+    /// Streams every frequent itemset with its exact closure verdict before its
+    /// frontier is retired.
+    ///
+    /// This is the uncapped population door. Unlike [`Self::run_ranked`], it
+    /// never orders by evidence and never discards a row below `keep`; every
+    /// itemset is offered once in ladder level then canonical-mask order. The
+    /// caller may expand each closed mask into both directions and every
+    /// versioned exit cell without a hidden evidence prefix.
+    ///
+    /// A sink refusal is remembered and no further row is offered. The engine
+    /// still completes its current deterministic walk because its retirement
+    /// callback is infallible; the partial sink is never returned as an answer,
+    /// and this method returns the original refusal after the walk. A future
+    /// fallible engine callback may make that failure faster without changing
+    /// the correctness contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first error produced by `on_member`. No [`PopulationRun`] is
+    /// exposed in that case.
+    pub fn run_prepared_population_by_reporting<E, F>(
+        &self,
+        column: Column,
+        on_level: &dyn Fn(&engine::Frontier, usize, u64),
+        mut on_member: F,
+    ) -> Result<PopulationRun, E>
+    where
+        F: FnMut(PopulationMember) -> Result<(), E>,
+    {
+        let live = live_positions();
+        let mut considered: u64 = 0;
+        let mut redundant: u64 = 0;
+        let mut closed: u64 = 0;
+        let mut closure_complete = true;
+        let mut sink_error: Option<E> = None;
+        let mut progress = |level: &engine::Frontier, admitted: usize, pairs: u64| {
+            on_level(level, admitted, pairs);
+        };
+        let mut retire = |level: &engine::Frontier, next: Option<&engine::Frontier>| {
+            considered =
+                considered.saturating_add(u64::try_from(level.frequent.len()).unwrap_or(u64::MAX));
+            if level.frequent.is_empty() {
+                return;
+            }
+            let (redundant_here, known) = if let Some(next) = next {
+                (crate::closed::redundant_between(level, next), true)
+            } else {
+                closure_complete = false;
+                (std::collections::HashSet::with_capacity(0), false)
+            };
+            redundant =
+                redundant.saturating_add(u64::try_from(redundant_here.len()).unwrap_or(u64::MAX));
+            for item in &level.frequent {
+                let closure = if !known {
+                    ClosureVerdict::Unknown
+                } else if redundant_here.contains(&item.mask) {
+                    ClosureVerdict::Redundant
+                } else {
+                    closed = closed.saturating_add(1);
+                    ClosureVerdict::Closed
+                };
+                if sink_error.is_none()
+                    && let Err(why) = on_member(PopulationMember {
+                        item: *item,
+                        closure,
+                    })
+                {
+                    sink_error = Some(why);
+                }
+            }
+        };
+        let sweep = self.ladder.walk_streamed_with_retirement(
+            column.bits(),
+            &live,
+            &mut progress,
+            &mut retire,
+        );
+        if let Some(why) = sink_error {
+            return Err(why);
+        }
+        debug_assert_eq!(
+            considered, sweep.streamed,
+            "the population sink must see every survivor the engine streams"
+        );
+        let trials = sweep.levels.iter().fold(0_u64, |total, level| {
+            total
+                .saturating_add(level.survivors)
+                .saturating_add(level.infrequent)
+        });
+        Ok(PopulationRun {
+            outcome: RankedOutcome {
+                census: column.census(),
+                first_swept: column.first_swept(),
+                effective_trials: trials.saturating_sub(redundant),
+                trials,
+                closure_complete,
+                sweep,
+            },
+            column,
+            considered,
+            redundant,
+            closed,
+        })
+    }
+
+    /// The one streamed ranked walk shared by same-series and projected runs.
+    fn rank_prepared(
+        &self,
+        column: Column,
+        scoring_column: Option<&Column>,
+        forward: &crate::outcome::Forward,
+        keep: usize,
+        lens: crate::rank::Lens,
+        on_level: &dyn Fn(&engine::Frontier, usize, u64),
+    ) -> RankedRun {
+        let scored_on = scoring_column.unwrap_or(&column);
+        let live = live_positions();
+        let mut accumulator = crate::rank::Accumulator::new(keep, lens);
+        let mut progress = |level: &engine::Frontier, admitted: usize, pairs: u64| {
+            on_level(level, admitted, pairs);
+        };
+        let mut retire = |level: &engine::Frontier, next: Option<&engine::Frontier>| {
+            accumulator.offer_retired(level, next, scored_on, forward);
+        };
+        let sweep = self.ladder.walk_streamed_with_retirement(
+            column.bits(),
+            &live,
+            &mut progress,
+            &mut retire,
+        );
+        let ranked = accumulator.finish();
+        debug_assert_eq!(
+            ranked.considered, sweep.streamed,
+            "the ranker must see every survivor the engine streams"
+        );
+        let trials = sweep.levels.iter().fold(0_u64, |total, level| {
+            total
+                .saturating_add(level.survivors)
+                .saturating_add(level.infrequent)
+        });
         RankedRun {
-            outcome: Self::outcome_of(&column, sweep),
+            outcome: RankedOutcome {
+                census: column.census(),
+                first_swept: column.first_swept(),
+                effective_trials: trials.saturating_sub(ranked.redundant),
+                trials,
+                closure_complete: ranked.closure_complete,
+                sweep,
+            },
             ranked,
             column,
         }
+    }
+}
+
+/// Whether one frequent itemset is an exact closed representative.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClosureVerdict {
+    /// No immediate superset has equal support; this mask belongs to the
+    /// lossless closed population.
+    Closed,
+    /// An immediate superset has the same support; this mask is recoverable
+    /// from that closed superset and is not a separate strategy population row.
+    Redundant,
+    /// The ladder halted before a successor frontier could decide closure.
+    Unknown,
+}
+
+/// One canonical frequent itemset at the instant its frontier retires.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PopulationMember {
+    /// Exact mask and support measured by the engine.
+    pub item: engine::Itemset,
+    /// Closure verdict decided from the immediate successor frontier.
+    pub closure: ClosureVerdict,
+}
+
+/// One uncapped streamed population walk and its exact reconciliation.
+#[derive(Clone, Debug)]
+pub struct PopulationRun {
+    /// Census, extinction/halt state, level tallies and closure completeness.
+    pub outcome: RankedOutcome,
+    /// The same signal column that was walked, retained for exact downstream
+    /// pricing and evidence derivation.
+    pub column: Column,
+    /// Every frequent itemset offered to the sink.
+    pub considered: u64,
+    /// Itemsets recoverable from an equal-support closed superset.
+    pub redundant: u64,
+    /// Closed itemsets available for direction/exit-cell expansion.
+    pub closed: u64,
+}
+
+impl PopulationRun {
+    /// Whether enumeration, census and every closure decision are complete.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.outcome.is_complete() && self.considered == self.redundant.saturating_add(self.closed)
+    }
+}
+
+/// A ranked sweep's census and exact level tallies, without retained survivors.
+///
+/// This is the streamed counterpart of [`Outcome`]. A ranked caller never needs
+/// every frequent itemset after the bounded edge ranker has made its cut, so
+/// representing this result as [`Sweep`] would force the engine to retain the
+/// very vectors the ranked path exists to discard. [`engine::keep::Streamed`]
+/// preserves the extinction depth, halt, exclusions and every level counter;
+/// [`RankedRun::ranked`] preserves the best rows and how many were considered.
+#[derive(Clone, Debug)]
+pub struct RankedOutcome {
+    /// Where every offered bar went — swept, still warming, or refused by name.
+    pub census: Census,
+    /// The caller-slice index of the first swept bar, or `None` if none warmed.
+    pub first_swept: Option<usize>,
+    /// Every candidate whose support was measured: infrequent plus survivors.
+    pub trials: u64,
+    /// [`Self::trials`] after exact equal-support duplicates are removed.
+    pub effective_trials: u64,
+    /// Whether closure was decided for every non-empty level.
+    pub closure_complete: bool,
+    /// The ladder result with each retired survivor vector reduced to its exact
+    /// count and all other counters retained.
+    pub sweep: engine::keep::Streamed,
+}
+
+impl RankedOutcome {
+    /// Did this streamed run produce a complete, trustworthy answer?
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.closure_complete
+            && complete(
+                &self.census,
+                self.first_swept,
+                self.sweep.bars,
+                self.sweep.completed(),
+            )
     }
 }
 
@@ -351,8 +629,8 @@ impl Sweeper {
 /// trade walk, so the three cannot disagree about what they measured.
 #[derive(Debug)]
 pub struct RankedRun {
-    /// The census, the warm-up boundary and the ladder's result.
-    pub outcome: Outcome,
+    /// The census, warm-up boundary, and streamed ladder tallies.
+    pub outcome: RankedOutcome,
     /// The strongest combinations by |t|, best first, bounded by `keep`.
     pub ranked: crate::rank::Ranked,
     /// The bar-bit column every figure above was measured on.
@@ -449,21 +727,32 @@ impl Sweeper {
     /// search costs `log2(bars)` ladder walks over a column built one time.
     pub fn auto(&self, bars: &[Candle], evaluator: &mut Evaluator) -> Auto {
         let column = Column::build(bars, evaluator);
+        self.auto_prepared(&column)
+    }
+
+    /// Search the threshold over one already-built condition column.
+    ///
+    /// The column is consumed because the returned [`Auto`] retains only its
+    /// census and sweep tallies.  External-reference evaluators can therefore
+    /// build once, validate their own causal receipts, and use the same search
+    /// as an ordinary [`Evaluator`] without reconstructing masks under a
+    /// different input policy.
+    #[must_use]
+    pub fn auto_prepared(&self, column: &Column) -> Auto {
         let live = live_positions();
-        // THE TRANSPOSE IS PAID ONCE TOO, AND IT WAS NOT.
+        // THE OWNED SUPPORT COLUMN IS BUILT ONCE TOO, AND IT WAS NOT.
         //
         // The doc above says "the column is folded once and every probe walks
         // the same one". That was true of `Column::build` and FALSE of the
-        // bitmap the ladder actually counts against: `Ladder::walk` transposes
-        // its input itself, so each of the ~17 halvings and ~17 bisections below
-        // re-entered `engine::column::Column::transpose` on identical bars.
+        // owned column the ladder actually counts against: `Ladder::walk`
+        // copies its input itself, so each of the ~17 halvings and ~17
+        // bisections below would rebuild identical rows.
         //
-        // A transpose is `vec![0_u64; BITS * ceil(bars/64)]` -- 58.7 MB zeroed
-        // at 1,222,791 bars -- plus a full pass setting one bit per (bar,
-        // position). So an auto-tuned run rebuilt an identical 58.7 MB structure
-        // up to thirty-four times, having already paid for it once. Found by an
-        // O(1) audit; no per-walk cost was wrong, which is why review missed it.
-        let transposed = engine::column::Column::transpose(column.bits());
+        // One row-major copy is 58.7 MB at 1,222,791 bars. So an auto-tuned run
+        // rebuilt that identical allocation up to thirty-four times, having
+        // already paid for it once. Found by an O(1) audit; no per-walk cost was
+        // wrong, which is why review missed it.
+        let support_column = engine::column::Column::from_rows(column.bits());
         let census = column.census();
         let first_swept = column.first_swept();
 
@@ -494,7 +783,7 @@ impl Sweeper {
             let sweep = Ladder::with_min_hits(threshold)
                 .with_ceiling(self.ladder.ceiling())
                 .with_pair_budget(PROBE_PAIRS)
-                .walk_column(&transposed, &live, &|_, _, _| {});
+                .walk_column(&support_column, &live, &|_, _, _| {});
             if sweep.completed() {
                 // A PROBE THAT FOUND NOTHING IS NOT AN ANSWER, and this is the
                 // whole of the bug an audit found on a 98,124-bar column.
@@ -613,7 +902,7 @@ impl Sweeper {
                 let sweep = Ladder::with_min_hits(mid)
                     .with_ceiling(self.ladder.ceiling())
                     .with_pair_budget(PROBE_PAIRS)
-                    .walk_column(&transposed, &live, &|_, _, _| {});
+                    .walk_column(&support_column, &live, &|_, _, _| {});
                 if sweep.completed() {
                     let found = sweep.depth() >= 1;
                     hi = mid;
@@ -684,9 +973,12 @@ pub fn column_of(bars: &[Candle], evaluator: &mut Evaluator) -> Vec<ConditionMas
               instrumented, so it leaves no uncoverable region behind."
 )]
 mod tests {
-    use super::{Outcome, Sweeper, candle, column_of, live_positions};
+    use super::{
+        ClosureVerdict, Outcome, PopulationMember, Sweeper, candle, column_of, live_positions,
+    };
     use crate::synthetic;
     use engine::Ladder;
+    use indicators::column::Column;
     use indicators::evaluator::{Evaluator, Widths};
     use indicators::pattern::Thresholds;
     use indicators::vwap::Availability;
@@ -706,6 +998,76 @@ mod tests {
         Ladder::with_min_hits(600).with_ceiling(50_000)
     }
 
+    #[test]
+    fn the_population_door_streams_every_closed_mask_without_an_evidence_cap() {
+        let bars = synthetic::sessions(8);
+        let column = Column::build(&bars, &mut evaluator());
+        let mut members: Vec<PopulationMember> = Vec::new();
+        let population = Sweeper::new(bounded())
+            .run_prepared_population_by_reporting(
+                column,
+                &|_, _, _| {},
+                |member| -> Result<(), &'static str> {
+                    members.push(member);
+                    Ok(())
+                },
+            )
+            .expect("the in-memory sink cannot refuse");
+
+        let retaining = Sweeper::new(bounded()).run(&bars, &mut evaluator());
+        let expected = crate::closed::closed(&retaining.sweep);
+        let actual_closed: Vec<_> = members
+            .iter()
+            .filter(|member| member.closure == ClosureVerdict::Closed)
+            .map(|member| member.item)
+            .collect();
+
+        assert!(population.is_complete());
+        assert_eq!(
+            population.considered,
+            u64::try_from(members.len()).unwrap_or(u64::MAX)
+        );
+        assert_eq!(population.considered, expected.considered);
+        assert_eq!(population.redundant, expected.redundant());
+        assert_eq!(
+            population.closed,
+            u64::try_from(actual_closed.len()).unwrap_or(u64::MAX)
+        );
+        assert_eq!(
+            actual_closed, expected.kept,
+            "streaming closure must equal the uncapped retaining reference"
+        );
+        assert!(
+            members
+                .iter()
+                .all(|member| member.closure != ClosureVerdict::Unknown),
+            "an extinct ladder decides every closure verdict"
+        );
+    }
+
+    #[test]
+    fn one_population_sink_refusal_exposes_no_partial_run() {
+        let bars = synthetic::sessions(8);
+        let column = Column::build(&bars, &mut evaluator());
+        let mut offered: u64 = 0;
+        let result = Sweeper::new(bounded()).run_prepared_population_by_reporting(
+            column,
+            &|_, _, _| {},
+            |_| -> Result<(), &'static str> {
+                offered = offered.saturating_add(1);
+                Err("population writer refused")
+            },
+        );
+        assert_eq!(
+            result.expect_err("a refusing population writer must withhold the partial run"),
+            "population writer refused"
+        );
+        assert_eq!(
+            offered, 1,
+            "after the first refusal no later row may reach a partial sink"
+        );
+    }
+
     /// `run_ranked` AGREES WITH `run`, AND PAIRS ITS FORWARD WITH ITS OWN COLUMN.
     ///
     /// # Why this test had to be written before anything else here was trusted
@@ -722,10 +1084,9 @@ mod tests {
     ///
     /// # The two properties, and why the second is the one that matters
     ///
-    /// The first is agreement: the sweep half of `run_ranked` must produce
-    /// exactly what `run` produces, or the two entry points answer differently
-    /// about the same bars. Both now share `fold_and_walk`, and this is what
-    /// stops that sharing being undone silently.
+    /// The first is agreement: the streamed sweep half of `run_ranked` must
+    /// produce every counter and the same extinction depth as `run`, while its
+    /// bounded ranking must equal ranking the retained result afterwards.
     ///
     /// The second is the claim the method's own doc makes and nothing proved:
     /// that building the column and the `Forward` from **one** slice makes
@@ -759,6 +1120,53 @@ mod tests {
             plain.sweep.depth(),
             "and the same ladder depth — a ranked run is a plain run that also scores"
         );
+        assert_eq!(run.outcome.sweep.bars, plain.sweep.bars);
+        assert_eq!(run.outcome.sweep.min_hits, plain.sweep.min_hits);
+        assert_eq!(run.outcome.sweep.halted, plain.sweep.halted);
+        assert_eq!(run.outcome.sweep.excluded, plain.sweep.excluded);
+        assert_eq!(
+            run.outcome.sweep.levels.len(),
+            plain.sweep.levels.len(),
+            "the empty extinction level and a partial halted level are retained as tallies"
+        );
+        for (streamed, retained) in run.outcome.sweep.levels.iter().zip(&plain.sweep.levels) {
+            assert_eq!(
+                *streamed,
+                engine::keep::Tally::of(retained),
+                "every level counter must survive dropping its itemsets"
+            );
+        }
+        assert_eq!(
+            run.ranked.considered, run.outcome.sweep.streamed,
+            "every streamed survivor must reach the edge ranker exactly once"
+        );
+        assert!(
+            run.outcome.is_complete(),
+            "dropping retired survivor vectors must not make a complete walk read partial"
+        );
+        assert_eq!(
+            run.outcome.trials,
+            crate::significance::trials(&plain.sweep),
+            "streaming must retain every support evaluation in the raw trial count"
+        );
+        assert_eq!(
+            run.outcome.effective_trials,
+            crate::significance::effective_trials(&plain.sweep),
+            "adjacent retirement must deflate exactly the duplicates a retained sweep finds"
+        );
+
+        let legacy = crate::rank::rank_by(
+            &plain.sweep,
+            &run.column,
+            &crate::outcome::forward(&bars, &run.column, crate::outcome::Horizon::DEFAULT),
+            10,
+            crate::rank::Lens::Detectability,
+        );
+        assert_eq!(run.ranked.considered, legacy.considered);
+        assert_eq!(
+            run.ranked.top, legacy.top,
+            "streaming changes retention, not which edge-ranked rows survive the cut"
+        );
 
         // THE FIXTURE HAS TO PRODUCE SOMETHING, or every assertion below is
         // vacuous and this test would pass on a `rank` that returned nothing.
@@ -791,6 +1199,68 @@ mod tests {
             usize::try_from(run.outcome.census.swept).unwrap_or(usize::MAX),
             "the returned column is the one the census counted, not another"
         );
+    }
+
+    /// The projected execution series must decide the hard cut while every
+    /// signal frontier is still live, not after signal-ranked rows were dropped.
+    #[test]
+    fn prepared_projected_ranking_matches_a_retained_execution_ranking() {
+        let bars = synthetic::sessions(8);
+        let signal = Column::build(&bars, &mut evaluator());
+        let onto: Vec<Option<usize>> = (0..signal.bits().len())
+            .map(|index| Some(index.saturating_mul(2)))
+            .collect();
+        let (execution, dropped) = signal
+            .reproject_checked(&onto, &bars)
+            .expect("the alignment is parallel to the signal column");
+        assert_eq!(dropped, 0, "every fixture signal has an execution bar");
+        let forward = crate::outcome::forward(&bars, &execution, crate::outcome::Horizon::DEFAULT);
+        let retained = Sweeper::new(bounded()).run(&bars, &mut evaluator());
+
+        for lens in [crate::rank::Lens::Detectability, crate::rank::Lens::Payoff] {
+            let expected = crate::rank::rank_by(&retained.sweep, &execution, &forward, 10, lens);
+            let got = Sweeper::new(bounded()).run_prepared_ranked_by_reporting(
+                signal.clone(),
+                &execution,
+                &forward,
+                10,
+                lens,
+                &|_, _, _| {},
+            );
+
+            assert_eq!(got.ranked.top, expected.top, "projected {lens:?} cut");
+            assert_eq!(
+                got.ranked.closed_top, expected.closed_top,
+                "projected {lens:?} closure filter"
+            );
+            assert_eq!(got.ranked.considered, expected.considered);
+            assert!(got.outcome.is_complete());
+        }
+    }
+
+    #[test]
+    fn prepared_retained_and_auto_paths_equal_the_ordinary_folded_paths() {
+        let bars = synthetic::sessions(8);
+        let column = Column::build(&bars, &mut evaluator());
+        let retained = Sweeper::new(bounded()).run(&bars, &mut evaluator());
+        let prepared = Sweeper::new(bounded()).run_prepared(&column);
+        assert_eq!(prepared.census, retained.census);
+        assert_eq!(prepared.first_swept, retained.first_swept);
+        assert_eq!(prepared.sweep, retained.sweep);
+
+        let search = Ladder::with_min_hits(1).with_ceiling(50_000);
+        let ordinary_auto = Sweeper::new(search).auto(&bars, &mut evaluator());
+        let prepared_auto = Sweeper::new(search).auto_prepared(&column);
+        assert_eq!(prepared_auto.affordable, ordinary_auto.affordable);
+        assert_eq!(prepared_auto.min_hits, ordinary_auto.min_hits);
+        assert_eq!(prepared_auto.attempts, ordinary_auto.attempts);
+        assert_eq!(prepared_auto.refused_below, ordinary_auto.refused_below);
+        assert_eq!(prepared_auto.outcome.census, ordinary_auto.outcome.census);
+        assert_eq!(
+            prepared_auto.outcome.first_swept,
+            ordinary_auto.outcome.first_swept
+        );
+        assert_eq!(prepared_auto.outcome.sweep, ordinary_auto.outcome.sweep);
     }
 
     fn evaluator() -> Evaluator {
@@ -968,6 +1438,29 @@ mod tests {
         assert!(out.census.reconciles());
     }
 
+    #[test]
+    fn a_halted_ranked_sweep_cannot_certify_closure() {
+        let bars = synthetic::sessions(8);
+        let tight = Ladder::with_min_hits(1).with_ceiling(1);
+        let run = Sweeper::new(tight).run_ranked(
+            &bars,
+            &mut evaluator(),
+            crate::outcome::Horizon::DEFAULT,
+            10,
+        );
+
+        assert!(
+            run.outcome.sweep.halted.is_some(),
+            "the fixture must breach"
+        );
+        assert!(
+            !run.outcome.closure_complete,
+            "a partial successor cannot prove the level below it closed"
+        );
+        assert!(!run.outcome.is_complete());
+        assert_eq!(run.ranked.considered, run.outcome.sweep.streamed);
+    }
+
     /// The exact call that OOM-killed this process, now a loud refusal.
     ///
     /// `min_hits(2)` over eight sessions is 0.067% support: nearly all 238
@@ -997,7 +1490,7 @@ mod tests {
         assert!(!out.sweep.levels.is_empty());
     }
 
-    /// This crate cannot read a bar, and that is checked rather than promised.
+    /// This crate cannot open the store, and that is checked rather than promised.
     ///
     /// # Why this test exists and why it is structural
     ///
@@ -1008,10 +1501,13 @@ mod tests {
     /// crate that joins them has to sit outside it. That leaves exactly one crate
     /// in the sweep chain whose purity is not welded shut by CI.
     ///
-    /// The operator's rule is absolute — no vendor pull, no ingest, and not the
-    /// bars already on disk either — so "I inspected it" is not a good enough
-    /// guarantee for the one unguarded link. This runs under `cargo test`, needs
-    /// no workflow change, and fails the moment a filesystem call appears here.
+    /// The architectural boundary is absolute: `runner` consumes slices a caller
+    /// already holds and must not acquire a filesystem or store dependency of its
+    /// own. `cli sweep-stored` may load real bars and pass those slices in; this
+    /// crate may not pull, ingest or open them itself. So "I inspected it" is not
+    /// a good enough guarantee for the one unguarded link. This runs under
+    /// `cargo test`, needs no workflow change, and fails the moment a filesystem
+    /// call appears here.
     ///
     /// The probe list is gate 22 clause B's own, plus the embedding macro and the
     /// path and environment types a reader would need before it could name a file
@@ -1023,9 +1519,51 @@ mod tests {
     /// gate 17 refused a comment describing gate 17, gate 22 clause A read a
     /// comment as a dependency table, and `core`'s float scanner read a hex digest
     /// as a type name. A guard that reads text must never spell what it hunts.
+    ///
+    /// **It has now happened a fifth time, in this very paragraph.** Widening
+    /// the scan to every module put `lib.rs`'s own doc under it, and the
+    /// sentence below naming the modules that were unguarded spelled one of the
+    /// needles while doing so. The rule is not a footnote about the array
+    /// literal; it covers the prose too, because the prose is in the file.
+    ///
+    /// # IT SCANNED TWO MODULES OF TWENTY-FOUR
+    ///
+    /// The list was `lib.rs` and `synthetic.rs`. `crates/runner/src/` holds
+    /// twenty-four modules, so an open-a-file call in `admission.rs`,
+    /// `validate.rs`, `exit_grid_policy.rs`, `grid.rs`, `outcome.rs`, `trade.rs`,
+    /// `rank.rs`, `replay_mask.rs`, `audit.rs`, `report.rs`, `bootstrap.rs`,
+    /// `excursion.rs`, `align.rs`, `closed.rs`, `pbo.rs`, `portfolio.rs`,
+    /// `resample.rs`, `significance.rs`, `split.rs`, `topn.rs`, `bound.rs` or
+    /// `identity.rs` passed unseen — **twenty-two of the twenty-four, including
+    /// every module that actually holds the sweep.** A guard whose own doc says
+    /// it "fails the moment a filesystem call appears here" has to look at
+    /// "here".
+    ///
+    /// # THE ENVIRONMENT NEEDLE IS SEPARATED, AND NOT DELETED
+    ///
+    /// Extending the list makes one needle match: `validate.rs:441` reads
+    /// `BRUTEX_GRID_RUNGS` to size the walk-forward exit ladder. Deleting the
+    /// needle to get green would trade a real guard for a green tick, so the
+    /// needle stays and moves to its own tier, because it is guarding a
+    /// different thing from the other fifteen.
+    ///
+    /// The fifteen name a FILE or a PROCESS: any of them is the operator's rule
+    /// broken outright, in any module, with no exception. An environment read is
+    /// not one of those — it reads a `usize` and cannot open anything — and it
+    /// is on this list only because a PATH is how a file would arrive. So the
+    /// second tier asserts what that threat actually needs:
+    ///
+    /// * no module may call `env::var`, in any module — an environment read
+    ///   whose result is a `String` is the one that could be a path;
+    /// * the crate may make exactly ONE environment read of any kind, and its
+    ///   variable must be the audited one.
+    ///
+    /// A second env read, or a first one under any other name, fails here. And
+    /// the fifteen still stand behind it: even a path that arrived could not be
+    /// opened.
     #[test]
     fn this_crate_cannot_open_a_file_and_cannot_name_the_store() {
-        let banned: [&str; 16] = [
+        let banned: [&str; 15] = [
             concat!("Fi", "le::open"),
             concat!("Fi", "le::create"),
             concat!("Open", "Options"),
@@ -1041,24 +1579,87 @@ mod tests {
             concat!("st", "d::os::"),
             concat!("lib", "c::"),
             concat!("Path", "Buf"),
-            concat!("en", "v::var"),
         ];
-        let sources = [
+        // EVERY MODULE UNDER `crates/runner/src/`. A module missing from this
+        // list is a module the guard does not cover, which is what it was.
+        let sources: [(&str, &str); 24] = [
+            ("admission.rs", include_str!("admission.rs")),
+            ("align.rs", include_str!("align.rs")),
+            ("audit.rs", include_str!("audit.rs")),
+            ("bootstrap.rs", include_str!("bootstrap.rs")),
+            ("bound.rs", include_str!("bound.rs")),
+            ("closed.rs", include_str!("closed.rs")),
+            ("excursion.rs", include_str!("excursion.rs")),
+            ("exit_grid_policy.rs", include_str!("exit_grid_policy.rs")),
+            ("grid.rs", include_str!("grid.rs")),
+            ("identity.rs", include_str!("identity.rs")),
             ("lib.rs", include_str!("lib.rs")),
+            ("outcome.rs", include_str!("outcome.rs")),
+            ("pbo.rs", include_str!("pbo.rs")),
+            ("portfolio.rs", include_str!("portfolio.rs")),
+            ("rank.rs", include_str!("rank.rs")),
+            ("replay_mask.rs", include_str!("replay_mask.rs")),
+            ("report.rs", include_str!("report.rs")),
+            ("resample.rs", include_str!("resample.rs")),
+            ("significance.rs", include_str!("significance.rs")),
+            ("split.rs", include_str!("split.rs")),
             ("synthetic.rs", include_str!("synthetic.rs")),
+            ("topn.rs", include_str!("topn.rs")),
+            ("trade.rs", include_str!("trade.rs")),
+            ("validate.rs", include_str!("validate.rs")),
         ];
         for (name, src) in sources {
             for needle in banned {
                 assert!(
                     !src.contains(needle),
                     "crates/runner/src/{name} contains `{needle}`. This crate is the \
-                     one link in the sweep chain gate 22 does not guard, and the \
-                     operator's rule is that neither a pull nor a stored bar may \
-                     ever reach it. Every candle here comes from `synthetic::bar`, \
-                     which is arithmetic on two integers."
+                     one link in the sweep chain gate 22 does not guard. It may \
+                     consume caller-supplied generated or stored candle slices, \
+                     but it may not open a file, pull, ingest or acquire a store \
+                     dependency itself."
                 );
             }
         }
+
+        // THE SECOND TIER. A `String`-valued environment read is the one that
+        // could carry a path, and no module makes one.
+        for (name, src) in sources {
+            assert!(
+                !src.contains(concat!("en", "v::var(")),
+                "crates/runner/src/{name} reads a String-valued environment \
+                 variable. That is how a path reaches a program, and this crate \
+                 may not name a file at all."
+            );
+        }
+
+        // AND EXACTLY ONE ENVIRONMENT READ IN THE CRATE, of the audited
+        // variable. `validate.rs` sizes its exit ladder from it -- a `usize`,
+        // which opens nothing -- and a second reader, or a different name,
+        // fails here rather than being noticed later.
+        let reads: Vec<(&str, &str)> = sources
+            .iter()
+            .flat_map(|&(name, src)| {
+                src.match_indices(concat!("va", "r_os("))
+                    .map(move |(at, _)| {
+                        (name, src.get(at..at.saturating_add(28)).unwrap_or_default())
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(
+            reads.len(),
+            1,
+            "this crate makes {} environment reads and may make exactly one: \
+             {reads:?}",
+            reads.len()
+        );
+        assert!(
+            reads.first().is_some_and(
+                |&(name, text)| name == "validate.rs" && text.contains("BRUTEX_GRID_RUNGS")
+            ),
+            "the one environment read must be `validate.rs` sizing its exit \
+             ladder, and it is {reads:?}"
+        );
 
         // And the dependency set, exactly — the same argument gate 22 clause A
         // makes: a crate that cannot NAME a bar reader cannot call one.
@@ -1067,7 +1668,7 @@ mod tests {
             assert!(
                 !manifest.contains(&format!("\n{forbidden} ")),
                 "crates/runner must not depend on `{forbidden}` -- that is how a \
-                 stored bar would reach the sweep"
+                 caller-owned input would become a runner-owned read"
             );
         }
     }

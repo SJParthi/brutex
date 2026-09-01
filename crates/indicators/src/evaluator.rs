@@ -49,6 +49,7 @@
 //! bitwise ORs over six `u64`.
 
 use crate::Candle;
+use vocab::tolerance::Base;
 use vocab::{ConditionMask, Tolerance};
 
 use crate::daily::DailyLevels;
@@ -275,6 +276,14 @@ const _: () = {
 pub struct Evaluator {
     widths: Widths,
     calendar: Calendar,
+    /// True only behind [`crate::anchored::AnchoredEvaluator`].
+    ///
+    /// In that path the previous-day families are advanced from caller-supplied,
+    /// sealed one-day records.  A signal-session rollover must therefore NOT
+    /// install the signal rung's own OHLC as yesterday.  Keeping the switch on
+    /// the evaluator makes the prohibition structural at the one write site;
+    /// the ordinary [`Evaluator`] path leaves it false and is unchanged.
+    external_daily_references: bool,
     /// The IST day of the bar last folded. `i64::MIN` before the first bar.
     day: i64,
     /// True once at least one bar has been folded into the running session.
@@ -350,6 +359,102 @@ pub struct Evaluator {
     vwap: Vwap,
 }
 
+/// The caller-decided configuration needed to replay an evaluation on another
+/// bar slice, with no state carried over from the first slice.
+///
+/// This is crate-private because a caller must not be able to edit one field of
+/// an existing evaluator and call the result the same run. [`Evaluator::spec`]
+/// snapshots all four choices together and [`Self::fresh`] is the only way the
+/// column layer uses it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct EvaluationSpec {
+    widths: Widths,
+    availability: Availability,
+    thresholds: Thresholds,
+    calendar: Calendar,
+}
+
+/// Length of the collision-free canonical V1 evaluator-specification encoding.
+///
+/// This is a fixed record rather than a hash.  The crate graph permits
+/// `indicators` only its `vocab` dependency, so the identity-owning caller may
+/// feed these exact bytes into its approved digest without this crate gaining a
+/// second identity implementation.
+pub(crate) const EVALUATION_SPEC_V1_LEN: usize = 155;
+
+impl EvaluationSpec {
+    /// A state-empty evaluator under exactly the choices this spec captured.
+    #[must_use]
+    pub(crate) const fn fresh(self) -> Evaluator {
+        Evaluator::with_calendar(
+            self.widths,
+            self.availability,
+            self.thresholds,
+            self.calendar,
+        )
+    }
+
+    /// Encode every caller choice into the stable, injective V1 record.
+    ///
+    /// Layout, in order:
+    ///
+    /// - 16-byte domain/version marker `brutex/eval/v1`;
+    /// - Fibonacci tolerance base tag and signed little-endian `milli`;
+    /// - pivot tolerance base tag and signed little-endian `milli`;
+    /// - VWAP-availability tag;
+    /// - all six signed little-endian pattern thresholds, declaration order;
+    /// - calendar length as little-endian `u64`;
+    /// - all eight signed little-endian calendar day slots, array order.
+    ///
+    /// Base tags are `0 = unspecified`, `1 = session range`, `2 = CPR width`;
+    /// availability is `0 = absent`, `1 = present`.  Explicit tags keep the
+    /// representation independent of Rust enum discriminants.  Encoding every
+    /// calendar slot as well as its length makes even a malformed internal
+    /// value distinguishable instead of normalising it into a valid-looking
+    /// policy.
+    #[must_use]
+    pub(crate) fn canonical_v1_bytes(self) -> [u8; EVALUATION_SPEC_V1_LEN] {
+        const DOMAIN: [u8; 16] = *b"brutex/eval/v1\0\0";
+
+        let calendar_len = u64::try_from(self.calendar.len).unwrap_or(u64::MAX);
+        let mut encoded = DOMAIN
+            .into_iter()
+            .chain([tolerance_base_tag(self.widths.fib.base())])
+            .chain(self.widths.fib.milli().to_le_bytes())
+            .chain([tolerance_base_tag(self.widths.pivot.base())])
+            .chain(self.widths.pivot.milli().to_le_bytes())
+            .chain([availability_tag(self.availability)])
+            .chain(self.thresholds.doji_body.to_le_bytes())
+            .chain(self.thresholds.long_body.to_le_bytes())
+            .chain(self.thresholds.tiny_wick.to_le_bytes())
+            .chain(self.thresholds.small_body.to_le_bytes())
+            .chain(self.thresholds.long_wick_vs_body.to_le_bytes())
+            .chain(self.thresholds.high_wave_shadow.to_le_bytes())
+            .chain(calendar_len.to_le_bytes())
+            .chain(self.calendar.days.into_iter().flat_map(i64::to_le_bytes));
+        let bytes = core::array::from_fn(|_| encoded.next().unwrap_or(0));
+        debug_assert!(encoded.next().is_none());
+        bytes
+    }
+}
+
+/// Stable tolerance-base tag for [`EvaluationSpec::canonical_v1_bytes`].
+const fn tolerance_base_tag(base: Option<Base>) -> u8 {
+    match base {
+        None => 0,
+        Some(Base::SessionRange) => 1,
+        Some(Base::CprWidth) => 2,
+    }
+}
+
+/// Stable VWAP-availability tag for [`EvaluationSpec::canonical_v1_bytes`].
+const fn availability_tag(availability: Availability) -> u8 {
+    match availability {
+        Availability::Absent => 0,
+        Availability::Present => 1,
+    }
+}
+
 /// Which side of one level a bar closed on, or that it had none.
 ///
 /// # Three states, and the third is not "neither of the other two"
@@ -388,6 +493,22 @@ enum Side {
 const _: () = assert!(core::mem::size_of::<Evaluator>() <= 1824);
 
 impl Evaluator {
+    /// Snapshot the four caller choices, without any running indicator state.
+    ///
+    /// `Column::reproject_checked` uses this to evaluate the EXECUTION slice
+    /// afresh. Copying the already-folded evaluator would start the one-minute
+    /// series with the signal series' last timestamp and accumulators, so its
+    /// first bar would be refused and every subsequent state would be poisoned.
+    #[must_use]
+    pub(crate) const fn spec(&self) -> EvaluationSpec {
+        EvaluationSpec {
+            widths: self.widths,
+            availability: self.vwap.availability(),
+            thresholds: self.patterns.thresholds(),
+            calendar: self.calendar,
+        }
+    }
+
     /// A fresh evaluator.
     ///
     /// `availability` is the VWAP verdict for the **whole run**, decided by the
@@ -418,6 +539,7 @@ impl Evaluator {
         Self {
             widths,
             calendar,
+            external_daily_references: false,
             day: i64::MIN,
             seeded: false,
             last_ts: None,
@@ -441,6 +563,43 @@ impl Evaluator {
             ),
             vwap: Vwap::for_slice(availability),
         }
+    }
+
+    /// A fresh evaluator whose previous-day families may only be advanced by
+    /// [`Self::install_external_daily_reference`].
+    ///
+    /// Crate-private on purpose: the public constructor is
+    /// [`crate::anchored::AnchoredEvaluator::with_calendar`], which validates
+    /// the complete daily-reference series before this mode can be entered.
+    #[must_use]
+    pub(crate) const fn with_external_daily_references(
+        widths: Widths,
+        availability: Availability,
+        thresholds: Thresholds,
+        calendar: Calendar,
+    ) -> Self {
+        let mut evaluator = Self::with_calendar(widths, availability, thresholds, calendar);
+        evaluator.external_daily_references = true;
+        evaluator
+    }
+
+    /// Advance every family whose declared input is a completed daily session.
+    ///
+    /// `levels` was built from the same `high`, `low`, and `close` by the
+    /// validated anchored path.  Passing it in rather than rebuilding it here
+    /// makes a level refusal impossible after the cursor has committed the
+    /// reference.  `GapFib` is deliberately absent: its source specification is
+    /// the signal series' last three intraday bars, not daily OHLC.
+    pub(crate) fn install_external_daily_reference(
+        &mut self,
+        high: i64,
+        low: i64,
+        close: i64,
+        levels: DailyLevels,
+    ) {
+        self.prev5.push_completed_session(high, low);
+        self.yesterday = Some(levels);
+        self.previous = Some(PreviousSession { high, low, close });
     }
 
     /// Every condition bit this crate can compute for `bar`.
@@ -790,6 +949,15 @@ impl Evaluator {
     /// WHICH session that is. The body says what happens when the pivot ladder cannot be
     /// built from it, which is the one case where they used to disagree.
     fn close_the_books(&mut self, was_regular: bool) {
+        // The anchored path closes SIGNAL sessions for every intraday family,
+        // but its daily references come from a different, already-sealed
+        // series.  Letting this write would replace the stored one-day anchor
+        // with a 60-minute (or other signal-rung) OHLC on the very first
+        // rollover.  There is one guard at the one mutation boundary instead
+        // of a caller repairing three fields after they were already emitted.
+        if self.external_daily_references {
+            return;
+        }
         if !was_regular {
             return;
         }
@@ -1101,6 +1269,134 @@ mod tests {
     /// the one refusal that fires after seven modules have folded -- is unreachable.
     fn fresh_with_volume() -> Evaluator {
         Evaluator::new(widths(), Availability::Present, Thresholds::CLASSICAL)
+    }
+
+    /// The durable evaluator identity is a complete record, not a hand-picked
+    /// subset of the choices that happened to differ in one fixture.
+    #[test]
+    fn canonical_v1_changes_for_every_evaluation_spec_field() {
+        let baseline = EvaluationSpec {
+            widths: Widths {
+                fib: Tolerance::from_milli_on(Base::SessionRange, 11)
+                    .expect("the test Fibonacci width is valid"),
+                pivot: Tolerance::from_milli_on(Base::CprWidth, 501)
+                    .expect("the test pivot width is valid"),
+            },
+            availability: Availability::Present,
+            thresholds: Thresholds {
+                doji_body: 101,
+                long_body: 701,
+                tiny_wick: 51,
+                small_body: 301,
+                long_wick_vs_body: 2_001,
+                high_wave_shadow: 301,
+            },
+            calendar: Calendar {
+                days: [
+                    18_580, 18_935, 19_289, 19_673, 20_028, 20_382, 19_784, 19_861,
+                ],
+                len: 8,
+            },
+        };
+        let bytes = baseline.canonical_v1_bytes();
+        let assert_changed = |label: &str, changed: EvaluationSpec| {
+            assert_ne!(
+                bytes,
+                changed.canonical_v1_bytes(),
+                "changing {label} did not change the canonical V1 identity"
+            );
+        };
+
+        let mut changed = baseline;
+        changed.widths.fib = Tolerance::from_milli_on(Base::SessionRange, 12)
+            .expect("the changed Fibonacci width is valid");
+        assert_changed("fib.milli", changed);
+        changed = baseline;
+        changed.widths.fib = Tolerance::from_milli_on(Base::CprWidth, 11)
+            .expect("the changed Fibonacci base is valid");
+        assert_changed("fib.base", changed);
+        changed = baseline;
+        changed.widths.pivot = Tolerance::from_milli_on(Base::CprWidth, 502)
+            .expect("the changed pivot width is valid");
+        assert_changed("pivot.milli", changed);
+        changed = baseline;
+        changed.widths.pivot = Tolerance::from_milli_on(Base::SessionRange, 501)
+            .expect("the changed pivot base is valid");
+        assert_changed("pivot.base", changed);
+
+        changed = baseline;
+        changed.availability = Availability::Absent;
+        assert_changed("availability", changed);
+
+        changed = baseline;
+        changed.thresholds.doji_body = changed.thresholds.doji_body.saturating_add(1);
+        assert_changed("thresholds.doji_body", changed);
+        changed = baseline;
+        changed.thresholds.long_body = changed.thresholds.long_body.saturating_add(1);
+        assert_changed("thresholds.long_body", changed);
+        changed = baseline;
+        changed.thresholds.tiny_wick = changed.thresholds.tiny_wick.saturating_add(1);
+        assert_changed("thresholds.tiny_wick", changed);
+        changed = baseline;
+        changed.thresholds.small_body = changed.thresholds.small_body.saturating_add(1);
+        assert_changed("thresholds.small_body", changed);
+        changed = baseline;
+        changed.thresholds.long_wick_vs_body =
+            changed.thresholds.long_wick_vs_body.saturating_add(1);
+        assert_changed("thresholds.long_wick_vs_body", changed);
+        changed = baseline;
+        changed.thresholds.high_wave_shadow = changed.thresholds.high_wave_shadow.saturating_add(1);
+        assert_changed("thresholds.high_wave_shadow", changed);
+
+        changed = baseline;
+        changed.calendar.len = 7;
+        assert_changed("calendar.len", changed);
+        for index in 0..baseline.calendar.days.len() {
+            changed = baseline;
+            if let Some(day) = changed.calendar.days.get_mut(index) {
+                *day = day.saturating_add(1);
+            }
+            assert_changed("one exact calendar day slot", changed);
+        }
+    }
+
+    #[test]
+    fn independently_constructed_equivalent_specs_have_identical_v1_bytes() {
+        let first = EvaluationSpec {
+            widths: widths(),
+            availability: Availability::Absent,
+            thresholds: Thresholds::CLASSICAL,
+            calendar: Calendar::charter(),
+        };
+        let second = EvaluationSpec {
+            widths: Widths {
+                fib: vocab::tolerance::pinned_fib().expect("the pinned width is valid"),
+                pivot: vocab::tolerance::pinned_pivot().expect("the pinned width is valid"),
+            },
+            availability: Availability::Absent,
+            thresholds: Thresholds {
+                doji_body: 100,
+                long_body: 700,
+                tiny_wick: 50,
+                small_body: 300,
+                long_wick_vs_body: 2_000,
+                high_wave_shadow: 300,
+            },
+            calendar: Calendar {
+                days: [
+                    18_580, 18_935, 19_289, 19_673, 20_028, 20_382, 19_784, 19_861,
+                ],
+                len: 8,
+            },
+        };
+
+        assert_eq!(first, second, "the fixture must be semantically equivalent");
+        assert_eq!(first.canonical_v1_bytes(), second.canonical_v1_bytes());
+        assert_eq!(
+            first.canonical_v1_bytes().len(),
+            EVALUATION_SPEC_V1_LEN,
+            "the public record length and encoder must not drift"
+        );
     }
 
     /// A synthetic session. Prices wander so bars differ from one another.

@@ -489,3 +489,360 @@ Enumerated because a 22,400-request run (daily) and a 129,600-request run
 
 **#11 is the only one certain to fire**, because no run of this size fits inside
 one 24-hour token. It is a hard stop today.
+
+---
+
+## 11. Step 3 authority closure — measured through 2026-09-01
+
+This section records the current drill-down work and does not rewrite the older
+pull plan above. The last complete locked workspace test/doctest measurement —
+**407/407 CLI**, **438/438 runner**, **86/86 engine** and **816/816 API** library
+tests, plus one intentionally ignored real-store API test — predates the current
+untracked Population V5 and Execution V3 Stage-A work. It is carry-over evidence
+only. No current-tree strict CLI Clippy, locked workspace, coverage, mutation or
+benchmark gate is claimed green. Focused earlier suites and the live ratio bench
+remain recorded below with their boundaries; none is a completion percentage or
+a substitute for the production authority path.
+
+### What Step 3 means end to end
+
+Step 3 is the authoritative computation core for one deep stored-data
+drill-down sweep. It starts with exact stored source capabilities and ends with
+one reopened global execution receipt whose 200 selected witnesses resolve
+back through every earlier receipt. It does not include the operator command,
+HTTP route or browser table that invokes/renders that core; those are Step 4.
+The frozen full gate matrix is Step 5, and the separately authorized real
+Zerodha NIFTY run is Step 6.
+
+| Layer | Complete Step-3 responsibility | Fail-closed boundary |
+|---|---|---|
+| Stored source | Own exact signal bars, full one-minute context, evaluated one-minute slice, causal prior-day daily reference, feed/commit and complete IST calendars under explicit nonzero load bounds | No caller-authored digest, invented tick, sampled month, silent missing month or foreign feed |
+| Candidate Universe | Walk Apriori levels from one condition to natural frontier extinction and expand every closed mask through both directions and both complete dynamic grids | No depth parameter, retained-only family, caller-capped grid or partially closed frontier |
+| Pre-Admission | Reconcile that exact Candidate completion with the same measured bar/daily/calendar source before Population IDs, statistics or ranking exist | No Population/admission cycle, substituted execution slice or claimed calendar receipt |
+| Statistics V2 | Build one complete NIFTY-then-BANKNIFTY hypothesis family per rung; retain aligned returns and complementary splits; recompute Wilson, CSCV/PBO, White, SPA and Romano--Wolf | No lucky-survivor family, caller-authored score/digest, per-instrument undercount or post-selection evidence cycle |
+| Search V4, Admission V3 and Finalization V3 | Bind reopened Candidate/Base/Observation/Statistics authority, anchored search lineage and one canonical Runner V3 decision to every row, then finalize the complete NIFTY-first/BANKNIFTY family receipt-last | No Admission V1 downgrade, detached digest authoring, per-candidate full-ledger rescans or status-only promotion |
+| Population V5 and Execution V3 successors | Exact-join authenticated Candidate record bytes to Finalization V3, persist final Population semantics, then rebuild one truthful terminal execution disposition per row from matching stored series, columns and grids | No reinterpretation of Population V4/Admission V1/Execution V2 bytes, dropped policy-refused coordinate, copied capability or foreign completion |
+| Selection V5 successor | Recompute one deterministic global Top-25 for each rung from the complete successor admitted-and-authorized NIFTY/BANKNIFTY family; Top-10 is the exact prefix | No externally implementable fake authority, duplicate strategy alias, partial family or structural receipt without full replay |
+| Global Replay V3 successor | Resolve all eight Top-25 lists into 200 authority-owned stored witnesses, schedule them under one global inclusive position lock and persist/reopen the exact decision/money/VIX publication chain | No simultaneous long/short/instrument/timeframe position, caller-assembled witness, missing 8×25 topology or inferred money/VIX authority |
+| Receipt chain | Sync data rows before each Completion, recover only an exact valid trailing prefix, then reopen/recompute every one-to-one join and identity | No fallback, overwrite, stale same-length handle, corrupt/resealed forgery or success inferred from a controlled fixture |
+
+Most work in this table is input-dependent. Fixed-stride seeks and the named
+per-operation primitives remain O(1); universe construction, file validation,
+statistics, replay, persistence and total latency do not become O(1).
+
+The newer 2026-08-31 Runner checkpoint is current-tree evidence: after V1
+measured-PBO construction/reopen was made fail-closed, Admission V2 also
+refuses a decided choice without its exact pessimistic OOS result and refuses a
+retained score family shorter than the fold's priced count. The focused V2
+slice is **6/6 green**, the complete validate slice **25/25**, the complete
+Runner library **474/474**, Runner compile-fail doctests **3/3**, and strict
+Runner library/test Clippy reports zero findings. The opaque V2 search
+projection is now public but non-constructible/non-`Debug`, while zero resolved
+rungs refuse before search. This does not refresh the CLI/API/workspace,
+coverage, mutation or benchmark gates.
+
+The current paired stored production-seam checkpoint is also narrower than
+Step-3 closure. A deterministic synthetic temporary store drives the actual
+NIFTY-then-BANKNIFTY `BarFile` load, Candidate, Pre-Admission, Observation and
+Statistics code paths. The orchestrator is **14/14**, Observation **7/7** and
+Statistics **17/17** focused-green; exact retry preserves freshly reopened
+audits/projections and byte-identical output ledgers. An independent audit found
+no bounded-seam bypass. This proves the typed architecture and idempotence, not
+real-market correctness, Admission V2, Finalization or the all-rung caller.
+
+The newest successor checkpoint supersedes the last sentence above without
+retroactively closing Step 3. Population Admission V3 was previously measured
+**10/10**, Population Finalization V3 **9/9**, and the retained orchestrator
+**14/14**. Admission authenticates the complete Statistics family once and
+joins fixed-offset Base rows in O(Statistics-file-bytes + candidates);
+Finalization consumes one bulk Admission projection in
+O(Admission-file-bytes + candidates). Population V5 and an Execution V3
+fixed-record/receipt kernel now exist, so describing the successor as merely
+absent is no longer accurate. The current Execution V3 Stage-A focused suite is
+**13/13 green**. Layout V5 proves the independent 4x2 admission/execution
+matrix, nonzero PolicyRefused run provenance, one common rung, unique Candidate
+base rows, exact resolved Stop/Target/Trail/ratio-pair cardinalities, forced-stop
+identity and all five exact exit-coordinate slots. This focused result still
+did not by itself make Execution V3 a production authority. D-0487 now adds a
+sole production door that consumes `CommittedStoredPopulationV5`, retains that
+source beside the durable Execution capability, and reconstructs the exact
+run/grid/column/context evidence before and after persistence without copying
+Population ranking facts into layout 5. The extended stored architectural
+fixture proves first write, fresh reopen, exact reuse and refusal after its
+retained Finalization source changes. This closes the one-rung retained-source
+door; it does not create the absent all-rung non-test caller, Selection V5
+production constructor or Global Replay V3 authority.
+
+The first canonical eight-rung Population V5 coordinator is **5/5 focused
+green**, including canonical topology, missing-rung and symlink refusal, but an
+independent adversarial review proved that its original raw-array successor
+escape permitted sibling code to reorder rungs. That escape was removed. The
+coordinator is therefore intentionally non-callable until a sealed Execution
+successor owns the canonical topology and the retained full resolved grids.
+The review also proved that natural one-family extinction was not end-to-end.
+Pre-Admission Data V2 now seals the exact Candidate extinction proof with a
+**13/13** focused V1+V2 suite, and Observation V2 consumes only that opaque
+production/commit to persist one family-specific `NaturallyExtinct` authority
+with zero observation rows; its focused V1+V2 suite is **11/11 green**.
+Statistics V3 is now the first typed mixed/extinct successor and its focused
+suite is **6/6 green**. It accepts an evaluated Observation V1 family plus one
+authenticated Observation V2 extinction in either orientation, or two exact
+extinction receipts; its terminal shape forbids numeric evidence for an empty
+family and distinguishes a real one-Candidate `InsufficientForCscv` family.
+This closes Statistics only. Admission, Finalization and Population still
+cannot consume that opaque mixed/extinct authority, so the paired production
+chain and Step 3 remain open.
+Execution V3's
+authenticated fixed-offset lookup also rehashes all held files, making the
+authenticated operation O(total bounded file bytes), not O(1). The retained
+all-rung Execution and Selection joins are the next open seams, and no current strict CLI or
+workspace gate is claimed green. The latest strict CLI Clippy attempt reached
+the new module and failed on its production dead-code warnings, which is
+measured confirmation that no non-test caller exists; these warnings will not
+be suppressed and called production wiring. Existing Population V4/Admission V1,
+Execution V2, Selection V4 and Global Replay V2 remain valid legacy audit
+formats and tests; genuine V3 evidence may not be coerced into them.
+
+Two resource limits remain explicit. The coordinator can retain sixteen
+bounded stored execution contexts at once; each context has a ceiling, but no
+aggregate all-rung memory ceiling has yet been admitted. Root capabilities and
+pre/post generation checks fail closed for stable missing, symlinked, aliased
+or replaced paths, but pathname-based lower I/O is not atomic with those checks.
+A hot-unplug followed by mount-point replacement can therefore touch the
+replacement before the post-check refuses. Proving that an internal disk is
+never touched requires capability-relative lower I/O (an `openat`-equivalent
+design), not another pathname preflight.
+
+The 2026-09-01 host inventory confirms useful routing but not confinement:
+`~/.brutex`, `target`, `logs`, `.claude/worktrees` and `mutants.out*` currently
+resolve onto `/Volumes/WD_BLACK`, whose followed device differs from the
+repository device. None of those symlinks is a durable authority. Replacing one
+with an internal directory redirects ambient pathname I/O before the existing
+post-check can refuse. Closing that gap requires a safe Rust directory-
+capability layer, a marker/device policy whose expected value is supplied
+independently of the drive, and bottom-up conversion of Store, result/Step-3
+ledgers, pull audit, telemetry and API locks/readers to relative child opens,
+renames, unlinks and syncs. `std::fs` alone exposes no capability-relative
+child operation; a reviewed safe Rust facade may keep every brutex crate under
+`forbid(unsafe_code)`, while forbidding even a dependency's OS syscall boundary
+would make the requested confinement impossible. Cargo target/TMP routing is a
+separate host-preflight concern because a repository build check runs only
+after Cargo has already selected its output locations.
+
+No dependency is authorized at this checkpoint. `cap-std` has no locally
+auditable source or index metadata and therefore remains `UNVERIFIED`.
+`rustix` 1.1.4 is locally auditable and exposes the required macOS relative-I/O
+primitives without native C/C++ source, but its unconditional `build.rs`
+launches `rustc`; that violates the repository's no-external-process build-
+script law even though existing CI does not inspect registry build scripts.
+Adding either package without first resolving those facts would replace one
+unproved guarantee with another.
+
+The later Global Replay V2 checkpoint is narrower and newer: its focused module
+is **6/6 green** and its public test carries eight Selection V4 receipts,
+sixteen Population V4/admission/Execution V2 completions and 200 exact witnesses
+through preparation, receipt-last append, reopen and scheduler reconstruction.
+Strict CLI Clippy reported zero diagnostics from that module; the package-wide
+test-target run still had four fixture-only diagnostics in sibling modules at
+that checkpoint, so the complete Clippy gate remains open. V2 is explicitly
+execution-only: it persists no admitted money rows and no VIX stamps.
+
+The newer Execution Disposition V2 checkpoint is **8/8 focused tests green**.
+It persists exactly one terminal row for every Population V4 row, including
+policy-refused coordinates that V1 could not represent, and reconstructs its
+admission marginals and complete 4×2 admission/execution matrix on reopen. The
+suite includes missing/foreign authority, semantic matrix redistribution,
+orphan/torn/corrupt and post-open same-length mutation attacks. This supersedes
+the stale V1 cardinality blocker only; strict package Clippy and the non-test
+stored producer/caller remain separate open gates.
+
+| Surface | Measured state | Remaining dependency |
+|---|---|---|
+| Live mask support | Release ratio bench green on the live owned-row path: k=1→4 **0.971x**, k=1→8 **0.996x**, k=1→384 **0.942x**; each bar performs one fixed-six-word hit operation; post-edit engine and complete workspace regressions are green | Total support remains O(bars), and frontier/sweep/replay work is not O(1) |
+| Population V4 | Focused suite green; fixed receipt persists full requested-span signal and independent one-minute calendar coverage | Non-test stored producer for both indices and all eight rungs |
+| Stored-data completeness V1 | **5/5** focused authority tests green plus **10/10** institutional-evidence regressions; exact signal, full one-minute context, evaluated execution and daily-reference bytes/policies/calendar receipts reconcile to one Population V4 before a sealed receipt can reopen as typed `Complete`; foreign/corrupt/ragged/stale authority refuses | No non-test stored-run caller produces/commits/reopens this authority; vendor integrity remains explicitly `UnverifiedNoReceipt`; preparation/open are O(data/file) |
+| Institutional evidence and exact family statistics | The current institutional-evidence slice is **14/14 focused tests green**: anchored walk-forward decided/profitable/OOS facts remain measured, while all three genuine-PBO V1 fields stay `Unmeasured`; its 44-field source matrix and **seven** blockers name the missing authority. Runner Admission V1 fails closed at construction and canonical reopen for every measured PBO-named field; its focused suite is **32/32 green** and strict Runner library/test Clippy reports zero findings. Candidate Observation V1 plus the zero-family Observation V2 successor are **11/11 focused tests green**. V2 embeds the exact sealed Pre-Admission V2 Data record and records only `NaturallyExtinct` with zero rows. Population Statistics V2 remains the paired-nonempty authority. Statistics V3 is **6/6 focused green** for both mixed orientations, truthful all-extinct, one-Candidate CSCV insufficiency, exact receipt reuse and corrupt/stale/path-replacement refusal; it never creates numeric evidence for an extinct family | The opaque Statistics V3 result still has no non-test Admission successor consumer, so Admission/Finalization/Population cannot yet carry a mixed/extinct pair through the all-rung chain. Global `full_precision_statistics_complete` remains `Unmeasured`; no non-test uncapped real family exists. Projection, resampling, authentication and persistence are input/file/system proportional, not total O(1) |
+| Population + admission producer | **11/11** focused tests green; uncapped closed-mask expansion, one-pass grid validation, receipt-last two-ledger commit/reopen and exact reuse are proved | Invoke it from the real stored pipeline with authoritative evidence; no non-test caller exists |
+| Population V5 to Execution V3 | A source-retaining `CommittedStoredPopulationV5` capability and sole layout-5 Execution V3 commit door now exist. Runner full-instrument digest **1/1**, Candidate replay **1/1**, the extended stored write/reopen/reuse/stale-source fixture **1/1**, and Execution V3 **13/13** are focused-green. Ranking facts remain owned by retained Population V5 rather than copied into Execution bytes. The canonical eight-rung Population V5 coordinator remains **5/5 focused-green** at its isolated topology/root boundary | The new door's only exercised caller is the focused `#[cfg(test)]` stored fixture; the all-rung coordinator still has no non-test caller, Selection V5 has no production constructor, natural zero-family extinction has not crossed every successor, and authenticated reads still perform O(file-bytes) generation checks |
+| Global Selection V3 + Top-N policy | Selection V3 focused 8-test suite green; Top-N focused **14/14** green; the corrected 76-byte policy identity includes all eleven runtime weights; both Population V4/admission completions are cohort-bound and only recomputed joined verdicts enter Top-N | Non-test all-rung caller plus a resolvable exact execution authority contract for every population row |
+| Execution disposition V2 | **10/10** focused tests green; exactly one `Authorized` or `PolicyRefused` terminal persists per Population V4 row, with sparse capability/refusal partition, exact admission binding and 4×2 matrix; append/reopen/reuse/orphan/corrupt/resealed-matrix/stale attacks refuse, and an absent/non-directory authority root is never recursively recreated | V1 remains unchanged but its cardinality blocker is superseded. No non-test stored all-rung producer/caller reconstructs these authorities from real grids/runs yet; initial pathname safety is not physical-device identity or hot-unplug atomicity |
+| India VIX reference | Nine focused tests green; same-feed/month exact-minute or typed-absent lookup is fail-closed and remains reference-only | Load required months in the production replay path; no non-test caller exists |
+| Global replay V1 | Seven focused tests green: prepared-fixture persistence proves fixed 200-stream codecs, inclusive occupancy, replay/VIX identity separation, append/reopen/reuse and corruption/stale refusal; direct public preparation proves 8 selections + 16 execution authorities + 200 witnesses reach scheduling and missing/foreign authorities refuse | Replace controlled fixtures with real stored selected reconstruction, invoke it from production and append/reopen/replay that exact public result; no non-test caller exists |
+| Global replay V2 execution authority | **7/7** focused tests green: exact Selection V4 reproduction, sixteen distinct Population V4/admission/Execution V2 completions, 200 fresh reclassifications, shared global occupancy, five-file receipt-last append/reopen/exact reuse, valid orphan-gap continuation, corrupt/reordered/stale refusal | Controlled fixtures only; no non-test stored caller. The completion deliberately says no money/no VIX, so admitted `TradeRow` and exact-or-absent VIX publication remain separate open authorities |
+| Step-3 comparison read model | At its earlier isolated checkpoint the Rust read model was **9/9** focused-green and opened only Population V4/admission V1/Execution V2/stored-data V1/Selection V4/Global Replay V2 authorities, reconciled exact IDs/counts, preserved `READY`/`BLOCKED`/`UNMEASURED`/`REFUSED`, proved Top-10=80/Top-25=200/8×25=200 and rendered one deterministic CommonMark table | That checkpoint predates the current successor edits and does not make current CLI Clippy green. The model remains library-only with no CLI/API/audit/dashboard caller; Selection remains blocked until exact authority replay, and no real stored authority set was compared |
+| Operator surface and real sweep | Not authoritative and not run | Reopened replay receipt must drive CLI/API/audit/dashboard comparison; then complete gates, then explicitly authorized stored Zerodha NIFTY sweep |
+
+### Exact remaining Step-3 sequence
+
+| Order | Required proof | Current state |
+|---:|---|---|
+| 1 | Resolve the population/execution cardinality law: every persisted Population V4 row must have one truthful terminal representation without treating a policy-refused coordinate as selected | **Closed at the versioned V2 kernel/ledger boundary** — 10/10 focused tests prove one `Authorized` or `PolicyRefused` record per row, including missing-row, semantic-matrix and missing/non-directory-root attacks. This is not production wiring or Step-3 completion |
+| 2 | Real stored authorities produce the complete Candidate→Pre-Admission→Observation→Statistics→Search V4→Admission V3→Finalization V3 chain, then exact-join literal Candidate bytes into Population V5 for both indices at every canonical rung | **In progress, not gate-proven** — Pre-Admission V2 and Observation V2 carry authenticated zero-family extinction through independent receipt-last formats; Observation V2 is **11/11** focused green. D-0492 Statistics V3 now joins one exact nonempty Observation V1 family to one authenticated Observation V2 extinction in either orientation, or two truthful extinctions, and is **6/6** focused green. It fabricates no empty-side rows or statistics. Admission/Finalization/Population still lack the typed mixed/extinct successors, and no production all-rung caller exists. The retained `CommittedStoredPopulationV5` and isolated topology fixtures prove only the current nonempty controlled path |
+| 3 | Population V5 rows produce exact Execution V3 terminal authorities, and Selection V5 winners reproduce their sealed selected exits from matching training columns/runs and stored one-minute series | **In progress; the one-rung Population V5→Execution V3 door is now focused-green, while the all-rung and Selection joins remain open** — D-0487 proves full-instrument identity, exact Candidate run/grid/column/context replay, layout-5 write/fresh-reopen/exact-reuse and stale retained-source refusal. The capability retains Population ranking facts beside, not inside, Execution bytes. Its current exercised caller is test-only. Closure still requires the non-test eight-rung caller plus an Execution-to-Selection V5 production projection and exact selected-exit replay. Authenticated whole-file generation checks remain honestly O(file bytes), not O(1) |
+| 4 | Global Replay V3 consumes all eight real Selection V5 receipts, sixteen successor execution authorities and 200 authority-owned stored witnesses, then writes/reopens/replays the same decision, admitted-money and exact-or-absent VIX publication chain | **Open** — Global Replay V2 proves an execution-only 8/16/200 scheduler/ledger over controlled fixtures. It is hard-bound to legacy authorities, has no production caller and truthfully contains neither money rows nor VIX stamps; its scheduling kernel may be reused but its bytes may not be relabelled V3 |
+| 5 | CLI, API, audit and dashboard expose the same receipt identities, counters, decisions, trades, typed absences and comparison rows | **Earlier comparison kernel measured; current successor callers open** — the six-row Rust comparison model's prior 9/9 checkpoint predates the current edits. It still has no non-test CLI/API/audit/dashboard caller for V5/V3 authorities, and no current strict-Clippy claim is made |
+| 6 | Formatting, strict Clippy, locked workspace tests, deny/security, adversarial, benchmark, coverage and mutation gates | **Open with current evidence** — owned formatting and repository diff checks are clean; the D-0487 Runner/Candidate/stored-seam/Execution focused runs are **1/1 + 1/1 + 1/1 + 13/13**, Pre-Admission V1+V2 is **13/13**, Observation V1+V2 is **11/11**, and all-rung topology/root safety remains **5/5**. Focused test builds succeed but most recently report 11 successor dead-code warnings from the unreachable all-rung coordinator and not-yet-consumed Pre-Admission V2; they are not a strict-Clippy success. Locked workspace tests, deny/security, full adversarial suites, benchmarks, coverage and mutation remain to run after implementation freezes; no current-tree complete green gate is claimed |
+| 7 | Review manifest, commit/push `feat/pull`, then run the separately authorized real stored Zerodha NIFTY sweep | **Blocked by open orders 2–6** |
+
+Step 3 is therefore **not finished**. Its kernels and durable formats have
+advanced, but green submodules, fixed fixtures and stored primitives do not
+prove the missing production joins. Step 4 starts only after orders 1–4 produce
+one reopened replay authority. Step 5 is the complete gate matrix, and Step 6
+is the first authorized real stored sweep—not evidence retroactively used to
+mark the earlier steps complete.
+
+The statistics claim is also deliberately bounded. Each rung's uncapped NIFTY
+plus BANKNIFTY pair is the complete family that competes for that rung's one
+Selection V4 Top-25; Top-10 is its exact prefix. Those eight per-rung families
+are not advertised as one cross-rung FWER-controlled family, because Global
+Replay V2 consumes their completed lists without jointly re-ranking the source
+families. D-0464 requires every CLI/API/dashboard comparison to retain that
+label. A future joint cross-rung statistical selection needs a new versioned
+policy rather than a stronger claim over these bytes.
+
+### 2026-09-01 Global Replay V3 authority checkpoint — D-0493
+
+The stale order-4 row above is superseded at the isolated library seam, not
+closed end to end. Global Replay V3 now consumes D-0494's named all-rung
+Selection successor plus exactly 200 opaque Runner OOS replay capabilities,
+exact-joins their selected-exit/instrument/direction/OOS identities, schedules
+all candidates under one global inclusive position lock and writes/reopens a
+new receipt-last Witness/Candidate/Decision/Money/Completion authority. The
+focused V3 suite is **5/5 green** and the Runner witness-mint proof is **1/1
+green**. The typed cross-authority join compiles, but the five V3 tests use
+private controlled witnesses; no one focused fixture yet constructs the
+complete all-rung Selection successor and all 200 opaque Runner capabilities
+together.
+
+| Global Replay V3 subproof | Measured state | Honest remaining work |
+|---|---|---|
+| Canonical 8x25 Selection handoff | Typed all-rung Selection successor preflights eight authorities and visits exactly 200 winners in literal rung/rank order | Natural zero-family extinction still requires its separately versioned upstream successor; no rows or statistics may be invented |
+| Authority-owned OOS witnesses | Runner's opaque mint binds canonical full instrument, feed, direction, first OOS, run, selected exit and exact replay candidates; the mint test is 1/1 green | A non-test Step-3 orchestrator must obtain and move these capabilities from the real stored successor chain |
+| Global lock and publication semantics | V3 5/5 proves one inclusive position lock, deterministic simultaneous/occupied outcomes, pricing-refused occupancy, admitted-only money and admitted-only same-feed exact-or-absent VIX | Controlled private fixtures only; no real pulled/stored bars were swept |
+| Receipt-last V3 ledger | Five new fixed-stride codecs, explicit bounds, exact reuse, fresh semantic replay and torn/corrupt/foreign refusal are focused-green. Its sole crate-level commit door returns an opaque capability only after fresh reopen reproduces the prepared identity, counts and counters. Runner strict library/test Clippy is green and the latest strict CLI attempt reports no V3-file diagnostic | The CLI package gate remains red in sibling unfinished successors; full workspace tests, deny/security, benchmarks, coverage, mutation and physical storage-failure injection remain open |
+| Operator surfaces | The crate-private production door exists; no upstream stored orchestrator or operator caller invokes it | Move the real successor capabilities into that door, then wire its reopened audit projection into the authoritative CLI/API/database/audit/monitoring/dashboard comparison without copying facts |
+| Final real sweep | Not run | Only after the production chain, operator surfaces, complete gates, manifest review and commit/push are green may the separately authorized stored Zerodha NIFTY sweep run |
+
+Therefore Step 3 is still open, but Global Replay V3 is no longer the missing
+library authority described by the earlier row. The principal remaining seams
+are the non-test stored orchestrator, natural-extinction successor completion,
+operator publication and the complete gate matrix. This checkpoint neither
+claims profitability nor upgrades fixed topology into impossible universal
+O(1) time, space or latency.
+
+### 2026-09-01 Statistics V3 to Admission V4 checkpoint — D-0495
+
+The earlier order-2 statement that Statistics V3 has no Admission successor is
+superseded at the isolated library boundary only. Admission V4 now consumes the
+typed mixed/extinct Statistics projection and retains a fresh-reopen authority
+with a complete Finalization-facing projection. Admission V3 and Finalization
+V3 bytes/paired-nonempty semantics remain unchanged.
+
+| Admission successor subproof | Measured state | Honest remaining work |
+|---|---|---|
+| Statistics handoff | Statistics V3 exposes exact common authority, literal NIFTY/BANKNIFTY family projections and only real Candidate projections; evaluated Candidates carry a genuine Runner V3 draft, an insufficient singleton carries none, and extinction emits no row. Focused Statistics V3 is **7/7 green** | No one production fixture constructs the complete stored upstream chain and transfers the opaque source into Admission V4 |
+| Candidate/Base/Search authentication | The sole production preparation signature requires both reopened Candidate audits, one bound paired Base reader, retained Search V4, authenticated durable Search V4 lineage and one Runner policy. It exact-joins cohort, ordinal, semantic, Observation, signal, long/short grid and validation facts; it accepts no caller digest, family, status or row | Exercise this entire typed door from the non-test stored orchestrator, including adversarial upstream crosswire fixtures |
+| Mixed terminal policy | Evaluated families recompute one canonical Runner exact-grid decision per real Candidate. `InsufficientForCscv` preserves one Candidate lineage with zero decisions/PBO invention. `NaturallyExtinct` preserves the Observation V2 proof with zero Candidate/statistic/decision rows. NIFTY is always first | Finalization V3 cannot represent this honestly and must never receive relabelled V4 facts |
+| Admission V4 ledger | Independent sealed 4,096-byte Data/Family/Decision/Completion records, explicit bounds, evidence-before-Completion sync, exact reuse, one exact-prefix retry, bounded fresh reopen and corrupt/resealed/stale/path refusal are **5/5 green** | Physical ENOSPC/power-loss/kernel-crash/hot-unplug testing and full workspace gates remain open |
+| Finalization handoff | Only the retained fresh-reopen Admission authority can return the complete typed common/family/decision projection; every Runner decision is reverified during projection | Implement a version-separated Finalization V4 codec, receipt-last persistence/fresh authority and its typed Population successor; do not fake Admission/Finalization V3 compatibility or invent zero-family rows |
+| Focused compile/lint state | `cargo check -p cli --lib --locked` is green. The substantive CLI library Clippy diagnostic (`-D warnings -A dead-code`) reports **0 findings** in `population_admission_v4.rs` and **0** in `population_statistics_v3.rs` | That command remains red on **38 sibling findings**, and the full strict command is still open. Full formatting, locked workspace tests, deny/security, benchmarks, coverage and mutation are not green by implication |
+| Operator/real-run state | No CLI/API/database/audit/monitoring/dashboard caller and no real stored sweep was added | Finish Finalization V4 plus the all-rung production join, then publish the same reopened identities on every operator surface, complete the full gate matrix, review/commit/push, and only then run the separately authorized stored sweep |
+
+Step 3 therefore remains **in progress**. This checkpoint closes the
+Statistics→Admission mixed-terminal library seam and makes its exact projection
+available to a future Finalization V4 authority; it does not close
+Finalization, Population, all-rung orchestration, Global Replay integration or
+operator publication. Preparation, decision evaluation, hashing, persistence
+and reopen are input/file/system proportional. Fixed-stride offset arithmetic
+alone is worst-case O(1), and no universal O(1) time, space or latency promise
+is made.
+
+### 2026-09-01 Admission V4 to Finalization V4 checkpoint — D-0496
+
+The D-0495 row that names Finalization V4 as absent is superseded at the
+isolated library boundary only. A version-separated Finalization V4 now owns a
+fixed Data/NIFTY Family/BANKNIFTY Family/evaluated-Decision/Completion grammar
+and a source-retaining typed Population handoff. Finalization V3 and Population
+V5 bytes remain unchanged.
+
+| Finalization successor subproof | Measured state | Honest remaining work |
+|---|---|---|
+| Admission-only mint | The sole production door moves retained Admission V4 and obtains its fresh projection internally; no detached receipt, digest, row, status, terminal or policy enters | Exercise the complete non-test stored upstream chain and all eight rungs |
+| Mixed terminal preservation | Exact NIFTY/BANKNIFTY Family records carry evaluated, insufficient and extinct shapes; only evaluated Candidates emit decisions, and Statistics sequence preserves an insufficient singleton gap. Focused suite is **5/5 green** with **729 filtered** | Construct and move the complete non-test upstream capability chain rather than controlled sources |
+| Finalization V4 ledger | Independent 64-byte header and sealed 4,096-byte Data/Family/Decision/Completion records; explicit bounds, evidence-before-Completion sync, exact reuse, every exact-prefix retry, fresh reopen and generation checks. Focused CLI library check is green | Strict library/test diagnostic has zero V4 findings but remains package-red on **105/117 sibling findings**; physical storage-failure injection and full workspace gates remain open |
+| Population handoff | The retained capability reauthenticates Admission before and after a complete Finalization read and returns exact common/family/Runner decision projections | Existing Population V5 is hard-bound to V3 snapshots and cannot represent zero-decision families. Implement a new Population byte version, rather than widen/relabel V5 |
+| Operator/real-run state | No CLI/API/database/audit/monitoring/dashboard caller and no real stored sweep is added | Complete the new Population→Execution→Selection→Global Replay production joins, publish the same reopened facts, finish gates, then run the separately authorized sweep |
+
+Finalization V4 closes neither Step 3 nor the mixed-terminal all-rung chain by
+itself. Authentication, decision replay, hashing, persistence and reopen remain
+input/file/system proportional. Fixed-record offset arithmetic alone is
+worst-case O(1); no total O(1) time, space or latency promise is made.
+
+### 2026-09-01 stored post-training OOS and terminal-aware Replay V4 pivot — D-0497
+
+The earlier D-0493 checkpoint remains true for Global Replay V3's legacy fixed
+eight-by-Top-25 topology, but it cannot honestly close current Step 3 after the
+mixed-terminal chain admitted natural extinction and insufficient statistical
+evidence. Those states yield an actual zero-through-twenty-five winners per
+rung, so the production successor is Selection V6 plus Global Replay V4. V3 is
+not changed or relabelled.
+
+| Boundary | Current precise state | Honest remaining work |
+|---|---|---|
+| Stored OOS request | `StoredPostTrainingOosRequestV1` accepts only an inclusive civil month range and explicit signal/minute/daily record ceilings; the controlled suite is **3/3 green** and the focused CLI library check is green | Strict shared-tree Clippy remains red; four direct cohort/orchestrator findings from the measured attempt were corrected statically and need a post-correction rerun |
+| Source derivation | The retained stored Candidate transaction now reuses the common bounded loader and derives vendor, full instrument, rung, commit, evaluator, horizon, ladder, dynamic Long/Short grids and training boundary without caller-authored market facts | No real pull or sweep is part of this phase; complete workspace/coverage/mutation/security gates remain open |
+| OOS cohort identity | The opaque cohort owns complete signal/daily/exact-minute evidence and a held root; its seal binds root generation, source/calendar/policy/data/grid identities, exact training/OOS boundaries and load ceilings. Empty, incomplete, overlap, crosswire and root replacement paths are fail-closed in code | Physical hot-unplug/ENOSPC/power-loss and live-current per-file generation are not proved; §169 records the boundary |
+| Witness mint | Runner remains the only producer of an opaque replay universe. The stored adapter builds the exact causal OOS column/run and binds cohort ID plus run/selected-exit/universe identity; it exposes no raw bars or loose feed/family/direction/mask/price fields. Exact reuse, cross-family and root-replacement paths are included in the **3/3 green** controlled suite | Selection V6 must retain the matching opaque Execution dispositions rather than only copy their digests |
+| Selection V6 dependency | Separate lane is defining terminal-aware actual winner prefixes (0..=25 per named rung) | Freeze the opaque all-rung move type and its preflight semantics before Replay V4 code begins |
+| Global Replay V4 | Contract map below is locked; no V4 codec/coordinator has been invented | Implement only after Selection V6 freezes, then add receipt-last persistence, fresh reopen, global no-overlap replay and full adversarial tests |
+| Operator and real-run state | No new CLI/API/database/audit/monitoring/dashboard caller and no real stored sweep | Publish one reopened V4 authority everywhere, complete the full gate matrix and manifest review/commit/push, then run the separately authorized stored Zerodha NIFTY sweep as the final step |
+
+#### Global Replay V4 contract map
+
+| Stage | Required opaque input/output | Mandatory refusal before any durable append |
+|---:|---|---|
+| 1. Selection handoff | Consume one freshly authenticated Selection V6 capability containing eight named rungs in 60/120/180/300/600/900/1,800/3,600-second order, each with its actual canonical 0..=25 rank prefix and terminal reason | Missing/duplicate/reordered rung; non-prefix/duplicate rank; stale retained Population/Execution/Selection source; any caller-authored replacement row |
+| 2. OOS handoff | Consume the eight matching `StoredPostTrainingOosCohortV1` capabilities by value | Missing/duplicate cohort; family/rung/feed/instrument/commit/calendar mismatch; empty/incomplete/overlapping OOS; changed root capability |
+| 3. Full preflight | For every actual winner, exact-join its retained Execution disposition and mint one `StoredPostTrainingOosWitnessV1`; retain all successes in canonical rung/rank order before writing | Missing/duplicate/reordered winner or disposition; selected-exit/evaluator/side mismatch; stale/crosswired witness; partial winner prefix; any replay/pricing refusal that invalidates capability mint |
+| 4. Global scheduler | Schedule every reachable candidate under one inclusive global position lock across NIFTY/BANKNIFTY, Long/Short and all rungs; deterministic same-minute priority binds rank plus strategy identity | Any overlap, ambiguous ordering, out-of-range time, unbound money or noncanonical decision terminal |
+| 5. Receipt-last ledger | Version-new Witness/Candidate/Decision/Money/Completion bytes bind actual per-rung counts and total P, not fixed 200; Completion syncs last | Ragged/torn/corrupt/resealed/foreign/orphan evidence, exceeded explicit bounds, nonexact retry, stale named path |
+| 6. Fresh authority | Drop writer, reopen read-only, decode/authenticate every bounded record, replay scheduler/publication and compare the complete semantic projection before returning an opaque committed V4 capability | Any counter/order/decision/money/VIX/identity difference, hidden unreferenced record, retained upstream generation change |
+
+The all-rung-empty publication rule and exact Selection V6 move type remain
+open and must be decided by a later append-only entry, not guessed in V4. The
+three controlled-fixture tests are **3/3 green**, and the focused CLI library
+check is green. Strict shared-tree Clippy remains red at 115 library and 126
+library-test diagnostics from the last measured attempt; four direct
+cohort/orchestrator findings were corrected statically afterward and await a
+post-correction rerun. Step 3 therefore remains open. Complete store loading, causal derivation, witness
+replay, scheduling, hashing, persistence and reopen are input/file/system
+proportional; only fixed-field and admitted fixed-offset primitives can be
+described as worst-case O(1).
+
+### 2026-09-01 Candidate reachability and Population/Execution successor checkpoint — D-0498
+
+The earlier rows calling `InsufficientForCscv` one real Candidate V1 row are
+superseded for production reachability. Candidate V1 stores
+mask×direction×exit execution-coordinate rows, and every nonempty production
+has both Long and Short; one closed mask therefore yields at least two rows.
+The insufficient enum/ledger shape remains append-only history, but no current
+Candidate V1 production can originate it. Population V6 admits four reachable
+E/X pairs and refuses the five singleton-containing pairs rather than inventing
+evidence or relabelling V3/V4.
+
+| Step-3 successor subproof | Current exact state | Remaining proof/work |
+|---|---|---|
+| Candidate reachability | Candidate receipt validation now recomputes exact `closed_masks * (Long + Short)` rows and rejects nonzero `< 2`; the focused invariant test also proves both directions | Run the focused Candidate test under the serialized Cargo slot |
+| Statistics V3 E/E | New production door consumes two genuine evaluated Observation/Pre-Admission sources, requires NIFTY first, reuses existing family validation and V3 bytes, and has E/E/swapped/crosswired/stale coverage | Run the focused Statistics V3 suite and strict diagnostic; no V3 byte migration is allowed |
+| Population V6 source | Four typed source doors retain Finalization V4 plus Candidate authorities only for evaluated families: E/E=two, E/X=NIFTY, X/E=BANKNIFTY, X/X=none. No caller terminal/count/digest enters | Genuine E/E chain is present; full genuine stored mixed/X/X orchestration and all eight rungs remain to be composed |
+| Population V6 ledger | Independent fixed Data/NIFTY/BANKNIFTY/Candidate/Completion grammar; truthful zero rows; exact lineage and Runner bytes; receipt-last sync/recovery/reuse/fresh reopen; duplicate/gap/crosswire/corruption/ragged/stale/symlink/path-replacement tests are written | Focused compile/test/check/strict diagnostic are pending serialized Cargo; physical fault injection, coverage and mutation remain open |
+| Execution V4 | Static version-separated implementation consumes and retains Population V6, persists 0/2/4 active-family parameters, percentiles, dispositions and Completion, and exposes only a fresh-reopen Selection V6 source. Seventeen codec/topology/recovery/corruption/matrix tests are written | Module compile/test/strict proof is pending serialized Cargo; no downstream Selection V6 implementation is claimed |
+| Downstream compatibility | Population V5 and Execution V3 remain unchanged. Terminal families and zero rows require Population V6→Execution V4→Selection V6; D-0497 already requires Global Replay V4 actual winner prefixes | Implement Selection V6, then its all-rung coordinator and Global Replay V4; do not fake V5/V3 compatibility |
+| Operator state | No new CLI/API/database/audit/logging/monitoring/dashboard surface and no real stored sweep | Publish only freshly reopened final authorities after downstream freeze and gates; then run the separately authorized real stored sweep |
+
+This is a static implementation checkpoint. `rustfmt --check` is green for the
+touched Rust files; no new Cargo command has run. Step 3 remains in progress.
+Authentication, exact joins, hashing, persistence and reopen are
+input/file/system proportional; only admitted fixed-record address arithmetic
+is worst-case O(1). No universal O(1) space/latency or customer-scale guarantee
+is inferred.

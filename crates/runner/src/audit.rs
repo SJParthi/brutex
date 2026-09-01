@@ -6,7 +6,7 @@
 //! [`crate::report`] renders the SWEEP, the BARS, the LADDER, the SIGNIFICANCE
 //! bar and the FINDINGS. It was written before any of the execution stages
 //! existed and it shows **none** of them: not the trades, not the exit grid, not
-//! the sniper measure, not the walk-forward, not the overfitting probability,
+//! the sniper measure, not the walk-forward, not the legacy bottom-half rate,
 //! not the bootstrap.
 //!
 //! So the engine could measure all of it and an operator could see none of it.
@@ -17,9 +17,9 @@
 //! # Every section states what it CANNOT tell you
 //!
 //! That is not modesty, it is the difference between an audit and a brochure.
-//! A reader who takes "PBO 0.08" as "this is profitable" has been misled by a
-//! true number, and the only defence is to put the limit beside the figure
-//! rather than in a document they will not open.
+//! A reader who takes an anchored-fold bottom-half rate as genuine CSCV/PBO has
+//! been misled by a true number under the wrong name. The limit therefore sits
+//! beside the figure rather than only in a document they may not open.
 //!
 //! # Plain text, and no dependency
 //!
@@ -112,6 +112,26 @@ pub fn render(
     boot: Option<(Option<&Verdict>, Option<&Verdict>, usize)>,
     rows: usize,
 ) -> String {
+    render_selected(taken, exits, None, folds, overfit, boot, rows)
+}
+
+/// [`render`] with the policy-selected cell named explicitly.
+///
+/// A grid's unconstrained [`Grid::best`] and a caller's best cell within its
+/// risk rules can differ. The durable result must report the latter when one was
+/// selected; falling back to `best()` here would put one exit in the ledger and
+/// a different strategy report below the same audit. `None` preserves the
+/// unconstrained historical rendering for callers that apply no policy.
+#[must_use]
+pub fn render_selected(
+    taken: Option<&Trades>,
+    exits: Option<&Grid>,
+    selected: Option<&Cell>,
+    folds: Option<&Validated>,
+    overfit: Option<&Pbo>,
+    boot: Option<(Option<&Verdict>, Option<&Verdict>, usize)>,
+    rows: usize,
+) -> String {
     let mut out = String::with_capacity(4_096);
     let _ = writeln!(out, "AUDIT");
     let _ = writeln!(
@@ -154,8 +174,16 @@ pub fn render(
             // adverse excursion any trade suffered. A grid row cannot carry
             // seventeen more columns, and an operator choosing a strategy needs
             // all of them for the one they picked.
-            if let Some(best) = x.best() {
-                strategy_report(&mut out, best, &exit_name(best));
+            if let Some(chosen) = selected.or_else(|| x.best()) {
+                if selected.is_some() {
+                    row(
+                        &mut out,
+                        "durable selected exit",
+                        &exit_name(chosen),
+                        "the final admitted screen row; it may differ from the grid's unconstrained BEST",
+                    );
+                }
+                strategy_report(&mut out, chosen, &exit_name(chosen));
             }
         }
         None => absent(&mut out, "EXIT GRID"),
@@ -222,7 +250,7 @@ pub fn trades(out: &mut String, t: &Trades) {
         out,
         "  too late to enter",
         &t.too_late.to_string(),
-        "at or past the 15:10 square-off",
+        "past the proved session boundary or missing a priceable path",
     );
     if !t.reconciles() {
         let _ = writeln!(
@@ -963,14 +991,20 @@ pub fn walk_forward(out: &mut String, v: &Validated) {
     let _ = writeln!(out);
 }
 
-/// The probability that the selection procedure is fooling itself.
+/// The legacy anchored-fold bottom-half diagnostic.
 pub fn overfitting(out: &mut String, p: &Pbo) {
     let _ = writeln!(out, "OVERFITTING");
+    row(
+        out,
+        "CSCV/PBO authority",
+        "NOT MEASURED",
+        "this run has anchored walk-forward folds, not combinatorially symmetric partitions",
+    );
     match p.probability() {
         None => {
             row(
                 out,
-                "PBO",
+                "legacy bottom-half rate",
                 "NOT MEASURED",
                 "no fold could be ranked -- not the same as zero",
             );
@@ -986,12 +1020,12 @@ pub fn overfitting(out: &mut String, p: &Pbo) {
         Some(ppm) => {
             row(
                 out,
-                "PBO",
+                "legacy bottom-half rate",
                 &format!("{}.{}%", ppm / 10_000, (ppm / 1_000) % 10),
                 if p.is_noise() {
-                    "AT OR ABOVE 50% -- the selection is a coin flip"
+                    "at or above 50% across these anchored folds only"
                 } else {
-                    "below 50% -- selection carries information"
+                    "below 50% across these anchored folds only"
                 },
             );
             row(out, "  folds ranked", &p.folds.to_string(), "");
@@ -1024,9 +1058,9 @@ pub fn overfitting(out: &mut String, p: &Pbo) {
     let _ = writeln!(out);
     let _ = writeln!(
         out,
-        "  A LOW PBO DOES NOT MEAN PROFITABLE. It means the SELECTION is not \
-         noise-fitting. A procedure can reliably pick the best of a hundred \
-         worthless combinations and score perfectly while losing on every one."
+        "  NON-AUTHORITATIVE: this is not CSCV/PBO and cannot establish lack \
+         of overfitting, generalisation or profitability. It describes only \
+         the supplied anchored walk-forward folds."
     );
     let _ = writeln!(out);
 }
@@ -1179,7 +1213,7 @@ mod tests {
             "the better rung must sort above the saturated one:\n{out}"
         );
     }
-    use super::{bootstrap, grid, overfitting, trades, walk_forward};
+    use super::{bootstrap, grid, overfitting, render_selected, trades, walk_forward};
     use crate::pbo::{Placement, probability_of_overfitting};
     use crate::trade::{Trade, Trades};
     use crate::validate::Validated;
@@ -1208,6 +1242,7 @@ mod tests {
     fn the_trades_section_shows_how_much_of_the_signal_count_was_overlap() {
         let t = Trades {
             eligible: Vec::new(),
+            occupancy: Vec::new(),
             trades: vec![
                 Trade {
                     signal_bar: 0,
@@ -1240,6 +1275,7 @@ mod tests {
         // healthy one.
         let t = Trades {
             eligible: Vec::new(),
+            occupancy: Vec::new(),
             trades: Vec::new(),
             signals: 100,
             while_open: 1,
@@ -1254,22 +1290,23 @@ mod tests {
     }
 
     #[test]
-    fn an_unmeasured_pbo_is_not_rendered_as_zero() {
+    fn an_unmeasured_legacy_rate_is_not_rendered_as_zero_or_pbo() {
         // "Never overfit" and "never measured" are different facts, and zero
         // reads as the first. This is the assertion that stops an audit from
         // reporting a perfect score for a test that never ran.
         let mut out = String::new();
         overfitting(&mut out, &probability_of_overfitting(&[]));
-        assert_eq!(cell(&out, "PBO"), "NOT");
+        assert_eq!(cell(&out, "legacy bottom-half rate"), "NOT");
+        assert_eq!(cell(&out, "CSCV/PBO authority"), "NOT");
         assert!(out.contains("not the same as zero"));
         assert!(
             !out.contains("0.0%"),
-            "an unmeasured PBO must not render as a number at all"
+            "an unmeasured legacy rate must not render as a number at all"
         );
     }
 
     #[test]
-    fn a_coin_flip_pbo_is_named_as_one() {
+    fn a_half_legacy_rate_is_bounded_to_the_supplied_anchored_folds() {
         let folds = [
             Placement {
                 candidates: 3,
@@ -1283,9 +1320,10 @@ mod tests {
         let mut out = String::new();
         overfitting(&mut out, &probability_of_overfitting(&folds));
         assert!(
-            out.contains("coin flip"),
-            "a PBO at or above half must be called what it is"
+            out.contains("at or above 50% across these anchored folds only"),
+            "the compatibility rate must name its exact narrow population"
         );
+        assert!(out.contains("this is not CSCV/PBO"));
     }
 
     #[test]
@@ -1295,7 +1333,8 @@ mod tests {
         // and the limit has to sit beside the figure.
         let mut out = String::new();
         overfitting(&mut out, &probability_of_overfitting(&[]));
-        assert!(out.contains("DOES NOT MEAN PROFITABLE"));
+        assert!(out.contains("cannot establish"));
+        assert!(out.contains("profitability"));
 
         let mut w = String::new();
         walk_forward(&mut w, &Validated::default());
@@ -1500,6 +1539,28 @@ mod tests {
         );
     }
 
+    /// The risk-policy winner can differ from the unconstrained money maximum;
+    /// the strategy report must follow the durable selection in that case.
+    #[test]
+    fn an_explicit_selected_cell_overrides_the_grids_unconstrained_best() {
+        let g = populated_grid();
+        let selected = g.cells.get(1).expect("the stop-only policy selection");
+        assert_ne!(
+            g.best(),
+            Some(selected),
+            "the fixture must separate policy selection from unconstrained best"
+        );
+        let out = render_selected(None, Some(&g), Some(selected), None, None, None, 10);
+        assert!(
+            out.contains("durable selected exit") && out.contains("0/-/-"),
+            "the report must name the explicitly selected stop-only variant: {out}"
+        );
+        assert!(
+            out.contains("₹10.21"),
+            "the selected cell's own strategy report must be rendered: {out}"
+        );
+    }
+
     #[test]
     fn a_grid_where_nothing_survives_says_so_rather_than_naming_a_loser() {
         // `sharpest` returns None when no variant made money under pessimistic
@@ -1614,10 +1675,9 @@ mod tests {
     }
 
     #[test]
-    fn a_measured_pbo_prints_its_denominator_and_its_median() {
-        // A PBO over three usable folds out of ten is a different number from
-        // one over ten, and a reader who cannot see the denominator cannot tell
-        // them apart.
+    fn a_measured_legacy_rate_prints_its_denominator_median_and_limit() {
+        // A rate over three usable folds out of four is a different number from
+        // one over all four, and a reader must also see that it is not PBO.
         let folds = [
             Placement {
                 candidates: 5,
@@ -1646,10 +1706,10 @@ mod tests {
         );
         assert!(out.contains("median placement"));
         assert!(
-            out.contains("selection carries information"),
-            "one of three below median is under half, so the procedure is not a \
-             coin flip and must be described as such"
+            out.contains("below 50% across these anchored folds only"),
+            "the rate must not escape the folds that supplied it"
         );
+        assert!(out.contains("NON-AUTHORITATIVE"));
     }
 
     #[test]
@@ -1690,6 +1750,7 @@ mod tests {
         // one, and between them every branch of the dispatcher is taken.
         let taken = Trades {
             eligible: Vec::new(),
+            occupancy: Vec::new(),
             trades: vec![
                 Trade {
                     signal_bar: 0,

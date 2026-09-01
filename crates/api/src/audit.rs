@@ -13,8 +13,11 @@
 //!
 //! It also has to be shared, and a shared mutable buffer inside the server is a
 //! lock on the render path — the one thing `crates/api/src/server.rs` says it
-//! does not have. An append-only file needs no lock here: the kernel's
-//! `O_APPEND` places the bytes, and every reader opens its own handle.
+//! does not have. The file itself is the lock boundary: every writer takes an
+//! advisory exclusive lock on its own handle before measuring or appending,
+//! while every reader opens its own handle. `O_APPEND` chooses the end offset;
+//! the lock is what stops two cooperating processes from interleaving the
+//! multi-call semantics of measure, write and sync.
 //!
 //! # Why the records are fixed stride
 //!
@@ -37,9 +40,12 @@
 //! leave a partial record. Both are visible rather than silent: the file length
 //! stops being a multiple of [`RECORD_LEN`], which [`Log::Held::torn`] reports
 //! by name, and any record whose bytes are wrong fails its CRC-32C and is
-//! rendered as a refusal in its own row instead of as a number. **Nothing here
-//! repairs a damaged record.** `CLAUDE.md` §4 — degrade loudly and name the
-//! reason, or refuse.
+//! rendered as a refusal in its own row instead of as a number. A later writer
+//! measures the file while holding the exclusive lock and refuses a ragged
+//! length before writing one byte: appending after a partial record would move
+//! every later record off its fixed-stride address. **Nothing here repairs or
+//! truncates a damaged record.** `CLAUDE.md` §3 rule 8 and §4 — append-only,
+//! then degrade loudly and name the reason, or refuse.
 //!
 //! # What is deliberately not here
 //!
@@ -1144,10 +1150,29 @@ impl Journal {
                 .map_err(|e| named("cannot create the audit directory", &e))?;
         }
         let mut file = std::fs::OpenOptions::new()
+            .read(true)
             .append(true)
             .create(true)
             .open(&self.path)
             .map_err(|e| named("cannot open the journal", &e))?;
+        file.try_lock().map_err(|e| {
+            format!(
+                "{}: cannot take the journal append lock; another writer may be appending, so this record was refused rather than interleaved — {e}",
+                self.path.display()
+            )
+        })?;
+        let bytes = file
+            .metadata()
+            .map_err(|e| named("cannot measure the locked journal", &e))?
+            .len();
+        let torn = bytes % RECORD_LEN_U64;
+        if torn != 0 {
+            return Err(format!(
+                "{}: the locked journal has {torn} trailing byte(s) after {} whole record(s); refused to append because those bytes are an interrupted record and appending after them would permanently misalign every later fixed-stride record. Nothing was truncated or repaired because audit history is append-only",
+                self.path.display(),
+                bytes / RECORD_LEN_U64,
+            ));
+        }
         file.write_all(&record.image())
             .map_err(|e| named("cannot append the record", &e))?;
         file.sync_all()
@@ -2204,6 +2229,83 @@ mod tests {
                 .expect("decodes")
                 .source,
             "whole"
+        );
+
+        let before = std::fs::read(&journal.path).expect("the torn journal");
+        let why = journal
+            .append(&Record::refused(
+                Scope::Spot,
+                Outcome::Stored,
+                at(2),
+                "must-not-land",
+                "",
+            ))
+            .expect_err("a torn tail blocks later appends");
+        assert!(why.contains("100 trailing byte(s)"), "{why}");
+        assert!(why.contains("refused to append"), "{why}");
+        assert!(why.contains("append-only"), "{why}");
+        assert_eq!(
+            std::fs::read(&journal.path).expect("still readable"),
+            before,
+            "the refusal neither appends after the tear nor repairs history"
+        );
+    }
+
+    #[test]
+    fn a_held_journal_lock_refuses_a_second_writer_without_appending() {
+        let root = scratch("audit-locked");
+        let journal = Journal::at(&root);
+        journal
+            .append(&Record::refused(
+                Scope::Spot,
+                Outcome::Stored,
+                at(1),
+                "first",
+                "",
+            ))
+            .expect("the first record");
+
+        let squatter = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&journal.path)
+            .expect("the journal handle");
+        squatter.try_lock().expect("nothing else holds it");
+
+        let why = journal
+            .append(&Record::refused(
+                Scope::Spot,
+                Outcome::Stored,
+                at(2),
+                "blocked",
+                "",
+            ))
+            .expect_err("the second writer is refused");
+        assert!(why.contains("cannot take the journal append lock"), "{why}");
+        assert!(why.contains("refused rather than interleaved"), "{why}");
+        assert_eq!(
+            std::fs::metadata(&journal.path).expect("metadata").len(),
+            RECORD_LEN_U64,
+            "a refused concurrent writer leaves no partial record"
+        );
+
+        drop(squatter);
+        journal
+            .append(&Record::refused(
+                Scope::Spot,
+                Outcome::Stored,
+                at(3),
+                "after-release",
+                "",
+            ))
+            .expect("the OS releases the advisory lock with its handle");
+        assert_eq!(
+            journal.look(),
+            Log::Held {
+                records: 2,
+                bytes: 2 * RECORD_LEN_U64,
+                torn: None,
+            }
         );
     }
 

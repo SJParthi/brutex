@@ -60,9 +60,9 @@ use core::fmt::Write as _;
 
 use crate::identity::RunId;
 use crate::rank::Ranked;
-use crate::{Auto, Outcome};
+use crate::{Auto, Outcome, RankedOutcome};
 use engine::column::set_positions;
-use engine::{Sweep, Why};
+use engine::{Excluded, Sweep, Why};
 use indicators::column::Census;
 use vocab::ConditionMask;
 
@@ -138,12 +138,12 @@ pub fn condition_names(mask: &ConditionMask) -> Vec<String> {
 /// One line per excluded position, at most `table::COUNT`. Off every path §3
 /// rule 4 bounds — it runs once, at the same structural boundary as the rest of
 /// the report.
-fn excluded_by_name(out: &mut String, sweep: &Sweep) {
-    if sweep.excluded.is_empty() {
+fn excluded_by_name(out: &mut String, excluded: &[Excluded]) {
+    if excluded.is_empty() {
         return;
     }
     let _ = writeln!(out, "  EXCLUDED BEFORE k=1, by name");
-    for e in &sweep.excluded {
+    for e in excluded {
         // `Why::NotLive` is the only variant with no measurement, and it says so
         // rather than printing a zero — a support of 0 and a support that was
         // never taken are different facts, and §3 rule 6 forbids naming a
@@ -166,7 +166,7 @@ fn excluded_by_name(out: &mut String, sweep: &Sweep) {
             e.position
         );
     }
-    vwap_absence_note(out, sweep);
+    vwap_absence_note(out, excluded);
     let _ = writeln!(out);
 }
 
@@ -205,9 +205,8 @@ fn excluded_by_name(out: &mut String, sweep: &Sweep) {
 ///
 /// One scan of `sweep.excluded`, which is at most `table::COUNT`, at the same
 /// once-per-run boundary as the rest of the report.
-fn vwap_absence_note(out: &mut String, sweep: &Sweep) {
-    let family = sweep
-        .excluded
+fn vwap_absence_note(out: &mut String, excluded: &[Excluded]) {
+    let family = excluded
         .iter()
         .filter(|e| e.reason == Why::AlwaysFalse)
         .filter(|e| {
@@ -305,6 +304,71 @@ pub fn render(outcome: &Outcome, id: Option<&RunId>) -> String {
     significance(&mut out, &outcome.sweep);
     verdict(&mut out, outcome);
     out
+}
+
+/// Render a streamed ranked outcome without fabricating retained frontiers.
+#[must_use]
+pub fn render_ranked(outcome: &RankedOutcome, id: Option<&RunId>) -> String {
+    let mut out = String::with_capacity(2_048);
+    let _ = writeln!(out, "SWEEP");
+    let _ = writeln!(
+        out,
+        "  {:<LABEL$}{:>14}",
+        "identity",
+        id.map_or_else(|| "NOT RECORDED".to_owned(), RunId::hex)
+    );
+    let _ = writeln!(out);
+    bars(&mut out, outcome.census);
+    ladder_ranked(&mut out, &outcome.sweep);
+    significance_counts(&mut out, outcome.trials, outcome.effective_trials);
+    verdict_ranked(&mut out, outcome);
+    out
+}
+
+/// The significance block from exact raw and duplicate-deflated counts.
+fn significance_counts(out: &mut String, raw: u64, effective: u64) {
+    let _ = writeln!(out, "SIGNIFICANCE");
+    row(
+        out,
+        "hypotheses tested",
+        &raw.to_string(),
+        "support counted against bars",
+    );
+    row(
+        out,
+        "  distinct tests among them",
+        &effective.to_string(),
+        "exact duplicates removed -- same support, same test",
+    );
+    if effective < 2 {
+        row(
+            out,
+            "threshold",
+            "-",
+            "too few hypotheses to have a noise floor",
+        );
+        let _ = writeln!(out);
+        return;
+    }
+    row(
+        out,
+        "best t-stat by luck alone",
+        &format!("{:.2}", crate::significance::expected_max_bailey(effective)),
+        "Bailey & Lopez de Prado, if every hypothesis were worthless",
+    );
+    row(
+        out,
+        "  the sqrt(2 ln N) approximation",
+        &format!("{:.2}", crate::significance::expected_max_t(effective)),
+        "the figure usually quoted -- it OVERSTATES the floor",
+    );
+    row(
+        out,
+        "t required (Bonferroni 5%)",
+        &format!("{:.2}", crate::significance::bonferroni_t(effective)),
+        "Harvey, Liu & Zhu: their floor is 3.0 for a HANDFUL of trials",
+    );
+    let _ = writeln!(out);
 }
 
 /// How large a t-statistic must be before it beats the best of luck.
@@ -425,6 +489,19 @@ pub fn render_findings(ranked: &Ranked, sweep: &Sweep) -> String {
     render_findings_of(&rows, ranked.considered, sweep)
 }
 
+/// [`render_findings`] for the streamed ranked path, using the exact trial
+/// summary computed while adjacent frontiers still existed.
+#[must_use]
+pub fn render_ranked_findings(ranked: &Ranked, outcome: &RankedOutcome) -> String {
+    let rows: Vec<&crate::rank::Scored> = ranked.top.iter().collect();
+    render_findings_at(
+        &rows,
+        ranked.considered,
+        outcome.effective_trials,
+        ranked.lens,
+    )
+}
+
 /// [`render_findings`] over a list a caller has already filtered.
 ///
 /// # Why this exists: the closure filter ran and the page did not use it
@@ -456,12 +533,26 @@ pub fn render_findings(ranked: &Ranked, sweep: &Sweep) -> String {
 /// exists to protect.
 #[must_use]
 pub fn render_findings_of(rows: &[&crate::rank::Scored], considered: u64, sweep: &Sweep) -> String {
+    render_findings_at(
+        rows,
+        considered,
+        crate::significance::effective_trials(sweep),
+        crate::rank::Lens::Detectability,
+    )
+}
+
+/// Findings with the trial count and ranking lens already resolved.
+fn render_findings_at(
+    rows: &[&crate::rank::Scored],
+    considered: u64,
+    n: u64,
+    lens: crate::rank::Lens,
+) -> String {
     let mut out = String::with_capacity(1_024);
     // THE SAME BAR THE SIGNIFICANCE SECTION PRINTS. It used `trials` while that
     // section used `effective_trials`, so one report carried two different
     // Bonferroni figures for one sweep and the per-row verdict used the harsher
     // one -- rejecting findings the page above had already said were allowed.
-    let n = crate::significance::effective_trials(sweep);
     let bar = crate::significance::bonferroni_t(n);
 
     let _ = writeln!(out, "FINDINGS");
@@ -471,7 +562,15 @@ pub fn render_findings_of(rows: &[&crate::rank::Scored], considered: u64, sweep:
         &considered.to_string(),
         "",
     );
-    row(&mut out, "kept", &rows.len().to_string(), "best by |t|");
+    row(
+        &mut out,
+        "kept",
+        &rows.len().to_string(),
+        match lens {
+            crate::rank::Lens::Detectability => "best by |t|",
+            crate::rank::Lens::Payoff => "best by payoff, then |t|",
+        },
+    );
     row(
         &mut out,
         "bar every row must clear",
@@ -661,7 +760,7 @@ fn ladder(out: &mut String, sweep: &Sweep) {
         "always-true, always-false or not live",
     );
     let _ = writeln!(out);
-    excluded_by_name(out, sweep);
+    excluded_by_name(out, &sweep.excluded);
 
     // ── per level ───────────────────────────────────────────────────────────
     // Every column `Frontier::reconciles` sums, in the order it sums them, so a
@@ -685,6 +784,52 @@ fn ladder(out: &mut String, sweep: &Sweep) {
             level.pruned,
             level.infrequent,
             level.frequent.len(),
+            if level.reconciles() {
+                ""
+            } else {
+                "  <- LOST A CANDIDATE"
+            }
+        );
+    }
+    let _ = writeln!(out);
+}
+
+/// [`ladder`] over streamed level tallies.
+fn ladder_ranked(out: &mut String, sweep: &engine::keep::Streamed) {
+    let _ = writeln!(out, "LADDER");
+    row(out, "min_hits applied", &sweep.min_hits.to_string(), "");
+    row(
+        out,
+        "support that requires",
+        &permille(sweep.min_hits, sweep.bars),
+        "of swept bars",
+    );
+    row(out, "depth reached", &sweep.depth().to_string(), "");
+    row(out, "combinations found", &sweep.streamed.to_string(), "");
+    row(
+        out,
+        "positions excluded before k=1",
+        &sweep.excluded.len().to_string(),
+        "always-true, always-false or not live",
+    );
+    let _ = writeln!(out);
+    excluded_by_name(out, &sweep.excluded);
+    let _ = writeln!(
+        out,
+        "  {:<6}{:>12}{:>12}{:>10}{:>10}{:>12}{:>10}",
+        "level", "generated", "duplicate", "excluded", "pruned", "infrequent", "frequent"
+    );
+    for level in &sweep.levels {
+        let _ = writeln!(
+            out,
+            "  k={:<4}{:>12}{:>12}{:>10}{:>10}{:>12}{:>10}{}",
+            level.k,
+            level.generated,
+            level.duplicates,
+            level.excluded,
+            level.pruned,
+            level.infrequent,
+            level.survivors,
             if level.reconciles() {
                 ""
             } else {
@@ -753,6 +898,62 @@ fn verdict(out: &mut String, outcome: &Outcome) {
         "trustworthy as a whole answer",
         if outcome.is_complete() { "yes" } else { "NO" },
         "",
+    );
+}
+
+/// [`verdict`] for a streamed ranked outcome.
+fn verdict_ranked(out: &mut String, outcome: &RankedOutcome) {
+    let sweep = &outcome.sweep;
+    let _ = writeln!(out, "VERDICT");
+    match sweep.halted {
+        None if sweep.levels.is_empty() || sweep.bars == 0 => row(
+            out,
+            "outcome",
+            "NOTHING MEASURED",
+            "no ladder was walked -- this is not extinction",
+        ),
+        None => row(
+            out,
+            "outcome",
+            "complete",
+            "the frontier went extinct, which is the answer",
+        ),
+        Some(halt) => {
+            row(out, "outcome", "REFUSED", "the walk stopped short");
+            row(
+                out,
+                "  budget spent",
+                match halt.breach {
+                    engine::Breach::Candidates => "candidates",
+                    engine::Breach::Pairs => "pairs",
+                    engine::Breach::Memory => "MEMORY",
+                },
+                "",
+            );
+            row(out, "  at level", &format!("k={}", halt.k), "");
+            row(
+                out,
+                "  candidates admitted",
+                &halt.candidates.to_string(),
+                &format!("of {}", halt.ceiling),
+            );
+            row(
+                out,
+                "  pairs walked",
+                &halt.pairs.to_string(),
+                &format!("of {}", halt.pair_budget),
+            );
+        }
+    }
+    row(
+        out,
+        "trustworthy as a whole answer",
+        if outcome.is_complete() { "yes" } else { "NO" },
+        if outcome.closure_complete {
+            ""
+        } else {
+            "closure is incomplete on the halted frontier"
+        },
     );
 }
 
@@ -1301,7 +1502,7 @@ mod tests {
         let bars = synthetic::sessions(8);
         let out = Sweeper::new(bounded()).run(&bars, &mut evaluator());
         let column = indicators::column::Column::build(&bars, &mut evaluator());
-        let f = crate::outcome::forward(&bars, crate::outcome::Horizon::DEFAULT);
+        let f = crate::outcome::forward(&bars, &column, crate::outcome::Horizon::DEFAULT);
         let ranked = crate::rank::rank(&out.sweep, &column, &f, 10);
         let text = crate::report::render_findings(&ranked, &out.sweep);
 
@@ -1344,7 +1545,7 @@ mod tests {
         let bars = synthetic::sessions(8);
         let out = Sweeper::new(bounded()).run(&bars, &mut evaluator());
         let column = indicators::column::Column::build(&bars, &mut evaluator());
-        let f = crate::outcome::forward(&bars, crate::outcome::Horizon::DEFAULT);
+        let f = crate::outcome::forward(&bars, &column, crate::outcome::Horizon::DEFAULT);
         let ranked = crate::rank::rank(&out.sweep, &column, &f, 0);
         let text = crate::report::render_findings(&ranked, &out.sweep);
 
@@ -1393,6 +1594,7 @@ mod tests {
         let ranked = crate::rank::Ranked {
             top: vec![weak],
             considered: 3_689,
+            ..crate::rank::Ranked::default()
         };
         let text = crate::report::render_findings(&ranked, &out.sweep);
 
@@ -1417,7 +1619,7 @@ mod tests {
         let bars = synthetic::sessions(8);
         let out = Sweeper::new(bounded()).run(&bars, &mut evaluator());
         let column = indicators::column::Column::build(&bars, &mut evaluator());
-        let f = crate::outcome::forward(&bars, crate::outcome::Horizon::DEFAULT);
+        let f = crate::outcome::forward(&bars, &column, crate::outcome::Horizon::DEFAULT);
         let ranked = crate::rank::rank(&out.sweep, &column, &f, 10);
 
         let stats = render(&out, None);
@@ -1460,6 +1662,7 @@ mod tests {
         let ranked = crate::rank::Ranked {
             top: vec![thin],
             considered: 3_689,
+            ..crate::rank::Ranked::default()
         };
         let text = crate::report::render_findings(&ranked, &out.sweep);
         assert!(
@@ -1698,7 +1901,7 @@ mod tests {
         });
 
         let mut out = String::new();
-        excluded_by_name(&mut out, &sweep);
+        excluded_by_name(&mut out, &sweep.excluded);
 
         assert!(
             out.contains("2 of those are the VWAP family"),
@@ -1725,7 +1928,7 @@ mod tests {
             reason: Why::AlwaysFalse,
         });
         let mut quiet = String::new();
-        excluded_by_name(&mut quiet, &other);
+        excluded_by_name(&mut quiet, &other.excluded);
         assert!(
             !quiet.contains("VWAP family"),
             "no VWAP exclusion, no VWAP note. Got:\n{quiet}"

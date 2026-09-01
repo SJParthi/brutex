@@ -28053,3 +28053,3853 @@ entire reason this exists.
 
 Proved by `a_hold_does_not_run_across_an_intraday_halt`, built from that real
 day's bar count, which also asserts the contiguous case is untouched.
+
+### D-0394
+
+**A ranked sweep streams retired frontiers into one bounded global rank, and
+changes no search semantic to buy the memory back.**
+
+A full-range attempt reached 7.4 GB resident and was killed at exit 137. The
+measurement separated enumeration from retention: across two eight-rung runs,
+all sixteen ladders had completed or halted within two and a half minutes; peak
+across the eight concurrent rungs was 8.91 GB, with 6.35 GB in survivors from
+levels the join had already finished with. Ranking 15–17 million retained
+survivors per rung happened afterwards. `Sweep::levels` kept the entire answer
+for a caller that wanted only the best `keep` rows.
+
+The engine therefore has one walk and two sinks. `Ladder::walk_into` owns k=1,
+the join, subset prune, support counts, duplicate rejection, candidate ceiling,
+pair budget, extinction and halt. The retaining sink preserves the existing
+`Sweep` API. The streamed sink replaces each retired `Frontier` with one
+fixed-size `Tally` and an exact cumulative `streamed` count. Ranked result
+retention is O(depth + keep), not O(total frequent combinations); the search's
+live frontier memory is unchanged.
+
+**Retirement is an explicit callback, at one exact boundary.** A lower frontier
+cannot be dropped until it has generated k+1, and it cannot be certified closed
+until that immediate successor is known. `walk_streamed_with_retirement` lends
+`(lower, Some(upper))` after a complete upper level was built and before lower
+is dropped. Normal extinction lends the empty successor too. A budget-partial
+successor is never evidence: its lower level receives `None`, and the partial
+level itself later receives `None`. The callback borrows both and retains
+neither.
+
+**The candidate ceiling and pair budget stay exactly the same.** The cumulative
+candidate ceiling is conservative once old levels are freed, but relaxing it
+only on the streamed path would make retention choose which combinations exist
+and how deep the ladder reaches. One `Ladder` must produce the same levels or
+the same halt through either sink. There is still no depth parameter, and the
+ranking cap is read by no engine operation.
+
+**With a positive retention cap, every retired survivor is scored before it can
+be discarded, and every level feeds the same bounded global cut.** A zero cap is
+the explicit count-only case: it accounts every survivor and computes no edge,
+because no score can be retained. `runner::rank::Accumulator` carries the chosen
+`Lens` for the whole run. Parallel worker heaps are bounded transients and merge
+into that one global heap; there is no independent top-N answer per level. The
+hard positive-cap cut remains rank all candidates, keep the best N, then filter
+that retained sequence to `closed_top`, with no backfill from below the cut.
+That is the historical selection semantic, not a new closed-first search.
+
+For a same-series run, scoring reads the signal column and its own `Forward`.
+For a projected run, `run_prepared_ranked_by_reporting` receives the execution
+column and execution `Forward`, and scores **every streamed survivor on that
+series before discard**. Ranking on the coarse signal series and re-scoring
+only its retained prefix is rejected: a mask below the signal-series cut can be
+the execution-series winner, and after retirement no later pass can recover it.
+
+**Closure and trial accounting remain exact.** Immediate equal-support
+supersets are sufficient for closure by anti-monotonicity, so the adjacent pair
+marks the same redundant masks as the retained whole-sweep walk. Raw hypotheses
+are `Σ(level.survivors + level.infrequent)`: exactly the candidates whose
+support was measured against bars. `Streamed::streamed` counts only frequent
+survivors and is therefore not a valid substitute. Effective trials subtract
+the exact redundant frequent masks from that raw count. No correlation discount
+is invented.
+
+**A halt is a refusal, not a smaller result.** A partial successor cannot decide
+closure for the level below it, and climbing from it would make the Apriori
+subset prune incomplete. The streamed result still counts and reports every
+partial survivor it saw, but `closure_complete` and
+`RankedOutcome::is_complete` are false. The operator path stops before the exit
+grid, trading and ledger record; it does not call the bounded prefix a success.
+
+The shortcuts not taken are part of the decision: no second Apriori walk, no
+streamed-only ceiling, no depth cap disguised as `keep`, no per-level final
+rank, no signal-ranked prefix re-scored as though it were the execution rank,
+no `streamed`-as-trials substitution, no approximate closure, and no
+closed-first backfill that changes which rows historical runs selected.
+
+### D-0395
+
+**Square-off follows each observed session's own close; slice end never proves
+the final session completed.** `SessionBounds` derives one boundary table in a
+backward pass. The forced exit is ten minutes before each day's observed close,
+so shortened and extended sessions do not inherit a fixed 15:10 assumption.
+Only the presence of a later day certifies that the preceding day ended. A
+truncated final slice therefore produces no fabricated square-off. This
+supersedes D-0181's fixed-close prose; it does not invent an exchange calendar.
+
+### D-0396
+
+**All per-slice timing facts are hoisted before candidate evaluation.**
+`SliceFacts` owns the median bar step and `SessionBounds`. Trade, grid and
+walk-forward entry points accept that one value rather than sorting timestamps
+or re-deriving session boundaries per mask or per exit cell. Compatibility
+entry points may construct it once for callers, but candidate loops may only
+read it. The complexity improvement is O(bars) once per slice; it is not a
+claim that the whole backtest is O(1).
+
+### D-0397
+
+**Execution-series facts govern trade-derived floors and the ranking cut.** A
+coarse signal rung decides when a condition fires, but when the one-minute
+series is supplied, entries, exits, forward returns, bootstrap trade families
+and derived floors read that series. When no execution series is supplied, the
+report explicitly names the swept rung as its fill rung. It may not display a
+coarse-bar fill as though one-minute execution had been measured.
+
+### D-0398
+
+**Runtime policy is resolved once, refusals are visible, and the exit-grid rung
+count is part of identity.** Empty text clears a knob. Malformed, zero and
+out-of-range count values are recorded before the documented fallback is used.
+The resolved grid width is threaded into the main grid and walk-forward folds
+and appended to the policy digest; no fold re-reads mutable process state.
+
+### D-0399
+
+**Test fixture paths include both process identity and a per-process serial.**
+The full locked workspace run exposed the old shared
+`/tmp/brutex-pull/big.toml`: another test could replace the file between its
+metadata check and read, producing `MissingKey` where the test expected
+`TooLarge`. A fixed filename is not isolation. Credential fixtures now use the
+process id plus an atomic serial. Four simultaneous complete `pull --test unit`
+processes passed after the change; the ordinary test also pins the path shape.
+
+### D-0400
+
+**The backtest page compares recorded runs in one conservative table without
+pretending unlike settings are like-for-like.** Rankable recorded totals are
+ordered by the pessimistic fill total, the same adverse-fill result the engine
+uses, and the first is labelled a reference among the records shown — never a
+promised winner or an apples-to-apples strategy score. A row that is halted,
+unsealed, non-signal, partial, trade-less,
+internally contradictory or missing a required result remains in the table with
+the reason it is unranked. Hiding it would turn a recorded failure or limitation
+into an apparently clean comparison. A failed integrity seal keeps the row but
+replaces its money and pattern with “not trusted”; coloring or decoding those
+bytes would visually endorse the same record the status refuses.
+
+Every row prints its own support floor as a share of swept bars and its fill
+spread (`optimistic - pessimistic`). Support decides which combinations could
+be enumerated at all, so two support settings answer different search questions;
+the fill spread says how much of the displayed result depends on execution
+assumption. Printing both beside every result lets a human compare them without
+silently claiming the rows were run under one setting. Deltas are against the
+displayed reference only, and an all-negative table names its first row as the
+least-negative result rather than a profitable strategy. Zero is breakeven,
+never described as a loss. A legacy ledger without masks says the pattern was
+not recorded instead of decoding six widened zero words as a real empty setup.
+
+The page reveals twelve records at a time and names how many remain behind an
+explicit “Show next” control. The ledger endpoint is bounded at 500 rows and
+the ledger itself is virtualized; rendering every mask and every cell at once
+would reintroduce the unbounded DOM that virtualization removed. The reveal
+count resets when the selected feed or refreshed ledger changes. At widths
+where the seven desktop columns would overflow, the semantic table becomes
+stacked labelled records instead of leaving clipped columns behind a
+mouse-only horizontal scroll region.
+
+### D-0401
+
+**The next one-minute fill is an exact timestamp, and an exit minute cannot also
+be a new entry minute.** A signal bar stamped `t` with length `L` is knowable at
+`t + L`; it may map only to a one-minute execution bar stamped exactly `t + L`.
+If that bar is absent, `Alignment::onto` records `None` and `unreachable` counts
+the signal. The first later available bar is not a fallback. This supersedes
+D-0293's “first execution bar stamped at or after” wording: that policy turned
+a data hole into a different, later trade while rendering it as the requested
+immediate fill.
+
+Exclusivity is decided on actual execution indices. A candidate is blocked when
+`entry <= previous_exit`, so the first permitted new fill is strictly after the
+exit bar. Comparing signals instead is wrong in both directions: a projected
+column's source already is its fill, while a signal-sourced column legitimately
+adds one minute. The actual-entry comparison blocks a same-minute close/reopen
+without suppressing a signal on the exit bar whose fill is the following minute.
+The level-less walk and every exit-grid variant apply the same inequality.
+
+Both policies preserve the existing bounds. Alignment remains one forward merge
+over signal and execution rows, `O(signals + execution)` total with no search per
+signal; exclusivity remains one constant-time index comparison per candidate.
+“One position” here means within each independently simulated combination,
+direction and exit variant. It does not invent a portfolio-wide lock across the
+millions of mutually compared strategies; adding that would change the engine
+from an independent backtest sweep into portfolio simulation and requires its
+own decision.
+
+### D-0402
+
+**The pull journal serializes cooperating writers on the journal inode and a
+torn tail permanently closes that file to append.** `O_APPEND` chooses an
+offset for an individual write; it does not serialize the larger operation of
+measuring the file, writing one record and making it durable. Every append now
+takes an OS advisory exclusive lock before that operation and holds it through
+`sync_all`. A competing writer is refused with the path and reason, and writes
+nothing. The lock is released with the file handle, including on process death,
+so no PID file or stale sentinel is introduced.
+
+The locked length is checked before the record image is written. A remainder
+of 1..255 bytes is an interrupted record. Appending a fresh 256-byte image after
+it would leave every later record permanently shifted away from
+`ordinal * RECORD_LEN`, so the append refuses and names the exact remainder.
+It does **not** truncate, pad, overwrite or rename the journal: none of those
+operations can prove what the interrupted bytes were, and append-only history
+forbids pretending that they never existed. Whole records before the tear
+remain readable, while the operator must preserve and replace the damaged file
+under an explicit recovery procedure before recording can resume.
+
+The lock is advisory, not a claim that an unrelated program opening the file
+without this protocol cannot write to it. Every journal writer in this
+workspace goes through `Journal::append`; protecting the file against a hostile
+or non-cooperating local process is outside this format's authority and is
+stated in `docs/06-limits.md` §97.
+
+### D-0403
+
+**Every browser-started engine task owns an armed finisher from slot claim to
+normal settlement.** Sweep, descent and stored-data command share one in-process
+slot because they append to the same result ledger. Before this decision each
+blocking closure wrote `finished_micros` only after its engine call returned. An
+unwind skipped that write and left the slot reading `in_flight` forever, so every
+later request was refused as busy against work that no longer existed.
+
+`TaskFinisher` is created before `spawn_blocking` and moved into its closure.
+That placement covers both an unwind while the engine runs and a queued closure
+dropped during runtime shutdown before its body starts. Abnormal drop changes
+the accepted progress into a timestamped refusal; it does not claim nothing was
+written, because the append-only result files may have received part of the work
+before the stop. The operator is told to inspect their integrity before retrying.
+
+Normal completion installs the engine's actual answer and disarms the guard.
+Disarming is load-bearing: a finished slot can be claimed by another request
+immediately, and an old still-armed destructor that merely looked for any
+in-flight value could otherwise fail the new owner's run. A guard also leaves an
+already-finished slot untouched.
+
+This is an in-process lifecycle guarantee, not a claim that Rust destructors run
+after process abort, power loss or memory exhaustion. The release profile aborts
+on panic, which ends the process and therefore destroys the in-memory slot; a
+restart begins with no claimed slot. Durable partial-write recovery is a
+separate result-store transaction decision and is not hidden by this guard.
+
+### D-0405
+
+**A master replacement is serialized per source and `Written` means both file
+data and the renamed directory entry were durably synced.**
+
+The previous landing path named its temporary after the target —
+`.FILE.partial` — and did not coordinate writers. Two browser refreshes, two
+server processes over the same masters directory, or a manual caller using the
+same function could therefore open and truncate that one temporary together.
+One rename could move the inode while the other still wrote it; the second
+rename then failed or the first caller published bytes the second caller had
+continued changing. The fact that different sources had different temporary
+names prevented cross-source exchange and did nothing for the same source.
+
+Each source now owns a persistent `.{target}.lock` inode. `land` takes an OS
+advisory blocking lock before it reads the old target for `changed`, and holds
+the handle through temporary write, file `sync_all`, atomic rename and
+containing-directory `sync_all`. Blocking is deliberate: once a body has been
+fetched, a local replacement queued behind another local replacement is not a
+vendor refusal. Different source names still take different locks and can land
+in parallel. The inode may remain on disk; ownership is the kernel lock, so a
+process death releases it and leaves no stale PID sentinel for manual repair.
+
+Durability has three states because two would require a false claim. A failure
+before rename is `Refused` and the old target still stands. Successful file and
+directory sync is `Written`. If rename succeeded but directory sync refused,
+the new bytes are already visible and the old target does *not* stand, while
+crash durability is not established; that becomes `Landed::Uncertain` with the
+byte count, change flag and cause. The masters API renders that state as
+`written:false, durable:false`, logs it at Error, and does not include it in the
+successful-landing count. A normal write now explicitly renders
+`durable:true`.
+
+Validation stays before the lock so a malformed or short host answer never
+queues a legitimate local landing. The locked region still writes the entire
+body, so its cost is O(body bytes), not O(1); it adds no scan of the existing
+master and no history proportional to the number of refreshes.
+
+### D-0406
+
+**A priceable entry whose exit cannot be priced remains an ordered, block-only
+occupancy interval in both the level-less walk and every exit-grid walk.**
+
+`trade::walk_core` called `round_trip` before it set `open_until`. That function
+checks both legs together, so a valid entry followed by a corrupt exit returned
+`None`; the signal was counted as `too_late`, but the walk forgot that the entry
+had already happened. The next adjacent signal could therefore open before the
+failed path's intended exit. The grid lost the same path earlier still, because
+`Trades::eligible` can represent only a completed, priced `Trade`.
+
+Entry refusal and exit refusal are different occupancy facts. A refused entry
+opens nothing and blocks nothing. When the entry is priceable and the exit is
+not, `Trades::occupancy` retains `(entry_bar, exit_bar, priceable: false)` in the
+same signal order as every priced path. The level-less walk advances
+`open_until` to that time exit. Every grid cell consumes the same ordered stream,
+marks that member block-only, and conservatively holds it through `time_exit`;
+it never adds money, a trade, a win, a loss, a streak or an excursion to any
+reported result.
+
+The time exit is deliberately the latest defensible release. A stop, target or
+trail might have closed the position sooner, but the corrupt exit/path is
+exactly the missing observation needed to decide that. Releasing it early would
+invent a fill; holding it to the known horizon can only refuse a later signal.
+This is the same conservative policy D-0390 applies to a corrupt bar inside a
+candidate path.
+
+The added work is one fixed-size occupancy record and one constant-time branch
+per otherwise eligible signal. The stream is O(eligible signals) space for the
+grid as a whole; this decision does not call the whole backtest O(1) space.
+`an_unpriceable_exit_still_occupies_both_long_and_short_walks` proves the base
+walk for both directions, and
+`an_exit_unpriceable_path_blocks_the_next_signal_in_every_grid_walk` proves the
+shared grid walk cannot promote the overlapping successor.
+
+### D-0408
+
+**The browser exposes every durable time grain and retains the complete streak
+series, while bounding only the rows admitted to the DOM.** `/trades.json`
+already carries hour, weekday, day, week, month, quarter, half-year and year
+buckets. Hiding five of those grains made the durable answer inaccessible, so
+the time-pattern control is derived from one eight-grain table and every grain
+uses the exact integer key written by `cli::trades::Period`. The weekly label
+names its Thursday-aligned seven-day boundary rather than pretending it is an
+ISO week. The weekday and calendar-month headline tiles may fold across the
+span; the chronological day and month series remain separate and are not
+replaced by those folds.
+
+Every consecutive worst-fill run is also retained, in trade-resolution `seq`
+order, with both its count and summed paisa result. A flat result remains a
+separate breakeven slice in the distribution view, but for streaks it ends a
+winning run and extends a losing run. That is the conservative rule already
+locked by `runner::grid::tally_trade`: only `pess > 0` is a win. The browser may
+not publish a friendlier streak convention under the same label as the Rust
+metric.
+
+The page admits at most 24 time buckets or 96 per-trade running-streak steps into a chart at once and
+clamps every requested page. This is a rendering bound, not an O(1) claim about
+the answer. Reading and ordering `T` recorded trades is output-sensitive and
+requires O(T) retained input; producing every streak can itself produce O(T)
+rows. Section 100 of `docs/06-limits.md` records that unavoidable boundary.
+The comparison table remains separately bounded at twelve displayed runs.
+
+### D-0407
+
+**A raw vendor capture is created exclusively under a restart-distinguishing
+name, and losing that evidence is both counted and logged without failing the
+pull.**
+
+The old name was `feed-method-sequence.txt`, where sequence restarted at zero
+in every process. A server restart therefore opened the previous process's
+first four captures with `std::fs::write`, truncating irreplaceable raw vendor
+evidence. Concurrent processes did the same. The in-process atomic budget
+prevented two threads from choosing one sequence and did nothing across
+processes or restarts.
+
+Each name now includes the process id, a once-per-process timestamp and a
+bounded collision ordinal. Neither PID nor time is claimed as unique: clocks
+repeat and PIDs are reused. The authority is `OpenOptions::create_new(true)`,
+which asks the filesystem to create the name only if it is absent. On collision
+the writer tries the next of exactly sixteen candidates. If all sixteen exist,
+it refuses the capture and leaves every old byte untouched; it never scans the
+directory and never opens an existing capture for writing. The file is
+`sync_all`-ed before its path is returned. The existing per-feed/method capture
+budget remains the bound on writes per process.
+
+A capture is diagnostic evidence beside a successful vendor response, so its
+I/O failure still does not replace or fail that response. Silence is not the
+alternative. Every failure increments the existing process counter and emits
+one `Error` event under `pull.capture`, including failure to resolve the vendor
+data root before a file could be opened. The event carries feed, capture kind
+and local I/O cause. It deliberately carries no URL, body or header: those are
+the evidence that failed to land, and duplicating a raw body into an NDJSON log
+would create an unbounded second capture surface; headers are where §8 puts the
+credential.
+
+This guarantees no overwrite by cooperating capture code. It does not make
+retained captures globally O(1) space across process restarts: each process can
+add its fixed budget, which is the evidence-preserving policy rather than a
+retention policy. The exact filesystem and crash limits are recorded in
+`docs/06-limits.md` §99.
+
+### D-0409
+
+**The comparison receives the exact engine signal surface from the server and
+admits only integers JavaScript can preserve exactly.** A `min` suffix is not a
+signal-rung authority: `0min` and `garbagemin` both match it and neither appears
+in `cli::EVERY_RUNG`. `/backtest.json` therefore publishes `signal_rungs`
+directly from that Rust constant on both success and refusal responses. The
+browser takes the array as an argument to the comparison fold. If an older or
+malformed server does not provide it, every otherwise eligible row receives a
+visible “signal rungs unavailable” refusal; the page does not manufacture a
+second list or infer membership from spelling.
+
+Result money remains signed `i64` in Rust, while a JavaScript `Number` preserves
+integers only through `Number.MAX_SAFE_INTEGER`. A finite check is insufficient:
+two different `i64` values can arrive as the same rounded double and acquire a
+false tie, and two individually safe signed endpoints can have a gap or delta
+outside the exact range. Comparison therefore requires safe integers for every
+money scalar and count it ranks or prints, requires the fill gap itself to be
+safe, and rechecks every delta against the selected reference. An unsafe raw
+value, gap or delta remains visible as an unranked “results unavailable” row and
+is never formatted as money. This narrows only what the browser claims it can
+compare; it does not narrow the Rust ledger's `i64` format or mutate history.
+
+Sorting no longer subtracts signed totals. It compares exact endpoints and uses
+the ledger index only after equality, so the comparator itself cannot create an
+out-of-range difference. The table still retains all records and keeps excluded
+records in their ledger order, as D-0400 requires.
+
+### D-0410
+
+**The Backtest drill-down borrows TradingView's analysis hierarchy, not an
+access-control metaphor, and it renders only columns its record can answer.**
+
+The nineteen supplied reference screenshots show the Strategy Tester as one
+dark, flat evidence surface: a compact toolbar, borderless four-column key
+statistics, a performance plot, filled pill tabs, red/teal analytical charts
+and dense hairline tables. None shows a lock inside the report. The lock-shaped
+controls visible at the far left belong to TradingView's global drawing toolbar
+and do not describe strategy data.
+
+Brutex had copied that unrelated glyph into 116 source positions. One symbol
+then meant seven different things: no trade file, an undefined denominator, an
+empty sample, an account model that does not exist, a period fixed by run
+identity, a known zero, or a field the durable schema omits. In particular,
+Commission load said in its own explanation that zero was the answer while the
+cell announced “Not recorded”. The details table manufactured Long and Short
+columns even though direction belongs to run identity, and the trade list
+repeated unavailable price, size and excursion cells on every recorded trade.
+
+The glyph is therefore replaced by a neutral unavailable value whose visible
+form is an em dash in dense cells or the word “Unavailable” elsewhere. The
+exact reason remains in both the title and accessible label. Known statutory
+commission is displayed as `0.00%`, with spread named separately as unmodeled;
+margin metrics say “Not applicable”. The details view presents one recorded
+run rather than two fabricated direction columns. The trade list keeps only
+durable entry/exit time and bar, duration, both fill-model results, return and
+cumulative worst-fill P&L, plus one sentence naming the deliberately omitted
+fields. Period choices that would require a different run are disabled and say
+so; enabled icon buttons with no action are removed.
+
+The expanded drill-down owns the supplied dark palette locally. It does not
+change Markets, Ingest, DB or the surrounding Backtest page, and selection is
+not painted as focus: the active analysis/view pill uses a light fill while the
+blue outline is reserved for `:focus-visible`. The phone layout collapses key
+statistics to one column and keeps overflow inside tab and table surfaces.
+
+The same browser correction also pins the form's identity and heading structure.
+Every visible input has a stable unique `name`: looped engine knobs and ranking
+weights derive it from their typed key, while the descent, top-count and ledger
+filter controls use fixed names. An `aria-label` gives an accessible name and a
+`name` gives browser tooling and form semantics an identity; they solve different
+problems and both remain. The drill-down's `h2` is followed by `h3` panel heads
+and `h4` subsection heads. CSS classes are unchanged, so this is semantic
+structure rather than a visual redesign.
+
+A second interaction audit removed the residue a screenshot could not expose.
+The fabricated Long/Short cells had only been hidden with CSS; they are now
+absent from the table source, leaving `Metric | This run`. The same audit
+exercised every tab, scale, pager, plot switch, disclosure and report view. A
+benchmark period selector that changed no plotted data was removed; chart-range
+buttons wait for a chart handle; empty streak switches disable; all exclusive
+selectors expose their pressed state. Time/streak marks expose accessible names,
+the fixed newest-first ledger declares its sort order, opening moves focus into
+the report, and closing returns it to the control that opened it. Unavailable
+outlier and cross-clock comparisons now name the missing rule rather than
+falsely claiming that a trade list or strategy series does not exist.
+
+### D-0404
+
+**The result ledger is the commit marker and is appended last, after both
+detail blocks, their fixed-stride cardinality receipt, and their directory
+entries are durable.** The former order was
+`runs.bin`, `frontier.bin`, `trades.bin`. A process killed after the first call
+left a sealed, publicly rankable run with no frontier or trade block; the next
+exact rerun hit the ledger's duplicate refusal and skipped both children, so the
+partial result was permanent. Three individually append-only files are not a
+transaction merely because each row seals itself.
+
+The order is now frontier, trades, `detail-sets.bin`, directory barrier, ledger,
+ledger-directory barrier. The receipt is version 1 at a fixed 56-byte stride:
+identity, exact frontier rows, exact unstopped-trade rows, and an eight-byte
+BLAKE3 seal. Both counts include zero. That field is necessary because ledger
+`combinations` counts the streamed search and ledger `trades` counts the chosen
+exit-grid cell; neither equals its detail file's cardinality. Frontier and trade
+appends complete their whole-block write and `sync_all`, then the receipt is
+appended or exactly reused and synced. Syncing only the child inode is not enough
+for a newly created file: the `results/` directory is synced before the commit
+marker, so a surviving marker cannot honestly point at a child whose name was
+never made durable. The ledger append and its directory barrier are last. A row
+visible through `runs.bin` therefore follows successful durability barriers for
+every required child and the manifest that binds their counts.
+
+Prepared children are not public. Read-only `Frontier::of_run` and
+`Trades::of_run` require the same identity in `runs.bin`, one sealed receipt for
+that identity, and the receipt's exact corresponding block count; a direct HTTP
+request that already knows an orphan identity receives a refusal rather than its
+rows. A zero receipt count proves a legitimate empty child even when ledger
+aggregates are non-zero. The receipt is consulted even when the whole child file
+cannot be opened: a missing child with a positive count is corruption and
+refuses, while an explicit zero count remains a complete empty answer. A seal
+failure, foreign identity, or content shortfall refuses the whole public block
+rather than returning its valid prefix. Writable handles deliberately omit the
+parent check, because they are the recovery door:
+an exact rerun reads the prepared block, checks every row for equality, and
+reuses it only when it is byte-for-byte the answer derived again. The receipt is
+also exact-reuse only; another count under one identity is nondeterminism. A
+differing block or receipt permanently refuses the ledger append. A whole
+matching set resumes; a ragged or aligned-but-short block cannot be proved
+complete and is not extended, truncated or overwritten.
+
+The same rule applies to an already-present ledger marker. Every deterministic
+field must match; only `finished_micros` may differ, because the first successful
+completion time is history and an exact rerun necessarily has another wall
+clock. Recovery repeats `sync_all` on the existing ledger and its directory
+before reporting it committed. This covers the case where a complete write
+landed but its original durability call returned an error. It never rewrites the
+row or manufactures a second completion time.
+
+One persistent `results/write.lock` inode serializes this whole sequence across
+cooperating processes, while the existing process mutex serializes threads.
+Individual file locks still protect each append. The outer lock closes the gap
+where two same-identity writers could each observe an empty detail kind and race
+different decisions into one parent. It has no payload, is never deleted, and
+is coordination rather than stored history.
+
+Legacy ledger-first gaps remain append-only. A committed row with no receipt may
+be complete pre-receipt history or may be a partial commit; the old bytes cannot
+distinguish those states, and aggregate counts cannot repair the ambiguity.
+Every receipt-less public detail read is therefore a named `unverifiable`
+refusal, whether a child block happens to exist or not. Only an exact rerun over
+the original bars can regenerate and verify a new receipt; no old row is
+rewritten. The exact receipt format is `docs/02-store-format.md` §12, and
+filesystem/crash limits that no in-process test can erase are recorded in
+`docs/06-limits.md` §98.
+
+### D-0411
+
+**The browser either decodes one complete exact drill-down payload or visibly
+refuses all of it.** Rust stores trade rows and their eight period summaries as
+`u64` and `i64`, while JSON exposes them to JavaScript as `Number`. A finite
+number is not sufficient evidence: JavaScript rounds integers outside its
+53-bit exact range, and adding or subtracting two individually safe integers can
+leave that range. Computing an equity curve, streak total or calendar result
+from either case would turn different stored facts into the same plausible
+chart.
+
+`/trades.json` therefore has one browser admission door before state is
+published. Every required integer on every trade and every hour, weekday, day,
+week, month, quarter, half-year and year bucket must be a safe integer. Counts,
+bar order, duration, fill ordering and per-grain totals must agree. The door
+rehearses the signed additions and differences used by cumulative P&L, gross
+profit/loss, durations, streak money, drawdown, alternating swings, period
+totals and calendar-slot folds. If any raw fact or intermediate cannot remain
+exact, the page clears both rows and periods, marks the fetch failed, and shows
+one alert above the complete report. It never computes a valid-looking prefix.
+
+Empty is not malformed. An existing empty trade file carries all eight empty
+arrays; a run predating the file can carry an empty list and the API's explicit
+absence sentence without a periods object. Both remain honest empty states. An
+empty list with neither complete periods nor that refusal is a partial response
+and is rejected.
+
+Condition masks follow the same all-or-nothing rule. A mask is exactly six
+canonical unsigned decimal strings, each no greater than `u64::MAX`. Leading
+zeroes, signs, whitespace, exponent spelling, numbers instead of strings,
+missing or extra words, and an oversized word are non-decodable. No valid words
+survive beside a bad one: showing five words out of six would name a different,
+smaller strategy while looking like a real answer. A canonical six-zero mask is
+kept distinct as a valid empty combination.
+
+The recorded-run comparison applies the exact-integer rule to every displayed
+setting count as well as money: ledger index, span endpoints, months asked and
+found, bars, support hits, combinations, ladder depth and trades. Calendar and
+support bounds must also agree. An unsafe count makes the row visibly “results
+unavailable” before a halted or otherwise ordinary status can lend it
+credibility; depth, coverage and trades render “not exact” rather than a rounded
+number. This is a browser refusal policy only. It neither narrows the Rust file
+format nor rewrites append-only history. The non-constant costs and remaining
+assurance boundary are recorded in `docs/06-limits.md` §101.
+
+### D-0412
+
+**A multi-month load recovers from absence and from nothing else.**
+`stored::load_span` formerly matched `Err(_)` from every monthly `load` and put
+the month in `Span::missing`. `load`'s refusal already distinguishes a file that
+does not exist from a writer lock, malformed header, torn committed extent,
+record-read failure, permission fault and ordinary I/O. Erasing that distinction
+at the range boundary let a corrupt February disappear between readable January
+and March; the engine then swept a smaller series and the banner called the
+damaged file absent.
+
+The public one-month door remains `Result<Loaded, String>` because its caller
+acts on the complete sentence. Internally it now classifies only two outcomes:
+`StoreError::Missing` and `Refused`. The former is the existing visible partial
+span policy: its `(year, month)` is retained in `Span::missing`. Every other open
+or record failure returns immediately, preserving its reason and guaranteeing
+that no condition, rank, trade, result receipt or dashboard row is computed from
+the reduced series. No string matching decides the branch; the store's typed
+error does.
+
+The distinction does not make a partial span a complete one. A genuinely absent
+month is still displayed and the recorded comparison excludes the run from
+ranking until all asked months are found. It also does not promise that a hostile
+process cannot delete a file at the instant it is opened. The precise boundary
+and linear output cost are recorded in `docs/06-limits.md` §102.
+
+### D-0413
+
+**A valid stored instrument crosses into a sweep only after core's exact
+`InstrumentKey::require_sweepable` predicate accepts it.** The stored loader
+previously constructed `InstrumentKey::index(NSE, underlying)` and treated that
+as permission. Construction proves syntax and kind, not scope: `INDIAVIX`,
+`FINNIFTY`, or any other valid NSE index could therefore be read, evaluated,
+ranked, traded and recorded if its file existed, despite the charter fixing the
+engine at NIFTY and BANKNIFTY and making INDIAVIX reference-only.
+
+Both the one-month door and the span door now pass through one private
+`swept_index` helper before building or opening a store path. That helper builds
+the key and delegates the decision to core's `require_sweepable`; it does not
+keep a second CLI or API symbol list. The refusal renders the allowed names from
+`InstrumentKey::SWEPT`, says that the rejected instrument remains storable, and
+states that no bytes were read. Because every stored sweep, audit range and HTTP
+run reaches `stored::load` or `stored::load_span`, the guard is shared rather
+than copied at each command surface.
+
+The regression does not rely on an absent file as accidental protection. It
+writes a valid INDIAVIX month first, then requires refusal before the read, while
+a second test walks the exact two authoritative keys far enough to receive the
+store's ordinary missing-file answer. The remaining filesystem and complexity
+bounds are recorded in `docs/06-limits.md` §103.
+
+### D-0414
+
+**The only durable selected result is the first finally admitted screen row,
+and its detail child is an exact replay of that row's chosen exit-grid cell.**
+The old path made two independent choices. `screen_cascade` could promote a
+passing candidate below the evidence leader, while `audit_bars` still committed
+`retained_by_evidence().first()` as the ledger mask. It then wrote the ledger
+aggregates from `Grid::best()` but wrote `results/trades.bin` from the
+level-less `trade::walk`. One identity could therefore name candidate A in its
+ledger, render candidate B as admitted, and serve the timestamps and P&L of a
+third exit policy. All three answers were individually plausible.
+
+Selection is now typed data, not a sentence parsed back out of the report. Each
+screen returns its final post-consistency selected scored row, direction,
+`Cell`, rules, and only that invocation's priced map. The operator policy runs
+first; generated fallback tiers run in order; the first tier with a final
+admission wins. A later screen replaces rather than extends the prior map, so a
+smaller later cap cannot leave an unvisited earlier-tier cell stamped with the
+selected tier's rules. If candidate A is evidence rank one but fails and B is
+the first admitted candidate, B's mask/direction/cell is the complete commit
+subject. If no final row is admitted, no selected ledger/detail result is
+written.
+
+After selection, the grid is rebuilt with that exact candidate, direction and
+selected tier's forced rule. The chosen `Cell` must exist unchanged. Its exact
+stop, target, live trail and armed trailing-take-profit variant is then replayed
+through the same exclusivity fold used to build cells: an early exit may release
+a later signal, while a refused path blocks through its conservative time exit.
+The replayed complete `Cell` must equal the selected one. An independent fold of
+the emitted rows must also equal its trade count, pessimistic and optimistic
+sums, worst trade and maximum drawdown. Any disagreement is a refusal; the
+level-less walk is never a fallback. The emitted rows durably carry signal,
+entry and exit bar/time, both realised fill results, selected direction and both
+adverse and favourable excursion in ppm and paisa.
+
+This semantic change gets new bytes. `results/trades.bin` version 2 remains
+append-only legacy history whose policy is the level-less walk. The current
+writer uses `results/chosen-trades.bin`, magic `BRUTEXCT`, version 1 and a
+136-byte sealed stride. A reader that finds only the legacy path refuses and
+requires an exact rerun; it never re-labels old bytes. `detail-sets.bin` is now
+version 2 at a 64-byte stride and seals identity, both child counts, selected
+direction and policy `chosen-grid-v1`. The frequency-run identity deliberately
+retains its `Undirected` term: selected long/short is result metadata, remains
+available for a zero-trade cell, and every returned row must agree with it.
+Receipt version/magic are read before version-2 stride checks so an intact
+version-1 file receives the legacy-version diagnostic rather than a false torn
+tail. Header and row reserves are zero and unknown values refuse.
+
+`/trades.json` publishes top-level policy/direction and row-level direction,
+MAE and MFE. Successful empty responses carry the same eight period arrays as a
+present zero-row file. The browser admits only canonical chosen-grid metadata,
+requires every row direction to match, and safe-integer validates all four new
+excursion integers before publishing any prefix. The dashboard names the
+selected direction and shows MAE/MFE beside each trade. It does not claim
+entry/exit prices, an exit-cause tag or chart markers: none is in the durable
+row, and inventing them would undo the point of this decision.
+
+The HTTP read is one conservative transaction snapshot. It first reads one
+canonical committed receipt, then freshly opens/indexes `chosen-trades.bin`,
+and reconciles that same receipt's identity, exact count and selected direction
+against every returned row. Neither the normal path nor missing-child handling
+reopens the receipt sidecar. A commit racing the request is therefore either in
+the captured proof or left for the next request; metadata from a later instant
+cannot label an earlier child index. No receipt plus no block is an explicitly
+uncommitted/absent response with a reason, never a clean committed-empty answer.
+Only a captured zero-row receipt can prove the latter.
+
+This decision supersedes D-0404's version-1/56-byte/unstopped-child description,
+D-0410/BT-26's statement that per-trade excursions are unrecorded, and D-0411's
+allowance for a successful absence response without period arrays. D-0404's
+parent-last transaction order and all-or-nothing visibility remain unchanged;
+only the child semantics and receipt schema advance. Exact byte layouts are in
+`docs/02-store-format.md` §12, proofs are CG-01 through CG-07, and output/open
+costs plus the external guarantee boundary are in `docs/06-limits.md` §111.
+
+### D-0415
+
+**Each asynchronous drill-down detail stream uses a latest-request object
+ticket plus the still-open run identity as its publication authority.** The
+page previously opened A, began `/frontier.json` and `/trades.json`, then could
+open B while A remained in flight. Whichever response finished last assigned the
+single global detail state. A slow A therefore rendered its rows, periods or
+failure under B's header; closing the panel did not stop the late assignment.
+
+Frontier and trades now own independent request gates. Starting a request
+replaces that gate's current ticket. After JSON decoding and again in the error
+path, publication requires object identity with the current ticket and equality
+between the ticket's requested run identity and `openRun.identity`. Closing the
+drill-down starts an explicit empty request in both streams, synchronously
+invalidating prior tickets and restoring idle state before focus is returned.
+Object identity is deliberate: unlike an incrementing JavaScript number, it has
+no 53-bit generation counter that can eventually lose exactness or collide.
+
+Aborting an obsolete HTTP request may save work but is not the correctness
+mechanism; cancellation can race with a response. The ticket check is still
+required at the state-write boundary. Deferred-promise tests cover late success,
+late failure and close, and the remaining browser/network boundary is recorded
+in `docs/06-limits.md` §104.
+
+### D-0416
+
+**Every browser-engine POST crosses one strict typed JSON-object boundary before
+any field, default, slot or engine knob is touched.** The sweep, descent and
+stored-command parsers formerly searched the raw body for quoted key substrings.
+That accepted text which was not JSON, ignored trailing bytes, stopped strings
+at the first quote without decoding escapes, and extracted the valid strings
+from a malformed rung array. Most dangerously, a truncated array returned the
+same `None` as an omitted one and widened `rungs` to every engine timeframe.
+
+`api` now directly declares the workspace-pinned `serde` and `serde_json`
+dependencies and decodes one union request struct. Serde requires a complete
+object and rejects a repeated declared key; the union covers every field read by
+the three routes, so a duplicate is rejected even when a particular command
+would not consume it. A `WireField<T>` keeps omission distinct from explicit
+`null`: null cannot become an absent list or absent knob. Rung members are all
+strings or the whole body is refused. Integer strings remain compatible with
+the prior semantic parser, JSON booleans remain valid for `validate`, and JSON
+escapes are decoded before the engine sees a value.
+
+Unknown fields remain ignored. That compatibility is deliberate: a newer page
+may send a field an older server does not use, while the fixed knob allow-list
+still prevents `BRUTEX_STORE`, `BRUTEX_LOG_DIR` or any unknown name from changing
+process state. Duplicate unknown names are likewise irrelevant because no
+route reads them. The parse is linear in request bytes and is not an end-to-end
+O(1) claim; the subsequent brute-force work remains outside the request path.
+
+### D-0417
+
+**An engine-task completion event reports the settled outcome shape and never
+invents a ledger commit.** The sweep and descent background closures emitted
+`a ... finished and its record is in the ledger` unconditionally. That sentence
+was false when `cli` returned a whole-command refusal, and was stronger than the
+evidence for a mixed report whose individual rungs carry their own recording or
+refusal outcomes. The command closure used a third, less specific completion
+vocabulary, so three callers could drift independently.
+
+All three closures now call one completion classifier over the `Progress` they
+will publish. Exactly one report produces an `Info` event with outcome
+`report`; exactly one refusal produces a `Warn` event with outcome `refused`
+and its full reason. Both fields or neither field is an internal contradiction,
+logged at `Error` as outcome `invalid` rather than resolved by precedence. The
+event also carries the operation, feed, underlying and elapsed microseconds,
+but makes no statement that a result row exists. The report remains the
+authority for its per-result recording outcomes, while D-0404's sealed receipt
+and parent marker remain the durable-publication authority.
+
+The three production emit calls became one shared site. The emit-site census
+drives its refusal arm without launching a sweep and checks the searchable
+operation, outcome and reason; unit tests pin the report, refusal and both
+invalid classifications. The durability and logger-failure boundaries are
+recorded in `docs/06-limits.md` §106.
+
+### D-0418
+
+**An unauthenticated API may bind only to an operating-system loopback
+address, with no bypass flag.** The command parser previously accepted every
+`SocketAddr`, including `0.0.0.0`, `::` and public interfaces, while D-0182
+states explicitly that the port has no authentication and deliberately admits
+a request carrying neither browser-origin header. On an explicit non-loopback
+bind, any reachable client could therefore start a pull, spend vendor quota,
+refresh masters, move autopilot state or start an engine run.
+
+The address is now parsed once and admitted only when `IpAddr::is_loopback()` is
+true. That includes the IPv4 `127.0.0.0/8` block and IPv6 `::1`; unspecified,
+private-LAN, public and IPv4-mapped IPv6 addresses refuse before `TcpListener`
+is called, naming both the absence of authentication and that no socket opened.
+There is no “unsafe” escape hatch: remote service first requires an
+authentication and authorization design, not a flag that converts the known
+hole back into an option.
+
+This is a deployment boundary, not a claim that loopback authenticates a
+person. Every local process that can reach the port remains a client, and a
+reverse proxy can independently re-expose it. D-0182's same-origin middleware
+remains browser-CSRF defence in depth; it is not promoted to authentication.
+The remaining boundary is stated in limits §107.
+
+This entry also corrects one ordering sentence in D-0182 without rewriting the
+append-only decision. `DefaultBodyLimit` is enforced when Axum extracts a
+handler's `String`; the same-origin middleware can return `403` before that
+extraction. Therefore an oversized cross-origin write answers `403`, while an
+otherwise admitted oversized body reaches extraction and answers `413`. Both
+stop before a form, JSON parser or engine slot. A real-socket regression pins
+the distinction rather than promising one universal status order.
+
+### D-0419
+
+**A frontier seal proves byte integrity, while a strict decoder separately
+proves that every assigned schema byte has a known value.** Version-4 frontier
+rows previously decoded direction as “one means short, every other byte means
+long” and discarded five reserved bytes. The header likewise checked magic and
+version but ignored its four-byte reserve. A caller able to alter and reseal a
+row could therefore smuggle an unknown enum or future schema through the
+current version as plausible long output; an accidental producer bug could do
+the same without any attacker.
+
+`frontier::Row::from_bytes` now returns `Result`: only direction `0=long` and
+`1=short` decode, row bytes `195..200` must all be zero, and header bytes
+`12..16` must all be zero. This does not bump the version because no writer byte
+changed; it enforces the version-4 format the writer already emits. Assigning a
+reserved byte a meaning remains a new format decision and version.
+
+The block index deliberately retains the first 32 identity bytes of a sealed
+schema-invalid row. Those identity bytes are covered by the valid seal, and
+keeping the key makes an exact interrupted rerun find the damaged prepared
+block and refuse it. Dropping the row from the index would make `holds` false
+and could append a second block around unexplained history. Direct reads name
+the schema refusal; recovery returns no decoded row and carries the damage;
+public receipt-backed reads expose no prefix. The transient live-frontier reader
+stops its ranked prefix on the same error, because skipping one row would
+renumber every row after it. Format §13, invariant FD-01/FD-02 and limits §108
+record the complete boundary.
+
+### D-0420
+
+**The 2021-02-24 NSE exchange session is primary-sourced at 220 normal-market
+minutes, while the spot-index bar denominator for that day is refused as
+unmeasured.** D-0262 and D-0267 treated the three stored 54-bar series ending
+10:08 as the session itself. Finding F-A918E3 caught the circularity: the data
+being audited supplied its own denominator, so `/gaps` reported zero loss by
+construction even though the charter already named a 17:00 close.
+
+SEBI now supplies the independent fact. Settlement Order
+SO/AB/EFD2/2023-24/6580 records a halt from 11:40, a 15-minute pre-open from
+15:30, and normal trading from 15:45 to 17:00. With left-edge one-minute bars,
+the normal-market windows are 09:15–11:39 and 15:45–16:59: 145 + 75 = 220.
+`pull::calendar` carries those two windows, and `Calendar::from_observed`
+replaces the shared 54-bar prefix with that primary-sourced exchange timetable
+in O(1) work for one fixed historical day. The replacement is applied after
+the observed fold whenever the verified date lies inside its span, so even a
+missing daily row cannot erase the independently proven open session by
+classifying its own date as closed.
+
+The same order also records NIFTY computation unavailable from 10:06 to 11:43.
+It does not establish an exact publication window shared by NIFTY, BANKNIFTY
+and INDIA VIX. Therefore 220 is not promoted into "220 index bars owed", and
+54 is not retained as "all index bars owed". `gaps::classify_spot_index_against`
+marks the whole date unmeasured for a generic index audit. CASH and derivative
+series retain the 220-minute exchange calendar. `/calendar.json` carries the
+two facts separately as `owed: 220` and `indexOwed: null`; the ingest page
+withholds the whole index-month denominator when even one day is unproved. An
+older server missing `indexOwed` also degrades to unknown rather than copying
+`owed`. This is a deliberate loud non-claim until a primary instrument-specific
+publication record can replace it; it prevents both false cleanliness and false
+vendor blame on the API and dashboard alike.
+
+Primary evidence: SEBI Settlement Order
+<https://www.sebi.gov.in/sebi_data/attachdocs/jun-2023/1687270559560.pdf>,
+paragraphs 1–2 and the recorded NIFTY-computation interval; corroborating
+contemporaneous release:
+<https://www.sebi.gov.in/sebi_data/attachdocs/feb-2021/1614256948318.pdf>.
+The remaining semantics and complexity boundary are in `docs/06-limits.md`
+§110.
+
+### D-0421
+
+**Execution prices are admitted by the evaluator's exact sequence verdict, and
+time exits require an exact observed instant or a proved earlier square-off.**
+D-0243 closed four record-local corruptions with `Candle::check`; D-0250 then
+recorded, but deliberately left open, that `TimestampNotIncreasing` and
+`AccumulatorTooLarge` are sequence facts the local predicate cannot see. A bar
+refused for either reason could still supply a forward close, entry or exit
+fill, path high/low, stop/target/trailing crossing, and ultimately a selected
+chosen-grid row.
+
+`Column::build` now retains one acceptance bit for every offered native bar from
+the same `Evaluator::step` call that produces its mask. A projection onto the
+one-minute execution slice creates one fresh evaluator from the original
+widths, VWAP availability, pattern thresholds and calendar, then records that
+same step verdict for every execution bar. No runner predicate restates any of
+the six corruption rules. The bitmap is shared through `SliceFacts`; an unknown
+length-only compatibility projection refuses every execution lookup rather
+than silently reverting to `Candle::check`.
+
+Every entry, exit and inclusive interior path now passes that membership gate.
+A refused path contributes no return, fill, excursion, order crossing, grid
+tally or chosen row. If its accepted entry proves that a position opened, its
+occupancy remains block-only through the conservative time exit, so removing
+its money cannot create room for a later overlapping long or short. Forward
+refusal counts, trade reconciliation, grid `refused_paths`, and the execution
+acceptance census keep the degradation observable rather than folding it into
+the tail.
+
+The horizon is wall-clock time, not `entry + H` positions. `SliceFacts` builds
+an accepted-timestamp index once and admits only a bar stamped at the exact
+deadline. A missing minute cannot be replaced by the preceding record. When a
+proved session square-off occurs before that deadline, it wins without
+requiring a deadline bar that the closed session could not contain.
+
+D-0395's claim that a later day proves the prior session ended is superseded.
+A later day can follow a truncated prefix, and an endpoint can conceal a
+refused interval. Without a verified session calendar in `runner`, a real
+square-off is certified only by a contiguous accepted regular path beginning
+09:15 and ending at the bar interval that reaches 15:30. A complete final
+regular session therefore proves itself; a truncated prior session does not.
+Observed non-regular shapes still provide conservative entry geometry and may
+price exact horizons inside their observed paths, but an overrun cannot be
+invented as a session close.
+
+The complexity boundary is explicit. Bitmap, refusal-prefix, timestamp index
+and session facts each cost O(B) construction and O(B) retained space per
+execution slice. Membership and inclusive-path checks are worst-case O(1);
+Rust's standard `HashMap` deadline lookup is expected/amortized O(1), not a
+deterministic worst-case guarantee. Candidate walks, grid replay, materialized
+output and the whole backtest remain output- and path-sensitive. Invariants
+EB-01 through EB-05 and limits §113 pin the proofs and the non-claims.
+
+### D-0422
+
+**A browser frontier is admitted as one exact object or none of it reaches a
+ranking.** `/frontier.json` correctly quotes each six-word condition mask, but
+all other Rust `u64`, `i64`, `usize` and `u16` values remain bare JSON numbers.
+JavaScript parses those through a binary64 `Number`; an integer wider than its
+53-bit exact range is already rounded before a rank function can inspect it.
+`Number.isFinite` therefore proved only that the rounded value was numeric. It
+did not prove that the value the engine wrote survived.
+
+Both consumers now pass the complete response through one
+`validateFrontierPayload` door: the open run's combinations and the parallel
+all-timeframe board. Every envelope, rule and row integer must be a safe
+integer; counts are non-negative; nullable ratios are either null or exact;
+direction is canonical; masks cross the existing six-string `u64` decoder;
+and count/admission, evidence counts, trade outcome counts, priced state,
+gross-result sum and verdict relations must agree. A partial server read or
+one malformed row returns an empty refusal object. Neither consumer publishes
+the valid-looking rows before or after the bad row.
+
+This is deliberately a conservative compatibility boundary, not a conversion
+to approximate ranking. Quoting every integer and ranking with `BigInt` would
+be a new wire contract and would still need an explicit policy for ratios and
+normalised weighted scores. The current response remains unchanged; values
+inside JavaScript's exact range keep their existing shape and the mask words
+remain canonical decimal strings. Explicit committed-empty and absent-child
+responses remain distinct valid empty states. Invariant BT-34 and limits §112
+record the proof and cost.
+
+### D-0423
+
+**The expanded Backtest report follows the supplied Strategy Tester reference
+only where the durable run can support the same visual claim.** The report now
+draws its performance evidence on one trade-resolution surface: each admitted
+trade contributes one green or red worst-fill bar, and the exact cumulative
+sum runs across those same points. A second selectable plot segments that same
+strategy curve into completed run-ups and drawdowns. It does not align this
+trade clock with the bar-resolution buy-and-hold clock, invent entry markers,
+or add capital and execution popovers whose inputs do not exist.
+
+Density is bounded without weakening evidence. The full validated trade array
+continues to drive every statistic, period and streak calculation, while the
+newest-first ledger renders a fixed 20-trade window inside a focusable,
+sticky-header, two-axis scrollable evidence viewport and exposes exact
+newer/older ranges. Its markup precedes frontier ranking, so the button's
+visual destination and the assistive-technology reading order are identical.
+Opening another run resets that page and every local report selector. Time,
+streak, performance and swing pages keep the complete series' vertical scale;
+the performance bars, axis, cumulative line and area fill all consume that one
+scale, so paging never changes the apparent size of an unchanged value. This is DOM
+containment, not sampling or truncation of the result.
+
+Absence is classified before it is styled. A known empty result has zero gross
+profit, zero gross loss and zero winner/loser/breakeven counts; a ratio with a
+zero denominator is `Undefined`; account and margin concepts outside this
+one-unit spot-index model are `Not applicable`; and evidence not recorded or
+not yet loaded is `Unavailable`. The disclosure control remains keyboard and
+pointer reachable but deliberately contains no lock glyph, because none of
+these states is an entitlement or paywall. Generic empty chart frames carry
+the same classification instead of collapsing every case into unavailable.
+
+The final interaction pass makes the testing-period disclosure a real dialog
+with focus ownership, Escape and outside dismissal; restores focus after
+keyboard row activation; gives native captions and row headers to property
+tables; keeps recorded toolbar facts non-interactive; and gives disabled plot
+selectors a disabled appearance. The reference recheck raises desktop body,
+label and numeric hierarchy without widening the panel, keeps ordinary values
+below their section headings while reserving the 21-pixel step for headline
+figures, gives every dense annotation and unavailable-state label a 12-pixel
+floor, compacts single-column phone section spacing, preserves all 24 hour slots including recorded
+zeroes, and makes List land on the sticky-header trade ledger before the
+frontier ranking. These choices are pinned by invariant BT-35
+and the reference, truth and UI source tests named there, plus internal-browser
+checks at desktop and phone widths.
+
+### D-0424
+
+**A durable result set writes one correlation event only after its ledger-last
+commit outcome is known.** The CLI already emitted phase progress and the API
+emitted an honest task-completion classification, but neither line proved that
+the four-file result set became public. An operator could search an identity in
+`/logs` and see the grid finish without seeing whether its frontier, chosen
+trades, receipt and parent ledger row committed together, were byte-verified on
+an exact rerun, or remained hidden after a persistence refusal.
+
+`record_all` is now the single audit boundary around a typed persistence
+attempt. A new or re-verified parent emits one `Info` event on `cli.audit` with
+the 64-character identity, `written|reused`, selected `long|short` direction,
+policy `chosen-grid-v1`, the receipt's exact frontier and chosen-trade row
+counts, and the ledger's stable zero-based index. Reuse retains the original
+index rather than dropping it from the result as it did before. The event is
+constructed only after `record_run` has appended and synced the ledger marker,
+or has compared every deterministic field and repeated its durability barrier.
+
+Every result-set persistence refusal instead emits one `Warn` event with the
+same identity and the cause. The outer boundary owns both emit calls, so early
+lock, child, receipt, directory-barrier and ledger failures cannot double-log
+as they unwind. Telemetry's fixed field and encoded-string ceilings bound the
+line, and the call is once per result set outside every bar, candidate, grid and
+trade loop. A logger failure does not roll back a successfully committed result
+set; §106 remains the honest boundary: the database files and their receipt are
+the durability authority, while telemetry exposes its own write health and is
+not a second transaction coordinator. Invariant RS-07 pins the field schema,
+both commit states, exact-one call shape and ledger-before-event ordering;
+limits §114 states the kill window and logger-failure boundary.
+
+### D-0425
+
+**A parsed ledger row is admitted as one exact object before any browser
+computation, or it remains metadata-only.** The earlier comparison guard
+checked the handful of headline values it ranked. The same row also supplies
+timestamps, calendar bounds, masks, exit-rung indices, excursion totals and
+full-report charts. A damaged value outside the headline could therefore sit
+dormant in the table and become a rounded date, ratio, chart scale or drill-down
+after the operator opened it. Individually safe endpoints could also produce an
+unsafe subtraction or scaled ratio, and a suffix such as `garbagemin` could look
+like a signal rung without belonging to the engine's published set.
+
+`validateRunForComputation` is now the sole door from a parsed
+`/backtest.json` row to the answer, rung leaders, sorting, derived metrics and
+full report. Every integer field is a non-negative or signed JavaScript safe
+integer according to its meaning, with negative zero refused; the narrower Rust
+year, month-count, depth and exit-rung domains are enforced; span ordinals,
+month counts, `whole_span`, bars and support reconcile; labels, booleans and the
+64-hex identity are canonical; arrays are dense at exactly five exit rungs and
+six decimal `u64` mask words. Signal membership comes only from the exact
+`signal_rungs` array published by the Rust API. Malformed envelopes and
+non-object members cannot bypass the same check.
+
+A refused row remains visible only as escaped descriptive metadata with its
+admission reason. It derives no support, fill gap, delta, mask or rank and its
+full-report control is disabled. Integrity failure may retain precedence as the
+row's human status, but it does not restore computation eligibility. Headline
+and per-rung leaders are selected only from rows that are both admitted and
+comparison-eligible. Exact subtraction and scaled-ratio helpers refuse an
+unsafe derived result even when both inputs were exact.
+
+This is a conservative boundary for the existing bare-number wire, not a
+silent `BigInt` migration. A value rounded by `JSON.parse` cannot be recovered;
+it is excluded. Validating R rows and retaining their decorated comparison
+records costs O(R) time and O(R) space. Each fixed field/domain check is O(1),
+but the response, sorting, rendering and drill-down are not. Invariant BT-36
+and limits §115 record the proof and the boundary.
+
+### D-0426
+
+**A detail writer refreshes append-only history under its file lock, and an
+exact reuse repeats the durability barrier.** Frontier, chosen-trade and
+receipt handles build identity maps when they open. That is sufficient for a
+single owner, but it is not authority after another cooperating handle writes:
+two stale maps could both call one identity absent, a cached receipt could be
+reported reused after the file shrank, and a writer could append a valid row
+after a peer left either a ragged tail or a whole bad-seal row. A fresh reopen
+had a related failure shape: it retained the healthy prefix for diagnosis but
+could forget that later corruption must stop every future append and promotion.
+
+Each detail store now retains the first byte it has validated. Under the same
+lock that protects extension it remeasures the file, refuses shrinkage and
+misalignment, reads every newly appended whole row, validates its seal/schema,
+and incorporates it into duplicate rejection. A fresh frontier or chosen-trade
+writer separately retains the first bad-seal row; reads of unaffected committed
+blocks remain possible, while append and `confirm_durable` stop at that row.
+This preserves diagnostic access without treating a valid prefix as permission
+to write around corruption. An externally created tear is left untouched and
+named, because silently trimming another process's bytes would violate
+append-only history.
+
+The one recoverable partial write is the current locked call's own. Its exact
+pre-write length is known, so a failed buffered frontier/detail/receipt append
+attempts `set_len` back to that boundary. The injected frontier proof verifies
+that older whole rows remain byte-aligned and the failed identity gains no
+block. If rollback itself fails, the refusal says the file may be ragged; it
+does not call the append recovered. New child bytes use `sync_all`. A byte-equal
+prepared frontier or chosen-trade block calls `confirm_durable`, an equal
+receipt repeats `sync_all`, and only after those barriers and the result
+directory barrier may the ledger-last marker be written or re-verified.
+
+This is cooperating-writer recovery, not an atomic-filesystem claim. Advisory
+locks, `set_len`, `sync_all`, directory sync and the multi-file kill windows
+retain the limits already stated in §98. Invariant RS-08 pins stale and reopened
+corruption, duplicate rejection, rollback and promotion order. Limit §116
+states the work and the failure boundary.
+
+### D-0427
+
+**The native one-minute execution clock is explicit; missing rows cannot vote
+to make it slower.** A native `1min` signal column used the same-rung
+compatibility walk, whose cadence is measured from observed timestamp gaps.
+One isolated hole was refused by exact timestamps, but a systematically sparse
+slice could make two minutes the median and thereby redefine an absent
+immediate minute as the next valid bar. That is a data defect changing the
+execution contract, not a dynamic parameter.
+
+Every shipping audit path that knows its native input is the `1min` rung now
+self-aligns the signal column onto the same stored bars at exactly signal close
+plus 60 seconds and performs checked reprojection. The result is a fill-sourced
+column: a missing timestamp increments the visible dropped count and no later
+row substitutes for it. `SliceFacts` assigns every fill-sourced column the
+fixed 60-second cadence and builds a second prefix count over adjacent timestamp
+breaks. One held-path query therefore requires both zero evaluator refusals and
+zero cadence breaks; valid endpoints can no longer conceal a missing interior
+minute.
+
+Coarse-native commands are not silently changed into one-minute executions.
+When no separate execution series is supplied and the caller explicitly marks
+the path non-minute, the column remains signal-sourced and its measured rung
+cadence continues to price exact horizons supported by that compatibility
+mode. Range audits that load a one-minute execution series keep using the
+existing exact signal-close alignment. The two modes have different names and
+source types, so neither can impersonate the other. Invariant XM-05 records the
+self-projection, sparse-gap refusal and retained coarse behavior; limit §117
+records their real costs and evidence boundary.
+
+### D-0428
+
+**A browser answer is identity-bound and independently reconciled before it is
+displayed.** Generation tickets prevented one open run's late frontier/trade
+response from overwriting another, but the successful response body did not
+name the run it described. Several other doors checked wire types without
+proving semantics: frontier ratios and verdict booleans could disagree with raw
+cell totals; period grand totals could agree after a trade moved to the wrong
+calendar bucket; reordered or overlapping chosen rows could still fold; and
+bar, vocabulary, benchmark and auxiliary request paths did not all share one
+dense all-or-nothing admission policy. A board keyed by rung alone could also
+replace one feed/instrument/span comparison question with another.
+
+Successful, committed-empty and explicitly absent frontier/trade bodies now
+carry one canonical identity. Both validators compare it with the requested
+admitted run before publishing rows. Frontier admission recomputes win rate,
+reward/risk, return/drawdown and averages with `BigInt` intermediates that match
+Rust's saturating `i64` operations, independently recomputes the Wilson
+assurance predicate, then reconciles all five rule predicates, their
+conjunction and the admitted count. Trade admission preserves canonical
+wire sequence, admits only fill-sourced or exact-next-bar provenance, enforces
+strict one-position bar and timestamp order, and independently folds count,
+both P&L readings, worst trade and peak-from-zero drawdown against the immutable
+ledger row. Each of the eight `Period::bucket` maps is rebuilt from entry
+timestamps and compared key-for-key and field-for-field, not merely by total.
+
+The vocabulary must be a dense unique append-positioned table within the
+six-word mask capacity. Series and benchmark bars share one window validator
+for exact integers, OHLC/null domains, order, totals and inclusive month
+accounting. Series, rung and benchmark loaders all invalidate late success,
+failure and exception writes when a newer request or panel close advances their
+ticket. Board slots use the complete comparison question plus rung. The
+benchmark query is pinned to the run's recorded rung rather than the mutable
+chart selector.
+
+That benchmark is still fetched from the current store. The bars endpoint does
+not bind its bytes to the run's `data_digest`, so every benchmark surface calls
+it a **current-store reference** and says it is not the historical run snapshot.
+This is an explicit limit, not a claim that validation recovered missing
+provenance. Bare JSON scalars also remain JavaScript safe integers or refuse;
+there is no silent all-`BigInt` wire migration. Mask words and fixed arithmetic
+intermediates use `BigInt`, while rupee display keeps integer quotient and paisa
+remainder separate through the full safe range. Invariants BT-37 through BT-39
+pin these boundaries; limit §118 states their output-sensitive cost and the
+unclosed snapshot/authenticity limits.
+
+### D-0429
+
+**The whole-ladder per-bar gate is one-sided; the primitive gates remain
+symmetric.** C-E-04 timed a complete Apriori ladder at 10,000 and 100,000 bars
+and rejected either direction beyond 3×. That contract treated a lower per-bar
+cost as a defect even though the walk is `T(B) = aB + b`: support is proportional
+to bars, while joining, sorting, duplicate rejection and reconciliation include
+fixed work for the held-constant frontier. Dividing by B necessarily amortises
+that fixed term on the larger column. A faster larger leg therefore made a sound
+implementation fail while saying nothing adverse about asymptotic growth.
+
+C-E-04 now rejects zero-time samples and per-bar growth above its unchanged 3×
+ceiling, but permits a cheaper larger leg. It first runs untimed probes and
+requires both sizes to complete the same non-empty level/depth topology,
+reconcile every level and produce the same ordered masks and all accounting
+counters, so a cheap early refusal or changed computation cannot pass. Support,
+hit/miss, depth, duplicate-probe and result-append rows still use the shared
+symmetric ratio helper because those isolate one operation rather than a
+composite with a fixed prologue. Limit §119 records exactly what this gate does
+and does not prove.
+
+### D-0430
+
+**The existing data-digest term binds a separate execution series; the identity
+does not gain a tenth term.** A coarse signal column can remain byte-identical
+while one hidden one-minute bar changes. That minute can reverse which of a stop
+and target crossed first, move a trailing peak or change a forced exit, so two
+different recorded answers previously shared all nine identity inputs: only the
+signal slice reached `data_digest` while the one-minute slice supplied every
+fill.
+
+`data_digest_with_execution` now composes the complete ordered signal digest and
+the complete ordered execution digest under a versioned BLAKE3 domain with
+distinct role tags. It is used by every stored range/screen path that loads a
+second execution slice before any result identity is constructed. This is a
+stronger value for the sixth term, not a new field in the formula.
+
+The absent arm deliberately returns the historical `data_digest(signal)` bytes
+unchanged. Native one-minute runs and explicit coarse-native compatibility
+therefore retain their existing identities and do not append duplicate history;
+only a computation that actually depends on a second dataset is re-keyed. A
+present second role stays domain-distinct even if its bytes happen to equal the
+signal bytes. Invariant X-18 pins both the hidden-path sensitivity and the
+no-second-series compatibility; limit §120 records the linear hashing work and
+the cryptographic boundary.
+
+### D-0431
+
+**A valid row seal proves bytes, not schema or block contiguity.** Fresh frontier
+and chosen-trade reopens built their identity index from seal-valid rows without
+decoding every schema field. A row with a recomputed valid seal but an unknown
+direction or non-zero reserve could therefore enter the index, and an `A,B,A`
+file could extend A's range across B. Reads might later refuse a decoded row,
+but append/reuse decisions had already accepted a false file shape.
+
+Fresh indexing now schema-decodes every seal-valid row and records one poisoned
+integrity state instead of failing open. A repeated identity extends a range
+only when the new row is immediately adjacent. Schema-invalid rows and a second
+non-contiguous block preserve every healthy readable prefix but refuse all
+append and durability promotion; an `A,B,A` index never spans B. Frontier also
+refuses a mixed-identity append batch before the first byte is written. Exact
+contiguous healthy blocks retain their existing reopen/reuse path. RS-08 names
+the four disk-level adversarial proofs; §121 states why cold indexing remains
+linear and why a checksum is not authentication.
+
+### D-0432
+
+**A commit stamp is a build proof, not an environment-variable presence
+test.** D-0348 made a clean IDE build usable by reading HEAD, but it accepted
+any explicit `BRUTEX_COMMIT` before inspection and stamped HEAD even when the
+index or compiled working files differed. A dirty binary could therefore
+persist a run under the clean parent commit—the exact reproducibility claim the
+identity is meant to prevent. An empty explicit value was even treated as a
+valid stamp by API admission. This entry supersedes those two D-0348 choices;
+the process-free build-script exception itself remains.
+
+There is one accepted representation: forty lowercase SHA-1 hexadecimal
+characters. `cli::commit_stamp` and the API's early gate call the same validator.
+An explicit value is only an assertion: it must be canonical and byte-equal to
+locally resolved HEAD. It cannot override the proof. Any failure emits an empty
+compile-time sentinel, which the shared validator converts to no stamp, so an
+ambient value cannot leak through after the build script rejects it.
+
+The proof reads Git as a versioned binary format in Rust and starts no process.
+It validates the SHA-1 index checksum, accepts index versions 2 and 3 only,
+resolves detached/loose/packed refs and linked-worktree common directories,
+reconstructs loose and pack-index-v2 objects from pack versions 2 or 3 including
+OFS and REF deltas, and verifies every reconstructed object's Git id. The
+resolved HEAD tree must equal the index by path, mode and object id. Every
+indexed file outside `web/` is then re-hashed as a Git blob and its executable
+mode checked against the index. The front end stays excluded because §2 makes
+it independent of every crate build; generated/tooling locations such as
+`target/`, logs, mutation output, local IDE state and agent scratch are excluded
+from untracked discovery. Any other untracked path refuses conservatively.
+
+Cargo watches the stamp environment, HEAD, index, resolved refs, every proved
+file and its source directories, so a later ordinary build re-runs the proof.
+`sha1` and `flate2` are direct build/dev dependencies because Git addresses
+these objects with SHA-1 and stores loose and packed payloads as zlib streams;
+both are Rust, and neither is linked into the CLI application binary merely for
+this proof.
+
+Unsupported or ambiguous Git shapes do not fall back to HEAD. SHA-256
+repositories, index v4, split/sparse/intent-to-add indexes, submodules, object
+alternates or unavailable promised objects, non-canonical paths and working-tree
+filters whose bytes differ from the index all leave the binary unstamped. This
+may refuse a repository Git itself calls clean; it cannot bless a state the
+implemented verifier did not prove. RP-01 through RP-03 pin the admitted and
+refused cases. Limit §122 records the linear build cost, conservative false
+refusals, cryptographic boundary and the unavoidable interval between a build
+script's final read and rustc opening its inputs.
+
+### D-0433
+
+**Every HTTP write proves the exact plain-HTTP loopback origin before its
+handler runs.** The existing middleware trusted
+`Sec-Fetch-Site: same-origin` before it inspected `Host`. That token describes
+the request relative to the page and remains truthfully `same-origin` when an
+attacker-controlled hostname is DNS-rebound to `127.0.0.1`; the foreign
+authority could therefore reach all three engine POST routes on this
+unauthenticated local service. The older fallback also admitted a request with
+neither `Origin` nor fetch metadata. This entry supersedes D-0182's admitted
+header/authority shapes; its GET/HEAD and middleware-order choices remain.
+
+The router now receives the listener's actual bound `SocketAddr`. Every method
+other than GET or HEAD must carry exactly one syntactically valid `Host` equal
+to either `localhost` or that bound loopback IP, always on the bound port, and
+exactly one plain-HTTP `Origin` with the identical authority. HTTPS is not an
+admitted origin because this listener has no TLS. `Sec-Fetch-Site` may be
+absent for compatible clients, but when present its only admitted value is
+`same-origin`; repeated, unreadable, contradictory or unknown values refuse.
+The exact bound IP rule means another address in `127.0.0.0/8` is admitted only
+when the listener was actually bound to that address. `localhost` remains the
+one deliberate alias because it is the URL operators use for the loopback
+listener.
+
+`Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Port` and
+`X-Forwarded-Proto` always refuse. This server has no configured trusted proxy,
+so accepting one of those values would let the requester choose the authority
+being checked. A non-browser client can still call a write deliberately by
+sending the exact local `Host` and matching `Origin`; an origin guard cannot
+authenticate a local process. HS-03 drives missing/malformed/foreign/conflicting
+metadata and a live DNS-rebinding request against `/backtest/run`,
+`/backtest/descend` and `/engine/command`. Limit §123 records the local-process,
+proxy and hostname boundaries.
+
+### D-0434
+
+**A browser-started engine task does not exist until its durable attempt marker
+exists, and an HTTP hit floor is never silently changed.** The live reducer
+admits no progress record until it sees the exact `cli.audit` "sweep attempt
+started" marker keyed by the status endpoint's attempt token. The API previously
+reserved a process-local fallback token and ignored whether that marker was
+filtered, dropped or had no installed sink. Work could therefore occupy the
+shared slot and run for hours while the shipped monitor had no durable way to
+identify it. Separately, the engine defensively raises `min_hits = 0` to one,
+while the browser boundary accepted zero as written; the request and the
+computation then described different support floors.
+
+The installed telemetry sink now owns the only attempt-id sequence. Missing
+sink, exhausted id space, filtered marker, dropped write and absent destination
+all answer 503 before a slot is published or blocking work is spawned. Sweep,
+descent and stored-command admission cross that same required-marker gate. A
+written marker followed by later execution failure remains an auditable failed
+attempt; a marker that was never written cannot be represented as accepted
+work.
+
+`audit-range`, `sweep-stored` and `sweep-all` also share one positive
+`min_hits` parser. Zero is a malformed request and is refused before admission;
+the engine's defensive floor remains for non-HTTP callers but is no longer an
+implicit HTTP rewrite. SW-31 and SW-32 pin both boundaries. Limit §124 records
+that durable observability and exact request semantics are fail-closed gates,
+not uptime, delivery or constant-latency guarantees.
+
+### D-0435
+
+**Disk-backed result details cross one bounded blocking door and a page is never
+called the complete result.** `/frontier.json` and `/trades.json` previously
+opened and indexed the complete results ledger, receipt manifest and child file,
+then read, aggregated and encoded the selected block directly inside an async
+handler. A large store or several simultaneous requests could therefore occupy
+Tokio worker threads with synchronous file and CPU work, retain unbounded index
+state and return an unbounded body.
+
+Both routes now acquire one shared process-local permit before
+`tokio::task::spawn_blocking`; queued plus running detail tasks are capped at
+four. A fifth request answers 429 and explicitly says no blocking task was
+queued. A blocking-task join failure answers 503. Query text is capped at 512
+bytes. `page` is zero-based and at most 4095; `limit` is from one through 256.
+Every freshly indexed ledger, receipt manifest, frontier file and chosen-trade
+file is capped at 64 MiB on its opened handle, so a stale path-level metadata
+preflight cannot authorize a larger scan. A selected result is capped at 4096
+verified rows and an emitted body at 8 MiB.
+
+Pagination happens only after the complete selected block within that row cap
+has passed the existing identity, receipt-count, schema, seal and foreign-row
+checks. A multi-page response uses 206, carries exact `total_count`, `page`,
+`limit`, `page_complete`, `next_page`, and `complete: false`, and includes an
+explicit partial-page refusal. The current browser therefore publishes none of
+that page as if it were the complete computation. A one-page result alone has
+`complete: true`. An out-of-range page answers 416. A receipt claiming more
+than 4096 rows answers 413 before the child block is read; it never returns a
+plausible prefix. Oversized output likewise answers 413 with no rows.
+
+The API captures one bounded committed-receipt snapshot before opening the
+child and passes that same value into the frontier or chosen-trade reader. It
+does not reopen either parent while reconciling the child, so exact run identity
+and the receipt's zero/non-zero distinction cannot race across two snapshots.
+The ordinary CLI readers keep their historical unrestricted entry points;
+explicit bounded variants are the HTTP resource boundary, not a silent global
+store-format change. HD-01 pins admission, hard limits, pagination, unknown
+identities and no-prefix corruption behavior. Limit §125 records the deliberate
+availability and complexity costs.
+
+### D-0436
+
+**Every stored trade path executes on exact one-minute evidence, and forced
+liquidation is the fixed 15:10 IST product policy.** This deliberately
+supersedes D-0395's session-close-minus-ten boundary, D-0397/D-0427's shipping
+coarse-native compatibility, and D-0430's statement that an operator path may
+omit a second dataset merely to retain its old identity. Those were explicit
+historical choices; the product requirement has changed.
+
+A signal continues to be discovered only on its named rung and is unknowable
+until that left-labelled bar closes. It may therefore enter only on the real
+stored `1min` bar whose timestamp exactly equals that close, on the same IST
+day. `audit-stored`, `audit-range` and the stored screening door load the same
+feed, underlying and month/span at `1min` for every coarser rung before pricing
+or identity construction. Native `1min` reuses its already loaded slice but
+self-aligns to the same exact-next-minute rule. An empty, corrupt, duplicate,
+backward, sub-minute or off-grid execution path refuses loudly. A whole missing
+minute remains represented as a gap, and any signal or held path that needs it
+is dropped; the next available minute, an interpolated value and a fabricated
+tick are never substitutes. A synthetic/coarse caller without an explicit
+one-minute path refuses rather than returning its coarse signal bars as fills.
+
+The fold stays a fold of **signal bars**. Each walk-forward training column is
+built only from its permitted signal range; only then is it mapped onto an
+execution prefix that ends strictly before the first test signal. Purge remains
+between the signal windows. Test indicators may see the permitted signal
+prefix, while their trade column is blank before the test window and its
+execution label path ends at the last test signal close plus the configured
+one-minute horizon. Every candidate grid, plain walk, chosen exit and
+out-of-sample score consumes those projected execution bars. Anchored and
+rolling shapes use the same two-series entry point; neither can fall back to a
+coarse same-series validation.
+
+The square-off clock is now fixed at **15:10 IST for every swept intraday
+execution**. This is a product policy, not an exchange close derived from the
+observed day. Store timestamps are left edges, so only exactly one accepted
+one-minute row stamped **15:09**—the interval `[15:09, 15:10)`—may price the
+forced fill. A 15:10-stamped row contains post-deadline prices and is
+unreachable. Missing, rejected, duplicate or otherwise ambiguous 15:09 data
+creates no forced price. The same clock applies to regular, extended and short
+sessions; a non-regular session without 15:09 therefore drops a hold that needs
+forced liquidation, while an earlier independently exact horizon may still be
+measured.
+
+The existing data term domain-separates and hashes the complete ordered signal
+and execution slices for every two-series run. Changing a hidden one-minute
+record therefore re-keys a coarse run, while native one-series identity retains
+its historical digest. The report names both SIGNAL RUNG and EXECUTION RUNG
+before money. The active round trip continues to bracket only printed OHLCV:
+best is stored one-minute Open and worst is the direction-aware stored
+PrintedExtreme, with no added adverse tick. Its existing occupancy state admits
+one position at a time within one candidate/directional walk and conservatively
+blocks across unpriceable open paths.
+
+This decision does not create live brokerage, prove exchange publication or
+vendor completeness, authenticate the store, simulate queue position, or add a
+workspace-wide/cross-strategy combined long-plus-short portfolio mutex. Those
+claims need separate mechanisms and evidence. UE-01 through UE-06 pin the
+stored doors, exact alignment, fold boundary, fixed deadline, identity/report
+and printed-fill/occupancy contracts. Limit §126 records the preparation,
+hashing, walk-forward, hash-table and real-execution boundaries.
+
+### D-0437
+
+**The final operator-weighted Top-N is one Rust V1 ordering over every
+institutionally admitted member of a completed population; a retained evidence
+prefix is not that population.** The browser had the only implementation of the
+operator's eleven money criteria and re-sorted whichever priced frontier rows
+happened to survive an earlier evidence cap. A candidate discarded before exit
+pricing could therefore never win, while the page could still present the
+survivors as a Top-N. That is a deterministic ordering of a prefix, not a global
+answer.
+
+`runner::topn::RankingPolicyV1` is the authoritative scoring kernel. Its eleven
+non-negative runtime weights are max drawdown, worst-trade loss magnitude,
+losing-trade rate, losing-trade count, gross-loss/gross-win, pessimistic profit,
+winning-trade count, win rate, reward/risk, average win and average-loss
+magnitude. All-zero refuses because it defines no ranking. Measured values use
+integer domains and a fixed one-million score scale; an undefined ratio stays
+undefined, contributes the neutral midpoint and increments an explicit
+unmeasured count rather than becoming a perfect or disastrous zero.
+
+Scoring is two-pass. The first pass sees every fully evaluated candidate but
+builds extrema only from institutionally admitted rows, so a refused outlier
+cannot change an admitted score. The second pass must replay that same
+population. Refused rows are reconciled and counted but can never occupy a
+Top-N slot. An admitted value outside the sealed extrema refuses the second
+pass rather than normalising against a different population. Exact population
+count/digest and extinction receipts remain caller obligations; the kernel
+does not infer completeness from the rows it happens to receive.
+
+The keeper accepts only `1..=25`, retains at most 25 rows, and examines/shifts
+at most that compile-time bound per offer. It returns strongest first by score,
+then pessimistic profit, assurance, canonical six-word mask and direction. Top
+10 is always the first ten of the same Top 25 ordering. Counts for considered,
+admitted, refused and undefined-ratio rows accompany the result. This makes the
+bounded ranking state O(1) with respect to candidate count; pricing and offering
+the complete population remain O(candidates), and a durable two-pass candidate
+record remains O(candidates) on disk.
+
+This decision does **not** make the current capped frontier writer global,
+persist a V1 selection, define the institutional admission verdict, or prove a
+run complete. Those integrations require a versioned on-disk population,
+policy identity, completion receipt and caller wiring before any API or browser
+may remove its current `Preview` label. GN-01 pins the kernel and §127 records
+the complexity and completeness boundary.
+
+### D-0438
+
+**One admitted portfolio position excludes every other long or short across
+both swept instruments and all eight intraday signal rungs until the first
+timestamp after its inclusive exit.** Existing trade occupancy was local to one
+candidate and direction, so it could not implement a combined portfolio rule:
+two independently valid walks could both report an open position at the same
+time. `runner::portfolio::GlobalSinglePositionV1` is the pure deterministic
+arbitration kernel for that separate portfolio model.
+
+The caller offers all intents for one strictly increasing execution minute in
+one atomic batch. Version one accepts at most 25. It orders them by ascending
+one-based priority and then the complete strategy digest; a duplicate ordering
+key refuses the whole minute because caller arrival order is not a policy. The
+first reachable valid intent may acquire the one lock. Its inclusive
+`occupied_through_micros` blocks every other instrument, direction and rung at
+that timestamp; only a later timestamp may enter. Unreachable evidence and an
+upstream refusal never open a position. When an entry occurred but later exit
+pricing failed, the caller must instead provide a conservative reachable
+occupancy interval so failure cannot release the lock early.
+
+Batch validation is all-or-nothing and occurs before mutation. More than 25
+intents, a repeated or backward minute, an unsupported instrument or rung, a
+priority outside `1..=25`, and a duplicate priority/digest pair each have a
+stable refusal. Accepted results retain every offered intent in canonical order
+and reconcile it into exactly one of admitted, blocked by prior occupancy,
+blocked by the simultaneous winner, unreachable or refused. The scheduler and
+one-minute result use fixed arrays and retain no history that grows with the
+number of minutes.
+
+This decision adds the arbitration kernel only. It does not yet generate a
+complete minute-by-minute intent stream from the final admitted Top-N, persist
+portfolio decisions, make the API or browser use the combined result, or prove
+that the current sweep obeys this global lock. Those are explicit integration
+requirements before a drill-down may be labelled portfolio-complete. GP-01
+pins the kernel and §128 records the bounded-work and modelling limits.
+
+### D-0439
+
+**Nested sweep parallelism shares one process-wide support-worker budget instead
+of multiplying the machine's core count by every outer sweep.** The CLI already
+ran independent rungs and catalog months through indexed Rayon iterators. The
+engine independently read `available_parallelism` for every ladder and spawned
+that many scoped support-counting workers. On the operator's fourteen-core M4
+Pro, eight concurrent rungs could therefore create 112 inner workers while the
+eight Rayon owners waited for them. `SharedBy` divided candidate memory but did
+not divide CPU concurrency.
+
+`engine::Ladder::with_support_lanes` is the scheduling boundary. It changes no
+threshold, ceiling, pair budget, candidate, extinction depth, ordering or run
+identity. A caller that names zero receives one lane; a caller that names
+nothing retains the engine's machine-derived default. The CLI derives
+`ceil(available cores / concurrent sweeps)`, so fourteen cores shared by eight
+rungs becomes two lanes per rung while a single rung retains fourteen. Catalog
+batching declares at most the smaller of catalog rows and the Rayon pool size,
+not the potentially 54,000 total jobs that cannot all be live at once.
+
+Ceiling division may exceed the core count by fewer than one lane per outer
+sweep when the split is uneven; it deliberately keeps every requested rung
+making progress. A machine narrower than its concurrent sweep count degrades to
+one inner lane per sweep rather than producing zero. This is not the forbidden
+sweep-depth parameter: the same ladder still climbs to extinction or an
+explicit resource refusal, and a one-lane/four-lane equality proof pins the
+answer. PA-01 records that proof and §129 records the scheduling and
+measurement limits.
+
+### D-0440
+
+**A final-ranking candidate is identified by a complete caller-supplied strategy
+digest, and the second population pass must reproduce the first pass's ordered
+count-and-digest proof before Top-N can seal.** Mask plus direction was not a
+complete key: two exit cells for one combination and side could carry identical
+visible metrics and collapse behind the same tie-break. `topn::Candidate` now
+also carries the 32-byte digest of the population id, instrument, timeframe,
+mask, direction, exact exit-cell key and evaluation policy that only the caller
+can know. It is the last total-order key after the stable human-facing mask and
+direction order.
+
+`PopulationPass` streams every fixed candidate field through a domain-separated
+BLAKE3 state and reconciles considered, admitted, refused and undefined-ratio
+counts. `VerifiedKeeper` builds the bounded Top-N while hashing pass two, then
+returns a selection only if the complete `PopulationProof` equals pass one.
+Equal extrema and row counts are no longer enough: an omission, duplicate,
+in-range replacement or reorder changes the proof and refuses sealing. The
+state remains bounded with respect to population length and the retained list
+remains at most 25.
+
+This is still a kernel boundary. It does not create the complete candidate
+population, decide the strategy-digest preimage, persist either pass, certify
+Apriori extinction, or make the current capped CLI/browser preview global. A
+durable append-only population ledger and receipt must supply and verify those
+facts before using `VerifiedKeeper` in production. GN-02 pins the mismatch and
+tie cases; §130 records the proof's linear-input boundary.
+
+### D-0441
+
+**The runner exposes one uncapped, canonical population stream at frontier
+retirement; evidence ranking is no longer the only way a caller can receive
+frequent masks.** `run_prepared_population_by_reporting` offers every frequent
+itemset exactly once in level-then-mask order with `Closed`, `Redundant` or
+`Unknown` decided from its immediate successor. It carries no `keep`, evidence
+lens, screen cap, timing budget or Top-N parameter. A normally extinct run's
+closed stream is proved equal to the existing retaining closed-set reference.
+
+The caller's sink is fallible. Its first refusal is retained, no later member is
+offered, and no partial `PopulationRun` is returned. The engine retirement
+callback is currently infallible, so the ladder finishes its deterministic walk
+before that error returns; this wastes work on an already failed writer but
+cannot expose the prefix as complete. `PopulationRun::is_complete` additionally
+requires census/sweep/closure completeness and exact
+`considered == redundant + closed` reconciliation.
+
+This door streams masks and support only. It does not yet expand both
+directions and every exit cell, perform institutional admission, persist rows,
+seal a receipt, select Top 25 or drive the global portfolio. Those operations
+belong to the CLI caller because runner may not depend on the store. CP-01 pins
+uncapped equivalence and refusal behavior; §131 records the remaining
+population-work boundary.
+
+### D-0442
+
+**The global single-position minute admits the complete union of eight
+per-rung Top-25 lists: at most 200 intents, while priority remains 1..=25
+inside each rung.** D-0438 fixed the whole minute at 25 because the selector's
+largest individual list is 25. That bound was the wrong composition: the
+product surface asks for a Top 10/25 for each of eight intraday rungs, and all
+eight can produce an entry on the same execution minute. Truncating their union
+to 25 before the global lock would discard as many as 175 valid constituents
+under an ordering the portfolio policy never declared.
+
+`MAX_PRIORITY_PER_RUNG` therefore remains 25 and
+`MAX_INTENTS_PER_MINUTE` is the compile-time product `8 * 25 = 200`. The
+scheduler still validates the whole minute before mutation, canonically orders
+priority then complete strategy digest, admits at most one reachable intent and
+accounts for every other one. An offered 201st intent refuses the entire minute;
+no prefix is scheduled. The fixed arrays make resident scheduler/result space
+and per-minute ordering work bounded independently of historical run length,
+but the larger constant permits up to 40,000 comparisons and is not an O(1)
+latency or throughput measurement.
+
+This corrects only the arbitration capacity. It does not prove that each rung's
+Top 25 is global, that the eight lists were all supplied, or that the resulting
+minute decisions were persisted. Those remain production integration and
+receipt obligations. GP-02 pins the complete 200-intent surface and §132 records
+the constant-work boundary.
+
+### D-0443
+
+**Exit-grid V1 keeps one stable, fully explicit policy per run and resolves its
+actual levels separately from each legal index's TRAINING one-minute OHLCV.**
+"Dynamic" applies to the observed distances, not to a rule allowed to change
+after seeing validation data. `ExitGridPolicyV1` has no default: execution
+resolution, integer range rounding, long/short side, rational rung percentiles, reward/risk
+interval and pair ceiling, grid-cell ceiling, selector, printed-OHLC cost model,
+forced-stop semantics, ambiguity ceiling and gap ceiling are all caller-owned.
+The only legal instrument families remain NSE-NIFTY and NSE-BANKNIFTY. Each is
+resolved from its own training distribution; an equity, future, option,
+reference index, BSE index or unknown index refuses rather than inheriting an
+index grid.
+
+The resolver validates exact one-minute OHLCV. A long stop samples `open-low`
+and a long target samples `high-open`; short swaps those adverse and favourable
+axes. Trailing distance samples the full printed `high-low` range. Each span is
+encoded against that bar's printed Open in integer PPM, and exact observed
+nearest-rank values are chosen under the supplied rational percentiles.
+Duplicates collapse without inventing an interpolated level. Stop-target
+admission uses checked cross-products over the inclusive runtime ratio interval
+and compiles its exact coordinates to a row-major bitmap. The policy digest
+(including side), training-data digest, instrument family, exact levels, exact
+coordinates, forced-stop coordinate and cell count form the resolved digest.
+An unsupported cost-model identity refuses instead of merely labelling money
+produced by another model.
+
+`evaluate_training_grid` is the only complete-grid V1 constructor. It verifies
+the exact training bytes and matching side, enumerates every canonical admitted
+coordinate over the resolved ladders without deriving candidate-local levels,
+and returns a private-field capability bound to the resolution digest. `select`
+accepts only that capability, then checks the ladder values, cell count and
+complete coordinate order, so an arbitrary public `Grid`, omission plus
+duplication, or an opposite-side evaluation cannot masquerade as complete.
+`replay_chosen` validates the matching side and OOS one-minute OHLCV and applies
+the already chosen coordinate to unchanged levels; no OOS price moves a rung.
+Existing printed-OHLC execution continues to keep pessimistic/optimistic
+intra-minute readings and opening-gap fills visible.
+
+This is a runner kernel, not yet an operator feature. CLI/screen/walk-forward do
+not construct it, no fixed-stride codec or completion receipt persists it, API
+and dashboard do not render it, and no stored Zerodha run has exercised it.
+Those gaps stay blocking. EG-01 pins the kernel and §133 records the linear
+resolution and combinatorial pricing boundary.
+
+### D-0444
+
+**Stored intraday condition columns use stored `1day` anchors and an exact
+stored `1min` GapFib overlay as three separately bound causal inputs.** Every
+stored operator path loads the signal rung, the same feed/instrument's daily
+reference span and the same feed/instrument's exact-minute context. Daily and
+minute context both include the preceding calendar month. A missing context
+month refuses: it is not renamed a holiday and is never reconstructed from a
+coarser rung.
+
+`AnchoredEvaluator` advances its monotonic daily cursor only across records on
+IST days strictly before the current signal day. Every GapFib position
+132..=142 produced by that signal evaluator is then cleared. `GapFib` is folded
+over the complete exact-minute context and only the one-minute bar opening at
+`signal timestamp + signal duration - one minute` may supply the replacement.
+That row must be on the signal's IST day and its close must equal the signal
+aggregate close. Missing, later, malformed or disagreeing evidence refuses the
+whole column; daily, coarse and neighbouring-minute substitution are forbidden.
+
+The stored walk-forward paths rebuild that same prepared daily-plus-minute
+column for each permitted prefix, and a builder refusal cannot fall back to the
+ordinary evaluator. The version-two three-stream data digest separately binds
+the complete ordered signal, exact-minute and daily bytes, every daily
+eligibility byte, daily schema, eligibility policy, GapFib overlay policy, the
+exact excluded-IST-day list, and separate daily/minute integrity states. The
+ordinary reader has no independent scrub receipt, so both states are explicitly
+`UnverifiedNoReceipt`; a bar-file read is not relabelled as a verified seal.
+
+This decision wires the stored sweep, stored threshold search, stored audit,
+range audit, screen/affordability and batch doors. It does not prove vendor or
+exchange completeness, a tick path, a live fill or a profitable result. No
+clean-stamped CLI run against a configured real store was executed for this
+change. DR-01 pins the causal/refusal/identity contract and §134 records the
+linear preprocessing and measured-proof boundary.
+
+### D-0445
+
+**The V1 dynamic exit-grid authority is the exact training resolution, exact
+evaluation capability, exact admitted coordinate and complete stored run
+identity—not a caller's grid, a generic percentage table or an arbitrary
+`Chosen`.** This entry corrects and extends D-0443 without rewriting it.
+D-0443 names `replay_chosen`; the implemented public replay door is
+`replay_selected`, and the distinction is load-bearing. A coordinate retained
+by global ranking can become a replay capability only through
+`authorize_coordinate`, which revalidates the complete canonical grid,
+resolution, side, zero-refusal census, exact coordinate bounds, stop/target
+ratio bitmap, minimum trades, ambiguity/gap ceilings and forced-stop rule.
+
+Training remains instrument- and side-specific. NIFTY-long, NIFTY-short,
+BANKNIFTY-long and BANKNIFTY-short are four separate resolutions even when one
+runtime policy schema supplies their percentile schedule. Prices at or after
+the fixed 15:10 IST liquidation boundary remain part of the exact source digest
+but cannot select a tradable stop, target or trail rung. A whole missing minute
+remains a gap rather than becoming a neighbouring or interpolated price; only a
+path that needs that minute is unpriceable. Accepted short or exceptional
+sessions are not rewritten onto a regular 09:15 cadence. Calendar membership is
+an upstream attestation bound by digest, not something the runner can infer
+from timestamps alone.
+
+The printed-OHLC execution engine applies an opening gap before any same-bar
+retrace. When target, stop and/or trailing levels are reachable inside the same
+one-minute envelope, pessimistic and optimistic outcomes follow the feasible
+price path; a farther stop cannot pre-empt a nearer live trail, and a later
+raised-trail endpoint cannot defeat a target already crossed. No tick or price
+outside the supplied Open, High, Low and Close is created.
+
+`ExecutionRunV1` now has two deliberately different constructors. `new` seals
+the native/two-stream identity. `new_with_daily_reference` recomputes the full
+signal + exact-minute + previous-day identity, including eligibility, schema,
+calendar exclusions, overlay policy and honest integrity states. A stored
+three-stream run refuses the weaker constructor, so wiring the exit grid cannot
+discard its previous-day evidence merely to satisfy a type.
+
+This remains a kernel correction, not production completion. The CLI still
+needs canonical calendar and cohort receipts, streaming population persistence,
+institutional evidence passes, exact-intent replay, global scheduling,
+authoritative API/dashboard wiring and a clean real stored run. Equities,
+futures and options remain stored-only and refuse grid resolution under the
+locked two-index sweep surface. EG-02 pins these boundaries and §135 records
+their complexity and assurance limits.
+
+### D-0446
+
+**Local dev and test profiles do not retain Cargo incremental compilation
+objects.** On 2026-08-30 the one shared workspace target was measured with at
+least 65,535 entries under `target/debug/deps` and 1,315 incremental
+directories. The filesystem fell to 3.4 GiB free and reported 100% capacity;
+concurrent Cargo processes held the same target locks while a clean attempt
+waited. A workspace-scoped `cargo clean` removed only reproducible build
+artifacts and recovered more than 38 GiB. No source, Git state, stored OHLCV or
+result ledger was removed.
+
+`[profile.dev] incremental = false` is therefore the repository-owned default,
+and the test profile inherits it. Agents share the canonical target and may not
+create per-agent target directories. Verification commands run serially at the
+Cargo boundary even when independent source audits run in parallel. This is a
+storage-integrity decision, not a throughput claim: dependency, coverage,
+mutation, release and benchmark artifacts still consume disk, so free space is
+measured before a full gate or stored sweep and generated artifacts may be
+cleaned again after their evidence has been recorded.
+
+### D-0447
+
+**Step 3's replay publication and durable discovery boundaries fail closed as
+separate capabilities.** A frozen exit coordinate now has a lossless replay
+door before strategy-local or global exclusivity. It publishes every reachable
+OOS entry in source order. A locally blocked entry is still part of that
+universe; a known entry whose path cannot be priced carries no money row but
+holds occupancy through its conservative inclusive time exit. The sealed
+capability binds the run, training selection, OOS data, evaluated column, local
+reconciliation cell, ordered candidates and refused-path count. Historical
+`replay_selected` delegates to this door and keeps its prior stricter rule that
+any pricing-refused path refuses the aggregate replay.
+
+The daily-reference execution seal distinguishes the complete exact-minute
+context read by the causal join from the requested exact-minute slice actually
+priced. The former, including warm-up, contributes to the three-stream data
+identity. The latter becomes execution authority only when it is an exact
+contiguous byte-for-byte subslice of that context. Thus changing warm-up bytes
+re-keys the run without changing the priced slice, while detached execution
+bytes cannot borrow the context's identity.
+
+A reopened V1 condition mask is legal only when all six stored words are a
+subset of the canonical live mask. The adapter never clears or redirects a
+retired, void or unallocated position; it reports the lowest invalid bit under
+a stable typed classification, including the recorded replacement for a
+tombstone. Separately, the global-selection ledger discovers its latest receipt
+only by the exact shared-cohort digest and signal-rung pair, in append order.
+There is no fallback to another span/cohort or timeframe and no timestamp-based
+inference of “current.”
+
+These are kernel and ledger boundaries, not a claim that Step 3 is wired end to
+end. The replay universe is not yet consumed by
+`GlobalSinglePositionV1`; the replay-mask adapter and exact latest-selection
+lookup have no non-test caller; and the daily-reference execution constructor
+is currently exercised only by its runner proofs. A stored-row decoder,
+selection-to-coordinate resolver, minute intent generator, global scheduler,
+portfolio receipt and authoritative CLI/API/dashboard path remain required
+before the combined result may be called complete. EG-03, DR-02, RM-01 and
+GN-03 pin the implemented boundary without blessing those missing integrations.
+
+### D-0448
+
+**Calendar-complete population and institutional admission authority are new
+append-only receipts; neither is inferred from legacy bytes.** Population V4
+embeds the unchanged V3 payload and adds typed complete-calendar digests for the
+exact signal rung and a separate one-minute execution stream over the full
+requested IST civil-month bounds. V2 and V3 remain readable audit records. An
+open does not promote them, shrink the request to observed endpoints or treat a
+coarse signal calendar as execution evidence.
+
+Population rows keep their historical admission summary for audit compatibility,
+but that summary cannot authorize ranking. Two new sidecars hold canonical
+evidence/verdict records and a receipt appended only after the complete decision
+block. Reopen decodes the exact policy/evidence/verdict bytes and recomputes each
+verdict under the receipt's policy. The receipt binds the exact Population V4
+completion, four terminal counts and ordered decision digest. A row binding uses
+the population module's domain-separated digest of its own canonical 304-byte
+payload; the sidecar does not duplicate that codec. The same
+`population-write.lock` serializes population and admission writes.
+
+This decision does not bless a caller-supplied digest merely because it is
+nonzero. Authoritative use must hold one shared-lock transaction while it joins
+Population V4 and admission pages, then compare population identity, row
+sequence, strategy digest, row-payload digest, V4 completion digest, policy
+digest, terminal counts and the legacy summary against the recomputed verdict.
+Selection V2 predates that join and remains audit-only for institutional
+admission; a new selection version must bind both admission completions and rank
+only joined verdicts. Until the production evidence builder, joined reader and
+new selection path exist, these files are persisted primitives rather than a
+completed stored sweep. PV-01, AD-01 and AD-02 pin what is already proved.
+
+### D-0449
+
+**Global Selection V3 is the first final-ranking receipt whose admission comes
+only from the recomputed Population V4/admission join.** It has a new path,
+magic, header, 3,112-byte stride and content-derived identity; no V1/V2 byte is
+reinterpreted. NIFTY and BANKNIFTY references appear in canonical order and each
+binds population identity, ordered rows, Population V4 completion and
+receipt-last admission completion. Construction holds immutable authority
+snapshots and performs three complete bounded-page passes: one proof/extrema
+pass, one verified Top-25 pass and one selected-row resolver. The legacy
+population-row admission summary remains an agreement check and cannot admit a
+candidate.
+
+The result keeps no more than 25 entries and Top 10 is its exact prefix. Every
+retained strategy is resolved back to one joined population sequence and a
+duplicate alias refuses rather than filling two ranks from one row. The ledger
+opens under an explicit receipt ceiling, rejects ragged/corrupt/duplicate or
+stale same-length state, and discovers latest only by exact shared-cohort digest
+and rung in append order.
+
+This decision does not authorize replay. Population V1 rows and Selection V3 do
+not carry a decodable `Horizon` or the full dynamic exit-grid parameters, so a
+consumer must require a separate append-only execution capability and reproduce
+the selected runner capability from exact bars/column/run inputs. Using
+`Horizon::DEFAULT`, inferring bytes from opaque digests or silently falling back
+to Selection V2 is forbidden. GN-04 pins the admitted selection boundary and
+§138 records its linear construction cost.
+
+### D-0450
+
+**A selected population row becomes replayable only through a receipt-last V1
+execution-capability authority; a Selection V3 identity or opaque digest is not
+enough.** The authority uses four append-only fixed-layout files under the
+population writer lock: two scalar parameter records in canonical long/short
+order, runtime-sized percentile atoms, one capability for every exact
+Population V4 row, and a completion appended after all three referenced blocks
+are synced. Parameter identity binds the complete dynamic policy, horizon,
+runner parameters, evaluation fingerprint, training geometry and the exact
+next-minute/15:10 printed-OHLCV law. A row capability additionally binds its
+Population V4 payload, strategy, training run and selected-exit digest.
+
+Physical orphan offsets are excluded from semantic authority. Reopen keeps a
+valid unreferenced tail as crash evidence, validates every referenced seal and
+ordered digest, reconstructs runtime percentile arrays, and refuses missing,
+reordered, foreign, copied-side, corrupt or stale same-length state. The
+measured real-Population-V4 fixture proves row-for-row preparation, receipt-last
+append, exact reuse and reopen. It deliberately does **not** prove
+`reconstruct_selected`: that door still needs an actual matching resolved grid,
+training column/run and exact stored series, and no production caller supplies
+them. EC-01 records precisely that boundary; §139 records its nonconstant work.
+
+### D-0451
+
+**A complete global replay publication has separate execution and presentation
+identities and four receipt-last V1 files.** Exactly 200 stream records represent
+the eight canonical rungs times each rung's Top 25. Ordered decision records
+carry every pre-exclusivity reachable candidate and its global disposition;
+money records exist only for globally admitted priceable paths. The completion
+binds the exact eight Selection V3 identities, sixteen execution authorities,
+all block ranges, scheduler reconciliation, ordered block digests, the exact
+execution law and the exact-or-absent VIX stamping policy.
+
+India VIX is still reference-only. Its exact stored entry/exit candle, or typed
+absence at that exact minute, may change `publication_id`; it cannot change
+selection, P&L, occupancy or the execution-only `replay_id`. Reopen replays the
+scheduler and refuses reordered, corrupt, overlapping, non-reconciling or stale
+state before indexing a receipt. Current focused tests prove codecs,
+persistence, exact reuse, orphan handling, stale/corrupt refusal, inclusive
+occupancy and the VIX identity split over a constructed prepared fixture. A
+separate direct test now calls the public preparation function with eight
+Selection V3 receipts, sixteen execution authorities and 200 witnessed rows;
+all 200 streams reach scheduling, while a missing or foreign execution
+authority refuses. Those are controlled fixtures, not a production stored
+caller or real selected reconstruction. GPR-01 and VX-01 keep that remaining
+boundary explicit; §140 records total-work and capacity limits.
+
+### D-0452
+
+**Green kernels cannot close Step 3 without production authority flow.** The
+measured locked CLI library suite is 407/407 green with zero failures, and
+strict CLI `--lib --tests -D warnings` Clippy is green. The focused population,
+admission, institutional-evidence, selection, execution-capability, VIX and
+global-replay kernels are green. That is proof of the tested boundaries, not a
+stored Zerodha sweep. Repository search still finds no non-test caller of the
+public institutional evidence builder, Population V4/admission producer,
+execution preparation, VIX reference month or global replay preparation.
+
+The typed runner `RomanoWolfReceipt` now proves one complete rejection or
+non-rejection decision and the exact denominators shared with White and SPA at
+the canonical 5% family-wise alpha. It does not provide a generic FWER p-value
+or candidate-adjusted Romano–Wolf p-values. Both remain explicitly unmeasured,
+and policy that requires them continues to fail closed rather than copying the
+White p-value or inventing a number.
+
+Step 3 therefore remains open until durable stored inputs produce every
+institutional evidence authority, Selection V3 winners reconstruct through
+their exact execution capabilities from real stored inputs, all eight real
+rung selections enter the now-tested public global preparation path, the
+receipt is appended/reopened/replayed, and the same authority reaches
+CLI/API/audit/dashboard comparison. No dashboard status,
+synthetic fixture, inferred digest, green count or persisted primitive may be
+substituted for those callers. The first real stored Zerodha NIFTY sweep remains
+after this closure and the complete Step-5 gate matrix, not evidence used to
+claim either one in advance.
+
+### D-0453
+
+**`cli -> pull` is a direct production calendar-attestation edge, not an
+ingest or network fallback.** The normal direct workspace dependencies measured
+by `cargo tree -p cli --edges normal --depth 1` are `core`, `costs`, `engine`,
+`indicators`, `pull`, `runner`, `store` and `telemetry`; `rayon` is the separate
+external dependency. The manifest already declared that graph, while the
+`docs/01-architecture.md` table and the hand-maintained graph in `AGENTS.md`
+omitted `pull`. The manifest is therefore unchanged and both documents are the
+copies corrected by this decision.
+
+The edge has production callers at the stored authority boundary:
+`pull::calendar::kind_of` supplies canonical IST open/closed session decisions,
+`pull::session::Day` supplies Population V4 requested civil-span bounds, and
+`pull::session::IstMoment` supplies global-replay and VIX-reference month
+identity. Reimplementing those in `cli` would create a second calendar/session
+authority. This edge does not authorize `cli` to request vendor data, and no
+stored-reader absence or invalidity is hidden by a network fetch or fallback;
+the authority paths still fail closed. The graph remains acyclic because
+`pull` does not depend on `cli`.
+
+The graph proof is `core/tests/graph.rs`: it reads only
+`docs/01-architecture.md`'s `## 1. The graph` section, recognises rows beginning
+with ``| `crate` ``, takes backticked workspace names from the third cell, and
+compares all thirteen member rows with dependency declarations in normal,
+development and build tables in both directions before checking acyclicity. Its
+ASCII diagram is deliberately non-authoritative. That gate found this drift;
+the corrected table makes the direct edge explicit rather than weakening the
+proof or removing the production dependency.
+
+### D-0454
+
+**The live sweep support representation is one owned six-word row mask per bar,
+not one bitmap probe per selected condition.** `Column::from_rows` copies every
+fixed-width `ConditionMask`, and `Column::support` performs exactly one
+six-word `ConditionMask::hits` operation for each bar. Candidate popcount is
+therefore absent from the live support loop: k=1 and k=384 take the same
+operation shape. `support_fingerprinted` repacks the same row result into stable
+64-bar hit words so support identity remains byte-reproducible, and runner
+auto-tuning reuses the same owned column instead of rebuilding it per probe.
+
+The release ratio gate measured the actual live method on 2026-08-30:
+`C-E-02` was **0.971x** from k=1 to k=4 and **0.996x** from k=1 to k=8;
+`C-E-09` was **0.942x** from k=1 to k=384. The fixed-width reference-to-live
+comparison `C-E-06` was **0.739x** at k=1 and **0.671x** at k=8. All rows were
+inside the declared 3.0x ceiling. These ratios prove flat per-bar support across
+mask depth on that measured host and benchmark input; they do not make column
+construction, a complete support count, Apriori enumeration, replay,
+persistence or end-to-end sweep latency O(1). The owned row copy is O(B) time
+and space for B bars, and one complete support count is O(B) total work.
+
+### D-0455
+
+**One complete exit-grid validation mints a retained capability; institutional
+evidence and population identity may not rescan that grid once per cell.** The
+population/admission finalizer calls `validate_evaluation` once for each
+evaluated grid, an O(G) integrity pass over G cells. It then passes the opaque
+`ValidatedExitGridV1` and canonical cell ordinal through
+`PopulationCellContextV1`. Each strategy digest and institutional-evidence
+ownership check uses one bounds-checked cell lookup plus exact in-memory
+evaluation identity, O(1) per cell. This changes a complete G-cell projection
+from the accidental O(G^2) validation shape to O(G), before the separately
+named evidence work.
+
+The focused locked checkpoints are **11/11** population/admission-writer tests
+and **10/10** institutional-evidence tests. They prove retained-capability
+identity, ordinal ownership and the tested refusal paths. They do not prove the
+missing production caller or make exact trade replay, support-session counting,
+walk-forward/PBO reconciliation, hashing, file I/O or the whole population
+constant-time. In particular, validation/PBO reconciliation remains
+O(sum of candidate rows across folds + F log F) for F folds, and exact trade
+evidence remains proportional to the replayed execution path.
+
+### D-0456
+
+**The canonical V1 final-ranking policy is 76 bytes: a 24-byte envelope plus a
+52-byte payload, including all eleven runtime weights.** The former 72-byte
+array ended before bytes 72..76. Because the encoder used a checked optional
+slice, the eleventh `average_loss` weight was silently omitted rather than
+panicking; policies that differed only in that criterion could therefore share
+one identity. The wire length is corrected without changing the domain,
+version or declared 52-byte payload.
+
+`every_runtime_weight_changes_the_canonical_policy_identity` now varies every
+one of the eleven weights independently, requires every digest to differ from
+the equal-weight policy and from every other single-weight variant, and the
+complete focused Top-N suite is **14/14** green. This repairs policy identity;
+it does not prove a global selection unless every admitted population row was
+offered, nor does it resolve the open production mismatch where Population V4
+can contain evaluated cells for which the exit-policy admission door cannot
+mint the one-per-row execution capability required by V1.
+
+### D-0457
+
+**The production PBO projection preserves one placement record per aligned
+walk-forward fold and refuses the complete statistic on any candidate-family
+mismatch.** An empty candidate family emits `Placement { candidates: 0,
+winner_rank: 0 }`; a singleton passes through the ordinary placement function
+and is likewise unrankable. Both therefore increment `Pbo.unrankable` instead
+of disappearing through `filter_map`. A fold whose in-sample and out-of-sample
+arrays differ in length is not another kind of unrankable fold: the arrays name
+different candidate families, so the whole projection returns absence rather
+than truncating, fabricating a rank or retaining only the other folds.
+
+An actually absent walk-forward still returns absence, while a completed walk
+containing only empty/singleton folds returns measured fold completeness with
+no numeric PBO probability. Four focused tests pin empty, singleton, aligned
+multi-candidate and mixed-valid-plus-mismatched cases. This closes the former
+production-PBO helper row, reducing the fixed V1 blocker catalog from eight to
+seven; it does not close the remaining durable institutional authorities and
+does not change PBO's O(sum candidate rows + F log F) time or O(F) temporary
+space.
+
+### D-0458
+
+**Stored-data completeness is a sealed append-only authority tied to one exact
+Population V4, never a boolean supplied by an evidence caller.** A V1 receipt
+recomputes and records the count, endpoint and ordered digest of the signal
+stream, full one-minute daily-reference context, evaluated one-minute execution
+slice and daily bars. It also binds the exact eligibility bytes, excluded IST
+days, daily schema and policy terms, feed, source commit, calendar policy and
+both Population V4 complete-calendar receipt digests. The execution slice must
+occur contiguously and byte-for-byte inside the full minute context, both
+calendars must rebuild over the requested civil span, and the three-stream data
+digest must equal the Population V4 identity.
+
+Preparation alone is not evidence completeness. Only a receipt that was
+appended to and reopened from `results/stored-data-completeness-v1.bin` yields
+`StoredDataCompletenessAuthorityV1`; institutional evidence accepts its
+`Complete` state only after that authority revalidates the same semantic
+Population V4 and context population identity. The fixed 676-byte records and
+sealed 64-byte header have a new format/version; no earlier file is promoted.
+Exact retry is reusable, while foreign identity, conflicting content,
+noncanonical reserve, bad seal, ragged tail, duplicate population and stale
+same-length mutation refuse.
+
+This decision does not authenticate the vendor or invent an upstream checksum.
+The currently available daily/minute integrity state remains
+`UnverifiedNoReceipt` and is itself identity-bound. Preparation, ledger open and
+stale validation are O(data/file), not O(1), and no non-test stored-run caller
+currently produces this authority. Five focused stored-data tests and ten
+institutional-evidence tests are green; they close the typed data-completeness
+kernel, not Step 3 or the separately required real stored Zerodha sweep. DC-01
+and §142 record that boundary.
+
+### D-0460
+
+**Romano--Wolf candidate-adjusted probabilities come from the one shared
+resample matrix, with their exact finite-resample counts and ordered family
+identity retained.** The new V1 runner receipt follows Romano and Wolf (2016)
+Algorithm 4.1: order candidates by decreasing observed studentized statistic,
+compute each initial probability against the maximum null statistic over its
+surviving suffix, and replace it by the cumulative maximum of all initial
+probabilities through that rank. The last operation is not presentation
+sorting; the primary source says omitting it makes later hypotheses generally
+too optimistic. The first adjusted probability is also exposed under the
+precise name `familywise_p_value`: it is the full-family maximum/intersection
+test, not an estimate of realised FWER and not a value copied from White's
+Reality Check.
+
+Every probability retains the exact `strict_exceedances + 1` numerator and
+`draws + 1` denominator beside its direct full-precision `f64` projection. The
+receipt also retains the observed statistic bit-for-bit, explicit seed, block
+length, canonical rank, caller-position lookup and a BLAKE3 digest over the
+ordered complete return family plus procedure inputs. Exact statistic ties use
+ascending caller position. Reordering the input therefore rekeys the receipt,
+while tests prove that probabilities remain equivariant when mapped back to
+the same series identity. Zero draws, zero block, fewer than two periods,
+misalignment and any zero-variance candidate refuse the complete receipt; the
+last rule prevents a point mass at zero from receiving the primary algorithm's
+smallest strict-exceedance probability.
+
+The existing fixed-alpha `romano_wolf` and `RomanoWolfReceipt` APIs remain
+compatible and unchanged for current callers. Seven new adversarial adjusted-p
+tests are green, all 29 bootstrap-focused tests are green, and strict Runner
+library/test Clippy is clean. Construction is O(S·N + S log S + B·N +
+B·S·N) time with O(B·N + B + S) temporary space for S candidates, N periods
+and B draws; only lookup in the completed candidate table is O(1). This is an
+in-memory statistical authority. It is not yet an append-only durable raw
+statistics ledger, does not prove that the production bootstrap family is
+uncapped or complete, is not wired into institutional admission, and therefore
+does not by itself close Step 3.
+
+### D-0459
+
+**Global Replay V2 is a separate receipt-last execution authority over exact
+Selection V4 and Execution-Disposition V2 lineage; it never promotes or
+reinterprets V1/V3 replay evidence.** Preparation requires exactly eight
+canonical rung-ordered Selection V4 receipts, their sixteen distinct
+Population V4/admission/Execution V2 completions, and all 200 selected-row
+witnesses. Each receipt is reproduced from its live pair of triple-authority
+views, each selected row is joined again, and fresh admission-aware execution
+reclassification must reproduce the exact authorized disposition before OOS
+candidate reconstruction. One shared scheduler then applies the same inclusive
+long/short, NIFTY/BANKNIFTY and cross-rung occupancy law.
+
+Five new append-only files share `results/global-replay-write-v2.lock`:
+manifest, stream header, pre-exclusivity candidate, scheduler decision and
+completion. Every fixed record is canonically encoded and BLAKE3-sealed. The
+four evidence files are appended and synced before the completion is appended
+and synced last. A completion binds the exact manifest, stream/candidate/
+decision order, execution law, physical block ranges, scheduler counters and
+pricing-refusal counts. Reopen validates every record—including unreferenced
+orphans—allows a later receipt to skip a valid orphan range, reconstructs all
+200 streams, and re-runs the scheduler before indexing the completion. Exact
+retry reuses the reconstructed result; corrupt seals, reordered sealed
+decisions, overlapping/backward ranges, duplicate replay/completion identity
+and same-length stale-handle changes refuse.
+
+The completion's authority-scope digest explicitly says **execution only,
+no money, no VIX**. Current `PreparedGlobalReplayV2` types contain candidate
+path classes and occupancy, but no admitted `TradeRow` and no exact-or-absent
+India VIX stamp. This format therefore cannot claim either publication
+authority, and it does not borrow them from V1. The focused V2 module is
+**6/6 green**; its public test crosses 8 selections, 16 authorities and 200
+witnesses through prepare, append, reopen, exact replay and the orphan/
+corruption/reordering/stale attacks. Those are controlled fixtures, not a
+non-test stored caller or a real Zerodha sweep. Preparation and reopen are
+linear in reconstructed bars/candidates and complete file history; only lookup
+on an already validated unchanged handle is average O(1). GPR-02, store-format
+§20 and limits §143 preserve those exact boundaries.
+
+### D-0463
+
+**Execution Disposition V2 replaces the impossible V1 all-capability
+cardinality with one truthful terminal record per Population V4 row.** A
+structurally valid row is exactly one of `Authorized` or `PolicyRefused`.
+Authorization alone carries a sparse execution capability and requires empty
+refusal bits. Policy refusal carries no capability and retains the runner's
+exact nonempty known refusal bits. Structural classification failures remain
+errors; no codec or adapter may recast them as policy refusal.
+
+Four new fixed-stride append-only files share `population-write.lock`: exact
+long/short dynamic parameters, runtime-sized percentile atoms, ordered row
+dispositions and a receipt-last completion. The completion binds Population
+V4, recomputed admission, parameter and row order, the execution law, exact
+terminal counts and the row-major 4×2 admission/execution matrix. Physical
+block offsets do not enter semantic identity, so a valid orphan may remain
+visible after a crash while an exact retry stays byte-for-byte reusable.
+Reopen reconstructs every committed block and matrix before indexing.
+
+The exact focused V2 suite is **8/8 green**. It covers both indices and both
+terminals, all four admission states, missing/foreign/reordered authority,
+dynamic-parameter reconstruction, noncanonical codec states, append/reopen/
+reuse, valid orphans, torn and corrupt files, a semantically resealed matrix
+redistribution, and a same-length post-open mutation. This closes the stale V1
+population/execution cardinality blocker only at the versioned kernel and
+ledger boundary. There is still no non-test stored caller, real all-rung
+Population V4 execution publication, complete institutional evidence flow or
+real Zerodha sweep. Preparation/reopen remain O(rows), pages O(requested) with
+a 256-row ceiling, and indexed lookup only average O(1); this decision makes no
+end-to-end O(1), latency, capacity, fill, profit or Step-3-completion claim.
+ED-01, store-format §21, limits §144 and the exact Step-3 sequence preserve
+those boundaries.
+
+### D-0462
+
+**The Step-3 comparison is one typed, fail-closed read model over current
+authorities, not a dashboard-side join and not a “latest” discovery rule.** A
+caller supplies exactly sixteen Population V4 identities in canonical rung then
+`[NIFTY, BANKNIFTY]` order, eight Selection V4 identities in canonical rung
+order and one Global Replay V2 completion identity. The reader opens only
+Population V4, admission V1, Execution V2, stored-data completeness V1,
+Selection V4 and Global Replay V2 files. It never consults V1/V2/V3 selection
+or replay bytes as a substitute and never invents an absent identity.
+
+The six fixed rows distinguish four states. `READY` means the current typed
+receipt exists and its exact population/completion/parameter/data IDs and
+exhaustive counts reconcile with its prerequisites. A structurally valid
+Selection V4 receipt is deliberately not enough: its row remains `BLOCKED`
+until `SelectionReceiptV4::verify_against_authorities` replays the complete
+Top-N against live triple authorities using the exact `RankingPolicyV1`.
+Because the current request carries neither that policy nor that replay
+capability, Global Replay is blocked transitively; no default policy is
+invented.
+`UNMEASURED` means the current-format primary file or requested receipt is
+absent. `BLOCKED` means valid bytes cannot complete the comparison because an
+upstream row or the full Top-10=80, Top-25=200, 8×25 topology is not ready.
+`REFUSED` means existing bytes, a generation check or a cross-authority join is
+corrupt, stale, foreign or inconsistent. Every row retains full untruncated
+hexadecimal identities and exact named counts; the deterministic CommonMark
+renderer performs no independent inference.
+
+This read model does not produce any authority and has no non-test CLI, API,
+audit or dashboard caller yet. It does not turn Global Replay V2's declared
+execution-only/no-money/no-VIX scope into a publication claim, prove a real
+stored Zerodha run, measure profitability or finish Step 3. Opening is linear
+in bounded ledger contents and rendering is linear in the fixed authority IDs.
+Population/admission have atomic bounded openers and selection/stored have
+fixed-record ceilings. Execution V2 and Global Replay V2 currently expose no
+public atomic max-byte opener, so the reader metadata-preflights every public
+file before their typed open; a race-free hard scan budget still requires
+`open_read_bounded` on those ledgers. Nine focused comparison tests are green,
+strict CLI library/test Clippy is green, SC-01 pins the state machine and §145
+records the cost and remaining bound.
+
+### D-0461
+
+**Exact institutional family statistics become durable authority only through
+a selection-bound receipt-last ledger, and that authority is post-selection
+audit evidence rather than pre-selection admission evidence.** The V1 value
+row binds one Population V4 identity, receipt-last Selection V4 identity,
+ranking-policy identity, selected-strategy identity, ordered complete
+Romano--Wolf family identity, draws, periods, seed, block length, candidate
+position and canonical rank. It retains the observed statistic and White/SPA
+statistics and probabilities by their original `f64` bits, plus exact
+numerator/denominator pairs for the initial, candidate-adjusted and named
+full-family Romano--Wolf probabilities. The two integer-ppm projections are
+derived from those exact fractions only at the value-row write boundary; they
+are not rounded storage substitutes for the fractions or copied from another
+test.
+
+Two new fixed-stride, sealed files share one write lock. The 400-byte value row
+is appended and synced before the 288-byte completion is appended and synced
+last. Reopen validates every row and completion before indexing. An exact
+committed retry reuses the existing bytes. A crash may leave exactly one valid
+trailing value row, and only its byte-identical retry may append the missing
+completion. A foreign or changed retry under the same subject, duplicate
+subject, reordered/backward completion, second or middle orphan, torn or
+ragged file, bad seal/reserve, over-bound file, or stale length/same-length
+mutation refuses.
+
+The V1 institutional-evidence adapter can project that reopened receipt after
+selection and preserves its exact counts, full-precision bits and canonical
+Romano--Wolf decision. It deliberately cannot authorize the pre-selection
+admission that is required to create Population V4 and Selection V4. Doing so
+would create the cycle admission → Population/Selection → selected statistics
+→ admission. The public admission builder therefore refuses a selection-bound
+durable family receipt and leaves its adjusted-FWER and Romano--Wolf sources
+absent. This is a semantic blocker, not missing orchestration and not a reason
+to add a coordinator fallback.
+
+The global `full_precision_statistics_complete` field remains explicitly
+`Unmeasured`. This narrow receipt contains no complete raw Wilson, PBO or
+risk/ratio authority and cannot truthfully promote them from its White/SPA and
+Romano--Wolf values. Five ledger tests and eleven institutional-evidence tests
+are green, including exact reopen/reuse, orphan completion, corruption,
+duplicate/reorder, stale-handle, identity and authority-cycle attacks; strict
+CLI library/test Clippy is clean. These are controlled fixtures. There is no
+non-test producer, no uncapped real bootstrap family, no real stored sweep and
+no end-to-end Step-3 claim.
+
+Romano--Wolf construction remains O(S·N + S log S + B·N + B·S·N) time and
+O(B·N + B + S) temporary space. Ledger open and stale validation scan bounded
+file history. A fixed record append has constant byte width only after that
+validation; hashing, locking, allocation, `sync_all`, filesystem latency and
+hash-table collision behavior are not worst-case O(1) guarantees. Store-format
+§22, IS-01 and limits §146 preserve these boundaries.
+
+### D-0464
+
+**Step 3 breaks its admission/statistics authority cycle with new
+selection-independent pre-admission authorities; it does not reinterpret an
+existing final format as provisional.** The reviewed production dependency
+graph cannot currently produce one admitted row: Stored Data Completeness V1
+requires the Population V4 receipt whose admission requires data completeness,
+while Institutional Statistics V1 requires the downstream Selection V4 receipt
+whose population already embeds that admission. A coordinator, default digest,
+copied probability or test fixture cannot make either cycle authoritative.
+
+The successor path is therefore append-only and ordered:
+
+1. an uncapped `CandidateUniverseV1` streams every canonical closed-mask,
+   direction and dynamically resolved exit cell through natural frontier
+   extinction, then appends its completion last;
+2. `PreAdmissionDataV1` proves the exact signal, complete one-minute context,
+   evaluated one-minute execution slice, prior-day daily reference, calendar,
+   feed and commit for that universe without naming Population V4;
+3. `PopulationStatisticsV2` covers the complete NIFTY-then-BANKNIFTY candidate
+   pair for exactly one signal rung before ranking or admission, retains the raw
+   period/fold sources and exact Wilson, PBO, White, SPA and Romano--Wolf
+   evidence, and appends its completion last;
+4. a domain-separated final Population-ID V2 capability binds those reopened
+   authorities plus the exact admission, ranking and statistics policies;
+5. final strategy IDs are rekeyed from that Population-ID and the candidate's
+   semantic digest, Population V4 and Admission V1 are written with their real
+   final verdicts, and a `PopulationFinalizationV2` receipt is appended last;
+6. only a reopen that revalidates every source, final row, decision and
+   one-to-one rekey mapping may mint the finalization capability accepted by
+   Execution V2 and Selection V4.
+
+Population V4 remains final, Admission V1 remains its one admission truth, and
+Execution V2, Selection V4 and Global Replay V2 retain their record meanings.
+Legacy Population V4 chains remain readable for audit but cannot satisfy the
+new authoritative production path without a matching Finalization V2
+capability. This avoids a provisional Population V4 whose embedded unmeasured
+admission would contradict a later final verdict and avoids a cascade of
+Population V5, Admission V2, Execution V3, Selection V5 and Replay V3 formats.
+
+The statistical family is the complete uncapped NIFTY plus BANKNIFTY candidate
+pair for one rung, because Selection V4 jointly ranks exactly that pair into
+one per-timeframe Top-25 and exposes Top-10 as its exact prefix. Per-instrument
+correction would undercount the hypotheses competing for that list. The eight
+per-rung families are not relabelled as one cross-rung FWER claim: Global Replay
+V2 consumes eight completed lists but does not re-rank their uncapped source
+families. Any future joint cross-rung statistical selection requires a new
+versioned policy and decision. Operator surfaces must label this limit rather
+than imply global eight-rung FWER.
+
+Only fixed-stride row lookup by validated sequence is worst-case O(1). Hash-map
+lookup is average O(1), not worst-case guaranteed. Universe construction,
+stored-data reconciliation, family statistics, finalization, file validation,
+hashing and durability are input-dependent; Romano--Wolf alone remains
+O(S·N + S log S + B·N + B·S·N). No whole-sweep, whole-file, O(1)-space,
+latency, profit, capacity or completion claim follows from this decision. Until
+all new authorities, production joins and their adversarial tests exist, Step 3
+remains explicitly open.
+
+### D-0465
+
+**White's Reality Check and Hansen's SPA retain exact finite-resample counts in
+new in-memory V1 receipts without changing either legacy procedure.** The
+legacy implementations count a bootstrap maximum that matches or exceeds the
+observed statistic. The successor receipts preserve that exact `>=` rule and
+store `matched_or_exceeded + 1` over `draws + 1`; relabelling the numerator as a
+strict exceedance or changing the comparison to `>` would silently define a
+different procedure on tied statistics.
+
+`WhiteRealityCheckReceiptV1` and `SpaReceiptV1` retain the observed statistic
+and p-value by their original `f64` bits, the exact fraction, draw/candidate/
+period counts, seed, block length and a procedure-separated BLAKE3 digest of
+the complete ordered return family and every resampling input. Their `verdict`
+projection reproduces the existing `Verdict` bit-for-bit. Zero draws, zero
+block, a nonrepresentable `draws + 1`, empty/misaligned inputs or fewer than two
+periods cannot produce the exact receipt. SPA retains its existing conservative
+zero contribution for a zero-variance candidate rather than dropping or
+promoting it.
+
+Four focused exact-receipt tests, all 31 bootstrap tests and strict Runner
+library/test Clippy are green. These receipts are in-memory statistical
+sources, not durable authority, an uncapped production family or a completed
+Step-3 join. Construction remains O(B·N·S) time with input-dependent temporary
+space; only copying a completed fixed field is O(1). No whole-family, latency,
+profit or capacity claim follows.
+
+### D-0466
+
+**The accepted-session calendar identity is computed from the complete
+measured V2 policy; a caller-chosen nonzero digest is not calendar authority.**
+A requested-span `CalendarReceiptV2` proves the offered timestamps for one
+rung and civil span. It cannot also identify the global policy, because its
+digest intentionally changes with rung, bounds and offered bytes.
+
+`calendar_policy_digest_v2` therefore has its own domain and binds the V2
+schema/policy versions, all eight supported signal rungs, the 09:15 IST anchor,
+the measured calendar boundaries and every measured day's exact disposition
+and session windows. The execution-series calendar term and every successor
+pre-admission identity must use this canonical value. Complete signal and
+one-minute receipts remain separate required coverage terms; neither may be
+substituted for the policy identity.
+
+Computing the digest walks the measured calendar in O(D) time and O(1)
+auxiliary space, with at most two windows per day. It is run-boundary
+provenance work, not a sweep inner-loop primitive and not total O(1) work.
+The first focused test is intentionally narrow: it proves deterministic,
+nonzero, domain-separated policy identity and exact agreement between the
+policy's rung list and the V2 coverage contract. The later opaque same-feed
+stored loader must prove that no production source can inject a foreign digest
+before Step 3 can close.
+
+### D-0467
+
+**The existing `runner::pbo` result is frozen as an anchored walk-forward
+bottom-half diagnostic; genuine CSCV/PBO remains absent and unmeasured.** The
+current folds are anchored expanding windows. They are not combinatorially
+symmetric train/test partitions, their out-of-sample windows are not the
+complements of every in-sample partition, and the repository has no stable
+candidate family and split receipt covering that missing design. Reusing the
+historical `Pbo` name does not supply those facts.
+
+The honest successor names exactly what exists:
+`PlacementV1` records one supplied anchored fold and
+`AnchoredWalkForwardBottomHalfRateV1` aggregates those folds. Validation scans
+canonical candidate order and replaces its winner only on strict `>`;
+`place_v1` now uses the same first-maximum rule instead of
+`Iterator::max_by_key`'s last-equal-maximum behavior. An out-of-sample tied
+block retains exact doubled terms
+`(2 * better + tied - 1, 2 * (candidate_count - 1))`. Midpoint
+classification compares those integers directly and never compares a rounded
+parts-per-million projection.
+
+`Placement` and `Pbo` remain compatibility-only public wrappers while current
+CLI callers construct the old two-field record. The wrapper deliberately keeps
+its historical integer midrank projection and is therefore lossy for an even
+tied block. It is rendered as a non-authoritative legacy diagnostic, cannot
+satisfy Population Statistics V2, and cannot be used as evidence that
+overfitting, generalisation or profitability was established. A later
+coordinated CLI migration may consume `PlacementV1`; it may not relabel the
+anchored-fold rate as CSCV/PBO.
+
+Exact placement scans both score vectors in O(C) time and O(1) auxiliary
+space. Aggregating F supplied placements is O(F log F) time and O(F) temporary
+space because the display median is sorted. Genuine CSCV/PBO has no
+implementation or measured complexity in this repository. No O(1) whole-run,
+profit, latency or completion claim follows.
+
+### D-0468
+
+**Candidate Universe V1 is a sealed, receipt-last audit format whose production
+authoring door remains intentionally absent.** Population V4 already embeds an
+admission verdict, so it cannot truthfully be the source from which the evidence
+needed to decide that verdict is derived. Candidate Universe therefore stores
+the earlier facts only: complete closed masks, their support, both directions,
+every dynamic exit coordinate and every raw direct evaluated-cell field.
+
+The universe identity binds the exact feed and source commit; vocabulary and
+evaluation policy; separate long/short grid policy and resolved identities;
+canonical measured-calendar and causal prior-day policies; requested month
+span; complete signal-rung and one-minute calendar receipts; exact signal and
+execution streams; and exact signal/execution columns. Rows and completions use
+new sealed fixed-stride files. Rows are synced before their completion; exact
+retry reuses bytes; only an exact trailing orphan prefix may be completed.
+Canonical row order is validated with constant state, so duplicate or reordered
+coordinates cannot be hidden by an allocation-dependent set.
+
+The current module exposes read-only open, reopened audit and bounded pages. Its
+descriptor constructor, prepared block, writable open and append are private or
+test-only. That is deliberate: a caller-supplied nonzero digest is not source
+authority, and the typed producer that owns the anchored `Column`, streamed
+closed frontier, both complete grids and every reconciliation term does not yet
+exist. Seven focused tests prove the codec, identity terms, ordering,
+receipt-last idempotence, exact orphan continuation, corruption/stale refusal
+and Unix path replacement. They do not prove production construction, real
+stored Zerodha inputs or Step-3 completion.
+
+Open and full validation are O(R+C) for R rows and C completions and retain a
+bounded index. One fixed-stride row seek by validated sequence is worst-case
+O(1) in record count; hash lookup is average O(1), and a page is O(P). Hashing,
+locking, allocation, sync, filesystem latency and universe construction remain
+input/system dependent. No whole-sweep, O(1)-space, latency, capacity,
+profitability or million-customer claim follows.
+
+### D-0469
+
+**A pre-admission stored span names an explicit nonzero cumulative record
+ceiling and refuses before a month that would cross it is allocated or read.**
+The ceiling is carried by `StoredSpanLoadBoundV1`, which has no `Default` and
+refuses zero. For every requested month the loader opens and validates the store
+header, compares its committed record count with the remaining ceiling, and
+only then allocates/reads the month. The assembled vector uses fallible exact
+reserves and checked cumulative arithmetic.
+
+This is a resource-admission bound, not a semantic filter. Crossing it refuses
+the complete request with the named month and counts; it never truncates a
+month, samples bars, shortens the requested span, changes the missing-month law
+or introduces the forbidden sweep-depth parameter. A higher caller ceiling may
+admit a larger real span, but the work remains proportional to the admitted
+months and bars.
+
+For M requested months and B returned bars the operation is O(M+B) time and
+O(M+B) returned state including the requested/missing month ledgers and bar
+vector; header admission is O(1) per month. File open, validation, locking,
+allocation and I/O latency remain system-dependent. Four focused stored tests
+prove pre-allocation refusal, nonzero/no-default construction, strict temporal
+join and corruption refusal. No total O(1), capacity or completion claim
+follows.
+
+### D-0470
+
+**Admission Evidence V1 refuses every measured PBO-named observation; genuine
+CSCV/PBO requires a successor version.** D-0467 proved that the only current
+calculation is an anchored walk-forward bottom-half diagnostic. V1 nevertheless
+retained historical slots named `pbo_ppm`, `pbo_contributing_folds` and
+`pbo_unrankable_folds`. Letting caller-supplied measured values enter those
+slots would have allowed the non-CSCV diagnostic—or entirely invented values—to
+survive canonical encoding and influence admission.
+
+`AdmissionEvidenceV1::new` now refuses any measured state in those three slots
+with the exact field and `UnsupportedMeasuredPboV1`. The canonical decoder
+reuses that constructor, so pre-decision bytes with measured legacy values and
+a decision seal containing them both fail at the nested evidence boundary.
+The existing V1 length, field order, observation tags and record versions are
+unchanged. Historical `Unmeasured` and `Refused` states remain readable and
+auditable.
+
+The consequence is deliberately fail-closed: no publicly constructible or
+reopened V1 evidence can be `Admitted`, because the V1 policy requires the
+three PBO observations and none can truthfully be measured. Positive admission
+or admitted replay fixtures must not regain that state through a production
+bypass. Durable V1 integration tests use truthful unmeasured/refused evidence;
+pure status and matrix algebra may use only test-private, non-durable fixtures.
+A real admissible path waits for Population Statistics V2 to carry a complete
+typed CSCV procedure, split-family receipt and authority identity in a new
+evidence version.
+
+This narrowly supersedes D-0464's statement that Admission V1 could remain the
+final production truth without a version cascade. Its bytes remain readable
+for audit, but they cannot encode genuine CSCV authority and therefore cannot
+close the successor production path. The smallest honest successor version is
+chosen only after Statistics V2 fixes the complete evidence shape; no current
+fixture is allowed to guess that layout early.
+
+The focused Runner admission suite is 32/32 green and strict Runner
+library/test Clippy has zero findings at this checkpoint. Those gates prove the
+V1 refusal boundary only. They do not prove the successor, downstream CLI
+fixture migration, production Step-3 wiring, real stored data, profitability or
+the complete workspace gates.
+
+### D-0471
+
+**Pre-Admission Data V1 is a sealed, receipt-last audit ledger over measured
+source streams; D-0475 is its only public production authoring door.** The
+format binds one completed
+Candidate universe to exact signal bars, the complete stored one-minute
+context, the evaluated contiguous one-minute subslice, causal prior-day daily
+records and eligibility, both complete requested-span calendars, feed/commit
+and policy identities, and three explicit nonzero stored-load ceilings.
+
+The source join is private and accepts actual bars plus typed Candidate and
+calendar capabilities. It compares the execution slice with the claimed range
+of the minute context, recomputes ordered data identities and full-span calendar
+receipts, and refuses every foreign term. A public digest-only constructor
+would let a caller state the property being proved, so none exists. D-0475 now
+owns that typed producer and freshly reopens its exact Candidate and
+Pre-Admission pair; independently opened bytes remain structural audit rather
+than proof that the stored-origin transaction produced them.
+
+One 740-byte Data record is synced before its adjacent semantic Completion is
+synced. A crash may leave exactly one trailing Data record; only a byte-exact
+retry may finish it. Open uses explicit nonzero row/file ceilings, checked
+offset arithmetic, fallible allocation, full seals and generation checks that
+remain unchanged through the scan. Append reserves index capacity before any
+new bytes. Public access is bounded open, exact lookup and pages only.
+
+The focused suite is 8/8 green. This proves codec identity, measured contiguous
+source binding, receipt-last durability/idempotence, exact orphan continuation,
+corruption/foreign/stale/bound and Unix path-replacement refusal. It does not
+prove Population Statistics V2 observation production, finalization,
+real stored Zerodha input, complete gates, O(1) total work or profitability.
+
+**Post-D-0475 removable-root hardening:** the writable Pre-Admission ledger now
+requires its configured root to exist and to be a directory before it opens any
+child. It never calls `create_dir_all` for that authority root. A missing or
+non-directory root refuses, and the missing-root regression proves the path
+remains absent. This closes the direct Pre-Admission form of D-0473's
+"manufacture the vanished mount path" failure. It does not turn the pathname
+into a held directory capability, identify the physical device, or prove that
+the volume cannot disappear after admission; those remain the explicit D-0473
+limits.
+
+### D-0472
+
+**Population Statistics V2 is a sealed, receipt-last audit ledger whose
+statistics recompute from retained rows; its public writer accepts only an
+opaque prepared capability whose production constructor remains closed.** One
+paired family covers exactly one signal rung in canonical
+NIFTY-then-BANKNIFTY candidate order. It retains every aligned period return,
+every canonical complementary-half split score, exact Wilson inputs,
+split-count-derived CSCV/PBO, exact White and SPA receipts and
+candidate-specific Romano--Wolf evidence. Open does not trust those summaries:
+it recomputes candidate order and totals, period and split digests, CSCV
+placement/counts and the bootstrap family before accepting a receipt.
+
+The identity binds both exact Pre-Admission authorities, requested span, rung,
+horizon, feed, source commit, calendar and prior-day policies, candidate/period/
+split ordering and every resampling input. Data and raw rows are synced before
+the semantic Completion is synced last. A valid trailing prefix is recoverable
+only by a byte-identical retry; foreign retry, reordered or duplicate rows,
+ragged/corrupt bytes, resource-bound breach and stale same-length mutation
+refuse.
+
+This format does not yet make the statistics production authority. Its raw
+candidate/period/split source and the only constructor of the opaque prepared
+block are test-private because no production component currently derives the
+aligned return periods and complementary split scores from the typed Candidate
+and Pre-Admission chain. A caller-supplied split score is not proof of how that
+score was obtained. The public durability seam can append and freshly reopen
+only that opaque capability; the remaining public surface opens, recomputes,
+verifies the Pre-Admission pair and pages already-written bytes. A successor
+admission format may consume this evidence only after a production writer owns
+that derivation; it may not expose a digest-only constructor or treat the test
+fixture as authority.
+
+The focused suite is 8/8 green at this checkpoint. It proves exact byte and
+statistical recomputation, paired identity, ordering, receipt-last retry,
+corruption/stale/bound/root refusal, opaque prepared-capability durability and
+bounded lookup/page behavior. It does not
+prove the missing production statistics source, finalization, successor
+admission, real stored Zerodha data, workspace gates, wall-clock capacity,
+future profitability or total O(1) work.
+
+### D-0473
+
+**A configured store root is an existing capability, never startup or recovery
+scratch; Phase 1 refuses an absent or non-directory root at the API and CLI
+process boundaries without claiming removable-volume identity.** Two API paths
+used to call `create_dir_all` on the configured store root. With a dangling link
+into `/Volumes/...`, that can manufacture the absent mount-point hierarchy on
+the internal filesystem and let one append-only history continue as a second
+empty store under the same spelling. A third API path classified every missing
+vendor manifest as `Absent`; when the ROOT itself had disappeared, that turned
+one systems failure into the plausible statement "fresh empty store". The CLI
+binary also installed its telemetry sink before proving that its configured
+store still existed.
+
+The server now takes its one-process lock only after `metadata` proves that the
+configured root already exists and is a directory. It then requires
+`canonicalize` to resolve that existing physical path; a canonicalization
+failure is a refusal, not the old path spelling used as a fallback identity.
+The lock file is opened under that canonical target, and the serving `Site`
+receives the same target from its still-live `ServeLock`; retargeting the
+configured symlink after admission therefore cannot move either to another
+directory while leaving the original lock held.
+The autopilot's recovery probe applies the same existing-directory premise
+before creating its bounded probe file, syncing it and removing it. The API
+census admits the shared root before reading a vendor manifest: a missing or
+non-directory root becomes `Census::Unreadable` for every member of the fixed
+`Vendor::ALL`, while an absent manifest beneath an existing admitted root keeps
+its legitimate `Census::Absent` meaning. None of these API paths creates the
+configured root.
+
+The CLI now resolves the configured path and passes it through
+`preflight_store_root` before `install_log` and before command dispatch. That
+preflight requires canonicalization and directory metadata and has no create or
+alternate-root arm. A missing root therefore leaves both the configured store
+path and the proposed log directory absent in the binary regression. The
+canonical path is an admission result, not a durable capability: `main` does
+not hold a directory handle across later writers, and library entry points can
+be called without entering the binary at all.
+
+Two downstream writable library boundaries now enforce the same narrow root
+premise independently. `SelectionLedgerV4::open` and
+`ExecutionDispositionLedgerV2::open` first require their configured authority
+root to exist and to be a directory, then create only the direct `results`
+child with single-level `create_dir`. Neither production path recursively
+creates the configured root or a vanished `/Volumes/...` hierarchy. Each
+focused regression drives both an absent root and a regular file at that
+spelling, requires a refusal and proves the fixture was not replaced. This
+closes those two direct-writer instances; it does not make their pathname a
+held volume capability or close the check/use race.
+
+This **supersedes the pathname-only recovery permission** in D-0108 and
+D-0124, narrowly and explicitly. D-0108's successful few-byte write is not
+permission to recreate a missing root, and D-0124's explicit `BRUTEX_STORE`
+path selects configuration but does not prove which filesystem currently owns
+that spelling. Their other decisions remain: the store probe is bounded and
+durable, and missing configuration still refuses rather than choosing `.`.
+
+The implementation remains only the first half of that supersession. An
+already-running autopilot still applies D-0108's bounded schedule and can clear
+a store halt when a later path probe succeeds. Without the identity capability
+below, that success proves writability of the path then present, not return of
+the expected volume. The finding therefore stays `IN PROGRESS`; this entry does
+not relabel the still-pathname-only recovery as complete.
+
+The word *Phase 1* is load-bearing. An already-existing wrong directory, a
+different volume mounted under the same name, or a path swapped after the
+check can still pass this boundary. No sealed sentinel, expected device/volume
+identity, continuous mount monitor, free-space reserve, encryption check or
+all-entry-point storage capability is implemented here. The CLI process and
+three API boundaries now share the refusal premise but not one held directory
+capability, and direct library writers do not inherit the CLI binary's
+preflight. Those are the open capability phase recorded in
+`docs/11-findings.md`, not properties silently attributed to this patch.
+
+The focused green assertions are
+`api::autopilot::tests::the_write_probe_measures_the_disk_and_leaves_nothing_behind`,
+`api::server::tests::a_missing_store_root_is_refused_without_manufacturing_a_replacement`,
+`api::server::tests::a_retargeted_store_symlink_cannot_move_the_admitted_server_lock`,
+`api::census::tests::a_missing_or_non_directory_root_is_loud_and_never_manufactured`,
+the four CLI unit cases `the_store_root_prefers_the_override_and_refuses_when_it_has_neither`,
+`a_missing_store_root_is_not_created_or_replaced`,
+`a_regular_file_cannot_be_used_as_the_store_root` and
+`an_existing_store_directory_is_returned_canonically`, plus the binary case
+`a_missing_store_refuses_before_logging_or_dispatch`, plus
+`cli::selection_v4::tests::writable_ledger_refuses_missing_or_nondirectory_root_without_recreation`
+and
+`cli::execution_disposition_v2::tests::writable_ledger_refuses_missing_or_nondirectory_root_without_recreation`.
+They prove that an absent
+configured root stays absent, a regular file cannot become a store root, a root
+outage cannot masquerade as all-absent vendor manifests, and the CLI's initial
+refusal precedes its log sink and dispatcher. The two downstream ledgers also
+cannot recursively manufacture a missing authority root. These tests do not
+simulate physical unplug during I/O, prove volume identity, cover every other
+direct writer, or close
+the metadata/canonicalization/use race.
+
+### D-0474
+
+**Population Statistics V2 exposes durability without exposing a way to invent
+statistics.** The writer boundary now accepts only an opaque
+`PreparedPopulationStatisticsV2`. It appends and syncs the Data manifest,
+candidate rows, aligned-period rows and complementary-split rows before it
+appends and syncs Completion; then it drops the writable ledger, opens a fresh
+read-only ledger and requires the exact recomputed audit to be present. Exact
+existing bytes return `Reused`; a new block returns `Written`. A missing or
+non-directory configured root refuses and is never manufactured.
+
+This is deliberately not a production statistics constructor. Every raw
+candidate, period and split type, the source pair, and the only prepared-block
+constructor remain private under `#[cfg(test)]`. Consequently no production
+caller can state a candidate semantic digest, period return/trade/win count,
+train/test mask or score, bootstrap summary or p-value determinant and then ask
+the ledger to bless it. The public writer is callable only after a future typed
+producer returns the opaque capability; until then it is a tested persistence
+seam rather than real-market authority.
+
+The focused suite is **8/8 green**. The two new cases prove fresh read-only
+reopen with exact Written/Reuse state and absence/non-directory root refusal;
+the original six continue to prove recomputation, ordering, exact orphan retry,
+corruption, reseal, explicit bounds and stale same-length refusal. This entry
+does not define the still-missing IST observation period, CSCV segment count or
+score policy, does not authorize Admission V1, and does not establish a stored
+Zerodha run, Step-3 closure, final gates, profitability, latency or total O(1)
+work.
+
+### D-0475
+
+**The public stored Candidate-to-Pre-Admission door owns every source-authority
+term and refuses an unstamped build before opening market data.** The request to
+`commit_stored_candidate_pre_admission_v1` names only an existing store root,
+feed, one of the two sweepable underlyings, canonical signal rung, inclusive
+month span, naturally-extinct sweeper, explicit indicator/outcome policies,
+complete long/short exit-grid policies and independent nonzero resource
+ceilings. It accepts no bars, digest, calendar receipt, commit string,
+pre-resolved grid, depth, fallback or truncated prefix.
+
+The implementation first obtains the canonical compiler-embedded clean commit
+stamp. A dirty or unstamped binary refuses before a store read. Signal bars are
+loaded through the bounded span door; one-day and exact-minute warm-up streams
+use new bounded typed doors that route through the same private converters as
+their existing unbounded counterparts. Their month headers enforce the
+cumulative ceiling before record allocation. The transaction then derives
+complete signal and execution calendars, cuts the exact requested IST
+one-minute subspan, constructs one `ExecutionSeriesV1`, resolves distinct
+attested long and short grids, mints the crate-private Candidate source,
+produces and receipt-last commits Candidate, derives and receipt-last commits
+Pre-Admission, and finally requires equality of the reopened universe ID,
+Candidate completion digest and row count. Only those immutable identities and
+the reopened Pre-Admission authority ID escape.
+
+This does not claim an observed real-store success on the current dirty tree:
+the clean-stamp refusal intentionally prevents one. The four focused
+orchestrator tests prove exact reopened joins, foreign-term refusal, exact
+requested-day subspan selection and canonical rung conversion; the bounded
+typed-loader regression proves daily and minute headers refuse before crossing
+their remaining ceilings. `cargo check -p cli --lib --locked`, formatting and
+diff checks are green at this checkpoint. Complete strict CLI Clippy remains
+open in sibling production modules.
+
+The store still carries `ReferenceIntegrity::UnverifiedNoReceipt` for daily and
+minute vendor integrity, exactly as the existing stored-data authority records;
+this door does not invent a checksum receipt. It also does not derive aligned
+trade-period observations, construct Statistics V2, finalize Population or
+admission, reconstruct Selection/Execution, produce Global Replay, prove a
+physical removable-volume identity, close path/hot-unplug races, establish
+profitability or make the input-dependent transaction O(1). Those remain named
+downstream or storage-capability gaps rather than properties inferred from this
+boundary.
+
+**Post-checkpoint adversarial correction:** D-0475 was not closed at that
+checkpoint. The first audit found that the reused daily converter classified every
+row outside the charter's short exceptional-date list as eligible, rather than
+requiring the canonical NSE session classification. The exact-minute converter
+selected the latest prior non-exception day and required only three rows, not
+the true terminal-minute geometry. A stray closed-day daily row or three early
+prior-session minutes could therefore change prior-day/CPR/GapFib inputs without
+refusal. The converter also used three infallible transformed-vector
+allocations after bounded raw admission. Canonical `kind_of` session binding,
+exact terminal-minute validation, fallible reservation and the corresponding
+closed-day/truncated-session attacks are required before SO-01/SO-02 and this
+door return to green. The root/path/hot-unplug race remains the separately
+documented D-0473/§155 capability gap.
+
+**Adversarial correction completed:** the daily path now classifies every stored
+row and every unique signal day through canonical `pull::calendar::kind_of`.
+Closed/unmeasured stray rows refuse; an explicitly named non-regular open day
+may emit real signal bars but remains excluded as a previous-day anchor. The
+minute path walks backward to the latest canonical accepted session, validates
+every row against its measured window and requires the observed final three to
+equal that session's exact terminal-minute geometry. Sunday, weekday-closed,
+single closed signal-day and three-early-minute attacks all refuse. The three
+daily output vectors use fallible, named `try_reserve_exact` operations. The
+focused stored suite is **51/51 green**; CLI library check, file formatting and
+diff checks are green. A final whole-CLI strict-Clippy receipt is currently
+blocked by an actively edited sibling observation module, not by an owned
+`stored.rs` diagnostic. No clean-build real-store success, physical device
+identity, downstream observation/finalization or complete gate is inferred.
+
+### D-0476
+
+**Candidate V1 owns the exact IST-session observation family and persists a
+receipt-last companion authority without changing Population Statistics V2
+bytes.** One observation period is created for every ordered IST civil session
+that contains at least one bar accepted by the exact Candidate execution
+column. Every candidate retains every such period, including an explicit zero
+period when no trade exits. A trade is attributed to its exit session, its
+return is the checked sum of exact `TradeRow::worst`, and a win is exactly
+`worst > 0`. Foreign indices/timestamps, a cross-IST-day trade, duplicate
+candidate semantics, overflow, or any disagreement with the evaluated
+`Cell`'s trades/wins/pessimistic total refuses the complete family.
+
+NIFTY is paired before BANKNIFTY only when both sealed Candidate sources have
+the same ordered accepted-session sequence and the same rung, horizon, span,
+feed, source commit, vocabulary, evaluation, calendar and daily-reference
+policies. CSCV layout version one accepts no caller segment count and has no
+default: it selects the largest even divisor of the complete period count in
+`2..=16`. Failure to find one refuses. Every period is retained in equal,
+contiguous blocks. Canonical complementary halves keep bit zero in the test
+side, enumerate train masks in ascending Gosper order, and number exactly
+`C(S-1,S/2)` splits; train/test scores are checked sums of the sealed period
+returns. The versioned identity also names the Statistics V2 first-strict-max
+tie rule. No resource pressure may silently choose another scientific layout,
+truncate periods, pad a block or introduce sweep depth.
+
+The companion file stores authority, source, observation/layout policy,
+family, accepted-session, ordered-period and ordered-score identities plus
+exact counts. It does **not** store the raw period or split rows and it does not
+alter Statistics V2's format. Data is synced first and Completion is synced
+last; an exact trailing Data may receive only its matching Completion. The
+writer drops, freshly opens read-only, and the opaque pair recomputes the exact
+Data and Completion audit before success. Missing/non-directory roots,
+foreign orphan, corrupt/ragged/duplicate/stale bytes, explicit-bound breach and
+replacement of the open lock or data path refuse.
+
+The focused observation suite is **7/7 green** and Candidate integration is
+**10/10 green** at this checkpoint. These prove the typed Candidate observation
+producer and companion authority, not the still-missing Statistics V2
+production constructor, Finalization V2, successor admission, all-rung stored
+caller, real Zerodha run, profitability, capacity or complete Step 3. The
+existing-root and open-file generation checks are pathname/inode evidence, not
+a sealed physical-volume identity or a guarantee against hot unplug; D-0473
+and limits §155 remain fully applicable.
+
+### D-0477
+
+**Admission Evidence V2 keeps anchored walk-forward evidence as a separate
+typed authority; accepted IST sessions and overlapping CSCV halves may never
+be relabelled as decided out-of-sample folds.** Admission V1's
+`decided_folds`, `profitable_oos_folds` and aggregate out-of-sample return are
+defined by the anchored walk-forward path: a fold is decided only when its
+validated choice is present, profitability is the strict positive result of
+that chosen fold's exact out-of-sample exit, and the aggregate is the checked
+sum over those same complete chosen outcomes. Population Statistics V2 stores
+complete accepted-session periods, including explicit zero/no-trade sessions,
+and overlapping complementary CSCV halves. It stores neither the anchored
+choice bit nor one disjoint out-of-sample partition. Substituting its period or
+split counts would therefore change the denominator or count the same period
+through multiple halves while retaining the old field names.
+
+The successor must join two independent reopened authorities. Statistics V2
+supplies CSCV/PBO, White, SPA, Wilson and Romano--Wolf evidence. A typed
+walk-forward authority supplies the decided/profitable/aggregate-OOS fields
+without accepting caller-authored counts, sums or digests. Generic FWER keeps
+the existing D-0460 meaning: the Romano--Wolf complete-family
+maximum/intersection adjusted probability; the candidate Romano--Wolf field
+keeps that candidate's adjusted probability. Admission V2 may evaluate only
+after both authorities bind the exact Candidate semantic identity, source
+policies and finalization family. Neither authority may fill a missing field
+from the other.
+
+The alternatives are explicitly rejected. Renaming the three V1 fields to
+session statistics would silently change the admission policy, and removing
+them would weaken it. Zero-return accepted sessions remain part of the CSCV
+family under D-0476; they do not become decided anchored folds merely by
+existing. Admission V1 bytes and Population Statistics V2 bytes remain
+unchanged. This entry locks semantics only: the typed walk-forward authority,
+Admission Evidence/Decision V2 codec, persistence and finalization join remain
+implementation work and cannot be reported green from this decision.
+
+### D-0478
+
+**Anchored walk-forward V2 is population/search-validation authority, not
+candidate-specific evidence; this supersedes only D-0477's candidate-identity
+binding sentence.** A fresh source audit established that one
+`validate::Validated` contains folds whose winners are chosen independently.
+The chosen mask, direction and exit coordinate may therefore differ from one
+fold to the next. By contrast, one Candidate Universe semantic digest names one
+exact `(mask, direction, exit coordinate)` row. Copying that row's digest into
+an authority derived from the multi-winner fold set would create a matching
+hash over a false semantic statement: the hash would prove only that the copied
+bytes were copied consistently.
+
+The successor authority must instead bind the exact Candidate Universe/search
+identity, ranking/validation policy, source-policy aggregate and complete
+finalization family. Its decided, profitable and aggregate-OOS fields retain
+their existing Admission V1 meaning: shared diagnostics of the anchored search
+and its independently chosen fold winners. Candidate-specific Statistics V2
+remains separately bound to one exact Candidate semantic. Admission V2 may join
+the two only when their explicit universe, ranking, source and family terms
+match freshly reopened CLI authorities; it must not claim that the shared
+walk-forward values describe the candidate row itself. Two candidates in one
+exact family may therefore share this search-level authority, while a foreign
+universe, ranking policy, source or family refuses.
+
+A genuinely candidate-specific fold-OOS admission test is a different
+procedure. It would need a new evaluator and versioned receipt that fixes one
+candidate's mask, side and exit coordinate before every fold and then applies
+that unchanged candidate out of sample. Existing `Validated` cannot supply that
+proof, and neither its score arrays nor its per-fold winners may be re-labelled
+to do so. That extension is not inferred into Step 3.
+
+The same audit fixes the exact 5% decision boundary. The existing canonical
+finite-resample API rejects when `p <= alpha`; Admission V2 must reproduce that
+integer cross-multiplication rule. A strict `<` would make an exact `1/20`
+probability pass the numeric maximum-p threshold but fail the required-rejection
+decision, producing two verdicts from the same evidence. Exact-equality and
+just-below/just-above regression tests are required. These corrections do not
+make Admission V2 durable: codec, persistence, fresh cross-crate reopen,
+Finalization V2 and the all-rung production join remain separate gates.
+
+### D-0479
+
+**Runner Admission V2 is a detached arithmetic verifier; only CLI Finalization
+V2 may promote its output into durable admission authority.** Runner cannot
+depend on `cli`, so a Runner type cannot prove that Candidate, Pre-Admission,
+Observation or Statistics bytes were freshly reopened from the configured
+store. A public constructor accepting caller-authored digests would merely
+check that invented values agree with one another. Domain separation and a
+self-recomputing hash do not turn those values into external provenance.
+
+Runner may therefore expose one public, explicitly non-authoritative projection
+operation. It validates the exact Statistics fractions and denominators,
+recomputes Wilson from trades and wins, derives the anchored search diagnostics,
+checks D-0478's four shared terms and applies the immutable admission policy.
+The result is arithmetic evidence and a recomputable verdict, not a seal,
+receipt, database row or production capability. Raw V2 evidence joins,
+decision construction and decision decoding remain private implementation
+details; no production consumer may accept detached projection bytes as an
+admitted strategy.
+
+The authority boundary lives in `cli`. Finalization V2 must start from freshly
+reopened, opaque Candidate/Pre-Admission, Observation, Statistics and anchored
+search lineage; compare the exact audit, receipt-last completion, ordered-family,
+feed, instrument, rung, span, data, vocabulary, commit, ranking and source-policy
+identities; call Runner's arithmetic projection; append its own versioned data
+and Completion receipt; drop the writer; and independently reopen the exact
+record before returning an opaque finalized admission capability. Population,
+Execution, Selection, API, audit and dashboard production paths may consume
+only that capability or its freshly reopened receipt. They may not reconstruct
+authority from display fields, detached digests or a Runner verdict.
+
+This boundary does not claim that Finalization V2, its ledger, downstream V2
+adapters or the all-rung stored caller already exist. It fixes which layer must
+own them and keeps the current work honestly blocked until their receipt-last
+implementation and semantic-reseal attacks are green.
+
+### D-0480
+
+**The production Observation-to-Statistics V2 bridge consumes and retains the
+two opaque stored Candidate/Pre-Admission transactions; reopened identities or
+caller-authored statistics are not a substitute.** NIFTY and BANKNIFTY must
+come from the same held canonical source directory identity and arrive in that
+order. The bridge admits two already-existing output roots, derives the paired
+observations from the retained source capabilities, appends and freshly reopens
+the Observation authority, derives Statistics V2 from that exact audit and the
+two reopened Pre-Admission audits, appends and freshly reopens Statistics, and
+rechecks every Observation/Statistics and per-family source join before an
+opaque result can escape.
+
+Pre-Admission's physical append sequence is deliberately not part of semantic
+equality. The first family occupies sequence zero and the second sequence one;
+requiring whole-struct equality made a valid shared ledger reject its second
+family. The corrected comparison enumerates every semantic accessor and
+excludes only that physical sequence, matching the lower ledger's canonical
+`same_semantics` rule and authority-id formula. No other field is omitted.
+
+A deterministic temporary-disk fixture now drives the real `BarFile`, stored
+load, Candidate, Pre-Admission, Observation and Statistics code paths for both
+families, then repeats the transaction and requires the same reopened audits,
+projections and byte-identical Observation/Statistics directories. It uses
+synthetic bars and a test-only verified build stamp; it is architectural and
+idempotence proof, not real-market evidence. The orchestrator suite is **14/14
+green**, the lower Observation suite **7/7**, the lower Statistics suite
+**17/17**, and strict CLI library/test Clippy and formatting are green at this
+checkpoint. Finalization, Admission V2, the all-rung caller and the real stored
+Zerodha run remain open.
+
+### D-0481
+
+**An anchored Admission V2 projection refuses a chosen fold without that exact
+choice's pessimistic out-of-sample exit and refuses any retained candidate
+family shorter than the fold's priced count.** `Validated::decided()` counts a
+fold when it chose a candidate, regardless of whether its optional legacy OOS
+field exists. Silently omitting that fold from V2's decided count changed the
+denominator and also made the profitable classification and aggregate OOS sum
+look measured. V2 now requires the exact chosen OOS value; absence is the typed
+`IncompleteChosenOos` refusal, never an invented zero.
+
+Likewise, equality among the retained score, OOS and visible score-vector
+lengths proves only internal alignment. It does not prove that every priced
+candidate survived capture. V2 additionally requires the retained scored
+length to equal `priced`, so a two-priced/one-retained fold refuses even when
+all one-row vectors agree. The focused Admission V2 suite is **6/6**, the
+validate suite **25/25**, the complete Runner library **472/472**, and strict
+Runner library/test Clippy and formatting are green at this checkpoint. This
+hardens Runner arithmetic provenance; it does not itself create durable CLI
+Admission authority.
+
+### D-0482
+
+**The anchored Admission V2 production door treats zero resolved exit-grid
+rungs as malformed policy, and cross-crate callers receive only a revalidated
+opaque search projection.** Legacy validation doors retain their historical
+zero-to-default behaviour for compatibility. The V2 door does not: the resolved
+rung count is an identity term supplied by the runtime policy owner, so silently
+substituting the legacy default would authenticate a policy the caller did not
+name. Zero now refuses before a column builder or search can run and is checked
+again in capture and semantic reconciliation.
+
+The public projection is not durable Admission authority. It is
+non-constructible, non-`Debug`, has no decoder, raw-fold accessor or
+chosen-ordinal accessor, and can be returned only after the opaque validation
+object reproduces every private policy, family, ordinal and walk seal. Three
+private-field typed newtypes expose policy, family and walk identities for exact
+equality joins; narrow accessors expose only fold, decided, profitable and
+aggregate-OOS facts. Chosen ordinals remain bound transitively inside the
+private seals. Runner's detached Admission arithmetic consumes this same
+projection rather than reaching around it.
+
+Focused zero/seal/ordinal tests are **3/3**, the complete Runner library is
+**474/474**, Runner compile-fail doctests are **3/3**, and strict Runner
+library/test Clippy and formatting are green at this checkpoint. The projection
+contains no feed, store, Candidate, Observation, Statistics or Finalization
+receipt. A CLI durable paired search-lineage authority and Admission V2 ledger
+remain required.
+
+### D-0483
+
+**Population Admission V2 is a separate bounded receipt-last sidecar whose
+public reopen proves structure only; production admission still requires an
+opaque constructor and Finalization V2 join that do not yet exist.** It does not
+reinterpret Admission V1 or contain final Population, strategy, Selection,
+Admission V1 or Finalization identities. Each decision occupies exactly 2,048
+bytes and each Completion exactly 4,096 bytes. The embedded Runner decision and
+policy widths are compile-time aliases of Runner's canonical constants rather
+than duplicated numbers, so an upstream width change cannot silently shift the
+CLI codec.
+
+Every caller must provide five explicit nonzero ceilings: total decision
+records, decision-file bytes, Completion records, Completion-file bytes and
+decisions per block. There is no `Default`; byte ceilings must hold their stated
+record ceilings and the per-block ceiling cannot exceed the total. One semantic
+block is NIFTY first and BANKNIFTY second, with contiguous global and per-family
+sequences. Its identity binds the exact rung, horizon, requested span, feed,
+source commit, calendar, daily, vocabulary, evaluation, exit-grid, ranking,
+admission-source and stored-source policies, both family authorities,
+Observation, Statistics, anchored search lineage, exact policy bytes and all
+cardinalities. Instrument-bearing NIFTY/BANKNIFTY authorities may not alias;
+content-addressed shared policies may. Each decision identity also binds its
+terminal status. Swapping statuses while preserving aggregate status counts
+therefore changes the ordered-decision digest and Completion identity rather
+than producing an equivalent receipt.
+
+The public ledger can only boundedly reopen and return a structural receipt.
+`PreparedPopulationAdmissionV2`, its fields, the authenticated authority and
+the Written/Reused production commit are crate-private; the prepared type has
+no `Debug` and currently has no production constructor. Promotion rereads the
+exact indexed decisions and Completion after a fresh reopen and compares them
+byte-for-byte with that opaque preparation. Data decisions are synced first,
+Completion is synced second and the directory is synced last. Exact committed
+reuse reissues both file barriers and the directory barrier. A complete trailing
+decision block without Completion is recoverable only by the byte-identical
+retry, which repeats that order. A proper subset of a block is deliberately not
+resumed because no authenticated source can prove the missing suffix; the next
+write refuses without truncating, rewriting or silently discarding it.
+
+This durability is deliberately not called O(1). Open, append, retry, exact
+reuse and promotion validate bounded full files and cost O(total ledger bytes +
+total records + block decisions). Repeating cumulative appends can therefore
+be quadratic in final ledger size. The in-memory block lookup is only average
+O(1) after that O(file) validation and retains O(Completion records + trailing
+block) state. The focused component is **14/14 green**, including codecs,
+identity/status rekeys, explicit bounds, exact reuse, ordered durability
+barriers, full-orphan retry, partial-prefix refusal, corrupt/resealed/reordered
+attacks and stale/path-replacement refusal. Those tests prove the component,
+not a production Admission result: the typed constructor from freshly reopened
+Candidate/Pre-Admission/Observation/Statistics/search/BaseEvidence authorities,
+Finalization V2, all-rung caller and real stored sweep remain open.
+
+### D-0484
+
+**Anchored Search V3 removes the false family-level direction and authenticates
+candidate-local TRAINING-edge side selection without reinterpreting Admission
+V2.** The V2 public constructor and its policy identity remain compatibility
+surfaces: they still accept and bind the historical requested direction. V3 is
+a distinct opaque result, domain set and typed projection. Its public
+constructor has no direction argument and its policy has no requested-direction
+field.
+
+The V3 rule is exact and versioned: each candidate reads only its own TRAINING
+mean forward edge; a strictly negative value selects Short and every
+non-negative value, including positive zero and negative zero, selects Long.
+That candidate side travels unchanged into its test window and is committed in
+the ordered candidate-family and walk identities. A fold with no winning
+candidate carries `chosen = None` and `chosen_side = None`; it cannot inherit a
+caller fallback because the shared core no longer has such a fallback value.
+
+V3 exposes only non-constructible, non-`Debug` typed policy, ordered-family and
+walk identities plus fold/decision/profit/aggregate counts after full private
+reconciliation. It is detached in-memory Runner evidence, not a durable search,
+Candidate, Statistics, Base-Evidence, Admission, Finalization or execution
+authority. It has no codec or persistence API, performs the existing complete
+fold/candidate scans, and makes no O(1) whole-run or durability claim. A later
+CLI receipt must bind these identities to freshly reopened lineage before any
+production promotion.
+
+### D-0485
+
+**Population Admission V3 and Population Finalization V3 are append-only
+successors that preserve genuine measured institutional evidence; neither may
+be projected into Admission V1 or called a final Population authority.**
+Admission V3 binds the exact NIFTY-first/BANKNIFTY Candidate, Base Evidence,
+Observation, Statistics, anchored Search V4, policy and canonical Runner V3
+decision bytes into one bounded decision block. Decisions are synced before
+their Completion, then the exact opaque preparation is freshly reopened and
+authenticated. Finalization V3 consumes only that nonconstructible Admission
+authority, copies no caller-authored identity, writes its ordered projection
+rows before its Completion and freshly reopens the exact result.
+
+The production preparation door authenticates the complete Statistics family
+once and then joins each already-open Base fixed-offset row in canonical global
+order. It must not perform one whole Statistics-ledger validation per
+Candidate. Finalization likewise uses Admission's ordered bulk projection under
+one generation-validation pair. The resulting work is
+O(Statistics-file-bytes + Candidate-count) for the Admission input join and
+O(Admission-file-bytes + Candidate-count) for Finalization preparation, before
+filesystem-dependent persistence. Those are linear whole-family operations,
+not O(1) end-to-end latency or space.
+
+The focused Admission V3 suite is **10/10**, Finalization V3 is **9/9**, the
+retained Step-3 orchestrator is **14/14**, and strict CLI library/test Clippy is
+green at this checkpoint. These proofs stop at Finalization. Its rows retain
+Candidate-row digests and V3 lineage/status but do not yet retain an
+authenticated Candidate-row-byte capability. A new append-only Population
+successor must exact-join those bytes before Execution, Selection or Global
+Replay successors can exist. Reinterpreting the legacy Population V4,
+Admission V1, Execution V2, Selection V4 or Global Replay V2 formats is
+forbidden; their versioned semantics remain unchanged.
+
+### D-0486
+
+**Browser-binding packages may remain as lock-only, target-gated entries, but
+none may be reachable from the current host workspace dependency graph.** Gate
+13 remains the deliberately toolchain-free manifest/lock name audit. The Rust
+`build` job now adds a separate host-graph gate after toolchain setup and the
+locked fetch but before compilation. It runs `cargo tree --workspace --locked
+-i` independently for `wasm-bindgen`, `js-sys` and `web-sys` and fails if any
+inverse tree is present.
+
+This distinction is intentional. `Cargo.lock` records packages for target-
+gated dependency paths, so rejecting their mere lockfile presence would require
+a count allowlist that could stay unchanged when one of those packages later
+became host-reachable. Conversely, a host inverse-dependency path means a Rust
+crate's build, test or run graph has acquired a browser-language binding and
+violates the engine boundary. The new gate changes no dependency, broadens no
+allowlist and makes no claim about packages under names it does not inspect.
+
+### D-0488
+
+**Pre-Admission Data V2 is an append-only zero-family successor; it never
+reinterprets or relaxes Pre-Admission Data V1.** V1 retains its exact magic,
+version, domains, filenames, 740-byte records and nonzero Candidate-row guard.
+V2 uses independent magic, version, domains, filenames and 812-byte records.
+Its public value has no public constructor, and its production preparation
+accepts only an opaque produced Candidate Universe V1 plus that value's exact
+production commit. It copies the authenticated Candidate Completion
+reconciliation rather than accepting a caller-authored zero marker or proof.
+
+A V2 zero-row family is valid only when that exact Candidate reconciliation
+simultaneously proves natural extinction, complete closure, a nonzero
+extinction depth, zero unknown-closure rows and exact zero-row arithmetic. Every
+Candidate family/universe/completion, requested-span, feed/source-commit,
+stream, calendar, policy and load-bound term remains identity-bearing. Bare
+zero, deletion of any proof term, semantic resealing, torn/ragged/corrupt
+history, a foreign orphan retry, same-length mutation, stale handles and
+lock/data path replacement refuse. Data is synchronized before its adjacent
+Completion receipt; exact committed reuse and the one exact tail-orphan retry
+preserve byte identity.
+
+This decision closes only the first zero-family storage seam. No Observation,
+Statistics, Admission, Population, Execution, Selection or Replay successor is
+created or implied. Opening, generation hashing, validation, append, retry and
+fresh reopen scan bounded ledger bytes and retain an index, so they are not
+whole-operation O(1). Fixed-stride addressing is worst-case O(1) in record
+count after admission and identity-map lookup is average O(1); allocation,
+locking, synchronization and device latency remain unbounded by this format.
+
+### D-0487
+
+**The one-rung Population V5-to-Execution V3 production seam retains and
+reauthenticates its live source; it does not accept a detached prepared block or
+widen fixed layout 5 with copied ranking data.** This number was reserved for
+the seam before D-0488 landed and is appended here rather than rewriting the
+append-only decision order.
+
+Runner owns a new domain-separated digest of the complete `InstrumentKey`. It
+uses the same private canonical structural encoder as the resolved exit-grid
+identity, so CLI cannot drift to a symbol-only encoding and Long/Short must
+name the same exchange, segment, kind, expiry, strike and option side. Candidate
+owns the replay adapter because only that module can reuse its private
+descriptor, column and run builders. Given the retained ladder, exact
+Completion and authenticated rows, it rebuilds both complete resolved grids,
+evaluates each canonical mask/direction group and returns opaque exact Runner
+terminal dispositions plus scalar parameter facts. It never releases bars,
+columns, grids, masks, coordinates, IDs or a detached authoring handle.
+
+Population V5 joins that replay only after authenticating its ordered rows and
+the complete retained Finalization source before and after. The resulting
+nonconstructible source keeps each authenticated Population row beside its
+Runner disposition. Execution V3 has exactly one production commit door: it
+consumes the live `CommittedStoredPopulationV5`, derives the canonical four
+NIFTY-Long, NIFTY-Short, BANKNIFTY-Long, BANKNIFTY-Short parameter blocks and
+all dispositions, writes data before the receipt-last Completion, freshly
+reopens exact layout-5 bytes, and reauthenticates the same source after the
+write. Its returned capability retains Population V5 so Selection can later
+recover exact strategy/mask and eleven ranking metrics without copying them
+into Execution records or silently changing the codec.
+
+The scope is deliberately one rung. This decision does not create the
+eight-rung coordinator, Selection V5, Replay V3, CLI/API/database/dashboard
+surfaces or a real stored Zerodha run. Replay and preparation are
+input-dependent, ledger open and retained-generation checks hash bounded file
+bytes, append includes synchronization and retained source state grows with the
+authenticated block. Fixed-stride offset arithmetic is O(1) in record count;
+the complete seam is not claimed to have O(1) time, latency or space.
+
+### D-0489
+
+**Observation Authority V2 is a separate receipt-last zero-family successor;
+it never relaxes or reinterprets Observation V1.** V1 retains its original
+magic, domains, filenames, 512-byte stride, paired-family requirement and
+nonzero per-family authority semantics. V2 uses independent magic, domains,
+filenames and a 1,024-byte fixed record. Each V2 Data/Completion record embeds
+the complete sealed 812-byte Pre-Admission Data V2 Data record, rather than
+copying a detached digest or accepting caller-authored extinction facts.
+
+The only production constructor consumes the opaque
+`ProducedPreAdmissionDataV2` and its exact receipt-last production commit. It
+authenticates those two as the same production, decodes the embedded source and
+accepts only exact zero Candidate rows whose retained reconciliation proves
+natural frontier extinction, complete closure, nonzero extinction depth, zero
+unknown closure and zero closed masks. Its only terminal disposition is
+`NaturallyExtinct`; the observation-row count is exactly zero. There is no
+`Observed`, statistics, assurance, admission, score, fallback or synthetic
+zero state in this format. A nonzero family must use the exact replay and
+observation path and cannot be mislabeled extinct.
+
+Data is synchronized before its adjacent Completion. Exact committed reuse and
+one exact tail-orphan retry preserve identity; a foreign commit or orphan,
+unsealed mutation, outer-resealed corrupt embedded source, ragged history,
+same-length stale edit and lock/data path replacement refuse. Open and fresh
+reopen scan and hash bounded ledger bytes and retain identity indexes, so the
+whole operation is O(file bytes) time and O(authorities) memory. Only
+fixed-stride offset arithmetic is worst-case O(1) in record count; hash-map
+lookup is average O(1), while allocation, locks, synchronization, page faults,
+device removal and latency remain unbounded.
+
+This closes one Candidate/Pre-Admission-to-Observation extinction seam only.
+It does not invent Statistics for an empty family, join the nonempty sibling,
+or prove Admission, Population, Execution, Selection, Replay, dashboard
+publication or a real stored-market sweep.
+
+### D-0491
+
+**The canonical all-rung Population V5-to-Execution V3 coordinator consumes
+one opaque Population authority exactly once and retains eight named live
+Execution authorities; it does not expose a reorderable authority collection.**
+The only accepted rung order is the literal sequence 60, 120, 180, 300, 600,
+900, 1,800 and 3,600 seconds. The private Population array is destructured once
+into eight named moves, and each move enters the sole D-0487 one-rung commit
+door. The output keeps named authorities, source and destination root
+capabilities, exact caller-supplied bounds and paired Population/Execution
+structural receipts private. There is no raw-authority array accessor, caller
+rung list, sweep-depth field, default bound, shared output root or
+caller-authored identity/digest.
+
+All eight destination directories must exist before the first Execution
+append. Each is admitted without following a symlink, has the exact rung name
+as its final component, is physically and canonically disjoint from every
+other destination and the complete retained Population topology, and remains
+held and rechecked around every rung commit and final reopen. Before and after
+each write, the coordinator reauthenticates the Population receipt and row
+order. After fresh Execution reopen it rechecks the exact bound, Population
+identity and ordered-row digest, disposition count, literal rung, global row
+sequence, Population-row identity and NIFTY-then-BANKNIFTY family order.
+
+Failure is not rollback. If a later rung refuses, already synchronized
+receipt-last prefixes remain append-only. A reconstructed exact Population
+source can retry: D-0487's one-rung door accepts only exact orphan completion
+or exact committed reuse, while foreign, stale, reordered, corrupt or replaced
+state refuses. The coordinator neither truncates nor silently skips a rung.
+
+This is a production authority seam, not a market run. It performs no vendor
+pull and no real or synthetic drill-down sweep in this change. Selection V5,
+Global Replay V3, CLI/API/database/audit/dashboard publication and the final
+stored Zerodha NIFTY run remain separate gates. Eight dispatches are fixed
+with respect to rung count, but source replay, file authentication,
+persistence and retained rows are input- or system-dependent; no whole-seam
+O(1) time, latency or space claim is made.
+
+### D-0490
+
+**One-rung Selection V5 can be produced only from the nonconstructible,
+source-retaining Execution V3 capability; fixed Selection layout 5 is not
+reinterpreted or widened.** This number was reserved before D-0491 landed and
+is appended here rather than rewriting the append-only decision order.
+
+The sole production door consumes `CommittedStoredExecutionV3` plus an exact
+canonical Runner ranking policy. It reauthenticates the retained Population V5
+source, freshly reads every durable Execution V3 disposition and
+reauthenticates Population again. The two vectors are exact-joined by
+Population identity, row identity, Candidate semantic/base identity,
+Admission/Finalization identity, global and family order, family, direction,
+rung, horizon, execution run, evaluated grid, coordinate and Runner terminal
+facts. A structural receipt, detached digest, caller row vector, mask, metric
+or terminal fact cannot enter this door.
+
+The eleven ranking metrics are reconstructed from the Candidate direct cell
+facts embedded in the authenticated Population row. Their overlapping
+Admission V3 comparison projections must agree whenever measured, and an
+admitted row may not carry an unmeasured or refused required comparison.
+Eligibility is exactly `AdmissionV3::Admitted &&
+ExecutionV3::Authorized`. Runner's canonical two-pass Top-N policy sees the
+complete NIFTY-first then BANKNIFTY population. Both source families must be
+nonempty and complete, but the strongest 25 may legitimately all come from one
+family. Top-10 is always the first ten persisted Top-25 rows and is never
+selected separately. Policy bytes/digest, complete ordered-population proof
+and all source identities remain selection-identity terms.
+
+Rows are synchronized before the receipt-last Completion and a fresh bounded
+reopen must equal the exact preparation. Exact committed retry reuses the same
+bytes. The returned nonconstructible capability retains Execution V3 and
+reauthenticates it around each winner read, so a stale Population or Execution
+source cannot remain hidden behind an earlier green Selection receipt. Existing
+1,024-byte row/Completion codecs, magic, version and filenames are unchanged.
+
+This decision deliberately covers only a nonempty one-rung successor. Natural
+zero-family extinction still requires a separately versioned Selection
+successor; it is not converted to an empty V5 family or a fabricated metric.
+The all-rung Selection coordinator, Global Replay V3, operator surfaces and
+real stored Zerodha sweep remain separate gates. Ranking is O(C), preparation
+and retained authentication scan bounded source files, and persistence depends
+on allocation, hashing, locks, synchronization and device latency. No complete
+Selection operation is claimed to have O(1) time, space or latency.
+
+### D-0492
+
+**Population Statistics V3 is the append-only authority for a paired family in
+which either one side was evaluated and the other naturally became empty, or
+both sides naturally became empty; it never reinterprets Statistics V2 or
+manufactures numeric evidence for extinction.** Statistics V2 keeps its magic,
+version, record layout, filenames and paired-nonempty meaning unchanged. V3
+uses independent domains, files and fixed 1,024-byte records. NIFTY is always
+the first family and BANKNIFTY the second, irrespective of which opaque source
+arrives first.
+
+The evaluated side is derived only from one exact Observation V1 family and
+its matching reopened Pre-Admission authority. `Evaluated` means at least two
+real Candidate rows and complete White, SPA, Romano--Wolf, Wilson and genuine
+CSCV/PBO evidence. `InsufficientForCscv` means exactly one real Candidate row:
+its measured White, SPA, Romano--Wolf and Wilson evidence is retained, while
+PBO is absent because there is no relative Candidate placement to measure.
+`NaturallyExtinct` can be derived only from one opaque Observation V2
+production authenticated by its exact receipt-last commit; it has exactly zero
+Candidate, period and split rows and no White, SPA, Romano--Wolf, Wilson, PBO,
+seed, draw or block placeholder. An all-extinct pair likewise carries no
+bootstrap procedure. Zero is never substituted for absence.
+
+V3 binds the ordered family and Candidate identities, complete family/source
+lineage, requested span, feed/source commit, calendar and previous-day policy,
+rung/horizon, exact family counts, procedure inputs and every retained numeric
+bit/fraction. Data records are synchronized before their Completion. Opening,
+append, exact committed reuse and the one exact receipt-less tail retry are
+bounded; a fresh reopen must reproduce the same authority. Foreign or
+crosswired terminal/source identities, evaluated rows with missing measured
+fields, fabricated extinct statistics, corrupt or semantically resealed bytes,
+torn/ragged history, stale same-length mutation and lock/data pathname
+replacement refuse. The returned Admission source is opaque: no public
+constructor accepts a terminal, row vector, statistic or digest.
+
+This decision closes the Statistics natural-extinction seam only. The focused
+V3 suite is **6/6 green** on 2026-09-01. Its source has no non-test Admission
+consumer yet, so strict Clippy and the complete workspace gates remain open;
+Admission/Finalization/Population extinction successors, all-rung Selection,
+Global Replay, operator surfaces and the separately authorized real stored
+Zerodha sweep are not implied. Projection/resampling is input dependent,
+opening and retained-generation authentication scan bounded file bytes, the
+ledger retains O(authorities + candidates) indexes, and persistence depends on
+allocation, locks, synchronization and device latency. Only fixed-stride
+record addressing is worst-case O(1) in admitted record count; identity-map
+lookup is average O(1). No whole-authority O(1) time, space or latency claim is
+made.
+
+### D-0494
+
+**The all-rung Selection V5 authority is a one-use, named successor of the
+complete all-rung Execution V3 authority; it is not a caller-assembled rung
+collection or a detached set of ranking receipts.** This number was reserved
+for this seam before the adjacent extinction successors landed and is appended
+without renumbering the decision ledger.
+
+The sole coordinator consumes `CommittedStoredAllRungExecutionV3` by value and
+accepts exactly eight named Selection roots, eight explicit bounds and one
+canonical Runner ranking policy. Before the first Selection append, it admits
+all eight roots under their exact `1min`, `2min`, `3min`, `5min`, `10min`,
+`15min`, `30min` and `60min` names and proves that they are mutually
+physically/canonically disjoint and disjoint from every retained Population V5
+and Execution V3 root. The resulting opaque topology token retains all three
+root generations and is reauthenticated before moving sources, around every
+one-rung commit, after the eighth commit and on every retained-authority audit.
+A symlink, nested root, hard-link alias, missing/replaced path or cross-layer
+overlap refuses; no path, root receipt or reorderable authority collection is
+released.
+
+The coordinator invokes only D-0490's production door in the literal
+60/120/180/300/600/900/1,800/3,600-second order. Every result must reproduce
+its exact Execution receipt, bound, policy, complete Top-25, exact Top-10
+prefix and durable selected-exit join. Selection, Completion, Population,
+Execution and winner-row identities are unique across rungs. The returned
+all-rung authority keeps eight named live Selection capabilities. Its only
+Global Replay handoff consumes that authority into an opaque successor set,
+preflights all eight Top-25s and the retained topology before the first
+callback, and on success visits exactly 200 authenticated winners in rung-major
+then rank-1-through-25 order. Callback-authored feed, family, metric, selected
+exit, path, receipt or rank facts never enter the handoff.
+
+The focused all-rung Selection suite is **5/5 green** on 2026-09-01. It proves
+the topology and pure cross-rung/prefix refusal surfaces and compiles the typed
+coordinator; D-0490's **11/11** one-rung suite remains the persistence,
+fresh-reopen, exact-reuse and adversarial ranking proof. It does not physically
+persist eight full upstream chains in one test, inject ENOSPC/power loss/hot
+unplug, prove Global Replay V3, wire CLI/API/database/audit/dashboard surfaces
+or run real stored Zerodha data. Selection V5 still requires both source
+families to be nonempty; natural extinction remains a separately versioned
+successor and is not represented by invented rows or zero metrics.
+
+Rung dispatch and the retained winner ceiling are fixed, but complete source
+authentication, ranking, exact joins, file hashing, persistence and fresh
+reopen remain linear in bounded source bytes/rows or dependent on allocation,
+locks, synchronization and device latency. Fixed-stride addressing is
+worst-case O(1) after admission and identity-map lookup is average O(1). No
+whole-coordinator O(1) time, space or latency claim is made.
+
+### D-0493
+
+**Global Replay V3 is a version-separated receipt-last authority that may be
+prepared only by exact-joining the consumed all-rung Selection V5 successor to
+200 opaque Runner OOS replay capabilities.** This number was reserved for the
+replay seam before D-0494 was appended and is recorded out of numeric order
+without renumbering the append-only ledger. V3 never opens, copies or
+reinterprets a Global Replay V1/V2 record.
+
+Selection V5 first authenticates its retained Population/Execution/Selection
+topology and visits exactly eight named Top-25s in literal
+60/120/180/300/600/900/1,800/3,600-second, rank-1-through-25 order. Runner owns
+the only OOS witness mint: `ResolvedExitGridV1::replay_global_witness` derives
+the complete replay universe at the authenticated selected-exit boundary and
+captures the exact canonical swept instrument, stored feed, direction,
+first-OOS boundary, run identity, selected-exit identity and candidate rows.
+Only a known canonical `Vendor` can be encoded; an unknown/caller-invented feed
+refuses. Global Replay exact-joins every Selection winner to the matching opaque
+Runner capability by selected exit, full instrument family, direction and OOS
+boundary before deriving a private V3 witness. No caller writes a feed, family,
+mask, rank, selected exit, candidate, price, money row or VIX stamp.
+
+The scheduler admits the fixed 8x25 topology only, keeps one global inclusive
+single-position lock across instrument, direction and rung, and treats a
+reachable pricing-refused path as real occupancy. Same-minute contenders are
+resolved deterministically by rank and strategy identity. A decision may emit
+money only when it is both globally admitted and exactly priceable. Entry and
+exit India VIX are then looked up under the same stored feed as exact-minute or
+typed-absent reference stamps; VIX never enters selection, execution, P&L or
+replay identity. The separate publication identity binds the admitted money
+and VIX policy.
+
+V3 owns five independent fixed-stride files: 512-byte Witness, 512-byte
+Candidate, 384-byte Decision, 512-byte Money and 1,024-byte Completion records.
+Explicit nonzero record ceilings are mandatory and have no default. Witness,
+Candidate, Decision and Money bytes are synchronized before the adjacent
+Completion. Exact committed retry reuses identical bytes; bounded fresh reopen
+decodes every sealed field, replays the global scheduler from persisted
+evidence and requires the reconstructed decisions, counters, money and VIX
+publication to equal the Completion. Ragged/torn data, corruption, semantic
+resealing, foreign money, invalid ranges and a valid receipt hiding an
+unreferenced semantic mismatch refuse. A valid unreferenced complete record is
+an orphan, not authority.
+
+The focused Global Replay V3 suite is **5/5 green** and the Runner witness-mint
+test is **1/1 green** on 2026-09-01. Runner strict library/test Clippy is green,
+and the latest strict CLI package attempt reports no diagnostic in
+`global_replay_v3.rs`; that package gate remains red in sibling unfinished
+successor modules. The five V3 tests use controlled private witnesses. The
+typed production join is compile-checked against D-0494's successor and
+Runner's opaque capability, but no single focused fixture constructs both
+upstream opaque authorities together. No test pulls or sweeps real market
+data. `commit_stored_global_replay_v3` is the sole crate-level production door:
+it consumes the all-rung Selection and 200 Runner capabilities by value,
+commits the five files receipt-last, freshly reopens them, compares the reopened
+identity/count/counter projection with the prepared evidence and only then
+returns an opaque `CommittedStoredGlobalReplayV3`. The door remains
+crate-private and has no upstream Step-3 orchestrator, CLI, API, audit,
+database, monitoring or dashboard caller. Full
+workspace Clippy/tests, deny/security, benchmarks, coverage, mutation,
+physical ENOSPC/power-loss/hot-unplug injection and the separately authorized
+real stored Zerodha NIFTY sweep remain open.
+
+The canonical 200-witness ceiling bounds control topology; it does not make a
+complete replay O(1). Preparation, sorting, scheduling, encoding,
+authentication and reopen are linear or `O(C log C)` in retained records, and
+persistence depends on allocation, locks, synchronization, hashing, page
+faults, controller behavior and removable-device latency. Fixed-stride record
+address arithmetic is worst-case O(1) after admission; identity-map lookup is
+average O(1). No whole-replay O(1) time, space or latency claim is made.
+
+## D-0495 — mixed/extinct Statistics V3 crosses a version-separated Admission V4 authority
+
+**Decision.** Admission V3 remains byte-for-byte paired-nonempty. Its format
+cannot honestly encode Statistics V3's three family terminals, so it is neither
+mutated nor given a compatibility shim. The successor is an independent
+`population-admission-v4.bin` plus `population-admission-v4.lock`, with a
+64-byte header and sealed 4,096-byte fixed records. One block is Data, exact
+NIFTY Family, exact BANKNIFTY Family, zero or more evaluated-Candidate
+Decisions, then Completion last.
+
+The only production preparation door consumes the opaque Statistics V3
+Admission source, both freshly reopened Candidate audits, the bound paired
+Base-Evidence reader, retained Search V4 pair, authenticated durable Search V4
+lineage and one Runner Admission policy. It equality-joins the complete cohort,
+Candidate/Base ordinals and semantic identities, Observation lineage, signal
+stream, long/short exit grids and Search validation facts before persistence.
+No caller supplies a family, terminal, row, status or digest. An `Evaluated`
+family recomputes the canonical Runner V3 exact-grid decision for every real
+Candidate. `InsufficientForCscv` preserves its one real Candidate lineage but
+has no fabricated PBO/draft/decision. `NaturallyExtinct` preserves the exact
+Observation V2 extinction proof and has no Candidate, statistic or decision
+row. Family order is always NIFTY then BANKNIFTY.
+
+Evidence records are synchronized before their adjacent Completion. Explicit
+nonzero authority/decision/file ceilings have no default. Exact committed retry
+reuses byte-identical history; one exact trailing receipt-less prefix may be
+completed. Fresh reopen revalidates the entire bounded grammar, canonical
+logical sequence, seals and source/decision identities. A Finalization-facing
+projection can be obtained only from an authority retaining both that fresh
+reopen and the opaque preparation, so a detached receipt or self-consistent
+reseal cannot promote itself.
+
+**Consequence.** This closes the typed Statistics V3→Admission V4 library seam,
+not Step 3. A version-separated Finalization V4 persistent codec/authority and
+the production all-rung orchestrator remain absent; the projection must not be
+relabeled as Finalization V3. CLI/API/database/audit/monitoring/dashboard
+publication, full workspace gates and a real stored sweep remain open.
+
+The focused Admission V4 suite is **5/5 green**, Statistics V3 is **7/7 green**,
+and `cargo check -p cli --lib --locked` is green on 2026-09-01. The substantive
+CLI library Clippy diagnostic command (`-D warnings -A dead-code`) reports zero
+findings in these two owned modules but still fails on **38 sibling findings**;
+the full strict command remains open and no package-wide green claim is made.
+Authentication, Runner evaluation, hashing, append, fresh reopen and projection
+are input/file/system proportional. Only fixed-record address arithmetic after
+admission is worst-case O(1); identity-map lookup is average O(1), and no total
+O(1) time, space or latency guarantee is made.
+
+## D-0496 — mixed-terminal Finalization V4 is a source-retaining Population-successor authority
+
+**Decision.** Finalization V3 remains byte-for-byte paired-nonempty and keeps
+its Admission V3-specific row grammar. Admission V4's evaluated,
+`InsufficientForCscv` and `NaturallyExtinct` family terminals cannot be
+relabelled into that format. Finalization V4 therefore owns an independent
+`population-finalization-v4.bin` and `population-finalization-v4.lock`, a
+64-byte header and sealed 4,096-byte fixed records. Every authority is exactly
+Data, NIFTY Family, BANKNIFTY Family, zero or more evaluated-Candidate
+Decisions and Completion last.
+
+The sole production door moves one retained Admission V4 authority and obtains
+its fresh-reopen Finalization projection internally. Caller-authored receipts,
+rows, digests, families, terminals, policies and statuses never enter.
+Finalization binds the exact Admission receipt and Completion, common cohort,
+Statistics/Base/Search identities, canonical Runner policy bytes/digest, both
+complete family lineages and every full Runner decision. It independently
+revalidates Runner arithmetic and status. `InsufficientForCscv` keeps one real
+Candidate in the family count but emits no decision or fabricated PBO;
+`NaturallyExtinct` keeps its Observation V2 proof and emits no Candidate,
+statistic or decision row. Decision sequence remains distinct from Statistics
+Candidate sequence, including the gap caused by an insufficient NIFTY
+singleton before evaluated BANKNIFTY Candidates.
+
+Data, both Families and all Decisions are synchronized before the adjacent
+Completion. Explicit nonzero authority, per-authority decision and byte bounds
+have no default. Exact committed retry reuses byte-identical history and one
+exact trailing receipt-less prefix may receive only its own suffix. A writer is
+dropped before a fresh read-only reopen reproduces the exact preparation.
+Structural receipts remain audit-only. The returned capability retains both
+Admission and Finalization; every Population handoff authenticates Admission
+before and after reading the complete Finalization block and rejects stale,
+replaced, corrupt, torn, reordered, crosswired or semantically resealed state.
+
+**Consequence.** The neutral
+`PopulationFinalizationV4PopulationSourceV1` is the complete typed input for a
+version-separated Population successor. Existing Population V5 bytes are
+irreducibly Admission/Finalization V3-specific: each row embeds literal V3
+Candidate, Admission and Finalization snapshots and the format rejects a
+zero-row family. It is not widened or given a dishonest V4 adapter. Persisting
+mixed/extinct Finalization V4 therefore requires a new Population byte version
+(most naturally V6) that can retain both terminal family records and join real
+evaluated decisions back to Candidate authorities by Statistics sequence.
+
+The focused Finalization V4 suite is **5/5 green** with **729 filtered**, and
+`cargo check -p cli --lib --locked` is green on 2026-09-01. The final strict
+CLI library/test diagnostic reports zero findings in the V4 module but remains
+package-red on **105 library / 117 library-test sibling findings**; no strict
+package success is claimed. Full workspace gates, physical ENOSPC/power-loss/kernel-
+crash/hot-unplug injection, the non-test stored all-rung orchestrator,
+Population successor persistence, Execution/Selection/Global Replay joins,
+operator surfaces and the separately authorized real stored sweep remain
+open. Complete authentication, hashing, persistence and fresh reopen are
+input/file/system proportional. Fixed-record address arithmetic alone is
+worst-case O(1); identity-map lookup is average O(1). No whole-authority O(1)
+time, space or latency guarantee is made.
+
+## D-0497 — post-training OOS evidence is a stored-source capability, and terminal-aware replay is V4
+
+**Decision.** Global Replay V3 remains the valid legacy successor for its
+fixed, nonempty eight-by-Top-25 Selection V5 topology. It is not widened,
+relabelled or used as the terminal-aware Step-3 production join. Natural
+extinction and statistically insufficient families require Selection V6 to
+carry the actual zero-through-twenty-five winners of each named rung and Global
+Replay V4 to consume that actual set. The V4 codec and scheduler are not
+implemented until Selection V6 freezes its opaque move shape.
+
+The reusable boundary below those versions is `StoredPostTrainingOosCohortV1`.
+Its caller supplies only an inclusive civil month range and three explicit
+record ceilings. The retained stored Candidate transaction supplies the
+canonical vendor, complete `InstrumentKey`, signal rung, build commit,
+evaluator inputs, horizon, search ladder, dynamic Long/Short resolutions and
+training boundary. The common bounded store loader supplies complete signal,
+previous-day and exact-minute contexts plus complete signal/execution calendar
+receipts. The requested execution slice must be nonempty and its first minute
+must be strictly later than the authenticated training last minute. Missing
+months, load-bound overflow, incomplete calendars, overlapping training/OOS,
+foreign family/feed/instrument/rung/commit/calendar/evaluator, a torn
+Long/Short training pair, root substitution or a pricing/replay refusal fail
+closed. There is no network fallback and no caller-authored timestamp, feed,
+family, direction, mask, selected exit, price or digest.
+
+The cohort identity domain-separately binds the held store-root generation,
+family, rung, horizon, requested span, canonical vendor and full instrument,
+build commit, calendar policy and both complete calendar receipts, daily
+reference policy, exact three-stream data identity, each raw stored stream and
+requested execution digest, both resolved grid identities, training digest
+and last timestamp, OOS first/last timestamps and count, and all three load
+ceilings. A witness is minted only through Runner's opaque
+`GlobalReplayWitnessUniverseV1`; its stored witness identity binds the cohort,
+canonical nine-term OOS run, selected exit and complete ordered replay
+universe. The stored cohort and witness types expose no raw bars, arrays or
+loose market facts.
+
+The terminal-aware V4 contract is fixed only at this boundary:
+
+1. Selection V6 must move an opaque, freshly authenticated set of eight named
+   rung authorities in canonical 60/120/180/300/600/900/1,800/3,600-second
+   order, with each rung carrying its actual canonical rank prefix of zero
+   through twenty-five winners and its terminal reason.
+2. The V4 production door must consume that Selection capability and the eight
+   matching stored OOS cohorts by value. Before the first durable append it
+   must preflight every actual winner against the exact retained Execution
+   disposition and mint every opaque stored witness. Missing, duplicate,
+   reordered, stale, cross-family, cross-rung, cross-feed or OOS-mismatched
+   evidence refuses the whole preparation; no partial winner prefix becomes
+   authority.
+3. V4 schedules only the resulting actual witness set under one global
+   inclusive single-position lock across both indices, both directions and all
+   rungs. Receipt-last persistence, exact reuse and fresh-reopen semantic replay
+   must bind the actual per-rung counts rather than V3's fixed 200.
+4. Empty-all-rung publication semantics, the final Selection V6 move type and
+   V4 byte layout remain explicitly open. No V4 implementation may guess them,
+   and no controlled test may be described as a real stored market sweep.
+
+The controlled fixture suite for exact OOS reuse/witness mint, absent and
+overlapping spans, pre-allocation ceilings, family crosswire and deterministic
+root replacement is **3/3 green** on 2026-09-01; the focused CLI library check
+is green. The strict CLI Clippy attempt remains red on the concurrently active
+successor tree: it reported 115 library diagnostics and 126 library-test
+diagnostics. Four diagnostics in the new cohort/orchestrator boundary were
+corrected statically after that run; a post-correction strict rerun and all
+workspace gates remain open. No physical hot-unplug or real stored Zerodha
+sweep success is claimed here. Loading, column derivation, replay, hashing and
+authentication remain proportional to bounded input or candidate evidence;
+file synchronization and removable-device latency remain system dependent.
+Only fixed-field projection and admitted fixed-offset access may make a
+worst-case O(1) claim.
+
+## D-0498 — Candidate V1 singleton reachability is corrected; Population V6 and Execution V4 retain terminal truth
+
+**Correction.** D-0492, D-0495 and D-0496 described
+`InsufficientForCscv` as one real Candidate V1 row. That wording conflated two
+different units. Statistics calls one mask/family hypothesis one candidate;
+Candidate V1 persists an execution-coordinate row containing that mask, one
+direction and one selected exit cell. Its sealed reconciliation requires
+
+`row_count = closed_itemsets * (long_exit_cells_per_mask + short_exit_cells_per_mask)`.
+
+Both directional grids are nonempty in production. A nonempty Candidate V1
+authority therefore has at least two rows and represents both Long and Short;
+an honest `row_count == 1` receipt is unreachable. The three upstream V3/V4
+codecs and enums are not reinterpreted: their insufficient shape remains
+decode-valid append-only history, but it is an abstract statistical terminal,
+not a terminal current Candidate V1 production can originate. No Candidate V2
+is introduced. The five ordered family pairs containing an insufficient side
+must fail at the Population V6 production boundary; only E/E, E/X, X/E and X/X
+(`E = Evaluated`, `X = NaturallyExtinct`) are reachable there.
+
+Statistics V3 gains only the missing genuine E/E production door. It consumes
+two authenticated evaluated Observation V1 authorities with their exact fresh
+Pre-Admission audits, requires literal NIFTY then BANKNIFTY order and one common
+rung/horizon/span/source identity, and reuses the existing per-family
+statistical preparation and V3 byte grammar. No caller supplies a family,
+terminal, count, digest or statistic. Swapped, crosswired and stale audits
+refuse. Existing Statistics V3 bytes, mixed/extinct constructors and identities
+are unchanged.
+
+**Population decision.** Population V5 remains byte-for-byte bound to
+Finalization V3. Population V6 owns independent `population-v6.bin` and
+`population-v6.lock` files, a 64-byte header and sealed 4,096-byte fixed
+records. One block is Data, exact NIFTY Family, exact BANKNIFTY Family, zero or
+more evaluated Candidate rows and Completion last. Candidate, evaluated and
+decision counts are separate fields and must reconcile exactly; a truthful X/X
+block has zero rows. Every evaluated row embeds and re-verifies the literal
+Candidate V1 canonical record, exact Finalization/Admission/Statistics/Base/
+Search lineage, full Runner decision bytes and canonical global/family
+sequence. Extinct Families retain their complete Finalization V4 envelope and
+invent no Candidate, statistic, decision or replay-parameter row.
+
+The sole source topology always retains Finalization V4 and retains Candidate
+Pre-Admission authorities only for evaluated families: two for E/E, NIFTY only
+for E/X, BANKNIFTY only for X/E and none for X/X. Four typed bind doors express
+those cases without caller-authored terminal/count/digest fields. Each door
+reauthenticates every retained source twice and exact-joins Candidate receipts,
+literal rows, signals, grids, cohort identity and Finalization decisions by
+Statistics sequence. Missing, duplicate, gapped, reordered, cross-family,
+stale, corrupt or replaced evidence fails closed.
+
+Data/Families/Candidates are synchronized before Completion. Explicit nonzero
+authority/Candidate/file ceilings have no default. Exact retry reuses identical
+bytes; an exact receipt-less prefix may receive only its own suffix. A writer is
+dropped before a bounded read-only reopen reproduces every source, family,
+Candidate and Completion field. The committed capability retains the live V6
+source and can mint only a nonconstructible Execution V4 input containing the
+V6 receipt, both terminal envelopes, the common rung/horizon and exactly 0, 2
+or 4 canonical Long/Short parameter authorities plus the globally ordered
+Candidate/Runner-disposition joins.
+
+**Execution consequence.** Execution V4 is version-separated from V3. Its
+independent fixed parameter, percentile, disposition and Completion files
+persist two parameters per evaluated family and zero for an extinct family;
+Completion keeps fixed NIFTY-Long/NIFTY-Short/BANKNIFTY-Long/BANKNIFTY-Short
+identity slots, with zero slots only for the corresponding extinct family.
+X/X therefore has zero parameters, percentiles and dispositions while retaining
+both terminal envelopes. The production door moves and retains the complete
+Population V6 authority; detached rows, IDs, masks, directions, grids,
+terminals and statuses are not accepted.
+
+This decision records a static implementation checkpoint, not a green gate.
+Focused Statistics E/E, Candidate two-sided, Population V6 and Execution V4
+tests, focused CLI library check and strict diagnostics still require the
+serialized Cargo slot. Full workspace tests/Clippy/deny, coverage, mutation,
+benchmarks, physical ENOSPC/power-loss/hot-unplug injection, the all-rung
+orchestrator, Selection V6/Global Replay V4, operator/database/audit/monitoring/
+dashboard publication and a real stored sweep remain open. Authentication,
+joining, hashing, encoding, synchronization and reopen are bounded but
+input/file/system proportional. Fixed-record address arithmetic alone is
+worst-case O(1); identity-map lookup is average O(1). No whole-authority O(1)
+time, space or latency guarantee is made.

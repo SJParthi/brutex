@@ -99,6 +99,27 @@
   import { placeIn } from '$lib/place.js';
   import { monthLabel } from '$lib/dates.js';
   import { rupee, group, exact } from '$lib/money.js';
+  import {
+    compareRuns,
+    exactIntegerDelta,
+    roundedScaledRatio,
+    supportBasisPoints,
+    supportRatioKey,
+    validateLedgerPayload,
+    validateRunForComputation
+  } from '$lib/comparison.js';
+  import { validateFrontierPayload } from '$lib/frontier-analytics.js';
+  import { decodeMaskWords } from '$lib/mask.js';
+  import { createRequestGate } from '$lib/request-gate.js';
+  import { reduceLiveProgress } from '$lib/live-progress';
+  import {
+    TIME_GRAINS,
+    equityMaxDrawdown,
+    streakSeries,
+    timePatternRows,
+    validateTradePayload,
+    windowSeries
+  } from '$lib/trade-analytics.js';
   import * as find from '$lib/find.js';
   import { sweepOutcome, ledgerBlock } from '$lib/sweep.js';
   /* THE FEED'S OWN MASTER, ALREADY ON HAND. `+layout.svelte` calls
@@ -107,8 +128,8 @@
      request -- and resolving it is what stops `NSE`/`INDEX` being written
      here as literals the store can contradict. */
   import { catalogue } from '$lib/index.svelte.js';
-  /* TRADINGVIEW'S OWN IDIOM FOR A METRIC IT CANNOT SHOW. See the component
-     for why the padlock is borrowed and where the two meanings differ. */
+  /* A neutral unavailable marker. The historical component name is retained,
+     but its visible output is text/dash—not an access-control symbol. */
   import Lock from '$lib/Lock.svelte';
 
   /* ====================================================================
@@ -117,6 +138,8 @@
 
   /** @type {{ phase: 'loading'|'ready'|'failed', body: any, why: string }} */
   let load = $state({ phase: 'loading', body: null, why: '' });
+  /** Generation of the only ledger response still allowed to publish. */
+  let ledgerSeq = 0;
 
   /** How many runs to ask for. The server clamps; this is what we request. */
   const LIMIT = 500;
@@ -189,9 +212,9 @@
    * `loading` → `pricing` → `priced` → `done`.
    *
    * @typedef {{
-   *   rung: string, bars: number, minHits: number,
+   *   key: string, rung: string, bars: number, minHits: number, supportPpm: number,
    *   done: boolean, why: string, recorded?: boolean,
-   *   phase: string, candidates: number, priced: number
+   *   validating: boolean, phase: string, candidates: number, priced: number
    * }} LiveRung
    */
   /* THE CAST IS INSIDE `$state(...)`, AND THAT PLACEMENT IS THE WHOLE FIX.
@@ -200,8 +223,9 @@
      `.minHits`, `.done`, `.recorded` and `.why` became "does not exist on type
      'never'". One untyped empty array, fifteen errors. */
   let live = $state(
-    /** @type {{ phase: string, rungs: LiveRung[], why: string }} */ ({
+    /** @type {{ phase: string, attempt: number | null, rungs: LiveRung[], why: string }} */ ({
       phase: 'idle',
+      attempt: null,
       rungs: [],
       why: ''
     })
@@ -227,10 +251,12 @@
      be a claim about a document this file does not own — the same reason
      `BoardGroup.rows` is `any[]`. */
   let tradeList = $state(
-    /** @type {{ phase: string, rows: any[], periods: any, why: string }} */ ({
+    /** @type {{ phase: string, rows: any[], periods: any, policy: string|null, direction: string|null, why: string }} */ ({
       phase: 'idle',
       rows: [],
       periods: null,
+      policy: null,
+      direction: null,
       why: ''
     })
   );
@@ -253,6 +279,14 @@
       why: ''
     })
   );
+
+  // Independent request generations for the two drill-down detail streams.
+  // A response belongs to the run that started it, not whichever run happens
+  // to be open when the network finishes. These counters are the correctness
+  // gates are the correctness mechanism; aborting a fetch would only be an
+  // optimisation.
+  const comboGate = createRequestGate();
+  const tradeGate = createRequestGate();
 
   /**
    * How much each measurement counts toward the ranking.
@@ -497,6 +531,7 @@
 
   /** @param {string|undefined} identity */
   async function fetchCombos(identity) {
+    const ticket = comboGate.begin(identity);
     if (!identity) {
       combos = { phase: 'idle', rows: [], rules: null, why: '' };
       return;
@@ -505,15 +540,36 @@
     try {
       const response = await ask_(`/frontier.json?identity=${encodeURIComponent(identity)}`);
       const body = await response.json();
+      if (!comboGate.admits(ticket, openRun?.identity)) return;
+      if (!response.ok) {
+        combos = {
+          phase: 'failed',
+          rows: [],
+          rules: null,
+          why: body.refusal ?? `/frontier.json answered ${response.status}`
+        };
+        return;
+      }
+      const checked = validateFrontierPayload(body, identity);
+      if (!checked.ok) {
+        combos = {
+          phase: 'failed',
+          rows: [],
+          rules: null,
+          why: `Frontier analytics refused this answer: ${checked.why}`
+        };
+        return;
+      }
       combos = {
-        phase: response.ok ? 'ready' : 'failed',
-        rows: Array.isArray(body.rows) ? body.rows : [],
+        phase: 'ready',
+        rows: checked.rows,
         // THE THRESHOLDS THIS RUN'S ROWS WERE JUDGED AGAINST, carried so a PASS
         // is never shown without the bar it cleared.
-        rules: body.rules ?? null,
-        why: body.refusal ?? (response.ok ? '' : `/frontier.json answered ${response.status}`)
+        rules: checked.rules,
+        why: checked.why
       };
     } catch (why) {
+      if (!comboGate.admits(ticket, openRun?.identity)) return;
       combos = {
         phase: 'failed',
         rows: [],
@@ -769,8 +825,8 @@
   const ranked = $derived.by(() => rankRows(combos.rows, weights, topShown));
 
   /**
-   * Every timeframe's frontier at once, so "the top ten per timeframe" is one
-   * board rather than eight visits.
+   * Every comparable question's timeframe frontier at once, so “top ten per
+   * timeframe” never collapses feeds, instruments, spans, or support ratios.
    *
    * # Why the NEWEST run per rung and not every run
    *
@@ -778,7 +834,8 @@
    * and stacking their combinations into one ranking would compare a 22%-support
    * search against a 10% one as though they answered the same question. They do
    * not: support decides which combinations were ENUMERATED AT ALL. One run per
-   * rung, the newest, and the support each was run at is printed beside it.
+   * comparable question and rung, the newest, and every question dimension is
+   * printed beside it.
    */
   /**
    * ONE RUNG'S BOARD ROW. `run` and `rows` are the ledger's own JSON and are
@@ -789,7 +846,11 @@
    * against, echoed so a PASS is shown beside the bar it cleared. `null` when
    * the route refused before it could read them.
    *
-   * @typedef {{ rung: string, run: any, rows: any[], rules: any, admitted: number, why: string }} BoardGroup
+   * `key` is the whole comparison question plus the rung. A rung alone is not
+   * a question: NIFTY and BANKNIFTY at 5min, or the same instrument over two
+   * spans, must never audition for the same slot.
+   *
+   * @typedef {{ key: string, question: string, rung: string, run: any, rows: any[], rules: any, admitted: number, why: string }} BoardGroup
    */
   /* INSIDE `$state(...)`, for the same reason `live` is — see its comment. */
   let board = $state(
@@ -800,15 +861,42 @@
     })
   );
 
+  /**
+   * The immutable parts of one comparison question. The support ratio is in
+   * the key because it decides which combinations were eligible to exist at
+   * all. Unit separators make this an unambiguous machine key even if a future
+   * feed or instrument name contains spaces.
+   *
+  * @param {any} r
+  */
+ function comparisonQuestionKey(r) {
+    const supportRatio = supportRatioKey(r);
+    return [
+      r.feed,
+      r.underlying,
+      `${r.from_year}-${r.from_month}`,
+      `${r.to_year}-${r.to_month}`,
+      supportRatio === null ? 'support-refused' : `support-ratio:${supportRatio}`
+    ].join('\u001f');
+  }
+
   /** @param {any[]} rowsIn the ledger rows currently in view */
   async function fetchBoard(rowsIn) {
-    // O(1) PER ROW AND ONE PASS. A Map keyed by rung keeps the newest, so
-    // picking eight runs out of a ledger of twenty thousand never sorts and
-    // never scans twice — the same technique `/db` uses, per CLAUDE.md §3 rule 4.
+    // Invalidate every older batch BEFORE the empty fast path. Otherwise an
+    // in-flight prior feed keeps the current ticket and can republish after the
+    // scope becomes empty.
+    boardSeq += 1;
+    const mine = boardSeq;
+    // O(1) PER ROW AND ONE PASS. A Map keyed by the WHOLE comparison question
+    // plus rung keeps the newest comparable answer. Keying only by rung made a
+    // newer BANKNIFTY 5min run erase NIFTY 5min, and made feed/span/support
+    // changes race for the same slot. Those are different questions, not
+    // reruns. The same technique `/db` uses keeps the fold O(1) per row.
     const newest = new Map();
     for (const r of rowsIn) {
-      const had = newest.get(r.timeframe);
-      if (!had || r.finished_micros > had.finished_micros) newest.set(r.timeframe, r);
+      const key = `${comparisonQuestionKey(r)}\u001f${r.timeframe}`;
+      const had = newest.get(key);
+      if (!had || r.finished_micros > had.finished_micros) newest.set(key, r);
     }
     if (newest.size === 0) {
       board = { phase: 'ready', groups: [], why: 'No completed run is in view.' };
@@ -823,8 +911,6 @@
     // whichever the network happened to favour. The phase still read `ready`,
     // so a board showing the previous feed's numbers was indistinguishable from
     // a correct one.
-    boardSeq += 1;
-    const mine = boardSeq;
     board = { phase: 'loading', groups: [], why: '' };
 
     // FETCHED IN PARALLEL because the eight are independent: eight sequential
@@ -834,14 +920,19 @@
     // discards every sibling result, so one rung answering 502 replaced all
     // eight tables with a single sentence naming one URL. A rung that fails now
     // fails alone and says so in its own section.
+    const selected = [...newest.values()];
     const settled = await Promise.allSettled(
-      [...newest.values()].map(async (run) => {
+      selected.map(async (run) => {
+        const question = comparisonQuestionKey(run);
+        const key = `${question}\u001f${run.timeframe}`;
         const response = await ask_(`/frontier.json?identity=${encodeURIComponent(run.identity)}`);
         // `ok` IS CHECKED BEFORE THE BODY IS PARSED. Reading `.json()` first
         // turned a clean 502 with an HTML body into `Unexpected token '<'`,
         // which names the parser instead of the failure.
         if (!response.ok && response.status !== 200) {
           return {
+            key,
+            question,
             rung: run.timeframe,
             run,
             rows: [],
@@ -851,13 +942,28 @@
           };
         }
         const body = await response.json();
+        const checked = validateFrontierPayload(body, run.identity);
+        if (!checked.ok) {
+          return {
+            key,
+            question,
+            rung: run.timeframe,
+            run,
+            rows: [],
+            rules: null,
+            admitted: 0,
+            why: `Frontier analytics refused ${run.timeframe}: ${checked.why}`
+          };
+        }
         return {
+          key,
+          question,
           rung: run.timeframe,
           run,
-          rows: Array.isArray(body.rows) ? body.rows : [],
-          rules: body.rules ?? null,
-          admitted: Number(body.admitted ?? 0),
-          why: body.refusal ?? ''
+          rows: checked.rows,
+          rules: checked.rules,
+          admitted: checked.admitted,
+          why: checked.why
         };
       })
     );
@@ -867,8 +973,12 @@
       s.status === 'fulfilled'
         ? s.value
         : {
-            rung: [...newest.values()][i]?.timeframe ?? '?',
-            run: [...newest.values()][i],
+            key: selected[i]
+              ? `${comparisonQuestionKey(selected[i])}\u001f${selected[i].timeframe}`
+              : `missing-${i}`,
+            question: selected[i] ? comparisonQuestionKey(selected[i]) : '',
+            rung: selected[i]?.timeframe ?? '?',
+            run: selected[i],
             rows: [],
             rules: null,
             admitted: 0,
@@ -877,9 +987,12 @@
             }`
           }
     );
-    // Ordered by the rung's own minutes, so the board reads 1min → 60min
-    // rather than in whatever order the ledger happened to hold.
-    groups.sort((a, b) => minutesOf(a.rung) - minutesOf(b.rung));
+    // Questions are kept together, then ordered by the rung's own minutes, so
+    // the board reads one feed/instrument/span/support comparison at a time.
+    groups.sort(
+      (a, b) =>
+        a.question.localeCompare(b.question) || minutesOf(a.rung) - minutesOf(b.rung)
+    );
     const allFailed = groups.every((g) => g.rows.length === 0 && g.why);
     board = {
       phase: 'ready',
@@ -944,38 +1057,100 @@
   // recomputes on its own. Re-ranking is the cheap half and refetching is the
   // expensive one; tying them together would have made every slider a round trip.
   $effect(() => {
-    void fetchBoard(runs);
+    // The board is a ranking surface. It receives the same exact-signal,
+    // sealed, whole-span, non-halted, priced-result admission as the headline,
+    // never merely every structurally parseable ledger row.
+    void fetchBoard(rankableRuns);
   });
 
   /** @param {string|undefined} identity */
   async function fetchTrades(identity) {
+    const ticket = tradeGate.begin(identity);
     if (!identity) {
-      tradeList = { phase: 'idle', rows: [], periods: null, why: '' };
+      tradeList = {
+        phase: 'idle',
+        rows: [],
+        periods: null,
+        policy: null,
+        direction: null,
+        why: ''
+      };
       return;
     }
-    tradeList = { phase: 'loading', rows: [], periods: null, why: '' };
+    // Snapshot the ledger parent this request must reconcile with. The request
+    // gate prevents publication after `openRun` changes; this value prevents a
+    // structurally valid child from being labelled by the wrong parent.
+    const expectedRun = openRun?.identity === identity ? openRun : undefined;
+    if (!expectedRun) {
+      tradeList = {
+        phase: 'failed',
+        rows: [],
+        periods: null,
+        policy: null,
+        direction: null,
+        why: 'Trade analytics refused an unbound request: no open ledger run owns this identity.'
+      };
+      return;
+    }
+    tradeList = {
+      phase: 'loading',
+      rows: [],
+      periods: null,
+      policy: null,
+      direction: null,
+      why: ''
+    };
     try {
       const response = await ask_(`/trades.json?identity=${encodeURIComponent(identity)}`);
       const body = await response.json();
+      if (!tradeGate.admits(ticket, openRun?.identity)) return;
+      if (!response.ok) {
+        tradeList = {
+          phase: 'failed',
+          rows: [],
+          periods: null,
+          policy: null,
+          direction: null,
+          why: body.refusal ?? `/trades.json answered ${response.status}`
+        };
+        return;
+      }
+      const checked = validateTradePayload(body, expectedRun);
+      if (!checked.ok) {
+        tradeList = {
+          phase: 'failed',
+          rows: [],
+          periods: null,
+          policy: null,
+          direction: null,
+          why: `Trade analytics refused the response: ${checked.why}`
+        };
+        return;
+      }
       // THE ROUTE ANSWERS 200 WITH AN EMPTY LIST AND A REASON when the file is
       // absent, so an empty store and a broken server never look alike. Both
       // are carried: the rows if any, the reason if any.
       tradeList = {
-        phase: response.ok ? 'ready' : 'failed',
-        rows: Array.isArray(body.trades) ? body.trades : [],
+        phase: 'ready',
+        rows: checked.rows,
         // THE PERIOD BUCKETS WERE BEING DROPPED. `/trades.json` sends eight of
         // them -- day, week, month, quarter, half, year, weekday, hour -- each
         // carrying `trades`, `wins`, `worst_wins`, `largest_win` and
         // `largest_loss`. Four metrics this page renders as "not recorded"
         // are sums of that object.
-        periods: body.periods ?? null,
-        why: body.refusal ?? (response.ok ? '' : `/trades.json answered ${response.status}`)
+        periods: checked.periods,
+        policy: checked.policy,
+        direction: checked.direction,
+        why: body.refusal ?? ''
       };
     } catch (why) {
+      if (!tradeGate.admits(ticket, openRun?.identity)) return;
       tradeList = {
         phase: 'failed',
         rows: [],
         periods: null,
+        policy: null,
+        direction: null,
         why: `The trades could not be fetched: ${why instanceof Error ? why.message : String(why)}`
       };
     }
@@ -1030,14 +1205,10 @@
     let bars = 0;
     let bestNet = 0;
     // Streaks need the ORDER trades resolved in, which is `seq`, so the list is
-    // walked in sequence rather than in the display order.
-    const ordered = [...rows].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
-    let runWin = 0;
-    let runLoss = 0;
-    let longestWin = 0;
-    let longestLoss = 0;
-    /** @type {number[]} */ const winRuns = [];
-    /** @type {number[]} */ const lossRuns = [];
+    // walked in sequence rather than in display order. The pure fold retains
+    // every run for the chart as well as its four summary numbers.
+    const streak = streakSeries(rows);
+    const ordered = streak.ordered;
 
     for (const t of ordered) {
       const net = t.worst ?? 0;
@@ -1048,40 +1219,20 @@
         grossProfit += net;
         barsWin += t.bars_held ?? 0;
         if (net > largestWin) largestWin = net;
-        runWin += 1;
-        if (runLoss > 0) lossRuns.push(runLoss);
-        longestLoss = Math.max(longestLoss, runLoss);
-        runLoss = 0;
       } else if (net < 0) {
         losses += 1;
         grossLoss += -net;
         barsLoss += t.bars_held ?? 0;
         if (-net > largestLoss) largestLoss = -net;
-        runLoss += 1;
-        if (runWin > 0) winRuns.push(runWin);
-        longestWin = Math.max(longestWin, runWin);
-        runWin = 0;
       } else {
         // A FLAT TRADE IS ITS OWN OUTCOME. The reference counts `Breakevens` as
         // a third slice of the donut, and folding them into losers would move
         // the win rate without any trade having lost anything.
         breakevens += 1;
-        if (runWin > 0) winRuns.push(runWin);
-        if (runLoss > 0) lossRuns.push(runLoss);
-        longestWin = Math.max(longestWin, runWin);
-        longestLoss = Math.max(longestLoss, runLoss);
-        runWin = 0;
-        runLoss = 0;
       }
     }
-    if (runWin > 0) winRuns.push(runWin);
-    if (runLoss > 0) lossRuns.push(runLoss);
-    longestWin = Math.max(longestWin, runWin);
-    longestLoss = Math.max(longestLoss, runLoss);
 
     const n = ordered.length;
-    const mean = (/** @type {number[]} */ xs) =>
-      xs.length === 0 ? null : xs.reduce((a, b) => a + b, 0) / xs.length;
     const net = grossProfit - grossLoss;
     return {
       trades: n,
@@ -1106,10 +1257,12 @@
       avgBars: Math.round(bars / n),
       avgBarsWin: wins ? Math.round(barsWin / wins) : null,
       avgBarsLoss: losses ? Math.round(barsLoss / losses) : null,
-      longestWin,
-      longestLoss,
-      avgWinStreak: mean(winRuns),
-      avgLossStreak: mean(lossRuns),
+      longestWin: streak.longestWin,
+      longestLoss: streak.longestLoss,
+      avgWinStreak: streak.avgWinStreak,
+      avgLossStreak: streak.avgLossStreak,
+      streaks: streak.streaks,
+      ordered,
       // The equity curve the `Performance` plot list has been calling
       // unrecordable: a running sum of realised worst-case results.
       curve: (() => {
@@ -1124,6 +1277,11 @@
 
   /** Which performance plot is drawn. `equity` is the strategy's own curve. */
   let plot = $state('equity');
+  let performancePage = $state(0);
+  const PERFORMANCE_PAGE_SIZE = 320;
+  /** A bounded window for dense alternating strategy or benchmark swings. */
+  let swingPage = $state(0);
+  const SWING_PAGE_SIZE = 96;
 
   /**
    * The equity curve, and everything that is a property of its SHAPE.
@@ -1157,12 +1315,8 @@
     // from any high to any subsequent low. Kept separate from the segmentation
     // below because it answers a different question — "what is the worst this
     // ever got" rather than "how long is a typical decline".
-    let peak = curve[0];
-    let maxDrawdown = 0;
-    for (const v of curve) {
-      if (v > peak) peak = v;
-      maxDrawdown = Math.max(maxDrawdown, peak - v);
-    }
+    const maxDrawdown = equityMaxDrawdown(curve);
+    if (maxDrawdown === null) return null;
 
     // ── RUN-UPS AND DRAWDOWNS: alternating SWINGS, not new highs ──
     //
@@ -1184,6 +1338,7 @@
     /** @type {number[]} */ const runUpLens = [];
     /** @type {number[]} */ const drawdowns = [];
     /** @type {number[]} */ const drawdownLens = [];
+    /** @type {Array<{up: boolean, size: number, current?: boolean}>} */ const swingSegments = [];
     let dir = 0;
     let anchor = curve[0];
     let anchorAt = 0;
@@ -1205,6 +1360,7 @@
           drawdowns.push(magnitude);
           drawdownLens.push(length);
         }
+        if (magnitude > 0) swingSegments.push({ up: dir === 1, size: magnitude });
         anchor = curve[i - 1];
         anchorAt = i - 1;
         dir = up ? 1 : -1;
@@ -1233,6 +1389,9 @@
     // opposite of what happened. It travels with its direction so the row can
     // say which of the two it is.
     const openStretch = curve[curve.length - 1] - anchor;
+    if (dir !== 0 && openStretch !== 0) {
+      swingSegments.push({ up: openStretch > 0, size: Math.abs(openStretch), current: true });
+    }
 
     // ── Sharpe and Sortino on per-trade returns ──
     const base = Number(bench.open);
@@ -1264,7 +1423,21 @@
     return {
       // `{t, v}` is the shape `areaChart` already eats, `t` in SECONDS off each
       // trade's own exit stamp.
-      points: rows.map((t, i) => ({ t: Math.round((t.exit_micros ?? 0) / 1e6), v: curve[i] })),
+      // TradingView overlays the resolved trade result as a zero-centred
+      // histogram above the cumulative curve. `pnl` is the same exact
+      // worst-fill integer added into `v`, not a second estimate.
+      points: rows.map((t, i) => ({
+        t: Math.round((t.exit_micros ?? 0) / 1e6),
+        v: curve[i],
+        pnl: t.worst ?? 0
+      })),
+      swingPlot:
+        swingSegments.length > 0
+          ? {
+              segs: swingSegments,
+              max: swingSegments.reduce((largest, segment) => Math.max(largest, segment.size), 1)
+            }
+          : null,
       maxRunUp: runUps.length > 0 ? maxRunUp : null,
       avgRunUp: mean(runUps),
       openStretch,
@@ -1285,34 +1458,11 @@
     };
   });
 
-  /** Weekday bucket keys, and `0` IS MONDAY. */
-  const WEEKDAY_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-
-  /**
-   * One UTC hour bucket, labelled in the exchange's own clock.
-   *
-   * # IST IS NOT A WHOLE NUMBER OF HOURS, and that is the whole comment
-   *
-   * `Period::bucket` keys the hour grain by the **UTC** hour index. India is
-   * UTC+5:30, so a UTC hour does not line up with an IST hour: UTC 04 spans IST
-   * **09:30–10:30**, straddling two IST hours. Adding five and calling it an
-   * hour would be wrong by thirty minutes on every row, in the direction that
-   * makes the opening bucket look like it starts at the bell when it starts an
-   * hour later.
-   *
-   * So the label is the half-open IST range the bucket actually covers, and the
-   * UTC key it came from rides along in the title.
-   *
-   * @param {number} utcHour
-   */
-  function istHourLabel(utcHour) {
-    const start = (utcHour * 60 + 330) % 1440;
-    const end = (start + 60) % 1440;
-    /** @param {number} m */
-    const hhmm = (m) =>
-      `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
-    return `${hhmm(start)}–${hhmm(end)}`;
-  }
+  /* Keep exact per-trade bars wide enough to read. Cumulative values remain
+     absolute across pages, so paging changes only the visible window. */
+  const performanceWindow = $derived(
+    windowSeries(equity?.points ?? [], performancePage, PERFORMANCE_PAGE_SIZE)
+  );
 
   /**
    * When this run made its money — by weekday and by hour of the session.
@@ -1325,7 +1475,7 @@
    * on every request. The page stored the object and rendered none of it.
    *
    * MEASURED on the 60min NIFTY run: every one of its 177 trades falls on a
-   * **Friday**, and the IST 09:30–10:30 bucket alone is worth more at worst-case
+   * **Friday**, and the IST 09:00–10:00 bucket alone is worth more at worst-case
    * fills than the entire run. A concentration like that is the difference
    * between an edge and an artefact, and it was one `{#each}` away from being
    * visible.
@@ -1333,139 +1483,60 @@
    * Sorted by worst-case money rather than by key, because the question is
    * *"which"* and not *"in what order do Mondays come"*.
    */
-  /** Month names for the `month` grain, whose key is `year * 12 + (month - 1)`. */
-  const MONTH_NAMES = [
-    'Jan',
-    'Feb',
-    'Mar',
-    'Apr',
-    'May',
-    'Jun',
-    'Jul',
-    'Aug',
-    'Sep',
-    'Oct',
-    'Nov',
-    'Dec'
-  ];
-
-  const timePatterns = $derived.by(() => {
-    const p = tradeList.periods;
-    if (!p) return null;
-    /** @param {any[]} buckets @param {(k: number) => string} label */
-    const shape = (buckets, label) =>
-      (Array.isArray(buckets) ? buckets : []).map((b) => {
-        const trades = b.trades ?? 0;
-        const wins = b.worst_wins ?? 0;
-        return {
-          key: b.key,
-          label: label(b.key),
-          trades,
-          wins,
-          losses: trades - wins,
-          rateBp: trades ? Math.round((wins / trades) * 10_000) : 0,
-          worst: b.worst_paisa ?? 0,
-          best: b.best_paisa ?? 0
-        };
-      });
-
-    // Chronological within the grain, because a column chart of hours that
-    // jumps 09:30, 13:30, 10:30 is unreadable however it is sorted.
-    const byKey = (/** @type {any[]} */ rows) => [...rows].sort((a, b) => a.key - b.key);
-    const hours = byKey(shape(p.hour, istHourLabel));
-
-    /**
-     * EVERY SLOT IN THE GRAIN, INCLUDING THE EMPTY ONES.
-     *
-     * The reference draws seven weekday columns and twelve month columns
-     * whatever the data holds, and that is not decoration: on this operator's
-     * 60-minute run EVERY ONE of the 177 trades falls on a single weekday. A
-     * chart of the buckets that exist draws one bar and says nothing; a chart
-     * of all seven draws one bar beside six empty ones and says the whole
-     * finding at a glance.
-     *
-     * Months are folded ACROSS YEARS — the bucket key is `year * 12 + (month -
-     * 1)`, so a five-year span puts five keys on "August", and the reference's
-     * axis is the twelve calendar months rather than sixty ledger keys.
-     *
-     * @param {number} size how many slots the grain has
-     * @param {(i: number) => number} keyOf the bucket key a slot collects
-     * @param {(i: number) => string} label
-     * @param {any[]} rows
-     */
-    const fill = (size, keyOf, label, rows) =>
-      Array.from({ length: size }, (unused, i) => {
-        const want = keyOf(i);
-        const hit = rows.filter((r) => ((r.key % size) + size) % size === want % size);
-        const trades = hit.reduce((n, r) => n + r.trades, 0);
-        const wins = hit.reduce((n, r) => n + r.wins, 0);
-        return {
-          key: i,
-          label: label(i),
-          trades,
-          wins,
-          losses: trades - wins,
-          rateBp: trades ? Math.round((wins / trades) * 10_000) : 0,
-          worst: hit.reduce((n, r) => n + r.worst, 0),
-          best: hit.reduce((n, r) => n + r.best, 0)
-        };
-      });
-
-    // SUNDAY FIRST, because the reference's axis reads Sun Mon Tue Wed Thu Fri
-    // Sat — while `Period::bucket` keys 0 as MONDAY. Slot `i` therefore collects
-    // weekday key `(i + 6) % 7`, and getting that backwards would label Friday's
-    // column Saturday.
-    const days = fill(
-      7,
-      (i) => (i + 6) % 7,
-      (i) => WEEKDAY_NAMES[(i + 6) % 7],
-      shape(p.weekday, (k) => WEEKDAY_NAMES[k] ?? `weekday ${k}`)
-    );
-    const months = fill(
-      12,
-      (i) => i,
-      (i) => MONTH_NAMES[i],
-      shape(p.month, (k) => MONTH_NAMES[((k % 12) + 12) % 12] ?? `month ${k}`)
-    );
-    if (hours.length === 0 && p.weekday?.length === 0 && p.month?.length === 0) return null;
-
-    // BEST BY WIN RATE, NOT BY MONEY, which is what the reference's tiles say:
-    // "09:00, 43.90% winners". A bucket of one trade that won is 100% and is not
-    // an answer, so a bucket must carry at least a twentieth of the run's trades
-    // to be eligible — stated rather than silently applied.
-    const total = hours.reduce((n, r) => n + r.trades, 0);
-    const floor = Math.max(1, Math.round(total / 20));
-    /** @param {any[]} rows */
-    const best = (rows) => {
-      const eligible = rows.filter((r) => r.trades >= floor);
-      if (eligible.length === 0) return null;
-      return eligible.reduce((a, b) => (b.rateBp > a.rateBp ? b : a));
-    };
-    return {
-      hours,
-      days,
-      months,
-      bestHour: best(hours),
-      bestDay: best(days),
-      bestMonth: best(months),
-      floor,
-      total
-    };
-  });
+  const timePatterns = $derived(timePatternRows(tradeList.periods));
 
   /** Which grain the `Results by time` chart is drawing. */
-  let timeGrain = $state('hours');
+  let timeGrain = $state('hour');
+  let timePage = $state(0);
+  const TIME_PAGE_SIZE = 24;
 
-  /** The rows the chart is currently drawing, and the tallest column in them. */
+  /** The streak chart's unit and bounded visible window. */
+  let streakMode = $state('count');
+  let streakPage = $state(0);
+  const STREAK_PAGE_SIZE = 96;
+
+  /** Only a bounded page enters the DOM; the durable series itself is complete. */
   const timeRows = $derived.by(() => {
-    if (!timePatterns) return { rows: [], tallest: 1 };
-    const rows =
-      timeGrain === 'days'
-        ? timePatterns.days
-        : timeGrain === 'months'
-          ? timePatterns.months
-          : timePatterns.hours;
-    return { rows, tallest: Math.max(1, ...rows.map((r) => r.trades)) };
+    /** @type {any[]} */
+    const all = timePatterns?.grains?.[timeGrain] ?? [];
+    const window = windowSeries(all, timePage, TIME_PAGE_SIZE);
+    const rows = window.rows;
+    // One scale for the COMPLETE grain. Paging must move the viewing window,
+    // not make an identical bucket appear taller or shorter on the next page.
+    const tallest = all.reduce((largest, row) => Math.max(largest, row.trades), 1);
+    return { ...window, tallest };
+  });
+
+  const streakRows = $derived.by(() => {
+    /** @type {Array<{index:number, runIndex:number, seq:number, kind:'win'|'loss', count:number, amount:number}>} */
+    const all = [];
+    /** @type {'win'|'loss'|null} */ let kind = null;
+    let count = 0;
+    let amount = 0;
+    let runIndex = 0;
+    for (const row of tradeStats?.ordered ?? []) {
+      const nextKind = row.worst > 0 ? 'win' : 'loss';
+      if (nextKind !== kind) {
+        kind = nextKind;
+        count = 0;
+        amount = 0;
+        runIndex += 1;
+      }
+      count += 1;
+      amount += row.worst;
+      all.push({ index: all.length + 1, runIndex, seq: row.seq, kind, count, amount });
+    }
+    const tallest = all.reduce(
+      (largest, step) =>
+        Math.max(largest, streakMode === 'amount' ? Math.abs(step.amount) : step.count),
+      1
+    );
+    const window = windowSeries(all, streakPage, STREAK_PAGE_SIZE);
+    const rows = window.rows.map((step) => ({
+      ...step,
+      value: streakMode === 'amount' ? Math.abs(step.amount) : step.count
+    }));
+    return { ...window, rows, tallest };
   });
 
   /** Mean bars held, for the reference's fourth tile. */
@@ -1566,64 +1637,179 @@
    * Reversed for DISPLAY only — `tradeRows` accumulates chronologically, and
    * running that sum backwards would make every cumulative figure wrong.
    */
-  const tradeRowsShown = $derived([...tradeRows].reverse());
+  /**
+   * Bound the live table, not the evidence.
+   *
+   * The chosen-grid file can hold tens of thousands of trades. Rendering two
+   * table rows for every one made the 850-trade reference run create 1,700 DOM
+   * rows and made accessible-name queries time out. The complete validated
+   * series still feeds every statistic and curve; only this newest-first slice
+   * enters the table DOM.
+   */
+  const TRADE_PAGE_SIZE = 20;
+  let tradePage = $state(0);
+  const tradeRowsShown = $derived.by(() => {
+    const newest = [...tradeRows].reverse();
+    const pages = Math.max(1, Math.ceil(newest.length / TRADE_PAGE_SIZE));
+    const page = Math.max(0, Math.min(tradePage, pages - 1));
+    const start = page * TRADE_PAGE_SIZE;
+    return newest.slice(start, start + TRADE_PAGE_SIZE);
+  });
+  const tradeRowsWindow = $derived.by(() => {
+    const window = windowSeries(tradeRows, tradePage, TRADE_PAGE_SIZE);
+    return { ...window, rows: tradeRowsShown };
+  });
 
-  /** Rungs seen so far, newest first, as `{rung, bars, minHits, done, why}`. */
-  async function fetchLive() {
+  /** Latest-request-wins generation for the independent live-event stream. */
+  let liveSeq = 0;
+
+  /** @param {any} run */
+  function liveRunKey(run) {
+    return JSON.stringify([
+      run?.attempt,
+      run?.kind,
+      run?.feed,
+      run?.underlying,
+      run?.from_year,
+      run?.from_month,
+      run?.to_year,
+      run?.to_month
+    ]);
+  }
+
+  /** Revoke every pending live request, optionally clearing the prior attempt. */
+  function invalidateLive(clear = false) {
+    liveSeq += 1;
+    if (clear) live = { phase: 'idle', attempt: null, rungs: [], why: '' };
+  }
+
+  /**
+   * Publish only if this is still the newest request for the exact status run.
+   * Publication also retires the ticket, on success and every failure path.
+   * @param {number} seq
+   * @param {any} run
+   * @param {any} next
+   */
+  function publishLive(seq, run, next) {
+    if (seq !== liveSeq || liveRunKey(sweep.run) !== liveRunKey(run)) return;
+    live = next;
+    liveSeq += 1;
+  }
+
+  /**
+   * Rungs seen so far, newest first, for one exact opaque attempt token.
+   * @param {any} run
+   */
+  async function fetchLive(run) {
+    const seq = ++liveSeq;
+    if (!Number.isSafeInteger(run?.attempt) || run.attempt <= 0) {
+      publishLive(seq, run, {
+        phase: 'failed',
+        attempt: null,
+        rungs: [],
+        why: 'The status endpoint supplied no positive safe attempt token, so no log event can be bound to this run.'
+      });
+      return;
+    }
     try {
-      const response = await ask_('/logs.json?limit=120', { cache: 'no-store' });
+      const response = await ask_(
+        `/logs.json?limit=200&run=${encodeURIComponent(String(run.attempt))}`,
+        { cache: 'no-store' }
+      );
+      if (seq !== liveSeq || liveRunKey(sweep.run) !== liveRunKey(run)) return;
       if (!response.ok) {
-        live = { phase: 'failed', rungs: [], why: `/logs.json answered ${response.status}` };
+        publishLive(seq, run, {
+          phase: 'failed',
+          attempt: run.attempt,
+          rungs: [],
+          why: `/logs.json answered ${response.status} for exact attempt ${run.attempt}.`
+        });
         return;
       }
       const body = await response.json();
-      // ONE ROW PER RUNG, not one per event: a rung emits a span load and later
-      // a finish, and the reader wants the rung's state, not its history.
-      const byRung = new Map();
-      for (const record of body.records ?? []) {
-        if (record.target !== 'cli.audit') continue;
-        const f = record.fields ?? {};
-        if (!f.rung) continue;
-        const held = byRung.get(f.rung) ?? {
-          rung: f.rung,
-          bars: 0,
-          minHits: 0,
-          done: false,
-          why: '',
-          // THE PHASE, because "loaded" and "finished" were the only two states
-          // this reducer could reach and the exit grid sits between them for
-          // 87.6% of the runtime. A rung four hours into its grid read exactly
-          // like one that had just loaded its span.
-          phase: 'loading',
-          candidates: 0,
-          priced: 0
-        };
-        if (f.bars) held.bars = f.bars;
-        if (f.min_hits) held.minHits = f.min_hits;
-        if (f.candidates) held.candidates = f.candidates;
-        if (record.message === 'exit grid entered') {
-          held.phase = 'pricing';
-        }
-        if (record.message === 'exit grid finished') {
-          held.phase = 'priced';
-          held.priced = f.priced ?? 0;
-        }
-        if (record.message === 'rung finished') {
-          held.done = true;
-          held.phase = 'done';
-          held.why = f.why ?? '';
-          held.recorded = f.recorded === 1;
-        }
-        byRung.set(f.rung, held);
-      }
-      live = { phase: 'ready', rungs: [...byRung.values()], why: '' };
+      if (seq !== liveSeq || liveRunKey(sweep.run) !== liveRunKey(run)) return;
+      publishLive(seq, run, reduceLiveProgress(run, body));
     } catch (why) {
-      live = {
+      publishLive(seq, run, {
         phase: 'failed',
+        attempt: Number.isSafeInteger(run?.attempt) ? run.attempt : null,
         rungs: [],
         why: `The event feed could not be read: ${why instanceof Error ? why.message : String(why)}`
-      };
+      });
     }
+  }
+
+  /** Six ledger mask words, each 64 bits wide. */
+  const MASK_CAPACITY = 6 * 64;
+
+  /**
+   * Admit one complete vocabulary envelope or none of it.
+   *
+   * A partial table is more dangerous than no table: bit 17 decoded against a
+   * shifted or duplicated row confidently names the wrong condition. Dense
+   * own indices, a reconciled count, unique names, exact booleans and a version
+   * are therefore one atomic admission decision.
+   *
+   * @param {unknown} payload
+   * @returns {{ ok: true, version: number, bits: Map<number, {name: string, live: boolean}>, why: '' } | { ok: false, version: 0, bits: Map<number, {name: string, live: boolean}>, why: string }}
+   */
+  function validateVocabEnvelope(payload) {
+    /** @param {string} why */
+    const refuse = (why) => ({
+      ok: /** @type {const} */ (false),
+      version: /** @type {const} */ (0),
+      /** @type {Map<number, {name: string, live: boolean}>} */
+      bits: new Map(),
+      why
+    });
+    if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+      return refuse('the response is not an object');
+    }
+    const body = /** @type {Record<string, unknown>} */ (payload);
+    if (!Number.isSafeInteger(body.vocab_version) || Number(body.vocab_version) < 1) {
+      return refuse('vocab_version is not a positive safe integer');
+    }
+    if (
+      !Number.isSafeInteger(body.count) ||
+      Number(body.count) < 1 ||
+      Number(body.count) > MASK_CAPACITY
+    ) {
+      return refuse(`count is not an integer between 1 and ${MASK_CAPACITY}`);
+    }
+    if (!Array.isArray(body.bits) || body.bits.length !== body.count) {
+      return refuse('bits is not an array whose length equals count');
+    }
+
+    /** @type {Map<number, {name: string, live: boolean}>} */
+    const bits = new Map();
+    const names = new Set();
+    for (let at = 0; at < body.bits.length; at += 1) {
+      const raw = body.bits[at];
+      if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+        return refuse(`bits[${at}] is not an object`);
+      }
+      const bit = /** @type {Record<string, unknown>} */ (raw);
+      if (!Number.isSafeInteger(bit.i) || Object.is(bit.i, -0) || bit.i !== at) {
+        return refuse(`bits[${at}].i is not its dense append-only position`);
+      }
+      if (typeof bit.name !== 'string' || bit.name.length === 0 || bit.name.trim() !== bit.name) {
+        return refuse(`bits[${at}].name is not a non-empty canonical string`);
+      }
+      if (names.has(bit.name)) {
+        return refuse(`bits[${at}].name duplicates an earlier condition`);
+      }
+      if (typeof bit.live !== 'boolean') {
+        return refuse(`bits[${at}].live is not a boolean`);
+      }
+      names.add(bit.name);
+      bits.set(at, { name: bit.name, live: bit.live });
+    }
+    return {
+      ok: /** @type {const} */ (true),
+      version: Number(body.vocab_version),
+      bits,
+      why: /** @type {const} */ ('')
+    };
   }
 
   async function fetchVocab() {
@@ -1646,11 +1832,19 @@
         return;
       }
       const body = await response.json();
-      const bits = new Map();
-      for (const bit of body.bits ?? []) {
-        bits.set(bit.i, { name: bit.name, live: bit.live });
+      const checked = validateVocabEnvelope(body);
+      if (!checked.ok) {
+        vocab = {
+          phase: 'failed',
+          version: 0,
+          bits: new Map(),
+          why:
+            `The condition table was refused: ${checked.why}. No mask is decoded ` +
+            `against a partial or malformed vocabulary.`
+        };
+        return;
       }
-      vocab = { phase: 'ready', version: body.vocab_version ?? 0, bits, why: '' };
+      vocab = { phase: 'ready', version: checked.version, bits: checked.bits, why: '' };
     } catch (why) {
       vocab = {
         phase: 'failed',
@@ -1718,43 +1912,12 @@
     }
   }
 
-  /**
-   * The positions a mask has set, in ascending order.
-   *
-   * Six words of 64 bits, little-endian in word order: word 0 holds positions
-   * 0..63, word 1 holds 64..127, and so on. `BigInt` and not `Number` because a
-   * word is 64 bits and a JS number carries 53 — the words arrive as decimal
-   * STRINGS for exactly that reason, and parsing one with `Number()` would set
-   * the wrong bits without throwing.
-   *
-   * @param {string[]} words
-   * @returns {number[]}
-   */
-  function positionsIn(words) {
-    /** @type {number[]} */
-    const out = [];
-    (words ?? []).forEach((word, index) => {
-      let value;
-      try {
-        value = BigInt(word);
-      } catch {
-        // A WORD THAT WILL NOT PARSE IS SKIPPED AND THE REST ARE READ. One
-        // malformed word must not blank a combination that is otherwise
-        // perfectly legible.
-        return;
-      }
-      for (let bit = 0; bit < 64 && value !== 0n; bit += 1) {
-        if ((value & 1n) === 1n) out.push(index * 64 + bit);
-        value >>= 1n;
-      }
-    });
-    return out;
-  }
-
   async function fetchLedger() {
+    const seq = ++ledgerSeq;
     load.phase = 'loading';
     try {
       const response = await ask_(`/backtest.json?limit=${LIMIT}`, { cache: 'no-store' });
+      if (seq !== ledgerSeq) return;
       if (!response.ok && response.status !== 503) {
         // A NON-503 FAILURE IS THE SERVER, NOT THE CONFIGURATION. 503 still
         // carries a parseable body with the refusal in it, so it is read
@@ -1773,6 +1936,7 @@
         // hours, every rebuild of this page reached them instantly, and none
         // of the route did. The message said "the API refused the request",
         // which is true and useless. It now names the cause and the fix.
+        if (seq !== ledgerSeq) return;
         load = {
           phase: 'failed',
           body: null,
@@ -1790,8 +1954,22 @@
         };
         return;
       }
-      load = { phase: 'ready', body: await response.json(), why: '' };
+      const body = await response.json();
+      if (seq !== ledgerSeq) return;
+      const checked = validateLedgerPayload(body);
+      if (!checked.ok) {
+        if (seq !== ledgerSeq) return;
+        load = {
+          phase: 'failed',
+          body: null,
+          why: `${checked.why} Nothing from it was ranked or opened.`
+        };
+        return;
+      }
+      if (seq !== ledgerSeq) return;
+      load = { phase: 'ready', body: checked.body, why: '' };
     } catch (error) {
+      if (seq !== ledgerSeq) return;
       load = {
         phase: 'failed',
         body: null,
@@ -1812,6 +1990,10 @@
     // AND WHETHER ONE IS ALREADY RUNNING. See `adoptRunning`: without this the
     // in-flight view survived exactly one browser reload, which is none.
     untrack(() => adoptRunning());
+    // Component teardown (or a future effect reset) revokes every pending read.
+    return () => {
+      ledgerSeq += 1;
+    };
   });
 
   /* ====================================================================
@@ -1893,10 +2075,11 @@
       const body = await response.json();
       const next = sweepOutcome(body.running);
       if (next.phase !== 'running') return;
+      invalidateLive(liveRunKey(sweep.run) !== liveRunKey(next.run));
       sweep = next;
       // THE EVENT FEED ON THE SAME TICK, exactly as `pollSweep` does it: the
       // status payload carries no progress and the rungs live in the log.
-      fetchLive();
+      fetchLive(next.run);
       pollAt = setTimeout(pollSweep, 2000);
     } catch (error) {
       // NAMED, NOT SWALLOWED. A page that could not ask is not a page with no
@@ -1910,7 +2093,10 @@
   async function pollSweep() {
     try {
       const response = await ask_(`/backtest/run.json`, { cache: 'no-store' });
-      if (!response.ok) return;
+      if (!response.ok) {
+        invalidateLive();
+        return;
+      }
       const body = await response.json();
       // ENDED IS NOT FINISHED, AND THIS TESTED ONLY THAT IT HAD ENDED.
       //
@@ -1927,26 +2113,30 @@
         // AND THE EVENT FEED, on the same tick. `next` carries no progress —
         // see `live` — so this is where the page learns which rungs have
         // loaded, what threshold each derived, and which have finished.
-        fetchLive();
+        fetchLive(next.run);
         pollAt = setTimeout(pollSweep, 2000);
         return;
       }
-      // FINISHED: the ledger now has one more record, so the table is stale.
-      // A REFUSAL DOES NOT RE-READ IT — nothing was appended, and re-reading
-      // would redraw the same table under a red note as though it had changed.
+      // DONE IS A COMPLETE REPORT, NOT A PROMISE THAT EVERY RUNG APPENDED.
+      // The report carries each rung's recorded/refused outcome. Re-read the
+      // ledger because one or more rows MAY have committed; a whole-run refusal
+      // does not take this branch.
       if (next.phase === 'done') {
         fetchLedger();
         // ONE LAST READ, so the finished state shows every rung's outcome
         // rather than freezing on whatever the last poll happened to catch.
-        fetchLive();
+        fetchLive(next.run);
         // AND THE RANKED COMBINATIONS, which is what was actually being asked
         // for. `fetchLedger` re-reads one row per run; this reads the twenty-five
         // rows behind each of them. Fired together and awaited by neither,
         // because they answer different questions and a slow frontier read must
         // not hold up the ledger table.
         fetchTop(next.run?.feed, next.run?.underlying);
+      } else {
+        invalidateLive();
       }
     } catch (error) {
+      invalidateLive();
       sweep = {
         phase: 'failed',
         run: null,
@@ -1961,6 +2151,7 @@
     // one poll later — and on a refusal raised HERE it never arrives at all.
     // See `pressed`.
     pressed = 'sweep';
+    invalidateLive(true);
     const from = months(ask.from);
     const to = months(ask.to);
     if (!from || !to) {
@@ -2194,6 +2385,7 @@
    */
   async function startDescent() {
     pressed = 'descent';
+    invalidateLive(true);
     const from = months(ask.from);
     const to = months(ask.to);
     if (!from || !to) {
@@ -2285,6 +2477,7 @@
   // timer firing against a component that is gone.
   $effect(() => () => {
     if (pollAt !== null) clearTimeout(pollAt);
+    invalidateLive();
   });
 
   /* ====================================================================
@@ -2352,7 +2545,8 @@
    * @property {number} max_runs
    * @property {boolean} halted
    * @property {number} unsealed
-   * @property {Run | null} best_complete
+   * @property {number | null} best_complete
+   * @property {string[]} signal_rungs exact `cli::EVERY_RUNG` values published by the server
    * @property {string | null} refusal
    * @property {Run[]} runs
    */
@@ -2360,7 +2554,7 @@
   /** @type {Ledger | null | undefined} */
   const ledger = $derived(load.body);
   /** Every run the server returned, newest first — the server ordered them. */
-  const allRuns = $derived(ledger?.runs ?? []);
+  const allRuns = $derived(Array.isArray(ledger?.runs) ? ledger.runs : []);
   /** The server's own refusal sentence, when it had one. */
   const refusal = $derived(ledger?.refusal ?? null);
   /**
@@ -2404,10 +2598,101 @@
 
      No feed now yields NO rows, and the empty-state branch below names the
      reason and offers the same way out. */
-  const runs = $derived(
-    everyFeed ? allRuns : activeFeed ? allRuns.filter((r) => r.feed === activeFeed) : []
+  const scopedRuns = $derived(
+    everyFeed
+      ? allRuns
+      : activeFeed
+        ? allRuns.filter((r) => {
+            // A malformed row with no usable feed cannot be attributed to a
+            // different vendor and silently hidden. Keep it in the active
+            // scope so the admission door can name and refuse it.
+            if (r === null || typeof r !== 'object' || Array.isArray(r)) return true;
+            return typeof r.feed !== 'string' || r.feed === activeFeed;
+          })
+        : []
   );
-  const hiddenByFeed = $derived(allRuns.length - runs.length);
+  /* ONE ADMISSION DOOR BEFORE EVERY ANSWER, RUNG, SORT AND DRILL COMPUTATION.
+     A JSON parser has already rounded an out-of-range i64/u64 by this point;
+     no formatter can recover it. Refused rows stay visible in the comparison
+     as metadata with the exact reason, but do not enter any arithmetic. */
+  const runAdmissions = $derived(
+    scopedRuns.map((run) => ({ run, admission: validateRunForComputation(run) }))
+  );
+  const runs = $derived(
+    runAdmissions.filter(({ admission }) => admission.ok).map(({ run }) => run)
+  );
+  const refusedNumericRuns = $derived(
+    runAdmissions.filter(({ admission }) => !admission.ok)
+  );
+  /**
+   * The plain-language comparison, sorted on the same conservative result the
+   * rest of this page leads with. Ineligible rows remain visible after the
+   * rankable ones with their exact reason; a stopped or unsealed run does not
+   * disappear merely because it cannot be ranked.
+   *
+   * `compareRuns` is a plain tested fold rather than markup-side conditionals,
+   * so the status, reference row and deltas cannot disagree across columns.
+   */
+  const comparedRuns = $derived.by(() => compareRuns(scopedRuns, ledger?.signal_rungs));
+  /**
+   * The server owns the signal-rung vocabulary.  A suffix is not authority:
+   * `garbagemin` ends in `min` and is still not a rung the engine swept.
+   * Malformed or duplicate wire values withhold every headline and leader.
+   */
+  const signalRungSet = $derived.by(() => {
+    const values = ledger?.signal_rungs;
+    if (
+      !Array.isArray(values) ||
+      values.length === 0 ||
+      Array.from(values).some((value) => typeof value !== 'string' || value.length === 0)
+    ) return null;
+    const exact = new Set(values);
+    return exact.size === values.length ? exact : null;
+  });
+  /** A comparison count either stays exact or says why no number is shown. */
+  const comparisonCount = (/** @type {unknown} */ value) =>
+    typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+      ? exact(value)
+      : 'not exact';
+  /** @param {Run} run */
+  const comparisonSpan = (run) =>
+    Number.isSafeInteger(run.from_year) &&
+    Number.isSafeInteger(run.to_year) &&
+    Number.isSafeInteger(run.from_month) &&
+    run.from_month >= 1 &&
+    run.from_month <= 12 &&
+    Number.isSafeInteger(run.to_month) &&
+    run.to_month >= 1 &&
+    run.to_month <= 12
+      ? span(run)
+      : 'span not exact';
+  const rankableRunCount = $derived(comparedRuns.filter((r) => r.eligible).length);
+  const positiveRankableCount = $derived(
+    comparedRuns.filter((r) => r.eligible && r.pessimistic > 0).length
+  );
+  const negativeRankableCount = $derived(
+    comparedRuns.filter((r) => r.eligible && r.pessimistic < 0).length
+  );
+  const breakevenRankableCount = $derived(
+    rankableRunCount - positiveRankableCount - negativeRankableCount
+  );
+  const COMPARISON_STEP = 12;
+  let comparisonShown = $state(COMPARISON_STEP);
+  const comparisonDatasetKey = $derived(
+    `${everyFeed}:${activeFeed ?? ''}:${scopedRuns.length}:${scopedRuns[0]?.identity ?? ''}:${scopedRuns[scopedRuns.length - 1]?.identity ?? ''}`
+  );
+  $effect(() => {
+    // Expanding one feed must not make the next feed inherit a hundreds-row
+    // DOM. The ledger is append-only, so its length and end identities are a
+    // sufficient dataset change signal without walking every row again.
+    comparisonDatasetKey;
+    comparisonShown = COMPARISON_STEP;
+  });
+  const visibleComparedRuns = $derived(comparedRuns.slice(0, comparisonShown));
+  const comparisonRemaining = $derived(
+    Math.max(0, comparedRuns.length - visibleComparedRuns.length)
+  );
+  const hiddenByFeed = $derived(allRuns.length - scopedRuns.length);
 
   /* ====================================================================
      WHAT THE STORE ACTUALLY HOLDS — the sweep form's only source of truth
@@ -3028,17 +3313,23 @@
    * comparison, exactly as a halted row is, and it says why where it
    * appears.
    *
-   * Same `min`-suffix test the catalog uses — a rule about the shape of a
-   * rung rather than a second copy of a private const.
+   * Membership comes from `/backtest.json.signal_rungs`, the exact
+   * `cli::EVERY_RUNG` values emitted by the server. A suffix test would admit
+   * `garbagemin`; a browser list would become a stale second vocabulary.
    *
    * @param {any} r
    */
-  const swept = (r) => /min$/.test(String(r?.timeframe ?? ''));
+  const swept = (r) =>
+    signalRungSet !== null && signalRungSet.has(String(r?.timeframe ?? ''));
 
   /** Recorded runs on a timeframe the engine never sweeps. */
-  const offSurfaceRuns = $derived(runs.filter((r) => !swept(r)));
+  const offSurfaceRuns = $derived(
+    signalRungSet === null ? [] : runs.filter((r) => !swept(r))
+  );
 
   const completeRuns = $derived(runs.filter((r) => !r.halted && trustworthy(r) && swept(r)));
+  /** Rows allowed to supply a product answer, not merely rows that terminated. */
+  const rankableRuns = $derived(comparedRuns.filter((r) => r.eligible));
   const haltedRuns = $derived(runs.filter((r) => r.halted));
   const unsealedRuns = $derived(runs.filter((r) => !trustworthy(r)));
   const holedRuns = $derived(runs.filter((r) => !r.whole_span));
@@ -3053,7 +3344,7 @@
    */
   const best = $derived.by(() => {
     let winner = null;
-    for (const run of completeRuns) {
+    for (const run of rankableRuns) {
       if (
         winner === null ||
         run.pessimistic > winner.pessimistic ||
@@ -3127,15 +3418,14 @@
    * that is a design question rather than a typo; recorded here so the next
    * reader is not misled by the paragraph above it.
    *
-   * Per-thousand rather than per-cent so two genuinely different thresholds a
-   * tenth of a percent apart stay apart. `bars === 0` yields `-1`, a value no
-   * real ratio takes, so a degenerate run groups with other degenerate runs
-   * rather than dividing by zero.
+   * This per-thousand value is for the one-decimal percentage display. The
+   * comparison key above uses the exact reduced `min_hits / bars` fraction;
+   * display rounding never identifies a search. `-1` is a visible refusal
+   * sentinel and never a real ratio.
    *
    * @param {any} r
    */
-  const supportPerMille = (r) =>
-    r.bars > 0 ? Math.round((r.min_hits / r.bars) * 1000) : -1;
+  const supportPerMille = (r) => roundedScaledRatio(r.min_hits, r.bars, 1000) ?? -1;
 
   /**
    * One key per comparable question: same feed, same instrument, same span,
@@ -3143,8 +3433,11 @@
    *
    * @param {any} r
    */
-  const groupKey = (r) =>
-    `${r.feed} ${r.underlying} ${r.from_year}-${r.from_month} ${r.to_year}-${r.to_month} ${supportPerMille(r)}`;
+  const groupKey = comparisonQuestionKey;
+
+  /** @param {any} r */
+  const runKey = (r) => `${r.index}:${r.identity}`;
+  const rankableRunKeys = $derived(new Set(rankableRuns.map(runKey)));
 
   /**
    * The rung comparison: one entry per comparable span, each holding the runs
@@ -3186,7 +3479,7 @@
       .map((g) => {
         const names = [...g.rungs.keys()].sort(byRung);
         const present = names.map((n) => g.rungs.get(n));
-        const complete = present.filter((r) => !r.halted && trustworthy(r));
+        const complete = present.filter((r) => rankableRunKeys.has(runKey(r)));
         // ONE SHARED SCALE, so bar heights are comparable across the row.
         // Taken over the absolute value so a losing rung is as legible as a
         // winning one.
@@ -3409,6 +3702,34 @@
   const noTrades = $derived(openRun !== null && openRun.trades === 0);
 
   /**
+   * Exact trade-evidence state, shared by every neutral value.
+   *
+   * A null fold is not one fact: it can mean a request is still in flight, a
+   * refusal, a valid empty response, an absent historical child, or a series
+   * that is present but too short for a curve. Call sites use this state rather
+   * than asserting that every null means “no trade file”.
+   */
+  const tradeEvidenceWhy = $derived.by(() => {
+    if (tradeList.phase === 'loading') return 'Trade evidence is still being read.';
+    if (tradeList.phase === 'failed') return tradeList.why || 'The trade response was refused.';
+    if (tradeList.phase === 'ready' && tradeRows.length === 0) {
+      if (noTrades) return 'The ledger records zero trades, so the set is known to be empty.';
+      return tradeList.why || 'The validated trade response is empty.';
+    }
+    if (tradeRows.length === 1) {
+      return 'One completed trade is present; at least two trades are required to form a curve.';
+    }
+    if (tradeList.phase === 'idle') return 'Open a run to read its chosen-grid trades.';
+    return 'The required trade evidence is not available for this recorded run.';
+  });
+
+  const equityEvidenceWhy = $derived(
+    tradeRows.length === 1
+      ? 'One completed trade is an insufficient sample; a curve needs at least two trades.'
+      : tradeEvidenceWhy
+  );
+
+  /**
    * Are the padlocked metrics expanded?
    *
    * # OPEN by default now, and the reason it was closed has gone
@@ -3425,6 +3746,22 @@
    * collapse it — but the default is the reference's.
    */
   let showAllMetrics = $state(true);
+
+  /** The control that opened the report, so Close can return keyboard focus. @type {HTMLElement | null} */
+  let drillTrigger = null;
+
+  /** Close the report and return focus to its opening control when it still exists. */
+  async function closeDrill() {
+    periodOpen = false;
+    openIndex = null;
+    // Invalidate both in-flight requests before either can publish under a
+    // later run's heading. The calls reset their visible state synchronously.
+    void fetchTrades(undefined);
+    void fetchCombos(undefined);
+    await tick();
+    if (drillTrigger?.isConnected) drillTrigger.focus();
+    drillTrigger = null;
+  }
 
   /**
    * Open or close a run's drill-down, AND GO TO IT WHEN IT OPENS.
@@ -3459,11 +3796,31 @@
    * Naming `.page` removes the guess.
    *
    * @param {any} run
+   * @param {HTMLElement | null} [trigger]
    */
-  async function toggle(run) {
-    const opening = openIndex !== run.index;
-    openIndex = opening ? run.index : null;
-    if (!opening) return;
+  async function toggle(run, trigger = null) {
+    // Defense in depth behind every button. An unsafe row can still be
+    // retained as visible metadata in the comparison table, but cannot become
+    // `openRun` or trigger child requests even if a caller invokes this
+    // function directly.
+    if (!validateRunForComputation(run).ok) return;
+    const opening = openRun?.index !== run.index;
+    if (!opening) {
+      await closeDrill();
+      return;
+    }
+    // The answer and comparison controls sit outside the searchable ledger.
+    // If that ledger's query currently excludes this run, clear the query so
+    // `openRun` can resolve it instead of claiming the report expanded while
+    // rendering no report at all.
+    if (opening && !matched.some((row) => row.index === run.index)) query = '';
+    periodOpen = false;
+    plot = 'equity';
+    performancePage = 0;
+    swingPage = 0;
+    tradePage = 0;
+    drillTrigger = trigger;
+    openIndex = run.index;
     // THE TRADES OF THIS RUN, fetched when it is opened rather than for every
     // row in the ledger. A run can hold tens of thousands of them and the list
     // is only ever looked at one run at a time.
@@ -3503,7 +3860,7 @@
       });
     await settle();
 
-    const panel = document.querySelector('.drill');
+    const panel = /** @type {HTMLElement | null} */ (document.querySelector('.drill'));
     if (!panel) return;
     const delta = panel.getBoundingClientRect().top - page.getBoundingClientRect().top;
     /* ASSIGNED, NOT `scrollTo({behavior:'smooth'})`, AND THIS IS THE THIRD
@@ -3524,26 +3881,26 @@
        not. `- 8` keeps the panel's top edge off the rim of the scrollport
        so it reads as arriving rather than as clipped. */
     page.scrollTop = page.scrollTop + delta - 8;
+    panel.focus({ preventScroll: true });
   }
 
   /* ====================================================================
-     THE PRICE THE RUN WAS SWEPT OVER — TradingView's own library
+     THE CURRENT STORE PRICE REFERENCE — TradingView's own library
      --------------------------------------------------------------------
      THE BARS ARE REAL AND THE TRADES ARE NOT DRAWN, and the second half
      of that sentence is the important one.
 
-     `/bars/window.json` serves the actual OHLCV the sweep read, at the
-     run's own instrument, rung and span — so this chart is the price
-     series the result was computed against, not an illustration of one.
-     The store holds 81 month files for this NIFTY span and the ledger
-     record says `months_found: 81`; the chart reads the same files.
+     `/bars/window.json` serves the OHLCV in the store NOW at the run's
+     instrument, rung and span. It does not echo or prove the run's recorded
+     `data_digest`, so this chart is a current-store reference and must never be
+     described as the exact bytes the historical result used.
 
-     What CANNOT be drawn on it is entries and exits. The ledger records
-     `trades: 5093` as a COUNT and keeps no trade list, so there is no
-     timestamp to put a marker at. Drawing markers would be the invention
-     CLAUDE.md §3 rule 1 bans, and a chart with plausible markers is far
-     worse than one with none: it would look like the answer to "when did
-     it trade", which nothing on disk can answer.
+     Entries and exits are deliberately not overlaid. The chosen-trade file now
+     owns exact execution-series indices and times for the same selected cell as
+     the headline. This chart can show another rung and only a clipped window,
+     while the row carries neither a chart-alignment key nor an exit-cause tag.
+     Guessing either marker would still make a convincing wrong picture; the
+     separate trade list shows every durable fact instead.
      ==================================================================== */
 
   /**
@@ -3560,6 +3917,140 @@
    * ledger's own `hit_scan_cap` keeps, for the same reason.
    */
   const MAX_WINDOW_LIMIT = 1000;
+
+  /** @param {unknown} value */
+  const integer = (value) => Number.isSafeInteger(value) && !Object.is(value, -0);
+  /** @param {unknown} value */
+  const whole = (value) => integer(value) && Number(value) >= 0;
+
+  /** @param {any} run */
+  function runMonthCount(run) {
+    if (
+      !whole(run?.from_year) ||
+      !whole(run?.from_month) ||
+      !whole(run?.to_year) ||
+      !whole(run?.to_month) ||
+      run.from_month < 1 ||
+      run.from_month > 12 ||
+      run.to_month < 1 ||
+      run.to_month > 12
+    ) {
+      return null;
+    }
+    const span = (run.to_year - run.from_year) * 12 + run.to_month - run.from_month + 1;
+    return Number.isSafeInteger(span) && span > 0 ? span : null;
+  }
+
+  /**
+   * Admit the complete `/bars/window.json` contract before a single bar is
+   * used by a chart or benchmark. This is intentionally one door shared by
+   * both consumers: otherwise the benchmark can accept a value the series
+   * refuses and the two displays disagree while each looks internally valid.
+   *
+   * @param {unknown} payload
+   * @param {'asc'|'desc'} direction the wire order explicitly requested
+   * @param {number} limit the exact request limit (offset is always zero here)
+   * @param {number} expectedMonths the inclusive month range in the request
+   * @returns {{ ok: true, bars: any[], total: number, monthsRead: number, monthsMissing: number, why: '' } | { ok: false, bars: never[], total: 0, monthsRead: 0, monthsMissing: 0, why: string }}
+   */
+  function validateBarsWindow(payload, direction, limit, expectedMonths) {
+    /** @param {string} why */
+    const refuse = (why) => ({
+      ok: /** @type {const} */ (false),
+      bars: /** @type {never[]} */ ([]),
+      total: /** @type {const} */ (0),
+      monthsRead: /** @type {const} */ (0),
+      monthsMissing: /** @type {const} */ (0),
+      why
+    });
+    if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+      return refuse('the response is not an object');
+    }
+    const body = /** @type {Record<string, unknown>} */ (payload);
+    if (!whole(body.total)) return refuse('total is not a non-negative safe integer');
+    if (!whole(body.months_read)) {
+      return refuse('months_read is not a non-negative safe integer');
+    }
+    if (!whole(body.months_missing)) {
+      return refuse('months_missing is not a non-negative safe integer');
+    }
+    if (
+      !Number.isSafeInteger(expectedMonths) ||
+      expectedMonths < 1 ||
+      Number(body.months_read) + Number(body.months_missing) !== expectedMonths
+    ) {
+      return refuse('months_read plus months_missing does not equal the requested span');
+    }
+    if (body.scanned !== false || body.extremes !== null || body.faults !== null) {
+      return refuse('the timestamp window is scanned, partial, or carries unexpected extremes');
+    }
+    if (!Array.isArray(body.bars)) return refuse('bars is not an array');
+    if (!Number.isSafeInteger(limit) || limit < 1 || body.bars.length > limit) {
+      return refuse('bars exceeds the exact request limit');
+    }
+    const total = Number(body.total);
+    if (body.bars.length !== Math.min(total, limit)) {
+      return refuse('bars length does not reconcile with total and limit at offset zero');
+    }
+
+    /** @type {any[]} */
+    const bars = [];
+    let previous = null;
+    for (let at = 0; at < body.bars.length; at += 1) {
+      const raw = body.bars[at];
+      if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+        return refuse(`bars[${at}] is not an object`);
+      }
+      const bar = /** @type {Record<string, unknown>} */ (raw);
+      for (const field of ['t', 'o', 'h', 'l', 'c', 'v']) {
+        if (!whole(bar[field])) return refuse(`bars[${at}].${field} is not a safe whole number`);
+      }
+      if (!(bar.oi === null || whole(bar.oi))) {
+        return refuse(`bars[${at}].oi is neither null nor a safe whole number`);
+      }
+      if (
+        Number(bar.h) < Number(bar.o) ||
+        Number(bar.h) < Number(bar.l) ||
+        Number(bar.h) < Number(bar.c) ||
+        Number(bar.l) > Number(bar.o) ||
+        Number(bar.l) > Number(bar.c)
+      ) {
+        return refuse(`bars[${at}] has impossible OHLC ordering`);
+      }
+      for (const [valueField, whyField] of [
+        ['chg', 'chg_why'],
+        ['oichg', 'oichg_why']
+      ]) {
+        const value = bar[valueField];
+        const why = bar[whyField];
+        if (value === null) {
+          if (typeof why !== 'string' || why.length === 0) {
+            return refuse(`bars[${at}].${whyField} does not explain a null ${valueField}`);
+          }
+        } else if (!integer(value) || why !== null) {
+          return refuse(`bars[${at}].${valueField}/${whyField} is not an exclusive value/reason pair`);
+        }
+      }
+      const timestamp = Number(bar.t);
+      if (
+        previous !== null &&
+        ((direction === 'asc' && timestamp <= previous) ||
+          (direction === 'desc' && timestamp >= previous))
+      ) {
+        return refuse(`bars[${at}].t is duplicated or out of requested ${direction} order`);
+      }
+      previous = timestamp;
+      bars.push(raw);
+    }
+    return {
+      ok: /** @type {const} */ (true),
+      bars,
+      total,
+      monthsRead: Number(body.months_read),
+      monthsMissing: Number(body.months_missing),
+      why: /** @type {const} */ ('')
+    };
+  }
 
   /** @type {{ phase: 'idle'|'loading'|'ready'|'failed', bars: any[], total: number, months_read: number, months_missing: number, why: string }} */
   let series = $state({
@@ -3663,6 +4154,18 @@
       };
       return;
     }
+    const expectedMonths = runMonthCount(run);
+    if (expectedMonths === null) {
+      series = {
+        phase: 'failed',
+        bars: [],
+        total: 0,
+        months_read: 0,
+        months_missing: 0,
+        why: 'The recorded run does not name a valid inclusive month span.'
+      };
+      return;
+    }
     series = { phase: 'loading', bars: [], total: 0, months_read: 0, months_missing: 0, why: '' };
     const from = `${run.from_year}-${String(run.from_month).padStart(2, '0')}`;
     const to = `${run.to_year}-${String(run.to_month).padStart(2, '0')}`;
@@ -3671,7 +4174,7 @@
       `&exchange=${encodeURIComponent(at.exchange)}&segment=${encodeURIComponent(at.segment)}` +
       `&symbol=${encodeURIComponent(run.underlying)}` +
       `&timeframe=${encodeURIComponent(rung)}&from=${from}&to=${to}` +
-      `&limit=${MAX_WINDOW_LIMIT}`;
+      `&sort=ts&dir=desc&limit=${MAX_WINDOW_LIMIT}`;
     try {
       // 30 s rather than the default 15: 81 months of 30-minute bars is 21,620
       // records off a cold page cache, and giving up on a read that is working
@@ -3696,20 +4199,32 @@
       }
       const body = await response.json();
       if (seq !== seriesSeq) return;
-      // ASCENDING, BECAUSE THE LIBRARY REQUIRES IT AND THE ROUTE DOES NOT
-      // PROMISE IT. `/bars/window.json` answers newest first, which is right
-      // for a table and wrong for a time axis; lightweight-charts throws on
-      // unordered data rather than drawing it wrong.
-      const bars = [...(body.bars ?? [])].sort((a, b) => a.t - b.t);
+      const checked = validateBarsWindow(body, 'desc', MAX_WINDOW_LIMIT, expectedMonths);
+      if (!checked.ok) {
+        series = {
+          phase: 'failed',
+          bars: [],
+          total: 0,
+          months_read: 0,
+          months_missing: 0,
+          why: `The bar window was refused before charting: ${checked.why}.`
+        };
+        return;
+      }
+      // The wire was explicitly requested and admitted newest-first. Reversal
+      // is therefore sufficient and cannot conceal a duplicate or unordered
+      // timestamp the admission door should have refused.
+      const bars = [...checked.bars].reverse();
       series = {
         phase: 'ready',
         bars,
-        total: body.total ?? bars.length,
-        months_read: body.months_read ?? 0,
-        months_missing: body.months_missing ?? 0,
+        total: checked.total,
+        months_read: checked.monthsRead,
+        months_missing: checked.monthsMissing,
         why: ''
       };
     } catch (error) {
+      if (seq !== seriesSeq) return;
       series = {
         phase: 'failed',
         bars: [],
@@ -3726,7 +4241,11 @@
   // run's price, which is the stale-value shape §4 bans.
   $effect(() => {
     const run = openRun;
-    if (!run) return;
+    if (!run) {
+      rungsSeq += 1;
+      storeRungs = [];
+      return;
+    }
     untrack(() => {
       chartRung = run.timeframe;
       storeRungs = [];
@@ -3739,6 +4258,7 @@
   $effect(() => {
     const run = openRun;
     if (!run) {
+      seriesSeq += 1;
       series = { phase: 'idle', bars: [], total: 0, months_read: 0, months_missing: 0, why: '' };
       return;
     }
@@ -3746,8 +4266,21 @@
     void catalogue.ready; // re-resolve once the master lands
     untrack(() => {
       loadSeries(run, rung);
-      loadBenchmark(run, rung);
     });
+  });
+
+  // The benchmark QUERY is fixed to the run's own rung, so the chart-view
+  // switcher cannot rewrite it. Its bytes are a CURRENT STORE reference: the
+  // bars endpoint does not echo the run's recorded data_digest.
+  $effect(() => {
+    const run = openRun;
+    if (!run) {
+      benchSeq += 1;
+      bench = { phase: 'idle', open: 0, close: 0, why: '' };
+      return;
+    }
+    void catalogue.ready;
+    untrack(() => loadBenchmark(run));
   });
 
   /* ====================================================================
@@ -3844,6 +4377,7 @@
         .map(([name, count]) => ({ name, months: count }))
         .sort((a, b) => byRung(a.name, b.name));
     } catch {
+      if (seq !== rungsSeq) return;
       // A census that will not load costs the SWITCHER and nothing else: the
       // chart still draws the run's own rung, which is the one that matters.
       storeRungs = [];
@@ -3853,20 +4387,17 @@
   /* ====================================================================
      BUY & HOLD — TradingView's headline comparison, and ours was missing
      --------------------------------------------------------------------
-     Every strategy report worth reading answers "did this beat simply
-     holding the thing", and until this the page could not. It is the one
-     TradingView metric this ledger does NOT carry that is nevertheless
-     computable here, because the bars are on disk: close of the span's
-     first bar against close of its last is buy-and-hold, exactly as
-     TradingView defines it.
+     This is a CURRENT-STORE REFERENCE, not a run-bound metric. Close of the
+     current span's first stored bar against its last is buy-and-hold, but the
+     bars route does not echo the run's data_digest. It cannot prove those are
+     the historical bytes on which the persisted sweep result was computed.
 
      IT NEEDS ITS OWN REQUEST, and the reason is the 1,000-bar ceiling.
      `series` holds the NEWEST 1,000 bars of the span, so its first bar is
      three weeks old, not seven years. Buy-and-hold over the visible window
-     is a different and much smaller number than buy-and-hold over the run,
-     and quietly using the first would understate the benchmark the run is
-     measured against — flattering the strategy, which is the direction
-     this page must never err in.
+     is a different and much smaller number than buy-and-hold over the named
+     full span, so the endpoint pair is fetched separately and labelled as
+     current-store evidence everywhere it is used.
 
      ONE UNIT, AND IT IS STATED. The ledger records totals in paisa of
      index points with no position size and no capital, so the comparison
@@ -3878,53 +4409,90 @@
   let bench = $state({ phase: 'idle', open: 0, close: 0, why: '' });
 
   /**
-   * The close of the span's FIRST bar, fetched from its first month alone.
+   * The closes of the span's current-store first and last stored bars.
+   *
+   * Both requests cover the whole recorded span so a sparse edge month does
+   * not turn “first” into “missing”. `limit=1` plus an explicit timestamp
+   * direction asks the indexed store for the endpoint itself; downloading a
+   * 1,000-row tail and sorting it in the browser does not.
    *
    * @param {any} run
-   * @param {string} rung
    */
-  async function loadBenchmark(run, rung) {
+  async function loadBenchmark(run) {
     const seq = ++benchSeq;
     const at = place(run.underlying, run.feed);
     if (!at) {
       bench = { phase: 'idle', open: 0, close: 0, why: '' };
       return;
     }
+    const expectedMonths = runMonthCount(run);
+    if (expectedMonths === null) {
+      bench = {
+        phase: 'failed',
+        open: 0,
+        close: 0,
+        why: 'The recorded run does not name a valid inclusive month span.'
+      };
+      return;
+    }
     bench = { phase: 'loading', open: 0, close: 0, why: '' };
-    const first = `${run.from_year}-${String(run.from_month).padStart(2, '0')}`;
+    const from = `${run.from_year}-${String(run.from_month).padStart(2, '0')}`;
+    const to = `${run.to_year}-${String(run.to_month).padStart(2, '0')}`;
+    const base =
+      `/bars/window.json?feed=${encodeURIComponent(run.feed)}` +
+      `&exchange=${encodeURIComponent(at.exchange)}&segment=${encodeURIComponent(at.segment)}` +
+      `&symbol=${encodeURIComponent(run.underlying)}` +
+      `&timeframe=${encodeURIComponent(run.timeframe)}&from=${from}&to=${to}` +
+      '&sort=ts';
     try {
-      const response = await ask_(
-        `/bars/window.json?feed=${encodeURIComponent(run.feed)}` +
-          `&exchange=${encodeURIComponent(at.exchange)}&segment=${encodeURIComponent(at.segment)}` +
-          `&symbol=${encodeURIComponent(run.underlying)}` +
-          `&timeframe=${encodeURIComponent(rung)}&from=${first}&to=${first}` +
-          `&limit=${MAX_WINDOW_LIMIT}`,
-        { cache: 'no-store', ms: 30_000 }
-      );
+      const [firstResponse, lastResponse] = await Promise.all([
+        ask_(`${base}&dir=asc&limit=1`, { cache: 'no-store', ms: 30_000 }),
+        ask_(`${base}&dir=desc&limit=1`, { cache: 'no-store', ms: 30_000 })
+      ]);
       if (seq !== benchSeq) return;
-      if (!response.ok) {
+      if (!firstResponse.ok || !lastResponse.ok) {
         bench = {
           phase: 'failed',
           open: 0,
           close: 0,
-          why: `The span's first month answered ${response.status}, so buy-and-hold has no starting price.`
+          why:
+            `The span endpoints answered ${firstResponse.status}/${lastResponse.status}, ` +
+            'so the current-store buy-and-hold reference has no price pair.'
         };
         return;
       }
-      const body = await response.json();
+      const [firstBody, lastBody] = await Promise.all([
+        firstResponse.json(),
+        lastResponse.json()
+      ]);
       if (seq !== benchSeq) return;
-      const bars = [...(body.bars ?? [])].sort((a, b) => a.t - b.t);
-      if (bars.length === 0) {
+      const first = validateBarsWindow(firstBody, 'asc', 1, expectedMonths);
+      const last = validateBarsWindow(lastBody, 'desc', 1, expectedMonths);
+      if (!first.ok || !last.ok) {
         bench = {
           phase: 'failed',
           open: 0,
           close: 0,
-          why: `The store holds no ${rung} bars for ${first}, the span's first month, so there is no price to start the comparison from.`
+          why:
+            'The benchmark bar window was refused before computation: ' +
+            `${!first.ok ? first.why : last.ok ? '' : last.why}.`
         };
         return;
       }
-      bench = { phase: 'ready', open: bars[0].c, close: 0, why: '' };
+      const opening = first.bars[0];
+      const closing = last.bars[0];
+      if (!opening || !closing) {
+        bench = {
+          phase: 'failed',
+          open: 0,
+          close: 0,
+          why: `The store holds no ${run.timeframe} bars in ${from} through ${to}, so buy-and-hold has no price pair.`
+        };
+        return;
+      }
+      bench = { phase: 'ready', open: opening.c, close: closing.c, why: '' };
     } catch (error) {
+      if (seq !== benchSeq) return;
       bench = {
         phase: 'failed',
         open: 0,
@@ -3935,24 +4503,27 @@
   }
 
   /**
-   * Buy-and-hold over the run's whole span, in paisa of index points.
+   * Current-store buy-and-hold over the run's named span, in paisa.
    *
-   * The start comes from [`loadBenchmark`]'s own request; the end is the
-   * newest bar already on screen, which IS the span's last bar because
-   * `/bars/window.json` answers newest first.
+   * Both endpoints come from [`loadBenchmark`]'s own timestamp-indexed
+   * requests at the run's recorded rung. Switching the display rung therefore
+   * cannot rewrite the query. The endpoint does not bind those current bytes to
+   * the run's data_digest, so every derived comparison remains explicitly a
+   * current-store reference.
    */
   /* ====================================================================
      THE SERIES THE CHARTS ACTUALLY DRAW
      --------------------------------------------------------------------
      WHAT THESE ARE, SAID ONCE AND SAID PLAINLY: every curve, bar and
-     column below is the BENCHMARK's — one unit of the index, held. Not the
+     column below is the CURRENT STORE's — one unit of the index, held. Not the
      strategy's. The strategy has no series on disk and cannot be given
      one, so drawing its equity curve is off the table permanently.
 
-     But the benchmark's series IS on disk: it is the closes of the bars
-     already loaded for the price chart. Cumulative P&L of holding, P&L per
+     The reference series is the closes of the current bars already loaded for
+     the price chart. Cumulative P&L of holding, P&L per
      week, the distribution of per-bar returns, the run-up and drawdown
-     segments — all of it folds out of `series.bars` and all of it is true.
+     segments — all of it folds out of `series.bars`. None is claimed to match
+     the sealed run's data_digest.
 
      That is the difference between an empty frame and a full one, and it
      costs nothing in honesty as long as every plot says whose line it is.
@@ -3962,9 +4533,13 @@
   /** Cumulative P&L of holding one unit, in paisa, bar by bar. */
   const holdCurve = $derived.by(() => {
     const bars = series.bars;
-    if (bars.length < 2) return [];
-    const base = bars[0].c;
-    return bars.map((b) => ({ t: b.t, v: b.c - base }));
+    if (bars.length < 2 || bench.phase !== 'ready') return [];
+    // `series` is only the newest bounded chart window. Rebasing that tail to
+    // its own first close made its last point disagree with the full-span
+    // current-store buy-and-hold headline. Anchor every visible point to the
+    // separately fetched current-store opening. Its headline endpoint remains
+    // the separately fetched run-rung query even while another rung is viewed.
+    return bars.map((b) => ({ t: b.t, v: b.c - bench.open }));
   });
 
   /**
@@ -3980,7 +4555,9 @@
     if (bars.length < 2) return [];
     /** @param {number} t */
     const key = (t) => {
-      const d = new Date(t * 1000);
+      // `t` is epoch seconds on the wire. Shift only for calendar projection;
+      // the stored instant remains unchanged and timezone neutral.
+      const d = new Date(t * 1000 + 19_800_000);
       const y = d.getUTCFullYear();
       if (periodScale === 'yearly') return `${y}`;
       if (periodScale === 'quarterly') return `Q${Math.floor(d.getUTCMonth() / 3) + 1} '${String(y).slice(2)}`;
@@ -4061,8 +4638,8 @@
    * Alternating run-up and drawdown segments of the hold curve.
    *
    * A segment runs from one running extreme to the next reversal. Real, and
-   * a property of the PRICE — which is what makes it the benchmark's growth
-   * and decline rather than the strategy's.
+   * a property of the CURRENT STORE PRICE — a reference's growth and decline,
+   * not the strategy's and not a data-digest-bound historical replay.
    */
   const holdSwings = $derived.by(() => {
     const curve = holdCurve;
@@ -4100,15 +4677,15 @@
   });
 
   const buyHold = $derived.by(() => {
-    if (bench.phase !== 'ready' || series.bars.length === 0) return null;
-    const last = series.bars[series.bars.length - 1];
-    if (!last || bench.open <= 0) return null;
-    const gain = last.c - bench.open;
+    if (bench.phase !== 'ready' || bench.open <= 0) return null;
+    const gain = exactIntegerDelta(bench.close, bench.open);
+    const bps = roundedScaledRatio(gain, bench.open, 10_000);
+    if (gain === null || bps === null) return null;
     return {
       from: bench.open,
-      to: last.c,
+      to: bench.close,
       gain,
-      bps: Math.round((gain / bench.open) * 10_000)
+      bps
     };
   });
 
@@ -4121,10 +4698,12 @@
    */
   const outperformance = $derived.by(() => {
     if (!buyHold || !openRun) return null;
+    const edge = exactIntegerDelta(openRun.pessimistic, buyHold.gain);
+    if (edge === null) return null;
     return {
       strategy: openRun.pessimistic,
       hold: buyHold.gain,
-      edge: openRun.pessimistic - buyHold.gain,
+      edge,
       beat: openRun.pessimistic > buyHold.gain
     };
   });
@@ -4137,28 +4716,24 @@
    */
   const perTrade = $derived.by(() => {
     if (!openRun || openRun.trades === 0) return null;
+    const worst = roundedScaledRatio(openRun.pessimistic, openRun.trades, 1);
+    const best = roundedScaledRatio(openRun.optimistic, openRun.trades, 1);
+    if (worst === null || best === null) return null;
     return {
-      worst: Math.round(openRun.pessimistic / openRun.trades),
-      best: Math.round(openRun.optimistic / openRun.trades)
+      worst,
+      best
     };
   });
 
   /* ====================================================================
-     THE STRATEGY TESTER — TradingView's own layout, lock glyphs and all
+     THE STRATEGY TESTER — TradingView's analysis hierarchy, Brutex facts
      --------------------------------------------------------------------
-     THE PADLOCK IS THEIR IDIOM AND IT IS EXACTLY THE ONE THIS PAGE NEEDS.
-     TradingView renders a metric it cannot show as a LOCK GLYPH in the
-     cell — not a blank, not "N/A", not a dropped row. Their lock means
-     "your plan does not include this"; ours means "the sweep never wrote
-     this". The meaning differs and the discipline is identical: the row
-     stays, in its place, in its order, and the cell says it is unavailable
-     rather than pretending the metric does not exist.
-
-     So every row TradingView shows is here, in TradingView's order, and
-     the ones this ledger cannot fill carry a lock whose tooltip says why.
-     A reader who knows the Strategy Tester can read this without learning
-     anything new, and can see at a glance exactly how much of it the
-     engine currently records.
+     The supplied tester screenshots contain no padlock inside the report;
+     the visible locks belong to TradingView's separate drawing toolbar.
+     A report lock therefore invents a permission/paywall meaning that the
+     recorded data does not have. Rows keep their order, but unavailable
+     arithmetic and absent evidence use neutral text/dashes with the reason.
+     Known zeroes and inapplicable account metrics say exactly that.
      ==================================================================== */
 
   /** Which of the tester's three views is showing. */
@@ -4170,12 +4745,64 @@
   let periodScale = $state('weekly');
   /** "Profits and losses" split. TradingView's two. */
   let plSplit = $state('signals');
-  /** The streak chart's unit. TradingView's two. */
-  let streakMode = $state('count');
   /** Whether the testing-period menu is open. */
   let periodOpen = $state(false);
-  /** Which testing period is selected. TradingView's list, verbatim. */
-  let testingPeriod = $state('Available chart range');
+  /** @type {HTMLElement | null} */
+  let periodRoot = $state(null);
+  /** @type {HTMLButtonElement | null} */
+  let periodTrigger = $state(null);
+  /** @type {HTMLElement | null} */
+  let periodDialog = $state(null);
+
+  /** Open the non-modal period dialog and put focus on its current choice. */
+  async function togglePeriodMenu() {
+    if (periodOpen) {
+      periodOpen = false;
+      return;
+    }
+    periodOpen = true;
+    await tick();
+    const current = periodDialog?.querySelector('button:not(:disabled)');
+    if (current instanceof HTMLButtonElement) current.focus();
+  }
+
+  /** @param {boolean} [restoreFocus] */
+  async function closePeriodMenu(restoreFocus = false) {
+    periodOpen = false;
+    if (!restoreFocus) return;
+    await tick();
+    if (periodTrigger?.isConnected) periodTrigger.focus();
+  }
+
+  /** @param {MouseEvent} event */
+  function dismissPeriodOnOutsideClick(event) {
+    if (
+      periodOpen &&
+      periodRoot &&
+      event.target instanceof Node &&
+      !periodRoot.contains(event.target)
+    ) {
+      periodOpen = false;
+    }
+  }
+
+  /** @param {FocusEvent} event */
+  function dismissPeriodOnFocusOut(event) {
+    if (
+      periodOpen &&
+      periodRoot &&
+      (!(event.relatedTarget instanceof Node) || !periodRoot.contains(event.relatedTarget))
+    ) {
+      periodOpen = false;
+    }
+  }
+
+  /** @param {KeyboardEvent} event */
+  function closePeriodOnEscape(event) {
+    if (!periodOpen || event.key !== 'Escape') return;
+    event.preventDefault();
+    void closePeriodMenu(true);
+  }
   /** TradingView's testing-period menu, in its order. */
   const TESTING_PERIODS = [
     'Available chart range',
@@ -4191,15 +4818,16 @@
   let taTab = $state('distribution');
 
   /**
-   * Return on ONE UNIT of the index, in basis points.
+   * Run P&L normalised by the CURRENT STORE opening close, in basis points.
    *
    * The ledger records totals in paisa of index points and no capital, so
-   * "return" here is the total against the price one unit cost at the span's
-   * start — which is the only denominator on disk. Stated wherever it shows.
+   * "return" here is the total against the current store price one unit cost at
+   * the span's start — the only denominator available to this page. The bars
+   * endpoint does not bind it to the run's data_digest; stated wherever it shows.
    */
   const strategyBps = $derived.by(() => {
     if (!openRun || bench.phase !== 'ready' || bench.open <= 0) return null;
-    return Math.round((openRun.pessimistic / bench.open) * 10_000);
+    return roundedScaledRatio(openRun.pessimistic, bench.open, 10_000);
   });
 
   /** Years the span covers, for the annualised figure. */
@@ -4219,14 +4847,22 @@
     if (strategyBps === null || !spanYears || spanYears <= 0) return null;
     const total = 1 + strategyBps / 10_000;
     if (total <= 0) return null;
-    return Math.round((total ** (1 / spanYears) - 1) * 10_000);
+    const result = Math.round((total ** (1 / spanYears) - 1) * 10_000);
+    return Number.isSafeInteger(result) ? result : null;
   });
 
   /** Max drawdown against the span's opening price, in basis points. */
   const drawdownBps = $derived.by(() => {
     if (!openRun || bench.phase !== 'ready' || bench.open <= 0) return null;
-    return Math.round((Math.abs(openRun.max_drawdown) / bench.open) * 10_000);
+    return roundedScaledRatio(Math.abs(openRun.max_drawdown), bench.open, 10_000);
   });
+
+  /** A difference of two exact basis-point endpoints may itself be inexact. */
+  const outperformanceBps = $derived(
+    strategyBps === null || buyHold === null
+      ? null
+      : exactIntegerDelta(strategyBps, buyHold.bps)
+  );
 
   /** One scale for the two fill-model bars, so their lengths are comparable. */
   const fillScale = $derived(
@@ -4254,9 +4890,6 @@
   const PNL_TICKS = ['+2K', '+1K', '0', '−1K', '−2K'];
   /** Percentage axis — margin utilisation and the growth/decline plot. */
   const PCT_TICKS = ['100%', '75%', '50%', '25%', '0%'];
-  /** Streak counts run outward in BOTH directions from zero, as TradingView
-      draws them: wins above the line, losses below, both counted positive. */
-  const STREAK_TICKS = ['8', '4', '0', '4', '8'];
   /** A histogram counts trades, so its axis starts at zero and only rises. */
   const COUNT_TICKS = ['20', '15', '10', '5', '0'];
   /** The returns histogram's own x-axis, in percent, as TradingView labels it. */
@@ -4340,9 +4973,9 @@
      silently render one panel's data under another panel's heading. ---- */
 
   /**
-   * One plotted value. `v` is the only field the geometry reads.
+   * One plotted value. `pnl` is present only on a resolved strategy trade.
    *
-   * @typedef {{ v: number }} Point
+   * @typedef {{ t?: number, v: number, pnl?: number }} Point
    */
 
   /**
@@ -4358,24 +4991,40 @@
    */
 
   /**
-   * The vertical extent a curve needs, symmetric so zero stays on a line.
+   * The shared vertical extent of a curve and any per-point PnL bars,
+   * symmetric so both use the same visible zero and currency axis.
    *
    * @param {Point[]} points
    */
   function curveScale(points) {
-    return Math.max(1, ...points.map((p) => Math.abs(p.v)));
+    return points.reduce(
+      (largest, point) => Math.max(largest, Math.abs(point.v), Math.abs(point.pnl ?? 0)),
+      1
+    );
+  }
+
+  /** At most seven exact timestamps across a plotted curve window. @param {Point[]} points */
+  function curveLabels(points) {
+    if (points.length === 0) return [];
+    const count = Math.min(7, points.length);
+    return Array.from({ length: count }, (_, index) => {
+      const at = count === 1 ? 0 : Math.round((index * (points.length - 1)) / (count - 1));
+      const stamp = points[at]?.t;
+      return typeof stamp === 'number' && Number.isFinite(stamp) ? istLabel(stamp, true) : '';
+    });
   }
 
   /**
    * The polyline through a cumulative series.
    *
    * @param {Point[]} points
+   * @param {number} scale
    */
-  function linePath(points) {
-    const scale = curveScale(points);
+  function linePath(points, scale) {
+    const resolvedScale = Math.max(1, scale);
     const step = 1000 / Math.max(1, points.length - 1);
     return points
-      .map((p, i) => `${i === 0 ? 'M' : 'L'}${(i * step).toFixed(1)} ${(130 - (p.v / scale) * 120).toFixed(1)}`)
+      .map((p, i) => `${i === 0 ? 'M' : 'L'}${(i * step).toFixed(1)} ${(130 - (p.v / resolvedScale) * 120).toFixed(1)}`)
       .join(' ');
   }
 
@@ -4383,10 +5032,11 @@
    * The same polyline, closed to the zero line, for the area fill.
    *
    * @param {Point[]} points
+   * @param {number} scale
    */
-  function areaPath(points) {
+  function areaPath(points, scale) {
     const step = 1000 / Math.max(1, points.length - 1);
-    return `${linePath(points)} L${((points.length - 1) * step).toFixed(1)} 130 L0 130 Z`;
+    return `${linePath(points, scale)} L${((points.length - 1) * step).toFixed(1)} 130 L0 130 Z`;
   }
 
   /**
@@ -4395,7 +5045,7 @@
    * @param {Bar[]} bars
    */
   function barScale(bars) {
-    return Math.max(1, ...bars.map((b) => Math.abs(b.v)));
+    return bars.reduce((largest, bar) => Math.max(largest, Math.abs(bar.v)), 1);
   }
 
   /**
@@ -4474,9 +5124,15 @@
     new Set(runs.filter((r) => r.underlying === openRun?.underlying).map((r) => r.timeframe))
   );
 
-  /** The console's own palette, read off the document so both themes follow. */
+  /**
+   * The drill-down's local palette.
+   *
+   * The reference is one dark analysis surface even when the surrounding
+   * browser chrome is light. Reading the chart host rather than `:root` keeps
+   * the candlesticks on the same red/teal/grid ramp as that surface.
+   */
   function chartTokens() {
-    const s = getComputedStyle(document.documentElement);
+    const s = getComputedStyle(chartHost ?? document.documentElement);
     /**
      * @param {string} name a CSS custom property
      * @param {string} fallback used when the theme does not define it
@@ -4498,6 +5154,8 @@
    * @type {any} matching the loose handles on `/` — see the note there.
    */
   let chartApi = null;
+  /** True only after the chart handle exists, so range controls never become enabled no-ops. */
+  let chartReady = $state(false);
 
   /**
    * Show the last `n` bars, or everything.
@@ -4644,6 +5302,7 @@
 
         made.timeScale().fitContent();
         chartApi = made;
+        chartReady = true;
         chartError = '';
       } catch (why) {
         // A chart library that will not load is a NAMED failure, not a blank
@@ -4652,12 +5311,16 @@
            above, for the same reason: `?.message` on a thrown non-Error is
            `undefined` and falls through, but on an object whose `message` is
            not a string it prints `[object Object]` as the failure reason. */
-        if (!dead) chartError = why instanceof Error ? why.message : String(why);
+        if (!dead) {
+          chartReady = false;
+          chartError = why instanceof Error ? why.message : String(why);
+        }
       }
     })();
     return () => {
       dead = true;
       chartApi = null;
+      chartReady = false;
       ohlc = null;
       try {
         made?.remove();
@@ -4778,8 +5441,9 @@
    * The reference prints every money column as two lines — `450.8 INR` above,
    * `0.31%` below — because a figure in currency says nothing about whether it
    * was a large move without a base to divide by. `bench.open` is that base:
-   * the first close of the swept span, already fetched for the buy-and-hold
-   * comparison, so this costs no request.
+   * the current store's first close over the run's named span, already fetched
+   * for the buy-and-hold reference. The bars route does not bind it to the
+   * run's recorded data_digest.
    *
    * `null` when the base is not loaded yet or is zero. NOT `0` — a ratio with
    * no base is undefined, and `0.00%` reads as "measured, and flat".
@@ -4878,7 +5542,15 @@
   const EXIT_AXES = ['stop', 'target', 'trailing stop', 'TTP arm', 'TTP trail'];
 </script>
 
-<svelte:head><title>Backtest · brutex</title></svelte:head>
+<svelte:window onclick={dismissPeriodOnOutsideClick} onkeydown={closePeriodOnEscape} />
+
+<svelte:head>
+  <title>Backtest · brutex</title>
+  <meta
+    name="description"
+    content="Compare recorded brutex runs, inspect conservative fill results, and open the complete backtest evidence for each run."
+  />
+</svelte:head>
 
 <!-- ============================================================
      A CHART FRAME WITH NO SERIES IN IT.
@@ -4888,17 +5560,16 @@
      area carries the sentence saying which field the sweep would have to
      write for the series to appear.
 
-     Drawing the frame rather than hiding the panel is the same choice
-     the padlock makes one level down: the thing keeps its place, and the
-     absence is legible instead of invisible.
+     Drawing the frame rather than hiding the panel keeps the thing in its
+     place while the reason remains legible instead of invisible.
      ============================================================ -->
 
 <!-- ============================================================
      THE DRAWN CHARTS.
      Each takes a real series folded out of the bars on disk and each
-     carries a label saying whose series it is. They are the BENCHMARK's --
-     one unit of the index, held -- because the strategy has none on disk
-     and never will until the sweep writes one.
+     carries a label saying whose series it is. Bar-clock series are the
+     BENCHMARK's one-unit hold; the strategy's separate series comes from the
+     exact chosen-grid trades and advances when each trade resolves.
      ============================================================ -->
 
 <!-- ══ THE COMBINATION'S NAMES, ON EVERY RANKED ROW ══
@@ -4912,40 +5583,29 @@
      Retired bits are shown rather than filtered: the mask CARRIES them, and a
      combination that reads as three conditions when it was recorded on four is
      a different claim about what won. -->
-<!-- ══ TWO WALKS, ONE RUN IDENTITY ══
-     MEASURED, and this is the most consequential thing on the page.
-
-     `crates/cli/src/lib.rs:4619` writes the trade file from
-     `trade::walk(bars, column, mask, horizon, direction)` — which takes NO exit
-     levels. It is the raw walk to the horizon: no stop, no target, no trail.
-     The results ledger's headline stores the winning cell of the 625-cell exit
-     GRID, which has all three.
-
-     Both are correct for what they are. They are not the same walk, and every
-     figure derived from the trade file therefore describes a DIFFERENT strategy
-     from the one the Key stats above describe. On the 2,101-trade 30-minute run:
-
-       worst single trade   trade file −Rs 184.80   ledger −Rs 64.90
-       max drawdown         trade file  Rs 20,949.95   ledger  Rs 7,495.60
-       total, worst fills   trade file −Rs 20,941.50   ledger −Rs 7,495.60
-
-     A worst trade capped at a third of the unstopped one is exactly what a stop
-     does. Showing both sets of numbers on one screen without saying this is the
-     "convincing wrong picture" the old donut comment warned about, and it is
-     why this note exists rather than a footnote. -->
-{#snippet unstoppedWalkNote()}
+<!-- ══ ONE SELECTED CELL, ONE DURABLE DETAIL STREAM ══
+     D-0414 replaced the legacy level-less `trades.bin` policy. The current
+     child replays the exact finally admitted grid cell, including its own
+     stop/target/trailing exits and exclusivity, and refuses unless its full
+     Cell plus independently folded count/sums/worst/max-drawdown reconcile.
+     The policy and selected direction live in the sealed receipt even when the
+     exact cell takes zero trades. -->
+{#snippet chosenGridTradeNote()}
   <p class="tt-warnnote">
-    <b>Everything below comes from the UNSTOPPED walk.</b> The trade file is written by
-    <code>trade::walk</code>, which takes no exit levels — no stop, no target, no trail. The
-    <b>Key stats</b> above come from the winning cell of the exit grid, which has all three. They
-    describe two different strategies over the same signals, so a figure here will not reconcile with
-    one there, and the gap is the stop doing its job.
+    <b>Exact chosen-grid rows.</b> The sealed <code>{tradeList.policy ?? 'chosen-grid-v1'}</code>
+    detail replays the finally admitted <b>{tradeList.direction ?? 'selected'}</b> cell, including
+    its stop, target, trailing exits, and one-position-at-a-time exclusivity. Its rows are published
+    only after their count, both P&amp;L sums, worst trade, max drawdown, and complete grid cell
+    reconcile with the headline result.
   </p>
 {/snippet}
 
 {#snippet conditionNames(/** @type {any} */ words)}
-  {@const bits = positionsIn(words)}
-  {#if vocab.phase === 'failed'}
+  {@const decoded = decodeMaskWords(words)}
+  {@const bits = decoded.positions}
+  {#if !decoded.ok}
+    <span class="cnames dim"><b>Combination cannot be decoded.</b> {decoded.why}</span>
+  {:else if vocab.phase === 'failed'}
     <span class="cnames dim">Shown as raw positions — {vocab.why}: {bits.join(' · ')}</span>
   {:else if bits.length === 0}
     <span class="cnames dim">No condition bits are set on this row.</span>
@@ -5002,20 +5662,55 @@
      thing to update when the derivation that builds it changes, and the one
      that would not be updated is this one. -->
 {#snippet areaChart(
-  /** @type {typeof holdCurve} */ points,
+  /** @type {Point[]} */ points,
   /** @type {string[]} */ ticks,
   /** @type {string[]} */ xLabels,
-  /** @type {string} */ note
+  /** @type {string} */ note,
+  /** @type {number} */ verticalScale
 )}
+  {@const losing = (points[points.length - 1]?.v ?? 0) < 0}
+  {@const resolvedScale = Math.max(1, verticalScale)}
   <div class="cf">
     <div class="cf-plot tall">
       <svg class="cf-svg" viewBox="0 0 1000 260" preserveAspectRatio="none" aria-hidden="true">
         {#each [0, 65, 130, 195, 260] as y (y)}
           <line x1="0" y1={y} x2="1000" y2={y} stroke="var(--n5)" stroke-width="1" vector-effect="non-scaling-stroke" />
         {/each}
+        {#if points.some((point) => point.pnl !== undefined)}
+          <!-- One exact bar per resolved trade, centred around its own zero
+               line like the TradingView reference. The curve below is the
+               cumulative sum of these same values. -->
+          <line x1="0" y1="130" x2="1000" y2="130" stroke="var(--n7)" stroke-width="1" vector-effect="non-scaling-stroke" />
+          {#each points as point, i (i)}
+            {#if point.pnl !== undefined}
+              {@const width = 1000 / Math.max(1, points.length)}
+              {@const height = (Math.abs(point.pnl) / resolvedScale) * 120}
+              <rect
+                x={i * width + width * 0.12}
+                y={point.pnl >= 0 ? 130 - height : 130}
+                width={Math.max(0.55, width * 0.76)}
+                height={Math.max(0.7, height)}
+                fill={point.pnl >= 0 ? 'var(--up)' : 'var(--down)'}
+                opacity="0.72"
+              />
+            {/if}
+          {/each}
+        {/if}
         {#if points.length > 1}
-          <path d={areaPath(points)} fill="var(--acc-soft)" />
-          <path d={linePath(points)} fill="none" stroke="var(--acc)" stroke-width="2" vector-effect="non-scaling-stroke" stroke-linejoin="round" />
+          <path
+            d={areaPath(points, resolvedScale)}
+            fill={losing
+              ? 'color-mix(in srgb, var(--down) 16%, transparent)'
+              : 'color-mix(in srgb, var(--up) 14%, transparent)'}
+          />
+          <path
+            d={linePath(points, resolvedScale)}
+            fill="none"
+            stroke={losing ? 'var(--down)' : 'var(--up)'}
+            stroke-width="2"
+            vector-effect="non-scaling-stroke"
+            stroke-linejoin="round"
+          />
         {/if}
       </svg>
       <div class="cf-axis">{#each ticks as t, ti (ti)}<span>{t}</span>{/each}</div>
@@ -5105,26 +5800,58 @@
 {/snippet}
 
 {#snippet swingChart(/** @type {typeof holdSwings} */ sw, /** @type {string} */ note)}
+  {@const swingWindow = windowSeries(sw.segs, swingPage, SWING_PAGE_SIZE)}
+  {@const visibleMax = sw.max}
   <div class="cf">
     <div class="cf-plot">
       <svg class="cf-svg" viewBox="0 0 1000 200" preserveAspectRatio="none" aria-hidden="true">
         {#each [0, 50, 100, 150, 200] as y (y)}
           <line x1="0" y1={y} x2="1000" y2={y} stroke="var(--n5)" stroke-width="1" vector-effect="non-scaling-stroke" />
         {/each}
-        {#each sw.segs as s, i (i)}
-          {@const w = 1000 / Math.max(1, sw.segs.length)}
-          {@const h = (s.size / sw.max) * 190}
-          <rect x={i * w + w * 0.16} y={200 - h} width={w * 0.68} height={Math.max(1, h)} fill={s.up ? 'var(--up)' : 'var(--down)'} rx="1" />
+        {#each swingWindow.rows as s, i (swingWindow.start + i)}
+          {@const w = 1000 / Math.max(1, swingWindow.rows.length)}
+          {@const h = (s.size / visibleMax) * 90}
+          <rect
+            x={i * w + w * 0.16}
+            y={s.up ? 100 - h : 100}
+            width={w * 0.68}
+            height={Math.max(1, h)}
+            fill={s.up ? 'var(--up)' : 'var(--down)'}
+            stroke={s.current ? 'var(--warn)' : 'none'}
+            stroke-width={s.current ? '2' : '0'}
+            vector-effect="non-scaling-stroke"
+            rx="1"
+          />
         {/each}
       </svg>
       <div class="cf-axis">
-        <span>{money(sw.max)}</span><span>{money(Math.round(sw.max / 2))}</span><span>0</span>
+        <span>{money(visibleMax)}</span><span>{money(Math.round(visibleMax / 2))}</span><span>0</span><span>{money(-Math.round(visibleMax / 2))}</span><span>{money(-visibleMax)}</span>
       </div>
     </div>
     <ul class="cf-legend">
       <li><span class="cf-sw s0"></span>Run-up</li>
       <li><span class="cf-sw s1"></span>Drawdown</li>
+      <li><span class="cf-sw s3"></span>Current open stretch</li>
     </ul>
+    {#if swingWindow.pages > 1}
+      <div class="series-nav" aria-label="Swing pages">
+        <button
+          aria-label="Earlier swings"
+          disabled={swingWindow.page === 0}
+          onclick={() => (swingPage = Math.max(0, swingWindow.page - 1))}>‹</button
+        >
+        <span
+          >Swings {exact(swingWindow.start + 1)}–{exact(
+            Math.min(swingWindow.start + swingWindow.rows.length, swingWindow.total)
+          )} of {exact(swingWindow.total)}</span
+        >
+        <button
+          aria-label="Later swings"
+          disabled={swingWindow.page + 1 >= swingWindow.pages}
+          onclick={() => (swingPage = Math.min(swingWindow.pages - 1, swingWindow.page + 1))}>›</button
+        >
+      </div>
+    {/if}
     <p class="cf-note">{note}</p>
   </div>
 {/snippet}
@@ -5139,7 +5866,8 @@
   /** @type {Array<string | { label: string, dash?: boolean, value?: string }>} */ legend,
   /** @type {string[]} */ ticks,
   /** @type {string[]} */ xLabels,
-  /** @type {boolean} */ pager
+  /** @type {boolean} */ pager,
+  /** @type {'undefined' | 'unavailable'} */ kind
 )}
   <div class="cf">
     <div class="cf-plot">
@@ -5162,7 +5890,7 @@
       <div class="cf-axis">
         {#each ticks as t, ti (ti)}<span>{t}</span>{/each}
       </div>
-      <div class="cf-msg"><Lock /> <span>{why}</span></div>
+      <div class="cf-msg"><Lock {kind} /> <span>{why}</span></div>
     </div>
     {#if xLabels.length > 0}
       <div class="cf-x">
@@ -5270,8 +5998,10 @@
          defect the comment names, which is worse than none.
 
          FIRST, because it is first in the cascade and not merely first in the
-         layout. A run's identity is `blake3(mask ‖ direction ‖ instrument ‖
-         timeframe ‖ params ‖ data_digest ‖ vocab_version ‖ commit)`, and the
+         layout. A frequency run's identity is `blake3(mask ‖ Undirected ‖
+         instrument ‖ timeframe ‖ params ‖ data_digest ‖ vocab_version ‖ commit
+         ‖ feed)`. The finally selected long/short direction is sealed result
+         metadata, not something the browser can reverse out of that hash. The
          feed decides the bars every one of those terms is measured over: the
          instruments below are whichever ones this feed's store holds, and the
          ledger is filtered to runs stamped with it. Reading the strip left to
@@ -5568,6 +6298,7 @@
             <span class="eng-lab">{k.label}</span>
             <input
               class="eng-in"
+              name={`engine-${k.key}`}
               type="text"
               inputmode="numeric"
               placeholder={k.fallback}
@@ -5758,6 +6489,7 @@
       <label class="dnum" class:wrong={descent.points !== '' && descentPoints === null}>
         <input
           class="dnum-in"
+          name="descent-stop-ceiling-points"
           type="text"
           inputmode="numeric"
           autocomplete="off"
@@ -5776,6 +6508,7 @@
       <label class="dnum" class:wrong={descent.top !== '' && descentRows === null}>
         <input
           class="dnum-in"
+          name="descent-ranked-row-count"
           type="text"
           inputmode="numeric"
           autocomplete="off"
@@ -5895,9 +6628,9 @@
             <tr><th>timeframe</th><th class="num">bars</th><th class="num">needs</th><th class="num">support</th><th class="num">candidates</th><th>state</th></tr>
           </thead>
           <tbody>
-            {#each live.rungs as r (r.rung)}
+            {#each live.rungs as r (r.key)}
               <tr>
-                <td><b>{r.rung}</b></td>
+                <td><b>{r.rung}</b>{#if r.validating} <span class="dim">validation</span>{/if}</td>
                 <td class="num">{r.bars ? r.bars.toLocaleString() : '—'}</td>
                 <td class="num">{r.minHits ? r.minHits.toLocaleString() : '—'}</td>
                 <td class="num">
@@ -6157,7 +6890,7 @@
           {#if unsealedRuns.length > 0}
             ran to extinction AND read back intact
           {:else}
-            comparable against each other
+            finished result records
           {/if}
         </span>
       </div>
@@ -6234,6 +6967,15 @@
       </p>
     {/if}
 
+    {#if refusedNumericRuns.length > 0 && runs.length > 0}
+      <div class="inline-note warn" role="alert">
+        <b>{exact(refusedNumericRuns.length)} ledger {refusedNumericRuns.length === 1 ? 'row was' : 'rows were'} refused before computation.</b>
+        At least one 64-bit fact, mask, or required field cannot be represented exactly by this
+        browser. The records remain visible as metadata in the comparison table, but they cannot
+        enter the answer, rung charts, sorting, or Full report.
+      </div>
+    {/if}
+
     {#if runs.length === 0}
       <!-- ============================================================
            THE FEED FILTER EMPTIED THE TABLE — a fact, with the way out
@@ -6277,6 +7019,30 @@
           </p>
           {#if ledger?.path}
             <p class="path"><span class="bt-lab">file</span> <code>{ledger.path}</code></p>
+          {/if}
+        </div>
+      {:else if scopedRuns.length > 0}
+        <div class="panel bt-note" role="alert">
+          <h2>No scoped run is safe to compute</h2>
+          <p>
+            The ledger contains {exact(scopedRuns.length)} scoped
+            {scopedRuns.length === 1 ? 'record' : 'records'}, but every one failed the exact
+            integer and shape admission door. Nothing below is ranked, averaged, charted, or
+            opened as a Full report. The escaped identifiers remain visible for diagnosis.
+          </p>
+          <ul>
+            {#each refusedNumericRuns.slice(0, 8) as refused}
+              <li>
+                <code>{String(refused.run?.identity ?? 'identity unavailable')}</code>
+                · {String(refused.run?.feed ?? 'feed unavailable')}
+                · {String(refused.run?.underlying ?? 'instrument unavailable')}
+                · {String(refused.run?.timeframe ?? 'timeframe unavailable')}
+                — {refused.admission.why}
+              </li>
+            {/each}
+          </ul>
+          {#if refusedNumericRuns.length > 8}
+            <p>{exact(refusedNumericRuns.length - 8)} more refused metadata rows are not expanded.</p>
           {/if}
         </div>
       <!-- NO FEED IS NOT "NO RUNS UNDER THIS FEED". Without this arm the panel
@@ -6363,11 +7129,11 @@
               </div>
               <p class="crown-note">
                 Ranked on the worst-case number. The best case is
-                <b>{money(best.optimistic - best.pessimistic)}</b> higher, which is how much of
+                <b>{money(best.fillGap)}</b> higher, which is how much of
                 the headline is fill assumption rather than edge.
               </p>
             </div>
-            <button class="btn ghost sm" onclick={() => toggle(best)}>
+            <button class="btn ghost sm" onclick={(event) => toggle(best, event.currentTarget)}>
               {openIndex === best.index ? 'Close' : 'Drill in'}
             </button>
           </div>
@@ -6375,7 +7141,12 @@
           <div class="panel bt-note">
             <h2>NO COMPLETE RUN</h2>
             <p>
-              {#if haltedRuns.length > 0}
+              {#if signalRungSet === null}
+                The server did not publish one non-empty, duplicate-free signal-rung set, so this
+                browser has no authority to decide which records the engine actually swept. Every
+                headline and rung leader is withheld; the comparison table keeps each row and names
+                the missing signal surface.
+              {:else if haltedRuns.length > 0}
                 All {exact(haltedRuns.length)}
                 {haltedRuns.length === 1 ? 'run' : 'runs'} shown were halted by a budget, so every
                 one of them searched less of the ladder than its <code>combinations</code> figure
@@ -6387,6 +7158,259 @@
             </p>
           </div>
         {/if}
+      </section>
+
+      <!-- ============================================================
+           THE HUMAN COMPARISON — ONE ROW, ONE DECISION
+
+           The charts and the thirteen-column frontier board below are the
+           operator surface. This is the customer surface: every recorded run
+           in view, the setting that made it a different question, the result
+           under unfavorable fills, the distance between the two fill models,
+           and the two loss figures a person needs before opening the report.
+
+           `#1` means only "highest unfavorable-fill result among the eligible
+           rows shown". It does not mean profitable, and the sentence directly
+           above the table says so when every row is below zero. Stopped,
+           partial, zero-trade and unsealed rows stay in the ordered result with
+           no rank. The view reveals twelve at a time and names every remainder;
+           hiding one silently would turn a refusal into a cleaner-looking answer.
+           ============================================================ -->
+      <section class="block rise compare-block" aria-labelledby="recorded-compare-title">
+        <div class="bh-row compare-heading">
+          <div>
+            <h2 class="bh" id="recorded-compare-title">Compare recorded runs</h2>
+            <p class="bsub">
+              Automatically ordered by the result when allowed fills go against you. The pattern
+              minimum stays beside every row because a different minimum is a different search.
+              <b>These are recorded totals, not like-for-like strategy scores; #1 is a reading
+                reference, not a promise.</b>
+            </p>
+          </div>
+          <span class="count">
+            {exact(rankableRunCount)} finished · {exact(visibleComparedRuns.length)} of
+            {exact(comparedRuns.length)} shown
+          </span>
+        </div>
+
+        {#if rankableRunCount > 0}
+          <div
+            class="compare-callout"
+            class:negative={positiveRankableCount === 0}
+            role={positiveRankableCount === 0 ? 'note' : undefined}
+          >
+            <span class="compare-callout-mark" aria-hidden="true">
+              {positiveRankableCount === 0 ? '!' : '✓'}
+            </span>
+            <div>
+              {#if positiveRankableCount === 0}
+                {#if negativeRankableCount === rankableRunCount}
+                  <b>Every finished result loses under unfavorable fills.</b>
+                  <span>
+                    The first row is the least-negative result in this view, not a profitable
+                    winner.
+                  </span>
+                {:else}
+                  <b>No finished result is profitable under unfavorable fills.</b>
+                  <span>
+                    {exact(breakevenRankableCount)} break even and
+                    {exact(negativeRankableCount)} lose. The first row is only a reading reference.
+                  </span>
+                {/if}
+              {:else}
+                <b>
+                  {exact(positiveRankableCount)} of {exact(rankableRunCount)} finished
+                  {rankableRunCount === 1 ? 'result stays' : 'results stay'} positive under
+                  unfavorable fills.
+                </b>
+                <span>The table keeps the more favorable fill result beside it for context.</span>
+              {/if}
+              {#if ledger?.hit_scan_cap}
+                <span>
+                  This is the newest {exact(ledger.scanned)} records only; the ledger read stopped
+                  at its ceiling.
+                </span>
+              {/if}
+            </div>
+          </div>
+        {/if}
+
+        {#if comparedRuns.length === 0}
+          <p class="inline-note">No recorded runs are available to compare yet.</p>
+        {:else}
+          <div
+            class="compare-wrap"
+            role="region"
+            aria-label="Recorded run comparison table"
+          >
+          <table class="compare-table">
+            <caption class="sr-only">
+              Recorded runs sorted by unfavorable-fill result. Rows that stopped early, failed
+              integrity, cover only part of their span, or took no trades remain visible but are
+              not ranked.
+            </caption>
+            <thead>
+              <tr>
+                <th scope="col">Rank &amp; status</th>
+                <th scope="col">Run &amp; setting</th>
+                <th scope="col" class="num">Unfavorable fills</th>
+                <th scope="col" class="num">Fill impact</th>
+                <th scope="col" class="num">Loss &amp; drawdown</th>
+                <th scope="col">Pattern selected</th>
+                <th scope="col"><span class="sr-only">Open full report</span></th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each visibleComparedRuns as r (r.sourceIndex)}
+                <tr class:reference={r.reference} class:excluded={!r.eligible}>
+                  <th scope="row" class="compare-rank">
+                    <span class="compare-place">{r.rank === null ? '—' : `#${r.rank}`}</span>
+                    <span
+                      class="compare-state"
+                      class:good={r.status.key === 'rankable'}
+                      class:warn={[
+                        'halted',
+                        'non_signal_timeframe',
+                        'partial_span',
+                        'no_trades'
+                      ].includes(r.status.key)}
+                      class:bad={[
+                        'integrity_failed',
+                        'signal_surface_unavailable',
+                        'contradictory_fill_totals',
+                        'missing_numeric_results'
+                      ].includes(r.status.key)}
+                    >
+                      {r.reference ? 'Reference' : r.status.label}
+                    </span>
+                    {#if r.reference}<small>{r.status.label}</small>{/if}
+                  </th>
+                  <td class="compare-run">
+                    <div class="compare-id">
+                      <b>{r.underlying}</b>
+                      <span class="rung">{r.timeframe}</span>
+                      <span class="dim">{r.feed}</span>
+                    </div>
+                    <span>{r.admitted ? comparisonSpan(r) : 'span not computed'}</span>
+                    <span class="compare-setting">
+                      pattern minimum
+                      <b>{!r.admitted || r.supportBp === null ? 'not measured' : `${(r.supportBp / 100).toFixed(2)}%`}</b>
+                      · months <b>{r.admitted ? `${comparisonCount(r.months_found)}/${comparisonCount(r.months_asked)}` : 'not computed'}</b>
+                      · depth <b>{r.admitted ? comparisonCount(r.depth) : 'not computed'}</b> ·
+                      <b>{r.admitted ? comparisonCount(r.trades) : 'not computed'}</b> trades
+                    </span>
+                  </td>
+                  <td
+                    class="num compare-money"
+                    class:up={r.eligible && r.pessimistic >= 0}
+                    class:down={r.eligible && r.pessimistic < 0}
+                    data-label="Unfavorable fills"
+                  >
+                    <b>
+                      {!r.admitted
+                        ? 'not admitted'
+                        : r.status.key === 'integrity_failed'
+                        ? 'not trusted'
+                        : Number.isSafeInteger(r.pessimistic)
+                          ? money(r.pessimistic)
+                          : 'not exact'}
+                    </b>
+                    {#if !r.admitted}
+                      <small>{r.admissionWhy}</small>
+                    {:else if r.status.key === 'integrity_failed'}
+                      <small>{r.status.reason}</small>
+                    {:else if r.reference}
+                      <small>highest finished recorded total shown</small>
+                    {:else if r.eligible && r.deltas?.pessimistic !== null}
+                      <small>{money(Math.abs(r.deltas.pessimistic))} below reference</small>
+                    {:else}
+                      <small>{r.status.reason}</small>
+                    {/if}
+                  </td>
+                  <td class="num compare-money" data-label="Fill impact">
+                    <b>
+                      {!r.admitted
+                        ? 'not admitted'
+                        : r.status.key === 'integrity_failed'
+                        ? 'not trusted'
+                        : r.fillGap === null
+                          ? 'not usable'
+                          : money(r.fillGap)}
+                    </b>
+                    <small>
+                      {!r.admitted
+                        ? r.admissionWhy
+                        : r.status.key === 'integrity_failed'
+                        ? 'the record failed its integrity seal'
+                        : r.fillGap === null
+                        ? 'the two fill totals contradict, are absent, or are not exact integers'
+                        : `more favorable fills: ${money(r.optimistic)}`}
+                    </small>
+                  </td>
+                  <td class="num compare-risk" data-label="Loss &amp; drawdown">
+                    {#if !r.admitted}
+                      <b>not admitted</b>
+                      <small>{r.admissionWhy}</small>
+                    {:else if r.status.key === 'integrity_failed'}
+                      <b>not trusted</b>
+                      <small>the record failed its integrity seal</small>
+                    {:else}
+                      <b>{Number.isSafeInteger(r.max_drawdown) ? money(Math.abs(r.max_drawdown)) : 'not exact'}</b>
+                      <small>biggest fall from a peak</small>
+                      <span>worst trade {Number.isSafeInteger(r.worst_trade) ? money(r.worst_trade) : 'not exact'}</span>
+                    {/if}
+                  </td>
+                  <td class="compare-pattern" data-label="Pattern selected">
+                    {#if !r.admitted}
+                      <span class="dim">not decoded — {r.admissionWhy}</span>
+                    {:else if r.status.key === 'integrity_failed'}
+                      <span class="dim">not trusted — the record failed its integrity seal</span>
+                    {:else if ledger?.has_mask === undefined}
+                      <span class="dim">the running server does not identify mask-era records</span>
+                    {:else if !ledger.has_mask}
+                      <span class="dim">this record predates the condition mask</span>
+                    {:else}
+                      {@render conditionNames(r.mask_words)}
+                    {/if}
+                  </td>
+                  <td class="compare-action">
+                    <button
+                      class="btn ghost sm"
+                      aria-expanded={openRun?.index === r.index}
+                      aria-label={`${openRun?.index === r.index ? 'Close' : 'Open'} the full ${r.underlying} ${r.timeframe} report`}
+                      disabled={!r.admitted}
+                      title={r.admitted
+                        ? 'Open the exact recorded report'
+                        : `Full report refused: ${r.admissionWhy}`}
+                      onclick={(event) => toggle(r, event.currentTarget)}
+                    >
+                      {openRun?.index === r.index
+                        ? 'Close'
+                        : r.admitted
+                          ? 'Full report'
+                          : 'Report refused'}
+                    </button>
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+            </table>
+          </div>
+          {#if comparisonRemaining > 0}
+            <button
+              class="btn ghost sm compare-more"
+              onclick={() => (comparisonShown += COMPARISON_STEP)}
+            >
+              Show next {exact(Math.min(COMPARISON_STEP, comparisonRemaining))} records ·
+              {exact(comparisonRemaining)} remain
+            </button>
+          {/if}
+        {/if}
+        <p class="compare-foot">
+          “Unfavorable” and “more favorable” are the two allowed fill models recorded for the same
+          trades. They are not confidence bounds. Open a row for charts, trade detail, validation
+          and every technical metric.
+        </p>
       </section>
 
       <!-- ============================================================
@@ -6457,7 +7481,7 @@
                   class:halted={r.halted}
                   class:unsealed={!trustworthy(r)}
                   class:leader={g.leader && r.index === g.leader.index}
-                  onclick={() => toggle(r)}
+                  onclick={(event) => toggle(r, event.currentTarget)}
                   title={!trustworthy(r)
                     ? 'Failed its integrity seal — this figure may not be what the sweep wrote, so it is charted but never ranked'
                     : r.halted
@@ -6522,12 +7546,14 @@
         {/each}
       </section>
       <!-- ============================================================
-           LEVEL 0.5 — THE TOP TEN OF EVERY TIMEFRAME
+           LEVEL 0.5 — THE RECORDED PREFIX OF EVERY TIMEFRAME
 
            The ledger below shows ONE row per run: the single combination the
-           exit grid picked. This board shows the ten best of every timeframe,
-           ranked on the operator's own eleven criteria, and it is the surface
-           the whole `/frontier.json` route exists to serve.
+           exit grid picked. This board reorders the PRICED ROWS IN THE STORED
+           FRONTIER PREFIX on the operator's own eleven criteria. It must not be
+           called a global Top-N: `record_frontier` receives a bounded evidence
+           prefix, so a combination outside that prefix never reached the exit
+           grid and cannot audition here.
 
            Ranked in the BROWSER on purpose. A score compiled into the binary is
            one more number nobody can see -- the exact failure that cost this
@@ -6536,16 +7562,24 @@
            ============================================================ -->
       <section class="block rise">
         <div class="bh-row">
-          <h2 class="bh">Top {topShown} of every timeframe</h2>
+          <h2 class="bh">Preview: top {topShown} within each stored prefix</h2>
           <span class="count">
-            {#if board.phase === 'loading'}reading…{:else}{exact(board10.length)} timeframes{/if}
+            {#if board.phase === 'loading'}reading…{:else}{exact(board10.length)} comparable question/timeframe groups{/if}
           </span>
         </div>
+
+        <p class="inline-note">
+          <b>This is not yet a global Top {topShown}.</b> Each table re-ranks only the combinations
+          retained, priced, and persisted by that run. A run may be called globally complete only
+          after Apriori extinction and after every eligible closed combination has been priced and
+          judged by the same versioned Rust ranking policy. Until that completion receipt exists,
+          rows omitted before the exit grid remain unknown—not losers.
+        </p>
 
         <div class="wrow">
           <label class="wlab">
             show top
-            <input class="wnum" type="number" min="1" max="100" bind:value={topN} />
+            <input class="wnum" name="frontier-top-count" type="number" min="1" max="100" bind:value={topN} />
           </label>
           <!-- ELEVEN PAIRS, and the eleventh is the one that was missing. The
                operator's ranking names eleven quantities; this row carried ten,
@@ -6566,6 +7600,7 @@
                 >{/if}
               <input
                 class="wrange"
+                name={`frontier-weight-${key}`}
                 type="range"
                 min="0"
                 max="3"
@@ -6593,18 +7628,18 @@
           <p class="inline-note">{board.why}</p>
         {/if}
 
-        {#each board10 as g (g.rung)}
+        {#each board10 as g (g.key)}
           <div class="tt-sec">
             <div class="tt-hrow">
-              <h4 class="tt-h">
-                {g.rung}
+              <h3 class="tt-h">
+                {g.run.feed} · {g.run.underlying} · {span(g.run)} · {g.rung}
                 <span class="dim">
                   · {exact(g.run.bars)} bars · support {(
                     (g.run.min_hits / Math.max(1, g.run.bars)) *
                     100
                   ).toFixed(1)}% · depth {g.run.depth} · {exact(g.run.combinations)} combinations enumerated
                 </span>
-              </h4>
+              </h3>
             </div>
             {#if g.top.length > 0}
               <div class="tt-tblwrap">
@@ -6662,6 +7697,7 @@
                 {exact(g.priced)} of {exact(g.rows.length)} recorded combinations were priced
                 against the exit grid; the rest store zeros and are excluded, because a zero
                 drawdown outranks every real one.
+                <b>This ordering is complete only within those {exact(g.priced)} priced rows.</b>
                 {#if g.rules}
                   <b>{exact(g.admittedShown)} of {exact(g.top.length)} shown meet your rules</b>
                   — win rate ≥ {(g.rules.min_win_rate_bp / 100).toFixed(0)}%, reward:risk ≥
@@ -6693,6 +7729,7 @@
           <h2 class="bh">The ledger</h2>
           <input
             class="find"
+            name="ledger-filter"
             type="search"
             placeholder="instrument, feed or rung…"
             bind:value={query}
@@ -6758,8 +7795,12 @@
                   tabindex="0"
                   aria-expanded={openIndex === r.index}
                   aria-label={rowLabel(r)}
-                  onclick={() => toggle(r)}
-                  onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && toggle(r)}
+                  onclick={(event) => toggle(r, event.currentTarget)}
+                  onkeydown={(event) => {
+                    if (event.key !== 'Enter' && event.key !== ' ') return;
+                    event.preventDefault();
+                    void toggle(r, event.currentTarget);
+                  }}
                 >
                   <span class="cell inst"
                     ><b>{r.underlying}</b><span class="dim sm">{r.feed}</span></span
@@ -6819,11 +7860,19 @@
            LEVELS 3–7 — THE DRILL-DOWN
            ============================================================ -->
       {#if openRun}
-        <section class="block drill">
+        <section class="block drill" tabindex="-1">
           <div class="bh-row">
             <h2 class="bh">{openRun.underlying} · {openRun.timeframe} · {span(openRun)}</h2>
-            <button class="btn ghost sm" onclick={() => (openIndex = null)}>Close</button>
+            <button class="btn ghost sm" onclick={closeDrill}>Close</button>
           </div>
+
+          {#if tradeList.phase === 'failed'}
+            <p class="inline-note bad" role="alert">
+              <b>The trade analytics payload was refused.</b> {tradeList.why} No trade row,
+              equity, streak, time bucket, win count, or derived money figure from that response is
+              displayed. This is different from an honestly empty trade file.
+            </p>
+          {/if}
 
           {#if contradicts(openRun)}
             <!-- A CONTRADICTION IN THE RECORD, not an unusual result. Named
@@ -6891,6 +7940,7 @@
                       class="rungbtn"
                       class:on={chartRung === r.name}
                       class:swept={sweptRungs.has(r.name)}
+                      aria-pressed={chartRung === r.name}
                       onclick={() => (chartRung = r.name)}
                       title="{r.months} months on disk{sweptRungs.has(r.name)
                         ? ' · a run is recorded at this rung'
@@ -6947,8 +7997,8 @@
               <div class="chart-state">
                 <span class="spin" aria-hidden="true"></span>
                 <p>
-                  Reading {span(openRun)} at {chartRung} off the store — the same files the sweep
-                  read.
+                  Reading the current store for {span(openRun)} at {chartRung}. This endpoint does
+                  not prove those bytes match the run's recorded data digest.
                 </p>
               </div>
             {:else if series.phase === 'failed'}
@@ -6977,7 +8027,7 @@
                 role="img"
                 aria-label="Candlestick chart of {openRun.underlying} at the {chartRung} rung, {exact(
                   series.bars.length
-                )} bars ending {span(openRun)}. Prices in rupees. No entries or exits are marked because the ledger records no trade list."
+                )} bars ending {span(openRun)}. Prices in rupees. Entry and exit markers are omitted because chosen rows use execution-series bar indices while this chart may show another rung or a clipped window, and no durable alignment or exit-cause marker is stored."
               ></div>
             {/if}
 
@@ -7005,7 +8055,7 @@
               {#if presets.length > 1 && series.phase === 'ready'}
                 <div class="ranges" role="group" aria-label="Visible range">
                   {#each presets as p (p.label)}
-                    <button class="rangebtn" onclick={() => showLast(p.bars)}>{p.label}</button>
+                    <button class="rangebtn" disabled={!chartReady} onclick={() => showLast(p.bars)}>{p.label}</button>
                   {/each}
                 </div>
               {/if}
@@ -7013,12 +8063,12 @@
 
             {#if series.phase === 'ready' && series.bars.length > 0}
               <p class="cnote faint term-note">
-                <b>No entries or exits are marked, and that is deliberate.</b> The ledger records
-                {exact(openRun.trades)} trades as a COUNT and keeps no trade list, so there is no
-                timestamp to put a marker at. A chart with plausible markers would look like the
-                answer to "when did it trade", which nothing on disk can answer. No indicator is
-                overlaid either — one computed here would be a second implementation of something
-                <code>crates/indicators</code> already owns.
+                <b>No entries or exits are marked, and that is deliberate.</b> Chosen-grid rows carry
+                exact execution-series bar indices and times, but this chart may show another rung
+                or only the newest window. The durable row stores no chart-alignment key and no
+                exit-cause marker, so overlaying one would guess. Use List of trades for the exact
+                timestamps and MAE/MFE. No indicator is overlaid either — one computed here would
+                be a second implementation of something <code>crates/indicators</code> already owns.
               </p>
             {/if}
           </div>
@@ -7027,9 +8077,9 @@
                THE STRATEGY TESTER
                Built to the operator's screenshots: TradingView's toolbar,
                its three views, its five and three pill tabs, its stat
-               quads with the percentage under the absolute, its chart
-               frames with axes and legends and toggles, and its padlock
-               for a cell that cannot be filled.
+               quads with the percentage under the absolute, and its chart
+               frames with axes, legends and toggles. Unavailable data is
+               named neutrally; a lock would falsely imply a permission gate.
 
                A CHART WITHOUT A SOURCE STILL DRAWS ITS FRAME. Axes,
                legend, period toggles and pagers are all present and all
@@ -7088,61 +8138,76 @@
               </div>
 
               <div class="tt-views" role="group" aria-label="Report view">
-                <button class="tt-view ic" class:on={testerView === 'metrics'} onclick={() => (testerView = 'metrics')} title="Metrics">
+                <button class="tt-view ic" class:on={testerView === 'metrics'} aria-label="Metrics report" aria-pressed={testerView === 'metrics'} onclick={() => (testerView = 'metrics')} title="Metrics">
                   <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 11l3.5-4.5L8.5 9 14 3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
                 </button>
-                <button class="tt-view ic" class:on={testerView === 'trades'} onclick={() => (testerView = 'trades')} title="List of trades">
+                <button class="tt-view ic" class:on={testerView === 'trades'} aria-label="List of trades" aria-pressed={testerView === 'trades'} onclick={() => (testerView = 'trades')} title="List of trades">
                   <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="1" fill="none" stroke="currentColor" stroke-width="1.3" /><path d="M2 6.5h12M6 6.5V13" stroke="currentColor" stroke-width="1.1" /></svg>
                 </button>
-                <button class="tt-view" class:on={testerView === 'properties'} onclick={() => (testerView = 'properties')}>Properties</button>
+                <button class="tt-view" class:on={testerView === 'properties'} aria-pressed={testerView === 'properties'} onclick={() => (testerView = 'properties')}>Properties</button>
               </div>
 
               <!-- TESTING PERIOD, with TradingView's own menu -->
-              <div class="tt-period">
-                <button class="tt-ctl" onclick={() => (periodOpen = !periodOpen)} aria-expanded={periodOpen}>
+              <div class="tt-period" bind:this={periodRoot} onfocusout={dismissPeriodOnFocusOut}>
+                <button
+                  class="tt-ctl"
+                  bind:this={periodTrigger}
+                  aria-label="Testing period: {span(openRun)}"
+                  aria-haspopup="dialog"
+                  aria-controls="testing-period-choices"
+                  aria-expanded={periodOpen}
+                  onclick={togglePeriodMenu}
+                >
                   <svg viewBox="0 0 16 16" class="tt-cico" aria-hidden="true"><rect x="2" y="3" width="12" height="11" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.3" /><path d="M2 6.5h12M5.5 2v2.5M10.5 2v2.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" /></svg>
                   {span(openRun)}
                   <span class="tt-caret" aria-hidden="true">⌄</span>
                 </button>
                 {#if periodOpen}
-                  <div class="tt-menu">
+                  <div
+                    class="tt-menu"
+                    id="testing-period-choices"
+                    role="dialog"
+                    aria-labelledby="testing-period-title"
+                    bind:this={periodDialog}
+                  >
                     <div class="tt-menuhead">
-                      <span>Testing period</span>
-                      <button class="tt-reset" onclick={() => { testingPeriod = 'Available chart range'; periodOpen = false; }}>Reset</button>
+                      <span id="testing-period-title">Testing period</span>
                     </div>
                     {#each TESTING_PERIODS as p (p)}
                       <button
                         class="tt-menuitem"
-                        class:sel={testingPeriod === p}
-                        onclick={() => { testingPeriod = p; periodOpen = false; }}
+                        class:sel={p === 'Available chart range'}
+                        aria-pressed={p === 'Available chart range'}
+                        disabled={p !== 'Available chart range'}
+                        onclick={() => closePeriodMenu(true)}
                       >
                         {p}
                         {#if p === 'Available chart range'}<span class="tt-default">Default</span>{/if}
-                        {#if p !== 'Available chart range'}<Lock small why="The run's span is fixed at the moment the sweep ran and recorded. Re-testing a different window means running the sweep again, not re-reading this record." />{/if}
+                        {#if p !== 'Available chart range'}<span class="tt-default">new run required</span>{/if}
                       </button>
                     {/each}
                     <!-- TradingView's last item sits under a divider and
                          carries a calendar. -->
                     <div class="tt-menudiv"></div>
-                    <button class="tt-menuitem">
+                    <button class="tt-menuitem" disabled>
                       <span class="tt-menuic">
                         <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3" width="12" height="11" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.3" /><path d="M2 6.5h12M5.5 2v2.5M10.5 2v2.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" /></svg>
                         Custom date range
                       </span>
-                      <Lock small why="A different window is a different sweep, not a different reading of this record. The span is one of the nine terms in the run's identity." />
+                      <span class="tt-default">new run required</span>
                     </button>
                   </div>
                 {/if}
               </div>
 
-              <button class="tt-ctl" title="Initial capital">
+              <span class="tt-fact" title="Recorded unit; this report does not model an account">
                 <svg viewBox="0 0 16 16" class="tt-cico" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.3" /><path d="M8 5v6M6.3 6.5h3.4M6.3 9.5h3.4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" /></svg>
                 1 unit <span class="tt-dim2">index points</span>
-              </button>
-              <button class="tt-ctl" title="Detalization">
+              </span>
+              <span class="tt-fact" title="Recorded signal and execution resolution">
                 <svg viewBox="0 0 16 16" class="tt-cico" aria-hidden="true"><path d="M3 13V7M8 13V3M13 13V9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" /></svg>
                 {openRun.timeframe} signal · 1min execution
-              </button>
+              </span>
 
               <div class="tt-meta">
                 <!-- THE LEDGER ROW AND THIS BAR MUST NOT DISAGREE ABOUT ONE
@@ -7174,7 +8239,7 @@
             {#if testerView === 'metrics'}
               <!-- ================= KEY STATS ================= -->
               <div class="tt-sec">
-                <h4 class="tt-h">Key stats</h4>
+                <h3 class="tt-h">Key stats</h3>
                 <div class="tt-quad">
                   <div class="tt-q">
                     <span class="tt-k">Total PnL</span>
@@ -7245,7 +8310,7 @@
                       >
                     {:else}
                       <span class="tt-qv big">
-                        <Lock why="This run recorded no trade file, so there is nothing to count. The results ledger keeps a net total, and a net cannot be split into winners and losers after the fact." />
+                        <Lock why={tradeEvidenceWhy} />
                         <em class="tt-frac"><Lock small why="The numerator — how many of these trades won — needs the trade file." />/{exact(openRun.trades)}</em>
                       </span>
                       <span class="tt-note">of {exact(openRun.trades)} closed</span>
@@ -7258,7 +8323,7 @@
                          realised worst-case result, so both gross halves are
                          sums over it. -->
                     <span class="tt-qv big"
-                      >{#if tradeStats?.profitFactor !== null && tradeStats}{tradeStats.profitFactor?.toFixed(3)}{:else}<Lock why="Needs a losing trade to divide by. This run recorded none at worst-case fills, and a ratio with no denominator is undefined rather than infinite." />{/if}</span
+                      >{#if tradeStats?.profitFactor !== null && tradeStats}{tradeStats.profitFactor?.toFixed(3)}{:else if tradeStats}<Lock kind="undefined" why="Needs a losing trade to divide by. This run recorded none at worst-case fills, and a ratio with no denominator is undefined rather than infinite." />{:else}<Lock why={tradeEvidenceWhy} />{/if}</span
                     >
                     <span class="tt-note">gross profit ÷ gross loss, at worst-case fills</span>
                   </div>
@@ -7268,12 +8333,7 @@
               <!-- ================= PERFORMANCE ================= -->
               <div class="tt-sec">
                 <div class="tt-hrow">
-                  <h4 class="tt-h">Performance <button class="tt-info" title="What these four plots are" aria-label="About the performance plots"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M8 7.2v4M8 4.9v.1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button></h4>
-                  <div class="tt-icons">
-                    <button class="tt-iconbtn" title="Chart settings" aria-label="Chart settings"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.2" fill="none" stroke="currentColor" stroke-width="1.3" /><path d="M8 1.6v2M8 12.4v2M1.6 8h2M12.4 8h2M3.5 3.5l1.4 1.4M11.1 11.1l1.4 1.4M12.5 3.5l-1.4 1.4M4.9 11.1l-1.4 1.4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" /></svg></button>
-                    <button class="tt-iconbtn" title="Snapshot" aria-label="Snapshot"><svg viewBox="0 0 16 16"><rect x="1.8" y="4.5" width="12.4" height="8.5" rx="1.4" fill="none" stroke="currentColor" stroke-width="1.3" /><circle cx="8" cy="8.7" r="2.4" fill="none" stroke="currentColor" stroke-width="1.3" /><path d="M5.6 4.5l1-1.5h2.8l1 1.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" /></svg></button>
-                    <button class="tt-iconbtn" title="Expand" aria-label="Expand"><svg viewBox="0 0 16 16"><path d="M6 2H2v4M10 14h4v-4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" /></svg></button>
-                  </div>
+                  <h3 class="tt-h">Performance</h3>
                 </div>
                 <div class="tt-perf">
                   <!-- TradingView lists the plots as PLAIN TEXT down the left
@@ -7293,75 +8353,146 @@
                           class="tt-eye"
                           title={plot === 'equity' ? 'Shown' : 'Show'}
                           aria-label="Show cumulative PnL"
-                          onclick={() => (plot = 'equity')}
+                          aria-pressed={plot === 'equity'}
+                          onclick={() => {
+                            plot = 'equity';
+                            performancePage = 0;
+                          }}
                         >
                           <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 8s2.4-4 6.5-4 6.5 4 6.5 4-2.4 4-6.5 4S1.5 8 1.5 8z" fill="none" stroke="currentColor" stroke-width="1.3" /><circle cx="8" cy="8" r="1.9" fill="currentColor" /></svg>
                         </button>
                       {:else}
-                        <Lock small why="Needs the trade file — the results ledger's four scalars cannot make a curve." />
+                        <Lock small why={equityEvidenceWhy} />
                       {/if}
                     </div>
                     <div class="tt-plotrow" class:off={equity && plot !== 'hold'}>
-                      <span>Buy and hold</span>
+                      <span>Buy and hold · current store</span>
                       <button
                         class="tt-eye"
                         title={plot === 'hold' || !equity ? 'Shown' : 'Show'}
                         aria-label="Show buy and hold"
-                        onclick={() => (plot = 'hold')}
+                        aria-pressed={plot === 'hold' || !equity}
+                        onclick={() => {
+                          plot = 'hold';
+                          performancePage = 0;
+                        }}
                       >
                         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 8s2.4-4 6.5-4 6.5 4 6.5 4-2.4 4-6.5 4S1.5 8 1.5 8z" fill="none" stroke="currentColor" stroke-width="1.3" /><circle cx="8" cy="8" r="1.9" fill="currentColor" /></svg>
                       </button>
                     </div>
-                    <div class="tt-plotrow off">
-                      <span>Trades excursions</span>
-                      <Lock small why="Three aggregates are recorded, not one column per trade." />
+                    <div class="tt-plotrow">
+                      <span>Trade MAE / MFE</span>
+                      <small>recorded per trade · table below</small>
                     </div>
-                    <div class="tt-plotrow off">
+                    <div class="tt-plotrow" class:off={!equity?.swingPlot || plot !== 'swings'}>
                       <span>Run-ups and drawdowns</span>
-                      <Lock small why="One drawdown figure is recorded, not a series over time." />
+                      <button
+                        class="tt-eye"
+                        title={equity?.swingPlot
+                          ? plot === 'swings'
+                            ? 'Shown'
+                            : 'Show'
+                          : equity
+                            ? 'The strategy curve is flat, so it contains no rising or falling stretch.'
+                            : equityEvidenceWhy}
+                        aria-label="Show strategy run-ups and drawdowns"
+                        aria-pressed={plot === 'swings'}
+                        disabled={!equity?.swingPlot}
+                        onclick={() => {
+                          if (equity?.swingPlot) {
+                            plot = 'swings';
+                            swingPage = 0;
+                          }
+                        }}
+                      >
+                        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 8s2.4-4 6.5-4 6.5 4 6.5 4-2.4 4-6.5 4S1.5 8 1.5 8z" fill="none" stroke="currentColor" stroke-width="1.3" /><circle cx="8" cy="8" r="1.9" fill="currentColor" /></svg>
+                      </button>
                     </div>
-                    <button class="tt-collapse" aria-label="Collapse plot list">
-                      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 10l4-4 4 4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
-                    </button>
                   </div>
                   <div class="tt-plot">
                     {#if equity && plot === 'equity'}
                       <!-- `equity.points` is `{t, v}` — the shape `areaChart`
                            already eats — with `t` in seconds off each trade's
                            own exit stamp, so the axis needs no new formatter. -->
+                      {@const performanceScale = curveScale(equity.points)}
                       {@render areaChart(
-                        equity.points,
-                        [money(equity.high), money(Math.round((equity.high + equity.low) / 2)), money(equity.low)],
+                        performanceWindow.rows,
                         [
-                          istLabel(equity.points[0].t, true),
-                          istLabel(equity.points[equity.points.length - 1].t, true)
+                          money(performanceScale),
+                          money(Math.round(performanceScale / 2)),
+                          '0',
+                          money(-Math.round(performanceScale / 2)),
+                          money(-performanceScale)
                         ],
-                        ''
+                        curveLabels(performanceWindow.rows),
+                        '',
+                        performanceScale
+                      )}
+                      {#if performanceWindow.pages > 1}
+                        <div class="series-nav" aria-label="Performance trade pages">
+                          <button
+                            aria-label="Earlier performance trades"
+                            disabled={performanceWindow.page === 0}
+                            onclick={() => (performancePage = Math.max(0, performanceWindow.page - 1))}>‹</button
+                          >
+                          <span
+                            >Trades {exact(performanceWindow.start + 1)}–{exact(
+                              Math.min(
+                                performanceWindow.start + performanceWindow.rows.length,
+                                performanceWindow.total
+                              )
+                            )} of {exact(performanceWindow.total)}</span
+                          >
+                          <button
+                            aria-label="Later performance trades"
+                            disabled={performanceWindow.page + 1 >= performanceWindow.pages}
+                            onclick={() =>
+                              (performancePage = Math.min(
+                                performanceWindow.pages - 1,
+                                performanceWindow.page + 1
+                              ))}>›</button
+                          >
+                        </div>
+                      {/if}
+                      <p class="tt-plotnote">
+                        Up to <b>{exact(PERFORMANCE_PAGE_SIZE)} exact trades</b> are shown per page;
+                        paging changes only the visible window, while cumulative values stay absolute.
+                        The running sum uses each trade's realised <b>worst-case</b> result in the
+                        exact chosen-grid resolution order. The sealed writer refuses the result unless
+                        this curve ends at the ledger headline
+                        <b>{money(openRun.pessimistic)}</b> and its count, optimistic sum, worst trade,
+                        max drawdown, and complete cell also reconcile.
+                      </p>
+                    {:else if equity?.swingPlot && plot === 'swings'}
+                      {@render swingChart(
+                        equity.swingPlot,
+                        'Alternating rising and falling stretches of the strategy equity curve, on the same trade-resolution clock as cumulative P&L. The final open stretch is included and marked by its actual direction.'
+                      )}
+                    {:else if bench.phase === 'loading'}
+                      <div class="tt-empty"><span class="spin sm" aria-hidden="true"></span> Reading the current store's span endpoints…</div>
+                    {:else if holdCurve.length > 1}
+                      {@const holdScale = curveScale(holdCurve)}
+                      {@render areaChart(
+                        holdCurve,
+                        [
+                          money(holdScale),
+                          money(Math.round(holdScale / 2)),
+                          '0',
+                          money(-Math.round(holdScale / 2)),
+                          money(-holdScale)
+                        ],
+                        curveLabels(holdCurve),
+                        '',
+                        holdScale
                       )}
                       <p class="tt-plotnote">
-                        The running sum of each trade's realised <b>worst-case</b> result, in the
-                        order they resolved — the unstopped walk. The ledger's headline walks the
-                        stopped exit grid and ends at <b>{money(openRun.pessimistic)}</b>, which is
-                        why the two do not meet.
-                      </p>
-                    {:else if bench.phase === 'loading'}
-                      <div class="tt-empty"><span class="spin sm" aria-hidden="true"></span> Reading the span's opening price…</div>
-                    {:else if outperformance && buyHold}
-                      <div class="tt-bench">
-                        <div class="tt-brow">
-                          <span class="tt-blab">Strategy</span>
-                          <span class="tt-bbar"><span class="tt-bfill" class:down={outperformance.strategy < 0} style="width:{(Math.abs(outperformance.strategy) / benchScale) * 100}%"></span></span>
-                          <span class="tt-bval strong">{money(outperformance.strategy)}</span>
-                        </div>
-                        <div class="tt-brow">
-                          <span class="tt-blab">Buy and hold</span>
-                          <span class="tt-bbar"><span class="tt-bfill hold" class:down={outperformance.hold < 0} style="width:{(Math.abs(outperformance.hold) / benchScale) * 100}%"></span></span>
-                          <span class="tt-bval">{money(outperformance.hold)}</span>
-                        </div>
-                      </div>
-                      <p class="tt-plotnote">
-                        Three of the four plots above need a series the sweep never wrote. <b>Buy and hold is the one that is
-                        computable</b> — from the bars on disk — so it is the one drawn.
+                        This is the newest current-store window tail of holding one unit from the
+                        current store's first close over the named span. The headline endpoint
+                        <b>{buyHold ? money(buyHold.gain) : '—'}</b> is independently fetched at the
+                        run's recorded rung, so switching this display rung cannot rewrite the query.
+                        The bars endpoint does not bind either price to the run's data digest. The
+                        strategy curve remains on its separate trade-resolution clock; the two are not
+                        falsely aligned point by point.
                       </p>
                     {:else}
                       <div class="tt-empty"><Lock /> {bench.why || 'No plot on this list can be drawn from what is recorded.'}</div>
@@ -7372,10 +8503,10 @@
 
               <!-- ================= PERFORMANCE ANALYSIS ================= -->
               <div class="tt-sec">
-                <h4 class="tt-h">Performance analysis</h4>
+                <h3 class="tt-h">Performance analysis</h3>
                 <div class="tt-pills" role="group" aria-label="Performance analysis">
                   {#each [['breakdown', 'Breakdown'], ['periodical', 'Periodical'], ['benchmarking', 'Benchmarking'], ['margin', 'Margin usage'], ['growth', 'Growth and decline']] as [key, label] (key)}
-                    <button class="tt-pill" class:on={paTab === key} onclick={() => (paTab = key)}>{label}</button>
+                    <button class="tt-pill" class:on={paTab === key} aria-pressed={paTab === key} onclick={() => (paTab = key)}>{label}</button>
                   {/each}
                 </div>
 
@@ -7391,19 +8522,19 @@
                     <div class="tt-q">
                       <span class="tt-k">Gross profit</span>
                       <span class="tt-qv"
-                        >{#if tradeStats}{money(tradeStats.grossProfit)}{:else}<Lock why="Needs the trade file, which this run did not record." />{/if}</span
+                        >{#if noTrades}{money(0)}{:else if tradeStats}{money(tradeStats.grossProfit)}{:else}<Lock why={tradeEvidenceWhy} />{/if}</span
                       >
                     </div>
                     <div class="tt-q">
                       <span class="tt-k">Gross loss</span>
                       <span class="tt-qv"
-                        >{#if tradeStats}{money(tradeStats.grossLoss)}{:else}<Lock why="Needs the trade file, which this run did not record." />{/if}</span
+                        >{#if noTrades}{money(0)}{:else if tradeStats}{money(tradeStats.grossLoss)}{:else}<Lock why={tradeEvidenceWhy} />{/if}</span
                       >
                     </div>
                     <div class="tt-q">
                       <span class="tt-k">Profit factor</span>
                       <span class="tt-qv"
-                        >{#if tradeStats?.profitFactor !== null && tradeStats}{tradeStats.profitFactor?.toFixed(3)}{:else}<Lock why="This run recorded no losing trade at worst-case fills, so gross loss is zero — a profit factor with no denominator is undefined, not infinite." />{/if}</span
+                        >{#if tradeStats?.profitFactor !== null && tradeStats}{tradeStats.profitFactor?.toFixed(3)}{:else if tradeStats}<Lock kind="undefined" why="This run recorded no losing trade at worst-case fills, so gross loss is zero — a profit factor with no denominator is undefined, not infinite." />{:else}<Lock why={tradeEvidenceWhy} />{/if}</span
                       >
                     </div>
                     <!-- TWO DIFFERENT THINGS, AND THIS LOCK USED TO LUMP THEM.
@@ -7428,30 +8559,61 @@
                          −27,883p and −8,658p once a tick was charged, so it is
                          a bound and not a rounding. Kept separate, and kept
                          visible. -->
-                    <div class="tt-q"><span class="tt-k">Commission load</span><span class="tt-qv"><Lock why="ZERO IS THE ANSWER, not a missing one. A spot index is not tradeable and no order is placed, so there is no brokerage, no STT, no stamp duty and no GST — costs::scope::is_cost_free returns true for IndexSpot and says so, and this engine sweeps only spot indices. What is NOT charged is the SPREAD, which is a fill-model question rather than a levy: no tick is added on any leg, and trade.rs records two horizons flipping sign once one was. That omission is real and unmeasured; the statutory stack is not missing, it is zero." /></span></div>
+                    <div class="tt-q">
+                      <span class="tt-k">Commission load</span>
+                      <span class="tt-qv">0.00%</span>
+                      <span class="tt-note">statutory charges are zero for spot indices · spread is not modeled</span>
+                    </div>
                   </div>
 
                   <div class="tt-hrow tight">
-                    <h5 class="tt-h5">Profits and losses</h5>
+                    <h4 class="tt-h5">Profits and losses</h4>
                     <div class="tt-seg" role="group" aria-label="Split">
-                      <button class="tt-segbtn" class:on={plSplit === 'signals'} onclick={() => (plSplit = 'signals')}>By signals</button>
-                      <button class="tt-segbtn" class:on={plSplit === 'side'} onclick={() => (plSplit = 'side')}>By side</button>
+                      <button class="tt-segbtn" class:on={plSplit === 'signals'} aria-pressed={plSplit === 'signals'} onclick={() => (plSplit = 'signals')}>By signals</button>
+                      <button class="tt-segbtn" class:on={plSplit === 'side'} aria-pressed={plSplit === 'side'} onclick={() => (plSplit = 'side')}>By side</button>
                     </div>
                   </div>
-                  <div class="tt-lockpanel">
-                    <Lock />
-                    <span>
-                      {#if plSplit === 'signals'}
+                  {#if plSplit === 'signals'}
+                    <div class="tt-unavailable-panel">
+                      <span>
                         Splitting profit and loss <b>by signal</b> needs each trade tagged with the entry that opened it. The
                         sweep records one total for the whole run.
-                      {:else}
-                        Splitting <b>by side</b> needs a long/short tag per trade. Direction is one of the nine terms inside
-                        the run's identity hash, not a field beside it.
-                      {/if}
-                    </span>
-                  </div>
+                      </span>
+                    </div>
+                  {:else if tradeStats && tradeList.direction}
+                    {@const sideGross = Math.max(1, tradeStats.grossProfit + tradeStats.grossLoss)}
+                    <div class="tt-side">
+                      <div class="tt-sidehead">
+                        <b>{tradeList.direction === 'long' ? 'Long' : 'Short'}</b>
+                        <span>selected direction only</span>
+                        <strong class:up={openRun.pessimistic >= 0} class:down={openRun.pessimistic < 0}
+                          >{money(openRun.pessimistic)}</strong
+                        >
+                      </div>
+                      <div
+                        class="tt-sidebar"
+                        role="img"
+                        aria-label="Selected {tradeList.direction} side: {money(tradeStats.grossLoss)} gross loss and {money(tradeStats.grossProfit)} gross profit at worst-case fills"
+                      >
+                        <span class="loss" style="width:{(tradeStats.grossLoss / sideGross) * 100}%"></span>
+                        <span class="profit" style="width:{(tradeStats.grossProfit / sideGross) * 100}%"></span>
+                      </div>
+                      <div class="tt-sidefacts">
+                        <span><i class="loss"></i>Gross loss <b>{money(tradeStats.grossLoss)}</b></span>
+                        <span><i class="profit"></i>Gross profit <b>{money(tradeStats.grossProfit)}</b></span>
+                      </div>
+                      <p>
+                        Every sealed row agrees on this one selected direction. A simultaneous
+                        Long/Short comparison would require a second recorded run, so no missing side is fabricated.
+                      </p>
+                    </div>
+                  {:else}
+                    <div class="tt-unavailable-panel">
+                      <span>{tradeEvidenceWhy}</span>
+                    </div>
+                  {/if}
 
-                  <h5 class="tt-h5">Fill models <span class="tt-own">brutex</span></h5>
+                  <h4 class="tt-h5">Fill models <span class="tt-own">brutex</span></h4>
                   <p class="tt-note2">
                     TradingView simulates one fill model. This sweep records the same combination under both ends of every
                     bar and ranks on the worse, so the spread between them is a figure the Strategy Tester has no row for.
@@ -7475,8 +8637,8 @@
                   </div>
                 {:else if paTab === 'periodical'}
                   <div class="tt-quad">
-                    <div class="tt-q"><span class="tt-k">Annualized return (CAGR)</span><span class="tt-qv" class:up={(cagrBps ?? 0) >= 0} class:down={(cagrBps ?? 0) < 0}>{noTrades ? 'none' : cagrBps === null ? '—' : pct(cagrBps)}</span></div>
-                    <div class="tt-q"><span class="tt-k">Total return</span><span class="tt-qv" class:up={!noTrades && (strategyBps ?? 0) >= 0} class:down={!noTrades && (strategyBps ?? 0) < 0}>{noTrades ? "none" : pct(strategyBps)}</span></div>
+                    <div class="tt-q"><span class="tt-k">Annualized return (CAGR) · current-store normalized</span><span class="tt-qv" class:up={(cagrBps ?? 0) >= 0} class:down={(cagrBps ?? 0) < 0}>{noTrades ? 'none' : cagrBps === null ? '—' : pct(cagrBps)}</span></div>
+                    <div class="tt-q"><span class="tt-k">Total return · current-store normalized</span><span class="tt-qv" class:up={!noTrades && (strategyBps ?? 0) >= 0} class:down={!noTrades && (strategyBps ?? 0) < 0}>{noTrades ? "none" : pct(strategyBps)}</span></div>
                     <!-- REAL, ON PER-TRADE RETURNS. Both read "no ratio reaches
                          the record" — true of the ledger's four scalars, untrue
                          of the trade file, which is a series. Annualised by the
@@ -7497,10 +8659,10 @@
                   </div>
 
                   <div class="tt-hrow tight">
-                    <h5 class="tt-h5">{PERIOD_LABEL[periodScale]} PnL</h5>
+                    <h4 class="tt-h5">{PERIOD_LABEL[periodScale]} PnL</h4>
                     <div class="tt-seg" role="group" aria-label="Period">
                       {#each PERIOD_SCALES as s (s)}
-                        <button class="tt-segbtn" class:on={periodScale === s} onclick={() => (periodScale = s)}>{s[0].toUpperCase() + s.slice(1)}</button>
+                        <button class="tt-segbtn" class:on={periodScale === s} aria-pressed={periodScale === s} onclick={() => (periodScale = s)}>{s[0].toUpperCase() + s.slice(1)}</button>
                       {/each}
                     </div>
                   </div>
@@ -7508,34 +8670,42 @@
                     {@render barChart(
                       holdPeriods,
                       [money(barScale(holdPeriods)), money(Math.round(barScale(holdPeriods) / 2)), "0", money(-Math.round(barScale(holdPeriods) / 2)), money(-barScale(holdPeriods))],
-                      "Per-period P&L of HOLDING one unit, from the bars on disk. The strategy has no per-period series — it records one total for the whole span — so this is the benchmark, and it is the only one of the two that can be bucketed.",
-                      ["Benchmark gain", "Benchmark loss"]
+                      "Per-period P&L of HOLDING one unit, from the current store. The bars endpoint does not bind these bytes to the run's data digest. The strategy has no per-period series — it records one total for the whole span — so only this current-store reference can be bucketed.",
+                      ["Current-store gain", "Current-store loss"]
                     )}
                   {:else}
                     {@render chartFrame(
-                      'No bars are loaded, so there is nothing to bucket by ' + PERIOD_NOUN[periodScale] + '.',
+                      'Fewer than two ' + PERIOD_NOUN[periodScale] + ' buckets are present, so a period-to-period chart is undefined.',
                       ['Realized profit', 'Realized loss', 'Favorable excursion', 'Adverse excursion'],
                       PNL_TICKS,
                       periodTicks,
-                      periodScale === 'daily'
+                      periodScale === 'daily',
+                      'undefined'
                     )}
                   {/if}
                   <p class="tt-note2">
-                    Return is on <b>one unit of the index</b>, against the price at the span's start {bench.phase === 'ready' && bench.open > 0 ? ` (${money(bench.open)})` : ' — not loaded, so every percentage on this tab is withheld rather than divided by zero'}.
+                    <b>Current-store reference; not bound to the run's data digest.</b> Return is on
+                    one unit of the index, against the current store price at the span's start {bench.phase === 'ready' && bench.open > 0 ? ` (${money(bench.open)})` : ' — not loaded, so every percentage on this tab is withheld rather than divided by zero'}.
                     The ledger records no capital, so a return on equity has no denominator on disk. Annualised over the
                     {exact(openRun.months_found)} months actually found.
                   </p>
                 {:else if paTab === 'benchmarking'}
+                  <p class="tt-warnnote">
+                    <b>Current-store reference; not bound to this run's data digest.</b> The bars
+                    endpoint proves its own envelope, not that these are the exact historical bytes
+                    named by the sealed run. Persisted strategy paisa remain the run-authoritative
+                    values; percentages and comparisons below use today's stored endpoint prices.
+                  </p>
                   <div class="tt-quad">
-                    <div class="tt-q"><span class="tt-k">Strategy return</span><span class="tt-qv" class:up={!noTrades && (strategyBps ?? 0) >= 0} class:down={!noTrades && (strategyBps ?? 0) < 0}>{noTrades ? "none" : pct(strategyBps)}</span></div>
-                    <div class="tt-q"><span class="tt-k">Buy and hold return</span><span class="tt-qv" class:up={(buyHold?.bps ?? 0) >= 0} class:down={(buyHold?.bps ?? 0) < 0}>{buyHold ? pct(buyHold.bps) : '—'}</span></div>
+                    <div class="tt-q"><span class="tt-k">Strategy return · current-store normalized</span><span class="tt-qv" class:up={!noTrades && (strategyBps ?? 0) >= 0} class:down={!noTrades && (strategyBps ?? 0) < 0}>{noTrades ? "none" : pct(strategyBps)}</span></div>
+                    <div class="tt-q"><span class="tt-k">Buy and hold return · current store</span><span class="tt-qv" class:up={(buyHold?.bps ?? 0) >= 0} class:down={(buyHold?.bps ?? 0) < 0}>{buyHold ? pct(buyHold.bps) : '—'}</span></div>
                     <div class="tt-q">
-                      <span class="tt-k">Strategy outperformance</span>
+                      <span class="tt-k">Strategy outperformance · vs current store</span>
                       <span class="tt-qv" class:up={outperformance?.beat} class:down={outperformance && !outperformance.beat}>
-                        {noTrades ? 'none — the sweep never entered' : outperformance && buyHold && strategyBps !== null ? pct(strategyBps - buyHold.bps) : '—'}
+                        {noTrades ? 'none — the sweep never entered' : outperformanceBps !== null ? pct(outperformanceBps) : '—'}
                       </span>
                     </div>
-                    <div class="tt-q"><span class="tt-k">Correlation</span><span class="tt-qv"><Lock why="Needs a strategy return series to correlate against the benchmark's." /></span></div>
+                    <div class="tt-q"><span class="tt-k">Correlation</span><span class="tt-qv"><Lock why="The strategy curve advances at trade exits and the benchmark advances at every bar. No recorded alignment and sampling rule makes those two clocks comparable." /></span></div>
                   </div>
                   <!-- A COMPARISON NEEDS TWO PARTICIPANTS. With no trades this
                        read "The sweep falls short of buy and hold by ₹6,021.60
@@ -7546,58 +8716,55 @@
                   {#if noTrades}
                     <p class="tt-note2">
                       <b>No comparison is possible.</b> The sweep opened no position, so it neither
-                      beat nor lost to holding the index — it was not in the market. Buy and hold's
-                      own return above is still true: it is a property of the bars, not of this run.
+                      beat nor lost to holding the index — it was not in the market. The current-store
+                      holding reference above is a property of today's endpoint bars, not of this run.
                     </p>
                   {:else if outperformance}
                     <p class="tt-note2" class:badnote={!outperformance.beat}>
                       {#if outperformance.beat}
-                        The sweep <b>beats buy and hold by {money(outperformance.edge)}</b> under worst-case fills.
+                        Against the unbound current-store reference, the sweep's persisted worst-case
+                        total is <b>higher by {money(outperformance.edge)}</b>.
                       {:else}
-                        <b>The sweep falls short of buy and hold by {money(-outperformance.edge)}</b> under worst-case fills —
+                        Against the unbound current-store reference, the sweep's persisted worst-case
+                        total is <b>lower by {money(-outperformance.edge)}</b> —
                         {exact(openRun.trades)} trades across {(spanYears ?? 0).toFixed(1)} years to end up behind holding the index.
                       {/if}
                     </p>
                   {/if}
-                  <div class="tt-hrow tight">
-                    <h5 class="tt-h5">Strategy vs benchmark</h5>
-                    <div class="tt-seg" role="group" aria-label="Period">
-                      {#each PERIOD_SCALES as s (s)}
-                        <button class="tt-segbtn" class:on={periodScale === s} onclick={() => (periodScale = s)}>{s[0].toUpperCase() + s.slice(1)}</button>
-                      {/each}
-                    </div>
-                  </div>
+                  <h4 class="tt-h5">Strategy vs current-store reference</h4>
                   {#if holdCurve.length > 1}
                     {@render areaChart(
                       holdCurve,
                       [money(curveScale(holdCurve)), money(Math.round(curveScale(holdCurve) / 2)), "0", money(-Math.round(curveScale(holdCurve) / 2)), money(-curveScale(holdCurve))],
-                      periodTicks,
-                      "Cumulative P&L of HOLDING one unit across the window on screen, bar by bar. The strategy line TradingView draws beside this one needs an equity series the sweep never wrote — its whole-span total is the bar under Performance above."
+                      curveLabels(holdCurve),
+                      "The newest plotted tail of HOLDING one unit from the current store's full-span opening close, bar by bar. It is not data-digest-bound to the run. The strategy curve is recorded on trade-resolution timestamps, so the two series remain separate until a clock-alignment rule is defined.",
+                      curveScale(holdCurve)
                     )}
                   {:else}
                     {@render chartFrame(
-                      'No bars are loaded, so the benchmark curve has nothing to draw.',
+                      'The benchmark contains fewer than two plotted bars, so it cannot form a curve.',
                       ['Strategy PnL', 'Buy and hold PnL'],
                       PNL_TICKS,
                       periodTicks,
-                      false
+                      false,
+                      'unavailable'
                     )}
                   {/if}
                 {:else if paTab === 'margin'}
                   <div class="tt-quad">
-                    <div class="tt-q"><span class="tt-k">Margin efficiency</span><span class="tt-qv"><Lock why="The engine models no account." /></span></div>
-                    <div class="tt-q"><span class="tt-k">Average margin used</span><span class="tt-qv"><Lock why="The engine models no account." /></span></div>
-                    <div class="tt-q"><span class="tt-k">Margin calls</span><span class="tt-qv"><Lock why="The engine models no account." /></span></div>
-                    <div class="tt-q"><span class="tt-k">Total liquidated volume</span><span class="tt-qv"><Lock why="The engine models no account." /></span></div>
+                    <div class="tt-q"><span class="tt-k">Margin efficiency</span><span class="tt-qv dim">Not applicable</span></div>
+                    <div class="tt-q"><span class="tt-k">Average margin used</span><span class="tt-qv dim">Not applicable</span></div>
+                    <div class="tt-q"><span class="tt-k">Margin calls</span><span class="tt-qv dim">Not applicable</span></div>
+                    <div class="tt-q"><span class="tt-k">Total liquidated volume</span><span class="tt-qv dim">Not applicable</span></div>
                   </div>
-                  <h5 class="tt-h5">Margin utilization</h5>
-                  {@render chartFrame(
-                    'Every row on this tab is locked, and that is a DESIGN FACT rather than a gap to fill. The engine computes totals in index points with no capital, no position size and no broker. There is no margin to use, so there is nothing here to record.',
-                    [],
-                    PCT_TICKS,
-                    periodTicks,
-                    false
-                  )}
+                  <h4 class="tt-h5">Margin utilization</h4>
+                  <div class="tt-unavailable-panel not-applicable">
+                    <span>
+                      <b>Not applicable.</b> The engine computes one-unit spot-index totals with no
+                      account, position size or broker, so there is no capital, margin call or
+                      liquidation to measure.
+                    </span>
+                  </div>
                 {:else}
                   <div class="tt-quad">
                     <!-- REAL. Durations are in TRADES, not bars: the equity
@@ -7621,28 +8788,31 @@
                       >
                     </div>
                     <div class="tt-q"><span class="tt-k">Max drawdown</span><span class="tt-qv down">{money(Math.abs(openRun.max_drawdown))}<em class="tt-pc">{drawdownBps === null ? '' : `${(drawdownBps / 100).toFixed(2)}%`}</em></span></div>
-                    <div class="tt-q"><span class="tt-k">Max drawdown as % of opening price</span><span class="tt-qv">{drawdownBps === null ? '—' : `${(drawdownBps / 100).toFixed(2)}%`}</span></div>
+                    <div class="tt-q"><span class="tt-k">Max drawdown / current-store open</span><span class="tt-qv">{drawdownBps === null ? '—' : `${(drawdownBps / 100).toFixed(2)}%`}</span></div>
                   </div>
-                  <h5 class="tt-h5">Alternating growth and decline</h5>
+                  <h4 class="tt-h5">Alternating growth and decline</h4>
                   {#if holdSwings.segs.length > 0}
                     {@render swingChart(
                       holdSwings,
-                      "Alternating run-up and drawdown of the BENCHMARK — one unit held — segmented from the cumulative curve on disk. The strategy has no equity series to segment, so its single recorded drawdown is the figure in the quad above."
+                      "Alternating run-up and drawdown of the CURRENT-STORE REFERENCE — one unit held — segmented from the cumulative endpoint curve. It is not bound to the run's data digest. The strategy's own trade-resolution swings are selectable in Performance and summarized below."
                     )}
                   {:else}
                     {@render chartFrame(
-                      'No bars are loaded, so there is no curve to segment into run-ups and drawdowns.',
+                      holdCurve.length < 2
+                        ? 'The benchmark contains fewer than two plotted bars, so it cannot form an alternating swing.'
+                        : 'The benchmark has no completed alternating turn, so a run-up or drawdown duration is undefined.',
                       ['Run-up', 'Drawdown', 'Current run-up'],
                       PCT_TICKS,
                       periodTicks,
-                      false
+                      false,
+                      holdCurve.length < 2 ? 'unavailable' : 'undefined'
                     )}
                   {/if}
                   <!-- TradingView's second block on this tab: run-up and
                        drawdown, each as maximum / average / current, on one
                        shared scale. The maximum drawdown is the one figure
                        recorded, so it is the one bar drawn. -->
-                  <h5 class="tt-h5">Comparison of growth and decline periods</h5>
+                  <h4 class="tt-h5">Comparison of growth and decline periods</h4>
                   <!-- ALL FIVE REAL. "Run-up needs an equity series to measure a
                        rise across" — the trade file IS that series. Every bar is
                        scaled against the largest magnitude in the block, so a
@@ -7689,19 +8859,15 @@
                         </div>
                       {/each}
                     </div>
-                    <!-- THE LEDGER'S OWN FIGURE BESIDE THE CURVE'S, because they
-                         are two different walks and this block would otherwise
-                         quietly replace one with the other. -->
                     <p class="tt-note2 dim">
                       Run-ups and drawdowns are <b>alternating swings</b> of the equity curve — a
                       rising stretch and a falling one, bounded by the turns between them —
                       averaged over {exact(equity.swings)} of them, and measured in trades because
                       the curve advances one point per trade. <b>Maximum drawdown is different</b>:
                       it is the deepest fall from any high to any later low, which is the figure the
-                      ledger also keeps. The ledger records
-                      <b>{money(Math.abs(openRun.max_drawdown))}</b> for it — a smaller number than
-                      the one above because the ledger walks the stopped exit grid and this walks
-                      the unstopped trade list.
+                      ledger also keeps. The chosen rows are accepted only when that reconstructed
+                      maximum is exactly the ledger's
+                      <b>{money(Math.abs(openRun.max_drawdown))}</b>.
                     </p>
                   {:else}
                     <div class="tt-cmp">
@@ -7710,7 +8876,7 @@
                         <div class="tt-cmprow">
                           <span class="tt-cmplab">{k}</span>
                           <span class="tt-cmpbar"></span>
-                          <span class="tt-cmpval"><Lock small why="Needs the trade file, which this run did not record." /></span>
+                          <span class="tt-cmpval"><Lock small why={equityEvidenceWhy} /></span>
                         </div>
                       {/each}
                       <span class="tt-cmpgrp">Drawdown</span>
@@ -7722,12 +8888,12 @@
                       <div class="tt-cmprow">
                         <span class="tt-cmplab">Average</span>
                         <span class="tt-cmpbar"></span>
-                        <span class="tt-cmpval"><Lock small why="Needs the trade file, which this run did not record." /></span>
+                        <span class="tt-cmpval"><Lock small why={equityEvidenceWhy} /></span>
                       </div>
                     </div>
                   {/if}
 
-                  <h5 class="tt-h5">Excursion <span class="tt-own">brutex</span></h5>
+                  <h4 class="tt-h5">Excursion <span class="tt-own">brutex</span></h4>
                   <p class="tt-note2">
                     How far trades went against the position before resolving, in parts per million. The winners' adverse
                     excursion is <b>the tightest stop that would not have killed a winner</b> — a figure TradingView reports
@@ -7758,15 +8924,15 @@
 
               <!-- ================= TRADES ANALYSIS ================= -->
               <div class="tt-sec">
-                <h4 class="tt-h">Trades analysis</h4>
-                {@render unstoppedWalkNote()}
+                <h3 class="tt-h">Trades analysis</h3>
+                {@render chosenGridTradeNote()}
                 <div class="tt-pills" role="group" aria-label="Trades analysis">
                   <!-- `Time patterns` IS THE REFERENCE'S FOURTH PILL, and it was
                        the one missing. Its data has been on the wire the whole
                        time: `/trades.json` serves a `weekday` and an `hour`
                        bucket set on every request. -->
                   {#each [['distribution', 'Distribution'], ['streaks', 'Streaks'], ['time', 'Time patterns'], ['details', 'Trades analysis details']] as [key, label] (key)}
-                    <button class="tt-pill" class:on={taTab === key} onclick={() => (taTab = key)}>{label}</button>
+                    <button class="tt-pill" class:on={taTab === key} aria-pressed={taTab === key} onclick={() => (taTab = key)}>{label}</button>
                   {/each}
                 </div>
 
@@ -7780,17 +8946,17 @@
                   {#if taTab === 'distribution'}
                   <div class="tt-quad">
                     <div class="tt-q"><span class="tt-k">Expected payoff</span><span class="tt-qv">{perTrade ? money(perTrade.worst) : '—'}</span></div>
-                    <div class="tt-q"><span class="tt-k">Outliers PnL</span><span class="tt-qv"><Lock why="Needs a per-trade list to find outliers in." /></span></div>
+                    <div class="tt-q"><span class="tt-k">Outliers PnL</span><span class="tt-qv"><Lock why="No outlier rule is part of the recorded run. Choosing a threshold after seeing the results would invent both the subset and its PnL." /></span></div>
                     <div class="tt-q"><span class="tt-k">Largest profit</span><span class="tt-qv">{#if tradeStats?.largestWin}{money(tradeStats.largestWin)}{:else}<Lock why="This run recorded no winning trade at worst-case fills." />{/if}</span></div>
                     <div class="tt-q"><span class="tt-k">Largest loss</span><span class="tt-qv down">{money(Math.abs(openRun.worst_trade))}</span></div>
                   </div>
                   <div class="tt-two">
                     <div>
-                      <h5 class="tt-h5">Returns distribution</h5>
-                      {#if returnHistogram}{@render histogram(returnHistogram,'The distribution of per-BAR returns over the window on screen, from the bars on disk — NOT per trade. The trade file does carry a per-trade result and the donut beside this is cut from it; what it does not carry is a per-trade RETURN, which needs each trade\'s own entry price rather than the span\'s opening one.')}{:else}{@render chartFrame('No bars are loaded, so there is nothing to distribute.', HIST_LEGEND, COUNT_TICKS, RETURN_TICKS, false)}{/if}
+                      <h4 class="tt-h5">Bar returns distribution</h4>
+                      {#if returnHistogram}{@render histogram(returnHistogram,'The distribution of per-BAR returns over the window on screen, from the bars on disk — NOT per trade. The trade file does carry a per-trade result and the donut beside this is cut from it; what it does not carry is a per-trade RETURN, which needs each trade\'s own entry price rather than the span\'s opening one.')}{:else}{@render chartFrame('No bars are loaded, so there is nothing to distribute.', HIST_LEGEND, COUNT_TICKS, RETURN_TICKS, false, 'unavailable')}{/if}
                     </div>
                     <div>
-                      <h5 class="tt-h5">Trades distribution</h5>
+                      <h4 class="tt-h5">Trades distribution</h4>
                       <!-- THE DONUT, DRAWN AS A RING WITH NO SPLIT. The total is
                            real and sits in the middle where TradingView puts it;
                            the arc is not divided because the winner/loser split
@@ -7805,7 +8971,29 @@
                            `stroke-dasharray` over a 276.46 circumference
                            (2*pi*44), offset by the arcs before them. -->
                       <div class="tt-donutwrap">
-                        {#if tradeStats}
+                        {#if noTrades}
+                          <svg class="tt-donut" viewBox="0 0 120 120" role="img" aria-label="0 trades: 0 winners, 0 losers, 0 breakevens.">
+                            <circle cx="60" cy="60" r="44" fill="none" stroke="var(--n5)" stroke-width="16" />
+                          </svg>
+                          <div class="tt-donutmid">
+                            <b>{exact(0)}</b>
+                            <span>Total trades</span>
+                          </div>
+                          <ul class="tt-donutleg">
+                            <li>
+                              <span class="sw up"></span><span class="nm">Winners</span>
+                              <span class="ct">{exact(0)} trades</span><span class="pc">—</span>
+                            </li>
+                            <li>
+                              <span class="sw down"></span><span class="nm">Losers</span>
+                              <span class="ct">{exact(0)} trades</span><span class="pc">—</span>
+                            </li>
+                            <li>
+                              <span class="sw flat"></span><span class="nm">Breakevens</span>
+                              <span class="ct">{exact(0)} trades</span><span class="pc">—</span>
+                            </li>
+                          </ul>
+                        {:else if tradeStats}
                           {@const C = 2 * Math.PI * 44}
                           {@const w = (tradeStats.wins / tradeStats.trades) * C}
                           {@const l = (tradeStats.losses / tradeStats.trades) * C}
@@ -7818,7 +9006,7 @@
                           >
                             <circle cx="60" cy="60" r="44" fill="none" stroke="var(--up)" stroke-width="16" stroke-dasharray="{w} {C - w}" transform="rotate(-90 60 60)" />
                             <circle cx="60" cy="60" r="44" fill="none" stroke="var(--down)" stroke-width="16" stroke-dasharray="{l} {C - l}" stroke-dashoffset={-w} transform="rotate(-90 60 60)" />
-                            <circle cx="60" cy="60" r="44" fill="none" stroke="var(--n7)" stroke-width="16" stroke-dasharray="{b} {C - b}" stroke-dashoffset={-(w + l)} transform="rotate(-90 60 60)" />
+                            <circle cx="60" cy="60" r="44" fill="none" stroke="var(--warn)" stroke-width="16" stroke-dasharray="{b} {C - b}" stroke-dashoffset={-(w + l)} transform="rotate(-90 60 60)" />
                           </svg>
                           <div class="tt-donutmid">
                             <b>{exact(tradeStats.trades)}</b>
@@ -7855,23 +9043,29 @@
                           <ul class="tt-donutleg">
                             <li>
                               <span class="sw up"></span><span class="nm">Winners</span>
-                              <span class="ct"><Lock small why="This run recorded no trade file, so the split is unknown." /></span>
+                              <span class="ct"><Lock small why={tradeEvidenceWhy} /></span>
                               <span class="pc"><Lock small why="Needs the win count above." /></span>
                             </li>
                             <li>
                               <span class="sw down"></span><span class="nm">Losers</span>
-                              <span class="ct"><Lock small why="This run recorded no trade file, so the split is unknown." /></span>
+                              <span class="ct"><Lock small why={tradeEvidenceWhy} /></span>
                               <span class="pc"><Lock small why="Needs the loss count above." /></span>
                             </li>
                             <li>
                               <span class="sw flat"></span><span class="nm">Breakevens</span>
-                              <span class="ct"><Lock small why="This run recorded no trade file, so the split is unknown." /></span>
+                              <span class="ct"><Lock small why={tradeEvidenceWhy} /></span>
                               <span class="pc"><Lock small why="Needs the breakeven count above." /></span>
                             </li>
                           </ul>
                         {/if}
                       </div>
-                      {#if tradeStats}
+                      {#if noTrades}
+                        <p class="tt-note2 dim">
+                          The ledger proves this run opened no trade. All three outcome counts are
+                          therefore zero; their percentage shares are undefined because zero trades
+                          provide no denominator.
+                        </p>
+                      {:else if tradeStats}
                         <p class="tt-note2 dim">
                           Cut at <b>worst-case fills</b> — a trade counts as a winner only if it
                           won with both legs filled at the printed extreme. At best-case fills the
@@ -7881,10 +9075,7 @@
                           having lost anything.
                         </p>
                       {:else}
-                        <p class="tt-note2">
-                          The ring is <b>undivided</b> because this run recorded no trade file. The
-                          total is real; the split needs the per-trade results.
-                        </p>
+                        <p class="tt-note2">The ring is undivided. {tradeEvidenceWhy}</p>
                       {/if}
                     </div>
                   </div>
@@ -7914,37 +9105,39 @@
                       <div class="tt-q">
                         <span class="tt-k">Best day for entries</span>
                         <span class="tt-qv"
-                          >{#if timePatterns.bestDay}{timePatterns.bestDay.label},<em class="tt-unit2"
-                              >{share(timePatterns.bestDay.rateBp)} winners</em
-                            >{:else}<Lock small why="No weekday bucket carries enough trades to name a best one." />{/if}</span
+                          >{timePatterns.bestWeekday.label},<em class="tt-unit2"
+                            >{share(timePatterns.bestWeekday.rateBp)} winners</em
+                          ></span
                         >
                       </div>
                       <div class="tt-q">
                         <span class="tt-k">Best month for entries</span>
                         <span class="tt-qv"
-                          >{#if timePatterns.bestMonth}{timePatterns.bestMonth.label},<em class="tt-unit2"
-                              >{share(timePatterns.bestMonth.rateBp)} winners</em
-                            >{:else}<Lock small why="No month bucket carries enough trades to name a best one." />{/if}</span
+                          >{timePatterns.bestCalendarMonth.label},<em class="tt-unit2"
+                            >{share(timePatterns.bestCalendarMonth.rateBp)} winners</em
+                          ></span
                         >
                       </div>
                       <div class="tt-q">
                         <span class="tt-k">Average trade duration</span>
                         <span class="tt-qv"
-                          >{#if averageDuration !== null}{exact(averageDuration)}<em class="tt-unit2"
-                              >bars</em
-                            >{:else}<Lock small why="Needs the per-trade bar counts, which arrive with the trade file." />{/if}</span
+                          >{averageDuration === null ? 'not exact' : exact(averageDuration)}<em class="tt-unit2">bars</em></span
                         >
                       </div>
                     </div>
 
                     <div class="tt-hrow tight">
-                      <h5 class="tt-h5">Results by time</h5>
+                      <h4 class="tt-h5">Results by time</h4>
                       <div class="tt-seg" role="group" aria-label="Time grain">
-                        {#each [['hours', 'Hours'], ['days', 'Days'], ['months', 'Months']] as [key, label] (key)}
+                        {#each TIME_GRAINS as grain (grain.key)}
                           <button
                             class="tt-segbtn"
-                            class:on={timeGrain === key}
-                            onclick={() => (timeGrain = key)}>{label}</button
+                            class:on={timeGrain === grain.key}
+                            aria-pressed={timeGrain === grain.key}
+                            onclick={() => {
+                              timeGrain = grain.key;
+                              timePage = 0;
+                            }}>{grain.label}</button
                           >
                         {/each}
                       </div>
@@ -7953,8 +9146,18 @@
                     {#if timeRows.rows.length > 0}
                       <div class="rbt">
                         <div class="rbt-plot">
+                          <div class="rbt-axis" aria-hidden="true">
+                            <span>{exact(timeRows.tallest)}</span>
+                            <span>{exact(Math.round(timeRows.tallest / 2))}</span>
+                            <span>0</span>
+                          </div>
                           {#each timeRows.rows as r (r.key)}
-                            <div class="rbt-col" title="{r.label} · {exact(r.trades)} trades · {exact(r.wins)} won at worst-case fills">
+                            <div
+                              class="rbt-col"
+                              role="img"
+                              aria-label="{r.label}: {exact(r.trades)} trades, {exact(r.wins)} winners and {exact(r.losses)} losers at worst-case fills"
+                              title="{r.label} · {exact(r.trades)} trades · {exact(r.wins)} won at worst-case fills"
+                            >
                               <div class="rbt-stack">
                                 <!-- LOSERS ABOVE, WINNERS BELOW, as the reference
                                      stacks them: the green base is what the
@@ -7977,6 +9180,25 @@
                           <li><i class="rbt-dot win"></i>Winners</li>
                           <li><i class="rbt-dot loss"></i>Losers</li>
                         </ul>
+                        {#if timeRows.pages > 1}
+                          <div class="series-nav" aria-label="Time bucket pages">
+                            <button
+                              aria-label="Earlier time buckets"
+                              disabled={timeRows.page === 0}
+                              onclick={() => (timePage = Math.max(0, timeRows.page - 1))}>‹</button
+                            >
+                            <span
+                              >Buckets {exact(timeRows.start + 1)}–{exact(
+                                Math.min(timeRows.start + timeRows.rows.length, timeRows.total)
+                              )} of {exact(timeRows.total)}</span
+                            >
+                            <button
+                              aria-label="Later time buckets"
+                              disabled={timeRows.page + 1 >= timeRows.pages}
+                              onclick={() => (timePage = Math.min(timeRows.pages - 1, timeRows.page + 1))}>›</button
+                            >
+                          </div>
+                        {/if}
                       </div>
                       <p class="tt-note2 dim">
                         <!-- THIS PRINTED THE WORST-CASE WINNER TOTAL AS A
@@ -7994,9 +9216,12 @@
                           best-case{/if}. A bucket must hold at least {exact(timePatterns.floor)} trades
                         — a twentieth of the run's {exact(timePatterns.total)} — before it can be
                         named a best one above, so a single lucky trade cannot take the tile.
-                        {#if timeGrain === 'hours'}
-                          Buckets are keyed by the <b>UTC</b> hour and IST is UTC+5:30, so each label
-                          is the IST window that hour actually covers rather than a whole IST hour.
+                        {#if timeGrain === 'hour'}
+                          Buckets are keyed by whole <b>IST exchange-calendar hours</b>; the stored
+                          epoch instant is shifted exactly once before categorisation.
+                        {:else if timeGrain === 'week'}
+                          Weekly buckets begin on <b>Monday in IST</b>. Saturday and Sunday retain
+                          deterministic slots for validation, while normal NSE trading is Monday–Friday.
                         {/if}
                       </p>
                     {:else}
@@ -8018,15 +9243,17 @@
                     <div class="tt-q">
                       <span class="tt-k">Longest winning streak</span>
                       <span class="tt-qv"
-                        >{#if tradeStats}{exact(tradeStats.longestWin)}<em class="tt-unit2">trades</em
-                          >{:else}<Lock why="Needs the trade file, which this run did not record." />{/if}</span
+                        >{#if noTrades}{exact(0)}<em class="tt-unit2">trades</em
+                          >{:else if tradeStats}{exact(tradeStats.longestWin)}<em class="tt-unit2">trades</em
+                          >{:else}<Lock why={tradeEvidenceWhy} />{/if}</span
                       >
                     </div>
                     <div class="tt-q">
                       <span class="tt-k">Longest losing streak</span>
                       <span class="tt-qv"
-                        >{#if tradeStats}{exact(tradeStats.longestLoss)}<em class="tt-unit2">trades</em
-                          >{:else}<Lock why="Needs the trade file, which this run did not record." />{/if}</span
+                        >{#if noTrades}{exact(0)}<em class="tt-unit2">trades</em
+                          >{:else if tradeStats}{exact(tradeStats.longestLoss)}<em class="tt-unit2">trades</em
+                          >{:else}<Lock why={tradeEvidenceWhy} />{/if}</span
                       >
                     </div>
                     <div class="tt-q">
@@ -8047,29 +9274,91 @@
                     </div>
                   </div>
                   <div class="tt-hrow tight">
-                    <h5 class="tt-h5">Winning and losing streaks</h5>
+                    <h4 class="tt-h5">Winning and losing streaks</h4>
                     <div class="tt-seg" role="group" aria-label="Streak unit">
-                      <button class="tt-segbtn" class:on={streakMode === 'count'} onclick={() => (streakMode = 'count')}>Count</button>
-                      <button class="tt-segbtn" class:on={streakMode === 'amount'} onclick={() => (streakMode = 'amount')}>Amount</button>
+                      <button class="tt-segbtn" class:on={streakMode === 'count'} aria-pressed={streakMode === 'count'} disabled={streakRows.rows.length === 0} onclick={() => (streakMode = 'count')}>Count</button>
+                      <button class="tt-segbtn" class:on={streakMode === 'amount'} aria-pressed={streakMode === 'amount'} disabled={streakRows.rows.length === 0} onclick={() => (streakMode = 'amount')}>Amount</button>
                     </div>
                   </div>
-                  {@render chartFrame(
-                    'The four figures above ARE recoverable and are measured — a walk of the trade file in `seq` order gives every streak length. What is missing is the per-streak series this chart would draw: `tradeStats` records how long each run was and discards the runs themselves.',
-                    [],
-                    STREAK_TICKS,
-                    [],
-                    false
-                  )}
+                  {#if streakRows.rows.length > 0}
+                    <div class="streak-chart">
+                      <div class="streak-plot">
+                        <div class="streak-axis" aria-hidden="true">
+                          <span>{streakMode === 'amount' ? money(streakRows.tallest) : exact(streakRows.tallest)}</span>
+                          <span>0</span>
+                          <span>{streakMode === 'amount' ? money(-streakRows.tallest) : exact(streakRows.tallest)}</span>
+                        </div>
+                        {#each streakRows.rows as run, i (run.seq)}
+                          <div
+                            class="streak-col"
+                            role="img"
+                            aria-label="Trade {run.index}: {run.kind === 'win' ? 'winning' : 'losing or flat'} streak step {exact(run.count)}, {money(run.amount)} absolute worst-fill PnL in streak {run.runIndex}"
+                            title="Trade {run.index} · streak {run.runIndex} · {exact(run.count)} {run.kind === 'win' ? 'winning' : 'losing'} in sequence · {money(run.amount)}"
+                          >
+                            <div class="streak-half top">
+                              {#if run.kind === 'win'}
+                                <span style="height:{(run.value / streakRows.tallest) * 100}%"></span>
+                              {/if}
+                            </div>
+                            <div class="streak-half bottom">
+                              {#if run.kind === 'loss'}
+                                <span style="height:{(run.value / streakRows.tallest) * 100}%"></span>
+                              {/if}
+                            </div>
+                            <small>{i % 12 === 0 ? exact(run.index) : ''}</small>
+                          </div>
+                        {/each}
+                      </div>
+                      <ul class="rbt-leg">
+                        <li><i class="rbt-dot win"></i>Winning streak</li>
+                        <li><i class="rbt-dot loss"></i>Losing or flat streak</li>
+                      </ul>
+                      {#if streakRows.pages > 1}
+                        <div class="series-nav" aria-label="Streak pages">
+                          <button
+                            aria-label="Earlier streaks"
+                            disabled={streakRows.page === 0}
+                            onclick={() => (streakPage = Math.max(0, streakRows.page - 1))}>‹</button
+                          >
+                          <span
+                            >Trades {exact(streakRows.start + 1)}–{exact(
+                              Math.min(streakRows.start + streakRows.rows.length, streakRows.total)
+                            )} of {exact(streakRows.total)}</span
+                          >
+                          <button
+                            aria-label="Later streaks"
+                            disabled={streakRows.page + 1 >= streakRows.pages}
+                            onclick={() => (streakPage = Math.min(streakRows.pages - 1, streakRows.page + 1))}>›</button
+                          >
+                        </div>
+                      {/if}
+                      <p class="tt-note2 dim">
+                        Each bar is the running streak at that resolved trade. Count shows its current
+                        length; Amount shows its cumulative absolute worst-fill P&amp;L. A flat trade ends a winning run
+                        and joins the losing run, matching the Rust grid's conservative streak rule.
+                      </p>
+                    </div>
+                  {:else}
+                    <p class="tt-note2">This run recorded no ordered trade from which to form a streak.</p>
+                  {/if}
                 {:else}
+                  <p class="tt-note2 run-scope">
+                    Selected direction:
+                    <b>{tradeList.direction ?? 'not available for this uncommitted/legacy result'}</b>.
+                    It is sealed receipt metadata and every chosen row must agree. The frequency
+                    sweep identity remains undirected, so direction is never guessed from its hash.
+                    A directional comparison needs two selected results—not two columns fabricated
+                    from this one.
+                  </p>
                   <div class="tt-tblwrap">
-                    <table class="tt-tbl">
+                    <table class="tt-tbl run-metrics">
                       <thead>
-                        <tr><th>Metric</th><th class="n">All</th><th class="n">Long</th><th class="n">Short</th></tr>
+                        <tr><th>Metric</th><th class="n">This run</th></tr>
                       </thead>
                       <tbody>
-                        <tr><td>Total trades</td><td class="n">{exact(openRun.trades)}</td><td class="n"><Lock small why="Direction is one of the nine terms inside the run's identity hash, not a field beside it." /></td><td class="n"><Lock small why="Direction is one of the nine terms inside the run's identity hash, not a field beside it." /></td></tr>
+                        <tr><td>Total trades</td><td class="n">{exact(openRun.trades)}</td></tr>
                         {#if showAllMetrics}
-                        <tr><td>Total open trades</td><td class="n"><Lock small why="The sweep closes every position at the span's end; open positions are not recorded." /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
+                        <tr><td>Total open trades</td><td class="n"><span class="tv">0</span><span class="tp">closed at span end</span></td></tr>
                         <!-- REAL SINCE `/trades.json` STARTED SERVING `periods`.
                              These three read "No win count is recorded", which
                              was true of the RESULTS ledger and stopped being
@@ -8079,34 +9368,28 @@
                              the worst one. -->
                         <tr>
                           <td>Total winners</td>
-                          <td class="n up">{#if tradeTotals}{exact(tradeTotals.worstWins)}<em class="tt-pc2">{exact(tradeTotals.wins)} at best fills</em>{:else}<Lock small why="This run recorded no trade file, so there is nothing to count." />{/if}</td>
-                          <td class="n"><Lock small why="Direction is one of the nine terms of the run identity, not a column on a trade — a long run and a short run are two runs." /></td>
-                          <td class="n"><Lock small why="Direction is one of the nine terms of the run identity, not a column on a trade — a long run and a short run are two runs." /></td>
+                          <td class="n up">{#if noTrades}{exact(0)}{:else if tradeTotals}{exact(tradeTotals.worstWins)}<em class="tt-pc2">{exact(tradeTotals.wins)} at best fills</em>{:else}<Lock small why={tradeEvidenceWhy} />{/if}</td>
                         </tr>
                         <tr>
                           <td>Total losers</td>
-                          <td class="n down">{#if tradeTotals}{exact(tradeTotals.losses)}<em class="tt-pc2">{exact(tradeTotals.bestLosses)} at best fills</em>{:else}<Lock small why="This run recorded no trade file, so there is nothing to count." />{/if}</td>
-                          <td class="n"><Lock small why="Direction is one of the nine terms of the run identity, not a column on a trade." /></td>
-                          <td class="n"><Lock small why="Direction is one of the nine terms of the run identity, not a column on a trade." /></td>
+                          <td class="n down">{#if noTrades}{exact(0)}{:else if tradeTotals}{exact(tradeTotals.losses)}<em class="tt-pc2">{exact(tradeTotals.bestLosses)} at best fills</em>{:else}<Lock small why={tradeEvidenceWhy} />{/if}</td>
                         </tr>
                         <tr>
                           <td>Percent profitable</td>
-                          <td class="n">{#if tradeTotals}{share(tradeTotals.rateBp)}<em class="tt-pc2">{share(tradeTotals.bestRateBp)} at best fills</em>{:else}<Lock small why="This run recorded no trade file, so there is nothing to divide." />{/if}</td>
-                          <td class="n"><Lock small why="Direction is one of the nine terms of the run identity, not a column on a trade." /></td>
-                          <td class="n"><Lock small why="Direction is one of the nine terms of the run identity, not a column on a trade." /></td>
+                          <td class="n">{#if noTrades}<Lock small kind="undefined" why="Zero trades have no profitable percentage denominator." />{:else if tradeTotals}{share(tradeTotals.rateBp)}<em class="tt-pc2">{share(tradeTotals.bestRateBp)} at best fills</em>{:else}<Lock small why={tradeEvidenceWhy} />{/if}</td>
                         </tr>
                         {/if}
-                        <tr><td>Average PnL</td><td class="n"><span class="tv">{perTrade ? money(perTrade.worst) : "—"}</span><span class="tp">{perTrade && bench.open > 0 ? `${((perTrade.worst / bench.open) * 100).toFixed(2)}%` : ""}</span></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
+                        <tr><td>Average PnL</td><td class="n"><span class="tv">{perTrade ? money(perTrade.worst) : "—"}</span><span class="tp">{perTrade && bench.open > 0 ? `${((perTrade.worst / bench.open) * 100).toFixed(2)}% of current-store open` : ""}</span></td></tr>
                         {#if showAllMetrics}
                         <!-- FOUR MORE THE TRADE FILE MAKES REAL. Each needed
                              "gross profit and a winner count", both of which are
                              one walk of `worst` — the realised worst-case result
                              per round trip. The reference prints `Average loss`
                              as a POSITIVE magnitude, so it is not negated here. -->
-                        <tr><td>Average profit</td><td class="n up">{#if tradeStats?.avgWin !== null && tradeStats}{money(tradeStats.avgWin)}{:else}<Lock small why="No winning trade at worst-case fills." />{/if}</td><td class="n"><Lock small why="Direction is a term of the run identity, not a column on a trade." /></td><td class="n"><Lock small why="Direction is a term of the run identity, not a column on a trade." /></td></tr>
-                        <tr><td>Average loss</td><td class="n">{#if tradeStats?.avgLoss !== null && tradeStats}{money(tradeStats.avgLoss)}{:else}<Lock small why="No losing trade at worst-case fills." />{/if}</td><td class="n"><Lock small why="Direction is a term of the run identity, not a column on a trade." /></td><td class="n"><Lock small why="Direction is a term of the run identity, not a column on a trade." /></td></tr>
-                        <tr><td>Average profit / average loss</td><td class="n">{#if tradeStats?.winLossRatio !== null && tradeStats}{tradeStats.winLossRatio?.toFixed(3)}{:else}<Lock small why="Needs both a winning and a losing trade to form the ratio." />{/if}</td><td class="n"><Lock small why="Direction is a term of the run identity, not a column on a trade." /></td><td class="n"><Lock small why="Direction is a term of the run identity, not a column on a trade." /></td></tr>
-                        <tr><td>Largest profit</td><td class="n up">{#if tradeStats?.largestWin}{money(tradeStats.largestWin)}{:else}<Lock small why="No winning trade at worst-case fills." />{/if}</td><td class="n"><Lock small why="Direction is a term of the run identity, not a column on a trade." /></td><td class="n"><Lock small why="Direction is a term of the run identity, not a column on a trade." /></td></tr>
+                        <tr><td>Average profit</td><td class="n up">{#if tradeStats?.avgWin !== null && tradeStats}{money(tradeStats.avgWin)}{:else}<Lock small why="No winning trade at worst-case fills." />{/if}</td></tr>
+                        <tr><td>Average loss</td><td class="n">{#if tradeStats?.avgLoss !== null && tradeStats}{money(tradeStats.avgLoss)}{:else}<Lock small why="No losing trade at worst-case fills." />{/if}</td></tr>
+                        <tr><td>Average profit / average loss</td><td class="n">{#if tradeStats?.winLossRatio !== null && tradeStats}{tradeStats.winLossRatio?.toFixed(3)}{:else}<Lock small why="Needs both a winning and a losing trade to form the ratio." />{/if}</td></tr>
+                        <tr><td>Largest profit</td><td class="n up">{#if tradeStats?.largestWin}{money(tradeStats.largestWin)}{:else}<Lock small why="No winning trade at worst-case fills." />{/if}</td></tr>
                         <!-- TWO OF THESE WERE BARE PADLOCKS OVER ARITHMETIC THE
                              PAGE ALREADY DOES ONE ROW AWAY. `largestWin` and
                              `grossProfit` are both on `tradeStats`, and the
@@ -8114,15 +9397,15 @@
                              out for `Largest loss` below. A lock with no `why`
                              is what `Lock.svelte` calls "a lock that teaches an
                              operator to stop asking". -->
-                        <tr><td>Largest profit %</td><td class="n">{#if tradeStats?.largestWin && shareOfOpen(tradeStats.largestWin)}{shareOfOpen(tradeStats.largestWin)}{:else}<Lock small why="Needs a winning trade and the span's opening price to divide by." />{/if}</td><td class="n"><Lock small why="Direction is a term of the run identity, not a column on a trade." /></td><td class="n"><Lock small why="Direction is a term of the run identity, not a column on a trade." /></td></tr>
-                        <tr><td>Largest profit as % of gross profit</td><td class="n">{#if tradeStats?.largestWin && tradeStats.grossProfit > 0}{share(Math.round((tradeStats.largestWin / tradeStats.grossProfit) * 10000))}{:else}<Lock small why="Needs a winning trade — with no gross profit there is nothing for the largest one to be a share of." />{/if}</td><td class="n"><Lock small why="Direction is a term of the run identity, not a column on a trade." /></td><td class="n"><Lock small why="Direction is a term of the run identity, not a column on a trade." /></td></tr>
+                        <tr><td>Largest profit / current-store open</td><td class="n">{#if tradeStats?.largestWin && shareOfOpen(tradeStats.largestWin)}{shareOfOpen(tradeStats.largestWin)}{:else}<Lock small why="Needs a winning trade and the current store's span opening price to divide by." />{/if}</td></tr>
+                        <tr><td>Largest profit as % of gross profit</td><td class="n">{#if tradeStats?.largestWin && tradeStats.grossProfit > 0}{share(Math.round((tradeStats.largestWin / tradeStats.grossProfit) * 10000))}{:else}<Lock small why="Needs a winning trade — with no gross profit there is nothing for the largest one to be a share of." />{/if}</td></tr>
                         {/if}
-                        <tr><td>Largest loss</td><td class="n down"><span class="tv">{money(openRun.worst_trade)}</span><span class="tp">{bench.open > 0 ? `${((openRun.worst_trade / bench.open) * 100).toFixed(2)}%` : ""}</span></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
+                        <tr><td>Largest loss</td><td class="n down"><span class="tv">{money(openRun.worst_trade)}</span><span class="tp">{bench.open > 0 ? `${((openRun.worst_trade / bench.open) * 100).toFixed(2)}% of current-store open` : ""}</span></td></tr>
                         {#if showAllMetrics}
-                        <tr><td>Largest loss %</td><td class="n"><Lock small why="Needs the entry price of that trade." /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
-                        <tr><td>Largest loss as % of gross loss</td><td class="n">{#if tradeStats?.largestLoss && tradeStats.grossLoss > 0}{share(Math.round((tradeStats.largestLoss / tradeStats.grossLoss) * 10000))}{:else}<Lock small why="Needs a losing trade — with no gross loss there is nothing for the largest one to be a share of." />{/if}</td><td class="n"><Lock small why="Direction is a term of the run identity, not a column on a trade." /></td><td class="n"><Lock small why="Direction is a term of the run identity, not a column on a trade." /></td></tr>
-                        <tr><td>Outliers</td><td class="n"><Lock small why="Needs a per-trade list." /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
-                        <tr><td>Outliers P&amp;L</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
+                        <tr><td>Largest loss %</td><td class="n"><Lock small why="Needs the entry price of that specific trade; the durable trade row records its result and bar positions, not its price." /></td></tr>
+                        <tr><td>Largest loss as % of gross loss</td><td class="n">{#if tradeStats?.largestLoss && tradeStats.grossLoss > 0}{share(Math.round((tradeStats.largestLoss / tradeStats.grossLoss) * 10000))}{:else}<Lock small why="Needs a losing trade — with no gross loss there is nothing for the largest one to be a share of." />{/if}</td></tr>
+                        <tr><td>Outliers</td><td class="n"><Lock small why="No outlier rule is part of the recorded run. Choosing a threshold after seeing the results would invent one." /></td></tr>
+                        <tr><td>Outliers P&amp;L</td><td class="n"><Lock small why="No outlier rule is part of the recorded run, so there is no honest subset whose P&amp;L can be summed." /></td></tr>
                         <!-- THE OLD LOCK WAS RIGHT ABOUT THE WRONG ARITHMETIC.
                              It refused `bars / trades` because that is the mean
                              gap BETWEEN trades, not the mean length OF one —
@@ -8130,14 +9413,14 @@
                              file carries `bars_held` per round trip, so the mean
                              of THAT is the quantity the row names, and the
                              winners/losers split falls out of the same walk. -->
-                        <tr><td>Average bars in trades</td><td class="n">{#if tradeStats}{exact(tradeStats.avgBars)}{:else}<Lock small why="Needs the trade file's per-trade bar counts." />{/if}</td><td class="n"><Lock small why="Direction is a term of the run identity, not a column on a trade." /></td><td class="n"><Lock small why="Direction is a term of the run identity, not a column on a trade." /></td></tr>
-                        <tr><td>Average bars in winners</td><td class="n">{#if tradeStats?.avgBarsWin !== null && tradeStats}{exact(tradeStats.avgBarsWin)}{:else}<Lock small why="No winning trade at worst-case fills." />{/if}</td><td class="n"><Lock small why="Direction is a term of the run identity, not a column on a trade." /></td><td class="n"><Lock small why="Direction is a term of the run identity, not a column on a trade." /></td></tr>
-                        <tr><td>Average bars in losers</td><td class="n">{#if tradeStats?.avgBarsLoss !== null && tradeStats}{exact(tradeStats.avgBarsLoss)}{:else}<Lock small why="No losing trade at worst-case fills." />{/if}</td><td class="n"><Lock small why="Direction is a term of the run identity, not a column on a trade." /></td><td class="n"><Lock small why="Direction is a term of the run identity, not a column on a trade." /></td></tr>
+                        <tr><td>Average bars in trades</td><td class="n">{#if noTrades}<Lock small kind="undefined" why="Zero trades have no average duration." />{:else if tradeStats}{exact(tradeStats.avgBars)}{:else}<Lock small why={tradeEvidenceWhy} />{/if}</td></tr>
+                        <tr><td>Average bars in winners</td><td class="n">{#if tradeStats?.avgBarsWin !== null && tradeStats}{exact(tradeStats.avgBarsWin)}{:else}<Lock small why="No winning trade at worst-case fills." />{/if}</td></tr>
+                        <tr><td>Average bars in losers</td><td class="n">{#if tradeStats?.avgBarsLoss !== null && tradeStats}{exact(tradeStats.avgBarsLoss)}{:else}<Lock small why="No losing trade at worst-case fills." />{/if}</td></tr>
                         {/if}
-                        <tr class="own"><td title="MAE — maximum adverse excursion, winners only">How far a winner fell before it paid <span class="tt-own">brutex</span></td><td class="n">{openRun.trades === 0 ? "none" : ppmPct(openRun.winner_mae)}</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
-                        <tr class="own"><td title="MFE — maximum favourable excursion, winners only">How far a winner rose at its best <span class="tt-own">brutex</span></td><td class="n">{openRun.trades === 0 ? "none" : ppmPct(openRun.winner_mfe)}</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
-                        <tr class="own"><td title="MAE — maximum adverse excursion, every trade">How far any trade fell <span class="tt-own">brutex</span></td><td class="n">{openRun.trades === 0 ? "none" : ppmPct(openRun.all_mae)}</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
-                        <tr class="own"><td>Signal bars swept <span class="tt-own">brutex</span></td><td class="n">{exact(openRun.bars)}</td><td class="n"><Lock small /></td><td class="n"><Lock small /></td></tr>
+                        <tr class="own"><td title="MAE — maximum adverse excursion, winners only">How far a winner fell before it paid <span class="tt-own">brutex</span></td><td class="n">{openRun.trades === 0 ? "none" : ppmPct(openRun.winner_mae)}</td></tr>
+                        <tr class="own"><td title="MFE — maximum favourable excursion, winners only">How far a winner rose at its best <span class="tt-own">brutex</span></td><td class="n">{openRun.trades === 0 ? "none" : ppmPct(openRun.winner_mfe)}</td></tr>
+                        <tr class="own"><td title="MAE — maximum adverse excursion, every trade">How far any trade fell <span class="tt-own">brutex</span></td><td class="n">{openRun.trades === 0 ? "none" : ppmPct(openRun.all_mae)}</td></tr>
+                        <tr class="own"><td>Signal bars swept <span class="tt-own">brutex</span></td><td class="n">{exact(openRun.bars)}</td></tr>
                         <!-- SEVENTEEN ROWS OF PADLOCK, BEHIND ONE LINE.
                              Measured: this table was 24 rows and 96 cells with
                              **65 of them locked -- 68%** -- 1,406px of panel to
@@ -8153,7 +9436,7 @@
                              says how many and why, so nothing is a surprise
                              behind it. -->
                         <tr class="tt-more">
-                          <td colspan="4">
+                          <td colspan="2">
                             <button
                               class="linky"
                               aria-expanded={showAllMetrics}
@@ -8162,8 +9445,8 @@
                               {showAllMetrics ? 'Show only the headline rows' : 'Show every metric'}
                             </button>
                             <span class="dim sm">
-                              — the reference lists all twenty at once. Nine are still padlocked;
-                              each names the field it would need.
+                              — unavailable values stay in place as neutral dashes; activate or hover one for
+                              the exact missing field or undefined denominator.
                             </span>
                           </td>
                         </tr>
@@ -8175,15 +9458,134 @@
               {/key}
               </div>
             {:else if testerView === 'trades'}
+              <!-- ================= LIST OF TRADES ================= -->
+              <div class="tt-sec trade-list">
+                <div class="tt-hrow">
+                  <h3 class="tt-h">List of trades</h3>
+                  {@render chosenGridTradeNote()}
+                </div>
+                <p class="tt-note2 trade-schema">
+                  One trade keeps its entry/exit times and bar positions, duration, worst-fill and
+                  best-fill P&amp;L, cumulative worst-fill result, selected direction, and exact MAE/MFE
+                  in paisa and ppm. Entry/exit prices and the exit-cause tag are not recorded, so
+                  those are not invented. Statutory charges are zero for this spot-index sweep;
+                  spread remains unmodeled.
+                </p>
+                {#if tradeRowsWindow.total > 0}
+                  <div class="series-nav trade-pages" aria-label="Trade pages">
+                    <button
+                      aria-label="Newer trades"
+                      disabled={tradeRowsWindow.page === 0}
+                      onclick={() => (tradePage = Math.max(0, tradeRowsWindow.page - 1))}>‹</button
+                    >
+                    <span
+                      >Trades {exact(tradeRowsWindow.start + 1)}–{exact(
+                        Math.min(
+                          tradeRowsWindow.start + tradeRowsWindow.rows.length,
+                          tradeRowsWindow.total
+                        )
+                      )} of {exact(tradeRowsWindow.total)} · newest first</span
+                    >
+                    <button
+                      aria-label="Older trades"
+                      disabled={tradeRowsWindow.page + 1 >= tradeRowsWindow.pages}
+                      onclick={() =>
+                        (tradePage = Math.min(
+                          tradeRowsWindow.pages - 1,
+                          tradeRowsWindow.page + 1
+                        ))}>›</button
+                    >
+                  </div>
+                {/if}
+                <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+                <div
+                  class="tt-tblwrap trade-ledger-wrap"
+                  role="region"
+                  aria-label="Trade list; scroll horizontally and vertically"
+                  tabindex="0"
+                >
+                  <table class="tt-tbl trade-ledger">
+                    <thead>
+                      <tr>
+                        <th aria-sort="descending">Trade <span class="lot-sort" aria-hidden="true">↓</span><span class="sr-only">, newest first</span></th>
+                        <th>Leg</th>
+                        <th>Direction</th>
+                        <th>Date and time</th>
+                        <th class="n">Bar</th>
+                        <th class="n">Worst-fill PnL</th>
+                        <th class="n">Best-fill PnL</th>
+                        <th class="n" title="Worst-fill PnL divided by the current store's span opening close; the endpoint does not bind it to the run data digest and entry price is not recorded.">PnL / current-store open</th>
+                        <th class="n" title="A running sum of each trade's realised worst-fill result.">Cumulative PnL</th>
+                        <th class="n" title="Maximum adverse excursion from entry.">MAE</th>
+                        <th class="n" title="Maximum favourable excursion from entry.">MFE</th>
+                        <th class="n">Duration</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <!-- One trade stays a two-row Exit/Entry block like the
+                           reference. Only durable fields get columns. -->
+                      {#if tradeList.phase === 'ready' && tradeRowsShown.length > 0}
+                        {#each tradeRowsShown as t (t.seq)}
+                          <tr class="lot-a">
+                            <td rowspan="2" class="lot-num">{t.seq + 1}</td>
+                            <td>Exit</td>
+                            <td rowspan="2">{t.direction}</td>
+                            <td>{tradeWhen(t.exit_micros)}</td>
+                            <td class="n">{exact(t.exit_bar)}</td>
+                            <td rowspan="2" class="n {t.worst < 0 ? 'down' : 'up'}">{money(t.worst)}</td>
+                            <td rowspan="2" class="n {t.best < 0 ? 'down' : 'up'}">{money(t.best)}</td>
+                            <td rowspan="2" class="n {t.worst < 0 ? 'down' : 'up'}">
+                              {shareOfOpen(t.worst) ?? '—'}
+                            </td>
+                            <td rowspan="2" class="n">
+                              {money(t.cumulative)}
+                              {#if shareOfOpen(t.cumulative)}<em class="lot-pc">{shareOfOpen(t.cumulative)}</em>{/if}
+                            </td>
+                            <td rowspan="2" class="n down">
+                              {money(t.adverse_paisa)}<em class="lot-pc">{ppmPct(t.adverse_ppm)}</em>
+                            </td>
+                            <td rowspan="2" class="n up">
+                              {money(t.favourable_paisa)}<em class="lot-pc">{ppmPct(t.favourable_ppm)}</em>
+                            </td>
+                            <td rowspan="2" class="n">{exact(t.bars_held)} bars</td>
+                          </tr>
+                          <tr class="lot-b">
+                            <td>Entry</td>
+                            <td>{tradeWhen(t.entry_micros)}</td>
+                            <td class="n" title="signal bar {exact(t.signal_bar)}">{exact(t.entry_bar)}</td>
+                          </tr>
+                        {/each}
+                      {:else if tradeList.phase === 'loading'}
+                        <tr><td colspan="12" class="dim">Reading this run's trades…</td></tr>
+                      {:else}
+                        <!-- NAMED, NOT BLANK. An empty table and a failed fetch
+                             look identical unless one of them says so, and the
+                             route answers 200-with-a-reason precisely so the
+                             two can be told apart here. -->
+                        <tr>
+                          <td colspan="12">
+                            <p class="tt-note2">
+                              {#if tradeList.why}{tradeList.why}
+                              {:else if tradeList.phase === 'ready'}This run recorded no round trips.
+                              {:else}Open a run to read its trades.{/if}
+                            </p>
+                          </td>
+                        </tr>
+                      {/if}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
               <!-- ============ TOP COMBINATIONS, RANKED ON THE OPERATOR'S OWN CRITERIA ============
-                   The ledger row above is the ONE combination the exit grid
+                   The ledger above is the ONE combination the exit grid
                    chose. These are the rest of the frontier, ranked by the
                    eleven measurements the operator named -- and ranked HERE
                    rather than in Rust, because a score compiled into the binary
                    is one more number nobody can see. -->
-              <div class="tt-sec">
+              <div class="tt-sec combo-ranking">
                 <div class="tt-hrow">
-                  <h4 class="tt-h">Top {topShown} combinations — ranked on your criteria</h4>
+                  <h3 class="tt-h">Top {topShown} combinations — ranked on your criteria</h3>
                 </div>
                 {#if combos.phase === 'ready' && ranked.length > 0}
                   <div class="tt-tblwrap">
@@ -8255,146 +9657,41 @@
                   </p>
                 {/if}
               </div>
-
-              <!-- ================= LIST OF TRADES ================= -->
-              <div class="tt-sec">
-                <div class="tt-hrow">
-                  <h4 class="tt-h">List of trades</h4>
-                  {@render unstoppedWalkNote()}
-                  <div class="tt-icons">
-                    <button class="tt-iconbtn" title="Download" aria-label="Download"><svg viewBox="0 0 16 16"><path d="M8 2v8m0 0L5 7m3 3l3-3M3 13h10" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" /></svg></button>
-                    <button class="tt-iconbtn" title="Columns" aria-label="Columns"><svg viewBox="0 0 16 16"><rect x="2" y="3" width="3.2" height="10" rx="1" fill="none" stroke="currentColor" stroke-width="1.3" /><rect x="6.4" y="3" width="3.2" height="10" rx="1" fill="none" stroke="currentColor" stroke-width="1.3" /><rect x="10.8" y="3" width="3.2" height="10" rx="1" fill="none" stroke="currentColor" stroke-width="1.3" /></svg></button>
-                  </div>
-                </div>
-                <div class="tt-tblwrap">
-                  <table class="tt-tbl ghosted">
-                    <thead>
-                      <tr>
-                        <th>Trade number <span class="lot-sort">↓</span></th><th>Type</th><th>Date and time</th><th>Signal</th><th class="n">Price</th>
-                        <th class="n">Size</th><th class="n">Net PnL</th><th class="n">Return</th>
-                        <th class="n" title="A spot index is not tradeable and no order is placed, so brokerage, STT, exchange, SEBI, IPFT, GST and stamp are all ZERO by rule — costs::scope::is_cost_free returns true for IndexSpot. That is the answer, not a missing one. The SPREAD is separate and is not charged: no tick is added on any leg.">Commission</th><th class="n">Favorable excursion</th><th class="n">Adverse excursion</th>
-                        <th class="n" title="A running sum of each trade's realised WORST-CASE result — the strategy's equity curve under the pessimistic fill model, which is the reading this page ranks on.">Cumulative PnL</th><th class="n">Duration (bars)</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      <!-- ONE TRADE IS TWO ROWS: exit above, entry below, in a
-                           bordered block, with the per-TRADE columns spanning
-                           both and the per-LEG columns differing. That shape is
-                           the whole reason this table reads as trades rather
-                           than as a log, and it is now drawn with real rows.
-                           Every cell here was a padlock until `cli::trades`
-                           wrote the file and `/trades.json` served it. -->
-                      {#if tradeList.phase === 'ready' && tradeRowsShown.length > 0}
-                        {#each tradeRowsShown as t (t.seq)}
-                          <tr class="lot-a">
-                            <td rowspan="2" class="lot-num">{t.seq + 1}</td>
-                            <td>Exit</td>
-                            <!-- THE DATE, NOT THE BAR INDEX. `/trades.json` sends
-                                 `exit_micros`; this column rendered an ordinal
-                                 into the bar file under a header reading "Date
-                                 and time". The index keeps its place in the
-                                 tooltip, where it is useful and not misread. -->
-                            <td title="bar {exact(t.exit_bar)}">{tradeWhen(t.exit_micros)}</td>
-                            <td><Lock small why="The exit signal is not stored per trade — the run's chosen exit variant is on the record above." /></td>
-                            <td class="n"><Lock small why="Prices are not repeated per trade; the bar index above indexes the stored bars." /></td>
-                            <td rowspan="2" class="n"><Lock small why="Position size is not part of a sweep — the engine measures one unit of the index." /></td>
-                            <!-- REAL, AND THE PADLOCK HERE WAS THE MISREADING.
-                                 It said "Realised net P&L per trade is not
-                                 stored; the excursions beside it are" — and
-                                 `crates/cli/src/trades.rs` says the opposite in
-                                 as many words: `worst` is "the WORST-CASE
-                                 realised P&L, and the figure selection actually
-                                 ranks on", `best` is "the BEST-CASE realised
-                                 P&L of this round trip, NOT an excursion". That
-                                 doc carries its own correction notice warning a
-                                 reader would otherwise "read an excursion where
-                                 a result was". This table was that reader. -->
-                            <td rowspan="2" class="n {t.worst < 0 ? 'down' : 'up'}">
-                              {money(t.worst)}
-                              <em class="lot-pc">{money(t.best)} at best</em>
-                            </td>
-                            <td rowspan="2" class="n {t.worst < 0 ? 'down' : 'up'}">
-                              {shareOfOpen(t.worst) ?? '—'}
-                            </td>
-                            <td rowspan="2" class="n"><Lock small why="Zero by rule, not by omission: a spot index is not tradeable and no order is placed, so costs::scope::is_cost_free returns true for IndexSpot and there is no levy to charge. Shown as a lock rather than 0.00 because the SPREAD is separately not charged — no tick is added on any leg — and a bare zero would read as though both had been priced." /></td>
-                            <!-- MFE AND MAE ARE NOT PER-TRADE HERE, and these two
-                                 columns used to be filled with `best` and `worst`
-                                 — which are the two FILL MODELS of one result,
-                                 not the excursion the position reached while it
-                                 was open. Only three run-level excursion
-                                 aggregates are recorded, and they are shown under
-                                 Growth and decline. Naming that is the honest
-                                 column; repeating the P&L under an excursion
-                                 header was not. -->
-                            <td rowspan="2" class="n"><Lock small why="Maximum favourable excursion is recorded once per RUN, not once per trade — see Excursion under Growth and decline. The figure that used to sit here was the best-case realised result, which is a different quantity." /></td>
-                            <td rowspan="2" class="n"><Lock small why="Maximum adverse excursion is recorded once per RUN, not once per trade — see Excursion under Growth and decline. The figure that used to sit here was the worst-case realised result, which is a different quantity." /></td>
-                            <td rowspan="2" class="n">
-                              {money(t.cumulative)}
-                              {#if shareOfOpen(t.cumulative)}<em class="lot-pc">{shareOfOpen(t.cumulative)}</em>{/if}
-                            </td>
-                            <td rowspan="2" class="n">{exact(t.bars_held)}</td>
-                          </tr>
-                          <tr class="lot-b">
-                            <td>Entry</td>
-                            <td title="bar {exact(t.entry_bar)}">{tradeWhen(t.entry_micros)}</td>
-                            <td title="bar {exact(t.signal_bar)}">signal bar</td>
-                            <td class="n"><Lock small why="Prices are not repeated per trade; the bar index beside it indexes the stored bars." /></td>
-                          </tr>
-                        {/each}
-                      {:else if tradeList.phase === 'loading'}
-                        <tr><td colspan="13" class="dim">Reading this run's trades…</td></tr>
-                      {:else}
-                        <!-- NAMED, NOT BLANK. An empty table and a failed fetch
-                             look identical unless one of them says so, and the
-                             route answers 200-with-a-reason precisely so the
-                             two can be told apart here. -->
-                        <tr>
-                          <td colspan="13">
-                            <p class="tt-note2">
-                              {#if tradeList.why}{tradeList.why}
-                              {:else if tradeList.phase === 'ready'}This run recorded no round trips.
-                              {:else}Open a run to read its trades.{/if}
-                            </p>
-                          </td>
-                        </tr>
-                      {/if}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
             {:else}
               <!-- ================= PROPERTIES ================= -->
               <div class="tt-sec">
-                <h4 class="tt-h">Properties</h4>
+                <h3 class="tt-h">Properties</h3>
                 <p class="tt-note2">
                   What the sweep was actually asked to do. TradingView shows the author's inputs here; this shows the run's
                   own terms, which are the nine that make up its identity.
                 </p>
                 <div class="tt-tblwrap">
                   <table class="tt-tbl">
+                    <caption class="sr-only">Recorded run properties</caption>
                     <tbody>
-                      <tr><td>Feed</td><td class="n">{openRun.feed}</td></tr>
-                      <tr><td>Instrument</td><td class="n">{openRun.underlying}</td></tr>
-                      <tr><td>Signal rung</td><td class="n">{openRun.timeframe}</td></tr>
-                      <tr><td>Execution rung</td><td class="n">1min — always</td></tr>
-                      <tr><td>Span asked</td><td class="n">{span(openRun)} · {exact(openRun.months_asked)} months</td></tr>
-                      <tr class:warnrow={!openRun.whole_span}><td>Span found</td><td class="n">{exact(openRun.months_found)} months{openRun.whole_span ? '' : ' — a SHORTER sample, not a corrected one'}</td></tr>
-                      <tr><td>Signal bars swept</td><td class="n">{exact(openRun.bars)}</td></tr>
-                      <tr><td title="The support threshold. A combination had to hit at least this many bars to survive the ladder.">How often a pattern had to appear</td><td class="n">{exact(openRun.min_hits)} times · {(supportPerMille(openRun) / 10).toFixed(1)}% of bars</td></tr>
-                      <tr><td>Combinations enumerated</td><td class="n">{exact(openRun.combinations)}</td></tr>
-                      <tr class:warnrow={openRun.halted}><td>Ladder depth</td><td class="n">{openRun.depth}{openRun.halted ? ' — PARTIAL, a budget stopped the walk' : ' — ran to extinction'}</td></tr>
-                      <tr><td>Recorded</td><td class="n">{when(openRun.finished_micros)}</td></tr>
+                      <tr><th class="tt-rowhead" scope="row">Feed</th><td class="n">{openRun.feed}</td></tr>
+                      <tr><th class="tt-rowhead" scope="row">Instrument</th><td class="n">{openRun.underlying}</td></tr>
+                      <tr><th class="tt-rowhead" scope="row">Signal rung</th><td class="n">{openRun.timeframe}</td></tr>
+                      <tr><th class="tt-rowhead" scope="row">Execution rung</th><td class="n">1min — always</td></tr>
+                      <tr><th class="tt-rowhead" scope="row">Span asked</th><td class="n">{span(openRun)} · {exact(openRun.months_asked)} months</td></tr>
+                      <tr class:warnrow={!openRun.whole_span}><th class="tt-rowhead" scope="row">Span found</th><td class="n">{exact(openRun.months_found)} months{openRun.whole_span ? '' : ' — a SHORTER sample, not a corrected one'}</td></tr>
+                      <tr><th class="tt-rowhead" scope="row">Signal bars swept</th><td class="n">{exact(openRun.bars)}</td></tr>
+                      <tr><th class="tt-rowhead" scope="row" title="The support threshold. A combination had to hit at least this many bars to survive the ladder.">How often a pattern had to appear</th><td class="n">{exact(openRun.min_hits)} times · {(supportPerMille(openRun) / 10).toFixed(1)}% of bars</td></tr>
+                      <tr><th class="tt-rowhead" scope="row">Combinations enumerated</th><td class="n">{exact(openRun.combinations)}</td></tr>
+                      <tr class:warnrow={openRun.halted}><th class="tt-rowhead" scope="row">Ladder depth</th><td class="n">{openRun.depth}{openRun.halted ? ' — PARTIAL, a budget stopped the walk' : ' — ran to extinction'}</td></tr>
+                      <tr><th class="tt-rowhead" scope="row">Recorded</th><td class="n">{when(openRun.finished_micros)}</td></tr>
                     </tbody>
                   </table>
                 </div>
 
-                <h5 class="tt-h5">Exit geometry</h5>
+                <h4 class="tt-h5">Exit geometry</h4>
                 <div class="tt-tblwrap">
                   <table class="tt-tbl">
+                    <caption class="sr-only">Exit geometry</caption>
                     <tbody>
                       {#each openRun.exit_rungs ?? [] as rung, i (i)}
                         <tr class:offrow={rung < 0}>
-                          <td>{EXIT_AXES[i] ?? `axis ${i} — not named by this build`}</td>
+                          <th class="tt-rowhead" scope="row">{EXIT_AXES[i] ?? `axis ${i} — not named by this build`}</th>
                           <td class="n">{rung < 0 ? 'no rung — not used' : `rung ${rung}`}</td>
                         </tr>
                       {/each}
@@ -8402,7 +9699,7 @@
                   </table>
                 </div>
 
-                <h5 class="tt-h5">The ladder <span class="tt-own">not recorded</span></h5>
+                <h4 class="tt-h5">The ladder <span class="tt-own">not recorded</span></h4>
                 <p class="tt-note2">
                   This run walked to depth <b>{openRun.depth}</b> and produced <b>{exact(openRun.combinations)}</b>
                   combinations. <b>Where the frequent frontier emptied cannot be shown</b> — the ledger stores those two
@@ -8418,7 +9715,7 @@
                        `fetchLedger`'s 404 arm was written for. Reporting a
                        missing FIELD as an absent MASK would blame the data for
                        a stale process. -->
-                  <h5 class="tt-h5">The winning combination <span class="tt-own">server too old</span></h5>
+                  <h4 class="tt-h5">The winning combination <span class="tt-own">server too old</span></h4>
                   <p class="tt-note2">
                     <b>The running server does not send <code>has_mask</code>.</b> This page can read the winning
                     combination, but the binary answering it predates the field — so whether this ledger holds a mask
@@ -8431,7 +9728,7 @@
                        may carry six zero words because it found no combination.
                        The bytes are identical. Rendering both as "no conditions"
                        is the fallback CLAUDE.md §4 bans. -->
-                  <h5 class="tt-h5">The winning combination <span class="tt-own">not in this file</span></h5>
+                  <h4 class="tt-h5">The winning combination <span class="tt-own">not in this file</span></h4>
                   <p class="tt-note2">
                     <b>This ledger predates the condition mask.</b> It is format version
                     <b>{load.body?.version ?? '?'}</b>, which stored the run's identity — a blake3 over the mask and
@@ -8439,12 +9736,23 @@
                     the field did not exist when it was recorded. A run swept by this build records it.
                   </p>
                 {:else}
-                  {@const positions = positionsIn(openRun.mask_words)}
-                  <h5 class="tt-h5">
+                  {@const decoded = decodeMaskWords(openRun.mask_words)}
+                  {@const positions = decoded.positions}
+                  <h4 class="tt-h5">
                     The winning combination
-                    <span class="tt-own">{positions.length} condition{positions.length === 1 ? '' : 's'}</span>
-                  </h5>
-                  {#if positions.length === 0}
+                    <span class="tt-own"
+                      >{decoded.ok
+                        ? `${positions.length} condition${positions.length === 1 ? '' : 's'}`
+                        : 'not decodable'}</span
+                    >
+                  </h4>
+                  {#if !decoded.ok}
+                    <p class="tt-note2">
+                      <b>The winning combination cannot be decoded.</b> {decoded.why} No subset of
+                      the mask is shown because a partial condition list would name a different
+                      strategy while looking valid.
+                    </p>
+                  {:else if positions.length === 0}
                     <p class="tt-note2">
                       <b>This run recorded no combination.</b> The mask is empty and the ledger is new enough to mean
                       it — the frequent frontier emptied before any combination survived, so there is nothing to name.
@@ -8455,11 +9763,12 @@
                     {/if}
                     <div class="tt-tblwrap">
                       <table class="tt-tbl">
+                        <caption class="sr-only">Winning combination conditions</caption>
                         <tbody>
                           {#each positions as position (position)}
                             {@const bit = vocab.bits.get(position)}
                             <tr class:offrow={bit ? !bit.live : false}>
-                              <td>{bit ? bit.name : `position ${position} — not named by this vocabulary`}</td>
+                              <th class="tt-rowhead" scope="row">{bit ? bit.name : `position ${position} — not named by this vocabulary`}</th>
                               <td class="n">
                                 {#if bit && !bit.live}
                                   bit {position} — RETIRED, kept because the mask carries it
@@ -10604,6 +11913,12 @@
     background: var(--acc);
     color: var(--on-acc);
   }
+  /* The report-mode control in the supplied Strategy Tester references is a
+     dark toolbar selection, not the white analysis-tab pill used below it. */
+  .tt-views .tt-view.on {
+    background: var(--n5);
+    color: var(--n12);
+  }
   .tt-view:focus-visible {
     outline: 2px solid var(--focus);
     outline-offset: 1px;
@@ -10632,7 +11947,8 @@
   }
 
   /* ---- toolbar controls (TradingView's pill-shaped buttons) ---- */
-  .tt-ctl {
+  .tt-ctl,
+  .tt-fact {
     display: inline-flex;
     align-items: center;
     gap: 0.4rem;
@@ -10643,9 +11959,14 @@
     font: inherit;
     font-size: 0.75rem;
     color: var(--n10);
-    cursor: pointer;
     white-space: nowrap;
+  }
+  .tt-ctl {
+    cursor: pointer;
     transition: background 0.14s ease;
+  }
+  .tt-fact {
+    cursor: default;
   }
   .tt-ctl:hover {
     background: var(--n4);
@@ -10725,6 +12046,13 @@
   .tt-menuitem:hover {
     background: var(--n4);
   }
+  .tt-menuitem:disabled {
+    opacity: 0.52;
+    cursor: not-allowed;
+  }
+  .tt-menuitem:disabled:hover {
+    background: transparent;
+  }
   .tt-menuitem.sel {
     border-color: var(--acc);
     color: var(--n12);
@@ -10734,22 +12062,6 @@
     color: var(--n8);
   }
 
-  .tt-info {
-    background: none;
-    border: 0;
-    margin-left: 0.3rem;
-    line-height: 0;
-    color: var(--n8);
-    cursor: help;
-    vertical-align: -2px;
-  }
-  .tt-info svg {
-    width: 13px;
-    height: 13px;
-  }
-  .tt-info:hover {
-    color: var(--n10);
-  }
   .tt-menudiv {
     height: 1px;
     background: var(--n5);
@@ -10776,44 +12088,6 @@
   }
   .tt-hrow.tight {
     margin-top: 1rem;
-  }
-  .tt-icons {
-    display: flex;
-    gap: 0.2rem;
-  }
-  /* 24x24 EXACTLY, and it was landing just under. `0.28rem` of padding
-     around a 14px icon measures 23.x and rounds to 24 in a readout while
-     failing the 24x24 floor a pointer target needs. Stating the box
-     removes the arithmetic: `Chart settings`, `Snapshot` and `Expand` are
-     the three, and none of them should be a near-miss. */
-  .tt-iconbtn {
-    background: transparent;
-    border: 0;
-    border-radius: 5px;
-    padding: 0.28rem;
-    min-width: 24px;
-    min-height: 24px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--n8);
-    cursor: pointer;
-    line-height: 0;
-    transition:
-      background 0.14s ease,
-      color 0.14s ease;
-  }
-  .tt-iconbtn svg {
-    width: 15px;
-    height: 15px;
-  }
-  .tt-iconbtn:hover {
-    background: var(--n4);
-    color: var(--n11);
-  }
-  .tt-iconbtn:focus-visible {
-    outline: 2px solid var(--focus);
-    outline-offset: 1px;
   }
   .tt-view.ic {
     padding: 0.28rem 0.5rem;
@@ -10846,9 +12120,13 @@
       background 0.14s ease,
       color 0.14s ease;
   }
-  .tt-segbtn:hover {
+  .tt-segbtn:not(:disabled):hover {
     background: var(--n4);
     color: var(--n11);
+  }
+  .tt-segbtn:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
   }
   .tt-segbtn.on {
     background: var(--n3);
@@ -11011,19 +12289,20 @@
   .tester .tt-pl .tt-plrow:nth-child(2) { animation-delay: 0.06s; }
   .tester .tt-pl .tt-plrow:nth-child(3) { animation-delay: 0.12s; }
 
-  /* The donut ring sweeps round once, from the top, then holds. */
-  .tester .tt-donut circle {
-    transform-origin: 50% 50%;
-    animation: sweep 0.9s cubic-bezier(0.33, 0.8, 0.35, 1) both;
+  /* Animate the whole donut without touching each arc's data-driven
+     dasharray/dashoffset. Animating those properties replaced every real
+     winner/loser/breakeven proportion with one fixed 276/400 ring. */
+  .tester .tt-donut {
+    animation: donut-in 0.5s cubic-bezier(0.33, 0.8, 0.35, 1) both;
   }
-  @keyframes sweep {
+  @keyframes donut-in {
     from {
-      stroke-dasharray: 0 400;
-      transform: rotate(-90deg);
+      opacity: 0.25;
+      transform: scale(0.94);
     }
     to {
-      stroke-dasharray: 276 400;
-      transform: rotate(-90deg);
+      opacity: 1;
+      transform: none;
     }
   }
 
@@ -11036,15 +12315,6 @@
       background 0.16s ease,
       color 0.16s ease,
       border-color 0.16s ease;
-  }
-  .tester .tt-iconbtn {
-    transition:
-      background 0.16s ease,
-      color 0.16s ease,
-      transform 0.16s ease;
-  }
-  .tester .tt-iconbtn:hover {
-    transform: translateY(-1px);
   }
 
   /* NOTHING MOVES FOR A READER WHO ASKED FOR STILLNESS, and a bar that
@@ -11061,12 +12331,10 @@
     .tester .tt-brow,
     .tester .tt-plrow,
     .tester .tt-cmprow,
-    .tester .tt-donut circle {
+    .tester .tt-donut {
       animation: none !important;
       opacity: 1 !important;
       transform: none !important;
-      stroke-dasharray: none !important;
-      stroke-dashoffset: 0 !important;
     }
   }
 
@@ -11114,6 +12382,40 @@
   .drill {
     animation: drillopen 0.42s cubic-bezier(0.22, 0.75, 0.3, 1) backwards;
     transform-origin: top center;
+    /* The supplied reference is one dark, docked analysis surface even when
+       the browser chrome around it is light. Scope the ramp here so the rest
+       of the console keeps the operator's chosen theme. */
+    --n0: #090b0d;
+    --n2: #16191c;
+    --n3: #0f1113;
+    --n4: #23272b;
+    --n5: #2b3035;
+    --n6: #363c42;
+    --n7: #5e666d;
+    --n8: #868f96;
+    --n9: #a7afb5;
+    --n10: #c0c6ca;
+    --n11: #d1d5d8;
+    --n12: #f2f4f5;
+    --panel: #16191c;
+    --ink: #f2f4f5;
+    --muted: #868f96;
+    --faint: #5e666d;
+    --line: #363c42;
+    --line-soft: #2b3035;
+    --acc: #2962ff;
+    --acc-soft: color-mix(in srgb, #2962ff 14%, transparent);
+    --focus: #2962ff;
+    --on-acc: #ffffff;
+    --up: #089981;
+    --up-soft: color-mix(in srgb, #089981 15%, transparent);
+    --down: #f23645;
+    --down-soft: color-mix(in srgb, #f23645 14%, transparent);
+    --warn: #ffb23e;
+    --warn-soft: color-mix(in srgb, #ffb23e 14%, transparent);
+    background: #0f1113;
+    border-color: #363c42;
+    color: #d1d5d8;
   }
   @keyframes drillopen {
     from {
@@ -11168,7 +12470,7 @@
 
   /* ---- drawn charts ---- */
   .cf-plot.tall {
-    height: 250px;
+    height: 300px;
   }
   .cf-svg {
     position: absolute;
@@ -11285,14 +12587,14 @@
     margin-top: 0.55rem;
   }
   .tt-donut {
-    width: 132px;
-    height: 132px;
+    width: 172px;
+    height: 172px;
     flex: none;
   }
   .tt-donutmid {
     position: absolute;
-    left: 66px;
-    top: 66px;
+    left: 86px;
+    top: 86px;
     transform: translate(-50%, -50%);
     text-align: center;
     pointer-events: none;
@@ -11367,7 +12669,6 @@
      The icon keeps its size; the TARGET grows around it with padding and a
      negative margin, so nothing in the layout moves. `-webkit-tap-highlight`
      is untouched: this is about the hit box, not about how it flashes. */
-  .tt-info,
   .tt-eye {
     padding: 6px;
     margin: -6px;
@@ -11384,25 +12685,11 @@
     width: 14px;
     height: 14px;
   }
-  .tt-collapse {
-    align-self: flex-start;
-    margin-top: 0.3rem;
-    background: var(--n4);
-    border: 0;
-    border-radius: 5px;
-    padding: 0.18rem 0.4rem;
-    color: var(--n9);
-    cursor: pointer;
-    line-height: 0;
+  .tt-eye:disabled {
+    color: var(--n7);
+    cursor: not-allowed;
+    opacity: 0.55;
   }
-  .tt-collapse svg {
-    width: 13px;
-    height: 13px;
-  }
-  .tt-collapse:hover {
-    color: var(--n11);
-  }
-
   /* ---- the two-value key stat ---- */
   .tt-frac {
     font-size: 0.82rem;
@@ -11628,6 +12915,8 @@
     font-family: -apple-system, BlinkMacSystemFont, 'Trebuchet MS', Roboto, Ubuntu, sans-serif;
     background: var(--tv-bg);
     border-color: var(--tv-line);
+    border-radius: 0;
+    box-shadow: none;
     color: var(--tv-text);
   }
   /* A LIGHT-THEME READER GETS THE CONSOLE'S PALETTE, not a dark panel
@@ -12029,6 +13318,42 @@
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
   }
+  @media (max-width: 520px) {
+    .tester .tt-quad,
+    .tester .tt-stats {
+      grid-template-columns: 1fr;
+    }
+    .tester .tt-bar {
+      align-items: stretch;
+      gap: 0.55rem;
+    }
+    .tester .tt-name,
+    .tester .tt-meta {
+      width: 100%;
+    }
+    .tester .tt-meta {
+      margin-left: 0;
+    }
+    .tester .tt-pills {
+      flex-wrap: nowrap;
+      overflow-x: auto;
+      padding-bottom: 0.2rem;
+      scrollbar-width: thin;
+    }
+    .tester .tt-pill {
+      flex: 0 0 auto;
+    }
+    .tt-menu {
+      right: 0;
+      left: auto;
+      width: min(230px, calc(100vw - 2rem));
+      max-width: calc(100vw - 2rem);
+    }
+    .term .bt-chart {
+      height: clamp(260px, 50svh, 420px);
+      flex-basis: clamp(260px, 50svh, 420px);
+    }
+  }
   .tester .tt-k {
     font-size: 13px;
     color: var(--tv-label);
@@ -12109,9 +13434,10 @@
     color: var(--tv-text);
   }
   .tester .tt-pill.on {
-    background: transparent;
-    border-color: var(--tv-blue);
-    color: var(--tv-text);
+    background: #f2f2f2;
+    border-color: #f2f2f2;
+    color: #111315;
+    font-weight: 600;
   }
   .tester .tt-seg {
     background: var(--tv-panel);
@@ -12187,13 +13513,14 @@
     color: var(--warn);
   }
   .tester .tt-ctl,
+  .tester .tt-fact,
   .tester .tt-view {
     font-size: 13px;
     color: var(--tv-label);
   }
   .tester .tt-view.on {
-    background: var(--tv-blue);
-    color: #fff;
+    background: var(--tv-seg-on);
+    color: var(--tv-text);
   }
   .tester .tt-name b {
     font-size: 14px;
@@ -12261,6 +13588,86 @@
     font-size: 13px;
     color: var(--tv-text);
     gap: 0.7rem;
+  }
+
+  /* TradingView's compact geometry is already matched above. On screens with
+     room for the full report, lift the reading scale by one pixel without
+     changing pill heights, table padding, section spacing, or plot geometry.
+     The phone layout keeps the reference's denser type scale below 521px. */
+  @media (min-width: 521px) {
+    .tester {
+      font-size: 14px;
+      line-height: 1.45;
+    }
+    .tester .tt-h {
+      font-size: 16px;
+    }
+    .tester .tt-h5 {
+      font-size: 15px;
+    }
+    .tester .tt-k {
+      font-size: 14px;
+    }
+    .tester .tt-qv {
+      font-size: 15px;
+    }
+    .tester .tt-note,
+    .tester .tt-note2,
+    .tester .tt-tbl td .tp {
+      font-size: 13px;
+    }
+    .tester .tt-pill,
+    .tester .tt-segbtn,
+    .tester .tt-tbl,
+    .tester .tt-tbl th,
+    .tester .tt-ctl,
+    .tester .tt-fact,
+    .tester .tt-view,
+    .tester .tt-plotrow,
+    .tester .tt-blab,
+    .tester .tt-pllab,
+    .tester .tt-cmplab,
+    .tester .tt-bval,
+    .tester .tt-plval,
+    .tester .tt-cmpval {
+      font-size: 14px;
+    }
+    .tester .tt-name b {
+      font-size: 15px;
+    }
+    .tester .tt-chip,
+    .tester .tt-dim,
+    .tester .tt-menuhead,
+    .tester .cf-axis,
+    .tester .cf-x,
+    .tester .cf-legend,
+    .tester .cf-note,
+    .tester .tt-donutmid span {
+      font-size: 13px;
+    }
+    .tester .tt-menuitem,
+    .tester .tt-donutleg {
+      font-size: 14px;
+    }
+  }
+
+  /* These labels were 10-11px in the inherited console scale. Keep their
+     compact roles, but give every report annotation a legible 12px floor. */
+  .tester .rbt-x,
+  .tester .streak-col small,
+  .tester .lot-pc,
+  .tester .tt-pc2,
+  .tester .tt-subject-k {
+    font-size: 12px;
+  }
+  .tester .rbt-leg,
+  .tester .series-nav,
+  .tester .tt-plotnote,
+  .tester .tt-warnnote {
+    font-size: 13px;
+  }
+  .tester .tt-subject-v {
+    font-size: 14px;
   }
 
   /* ---- sections ---- */
@@ -12369,7 +13776,7 @@
   /* ---- the performance plot area ---- */
   .tt-perf {
     display: grid;
-    grid-template-columns: minmax(180px, 220px) 1fr;
+    grid-template-columns: minmax(150px, 180px) 1fr;
     gap: 1rem;
     align-items: start;
   }
@@ -12523,7 +13930,313 @@
   }
   .tt-pill:focus-visible {
     outline: 2px solid var(--focus);
-    outline-offset: 1px;
+    outline-offset: -2px;
+  }
+
+  /* ---- the customer comparison ------------------------------------
+
+     A MARKET BLOTTER, NOT ANOTHER CARD DECK. The reference is a persistent
+     accent rail down one row, while every other distinction is written as a
+     word: Comparable, Stopped early, Partial history. The rail is the one
+     aesthetic gesture this layer spends; the table around it stays quiet so
+     seven different facts can still be read left to right.
+
+     This owns its horizontal scroll. `.page` must never grow wider than the
+     shell, so a narrow screen moves this one comparison rather than the whole
+     product. */
+  .compare-heading {
+    justify-content: space-between;
+    align-items: flex-start;
+  }
+  .compare-heading > div {
+    flex: 1 1 460px;
+  }
+  .compare-heading .bsub {
+    margin-top: 0.3rem;
+  }
+  .compare-heading .bsub b {
+    color: var(--n11);
+  }
+  .compare-callout {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.65rem;
+    padding: 0.7rem 0.8rem;
+    border: 1px solid var(--up);
+    border-left-width: 3px;
+    border-radius: 8px;
+    background: var(--up-soft);
+    color: var(--n10);
+    font-size: var(--fs-mini);
+  }
+  .compare-callout.negative {
+    border-color: var(--down);
+    background: var(--down-soft);
+  }
+  .compare-callout-mark {
+    display: grid;
+    place-items: center;
+    width: 1.35rem;
+    height: 1.35rem;
+    flex: 0 0 1.35rem;
+    border-radius: 999px;
+    background: var(--up);
+    color: var(--n2);
+    font-family: var(--num);
+    font-weight: var(--w-bold);
+  }
+  .compare-callout.negative .compare-callout-mark {
+    background: var(--down);
+  }
+  .compare-callout > div {
+    display: flex;
+    flex-direction: column;
+    gap: 0.12rem;
+  }
+  .compare-callout b {
+    color: var(--n12);
+  }
+  .compare-wrap {
+    overflow-x: auto;
+    border: 1px solid var(--n6);
+    border-radius: 8px;
+    background: var(--n3);
+    scrollbar-gutter: stable;
+  }
+  .compare-table {
+    width: 100%;
+    min-width: 1040px;
+    border-collapse: collapse;
+    font-size: var(--fs-mini);
+  }
+  .compare-table th,
+  .compare-table td {
+    padding: 0.72rem 0.75rem;
+    border-bottom: 1px solid var(--n5);
+    text-align: left;
+    vertical-align: top;
+  }
+  .compare-table thead th {
+    background: var(--n2);
+    color: var(--n8);
+    font-size: var(--fs-micro);
+    font-weight: var(--w-semi);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+  .compare-table tbody tr:last-child > * {
+    border-bottom: 0;
+  }
+  .compare-table tbody tr.reference > * {
+    background: var(--acc-soft);
+  }
+  .compare-table tbody tr.reference > :first-child {
+    box-shadow: inset 3px 0 0 var(--acc);
+  }
+  .compare-table tbody tr.excluded > * {
+    color: var(--n9);
+    background: var(--n2);
+  }
+  .compare-table .num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  .compare-rank {
+    width: 92px;
+    min-width: 92px;
+  }
+  .compare-place {
+    display: block;
+    color: var(--n12);
+    font-family: var(--num);
+    font-size: var(--fs-data);
+    line-height: 1;
+  }
+  .compare-state {
+    display: inline-flex;
+    margin-top: 0.4rem;
+    padding: 0.2rem 0.42rem;
+    border-radius: 999px;
+    color: var(--n10);
+    background: var(--n4);
+    font-size: var(--fs-micro);
+    font-weight: var(--w-semi);
+    white-space: nowrap;
+  }
+  .compare-state.good {
+    color: var(--up);
+    background: var(--up-soft);
+  }
+  .compare-state.warn {
+    color: var(--warn);
+    background: var(--warn-soft);
+  }
+  .compare-state.bad {
+    color: var(--down);
+    background: var(--down-soft);
+  }
+  .compare-rank small,
+  .compare-money small,
+  .compare-risk small {
+    display: block;
+    margin-top: 0.28rem;
+    color: var(--n8);
+    font-size: var(--fs-micro);
+    font-weight: var(--w-reg);
+    line-height: 1.35;
+  }
+  .compare-run {
+    min-width: 205px;
+  }
+  .compare-id {
+    display: flex;
+    align-items: baseline;
+    gap: 0.38rem;
+    flex-wrap: wrap;
+    margin-bottom: 0.22rem;
+  }
+  .compare-id b {
+    color: var(--n12);
+    font-size: var(--fs-base);
+  }
+  .compare-setting {
+    display: block;
+    margin-top: 0.3rem;
+    color: var(--n8);
+    line-height: 1.45;
+  }
+  .compare-setting b {
+    color: var(--n10);
+    font-family: var(--num);
+  }
+  .compare-money,
+  .compare-risk {
+    min-width: 122px;
+    font-family: var(--num);
+  }
+  .compare-money > b,
+  .compare-risk > b {
+    color: var(--n11);
+    font-size: var(--fs-data);
+    white-space: nowrap;
+  }
+  .compare-money.up > b {
+    color: var(--up);
+  }
+  .compare-money.down > b {
+    color: var(--down);
+  }
+  .compare-risk span {
+    display: block;
+    margin-top: 0.35rem;
+    color: var(--down);
+    font-size: var(--fs-micro);
+    white-space: nowrap;
+  }
+  .compare-pattern {
+    min-width: 210px;
+    max-width: 330px;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+  }
+  .compare-action {
+    width: 84px;
+    text-align: right;
+    white-space: nowrap;
+  }
+  .compare-foot {
+    margin: 0;
+    max-width: 96ch;
+    color: var(--n8);
+    font-size: var(--fs-micro);
+    line-height: 1.45;
+  }
+  .compare-more {
+    width: fit-content;
+  }
+
+  @media (max-width: 1100px) {
+    .compare-wrap {
+      overflow: visible;
+      border: 0;
+      background: transparent;
+    }
+    .compare-table {
+      display: block;
+      min-width: 0;
+    }
+    .compare-table thead {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+    .compare-table tbody {
+      display: grid;
+      gap: 0.65rem;
+    }
+    .compare-table tbody tr {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      overflow: hidden;
+      border: 1px solid var(--n6);
+      border-radius: 8px;
+      background: var(--n3);
+    }
+    .compare-table th,
+    .compare-table td {
+      width: auto;
+      min-width: 0;
+      max-width: none;
+      padding: 0.68rem 0.72rem;
+      border-bottom: 1px solid var(--n5);
+    }
+    .compare-table tbody tr > :nth-child(2) {
+      border-left: 0;
+    }
+    .compare-table tbody tr > * {
+      grid-column: 1 / -1;
+    }
+    .compare-table tbody tr > :last-child {
+      border-bottom: 0;
+    }
+    .compare-table td[data-label]::before {
+      display: block;
+      margin-bottom: 0.3rem;
+      color: var(--n8);
+      font-size: var(--fs-micro);
+      font-weight: var(--w-semi);
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      content: attr(data-label);
+    }
+    .compare-table .num {
+      text-align: left;
+    }
+    .compare-rank {
+      display: flex;
+      align-items: center;
+      gap: 0.45rem;
+    }
+    .compare-state,
+    .compare-rank small {
+      margin-top: 0;
+    }
+    .compare-action {
+      text-align: left;
+    }
+    .compare-action .btn {
+      width: 100%;
+    }
+    .compare-heading .count {
+      width: 100%;
+    }
   }
 
   /* ---- tables ---- */
@@ -12559,7 +14272,23 @@
     border-bottom: 1px solid var(--n5);
     color: var(--n10);
   }
-  .tt-tbl tbody tr:last-child td {
+  /* Label/value tables use native row headers without borrowing the visual
+     treatment of a column-heading band. */
+  .tt-tbl th.tt-rowhead {
+    background: transparent;
+    color: var(--n10);
+    font: inherit;
+    font-weight: 400;
+    padding: 0.46rem 0.75rem;
+    border-bottom: 1px solid var(--n5);
+    white-space: normal;
+  }
+  .tester .tt-tbl th.tt-rowhead {
+    color: var(--tv-text);
+    padding: 0.95rem 1rem;
+    border-bottom-color: var(--tv-line-soft);
+  }
+  .tt-tbl tbody tr:last-child :is(th, td) {
     border-bottom: 0;
   }
   .tt-tbl tbody tr:hover {
@@ -12571,17 +14300,11 @@
   .tt-tbl tr.own td:first-child {
     color: var(--n11);
   }
-  .tt-tbl tr.warnrow td {
+  .tt-tbl tr.warnrow :is(th, td) {
     color: var(--warn);
   }
-  .tt-tbl tr.offrow td {
+  .tt-tbl tr.offrow :is(th, td) {
     color: var(--n8);
-  }
-  /* The trade list's header stays legible while its body is one locked
-     row: the COLUMNS are what the operator is being told they cannot see. */
-  .tt-tbl.ghosted th {
-    color: var(--n8);
-    opacity: 0.75;
   }
   /* ══ THE PADLOCK'S RULES GO WITH THE PADLOCK ══
      `4b3220b` — "the trade table shows trades, not padlocks" — deleted
@@ -12594,8 +14317,8 @@
      reports one line per SELECTOR and a rule may list several, which is how an
      earlier line-based deletion took 375 lines and broke a build. */
 
-  /* ---- locked panels ---- */
-  .tt-lockpanel {
+  /* A single explanation replaces a field of repeated unavailable marks. */
+  .tt-unavailable-panel {
     display: flex;
     align-items: flex-start;
     gap: 0.6rem;
@@ -12608,8 +14331,80 @@
     color: var(--n9);
     max-width: 96ch;
   }
-  .tt-lockpanel b {
+  .tt-unavailable-panel b {
     color: var(--n11);
+  }
+
+  /* One truthful selected-side bar where TradingView draws All/Long/Short.
+     It uses gross magnitudes, while the value at the right remains the exact
+     signed net. A second side is never implied. */
+  .tt-side {
+    margin-top: 0.8rem;
+  }
+  .tt-sidehead,
+  .tt-sidefacts {
+    display: flex;
+    align-items: center;
+    gap: 0.8rem;
+  }
+  .tt-sidehead b {
+    min-width: 4rem;
+    color: var(--n12);
+  }
+  .tt-sidehead span {
+    color: var(--n8);
+    font-size: 0.78rem;
+  }
+  .tt-sidehead strong {
+    margin-left: auto;
+    font-weight: 500;
+  }
+  .tt-sidebar {
+    display: flex;
+    height: 12px;
+    margin: 0.65rem 0 0.55rem;
+    overflow: hidden;
+    border-radius: 3px;
+    background: var(--n5);
+  }
+  .tt-sidebar .loss,
+  .tt-sidefacts i.loss {
+    background: var(--down);
+  }
+  .tt-sidebar .profit,
+  .tt-sidefacts i.profit {
+    background: var(--up);
+  }
+  .tt-sidefacts {
+    flex-wrap: wrap;
+    color: var(--n9);
+    font-size: 0.78rem;
+  }
+  .tt-sidefacts span {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+  }
+  .tt-sidefacts i {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+  }
+  .tt-sidefacts b {
+    color: var(--n11);
+    font-weight: 500;
+  }
+  .tt-side p {
+    margin: 0.6rem 0 0;
+    max-width: 96ch;
+    color: var(--n8);
+    font-size: 0.78rem;
+  }
+
+  .run-scope,
+  .trade-schema {
+    margin: 0 0 0.8rem;
+    max-width: 100ch;
   }
   .tt-ident {
     margin: 0.6rem 0 0;
@@ -12704,7 +14499,7 @@
   }
   .rungbtn:focus-visible {
     outline: 2px solid var(--focus);
-    outline-offset: 1px;
+    outline-offset: -2px;
   }
   /* A rung that carries a recorded run wears its tick. A rung that does not
      is still selectable -- looking at price the sweep never ran on is a
@@ -12810,9 +14605,13 @@
       background 0.14s ease,
       color 0.14s ease;
   }
-  .rangebtn:hover {
+  .rangebtn:not(:disabled):hover {
     background: var(--n4);
     color: var(--n11);
+  }
+  .rangebtn:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
   }
   .rangebtn:focus-visible {
     outline: 2px solid var(--focus);
@@ -13205,13 +15004,35 @@
     margin: var(--s5) 0 var(--s4);
   }
   .rbt-plot {
+    position: relative;
     display: flex;
     align-items: flex-end;
     gap: var(--s4);
-    height: 12rem;
-    padding: var(--s4) var(--s3) 0;
+    height: 17rem;
+    padding: var(--s4) 4.5rem 0 var(--s3);
     border-bottom: 1px solid var(--line);
+    background-image: repeating-linear-gradient(
+      to bottom,
+      transparent 0,
+      transparent calc(25% - 1px),
+      var(--line-soft) 25%
+    );
     overflow-x: auto;
+  }
+  .rbt-axis,
+  .streak-axis {
+    position: absolute;
+    z-index: 2;
+    right: 0.5rem;
+    top: var(--s3);
+    bottom: 1.7rem;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    color: var(--n8);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    pointer-events: none;
   }
   .rbt-col {
     flex: 1 1 0;
@@ -13274,6 +15095,157 @@
   }
   .rbt-dot.loss {
     background: var(--down);
+  }
+
+  /* Eight durable calendar grains need to wrap rather than force the whole
+     tester wider than a phone. */
+  .tt-hrow.tight .tt-seg {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+
+  .series-nav {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--s4);
+    margin: var(--s4) 0 0;
+    color: var(--n9);
+    font-size: 0.72rem;
+  }
+  .series-nav button {
+    width: 1.8rem;
+    height: 1.8rem;
+    border: 1px solid var(--line);
+    border-radius: var(--r1);
+    background: var(--n2);
+    color: var(--n11);
+    cursor: pointer;
+  }
+  .series-nav button:disabled {
+    opacity: 0.38;
+    cursor: default;
+  }
+  .series-nav button:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+  }
+  .trade-pages {
+    justify-content: flex-end;
+    margin: var(--s4) 0 var(--s3);
+  }
+
+  .streak-chart {
+    margin: var(--s5) 0 var(--s4);
+  }
+  .streak-plot {
+    position: relative;
+    display: flex;
+    gap: 2px;
+    min-height: 17rem;
+    padding: var(--s3) 4.8rem var(--s3) var(--s3);
+    background-image: repeating-linear-gradient(
+      to bottom,
+      transparent 0,
+      transparent calc(25% - 1px),
+      var(--line-soft) 25%
+    );
+    overflow-x: auto;
+  }
+  .streak-axis {
+    bottom: 1.8rem;
+  }
+  .streak-col {
+    flex: 1 1 0;
+    min-width: 0.42rem;
+    display: grid;
+    grid-template-rows: 7rem 7rem auto;
+    text-align: center;
+  }
+  .streak-half {
+    display: flex;
+    justify-content: center;
+  }
+  .streak-half.top {
+    align-items: flex-end;
+    border-bottom: 1px solid var(--line);
+  }
+  .streak-half.bottom {
+    align-items: flex-start;
+  }
+  .streak-half span {
+    display: block;
+    width: min(100%, 1.15rem);
+    min-height: 1px;
+  }
+  .streak-half.top span {
+    background: var(--up);
+    border-radius: var(--r1) var(--r1) 0 0;
+  }
+  .streak-half.bottom span {
+    background: var(--down);
+    border-radius: 0 0 var(--r1) var(--r1);
+  }
+  .streak-col small {
+    margin-top: var(--s2);
+    color: var(--n8);
+    font-size: 0.62rem;
+  }
+
+  /* Twenty two-row blocks are dense enough for comparison without turning
+     the page into an unbounded wall. The header stays visible while the exact
+     wider ledger scrolls in either direction. */
+  .tester .trade-ledger-wrap {
+    max-height: min(70vh, 760px);
+    overflow: auto;
+    border-top: 1px solid var(--tv-line);
+    border-bottom: 1px solid var(--tv-line);
+  }
+  .tester .trade-ledger-wrap:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: -2px;
+  }
+  .tester .trade-ledger {
+    min-width: 1300px;
+    white-space: nowrap;
+  }
+  .tester .trade-ledger thead {
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    background: var(--tv-bg);
+  }
+
+  /* Final readability floor for dense selectors and machine-like annotations
+     that inherited 9-11px console tokens. */
+  .tester .tick,
+  .tester .tt-caret,
+  .tester .vp,
+  .tester .cnames,
+  .tester .cret i,
+  .tester .tt-sidehead span,
+  .tester .tt-sidefacts,
+  .tester .tt-side p {
+    font-size: 12px;
+  }
+
+  @media (min-width: 521px) {
+    .tester .tt-quad .tt-qv {
+      font-size: 15px;
+      line-height: 1.25;
+    }
+    .tester .tt-quad .tt-qv.big {
+      font-size: 21px;
+    }
+    .tester .tt-sec {
+      padding: 1rem 1.1rem 1.15rem;
+    }
+  }
+
+  @media (max-width: 520px) {
+    .tester .tt-sec {
+      padding: 1rem 0.8rem 1.1rem;
+    }
   }
 
   /* ---- the engine's own knobs -------------------------------------------
@@ -13349,5 +15321,11 @@
     font-size: var(--fs-micro);
     line-height: 1.5;
     color: var(--n9);
+  }
+  @media (max-width: 520px) {
+    .term .bt-chart {
+      height: clamp(260px, 50svh, 420px);
+      flex-basis: clamp(260px, 50svh, 420px);
+    }
   }
 </style>

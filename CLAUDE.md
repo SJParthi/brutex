@@ -109,35 +109,33 @@ CI gate 1 enforces this by walking every tracked file. It is not advisory.
    evaluation, duplicate rejection and result append are each O(1). A change
    that makes one of them scan fails the bench gate.
 
-   **Two of those five no longer hold as written, and an O(1) audit found both
-   rather than any test.** They are stated here because §3 rule 6 asks for
-   honest limits, and a rule naming an operation that does not exist cannot be
-   enforced by anything.
+   **An O(1) audit found two drifted implementations, and both corrections are
+   now on the live path.** The history remains stated because §3 rule 6 asks for
+   honest limits; describing either historical defect as current would now be a
+   second documentation defect.
 
-   *Mask evaluation* is O(1) in `vocab::ConditionMask::hits` — six ANDs, six
-   XORs, five ORs, one compare, branchless — and **the sweep has not called it
-   since 7461f57**. `engine::column::Column::support` ANDs one bitmap per named
-   position, so its per-bar cost is **Θ(k)**, measured at **7.307x from k=1 to
-   k=8 against a 3.0x ceiling** by the engine's own bench, which says so in its
-   own comment. Worse, `C-E-02` — the row `docs/04-invariants.md` §6 leans on
-   to argue there is no depth parameter — measures the free `engine::support`
-   function, which has **no production caller anywhere in the workspace**.
+   *Mask evaluation* is O(1) per bar in the production
+   `engine::column::Column::support` path. The owned column is row-major and
+   folds exactly one fixed-six-word `vocab::ConditionMask::hits` call per bar,
+   independent of candidate width and of whether the row matches. The former
+   vertical implementation did one bitmap intersection per named condition and
+   was Θ(k); `C-E-02b` retains that failed measurement, while `C-E-02`,
+   `C-E-09` and the source-shape tests bind the corrected live method.
 
-   What is genuinely constant, and is the property that makes a sweep
-   budgetable, is *the cost per bitmap read* and *the independence of the cost
-   from the data*: the short-circuit was deliberately removed so a candidate
-   that misses on the first word costs exactly what one matching every bar
-   costs. That is a stricter guarantee than O(1) and it is the one to keep.
+   *Duplicate rejection* is one pre-sized `HashSet<u32>::insert` for each k=1
+   offered position. That probe is expected/amortised O(1), not an adversarial
+   worst-case hash-table guarantee. At k≥2 the prefix join is injective, so its
+   former candidate `seen` set was removed: there is no dedup operation on that
+   path to call O(1).
 
-   *Duplicate rejection* was one `HashSet` probe and **the set is deleted**. The
-   prefix join is injective — it rejected nothing, not rarely but never — so
-   removing it was right. At k≥2 there is no dedup operation to be O(1) about;
-   k=1 still probes an `offered` set once per position.
+   *Result append* is `Vec::push`. k=1 reserves the offered width and later
+   levels reserve a capped previous-frontier heuristic. Pushes within that
+   reservation allocate nothing; an expanding level can outgrow it, so the
+   unconditional bound is amortised O(1), not worst-case O(1) for every push.
 
-   Rewriting this rule is a `docs/05-decisions.md` matter and is not done here,
-   for the reason the rest of this file is careful about: a session that widens
-   or narrows a law to match the tree is the shape §2 exists to refuse. What a
-   session may do is refuse to leave a false claim standing unremarked.
+   These qualifications do not widen the rule: they identify where its named
+   primitive exists, where injectivity removes the need for one, and where
+   Rust's collection guarantee is amortised rather than worst-case.
 5. **Idempotence.** Same inputs, same outputs, byte for byte. Reruns are safe.
 6. **Honest limits.** If a bound cannot be met, say so. Never claim a
    measurement you did not take. Label extrapolations as extrapolations.

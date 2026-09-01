@@ -18,9 +18,15 @@
 //!
 //! # Where this list comes from
 //!
-//! **Not from a webpage.** `nseindia.com` is unreachable from the environment
-//! this was built in — the documentation fetch timed out and the browser refused
-//! the host — so nothing here was typed off a published calendar.
+//! The open-day set is not typed from a webpage. `nseindia.com` was unreachable
+//! from the environment this was built in, so it is derived from the store as
+//! described below. There is one deliberately different evidence lane:
+//! **2021-02-24's trading windows come from SEBI's primary record**, because all
+//! three stored series end at 10:08 while SEBI records trading until 11:40 and
+//! again from 15:45 to 17:00. Letting three truncated index series define the
+//! exchange session would erase the evening reopening. The exact index-
+//! publication denominator is a separate, explicitly unmeasured question in
+//! [`crate::gaps::classify_spot_index_against`].
 //!
 //! It is derived from **what actually traded**: every day carrying a `1day` bar
 //! in the operator's own Zerodha store over 2019-12-02 … 2026-08-21. Three
@@ -117,6 +123,12 @@ pub const LAST_MINUTE: u16 = 15 * 60 + 29;
 pub const FULL_BARS: u16 = LAST_MINUTE - OPEN_MINUTE + 1;
 
 const _: () = assert!(FULL_BARS == 375);
+
+/// 2021-02-24, the NSE systems-outage day, as days since the epoch.
+///
+/// Public because the exchange calendar and the spot-index completeness policy
+/// must name the same fixed historical event without duplicating its number.
+pub const SYSTEMS_OUTAGE_DAY: i64 = 18_682;
 
 /// One trading window: the minute its first bar opens, and its last.
 ///
@@ -244,19 +256,28 @@ pub enum DayKind {
 
 /// The four sessions in the measured window that are not 09:15–15:29.
 ///
-/// Each was read off the stored bars, not off a description of the event. The
-/// names in the comments are identifications from shape and date and are NOT
-/// vendor-confirmed labels — `CLAUDE.md` §3 rule 1 keeps that distinction, so
-/// the DATA here binds and the prose beside it does not.
+/// Three were read off the stored bars. The 2021-02-24 windows instead come
+/// from SEBI Settlement Order SO/AB/EFD2/2023-24/6580: halt from 11:40,
+/// 15-minute pre-open from 15:30, normal trading 15:45–17:00. Its stored 54-bar
+/// index prefix is not the exchange timetable and must not define it. This does
+/// not claim an index value existed at every normal-market minute.
+/// The names in the other comments are identifications from shape and date and
+/// are not vendor-confirmed labels.
 const IRREGULAR: [(i64, Session); 4] = [
-    // 2021-02-24 — traded 09:15 and stopped at 10:08. The shape of an exchange
-    // outage rather than a scheduled short day: no announced session ends at
-    // 10:08.
+    // 2021-02-24 — normal trading 09:15–11:40 and 15:45–17:00. Bar timestamps
+    // are left edges, so the inclusive minute opens are 09:15–11:39 and
+    // 15:45–16:59: 145 + 75 = 220.
     (
-        18_682,
+        SYSTEMS_OUTAGE_DAY,
         Session {
-            windows: [Window { from: 555, to: 608 }, Window { from: 0, to: 0 }],
-            count: 1,
+            windows: [
+                Window { from: 555, to: 699 },
+                Window {
+                    from: 945,
+                    to: 1_019,
+                },
+            ],
+            count: 2,
         },
     ),
     // 2024-03-02 (Sat) — two windows. A disaster-recovery live test.
@@ -510,15 +531,27 @@ mod tests {
         assert!(sessions_between(FIRST_DAY, LAST_DAY).is_some());
     }
 
-    /// **THE FOUR IRREGULAR SESSIONS ARE THE ONES THE STORE MEASURED.**
+    /// **THE FOUR IRREGULAR SESSIONS USE THEIR RECORDED EVIDENCE LANE.**
     ///
-    /// Each bar count was read off the stored timestamps. A calendar that got
-    /// these wrong would report a Muhurat hour as 315 missing bars, which is
-    /// precisely the false alarm this module exists to stop.
+    /// Three bar counts were read off stored timestamps. The outage day's
+    /// exchange windows are pinned to SEBI's primary record because a stored
+    /// index prefix cannot define the market timetable. A calendar that got
+    /// either lane wrong would understate a session or report a special session
+    /// as hundreds of false gaps.
     #[test]
-    fn every_irregular_session_holds_the_bars_the_store_holds() {
-        // 2021-02-24 — the outage. 09:15 to 10:08.
-        assert_eq!(expected_bars(18_682), Some(54));
+    fn every_irregular_session_holds_the_bars_its_evidence_proves() {
+        // 2021-02-24 — 09:15–11:39 then 15:45–16:59.
+        assert_eq!(expected_bars(SYSTEMS_OUTAGE_DAY), Some(220));
+        let DayKind::Open(outage) = kind_of(SYSTEMS_OUTAGE_DAY) else {
+            panic!("2021-02-24 traded");
+        };
+        assert_eq!(outage.count, 2);
+        assert!(outage.expects(11 * 60 + 39), "last minute before halt");
+        assert!(!outage.expects(11 * 60 + 40), "halt starts at 11:40");
+        assert!(!outage.expects(15 * 60 + 44), "pre-open is not a bar");
+        assert!(outage.expects(15 * 60 + 45), "normal trading resumed");
+        assert!(outage.expects(16 * 60 + 59), "last minute before 17:00");
+        assert!(!outage.expects(17 * 60), "17:00 is the exclusive close");
         // The two disaster-recovery Saturdays: 45 + 60.
         assert_eq!(expected_bars(19_784), Some(105));
         assert_eq!(expected_bars(19_861), Some(105));
@@ -696,23 +729,28 @@ mod tests {
         assert_eq!(cal.expected_bars(20_000), None);
     }
 
-    /// **THE DERIVED ANSWER MATCHES THE HAND-BUILT ONE ON THE DAYS BOTH KNOW.**
+    /// **PRIMARY EVIDENCE OVERRIDES A TRUNCATED OBSERVED OUTAGE DAY.**
     ///
     /// The baked tables were themselves derived from this store on 2026-08-22,
     /// so a disagreement means the derivation is wrong — this is the bridge that
     /// lets the constants be deleted with evidence rather than with hope.
     #[test]
-    fn the_derivation_agrees_with_the_baked_tables_it_replaces() {
-        // The four irregular sessions, with the runs the store actually holds —
-        // TWO of them for the disaster-recovery Saturdays.
+    fn the_derivation_uses_the_sourced_outage_and_agrees_on_other_irregular_days() {
+        // The store holds only 09:15–10:08 on 2021-02-24. That is not the
+        // exchange window; whether each absent index minute is a vendor gap is
+        // a separate unmeasured question. The other three sessions use their
+        // measured store runs, including TWO on each DR Saturday.
         let cal = Calendar::from_observed(&[
-            Observed::from_runs(18_682, &[(555, 608)]),
+            Observed::from_runs(SYSTEMS_OUTAGE_DAY, &[(555, 608)]),
             Observed::from_runs(19_784, &[(555, 599), (690, 749)]),
             Observed::from_runs(19_861, &[(555, 599), (690, 749)]),
             Observed::from_runs(20_382, &[(825, 884)]),
         ]);
 
-        // EVERY ONE AGREES, INCLUDING THE TWO-WINDOW DAYS.
+        // EVERY ONE AGREES WITH THE CANONICAL TABLE. On the outage day this
+        // proves the derived calendar did not turn 166 normal-market slots into
+        // a clean 54-minute exchange session merely because every stored index
+        // series has the same prefix.
         //
         // An earlier draft of `Observed` carried only a first and a last minute,
         // and this assertion had to be written as a documented DISAGREEMENT:
@@ -722,7 +760,7 @@ mod tests {
         // reported NIFTY short by 208 where the truth is 28. Carrying the runs
         // instead of the span removes it, and this line is now an equality
         // rather than an excuse.
-        for day in [18_682_i64, 19_784, 19_861, 20_382] {
+        for day in [SYSTEMS_OUTAGE_DAY, 19_784, 19_861, 20_382] {
             assert_eq!(
                 cal.expected_bars(day),
                 expected_bars(day),
@@ -730,6 +768,26 @@ mod tests {
             );
         }
         assert_eq!(cal.expected_bars(19_784), Some(105), "45 + 60, not 195");
+        assert_eq!(
+            cal.expected_bars(SYSTEMS_OUTAGE_DAY),
+            Some(220),
+            "145 + 75, not 54"
+        );
+    }
+
+    /// **PRIMARY EVIDENCE DOES NOT DEPEND ON THE DAMAGED INPUT MENTIONING
+    /// ITSELF.**
+    #[test]
+    fn a_missing_daily_outage_row_cannot_reclassify_the_verified_session_as_closed() {
+        let cal = Calendar::from_observed(&[
+            Observed::from_runs(SYSTEMS_OUTAGE_DAY - 1, &[(555, 929)]),
+            Observed::from_runs(SYSTEMS_OUTAGE_DAY + 1, &[(555, 929)]),
+        ]);
+        assert_eq!(
+            cal.expected_bars(SYSTEMS_OUTAGE_DAY),
+            Some(220),
+            "an absent stored daily row cannot erase a primary-sourced open day"
+        );
     }
 }
 
@@ -742,13 +800,16 @@ mod tests {
 /// started in September 2024 and was wrong on five of them; the Zerodha history
 /// floor claimed a rolling ten years against a vendor that holds from 2015; the
 /// minute expectation multiplied 375 across nine days that never traded 375.
-/// The constants above are correct **today** because they were derived from the
-/// store this afternoon — and nothing keeps them correct tomorrow.
+/// Three irregular constants above were derived from the store. The fourth,
+/// 2021-02-24, is fixed by SEBI's primary record because an index prefix cannot
+/// define the exchange timetable on precisely the day systems failed.
 ///
-/// This type removes the table. The **daily rung is the calendar**: a `1day` bar
-/// is proof the exchange traded, and the first and last minute bar of that day
-/// are proof of how long. Nothing is typed, so nothing can be typed wrong, and
-/// the answer extends itself the moment an earlier month is pulled.
+/// This type removes the general date table. The **daily rung is normally the
+/// calendar**: a `1day` bar is proof the exchange traded, and the minute runs
+/// describe its windows. One primary-sourced override remains for 2021-02-24;
+/// without it, three identical index prefixes would unanimously erase 166
+/// normal-market slots. The answer still extends itself when earlier months are
+/// pulled, while that fixed historical fact cannot drift with vendor bytes.
 ///
 /// # Why it is not circular
 ///
@@ -757,7 +818,9 @@ mod tests {
 /// The daily rung says which days traded; the minute rung is measured against
 /// it. A day with a daily bar and no minute bars is a real gap — which is
 /// exactly how the five pre-2025 Muhurat sessions were found, after an audit
-/// had already called the store complete.
+/// had already called the store complete. Cross-rung agreement is not enough
+/// when all stored minute series share one truncation; the fixed SEBI override
+/// is the independently sourced answer for that one known case.
 ///
 /// # Cost
 ///
@@ -828,10 +891,11 @@ impl Calendar {
     /// `observed` are [`DayKind::Closed`] — the exchange did not trade — and
     /// days outside that span are [`DayKind::Unmeasured`].
     ///
-    /// **The windows come from the bars, not from a table and not from a
-    /// guess.** The caller walks the day and hands over the contiguous runs it
-    /// actually found, so a disaster-recovery Saturday arrives as its two real
-    /// windows rather than as one 195-minute span with a 90-minute hole in it.
+    /// **The windows come from the bars, except where a primary regulator's
+    /// record proves those bars incomplete.** The caller normally hands over
+    /// the contiguous runs it found, so a disaster-recovery Saturday arrives
+    /// as its two real windows. The fixed 2021-02-24 SEBI override prevents the
+    /// stored 54-bar prefix from declaring itself complete.
     ///
     /// An earlier draft inferred a single window from the first and last minute.
     /// It was measured against the operator's store and over-counted by exactly
@@ -863,6 +927,18 @@ impl Calendar {
                 None => DayKind::OpenLengthUnmeasured,
                 Some(session) => DayKind::Open(session),
             };
+        }
+        // ONE PRIMARY-SOURCED EXCEPTION. Apply it AFTER the observed fold, not
+        // only while visiting a stored row. A missing DAILY row on this date is
+        // damage in the evidence being audited; it cannot turn a regulator-
+        // verified open session into `Closed` merely by omitting itself. SEBI
+        // records a halt from 11:40, a 15-minute pre-open from 15:30, and normal
+        // trading 15:45–17:00. Index-bar availability is separately refused by
+        // `classify_spot_index_against`.
+        if let Ok(at) = usize::try_from(SYSTEMS_OUTAGE_DAY - first)
+            && let Some(slot) = kinds.get_mut(at)
+        {
+            *slot = DayKind::Open(IRREGULAR[0].1);
         }
         Self { first, kinds }
     }

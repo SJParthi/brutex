@@ -40,6 +40,8 @@
 //! A module that owned its own HTTP client would be a second transport with a
 //! second retry policy and a second idea of what a timeout is.
 
+use std::fs::{File, OpenOptions};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use brutex_core::vendor::Vendor;
@@ -779,6 +781,22 @@ pub enum Landed {
         /// look like new data.
         changed: bool,
     },
+    /// The target was atomically replaced, but the directory entry could not
+    /// be durably published.
+    ///
+    /// This is deliberately neither [`Written`](Self::Written) nor
+    /// [`Refused`](Self::Refused). Once `rename` succeeds the old bytes no
+    /// longer stand, but without a directory `sync_all` a power loss may still
+    /// forget the replacement. Collapsing that state into either neighbour
+    /// would make one of those two claims false.
+    Uncertain {
+        /// Bytes now visible at the target.
+        bytes: usize,
+        /// Whether those bytes differ from the target held before replacement.
+        changed: bool,
+        /// The durability operation the platform refused.
+        why: String,
+    },
     /// Refused, with the reason an operator reads.
     Refused(String),
 }
@@ -795,6 +813,107 @@ impl Landed {
 #[must_use]
 pub fn path_of(dir: &Path, source: &Source) -> PathBuf {
     dir.join(source.file)
+}
+
+/// The persistent advisory-lock sibling for one source.
+///
+/// The name is a function of the target, so two calls for one source meet on
+/// one inode while different sources remain independent. A persistent inode
+/// is intentional: the kernel releases the lock with the handle, including on
+/// process death, so there is no stale PID sentinel for an operator to clear.
+fn lock_path_of(dir: &Path, source: &Source) -> PathBuf {
+    dir.join(format!(".{}.lock", source.file))
+}
+
+/// Takes the source's process- and thread-wide advisory lock.
+///
+/// Blocking is the policy: a second refresh is queued behind the first rather
+/// than reported as a vendor failure. The network body is already in memory at
+/// this boundary, so the critical section is one bounded local replacement,
+/// not a socket wait.
+fn lock_source(dir: &Path, source: &Source) -> Result<File, String> {
+    let path = lock_path_of(dir, source);
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|why| format!("{} could not be opened for locking — {why}", path.display()))?;
+    file.lock()
+        .map_err(|why| format!("{} could not be locked — {why}", path.display()))?;
+    Ok(file)
+}
+
+/// Removes a failed partial and keeps both failures when cleanup also refuses.
+fn remove_partial_after(temporary: &Path, failure: String) -> String {
+    match std::fs::remove_file(temporary) {
+        Ok(()) => failure,
+        Err(cleanup) if cleanup.kind() == std::io::ErrorKind::NotFound => failure,
+        Err(cleanup) => format!(
+            "{failure}; cleanup of {} also failed — {cleanup}",
+            temporary.display()
+        ),
+    }
+}
+
+/// Writes, syncs and atomically publishes one already-validated master.
+///
+/// The returned outer error means the target was not replaced. The inner
+/// error means `rename` succeeded but syncing the containing directory did
+/// not, which is a distinct durability state carried by [`Landed::Uncertain`].
+fn replace_locked(dir: &Path, source: &Source, body: &str) -> Result<Result<(), String>, String> {
+    let target = path_of(dir, source);
+    let temporary = dir.join(format!(".{}.partial", source.file));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&temporary)
+        .map_err(|why| format!("{} could not be opened — {why}", temporary.display()))?;
+    if let Err(why) = file.write_all(body.as_bytes()) {
+        drop(file);
+        return Err(remove_partial_after(
+            &temporary,
+            format!("{} could not be written — {why}", temporary.display()),
+        ));
+    }
+    if let Err(why) = file.sync_all() {
+        drop(file);
+        return Err(remove_partial_after(
+            &temporary,
+            format!("{} could not be synced — {why}", temporary.display()),
+        ));
+    }
+    drop(file);
+
+    if let Err(why) = std::fs::rename(&temporary, &target) {
+        return Err(remove_partial_after(
+            &temporary,
+            format!(
+                "{} could not replace {} — {why}",
+                temporary.display(),
+                target.display()
+            ),
+        ));
+    }
+
+    // FILE DATA FIRST, DIRECTORY ENTRY SECOND. `sync_all` on the temporary
+    // above makes the bytes durable; syncing the containing directory after
+    // rename makes the name-to-inode replacement durable on platforms that
+    // expose directory handles through `File::open` (the Unix platforms this
+    // workspace builds on do). A failure here cannot truthfully be called a
+    // refusal: the new target is already visible, so the caller receives the
+    // explicit uncertain state instead.
+    match File::open(dir).and_then(|directory| directory.sync_all()) {
+        Ok(()) => Ok(Ok(())),
+        Err(why) => Ok(Err(format!(
+            "{} replaced {}, but the containing directory could not be synced — {why}; \
+             the new bytes are visible, but crash durability is UNVERIFIED",
+            temporary.display(),
+            target.display()
+        ))),
+    }
 }
 
 /// Writes one fetched body, refusing anything that cannot be a master.
@@ -899,36 +1018,35 @@ pub fn land(dir: &Path, source: &Source, body: &str) -> Landed {
         }
     }
 
-    let target = path_of(dir, source);
-    let changed = std::fs::read_to_string(&target).map_or(true, |held| held != body);
     if let Err(why) = std::fs::create_dir_all(dir) {
         return Landed::Refused(format!(
             "the masters directory {} cannot be created — {why}",
             dir.display()
         ));
     }
-    // NAMED FOR THE TARGET, so two sources refreshing at once cannot collide on
-    // one temporary file and hand each other's bytes to the rename.
-    let temporary = dir.join(format!(".{}.partial", source.file));
-    if let Err(why) = std::fs::write(&temporary, body) {
-        return Landed::Refused(format!(
-            "{} could not be written — {why}",
-            temporary.display()
-        ));
-    }
-    if let Err(why) = std::fs::rename(&temporary, &target) {
-        // THE PARTIAL IS REMOVED ON A FAILED RENAME. Leaving it would grow one
-        // stale file per failed refresh in a directory the operator reads.
-        let _ignored = std::fs::remove_file(&temporary);
-        return Landed::Refused(format!(
-            "{} could not replace {} — {why}",
-            temporary.display(),
-            target.display()
-        ));
-    }
-    Landed::Written {
-        bytes: body.len(),
-        changed,
+    // THE LOCK PRECEDES THE READ AS WELL AS THE WRITE. Computing `changed`
+    // outside it lets two callers compare against the same old target and both
+    // report themselves as the change even though the second replaces the
+    // first. More importantly, the shared `.partial` is safe only while every
+    // same-source writer holds this inode.
+    let _lock = match lock_source(dir, source) {
+        Ok(lock) => lock,
+        Err(why) => return Landed::Refused(why),
+    };
+    let target = path_of(dir, source);
+    let changed = std::fs::read_to_string(&target).map_or(true, |held| held != body);
+
+    match replace_locked(dir, source, body) {
+        Ok(Ok(())) => Landed::Written {
+            bytes: body.len(),
+            changed,
+        },
+        Ok(Err(why)) => Landed::Uncertain {
+            bytes: body.len(),
+            changed,
+            why,
+        },
+        Err(why) => Landed::Refused(why),
     }
 }
 
@@ -1309,7 +1427,7 @@ async fn prime_now<D: crate::chain::Discovery>(
 mod tests {
     use super::{
         Landed, MIN_BODY_BYTES, NSE_INDICES_FILE, SOURCES, Transport, free_sources, land,
-        may_fetch, path_of, token_sources,
+        lock_path_of, lock_source, may_fetch, path_of, token_sources,
     };
     use brutex_core::vendor::Vendor;
 
@@ -1652,6 +1770,72 @@ mod tests {
             .filter(|name| name.contains("partial"))
             .collect();
         assert!(leftovers.is_empty(), "left behind: {leftovers:?}");
+    }
+
+    #[test]
+    fn a_second_same_source_landing_waits_for_the_first_sources_lock() {
+        // HOLD THE EXACT LOCK `land` TAKES, then start a real landing. Before
+        // this lock existed both calls opened `.FILE.partial`; one rename could
+        // move the inode while the other still wrote it, making one source's
+        // successful download report a local rename failure or publishing the
+        // wrong caller's bytes.
+        let dir = scratch("same-source-lock");
+        let source = &SOURCES[1];
+        let held = lock_source(&dir, source).expect("the first refresh holds the source");
+        let body = a_master_for(source);
+        let worker_dir = dir.clone();
+        let gate = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let worker_gate = std::sync::Arc::clone(&gate);
+        let (sent, received) = std::sync::mpsc::channel();
+
+        let worker = std::thread::spawn(move || {
+            worker_gate.wait();
+            sent.send(land(&worker_dir, source, &body))
+                .expect("the receiver remains alive");
+        });
+        gate.wait();
+        assert!(
+            received
+                .recv_timeout(std::time::Duration::from_millis(75))
+                .is_err(),
+            "the second landing must not pass the lock while the first owns it"
+        );
+
+        drop(held);
+        let landed = received
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("releasing the lock lets the queued landing finish");
+        worker.join().expect("the landing thread did not panic");
+        assert!(landed.is_written(), "the queued body lands: {landed:?}");
+        assert!(path_of(&dir, source).is_file(), "the target exists");
+        assert!(
+            lock_path_of(&dir, source).is_file(),
+            "the persistent inode remains; the kernel lock, not file presence, is ownership"
+        );
+    }
+
+    #[test]
+    fn every_source_has_its_own_persistent_lock_inode() {
+        let dir = scratch("lock-names");
+        let names: std::collections::BTreeSet<_> = SOURCES
+            .iter()
+            .map(|source| lock_path_of(&dir, source))
+            .collect();
+        assert_eq!(
+            names.len(),
+            SOURCES.len(),
+            "different masters never queue behind an unrelated source"
+        );
+        for source in SOURCES {
+            assert!(
+                lock_path_of(&dir, &source)
+                    .file_name()
+                    .and_then(std::ffi::OsStr::to_str)
+                    .is_some_and(|name| name.contains(source.file)),
+                "the lock must be derivable from its target: {}",
+                source.file
+            );
+        }
     }
 
     #[test]

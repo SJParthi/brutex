@@ -275,6 +275,25 @@ pub fn emit(event: &Event<'_>) -> Emitted {
     global().map_or(Emitted::NotInstalled, |sink| sink.emit(event))
 }
 
+/// Writes one event to the process-wide sink under an explicit run id.
+///
+/// This is the concurrent-safe counterpart to [`Sink::set_run`]: it stamps
+/// this event only and leaves the sink's ambient run untouched.
+#[must_use]
+pub fn emit_for_run(run: u64, event: &Event<'_>) -> Emitted {
+    global().map_or(Emitted::NotInstalled, |sink| sink.emit_for_run(run, event))
+}
+
+/// Reserves a non-zero correlation id from the process-wide log sequence.
+///
+/// [`None`] means either that logging is not installed or that the id space is
+/// exhausted. A caller that needs an auditable exact attempt boundary must
+/// refuse in either case rather than fall back to a timestamp guess.
+#[must_use]
+pub fn reserve_run_id() -> Option<u64> {
+    global().and_then(Sink::reserve_run_id)
+}
+
 #[cfg(test)]
 #[allow(
     clippy::indexing_slicing,

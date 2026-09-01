@@ -60,10 +60,11 @@ multiplied out.
 | Frequent-count pass | 0.257 ns per bar·mask | same harness |
 | Record width | 56 bytes | this format |
 
-**A full production sweep has never been run.** Every wall-clock figure for a
-complete sweep is a model, not an observation. That sentence stays here until
-the day a real sweep completes and its wall time is recorded — at which point
-it is replaced by the measurement, with the hardware named.
+**A full production sweep has never completed.** A full-range attempt did run:
+it reached 7.4 GB resident and was killed at exit 137. That is a measurement of
+a failure, not a completion time. Every wall-clock figure for a complete sweep
+is still a model rather than an observation, and stays labelled that way until
+a real sweep completes with its hardware recorded.
 
 ---
 
@@ -92,10 +93,12 @@ At 238 live conditions, holding one level exactly:
 The `HashSet` column is the raw key bytes and understates the real cost: hashbrown
 keeps a load factor near 7/8 and adds one control byte per slot.
 
-**k=4 is the wall, and it is memory rather than time.** 6.80 GiB of `out` plus
-5.83 GiB of `seen` is past the reference machine before the clock becomes the
-problem. At k=5 the join itself dominates everything: `|F|²/2` pair-unions is
-8.49 × 10¹⁵ six-word ORs, months of work independent of the bars.
+**k=4 is the first whole-vocabulary level at the shipped candidate ceiling.**
+Its 130,344,865 rows nearly fill `DEFAULT_CEILING = 2^27`; `out` and the raw
+`seen` keys alone are 12.63 GiB before allocator overhead, the previous
+frontier, batches or ranking. At k=5 the join itself dominates everything:
+`|F|²/2` pair-unions is 8.49 × 10¹⁵ six-word ORs, months of work independent
+of the bars.
 
 What the design does about it: it never enumerates those levels. Apriori pruning
 generates level k only from level k−1's survivors, and the ladder stops at
@@ -113,7 +116,7 @@ be the other.
 
 | bound | what refuses | what it catches | what it misses |
 |---|---|---|---|
-| `DEFAULT_CEILING` = 2^26 | a constant | overcommit death | the right value for a machine it has not seen |
+| `DEFAULT_CEILING` = 2^27 | a constant | overcommit death | the right value for a machine it has not seen |
 | `Breach::Memory` | the allocator | an honest refusal, discovered at runtime | overcommit |
 
 `Ladder::exhausted` asks both as one question. The allocator half is
@@ -127,14 +130,53 @@ can succeed and the process still be killed when the pages are touched. So the
 OOM this section used to describe is **narrowed, not eliminated** — it is why the
 constant survives beside the dynamic bound rather than being deleted.
 
-Measured on 1,124 swept bars at `min_hits = 50`: the walk went extinct at depth
-23 holding 34,979,095 combinations and **5.0 GB** peak, against the 8 GiB the
-ceiling's own arithmetic describes.
+Measured on 1,124 swept bars at `min_hits = 50`: the retaining walk went extinct
+at depth 23 holding 34,979,095 combinations and **5.0 GB** peak, against the
+ceiling's own arithmetic.
 
-Whether the worst case is REACHABLE is **UNMEASURED**. It depends on how fast the
-frequent frontier collapses on real bars at a real `min_hits`, and §4 of this
-document already records that no full production sweep has ever been run. The
-extrapolation above is an extrapolation, per §3.6.
+### Ranked streaming removes retention, not the frontier wall
+
+The measured full-range failure separated the two costs. Across two eight-rung
+runs, all sixteen ladder walks had completed or halted within two and a half
+minutes; peak across the eight concurrent rungs was 8.91 GB, of which 6.35 GB
+was already-retired survivors kept in `Sweep::levels`. Ranking 15–17 million
+retained survivors per rung happened afterwards, and the process died before a
+complete result existed.
+
+The ranked path no longer returns those survivor vectors. Both retained and
+streamed entry points execute the same `Ladder::walk_into`; the streamed sink
+reduces every retired frontier to one fixed-size `Tally`. Its engine result is
+therefore **O(depth)**, plus the vocabulary-bounded exclusion list. Ranking
+keeps at most `keep` rows in the one global cut. Parallel scoring uses bounded
+worker heaps before merging into that global heap, so its transient peak is
+O(`keep × workers`), never O(total frequent combinations). `top` and
+`closed_top` are each bounded by `keep` in the returned result.
+
+That does **not** make the engine's peak O(depth). While building level k, the
+walk still needs the whole k−1 frontier, the k frontier under construction,
+and the level's candidate/dedup indexes and batches. Streaming frees levels
+older than k−1; it cannot free the adjacent pair before the join and exact
+closure have read them. A single explosive frontier can therefore still breach
+the same candidate ceiling, pair budget or allocator bound and halt.
+
+The candidate ceiling is deliberately the **same cumulative ceiling** on both
+paths even though a streamed walk has freed older levels. Changing result
+retention is not permission to change the search: with one `Ladder`, retained
+and streamed walks reach the same depth or report the same halt. The ceiling is
+conservative on the streamed path as a consequence; it bounds total admitted
+candidates, not only currently live bytes.
+
+There is still **no depth parameter**. `keep = 0` and a cap large enough for
+every survivor walk exactly the same levels to exactly the same extinction or
+halt. The cap decides only what the caller retains; the join, support test,
+subset prune and both budgets never read it. `Sweep` remains available to a
+plain caller that explicitly wants every survivor and accepts that retention
+cost; only ranked entry points take the streamed result.
+
+Whether the whole-vocabulary worst case is REACHABLE is **UNMEASURED**. It
+depends on how fast the frequent frontier collapses on real bars at a real
+`min_hits`, and §4 records that the full production attempt did not complete.
+The combinatorial table above remains an extrapolation, per §3.6.
 
 ---
 
@@ -298,7 +340,7 @@ write boundary is exact rather than merely close.
 |---|---|
 | **SENSEX history begins 2022-09-01**, not 2020-01 | NIFTY and BANKNIFTY have 2 years 8 months that SENSEX does not. A cross-instrument sweep before 2022-09 has no SENSEX data at all. D-0017 has since dropped SENSEX from the swept set, so no sweep can produce that result; the gap still binds any comparison drawn against the SENSEX bars left on disk. |
 | **India VIX does not print every minute** | 449 of 1,630 dates deviate from 375 bars, against 13 for NIFTY. Gaps are single scattered minutes with no time-of-day concentration — 2024-06 has 7,088 VIX bars against 7,125 NIFTY bars. The `vix_at_entry` / `vix_at_exit` stamp therefore **cannot assume a VIX bar exists for its index bar**, and must carry an explicit absence rather than a zero. |
-| **375 bars per day is the common case, not the rule** | 13 NIFTY days, 8 SENSEX days and 449 VIX days differ. Ten sessions sit wholly or partly outside 09:15–15:29: three weekend budget sessions, four evening Muhurat sessions, one afternoon Muhurat session, one circuit-halt pair, and the 2021-02-24 outage day which runs to 16:59 with a 3.5-hour hole. Any code that hardcodes 375 is wrong on those days. |
+| **375 bars per day is the common case, not the rule** | 13 NIFTY days, 8 SENSEX days and 449 VIX days differ. Ten sessions sit wholly or partly outside 09:15–15:29: three weekend budget sessions, four evening Muhurat sessions, one afternoon Muhurat session, one circuit-halt pair, and the 2021-02-24 outage day which runs to 16:59 with a 245-minute normal-market halt. Any code that hardcodes 375 is wrong on those days. |
 | **Parquet footer statistics are absent** | The writer emitted no min/max/null-count for any column chunk. Integrity verification during conversion requires reading column data; there is no cheap footer path. |
 | **`open_interest` is 100% null, `volume` is 100% literal zero** | Across all 1,706,290 bars, `volume` has exactly one distinct value. Both columns carry no information for spot indices. The null/zero distinction is preserved correctly in the source, so mapping null to `i64::MIN` cannot collide with a genuine zero. |
 
@@ -3340,11 +3382,10 @@ session. A per-bar cost quoted from quiet data understates an active day by up t
 
 ---
 
-## 53. Two engine invariants are UNMEASURED and say so in the table
+## 53. Peak memory is unmeasured; corrected collection benches require a rerun
 
-`docs/04-invariants.md` carries both rows with `— ` and the word **UNMEASURED**
-rather than a test name. They are kept rather than deleted because the invariants
-are real; the gate's own instruction is that a row is never deleted to go green.
+`docs/04-invariants.md` keeps the rows rather than deleting them to go green.
+Their limits are different and must not be collapsed into one check mark.
 
 **E-08 — peak memory under a declared budget.** There is no declared budget and no
 process-memory measurement anywhere in this workspace. Two things are missing, not
@@ -3354,14 +3395,22 @@ a function of how many combinations survive at the widest level, which depends o
 the data and on `min_hits`, and no run has been performed to observe it. Writing a
 budget now would be inventing one, which §3 rule 1 forbids.
 
-**C-04 — result append cost flat from 1× to 100× results held.** The engine pushes
-to a `Vec`, whose amortised push is O(1) by construction. No bench varies the
-results-held count independently, so the claim rests on the standard library's
-documented behaviour rather than on a measurement taken here. That is a weaker
-position than every other `C-` row in the table and is labelled as such.
+**C-03/C-04 — source rows exist, but their corrected production mapping has not
+yet been remeasured.** C-E-10 formerly timed hit and miss on an independent
+`HashSet<ConditionMask>`; production duplicate rejection is only the pre-sized
+k=1 `HashSet<u32>::insert` path. C-E-11 formerly grew an unreserved
+`Vec<ConditionMask>`; production retains `Itemset` values and pre-sizes k=1 to
+the offered width and later levels to a capped previous-frontier heuristic. The
+benchmark sources now match those paths, so the former ratios are historical
+and cannot be relabelled as measurements of the corrected rows.
 
-Both are the honest form of §3 rule 6: the bound may hold, and it has not been
-measured, and neither of those sentences is allowed to be dropped.
+A push that fits existing capacity has no growth allocation. A later level can
+outgrow its heuristic, and that individual push can move every held item; only
+the sequence has `Vec`'s amortised O(1) bound. Likewise, a hash-table insertion
+has an expected/amortised bound rather than an adversarial worst-case one.
+
+This is the honest form of §3 rule 6: a structural bound and a current
+measurement are separate evidence, and neither may be inferred from the other.
 
 ---
 
@@ -4232,13 +4281,18 @@ stated aim is maximum profit at minimal stop, and only the first half is ranked
 on. `Cell::edge_ratio` is the nearest thing and is computed over trades that
 ended PROFITABLE, so it is structurally silent about how large a loser gets.
 
-**PBO has the statistic and not the design.** `pbo::place` correctly finds the
-in-sample winner and ranks it out of sample, which is Bailey–Borwein–López de
-Prado–Zhu's per-split quantity. The CSCV experimental design — the S-choose-S/2
-combinatorial splits that feed it — does not exist, and `walk_forward` keeps
-only each fold's winner, so the full candidate vectors a real split needs are
-not retained. Reported PBO is therefore only as good as the placements a caller
-supplies, and no caller in this repository can supply real ones.
+**CSCV/PBO is absent; the existing number is an anchored-fold diagnostic.**
+`validate` now retains each fold's aligned in-sample and out-of-sample
+candidate vectors, so the former statement that only the winner survives is
+stale. Those vectors belong to anchored expanding walk-forward folds. The
+repository still has no combinatorially symmetric partitions, complementary
+out-of-sample sets, stable candidate family shared by every partition, CSCV
+split identity or complete receipt. `pbo::Placement`/`Pbo` remain
+compatibility-only lossy wrappers. The explicitly named
+`PlacementV1`/`AnchoredWalkForwardBottomHalfRateV1` preserves first-strict-max
+selection and exact doubled midranks, but it is still only a bottom-half rate
+over the supplied anchored folds. It cannot authorize Population Statistics
+V2 and must never be labelled genuine CSCV/PBO.
 
 **Twelve named mutants survive.** An adversarial fleet named fourteen mutations
 of `crates/runner` that the suite does not catch; two are now killed
@@ -4294,33 +4348,30 @@ proxy standing in for one.
 
 ---
 
-## 74. The Romano–Wolf monotonicity is unverified by any test
+## 74. Adjusted-p monotonicity is proved; the legacy fixed-alpha thresholds remain opaque
 
+The old limit was exact and remains exact for the compatibility API:
 `the_stepdown_threshold_never_rises_as_the_surviving_set_shrinks` does not
-exercise the property it is named for. Measured: on every fixture tried the
-stepdown finishes in ONE round — `Rejected::round` is `[0, 0]` — so the
-non-decreasing assertion compares `0 >= 0` and holds vacuously.
+exercise more than one fixed-alpha round on its fixture. `romano_wolf` still
+does not expose its per-round critical thresholds, so a regression that keeps
+the rejection rows plausible while raising a later threshold is not directly
+observable there. The repair still rests on the recorded instrumentation:
+32.536 → 33.906 at seed 97 under per-round resampling, rises in 19/400
+configurations before one matrix was shared, and 0/400 after.
 
-That is a property of the algorithm, not a bad fixture. A round rejects EVERY
-alive strategy above the threshold at once, so a second round needs a strategy
-that sat below the old bar and is above the new one. The bar is the maximum over
-CENTRED bootstrap draws, so a large mean cannot raise it — only a large spread
-can. Three attempts failed: a 300-edge strategy, marginal 30/34/38 edges beneath
-it, and a 12x-variance series built specifically to dominate the maximum. All
-gave `[0, 0]`.
+D-0460 adds a separate primary-source adjusted-p API rather than pretending
+that vacuous test closed the gap. `RomanoWolfAdjustedReceiptV1` records every
+candidate in canonical observed-statistic order and every exact initial and
+adjusted numerator. Its test directly asserts the Algorithm 4.1 cumulative
+maximum at every rank, including an exact observed-statistic tie, so
+candidate-adjusted p-value monotonicity is now a regression-tested property.
+It does **not** expose the legacy quantile thresholds or prove that the two
+finite-resample conventions agree at every discrete equality boundary.
 
-**What the fix rests on instead.** The monotonicity was verified by
-instrumentation while the change was made: the threshold rose from 32.536 to
-33.906 at seed 97 under per-round resampling, in 19 of 400 configurations, and
-in 0 of 400 with one matrix held across the stepdown. That is a real
-measurement and it is not a regression test — nothing would catch the revert.
-
-**What would close it.** `romano_wolf` returning its per-round thresholds, so a
-test can assert the sequence is non-increasing directly. That is an API change
-to a public function.
-
-**Found by** an independent fleet pointed at this session's own fixes, which
-reverted the change and observed the suite stay green.
+The new result also remains in memory. It has no append-only raw-statistics
+record, no production uncapped family constructor and no institutional-evidence
+caller. Thus it closes the mathematical computation and its monotonicity proof,
+not durable provenance or Step 3.
 
 ---
 
@@ -5331,13 +5382,14 @@ has taken.
 
 ## The two stored commands' events are verified by measurement, not by a test — D-0255
 
-`cli::commit_stamp` is `option_env!("BRUTEX_COMMIT")`, read at COMPILE time. A
-`cargo test` build carries no stamp, so `sweep_stored` and `audit_stored_inner`
-both refuse at the commit gate before the store is touched — which is correct,
-because §3 rule 3 forbids a computation whose identity cannot be recorded, and
-the gate must therefore come first. The consequence is that **the four `note`
-calls on those two paths are in a region `cargo test` cannot enter**, and no
-amount of fixture work inside the crate changes that; only a stamped build does.
+This section records the state measured at D-0255. At that time
+`cli::commit_stamp` was an unpopulated `option_env!("BRUTEX_COMMIT")`, so the
+ordinary `cargo test` build refused before the store and could not reach the
+four `note` calls. D-0348 later auto-stamped HEAD, and D-0432 now stamps only a
+proved clean supported checkout. A clean checkout's test harness can therefore
+reach farther; a dirty or unprovable checkout still stops at the identity gate.
+The historical event measurement below remains valid, but the former universal
+claim that tests can never enter those paths is superseded.
 
 `the_stored_audit_refuses_for_the_same_cause_and_names_itself` already states
 this limit for the refusal path, and says why asserting more would be worse than
@@ -5735,3 +5787,2252 @@ finding a `build.rs` that runs `rustc` in `~/.cargo/registry` has found
 something true and something this workspace already contains fourteen of. See
 D-0311, where that rule was invoked against one crate before it was measured
 against the rest.
+
+### §97 — the pull journal lock coordinates this workspace; it is not a filesystem security boundary
+
+`Journal::append` takes an OS advisory exclusive lock on `pull.journal` across
+the locked-length check, one fixed-stride write and `sync_all`. That proves two
+writers using this workspace's append door cannot interleave. Advisory means
+exactly that: a different executable that ignores the protocol can still write
+the inode, and permissions or process isolation are the controls for that
+case.
+
+A torn tail is deliberately not repaired automatically. The whole records
+before it remain readable, but every later append refuses until an operator
+preserves the damaged journal and installs an explicitly reviewed replacement.
+The code cannot distinguish an interrupted prefix worth forensic examination
+from arbitrary bytes, so truncating or padding would mutate append-only history
+and fabricate certainty. D-0402 records the refusal policy; J-04 and J-05 prove
+the two states the writer can enforce.
+
+### §99 — master locks and exclusive capture names close cooperating races, not every filesystem or crash fault
+
+The master replacement lock is **advisory**. Every writer in this workspace
+uses `masters::land`, so threads and processes using this code serialize on one
+inode per source. A different executable that ignores the protocol can still
+truncate `.FILE.partial` or replace the target, and a network filesystem whose
+lock implementation does not coordinate its clients can still admit two
+writers. Permissions, a local filesystem and process isolation are the controls
+for those cases. The blocking lock has no timeout: a live thread that acquires
+it and then wedges in local I/O can queue the next same-source landing until
+that thread or process ends. The critical section contains no network wait.
+
+`sync_all` means the guarantee the operating system and filesystem expose. A
+device that lies about cache flushes, remote storage that acknowledges before
+replication, physical media failure and sudden loss of the whole volume remain
+outside the process's proof. The normal order is temporary bytes → file sync →
+rename → directory sync. If the final sync returns an error, the live process
+reports `Landed::Uncertain`. A process killed or a machine losing power in the
+few instructions between rename and that sync cannot execute the return path,
+so no in-memory outcome can report it after restart; directory sync narrows
+that durability window and cannot make abrupt termination observable.
+
+Raw captures are bounded **per process**, not for the lifetime of the data
+directory. Each process may add at most its fixed feed/method and unreadable
+budgets, and previous processes' files are deliberately preserved because they
+are evidence. Therefore retained capture space across N restarts is O(N), not
+O(1). A separate retention or archival policy would be a destructive evidence
+decision and is not invented here.
+
+`create_new` guarantees this code never opens an earlier capture for writing,
+even if PID and timestamp repeat. It does not make the write transactional: a
+process killed after exclusive creation and before `write_all + sync_all`
+finishes can leave a truncated **new** capture. It cannot damage an old one, and
+the capture header's declared body length lets a future reader identify the
+short file, but no production reader currently performs that check. Ordinary
+write and sync errors remove the incomplete file when cleanup succeeds and emit
+`pull.capture`; if cleanup itself fails, that second failure is included in the
+same event. Telemetry can itself be unavailable or saturated, so the process
+counter is the independent in-memory signal; that counter, like every process
+counter, resets on restart.
+
+The sixteen collision attempts are a fixed upper bound, not a claim that a
+capture must always land. A directory pre-populated with every candidate causes
+an explicit counted/logged capture failure after sixteen `create_new` calls.
+The vendor response continues by policy, because diagnostic I/O is not allowed
+to replace a valid market-data response with a different filesystem failure.
+D-0405 and D-0407 record the two choices.
+
+### §100 — complete trade analytics and arbitrary output cannot be O(1)
+
+The dashboard's period and streak views are derived from the run's durable
+trade block. With `T` trades, reading the block is O(T); ordering by resolution
+sequence is O(T log T) in the browser; retaining the input and a worst-case
+one-trade-per-streak series is O(T) space. A run can also have O(T) distinct day
+buckets. No implementation can print an arbitrary number of exact rows in
+O(1) time or retain them in O(1) space.
+
+What is bounded is the interactive surface: the time chart admits no more than
+24 bucket rows to the DOM and the streak chart no more than 32 run rows, with
+clamped paging over the complete derived answer. Per-row arithmetic and label
+decoding are constant work. This prevents browser layout cost from growing with
+the whole series while refusing the false claim that the series itself is
+constant-sized. D-0408 and BT-21 through BT-23 record and test that boundary.
+
+### §98 — four durable files are a commit protocol, not an atomic filesystem transaction
+
+D-0404 makes `runs.bin` the last-written visibility marker. On a filesystem
+that honours successful `sync_all` calls and ordered directory barriers, a
+surviving new ledger row follows durable frontier and trade blocks plus one
+sealed `detail-sets.bin` receipt containing their exact row counts. A killed
+writer before that point leaves no public parent; a whole matching prepared
+block/receipt is resumed by the exact rerun, while a differing or damaged byte
+or count refuses.
+
+This is not a claim that one operating-system syscall atomically commits four
+files. No portable Rust API offers that operation, and power can fail between
+any two barriers. The protocol chooses which intermediate states are visible
+and makes every non-final state either recoverable or loud. Its guarantees stop
+where the storage stack lies about `fsync`, loses already-acknowledged writes,
+or permits a non-cooperating process to ignore advisory locks and edit the
+files. Filesystem redundancy, hardware write-cache policy and hostile local
+process isolation are outside this repository.
+
+A process can die part-way through a detail or receipt `write_all`. A ragged
+tail refuses at open. An aligned strict child prefix has no receipt/parent from
+the new writer; the exact rerun detects different rows or counts and refuses. A
+corrupt receipted row can still leave the block index spanning the expected
+number of offsets, which is why count equality alone is not the integrity proof:
+the public reader also requires every row seal and identity, and returns no
+prefix on any failure. Loss of the entire child file is checked against the
+receipt before an API can call it absent: a positive committed count refuses,
+and only an explicit zero count is an empty answer. The recovery path never
+appends a guessed suffix: doing so could join an unknown prefix to a newly
+derived answer and call the mixture one run. Manual forensic recovery must
+preserve the damaged file and install a reviewed replacement; the program does
+not silently truncate append-only history.
+
+Legacy rows written in the former ledger-first order have no receipt. The
+ledger's streamed combination count is not the retained-frontier row count, and
+its chosen-grid trade count is not the unstopped trade-block count. Therefore a
+missing/short child cannot be distinguished from a legitimate empty/smaller
+historical child by those aggregates. Public detail reads refuse every
+receipt-less legacy row as `unverifiable`, including rows whose children appear
+present; this sacrifices immediate legacy drill-down rather than silently
+blessing a possible aligned partial commit. An exact rerun over the original
+bars may append the receipt after verifying the children and deterministic
+ledger fields. No legacy byte is rewritten.
+
+The steady-state append work is O(frontier rows + trade rows), which is the
+output itself; the receipt and ledger are one fixed stride each. Recovery
+compares every prepared output row, also O(output). A fresh public detail handle
+opens/indexes its whole child file, all receipts, and `runs.bin`, so end-to-end
+request setup is O(total child rows + total receipts + total ledger rows), then
+the three in-memory identity probes are O(1) and reading the selected block is
+O(selected output). There is no reusable cross-request ledger/receipt index on
+the current HTTP path. It would therefore be false to call fresh detail lookup
+or latency O(1). Neither the four-file commit nor arbitrary durable output has
+O(1) total time or O(1) space. `results/write.lock` serializes the short
+persistence phase across cooperating writers, so result commits queue under
+contention even though independent sweeps may compute in parallel.
+
+The fixed-width ledger append is not unconditionally O(1) either. Once it holds
+the exclusive file lock, `Results::append` absorbs `delta` complete rows written
+by other processes since that handle last scanned, then performs the one-stride
+write and expected-O(1) identity-map update. Its local work is therefore
+O(delta + 1); only the common `delta == 0` single-writer path has fixed local
+work. Lock waiting, seek/write and `sync_all` latency remain filesystem- and
+contention-dependent rather than worst-case O(1).
+
+### §101 — exact browser drill-down arithmetic is a refusal boundary, not an `i64` proof
+
+JavaScript `Number` exactly represents integers only from
+`-9,007,199,254,740,991` through `9,007,199,254,740,991`; Rust's signed and
+unsigned 64-bit stores are wider. D-0411 deliberately refuses a valid stored
+integer outside the browser range instead of rounding it. This means the Rust
+record can remain readable through Rust while its browser analytics are
+unavailable. Serving all integer facts as canonical decimal strings and doing
+the complete report in `BigInt` would widen that browser surface, but statistical
+ratios, date/chart libraries and money formatters would still need explicit
+conversion boundaries. That is not smuggled into this fix.
+
+With `T` trade rows and `B` period buckets, admission is O(T + B) time. It sorts
+the rows by sequence and retains a rehearsal curve, so its additional working
+space is O(T); the analytics then retain their own O(T) series as §100 records.
+The check cannot be O(1) total time because every integer that may be displayed
+must be read, and an answer containing T distinct trades is itself O(T). The
+comparison adds constant validation per run but still ranks R eligible runs in
+O(R log R) time and retains O(R) rows. Only mask decoding is genuinely bounded:
+exactly six words times 64 bits, with at most 384 returned positions, is O(1)
+time and O(1) space relative to store growth.
+
+The admission door proves representability, required shape and the arithmetic
+relations it checks. It is not a cryptographic authentication layer for HTTP and
+cannot prove that a malicious server supplied the real safe integer rather than
+a different safe integer. The sealed Rust trade file and result ledger remain
+the storage-integrity authorities. Bucket totals are reconciled with the served
+trade rows, but the browser does not independently reimplement Rust's civil-time
+bucketing to prove every row belongs under the reported key; doing so would
+create a second definition of the period algorithm. The API's Rust aggregation
+remains the owner of that semantic. D-0411 therefore prevents silent browser
+rounding and partial decoding; it does not claim end-to-end immunity from a
+compromised server, filesystem or browser runtime.
+
+### §102 — a span distinguishes absence from damage; it does not make loading constant-time
+
+`stored::load_span` may continue only after the store returns the typed
+`StoreError::Missing`. Every other open or read failure aborts before the span
+reaches the evaluator. This closes the silent reduced-sample path for a locked,
+torn, corrupt, denied or otherwise unreadable month; it does not turn a genuinely
+absent month into present data. The returned `Span::missing` list and the
+comparison's partial-span refusal remain the visible authority for that case.
+
+Loading M months containing B bars performs M opens and B fixed-stride record
+reads and retains B candles, so its total time is O(M + B) and its output space is
+O(B). Only each indexed record read is O(1). A successful open is also a
+point-in-time filesystem observation: an uncooperative process can delete or
+replace paths outside the advisory-lock protocol, and no in-process type can
+guarantee against a hostile filesystem or storage hardware that returns false
+success. D-0412 narrows recovery to the only absence the store itself observed;
+it does not claim O(1) whole-span latency or an external security boundary.
+
+### §103 — one constant-time scope predicate cannot authenticate mutable storage
+
+The stored-sweep boundary checks one fixed two-entry
+`InstrumentKey::SWEPT` table before it constructs or opens a path. Relative to
+repository growth that predicate is O(1) time and O(1) space, and its accepted
+set cannot drift from core because the loader calls `require_sweepable` instead
+of maintaining another allow-list. The complete load remains O(months + bars)
+time and O(bars) output space as §102 records; refusing a non-swept key performs
+no month walk and reads no bar file.
+
+This guard proves which structured key this process decided to request. It does
+not cryptographically bind a pathname to its later bytes, prevent a privileged
+or non-cooperating process from replacing files after the check, or prove that
+the feed labelled a NIFTY file actually supplied NIFTY data. Header identity,
+fixed paths, seals and advisory locks are the repository's storage controls;
+filesystem permissions, vendor authenticity and hostile-host resistance remain
+external boundaries. D-0413 closes accidental engine-surface widening, not
+those different threats.
+
+### §104 — latest-request publication is O(1); the abandoned network work is not erased
+
+Each drill-down stream retains one current object reference. Beginning,
+invalidating and checking a ticket are O(1) time and O(1) live gate state; the
+identity comparison is bounded by the fixed run-identity representation used by
+the page. An obsolete promise retains its own ticket until it settles, so N
+concurrent requests created by N rapid user actions can still occupy O(N)
+browser/network resources temporarily. The gate prevents their results from
+publishing; it does not claim to cancel bytes already in flight.
+
+Browser or extension code with arbitrary access to component state remains
+outside this mechanism, as do a compromised server and a runtime that violates
+JavaScript promise ordering. The deferred tests prove every ordering the page
+itself can create: B before A, A after close, and stale failure after current
+success. They do not make network delivery bounded or guarantee that a remote
+request completes. D-0415 is a state-consistency rule, not a latency claim.
+
+### §105 — strict JSON removes ambiguity; it does not make parsing free
+
+The browser-engine POST boundary first collects at most `MAX_FORM_BYTES` (8
+KiB) under the router's `DefaultBodyLimit`, then `serde_json` reads the complete
+body once. For B accepted request bytes, body extraction and JSON decoding are
+O(B) time and may retain O(B) bytes for the extracted `String`, decoded strings
+and rung members. The 8-KiB admission ceiling makes that resource use a fixed
+deployment bound; it does not make the parser O(1) as a function of attacker-
+supplied bytes, and it does not make the sweep started by a valid request
+constant-time or constant-space. An otherwise admitted body beyond the ceiling
+is rejected by Axum with `413` before `WireBody` or an engine slot is reached;
+an earlier middleware may instead reject the request (for example, a
+cross-origin write answers `403`) without reading it into `WireBody` at all.
+
+The typed union proves only the request syntax and field boundary recorded by
+D-0416: one complete JSON object, one value for every known key, declared value
+types, and a real distinction between an absent member and explicit `null`.
+Unknown members are deliberately ignored for forward compatibility, but their
+bytes must still be received and parsed within the same limit. This is neither
+authentication nor semantic proof that a feed, date span or knob is safe; the
+route's existing validators and the engine remain responsible for those facts.
+The process, filesystem, network stack and allocator can also fail despite the
+bound. D-0416 closes malformed-prefix/default widening, not those external or
+downstream failure classes.
+
+### §106 — an honest completion event is not a storage receipt
+
+Completion classification reads two optional fields and emits one event with a
+fixed number of bounded fields, so its local work is O(1) time and O(1) space
+relative to bars, candidates, trades and result-history length. It does not
+open or scan the result store. The event deliberately says `report`, `refused`
+or `invalid`; it never upgrades any of those states to “ledger committed”.
+
+This classification proves only what the settled in-process `Progress` holds.
+It cannot make a report's individual recording lines true, recover a task that
+was killed before settlement, or replace D-0404's sealed result receipt and
+ledger parent check. Telemetry itself may be filtered or fail to write; the
+logger exposes that through its health counters and first-failure diagnostic,
+but an absent log line is not proof that a task did not run. The rolling log is
+also not synced per event, so a power loss can lose kernel-buffered records.
+D-0417 removes a false success claim from the audit trail; it does not turn the
+audit trail into the database commit protocol.
+
+### §107 — loopback-only is exposure reduction, not authentication
+
+Checking one parsed `SocketAddr` with `IpAddr::is_loopback` is O(1) time and
+space. It happens before `TcpListener::bind`, so a refused address opens no
+socket, reads no store and contacts no vendor. That bound says nothing about
+request work after a valid loopback bind; pulls, sweeps, reports and stored
+reads retain their documented data-dependent costs.
+
+Loopback identifies a network interface, not a user. Any local process allowed
+by the operating system to connect to the port can issue the same requests, and
+this server has no account, credential, role or tenant boundary. A reverse
+proxy, port-forwarder, container-network rule or compromised host can expose a
+loopback service independently of this parser. Host permissions and process
+isolation remain the controls for those cases. Serving remote or multi-user
+clients requires real authentication and authorization before the bind policy
+can be widened.
+
+The same-origin middleware prevents the ordinary hostile-browser POSTs it can
+identify; it does not authenticate curl or a custom local client. Its decision
+may also precede Axum's body extraction: an oversized cross-origin request can
+answer `403`, while an otherwise admitted oversized body answers `413`. Both
+avoid the application parser, but neither status means the sender was
+authenticated. D-0418 closes accidental network exposure, not host compromise
+or every browser/network attack.
+
+### §108 — strict frontier decoding is fixed work per row; opening still walks the file
+
+Direction and reserve validation examines one direction byte, five reserved row
+bytes and four reserved header bytes. That is O(1) time and O(1) space per row
+or header. It does not make a frontier request O(1): opening builds the block
+index in O(all frontier rows), parent/receipt verification has its own ledger
+walks, and returning one run remains O(its selected rows). The output itself
+cannot be emitted in constant total time or space.
+
+The eight-byte BLAKE3 prefix detects accidental damage with a finite collision
+probability; it is not a MAC and provides no authenticity against a process
+that can edit and reseal the file. Strict enum/reserve checks prevent such a
+row from being interpreted under the current schema, but filesystem permissions
+and hostile-process isolation remain external. Retaining the sealed identity in
+the recovery index only ensures the program refuses rather than appends around
+that block; it does not repair, delete or reinterpret it. D-0419 is a loud
+schema boundary, not a storage-authentication or O(1)-latency guarantee.
+
+### §110 — a verified market session is not proof of every index value
+
+SEBI fixes the 2021-02-24 NSE normal-market timetable at 09:15–11:40 and
+15:45–17:00, with a pre-open between 15:30 and 15:45. That is enough to keep a
+shared 54-bar vendor prefix from rewriting the exchange session. The same
+primary order records NIFTY computation unavailable from 10:06 to 11:43 and
+does not state one exact publication interval for NIFTY, BANKNIFTY and INDIA
+VIX. It is therefore not evidence that each index owes all 220 normal-market
+bars.
+
+For a spot-index audit, 2021-02-24 is one explicit `unmeasured` day: held rows
+remain visible, expected and lost counts do not include the day, and the gap
+ledger names the non-claim. This may under-report a real vendor omission after
+the 15:45 reopening; that is the safe direction until instrument-specific
+primary evidence exists. Calling all 166 absent normal-market slots vendor
+holes would be the opposite and unsupported claim. CASH and derivative audits
+continue to use the verified 220-minute exchange session.
+
+The fixed-date subject check is O(1) time and O(1) space per day. The complete
+month audit remains linear in month minutes and stored bars as §102 and P-70
+already state. Neither the calendar nor this refusal authenticates vendor
+bytes, proves an index was disseminated at an undocumented minute, or repairs
+an append-only historical hole. D-0420 closes the circular denominator; it does
+not manufacture the missing publication record.
+
+The primary-sourced exchange override also applies when that date is absent
+from the observed daily rows but lies within their derived span. This prevents
+the input being audited from erasing the known session. It does not fill or
+repair the absent daily row, authenticate surrounding rows, or infer any other
+holiday/session outside this one recorded exception.
+
+### §111 — exact chosen-grid detail is output-sensitive replay, not O(1) latency
+
+D-0414 removes a semantic mismatch by doing additional real work. After the
+final screen selects one candidate/cell, materialisation repeats that
+candidate's execution walk, constructs the path-crossing facts needed by the
+selected stop/target/trailing variant, walks its ordered candidates once, and
+emits T chosen rows. Its time is proportional to the bars/path intervals it must
+inspect plus T; its row vector and write buffer are O(T) space. The exact factor
+also depends on the already-bounded rung tables consulted while crossings are
+built. Reconciliation then folds those T rows once in O(T) time and O(1)
+additional accumulator space. These operations cannot be O(1) total time or
+space while returning an arbitrary number of distinct trades.
+
+One selected variant applies exclusivity sequentially: whether signal N+1 may
+enter depends on the actual exit or conservative blocking interval chosen for
+N. Independent candidates and sweep combinations may still be computed in
+parallel elsewhere, but splitting this ordered fold without a proven prefix
+state merge would change the strategy. The implementation prefers the exact
+answer over an unsupported claim that every part can run concurrently.
+
+Persistence appends and seals 136 bytes per chosen row, so a result with T rows
+costs O(T) bytes and write work; its version-2 receipt and ledger marker remain
+fixed strides. Opening `chosen-trades.bin` rebuilds its identity index in O(all
+chosen rows). A fresh API request additionally opens/indexes the ledger and
+receipts and then reads O(T) selected rows and builds O(B) period buckets. The
+browser validates O(T+B) integer facts and retains its derived series. Hash
+lookup after an index exists and each fixed-stride row seek are O(1); fresh HTTP
+latency, the complete dashboard, durable history and the brute-force sweep are
+not. No benchmark in this change turns those bounds into a percentile-latency
+guarantee.
+
+The complete-Cell equality and independent count/sum/worst/drawdown fold prove
+that rows derived by this binary describe the selected cell under the modeled
+bars and fills. They do not authenticate vendor data, predict live fills,
+eliminate market risk, or prove profitability. The eight-byte BLAKE3 prefixes
+detect accidental damage with finite collision probability; they are not MACs
+against a local process able to edit and reseal files. Advisory locks govern
+cooperating writers only, and `fsync` guarantees stop at the storage stack's
+honesty as §98 records.
+
+`/trades.json` obtains one receipt/ledger proof and then freshly indexes the
+chosen-trade child, so a single response never mixes two receipt snapshots.
+That ordering is conservative rather than globally atomic: a commit completed
+after the proof read may make the fresh child look like an orphan and be
+refused for that request; the next request sees the complete append-only set.
+The reader never waits, retries into a mixed snapshot or weakens a refusal into
+clean empty. A hostile process rewriting already-committed bytes remains beyond
+the cooperating-writer transaction model.
+
+Legacy `results/trades.bin` version 2 and receipt version 1 are refused rather
+than migrated because their bytes lack selected policy/direction and represent
+different exits. Recovery requires the exact original bars/configuration and a
+deterministic rerun; if those inputs are unavailable, chosen-grid drill-down for
+that history remains unavailable. The new row also does not store entry/exit
+prices, an exit-cause enum, or a cross-rung chart-alignment key. The UI may show
+its durable indices, times, realised fills, direction and MAE/MFE, but it must
+not infer the absent facts or promise chart markers.
+
+### §112 — browser frontier admission is linear and conservatively bounded
+
+`validateFrontierPayload` walks all R returned rows once, checks a fixed set of
+fields per row, and decodes six fixed-width mask words. It uses a set of R rank
+values to reject duplicates. Time and additional space are therefore O(R), not
+O(1) for a complete response. Each individual field check and each fixed mask
+word operation is O(1). The open-run and all-timeframe paths perform this fold
+independently for every response they fetch; the latter still fetches rungs in
+parallel, but parallel issue does not make total validation work constant.
+
+The admission door is intentionally narrower than Rust's numeric domain.
+JavaScript `Number` exactly represents integers only through 2^53−1, while the
+wire carries bare `u64` and `i64` values. A larger integer has already lost its
+identity during `JSON.parse`, so this code refuses it rather than extrapolating
+the original from a rounded double. Mask words avoid that boundary because the
+API sends canonical decimal strings and the browser decodes them with `BigInt`.
+Moving every other field to strings/`BigInt` would require a versioned wire and
+ranking policy; D-0422 does not silently introduce one.
+
+These checks prove internal response exactness and consistency only. They do
+not authenticate local files, prove that a ranked strategy will remain
+profitable, bound network or rendering latency, or turn the output-sensitive
+frontier/API/dashboard path into O(1) total work. A malicious local producer
+that supplies different but internally consistent safe numbers remains outside
+this non-cryptographic browser boundary.
+
+### §113 — execution membership makes each gate constant-time, not the run
+
+D-0421 adds linear preparation so the hot execution decisions do not scan.
+For B execution bars, the checked evaluator replay costs O(B) time and retains
+O(B) acceptance bits. `SliceFacts` then builds an O(B) refusal-prefix table, an
+O(B) accepted-timestamp index and O(B) session facts. The acceptance bitmap is
+shared by reference across candidate and grid walks; cloning it does not copy B
+verdicts. These are per-slice costs, not per-candidate costs.
+
+One membership read and one inclusive path-refusal query are worst-case O(1):
+the latter is two prefix reads and a subtraction. Exact-deadline lookup through
+Rust's standard `HashMap` is expected/amortized O(1). It is not a deterministic
+worst-case O(1) guarantee under arbitrary collision behavior, and this decision
+does not relabel it as one. Building the map, the acceptance pass, the prefix,
+the forward vector and the session table remain linear in B and cannot be O(1)
+total while retaining one answer per input bar.
+
+The larger operations keep their real bounds. A trade walk is linear in the
+signals it must decide. Excursion/crossing construction reads the relevant
+paths. An exit grid evaluates its bounded configured cells over ordered
+candidates, and chosen-row replay plus persistence is output-sensitive. The
+brute-force combination ladder, complete durable history, API response and
+dashboard are not constant-time or constant-space. Parallel issue changes wall
+time and resource overlap; it does not change those total-work bounds or make
+the one-position state machine safely reorderable.
+
+Conservative refusal also has a cost. A missing exact deadline keeps a
+block-only occupancy through the available time boundary even though the true
+unobserved exit is unknowable. Without a verified session calendar in
+`runner`, a non-regular or incomplete session cannot price an overrun as a
+square-off, so valid special-session trades may be omitted. This is deliberate
+under-counting in preference to manufactured fills, not proof that no position
+existed or that the market was closed.
+
+The bitmap proves only that the configured evaluator accepted the supplied
+sequence. It does not authenticate vendor bytes, reconstruct missing market
+events, establish live order priority or slippage, predict profitability, or
+provide a latency percentile. The adversarial tests prove the modeled bars no
+longer leak through the named pricing and materialization paths; they cannot
+guarantee live-market outcomes or every future code change.
+
+### §114 — result-set correlation is one bounded event, not a second commit
+
+The success event formats one fixed 32-byte identity and carries seven scalar
+fields; the refusal carries that identity and one bounded string. Its local
+construction and emission are O(1) time and O(1) space relative to bars,
+candidates, trades and result-history length, and neither call is inside one of
+those loops. Reuse obtains its stable zero-based ledger index from the
+open-time identity map with one hash probe. This does not make opening the
+ledger O(1): building that map still walks all run records, as the ledger format
+already states.
+
+The event is deliberately ordered after the database outcome, not atomically
+inside it. A process killed after the ledger sync and before telemetry emission
+leaves a valid public result set without this line. An uninstalled, filtered or
+failed sink can do the same; rolling telemetry is not fsynced per event and a
+power loss may lose buffered log records. Conversely, a refusal line proves
+that this process attempted persistence and received that cause, not that no
+other cooperating process later committed the identity. `/logs` is therefore a
+searchable correlation surface, while the frontier/trade/receipt/ledger files
+remain the only publication authority.
+
+Telemetry failure never rolls back a durable result set. Coupling those two
+would trade recorded computation for observability and still could not make two
+separate filesystems one transaction. The logger's health counters and
+first-failure diagnostic remain the way to detect missing audit writes. D-0424
+closes the previously dark commit/reuse/refusal outcome; it cannot guarantee
+that an external storage stack or the audit sink always accepts a write.
+
+### §115 — full ledger admission and comparison are linear, not O(1)
+
+`validateRunForComputation` checks a fixed schema for one row in O(1) time and
+O(1) additional space. It includes exact integer and Rust-domain bounds, fixed
+five- and six-element arrays, calendar/span relations and canonical labels.
+Exact subtraction and scaled-ratio helpers also take O(1), and return no value
+when their derived integer would exceed JavaScript's exact range.
+
+A response contains R arbitrary rows. Admitting and decorating all of them is
+O(R) time and O(R) retained space; selecting leaders and sorting eligible rows
+are likewise input-sensitive. The dashboard, masks, charts and full drill-down
+add work proportional to the evidence they display. Parallel fetches and fixed
+per-row checks do not turn that total work, space, browser latency or network
+latency into O(1).
+
+The door proves consistency only for the bytes the browser received. It does
+not authenticate the local API or store, recover a bare integer already rounded
+by JSON parsing, prove vendor completeness, predict live fills or profit, or
+establish a latency/service-level guarantee. A different internally consistent
+payload from a malicious local producer remains outside this non-cryptographic
+check. Moving every numeric field to canonical strings and `BigInt` would be a
+new versioned wire contract; D-0425 deliberately refuses unsafe rows rather
+than inventing that migration inside the browser.
+
+### §116 — refreshed detail recovery is bounded by new history, not O(1) end to end
+
+A frontier or chosen-trade handle opens by indexing every existing row, and a
+receipt handle opens by indexing every receipt. Those cold paths are O(F), O(T)
+and O(R) time and retain one hash entry per identity/block. Once open, ordinary
+identity lookup is one standard-library hash probe: expected/amortized O(1),
+not a deterministic collision-proof bound.
+
+Before an append or durability confirmation, a stale handle scans the bytes
+added since its last validated offset. The work is O(new rows), zero on the
+ordinary serialized path and linear in concurrent append history in the worst
+case. A frontier or chosen-trade block of N rows still requires O(N) validation,
+encoding and write work and O(N) buffering; only the receipt row, file-length
+arithmetic and fixed-stride seek are constant-size. Repeating `sync_all` for a
+byte-equal reuse is a fixed number of calls, not constant storage latency.
+Filesystem queues, device caches, directory metadata and flush duration remain
+outside an algorithmic O(1) promise.
+
+Rollback is deliberately narrow. Only bytes written by the current call after
+its locked, measured end may be truncated. If `set_len` fails, the file can
+remain ragged and every later writer refuses until an operator repairs that
+tail; the software does not claim recovery. A shrink, peer-created ragged tail,
+bad seal or duplicate identity is likewise retained and named rather than
+rewritten. Advisory locks coordinate cooperating processes only, checksums are
+not authentication, and the storage stack can still lie about durability.
+
+The repeated child/receipt/directory/ledger barriers reduce the ambiguous crash
+windows and make exact reruns safe under the recorded protocol. They do not
+turn four append-only files into one atomic transaction, survive arbitrary
+hostile mutation, or guarantee that power loss cannot defeat hardware that
+acknowledged a flush incorrectly. D-0426 and RS-08 close the stale-cache and
+write-around-corruption paths; §98 remains the underlying transaction limit.
+
+### §117 — exact one-minute cadence is linear preparation over supplied evidence
+
+Self-projecting B native one-minute bars builds an exact-timestamp alignment and
+a checked fill column in O(B) time and O(B) space. `SliceFacts` then builds the
+acceptance, timestamp-gap and session prefixes plus its timestamp index in
+O(B) time and O(B) retained space. One accepted-member read and one inclusive
+path acceptance/gap test are worst-case O(1) vector operations; an exact
+timestamp lookup through Rust's `HashMap` is expected/amortized O(1). None of
+that makes a complete trade walk, exit grid, chosen replay or sweep constant in
+total time or space.
+
+The 60-second rule proves the model used for supplied `1min` bars. It does not
+reconstruct an absent exchange event, authenticate vendor data, infer a fill
+inside a missing minute, establish queue position/slippage, or guarantee a
+live order. Missing immediate or interior timestamps conservatively drop or
+block modeled trades and can therefore undercount a strategy. The visible
+dropped/refused counts are evidence of that boundary, not repaired data.
+
+D-0436 supersedes the shipping coarse-native compatibility described here.
+Every operator path that prices a coarse signal must now supply matching
+one-minute execution evidence or refuse; only native `1min` self-projection is a
+shipping one-series trade path. Low-level runner same-series APIs remain
+available to direct Rust callers and tests, but their type/reporting contract
+does not authorize a CLI command to present coarse OHLCV as one-minute
+execution. D-0427 and XM-05 still prevent sparse native evidence from redefining
+the minute; D-0436, UE-01 through UE-03 and §126 bind the new operator boundary
+without claiming a latency percentile.
+
+### §118 — complete browser admission is output-sensitive and the benchmark is not a run snapshot
+
+The browser validates evidence proportional to what it receives. A vocabulary
+costs O(V) time and O(V) map/set space; a bar window costs O(B) time and O(B)
+retained chart data; a frontier costs O(F) time and O(F) rows/ranks; chosen
+trades plus their recomputed period maps cost O(T + P) time and O(T + P) space.
+Ledger admission, comparison sorting, chart preparation and DOM windows retain
+their previously stated input/output-sensitive bounds. Generation tickets and
+fixed per-row checks are O(1) each; parallel fetches do not make their total
+work, bandwidth, memory or wall-clock latency O(1).
+
+`BigInt` preserves six decimal mask words and exact fixed-width intermediate
+arithmetic after a scalar has been admitted. It cannot recover an `i64`/`u64`
+bare JSON number that `JSON.parse` already rounded. Those values therefore
+remain confined to JavaScript's safe-integer range, and a fold or scale outside
+it refuses rather than displaying an approximation. Rupee formatting preserves
+the final paisa across that admitted range, but chart libraries still receive
+display-boundary floating-point coordinates. This is exact source labeling and
+legend formatting, not an all-integer rendering engine.
+
+Request generations prevent a late success, refusal or exception from
+publishing into a newer report; they do not cancel work already in flight or
+make an external response authentic. Dense vocabulary/bar checks, identity
+binding, raw-to-derived recomputation, period reconstruction and ledger
+reconciliation prove internal consistency of the received objects. They do not
+prove vendor completeness, filesystem authenticity, future profitability,
+million-user capacity, or a latency/service-level guarantee.
+
+Most importantly, `/bars.json` does not carry the run's `data_digest` or an
+immutable snapshot identifier. The buy-and-hold endpoints are validated and
+pinned to the run's recorded timeframe and span, but they read the **current
+store**. Later append-only additions, repairs or a different mounted store can
+therefore produce a different reference from the bytes the run swept. The UI
+states that caveat and keeps the benchmark series separate from the
+trade-resolution strategy curve; it must not call the result a digest-bound
+historical comparison. Closing that limit requires a versioned endpoint bound
+to the run identity/data digest and retained source bytes, not another browser
+arithmetic check. D-0428 and BT-37 through BT-39 close the named admission and
+mixing failures only.
+
+### §119 — a no-growth ladder ratio is not a whole-run O(1) claim
+
+C-E-04 compares the complete ladder's elapsed time divided by bars at 10,000 and
+100,000 rows. The ladder has both proportional support work and fixed work for
+the held-constant candidate topology, so its shape is `T(B) = aB + b` for that
+experiment. A lower quotient on the larger input is expected amortisation, not
+proof of input dependence and not an O(1) total-runtime result. The gate therefore
+refuses only a greater-than-3× per-bar cost after both untimed probes complete the
+same non-empty topology, masks and reconciled counters. Timer noise, scheduler
+contention and hardware effects still exist beneath that deliberately generous
+regression ceiling.
+
+The symmetric ratio remains appropriate for isolated primitive rows where the
+timed operation itself is the controlled variable. Neither form proves
+worst-case constant latency, collision-proof hash lookup, constant total sweep
+time, constant total space, million-user throughput or a service-level bound.
+Apriori enumeration still depends on the surviving frontier, support still reads
+the supplied bars, reports and browser admission remain output-sensitive, and
+storage durability still depends on the filesystem. D-0429 changes one false-red
+measurement contract; it does not widen the O(1) claims in the charter.
+
+### §120 — binding two bar series is linear evidence, not constant total work
+
+A one-series run retains the historical streamed digest: O(S) time over S signal
+bars and fixed hasher state. A run whose fills use a separate execution series
+streams both component digests and one fixed-size composition: O(S + E) time,
+O(1) auxiliary hasher space, and no data-sized allocation. The operation is
+constant per bar; taking a digest over an arbitrarily long dataset is not O(1)
+in total time. The thirty-two-byte result makes later identity assembly fixed
+size, but does not make producing those bytes free.
+
+BLAKE3 supplies collision resistance, not a mathematical proof that two
+arbitrary byte strings can never collide. The digest authenticates neither the
+vendor nor the filesystem; `feed` is still a separate identity term and store
+seals remain corruption checks rather than signatures. Binding the supplied
+one-minute slice proves which bytes the model consumed. It cannot prove that a
+vendor supplied every exchange event, reconstruct a missing minute, establish
+live queue position or guarantee a fill. D-0430 closes the omitted-input
+collision in the computation identity and none of those external limits.
+
+### §121 — a poisoned reopen preserves evidence and deliberately stops writes
+
+Frontier and chosen-trade files are indexed by walking every fixed-stride row on
+open. Schema-decoding seal-valid rows and checking adjacency add fixed work per
+row, so cold open remains O(F) or O(T) time with O(number of indexed identities)
+retained space. Ordinary lookup on an already-open healthy handle remains one
+expected/amortized standard-library hash probe. A hostile hash-collision bound,
+constant cold-open latency and constant total index space are not claimed.
+
+A seal-valid but schema-invalid row or a non-contiguous repeated identity poisons
+append and durability promotion without deleting bytes. Healthy prefix ranges
+remain exactly addressable, but the software does not guess which later block a
+human meant, merge split history, rewrite a reserve byte or repair a recomputed
+seal. That is fail-closed append-only behavior, not automatic recovery. CRC/seal
+checks detect ordinary corruption and do not authenticate a malicious writer
+that can alter bytes and recompute the seal. D-0431 and RS-08 close the fresh
+reopen/index ambiguity; §98 and §116 retain the multi-file, filesystem and stale
+handle limits.
+
+### §122 — source provenance is a linear build proof with a conservative Git boundary
+
+The commit verifier walks the relevant HEAD tree and index, reconstructs the Git
+objects they name and hashes every indexed non-front-end working file. Its work
+is O(G + S + U): Git object/index bytes read, source bytes hashed and directory
+entries inspected for untracked input. It retains O(P) path/index state. This is
+build-time work and adds no per-bar runtime operation, but it is not O(1) total
+time, O(1) space or a constant build-latency guarantee. Pack decompression,
+filesystem caches and repository size remain real inputs.
+
+The admitted format is deliberately narrower than everything Git can represent:
+SHA-1 repositories; index v2/v3 with no mandatory extension the verifier does
+not implement; ordinary, detached or linked-worktree refs; loose objects and
+pack-index v2 over pack v2/v3 with OFS/REF deltas. SHA-256 repositories, index
+v4, split/sparse/intent-to-add state, submodules, alternate stores, unavailable
+promisor objects, non-canonical paths and clean/smudge or line-ending filters
+whose worktree bytes differ from the indexed blob all refuse. Non-Unix
+executable-bit semantics may also refuse a clean executable entry. These are
+false refusals by design, never permission to guess a stamp. A Git feature added
+later likewise remains refused until its format and adversarial tests land.
+
+Untracked discovery excludes `web/` by the repository's front-end boundary and
+known regenerated or operator-only roots (`target`, logs, mutation output,
+credentials, IDE/agent scratch). That exclusion relies on the enforced rule that
+no crate compiles from the front end or those runtime/build-output roots. A
+future tracked source that deliberately reads an excluded untracked artifact
+would invalidate that premise and needs a new decision rather than inheriting
+this proof silently.
+
+The verifier checks Git's SHA-1 object ids and index checksum. SHA-1 gives the
+repository's own object identity, not modern collision-proof authentication;
+the proof does not authenticate the repository owner, filesystem, compiler,
+dependency registry or host. A malicious actor able to replace both Git
+metadata and source can still present one internally consistent tree.
+
+There is also an irreducible build-script TOCTOU interval. The final proof runs
+before rustc opens every source input. Cargo's `rerun-if-changed` watches the
+proved files and directories and causes an ordinary subsequent build to repeat
+the proof, but a concurrent or malicious edit after the verifier's last read and
+before rustc's read is not atomically locked by Cargo. No finite re-read inside a
+terminating build script can lock future compiler I/O. Eliminating that interval
+requires compiling from an immutable content-addressed checkout or teaching the
+compiler/build orchestrator to consume the verified snapshot; this repository
+does neither and must not call the current mechanism a proof against concurrent
+hostile mutation. D-0432 and RP-01 through RP-03 prove the stable supported
+checkout case and fail closed on every observed ambiguity.
+
+### §123 — loopback origin admission is not local-process authentication
+
+The write gate examines a fixed set of headers, parses two bounded authority
+values and compares them with one `SocketAddr`: O(1) work and fixed auxiliary
+space per request. It does not make the handler's work, sweep runtime, storage
+append, network latency or concurrent service capacity O(1). The body limit and
+the individual command's own bounds remain separate gates after admission.
+
+Requiring the exact bound loopback IP or `localhost`, bound port, matching
+plain-HTTP Origin and coherent optional fetch metadata closes the measured
+cross-site-form and DNS-rebinding browser paths. Rejecting all conventional
+forwarded-authority headers is correct only because this application has no
+trusted reverse-proxy mode. A future proxy deployment cannot silently inherit
+this behavior: it needs an explicit trust boundary, authenticated proxy peer
+and a new decision/test surface. Likewise, HTTPS is refused because this
+listener terminates only plain HTTP; TLS termination would require a new
+authority contract rather than accepting an asserted proto header.
+
+This is not authentication or authorization. A local process can connect to
+the port and deliberately supply the exact admitted headers, browser extensions
+or compromised same-origin script execute with the page's origin, and malware
+with filesystem/process access is outside an HTTP-origin check. `localhost` is
+a deliberate alias for the exact loopback listener and depends on the client
+resolving that reserved name locally; arbitrary loopback IPs are accepted only
+when they are the listener's actual bound address. D-0433 and HS-03 prove the
+header and router boundary, not operator identity, CSRF tokens, remote-proxy
+safety, million-user isolation or a network service-level guarantee.
+
+### §124 — required audit admission can refuse healthy computation
+
+Reserving one attempt id and appending one required marker are fixed-shape
+operations at the API boundary, but their latency and success depend on the
+telemetry sink and filesystem. They do not make a sweep, descent, stored read,
+append, network response or dashboard update O(1) in total time or space. A
+full, read-only, filtered or unavailable log deliberately makes a browser engine
+request answer 503 even when the mathematical computation itself could run.
+That is an availability cost chosen to prevent an unobservable hours-long task,
+not evidence that telemetry is infallible.
+
+The start marker proves only that one exact attempt was durably admitted to the
+configured append path. It does not prove every later event will be written,
+that a process or host crash will produce a terminal marker, that storage
+hardware honoured a flush, or that a reader has already observed the bytes.
+Later health and completion records remain necessary, and an operator must not
+infer success from admission alone.
+
+Refusing HTTP `min_hits = 0` makes the wire request equal the executed support
+floor. It does not make a positive floor statistically sufficient, bound the
+Apriori frontier, force extinction within a fixed duration, or turn support
+counting into constant total work. The engine retains its defensive zero-to-one
+normalisation for direct library callers; a new external boundary must either
+refuse zero explicitly or state and identity-bind a different policy rather
+than inheriting that fallback silently. D-0434 and SW-31 through SW-32 prove
+only these admission boundaries.
+
+### §125 — bounded detail reads are finite linear work, not constant latency
+
+The two detail routes now impose absolute per-request ceilings, but cold open
+still walks each admitted fixed-stride file and builds an identity index. Within
+the compiled limits that is at most 64 MiB apiece for the ledger, receipt and
+selected child, followed by at most 4096 selected rows and an 8 MiB encoded
+body. Its shape remains linear in the bytes and selected rows below those caps;
+hash lookup is the standard library's expected/amortized behavior, not a
+collision-proof worst-case O(1) guarantee. `spawn_blocking` keeps that work off
+Tokio workers. It does not make filesystem latency, allocation, JSON encoding,
+network delivery or end-to-end response time constant.
+
+Four permits are one-process overload protection, not a throughput or fairness
+guarantee. A healthy fifth request can receive 429 while earlier detail work is
+queued or running, other blocking work can still contend for Tokio's blocking
+pool, a process restart forgets its prior permits, and multiple API processes
+do not share the counter. No million-user capacity or latency service level was
+measured or is claimed.
+
+The opened-handle byte check fixes the stale-preflight authorization failure:
+each reader measures once and scans no farther than that captured length. An
+append that becomes visible after the measurement is left for the next request,
+while truncation, short reads, bad seals, schema errors, split identities and
+receipt/count disagreement still refuse without a prefix. These seals detect
+ordinary corruption; they do not authenticate a malicious filesystem writer.
+An immutable filesystem snapshot would be needed for a stronger concurrent-host
+integrity claim.
+
+A result above 4096 rows is deliberately unavailable from these routes even
+when its bytes are valid. Returning pages from it would require either rereading
+and revalidating the full block on every page or a separately persisted,
+identity-bound verified index/snapshot; neither exists. For a bounded result
+above one page, every response is honestly partial and the shipped browser
+rejects it rather than composing pages. Period summaries on a chosen-trade page
+describe the completely verified bounded result and are labelled
+`complete-result`; they do not make that row page complete. D-0435 and HD-01
+prove the named resource and truth boundaries only.
+
+### §126 — exact one-minute execution is linear evidence work, not O(1) total runtime
+
+Loading and validating signal/execution files, hashing both ordered series,
+building exact-timestamp alignment, checked reprojection, evaluator membership,
+gap/session prefixes and fold-bounded columns require O(S + E) time and O(S +
+E) retained or transient space for S signal and E execution records. Each fold
+then performs its own signal sweep and execution pricing; total validation work
+depends on bars, folds, survivors and exit-grid cells. Parallel candidate lanes
+change wall-clock scheduling, not that work or its memory bound. None of these
+passes, the full Apriori search, result append, filesystem latency, dashboard
+delivery or end-to-end trade decision is O(1) in total time or space.
+
+After preparation, a bar/member/prefix lookup is a fixed number of vector reads
+and subtractions. Rust `HashMap` exact-timestamp and identity lookups are
+expected/amortized O(1), not an adversarial collision-proof worst-case
+guarantee. Binary `partition_point` used to cut each fold's execution prefix is
+O(log E). Run identity hashing must read every input byte, and no digest can be
+both sensitive to an arbitrarily changed hidden bar and independent of input
+length. These are honest boundaries to the repository's constant
+**per-operation** rule; they do not support claims of universal O(1) latency,
+space, deduplication or million-user capacity.
+
+Exact timestamp alignment proves only which supplied stored record the model
+used. It cannot prove that NSE published a spot-index value in a missing minute,
+that a vendor delivered complete/authentic data, or that a live order filled at
+Open or PrintedExtreme. Missing/corrupt/ambiguous minutes conservatively remove
+modeled paths and may undercount a strategy. The optimistic/pessimistic bracket
+uses printed one-minute OHLCV and cannot determine tick order inside that
+minute, queue position, spread, market impact, slippage or brokerage execution.
+
+Fixed 15:10 IST is a deliberate product policy rather than a sourced exchange
+close fact. Because bars are left-labelled, only the unique accepted 15:09 row
+can price that boundary; 15:10 is post-deadline and a neighbour cannot repair
+15:09. A short, Muhurat, outage or otherwise non-regular session lacking that
+exact record makes any hold requiring forced liquidation unpriceable even when
+the session has other valid bars. Earlier exact horizons may remain available.
+This conservative loss of observations is the cost of refusing a fabricated
+forced fill.
+
+Fold clipping prevents the measured signal/execution look-ahead paths covered
+by UE-03; it does not turn anchored walk-forward into causal live proof, remove
+selection bias, guarantee future profitability or make purge width optimal for
+every strategy. The execution label tail after a test signal is deliberately
+the outcome being judged and is bounded to its configured one-minute horizon.
+The existing one-position occupancy is local to a candidate/directional walk.
+There is no live brokerage adapter, shared cross-strategy portfolio lock, or
+single combined long/short arbiter in this change, and no such guarantee is
+claimed. D-0436 and UE-01 through UE-06 establish the tested model boundary,
+not a guaranteed real-market fill or service-level assurance.
+
+### §127 — a bounded Top 25 still requires a complete linear population walk
+
+`runner::topn` retains at most 25 ranked rows and each insertion inspects and
+shifts at most that fixed bound. Its resident selection state is therefore O(1)
+with respect to the candidate population. Scoring one already materialised row
+uses eleven fixed integer fields and fixed-size identity keys. These local
+bounds do not make final selection O(1) in total time: every eligible candidate
+must first be generated, exit-priced, institutionally judged, written or
+otherwise made replayable, observed in the extrema pass and offered in the
+selection pass. That is O(C) time for C candidate records after the much larger
+candidate-pricing work. A disk-backed two-pass population is O(C) durable
+space; a resident helper over a supplied slice inherits the caller's O(C)
+memory.
+
+Min/max normalisation makes scores relative to the exact supplied population,
+not an absolute promise that a score is good. Runtime weights can change the
+ordering, and zero can deliberately remove one criterion; all eleven zero is
+refused. Undefined ratios use a declared neutral score and an explicit count,
+which is deterministic but remains a V1 modelling choice rather than measured
+evidence. Fixed-point arithmetic avoids float ordering and overflow in the
+tested integer domain; it does not make the underlying statistical estimates
+more certain.
+
+The kernel cannot prove that its caller reached Apriori extinction, priced
+every surviving direction/grid, replayed the same population twice or stored a
+complete file. Range checks detect an admitted second-pass value outside the
+first-pass extrema, but equal counts and a population digest are still needed
+to detect omission, duplication or replacement inside those extrema. Until
+those caller receipts and policy identity are persisted and the API verifies
+them, any ranking over the current capped frontier remains a `Preview` of that
+prefix and must not be advertised as global Top 10/25.
+
+No historical Top-N, complete or otherwise, guarantees future profitability,
+capital preservation, live fills, constant latency or a wealth percentile.
+D-0437 and GN-01 prove only the deterministic bounded selection kernel over the
+data and admission verdicts it was actually given.
+
+### §128 — the fixed portfolio arbiter is bounded per minute, not a completed portfolio simulation
+
+`GlobalSinglePositionV1` stores one optional occupancy timestamp, one previous
+minute and fixed counters. A minute owns at most 25 intents and a fixed 25-slot
+result. Atomic validation and canonical fixed-array insertion can each compare
+up to the square of that compiled ceiling, so their work and auxiliary state
+are O(1) with respect to run length. That statement does not make a historical
+portfolio run O(1): the caller still has to generate, execute, order, offer,
+persist and display every relevant minute and intent, so total work grows with
+the input history.
+
+Priority is supplied by a caller. The scheduler proves only that one declared
+priority/digest ordering was applied consistently; it does not prove that the
+priority came from the global Top-N population, that all simultaneous intents
+were offered in one batch or that the caller supplied a conservative occupancy
+end after an execution failure. Those facts need identity-bound population,
+intent and completion receipts. Calling the scheduler more than once for the
+same minute is refused, which prevents a cooperative caller from splitting a
+batch, but it is not authentication against a different process fabricating a
+new scheduler state.
+
+The inclusive occupancy rule is a backtest model. It prevents modeled overlap
+across the two swept instruments, both directions and all eight intraday rungs;
+it does not place, cancel, reconcile or observe live broker orders, partial
+fills, exchange rejects or external positions. The fixed 25-intent ceiling is
+the version-one Top-N portfolio surface and deliberately refuses a wider
+minute. D-0438 and GP-01 prove the pure arbitration kernel only; persistence,
+CLI/API wiring and a complete multi-strategy replay remain unfinished.
+
+### §129 — bounded nested workers are a scheduling control, not an O(1) sweep
+
+The engine's support work is still proportional to candidate mask width and
+the stored column it must count. `with_support_lanes` changes how many
+independent counts run simultaneously; it does not remove one count, shorten a
+column, change Apriori extinction or make total candidate work constant. A
+one-lane and four-lane fixture produce exactly equal `Sweep` values, but no
+full stored-run wall-clock speedup has yet been measured for the new bound.
+
+The CLI uses ceiling division across declared concurrent sweeps. Fourteen cores
+shared by eight rungs therefore permits sixteen inner support lanes in the
+worst phase, an oversubscription of two rather than the former theoretical 112.
+Rayon owners normally wait while their scoped support lanes run, but joins,
+allocation, OS scheduling and unrelated processes can still contend. When
+there are more outer sweeps than cores, every sweep retains one lane, so the
+process can still have more runnable work than cores; this is deliberate
+forward progress, not a latency guarantee.
+
+The process-global `SharedBy` counter coordinates this CLI process only. A
+second CLI process has its own counter and can oversubscribe the same machine;
+the OS, another application, thermal state, power mode and filesystem work are
+outside it. Catalog batching declares the Rayon pool width because that is the
+maximum simultaneously executing outer jobs, not the total catalog length.
+Neither fact proves a service-level latency, million-user capacity or that all
+phases parallelise equally. D-0439 and PA-01 prove deterministic equivalence and
+the arithmetic bound only.
+
+### §130 — an exact two-pass proof hashes every population row
+
+`PopulationPass` retains fixed counters and one bounded BLAKE3 state, while
+`VerifiedKeeper` retains at most 25 ranked rows. Their resident state is O(1)
+with respect to candidate count, and one already materialised candidate is
+encoded through a fixed sequence of integer fields. The complete proof is not
+O(1) total time: both passes must read and hash all C rows, so verification is
+O(C), and a durable replayable population remains O(C) bytes.
+
+The ordered digest detects omission, duplication, replacement and reordering
+between the two streams; it does not prove that the first stream was complete.
+That requires an external receipt tying the rows to extinction, closure,
+direction/cell expansion, admission policy and exact stored inputs. The
+strategy digest is likewise only as truthful as its caller's canonical preimage
+construction. Until the CLI writes and reopens such a sealed ledger, the proof
+kernel cannot turn a capped evidence prefix into a global Top 10 or Top 25.
+D-0440 and GN-02 prove pass equality, not market validity or future performance.
+
+### §131 — an uncapped stream removes retained loss, not combinatorial work
+
+The population callback itself retains fixed counters, one adjacent-frontier
+redundancy set and the caller's sink state. It does not hold every frequent
+mask. Computing closure still builds an O(|F_k|) hash set for one retired level,
+and the Apriori ladder still performs all data-dependent joins and support
+counts. Emitting C frequent members is necessarily O(C) calls; expanding each
+closed mask across two directions and G exit cells is O(C × G) semantic rows
+before their one-minute path pricing.
+
+On a sink failure the current engine callback cannot abort the walk. Runner
+stops offering rows and withholds the result, but support work may continue
+until extinction or an explicit engine resource refusal. This is correct and
+potentially expensive; a future fallible retirement API may reduce wasted time
+without changing output. The stream alone proves neither durable completeness
+nor global Top-N. Those require the CLI to append, sync, reopen and reconcile a
+versioned population plus receipt before the two ranking passes. D-0441 and
+CP-01 prove only the no-prefix runner boundary.
+
+### §132 — 200 fixed intents are bounded per minute, not free
+
+The eight-rung Top-25 union is a compile-time maximum of 200 intents. The V1
+portfolio scheduler uses fixed arrays and a fixed nested comparison bound, so
+its resident state and one minute's work do not grow with the number of bars,
+months or historical entry minutes. Canonical selection may nevertheless make
+up to 200 × 200 comparisons in a fully populated minute. No benchmark currently
+turns that structural ceiling into a latency, throughput or simultaneous-user
+claim.
+
+Every historical entry minute must still be generated, grouped, scheduled,
+persisted and displayed, so a portfolio replay is linear in the number of
+offered minutes and intents. The 200-row capacity also proves no completeness
+by itself: a caller can omit one rung or one constituent and still fit. An
+identity-bound receipt over all eight authoritative per-rung selections and the
+complete ordered intent stream is required before the dashboard may call the
+portfolio replay complete. D-0442 and GP-02 remove the earlier silent-cap shape;
+they do not yet supply that receipt.
+
+### §133 — a dynamic resolved grid has constant lookups, not constant total work
+
+Resolving one V1 grid validates and reads T training bars, sorts up to T positive
+range samples and selects a fixed runtime-bounded set of percentiles. It is at
+least O(T) time and O(T) transient space, plus sorting; changing a hidden
+training bar must change the data digest, so neither reading nor hashing the
+training stream can be O(1). The exact stop-target bitmap takes O(S × R) bits
+and construction work for S stop and R target rungs. One later coordinate
+admission is a checked index and one boolean read, O(1).
+
+Complete grid evaluation still prices every canonical stop/target/trail/TTP
+cell over the candidate's reachable one-minute paths. Bounds on rungs, ratio
+pairs and cells prevent an accidental unbounded allocation; they do not make
+the complete evaluation independent of bars, trades or cells. No benchmark yet
+measures this V1 resolver/enumerator, and no stored Zerodha run has supplied a
+wall-clock result.
+
+The same policy schema does not make NIFTY and BANKNIFTY levels interchangeable:
+their separately resolved values and training digests differ. Nor does one
+index's long grid stand in for its short grid: side is policy identity, adverse
+and favourable spans swap, and an opposite-side evaluation/replay refuses.
+Conversely, this module provides no stock/equity policy at all because the
+engine surface still forbids sweeping one. Supporting equities would require an
+explicit scope decision, sourced cost/fill contract, a new version and its own
+tests; silently falling back to the index policy is forbidden. D-0443 and EG-01
+prove the pure kernel boundary, not persistence, dashboard reachability, live
+fills, future profitability or end-to-end latency.
+
+### §134 — causal daily and exact-minute preparation is linear, not O(1) total work
+
+For D daily records, M exact-minute records and S signal records, context
+loading, OHLCV/cadence validation and identity hashing must read the supplied
+bytes. Daily validation plus the monotonic anchor fold is O(D + S); exact-minute
+GapFib folding and its monotonic exact-close join is O(M + S). The prepared
+minute masks, per-signal overlay and signal column retain O(M + S) transient
+space, while daily/reference/eligibility input retains O(D). Walk-forward
+rebuilds the permitted prefixes per fold, so its total work also grows with the
+number and sizes of those folds. Parallel callers can change scheduling, not
+these input-dependent bounds.
+
+After preparation, advancing either monotonic cursor is amortized O(1) per
+offered record, a condition-mask lookup is a fixed-width read, and replacing
+GapFib touches exactly the eleven append-only positions 132..=142 per retained
+signal row. Those are the constant **per-operation** boundaries required by the
+architecture. They do not make store I/O, allocation, complete-column
+construction, hashing, replay, the Apriori sweep, filesystem latency or
+end-to-end runtime O(1). A digest that changes when any hidden input bar changes
+cannot be computed without reading input proportional to its length.
+
+Exact timestamp and close equality prove which supplied one-minute record was
+used and prevent a neighbouring/coarse substitute. They do not prove that a
+vendor supplied every exchange publication, that the bytes are authentic, or
+that tick order and a live fill matched the printed OHLCV. Complete context
+months and three prior-session minutes are conservative admission rules, not an
+exchange-calendar completeness proof. The ordinary read path has no independent
+checksum-scrub receipt; the identity and report therefore preserve
+`UnverifiedNoReceipt` rather than claiming a seal.
+
+The existing adversarial tests exercise pure kernels, temporary stores, static
+production call-site bindings and prepared replay refusal. No clean-stamped CLI
+run against a configured real store, no stored Zerodha NIFTY/BANKNIFTY sweep and
+no wall-clock benchmark of this three-stream path was performed for D-0444.
+Consequently it provides no measured live-run result, latency/throughput service
+level, market-fill assurance, future-profit guarantee or million-user capacity
+claim. D-0444 and DR-01 prove only the stated causal construction, refusal and
+identity boundaries over the bytes actually supplied.
+
+### §135 — a dynamic exit grid is data-resolved, not policy-free or O(1) end to end
+
+One versioned runtime policy can describe how rungs are resolved, but it does
+not make the resulting numbers static or interchangeable. NIFTY/BANKNIFTY and
+long/short each read their own training distribution and therefore produce four
+separate resolutions per timeframe. Adding an equity policy would not be an
+automatic scale-up of this table: equities are outside the swept surface and
+need a sourced fill/cost contract, a scope decision, a new policy version and
+their own measured tests. V1 refuses them instead of silently borrowing an
+index result.
+
+Resolution validates and hashes every supplied bar and sorts observed ranges;
+complete evaluation prices every closed-mask/side/grid coordinate over the
+reachable one-minute paths. Those total operations grow with input bars,
+candidate population and grid size. Only the already-resolved coordinate
+lookup, ratio-bitmap check, fixed-width digest comparisons and other named
+per-operation primitives are constant/bounded. Filesystem access, BLAKE3 over a
+whole stream, sorting, Apriori enumeration, full replay, persistence, Top-N
+passes, and end-to-end latency cannot honestly be called O(1).
+
+The 15:10 boundary prevents post-deadline prices from choosing tradable rungs,
+but those bytes remain identity-bearing. A whole-minute gap remains absent; the
+current grid returns no price for a path needing it rather than fabricating a
+tick. OHLC can bound feasible pessimistic/optimistic order, but it cannot reveal
+the exchange's true tick sequence inside a minute. These models therefore
+prove reproducible behavior over supplied one-minute bars, not live fills.
+
+`ExecutionSeriesV1` currently binds a caller-supplied calendar digest. Until the
+CLI derives that value from a reopened versioned calendar receipt and the
+production orchestrator supplies it, nonzero bytes alone do not prove exchange
+membership or completeness. Likewise the typed three-stream constructor proves
+that daily-reference identity was not dropped; it does not authenticate the
+vendor bytes. No real stored Zerodha drill-down, wall-clock capacity benchmark,
+future-return study or live order reconciliation has yet closed those gaps.
+D-0445 and EG-02 pin the exact kernel and the refusal boundary only.
+
+### §136 — parallel source work does not authorize parallel Cargo writers
+
+The workspace can be inspected and edited in parallel, but Cargo's target is a
+shared, mutable cache. Concurrent builds serialize on Cargo locks and may still
+materialize different hashed artifacts before old ones are collected. On the
+measured 2026-08-30 failure, the debug target held at least 65,535 dependency
+entries and 1,315 incremental directories while the host reached 100% disk
+capacity. That observation proves a local storage failure, not the exact byte
+contribution of each build kind or process.
+
+Disabling dev/test incremental compilation bounds one source of cache growth;
+it does not make build storage O(1). Dependency variants, test binaries,
+coverage instrumentation, mutants, release objects and debug symbols still
+scale with the gates requested. The operational rule is therefore one shared
+Cargo writer, a free-space measurement before build/sweep, and explicit cleanup
+of reproducible target artifacts when needed. Market-data and result stores are
+outside that cleanup boundary and are never substituted for build-cache space.
+
+### §137 — receipt-last admission has fixed records, not constant total work
+
+One admission policy evaluates a fixed version-one set of checks and one
+canonical decision encodes a fixed 310-byte policy, 352-byte evidence and
+45-byte verdict. Those per-decision operations and one already-indexed
+population/sequence lookup are bounded; a hash-map probe is average O(1), not a
+worst-case latency guarantee.
+
+Creating or reopening an authority must still read, decode, hash and recompute
+every decision. Commit is O(R) for R population rows, open/reconciliation is
+O(all decision and receipt records), a page is O(requested rows), and the
+indexes retain space proportional to committed populations. Joining a page to
+Population V4 repeats fixed comparisons for every returned row. Filesystem
+seek/sync latency and BLAKE3 over an ordered block are not O(1).
+
+The persisted evidence contains the version-one policy inputs, some of which
+are exact integer counts and some of which are explicitly fixed-point
+projections. It does not prove a live fill, an exchange tick path, future
+profitability, or that omitted raw statistical samples can be recovered from a
+projection. Likewise a complete sidecar does not prove the producer sourced its
+evidence from durable evaluated artifacts until the production builder and
+cross-ledger join are wired and replay-tested. D-0448 records the append-only
+authority boundary without making that missing end-to-end claim.
+
+### §138 — authoritative Top-N is bounded in memory, not constant in total work
+
+Selection V3 reads both complete joined populations three times. For N NIFTY
+rows and B BANKNIFTY rows, construction is O(N+B) time per pass and therefore
+O(N+B) total asymptotically. Each page is capped at 256 joined rows and the
+keeper retains at most 25 candidates, so ranking working memory is bounded by
+one page plus fixed Top-N state. The final resolver again reads the populations;
+it does not trust or copy a candidate payload detached from its joined source.
+
+Opening a ledger is O(receipts) because every fixed record and seal is checked.
+After open, exact identity and latest `(cohort,rung)` probes are average O(1)
+hash lookups. Record append and sync latency, BLAKE3 over complete payloads,
+population-page I/O, three-pass ranking and open-time validation are not O(1).
+The format proves deterministic admitted ordering over the supplied complete
+authorities. It does not prove that the still-missing producer measured every
+institutional evidence field, reconstruct an exit grid, perform global replay,
+authenticate vendor bytes, predict future returns or guarantee live fills.
+
+### §139 — execution capabilities make later probes bounded, not preparation O(1)
+
+Preparing one V1 execution authority reads every row in one Population V4
+block, checks one offered capability against each row, builds two scalar
+parameter records and emits every runtime percentile atom. For R population
+rows and A percentile atoms, preparation and ordered hashing are O(R+A) time
+and retain O(R+A) prepared records. Appending, syncing and reopening likewise
+scale with the referenced records and all historical completion records. A
+dynamic 31-rung axis is supported because atoms are runtime-sized; it is not a
+constant-space claim independent of configured bounds.
+
+After a clean reopen, exact population completion, side-parameter and
+population-row capability lookups are average O(1) hash probes preceded by
+fixed file-generation checks. “Average” does not mean worst-case latency, and
+filesystem locks, metadata, page cache, `sync_all`, allocation and hash-table
+collisions are outside that bound. Reconstructing a selected exit is still at
+least proportional to training bars, complete grid cells and reachable OOS
+paths because it re-resolves and re-evaluates the actual capability. No test has
+yet crossed that public reconstruction door from a real stored authority.
+
+The measured locked CLI suite being 407/407 green with zero failures and strict
+CLI `--lib --tests -D warnings` Clippy being green prove those current gates, not
+coverage, mutation score, performance, a production caller or a real Zerodha
+result. No wall-clock throughput or memory benchmark was taken for this new
+ledger, and no millions/billions capacity statement follows from fixed record
+strides. D-0450 and EC-01 record the tested persistence boundary.
+
+### §140 — global replay is linear in candidates and history, not constant end to end
+
+The intended public global preparation reads exactly eight Selection V3
+receipts and sixteen execution authorities, then reconstructs 200 selected
+strategy streams. Its fixed 200-stream ceiling bounds the number of simultaneous
+constituents; it does not bound how many pre-exclusivity candidates those
+streams publish. Scheduling and decision materialization are O(C) for C
+reachable candidates, money/VIX publication is O(A) for admitted priceable
+paths, and ordered hashing/persistence is proportional to every emitted record.
+
+Opening the four replay files reads and hashes their complete current contents,
+decodes every record, replays every committed decision block and retains indexes
+and completion order proportional to committed publications. Exact completion
+and latest-publication probes are average O(1) only after that open-time work.
+The 400/240/352/1,248-byte strides make one record bounded; they do not make file
+growth, BLAKE3 over a file, locking, syncing or end-to-end latency O(1).
+
+The focused global tests prove fixed codecs, replay reconciliation,
+orphan/corruption/stale refusal, inclusive occupancy and VIX publication
+separation over a constructed `PreparedGlobalReplayV1`. A direct public test
+also exercises `prepare_global_replay_v1` with eight selections, sixteen
+execution authorities and 200 exact witnesses, and proves missing/foreign
+authority refusal. Those remain controlled in-memory/on-disk fixtures;
+repository search finds no non-test caller of that function, the execution
+preparation door, the VIX month reader, the institutional evidence builder or
+the population/admission producer. Therefore no real stored sweep,
+service-level latency, future profit, live fill or million-user capacity is
+measured or guaranteed. D-0451, D-0452, VX-01 and GPR-01 preserve that
+boundary.
+
+### §141 — Step-3 adapters remove repeated scans; their complete work still scales
+
+For one evaluated exit grid containing G cells, `validate_evaluation` performs
+one O(G) integrity pass and mints `ValidatedExitGridV1`. Population finalization
+then projects each canonical ordinal by one bounds-checked lookup and one exact
+evaluation-identity check, O(1) per cell. Projecting all G cells is therefore
+O(G), not the previous accidental O(G^2) shape where each cell rebuilt the
+complete validation. Across evaluated grids with widths G_i, this boundary is
+O(sum G_i) time before evidence-specific work. The retained validation table
+itself uses O(G_i) space for each grid while that grid is being projected.
+
+Institutional evidence has separate input-dependent costs. Exact trade
+reconciliation, session concentration and stability are O(T) for T trade rows;
+independent support-session measurement is O(S) for S signal bars. For F
+walk-forward folds containing C_i aligned candidate rows, the fold checks and
+legacy anchored-fold placements scan O(sum C_i) rows, and either compatibility
+aggregation or `anchored_walk_forward_bottom_half_rate_v1` sorts F display
+projections in O(F log F). The temporary placement vector is O(F). This is not
+the cost of genuine CSCV/PBO, whose design and implementation are absent.
+None of those operations becomes O(1) because cell ownership is now indexed.
+Candidate-adjusted Romano--Wolf probabilities and the named full-family
+maximum/intersection probability now have an in-memory exact-count authority.
+For S candidates, N periods and B draws it costs O(S·N + S log S + B·N +
+B·S·N) time and O(B·N + B + S) temporary space; only candidate lookup after
+construction is O(1). The production complete-family constructor, durable raw
+full-precision statistics record and institutional-evidence wiring remain
+absent. A generic p-value from a procedure other than this named Romano--Wolf
+family-intersection test also remains absent, so no complexity statement can
+stand in for those missing authorities.
+
+The version-one evidence catalog is exactly 44 compile-time source-map rows and
+7 compile-time blocker rows. Traversing either is bounded only because that
+version fixes those counts; the tables describe availability and do not produce
+or authenticate evidence. India VIX has no hidden all-history catalog: opening
+one civil month reads and validates V committed records in O(V) time and
+allocates exactly 44,640 optional minute slots. Only an exact timestamp lookup
+inside that already-open month is O(1). Opening M required months still costs
+O(sum V_m) reads and M fixed month allocations.
+
+The current production compatibility adapter preserves the same F-fold
+denominator shape: each aligned anchored fold emits one legacy placement,
+including an explicit unrankable placement for an empty or singleton candidate
+family. An unequal in/out family still refuses the complete diagnostic rather
+than disappearing from the denominator. This closes only that adapter blocker;
+it does not produce CSCV/PBO, migrate the CLI to the exact V1 placement, or
+alter the O(sum C_i + F log F) time and O(F) temporary-space bounds above.
+
+The live support column similarly makes candidate depth constant per bar, not
+the sweep constant in total. Building the owned column is O(B) time and space
+for B fixed-six-word masks; one support or fingerprint pass is O(B) total with
+O(1) work per bar independent of k. Measured `C-E-02` ratios were 0.971x at
+k=4 and 0.996x at k=8 relative to k=1, and `C-E-09` was 0.942x from k=1 to
+k=384. Those release measurements close the former live O(k)-per-bar defect;
+they do not bound Apriori frontier growth, number of candidates, persistence,
+replay, Top-N population passes, filesystem latency or end-to-end duration.
+
+Finally, the 76-byte ranking-policy record makes one policy encode/hash fixed
+size, but Global Selection remains O(N+B) over complete NIFTY and BANKNIFTY
+populations. V1 execution capability still cannot represent a complete
+Population V4 containing a structurally valid policy-refused cell because V1
+requires one selected capability per row. D-0463 does not repair or reinterpret
+that old file version: Execution Disposition V2 supersedes it with exactly one
+terminal row for every Population V4 row, sparse capability only for
+`Authorized`, and exact nonempty refusal bits only for `PolicyRefused`.
+Structural failures remain errors. This closes the cardinality semantics at the
+V2 kernel/ledger boundary, not the still-absent production stored caller or an
+end-to-end O(1) backtest. D-0454 through D-0456 and D-0463 preserve those
+separate boundaries.
+
+### §142 — stored-data completeness scans and seals exact evidence; it is not O(1)
+
+Preparing one V1 stored-data completeness receipt is O(S+M+E+D+C) time for S
+signal bars, M full one-minute context bars, E evaluated execution bars, D daily
+bars and C civil calendar days. It hashes every supplied stream, compares the
+execution slice against the context, rebuilds both calendar receipts and
+recomputes the composite daily-reference data identity. The canonical calendar
+API currently requires owned timestamp vectors, so preparation also allocates
+O(S+E) temporary space. These are authority-construction costs outside the
+sweep's inner loop, not constant-time primitives.
+
+Opening or stale-checking the append-only ledger reads and hashes the complete
+file and retains one population index entry per receipt. Appending one fixed
+676-byte record is bounded only after that O(file) validation; filesystem
+locking, allocation, page cache, `sync_all` and hash-table collision latency
+remain unbounded by the record stride. A lookup is average O(1) only on an
+already validated unchanged handle.
+
+The receipt proves reconciliation of the exact supplied signal, minute-context,
+execution and daily-reference bytes with the same Population V4 identities and
+complete-calendar receipts. It does not prove that a vendor originated those
+bytes, that upstream storage has a vendor checksum, that future bars or fills
+will match the backtest, or that a production stored-run caller exists. Today's
+`ReferenceIntegrity::UnverifiedNoReceipt` state remains explicit and digest
+load-bearing. D-0458 and DC-01 therefore close a typed authority kernel without
+claiming Step 3, end-to-end latency, capacity, profit or a real Zerodha result.
+
+### §143 — Global Replay V2 persistence is linear execution authority, not an O(1) or publication claim
+
+V2 preparation re-verifies eight Selection V4 receipts against sixteen live
+Population V4/admission/Execution V2 authority triples, reconstructs each of
+200 selected rows from its complete training grid and OOS one-minute series,
+and materializes every reachable pre-exclusivity candidate. For B_i training
+and OOS bars and G_i resolved grid cells per selected stream, that work is at
+least O(sum(B_i + G_i)) before scheduling. The fixed 200-stream ceiling bounds
+simultaneous stream heads, not candidate history: scheduling, candidate/
+decision encoding and ordered hashing are O(C) for C reachable candidates.
+
+Opening the five V2 files reads, decodes and hashes every record—including
+valid unreferenced orphans—then reconstructs and re-runs every completed
+scheduler block. It therefore costs O(F+C+D) time for file records F,
+candidates C and decisions D, and retains memory proportional to indexed
+completions plus their reconstructed streams and decisions. A fixed record
+append is bounded in bytes only after that validation; lock acquisition,
+allocation, file hashing, page cache, `sync_all` and filesystem latency are not
+O(1). Completion/replay hash lookup is average O(1) only on an already opened,
+fully validated, unchanged handle. File-digest stale checks deliberately scan
+all five files before a write or exact reuse.
+
+The focused module is 6/6 green and the public test proves eight selections,
+sixteen authorities, 200 witnesses, receipt-last append/reopen/exact reuse, a
+valid orphan gap followed by a later completion, corrupt-record refusal,
+sealed-decision reorder refusal and same-length stale-handle refusal. Those are
+controlled fixtures. No non-test stored caller supplies the sixteen real
+authorities or 200 real OOS witnesses, and no throughput, memory-capacity,
+million-user, future-profit or live-fill measurement was taken.
+
+Most importantly, the V2 completion is intentionally scoped to execution. Its
+types and files contain no admitted money row and no exact-or-absent India VIX
+stamp. A path tagged priceable means only that replay did not refuse pricing
+evidence at that boundary; it is not durable P&L. The versioned
+execution-only/no-money/no-VIX scope prevents this ledger from being presented
+as the complete publication that Step 3 and the operator surfaces still need.
+D-0459 and GPR-02 record the tested authority without filling those missing
+fields by inference.
+
+### §144 — Execution Disposition V2 closes cardinality, not linear work or production wiring
+
+Preparing one V2 authority joins and validates R Population V4 rows against R
+recomputed admission decisions and R runner classifications, reconstructs the
+two dynamic parameter blocks and hashes every ordered record. It therefore
+costs O(R) time and retains O(R) row/index state. A page costs O(P) for the
+requested P rows and refuses P greater than 256. Only exact completion or
+`(population, sequence)` lookup on an already opened, fully validated,
+unchanged handle is average O(1); hash-table collision latency is not a
+worst-case constant-time guarantee.
+
+Opening the four files decodes and seals every fixed record, accepts only valid
+unreferenced orphan ranges, reconstructs every committed parameter/percentile/
+row block, and recomputes terminal counts, admission marginals, the 4×2 matrix
+and ordered digests. That is O(F+R) in file records and committed rows. Before
+lookup, append or exact reuse, generation validation hashes the files again;
+file locking, allocation, page cache and `sync_all` remain outside an O(1)
+claim.
+
+The exact V2 suite is 8/8 green, including a missing disposition, foreign
+authority, noncanonical tag/bit/reserve states, append/reopen/reuse, valid
+orphans, torn/corrupt records, a semantically resealed matrix redistribution
+that preserves the total and execution-column count, and a post-open
+same-length mutation. These are controlled fixtures. Repository search still
+finds no non-test stored caller that constructs all-rung NIFTY/BANKNIFTY V2
+authorities from real stored inputs, and no throughput, memory-capacity,
+million-user, future-profit or live-fill measurement was taken. D-0463 and
+ED-01 therefore supersede the stale V1 cardinality blocker without declaring
+Step 3 or the real Zerodha sweep complete.
+
+### §145 — the Step-3 comparison is a bounded linear audit view, not an O(1) dashboard claim
+
+`compare_step3_on_disk_v1` opens and validates six independent durable authority
+families before it compares them. Population and admission use their native
+max-byte openers. Selection V4 and stored-data completeness use fixed-record
+receipt ceilings plus a metadata byte preflight. Execution V2 metadata-
+preflights four files before its typed open, and Global Replay V2 preflights its
+manifest, stream, candidate, decision and completion files before its typed
+completion ceiling is applied. Every absent current-format primary file remains
+`UNMEASURED`; a present file that cannot pass its typed codec/generation checks
+is `REFUSED`. No V1/V2/V3 selection or replay file is opened as fallback. A
+sealed Selection V4 receipt plus matching reference IDs and exact 8×25 counts
+is only structural evidence: without the exact `RankingPolicyV1` and a full
+`verify_against_authorities` replay, Selection remains `BLOCKED` and Global
+Replay cannot become ready through it.
+
+Those bounds do not make the read O(1). Opening remains O(P+A+E+S+D+G) in the
+records/bytes scanned across population, admission, execution, selection,
+stored-data and global replay history. The comparison after open is over a fixed
+sixteen population authorities, eight selections and 200 selected streams, and
+the deterministic table is O(I+C) in the full identity text and named counters
+it emits. Exact lookup inside already validated indexes is average O(1), subject
+to the existing filesystem-lock and hash-table qualifications; the report as a
+whole is not.
+
+There is also an honest atomicity limit. Execution V2 and Global Replay V2 do
+not currently expose a public `open_read_bounded(max_bytes, ...)` door. A writer
+can grow a file between metadata preflight and the typed shared-lock open, so
+the preflight is a fail-closed admission check but not a race-free hard ceiling
+on bytes scanned. Closing that resource-bound gap requires bounded openers in
+the owning ledgers rather than a second parser in the comparison module. The
+nine focused tests and strict CLI library/test Clippy prove state
+classification, typed corruption refusal, foreign binding refusal, exact
+Top-10/Top-25/8×25 counters, structural-selection blocking and deterministic
+rendering. They do not prove a
+non-test caller, a real stored Zerodha authority set, end-to-end latency,
+coverage, mutation score, profit, future fills or million-user capacity.
+D-0462 and SC-01 preserve that boundary.
+
+### §146 — exact institutional family statistics are bounded durable evidence, not constant-time admission
+
+For S strategies, N observations and B stationary-bootstrap draws, the shared
+Romano--Wolf construction costs O(S·N + S log S + B·N + B·S·N) time and
+O(B·N + B + S) temporary space. Candidate lookup from an already completed
+receipt is positional O(1), but producing the family is not. No measured result
+supports an O(1) sweep, bootstrap, end-to-end latency or memory claim.
+
+Opening either Institutional Statistics V1 file decodes, seals and indexes its
+bounded fixed-record history. Generation validation hashes both complete files
+again before append or exact reuse, so open and stale detection are O(file
+bytes), not O(1). The indexed subject lookup is average O(1) on an already
+opened, fully validated, unchanged handle; hash-table collisions do not provide
+a worst-case constant guarantee. Value/completion append widths are fixed at
+400/288 bytes only after validation. Lock acquisition, allocation, page cache,
+file hashing, `sync_all` and filesystem latency remain explicitly unbounded by
+that byte width.
+
+The receipt is selection-bound. It proves exact selected-candidate and named
+full-family Romano--Wolf fractions plus bit-preserved White/SPA values after a
+Selection V4 receipt exists. It cannot feed the earlier admission whose durable
+Population V4 is required to create that selection without forming an
+admission → selection → statistics → admission cycle. The V1 evidence
+builder therefore refuses that projection at the admission boundary. Closing
+this blocker requires a new selection-independent pre-admission population
+statistics authority; a coordinator, default digest or copied post-selection
+value cannot close it truthfully.
+
+The global full-precision completeness field remains `Unmeasured`. This ledger
+does not contain the complete raw Wilson, PBO or risk/ratio sources, and
+White/SPA/Romano--Wolf evidence cannot stand in for them. The five focused
+ledger tests and eleven evidence tests use controlled fixtures. There is no
+non-test producer, no demonstrated uncapped real bootstrap family, no real
+stored Zerodha sweep, no coverage/mutation result for this change and no
+capacity, profit, fill-quality or million-user measurement. D-0461 and IS-01
+record exactly the authority that exists without expanding it into those
+missing claims.
+
+### §147 — breaking the Step-3 authority cycle adds linear authorities; it does not make the pipeline constant-time
+
+D-0464 locks a selection-independent successor path because the current V1
+authorities are cyclic: stored-data completeness names the final population,
+and exact durable statistics name the downstream selection, while admission
+needs both before either final object exists. Sealed bytes and passing unit
+tests do not change that dependency graph.
+
+Candidate Universe construction visits the uncapped frequent frontier and
+every dynamic exit coordinate, so it is proportional to the naturally extinct
+candidate population. Its ordered append-only rows occupy O(S) durable space
+for S candidates. Pre-Admission Data recomputes and hashes the complete signal,
+one-minute context, evaluated execution and prior-day daily streams, so its
+preparation is O(bars). Finalization reopens and reconciles every source,
+Population V4 row, Admission V1 decision and candidate-to-final rekey, so it is
+O(S plus bounded file history). None is whole-operation O(1).
+
+Population Statistics V2 is intentionally the full uncapped NIFTY+BANKNIFTY
+family for one rung. With S hypotheses, N aligned periods, F walk-forward folds
+and B bootstrap draws, raw evidence alone is O(S·N + F·S) durable data. The
+current adjusted Romano--Wolf construction remains O(S·N + S log S + B·N +
+B·S·N) time and O(B·N + B + S) temporary space; White, SPA, PBO, hashing,
+locking and `sync_all` add their own input- and system-dependent cost. Explicit
+open/build bounds are refusal ceilings, never a hidden depth, truncation or
+sampling policy.
+
+Only a fixed-stride row lookup by validated sequence is worst-case O(1). An
+indexed hash lookup is average O(1), and persistence is constant bytes per row
+only after nonconstant validation. The eight separately corrected per-rung
+families do not establish one cross-rung FWER guarantee. No latency, capacity,
+profit, fill quality, O(1)-space, million-customer or real-sweep claim is
+measured by the architecture decision or by a controlled fixture.
+
+### §148 — exact White/SPA counts preserve evidence; they do not make resampling O(1)
+
+The D-0465 receipts preserve the exact `matched_or_exceeded + 1` numerator,
+`draws + 1` denominator, statistic/p-value bits, ordered family and procedure
+inputs that the legacy `Verdict` projection could not recover. They deliberately
+keep the legacy `>=` tie rule; a strict comparison would be another procedure
+version rather than a codec fix.
+
+For B bootstrap draws, N aligned periods and S candidates, both constructors
+remain O(B·N·S) time and use input-dependent memory for family summaries and
+one resample index vector. The complete input already occupies O(S·N). Copying
+one completed count, digest or bit pattern is O(1); constructing the receipt is
+not. Four focused tests, 31 bootstrap regressions and strict Runner Clippy use
+controlled inputs. They do not prove an uncapped stored family, durable
+Statistics V2, wall-clock capacity, real Zerodha data, profitability or Step 3.
+
+### §149 — the canonical calendar-policy digest is linear in measured days
+
+The V2 calendar-policy identity hashes every day in the measured calendar and
+the at-most-two session windows of each open day. For D measured days its first
+construction is O(D) time and O(1) auxiliary space. Receipt construction for B
+offered timestamps over a requested D' day span remains O(B + D') time and
+O(1) auxiliary space. Neither operation is a whole-sweep or latency O(1)
+guarantee.
+
+The policy digest is deliberately separate from a complete requested-span
+receipt. The former identifies how every measured day is interpreted; the
+latter binds one rung, one span and its exact offered timestamp sequence. A
+nonzero arbitrary digest, a receipt digest or equal OHLCV bytes from another
+vendor cannot substitute for the policy identity. Until the opaque same-feed,
+same-instrument stored loader is implemented and adversarially tested, this
+function closes only the canonical identity primitive and not the production
+authority path.
+
+### §150 — Candidate Universe V1 is input-linear; stored authoring remains one owned door
+
+Opening Candidate Universe V1 walks, seals and validates every physical row and
+completion before it builds its bounded index, so R rows and C completions cost
+O(R+C) time and O(C) indexed state. A validated sequence seek is fixed offset
+and worst-case O(1) in record count; a hash lookup is average O(1), not a
+worst-case collision guarantee, and a page costs O(P) for P returned rows.
+Append, hashing, canonical-order validation and durability are proportional to
+the new block plus filesystem costs. Universe construction would additionally
+walk the naturally extinct frontier and both dynamic grids. It is not O(1).
+
+On Unix, cached-generation refusal binds the held lock, row and receipt paths by
+device/inode, length and nanosecond modification/change times and also hashes
+the data files. On non-Unix targets the portable generation token currently has
+only length and the platform modification time, so a same-length ABA path
+replacement with an indistinguishable timestamp is not proved detectable.
+Production deployment here is macOS/Unix, but portability remains an honest
+P2 limitation rather than an inferred guarantee.
+
+The ledger's own focused tests remain controlled fixtures and its direct public
+surface can only open, audit and page existing bytes. D-0475 now adds one owning
+public stored-origin orchestrator that constructs and appends Candidate only
+after bounded source loads, complete calendars, exact execution projection and
+attested grids. Its current tests prove helper/join boundaries, not a clean-
+build real-store success. Consequently neither format nor orchestrator yet
+proves one complete NIFTY-plus-BANKNIFTY family, Step-3 completion, throughput,
+memory capacity, latency, future profit or million-customer load.
+
+### §151 — bounded stored-span loading is O(months plus admitted bars)
+
+For M requested months and B admitted bars, `load_span_bounded` costs O(M+B)
+time. Its returned `Span` retains the requested-month list, missing-month list
+and bar vector, so returned state is O(M+B); saying only O(B) would omit real
+month-ledger storage. Each validated month header is compared with the remaining
+explicit ceiling before that month's vector is allocated or records are read.
+
+The ceiling does not make the operation O(1). It is a caller-owned refusal bound
+and has no default or zero value. It does not truncate, sample, silently skip a
+corrupt month or limit Apriori depth. File opens, locks, checksum/record
+validation, fallible allocation, page cache and I/O latency remain outside a
+constant-time claim. D-0469 and LS-03 bind that distinction.
+
+### §152 — V1 admission is intentionally unable to admit until genuine CSCV exists
+
+Admission Evidence V1 has fixed-size comparisons, but three of those fields
+were historically named as PBO without carrying a CSCV procedure identity,
+complete combinatorial split-family receipt or source authority. Accepting a
+measured value there would be cheap but false. D-0470 therefore makes public
+construction and canonical reopen refuse every measured PBO-named V1 state.
+Legacy `Unmeasured` and `Refused` states remain readable.
+
+This means V1 cannot produce `Admitted`, not that the engine has proven every
+strategy unsafe. It means the required evidence does not exist in this version.
+The focused 32-test admission suite and strict Runner Clippy prove that refusal
+boundary and its byte-reopen behavior. Downstream durable tests must retain the
+same absence; positive status/matrix algebra may use only private, non-durable
+test fixtures and is not stored authority.
+
+Genuine CSCV is nonconstant work over a complete hypothesis family and its
+split combinations. Its eventual cost, memory and capacity remain unmeasured
+until Population Statistics V2 and a successor admission-evidence version are
+implemented and benchmarked. No O(1) sweep, latency, profit, Step-3 completion
+or real Zerodha result follows from making the old boundary fail closed.
+
+### §153 — Pre-Admission Data has fixed records but input-linear proof work
+
+One Pre-Admission logical entry is two fixed 740-byte records after a 64-byte
+header. Fixed width makes a validated positional seek worst-case O(1) in record
+count; it does not make preparation, open or durability constant time. Source
+preparation compares complete ordered signal, minute, execution and daily
+streams, hashes their fields and recomputes two full-span calendars. Those costs
+are linear in admitted bars and calendar days.
+
+Opening a file with R physical records validates R seals and semantic pairs and
+hashes the complete file while holding the shared path lock, so it is O(file
+bytes) time with a bounded O(completions) index. A page costs O(P) for P returned
+rows. Hash-map lookup is average O(1), not a worst-case collision guarantee.
+Lock acquisition, filesystem cache, `sync_data`, allocation and storage latency
+remain system-dependent.
+
+The three load ceilings and ledger row/byte ceilings are refusal bounds. They
+never truncate bars, sample candidates, hide a missing month or impose sweep
+depth. D-0475 now owns the only public production writer through the bounded
+stored Candidate transaction; the Pre-Admission ledger still accepts no
+caller-authored source/digest claim. The focused cases and orchestrator helpers
+do not prove the still-missing Statistics V2 observation producer, Step-3
+completion, machine capacity, million-user load, future profit or a real stored
+Zerodha sweep.
+
+Writable open now refuses a missing or non-directory authority root and never
+creates that root. This prevents this ledger from recreating the spelling of a
+disconnected removable-volume mount on the internal disk. It is an admission
+check, not a durable filesystem handle or physical-device identity: replacement
+or unplug after the check and other direct writers remain within D-0473's named
+limits.
+
+### §154 — Population Statistics V2 recomputation is deliberately nonconstant
+
+One Statistics V2 logical block contains two manifest records plus C candidate
+records, C·P period records and C·S split records. Opening therefore scans and
+validates O(C·(P+S)) rows, reconstructs O(C·P) return state, evaluates every
+split across the complete candidate family and reruns the configured bootstrap
+procedures. For B resamples the dominating family work remains input-dependent;
+it is not made O(1) by storing its receipt.
+
+The 1,024-byte fixed stride makes one already-validated candidate seek
+worst-case O(1) in record count. A hash-index lookup is average O(1), a bounded
+page is O(page rows), and one record has constant encoded width. File open,
+whole-file validation, hashing, allocation, locks, `sync_all`, CSCV family work
+and bootstrap resampling are not constant-time or constant-space operations.
+Explicit audit/candidate/period/split/file ceilings are refusal bounds; they do
+not sample rows, cap Apriori depth or turn an admitted input into a smaller one.
+
+The eight focused tests use controlled, test-private source rows. The public
+API can durably append and freshly reopen only an opaque prepared capability;
+it still cannot construct that capability or derive production statistics.
+The raw candidate/period/split inputs, including every determinant of a split
+score and p-value, remain test-private. The measured tests therefore establish
+the codec, recomputation and durability boundary only. They do not establish
+real Zerodha provenance, a production observation policy, successor admission,
+Step-3 closure, machine throughput, latency, profitability, million-customer
+scale or a total-work O(1) guarantee.
+
+### §155 — removable-root Phase 1 rejects initial root loss, not device substitution or hot-unplug races
+
+The API server lock and autopilot write probe now perform a fixed sequence of
+filesystem operations against an already-existing configured root. The API
+census admits that shared root before interpreting any missing vendor manifest,
+so a detached or non-directory root is projected as `Unreadable` across the
+fixed vendor set instead of reported as one clean all-`Absent` store. The CLI
+binary canonicalizes and type-checks its configured root before installing its
+log sink or dispatching a command. Absence, unreadability, a non-directory and
+initial canonicalization failure therefore refuse without creating that root.
+This closes the concrete dangling-mountpoint and false-empty initial boundaries
+in D-0473. It does not turn a pathname into volume identity.
+
+An already-existing directory on the internal disk, a different removable
+volume mounted under the same name, or a replacement made between `metadata`,
+`canonicalize`, lock acquisition and a later writer can still satisfy the
+checks. The API now opens `serve.lock` and constructs `Site` from one canonical
+target, so retargeting only the configured symlink after admission cannot move
+those two operations. That narrow race closure is not a volume capability:
+holding `serve.lock` binds one open file description, not every future child
+open to the same physical filesystem, and a same-name mount replacement still
+occupies the same canonical pathname. The
+CLI returns a canonical pathname and later command code resolves paths again;
+it does not hold a root directory capability across logging and every append.
+The autopilot probe measures that one file create/write/`sync_all`/remove
+completed; it does not prove an expected UUID, sealed sentinel, APFS container,
+device id, encryption state, future free space or continued attachment. No such
+sentinel or storage-capability type exists in Phase 1. Direct library writers
+can bypass the CLI binary, so the checks are not one guard inherited by every
+writer. Selection V4 and Execution Disposition V2 now close their own
+missing/non-directory-root recreation instances by requiring the root and
+creating only its direct `results` child. That narrows the bypass set; it does
+not give either writer device identity or a directory capability held across
+every later operation.
+
+A physical unplug can happen after any successful check or during data write,
+receipt append, `sync_all`, rename or removal. A later syscall may refuse; an
+OS, controller or power failure can also leave effects whose durability cannot
+be inferred from an earlier probe. Receipt-last formats limit which completed
+software state may be accepted after reopen; they are not a guarantee against
+hardware loss, controller misreporting, theft or the absence of an independent
+backup. A refused startup requires the root to return before startup is tried
+again. An already-running autopilot may take another bounded D-0108 probe and
+clear on a path that has reappeared; without the missing identity capability,
+that is not proof that the same volume returned. Automatic fallback to internal
+storage remains forbidden.
+
+The nine focused regression cases are green: three API refusal boundaries, the
+API configured-symlink retarget boundary, the CLI
+resolver plus its three exact-path admission outcomes, and the binary ordering test.
+They use controlled missing-directory and regular-file fixtures. They do not
+physically eject a volume, inject ENOSPC or EROFS, interrupt a write, or prove
+reopen after any such fault. A green initial check cannot be extrapolated into
+those unperformed fault tests.
+
+These operations are not worst-case O(1) latency. The added admission work has
+a fixed call count relative to bars, candidates and ledger rows, and projecting
+one root refusal uses the currently fixed `Vendor::ALL`; reading admitted
+manifests still has its own data-dependent work. `canonicalize` depends on path
+components and symlinks, while `metadata`, open, lock, write, sync and remove
+have filesystem-, contention-, cache-, device- and failure-dependent latency.
+The probe and preflights are control-plane work, never inner-bar primitives.
+Phase 1 therefore adds no O(1) claim for startup latency, recovery, storage
+capacity, total sweep work or space.
+
+### §156 — the stored Candidate-to-Pre-Admission transaction is bounded, not constant-time
+
+The D-0475 production door checks the build stamp in fixed local work before it
+opens market data, but every successful stage after that remains
+input-dependent. For M admitted months and B bars, the three stored loads and
+calendar validations cost O(M+B) time and retain bounded O(B) returned state.
+Exit-grid resolution depends on its exact execution samples. Candidate
+production walks the naturally-extinct Apriori frontier and evaluates every
+closed mask across both complete resolved grids. Receipt construction,
+whole-file validation, hashing, locks, allocation and `sync_all` depend on the
+records and filesystem.
+
+The three load ceilings plus Candidate and Pre-Admission ledger ceilings are
+protective refusal bounds. They do not truncate bars, sample candidates, hide a
+missing month, cap the combination ladder or make end-to-end latency/space
+O(1). A fixed-stride seek remains worst-case O(1) in record count after a ledger
+has been fully admitted; hash-index probes are average O(1). The four focused
+orchestrator tests and one bounded typed-loader regression prove helper/join and
+pre-allocation boundaries, not a clean-build real-store success receipt.
+
+The transaction ends at reopened Candidate and Pre-Admission identities. It
+retains no non-forgeable aligned trade-period observation capability, so it
+cannot construct Statistics V2 or claim finalization, admission, Selection,
+Global Replay, profitability or a complete Step-3 run. Requiring a clean build
+also means the current dirty implementation tree correctly refuses a real
+stored attempt; test-only bypass of that stamp is not production evidence.
+
+The first adversarial audit found two narrower implementation gaps beneath this
+cost boundary: exception-list rather than canonical-session classification,
+three arbitrary prior rows rather than exact terminal-minute geometry, and
+three infallible transformed-vector allocations. They are now closed in the
+focused boundary. Canonical `kind_of` classifies every stored daily row and
+unique signal day; the latest accepted prior session and its measured window
+determine the exact final three minutes; all transformed vectors reserve
+fallibly. Closed-day, Sunday/weekday-holiday, single-day and early/truncated
+attacks are part of the **51/51** green stored suite. This is correctness and
+resource-refusal evidence, not a constant-time claim, and it does not weaken or
+replace the independent root/device/hot-unplug limits in §155.
+
+### §157 — exact Candidate observations and CSCV scores are bounded, input-dependent work
+
+For C evaluated Candidate rows, T exact materialized trades, P accepted IST
+sessions and K canonical complementary-half splits, observation construction
+retains one explicit period per candidate/session and one score per
+candidate/split. Its time is at least O(C·P + T + C·P·K), and retained state is
+O(C·P + C·K). Those terms are scientifically required evidence: zero-trade
+sessions cannot be discarded, splits cannot be sampled, and a resource
+failure cannot silently choose another segment count. The checked sums and one
+indexed exit-session update are fixed local work per supplied trade; that does
+not make the complete producer O(1).
+
+Layout version one selects the largest even divisor S of P in `2..=16`. It
+refuses if none exists, uses equal contiguous blocks of P/S periods and derives
+exactly `C(S-1,S/2)` canonical complementary halves, at most 6,435 under this
+version. Sixteen is an identity-bound scientific-policy ceiling, not a runtime
+fallback. Crossing it does not cause a different result based on machine
+memory: the same P always selects the same S or refuses. Any future layout
+change requires a new version and identity.
+
+The companion authority contains only fixed-size identities, counts and
+digests. It does not durably retain the O(C·P + C·K) raw evidence. Crash recovery
+therefore requires the upstream exact Candidate replay to derive the same
+observations again before an orphan Data may receive Completion. Opening the
+ledger scans and hashes its bounded bytes; hash-index lookup is average O(1),
+and one fixed-stride record position is worst-case O(1) in record count after
+admission. Allocation, hashing, locking, sync and device latency are not
+constant-time.
+
+The writer requires an existing canonical directory and cached audits compare
+the open lock/data generation to the currently named paths. This catches the
+tested missing root, regular-file root, same-length mutation and Unix
+lock/data-path replacement. It does not seal an expected APFS volume UUID,
+hold a root-directory capability, prevent mount substitution between syscalls,
+or guarantee that a removable drive remains attached during write or sync.
+Those are the still-open D-0473/§155 physical-root limits, not properties of a
+green receipt-last codec.
+
+### §158 — Population Admission V2 has fixed records but full-file validation and cumulative quadratic cost
+
+Admission V2 stores fixed 2,048-byte decisions and fixed 4,096-byte Completion
+receipts under five caller-supplied nonzero ceilings: decision records,
+decision bytes, Completion records, Completion bytes and decisions per block.
+Those bounds prevent unbounded allocation and reject an oversized input; they
+do not truncate a family, sample candidates, cap Apriori depth or make the
+operation constant-time. There is intentionally no default bound.
+
+Every open hashes and validates the bounded decision and Completion files,
+reconstructs canonical NIFTY-first/BANKNIFTY blocks and builds an index over
+completed receipts. Append, exact retry, exact reuse and private promotion also
+perform bounded full-ledger validation, then validate the block decisions. They
+therefore cost O(total ledger bytes + total records + block decisions). Calling
+the persistence seam once for every cumulatively growing block can be quadratic
+in final ledger size. Resident indexing is O(Completion records + a trailing
+decision block), not O(1). A block-identity lookup is only average O(1) after
+O(file) generation validation on an unchanged handle. Lock acquisition,
+allocation, hashing, page cache, `sync_all` and device latency remain
+system-dependent.
+
+Receipt-last recovery is intentionally narrower than generic prefix recovery.
+A fully synced decision block missing only its Completion can accept only the
+byte-identical retry, after which decisions, Completion and directory are
+durably synchronized in that order. A proper subset of the block is detectable
+but cannot prove its missing suffix because the module has no authenticated
+production source. It therefore blocks the next append without truncating or
+rewriting history. Exact committed reuse also reissues both file barriers and
+the directory barrier rather than treating old bytes as newly durable.
+
+The **14/14** focused tests prove these codecs, bounds, identities, barriers,
+reopen/reuse behavior and adversarial refusals on controlled preparations. The
+public API exposes only bounded structural reopen. The opaque preparation and
+authenticated authority remain crate-private, and there is no production
+constructor from reopened Candidate/Pre-Admission/Observation/Statistics,
+anchored-search and BaseEvidence authorities. Finalization V2 and the all-rung
+stored caller are also absent. This is therefore a green ledger component, not
+Step-3 closure, a real-market result, capacity/latency proof or a total O(1)
+claim.
+
+### §159 — Admission V3 and Finalization V3 use bulk authentication but remain linear whole-family work
+
+Population Admission V3 reads the bounded Statistics family under one shared
+lock and one before/after generation-validation pair. It then reads the exact
+Base record for each canonical global Candidate ordinal from an already opened
+paired ledger and equality-joins family, family ordinal, Candidate universe,
+semantic digest and row evidence. Its input preparation therefore costs
+O(Statistics-file-bytes + Candidate-count), not the earlier accidental
+O(Candidate-count × Statistics-file-bytes). Fixed-offset Base addressing is
+constant in record count after open; physical I/O, locking and latency are not.
+
+Population Finalization V3 similarly consumes Admission V3's complete ordered
+projection under one generation-validation pair. Preparation costs
+O(Admission-file-bytes + Candidate-count). Both modules then validate, hash,
+append, synchronize and freshly reopen bounded full ledger state. Allocation,
+hashing, file scans, `sync_all`, page cache, removable-device behavior and total
+retained rows remain input- or system-dependent. Neither module makes a
+whole-run O(1) time, space or latency claim.
+
+The focused Admission V3 **10/10**, Finalization V3 **9/9** and retained
+orchestrator **14/14** results prove their current controlled source chain.
+Finalization retains Candidate identity and row digest but not authenticated
+Candidate record bytes. It therefore cannot yet mint Population authority, and
+no Execution/Selection/Global-Replay or real stored-market success follows.
+
+### §160 — Pre-Admission Data V2 authenticates zero extinction but does not make ledger work constant
+
+Each V2 Data or Completion record has a fixed 812-byte layout, and a zero-row
+family retains constant-size reconciliation evidence rather than fabricating a
+Candidate row. That fixed record does not make production or durability O(1).
+Candidate production still reaches zero only by walking its naturally extinct
+frontier. The V2 producer validates the exact Candidate receipt and measures
+the retained source bundle. Open and fresh reopen hash and validate every
+bounded ledger record; append, orphan completion and exact reuse repeat the
+relevant full-file and semantic checks before synchronized persistence.
+
+For L admitted ledger records and B measured source bars, those operations are
+at least O(L+B) time. The ledger retains O(L) indexed identities after open.
+One fixed-stride record address is worst-case O(1) in record count after file
+admission, and one identity-map probe is average O(1); neither statement bounds
+hashing, allocation, lock acquisition, page faults, `sync_all`, removable-drive
+failure or device latency. The explicit byte/record ceilings are refusal bounds,
+not truncation, sampling, a depth parameter or constant end-to-end space.
+
+The **13/13** focused V1+V2 module result proves the codec, exact extinction
+proof, receipt-last reuse/recovery and controlled stale/path attacks. It does
+not test physical hot-unplug or ENOSPC. Observation V2 now consumes the exact
+opaque zero-family production result, but no Statistics, Admission, Population,
+Execution, Selection or Replay zero-family successor exists. A zero
+Pre-Admission receipt therefore cannot be extrapolated into Step-3 closure or a
+real stored-market sweep.
+
+### §161 — Observation V2 preserves the complete zero proof; it does not make durability constant
+
+Observation V2 stores one fixed 1,024-byte Data record and one adjacent
+Completion record. Each embeds the exact sealed 812-byte Pre-Admission V2 Data
+record, so the zero-family outcome retains the full Candidate/source and
+natural-extinction proof without fabricating an observation row or statistic.
+That constant record width does not make production, open or persistence O(1).
+
+For A admitted Observation authorities and B file bytes, open/fresh reopen scan
+and validate O(B) bytes and retain O(A) identity/data indexes. Append validates
+the embedded Pre-Admission record, hashes fixed records, synchronizes Data then
+Completion, hashes the bounded file and freshly reopens it. One fixed-stride
+record address is worst-case O(1) in record count after admission and one
+identity-map lookup is average O(1); allocation, locking, synchronization,
+filesystem traversal, page faults, controller behavior, removable-drive loss
+and latency have no constant bound. The explicit byte/authority ceilings refuse
+excess; they do not truncate history or hide a failure.
+
+The focused Observation V1+V2 suite is **11/11 green** and covers the exact
+opaque Pre-Admission commit join, NIFTY/BANKNIFTY family separation, nonzero
+refusal, every-byte unsealed mutation, outer-resealed embedded corruption,
+receipt-last reuse/orphan recovery, ragged/stale files and path replacement.
+It does not physically inject ENOSPC, power loss or hot-unplug, and it records no
+period row, split score, statistic, assurance or admission result. A later
+versioned successor must represent a naturally extinct family as statistically
+insufficient rather than manufacturing zeros before the complete paired chain
+can close.
+
+### §162 — All-rung Execution dispatch is fixed; replay and durability are not constant
+
+The Population V5-to-Execution V3 coordinator has exactly eight named calls in
+the canonical 60/120/180/300/600/900/1,800/3,600-second order. Choosing a call,
+its held output root and its explicit bound is constant work with respect to
+rung count because callers cannot supply a rung collection. This fixed control
+topology does not make the work behind a call constant.
+
+For Population row counts P1..P8 and authenticated file bytes B, the complete
+coordinator performs O(B + sum(P1..P8)) validation/replay work and retains
+O(sum(P1..P8)) live source/disposition evidence, subject to explicit refusal
+ceilings. Each one-rung door also hashes bounded ledgers, allocates indexes,
+appends, calls durability barriers and freshly reopens exact bytes. Fixed-
+stride record address arithmetic is worst-case O(1) after admission; identity
+map lookup is average O(1). Neither statement bounds allocation, lock wait,
+filesystem traversal, hashing, synchronization, page faults, controller
+behavior, removable-device loss or wall-clock latency.
+
+Controlled tests exercise exact named bounds and roots, reordered/missing/
+duplicate/nested paths, Population-tree overlap, symlink and pathname
+replacement, and row/rung/family identity refusals. D-0487's one-rung tests
+exercise exact committed reuse, receipt-less tail recovery, foreign orphans
+and stale retained sources. They do not physically inject ENOSPC, power loss,
+kernel crashes or hot-unplug, and no benchmark currently measures this complete
+eight-rung seam. No real vendor pull or stored Zerodha sweep is part of this
+coordinator proof.
+
+### §163 — Selection V5 has bounded Top-25 state, not constant whole-population work
+
+Selection V5 must authenticate and offer every one of C Population V5 rows to
+the authoritative two-pass ranking policy. It exact-joins those rows to C
+freshly reopened Execution V3 dispositions, reconstructs direct Candidate
+metrics, validates measured Admission projections and builds a complete ordered
+population proof. Preparation is therefore O(C) after the upstream bounded-file
+authentication; omitting a row would make a different population, not an
+optimization. The current projection retains O(C) temporary rows and identity
+sets. Runner's keeper itself retains at most 25 winners, but that bounded state
+does not make total ranking time or source state O(1).
+
+Opening, commit/reuse, source reauthentication and winner reads hash and decode
+bounded ledger bytes. Rows precede the receipt-last Completion and the fresh
+reopen repeats exact validation. Allocation, hashing, lock waits, page faults,
+filesystem traversal, synchronization, controller behavior, removable-device
+loss and wall-clock latency have no constant bound. Explicit record and byte
+ceilings refuse excess; they do not truncate the population, sample candidates,
+cap Apriori depth or silently choose a smaller Top-N.
+
+One admitted fixed-stride row address is worst-case O(1) in record count after
+file admission; an in-memory identity-map probe is average O(1). Top-10 is a
+constant-size prefix operation only after the complete authoritative Top-25 has
+been reproduced. Neither fact justifies an O(1) claim for selection,
+persistence, exact reuse or end-to-end Step 3.
+
+Layout V5 still requires both NIFTY and BANKNIFTY source families to be
+nonempty. Natural extinction is not an empty-vector special case and cannot be
+filled with zero metrics. A separately versioned successor must carry the typed
+extinction proof before the all-rung Selection/Replay chain can close.
+
+### §164 — Statistics V3 makes extinction truthful, not constant-time
+
+Statistics V3 removes one semantic blocker: a family that naturally reaches an
+empty Candidate frontier is represented by a typed terminal instead of an
+invented row or zero statistic. That does not make the evaluated sibling cheap.
+For C real Candidates, P accepted periods, S CSCV splits and R stationary-
+bootstrap draws, the V1 projection still performs the exact input-dependent
+observation, CSCV, White, SPA and Romano--Wolf work required by those
+procedures. It retains O(C) Candidate rows plus procedure state. An all-extinct
+pair correctly performs no bootstrap at all; it is not a constant-time
+substitute for an evaluated family.
+
+For A admitted authorities and bounded ledger bytes B, opening and fresh reopen
+scan and authenticate O(B) bytes and retain O(A + total candidates) indexes.
+Append, exact reuse and receipt-less tail comparison validate an authority-
+sized prefix and perform filesystem-dependent locking, allocation, writing,
+synchronization and reopen. Same-length generation checks hash the bounded file.
+A fixed 1,024-byte record address is worst-case O(1) in admitted record count;
+the identity map is average O(1). Neither statement provides worst-case O(1)
+hash behavior, total time, total space, I/O latency or device availability.
+
+The focused 6-test suite covers both mixed orientations, truthful all-extinct,
+one-Candidate CSCV insufficiency, foreign/crosswired sources, missing or
+fabricated evidence, receipt-last retry/reuse, corruption/resealing,
+torn/ragged history, stale same-length mutation and pathname replacement. It
+does not physically inject ENOSPC, power loss, kernel crash or hot-unplug, does
+not benchmark a real candidate family, and does not prove a non-test Admission
+consumer, complete Step 3, profitability, capacity, million-customer load or
+the separately authorized real stored Zerodha sweep.
+
+### §165 — All-rung Selection has fixed topology, not constant source work
+
+The Execution V3-to-Selection V5 coordinator has exactly eight named calls in
+the canonical 60/120/180/300/600/900/1,800/3,600-second order. Its successor
+handoff has exactly 200 successful visits: rank 1 through 25 for each literal
+rung. Choosing the next named call or visit is constant work with respect to
+rung count because neither surface accepts a caller collection. This bounded
+control topology does not make the authenticated work behind it constant.
+
+For eligible Population sizes C1..C8 and authenticated file bytes B, complete
+preparation and retained reauthentication perform O(B + sum(C1..C8)) work and
+retain O(sum(C1..C8)) upstream/identity evidence, subject to explicit refusal
+ceilings. Each one-rung ranking must see its entire authenticated eligible
+population before Top-25 is authoritative. Before the first successor callback
+the implementation reopens and authenticates all eight Top-25s, exact-joins
+their durable Execution dispositions and rechecks the retained Population,
+Execution and Selection root topology. That preflight is deliberately not a
+lazy per-callback shortcut.
+
+Fixed-stride row address arithmetic is worst-case O(1) after a ledger has been
+admitted; identity-map lookup is average O(1); Top-10 is a constant-size prefix
+only after the complete Top-25 has been reproduced. Allocation, hashing, file
+authentication, ranking, lock wait, append/reuse, durability barriers, fresh
+reopen, filesystem traversal, page faults, controller behavior, removable-
+device loss and wall-clock latency have no constant bound.
+
+The focused **5/5** suite covers canonical rung/prefix/count/cross-identity
+proofs and Selection-root duplicate/nesting/upstream-overlap/symlink/path-
+replacement refusal. D-0490's one-rung **11/11** suite covers deterministic
+ties, exact persistence/reopen/reuse, every valid orphan prefix, foreign or
+reordered rows, corruption and stale retained sources. No test physically
+persists all eight full source chains together, injects ENOSPC, power loss,
+kernel crash or hot-unplug, benchmarks a real population, proves a
+million-customer load, proves Global Replay/operator publication or executes
+the separately authorized real stored Zerodha sweep. Natural zero-family
+extinction remains unsupported by V5 and may not be replaced by fabricated
+rows or zero statistics.
+
+### §166 — Global Replay V3 has fixed 8x25 topology, not constant total work
+
+Global Replay V3 accepts exactly eight canonical Selection V5 Top-25s and
+exactly 200 opaque Runner OOS replay capabilities. Those constants bound the
+number of strategy streams and same-minute scheduler intents; they do not bound
+the number C of replay candidates produced across the 200 OOS universes. The
+current preparation allocates O(C) Candidate/Decision/Money evidence and sorts
+candidate attempts in O(C log C) time before the minute-wise global fold.
+Encoding, hashing, persistence, fresh reopen and semantic replay are O(200 + C)
+in record count, plus filesystem and controller latency.
+
+Fixed-stride address calculation for an already admitted record is worst-case
+O(1). Hash-map identity correlation is expected/average O(1), not a
+collision-independent worst-case guarantee. Same-minute scheduler work is
+bounded by the fixed 200-stream ceiling. None of those local facts makes a
+complete authority build, source authentication, durability barrier, lock
+wait, page fault, external-drive operation or wall-clock latency O(1). Memory
+and disk space necessarily grow with retained candidates, decisions and money
+rows.
+
+The focused tests use controlled private capabilities and an in-memory exact
+VIX authority. They prove canonical topology, one inclusive global lock,
+pricing-refusal occupancy, money/VIX gating, independent codecs,
+receipt-last reuse/reopen and several corrupt/torn/foreign attacks. They do not
+exercise real stored Zerodha bars, physically inject ENOSPC, power loss, kernel
+crash or hot-unplug, benchmark a maximum real candidate population, prove an
+aggregate RAM/disk ceiling, prove million-customer concurrency, or establish
+the complete Step-3 gate matrix. The crate-private V3 module exposes one opaque
+receipt-last commit/reopen door, but no upstream stored orchestrator or
+operator-surface caller invokes it at this checkpoint.
+
+### §167 — Admission V4 bounds records; it does not make authentication or durability O(1)
+
+Let C be the number of real Statistics V3 Candidates in the two-family block,
+D the evaluated-Candidate decisions (`D <= C`), and F the admitted Admission
+V4 file bytes. Preparation walks the exact Statistics Candidate projection once
+and performs one arithmetic Base fixed-offset read per Candidate, so its logical
+join and Runner evaluation are O(C). It allocates O(C + D) transient joined and
+decision storage. Encoding, ordered hashing and append are O(D); initial ledger
+scan, file-generation digest, fresh reopen and exact semantic comparison are
+O(F). Durable disk consumption necessarily grows by one Data, two Family, D
+Decision and one Completion record per complete authority.
+
+The explicit authority, decision-per-authority and byte ceilings make those
+operations bounded and fail-closed; they do not change their asymptotic work.
+One admitted Base row and one admitted Admission record have worst-case O(1)
+offset arithmetic. The in-memory identity table provides expected/average O(1)
+lookup, not a collision-independent guarantee. Lock acquisition, metadata,
+allocation, hashing, physical reads/writes, `sync_all`, page faults, filesystem
+behavior, controller caches, removable-device failure and wall-clock latency
+have no constant upper bound.
+
+The focused **5/5** Admission V4 and **7/7** Statistics V3 tests use controlled
+fixtures. They cover all typed terminal shapes, exact write/reopen/reuse and
+trailing-prefix recovery, noncanonical family/sequence, foreign policy/Search
+identity, corrupt/resealed records, stale same-length mutation and named-path
+replacement. They do not construct the complete upstream opaque
+Candidate/Base/Observation/Statistics/Search chain in one fixture, persist a
+Finalization V4 authority, run all eight real rungs, inject ENOSPC/power
+loss/kernel crash/hot unplug, benchmark a maximum real population, prove a
+million-customer load, or establish workspace coverage/mutation/security gates.
+The substantive CLI library Clippy attempt (`-D warnings -A dead-code`) has zero
+findings in the two owned modules but remains red on 38 sibling findings; the
+full strict command remains open. No universal O(1) time, O(1) space, O(1)
+latency, scalability or customer-capacity guarantee is established.
+
+### §168 — Finalization V4 bounds mixed-terminal evidence; it does not make source authentication constant
+
+Let D be the number of real evaluated-Candidate Admission decisions, A the
+number of admitted Finalization authorities and F the bounded Finalization file
+bytes. Preparation obtains and validates the complete fresh Admission V4
+projection, walks its two family records and D decisions, replays Runner
+arithmetic and retains O(D) exact decision state. Encoding, ordered hashing,
+exact-prefix comparison and append are O(D). Ledger open, same-length
+generation authentication, fresh reopen and retained projection hash/scan O(F)
+bytes and then compare O(D) semantics. Durable storage grows by one Data, two
+Family, D Decision and one Completion record per authority; an all-extinct
+authority correctly has four records rather than zero evidence or invented
+rows.
+
+Explicit authority, decisions-per-authority and byte ceilings refuse excess;
+they do not sample, truncate or change terminal meaning. One already admitted
+4,096-byte record address is worst-case O(1) in record count. Hash-map and
+HashSet probes are expected/average O(1), not collision-independent worst-case
+guarantees. Locks, metadata traversal, allocation, hashing, physical I/O,
+`sync_all`, page faults, filesystem/controller behavior, removable-device loss
+and wall-clock latency have no constant bound.
+
+The focused suite is **5/5 green** with **729 filtered** on 2026-09-01. The
+focused CLI library check is green; the strict library/test diagnostic reports
+zero Finalization V4 findings but remains red on **105/117 sibling findings**.
+The suite uses controlled Admission V4 authorities and does not construct
+the entire Candidate/Base/Observation/Statistics/Search chain in one fixture,
+physically inject ENOSPC, power loss, kernel crash or hot unplug, benchmark a
+maximum real family, prove million-customer concurrency, persist the required
+new Population successor, establish workspace coverage/mutation/security gates
+or run real stored Zerodha data. Existing Population V5 cannot consume this
+mixed-terminal shape without changing its V3-specific bytes; no compatibility
+or whole-system O(1) claim is made.
+
+### §169 — stored post-training OOS is a bounded snapshot, not O(1) replay or live-device continuity
+
+Let M be requested months, S signal bars, D daily bars, Q exact-minute context
+bars, E requested execution minutes, P the actual Selection V6 winners across
+all eight rungs (0..=200), and C the complete replay candidates emitted across
+those witnesses. Header admission is O(1) per stored month, but constructing
+one `StoredPostTrainingOosCohortV1` is O(M + S + D + Q): it loads complete
+bounded streams, validates calendar continuity, derives previous-day and
+exact-minute causal columns and hashes the retained snapshot. Space is
+O(S + D + Q) for the owned snapshot and derived column. Minting every witness
+is proportional to the authenticated Runner replay over its OOS bars and exit
+paths, and full future V4 preflight/scheduling is at least O(P + C) before
+persistence. Explicit record ceilings refuse excess before allocation where
+the store header permits; they do not convert any whole operation into O(1).
+
+The admitted root holds a device/inode capability and detects deterministic
+rename-and-replace substitution before/after stage boundaries. Existing store
+APIs remain pathname based, so this is not atomic `openat` confinement. The
+cohort owns the exact bytes it admitted: mutating an old pathname later cannot
+silently mutate that in-memory snapshot, but the capability does not claim that
+its snapshot is still the newest content currently present on disk. Proving
+live-current file identity would require retained per-file capabilities or a
+fresh bounded reopen; sudden unplug, kernel termination, controller cache
+loss, in-place file replacement after snapshot admission and physical media
+faults have not been injected. No seamless fallback to internal storage is
+allowed or implemented.
+
+The controlled OOS suite is **3/3 green** on 2026-09-01 and covers exact retry,
+opaque witness mint, absent/overlapping cohorts, pre-allocation refusal,
+cross-family disposition and deterministic root replacement. The focused CLI
+library check is green. Strict shared-tree Clippy remains red: its last attempt
+reported 115 library and 126 library-test diagnostics; four direct
+cohort/orchestrator diagnostics were corrected statically after that attempt,
+but the post-correction strict rerun is still open. These checks do not prove a
+frozen Selection V6 actual-winner handoff, Global Replay V4 bytes, receipt-last
+V4 persistence, operator surfaces, a maximum dataset, workspace
+Clippy/tests/deny/security, coverage, mutation, benchmarks, hot unplug or a real
+stored Zerodha sweep. No throughput, latency, customer capacity, profitability
+or universal O(1) time/space guarantee is measured or inferred.
+
+### §170 — Population V6 and Execution V4 use fixed records; their complete authorities are not O(1)
+
+D-0498 corrects one cardinality claim but does not create a constant-size
+population. Let C be the number of real evaluated Candidate V1
+execution-coordinate rows, P the total resolved percentile atoms for active
+Long/Short parameters, B the configured authority ceiling and F the total
+admitted bytes in the relevant ledger files.
+
+Candidate V1 receipt validation recomputes one constant number of aggregate
+fields, but producing and authenticating the Candidate block still walks its
+C rows. Population V6 authenticates retained Candidate and Finalization sources
+twice, exact-joins C Candidate/decision rows, validates canonical order and
+uniqueness with bounded hash sets, encodes C fixed records and freshly scans the
+complete file. Its preparation time is O(C), temporary/result space is O(C),
+and open/reopen/generation authentication is O(F). The four reachable terminal
+pairs change C, including truthful C=0 for X/X; they do not make worst-case C a
+constant. Hash-map identity lookup is average O(1), not worst-case O(1).
+
+Execution V4 has at most four parameter records because there are exactly two
+families and two directions, but its percentile and disposition files remain
+data-sized. Preparation, validation, crash-prefix comparison and fresh reopen
+are O(C + P) plus O(F) hashing and filesystem work; durable space is O(C + P +
+B). A held authenticated read deliberately rehashes retained bounded files
+before and after the record work, so even fixed-offset addressing does not make
+that complete authenticated operation O(1).
+
+Fixed record strides make only arithmetic from an already-admitted record index
+to its byte address worst-case O(1). Allocation, hashing, duplicate detection,
+source reauthentication, locks, synchronization, page faults, storage
+controller behavior and removable-device latency are not constant and no
+latency ceiling was measured. Explicit record/file bounds refuse excess; they
+do not change asymptotic work or space.
+
+At this checkpoint `rustfmt --check` is clean for the new Rust seams, but
+focused Cargo compile/tests/Clippy have not yet run under the serialized slot.
+The controlled genuine E/E fixture is not a real stored-market sweep; mixed and
+all-extinct codec tests do not establish profitability, maximum-dataset
+throughput, million-customer capacity, operator/database/dashboard publication,
+physical ENOSPC/power-loss/hot-unplug behavior, coverage, mutation or complete
+workspace gates. No universal O(1) time, space, uniqueness, deduplication,
+mapping or latency guarantee is claimed.

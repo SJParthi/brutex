@@ -4153,6 +4153,7 @@ mod route_tests {
                 std::sync::Arc::new(crate::assets::Assets::new(&crate::scratch::path(
                     "ingest-routes-front",
                 ))),
+                addr,
             ),
             Box::pin(async move { stopper.accept().await.map(|_| ()) }),
         ));
@@ -4167,9 +4168,12 @@ mod route_tests {
             exchange(
                 addr,
                 format!(
-                    "POST {path} HTTP/1.1\r\nHost: t\r\n\
+                    "POST {path} HTTP/1.1\r\nHost: localhost:{}\r\n\
+                     Origin: http://localhost:{}\r\nSec-Fetch-Site: same-origin\r\n\
                      Content-Type: application/x-www-form-urlencoded\r\n\
                      Content-Length: {}\r\nConnection: close\r\n\r\n{form}",
+                    addr.port(),
+                    addr.port(),
                     form.len()
                 ),
             )

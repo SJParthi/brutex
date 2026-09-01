@@ -20,11 +20,12 @@
 //!
 //! This list read `sweep | auto` and omitted half the surface, including the
 //! only command that touches real market data. `sweep-stored` also needs the
-//! binary stamped -- `BRUTEX_COMMIT=$(git rev-parse HEAD) cargo build --release
-//! -p cli` -- because CLAUDE.md section 3 rule 3 forbids a computation whose run
-//! identity cannot be recorded, and an unstamped build refuses before it reads a
-//! bar. [`cli::USAGE`] is what an operator actually sees; a doc comment here
-//! reaches nobody at a terminal, which is why it had drifted unnoticed.
+//! binary stamped from a clean HEAD. The build proves HEAD, index, and working
+//! source agree; an explicit `BRUTEX_COMMIT` can only assert that same HEAD and
+//! cannot bypass a dirty tree. CLAUDE.md section 3 rule 3 forbids a computation
+//! whose run identity cannot be recorded, so an unproved build refuses before it
+//! reads a bar. [`cli::USAGE`] is what an operator actually sees; a doc comment
+//! here reaches nobody at a terminal, which is why it had drifted unnoticed.
 
 // A BINARY IS ITS OWN CRATE ROOT. `lib.rs` carries this attribute and it does
 // not reach here, so CI gate 16 checks every root separately.
@@ -36,6 +37,17 @@
 /// rather than written as it is produced, so that every arm of the library is
 /// drivable from a test with no stdout to capture.
 fn main() -> std::process::ExitCode {
+    // THE STORE IS PROVED BEFORE THE FIRST POSSIBLE WRITE.
+    //
+    // `preflight_store_root` does not create the resolved path and does not
+    // canonicalize-or-fallback. A removed external volume, a dangling symlink,
+    // or a regular file therefore stops here: no log sink is installed and no
+    // command is dispatched against a different directory.
+    if let Err(why) = cli::preflight_store_root() {
+        println!("refused: {why}");
+        return std::process::ExitCode::from(cli::FAILED);
+    }
+
     // THE SINK, INSTALLED BEFORE THE COMMAND RUNS AND NOWHERE ELSE.
     //
     // Here rather than inside `cli::run` because the sink is process-wide:

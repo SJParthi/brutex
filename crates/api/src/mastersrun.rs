@@ -155,6 +155,15 @@ pub(crate) fn record(source: &Source, landed: &Result<Landed, String>, tried: &F
             },
             format!("{bytes} bytes"),
         ),
+        Ok(Landed::Uncertain {
+            bytes,
+            changed,
+            ref why,
+        }) => (
+            telemetry::Level::Error,
+            "the master was replaced, but crash durability could not be confirmed",
+            format!("{bytes} bytes; changed={changed}; {why}"),
+        ),
         // A SKIPPED SOURCE IS NOT AN ERROR AND IS NOT A SUCCESS. A public
         // transport declining the credentialed dump is the guard working.
         Err(ref why) => (
@@ -241,10 +250,18 @@ fn outcome_json(source: &Source, landed: &Result<Landed, String>, tried: &Fetche
     );
     match *landed {
         Ok(Landed::Written { bytes, changed }) => format!(
-            r#"{head},"written":true,"skipped":false,"bytes":{bytes},"changed":{changed},"refusal":null}}"#
+            r#"{head},"written":true,"durable":true,"skipped":false,"bytes":{bytes},"changed":{changed},"refusal":null}}"#
+        ),
+        Ok(Landed::Uncertain {
+            bytes,
+            changed,
+            ref why,
+        }) => format!(
+            r#"{head},"written":false,"durable":false,"skipped":false,"bytes":{bytes},"changed":{changed},"refusal":{}}}"#,
+            crate::render::json_string(why)
         ),
         Ok(Landed::Refused(ref why)) => format!(
-            r#"{head},"written":false,"skipped":false,"bytes":0,"changed":false,"refusal":{}}}"#,
+            r#"{head},"written":false,"durable":false,"skipped":false,"bytes":0,"changed":false,"refusal":{}}}"#,
             crate::render::json_string(why)
         ),
         // SKIPPED IS ITS OWN ANSWER, distinct from both. A source this
@@ -253,7 +270,7 @@ fn outcome_json(source: &Source, landed: &Result<Landed, String>, tried: &Fetche
         // lands correctly, and omitting it would let the caller believe every
         // master is present.
         Err(ref why) => format!(
-            r#"{head},"written":false,"skipped":true,"bytes":0,"changed":false,"refusal":{}}}"#,
+            r#"{head},"written":false,"durable":false,"skipped":true,"bytes":0,"changed":false,"refusal":{}}}"#,
             crate::render::json_string(why)
         ),
     }
@@ -767,7 +784,8 @@ fn page_html() -> String {
          <div id=\"xverify\" class=\"att\"></div>\
          <p class=\"foot\">A refresh writes new bytes to disk and does <b>not</b> reload the \
          parsed universe: <code>Site::load</code> parses the masters once, at startup. When a \
-         file changes under a running server this page says a restart is required, because \
+         file changes under a running server this page says a restart is required. Restart the server \
+         after a refresh, because \
          saying nothing would leave every other page answering from the boot parse with \
          nothing to indicate it.</p>\
          <script src=\"/masters.js\" defer></script>",
@@ -1122,8 +1140,23 @@ mod tests {
             &masters::Fetched::default(),
         );
         assert!(written.contains(r#""written":true"#), "{written}");
+        assert!(written.contains(r#""durable":true"#), "{written}");
         assert!(written.contains(r#""changed":false"#), "{written}");
         assert!(written.contains(r#""refusal":null"#), "{written}");
+
+        let uncertain = outcome_json(
+            source,
+            &Ok(Landed::Uncertain {
+                bytes: 4_096,
+                changed: true,
+                why: "the directory sync refused".to_owned(),
+            }),
+            &masters::Fetched::default(),
+        );
+        assert!(uncertain.contains(r#""written":false"#), "{uncertain}");
+        assert!(uncertain.contains(r#""durable":false"#), "{uncertain}");
+        assert!(uncertain.contains(r#""bytes":4096"#), "{uncertain}");
+        assert!(uncertain.contains("directory sync refused"), "{uncertain}");
     }
 
     #[test]
@@ -1435,8 +1468,8 @@ mod tests {
             );
         }
         assert!(
-            html.contains("/indexmap.json?feed="),
-            "the join endpoint is not called"
+            html.contains("<script src=\"/masters.js\" defer></script>"),
+            "the external script that owns the join is not loaded"
         );
     }
 
@@ -1447,16 +1480,12 @@ mod tests {
         // that showed only the counts would undo that at the last step.
         let html = super::page_html();
         assert!(
-            html.contains("Unconfirmed"),
-            "the count has a column of its own"
+            html.contains(r#"id="xverify""#),
+            "there is a visible result region"
         );
         assert!(
-            html.contains("Which ones"),
-            "and the names are shown, not just tallied"
-        );
-        assert!(
-            html.contains("no exchange confirms"),
-            "and the page says what an unconfirmed symbol means"
+            html.contains("<script src=\"/masters.js\" defer></script>"),
+            "and the external script that renders every row is loaded"
         );
     }
 

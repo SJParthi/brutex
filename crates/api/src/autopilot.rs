@@ -591,8 +591,8 @@ pub fn store_due(probe: Option<&Probe>, now_unix: i64) -> Due {
 ///
 /// # What this is, and what it is emphatically not
 ///
-/// It is a **measurement**, taken locally: create the directory if it is not
-/// there, write a few bytes to a per-vendor dot-file directly under the store
+/// It is a **measurement**, taken locally: require the configured store root to
+/// still exist as a directory, write a few bytes to a per-vendor dot-file directly under the store
 /// root, `sync_all` so the answer is the disk's and not the page cache's, and
 /// remove it. It contacts no vendor, opens no socket, reads no credential and
 /// spends no rate budget, so it can be taken on a schedule without any of it
@@ -634,7 +634,26 @@ pub fn store_writable(root: &std::path::Path, vendor: &str) -> Result<(), String
 /// anything.
 fn probe_io(root: &std::path::Path, path: &std::path::Path) -> std::io::Result<()> {
     use std::io::Write as _;
-    std::fs::create_dir_all(root)?;
+    // NEVER RECREATE A MISSING STORE ROOT.
+    //
+    // In particular, an external store is commonly reached through a symlink
+    // such as `$HOME/.brutex/store -> /Volumes/<drive>/...`. If that drive is
+    // unplugged, `create_dir_all(root)` can manufacture the absent mountpoint
+    // on the internal filesystem. A later successful probe would then revive
+    // the feed over the WRONG DEVICE and split one append-only history in two.
+    // The root is a startup/configuration capability, not scratch space: a
+    // missing or non-directory root stays a loud halt until the same root is
+    // mounted again and the server is restarted.
+    let metadata = std::fs::metadata(root)?;
+    if !metadata.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotADirectory,
+            format!(
+                "configured store root {} is not a directory",
+                root.display()
+            ),
+        ));
+    }
     let mut file = std::fs::File::create(path)?;
     file.write_all(b"brutex write probe\n")?;
     // THE BYTES HAVE TO REACH THE DEVICE. A write that only reached the page
@@ -5949,6 +5968,20 @@ mod tests {
             "three probes left three files behind — the probe must remove its own"
         );
 
+        // A MISSING ROOT STAYS MISSING. Before the external-volume guard this
+        // exact call recreated the root and returned success. For a dangling
+        // `/Volumes/...` symlink that means reviving on the internal disk.
+        let missing = crate::scratch::path("autopilot-probe-missing-root");
+        let _ = std::fs::remove_dir_all(&missing);
+        let why = store_writable(&missing, "zerodha")
+            .expect_err("a disappeared configured root must never be recreated");
+        assert!(why.contains("refused a write probe"), "{why}");
+        assert!(
+            !missing.exists(),
+            "the write probe manufactured a replacement store at {}",
+            missing.display()
+        );
+
         // A ROOT THAT CANNOT EXIST, because its parent is a regular file. The
         // host's own words travel, so `permission denied` on somebody else's
         // volume reads as itself rather than as "the disk is fine".
@@ -5958,7 +5991,7 @@ mod tests {
         let file = blocker.join("not-a-directory");
         std::fs::write(&file, b"x").expect("a regular file");
         let why = store_writable(&file.join("under"), "dhan")
-            .expect_err("a path under a regular file cannot be created");
+            .expect_err("a path under a regular file cannot exist");
         assert!(
             why.contains("not-a-directory"),
             "the refusal names the path: {why}"

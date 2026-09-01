@@ -15,8 +15,10 @@ Every layer below is one of these applied somewhere specific.
 **1 · Fixed width everywhere.** Variable-length input means variable-time
 hashing. A 2-letter ticker and a 24-letter one must cost the same.
 
-**2 · Pre-size every map.** Growth is the *only* source of O(n) in a hash table.
-Reserve the bound up front and the word "amortised" leaves the guarantee.
+**2 · Pre-size every map.** Growth is the whole-table O(n) resize this rule can
+exclude. Reserving a bound does **not** turn a hash table into a worst-case O(1)
+lookup: collisions remain, and Rust's `HashMap`/`HashSet` promises no adversarial
+probe bound. Where one remains, this document says **expected O(1)**.
 
 **3 · Never scan to answer a question.** Maintain a counter instead. "How many
 do I have?" must be a read, not a walk.
@@ -36,12 +38,12 @@ arrives from outside.
 |---|---|---|---|---|
 | 1 | Identity | Fixed width, never variable | `Symbol` 24 B, `Isin` 12 B, `InstrumentKey` is `Copy` with a structural hash | ✓ |
 | 2 | Hashing | No cryptographic hash on a trusted path | FNV-1a, not SipHash. `core` may declare no dependency (gate 9), so the hash is four `const` lines rather than a crate | ◐ |
-| 3 | Maps | Pre-sized with headroom | `HashMap::with_capacity(reservation_for(n))`, factor 2. **Lookup** is O(1) worst case. **Append** is O(1) worst case for the first `n_valid` calls after a load, and **amortised** O(1) after that — see below | ◐ |
+| 3 | Maps | Pre-sized with headroom | `HashMap::with_capacity(reservation_for(n))`, factor 2. **Lookup** is expected O(1), not adversarial worst-case. **Append** avoids a resize for the first `n_valid` calls after a load and is amortised O(1) after that — see below | ◐ |
 | 4 | Membership | No search of any kind | Open-addressed table built at compile time. **Never `binary_search`** | ✓ |
 | 5 | Address | Arithmetic, never lookup | `base + header + i·stride`. The path is the index | ✓ |
-| 6 | Hot data | 16 bytes per bar, not 56 | **48 bytes.** `ConditionMask` is `[u64; WORDS]` with `WORDS = 6`, pinned by a `const` assertion in `vocab::mask`. There is no bit plane — see below | ✗ |
-| 7 | Residency | Load once, never re-read | `indicators::Column` holds `Vec<ConditionMask>` plus a parallel index. Nothing pins anything, and the 7.75 GB figure was sized from the 16-byte row above | ○ |
-| 8 | Evaluation | One instruction | **Branchless, and not one instruction.** Six ANDs, six XORs, five ORs and one compare over `[u64; 6]` — no loop, no branch, constant | ◐ |
+| 6 | Hot data | One fixed-width mask per bar | **48 bytes.** `ConditionMask` is `[u64; WORDS]` with `WORDS = 6`, pinned by a `const` assertion in `vocab::mask`; `engine::column::Column` owns exactly one such row per bar and no position bit plane | ✓ |
+| 7 | Residency | Build once, reuse without re-reading the source slice | `engine::column::Column::from_rows` copies the fixed rows once and every threshold/candidate probe reuses them. This is logical reuse, not a claim that the OS physically pins all pages in RAM | ◐ |
+| 8 | Evaluation | One fixed-width hit test per candidate/bar pair | Six ANDs, six XORs, five ORs and one compare over `[u64; 6]`; `Column::support` invokes it exactly once per row, with no candidate-position loop or early exit | ✓ |
 | 9 | Allocation | **Zero in the hot loop** | Preallocated frontier. No `format!`, no `String`, no `push` | ○ |
 | 10 | Parallelism | Work-stealing, never static | 10 P-cores. A static split stalls waiting on the 4 efficiency cores | ○ |
 | 11 | Blocks | Whole records only | `BLOCK_LEN` is a whole multiple of the stride, so straddling is **unrepresentable** rather than handled | ✓ |
@@ -69,9 +71,8 @@ Measured on an Apple M4 Pro, 48 GB, macOS 26.5.2, rustc 1.97.1.
 
 | Operation | Measured | Note |
 |---|---|---|
-| One mask evaluation | flat **1→234 bits** (`C-V-01…03`) | The hardware floor. Identical at 0%, 28% and 100% hit rate, so no data-dependent branch. **The span was written as `1→74 bits`, then as `1→234`, and the vocabulary has 370 positions across six words** — 74 was the width when the row was first measured, and the ratios recorded against the current width live in `docs/04-invariants.md`: 0.998× hit→miss, 0.996× word 0 → word 5, 1.037× k=1 → k=370. A ratio quoted against a stale width is a measurement of a build nobody is running.
-
-**234 WAS THE SECOND STALE WIDTH, AND THIS ROW'S OWN SENTENCE IS WHAT CAUGHT IT.** Measured 2026-08-26: `vocab::table::TABLE` is `[BitDef; 370]`, `vocab::table::COUNT` is asserted `== 370` in both `lib.rs` and `table.rs`, and the running server's `/vocab.json` returns `count: 370`. 234 is not the vocabulary — it is the last bit of the classical-candlestick block (`plain(234, "pat_tri_star_bear")`, the end of the `198–234` range in this table's own header). The correction from 74 reached for a section boundary instead of `COUNT`, which is the same class of error the sentence warns about, committed while writing the warning. `CLAUDE.md` §5 states the width as 370 and is the copy that was right |
+| One mask evaluation | fixed **384-bit representation**, 370 allocated positions (`C-V-01…03`) | Six words are evaluated every time, independent of candidate popcount and answer. This row was first labelled `1→74`, then `1→234`; both were stale vocabulary counts. The live extreme is now tested separately all the way to the representation's padding at k=384, so a width correction cannot again stop at a condition-family boundary |
+| Live `Column::support`, candidate k=1 → k=4 / k=8 / k=384 | **0.971× / 0.996× / 0.942×** (`C-E-02`, `C-E-09`) | One fixed-six-word `hits` per row. `the_live_support_body_is_one_fixed_width_hit_test` structurally refuses the former Θ(k) position-bitmap loop; the ratios are regression evidence, not an adversarial latency guarantee |
 | Universe membership | worst probe **6** (750 members) / **7** (213 members) | Replaced ~10 comparisons that grew with the list |
 | NSE series membership | worst probe **2** (6 members) / **1** (2) / **6** (120) | Layer 4's last holdout. `core::vendor::board_of` binary-searched these three until D-0065. The 120-code table measured **10** at 256 slots and was refused by its own test until it was 512 — the second time this section's own warning has caught a table that was accepted by `build` and too slow to ship |
 | Page render, 2,787 → 50,000 instruments | **0.974× – 1.084×**, every sort column × pill, plus the hatch and a clamped deep page | Layer 12. `cargo bench -p api`, exit 0, 2026-08-12 — re-measured for D-0130. Absolute ~157 µs at *both* sizes, release profile. Marginal cost of one more instrument: **0 – 280 ps** per request (C-15), against 85,400 ps before D-0042. **It regressed to 1,433 – 2,100 ps on all thirty C-15 lines and was caught by this bench**, not by the rows or the counts — the page drew its notes, and a note's length is the universe. D-0130 |
@@ -85,7 +86,7 @@ Measured on an Apple M4 Pro, 48 GB, macOS 26.5.2, rustc 1.97.1.
 
 **Not O(1), and never claimed to be:** the sweep. Apriori over the vocabulary is
 combinatorial — each *step* is 0.2 ns, the number of steps is not constant.
-`CLAUDE.md` §3 rule 4 says "constant **per-operation** cost" for that reason.
+`AGENTS.md` §3 rule 4 says "constant **per-operation** cost" for that reason.
 
 **The C-11 spread was explained here, and the explanation was wrong.** This
 table said "the spread is the counter side at the clock's floor". The bench now
@@ -127,9 +128,11 @@ append after a load rebuilt the table at every census of the form `7·2^k`. It
 measured **5,100,585 ps per append at a 57,344-entry census**, and it passed
 every round-number bench because `with_capacity` happened to round 1,000 /
 10,000 / 50,000 up and leave spare slots. The reservation is now the census
-doubled, capped at `MAX_ENTRIES`. What that buys is stated exactly: O(1) worst
-case for the first `n_valid` appends after a load, **amortised** O(1) after
-that. `pull::unit::a_loaded_index_carries_headroom_for_the_appends_after_it`
+doubled, capped at `MAX_ENTRIES`. What that buys is stated exactly: **no
+whole-table resize** for the first `n_valid` appends after a load, then
+amortised O(1) growth. It does not bound hash collisions, so the complete
+lookup/insert remains expected O(1), not adversarial worst-case.
+`pull::unit::a_loaded_index_carries_headroom_for_the_appends_after_it`
 (M-19) asserts the growth past the headroom, deliberately, so the row cannot be
 read as an unconditional claim. `docs/06-limits.md` §23.
 
@@ -155,7 +158,10 @@ asserts the bound as a **number**:
   measured **14** — worse than the `binary_search` it replaced, still O(1) by
   definition — and the test refused it until the table was widened.
 - Layer 8's flatness is asserted against the 1.4× ceiling in
-  `docs/04-invariants.md`, measured across every mask width.
+  `docs/04-invariants.md`: C-E-02 checks ordinary k=1/4/8 candidates and C-E-09
+  drives the complete k=384 representation. The source guard separately pins one
+  fixed-width `hits` call per row, because a ratio alone can hide a uniformly
+  slower implementation.
 - Layer 3's guarantee is the *absence* of a rehash **over a stated number of
   appends**, so the bound is the reservation itself, taken from a count known
   before the loop starts — and the number of appends it covers is part of the

@@ -22,6 +22,25 @@ fn bin() -> std::path::PathBuf {
     p
 }
 
+/// One binary invocation with an already-existing store root.
+///
+/// Production must refuse a missing root before dispatch. These tests exercise
+/// commands rather than that refusal, so they explicitly point the process at
+/// the operating system's existing temporary directory and give each process
+/// its own log directory.
+fn command(tag: &str) -> Command {
+    let mut command = Command::new(bin());
+    command.env("BRUTEX_STORE", std::env::temp_dir());
+    command.env(
+        "BRUTEX_LOG_DIR",
+        std::env::temp_dir().join(format!(
+            "brutex-cli-binary-log-{tag}-{}",
+            std::process::id()
+        )),
+    );
+    command
+}
+
 /// The number a report renders on a labelled row, as an integer.
 ///
 /// The rows are `  <label><value right-aligned>  <note>`, so the value is the
@@ -67,7 +86,7 @@ fn a_sweep_runs_end_to_end_and_says_its_bars_were_generated() {
     // 374 swept. `min_hits` 200 keeps it at 8 ms and, importantly, leaves the
     // verdict `complete` rather than `REFUSED` — a budget breach would make the
     // "trustworthy" assertion below pin the wrong thing.
-    let out = Command::new(bin())
+    let out = command("sweep")
         .args(["sweep", "6", "200"])
         .output()
         .expect("the binary runs");
@@ -112,7 +131,7 @@ fn a_sweep_runs_end_to_end_and_says_its_bars_were_generated() {
 
 #[test]
 fn the_threshold_search_runs_end_to_end() {
-    let out = Command::new(bin())
+    let out = command("auto")
         .args(["auto", "2"])
         .output()
         .expect("the binary runs");
@@ -126,7 +145,7 @@ fn the_threshold_search_runs_end_to_end() {
 
 #[test]
 fn a_word_this_build_does_not_know_is_refused_by_name() {
-    let out = Command::new(bin())
+    let out = command("unknown")
         .args(["backtest"])
         .output()
         .expect("the binary runs");
@@ -145,12 +164,50 @@ fn a_word_this_build_does_not_know_is_refused_by_name() {
 
 #[test]
 fn no_command_at_all_is_refused_rather_than_defaulted() {
-    let out = Command::new(bin()).output().expect("the binary runs");
+    let out = command("empty").output().expect("the binary runs");
     assert_eq!(out.status.code(), Some(i32::from(cli::MISUSED)));
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(
         text.contains("no command given"),
         "silence is not a command, and guessing one would be the fallback \
-         CLAUDE.md section 4 bans:\n{text}"
+        CLAUDE.md section 4 bans:\n{text}"
     );
+}
+
+#[test]
+fn a_missing_store_refuses_before_logging_or_dispatch() {
+    let root = std::env::temp_dir().join(format!(
+        "brutex-cli-binary-missing-store-{}",
+        std::process::id()
+    ));
+    let logs = std::env::temp_dir().join(format!(
+        "brutex-cli-binary-missing-store-logs-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&root);
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&logs);
+
+    let out = Command::new(bin())
+        .env("BRUTEX_STORE", &root)
+        .env("BRUTEX_LOG_DIR", &logs)
+        .args(["sweep", "6", "200"])
+        .output()
+        .expect("the binary runs to its preflight");
+    assert_eq!(
+        out.status.code(),
+        Some(i32::from(cli::FAILED)),
+        "an unavailable configured store is an operational failure"
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.starts_with("refused: ") && text.contains(&root.display().to_string()),
+        "the refusal names the exact unavailable root:\n{text}"
+    );
+    assert!(
+        !text.contains("events ->") && !text.contains("THESE BARS ARE GENERATED"),
+        "neither logging nor dispatch may precede the store preflight:\n{text}"
+    );
+    assert!(!root.exists(), "the missing store was not created");
+    assert!(!logs.exists(), "the log sink was not installed");
 }

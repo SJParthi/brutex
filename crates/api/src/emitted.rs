@@ -209,7 +209,16 @@ struct Case {
 /// `conduct` calls `cli::range_over` on the real store two lines later -- a
 /// census that can only be satisfied by launching a sweep from `cargo test` is
 /// a census people route around.
-const ROWS: usize = 27;
+///
+/// 27 -> 28 when the three engine completion sites became one shared, honest
+/// classifier. Its refusal arm is cheap to drive here and proves that a task
+/// which recorded nothing never emits a fabricated ledger-success claim.
+///
+/// 28 -> 29 when live progress gained one exact attempt-start marker shared by
+/// all three browser engine entry points. The marker is driven directly here;
+/// proving an audit site must not require launching the expensive sweep it
+/// brackets.
+const ROWS: usize = 29;
 
 /// How many distinct production emit sites those rows cover.
 ///
@@ -723,6 +732,54 @@ fn cases() -> Vec<Case> {
             mine: Box::new(|record| says(record, "knobs", "BRUTEX_TOP=500")),
         });
     }
+    cases.push(Case {
+        site: "sweeprun.rs api.sweep an engine task finished",
+        target: "api.sweep",
+        message: "an engine task finished",
+        level: telemetry::Level::Warn,
+        drive: Box::new(|| {
+            let mut progress = crate::sweeprun::Progress::started(
+                "zerodha",
+                "NIFTY",
+                (2026, 8),
+                (2026, 8),
+                None,
+                1,
+                2,
+            );
+            progress.finished_micros = Some(2);
+            progress.refusal = Some("no result was recorded".to_owned());
+            crate::sweeprun::emit_completion(&progress, "sweep", 1);
+        }),
+        mine: Box::new(|record| {
+            says(record, "operation", "sweep")
+                && says(record, "outcome", "refused")
+                && says(record, "why", "no result was recorded")
+        }),
+    });
+    cases.push(Case {
+        site: "sweeprun.rs cli.audit sweep attempt started",
+        target: "cli.audit",
+        message: "sweep attempt started",
+        level: telemetry::Level::Info,
+        drive: Box::new(|| {
+            let progress = crate::sweeprun::Progress::started(
+                "zerodha",
+                "NIFTY",
+                (2026, 8),
+                (2026, 8),
+                None,
+                1,
+                2,
+            );
+            crate::sweeprun::emit_attempt_started(&progress);
+        }),
+        mine: Box::new(|record| {
+            counts(record, "attempt", 2)
+                && says(record, "feed", "zerodha")
+                && says(record, "underlying", "NIFTY")
+        }),
+    });
     {
         let site = json_site("emit-sweep-malformed");
         cases.push(Case {
@@ -762,6 +819,7 @@ fn cases() -> Vec<Case> {
                 (2024, 1),
                 Some(47_000),
                 0,
+                1,
             ));
         }
         cases.push(Case {
@@ -800,9 +858,9 @@ fn cases() -> Vec<Case> {
         });
 
         // THE COMMIT GATE'S OWN EVENT. Driven with NO stamp, which is also what
-        // every real `cargo run -p api -- serve` carries unless the operator
-        // exports `BRUTEX_COMMIT` -- so this is the arm a mis-built server takes
-        // on every press, and it must leave a record saying why.
+        // every build from a dirty or otherwise unprovable source tree carries;
+        // exporting `BRUTEX_COMMIT` cannot bypass that proof. This is the arm a
+        // mis-built server takes on every press, and it must leave a record.
         cases.push(Case {
             site: "sweeprun.rs api.sweep a sweep was refused because this build carries no commit stamp",
             target: "api.sweep",
@@ -1328,15 +1386,17 @@ fn lib_emit_sites() -> usize {
     // version of this test hand-counted for exactly this reason and said so;
     // this is that observation, mechanised instead of trusted.
     //
-    // TWO NEEDLES, BECAUSE THERE ARE TWO SPELLINGS. `emit_if!` gates on
+    // THREE NEEDLES, BECAUSE THERE ARE THREE SPELLINGS. `emit_if!` gates on
     // `admits` before evaluating its arguments, so a site that must not pay for
     // a filtered event is written that way — and `telemetry::emit_if!(` does NOT
     // contain `telemetry::emit(`. Counting only the first made this function
     // BLIND to every converted site: the first conversion dropped the count from
-    // 27 to 26 and the assertion below caught it. A second spelling that the
+    // 27 to 26 and the assertion below caught it. `emit_for_run` supplies an
+    // explicit concurrency-safe attempt key and is counted separately. A spelling the
     // accounting cannot see is a hole in the accounting, not a detail.
     const NEEDLE: &str = concat!("telemetry", "::", "emit", "(");
     const NEEDLE_IF: &str = concat!("telemetry", "::", "emit", "_if!", "(");
+    const NEEDLE_FOR_RUN: &str = concat!("telemetry", "::", "emit", "_for_run", "(");
     let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(&src)
         .expect("the crate's own src is readable")
@@ -1357,7 +1417,11 @@ fn lib_emit_sites() -> usize {
             let text = std::fs::read_to_string(path).expect("a tracked source file");
             text.lines()
                 .filter(|line| !line.trim_start().starts_with("//"))
-                .map(|line| line.matches(NEEDLE).count() + line.matches(NEEDLE_IF).count())
+                .map(|line| {
+                    line.matches(NEEDLE).count()
+                        + line.matches(NEEDLE_IF).count()
+                        + line.matches(NEEDLE_FOR_RUN).count()
+                })
                 .sum::<usize>()
         })
         .sum()
@@ -1454,13 +1518,13 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     /// failure; a path that hides its own progress is that rule pointing
     /// inward.
     ///
-    /// AND TWO MORE FROM `sweeprun.rs`, added with `/backtest/run`:
-    /// `a sweep was accepted from the browser` and `a sweep finished and its
-    /// record is in the ledger`. Reaching either means RUNNING A SWEEP — the
-    /// first is emitted after the blocking thread is spawned and the second
-    /// from inside it — so driving them puts a real walk over stored bars on
-    /// this suite's critical path, which is a different kind of test from the
-    /// one this table is.
+    /// AND ONE MORE FROM `sweeprun.rs`, added with `/backtest/run`:
+    /// `a sweep was accepted from the browser`. Reaching it means RUNNING A
+    /// SWEEP, so driving it puts a real walk over stored bars on this suite's
+    /// critical path, which is a different kind of test from the one this
+    /// table is. The old completion site is no longer here: all engine tasks
+    /// now share `an engine task finished`, whose refusal arm is driven in the
+    /// table above without touching a bar.
     ///
     /// **The module's other two sites are NOT here, and that is the point of
     /// the distinction.** Both refusals return before anything is spawned and
@@ -1469,26 +1533,24 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     /// is what said so: `lib_sites` went 33 to 37 while every column stood
     /// still.
     ///
-    /// AND TWO MORE AGAIN, added with `/backtest/descend` (D-0299):
-    /// `a descent was accepted from the browser` and `a descent finished and
-    /// its record is in the ledger`. Same shape and same reason as the sweep's
-    /// pair directly above — the first is emitted after the blocking thread is
-    /// spawned and the second from inside it, so driving either puts a real
-    /// support WALK over stored bars on this suite's critical path. A descent is
-    /// a full screen per rung of the support ladder, so it is the more expensive
-    /// of the two, not the less.
+    /// AND ONE MORE AGAIN, added with `/backtest/descend` (D-0299):
+    /// `a descent was accepted from the browser`. Same shape and same reason as
+    /// the sweep's accepted event directly above — driving it puts a real
+    /// support WALK over stored bars on this suite's critical path. A descent
+    /// is a full screen per rung of the support ladder, so it is the more
+    /// expensive of the two, not the less. Its completion uses the shared,
+    /// driven site above.
     ///
     /// **The descent's refusal is NOT here**, for the same reason the sweep's is
     /// not: it returns before anything is spawned and touches no store, no
     /// ledger and no bar file, so it is proven in the table above.
     ///
-    /// AND TWO MORE AGAIN, added with `/engine/command` (D-0300):
-    /// `an engine command was accepted from the browser` and `an engine command
-    /// finished`. Third instance of one shape: the first is emitted after the
-    /// blocking thread is spawned and the second from inside it, so driving
-    /// either runs one of five real commands over stored bars — `audit-range`
-    /// among them, which is a full validated audit with walk-forward, PBO and
-    /// the bootstrap behind it.
+    /// AND ONE MORE AGAIN, added with `/engine/command` (D-0300):
+    /// `an engine command was accepted from the browser`. Third instance of one
+    /// shape: driving it runs one of five real commands over stored bars —
+    /// `audit-range` among them, which is a full validated audit with
+    /// walk-forward, PBO and the bootstrap behind it. Its completion also uses
+    /// the shared, driven site above.
     ///
     /// **The dispatcher's refusal is NOT here**, and it is the one worth
     /// driving: it is what tells an operator asking for `sweep`, `audit` or
@@ -1511,8 +1573,8 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     /// The rows of the table above, every one of them struck through — plus
     /// `pull.fno discovery refused`, the three named before it and the seven
     /// named here, which are the sites no test in this binary can drive.
-    const UNREACHABLE: usize = 11;
-    // COUNTED FROM THE SOURCE, not declared. A FIFTIETH emit added
+    const UNREACHABLE: usize = 8;
+    // COUNTED FROM THE SOURCE, not declared. A FORTY-NINTH emit added
     // anywhere under `crates/api/src` fails this test until somebody decides
     // which of the three columns it belongs in, which is the whole point of
     // the accounting.
@@ -1522,7 +1584,7 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // exactly what `cargo test` is and the row costs nothing to reach.
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 49,
+        lib_sites, 48,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"

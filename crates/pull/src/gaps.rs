@@ -4,10 +4,12 @@
 //!
 //! On 2026-08-22 an operator asked why bars were missing from a completed pull.
 //! Answering took an afternoon of decoding fixed-stride records by hand, and the
-//! answer was that **almost nothing was missing**: of 1,204 absent minutes in a
-//! 623,546-bar series, 1,176 belonged to sessions that were never 375 minutes
-//! long — an exchange outage, two disaster-recovery Saturdays and a Muhurat hour
-//! — and 28 were minutes the vendor did not send.
+//! store-derived answer was that **almost nothing was missing**: of 1,204 absent
+//! minutes in a 623,546-bar series, 1,176 were assigned to sessions that were
+//! never 375 minutes long and 28 to vendor loss. D-0420 later proved one premise
+//! circular: the 2021-02-24 54-bar index prefix was being used as its own
+//! exchange timetable. The current classifier keeps the verified 220-minute
+//! market session and withholds an unproved spot-index denominator for that day.
 //!
 //! Every one of those numbers was recoverable from the store. None of them was
 //! **reported** by it. That is the gap this module closes: the store knew, and
@@ -272,6 +274,41 @@ pub fn classify_against(
     last: i64,
     against: Option<&Calendar>,
 ) -> Ledger {
+    classify_with_subject(stored, first, last, against, Subject::ExchangeSession)
+}
+
+/// Classify a spot-index series without inventing index publication during the
+/// 2021-02-24 NSE systems outage.
+///
+/// SEBI proves the equity market's two normal-trading windows that day, but the
+/// same order records NIFTY computation unavailable from 10:06 to 11:43. It
+/// does not establish an exact common publication window for NIFTY, BANKNIFTY
+/// and INDIA VIX. Therefore a generic spot-index audit makes no loss claim for
+/// that entire day. Equity-series callers continue to use [`classify_against`]
+/// and its verified 220-minute exchange session.
+#[must_use]
+pub fn classify_spot_index_against(
+    stored: &[i64],
+    first: i64,
+    last: i64,
+    against: Option<&Calendar>,
+) -> Ledger {
+    classify_with_subject(stored, first, last, against, Subject::SpotIndex)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Subject {
+    ExchangeSession,
+    SpotIndex,
+}
+
+fn classify_with_subject(
+    stored: &[i64],
+    first: i64,
+    last: i64,
+    against: Option<&Calendar>,
+    subject: Subject,
+) -> Ledger {
     let mut ledger = Ledger {
         held: u32::try_from(stored.len()).unwrap_or(u32::MAX),
         ..Ledger::default()
@@ -287,7 +324,15 @@ pub fn classify_against(
         // THE SUPPLIED CALENDAR WINS. A caller with a store to derive from has
         // a calendar that widens with it; the table is the fallback for one
         // that does not, and it is bounded by `LAST_DAY`.
-        let kind = against.map_or_else(|| calendar::kind_of(day), |cal| cal.kind_of(day));
+        let mut kind = against.map_or_else(|| calendar::kind_of(day), |cal| cal.kind_of(day));
+        // THE EXCHANGE SESSION IS KNOWN; THE COMMON INDEX-PUBLICATION SESSION
+        // IS NOT. SEBI records NIFTY computation unavailable during part of
+        // the still-trading morning, and no source read here states the exact
+        // BANKNIFTY or VIX interval. Calling absent index bars vendor holes
+        // would therefore invent the denominator this audit exists to supply.
+        if subject == Subject::SpotIndex && day == calendar::SYSTEMS_OUTAGE_DAY {
+            kind = DayKind::OpenLengthUnmeasured;
+        }
         // ADVANCE PAST ANY STORED BAR BEFORE THIS DAY. A bar the caller handed
         // us from outside the range is skipped rather than counted against it.
         while cursor < stored.len() && stored.get(cursor).copied().is_some_and(|t| ist(t).0 < day) {
@@ -394,9 +439,11 @@ fn flush(ledger: &mut Ledger, run: &mut Option<Gap>) {
 /// # Why a peer is the only witness that costs nothing
 ///
 /// A calendar derived from one instrument cannot tell a scheduled break from a
-/// hole: both are simply minutes with no bar. [`crate::calendar_of`] measures
-/// that exactly — it reports 623,546 owed for NIFTY, which is what NIFTY holds,
-/// so all 28 of its real holes are invisible.
+/// hole: both are simply minutes with no bar. Before D-0420,
+/// [`crate::calendar_of`] measured that exactly — it reported 623,546 owed for
+/// NIFTY, which is what NIFTY held, so all 28 candidate holes were invisible.
+/// The primary-sourced outage correction changes the total, not this general
+/// ambiguity; a peer or independent calendar is still required.
 ///
 /// A peer breaks the tie **for free**, because the bars are already on disk. If
 /// BANKNIFTY traded 12:41 on a day NIFTY did not, the exchange was open at 12:41
@@ -624,6 +671,36 @@ mod tests {
         );
     }
 
+    /// **AN EXCHANGE SESSION DOES NOT INVENT A SPOT-INDEX PUBLICATION WINDOW.**
+    ///
+    /// SEBI proves 220 normal-market minutes on 2021-02-24 and also records
+    /// NIFTY computation unavailable during part of the morning. BANKNIFTY and
+    /// VIX publication windows are not established by that record. The equity
+    /// session can therefore be sized while a common index-bar denominator
+    /// must remain unmeasured; the store's shared 54-bar prefix is neither
+    /// allowed to call itself complete nor labelled as 166 vendor losses.
+    #[test]
+    fn the_outage_day_separates_market_minutes_from_unverified_index_bars() {
+        let day = calendar::SYSTEMS_OUTAGE_DAY;
+        let stored: Vec<i64> = (555..=608).map(|minute| at(day, minute)).collect();
+        let observed = calendar::Observed::from_runs(day, &[(555, 608)]);
+        let derived = calendar::Calendar::from_observed(&[observed]);
+
+        let exchange = classify_against(&stored, day, day, Some(&derived));
+        assert_eq!(exchange.expected, 220, "the SEBI-recorded market session");
+        assert_eq!(exchange.lost_minutes(), 166, "market minutes not stored");
+
+        let index = classify_spot_index_against(&stored, day, day, Some(&derived));
+        assert_eq!(index.held, 54, "stored evidence remains visible");
+        assert_eq!(index.expected, 0, "no invented common index denominator");
+        assert_eq!(index.lost_minutes(), 0, "no invented vendor-hole count");
+        assert_eq!(index.unmeasured_minutes(), 1_440, "the whole day is named");
+        assert_eq!(
+            index.gaps.first().map(|gap| gap.reason),
+            Some(Reason::Unmeasured)
+        );
+    }
+
     /// **A SUPPLIED CALENDAR OVERRIDES THE TABLE, AND THAT IS THE WHOLE POINT
     /// OF `classify_against`.**
     ///
@@ -694,10 +771,10 @@ mod tests {
     ///
     /// The case this exists for: BANKNIFTY holds 51 gap-minutes that NIFTY and
     /// INDIAVIX do not share, measured on the operator's store. Every one is a
-    /// bar the exchange offered and Zerodha did not deliver, and nothing
-    /// reported them before — `calendar_of` reads 623,546 owed for NIFTY, which
-    /// is exactly what NIFTY holds, so a single-instrument calendar is blind to
-    /// its own holes by construction.
+    /// bar a peer offered evidence for and this series did not deliver, and
+    /// nothing reported them before. A single-instrument calendar remains blind
+    /// to its own holes by construction; D-0420's one primary-sourced day does
+    /// not remove that general ambiguity.
     #[test]
     fn a_minute_a_peer_traded_and_this_one_did_not_is_a_provable_hole() {
         let full = crate::calendar::Session::full();

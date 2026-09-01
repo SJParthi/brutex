@@ -5,8 +5,9 @@
 //! `docs/00-charter.md` §3 stamps a bar at the OPEN of its interval, so the bar
 //! stamped `t` covers `[t, t + length)` and its close prints at `t + length`.
 //! A condition decided on that bar is therefore not knowable until `t + length`,
-//! and the earliest bar it can be acted on is the first EXECUTION bar that opens
-//! at or after that instant.
+//! and the one bar it can be acted on is the EXECUTION bar that opens exactly at
+//! that instant. If that one-minute bar is absent, the signal is unreachable;
+//! a later bar is a different trading decision, not a delayed fill.
 //!
 //! That single sentence is the whole module. Everything else here is arithmetic
 //! and refusals.
@@ -36,7 +37,7 @@
 //! `Column::reproject` copies the mask a bar produced and changes only the index
 //! it is filed under. No indicator is evaluated on a series it was not built
 //! for. The mask came from bars `0..=s` of the signal series and the index it
-//! now carries points at a bar opening at or after that signal bar CLOSED, so
+//! now carries points at the bar opening exactly when that signal bar CLOSED, so
 //! `CLAUDE.md` §3 rule 7 holds by the same argument it always did.
 //!
 //! # Cost
@@ -58,7 +59,7 @@ use indicators::Candle;
 pub struct Alignment {
     /// For each column position, the execution index to act on, or `None`.
     pub onto: Vec<Option<usize>>,
-    /// Signals with no execution bar at or after their close.
+    /// Signals with no execution bar exactly at their close.
     ///
     /// The session's last bars produce these, and so does a signal whose close
     /// falls past the end of the execution series. Counted rather than hidden:
@@ -96,10 +97,10 @@ const fn closes_at(ts_micros: i64, length_micros: i64) -> i64 {
 ///
 /// So a bucket whose close falls into the next trading day is `None` — the same
 /// answer this module already gives a signal with no execution bar at all, and
-/// what [`Alignment::unreachable`] already says happens. A signal at 15:09
-/// closing at 15:10 still maps and is still `trade`'s to refuse; what is refused
-/// here is only the crossing of a day boundary, which is not a policy `trade`
-/// holds a second spelling of.
+/// what [`Alignment::unreachable`] already says happens. A signal closing onto
+/// the final accepted fill bar still maps and is still `trade`'s to refuse when
+/// no priceable exit remains; what is refused here is only the crossing of a day
+/// boundary, which is not a policy `trade` holds a second spelling of.
 ///
 /// # Errors
 ///
@@ -166,9 +167,16 @@ pub fn onto_execution(
         // already has for a signal whose execution bar does not exist — and
         // three docs, including this module's own `unreachable` field, already
         // assert that is what happens.
-        let landed = execution
-            .get(cursor)
-            .filter(|c| indicators::ist_day(c.ts_micros) == indicators::ist_day(bar.ts_micros));
+        // EXACTLY THE CLOSE INSTANT, NEVER MERELY A LATER BAR.
+        //
+        // The cursor still stops at the first timestamp at or after `deadline`,
+        // which preserves the one-pass merge. Equality is the policy: if the
+        // immediate one-minute bar is missing, a fill at the next available bar
+        // would silently turn a missing observation into a later trade.
+        let landed = execution.get(cursor).filter(|c| {
+            c.ts_micros == deadline
+                && indicators::ist_day(c.ts_micros) == indicators::ist_day(bar.ts_micros)
+        });
         if landed.is_some() {
             onto.push(Some(cursor));
         } else {
@@ -220,7 +228,7 @@ mod tests {
     const ONE_MIN: i64 = 60 * 1_000_000;
 
     #[test]
-    fn a_signal_lands_on_the_first_execution_bar_at_or_after_its_close() {
+    fn a_signal_lands_only_on_the_execution_bar_at_its_exact_close() {
         // THE WHOLE RULE. A fifteen-minute bar stamped at minute 0 covers
         // [0, 15) and closes at 15, so the earliest one-minute bar that may act
         // on it is the one stamped 15 -- not 14, which opened while the signal
@@ -313,23 +321,24 @@ mod tests {
     }
 
     #[test]
-    fn an_execution_series_with_holes_takes_the_first_bar_past_the_close() {
-        // A one-minute series is not dense in practice: a halt, a missing month,
-        // or a session boundary leaves gaps. The rule is "first bar at or after
-        // the close", so a gap moves the entry LATER and never earlier.
+    fn an_execution_gap_makes_the_immediate_fill_unreachable() {
+        // A one-minute series can contain a halt or missing records. The rule is
+        // the exact immediate minute, so a later bar never substitutes for the
+        // absent fill.
         let signal = coarse(15, 2);
         // Minutes 0..10 then a jump to 40. The first signal closes at 15 and
-        // there is no bar at 15, so it must take 40.
+        // the second at 30. Neither exact bar exists; minute 40 is not either
+        // decision's immediate next minute.
         let mut exec: Vec<Candle> = (0..10).map(bar).collect();
         exec.push(bar(40));
         let got = onto_execution(&signal, &[0, 1], &exec, FIFTEEN_MIN).expect("aligned");
         assert_eq!(
             got.onto,
-            vec![Some(10), Some(10)],
-            "both signals close before minute 40, so both take that bar"
+            vec![None, None],
+            "a later available bar must never replace the exact immediate fill"
         );
         assert_eq!(exec[10].ts_micros, 40 * 60_000_000);
-        assert_eq!(got.unreachable, 0);
+        assert_eq!(got.unreachable, 2);
     }
 
     #[test]
@@ -343,8 +352,8 @@ mod tests {
                 onto: vec![None, None],
                 unreachable: 2
             },
-            "no execution bar exists at or after either close, and that is \
-             COUNTED rather than mapped to the last bar"
+            "no execution bar exists at either exact close, and that is COUNTED \
+             rather than mapped to the last bar"
         );
     }
 

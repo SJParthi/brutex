@@ -217,9 +217,10 @@ fn run(vendor_word: &str, rung: &str, min_hits: u64) -> Result<String, String> {
     // whose identity cannot be recorded, and a 54,000-month run that discovers
     // that at the end has burned hours to produce nothing citable.
     let commit = crate::commit_stamp().ok_or_else(|| {
-        "this build carries no commit stamp, so §3 rule 3's run identity cannot be \
-         recorded and no sweep will run. Rebuild with \
-         `BRUTEX_COMMIT=$(git rev-parse HEAD) cargo build --release -p cli`"
+        "this build carries no verified commit stamp, so §3 rule 3's run identity \
+         cannot be recorded and no sweep will run. Restore every Rust/Cargo input \
+         to HEAD (normally by committing the intended change), then rebuild. An \
+         explicit BRUTEX_COMMIT is accepted only when it exactly equals clean HEAD"
             .to_owned()
     })?;
     // Parsed here as well as in sweep_under so a bad feed name refuses BEFORE
@@ -274,6 +275,13 @@ fn sweep_under(
     //   * the `Tally` is folded SEQUENTIALLY over `rows` below rather than
     //     mutated from the workers, so no counter depends on scheduling.
     // A rerun therefore produces the same bytes, which is what makes reruns safe.
+    // SHARE CPU AS WELL AS MEMORY. `par_iter` can keep at most the Rayon pool's
+    // workers active at once; declaring the full catalog length would divide a
+    // fourteen-core machine by 54,000 even though only fourteen months can be
+    // in flight. The engine's inner support lanes read this same bounded share,
+    // preventing N outer sweeps from each spawning one worker per machine core.
+    let concurrent = wanted.len().min(rayon::current_num_threads()).max(1);
+    let _sharing = crate::SharedBy::these(concurrent);
     let rows: Vec<Row> = wanted
         .par_iter()
         .map(|held| one(root, held, min_hits, commit))
@@ -297,6 +305,10 @@ fn sweep_under(
 ///
 /// Takes no `&mut Tally`. That parameter was what stopped the walk above being
 /// parallel, and removing it is what `Tally::fold` exists for.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one stored batch row keeps its signal, daily, exact-minute, identity, and refusal receipts together"
+)]
 fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row {
     let label = format!(
         "{} {} {} {}",
@@ -326,8 +338,17 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
             };
         }
     };
-    let mut ev = match crate::evaluator() {
-        Ok(ev) => ev,
+    let daily = match stored::load_daily_context(
+        root,
+        held.vendor,
+        &held.symbol,
+        (
+            (held.month.year(), held.month.month()),
+            (held.month.year(), held.month.month()),
+        ),
+        &loaded.bars,
+    ) {
+        Ok(daily) => daily,
         Err(why) => {
             return Row {
                 label,
@@ -336,7 +357,73 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
                 kept: 0,
                 completed: false,
                 identity: None,
-                refused: Some(why.to_owned()),
+                refused: Some(why),
+            };
+        }
+    };
+    let exact_minute = match stored::load_exact_minute_context(
+        root,
+        held.vendor,
+        &held.symbol,
+        (
+            (held.month.year(), held.month.month()),
+            (held.month.year(), held.month.month()),
+        ),
+        &loaded.bars,
+    ) {
+        Ok(context) => context,
+        Err(why) => {
+            return Row {
+                label,
+                bars: 0,
+                depth: 0,
+                kept: 0,
+                completed: false,
+                identity: None,
+                refused: Some(why),
+            };
+        }
+    };
+    let signal_length = match stored::rung_length_micros(held.timeframe.as_str()) {
+        Ok(length) => length,
+        Err(why) => {
+            return Row {
+                label,
+                bars: 0,
+                depth: 0,
+                kept: 0,
+                completed: false,
+                identity: None,
+                refused: Some(why),
+            };
+        }
+    };
+    let column =
+        match crate::stored_anchored_column(&loaded.bars, &daily, &exact_minute, signal_length) {
+            Ok(column) => column,
+            Err(why) => {
+                return Row {
+                    label,
+                    bars: 0,
+                    depth: 0,
+                    kept: 0,
+                    completed: false,
+                    identity: None,
+                    refused: Some(why),
+                };
+            }
+        };
+    let digest = match crate::stored_anchored_digest(&loaded.bars, &exact_minute, &daily) {
+        Ok(digest) => digest,
+        Err(why) => {
+            return Row {
+                label,
+                bars: 0,
+                depth: 0,
+                kept: 0,
+                completed: false,
+                identity: None,
+                refused: Some(why),
             };
         }
     };
@@ -364,8 +451,10 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
     // only in genuine exhaustion — a crash-level event, not a normal outcome.
     // Capping the thread count would not have fixed this; it only changes N,
     // and the halt would still be allocator-defined.
-    let ladder = Ladder::with_min_hits(min_hits).with_ceiling(BATCH_CEILING);
-    let outcome = Sweeper::new(ladder).run(&loaded.bars, &mut ev);
+    let ladder = Ladder::with_min_hits(min_hits)
+        .with_ceiling(BATCH_CEILING)
+        .with_support_lanes(crate::shared_support_lanes());
+    let outcome = Sweeper::new(ladder).run_prepared(&column);
 
     // THE IDENTITY THIS REPORT'S BANNER HAS ALWAYS PROMISED.
     //
@@ -389,7 +478,7 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
         instrument: &loaded.key,
         timeframe: loaded.timeframe,
         params: runner::identity::Params::of(ladder),
-        data_digest: runner::identity::data_digest(&loaded.bars),
+        data_digest: digest,
         commit,
         // The feed this month's file was actually read from. A whole-store
         // sweep walks several vendors in one run, so this is the term that keeps

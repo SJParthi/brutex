@@ -59,115 +59,44 @@
 //! # It degrades to the old behaviour rather than guessing
 //!
 //! No `.git`, an unreadable HEAD, a ref this cannot resolve, or anything that is
-//! not forty hex characters: this emits nothing, `option_env!` stays `None`, and
-//! the sweep refuses exactly as it did before. A tarball build is not silently
-//! given a fabricated identity.
+//! not forty lowercase hex characters: this emits an empty refusal sentinel,
+//! `cli::commit_stamp` converts it to `None`, and the sweep refuses. A tarball
+//! build is not silently given a fabricated identity.
 //!
-//! An explicit `BRUTEX_COMMIT` in the environment always wins, so CI and a
-//! deliberate `BRUTEX_COMMIT=… cargo build` are unchanged.
+//! An explicit `BRUTEX_COMMIT` is an assertion, not authority. It is accepted
+//! only when it is canonical, equals locally resolvable HEAD, and the index and
+//! working tree both equal that commit. A dirty build is deliberately
+//! unstamped: naming HEAD would claim that HEAD produced bytes it did not.
 
-use std::path::{Path, PathBuf};
+mod build_provenance;
+mod commit_stamp;
+
+use std::path::Path;
 
 fn main() {
-    // THE OPERATOR'S OWN VALUE WINS, AND IS CHECKED FIRST. A build that states
-    // its commit is stating something this file can only infer.
     println!("cargo:rerun-if-env-changed=BRUTEX_COMMIT");
-    if std::env::var_os("BRUTEX_COMMIT").is_some() {
-        return;
-    }
-
-    let Some(git_dir) = git_dir() else {
+    let Some(manifest) = std::env::var_os("CARGO_MANIFEST_DIR") else {
+        println!("cargo:rustc-env=BRUTEX_COMMIT=");
         return;
     };
-
-    // REBUILD WHEN THE COMMIT MOVES. Without this, a stamp compiled once would
-    // survive every later checkout — which is the runtime-read defect arriving
-    // by a slower route.
-    println!("cargo:rerun-if-changed={}", git_dir.join("HEAD").display());
-    println!(
-        "cargo:rerun-if-changed={}",
-        git_dir.join("packed-refs").display()
-    );
-
-    if let Some(sha) = head_commit(&git_dir) {
-        println!("cargo:rerun-if-changed={}", git_dir.join("HEAD").display());
-        println!("cargo:rustc-env=BRUTEX_COMMIT={sha}");
+    let explicit = std::env::var_os("BRUTEX_COMMIT");
+    let verified = build_provenance::verify(Path::new(&manifest), explicit.as_deref());
+    for path in &verified.watched_files {
+        println!("cargo:rerun-if-changed={}", path.display());
     }
-}
-
-/// The directory git keeps its refs in, walking up from this crate.
-///
-/// `.git` is normally a directory. In a worktree or a submodule it is a FILE
-/// whose contents are `gitdir: <path>` — which is how `.claude/worktrees/*`
-/// builds see the real one, and there are three of those in this tree today.
-fn git_dir() -> Option<PathBuf> {
-    let manifest = std::env::var_os("CARGO_MANIFEST_DIR")?;
-    let mut here: &Path = Path::new(&manifest);
-    loop {
-        let candidate = here.join(".git");
-        if candidate.is_dir() {
-            return Some(candidate);
-        }
-        if candidate.is_file() {
-            let text = std::fs::read_to_string(&candidate).ok()?;
-            let path = text.trim().strip_prefix("gitdir:")?.trim();
-            let resolved = here.join(path);
-            return resolved.is_dir().then_some(resolved);
-        }
-        here = here.parent()?;
+    for path in &verified.watched_directories {
+        println!("cargo:rerun-if-changed={}", path.display());
     }
-}
-
-/// The forty hex characters HEAD resolves to, or `None`.
-///
-/// Three shapes, all of them files git wrote:
-///
-/// * `HEAD` holding a bare sha — a detached checkout, which is what CI produces;
-/// * `HEAD` holding `ref: refs/heads/<branch>` and that ref existing as a loose
-///   file — an ordinary working checkout;
-/// * the same, with the ref **packed** into `packed-refs` because `git gc` moved
-///   it there. A long-lived clone reaches this state on its own, and a stamp
-///   that stopped working after a garbage collection would be worse than one
-///   that never worked.
-fn head_commit(git_dir: &Path) -> Option<String> {
-    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
-    let head = head.trim();
-
-    let Some(reference) = head.strip_prefix("ref:") else {
-        return sha(head);
-    };
-    let reference = reference.trim();
-
-    // A loose ref that is absent, unreadable, or not forty hex characters falls
-    // through to `packed-refs` rather than failing -- both are places git
-    // legitimately keeps the same answer, and which one holds it depends on
-    // whether `git gc` has run.
-    if let Ok(loose) = std::fs::read_to_string(git_dir.join(reference))
-        && let Some(found) = sha(loose.trim())
-    {
-        return Some(found);
+    if let Some(commit) = verified.commit {
+        println!("cargo:rustc-env=BRUTEX_COMMIT={commit}");
+    } else {
+        // This OVERRIDES an inherited explicit value. Merely declining to emit
+        // `rustc-env` would leave that ambient value visible to `option_env!`
+        // and silently bless the assertion we just rejected.
+        println!("cargo:rustc-env=BRUTEX_COMMIT=");
+        println!(
+            "cargo:warning=cli run persistence disabled: {}",
+            verified.reason
+        );
     }
-
-    let packed = std::fs::read_to_string(git_dir.join("packed-refs")).ok()?;
-    packed.lines().find_map(|line| {
-        // `<sha> <refname>`, and lines beginning `#` or `^` are a header and a
-        // peeled tag — neither is a branch tip.
-        let rest = line.strip_prefix(|c: char| c.is_ascii_hexdigit()).is_some();
-        if !rest || line.starts_with('#') || line.starts_with('^') {
-            return None;
-        }
-        let (found, name) = line.split_once(' ')?;
-        (name.trim() == reference).then(|| sha(found)).flatten()
-    })
-}
-
-/// A candidate, if it is exactly forty lowercase-or-uppercase hex digits.
-///
-/// The width is checked because anything else is not a commit, and a stamp that
-/// is not a commit is a reproducibility claim that cannot be honoured — the same
-/// objection `crates/cli/src/lib.rs` raises against a runtime read.
-fn sha(candidate: &str) -> Option<String> {
-    let candidate = candidate.trim();
-    (candidate.len() == 40 && candidate.bytes().all(|b| b.is_ascii_hexdigit()))
-        .then(|| candidate.to_owned())
 }

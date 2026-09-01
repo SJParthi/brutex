@@ -25,19 +25,22 @@ export const group = (n) => Number(n).toLocaleString(LOC);
 /**
  * A paisa integer as a rupee string, always to two places.
  *
- * THE ONLY DIVIDE, AND IT IS AT THE EDGE. Prices are `i64` paisa everywhere
- * else (CLAUDE.md §7); this is the display boundary and the one place a
- * fractional rupee may exist at all. `paisa / 100` is exact enough for the job
- * because the quotient always has exactly two decimal places — there is never a
- * third digit for the float error to reach — but that holds only while the
- * paisa stays inside `Number.MAX_SAFE_INTEGER`, which at ₹90 billion it does by
- * a wide margin for an index quote.
+ * No floating-point division occurs. The integer quotient and remainder are
+ * formatted separately, so even `Number.MAX_SAFE_INTEGER` retains its final
+ * paisa instead of rounding `.91` to `.90` at the display boundary.
  *
  * @param {number} paisa
  * @returns {string}
  */
-export const rupee = (paisa) =>
-  (paisa / 100).toLocaleString(LOC, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+export const rupee = (paisa) => {
+  if (!Number.isSafeInteger(paisa)) return '—';
+  const negative = paisa < 0;
+  const absolute = Math.abs(paisa);
+  const paise = absolute % 100;
+  const rupees = (absolute - paise) / 100;
+  const body = `${group(rupees)}.${String(paise).padStart(2, '0')}`;
+  return negative ? `-${body}` : body;
+};
 
 /**
  * THE EM DASH IS THE HONEST EMPTY, and `Intl` does not agree.

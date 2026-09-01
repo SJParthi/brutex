@@ -6,7 +6,7 @@
 //! [`crate::record_all`], which runs once, at the very end, after everything.
 //! MEASURED on 2026-08-29: a 60-minute `audit-range` over 81 months ran for
 //! **48 minutes and wrote zero bytes**. Its results directory still held the
-//! previous run's three files, untouched. Killed at minute 47 it would have left
+//! previous run's four durable files, untouched. Killed at minute 47 it would have left
 //! nothing at all, and there was no surface anywhere that could say what it had
 //! found so far — a browser polling `/frontier.json` sees the PREVIOUS run until
 //! this one ends.
@@ -63,9 +63,9 @@
 //! # It is TRANSIENT, and that is the whole reason it is a separate file
 //!
 //! `CLAUDE.md` §3 rule 8 makes history append-only, and `crate::record_all`
-//! writes LEDGER, then FRONTIER, then TRADES so that *"a detail row whose run
-//! has no ledger row is an orphan"*. The ledger row does not exist until the run
-//! ends. Writing live rows into `frontier.bin` would therefore manufacture
+//! writes FRONTIER, TRADES, a cardinality RECEIPT, and the LEDGER marker last.
+//! A detail row whose run has no ledger row is an orphan, and the ledger row
+//! does not exist until the run ends. Writing live rows into `frontier.bin` would therefore manufacture
 //! exactly that orphan — every partial run leaving detail rows whose parent
 //! never arrives — and it would do it by the one route the ordering cannot see.
 //!
@@ -441,7 +441,12 @@ fn read_one(path: &Path) -> Option<([u8; 32], Summary, Vec<Row>)> {
         if !Row::seal_matches(&raw) {
             break;
         }
-        let row = Row::from_bytes(&raw);
+        let Ok(row) = Row::from_bytes(&raw) else {
+            // A sealed row can still carry an unknown direction or non-zero
+            // reserved byte. Like a seal failure, that ends the ranked prefix:
+            // skipping it would renumber every later row.
+            break;
+        };
         if nth == 0 {
             identity = row.identity;
         }

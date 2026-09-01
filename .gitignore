@@ -20,6 +20,10 @@
 # confines to `.github/` and `crates/web/`.
 /mutants.out
 /mutants.out.old
+# Pre-external-drive mutation snapshots are preserved locally for recovery but
+# remain generated evidence, not repository source. Root the pattern so a
+# deliberately named fixture below a crate is not hidden.
+/mutants.out*.pre-wd-black-*
 
 # Editor and agent scratch. `.claude/` holds `launch.json` and
 # `settings.local.json`, and `.json` is NOT in CLAUDE.md section 2's allowed
@@ -73,6 +77,11 @@ web/build/**/*.map
 # allowlist — a committed log would be the build failure CLAUDE.md section 2
 # describes.
 logs/
+# `logs` is now a symlink to the external WD_BLACK tree; the slash-only rule
+# above matches a directory but not that symlink. Historical migration
+# snapshots are likewise retained locally and must never enter gate 1.
+/logs
+/logs.pre-wd-black-*
 
 # IntelliJ. Untracked but NOT ignored until now: a single `git add -A` would
 # stage `.idea/*.xml`, and `.xml` is on no gate 1 allowlist. The same hazard the

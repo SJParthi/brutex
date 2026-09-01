@@ -64,6 +64,9 @@
 //! written would be the fallback hiding a failure, pointing the other way.
 
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::fs::OpenOptions;
+use std::io::Write as _;
+use std::sync::OnceLock;
 
 use crate::vendor::{FEED_COUNT, Feed};
 
@@ -89,6 +92,30 @@ static TAKEN: [AtomicU32; SLOTS] = [const { AtomicU32::new(0) }; SLOTS];
 /// believing a fixture exists when none does — so it is counted here and
 /// emitted at the site.
 static REFUSED: AtomicU64 = AtomicU64::new(0);
+
+/// Exclusive filename attempts for one capture.
+///
+/// Sixteen is not a probability claim. Every attempt uses `create_new`, so an
+/// exhausted set refuses without overwriting any byte. The fixed ceiling keeps
+/// collision handling O(1) even when a hostile directory pre-creates every
+/// candidate this process would try.
+const NAME_ATTEMPTS: u8 = 16;
+
+/// One restart-distinguishing hint, sampled once.
+///
+/// This is NOT the uniqueness authority: clocks can repeat or move backwards.
+/// [`OpenOptions::create_new`] is the authority. The stamp merely makes the
+/// collision arm exceptional rather than the normal outcome after every
+/// restart. A pre-epoch clock uses zero safely because exclusive creation still
+/// refuses an occupied name.
+fn process_stamp() -> u128 {
+    static STAMP: OnceLock<u128> = OnceLock::new();
+    *STAMP.get_or_init(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos())
+    })
+}
 
 /// Which verb carried the answer.
 ///
@@ -118,6 +145,42 @@ impl Method {
 #[must_use]
 pub fn refused() -> u64 {
     REFUSED.load(Ordering::Relaxed)
+}
+
+/// Counts and emits one capture failure without changing the pull's outcome.
+///
+/// The event carries no URL, body or header. The URL and body are exactly the
+/// evidence that failed to land, and a header can contain the credential, so
+/// repeating any of them into telemetry would turn diagnostics into a second
+/// capture surface. Feed, kind and the local I/O reason are enough to find the
+/// failed slot and repair the filesystem.
+pub(crate) fn note_refused(feed: Feed, kind: &str, why: &str) {
+    REFUSED.fetch_add(1, Ordering::Relaxed);
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::error("pull.capture", "vendor capture could not be written")
+            .with("feed", telemetry::Value::Str(feed.wire()))
+            .with("kind", telemetry::Value::Str(kind))
+            .with("why", telemetry::Value::Str(why)),
+    );
+}
+
+/// Resolves the capture root or makes that pre-write failure observable.
+///
+/// Split around the result so the environment-refusal arm is testable without
+/// mutating `HOME` or `BRUTEX_VENDOR_DATA`, both process-wide state shared by
+/// every test thread.
+pub(crate) fn root_or_refused(
+    feed: Feed,
+    kind: &str,
+    root: Result<std::path::PathBuf, crate::folder::FolderError>,
+) -> Option<std::path::PathBuf> {
+    match root {
+        Ok(root) => Some(root),
+        Err(why) => {
+            note_refused(feed, kind, &why.to_string());
+            None
+        }
+    }
 }
 
 /// How many answers this slot has kept so far.
@@ -152,6 +215,72 @@ const fn slot(feed: Feed, method: Method) -> usize {
 const _: () = assert!(slot(Feed::Zerodha, Method::Post) == SLOTS - 1);
 const _: () = assert!(slot(Feed::Dhan, Method::Get) == 0);
 
+/// One candidate path under an exclusive capture prefix.
+fn candidate_path(
+    dir: &std::path::Path,
+    prefix: &str,
+    stamp: u128,
+    attempt: u8,
+) -> std::path::PathBuf {
+    dir.join(format!(
+        "{prefix}-p{}-t{stamp:032x}-c{attempt}.txt",
+        std::process::id()
+    ))
+}
+
+/// Persists one capture without ever opening an existing file for writing.
+fn write_new_capture_with_stamp(
+    dir: &std::path::Path,
+    prefix: &str,
+    bytes: &[u8],
+    stamp: u128,
+) -> Result<std::path::PathBuf, String> {
+    std::fs::create_dir_all(dir)
+        .map_err(|why| format!("{} cannot be created — {why}", dir.display()))?;
+
+    for attempt in 0..NAME_ATTEMPTS {
+        let path = candidate_path(dir, prefix, stamp, attempt);
+        let opened = OpenOptions::new().write(true).create_new(true).open(&path);
+        let mut file = match opened {
+            Ok(file) => file,
+            Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(why) => return Err(format!("{} cannot be created — {why}", path.display())),
+        };
+
+        if let Err(why) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+            drop(file);
+            let cleanup = std::fs::remove_file(&path);
+            return Err(match cleanup {
+                Ok(()) => format!("{} could not be written and synced — {why}", path.display()),
+                Err(ref cleanup) if cleanup.kind() == std::io::ErrorKind::NotFound => {
+                    format!("{} could not be written and synced — {why}", path.display())
+                }
+                Err(cleanup) => format!(
+                    "{} could not be written and synced — {why}; its incomplete file also \
+                     could not be removed — {cleanup}",
+                    path.display()
+                ),
+            });
+        }
+        return Ok(path);
+    }
+
+    Err(format!(
+        "all {NAME_ATTEMPTS} exclusive names for `{prefix}` already exist in {}; \
+         no existing capture was overwritten",
+        dir.display()
+    ))
+}
+
+/// Production wrapper around the injectable stamp used by collision tests.
+fn write_new_capture(
+    dir: &std::path::Path,
+    prefix: &str,
+    bytes: &[u8],
+) -> Result<std::path::PathBuf, String> {
+    write_new_capture_with_stamp(dir, prefix, bytes, process_stamp())
+}
+
 /// Keep this answer, if the slot has room.
 ///
 /// Returns the path written, or `None` when the slot is full or the write could
@@ -185,7 +314,7 @@ pub fn record(
         .ok()?;
 
     let dir = root.join("captures");
-    let path = dir.join(format!("{}-{}-{seq}.txt", feed.wire(), method.word()));
+    let prefix = format!("{}-{}-{seq}", feed.wire(), method.word());
 
     // THE HEADER IS THREE LINES AND THEN THE BODY UNTOUCHED. A separator that
     // could occur inside a JSON body would make the file ambiguous, so the
@@ -205,16 +334,16 @@ pub fn record(
     );
     text.push_str(body);
 
-    if std::fs::create_dir_all(&dir)
-        .and_then(|()| std::fs::write(&path, text.as_bytes()))
-        .is_err()
-    {
-        // COUNTED, NOT SWALLOWED, AND NOT PROPAGATED. See the module note:
-        // a vendor answer that arrived intact is not refused because a
-        // debugging aid could not be written.
-        REFUSED.fetch_add(1, Ordering::Relaxed);
-        return None;
-    }
+    let path = match write_new_capture(&dir, &prefix, text.as_bytes()) {
+        Ok(path) => path,
+        Err(why) => {
+            // COUNTED, NOT SWALLOWED, AND NOT PROPAGATED. See the module note:
+            // a vendor answer that arrived intact is not refused because a
+            // debugging aid could not be written.
+            note_refused(feed, method.word(), &why);
+            return None;
+        }
+    };
     Some(path)
 }
 
@@ -293,7 +422,7 @@ pub fn record_unreadable(
         .ok()?;
 
     let dir = root.join("captures");
-    let path = dir.join(format!("{}-unreadable-{seq}.txt", feed.wire()));
+    let prefix = format!("{}-unreadable-{seq}", feed.wire());
 
     let mut text = String::with_capacity(body.len() + 512);
     text.push_str("# brutex UNREADABLE vendor body — verbatim, exactly as it arrived.\n");
@@ -309,13 +438,13 @@ pub fn record_unreadable(
     );
     text.push_str(body);
 
-    if std::fs::create_dir_all(&dir)
-        .and_then(|()| std::fs::write(&path, text.as_bytes()))
-        .is_err()
-    {
-        REFUSED.fetch_add(1, Ordering::Relaxed);
-        return None;
-    }
+    let path = match write_new_capture(&dir, &prefix, text.as_bytes()) {
+        Ok(path) => path,
+        Err(failure) => {
+            note_refused(feed, "unreadable", &failure);
+            return None;
+        }
+    };
     Some(path)
 }
 
@@ -521,6 +650,100 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_restart_collision_creates_a_new_file_and_never_overwrites_the_old_one() {
+        // SAME STAMP, PID AND SEQUENCE: the exact state a reused process id and
+        // a repeated clock reading can reproduce after restart. `create_new`
+        // rather than the timestamp is the uniqueness authority, so the old
+        // evidence survives and the new body moves to the next bounded name.
+        let root = scratch("restart-collision");
+        let dir = root.join("captures");
+        std::fs::create_dir_all(&dir).expect("capture directory");
+        let prefix = "dhan-GET-0";
+        let stamp = 17;
+        let old = candidate_path(&dir, prefix, stamp, 0);
+        std::fs::write(&old, b"first process").expect("old evidence");
+
+        let new = write_new_capture_with_stamp(&dir, prefix, b"second process", stamp)
+            .expect("a collision advances to another exclusive name");
+        assert_ne!(new, old, "one pathname cannot name two captures");
+        assert_eq!(
+            std::fs::read(&old).expect("old capture remains"),
+            b"first process",
+            "restart must never overwrite evidence from the previous process"
+        );
+        assert_eq!(
+            std::fs::read(&new).expect("new capture landed"),
+            b"second process"
+        );
+    }
+
+    #[test]
+    fn concurrent_writers_get_distinct_exclusive_names_and_keep_their_own_bytes() {
+        // Threads stand in for processes here because `O_EXCL` is a filesystem
+        // property, not a mutex property. Every writer uses the SAME candidate
+        // sequence and stamp; only exclusive creation separates them.
+        const WRITERS: usize = 8;
+        let root = scratch("concurrent-names");
+        let dir = std::sync::Arc::new(root.join("captures"));
+        std::fs::create_dir_all(dir.as_ref()).expect("capture directory");
+        let gate = std::sync::Arc::new(std::sync::Barrier::new(WRITERS));
+        let mut workers = Vec::new();
+        for writer in 0..WRITERS {
+            let worker_dir = std::sync::Arc::clone(&dir);
+            let worker_gate = std::sync::Arc::clone(&gate);
+            workers.push(std::thread::spawn(move || {
+                let body = format!("writer-{writer}");
+                worker_gate.wait();
+                let path = write_new_capture_with_stamp(
+                    worker_dir.as_ref(),
+                    "groww-POST-0",
+                    body.as_bytes(),
+                    23,
+                )
+                .expect("eight writers fit inside sixteen bounded attempts");
+                (path, body)
+            }));
+        }
+
+        let mut paths = std::collections::BTreeSet::new();
+        for worker in workers {
+            let (path, body) = worker.join().expect("writer did not panic");
+            assert!(paths.insert(path.clone()), "every path is exclusive");
+            assert_eq!(
+                std::fs::read_to_string(path).expect("that writer's capture"),
+                body,
+                "one writer must never inherit another writer's bytes"
+            );
+        }
+        assert_eq!(paths.len(), WRITERS);
+    }
+
+    #[test]
+    fn exhausting_every_bounded_name_refuses_without_touching_any_capture() {
+        let root = scratch("all-names-held");
+        let dir = root.join("captures");
+        std::fs::create_dir_all(&dir).expect("capture directory");
+        let prefix = "zerodha-unreadable-0";
+        let stamp = 29;
+        for attempt in 0..NAME_ATTEMPTS {
+            std::fs::write(candidate_path(&dir, prefix, stamp, attempt), [attempt])
+                .expect("occupy the candidate");
+        }
+
+        let why = write_new_capture_with_stamp(&dir, prefix, b"must not replace", stamp)
+            .expect_err("a full fixed set refuses");
+        assert!(why.contains("no existing capture was overwritten"), "{why}");
+        for attempt in 0..NAME_ATTEMPTS {
+            assert_eq!(
+                std::fs::read(candidate_path(&dir, prefix, stamp, attempt))
+                    .expect("occupied evidence survives"),
+                [attempt],
+                "collision {attempt} was not opened for writing"
+            );
+        }
+    }
+
     /// **A WRITE THAT CANNOT LAND IS COUNTED, NEVER SWALLOWED.**
     ///
     /// The capture is a diagnostic beside the data path. Its failure must not
@@ -544,6 +767,22 @@ mod tests {
             before + 1,
             "and the failure is COUNTED -- silence here would be the fixture \
              that an operator thinks exists and does not"
+        );
+
+        let before_root = refused();
+        assert!(
+            root_or_refused(
+                Feed::Zerodha,
+                Method::Get.word(),
+                Err(crate::folder::FolderError::NoHome),
+            )
+            .is_none(),
+            "an unresolved root leaves no path to write"
+        );
+        assert_eq!(
+            refused(),
+            before_root + 1,
+            "failure before the recorder opens a file is counted too"
         );
     }
 }

@@ -23,7 +23,7 @@
 //!
 //! The store path IS `bars/<vendor>/<exchange>/<segment>/<symbol>/<rung>/<month>`,
 //! so a load knows its **vendor, instrument, timeframe and month** before it
-//! reads a byte. Those are four of the eight terms `runner::identity` needs, and
+//! reads a byte. Those are four of the nine terms `runner::identity` needs, and
 //! three of them were the reason a run identity could not be recorded: with
 //! synthetic bars there is no instrument to name and naming one would be an
 //! invention `CLAUDE.md` §3 rule 1 forbids. A stored load has them all.
@@ -31,8 +31,11 @@
 use brutex_core::instrument::{Exchange, InstrumentKey};
 use brutex_core::vendor::Vendor;
 use indicators::Candle;
+use indicators::anchored::{DailyEligibility, DailyReference};
+use indicators::evaluator::CHARTER_NON_REGULAR_IST_DAYS;
+use pull::calendar::{DayKind, MAX_WINDOWS, Session};
 use std::path::Path;
-use store::file::BarFile;
+use store::file::{BarFile, StoreError};
 use store::path::{FileKind, StorePath, Timeframe, YearMonth};
 
 /// One instrument-month, and everything the store knew about it.
@@ -54,10 +57,1275 @@ pub struct Loaded {
 
 /// Why a load could not happen, in the operator's words.
 ///
-/// A `String` and not an error enum, deliberately: every arm here is a sentence
-/// a person reads once and acts on, and none of them is matched on. An enum
-/// would invite a caller to branch on a distinction that does not exist.
+/// A `String` at the public boundary, deliberately: every arm here is a sentence
+/// a person reads once and acts on. The range loader keeps only the one internal
+/// distinction it needs — absent versus unsafe — and never exposes that as an
+/// invitation for callers to recover from corruption.
 pub type Refusal = String;
+
+/// Schema version of [`CalendarReceiptV1`].
+pub const CALENDAR_RECEIPT_SCHEMA_V1: u32 = 1;
+
+/// Policy version binding the meaning of the charter calendar receipt.
+///
+/// Policy 1 means exact one-minute timestamps, IST day/minute conversion,
+/// [`pull::calendar::kind_of`] as the sole session authority, an inclusive walk
+/// of every day from the first requested day through the last, and fail-closed
+/// refusal of timestamps the measured calendar says could not trade.
+pub const CALENDAR_RECEIPT_POLICY_V1: u32 = 1;
+
+const MICROS_PER_MINUTE_V1: i64 = 60_000_000;
+const MICROS_PER_DAY_V1: i64 = 86_400_000_000;
+
+/// Whether the exact timestamp slice reconciles with the measured calendar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CalendarStatusV1 {
+    /// Every minute in every measured open window was offered exactly once.
+    Complete,
+    /// At least one minute in a measured open window was absent.
+    Incomplete,
+    /// At least one day had no measured session length or lay outside the
+    /// calendar's measured range, so completeness cannot be claimed.
+    Unmeasured,
+}
+
+impl CalendarStatusV1 {
+    const fn code(self) -> u8 {
+        match self {
+            Self::Complete => 1,
+            Self::Incomplete => 2,
+            Self::Unmeasured => 3,
+        }
+    }
+}
+
+/// Calendar attestation for one exact, ordered execution-timestamp slice.
+///
+/// The digest binds the schema and policy versions, every offered timestamp and
+/// its membership decision, every day in the inclusive span, every measured
+/// session window, and the final counts/status. It therefore changes when the
+/// location of a hole changes even if all counts remain equal.
+///
+/// Fields are exposed through accessors rather than publicly writable slots so
+/// no caller can mutate a count while retaining the old digest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CalendarReceiptV1 {
+    schema_version: u32,
+    policy_version: u32,
+    first_day: i64,
+    last_day: i64,
+    offered: u64,
+    expected: u64,
+    missing: u64,
+    unexpected: u64,
+    status: CalendarStatusV1,
+    digest: [u8; 32],
+}
+
+impl CalendarReceiptV1 {
+    /// Receipt schema version.
+    #[must_use]
+    pub const fn schema_version(self) -> u32 {
+        self.schema_version
+    }
+
+    /// Calendar interpretation policy version.
+    #[must_use]
+    pub const fn policy_version(self) -> u32 {
+        self.policy_version
+    }
+
+    /// First requested IST day, inclusive.
+    #[must_use]
+    pub const fn first_day(self) -> i64 {
+        self.first_day
+    }
+
+    /// Last requested IST day, inclusive.
+    #[must_use]
+    pub const fn last_day(self) -> i64 {
+        self.last_day
+    }
+
+    /// Exact one-minute timestamps offered by the caller.
+    #[must_use]
+    pub const fn offered(self) -> u64 {
+        self.offered
+    }
+
+    /// Minutes owed by measured open sessions in the inclusive day span.
+    #[must_use]
+    pub const fn expected(self) -> u64 {
+        self.expected
+    }
+
+    /// Owed measured minutes absent from the offered slice.
+    #[must_use]
+    pub const fn missing(self) -> u64 {
+        self.missing
+    }
+
+    /// Offered timestamps outside a measured session.
+    ///
+    /// This is zero for every constructed V1 receipt: such a timestamp is a
+    /// refusal rather than a receipt. The explicit field keeps that admission
+    /// fact in the versioned schema and digest.
+    #[must_use]
+    pub const fn unexpected(self) -> u64 {
+        self.unexpected
+    }
+
+    /// Completeness conclusion.
+    #[must_use]
+    pub const fn status(self) -> CalendarStatusV1 {
+        self.status
+    }
+
+    /// Full BLAKE3 over the calendar and timestamp-membership decision.
+    #[must_use]
+    pub const fn digest(self) -> [u8; 32] {
+        self.digest
+    }
+}
+
+#[derive(Clone, Copy)]
+struct OfferedCalendarFactsV1 {
+    offered: u64,
+    measured_offered: u64,
+}
+
+#[derive(Clone, Copy)]
+struct CalendarDayFactsV1 {
+    expected: u64,
+    unmeasured: bool,
+}
+
+/// Exact IST day and minute for an exact UTC-minute timestamp.
+fn exact_ist_minute_v1(ts_micros: i64) -> Result<(i64, u16), Refusal> {
+    if ts_micros.rem_euclid(MICROS_PER_MINUTE_V1) != 0 {
+        return Err(format!(
+            "calendar receipt timestamp {ts_micros} is off the exact one-minute grid"
+        ));
+    }
+    let shifted = ts_micros
+        .checked_add(indicators::IST_OFFSET_MICROS)
+        .ok_or_else(|| {
+            format!(
+                "calendar receipt timestamp {ts_micros} cannot be shifted to IST without overflow"
+            )
+        })?;
+    let day = shifted.div_euclid(MICROS_PER_DAY_V1);
+    let minute = u16::try_from(shifted.rem_euclid(MICROS_PER_DAY_V1) / MICROS_PER_MINUTE_V1)
+        .map_err(|_| format!("calendar receipt timestamp {ts_micros} has no minute-of-day"))?;
+    Ok((day, minute))
+}
+
+/// Validate and hash every offered timestamp without allocating a membership set.
+fn hash_offered_calendar_v1(
+    timestamps: &[i64],
+    first_day: i64,
+    last_day: i64,
+    hasher: &mut brutex_core::blake3::Hasher,
+) -> Result<OfferedCalendarFactsV1, Refusal> {
+    let mut previous: Option<i64> = None;
+    let mut offered = 0_u64;
+    let mut measured_offered = 0_u64;
+
+    for (index, &timestamp) in timestamps.iter().enumerate() {
+        let (day, minute) = exact_ist_minute_v1(timestamp)?;
+        if let Some(prior) = previous
+            && timestamp <= prior
+        {
+            let fault = if timestamp == prior {
+                "duplicate"
+            } else {
+                "backward"
+            };
+            return Err(format!(
+                "calendar receipt timestamp {index} is {fault}: {prior} then {timestamp}"
+            ));
+        }
+        if day < first_day || day > last_day {
+            return Err(format!(
+                "calendar receipt timestamp {timestamp} belongs to IST day {day}, outside requested inclusive span {first_day}..={last_day}"
+            ));
+        }
+
+        let decision = match pull::calendar::kind_of(day) {
+            DayKind::Open(session) if session.expects(minute) => {
+                measured_offered = measured_offered.checked_add(1).ok_or_else(|| {
+                    "calendar receipt measured-offered count overflowed u64".to_owned()
+                })?;
+                1_u8
+            }
+            DayKind::Open(_) => {
+                return Err(format!(
+                    "calendar receipt timestamp {timestamp} is minute {minute} on measured open IST day {day}, but it is outside every measured session window"
+                ));
+            }
+            DayKind::Closed => {
+                return Err(format!(
+                    "calendar receipt timestamp {timestamp} is on measured closed IST day {day}"
+                ));
+            }
+            DayKind::OpenLengthUnmeasured => 3,
+            DayKind::Unmeasured => 4,
+        };
+
+        offered = offered
+            .checked_add(1)
+            .ok_or_else(|| "calendar receipt offered count overflowed u64".to_owned())?;
+        let ordinal = u64::try_from(index)
+            .map_err(|_| "calendar receipt timestamp index does not fit u64".to_owned())?;
+        hasher.update(b"T");
+        hasher.update(&ordinal.to_le_bytes());
+        hasher.update(&timestamp.to_le_bytes());
+        hasher.update(&day.to_le_bytes());
+        hasher.update(&minute.to_le_bytes());
+        hasher.update(&[decision]);
+        previous = Some(timestamp);
+    }
+
+    Ok(OfferedCalendarFactsV1 {
+        offered,
+        measured_offered,
+    })
+}
+
+/// Hash one measured session canonically and return how many minutes it owes.
+fn hash_open_session_v1(
+    day: i64,
+    session: Session,
+    hasher: &mut brutex_core::blake3::Hasher,
+) -> Result<u64, Refusal> {
+    let count = usize::from(session.count);
+    if count == 0 || count > MAX_WINDOWS {
+        return Err(format!(
+            "calendar policy produced {count} windows for open IST day {day}; V1 supports 1..={MAX_WINDOWS}"
+        ));
+    }
+    hasher.update(&[session.count]);
+    let mut expected = 0_u64;
+    let mut prior_to = None;
+    for index in 0..count {
+        let window = session.windows.get(index).copied().ok_or_else(|| {
+            format!("calendar policy omitted window {index} for open IST day {day}")
+        })?;
+        if window.from > window.to || window.to >= 1_440 {
+            return Err(format!(
+                "calendar policy window {index} on IST day {day} is invalid: {}..={} is not an ordered minute-of-day range",
+                window.from, window.to
+            ));
+        }
+        if prior_to.is_some_and(|prior| window.from <= prior) {
+            return Err(format!(
+                "calendar policy windows overlap or run backward on IST day {day} at window {index}"
+            ));
+        }
+        let bars = window
+            .to
+            .checked_sub(window.from)
+            .and_then(|width| width.checked_add(1))
+            .ok_or_else(|| format!("calendar policy window length overflowed on IST day {day}"))?;
+        expected = expected
+            .checked_add(u64::from(bars))
+            .ok_or_else(|| "calendar receipt expected count overflowed u64".to_owned())?;
+        let ordinal = u8::try_from(index)
+            .map_err(|_| "calendar policy window index does not fit u8".to_owned())?;
+        hasher.update(b"W");
+        hasher.update(&[ordinal]);
+        hasher.update(&window.from.to_le_bytes());
+        hasher.update(&window.to.to_le_bytes());
+        prior_to = Some(window.to);
+    }
+    Ok(expected)
+}
+
+/// Hash one complete day-level calendar decision.
+fn hash_calendar_day_v1(
+    day: i64,
+    hasher: &mut brutex_core::blake3::Hasher,
+) -> Result<CalendarDayFactsV1, Refusal> {
+    hasher.update(b"D");
+    hasher.update(&day.to_le_bytes());
+    match pull::calendar::kind_of(day) {
+        DayKind::Open(session) => {
+            hasher.update(&[1]);
+            Ok(CalendarDayFactsV1 {
+                expected: hash_open_session_v1(day, session, hasher)?,
+                unmeasured: false,
+            })
+        }
+        DayKind::Closed => {
+            hasher.update(&[2]);
+            Ok(CalendarDayFactsV1 {
+                expected: 0,
+                unmeasured: false,
+            })
+        }
+        DayKind::OpenLengthUnmeasured => {
+            hasher.update(&[3]);
+            Ok(CalendarDayFactsV1 {
+                expected: 0,
+                unmeasured: true,
+            })
+        }
+        DayKind::Unmeasured => {
+            hasher.update(&[4]);
+            Ok(CalendarDayFactsV1 {
+                expected: 0,
+                unmeasured: true,
+            })
+        }
+    }
+}
+
+/// Attest an exact ordered one-minute timestamp slice against the NSE calendar
+/// for one explicit inclusive requested IST-day span.
+///
+/// Missing measured minutes are counted in [`CalendarReceiptV1::missing`]; they
+/// are never synthesized and do not make construction fail. Duplicate,
+/// backward or off-minute timestamps, a bar on a measured closed day, and a bar
+/// outside the requested span or a measured open window are structural
+/// contradictions and refuse the receipt. A day whose session length is
+/// unmeasured remains accepted evidence, but the whole receipt is
+/// [`CalendarStatusV1::Unmeasured`]. An empty offered slice is still measured
+/// against the requested span: it is complete only when that span owes no bars.
+///
+/// # Cost
+///
+/// O(B + D) time for B offered timestamps and D inclusive calendar days, O(1)
+/// auxiliary space, and no hidden collection. Calendar lookup and each day's
+/// window walk are bounded by the calendar's fixed [`MAX_WINDOWS`]. This is a
+/// structural bound, not a benchmark measurement.
+///
+/// # Errors
+///
+/// A named [`Refusal`] for a backward or over-limit requested span, a malformed
+/// timestamp slice, a timestamp outside the requested span or contradicting a
+/// measured session, invalid calendar window geometry, or checked arithmetic
+/// that cannot be represented.
+pub fn calendar_receipt_v1(
+    timestamps: &[i64],
+    first_day: i64,
+    last_day: i64,
+) -> Result<CalendarReceiptV1, Refusal> {
+    if first_day > last_day {
+        return Err(format!(
+            "calendar receipt requested span runs backward: {first_day} is after {last_day}"
+        ));
+    }
+    let day_span = last_day
+        .checked_sub(first_day)
+        .and_then(|span| span.checked_add(1))
+        .ok_or_else(|| "calendar receipt inclusive day span overflowed i64".to_owned())?;
+    let day_span_usize = usize::try_from(day_span)
+        .map_err(|_| "calendar receipt inclusive day span does not fit usize".to_owned())?;
+    if day_span_usize > MAX_CALENDAR_RECEIPT_DAYS_V1 {
+        return Err(format!(
+            "calendar receipt requested span {first_day}..={last_day} is {day_span_usize} days; the existing {MAX_SPAN_MONTHS}-month span contract permits at most {MAX_CALENDAR_RECEIPT_DAYS_V1} days"
+        ));
+    }
+
+    let mut hasher = brutex_core::blake3::Hasher::new();
+    hasher.update(b"brutex.calendar-receipt.v1\0");
+    hasher.update(&CALENDAR_RECEIPT_SCHEMA_V1.to_le_bytes());
+    hasher.update(&CALENDAR_RECEIPT_POLICY_V1.to_le_bytes());
+    hasher.update(&first_day.to_le_bytes());
+    hasher.update(&last_day.to_le_bytes());
+    hasher.update(&day_span.to_le_bytes());
+
+    let offered = hash_offered_calendar_v1(timestamps, first_day, last_day, &mut hasher)?;
+    let mut expected = 0_u64;
+    let mut unmeasured = false;
+    let mut day = first_day;
+    loop {
+        let facts = hash_calendar_day_v1(day, &mut hasher)?;
+        expected = expected
+            .checked_add(facts.expected)
+            .ok_or_else(|| "calendar receipt expected count overflowed u64".to_owned())?;
+        unmeasured |= facts.unmeasured;
+        if day == last_day {
+            break;
+        }
+        day = day
+            .checked_add(1)
+            .ok_or_else(|| "calendar receipt day walk overflowed i64".to_owned())?;
+    }
+
+    let missing = expected
+        .checked_sub(offered.measured_offered)
+        .ok_or_else(|| {
+            "calendar receipt measured offered count exceeds measured expected minutes".to_owned()
+        })?;
+    let unexpected = 0_u64;
+    let status = if unmeasured {
+        CalendarStatusV1::Unmeasured
+    } else if missing == 0 {
+        CalendarStatusV1::Complete
+    } else {
+        CalendarStatusV1::Incomplete
+    };
+
+    hasher.update(b"S");
+    hasher.update(&offered.offered.to_le_bytes());
+    hasher.update(&expected.to_le_bytes());
+    hasher.update(&missing.to_le_bytes());
+    hasher.update(&unexpected.to_le_bytes());
+    hasher.update(&[status.code()]);
+    let digest = hasher.finalize();
+
+    Ok(CalendarReceiptV1 {
+        schema_version: CALENDAR_RECEIPT_SCHEMA_V1,
+        policy_version: CALENDAR_RECEIPT_POLICY_V1,
+        first_day,
+        last_day,
+        offered: offered.offered,
+        expected,
+        missing,
+        unexpected,
+        status,
+        digest,
+    })
+}
+
+/// Schema version of the rung-aware calendar receipt.
+pub const CALENDAR_RECEIPT_SCHEMA_V2: u32 = 2;
+
+/// Policy version binding the rung-aware, open-anchored bucket geometry.
+///
+/// Policy 2 means the exact eight intraday signal rungs, an anchor at the NSE
+/// open (09:15 IST), Euclidean bucket assignment, the measured windows from
+/// [`pull::calendar::kind_of`], and a union of the at-most-two bucket intervals
+/// that intersect those windows. It does not reinterpret a coarse bar as a
+/// one-minute bar: each rung receives its own receipt.
+pub const CALENDAR_RECEIPT_POLICY_V2: u32 = 2;
+
+const NSE_OPEN_MINUTE_V2: i64 = 555;
+const CALENDAR_POLICY_DIGEST_DOMAIN_V2: &[u8] = b"brutex.calendar-policy.v2\0";
+const CALENDAR_POLICY_RUNGS_V2: [u32; 8] = [60, 120, 180, 300, 600, 900, 1_800, 3_600];
+
+/// Canonical identity of the complete measured-calendar interpretation policy.
+///
+/// A calendar *receipt* identifies one offered timestamp slice and requested
+/// day span.  This digest instead identifies the policy used to interpret all
+/// such slices: the V2 schema/policy versions, exact supported signal rungs,
+/// open anchor, measured calendar range, and every measured day's disposition
+/// and session windows.  Execution inputs and durable population identities
+/// must carry this value rather than an arbitrary caller-chosen nonzero digest.
+///
+/// # Cost
+///
+/// O(D) time for the D days in the measured calendar and O(1) auxiliary space.
+/// Each open day hashes at most [`MAX_WINDOWS`] windows.  This is run-boundary
+/// provenance work, not a sweep inner-loop primitive, and is deliberately not
+/// described as total O(1) work.
+#[must_use]
+pub fn calendar_policy_digest_v2() -> [u8; 32] {
+    let mut hasher = brutex_core::blake3::Hasher::new();
+    hasher.update(CALENDAR_POLICY_DIGEST_DOMAIN_V2);
+    hasher.update(&CALENDAR_RECEIPT_SCHEMA_V2.to_le_bytes());
+    hasher.update(&CALENDAR_RECEIPT_POLICY_V2.to_le_bytes());
+    hasher.update(&NSE_OPEN_MINUTE_V2.to_le_bytes());
+    hasher.update(&u64::try_from(MAX_WINDOWS).unwrap_or(u64::MAX).to_le_bytes());
+    hasher.update(&pull::calendar::FIRST_DAY.to_le_bytes());
+    hasher.update(&pull::calendar::LAST_DAY.to_le_bytes());
+    hasher.update(
+        &u64::try_from(pull::calendar::DAYS)
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    hasher.update(
+        &u64::try_from(CALENDAR_POLICY_RUNGS_V2.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    for rung_seconds in CALENDAR_POLICY_RUNGS_V2 {
+        hasher.update(&rung_seconds.to_le_bytes());
+    }
+
+    let mut day = pull::calendar::FIRST_DAY;
+    loop {
+        hasher.update(&day.to_le_bytes());
+        match pull::calendar::kind_of(day) {
+            DayKind::Open(session) => {
+                hasher.update(&[1]);
+                hasher.update(&[session.count]);
+                for window in session
+                    .windows
+                    .iter()
+                    .take(usize::from(session.count).min(MAX_WINDOWS))
+                {
+                    hasher.update(&window.from.to_le_bytes());
+                    hasher.update(&window.to.to_le_bytes());
+                }
+            }
+            DayKind::OpenLengthUnmeasured => {
+                hasher.update(&[2]);
+            }
+            DayKind::Closed => {
+                hasher.update(&[3]);
+            }
+            DayKind::Unmeasured => {
+                hasher.update(&[4]);
+            }
+        }
+        if day == pull::calendar::LAST_DAY {
+            break;
+        }
+        day = day.saturating_add(1);
+    }
+    hasher.finalize()
+}
+
+/// Calendar attestation for one exact, ordered signal-rung timestamp slice.
+///
+/// Unlike [`CalendarReceiptV1`], which is deliberately the exact one-minute
+/// execution receipt, V2 binds the signal rung. The digest includes the schema
+/// and policy, rung width, requested IST-day boundaries, every offered
+/// timestamp in order, every measured day and raw session window, the derived
+/// open-anchored bucket intervals, and the final counts/status. It deliberately
+/// excludes instrument, feed and OHLCV values; those belong to the surrounding
+/// population/run identity rather than calendar coverage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CalendarReceiptV2 {
+    schema_version: u32,
+    policy_version: u32,
+    rung_seconds: u32,
+    first_day: i64,
+    last_day: i64,
+    offered: u64,
+    expected: u64,
+    missing: u64,
+    unexpected: u64,
+    status: CalendarStatusV1,
+    digest: [u8; 32],
+}
+
+impl CalendarReceiptV2 {
+    /// Receipt schema version.
+    #[must_use]
+    pub const fn schema_version(self) -> u32 {
+        self.schema_version
+    }
+
+    /// Calendar and bucket interpretation policy version.
+    #[must_use]
+    pub const fn policy_version(self) -> u32 {
+        self.policy_version
+    }
+
+    /// Width of this exact signal rung, in seconds.
+    #[must_use]
+    pub const fn rung_seconds(self) -> u32 {
+        self.rung_seconds
+    }
+
+    /// First requested IST day, inclusive.
+    #[must_use]
+    pub const fn first_day(self) -> i64 {
+        self.first_day
+    }
+
+    /// Last requested IST day, inclusive.
+    #[must_use]
+    pub const fn last_day(self) -> i64 {
+        self.last_day
+    }
+
+    /// Exact coarse-rung timestamps offered by the caller.
+    #[must_use]
+    pub const fn offered(self) -> u64 {
+        self.offered
+    }
+
+    /// Open-anchored buckets intersecting measured session windows.
+    #[must_use]
+    pub const fn expected(self) -> u64 {
+        self.expected
+    }
+
+    /// Expected measured buckets absent from the offered slice.
+    #[must_use]
+    pub const fn missing(self) -> u64 {
+        self.missing
+    }
+
+    /// Offered buckets contradicting the measured calendar.
+    ///
+    /// Every public constructor refuses such a timestamp, so this remains zero
+    /// for a constructed receipt and is retained as a digest-bound admission
+    /// fact.
+    #[must_use]
+    pub const fn unexpected(self) -> u64 {
+        self.unexpected
+    }
+
+    /// Completeness conclusion.
+    #[must_use]
+    pub const fn status(self) -> CalendarStatusV1 {
+        self.status
+    }
+
+    /// Full BLAKE3 over this rung's calendar-coverage evidence.
+    #[must_use]
+    pub const fn digest(self) -> [u8; 32] {
+        self.digest
+    }
+
+    /// Project a complete receipt into the opaque capability accepted later.
+    ///
+    /// The projection keeps the already domain-separated V2 digest unchanged;
+    /// it does not create a weaker summary digest. Every completeness predicate
+    /// is checked even where the status implies it, so a future decoder cannot
+    /// manufacture this capability from internally contradictory fields.
+    ///
+    /// # Errors
+    ///
+    /// A named refusal unless the receipt is measured complete, has no missing
+    /// or unexpected bucket, and offered exactly the measured denominator.
+    pub fn require_complete(self) -> Result<CompleteCalendarReceiptV2, Refusal> {
+        if self.status != CalendarStatusV1::Complete
+            || self.missing != 0
+            || self.unexpected != 0
+            || self.offered != self.expected
+        {
+            return Err(format!(
+                "calendar receipt V2 for {} seconds over IST days {}..={} is not complete: status {:?}, offered {}, expected {}, missing {}, unexpected {}",
+                self.rung_seconds,
+                self.first_day,
+                self.last_day,
+                self.status,
+                self.offered,
+                self.expected,
+                self.missing,
+                self.unexpected
+            ));
+        }
+        Ok(CompleteCalendarReceiptV2 {
+            rung_seconds: self.rung_seconds,
+            first_day: self.first_day,
+            last_day: self.last_day,
+            digest: self.digest,
+        })
+    }
+}
+
+/// Opaque proof that one signal rung completely covers its measured calendar.
+///
+/// Its fields are private and the only constructor is
+/// [`CalendarReceiptV2::require_complete`]. Later persistence and selection
+/// code can therefore require this type instead of remembering a list of
+/// status/count predicates. The digest is the full receipt digest, not a second
+/// summary hash.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CompleteCalendarReceiptV2 {
+    rung_seconds: u32,
+    first_day: i64,
+    last_day: i64,
+    digest: [u8; 32],
+}
+
+impl CompleteCalendarReceiptV2 {
+    /// Width of the proved-complete signal rung, in seconds.
+    #[must_use]
+    pub const fn rung_seconds(self) -> u32 {
+        self.rung_seconds
+    }
+
+    /// First completely covered IST day, inclusive.
+    #[must_use]
+    pub const fn first_day(self) -> i64 {
+        self.first_day
+    }
+
+    /// Last completely covered IST day, inclusive.
+    #[must_use]
+    pub const fn last_day(self) -> i64 {
+        self.last_day
+    }
+
+    /// The unchanged, fully bound V2 receipt digest.
+    #[must_use]
+    pub const fn digest(self) -> [u8; 32] {
+        self.digest
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BucketIntervalV2 {
+    first: i64,
+    last: i64,
+}
+
+/// Canonical union of the at-most-two bucket-index intervals in one session.
+#[derive(Clone, Copy)]
+struct ExpectedBucketsV2 {
+    intervals: [Option<BucketIntervalV2>; MAX_WINDOWS],
+    count: u8,
+    expected: u64,
+}
+
+impl ExpectedBucketsV2 {
+    const fn empty() -> Self {
+        Self {
+            intervals: [None; MAX_WINDOWS],
+            count: 0,
+            expected: 0,
+        }
+    }
+
+    fn insert(&mut self, interval: BucketIntervalV2, day: i64) -> Result<(), Refusal> {
+        if let Some(last_index) = usize::from(self.count).checked_sub(1) {
+            let last = self
+                .intervals
+                .get_mut(last_index)
+                .and_then(Option::as_mut)
+                .ok_or_else(|| {
+                    format!(
+                        "calendar receipt V2 lost expected bucket interval {last_index} on IST day {day}"
+                    )
+                })?;
+            if interval.first <= last.last.saturating_add(1) {
+                last.last = last.last.max(interval.last);
+                return Ok(());
+            }
+        }
+
+        let slot = self
+            .intervals
+            .get_mut(usize::from(self.count))
+            .ok_or_else(|| {
+                format!(
+                    "calendar receipt V2 produced more than {MAX_WINDOWS} disjoint bucket intervals on IST day {day}"
+                )
+            })?;
+        *slot = Some(interval);
+        self.count = self
+            .count
+            .checked_add(1)
+            .ok_or_else(|| "calendar receipt V2 bucket interval count overflowed u8".to_owned())?;
+        Ok(())
+    }
+
+    fn finish(&mut self) -> Result<(), Refusal> {
+        let mut expected = 0_u64;
+        for interval in self.intervals.iter().take(usize::from(self.count)) {
+            let interval = interval.ok_or_else(|| {
+                "calendar receipt V2 expected bucket interval was absent".to_owned()
+            })?;
+            let width = interval
+                .last
+                .checked_sub(interval.first)
+                .and_then(|span| span.checked_add(1))
+                .ok_or_else(|| {
+                    "calendar receipt V2 expected bucket interval overflowed i64".to_owned()
+                })?;
+            let width = u64::try_from(width).map_err(|_| {
+                "calendar receipt V2 expected bucket interval does not fit u64".to_owned()
+            })?;
+            expected = expected.checked_add(width).ok_or_else(|| {
+                "calendar receipt V2 expected bucket count overflowed u64".to_owned()
+            })?;
+        }
+        self.expected = expected;
+        Ok(())
+    }
+
+    fn contains(self, bucket: i64) -> bool {
+        self.intervals
+            .iter()
+            .take(usize::from(self.count))
+            .flatten()
+            .any(|interval| bucket >= interval.first && bucket <= interval.last)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct OfferedCalendarFactsV2 {
+    offered: u64,
+    measured_offered: u64,
+}
+
+#[derive(Clone, Copy)]
+struct CalendarDayFactsV2 {
+    expected: u64,
+    unmeasured: bool,
+}
+
+/// Exact eight signal rungs, as whole minutes.
+fn rung_minutes_v2(rung_seconds: u32) -> Result<i64, Refusal> {
+    match rung_seconds {
+        60 | 120 | 180 | 300 | 600 | 900 | 1_800 | 3_600 => Ok(i64::from(rung_seconds / 60)),
+        _ => Err(format!(
+            "calendar receipt V2 rung {rung_seconds} seconds is not one of the exact signal rungs: 60, 120, 180, 300, 600, 900, 1800, 3600"
+        )),
+    }
+}
+
+const fn bucket_index_v2(minute: i64, rung_minutes: i64) -> i64 {
+    minute
+        .saturating_sub(NSE_OPEN_MINUTE_V2)
+        .div_euclid(rung_minutes)
+}
+
+const fn bucket_minute_v2(bucket: i64, rung_minutes: i64) -> i64 {
+    NSE_OPEN_MINUTE_V2.saturating_add(bucket.saturating_mul(rung_minutes))
+}
+
+/// Derive and validate the canonical expected bucket union for one open day.
+fn expected_buckets_v2(
+    day: i64,
+    session: Session,
+    rung_minutes: i64,
+) -> Result<ExpectedBucketsV2, Refusal> {
+    let count = usize::from(session.count);
+    if count == 0 || count > MAX_WINDOWS {
+        return Err(format!(
+            "calendar policy produced {count} windows for open IST day {day}; V2 supports 1..={MAX_WINDOWS}"
+        ));
+    }
+
+    let mut expected = ExpectedBucketsV2::empty();
+    let mut prior_to = None;
+    for index in 0..count {
+        let window = session.windows.get(index).copied().ok_or_else(|| {
+            format!("calendar policy omitted window {index} for open IST day {day}")
+        })?;
+        if window.from > window.to || window.to >= 1_440 {
+            return Err(format!(
+                "calendar policy window {index} on IST day {day} is invalid: {}..={} is not an ordered minute-of-day range",
+                window.from, window.to
+            ));
+        }
+        if prior_to.is_some_and(|prior| window.from <= prior) {
+            return Err(format!(
+                "calendar policy windows overlap or run backward on IST day {day} at window {index}"
+            ));
+        }
+        expected.insert(
+            BucketIntervalV2 {
+                first: bucket_index_v2(i64::from(window.from), rung_minutes),
+                last: bucket_index_v2(i64::from(window.to), rung_minutes),
+            },
+            day,
+        )?;
+        prior_to = Some(window.to);
+    }
+    expected.finish()?;
+    Ok(expected)
+}
+
+/// Validate and hash every offered rung timestamp without a membership set.
+fn hash_offered_calendar_v2<I>(
+    timestamps: I,
+    rung_minutes: i64,
+    first_day: i64,
+    last_day: i64,
+    hasher: &mut brutex_core::blake3::Hasher,
+) -> Result<OfferedCalendarFactsV2, Refusal>
+where
+    I: IntoIterator<Item = i64>,
+{
+    let mut previous: Option<i64> = None;
+    let mut offered = 0_u64;
+    let mut measured_offered = 0_u64;
+
+    for (index, timestamp) in timestamps.into_iter().enumerate() {
+        let (day, minute) = exact_ist_minute_v1(timestamp)?;
+        if let Some(prior) = previous
+            && timestamp <= prior
+        {
+            let fault = if timestamp == prior {
+                "duplicate"
+            } else {
+                "backward"
+            };
+            return Err(format!(
+                "calendar receipt V2 timestamp {index} is {fault}: {prior} then {timestamp}"
+            ));
+        }
+        if day < first_day || day > last_day {
+            return Err(format!(
+                "calendar receipt V2 timestamp {timestamp} belongs to IST day {day}, outside requested inclusive span {first_day}..={last_day}"
+            ));
+        }
+
+        let minute = i64::from(minute);
+        let bucket = bucket_index_v2(minute, rung_minutes);
+        if bucket_minute_v2(bucket, rung_minutes) != minute {
+            let rung_seconds = rung_minutes.saturating_mul(60);
+            return Err(format!(
+                "calendar receipt V2 timestamp {timestamp} at IST minute {minute} is off the exact {rung_seconds}-second open-anchored grid"
+            ));
+        }
+
+        let decision = match pull::calendar::kind_of(day) {
+            DayKind::Open(session) => {
+                let expected = expected_buckets_v2(day, session, rung_minutes)?;
+                if !expected.contains(bucket) {
+                    return Err(format!(
+                        "calendar receipt V2 timestamp {timestamp} is bucket {bucket} on measured open IST day {day}, but that bucket intersects no measured session window"
+                    ));
+                }
+                measured_offered = measured_offered.checked_add(1).ok_or_else(|| {
+                    "calendar receipt V2 measured-offered count overflowed u64".to_owned()
+                })?;
+                1_u8
+            }
+            DayKind::Closed => {
+                return Err(format!(
+                    "calendar receipt V2 timestamp {timestamp} is on measured closed IST day {day}"
+                ));
+            }
+            DayKind::OpenLengthUnmeasured => 3,
+            DayKind::Unmeasured => 4,
+        };
+
+        offered = offered
+            .checked_add(1)
+            .ok_or_else(|| "calendar receipt V2 offered count overflowed u64".to_owned())?;
+        let ordinal = u64::try_from(index)
+            .map_err(|_| "calendar receipt V2 timestamp index does not fit u64".to_owned())?;
+        hasher.update(b"T");
+        hasher.update(&ordinal.to_le_bytes());
+        hasher.update(&timestamp.to_le_bytes());
+        hasher.update(&day.to_le_bytes());
+        hasher.update(&minute.to_le_bytes());
+        hasher.update(&bucket.to_le_bytes());
+        hasher.update(&[decision]);
+        previous = Some(timestamp);
+    }
+
+    Ok(OfferedCalendarFactsV2 {
+        offered,
+        measured_offered,
+    })
+}
+
+/// Hash one measured open session and its derived bucket geometry.
+fn hash_open_session_v2(
+    day: i64,
+    session: Session,
+    rung_minutes: i64,
+    hasher: &mut brutex_core::blake3::Hasher,
+) -> Result<u64, Refusal> {
+    let expected = expected_buckets_v2(day, session, rung_minutes)?;
+    hasher.update(&[session.count]);
+    for (index, window) in session
+        .windows
+        .iter()
+        .take(usize::from(session.count))
+        .enumerate()
+    {
+        let ordinal = u8::try_from(index)
+            .map_err(|_| "calendar receipt V2 window index does not fit u8".to_owned())?;
+        hasher.update(b"W");
+        hasher.update(&[ordinal]);
+        hasher.update(&window.from.to_le_bytes());
+        hasher.update(&window.to.to_le_bytes());
+    }
+    hasher.update(b"B");
+    hasher.update(&[expected.count]);
+    for (index, interval) in expected
+        .intervals
+        .iter()
+        .take(usize::from(expected.count))
+        .flatten()
+        .enumerate()
+    {
+        let ordinal = u8::try_from(index)
+            .map_err(|_| "calendar receipt V2 bucket interval index does not fit u8".to_owned())?;
+        hasher.update(&[ordinal]);
+        hasher.update(&interval.first.to_le_bytes());
+        hasher.update(&interval.last.to_le_bytes());
+    }
+    hasher.update(&expected.expected.to_le_bytes());
+    Ok(expected.expected)
+}
+
+/// Hash one complete day-level V2 calendar decision.
+fn hash_calendar_day_v2(
+    day: i64,
+    rung_minutes: i64,
+    hasher: &mut brutex_core::blake3::Hasher,
+) -> Result<CalendarDayFactsV2, Refusal> {
+    hasher.update(b"D");
+    hasher.update(&day.to_le_bytes());
+    match pull::calendar::kind_of(day) {
+        DayKind::Open(session) => {
+            hasher.update(&[1]);
+            Ok(CalendarDayFactsV2 {
+                expected: hash_open_session_v2(day, session, rung_minutes, hasher)?,
+                unmeasured: false,
+            })
+        }
+        DayKind::Closed => {
+            hasher.update(&[2]);
+            Ok(CalendarDayFactsV2 {
+                expected: 0,
+                unmeasured: false,
+            })
+        }
+        DayKind::OpenLengthUnmeasured => {
+            hasher.update(&[3]);
+            Ok(CalendarDayFactsV2 {
+                expected: 0,
+                unmeasured: true,
+            })
+        }
+        DayKind::Unmeasured => {
+            hasher.update(&[4]);
+            Ok(CalendarDayFactsV2 {
+                expected: 0,
+                unmeasured: true,
+            })
+        }
+    }
+}
+
+/// Attest an ordered signal-rung timestamp slice against the measured calendar.
+///
+/// The rung is one of 60, 120, 180, 300, 600, 900, 1,800 or 3,600 seconds.
+/// Every measured session window contributes every open-anchored bucket it
+/// intersects; overlapping or adjacent bucket intervals from a split session
+/// are merged before the denominator is counted. Missing buckets are counted,
+/// never synthesized. Duplicate, backward, off-grid, closed-day and
+/// non-intersecting measured-day timestamps refuse the receipt.
+///
+/// # Cost
+///
+/// O(B + D) time for B offered timestamps and D inclusive requested calendar
+/// days, O(1) auxiliary space. Each operation over a session is bounded by
+/// [`MAX_WINDOWS`] (currently two). This is a structural bound, not a measured
+/// benchmark result.
+///
+/// # Errors
+///
+/// A named [`Refusal`] for an unsupported rung, backward or over-limit span,
+/// malformed timestamps, contradictions with the measured calendar, invalid
+/// calendar geometry, or checked arithmetic that cannot be represented.
+pub fn calendar_receipt_v2(
+    timestamps: &[i64],
+    rung_seconds: u32,
+    first_day: i64,
+    last_day: i64,
+) -> Result<CalendarReceiptV2, Refusal> {
+    calendar_receipt_v2_from_iter(
+        timestamps.iter().copied(),
+        rung_seconds,
+        first_day,
+        last_day,
+    )
+}
+
+/// Attest exact ordered candle timestamps without allocating a parallel vector.
+///
+/// The receipt is byte-identical to [`calendar_receipt_v2`] over a separately
+/// collected timestamp slice.  Keeping the projection internal to this walk
+/// lets `CandidateUniverse` and pre-admission source builders prove that their
+/// exact OHLCV streams match their calendar receipts in O(1) auxiliary space.
+///
+/// # Errors
+///
+/// Every refusal made by [`calendar_receipt_v2`], unchanged.
+pub fn calendar_receipt_v2_for_bars(
+    bars: &[Candle],
+    rung_seconds: u32,
+    first_day: i64,
+    last_day: i64,
+) -> Result<CalendarReceiptV2, Refusal> {
+    calendar_receipt_v2_from_iter(
+        bars.iter().map(|bar| bar.ts_micros),
+        rung_seconds,
+        first_day,
+        last_day,
+    )
+}
+
+fn calendar_receipt_v2_from_iter<I>(
+    timestamps: I,
+    rung_seconds: u32,
+    first_day: i64,
+    last_day: i64,
+) -> Result<CalendarReceiptV2, Refusal>
+where
+    I: IntoIterator<Item = i64>,
+{
+    let rung_minutes = rung_minutes_v2(rung_seconds)?;
+    if first_day > last_day {
+        return Err(format!(
+            "calendar receipt V2 requested span runs backward: {first_day} is after {last_day}"
+        ));
+    }
+    let day_span = last_day
+        .checked_sub(first_day)
+        .and_then(|span| span.checked_add(1))
+        .ok_or_else(|| "calendar receipt V2 inclusive day span overflowed i64".to_owned())?;
+    let day_span_usize = usize::try_from(day_span)
+        .map_err(|_| "calendar receipt V2 inclusive day span does not fit usize".to_owned())?;
+    if day_span_usize > MAX_CALENDAR_RECEIPT_DAYS_V1 {
+        return Err(format!(
+            "calendar receipt V2 requested span {first_day}..={last_day} is {day_span_usize} days; the existing {MAX_SPAN_MONTHS}-month span contract permits at most {MAX_CALENDAR_RECEIPT_DAYS_V1} days"
+        ));
+    }
+
+    let mut hasher = brutex_core::blake3::Hasher::new();
+    hasher.update(b"brutex.calendar-receipt.v2\0");
+    hasher.update(&CALENDAR_RECEIPT_SCHEMA_V2.to_le_bytes());
+    hasher.update(&CALENDAR_RECEIPT_POLICY_V2.to_le_bytes());
+    hasher.update(&rung_seconds.to_le_bytes());
+    hasher.update(&first_day.to_le_bytes());
+    hasher.update(&last_day.to_le_bytes());
+    hasher.update(&day_span.to_le_bytes());
+
+    let offered =
+        hash_offered_calendar_v2(timestamps, rung_minutes, first_day, last_day, &mut hasher)?;
+    let mut expected = 0_u64;
+    let mut unmeasured = false;
+    let mut day = first_day;
+    loop {
+        let facts = hash_calendar_day_v2(day, rung_minutes, &mut hasher)?;
+        expected = expected
+            .checked_add(facts.expected)
+            .ok_or_else(|| "calendar receipt V2 expected bucket count overflowed u64".to_owned())?;
+        unmeasured |= facts.unmeasured;
+        if day == last_day {
+            break;
+        }
+        day = day
+            .checked_add(1)
+            .ok_or_else(|| "calendar receipt V2 day walk overflowed i64".to_owned())?;
+    }
+
+    let missing = expected
+        .checked_sub(offered.measured_offered)
+        .ok_or_else(|| {
+            "calendar receipt V2 measured offered count exceeds measured expected buckets"
+                .to_owned()
+        })?;
+    let unexpected = 0_u64;
+    let status = if unmeasured {
+        CalendarStatusV1::Unmeasured
+    } else if missing == 0 {
+        CalendarStatusV1::Complete
+    } else {
+        CalendarStatusV1::Incomplete
+    };
+
+    hasher.update(b"S");
+    hasher.update(&offered.offered.to_le_bytes());
+    hasher.update(&expected.to_le_bytes());
+    hasher.update(&missing.to_le_bytes());
+    hasher.update(&unexpected.to_le_bytes());
+    hasher.update(&[status.code()]);
+    let digest = hasher.finalize();
+
+    Ok(CalendarReceiptV2 {
+        schema_version: CALENDAR_RECEIPT_SCHEMA_V2,
+        policy_version: CALENDAR_RECEIPT_POLICY_V2,
+        rung_seconds,
+        first_day,
+        last_day,
+        offered: offered.offered,
+        expected,
+        missing,
+        unexpected,
+        status,
+        digest,
+    })
+}
+
+/// Version of the stored daily-reference payload and causal-join schema.
+///
+/// This number is folded into every stored run identity.  Changing the meaning
+/// of a daily record without incrementing it would let two computations share
+/// one identity.
+pub const DAILY_REFERENCE_SCHEMA: u32 = 1;
+
+/// Version of the charter-calendar eligibility rule.
+///
+/// The exact excluded IST-day list is also bound into the identity; the version
+/// names the rule that interprets that list.
+pub const DAILY_ELIGIBILITY_POLICY: u32 = 1;
+
+/// Version of the exact-minute `GapFib` overlay and close-alignment policy.
+///
+/// Policy 1 means: fold [`indicators::gap::GapFib`] only over stored `1min`
+/// bars from the same feed and instrument, then copy positions 132..=142 from
+/// the minute opening at `signal_open + signal_duration - one_minute`.  A later
+/// minute is never substituted and signal-local `GapFib` bits are always erased.
+pub const EXACT_MINUTE_GAP_POLICY: u32 = 1;
+
+/// The integrity statement the ordinary stored-read path can honestly make.
+///
+/// `BarFile::open_existing` validates the committed header and geometry but
+/// deliberately does not perform the O(file) checksum scrub.  No scrub receipt
+/// is supplied to this module, so calling these references integrity-sealed
+/// would invent evidence the read did not produce.
+pub const DAILY_INTEGRITY_NOTE: &str = "UNVERIFIED -- committed store records were read, but no independent checksum-scrub receipt was supplied";
+
+/// Integrity statement for the exact-minute `GapFib` evidence.
+///
+/// This is deliberately the same honest limitation as the daily stream, but a
+/// separate constant keeps the receipt from implying that one verification
+/// covered both files.
+pub const EXACT_MINUTE_INTEGRITY_NOTE: &str = "UNVERIFIED -- exact stored 1min records were read, but no independent checksum-scrub receipt was supplied";
+
+/// Stored one-day evidence ready for the causal anchored evaluator.
+#[derive(Clone, Debug)]
+pub struct DailyContext {
+    /// Every one-day OHLCV record that can influence the requested signal span.
+    pub bars: Vec<Candle>,
+    /// The validated records, parallel to [`Self::bars`].
+    pub references: Vec<DailyReference>,
+    /// One identity byte per record: `1` eligible, `0` explicitly excluded.
+    pub eligibility: Vec<u8>,
+    /// Months asked of the daily store, including the preceding warm-up month.
+    pub asked: u32,
+    /// Months actually found.
+    pub found: u32,
+}
+
+/// Same-feed, same-instrument stored one-minute evidence for `GapFib`.
+#[derive(Clone, Debug)]
+pub struct ExactMinuteContext {
+    /// Complete one-minute context, including the preceding warm-up month.
+    pub bars: Vec<Candle>,
+    /// Months asked of the one-minute store.
+    pub asked: u32,
+    /// Months actually found.
+    pub found: u32,
+    /// Latest regular IST session strictly before the first signal day.
+    pub prior_session_day: i64,
+    /// Exact bars observed on that prior session.
+    pub prior_session_bars: u32,
+}
+
+/// The only distinction a range loader is allowed to recover from.
+///
+/// A file that does not exist is a named hole in the requested sample. Every
+/// other store failure means bytes exist (or should exist) but cannot be
+/// trusted, and continuing would turn corruption, a live writer, or an I/O
+/// fault into a silently smaller backtest.
+enum LoadFailure {
+    Missing(Refusal),
+    Refused(Refusal),
+}
+
+impl LoadFailure {
+    fn message(self) -> Refusal {
+        match self {
+            Self::Missing(why) | Self::Refused(why) => why,
+        }
+    }
+}
+
+impl From<Refusal> for LoadFailure {
+    fn from(why: Refusal) -> Self {
+        Self::Refused(why)
+    }
+}
 
 /// The rung whose directory word is `name`, or the words that do exist.
 ///
@@ -78,6 +1346,31 @@ fn rung(name: &str) -> Result<Timeframe, Refusal> {
         })
 }
 
+/// One of the exact two spot indices this engine is allowed to sweep.
+///
+/// Constructing an [`InstrumentKey`] proves only that the identifier is a
+/// well-formed, storable NSE index. Reference indices and other valid symbols
+/// can therefore have real files in the store without belonging to the sweep
+/// surface. Every stored-sweep entry door comes through this helper so the
+/// authoritative allow-list remains [`InstrumentKey::SWEPT`], not a second
+/// string list in the CLI or API.
+fn swept_index(underlying: &str) -> Result<InstrumentKey, Refusal> {
+    let key = InstrumentKey::index(Exchange::Nse, underlying)
+        .map_err(|why| format!("`{underlying}` is not an index this engine sweeps: {why}"))?;
+    key.require_sweepable().map_err(|why| {
+        let allowed = InstrumentKey::SWEPT
+            .iter()
+            .map(|(_, symbol)| *symbol)
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "`{underlying}` is not an instrument this engine sweeps: {why}. \
+             The exact sweep surface is {allowed}. Nothing was read."
+        )
+    })?;
+    Ok(key)
+}
+
 /// One instrument-month of real bars, or the reason there are none.
 ///
 /// # Errors
@@ -94,9 +1387,68 @@ pub fn load(
     year: u16,
     month: u8,
 ) -> Result<Loaded, Refusal> {
+    load_classified(root, vendor, underlying, rung_name, year, month).map_err(LoadFailure::message)
+}
+
+/// Explicit ceiling for one assembled stored-bar span.
+///
+/// This type has no `Default`: a production caller must name how many records
+/// it is prepared to allocate and hash.  The ceiling is checked against each
+/// opened month's committed header count before allocating that month's
+/// vector, and against the accumulated span before the next month is read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StoredSpanLoadBoundV1 {
+    max_records: u64,
+}
+
+impl StoredSpanLoadBoundV1 {
+    /// Construct a nonzero record ceiling.
+    ///
+    /// # Errors
+    ///
+    /// Zero cannot authorize even one stored record and is refused before any
+    /// store path is opened.
+    pub fn new(max_records: u64) -> Result<Self, Refusal> {
+        if max_records == 0 {
+            return Err(
+                "stored span record ceiling must be greater than zero; nothing was opened"
+                    .to_owned(),
+            );
+        }
+        Ok(Self { max_records })
+    }
+
+    /// Maximum number of records the complete assembled span may hold.
+    #[must_use]
+    pub const fn max_records(self) -> u64 {
+        self.max_records
+    }
+}
+
+/// [`load`] with genuine absence kept distinct from every unsafe refusal.
+fn load_classified(
+    root: &Path,
+    vendor: Vendor,
+    underlying: &str,
+    rung_name: &str,
+    year: u16,
+    month: u8,
+) -> Result<Loaded, LoadFailure> {
+    load_classified_with_ceiling(root, vendor, underlying, rung_name, year, month, None)
+}
+
+/// Classified month load with an optional pre-allocation committed-record cap.
+fn load_classified_with_ceiling(
+    root: &Path,
+    vendor: Vendor,
+    underlying: &str,
+    rung_name: &str,
+    year: u16,
+    month: u8,
+    remaining_records: Option<u64>,
+) -> Result<Loaded, LoadFailure> {
     let timeframe = rung(rung_name)?;
-    let key = InstrumentKey::index(Exchange::Nse, underlying)
-        .map_err(|why| format!("`{underlying}` is not an index this engine sweeps: {why}"))?;
+    let key = swept_index(underlying)?;
     let ym = YearMonth::new(year, month)
         .map_err(|why| format!("{year}-{month:02} is not a month: {why}"))?;
     let path = StorePath::for_key(vendor, &key, timeframe, ym, FileKind::Bars)
@@ -133,25 +1485,48 @@ pub fn load(
     // `{why}` already carries the real cause; what was missing was permission to
     // read it as something other than "absent".
     let file = BarFile::open_existing(root, path, symbol_id).map_err(|why| {
-        format!(
+        let missing = matches!(why, StoreError::Missing { .. });
+        let message = format!(
             "{underlying} {rung_name} {year}-{month:02} could not be read from \
              the store for {}: {why}. Nothing was read. If that reason is \
              absence, pull the instrument-month. IF IT NAMES A LOCK, A WRITER \
              HOLDS IT -- a pull is in flight, and sweeping now would silently \
              leave this month out of the sample. Wait for the pull, then rerun.",
             vendor.as_str()
-        )
+        );
+        if missing {
+            LoadFailure::Missing(message)
+        } else {
+            LoadFailure::Refused(message)
+        }
     })?;
 
     // RESERVED ONCE, FROM THE HEADER'S OWN COUNT. `records()` is a field read,
     // not a walk, so this is one allocation for a known length rather than a
     // doubling per bar.
     let n = file.records();
-    let mut bars = Vec::with_capacity(usize::try_from(n).unwrap_or(0));
+    if let Some(remaining) = remaining_records
+        && n > remaining
+    {
+        return Err(LoadFailure::Refused(format!(
+            "{underlying} {rung_name} {year}-{month:02} declares {n} committed records, exceeding the {remaining}-record remainder of the explicit span ceiling before allocation. Nothing was read"
+        )));
+    }
+    let capacity = usize::try_from(n).map_err(|_| {
+        LoadFailure::Refused(format!(
+            "{underlying} {rung_name} {year}-{month:02} declares {n} committed records, which cannot fit this machine's address space. Nothing was allocated"
+        ))
+    })?;
+    let mut bars = Vec::new();
+    bars.try_reserve_exact(capacity).map_err(|why| {
+        LoadFailure::Refused(format!(
+            "{underlying} {rung_name} {year}-{month:02} could not reserve space for its {n} committed records: {why}. Nothing was read"
+        ))
+    })?;
     for i in 0..n {
-        let bar = file
-            .read_record(i)
-            .map_err(|why| format!("record {i} of {n} could not be read: {why}"))?;
+        let bar = file.read_record(i).map_err(|why| {
+            LoadFailure::Refused(format!("record {i} of {n} could not be read: {why}"))
+        })?;
         bars.push(Candle {
             ts_micros: bar.ts_micros,
             open: bar.open,
@@ -272,6 +1647,12 @@ const fn next_month(year: u16, month: u8) -> Option<(u16, u8)> {
 /// saying "too long".
 const MAX_SPAN_MONTHS: usize = 1_200;
 
+/// Maximum inclusive day span a V1 calendar receipt will walk.
+///
+/// Derived from the existing [`MAX_SPAN_MONTHS`] input contract at the widest
+/// possible civil month, not introduced as a second independent operator limit.
+const MAX_CALENDAR_RECEIPT_DAYS_V1: usize = MAX_SPAN_MONTHS * 31;
+
 /// Every month from `from` up to and including `to`, oldest first.
 ///
 /// Bounded twice over: by [`MAX_SPAN_MONTHS`] before the walk starts, and by
@@ -362,9 +1743,10 @@ fn months_between(from: (u16, u8), to: (u16, u8)) -> Result<Vec<(u16, u8)>, Refu
 ///
 /// # Cost
 ///
-/// One `open_existing` per month and one `read_record` per bar, each O(1), with
-/// the destination reserved once from the sum of the headers' own record counts.
-/// Total work is O(total bars), which is the size of the answer and not a
+/// One `open_existing` per month and one `read_record` per bar, each O(1). The
+/// month allocation is reserved from that month's validated header and the
+/// assembled destination grows with one fallible exact reserve per admitted
+/// month. Total work is O(months + total bars), which is the size of the answer and not a
 /// per-operation cost: `CLAUDE.md` §3 rule 4 governs bar lookup, condition
 /// lookup, mask evaluation, duplicate rejection and result append, and this is
 /// none of them. Nothing here scans, sorts or searches.
@@ -381,18 +1763,80 @@ pub fn load_span(
     from: (u16, u8),
     to: (u16, u8),
 ) -> Result<Span, Refusal> {
+    load_span_with_optional_bound(root, vendor, underlying, rung_name, from, to, None)
+}
+
+/// Load a stored span with an explicit committed-record ceiling.
+///
+/// Unlike [`load_span`], this door refuses a month from its validated header
+/// count before allocating or reading that month's records when the assembled
+/// answer would exceed `bound`.  It is the required primitive for later
+/// pre-admission source loading; the ordinary operator-facing loader remains
+/// available for its existing compatibility callers.
+///
+/// # Cost
+///
+/// O(M + B) time for M requested months and B admitted bars, and O(M + B)
+/// returned space for the requested/missing month ledgers plus bars. Header
+/// admission is O(1) per month. This is a resource ceiling, not a claim that
+/// assembling the span is O(1).
+///
+/// # Errors
+///
+/// Every [`load_span`] refusal plus a named pre-allocation refusal when a
+/// committed month would cross the explicit record ceiling.
+pub fn load_span_bounded(
+    root: &Path,
+    vendor: Vendor,
+    underlying: &str,
+    rung_name: &str,
+    from: (u16, u8),
+    to: (u16, u8),
+    bound: StoredSpanLoadBoundV1,
+) -> Result<Span, Refusal> {
+    load_span_with_optional_bound(root, vendor, underlying, rung_name, from, to, Some(bound))
+}
+
+fn load_span_with_optional_bound(
+    root: &Path,
+    vendor: Vendor,
+    underlying: &str,
+    rung_name: &str,
+    from: (u16, u8),
+    to: (u16, u8),
+    bound: Option<StoredSpanLoadBoundV1>,
+) -> Result<Span, Refusal> {
     let timeframe = rung(rung_name)?;
-    let key = InstrumentKey::index(Exchange::Nse, underlying)
-        .map_err(|why| format!("`{underlying}` is not an index this engine sweeps: {why}"))?;
+    let key = swept_index(underlying)?;
     let wanted = months_between(from, to)?;
 
     let mut bars: Vec<Candle> = Vec::new();
     let mut missing: Vec<(u16, u8)> = Vec::new();
     let mut found: u32 = 0;
+    let mut admitted_records = 0_u64;
 
     for &(year, month) in &wanted {
-        match load(root, vendor, underlying, rung_name, year, month) {
-            Err(_) => missing.push((year, month)),
+        let remaining_records = bound
+            .map(StoredSpanLoadBoundV1::max_records)
+            .map(|maximum| {
+                maximum.checked_sub(admitted_records).ok_or_else(|| {
+                    format!(
+                        "stored span already admitted {admitted_records} records, beyond its explicit {maximum}-record ceiling. Nothing else was read"
+                    )
+                })
+            })
+            .transpose()?;
+        match load_classified_with_ceiling(
+            root,
+            vendor,
+            underlying,
+            rung_name,
+            year,
+            month,
+            remaining_records,
+        ) {
+            Err(LoadFailure::Missing(_)) => missing.push((year, month)),
+            Err(LoadFailure::Refused(why)) => return Err(why),
             Ok(one) => {
                 // THE JOIN, CHECKED. Compared against the last bar already held
                 // rather than against the previous month's own last bar, so a
@@ -410,6 +1854,21 @@ pub fn load_span(
                     ));
                 }
                 found = found.saturating_add(1);
+                let month_records = u64::try_from(one.bars.len()).map_err(|_| {
+                    format!(
+                        "{underlying} {rung_name} {year}-{month:02} decoded record count does not fit u64"
+                    )
+                })?;
+                admitted_records = admitted_records.checked_add(month_records).ok_or_else(|| {
+                    format!(
+                        "{underlying} {rung_name} assembled record count overflowed u64 at {year}-{month:02}"
+                    )
+                })?;
+                bars.try_reserve_exact(one.bars.len()).map_err(|why| {
+                    format!(
+                        "{underlying} {rung_name} could not reserve the assembled span for {year}-{month:02}'s {month_records} committed records: {why}. Nothing was swept"
+                    )
+                })?;
                 bars.extend(one.bars);
             }
         }
@@ -437,6 +1896,452 @@ pub fn load_span(
         found,
         missing,
     })
+}
+
+/// The calendar month immediately before `at`.
+fn previous_month(at: (u16, u8)) -> Result<(u16, u8), Refusal> {
+    let (year, month) = at;
+    if !(1..=12).contains(&month) {
+        return Err(format!("{year}-{month:02} is not a month"));
+    }
+    if month > 1 {
+        return Ok((year, month - 1));
+    }
+    let Some(previous_year) = year.checked_sub(1) else {
+        return Err(
+            "year zero January has no preceding month for daily-reference warm-up".to_owned(),
+        );
+    };
+    Ok((previous_year, 12))
+}
+
+/// Classify one observed day under the canonical NSE calendar and the
+/// identity-bound previous-day exclusion policy.
+fn daily_eligibility_of(day: i64) -> Result<DailyEligibility, Refusal> {
+    let explicitly_excluded = CHARTER_NON_REGULAR_IST_DAYS.contains(&day);
+    match pull::calendar::kind_of(day) {
+        DayKind::Open(_) => Ok(if explicitly_excluded {
+            DailyEligibility::Excluded
+        } else {
+            DailyEligibility::Eligible
+        }),
+        DayKind::OpenLengthUnmeasured if explicitly_excluded => Ok(DailyEligibility::Excluded),
+        DayKind::OpenLengthUnmeasured => Err(format!(
+            "canonical NSE calendar marks IST day {day} open with unmeasured session length, but the identity-bound daily exclusion policy does not exclude it; no regular-session eligibility was invented"
+        )),
+        DayKind::Closed => Err(format!(
+            "stored reference evidence contains IST day {day}, which the canonical NSE calendar measures as closed; the stray row was not treated as a trading session"
+        )),
+        DayKind::Unmeasured => Err(format!(
+            "stored reference evidence contains IST day {day}, which is outside the canonical NSE calendar's measured range; session eligibility was not guessed"
+        )),
+    }
+}
+
+/// Turn a complete stored one-day span into explicit causal reference records.
+fn daily_context_from_span(daily: Span, signal: &[Candle]) -> Result<DailyContext, Refusal> {
+    let Some(first_signal) = signal.first() else {
+        return Err(
+            "the signal span is empty, so no previous-day reference can be selected".to_owned(),
+        );
+    };
+    let Some(last_signal) = signal.last() else {
+        return Err(
+            "the signal span is empty, so no previous-day reference can be selected".to_owned(),
+        );
+    };
+    require_complete_daily_span(&daily)?;
+
+    let first_signal_day = indicators::ist_day(first_signal.ts_micros);
+    let last_signal_day = indicators::ist_day(last_signal.ts_micros);
+    let capacity = daily.bars.len();
+    let mut bars = Vec::new();
+    bars.try_reserve_exact(capacity).map_err(|why| {
+        format!(
+            "stored 1day reference conversion could not reserve {capacity} causal bar record(s): {why}. Nothing was swept"
+        )
+    })?;
+    let mut references = Vec::new();
+    references.try_reserve_exact(capacity).map_err(|why| {
+        format!(
+            "stored 1day reference conversion could not reserve {capacity} typed reference record(s): {why}. Nothing was swept"
+        )
+    })?;
+    let mut eligibility = Vec::new();
+    eligibility.try_reserve_exact(capacity).map_err(|why| {
+        format!(
+            "stored 1day reference conversion could not reserve {capacity} eligibility record(s): {why}. Nothing was swept"
+        )
+    })?;
+    for bar in daily.bars {
+        let day = indicators::ist_day(bar.ts_micros);
+        // A same-day record is not sealed at the instant an intraday signal is
+        // evaluated, and a future record is look-ahead.  They are omitted from
+        // the offered reference stream rather than relying on the evaluator to
+        // ignore bytes the run identity then misleadingly claims it consumed.
+        if day >= last_signal_day {
+            continue;
+        }
+        let decision = daily_eligibility_of(day)?;
+        let reference = DailyReference::new(bar, decision).map_err(|why| {
+            format!(
+                "stored 1day record at timestamp {} is not usable reference evidence: {why:?}",
+                bar.ts_micros
+            )
+        })?;
+        bars.push(bar);
+        references.push(reference);
+        eligibility.push(u8::from(decision == DailyEligibility::Eligible));
+    }
+
+    if !references.iter().any(|reference| {
+        reference.ist_day() < first_signal_day
+            && reference.eligibility() == DailyEligibility::Eligible
+    }) {
+        return Err(format!(
+            "the first signal IST day {first_signal_day} has no eligible stored 1day record strictly before it. Same-day OHLCV, a coarse reconstruction, and a guessed holiday are all forbidden; load the preceding daily history"
+        ));
+    }
+
+    // Every regular signal session that is followed by another observed signal
+    // session must itself have a stored daily record.  The signal stream is the
+    // evidence that the session existed; no exchange holiday is invented here.
+    let mut previous_signal_day = None;
+    let mut daily_cursor = 0_usize;
+    for bar in signal {
+        let day = indicators::ist_day(bar.ts_micros);
+        if previous_signal_day.is_some_and(|(previous, _)| previous == day) {
+            continue;
+        }
+        let current_eligibility = daily_eligibility_of(day)?;
+        if let Some((previous, previous_eligibility)) = previous_signal_day
+            && previous_eligibility == DailyEligibility::Eligible
+        {
+            while references
+                .get(daily_cursor)
+                .is_some_and(|reference| reference.ist_day() < previous)
+            {
+                daily_cursor = daily_cursor.saturating_add(1);
+            }
+            if references
+                .get(daily_cursor)
+                .is_none_or(|reference| reference.ist_day() != previous)
+            {
+                return Err(format!(
+                    "signal bars prove IST day {previous} traded, but the same-feed same-instrument stored 1day stream has no record for it before day {day}. The older anchor was not silently reused"
+                ));
+            }
+        }
+        previous_signal_day = Some((day, current_eligibility));
+    }
+
+    Ok(DailyContext {
+        bars,
+        references,
+        eligibility,
+        asked: daily.asked,
+        found: daily.found,
+    })
+}
+
+fn require_complete_daily_span(daily: &Span) -> Result<(), Refusal> {
+    if daily.complete() {
+        return Ok(());
+    }
+    let missing = daily
+        .missing
+        .iter()
+        .map(|(year, month)| format!("{year}-{month:02}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(format!(
+        "the stored 1day reference stream is incomplete: missing {missing}. A missing daily month cannot be called a holiday or reconstructed from an intraday rung, so nothing was swept"
+    ))
+}
+
+/// Find the latest canonical session before `first_signal_day` that the
+/// previous-day policy allows to seed `GapFib`.
+fn prior_accepted_session(first_signal_day: i64) -> Result<(i64, Session), Refusal> {
+    let Some(mut day) = first_signal_day.checked_sub(1) else {
+        return Err(
+            "the first signal IST day has no representable prior day for GapFib".to_owned(),
+        );
+    };
+    loop {
+        match pull::calendar::kind_of(day) {
+            DayKind::Open(session) => {
+                if !CHARTER_NON_REGULAR_IST_DAYS.contains(&day) {
+                    return Ok((day, session));
+                }
+            }
+            DayKind::OpenLengthUnmeasured => {
+                if !CHARTER_NON_REGULAR_IST_DAYS.contains(&day) {
+                    return Err(format!(
+                        "canonical NSE calendar marks prior IST day {day} open with unmeasured length, but the identity-bound exclusion policy does not exclude it; the GapFib session was not guessed"
+                    ));
+                }
+            }
+            DayKind::Closed => {}
+            DayKind::Unmeasured => {
+                return Err(format!(
+                    "the first signal IST day {first_signal_day} has no prior accepted session inside the canonical NSE calendar's measured range; GapFib history was not guessed"
+                ));
+            }
+        }
+        let Some(previous) = day.checked_sub(1) else {
+            return Err(format!(
+                "the first signal IST day {first_signal_day} has no representable prior accepted session for GapFib"
+            ));
+        };
+        day = previous;
+    }
+}
+
+/// Require one stored minute to belong to a measured NSE session window.
+fn require_canonical_minute(index: usize, bar: &Candle) -> Result<(i64, u16), Refusal> {
+    let (day, minute) = exact_ist_minute_v1(bar.ts_micros).map_err(|why| {
+        format!(
+            "stored exact 1min GapFib record {index} at timestamp {} has no exact IST minute: {why}",
+            bar.ts_micros
+        )
+    })?;
+    match pull::calendar::kind_of(day) {
+        DayKind::Open(session) if session.expects(minute) => Ok((day, minute)),
+        DayKind::Open(_) => Err(format!(
+            "stored exact 1min GapFib record {index} at timestamp {} is minute {minute} outside every measured NSE session window on IST day {day}",
+            bar.ts_micros
+        )),
+        DayKind::Closed => Err(format!(
+            "stored exact 1min GapFib record {index} at timestamp {} is on canonical measured-closed IST day {day}; a Sunday or closed day was not treated as a prior session",
+            bar.ts_micros
+        )),
+        DayKind::OpenLengthUnmeasured => Err(format!(
+            "stored exact 1min GapFib record {index} at timestamp {} is on open IST day {day} whose session length is unmeasured; minute-window authority was not invented",
+            bar.ts_micros
+        )),
+        DayKind::Unmeasured => Err(format!(
+            "stored exact 1min GapFib record {index} at timestamp {} is outside the canonical NSE calendar's measured range on IST day {day}",
+            bar.ts_micros
+        )),
+    }
+}
+
+/// Load the same-feed, same-instrument stored one-day stream needed by an
+/// intraday signal span.
+///
+/// The preceding calendar month is included as warm-up evidence so the first
+/// requested signal day cannot borrow its own OHLC or start with an invented
+/// anchor.  Every daily month must be present; unlike the ordinary signal-span
+/// loader, this door cannot safely interpret a hole as a holiday.
+///
+/// # Errors
+///
+/// Every [`load_span`] refusal, an absent daily month, malformed daily OHLCV,
+/// or any observed regular signal day whose daily record is missing.
+pub fn load_daily_context(
+    root: &Path,
+    vendor: Vendor,
+    underlying: &str,
+    signal_months: ((u16, u8), (u16, u8)),
+    signal: &[Candle],
+) -> Result<DailyContext, Refusal> {
+    let (from, to) = signal_months;
+    let warm_from = previous_month(from)?;
+    let daily = load_span(root, vendor, underlying, "1day", warm_from, to)?;
+    daily_context_from_span(daily, signal)
+}
+
+/// Load stored one-day reference evidence under a pre-allocation record ceiling.
+///
+/// This is the bounded production counterpart to [`load_daily_context`].  It
+/// deliberately reuses the same private conversion boundary after the bounded
+/// span reader has admitted every committed month header.  There is therefore
+/// one daily/calendar interpretation, while `bound` remains protective rather
+/// than a row count recorded after an unbounded allocation.
+///
+/// # Cost
+///
+/// O(M + B) time and O(M + B) returned space for M requested months and B
+/// admitted daily records.  The committed record ceiling is checked in O(1)
+/// per month before that month's records are allocated.
+///
+/// # Errors
+///
+/// Every [`load_daily_context`] semantic refusal plus the named
+/// pre-allocation refusals from [`load_span_bounded`].
+pub fn load_daily_context_bounded(
+    root: &Path,
+    vendor: Vendor,
+    underlying: &str,
+    signal_months: ((u16, u8), (u16, u8)),
+    signal: &[Candle],
+    bound: StoredSpanLoadBoundV1,
+) -> Result<DailyContext, Refusal> {
+    let (from, to) = signal_months;
+    let warm_from = previous_month(from)?;
+    let daily = load_span_bounded(root, vendor, underlying, "1day", warm_from, to, bound)?;
+    daily_context_from_span(daily, signal)
+}
+
+/// Validate a complete stored one-minute span as `GapFib` context.
+fn exact_minute_context_from_span(
+    minute: Span,
+    signal: &[Candle],
+) -> Result<ExactMinuteContext, Refusal> {
+    let Some(first_signal) = signal.first() else {
+        return Err(
+            "the signal span is empty, so exact one-minute GapFib evidence cannot be aligned"
+                .to_owned(),
+        );
+    };
+    if !minute.complete() {
+        let missing = minute
+            .missing
+            .iter()
+            .map(|(year, month)| format!("{year}-{month:02}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "the stored exact 1min GapFib stream is incomplete: missing {missing}. A missing minute month cannot be reconstructed from the signal rung or called a holiday, so nothing was swept"
+        ));
+    }
+
+    let first_signal_day = indicators::ist_day(first_signal.ts_micros);
+    let (prior_session_day, prior_session) = prior_accepted_session(first_signal_day)?;
+    let mut previous = None;
+    let mut prior_session_bars = 0_usize;
+    let mut third_last = None;
+    let mut second_last = None;
+    let mut last = None;
+    for (index, bar) in minute.bars.iter().enumerate() {
+        bar.check().map_err(|why| {
+            format!(
+                "stored exact 1min GapFib record {index} at timestamp {} is malformed OHLCV: {why:?}",
+                bar.ts_micros
+            )
+        })?;
+        let (day, minute_of_day) = require_canonical_minute(index, bar)?;
+        if let Some(prior) = previous {
+            let delta = bar.ts_micros.saturating_sub(prior);
+            if delta < 60_000_000 || delta.rem_euclid(60_000_000) != 0 {
+                return Err(format!(
+                    "stored exact 1min GapFib cadence is malformed at record {index}: {prior} then {}",
+                    bar.ts_micros
+                ));
+            }
+        }
+        previous = Some(bar.ts_micros);
+        if day == prior_session_day {
+            prior_session_bars = prior_session_bars.saturating_add(1);
+            third_last = second_last;
+            second_last = last;
+            last = Some(minute_of_day);
+        }
+    }
+    if prior_session_bars < 3 {
+        return Err(format!(
+            "the latest accepted exact 1min session before signal day {first_signal_day} is IST day {prior_session_day}, but it holds only {prior_session_bars} bar(s); GapFib requires its final three and no coarse or daily substitute was used"
+        ));
+    }
+    let final_window = prior_session
+        .windows
+        .iter()
+        .take(usize::from(prior_session.count))
+        .next_back()
+        .copied()
+        .ok_or_else(|| {
+            format!(
+                "canonical NSE calendar returned no window for accepted prior IST session {prior_session_day}"
+            )
+        })?;
+    let expected_second = final_window.to.checked_sub(1).ok_or_else(|| {
+        format!(
+            "accepted prior IST session {prior_session_day} has no two terminal minutes for GapFib"
+        )
+    })?;
+    let expected_third = expected_second.checked_sub(1).ok_or_else(|| {
+        format!(
+            "accepted prior IST session {prior_session_day} has no three terminal minutes for GapFib"
+        )
+    })?;
+    if expected_third < final_window.from
+        || third_last != Some(expected_third)
+        || second_last != Some(expected_second)
+        || last != Some(final_window.to)
+    {
+        return Err(format!(
+            "the accepted prior exact 1min session on IST day {prior_session_day} does not end with canonical terminal-minute geometry {expected_third}, {expected_second}, {}; observed final three were {third_last:?}, {second_last:?}, {last:?}. Early or truncated bars cannot seed GapFib",
+            final_window.to
+        ));
+    }
+    let prior_session_bars = u32::try_from(prior_session_bars).map_err(|_| {
+        format!("the accepted prior IST session {prior_session_day} record count does not fit u32")
+    })?;
+
+    Ok(ExactMinuteContext {
+        bars: minute.bars,
+        asked: minute.asked,
+        found: minute.found,
+        prior_session_day,
+        prior_session_bars,
+    })
+}
+
+/// Load exact stored one-minute evidence for every signal rung's `GapFib` bits.
+///
+/// The preceding calendar month is required so the first requested signal day
+/// can observe the prior session's final three exact minutes. Every requested
+/// month must exist; a hole is not interpreted as a holiday. The overlay itself
+/// performs the final exact-close join and therefore also refuses an individual
+/// missing closing minute.
+///
+/// # Errors
+///
+/// Every [`load_span`] refusal, an absent minute month, malformed OHLCV or
+/// cadence, or fewer than three bars in the latest accepted prior session.
+pub fn load_exact_minute_context(
+    root: &Path,
+    vendor: Vendor,
+    underlying: &str,
+    signal_months: ((u16, u8), (u16, u8)),
+    signal: &[Candle],
+) -> Result<ExactMinuteContext, Refusal> {
+    let (from, to) = signal_months;
+    let warm_from = previous_month(from)?;
+    let minute = load_span(root, vendor, underlying, "1min", warm_from, to)?;
+    exact_minute_context_from_span(minute, signal)
+}
+
+/// Load exact stored one-minute evidence under a pre-allocation record ceiling.
+///
+/// This is the bounded production counterpart to
+/// [`load_exact_minute_context`].  It routes the bounded span through the same
+/// private cadence/prior-session converter, so no second minute or calendar
+/// authority is introduced and the explicit ceiling is enforced before any
+/// committed month is decoded.
+///
+/// # Cost
+///
+/// O(M + B) time and O(M + B) returned space for M requested months and B
+/// admitted minute records.  The committed record ceiling is checked in O(1)
+/// per month before that month's records are allocated.
+///
+/// # Errors
+///
+/// Every [`load_exact_minute_context`] semantic refusal plus the named
+/// pre-allocation refusals from [`load_span_bounded`].
+pub fn load_exact_minute_context_bounded(
+    root: &Path,
+    vendor: Vendor,
+    underlying: &str,
+    signal_months: ((u16, u8), (u16, u8)),
+    signal: &[Candle],
+    bound: StoredSpanLoadBoundV1,
+) -> Result<ExactMinuteContext, Refusal> {
+    let (from, to) = signal_months;
+    let warm_from = previous_month(from)?;
+    let minute = load_span_bounded(root, vendor, underlying, "1min", warm_from, to, bound)?;
+    exact_minute_context_from_span(minute, signal)
 }
 #[cfg(test)]
 #[allow(
@@ -482,14 +2387,14 @@ mod tests {
             .collect()
     }
 
-    /// Writes `n` bars for NIFTY 1min 2026-08 under `vendor`, and returns the root.
-    fn seeded(tag: &str, vendor: Vendor, n: i64) -> std::path::PathBuf {
+    /// Writes `n` bars for one storable NSE index in 2026-08.
+    fn seeded_symbol(tag: &str, vendor: Vendor, symbol: &str, n: i64) -> std::path::PathBuf {
         let r = root(tag);
-        let key = InstrumentKey::index(Exchange::Nse, "NIFTY").expect("NIFTY is swept");
+        let key = InstrumentKey::index(Exchange::Nse, symbol).expect("a valid stored index");
         let ym = YearMonth::new(2026, 8).expect("a real month");
         let path = StorePath::for_key(vendor, &key, Timeframe::MINUTE_1, ym, FileKind::Bars)
-            .expect("a path for a swept index");
-        let id = brutex_core::universe::fnv1a("NIFTY") as u32;
+            .expect("a path for a stored index");
+        let id = brutex_core::universe::fnv1a(symbol) as u32;
         let mut file = BarFile::open_or_create(&r, path, id).expect("a fresh month opens");
         // An empty batch is refused by the store as `EmptyBatch`, correctly — so
         // thezero -bar case is a file that was created and never appended to, which
@@ -498,6 +2403,11 @@ mod tests {
             file.append(&bars(n)).expect("and takes its bars");
         }
         r
+    }
+
+    /// Writes `n` bars for NIFTY 1min 2026-08 under `vendor`, and returns the root.
+    fn seeded(tag: &str, vendor: Vendor, n: i64) -> std::path::PathBuf {
+        seeded_symbol(tag, vendor, "NIFTY", n)
     }
 
     #[test]
@@ -613,23 +2523,51 @@ mod tests {
     }
 
     #[test]
-    fn a_name_the_store_has_no_file_for_is_refused_as_absent() {
-        // AND `InstrumentKey::index` DOES NOT VALIDATE THE NAME. It accepts
-        // `RELIANCE` and renders `NSE/INDEX/RELIANCE/…`, even though CLAUDE.md
-        // §1 puts exactly two instruments on the engine surface. The refusal
-        // therefore comes from the STORE — no such file — and not from the key.
-        // That is worth knowing: nothing between a typed symbol and a path
-        // checks it is swept, so the absence of the file is the only guard.
-        let why = load(&root("ins"), Vendor::Dhan, "RELIANCE", "1min", 2026, 8)
-            .expect_err("nothing was ever pulled for it");
+    fn an_existing_reference_index_is_refused_before_its_store_file_is_read() {
+        // INDIAVIX is intentionally storable and reference-only. Seed a real,
+        // readable file so absence cannot accidentally be the protection. The
+        // shared load door must apply core's authoritative sweep predicate
+        // before touching those bytes.
+        let r = seeded_symbol("reference-only", Vendor::Dhan, "INDIAVIX", 3);
+        let why = load(&r, Vendor::Dhan, "INDIAVIX", "1min", 2026, 8)
+            .expect_err("reference data must never enter a sweep");
         assert!(
-            why.contains("RELIANCE"),
+            why.contains("INDIAVIX"),
             "the refusal quotes what was asked: {why}"
         );
         assert!(
-            why.contains("does not exist"),
-            "the store's own reason survives the wrapper: {why}"
+            why.contains("storable but not sweepable"),
+            "the refusal distinguishes storage from the engine surface: {why}"
         );
+        assert!(
+            why.contains("NIFTY, BANKNIFTY"),
+            "the exact surface is rendered from core's authoritative list: {why}"
+        );
+        assert!(
+            !why.contains("does not exist"),
+            "the seeded file exists and absence must not masquerade as the guard: {why}"
+        );
+    }
+
+    #[test]
+    fn exactly_the_two_core_sweep_keys_cross_the_stored_loader_guard() {
+        assert_eq!(
+            InstrumentKey::SWEPT,
+            [(Exchange::Nse, "NIFTY"), (Exchange::Nse, "BANKNIFTY")],
+            "the test follows core's exact public engine surface"
+        );
+        for (_, symbol) in InstrumentKey::SWEPT {
+            let why = load(&root(symbol), Vendor::Dhan, symbol, "1min", 2026, 8)
+                .expect_err("the fixture deliberately has no file");
+            assert!(
+                why.contains("does not exist"),
+                "{symbol} crossed the sweep guard and reached the empty store: {why}"
+            );
+            assert!(
+                !why.contains("not an instrument this engine sweeps"),
+                "{symbol} is one of the exact two: {why}"
+            );
+        }
     }
 
     #[test]
@@ -728,11 +2666,12 @@ mod tests {
             .collect()
     }
 
-    /// Writes `n` bars into each of `months` for NIFTY 1min, and returns the root.
-    fn seeded_months(
+    /// Writes `n` bars into each of `months` for one NIFTY timeframe.
+    fn seeded_timeframe_months(
         tag: &str,
         vendor: Vendor,
         months: &[(u16, u8)],
+        timeframe: Timeframe,
         n: i64,
     ) -> std::path::PathBuf {
         let r = root(tag);
@@ -740,13 +2679,23 @@ mod tests {
         let id = brutex_core::universe::fnv1a("NIFTY") as u32;
         for &(y, m) in months {
             let ym = YearMonth::new(y, m).expect("a real month");
-            let path = StorePath::for_key(vendor, &key, Timeframe::MINUTE_1, ym, FileKind::Bars)
+            let path = StorePath::for_key(vendor, &key, timeframe, ym, FileKind::Bars)
                 .expect("a path for a swept index");
             let mut file = BarFile::open_or_create(&r, path, id).expect("a fresh month opens");
             file.append(&bars_in(i64::from(y), i64::from(m), n))
                 .expect("and takes its bars");
         }
         r
+    }
+
+    /// Writes `n` bars into each of `months` for NIFTY 1min, and returns the root.
+    fn seeded_months(
+        tag: &str,
+        vendor: Vendor,
+        months: &[(u16, u8)],
+        n: i64,
+    ) -> std::path::PathBuf {
+        seeded_timeframe_months(tag, vendor, months, Timeframe::MINUTE_1, n)
     }
 
     /// The date helper agrees with the constant the single-month fixture uses.
@@ -853,6 +2802,110 @@ mod tests {
     }
 
     #[test]
+    fn bounded_span_refuses_from_header_before_crossing_its_record_ceiling() {
+        let r = seeded_months(
+            "span-bounded",
+            Vendor::Zerodha,
+            &[(2026, 1), (2026, 2), (2026, 3)],
+            4,
+        );
+
+        let why = load_span_bounded(
+            &r,
+            Vendor::Zerodha,
+            "NIFTY",
+            "1min",
+            (2026, 1),
+            (2026, 3),
+            StoredSpanLoadBoundV1::new(11).expect("a nonzero bound"),
+        )
+        .expect_err("the third four-record header crosses an eleven-record ceiling");
+        assert!(
+            why.contains("2026-03"),
+            "the refusing month is named: {why}"
+        );
+        assert!(
+            why.contains("declares 4 committed records") && why.contains("3-record remainder"),
+            "the refusal reports header count and remaining ceiling before allocation: {why}"
+        );
+
+        let exact = load_span_bounded(
+            &r,
+            Vendor::Zerodha,
+            "NIFTY",
+            "1min",
+            (2026, 1),
+            (2026, 3),
+            StoredSpanLoadBoundV1::new(12).expect("the exact total is a valid bound"),
+        )
+        .expect("a ceiling admits exactly its declared records");
+        assert_eq!(exact.bars.len(), 12);
+        assert!(exact.complete());
+    }
+
+    #[test]
+    fn typed_daily_and_minute_context_doors_keep_the_header_bound_protective() {
+        let months = [(2026, 7), (2026, 8)];
+        let signal = [candle_on_ist_day(20_668, 2_600_000)];
+        let bound = StoredSpanLoadBoundV1::new(7).expect("a nonzero bound");
+
+        let daily_root = seeded_timeframe_months(
+            "daily-context-bounded",
+            Vendor::Zerodha,
+            &months,
+            Timeframe::DAY_1,
+            4,
+        );
+        let daily_why = load_daily_context_bounded(
+            &daily_root,
+            Vendor::Zerodha,
+            "NIFTY",
+            ((2026, 8), (2026, 8)),
+            &signal,
+            bound,
+        )
+        .expect_err("the requested daily month crosses the remaining header ceiling");
+        assert!(
+            daily_why.contains("2026-08")
+                && daily_why.contains("declares 4 committed records")
+                && daily_why.contains("3-record remainder"),
+            "the daily typed door refuses at the bounded header: {daily_why}"
+        );
+
+        let minute_root = seeded_months("minute-context-bounded", Vendor::Zerodha, &months, 4);
+        let minute_why = load_exact_minute_context_bounded(
+            &minute_root,
+            Vendor::Zerodha,
+            "NIFTY",
+            ((2026, 8), (2026, 8)),
+            &signal,
+            bound,
+        )
+        .expect_err("the requested minute month crosses the remaining header ceiling");
+        assert!(
+            minute_why.contains("2026-08")
+                && minute_why.contains("declares 4 committed records")
+                && minute_why.contains("3-record remainder"),
+            "the minute typed door refuses at the bounded header: {minute_why}"
+        );
+    }
+
+    #[test]
+    fn stored_span_bound_has_no_zero_or_implicit_default() {
+        let why = StoredSpanLoadBoundV1::new(0).expect_err("zero cannot authorize a read");
+        assert!(
+            why.contains("greater than zero") && why.contains("nothing was opened"),
+            "zero refuses before any store access: {why}"
+        );
+        assert_eq!(
+            StoredSpanLoadBoundV1::new(7)
+                .expect("an explicit ceiling")
+                .max_records(),
+            7
+        );
+    }
+
+    #[test]
     fn a_month_the_store_lacks_is_named_and_the_span_continues() {
         // February is absent. A seven-year request with one month un-pulled must
         // return six years and eleven months AND SAY SO -- refusing everything
@@ -866,6 +2919,44 @@ mod tests {
         assert_eq!(got.found, 2);
         assert_eq!(got.missing, vec![(2026, 2)], "the hole is named, in order");
         assert!(!got.complete(), "and the span knows it is not whole");
+    }
+
+    #[test]
+    fn a_corrupt_middle_month_refuses_the_whole_span_instead_of_becoming_missing() {
+        let r = seeded_months(
+            "span-corrupt",
+            Vendor::Zerodha,
+            &[(2026, 1), (2026, 2), (2026, 3)],
+            5,
+        );
+        let key = InstrumentKey::index(Exchange::Nse, "NIFTY").expect("NIFTY is swept");
+        let ym = YearMonth::new(2026, 2).expect("a real month");
+        let path = StorePath::for_key(
+            Vendor::Zerodha,
+            &key,
+            Timeframe::MINUTE_1,
+            ym,
+            FileKind::Bars,
+        )
+        .expect("a path for the middle month")
+        .to_path_buf(&r);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("the seeded file exists")
+            .set_len(1)
+            .expect("the fixture can tear the file");
+
+        let why = load_span(&r, Vendor::Zerodha, "NIFTY", "1min", (2026, 1), (2026, 3))
+            .expect_err("corrupt bytes are not an absent month");
+        assert!(
+            why.contains("2026-02"),
+            "the damaged member is named: {why}"
+        );
+        assert!(
+            !why.contains("all 3 month(s) are absent"),
+            "the failure must not be rewritten as missing: {why}"
+        );
     }
 
     #[test]
@@ -933,5 +3024,934 @@ mod tests {
             months_between((2026, 1), (2026, 12)).expect("legal").len(),
             12
         );
+    }
+
+    fn candle_on_ist_day(day: i64, close: i64) -> Candle {
+        let ts_micros = day
+            .saturating_mul(86_400_000_000)
+            .saturating_sub(indicators::IST_OFFSET_MICROS);
+        Candle {
+            ts_micros,
+            open: close,
+            high: close.saturating_add(100),
+            low: close.saturating_sub(100),
+            close,
+            volume: 0,
+            open_interest: i64::MIN,
+        }
+    }
+
+    const OPEN_MONDAY_2026_08_03: i64 = 20_668;
+    const OPEN_TUESDAY_2026_08_04: i64 = 20_669;
+    const OPEN_WEDNESDAY_2026_08_05: i64 = 20_670;
+    const CLOSED_SUNDAY_2026_08_02: i64 = 20_667;
+    const CLOSED_REPUBLIC_DAY_2026_01_26: i64 = 20_479;
+
+    fn accepted_open_before(day: i64) -> i64 {
+        (pull::calendar::FIRST_DAY..day)
+            .rev()
+            .find(|candidate| {
+                matches!(pull::calendar::kind_of(*candidate), DayKind::Open(_))
+                    && !CHARTER_NON_REGULAR_IST_DAYS.contains(candidate)
+            })
+            .expect("a measured accepted session precedes the fixture day")
+    }
+
+    fn accepted_open_after(day: i64) -> i64 {
+        (day.saturating_add(1)..=pull::calendar::LAST_DAY)
+            .find(|candidate| {
+                matches!(pull::calendar::kind_of(*candidate), DayKind::Open(_))
+                    && !CHARTER_NON_REGULAR_IST_DAYS.contains(candidate)
+            })
+            .expect("a measured accepted session follows the fixture day")
+    }
+
+    fn daily_span(bars: Vec<Candle>) -> Span {
+        Span {
+            bars,
+            vendor: Vendor::Zerodha,
+            key: InstrumentKey::index(Exchange::Nse, "NIFTY").expect("swept fixture"),
+            timeframe: "1day",
+            asked: 2,
+            found: 2,
+            missing: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn daily_context_is_strictly_prior_parallel_and_explicitly_unverified() {
+        let daily = daily_span(vec![
+            candle_on_ist_day(OPEN_MONDAY_2026_08_03, 2_500_000),
+            candle_on_ist_day(OPEN_TUESDAY_2026_08_04, 2_500_100),
+            candle_on_ist_day(OPEN_WEDNESDAY_2026_08_05, 2_500_200),
+        ]);
+        let signal = [
+            candle_on_ist_day(OPEN_TUESDAY_2026_08_04, 2_600_000),
+            candle_on_ist_day(OPEN_WEDNESDAY_2026_08_05, 2_600_100),
+        ];
+        let got = daily_context_from_span(daily, &signal).expect("complete causal daily stream");
+        assert_eq!(got.bars.len(), got.references.len());
+        assert_eq!(got.bars.len(), got.eligibility.len());
+        assert!(
+            got.references
+                .iter()
+                .all(|reference| reference.ist_day() < OPEN_WEDNESDAY_2026_08_05),
+            "same-day and future daily bytes cannot enter the offered stream"
+        );
+        assert_eq!(
+            got.references.last().map(DailyReference::ist_day),
+            Some(OPEN_TUESDAY_2026_08_04)
+        );
+        assert!(
+            DAILY_INTEGRITY_NOTE.starts_with("UNVERIFIED"),
+            "ordinary reads must never manufacture a scrub receipt"
+        );
+        assert_eq!(DAILY_REFERENCE_SCHEMA, 1);
+        assert_eq!(DAILY_ELIGIBILITY_POLICY, 1);
+        assert_eq!(CHARTER_NON_REGULAR_IST_DAYS.len(), 8);
+    }
+
+    #[test]
+    fn an_observed_regular_session_without_its_daily_record_refuses() {
+        let daily = daily_span(vec![candle_on_ist_day(OPEN_MONDAY_2026_08_03, 2_500_000)]);
+        let signal = [
+            candle_on_ist_day(OPEN_TUESDAY_2026_08_04, 2_600_000),
+            candle_on_ist_day(OPEN_WEDNESDAY_2026_08_05, 2_600_100),
+        ];
+        let why = daily_context_from_span(daily, &signal)
+            .expect_err("the first signal day is observed but absent from daily storage");
+        assert!(
+            why.contains(&format!("day {OPEN_TUESDAY_2026_08_04} traded")),
+            "{why}"
+        );
+        assert!(
+            why.contains("older anchor was not silently reused"),
+            "{why}"
+        );
+    }
+
+    #[test]
+    fn a_non_regular_observed_day_is_not_invented_as_an_eligible_anchor() {
+        let non_regular = CHARTER_NON_REGULAR_IST_DAYS[0];
+        let prior_regular = accepted_open_before(non_regular);
+        let next_regular = accepted_open_after(non_regular);
+        let daily = daily_span(vec![candle_on_ist_day(prior_regular, 2_500_000)]);
+        let signal = [
+            candle_on_ist_day(non_regular, 2_600_000),
+            candle_on_ist_day(next_regular, 2_600_100),
+        ];
+        let got = daily_context_from_span(daily, &signal)
+            .expect("the verified non-regular day must be skipped, not required as daily anchor");
+        assert_eq!(got.eligibility, vec![1]);
+    }
+
+    #[test]
+    fn a_stray_daily_row_on_a_measured_closed_day_refuses() {
+        assert!(matches!(
+            pull::calendar::kind_of(CLOSED_SUNDAY_2026_08_02),
+            DayKind::Closed
+        ));
+        let daily = daily_span(vec![
+            candle_on_ist_day(CLOSED_SUNDAY_2026_08_02, 2_400_000),
+            candle_on_ist_day(OPEN_MONDAY_2026_08_03, 2_500_000),
+        ]);
+        let signal = [candle_on_ist_day(OPEN_TUESDAY_2026_08_04, 2_600_000)];
+        let why = daily_context_from_span(daily, &signal)
+            .expect_err("a stored Sunday daily row cannot become market evidence");
+        assert!(why.contains("measures as closed"), "{why}");
+        assert!(why.contains("stray row"), "{why}");
+    }
+
+    #[test]
+    fn a_single_signal_day_measured_closed_refuses_inside_the_daily_door() {
+        let prior_open = accepted_open_before(CLOSED_SUNDAY_2026_08_02);
+        let daily = daily_span(vec![candle_on_ist_day(prior_open, 2_500_000)]);
+        let signal = [candle_on_ist_day(CLOSED_SUNDAY_2026_08_02, 2_600_000)];
+        let why = daily_context_from_span(daily, &signal)
+            .expect_err("the standalone typed daily door must classify its only signal day");
+        assert!(why.contains("measures as closed"), "{why}");
+        assert!(why.contains(&CLOSED_SUNDAY_2026_08_02.to_string()), "{why}");
+    }
+
+    #[test]
+    fn missing_warmup_and_missing_month_receipts_both_refuse_loudly() {
+        let signal = [candle_on_ist_day(OPEN_TUESDAY_2026_08_04, 2_600_000)];
+        let no_prior = daily_span(vec![candle_on_ist_day(OPEN_TUESDAY_2026_08_04, 2_500_000)]);
+        let why = daily_context_from_span(no_prior, &signal).expect_err("same day is not prior");
+        assert!(why.contains("strictly before"), "{why}");
+
+        let mut incomplete = daily_span(vec![candle_on_ist_day(OPEN_MONDAY_2026_08_03, 2_500_000)]);
+        incomplete.found = 1;
+        incomplete.missing.push((2026, 7));
+        let why = daily_context_from_span(incomplete, &signal).expect_err("hole is not a holiday");
+        assert!(why.contains("missing 2026-07"), "{why}");
+        assert!(why.contains("cannot be called a holiday"), "{why}");
+    }
+
+    fn minute_on_ist_day(day: i64, minute: i64, close: i64) -> Candle {
+        let mut bar = candle_on_ist_day(day, close);
+        bar.ts_micros = bar
+            .ts_micros
+            .saturating_add(minute.saturating_mul(60_000_000));
+        bar
+    }
+
+    fn minute_span(bars: Vec<Candle>) -> Span {
+        Span {
+            bars,
+            vendor: Vendor::Zerodha,
+            key: InstrumentKey::index(Exchange::Nse, "NIFTY").expect("swept fixture"),
+            timeframe: "1min",
+            asked: 2,
+            found: 2,
+            missing: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn exact_minute_context_requires_a_complete_prior_three_bar_session() {
+        let signal = [minute_on_ist_day(OPEN_TUESDAY_2026_08_04, 555, 2_600_000)];
+        let complete = minute_span(vec![
+            minute_on_ist_day(OPEN_MONDAY_2026_08_03, 927, 2_500_000),
+            minute_on_ist_day(OPEN_MONDAY_2026_08_03, 928, 2_500_100),
+            minute_on_ist_day(OPEN_MONDAY_2026_08_03, 929, 2_500_200),
+            minute_on_ist_day(OPEN_TUESDAY_2026_08_04, 555, 2_600_000),
+        ]);
+        let got = exact_minute_context_from_span(complete, &signal)
+            .expect("the exact canonical terminal three seed GapFib");
+        assert_eq!(got.prior_session_day, OPEN_MONDAY_2026_08_03);
+        assert_eq!(got.prior_session_bars, 3);
+        assert_eq!(got.bars.len(), 4);
+        assert_eq!(got.found, got.asked);
+        assert_eq!(EXACT_MINUTE_GAP_POLICY, 1);
+        assert!(EXACT_MINUTE_INTEGRITY_NOTE.starts_with("UNVERIFIED"));
+
+        let short = minute_span(vec![
+            minute_on_ist_day(OPEN_MONDAY_2026_08_03, 928, 2_500_100),
+            minute_on_ist_day(OPEN_MONDAY_2026_08_03, 929, 2_500_200),
+            minute_on_ist_day(OPEN_TUESDAY_2026_08_04, 555, 2_600_000),
+        ]);
+        let why = exact_minute_context_from_span(short, &signal)
+            .expect_err("two prior minutes cannot prove a three-bar gap");
+        assert!(why.contains("only 2 bar(s)"), "{why}");
+        assert!(why.contains("final three"), "{why}");
+    }
+
+    #[test]
+    fn exact_minute_context_refuses_sunday_and_weekday_closed_rows() {
+        let cases = [
+            (CLOSED_SUNDAY_2026_08_02, OPEN_MONDAY_2026_08_03),
+            (
+                CLOSED_REPUBLIC_DAY_2026_01_26,
+                accepted_open_after(CLOSED_REPUBLIC_DAY_2026_01_26),
+            ),
+        ];
+        for (closed_day, signal_day) in cases {
+            assert!(matches!(
+                pull::calendar::kind_of(closed_day),
+                DayKind::Closed
+            ));
+            let signal = [minute_on_ist_day(signal_day, 555, 2_600_000)];
+            let minute = minute_span(vec![
+                minute_on_ist_day(closed_day, 927, 2_500_000),
+                minute_on_ist_day(closed_day, 928, 2_500_100),
+                minute_on_ist_day(closed_day, 929, 2_500_200),
+                minute_on_ist_day(signal_day, 555, 2_600_000),
+            ]);
+            let why = exact_minute_context_from_span(minute, &signal)
+                .expect_err("closed-day minutes cannot impersonate a prior session");
+            assert!(why.contains("measured-closed"), "{why}");
+            assert!(why.contains(&closed_day.to_string()), "{why}");
+        }
+    }
+
+    #[test]
+    fn exact_minute_context_refuses_three_early_prior_session_bars() {
+        let signal = [minute_on_ist_day(OPEN_TUESDAY_2026_08_04, 555, 2_600_000)];
+        let early = minute_span(vec![
+            minute_on_ist_day(OPEN_MONDAY_2026_08_03, 555, 2_500_000),
+            minute_on_ist_day(OPEN_MONDAY_2026_08_03, 556, 2_500_100),
+            minute_on_ist_day(OPEN_MONDAY_2026_08_03, 557, 2_500_200),
+            minute_on_ist_day(OPEN_TUESDAY_2026_08_04, 555, 2_600_000),
+        ]);
+        let why = exact_minute_context_from_span(early, &signal)
+            .expect_err("three opening bars are not the prior session's terminal three");
+        assert!(why.contains("terminal-minute geometry"), "{why}");
+        assert!(why.contains("Early or truncated bars"), "{why}");
+    }
+
+    #[test]
+    fn exact_minute_context_refuses_holes_and_malformed_cadence() {
+        let signal = [minute_on_ist_day(OPEN_TUESDAY_2026_08_04, 555, 2_600_000)];
+        let mut hole = minute_span(vec![
+            minute_on_ist_day(OPEN_MONDAY_2026_08_03, 927, 2_500_000),
+            minute_on_ist_day(OPEN_MONDAY_2026_08_03, 928, 2_500_100),
+            minute_on_ist_day(OPEN_MONDAY_2026_08_03, 929, 2_500_200),
+        ]);
+        hole.found = 1;
+        hole.missing.push((2026, 7));
+        let why = exact_minute_context_from_span(hole, &signal)
+            .expect_err("a missing month is not a holiday");
+        assert!(why.contains("missing 2026-07"), "{why}");
+        assert!(why.contains("cannot be reconstructed"), "{why}");
+
+        let malformed = minute_span(vec![
+            minute_on_ist_day(OPEN_MONDAY_2026_08_03, 927, 2_500_000),
+            minute_on_ist_day(OPEN_MONDAY_2026_08_03, 928, 2_500_100),
+            minute_on_ist_day(OPEN_MONDAY_2026_08_03, 928, 2_500_200),
+        ]);
+        let why = exact_minute_context_from_span(malformed, &signal)
+            .expect_err("a duplicate exact minute is not an ordered path");
+        assert!(why.contains("cadence is malformed"), "{why}");
+    }
+
+    fn calendar_minute_v1(day: i64, minute: u16) -> i64 {
+        day.checked_mul(MICROS_PER_DAY_V1)
+            .and_then(|at| {
+                i64::from(minute)
+                    .checked_mul(MICROS_PER_MINUTE_V1)
+                    .and_then(|within| at.checked_add(within))
+            })
+            .and_then(|ist| ist.checked_sub(indicators::IST_OFFSET_MICROS))
+            .expect("the measured calendar fixture fits epoch micros")
+    }
+
+    fn calendar_windows_v1(day: i64, windows: &[(u16, u16)]) -> Vec<i64> {
+        let mut timestamps = Vec::new();
+        for &(from, to) in windows {
+            for minute in from..=to {
+                timestamps.push(calendar_minute_v1(day, minute));
+            }
+        }
+        timestamps
+    }
+
+    #[test]
+    fn calendar_receipt_regular_complete_and_gap_are_distinct() {
+        let day = 20_668_i64; // 2026-08-03, a measured regular session.
+        let complete = calendar_windows_v1(day, &[(555, 929)]);
+        let receipt =
+            calendar_receipt_v1(&complete, day, day).expect("the full regular session reconciles");
+        assert_eq!(receipt.schema_version(), CALENDAR_RECEIPT_SCHEMA_V1);
+        assert_eq!(receipt.policy_version(), CALENDAR_RECEIPT_POLICY_V1);
+        assert_eq!(receipt.first_day(), day);
+        assert_eq!(receipt.last_day(), day);
+        assert_eq!(receipt.offered(), 375);
+        assert_eq!(receipt.expected(), 375);
+        assert_eq!(receipt.missing(), 0);
+        assert_eq!(receipt.unexpected(), 0);
+        assert_eq!(receipt.status(), CalendarStatusV1::Complete);
+        assert_ne!(receipt.digest(), [0; 32]);
+
+        let gap: Vec<_> = complete
+            .iter()
+            .copied()
+            .filter(|timestamp| *timestamp != calendar_minute_v1(day, 700))
+            .collect();
+        let receipt =
+            calendar_receipt_v1(&gap, day, day).expect("an absent minute is counted, not invented");
+        assert_eq!(receipt.offered(), 374);
+        assert_eq!(receipt.expected(), 375);
+        assert_eq!(receipt.missing(), 1);
+        assert_eq!(receipt.unexpected(), 0);
+        assert_eq!(receipt.status(), CalendarStatusV1::Incomplete);
+    }
+
+    #[test]
+    fn calendar_receipt_counts_entire_missing_interior_and_boundary_days() {
+        let first_day = 20_668_i64;
+        let missing_day = 20_669_i64;
+        let last_day = 20_670_i64;
+        for day in [first_day, missing_day, last_day] {
+            assert!(
+                matches!(pull::calendar::kind_of(day), DayKind::Open(_)),
+                "fixture IST day {day} must be a measured open session"
+            );
+        }
+        let mut offered = calendar_windows_v1(first_day, &[(555, 929)]);
+        offered.extend(calendar_windows_v1(last_day, &[(555, 929)]));
+        let receipt = calendar_receipt_v1(&offered, first_day, last_day)
+            .expect("an absent measured day is a counted gap, not corruption");
+        assert_eq!(receipt.first_day(), first_day);
+        assert_eq!(receipt.last_day(), last_day);
+        assert_eq!(receipt.offered(), 750);
+        assert_eq!(receipt.expected(), 1_125);
+        assert_eq!(receipt.missing(), 375);
+        assert_eq!(receipt.status(), CalendarStatusV1::Incomplete);
+
+        let boundary_only = calendar_windows_v1(missing_day, &[(555, 929)]);
+        let receipt = calendar_receipt_v1(&boundary_only, first_day, last_day)
+            .expect("missing requested boundary days remain in the denominator");
+        assert_eq!(receipt.offered(), 375);
+        assert_eq!(receipt.expected(), 1_125);
+        assert_eq!(receipt.missing(), 750);
+        assert_eq!(receipt.status(), CalendarStatusV1::Incomplete);
+    }
+
+    #[test]
+    fn calendar_receipt_split_and_short_sessions_use_their_exact_windows() {
+        let split_day = 19_784_i64;
+        let split = calendar_windows_v1(split_day, &[(555, 599), (690, 749)]);
+        let receipt = calendar_receipt_v1(&split, split_day, split_day)
+            .expect("both measured split windows are complete");
+        assert_eq!(receipt.offered(), 105);
+        assert_eq!(receipt.expected(), 105);
+        assert_eq!(receipt.missing(), 0);
+        assert_eq!(receipt.status(), CalendarStatusV1::Complete);
+
+        let short_day = 20_382_i64;
+        let short = calendar_windows_v1(short_day, &[(825, 884)]);
+        let receipt = calendar_receipt_v1(&short, short_day, short_day)
+            .expect("the measured one-hour session is complete");
+        assert_eq!(receipt.offered(), 60);
+        assert_eq!(receipt.expected(), 60);
+        assert_eq!(receipt.missing(), 0);
+        assert_eq!(receipt.status(), CalendarStatusV1::Complete);
+    }
+
+    #[test]
+    fn calendar_receipt_refuses_closed_days_and_outside_window_bars() {
+        let closed = calendar_minute_v1(20_479, 555); // 2026-01-26, measured closed.
+        let why = calendar_receipt_v1(&[closed], 20_479, 20_479)
+            .expect_err("a closed day cannot carry a bar");
+        assert!(why.contains("measured closed IST day 20479"), "{why}");
+
+        let between_split_windows = calendar_minute_v1(19_784, 630);
+        let why = calendar_receipt_v1(&[between_split_windows], 19_784, 19_784)
+            .expect_err("the split-session break was not an offered minute");
+        assert!(
+            why.contains("outside every measured session window"),
+            "{why}"
+        );
+
+        let before_short_session = calendar_minute_v1(20_382, 555);
+        let why = calendar_receipt_v1(&[before_short_session], 20_382, 20_382)
+            .expect_err("a regular open is outside the measured short session");
+        assert!(
+            why.contains("outside every measured session window"),
+            "{why}"
+        );
+    }
+
+    #[test]
+    fn calendar_receipt_keeps_both_unmeasured_day_kinds_digest_bound() {
+        let outside_day = 16_436_i64; // 2015-01-01, before measured coverage.
+        let outside = calendar_receipt_v1(
+            &[calendar_minute_v1(outside_day, 555)],
+            outside_day,
+            outside_day,
+        )
+        .expect("an unmeasured day is a non-claim, not a refusal");
+        assert_eq!(outside.status(), CalendarStatusV1::Unmeasured);
+        assert_eq!(outside.first_day(), outside_day);
+        assert_eq!(outside.last_day(), outside_day);
+        assert_eq!(outside.offered(), 1);
+        assert_eq!(outside.expected(), 0);
+        assert_eq!(outside.missing(), 0);
+
+        let unknown_length_day = 20_028_i64;
+        let unknown_length = calendar_receipt_v1(
+            &[calendar_minute_v1(unknown_length_day, 825)],
+            unknown_length_day,
+            unknown_length_day,
+        )
+        .expect("a proved open day with unknown length remains a non-claim");
+        assert_eq!(unknown_length.status(), CalendarStatusV1::Unmeasured);
+        assert_eq!(unknown_length.expected(), 0);
+        assert_eq!(unknown_length.missing(), 0);
+        assert_ne!(
+            outside.digest(),
+            unknown_length.digest(),
+            "out-of-range and open-length-unmeasured are different bound decisions"
+        );
+    }
+
+    #[test]
+    fn calendar_receipt_empty_slices_use_the_requested_calendar_span() {
+        let open = calendar_receipt_v1(&[], 20_668, 20_668)
+            .expect("empty is a valid observation of a known open day");
+        assert_eq!(open.offered(), 0);
+        assert_eq!(open.expected(), 375);
+        assert_eq!(open.missing(), 375);
+        assert_eq!(open.status(), CalendarStatusV1::Incomplete);
+
+        let closed =
+            calendar_receipt_v1(&[], 20_479, 20_479).expect("a known closed day owes no bars");
+        assert_eq!(closed.offered(), 0);
+        assert_eq!(closed.expected(), 0);
+        assert_eq!(closed.missing(), 0);
+        assert_eq!(closed.status(), CalendarStatusV1::Complete);
+
+        let unmeasured = calendar_receipt_v1(&[], 16_436, 16_436)
+            .expect("an empty unmeasured day remains a non-claim");
+        assert_eq!(unmeasured.offered(), 0);
+        assert_eq!(unmeasured.expected(), 0);
+        assert_eq!(unmeasured.missing(), 0);
+        assert_eq!(unmeasured.status(), CalendarStatusV1::Unmeasured);
+    }
+
+    #[test]
+    fn calendar_receipt_refuses_off_grid_duplicate_backward_and_bad_spans() {
+        let base = calendar_minute_v1(20_668, 555);
+        let why = calendar_receipt_v1(&[base.saturating_add(1)], 20_668, 20_668)
+            .expect_err("one microsecond is not an exact minute");
+        assert!(why.contains("off the exact one-minute grid"), "{why}");
+
+        let why = calendar_receipt_v1(&[base, base], 20_668, 20_668)
+            .expect_err("duplicates are corruption");
+        assert!(why.contains("duplicate"), "{why}");
+
+        let next = base.saturating_add(MICROS_PER_MINUTE_V1);
+        let why = calendar_receipt_v1(&[next, base], 20_668, 20_668)
+            .expect_err("time cannot run backward");
+        assert!(why.contains("backward"), "{why}");
+
+        let outside = calendar_minute_v1(20_669, 555);
+        let why = calendar_receipt_v1(&[outside], 20_668, 20_668)
+            .expect_err("offered bounds cannot widen requested bounds");
+        assert!(why.contains("outside requested inclusive span"), "{why}");
+
+        let why = calendar_receipt_v1(&[], 20_669, 20_668)
+            .expect_err("a requested span cannot run backward");
+        assert!(why.contains("runs backward"), "{why}");
+
+        let too_many =
+            i64::try_from(MAX_CALENDAR_RECEIPT_DAYS_V1).expect("the month-derived cap fits i64");
+        let why = calendar_receipt_v1(&[], 0, too_many)
+            .expect_err("inclusive length is one beyond the existing span contract");
+        assert!(why.contains("1200-month span contract"), "{why}");
+        assert!(why.contains("37200"), "{why}");
+    }
+
+    #[test]
+    fn calendar_receipt_digest_binds_which_exact_minute_is_missing() {
+        let day = 20_668_i64;
+        let full = calendar_windows_v1(day, &[(555, 929)]);
+        let missing_600: Vec<_> = full
+            .iter()
+            .copied()
+            .filter(|timestamp| *timestamp != calendar_minute_v1(day, 600))
+            .collect();
+        let missing_601: Vec<_> = full
+            .iter()
+            .copied()
+            .filter(|timestamp| *timestamp != calendar_minute_v1(day, 601))
+            .collect();
+        let left = calendar_receipt_v1(&missing_600, day, day).expect("one named gap");
+        let repeated =
+            calendar_receipt_v1(&missing_600, day, day).expect("same bytes, same receipt");
+        let right = calendar_receipt_v1(&missing_601, day, day).expect("a different named gap");
+        assert_eq!(left, repeated, "receipt construction is byte-deterministic");
+        assert_eq!(left.offered(), right.offered());
+        assert_eq!(left.expected(), right.expected());
+        assert_eq!(left.missing(), right.missing());
+        assert_eq!(left.status(), right.status());
+        assert_ne!(
+            left.digest(),
+            right.digest(),
+            "equal counts cannot alias different timestamp-membership decisions"
+        );
+    }
+
+    const CALENDAR_RUNGS_V2: [(u32, u64); 8] = [
+        (60, 375),
+        (120, 188),
+        (180, 125),
+        (300, 75),
+        (600, 38),
+        (900, 25),
+        (1_800, 13),
+        (3_600, 7),
+    ];
+
+    fn calendar_bucket_indices_v2(
+        day: i64,
+        rung_seconds: u32,
+        intervals: &[(i64, i64)],
+    ) -> Vec<i64> {
+        let width = i64::from(rung_seconds / 60);
+        let mut timestamps = Vec::new();
+        for &(first, last) in intervals {
+            for bucket in first..=last {
+                let minute = NSE_OPEN_MINUTE_V2
+                    .checked_add(bucket.checked_mul(width).expect("fixture bucket fits"))
+                    .expect("fixture minute fits");
+                timestamps.push(calendar_minute_v1(
+                    day,
+                    u16::try_from(minute).expect("fixture minute is within one IST day"),
+                ));
+            }
+        }
+        timestamps
+    }
+
+    fn regular_buckets_v2(day: i64, rung_seconds: u32, expected: u64) -> Vec<i64> {
+        calendar_bucket_indices_v2(
+            day,
+            rung_seconds,
+            &[(
+                0,
+                i64::try_from(expected)
+                    .expect("regular denominator fits i64")
+                    .saturating_sub(1),
+            )],
+        )
+    }
+
+    fn split_intervals_v2(rung_seconds: u32) -> &'static [(i64, i64)] {
+        match rung_seconds {
+            60 => &[(0, 44), (135, 194)],
+            120 => &[(0, 22), (67, 97)],
+            180 => &[(0, 14), (45, 64)],
+            300 => &[(0, 8), (27, 38)],
+            600 => &[(0, 4), (13, 19)],
+            900 => &[(0, 2), (9, 12)],
+            1_800 => &[(0, 1), (4, 6)],
+            3_600 => &[(0, 0), (2, 3)],
+            _ => panic!("fixture names only a signal rung"),
+        }
+    }
+
+    fn short_intervals_v2(rung_seconds: u32) -> &'static [(i64, i64)] {
+        match rung_seconds {
+            60 => &[(270, 329)],
+            120 => &[(135, 164)],
+            180 => &[(90, 109)],
+            300 => &[(54, 65)],
+            600 => &[(27, 32)],
+            900 => &[(18, 21)],
+            1_800 => &[(9, 10)],
+            3_600 => &[(4, 5)],
+            _ => panic!("fixture names only a signal rung"),
+        }
+    }
+
+    #[test]
+    fn calendar_receipt_v2_regular_session_is_complete_on_all_eight_rungs() {
+        let day = 20_668_i64;
+        for (rung_seconds, expected) in CALENDAR_RUNGS_V2 {
+            let offered = regular_buckets_v2(day, rung_seconds, expected);
+            let receipt = calendar_receipt_v2(&offered, rung_seconds, day, day)
+                .expect("the pinned regular-session rung geometry reconciles");
+            assert_eq!(receipt.schema_version(), CALENDAR_RECEIPT_SCHEMA_V2);
+            assert_eq!(receipt.policy_version(), CALENDAR_RECEIPT_POLICY_V2);
+            assert_eq!(receipt.rung_seconds(), rung_seconds);
+            assert_eq!(receipt.first_day(), day);
+            assert_eq!(receipt.last_day(), day);
+            assert_eq!(receipt.offered(), expected, "rung {rung_seconds}");
+            assert_eq!(receipt.expected(), expected, "rung {rung_seconds}");
+            assert_eq!(receipt.missing(), 0, "rung {rung_seconds}");
+            assert_eq!(receipt.unexpected(), 0, "rung {rung_seconds}");
+            assert_eq!(
+                receipt.status(),
+                CalendarStatusV1::Complete,
+                "rung {rung_seconds}"
+            );
+            assert_ne!(receipt.digest(), [0; 32], "rung {rung_seconds}");
+
+            let complete = receipt
+                .require_complete()
+                .expect("a complete receipt projects into the capability");
+            assert_eq!(complete.rung_seconds(), rung_seconds);
+            assert_eq!(complete.first_day(), day);
+            assert_eq!(complete.last_day(), day);
+            assert_eq!(complete.digest(), receipt.digest());
+            assert_eq!(
+                receipt,
+                calendar_receipt_v2(&offered, rung_seconds, day, day)
+                    .expect("same evidence makes the same receipt"),
+                "rung {rung_seconds} is byte-deterministic"
+            );
+        }
+    }
+
+    #[test]
+    fn calendar_receipt_v2_gap_location_is_bound_on_all_eight_rungs() {
+        let day = 20_668_i64;
+        for (rung_seconds, expected) in CALENDAR_RUNGS_V2 {
+            let full = regular_buckets_v2(day, rung_seconds, expected);
+            let mut early = full.clone();
+            early.remove(1);
+            let mut late = full;
+            let late_index = late.len().saturating_sub(2);
+            late.remove(late_index);
+
+            let left = calendar_receipt_v2(&early, rung_seconds, day, day)
+                .expect("a gap is measured, never synthesized");
+            let right = calendar_receipt_v2(&late, rung_seconds, day, day)
+                .expect("a different gap is also measured");
+            for receipt in [left, right] {
+                assert_eq!(receipt.offered(), expected.saturating_sub(1));
+                assert_eq!(receipt.expected(), expected);
+                assert_eq!(receipt.missing(), 1);
+                assert_eq!(receipt.unexpected(), 0);
+                assert_eq!(receipt.status(), CalendarStatusV1::Incomplete);
+                let why = receipt
+                    .require_complete()
+                    .expect_err("a missing bucket cannot become a complete capability");
+                assert!(why.contains("is not complete"), "{why}");
+                assert!(why.contains("missing 1"), "{why}");
+            }
+            assert_ne!(
+                left.digest(),
+                right.digest(),
+                "rung {rung_seconds}: equal counts cannot alias different gaps"
+            );
+        }
+    }
+
+    #[test]
+    fn calendar_receipt_v2_split_and_short_exceptions_cover_all_eight_rungs() {
+        let split_day = 19_784_i64;
+        let short_day = 20_382_i64;
+        let split_counts = [105_u64, 54, 35, 21, 12, 7, 5, 3];
+        let short_counts = [60_u64, 30, 20, 12, 6, 4, 2, 2];
+
+        for (index, (rung_seconds, _)) in CALENDAR_RUNGS_V2.into_iter().enumerate() {
+            let split = calendar_bucket_indices_v2(
+                split_day,
+                rung_seconds,
+                split_intervals_v2(rung_seconds),
+            );
+            let split_receipt = calendar_receipt_v2(&split, rung_seconds, split_day, split_day)
+                .expect("both primary-measured split windows reconcile on this rung");
+            assert_eq!(split_receipt.offered(), split_counts[index]);
+            assert_eq!(split_receipt.expected(), split_counts[index]);
+            assert_eq!(split_receipt.status(), CalendarStatusV1::Complete);
+            split_receipt
+                .require_complete()
+                .expect("the complete split session is admissible");
+
+            let short = calendar_bucket_indices_v2(
+                short_day,
+                rung_seconds,
+                short_intervals_v2(rung_seconds),
+            );
+            let short_receipt = calendar_receipt_v2(&short, rung_seconds, short_day, short_day)
+                .expect("the measured one-hour exception reconciles on this rung");
+            assert_eq!(short_receipt.offered(), short_counts[index]);
+            assert_eq!(short_receipt.expected(), short_counts[index]);
+            assert_eq!(short_receipt.status(), CalendarStatusV1::Complete);
+            short_receipt
+                .require_complete()
+                .expect("the complete short exception is admissible");
+        }
+
+        let two_minute_split = calendar_bucket_indices_v2(split_day, 120, split_intervals_v2(120));
+        assert!(
+            two_minute_split.contains(&calendar_minute_v1(split_day, 689)),
+            "the bucket intersecting the second window is canonically stamped one minute before it"
+        );
+        let hourly_short = calendar_bucket_indices_v2(short_day, 3_600, short_intervals_v2(3_600));
+        assert!(
+            hourly_short.contains(&calendar_minute_v1(short_day, 795)),
+            "the first hourly bucket intersecting the 13:45 exception is stamped 13:15"
+        );
+    }
+
+    #[test]
+    fn calendar_receipt_v2_refuses_malformed_and_closed_bars_on_every_rung() {
+        let open_day = 20_668_i64;
+        let closed_day = 20_479_i64;
+        for (rung_seconds, _) in CALENDAR_RUNGS_V2 {
+            let width_minutes = u16::try_from(rung_seconds / 60).expect("rung fits u16");
+            let first = calendar_minute_v1(open_day, 555);
+            let second = calendar_minute_v1(open_day, 555 + width_minutes);
+
+            let why = calendar_receipt_v2(&[first, first], rung_seconds, open_day, open_day)
+                .expect_err("duplicates are corruption");
+            assert!(why.contains("duplicate"), "rung {rung_seconds}: {why}");
+
+            let why = calendar_receipt_v2(&[second, first], rung_seconds, open_day, open_day)
+                .expect_err("time cannot run backward");
+            assert!(why.contains("backward"), "rung {rung_seconds}: {why}");
+
+            let why =
+                calendar_receipt_v2(&[first.saturating_add(1)], rung_seconds, open_day, open_day)
+                    .expect_err("a sub-minute timestamp is never a bar boundary");
+            assert!(
+                why.contains("off the exact one-minute grid"),
+                "rung {rung_seconds}: {why}"
+            );
+
+            if rung_seconds > 60 {
+                let minute_but_not_rung = calendar_minute_v1(open_day, 556);
+                let why =
+                    calendar_receipt_v2(&[minute_but_not_rung], rung_seconds, open_day, open_day)
+                        .expect_err("an exact minute can still miss the signal rung grid");
+                assert!(
+                    why.contains("open-anchored grid"),
+                    "rung {rung_seconds}: {why}"
+                );
+            }
+
+            let prior_bucket_minute = 555_u16
+                .checked_sub(width_minutes)
+                .expect("the widest prior bucket remains within the IST day");
+            let outside_window = calendar_minute_v1(open_day, prior_bucket_minute);
+            let why = calendar_receipt_v2(&[outside_window], rung_seconds, open_day, open_day)
+                .expect_err("an aligned bucket that intersects no session is unexpected");
+            assert!(
+                why.contains("intersects no measured session window"),
+                "rung {rung_seconds}: {why}"
+            );
+
+            let closed = calendar_minute_v1(closed_day, 555);
+            let why = calendar_receipt_v2(&[closed], rung_seconds, closed_day, closed_day)
+                .expect_err("a measured closed day cannot carry a bar");
+            assert!(
+                why.contains("measured closed IST day 20479"),
+                "rung {rung_seconds}: {why}"
+            );
+        }
+    }
+
+    #[test]
+    fn calendar_receipt_v2_unmeasured_and_input_bounds_fail_closed() {
+        let unmeasured_day = 16_436_i64;
+        let receipt = calendar_receipt_v2(
+            &[calendar_minute_v1(unmeasured_day, 555)],
+            900,
+            unmeasured_day,
+            unmeasured_day,
+        )
+        .expect("an unmeasured day is retained as a non-claim");
+        assert_eq!(receipt.status(), CalendarStatusV1::Unmeasured);
+        assert_eq!(receipt.expected(), 0);
+        assert_eq!(receipt.missing(), 0);
+        assert!(
+            receipt.require_complete().is_err(),
+            "unmeasured evidence never becomes a completeness capability"
+        );
+
+        let why = calendar_receipt_v2(&[], 1, 20_668, 20_668)
+            .expect_err("one second is stored but is not one of the eight signal rungs");
+        assert!(why.contains("not one of the exact signal rungs"), "{why}");
+
+        let why = calendar_receipt_v2(&[], 86_400, 20_668, 20_668)
+            .expect_err("daily coverage is a different receipt contract");
+        assert!(why.contains("not one of the exact signal rungs"), "{why}");
+
+        let why = calendar_receipt_v2(&[], 60, 20_669, 20_668)
+            .expect_err("the requested span cannot run backward");
+        assert!(why.contains("runs backward"), "{why}");
+
+        let outside = calendar_minute_v1(20_669, 555);
+        let why = calendar_receipt_v2(&[outside], 60, 20_668, 20_668)
+            .expect_err("offered timestamps cannot widen requested bounds");
+        assert!(why.contains("outside requested inclusive span"), "{why}");
+    }
+
+    #[test]
+    fn calendar_receipt_v2_digest_binds_rung_and_requested_boundaries() {
+        let closed_day = 20_673_i64; // 2026-08-08, Saturday.
+        let next_closed_day = 20_674_i64; // 2026-08-09, Sunday.
+        assert!(
+            matches!(pull::calendar::kind_of(closed_day), DayKind::Closed),
+            "fixture day is measured closed"
+        );
+        assert!(
+            matches!(pull::calendar::kind_of(next_closed_day), DayKind::Closed),
+            "fixture Sunday is measured closed"
+        );
+
+        let mut prior_digest = None;
+        for (rung_seconds, _) in CALENDAR_RUNGS_V2 {
+            let receipt = calendar_receipt_v2(&[], rung_seconds, closed_day, closed_day)
+                .expect("an empty measured closed day is complete");
+            assert_eq!(receipt.status(), CalendarStatusV1::Complete);
+            receipt
+                .require_complete()
+                .expect("zero of zero expected buckets is complete");
+            if let Some(prior) = prior_digest {
+                assert_ne!(
+                    receipt.digest(),
+                    prior,
+                    "the rung is a digest term even when counts are identical"
+                );
+            }
+            prior_digest = Some(receipt.digest());
+        }
+
+        let one_day = calendar_receipt_v2(&[], 60, closed_day, closed_day)
+            .expect("one closed day reconciles");
+        let two_days = calendar_receipt_v2(&[], 60, closed_day, next_closed_day)
+            .expect("two closed days reconcile");
+        assert_eq!(one_day.offered(), two_days.offered());
+        assert_eq!(one_day.expected(), two_days.expected());
+        assert_ne!(
+            one_day.digest(),
+            two_days.digest(),
+            "equal counts over different requested boundaries never alias"
+        );
+    }
+
+    #[test]
+    fn calendar_policy_digest_v2_is_canonical_and_not_a_coverage_receipt() {
+        let policy = calendar_policy_digest_v2();
+        assert_ne!(
+            policy, [0; 32],
+            "the canonical policy is never an absent identity"
+        );
+        assert_eq!(
+            policy,
+            calendar_policy_digest_v2(),
+            "the complete measured-calendar policy is byte-deterministic"
+        );
+
+        for (production, (fixture, _)) in
+            CALENDAR_POLICY_RUNGS_V2.into_iter().zip(CALENDAR_RUNGS_V2)
+        {
+            assert_eq!(
+                production, fixture,
+                "the policy identity and coverage receipt must name the same eight rungs"
+            );
+        }
+
+        let closed_day = 20_673_i64;
+        let one_minute_coverage = calendar_receipt_v2(&[], 60, closed_day, closed_day)
+            .expect("an empty measured closed day is complete");
+        let one_hour_coverage = calendar_receipt_v2(&[], 3_600, closed_day, closed_day)
+            .expect("the same closed day is complete at every supported rung");
+        assert_ne!(
+            policy,
+            one_minute_coverage.digest(),
+            "a global policy identity cannot alias one requested-span receipt"
+        );
+        assert_ne!(
+            policy,
+            one_hour_coverage.digest(),
+            "policy and coverage remain separate at every rung"
+        );
+    }
+
+    #[test]
+    fn candle_calendar_projection_is_exactly_the_timestamp_receipt_without_a_side_vector() {
+        let open_day = 20_668_i64;
+        let timestamps = calendar_bucket_indices_v2(open_day, 3_600, &[(0, 6)]);
+        let bars: Vec<Candle> = timestamps
+            .iter()
+            .copied()
+            .map(|ts_micros| Candle {
+                ts_micros,
+                open: 100,
+                high: 100,
+                low: 100,
+                close: 100,
+                volume: 0,
+                open_interest: i64::MIN,
+            })
+            .collect();
+        let from_timestamps = calendar_receipt_v2(&timestamps, 3_600, open_day, open_day)
+            .expect("the regular hour-rung session is complete");
+        let from_bars = calendar_receipt_v2_for_bars(&bars, 3_600, open_day, open_day)
+            .expect("the exact same candle timestamps are complete");
+        assert_eq!(
+            from_bars, from_timestamps,
+            "projecting exact candle timestamps cannot change any calendar fact or digest"
+        );
+        from_bars
+            .require_complete()
+            .expect("all seven regular-session hour buckets were supplied");
     }
 }

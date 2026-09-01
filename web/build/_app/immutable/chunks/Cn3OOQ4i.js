@@ -1,0 +1,1 @@
+var e=`en-IN`,t=t=>Number(t).toLocaleString(e),n=e=>{if(!Number.isSafeInteger(e))return`—`;let n=e<0,r=Math.abs(e),i=r%100,a=`${t((r-i)/100)}.${String(i).padStart(2,`0`)}`;return n?`-${a}`:a},r=e=>Number.isFinite(e)?t(e):`—`,i=e=>Number.isFinite(e)?t(Math.round(e)):`—`;export{i as a,n as i,r as n,t as r,e as t};

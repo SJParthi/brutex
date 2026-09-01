@@ -7,10 +7,11 @@ cannot be used to check whether anything was missed.
 
 ## How to read it
 
-Ten adversarial lenses raised **114** findings. Each lens's output went to a second
-agent instructed to refute it and to default to refuting, because a false finding costs
-a real change to working code. **26 were killed. 102 stood.** Of those, **37 can lose a
-real combination or invent a false one**, which is the only ranking that matters for a
+Ten adversarial lenses initially raised **114** findings. Each lens's output went to a
+second agent instructed to refute it and to default to refuting, because a false finding
+costs a real change to working code. **26 were killed. With later audits appended, 111
+stood in this ledger.** Of those, **37 can lose a real
+combination or invent a false one**, which is the only ranking that matters for a
 brute-force search.
 
 `ID` is `F-` plus a hash of the finding's own title, so a row cannot be renumbered by
@@ -84,7 +85,7 @@ failure D-0104 records for D-0076, D-0077 and D-0078.
 
 ---
 
-## The other 65
+## The other 74
 
 | ID | Sev | Finding | Where | Disposition |
 |---|---|---|---|---|
@@ -150,9 +151,18 @@ failure D-0104 records for D-0076, D-0077 and D-0078.
 | `F-B40027` | `gap` | inside_day and outside_day are running predicates over the forming day, not day types — but the running form is the only form §3 rule 7 permits, so the defect is the label and the missing completed-day family | `crates/indicators/src/session.rs:376-380 (dh <= ph && dl >= pl over the RUNNING extremes), session.rs:191-197 (the…` | OPEN |
 | `F-255C6F` | `gap` | min_hits == bars is unsatisfiable by construction and reports identically to a satisfiable threshold nothing met | `crates/engine/src/lib.rs:310-318, :905-911 (the one test)` | OPEN |
 | `F-DD700B` | `wrong` | The two NSE disaster-recovery Saturdays were absent from `CHARTER_NON_REGULAR_IST_DAYS`, so a 105-bar drill became the previous-day anchor. Measured on the store: for 2024-03-04 the pivot moved 144.5 index points and the CPR width 6.2x, enough to flip `cpr_class`; `prev5` stayed contaminated five sessions | `crates/indicators/src/evaluator.rs:159` | FIXED c6273645 — added as days 7 and 8, the two free slots `Calendar` already had; `the_eight_non_regular_days_are_the_charter_dates` recomputes both day numbers from the calendar date; charter row added |
-| `F-A918E3` | `wrong` | `docs/00-charter.md` says 2021-02-24 forces exit at 16:50, implying a 17:00 close; `crates/pull/src/calendar.rs:252` says it "traded 09:15 and stopped at 10:08" and asserts 54 expected bars. The store holds 54. So the gaps audit's denominator was derived from the truncated series it exists to audit, and `GET /gaps` reports `lost_minutes: 0` for 2021-02 on a day the charter says traded seven hours longer — the P-70 tautology | `crates/pull/src/calendar.rs:252` vs `docs/00-charter.md:76` | NEEDS A DECISION — **UNVERIFIED**, per §3 rule 1. Two internal sources disagree and no third exists in the tree; resolving it needs the exchange's own record, which is a human call. Neither was changed |
-| `F-DD1DFC` | `wrong` | `median_step_micros` allocates and sorts `bars.len()-1` inside `walk_with`, so an O(n log n) sort runs PER CANDIDATE — up to 10,000 per rung under `par_iter`, twice per candidate in the walk-forward. Introduced this session by the horizon fix; the sibling `forced_exits` was hoisted out of the same loop for the same reason and this was left behind. Invisible to the ratio gates because it scales uniformly | `crates/runner/src/trade.rs:315` | IN PROGRESS — hoisting it the way `exits` is hoisted |
+| `F-A918E3` | `wrong` | `docs/00-charter.md` says 2021-02-24 forces exit at 16:50, implying a 17:00 close; `crates/pull/src/calendar.rs:252` said it "traded 09:15 and stopped at 10:08" and asserted 54 expected bars. The store holds 54. So the gaps audit's denominator was derived from the truncated series it exists to audit, and `GET /gaps` reported `lost_minutes: 0` for 2021-02 on a day the charter says traded seven hours longer — the P-70 tautology | `crates/pull/src/calendar.rs` vs `docs/00-charter.md` | IN PROGRESS — D-0420 and its named tests implement the sourced exchange/index split in this working tree; keep this status until an eventual commit SHA can close it honestly |
+| `F-DD1DFC` | `wrong` | `median_step_micros` allocates and sorts `bars.len()-1` inside `walk_with`, so an O(n log n) sort runs PER CANDIDATE — up to 10,000 per rung under `par_iter`, twice per candidate in the walk-forward. Introduced this session by the horizon fix; the sibling `forced_exits` was hoisted out of the same loop for the same reason and this was left behind. Invisible to the ratio gates because it scales uniformly | `crates/runner/src/trade.rs:315` | IN PROGRESS — D-0421 code and `the_per_candidate_walk_derives_nothing_and_sorts_nothing` are green; retain this status until the eventual commit SHA can replace it honestly |
 | `F-9DD4F6` | `gap` | walk's width check is a dead disjunct: no input can make `p >= ConditionMask::BITS` the deciding condition | `crates/engine/src/lib.rs:290-298, and an_out_of_range_position_is_refused_and_named at :1030-1043` | OPEN |
+| `F-A22DDA` | `wrong` | Phase-1 root admission now covers the API startup lock, census and autopilot plus the CLI binary before logging/dispatch, but an existing wrong directory or different removable volume at the same pathname still passes; no sealed sentinel or expected device identity binds the root, the CLI holds no root directory capability after preflight, and direct library writers can bypass that process boundary | `crates/api/src/autopilot.rs (store_writable); crates/api/src/census.rs (read_all); crates/api/src/server.rs (take_serve_lock); crates/cli/src/lib.rs (preflight_store_root); crates/cli/src/main.rs (startup ordering); docs/06-limits.md §155` | IN PROGRESS — D-0473 and RV-01 green-close absent/non-directory recreation, false all-absent census and initial CLI side effects only; sentinel/device identity, held-capability all-writer admission, TOCTOU/hot-unplug handling and physical eject/full/read-only proofs remain unimplemented or unproven |
+| `F-232FBF` | `wrong` | Execution V3 authenticated ledger rows only against identities and seals derived from those same rows, never against a retained Population V5 authority | `crates/cli/src/execution_v3.rs:1240-1326 (PreparedExecutionV3::validate), :2373-2382 (ExecutionV3SuccessorDisposition::authenticate), :2603-2642 (validate_complete_block)` | IN PROGRESS — the current module still takes caller-shaped PreparedExecutionV3 data and reconstructs completed blocks from its own ledger bytes; no CommittedStoredPopulationV5 production input or before/after source comparison has landed, so no fix is claimed |
+| `F-A02E36` | `gap` | ExecutionV3Authority drops the live Population V5 source after reopen, so a successor disposition cannot prove its source remained unchanged | `crates/cli/src/execution_v3.rs:2337-2362 (ExecutionV3Authority contains only receipt + ledger); crates/cli/src/population_v5.rs:2451-2495 (the retained CommittedStoredPopulationV5 capability that is not carried)` | IN PROGRESS — the source-retaining production wrapper named by the Execution V3 doc comment is absent; no source-retention or stale-source proof is claimed |
+| `F-328603` | `wrong` | Execution V3 lacked complete three-schedule validation for its five exit-coordinate slots: stop maps to Stop, target and TTP arm to Target, and TSL and TTP trail to Trail | `crates/cli/src/execution_v3.rs:164-170 (three axes), :2718-2872 (segment/order/bounds validators), :3966-3981 (fixture omits Trail)` | IN PROGRESS — the current untracked Stage-A rewrite now expresses that mapping and demands all three schedules, but its fixture still supplies only Stop and Target and no current test, Clippy or locked-workspace proof exists; no fix is claimed |
+| `F-A5D460` | `wrong` | Execution V3 accepts run, grid, column, context and Runner digests without reproducing them from live execution authorities | `crates/cli/src/execution_v3.rs:687-787 (ExecutionV3DispositionRecord::validate only requires and self-seals the digests), :2878-2997 (validate_disposition_prefix joins only the ledger's own parameter/source fields)` | IN PROGRESS — no retained Runner execution, evaluated-grid, one-minute column or causal-context capability is an input to the current commit/authentication boundary; no fix is claimed |
+| `F-63B197` | `gap` | Execution V3 has no persisted source-authenticated ranking metrics for Selection V5 to recompute | `crates/cli/src/execution_v3.rs:687-721 (disposition fields), :2365-2550 (successor projection); the module contains no ranking-metrics record or authenticated metrics accessor` | IN PROGRESS — support_hits alone cannot authorize win/loss, return, drawdown or risk-adjusted ranking; the metric authority and recomputation join are absent and no fix is claimed |
+| `F-BB41C0` | `wrong` | The PolicyRefused fixture drops the nonzero training-run identity even though the Candidate contract requires one | `crates/cli/src/execution_v3.rs:725-749 (every disposition requires a nonzero execution_run_id), :4030-4034 (PolicyRefused writes zero); crates/cli/src/candidate_universe.rs:1615-1622 (Candidate row requires the run)` | IN PROGRESS — the current fixture contradicts both record validation and the upstream Candidate contract, so the current Execution V3 suite cannot be called green; no repair or gate result is claimed |
+| `F-C29A38` | `wrong` | Execution V3 checks common rung only across caller-authored parameters and never against the Population V5 candidate rows | `crates/cli/src/execution_v3.rs:1285-1302 and :2913-2918 (parameter-only common-rung checks); crates/cli/src/population_v5.rs:744-806 (V5 retains the canonical Candidate record that Execution V3 never reads)` | IN PROGRESS — a source-bound seam must prove each V5 Candidate rung before a block can reject mixed-rung evidence or name one rung; that seam is absent and no fix is claimed |
+| `F-D3D96B` | `law` | One fixed-offset authenticated Execution V3 lookup hashes every held ledger file twice before and after the read | `crates/cli/src/execution_v3.rs:2221-2260 (two require_unchanged calls), :2322-2333 (all held files), :3311-3420 (two full-file hashes per generation check)` | OPEN — the lookup is O(total held file bytes), not O(1), and no measured constant-cost generation capability or replacement design has landed |
 
 ---
 
@@ -203,5 +213,29 @@ It does not claim a `FIXED` row is beyond question. It claims a test exists that
 **shown to fail** against the code before the fix — which is a different and smaller
 claim than correctness, and the only one that can be made mechanically.
 
-<!-- rows-digest: ad75f77e7a584098 -->
-<!-- dispositions: FIXED 18 · IN PROGRESS 1 · NEEDS A DECISION 8 · OPEN 67 · PARTLY FIXED 8 · REFUTED 0 · total 102 -->
+<!-- rows-digest: 2139d535ece43d40 -->
+<!-- dispositions: FIXED 18 · IN PROGRESS 10 · NEEDS A DECISION 7 · OPEN 68 · PARTLY FIXED 8 · REFUTED 0 · total 111 -->
+
+## 2026-09-01 appended successor finding — D-0498
+
+`F-23A9AE` (`wrong`) — **Candidate V1 statistical singleton is unreachable
+because every closed mask expands to both Long and Short execution-coordinate
+rows.** D-0492, D-0495, D-0496 and their invariant/plan prose called
+`InsufficientForCscv` one real Candidate row. Statistics was counting one
+mask/family hypothesis; Candidate V1 was counting persisted
+mask×direction×exit rows. `CandidateUniverseReceiptV1::validate` now makes the
+actual production law explicit: `closed_itemsets * (long cells + short cells)`,
+and both directional grids are nonempty, so a nonzero receipt is at least two.
+The upstream insufficient enum/codec shape remains append-only history, but it
+is production-unreachable from current Candidate V1 and must not be invented at
+Population V6.
+
+Evidence: `crates/cli/src/candidate_universe.rs` receipt reconciliation and
+`nonempty_candidate_receipt_is_exact_two_sided_mask_expansion`;
+`crates/cli/src/population_statistics_v3.rs` retains the abstract `row_count ==
+1` terminal; D-0498's Population V6 boundary accepts E/E, E/X, X/E and X/X and
+refuses the five insufficient-containing pairs. Disposition: **IN PROGRESS** —
+the semantic correction and static Rust/tests are present, but the focused
+serialized Cargo proof is still pending. This post-audit append is deliberately
+outside the immutable 2026-08-11 sweep tables and their guarded 111-row digest;
+it neither deletes nor silently repurposes an earlier finding row.

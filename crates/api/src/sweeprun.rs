@@ -103,6 +103,8 @@ pub struct Progress {
     pub support_ppm: Option<u64>,
     /// When the run was accepted, microseconds since the epoch.
     pub started_micros: i64,
+    /// Opaque exact attempt token shared by status and structural events.
+    pub attempt: u64,
     /// When it ended, or [`None`] while it is still going.
     pub finished_micros: Option<i64>,
     /// The report `cli` produced, once there is one.
@@ -121,6 +123,7 @@ impl Progress {
         to: (u16, u8),
         support_ppm: Option<u64>,
         now_micros: i64,
+        attempt: u64,
     ) -> Self {
         Self {
             // THE DEFAULT IS THE COMMAND THAT EXISTED FIRST, and a descent
@@ -135,6 +138,7 @@ impl Progress {
             to,
             support_ppm,
             started_micros: now_micros,
+            attempt,
             finished_micros: None,
             report: None,
             refusal: None,
@@ -180,6 +184,7 @@ impl Progress {
             None => out.push_str(r#","support_ppm":null"#),
         }
         let _ = write!(out, r#","started_micros":{}"#, self.started_micros);
+        let _ = write!(out, r#","attempt":{}"#, self.attempt);
         let _ = write!(out, r#","in_flight":{}"#, self.in_flight());
         match self.finished_micros {
             Some(at) => {
@@ -224,6 +229,8 @@ pub enum Refusal {
     /// work in the state it was built in, which is what 503 says and 400 does
     /// not.
     Unstamped(String),
+    /// No exact telemetry attempt key can be allocated.
+    Unobservable(String),
     //
     // THERE WAS A `Support` VARIANT HERE AND IT IS GONE. It refused a
     // threshold of zero, which makes every combination frequent so the
@@ -245,7 +252,8 @@ impl Refusal {
             Self::Malformed(ref s)
             | Self::Span(ref s)
             | Self::Busy(ref s)
-            | Self::Unstamped(ref s) => s,
+            | Self::Unstamped(ref s)
+            | Self::Unobservable(ref s) => s,
         }
     }
 
@@ -261,7 +269,9 @@ impl Refusal {
     pub const fn status(&self) -> axum::http::StatusCode {
         match *self {
             Self::Busy(_) => axum::http::StatusCode::CONFLICT,
-            Self::Unstamped(_) => axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            Self::Unstamped(_) | Self::Unobservable(_) => {
+                axum::http::StatusCode::SERVICE_UNAVAILABLE
+            }
             _ => axum::http::StatusCode::BAD_REQUEST,
         }
     }
@@ -311,16 +321,17 @@ impl Refusal {
 /// silently began sweeping 618,296 real bars and appending to the operator's
 /// ledger. Every reader of the stamp should take it, not read it.
 fn stamp_refusal(stamp: Option<&str>) -> Option<Refusal> {
-    if stamp.is_some() {
+    if stamp.is_some_and(cli::is_canonical_commit_stamp) {
         return None;
     }
     Some(Refusal::Unstamped(
-        "this server was built without BRUTEX_COMMIT, so no sweep it runs can \
+        "this server was built without one canonical, verified BRUTEX_COMMIT, so no sweep it runs can \
          be recorded: CLAUDE.md §3 rule 3 makes the commit part of every run's \
          identity, and it is read at COMPILE time so it cannot be filled in \
          now. Nothing was swept, because the answer did not depend on any bar. \
-         Rebuild and restart the server with \
-         `BRUTEX_COMMIT=$(git rev-parse HEAD) cargo run --release -p api -- serve`."
+         Restore every Rust/Cargo input to HEAD (normally by committing the \
+         intended change), rebuild, and restart the server. An explicit \
+         BRUTEX_COMMIT is accepted only when it exactly equals clean HEAD."
             .to_owned(),
     ))
 }
@@ -408,6 +419,161 @@ const KNOBS: [(&str, &str); 16] = [
     ("max_mae_ppm", "BRUTEX_MAX_MAE_PPM"),
 ];
 
+/// One scalar accepted by the browser engine request schema.
+///
+/// Numeric strings remain accepted because the original route accepted them,
+/// while arrays, objects, null and fractional numbers are rejected by the JSON
+/// decoder before any engine setting can silently disappear. `serde_json` owns
+/// JSON number syntax; the semantic integer bounds remain with the existing
+/// field parsers below.
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(untagged)]
+enum WireScalar {
+    /// A JSON string, decoded including escapes.
+    Text(String),
+    /// A non-negative JSON integer.
+    Unsigned(u64),
+    /// A negative JSON integer.
+    Signed(i64),
+    /// A JSON boolean, used by `validate`.
+    Boolean(bool),
+}
+
+impl WireScalar {
+    fn text(&self) -> String {
+        match *self {
+            Self::Text(ref value) => value.clone(),
+            Self::Unsigned(value) => value.to_string(),
+            Self::Signed(value) => value.to_string(),
+            Self::Boolean(value) => value.to_string(),
+        }
+    }
+}
+
+/// Distinguishes an absent JSON member from a present value.
+///
+/// `Option<T>` cannot do that: serde maps both a missing member and an explicit
+/// `null` to `None`. That would make `"rungs": null` indistinguishable from an
+/// omitted list and silently widen it to every rung. A present member therefore
+/// deserializes directly as `T`; `null` fails that type instead of becoming
+/// [`Self::Missing`].
+#[derive(Clone, Debug, Default)]
+enum WireField<T> {
+    /// The object did not contain this member.
+    #[default]
+    Missing,
+    /// The object contained one value of the declared type.
+    Value(T),
+}
+
+impl<T> WireField<T> {
+    fn as_ref(&self) -> Option<&T> {
+        match *self {
+            Self::Missing => None,
+            Self::Value(ref value) => Some(value),
+        }
+    }
+}
+
+impl<'de, T> serde::Deserialize<'de> for WireField<T>
+where
+    T: serde::Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        T::deserialize(deserializer).map(Self::Value)
+    }
+}
+
+/// The union of the three browser-engine request bodies.
+///
+/// Serde's struct decoder is the boundary: the input must be one complete JSON
+/// object, every declared field has one JSON type, and a repeated declared key
+/// is a duplicate-field error. Unknown fields remain ignored for compatibility
+/// with newer clients and with the existing store/log-dir safety test.
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+#[serde(default)]
+struct WireBody {
+    feed: WireField<String>,
+    underlying: WireField<String>,
+    from_year: WireField<WireScalar>,
+    from_month: WireField<WireScalar>,
+    to_year: WireField<WireScalar>,
+    to_month: WireField<WireScalar>,
+    rungs: WireField<Vec<String>>,
+    command: WireField<String>,
+    rung: WireField<String>,
+    min_hits: WireField<WireScalar>,
+    max_points: WireField<WireScalar>,
+    support_ppm: WireField<WireScalar>,
+    ceiling: WireField<WireScalar>,
+    screen_cap: WireField<WireScalar>,
+    screen_budget_ms: WireField<WireScalar>,
+    top: WireField<WireScalar>,
+    validate: WireField<WireScalar>,
+    horizon_bars: WireField<WireScalar>,
+    grid_rungs: WireField<WireScalar>,
+    grid_resolution: WireField<WireScalar>,
+    sizing_rate_bp: WireField<WireScalar>,
+    min_rr_bp: WireField<WireScalar>,
+    min_win_rate_bp: WireField<WireScalar>,
+    min_trades: WireField<WireScalar>,
+    min_ret_over_dd_bp: WireField<WireScalar>,
+    min_weakest_bp: WireField<WireScalar>,
+    max_mae_ppm: WireField<WireScalar>,
+}
+
+impl WireBody {
+    fn string(&self, name: &str) -> Option<&str> {
+        match name {
+            "feed" => self.feed.as_ref().map(String::as_str),
+            "underlying" => self.underlying.as_ref().map(String::as_str),
+            "command" => self.command.as_ref().map(String::as_str),
+            "rung" => self.rung.as_ref().map(String::as_str),
+            _ => None,
+        }
+    }
+
+    fn scalar(&self, name: &str) -> Option<&WireScalar> {
+        match name {
+            "from_year" => self.from_year.as_ref(),
+            "from_month" => self.from_month.as_ref(),
+            "to_year" => self.to_year.as_ref(),
+            "to_month" => self.to_month.as_ref(),
+            "min_hits" => self.min_hits.as_ref(),
+            "max_points" => self.max_points.as_ref(),
+            "support_ppm" => self.support_ppm.as_ref(),
+            "ceiling" => self.ceiling.as_ref(),
+            "screen_cap" => self.screen_cap.as_ref(),
+            "screen_budget_ms" => self.screen_budget_ms.as_ref(),
+            "top" => self.top.as_ref(),
+            "validate" => self.validate.as_ref(),
+            "horizon_bars" => self.horizon_bars.as_ref(),
+            "grid_rungs" => self.grid_rungs.as_ref(),
+            "grid_resolution" => self.grid_resolution.as_ref(),
+            "sizing_rate_bp" => self.sizing_rate_bp.as_ref(),
+            "min_rr_bp" => self.min_rr_bp.as_ref(),
+            "min_win_rate_bp" => self.min_win_rate_bp.as_ref(),
+            "min_trades" => self.min_trades.as_ref(),
+            "min_ret_over_dd_bp" => self.min_ret_over_dd_bp.as_ref(),
+            "min_weakest_bp" => self.min_weakest_bp.as_ref(),
+            "max_mae_ppm" => self.max_mae_ppm.as_ref(),
+            _ => None,
+        }
+    }
+}
+
+/// Parse exactly one complete JSON object before reading any field from it.
+fn wire_body(body: &str) -> Result<WireBody, Refusal> {
+    serde_json::from_str(body).map_err(|why| {
+        Refusal::Malformed(format!(
+            "the request body must be one complete JSON object with no duplicate known field: {why}"
+        ))
+    })
+}
+
 /// Read every knob the body names, in [`KNOBS`] order.
 ///
 /// # Why `validate` is normalised and the rest are not
@@ -418,7 +584,7 @@ const KNOBS: [(&str, &str); 16] = [
 /// therefore turn validation ON, which is the precise opposite of what it
 /// asked. Every other knob is a number whose text parses the same on both
 /// sides, so only this one needs the translation.
-fn knobs_in(body: &str) -> Vec<(&'static str, String)> {
+fn knobs_in(body: &WireBody) -> Vec<(&'static str, String)> {
     let mut out: Vec<(&'static str, String)> = Vec::with_capacity(KNOBS.len());
     for (asked, name) in KNOBS {
         let Some(raw) = field(body, asked) else {
@@ -550,61 +716,27 @@ pub struct AskedDescent {
 /// constant printed beside its result is a stated condition of the run.
 */
 
-/// One field out of a flat JSON object, as text.
-///
-/// A hand parser rather than a dependency: this body has five scalar fields and
-/// `crate::pullrun::legs_from` already parses its own by hand for the same
-/// reason. Nothing here has to survive nesting.
-fn field(body: &str, name: &str) -> Option<String> {
-    let key = format!("\"{name}\"");
-    let at = body.find(&key)? + key.len();
-    let rest = body.get(at..)?.trim_start();
-    let rest = rest.strip_prefix(':')?.trim_start();
-    if let Some(text) = rest.strip_prefix('"') {
-        let end = text.find('"')?;
-        return text.get(..end).map(str::to_owned);
-    }
-    let end = rest.find([',', '}']).unwrap_or(rest.len());
-    Some(rest.get(..end)?.trim().to_owned())
+/// One decoded scalar field as the text the existing semantic parsers consume.
+fn field(body: &WireBody, name: &str) -> Option<String> {
+    body.string(name)
+        .map(str::to_owned)
+        .or_else(|| body.scalar(name).map(WireScalar::text))
 }
 
-/// One field out of a flat JSON object, as a list of strings.
-///
-/// [`field`]'s sibling, and a hand parser for the same stated reason: this
-/// body has one array in it and nothing nested.
+/// One decoded list field.
 ///
 /// `None` means the key is absent, which callers read as "not asked for".
 /// `Some(vec![])` means the key is present and empty — a DIFFERENT fact, and
 /// the one the rung parser refuses rather than widening back to everything.
 ///
-/// Only the strings inside the brackets are taken, so `["1min","5min"]` and
-/// `[ "1min" , "5min" ]` parse the same. A malformed array — no closing
-/// bracket — reads as absent rather than as empty, because a body that was cut
-/// off did not ask for nothing, it failed to ask.
-fn list_field(body: &str, name: &str) -> Option<Vec<String>> {
-    let key = format!("\"{name}\"");
-    let at = body.find(&key)? + key.len();
-    let rest = body.get(at..)?.trim_start();
-    let rest = rest.strip_prefix(':')?.trim_start();
-    let inner = rest.strip_prefix('[')?;
-    let end = inner.find(']')?;
-    let inner = inner.get(..end)?;
-    let mut out = Vec::new();
-    let mut chars = inner.char_indices();
-    while let Some((i, c)) = chars.next() {
-        if c != '"' {
-            continue;
-        }
-        let after = inner.get(i + 1..)?;
-        let close = after.find('"')?;
-        out.push(after.get(..close)?.to_owned());
-        // Skip past the closing quote so the next scan starts after it and a
-        // two-item list cannot be read as one item plus the gap between them.
-        for _ in 0..=close {
-            let _ = chars.next();
-        }
+/// The JSON decoder has already required every member to be a string and the
+/// closing bracket to exist. A malformed/truncated array therefore never
+/// reaches this function and cannot widen to the absent/all-rungs policy.
+fn list_field(body: &WireBody, name: &str) -> Option<Vec<String>> {
+    match name {
+        "rungs" => body.rungs.as_ref().cloned(),
+        _ => None,
     }
-    Some(out)
 }
 
 /// The request body, or the first thing wrong with it.
@@ -614,6 +746,12 @@ fn list_field(body: &str, name: &str) -> Option<Vec<String>> {
 /// A missing or unparseable field, a month outside `1..=12`, a `to` before its
 /// `from`, a support threshold of zero, or a rung the engine does not sweep.
 pub fn asked_from(body: &str) -> Result<Asked, Refusal> {
+    let body = wire_body(body)?;
+    asked_from_wire(&body)
+}
+
+/// [`asked_from`] after the strict JSON boundary has been crossed once.
+fn asked_from_wire(body: &WireBody) -> Result<Asked, Refusal> {
     let feed = field(body, "feed")
         .filter(|s| !s.is_empty())
         .ok_or_else(|| {
@@ -781,12 +919,18 @@ pub use cli::EVERY_RUNG;
 /// Everything [`asked_from`] refuses, plus a rung that is not one of the eight,
 /// a stop ceiling below one point, and a listing bound of zero.
 pub fn descent_from(body: &str) -> Result<AskedDescent, Refusal> {
+    let body = wire_body(body)?;
+    descent_from_wire(&body)
+}
+
+/// [`descent_from`] over the same decoded object [`asked_from_wire`] reads.
+fn descent_from_wire(body: &WireBody) -> Result<AskedDescent, Refusal> {
     // THE SPAN AND FEED RULES ARE NOT RESTATED, THEY ARE REUSED. Two parsers
     // for one span is two places for a month bound to drift, and the overflow
     // this one already survives -- `{"from_year":18446744073709551615}` calling
     // `abort()` in a release build -- is exactly the kind that comes back when
     // a second copy is written from memory.
-    let asked = asked_from(body)?;
+    let asked = asked_from_wire(body)?;
 
     let rung = field(body, "rung")
         .filter(|s| !s.is_empty())
@@ -857,6 +1001,78 @@ pub fn descent_from(body: &str) -> Result<AskedDescent, Refusal> {
 /// the provenance banner, and never with this word.
 const REFUSED: &str = "refused";
 
+/// The answer left behind when a browser-started engine task disappears.
+///
+/// This is deliberately a refusal and not a report: a panic can happen after
+/// the ledger has begun an append, so neither "nothing was written" nor "the
+/// run completed" is an honest general claim. The operator is told both facts
+/// that are known: this task did not record its final answer, and the result
+/// files must be checked before it is retried.
+const ABNORMAL_END: &str = "the engine task stopped abnormally before it recorded a final answer — a panic, \
+     cancellation, or server shutdown. The in-process slot was released so another \
+     run is not blocked forever. Work may have reached the append-only result files \
+     before the stop; inspect their integrity before retrying.";
+
+/// Releases the browser engine slot however its background task ends.
+///
+/// # Why ownership begins before `spawn_blocking`
+///
+/// Constructing this guard before the closure is handed to Tokio covers both
+/// failure windows: a panic while the closure runs, and a runtime shutdown that
+/// drops a queued closure before it starts. In either case the captured guard
+/// is dropped and an in-flight slot becomes a visible refusal.
+///
+/// # Why normal completion disarms rather than relying on the slot
+///
+/// A completed slot may be replaced by a new accepted run immediately. If a
+/// still-armed old guard then inspected only `Progress::in_flight`, it could
+/// mark that NEW run as failed. [`Self::finish`] writes the completed value and
+/// disarms while it still owns the guard, so its subsequent `Drop` is inert.
+#[must_use = "the finisher must be moved into the background task"]
+struct TaskFinisher {
+    /// The site whose one shared engine slot this task owns.
+    site: crate::server::Loaded,
+    /// False only after this task installed its normal final value.
+    armed: bool,
+}
+
+impl TaskFinisher {
+    /// Arms one guard for the already-claimed slot.
+    fn new(site: crate::server::Loaded) -> Self {
+        Self { site, armed: true }
+    }
+
+    /// Installs a normal result and prevents `Drop` from painting over it.
+    fn finish(mut self, done: Progress) {
+        let mut slot = self
+            .site
+            .sweep
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *slot = Some(done);
+        self.armed = false;
+    }
+}
+
+impl Drop for TaskFinisher {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let mut slot = self
+            .site
+            .sweep
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(progress) = slot.as_mut().filter(|progress| progress.in_flight()) else {
+            return;
+        };
+        progress.finished_micros = Some(now_micros());
+        progress.report = None;
+        progress.refusal = Some(ABNORMAL_END.to_owned());
+    }
+}
+
 /// Files `cli`'s answer under the field that describes it, and ends the run.
 ///
 /// # The bug this exists to make impossible
@@ -885,6 +1101,64 @@ fn settle(progress: &mut Progress, text: String, finished_micros: i64) {
         progress.report = Some(text);
     }
     progress.finished_micros = Some(finished_micros);
+}
+
+/// The facts a completion event may claim from one settled engine task.
+///
+/// A report is deliberately called a `report`, not a committed ledger row.
+/// Range and descent reports contain one recording outcome per attempted
+/// result, and a mixed report can therefore be a valid completion without one
+/// universal "saved" statement. The event records the outcome shape that is
+/// actually present and leaves the per-result claims inside that report.
+struct CompletionAudit<'a> {
+    level: telemetry::Level,
+    outcome: &'static str,
+    why: &'a str,
+}
+
+/// Classifies a completed slot without interpreting `cli`'s prose again.
+fn completion_audit(progress: &Progress) -> CompletionAudit<'_> {
+    match (progress.report.as_ref(), progress.refusal.as_deref()) {
+        (Some(_), None) => CompletionAudit {
+            level: telemetry::Level::Info,
+            outcome: "report",
+            why: "",
+        },
+        (None, Some(why)) => CompletionAudit {
+            level: telemetry::Level::Warn,
+            outcome: "refused",
+            why,
+        },
+        (Some(_), Some(_)) => CompletionAudit {
+            level: telemetry::Level::Error,
+            outcome: "invalid",
+            why: "both report and refusal were set",
+        },
+        (None, None) => CompletionAudit {
+            level: telemetry::Level::Error,
+            outcome: "invalid",
+            why: "neither report nor refusal was set",
+        },
+    }
+}
+
+/// Emits one honest completion event shared by sweeps, descents and commands.
+///
+/// Kept as one production emit site so all three entry points use the same
+/// vocabulary and the emit-site census can drive it without running a sweep.
+pub(crate) fn emit_completion(progress: &Progress, operation: &str, elapsed_micros: u64) {
+    let audit = completion_audit(progress);
+    let _outcome = telemetry::emit_for_run(
+        progress.attempt,
+        &telemetry::Event::new(audit.level, "api.sweep", "an engine task finished")
+            .with("attempt", progress.attempt)
+            .with("operation", operation)
+            .with("feed", progress.feed.as_str())
+            .with("underlying", progress.underlying.as_str())
+            .with("outcome", audit.outcome)
+            .with("why", audit.why)
+            .with("elapsed_micros", elapsed_micros),
+    );
 }
 
 /// Runs the sweep and records what it produced.
@@ -984,7 +1258,7 @@ impl Drop for Applied {
 /// [`apply_knobs`] runs first and its `clear_all` runs last, so this request's
 /// settings cannot outlive it.
 #[must_use]
-pub fn conduct(asked: &Asked, now_micros: i64) -> Progress {
+pub fn conduct(asked: &Asked, now_micros: i64, attempt: u64) -> Progress {
     let mut progress = Progress::started(
         &asked.feed,
         &asked.underlying,
@@ -992,6 +1266,7 @@ pub fn conduct(asked: &Asked, now_micros: i64) -> Progress {
         asked.to,
         None,
         now_micros,
+        attempt,
     );
     // THE REQUEST'S OWN KNOBS, SET FOR THIS RUN AND CLEARED AFTER IT.
     //
@@ -1013,13 +1288,14 @@ pub fn conduct(asked: &Asked, now_micros: i64) -> Progress {
     // byte-identical to the old call for every existing client — `range_all`
     // is itself `range_over(&EVERY_RUNG, ..)` now, so there is one code path
     // rather than two that must be kept agreeing.
-    let text = cli::range_over(
+    let text = cli::range_over_for_attempt(
         &asked.feed,
         &asked.underlying,
         &asked.rungs,
         asked.from,
         asked.to,
         None,
+        attempt,
     );
     settle(&mut progress, text, now_micros);
     progress
@@ -1035,7 +1311,7 @@ pub fn conduct(asked: &Asked, now_micros: i64) -> Progress {
 /// from, not a threshold the run held. [`Kind::Descent`] is what tells the page
 /// to read it that way.
 #[must_use]
-pub fn conduct_descent(asked: &AskedDescent, now_micros: i64) -> Progress {
+pub fn conduct_descent(asked: &AskedDescent, now_micros: i64, attempt: u64) -> Progress {
     let mut progress = Progress::started(
         &asked.feed,
         &asked.underlying,
@@ -1043,20 +1319,21 @@ pub fn conduct_descent(asked: &AskedDescent, now_micros: i64) -> Progress {
         asked.to,
         None,
         now_micros,
+        attempt,
     )
     .of_kind(Kind::Descent);
     // POINTS, NEVER PPM. `cli::elite_descend_in_points` converts against the
     // midpoint of the span's own bars; a ppm computed on this side would be a
     // second answer to a question only the bars can settle, and its own doc
     // records what that has already cost.
-    let text = cli::elite_descend_in_points(
+    let text = cli::elite_descend_in_points_for_attempt(
         &asked.feed,
         &asked.underlying,
         &asked.rung,
-        asked.from,
-        asked.to,
+        (asked.from, asked.to),
         asked.max_points,
         asked.top,
+        attempt,
     );
     settle(&mut progress, text, now_micros);
     progress
@@ -1074,6 +1351,73 @@ pub fn now_micros() -> i64 {
         .ok()
         .and_then(|d| i64::try_from(d.as_micros()).ok())
         .unwrap_or(0)
+}
+
+/// Reserves one exact attempt token.
+///
+/// The installed sink owns the durable sequence space, so a restart resumes
+/// above every attempt still retained in the log. There is deliberately no
+/// process-local fallback: an attempt with no log cannot satisfy the exact
+/// marker contract the live monitor requires.
+fn reserve_attempt() -> Result<u64, Refusal> {
+    let sink = telemetry::global().ok_or_else(|| {
+        Refusal::Unobservable(
+            "no telemetry sink is installed, so no exact auditable attempt can be reserved. \
+             No engine work was started."
+                .to_owned(),
+        )
+    })?;
+    sink.reserve_run_id().ok_or_else(|| {
+        Refusal::Unobservable(
+            "the exact telemetry attempt id space is exhausted, so this run cannot be \
+             separated from earlier log records. No engine work was started."
+                .to_owned(),
+        )
+    })
+}
+
+/// The exact bracket the live reducer requires before admitting any rung.
+fn attempt_started_event(progress: &Progress) -> telemetry::Event<'_> {
+    telemetry::Event::info("cli.audit", "sweep attempt started")
+        .with("attempt", progress.attempt)
+        .with("kind", progress.kind.word())
+        .with("feed", progress.feed.as_str())
+        .with("underlying", progress.underlying.as_str())
+        .with("from_year", u64::from(progress.from.0))
+        .with("from_month", u64::from(progress.from.1))
+        .with("to_year", u64::from(progress.to.0))
+        .with("to_month", u64::from(progress.to.1))
+}
+
+/// Writes [`attempt_started_event`] under the same opaque key status exposes.
+pub(crate) fn emit_attempt_started(progress: &Progress) -> telemetry::Emitted {
+    telemetry::emit_for_run(progress.attempt, &attempt_started_event(progress))
+}
+
+/// Turns a missing required attempt marker into a loud admission refusal.
+///
+/// The browser's reducer deliberately accepts no live event until it sees this
+/// exact marker. Starting work after the marker was filtered, dropped, or had
+/// nowhere to land would therefore create a run that the shipped monitor can
+/// never identify. That is an observability failure before it is a logging
+/// preference, so the work does not start.
+fn marker_refusal(outcome: telemetry::Emitted) -> Option<Refusal> {
+    let why = match outcome {
+        telemetry::Emitted::Written => return None,
+        telemetry::Emitted::Filtered => {
+            "the required sweep-attempt marker was filtered by the telemetry policy. Enable \
+             info events for `cli.audit`; no engine work was started."
+        }
+        telemetry::Emitted::Dropped => {
+            "the required sweep-attempt marker could not be written. Telemetry health carries \
+             the storage failure; no engine work was started."
+        }
+        telemetry::Emitted::NotInstalled => {
+            "no telemetry sink is installed, so the required sweep-attempt marker has nowhere \
+             to be recorded. No engine work was started."
+        }
+    };
+    Some(Refusal::Unobservable(why.to_owned()))
 }
 
 /// The JSON content type both routes answer with.
@@ -1181,7 +1525,7 @@ pub(crate) fn run_with(
     // THE SLOT IS CLAIMED UNDER THE LOCK AND THE WORK STARTS OUTSIDE IT.
     // Holding a std mutex across an await is the deadlock this pattern exists
     // to avoid, so the guard is dropped before anything is spawned.
-    {
+    let (started, attempt) = {
         let mut held = match site.sweep.lock() {
             Ok(held) => held,
             Err(poisoned) => poisoned.into_inner(),
@@ -1199,15 +1543,26 @@ pub(crate) fn run_with(
             );
             return refused(&Refusal::Busy(why));
         }
-        *held = Some(Progress::started(
+        let attempt = match reserve_attempt() {
+            Ok(attempt) => attempt,
+            Err(why) => return refused(&why),
+        };
+        let started = now_micros();
+        let accepted = Progress::started(
             &asked.feed,
             &asked.underlying,
             asked.from,
             asked.to,
             None,
-            now_micros(),
-        ));
-    }
+            started,
+            attempt,
+        );
+        if let Some(why) = marker_refusal(emit_attempt_started(&accepted)) {
+            return refused(&why);
+        }
+        *held = Some(accepted.clone());
+        (started, attempt)
+    };
 
     // ONE EVENT PER RUN, NOT ONE PER BAR. Gate 17 silences `vocab engine
     // indicators runner` because those hold the loops; this is the boundary
@@ -1222,6 +1577,7 @@ pub(crate) fn run_with(
         "from_month" => telemetry::Value::Uint(u64::from(asked.from.1)),
         "to_year" => telemetry::Value::Uint(u64::from(asked.to.0)),
         "to_month" => telemetry::Value::Uint(u64::from(asked.to.1)),
+        "attempt" => telemetry::Value::Uint(attempt),
         // DERIVED PER RUNG, so there is no one number to log. Logging a
         // constant here would put a figure in the audit trail that no rung
         // actually used -- D-0303.
@@ -1231,26 +1587,17 @@ pub(crate) fn run_with(
     // A BLOCKING THREAD, NOT A WORKER. `cli::range_all` is CPU-bound over
     // millions of bars; on a worker it would hold that thread for the whole
     // sweep and every other request sharing it would wait.
-    let held_site = std::sync::Arc::clone(site);
-    let started = now_micros();
+    // ARMED BEFORE SPAWN. If Tokio drops a queued closure during shutdown, the
+    // captured guard still releases the slot even though the closure body never
+    // begins. A guard constructed inside the closure would miss that window.
+    let guard = TaskFinisher::new(std::sync::Arc::clone(site));
     tokio::task::spawn_blocking(move || {
-        let finished = conduct(&asked, started);
-        let mut slot = match held_site.sweep.lock() {
-            Ok(slot) => slot,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let finished = conduct(&asked, started, attempt);
         let elapsed = now_micros().saturating_sub(started);
-        let _ = telemetry::emit_if!(
-            telemetry::Level::Info,
-            "api.sweep",
-            "a sweep finished and its record is in the ledger",
-            "feed" => telemetry::Value::Str(&finished.feed),
-            "underlying" => telemetry::Value::Str(&finished.underlying),
-            "elapsed_micros" => telemetry::Value::Uint(elapsed.max(0).unsigned_abs()),
-        );
+        emit_completion(&finished, "sweep", elapsed.max(0).unsigned_abs());
         let mut done = finished;
         done.finished_micros = Some(now_micros());
-        *slot = Some(done);
+        guard.finish(done);
     });
 
     (
@@ -1322,7 +1669,7 @@ pub(crate) fn descend_with(
         return refused(&why);
     }
 
-    {
+    let (started, attempt) = {
         let mut held = match site.sweep.lock() {
             Ok(held) => held,
             Err(poisoned) => poisoned.into_inner(),
@@ -1335,18 +1682,27 @@ pub(crate) fn descend_with(
                 .to_owned();
             return refused(&Refusal::Busy(why));
         }
-        *held = Some(
-            Progress::started(
-                &asked.feed,
-                &asked.underlying,
-                asked.from,
-                asked.to,
-                None,
-                now_micros(),
-            )
-            .of_kind(Kind::Descent),
-        );
-    }
+        let attempt = match reserve_attempt() {
+            Ok(attempt) => attempt,
+            Err(why) => return refused(&why),
+        };
+        let started = now_micros();
+        let accepted = Progress::started(
+            &asked.feed,
+            &asked.underlying,
+            asked.from,
+            asked.to,
+            None,
+            started,
+            attempt,
+        )
+        .of_kind(Kind::Descent);
+        if let Some(why) = marker_refusal(emit_attempt_started(&accepted)) {
+            return refused(&why);
+        }
+        *held = Some(accepted.clone());
+        (started, attempt)
+    };
 
     let _ = telemetry::emit_if!(
         telemetry::Level::Info,
@@ -1356,28 +1712,17 @@ pub(crate) fn descend_with(
         "underlying" => telemetry::Value::Str(&asked.underlying),
         "rung" => telemetry::Value::Str(&asked.rung),
         "max_points" => telemetry::Value::Int(asked.max_points),
+        "attempt" => telemetry::Value::Uint(attempt),
     );
 
-    let held_site = std::sync::Arc::clone(site);
-    let started = now_micros();
+    let guard = TaskFinisher::new(std::sync::Arc::clone(site));
     tokio::task::spawn_blocking(move || {
-        let finished = conduct_descent(&asked, started);
-        let mut slot = match held_site.sweep.lock() {
-            Ok(slot) => slot,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let finished = conduct_descent(&asked, started, attempt);
         let elapsed = now_micros().saturating_sub(started);
-        let _ = telemetry::emit_if!(
-            telemetry::Level::Info,
-            "api.sweep",
-            "a descent finished and its record is in the ledger",
-            "feed" => telemetry::Value::Str(&finished.feed),
-            "underlying" => telemetry::Value::Str(&finished.underlying),
-            "elapsed_micros" => telemetry::Value::Uint(elapsed.max(0).unsigned_abs()),
-        );
+        emit_completion(&finished, "descent", elapsed.max(0).unsigned_abs());
         let mut done = finished;
         done.finished_micros = Some(now_micros());
-        *slot = Some(done);
+        guard.finish(done);
     });
 
     (
@@ -1560,17 +1905,34 @@ impl Command {
 }
 
 /// A whole number field, or the refusal naming it.
-fn whole<T: std::str::FromStr>(body: &str, name: &str, what: &str) -> Result<T, Refusal> {
+fn whole<T: std::str::FromStr>(body: &WireBody, name: &str, what: &str) -> Result<T, Refusal> {
     field(body, name)
         .and_then(|text| text.parse::<T>().ok())
         .ok_or_else(|| Refusal::Malformed(format!("`{name}` must be {what}.")))
 }
 
+/// A positive hit floor shared by every command that accepts `min_hits`.
+///
+/// The engine defensively raises zero to one, but the HTTP boundary must not
+/// accept a value the computation will change. Refusing here keeps the request,
+/// audit trail, and run identity about the value that actually runs.
+fn positive_min_hits(body: &WireBody) -> Result<u64, Refusal> {
+    let min_hits: u64 = whole(body, "min_hits", "a whole number of bars a mask must hit")?;
+    if min_hits == 0 {
+        return Err(Refusal::Malformed(
+            "`min_hits` must be 1 or more; 0 would disable extinction and is not silently \
+             changed to 1."
+                .to_owned(),
+        ));
+    }
+    Ok(min_hits)
+}
+
 /// The feed, instrument, rung and span every span-taking command needs.
-fn rung_from(body: &str) -> Result<AskedRung, Refusal> {
+fn rung_from(body: &WireBody) -> Result<AskedRung, Refusal> {
     // DELEGATES FOR THE FEED AND THE SPAN, exactly as `descent_from` does. One
     // month bound, one place.
-    let asked = asked_from(body)?;
+    let asked = asked_from_wire(body)?;
     let rung = field(body, "rung")
         .filter(|s| !s.is_empty())
         .ok_or_else(|| {
@@ -1613,6 +1975,12 @@ const EVERY_COMMAND: [&str; 5] = [
 /// word — an operator who asks for `sweep` deserves to be told WHY it is not
 /// here, not merely that it is not.
 pub fn command_from(body: &str) -> Result<Command, Refusal> {
+    let body = wire_body(body)?;
+    command_from_wire(&body)
+}
+
+/// [`command_from`] after strict JSON decoding and duplicate detection.
+fn command_from_wire(body: &WireBody) -> Result<Command, Refusal> {
     let word = field(body, "command")
         .filter(|s| !s.is_empty())
         .ok_or_else(|| {
@@ -1639,7 +2007,7 @@ pub fn command_from(body: &str) -> Result<Command, Refusal> {
     match word.as_str() {
         "audit-range" => Ok(Command::AuditRange {
             span: rung_from(body)?,
-            min_hits: whole(body, "min_hits", "a whole number of bars a mask must hit")?,
+            min_hits: positive_min_hits(body)?,
         }),
         "screen" => {
             let support_ppm: u64 = whole(
@@ -1675,10 +2043,10 @@ pub fn command_from(body: &str) -> Result<Command, Refusal> {
         }),
         "sweep-stored" => Ok(Command::SweepStored {
             span: rung_from(body)?,
-            min_hits: whole(body, "min_hits", "a whole number of bars a mask must hit")?,
+            min_hits: positive_min_hits(body)?,
         }),
         "sweep-all" => {
-            let asked = asked_from(body)?;
+            let asked = asked_from_wire(body)?;
             let rung = field(body, "rung")
                 .filter(|s| EVERY_RUNG.contains(&s.as_str()))
                 .ok_or_else(|| {
@@ -1690,7 +2058,7 @@ pub fn command_from(body: &str) -> Result<Command, Refusal> {
             Ok(Command::SweepAll {
                 feed: asked.feed,
                 rung,
-                min_hits: whole(body, "min_hits", "a whole number of bars a mask must hit")?,
+                min_hits: positive_min_hits(body)?,
             })
         }
         other => Err(Refusal::Malformed(format!(
@@ -1705,11 +2073,18 @@ pub fn command_from(body: &str) -> Result<Command, Refusal> {
 /// **Blocking on purpose**, exactly as [`conduct`] and [`conduct_descent`] are.
 /// Every arm here reads stored bars and several walk a ladder over them.
 #[must_use]
-pub fn conduct_command(asked: &Command, now_micros: i64) -> Progress {
+pub fn conduct_command(asked: &Command, now_micros: i64, attempt: u64) -> Progress {
     let (from, to) = asked.window();
-    let mut progress =
-        Progress::started(asked.feed(), asked.underlying(), from, to, None, now_micros)
-            .of_kind(Kind::Command);
+    let mut progress = Progress::started(
+        asked.feed(),
+        asked.underlying(),
+        from,
+        to,
+        None,
+        now_micros,
+        attempt,
+    )
+    .of_kind(Kind::Command);
     let text = match *asked {
         Command::AuditRange { ref span, min_hits } => cli::audit_range(
             &span.feed,
@@ -1808,7 +2183,7 @@ pub(crate) fn command_with(
         return refused(&why);
     }
 
-    {
+    let (started, attempt) = {
         let mut held = match site.sweep.lock() {
             Ok(held) => held,
             Err(poisoned) => poisoned.into_inner(),
@@ -1823,18 +2198,27 @@ pub(crate) fn command_with(
             ));
         }
         let (from, to) = asked.window();
-        *held = Some(
-            Progress::started(
-                asked.feed(),
-                asked.underlying(),
-                from,
-                to,
-                None,
-                now_micros(),
-            )
-            .of_kind(Kind::Command),
-        );
-    }
+        let attempt = match reserve_attempt() {
+            Ok(attempt) => attempt,
+            Err(why) => return refused(&why),
+        };
+        let started = now_micros();
+        let accepted = Progress::started(
+            asked.feed(),
+            asked.underlying(),
+            from,
+            to,
+            None,
+            started,
+            attempt,
+        )
+        .of_kind(Kind::Command);
+        if let Some(why) = marker_refusal(emit_attempt_started(&accepted)) {
+            return refused(&why);
+        }
+        *held = Some(accepted.clone());
+        (started, attempt)
+    };
 
     let _ = telemetry::emit_if!(
         telemetry::Level::Info,
@@ -1843,27 +2227,17 @@ pub(crate) fn command_with(
         "command" => telemetry::Value::Str(asked.word()),
         "feed" => telemetry::Value::Str(asked.feed()),
         "underlying" => telemetry::Value::Str(asked.underlying()),
+        "attempt" => telemetry::Value::Uint(attempt),
     );
 
-    let held_site = std::sync::Arc::clone(site);
-    let started = now_micros();
+    let guard = TaskFinisher::new(std::sync::Arc::clone(site));
     tokio::task::spawn_blocking(move || {
-        let finished = conduct_command(&asked, started);
-        let mut slot = match held_site.sweep.lock() {
-            Ok(slot) => slot,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let finished = conduct_command(&asked, started, attempt);
         let elapsed = now_micros().saturating_sub(started);
-        let _ = telemetry::emit_if!(
-            telemetry::Level::Info,
-            "api.sweep",
-            "an engine command finished",
-            "command" => telemetry::Value::Str(asked.word()),
-            "elapsed_micros" => telemetry::Value::Uint(elapsed.max(0).unsigned_abs()),
-        );
+        emit_completion(&finished, asked.word(), elapsed.max(0).unsigned_abs());
         let mut done = finished;
         done.finished_micros = Some(now_micros());
-        *slot = Some(done);
+        guard.finish(done);
     });
 
     (
@@ -1938,9 +2312,16 @@ pub async fn top_json(uri: axum::http::Uri) -> (axum::http::StatusCode, JsonHead
 )]
 mod tests {
     use super::{
-        Asked, AskedDescent, EVERY_COMMAND, EVERY_RUNG, KNOBS, Kind, Progress, Refusal, asked_from,
-        command_from, conduct_command, descent_from, field, now_micros, settle, stamp_refusal,
+        ABNORMAL_END, Asked, AskedDescent, EVERY_COMMAND, EVERY_RUNG, KNOBS, Kind, Progress,
+        Refusal, TaskFinisher, asked_from, attempt_started_event, command_from, completion_audit,
+        conduct_command, descent_from, marker_refusal, now_micros, settle, stamp_refusal,
     };
+
+    fn finisher_site(name: &str) -> crate::server::Loaded {
+        let masters = crate::scratch::path(&format!("sweep-finisher-masters-{name}"));
+        let store = crate::scratch::path(&format!("sweep-finisher-store-{name}"));
+        std::sync::Arc::new(crate::server::Site::load(&masters, &store))
+    }
 
     fn body(feed: &str, span: &str) -> String {
         format!(r#"{{"feed":"{feed}","underlying":"NIFTY",{span}}}"#)
@@ -2387,34 +2768,286 @@ mod tests {
     }
 
     #[test]
-    fn the_field_reader_handles_both_shapes_and_gives_up_cleanly() {
-        assert_eq!(field(r#"{"a":"text"}"#, "a").as_deref(), Some("text"));
-        assert_eq!(field(r#"{"a":42}"#, "a").as_deref(), Some("42"));
-        assert_eq!(field(r#"{"a":42,"b":1}"#, "a").as_deref(), Some("42"));
-        assert_eq!(field(r#"{"a":"x"}"#, "b"), None);
-        assert_eq!(field("", "a"), None);
-        // A key with no colon after it is not a field.
-        assert_eq!(field(r#"{"a" "x"}"#, "a"), None);
-        // An unterminated string is not a value.
-        assert_eq!(field(r#"{"a":"x"#, "a"), None);
+    fn malformed_non_object_and_truncated_json_never_reaches_semantic_defaults() {
+        let valid = r#"{"feed":"zerodha","underlying":"NIFTY","from_year":2026,
+            "from_month":1,"to_year":2026,"to_month":1}"#;
+        for raw in [
+            // The old substring reader found every required key in this text
+            // and accepted it even though it is not a JSON value at all.
+            r#"garbage "feed":"zerodha","underlying":"NIFTY","from_year":2026,
+               "from_month":1,"to_year":2026,"to_month":1 trailing"#,
+            // A JSON value, but not the object this route's schema declares.
+            r#"[{"feed":"zerodha","underlying":"NIFTY","from_year":2026,
+                "from_month":1,"to_year":2026,"to_month":1}]"#,
+            // The old list reader extracted `1min` and ignored the invalid tail.
+            r#"{"feed":"zerodha","underlying":"NIFTY","from_year":2026,
+                "from_month":1,"to_year":2026,"to_month":1,
+                "rungs":["1min",garbage]}"#,
+            // The old list reader treated a missing `]` as an absent list and
+            // widened the request to every rung.
+            r#"{"feed":"zerodha","underlying":"NIFTY","from_year":2026,
+                "from_month":1,"to_year":2026,"to_month":1,"rungs":["1min""#,
+        ] {
+            let why = asked_from(raw).expect_err("the strict JSON boundary must refuse");
+            assert!(
+                why.why().contains("complete JSON object"),
+                "the refusal names the structural boundary: {}",
+                why.why()
+            );
+        }
+
+        let trailing = format!("{valid} trailing");
+        assert!(
+            asked_from(&trailing).is_err(),
+            "trailing non-JSON bytes cannot be ignored"
+        );
+    }
+
+    #[test]
+    fn duplicate_known_fields_are_refused_before_any_engine_work() {
+        for raw in [
+            r#"{"feed":"zerodha","feed":"dhan","underlying":"NIFTY",
+                "from_year":2026,"from_month":1,"to_year":2026,"to_month":1}"#,
+            r#"{"feed":"zerodha","underlying":"NIFTY","from_year":2026,
+                "from_month":1,"to_year":2026,"to_month":1,
+                "rungs":["1min"],"rungs":["15min"]}"#,
+            r#"{"feed":"zerodha","underlying":"NIFTY","from_year":2026,
+                "from_month":1,"to_year":2026,"to_month":1,"top":10,"top":25}"#,
+        ] {
+            let why = asked_from(raw).expect_err("a known key cannot decide twice");
+            assert!(
+                why.why().contains("duplicate field"),
+                "serde must name the ambiguity: {}",
+                why.why()
+            );
+        }
+    }
+
+    #[test]
+    fn null_or_wrong_typed_known_fields_are_refused_not_treated_as_absent() {
+        for raw in [
+            r#"{"feed":"zerodha","underlying":"NIFTY","from_year":2026,
+                "from_month":1,"to_year":2026,"to_month":1,"rungs":null}"#,
+            r#"{"feed":"zerodha","underlying":"NIFTY","from_year":2026,
+                "from_month":1,"to_year":2026,"to_month":1,"rungs":["1min",7]}"#,
+            r#"{"feed":"zerodha","underlying":"NIFTY","from_year":2026,
+                "from_month":1,"to_year":2026,"to_month":1,"top":{"n":25}}"#,
+        ] {
+            assert!(
+                asked_from(raw).is_err(),
+                "a present invalid field must not become the absent/default policy: {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn escaped_strings_and_unknown_fields_keep_valid_request_compatibility() {
+        let raw = r#"{"feed":"zero\u0064ha","underlying":"NI\u0046TY",
+            "from_year":"2026","from_month":1,"to_year":2026,"to_month":"1",
+            "rungs":["1\u006din"],"future":{"nested":[1,true]},
+            "future_duplicate":1,"future_duplicate":2}"#;
+        let asked = asked_from(raw).expect("valid JSON with unknown fields remains compatible");
+        assert_eq!(asked.feed, "zerodha");
+        assert_eq!(asked.underlying, "NIFTY");
+        assert_eq!(asked.from, (2026, 1));
+        assert_eq!(asked.to, (2026, 1));
+        assert_eq!(asked.rungs, vec!["1min"]);
     }
 
     /* ==================== progress ==================== */
 
     #[test]
     fn a_started_run_is_in_flight_until_it_is_finished() {
-        let mut p = Progress::started("zerodha", "NIFTY", (2019, 12), (2026, 8), Some(200_000), 42);
+        let mut p = Progress::started(
+            "zerodha",
+            "NIFTY",
+            (2019, 12),
+            (2026, 8),
+            Some(200_000),
+            42,
+            43,
+        );
         assert!(p.in_flight());
         assert_eq!(p.started_micros, 42);
+        assert_eq!(p.attempt, 43);
         assert_eq!(p.finished_micros, None);
         assert_eq!(p.report, None);
         p.finished_micros = Some(99);
         assert!(!p.in_flight());
     }
 
+    /// The adversarial path the guard exists for: control unwinds before the
+    /// task reaches any of its ordinary completion writes.
+    #[test]
+    fn a_panicking_engine_task_becomes_a_visible_refusal_and_releases_the_slot() {
+        let site = finisher_site("panic");
+        *site
+            .sweep
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Progress::started(
+            "zerodha",
+            "NIFTY",
+            (2020, 1),
+            (2020, 1),
+            None,
+            7,
+            70,
+        ));
+
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe({
+            let site = std::sync::Arc::clone(&site);
+            move || {
+                let _finisher = TaskFinisher::new(site);
+                std::panic::resume_unwind(Box::new(
+                    "engine panic injected after the slot was claimed",
+                ));
+            }
+        }));
+        assert!(caught.is_err(), "the injected panic must actually unwind");
+
+        let held = site
+            .sweep
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let progress = held.as_ref().expect("the failed run remains visible");
+        assert!(
+            !progress.in_flight(),
+            "a dead task must not keep the slot busy"
+        );
+        assert!(progress.finished_micros.is_some(), "the end is timestamped");
+        assert_eq!(progress.report, None, "an abnormal end is not a report");
+        assert_eq!(progress.refusal.as_deref(), Some(ABNORMAL_END));
+        assert_eq!(
+            progress.started_micros, 7,
+            "the accepted run stays identifiable"
+        );
+    }
+
+    /// Normal completion and abnormal completion race through one destructor.
+    /// Disarming before that destructor runs is what prevents an old guard from
+    /// failing a new run which claimed the now-finished slot immediately.
+    #[test]
+    fn a_normal_finisher_preserves_its_answer_and_cannot_abort_the_next_run() {
+        let site = finisher_site("normal");
+        *site
+            .sweep
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Progress::started(
+            "zerodha",
+            "NIFTY",
+            (2020, 1),
+            (2020, 1),
+            None,
+            7,
+            70,
+        ));
+
+        let mut done = Progress::started("zerodha", "NIFTY", (2020, 1), (2020, 1), None, 7, 70);
+        done.finished_micros = Some(8);
+        done.report = Some("STORED_PROVENANCE\ncomplete".to_owned());
+        TaskFinisher::new(std::sync::Arc::clone(&site)).finish(done);
+
+        {
+            let held = site
+                .sweep
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let progress = held.as_ref().expect("the normal answer remains visible");
+            assert_eq!(progress.finished_micros, Some(8));
+            assert_eq!(
+                progress.report.as_deref(),
+                Some("STORED_PROVENANCE\ncomplete")
+            );
+            assert_eq!(progress.refusal, None);
+        }
+
+        *site
+            .sweep
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Progress::started(
+            "dhan",
+            "BANKNIFTY",
+            (2020, 2),
+            (2020, 2),
+            None,
+            9,
+            90,
+        ));
+        let held = site
+            .sweep
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let next = held.as_ref().expect("the next run owns the slot");
+        assert!(
+            next.in_flight(),
+            "the disarmed old guard cannot fail the next run"
+        );
+        assert_eq!(next.started_micros, 9);
+        assert_eq!(next.refusal, None);
+    }
+
+    #[test]
+    fn an_armed_guard_does_not_rewrite_a_slot_that_is_already_finished() {
+        let site = finisher_site("already-finished");
+        let mut done = Progress::started("zerodha", "NIFTY", (2020, 1), (2020, 1), None, 7, 70);
+        done.finished_micros = Some(8);
+        done.refusal = Some("the engine gave its own refusal".to_owned());
+        *site
+            .sweep
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(done);
+
+        drop(TaskFinisher::new(std::sync::Arc::clone(&site)));
+
+        let held = site
+            .sweep
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let progress = held.as_ref().expect("the answer remains visible");
+        assert_eq!(progress.finished_micros, Some(8));
+        assert_eq!(
+            progress.refusal.as_deref(),
+            Some("the engine gave its own refusal")
+        );
+    }
+
+    #[test]
+    fn all_three_browser_engine_tasks_arm_and_disarm_the_same_finisher() {
+        // The three producers share one slot: sweep, descent and command. A
+        // guard on two of them is still one route that can wedge the process,
+        // so pin the production census against the module before its tests.
+        let production = include_str!("sweeprun.rs")
+            .split_once("#[cfg(test)]")
+            .expect("this module has one test boundary")
+            .0;
+        let armed = ["let guard = Task", "Finisher::new"].concat();
+        let disarmed = ["guard.", "finish(done);"].concat();
+        assert_eq!(production.matches(&armed).count(), 3, "one guard per task");
+        assert_eq!(
+            production.matches(&disarmed).count(),
+            3,
+            "every normal exit must disarm its guard"
+        );
+        assert_eq!(
+            production
+                .matches("marker_refusal(emit_attempt_started(&accepted))")
+                .count(),
+            3,
+            "every task must durably bracket its exact attempt before occupying the slot"
+        );
+    }
+
     #[test]
     fn the_progress_json_carries_every_field_and_nulls_what_has_not_happened() {
-        let p = Progress::started("zerodha", "NIFTY", (2019, 12), (2026, 8), Some(200_000), 42);
+        let p = Progress::started(
+            "zerodha",
+            "NIFTY",
+            (2019, 12),
+            (2026, 8),
+            Some(200_000),
+            42,
+            43,
+        );
         let json = p.to_json();
         for fragment in [
             r#""feed":"zerodha""#,
@@ -2425,6 +3058,7 @@ mod tests {
             r#""to_month":8"#,
             r#""support_ppm":200000"#,
             r#""started_micros":42"#,
+            r#""attempt":43"#,
             r#""in_flight":true"#,
             r#""finished_micros":null"#,
             r#""report":null"#,
@@ -2435,8 +3069,56 @@ mod tests {
     }
 
     #[test]
+    fn the_attempt_marker_fits_the_field_ceiling_and_carries_the_whole_question() {
+        let progress = Progress::started("zerodha", "NIFTY", (2019, 12), (2026, 8), None, 42, 43)
+            .of_kind(Kind::Descent);
+        let event = attempt_started_event(&progress);
+        assert_eq!(event.target(), "cli.audit");
+        assert_eq!(event.message(), "sweep attempt started");
+        assert_eq!(event.fields().len(), 8);
+        assert_eq!(event.dropped_fields(), 0);
+        let keys: Vec<&str> = event.fields().iter().map(|(key, _)| *key).collect();
+        assert_eq!(
+            keys,
+            [
+                "attempt",
+                "kind",
+                "feed",
+                "underlying",
+                "from_year",
+                "from_month",
+                "to_year",
+                "to_month"
+            ]
+        );
+    }
+
+    #[test]
+    fn an_engine_task_starts_only_after_its_required_attempt_marker_was_written() {
+        assert_eq!(marker_refusal(telemetry::Emitted::Written), None);
+        for (outcome, phrase) in [
+            (telemetry::Emitted::Filtered, "filtered"),
+            (telemetry::Emitted::Dropped, "could not be written"),
+            (telemetry::Emitted::NotInstalled, "no telemetry sink"),
+        ] {
+            let refusal = marker_refusal(outcome).expect("every missing marker refuses");
+            assert_eq!(
+                refusal.status(),
+                axum::http::StatusCode::SERVICE_UNAVAILABLE
+            );
+            assert!(refusal.why().contains(phrase), "{}", refusal.why());
+            assert!(
+                refusal.why().contains("no engine work was started")
+                    || refusal.why().contains("No engine work was started"),
+                "{}",
+                refusal.why()
+            );
+        }
+    }
+
+    #[test]
     fn a_finished_run_carries_its_report_and_its_stamp() {
-        let mut p = Progress::started("zerodha", "NIFTY", (2020, 1), (2020, 1), Some(50_000), 1);
+        let mut p = Progress::started("zerodha", "NIFTY", (2020, 1), (2020, 1), Some(50_000), 1, 2);
         p.finished_micros = Some(500);
         p.report = Some("STORED_PROVENANCE\nrows".to_owned());
         let json = p.to_json();
@@ -2449,7 +3131,7 @@ mod tests {
 
     #[test]
     fn a_refusal_reaches_the_progress_json_as_a_sentence() {
-        let mut p = Progress::started("zerodha", "NIFTY", (2020, 1), (2020, 1), Some(50_000), 1);
+        let mut p = Progress::started("zerodha", "NIFTY", (2020, 1), (2020, 1), Some(50_000), 1, 2);
         p.refusal = Some("the store held no bars".to_owned());
         assert!(p.to_json().contains("the store held no bars"));
     }
@@ -2539,7 +3221,7 @@ mod tests {
                           feed zerodha · NIFTY · ALL EIGHT INTRADAY RUNGS\n";
 
     fn settled(text: &str) -> Progress {
-        let mut progress = Progress::started("zerodha", "NIFTY", (2019, 12), (2026, 8), None, 1);
+        let mut progress = Progress::started("zerodha", "NIFTY", (2019, 12), (2026, 8), None, 1, 2);
         settle(&mut progress, text.to_owned(), 2);
         progress
     }
@@ -2566,6 +3248,37 @@ mod tests {
              fault that is not there: {:?}",
             progress.refusal
         );
+    }
+
+    #[test]
+    fn completion_audit_never_invents_a_ledger_commit() {
+        let report = settled(REPORT);
+        let reported = completion_audit(&report);
+        assert_eq!(reported.level, telemetry::Level::Info);
+        assert_eq!(reported.outcome, "report");
+        assert_eq!(reported.why, "");
+
+        let refused = settled(REFUSAL);
+        let refusal = completion_audit(&refused);
+        assert_eq!(refusal.level, telemetry::Level::Warn);
+        assert_eq!(refusal.outcome, "refused");
+        assert_eq!(refusal.why, REFUSAL);
+    }
+
+    #[test]
+    fn contradictory_or_missing_completion_state_is_an_error() {
+        let mut both = settled(REPORT);
+        both.refusal = Some(REFUSAL.to_owned());
+        let contradiction = completion_audit(&both);
+        assert_eq!(contradiction.level, telemetry::Level::Error);
+        assert_eq!(contradiction.outcome, "invalid");
+        assert!(contradiction.why.contains("both"));
+
+        let empty = Progress::started("zerodha", "NIFTY", (2026, 1), (2026, 1), None, 1, 2);
+        let missing = completion_audit(&empty);
+        assert_eq!(missing.level, telemetry::Level::Error);
+        assert_eq!(missing.outcome, "invalid");
+        assert!(missing.why.contains("neither"));
     }
 
     #[test]
@@ -2639,13 +3352,19 @@ mod tests {
     }
 
     #[test]
-    fn a_stamped_build_does_not_refuse() {
-        assert!(stamp_refusal(Some("3b8f5af")).is_none());
-        // AND AN EMPTY STAMP IS STILL A STAMP. `option_env!` yields `Some("")`
-        // for `BRUTEX_COMMIT=`, which is a build someone stamped with nothing.
-        // Refusing it here would be this route inventing a rule `cli` does not
-        // have — `cli::commit_stamp` is the authority and it tests presence.
-        assert!(stamp_refusal(Some("")).is_none());
+    fn only_a_canonical_stamped_build_does_not_refuse() {
+        assert!(stamp_refusal(Some("0123456789abcdef0123456789abcdef01234567")).is_none());
+        for invalid in [
+            "",
+            "3b8f5af",
+            "0123456789abcdef0123456789abcdef0123456g",
+            "0123456789ABCDEF0123456789ABCDEF01234567",
+            " 0123456789abcdef0123456789abcdef01234567",
+        ] {
+            let why = stamp_refusal(Some(invalid)).expect("invalid stamp must refuse");
+            assert_eq!(why.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
+            assert!(why.why().contains("canonical"), "{}", why.why());
+        }
     }
 
     #[test]
@@ -2820,7 +3539,7 @@ mod tests {
     fn a_descent_and_a_sweep_are_told_apart_on_the_wire() {
         // `support_ppm` MEANS DIFFERENT THINGS IN THE TWO, so the page cannot
         // read it correctly without being told which it is looking at.
-        let sweep = Progress::started("zerodha", "NIFTY", (2019, 12), (2026, 8), None, 1);
+        let sweep = Progress::started("zerodha", "NIFTY", (2019, 12), (2026, 8), None, 1, 2);
         assert_eq!(sweep.kind, Kind::Sweep, "the default is the older command");
         assert!(sweep.to_json().contains(r#""kind":"sweep""#));
 
@@ -2915,7 +3634,7 @@ mod tests {
             r#""command":"sweep-stored","rung":"15min","min_hits":500"#,
         ))
         .expect("parses");
-        let progress = conduct_command(&asked, 1);
+        let progress = conduct_command(&asked, 1, 2);
         let why = progress.refusal.expect("a multi-month ask must refuse");
         assert!(why.contains("ONE month"), "{why}");
         assert!(progress.report.is_none(), "a refusal is not a report");
@@ -2962,13 +3681,24 @@ mod tests {
     }
 
     #[test]
+    fn every_http_hit_floor_refuses_zero_instead_of_running_at_one() {
+        for word in ["audit-range", "sweep-stored", "sweep-all"] {
+            let extra = format!(r#""command":"{word}","rung":"15min","min_hits":0"#);
+            let why = command_from(&command_body(&extra)).expect_err("zero is not honoured");
+            assert!(why.why().contains("min_hits"), "{}", why.why());
+            assert!(why.why().contains("1 or more"), "{}", why.why());
+            assert!(why.why().contains("not silently changed"), "{}", why.why());
+        }
+    }
+
+    #[test]
     fn a_command_run_is_marked_as_one_on_the_wire() {
         let asked = command_from(&command_body(
             r#""command":"audit-range","rung":"15min","min_hits":500"#,
         ))
         .expect("parses");
         let (from, to) = asked.window();
-        let progress = Progress::started(asked.feed(), asked.underlying(), from, to, None, 1)
+        let progress = Progress::started(asked.feed(), asked.underlying(), from, to, None, 1, 2)
             .of_kind(Kind::Command);
         assert!(progress.to_json().contains(r#""kind":"command""#));
         assert_eq!(Kind::Command.word(), "command");
@@ -2976,7 +3706,7 @@ mod tests {
 
     #[test]
     fn every_refusal_variant_carries_its_sentence() {
-        // `why` matches on all four; a variant added without an arm would not
+        // `why` matches on all five; a variant added without an arm would not
         // compile, and one added to the arm without a sentence would return an
         // empty string here.
         for why in [
@@ -2984,6 +3714,7 @@ mod tests {
             Refusal::Span("s".to_owned()),
             Refusal::Busy("b".to_owned()),
             Refusal::Unstamped("u".to_owned()),
+            Refusal::Unobservable("o".to_owned()),
         ] {
             assert!(!why.why().is_empty(), "{why:?} has no sentence");
         }

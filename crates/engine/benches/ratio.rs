@@ -53,7 +53,7 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use engine::column::Column;
-use engine::{Ladder, support};
+use engine::{Itemset, Ladder, support};
 use vocab::ConditionMask;
 
 /// A ratio above this is a failure. Thousandths, so the comparison is integer.
@@ -119,6 +119,36 @@ fn ratio(label: &str, base_ps: u128, at_ps: u128) -> bool {
         up % 1_000,
         if ok { "ok" } else { "BREACH" },
         if down > up { "(cheaper)" } else { "" },
+    );
+    ok
+}
+
+/// Prints a one-sided per-unit growth measurement.
+///
+/// Unlike [`ratio`], a cheaper larger input is allowed. This is only correct
+/// for a composite operation with fixed work outside the input-sized pass:
+/// `T(n) = a*n + b`, so `T(n)/n = a + b/n` legitimately falls as `n` grows.
+/// The caller must first prove both inputs performed the same non-vacuous
+/// structural work; otherwise an early exit could buy a dishonest pass.
+fn growth_ratio(label: &str, base_ps: u128, at_ps: u128) -> bool {
+    if base_ps == 0 || at_ps == 0 {
+        println!("  {label:<60} UNMEASURABLE — a side timed at zero");
+        return false;
+    }
+    let up = at_ps * 1_000 / base_ps;
+    let ok = up <= CEILING_PERMILLE;
+    println!(
+        "  {label:<60} {:>7} ps/bar -> {:>7} ps/bar   ratio {}.{:03}x  {} {}",
+        base_ps,
+        at_ps,
+        up / 1_000,
+        up % 1_000,
+        if ok { "ok" } else { "BREACH" },
+        if at_ps < base_ps {
+            "(cheaper; fixed work amortised)"
+        } else {
+            ""
+        },
     );
     ok
 }
@@ -195,13 +225,14 @@ fn support_stays_within_its_budget() -> bool {
 
     let bars = column(100_000);
     let floor = floor_ps_per_bar(&bars);
+    let owned = Column::from_rows(&bars);
     println!("  the per-bar floor is {floor} ps — one black-boxed wrapping_add per bar");
     let mut ok = true;
     for k in [1usize, DRAWN_FROM.len()] {
         ok &= budget(
             &format!("C-E-05 support at k={k}"),
             floor,
-            support_ps_per_bar(&bars, &candidate(k)),
+            support_ps_per_bar(&owned, &candidate(k)),
             ALLOWED,
         );
     }
@@ -234,6 +265,11 @@ fn column(n: usize) -> Vec<ConditionMask> {
         .collect()
 }
 
+/// The owned column the live ladder evaluates.
+fn owned_column(n: usize) -> Column {
+    Column::from_rows(&column(n))
+}
+
 /// A column where every bar carries every drawn position, so any candidate drawn
 /// from them matches every bar.
 fn column_all_set(n: usize) -> Vec<ConditionMask> {
@@ -253,10 +289,10 @@ fn candidate(k: usize) -> ConditionMask {
     m
 }
 
-/// Cost per bar, in picoseconds, of counting `mask`'s support over `bars`.
-fn support_ps_per_bar(bars: &[ConditionMask], mask: &ConditionMask) -> u128 {
-    let n = u128::try_from(bars.len()).unwrap_or(1).max(1);
-    once_ps(|| support(black_box(bars), black_box(mask))) / n
+/// Cost per bar, in picoseconds, of the support method the live ladder calls.
+fn support_ps_per_bar(column: &Column, mask: &ConditionMask) -> u128 {
+    let n = u128::from(column.bars()).max(1);
+    once_ps(|| column.support(black_box(mask))) / n
 }
 
 /// C-E-01 — the per-bar cost of support counting does not grow with the column.
@@ -271,14 +307,14 @@ fn support_costs_the_same_per_bar_at_every_column_length() -> bool {
     let Some(first) = sizes.next() else {
         refuse("COLUMNS is empty, so there is no baseline")
     };
-    let base = support_ps_per_bar(&column(*first), &mask);
+    let base = support_ps_per_bar(&owned_column(*first), &mask);
 
     let mut ok = true;
     for n in sizes {
         ok &= ratio(
             &format!("C-E-01 support: {first} bars -> {n} bars"),
             base,
-            support_ps_per_bar(&column(*n), &mask),
+            support_ps_per_bar(&owned_column(*n), &mask),
         );
     }
     ok
@@ -292,58 +328,45 @@ fn support_costs_the_same_per_bar_at_every_column_length() -> bool {
 /// operations whatever the popcount. If this drifted, the absent parameter would
 /// be a performance defect rather than a design decision.
 fn support_costs_the_same_per_bar_at_every_depth() -> bool {
-    let bars = column(100_000);
-    let base = support_ps_per_bar(&bars, &candidate(1));
+    let column = owned_column(100_000);
+    let base = support_ps_per_bar(&column, &candidate(1));
 
     let mut ok = true;
     for k in [4, DRAWN_FROM.len()] {
         ok &= ratio(
             &format!("C-E-02 support: a k=1 candidate -> a k={k} candidate"),
             base,
-            support_ps_per_bar(&bars, &candidate(k)),
+            support_ps_per_bar(&column, &candidate(k)),
         );
     }
     ok
 }
 
-/// A set of `n` distinct masks, filled the way a level's `seen` set is.
-///
-/// Distinct by construction — the low bits of `i` are spread across the six
-/// words, so no two entries collide and the set really holds `n`.
-fn seen_of(n: usize) -> std::collections::HashSet<ConditionMask> {
+/// `n` distinct offered positions, pre-sized as production k=1 pre-sizes them.
+fn offered_of(n: usize) -> std::collections::HashSet<u32> {
     let mut set = std::collections::HashSet::with_capacity(n);
-    for i in 0..n {
-        let mut m = ConditionMask::ZERO;
-        let raw = u32::try_from(i).unwrap_or(0);
-        for w in 0..6_u32 {
-            if (raw >> w) & 1 == 1 {
-                m = m.with_bit(w * 64 + (raw % 61));
-            }
-        }
-        m = m.with_bit(raw % 383);
-        set.insert(m);
+    let end = u32::try_from(n).unwrap_or(u32::MAX);
+    for position in 0..end {
+        set.insert(position);
     }
     set
 }
 
-/// C-E-10 — duplicate rejection costs the same however much has been seen.
+/// C-E-10 — k=1 duplicate rejection costs the same however much was offered.
 ///
 /// # Why this row exists beside C-E-04
 ///
-/// `CLAUDE.md` §3 rule 4 names duplicate rejection among the five operations
-/// that must be constant. `C-03` in `docs/04-invariants.md` covers it today and
-/// **says in its own row that it does not**: "the seen-set size is not varied
-/// independently, so this row proves dedup does not make a walk superlinear, and
-/// does NOT isolate a probe's own cost."
+/// `CLAUDE.md` §3 rule 4 names duplicate rejection among the five operations.
+/// Production performs it only at k=1: `offered` is a pre-sized `HashSet<u32>`
+/// and `insert` returning false rejects a repeated position. At k≥2 the prefix
+/// join is injective and there is no candidate-dedup table to benchmark.
 ///
-/// That is an honest narrowing and it leaves the operation unmeasured. A
-/// `HashSet` probe is O(1) amortised, but a rehash at an exact load factor is
-/// how `docs/06-limits.md` records a 2.4 ms stall at 50,000 entries — the defect
-/// gate 11 rule 3 was written for. Folding the probe into a whole-ladder walk
-/// hides exactly that.
-///
-/// So this varies the SEEN SET and nothing else: 1,000 / 10,000 / 100,000
-/// masks, one `contains` against each, hit and miss.
+/// So this varies that exact production-shaped table and nothing else: 1,000 /
+/// 10,000 / 100,000 already accepted positions, followed by repeated insertion
+/// of position zero. Pre-sizing matters: timing an unsized mask set, or a miss
+/// that grows it past its declared input width, would measure an implementation
+/// the live path does not use. The result is expected/amortised hash-table
+/// evidence, not an adversarial worst-case guarantee.
 fn duplicate_rejection_costs_the_same_however_much_is_seen() -> bool {
     // `once_ps` times ONE call and a hash probe is nanoseconds, so the repeats
     // go INSIDE and the total is divided by them. Same shape as C-E-11 below.
@@ -354,49 +377,34 @@ fn duplicate_rejection_costs_the_same_however_much_is_seen() -> bool {
     // refuses the spelling for that reason, and it is denied workspace-wide.
     const REPS: usize = 20_000;
 
-    let small = seen_of(1_000);
-    let medium = seen_of(10_000);
-    let large = seen_of(100_000);
+    let mut small = offered_of(1_000);
+    let mut medium = offered_of(10_000);
+    let mut large = offered_of(100_000);
 
-    // A mask that IS in every set, and one that is in none.
-    let present = candidate(1);
-    let absent = ConditionMask::ZERO.with_bit(380);
-    let probe = |set: &std::collections::HashSet<ConditionMask>, m: &ConditionMask| -> u128 {
+    let probe = |set: &mut std::collections::HashSet<u32>| -> u128 {
         let total = once_ps(|| {
-            let mut found = 0_usize;
+            let mut rejected = 0_usize;
             for _ in 0..REPS {
-                if black_box(set).contains(black_box(m)) {
-                    found = found.saturating_add(1);
+                if !black_box(&mut *set).insert(black_box(0)) {
+                    rejected = rejected.saturating_add(1);
                 }
             }
-            black_box(found)
+            black_box(rejected)
         });
         total / u128::try_from(REPS).unwrap_or(1).max(1)
     };
 
     let mut ok = true;
-    let hit = probe(&small, &present);
+    let base = probe(&mut small);
     ok &= ratio(
-        "C-E-10 dedup HIT: 1,000 -> 10,000 seen",
-        hit,
-        probe(&medium, &present),
+        "C-E-10 k=1 duplicate: 1,000 -> 10,000 offered",
+        base,
+        probe(&mut medium),
     );
     ok &= ratio(
-        "C-E-10 dedup HIT: 1,000 -> 100,000 seen",
-        hit,
-        probe(&large, &present),
-    );
-
-    let miss = probe(&small, &absent);
-    ok &= ratio(
-        "C-E-10 dedup MISS: 1,000 -> 10,000 seen",
-        miss,
-        probe(&medium, &absent),
-    );
-    ok &= ratio(
-        "C-E-10 dedup MISS: 1,000 -> 100,000 seen",
-        miss,
-        probe(&large, &absent),
+        "C-E-10 k=1 duplicate: 1,000 -> 100,000 offered",
+        base,
+        probe(&mut large),
     );
     ok
 }
@@ -405,28 +413,26 @@ fn duplicate_rejection_costs_the_same_however_much_is_seen() -> bool {
 ///
 /// # Why this row exists
 ///
-/// The fifth operation rule 4 names. `C-04` is marked **UNMEASURED** in
-/// `docs/04-invariants.md` — "the engine appends to a `Vec`, whose amortised
-/// push is O(1) by construction rather than by measurement here, and no bench
-/// varies the results-held count independently".
+/// The fifth operation rule 4 names. Production k=1 reserves the offered width;
+/// at k≥2 `out` reserves the previous survivor count capped by the candidate
+/// ceiling. This row measures the part that reservation actually makes flat:
+/// pushes that fit in already allocated storage, using the exact `Itemset`
+/// element type production retains.
 ///
-/// By construction is a real argument and it is not a measurement. `Vec::push`
-/// is amortised O(1) only if the growth is geometric and the element is `Copy`
-/// or cheap to move; an `Itemset` is 56 bytes, and a doubling reallocation at
-/// 100,000 results moves 5.6 MB. That is the cost this row bounds.
-///
-/// Measured as a BATCH divided by its own length rather than one push in
-/// isolation: a single push either hits a reallocation or does not, and timing
-/// one of each would measure the allocator's mood. Pushing `n` and dividing by
-/// `n` is the amortised figure the claim is actually about.
+/// The vector is allocated before the timer and cleared between trials. That
+/// keeps allocator behavior out of an append measurement and matches a live
+/// level after its pre-sizing step. It does **not** prove an individual push is
+/// worst-case O(1) after an expanding level outgrows the heuristic; that path
+/// retains `Vec`'s amortised O(1) growth bound and may move all held elements.
 fn result_append_costs_the_same_however_many_are_held() -> bool {
-    let one = candidate(3);
+    let one = Itemset {
+        mask: candidate(3),
+        hits: 1,
+    };
     let per_push = |n: usize| -> u128 {
+        let mut out: Vec<Itemset> = Vec::with_capacity(n);
         let total = once_ps(|| {
-            // Deliberately NOT `with_capacity`: reserving up front would measure
-            // a Vec that never grows, which is not what the sweep does --
-            // `next_level` builds `out` with `Vec::new`.
-            let mut out: Vec<ConditionMask> = Vec::new();
+            out.clear();
             for _ in 0..n {
                 out.push(black_box(one));
             }
@@ -498,54 +504,22 @@ fn one_join_pair_costs_the_same_at_every_frontier_width() -> bool {
     )
 }
 
-/// C-E-09 — the transposed layout costs a CONSTANT per bitmap read, and a
-/// candidate reads exactly `k` of them.
+/// C-E-09 — the live support path is flat across the mask's entire width.
 ///
-/// # The claim C-E-02 makes, and why it is false of the live function
-///
-/// `C-E-02` asserts the per-bar cost is flat from k=1 to k=8, and
-/// `docs/04-invariants.md` says §6's absent depth parameter depends on that row:
-/// if a deep combination cost more per bar, the ladder's total work would be
-/// quadratic in depth. It measures the free `support`, which is branchless over
-/// six words whatever `k` is — so flat, and it reads 1.128×.
-///
-/// **Since 7461f57 the sweep does not call that function.** `Column::support`
-/// ANDs one bitmap per named position, so its per-bar cost is `O(k)` by
-/// construction, and an audit measured it at **7.307×** from k=1 to k=8 against
-/// the same 3.0× ceiling. Reporting that as a breach would be wrong — the growth
-/// is the design, not a defect. Reporting nothing would leave the invariant
-/// evidenced by a function with no production caller.
-///
-/// So this row measures the quantity that IS constant: cost per bar **per named
-/// position**. A candidate naming `k` positions reads `k` bitmaps, so the total
-/// grows linearly in `k` and the unit cost does not. That is the honest form of
-/// the claim, and it is still what §6 needs: linear in depth is affordable, and
-/// the row above it would not have caught a drift to quadratic.
-///
-/// The transposed layout remains far cheaper in absolute terms at every `k`
-/// tested — `C-E-06` measures that separately — because it reads `k · bars/64`
-/// words where row-major reads `6 · bars`.
-fn transposed_support_costs_a_constant_per_bitmap_read() -> bool {
-    let bars = column(100_000);
-    let vertical = Column::transpose(&bars);
-    let n = u128::try_from(bars.len()).unwrap_or(1).max(1);
-
-    let per_position = |k: usize| -> u128 {
-        let cand = candidate(k);
-        let width = u128::try_from(k).unwrap_or(1).max(1);
-        once_ps(|| black_box(vertical.support(black_box(&cand)))) / n / width
-    };
-
-    let base = per_position(1);
-    let mut ok = true;
-    for k in [4, DRAWN_FROM.len()] {
-        ok &= ratio(
-            &format!("C-E-09 Column::support per bitmap: k=1 -> k={k}"),
-            base,
-            per_position(k),
-        );
-    }
-    ok
+/// C-E-02 follows the deepest ordinary fixture from k=1 to k=8. A defect keyed
+/// above that range could pass it while production is free to reach deeper levels.
+/// This row drives the other endpoint: every one of the mask's 384 positions is
+/// required. `Column::support` must still perform one six-word `hits` operation per
+/// bar, never one operation per required position.
+fn live_support_is_flat_across_the_entire_mask_width() -> bool {
+    let column = owned_column(100_000);
+    let one = candidate(1);
+    let every = ConditionMask::from_words([u64::MAX; 6]);
+    ratio(
+        "C-E-09 Column::support: k=1 -> k=384",
+        support_ps_per_bar(&column, &one),
+        support_ps_per_bar(&column, &every),
+    )
 }
 
 /// C-E-03 — the per-bar cost does not depend on the answer.
@@ -558,14 +532,14 @@ fn transposed_support_costs_a_constant_per_bitmap_read() -> bool {
 fn support_costs_the_same_whether_bars_match_or_not() -> bool {
     let n = 100_000;
     let mask = candidate(DRAWN_FROM.len());
-    let all = column_all_set(n);
-    let none = vec![ConditionMask::ZERO; n];
+    let all = Column::from_rows(&column_all_set(n));
+    let none = Column::from_rows(&vec![ConditionMask::ZERO; n]);
 
     // Confirm the two columns really are the two extremes, or the row measures
     // nothing: a "no match" column that happened to match would make the ratio
     // meaningless while still printing a number.
-    let hits_all = support(&all, &mask);
-    let hits_none = support(&none, &mask);
+    let hits_all = all.support(&mask);
+    let hits_none = none.support(&mask);
     let want = u64::try_from(n).unwrap_or(u64::MAX);
     if hits_all != want || hits_none != 0 {
         refuse(&format!(
@@ -585,27 +559,18 @@ fn support_costs_the_same_whether_bars_match_or_not() -> bool {
     )
 }
 
-/// C-E-07 — the cost of the support the SWEEP ACTUALLY CALLS does not depend on
-/// the answer.
+/// C-E-07 — the fingerprinted support path does not depend on the answer.
 ///
 /// # Why C-E-03 was not enough, and was measuring nothing
 ///
-/// `C-E-03` above asserts answer-independence of the free `support` function.
-/// Since 7461f57 wired the transposed layout into `Ladder::walk`, **the sweep does
-/// not call that function** — every support count in a real run goes through
-/// `Column::support`. So the row that guards the property was measuring dead code,
-/// and an adversarial audit measured the live function at **6.384x** against this
-/// same 3.0x ceiling while `C-E-03` printed 1.000x.
-///
-/// The cause was a `break` when the accumulator reached zero: a candidate that
-/// missed early cost less than one that matched, so the sweep's runtime tracked
-/// the market rather than the bar count. It is removed, and this row is what
-/// stops it coming back.
-fn transposed_support_costs_the_same_whether_bars_match_or_not() -> bool {
+/// C-E-03 now measures the exact `Column::support` method the sweep calls. This
+/// separate row retains coverage for `support_fingerprinted`, whose 64-bar packing
+/// and two folds must likewise process every bar and every packed word.
+fn fingerprinted_support_costs_the_same_whether_bars_match_or_not() -> bool {
     let n = 100_000;
     let mask = candidate(DRAWN_FROM.len());
-    let all = Column::transpose(&column_all_set(n));
-    let none = Column::transpose(&vec![ConditionMask::ZERO; n]);
+    let all = Column::from_rows(&column_all_set(n));
+    let none = Column::from_rows(&vec![ConditionMask::ZERO; n]);
 
     // Both extremes, confirmed, or the row prints a number that means nothing.
     let hits_all = all.support(&mask);
@@ -613,22 +578,22 @@ fn transposed_support_costs_the_same_whether_bars_match_or_not() -> bool {
     let want = u64::try_from(n).unwrap_or(u64::MAX);
     if hits_all != want || hits_none != 0 {
         refuse(&format!(
-            "the transposed columns are not the extremes they must be: \
+            "the owned columns are not the extremes they must be: \
              {hits_all} of {n} and {hits_none} of {n}"
         ));
     }
     let per_bar = |c: &Column| -> u128 {
         let bars = u128::try_from(n).unwrap_or(1).max(1);
-        once_ps(|| black_box(c.support(black_box(&mask)))) / bars
+        once_ps(|| black_box(c.support_fingerprinted(black_box(&mask)))) / bars
     };
     ratio(
-        "C-E-07 Column::support: every bar matches -> no bar matches",
+        "C-E-07 Column::support_fingerprinted: every bar -> none",
         per_bar(&all),
         per_bar(&none),
     )
 }
 
-/// C-E-04 — a whole ladder walk costs the same per bar at every column length.
+/// C-E-04 — a whole ladder walk's per-bar cost does not grow with column length.
 ///
 /// The end-to-end row. `Ladder::walk` generates candidates, prunes subsets,
 /// rejects duplicates and counts support, and the per-bar factor across all of
@@ -636,10 +601,11 @@ fn transposed_support_costs_the_same_whether_bars_match_or_not() -> bool {
 /// million bars, and a constant that drifts turns a linear pass into a
 /// superlinear one.
 ///
-/// The O(|frontier|²) level join is NOT what this measures and is not claimed to
-/// be constant — the live set is held fixed across the two columns so the
-/// frontier shape is identical and only the bar count varies.
-fn a_ladder_walk_costs_the_same_per_bar_at_every_column_length() -> bool {
+/// The O(|frontier|²) level join is NOT claimed to be constant. With the live
+/// set and frontier shape fixed it is a fixed cost in this comparison, so it is
+/// expected to amortise and make the larger column cheaper per bar. The gate is
+/// consequently one-sided: growth fails; improvement does not.
+fn a_ladder_walk_does_not_get_dearer_per_bar() -> bool {
     let live: Vec<u32> = DRAWN_FROM.to_vec();
 
     let walk_ps_per_bar = |n: usize| -> u128 {
@@ -648,19 +614,46 @@ fn a_ladder_walk_costs_the_same_per_bar_at_every_column_length() -> bool {
         once_ps(|| Ladder::with_min_hits(1).walk(black_box(&bars), black_box(&live))) / count
     };
 
-    // Reported once so a reader can see the walk did real work rather than
-    // returning an empty sweep, which would be fast and meaningless.
-    let probe = Ladder::with_min_hits(1).walk(&column(10_000), &live);
-    if probe.depth() == 0 {
-        refuse("the ladder reached no depth, so there is nothing to measure");
+    // Prove BOTH timed shapes do the same non-vacuous structural work before
+    // permitting the larger input to be cheaper. Hits may scale with the bar
+    // count; the masks, depth, completion and per-level accounting may not.
+    let small_probe = Ladder::with_min_hits(1).walk(&column(10_000), &live);
+    let large_probe = Ladder::with_min_hits(1).walk(&column(100_000), &live);
+    if small_probe.depth() == 0 || large_probe.depth() == 0 {
+        refuse("one ladder reached no depth, so there is nothing comparable to measure");
+    }
+    if !small_probe.completed() || !large_probe.completed() {
+        refuse("one ladder halted, so the two timed walks do not prove an extinction cost");
+    }
+    if small_probe.levels.len() != large_probe.levels.len()
+        || small_probe
+            .levels
+            .iter()
+            .zip(&large_probe.levels)
+            .any(|(small, large)| {
+                small.k != large.k
+                    || small.generated != large.generated
+                    || small.duplicates != large.duplicates
+                    || small.excluded != large.excluded
+                    || small.pruned != large.pruned
+                    || small.infrequent != large.infrequent
+                    || small.frequent.len() != large.frequent.len()
+                    || small
+                        .frequent
+                        .iter()
+                        .zip(&large.frequent)
+                        .any(|(a, b)| a.mask != b.mask)
+            })
+    {
+        refuse("the 10,000- and 100,000-bar walks produced different frontier topology");
     }
     println!(
         "  {:<60} depth {}, {} frequent set(s)",
         "C-E-04 what the walk actually found (context)",
-        probe.depth(),
-        probe.all_frequent().count()
+        small_probe.depth(),
+        small_probe.all_frequent().count()
     );
-    for level in &probe.levels {
+    for level in small_probe.levels.iter().chain(&large_probe.levels) {
         if !level.reconciles() {
             refuse(&format!(
                 "the frontier at k={} does not reconcile, so the walk is not sound \
@@ -674,64 +667,41 @@ fn a_ladder_walk_costs_the_same_per_bar_at_every_column_length() -> bool {
     // eight live positions takes minutes, and gate 8 runs on every push. The
     // 10,000 -> 100,000 step is a 10x change, which is enough to see a drifting
     // constant. Stated rather than implied, per §3 rule 6.
-    ratio(
+    growth_ratio(
         "C-E-04 walk: 10,000 bars -> 100,000 bars",
         walk_ps_per_bar(10_000),
         walk_ps_per_bar(100_000),
     )
 }
 
-/// C-E-06 — the transposed column costs a fraction of the row-major walk.
+/// C-E-06 — the owned live path costs the same class as its fixed-width reference.
 ///
-/// Not a ratio between two inputs to one operation, like every row above, but a ratio
-/// between two LAYOUTS answering the same question. That makes it the one row here that
-/// can catch a broken transpose by cost rather than by answer: `column::tests` already
-/// proves the two agree, and this proves the second one is worth having.
-///
-/// Measured on an arm64 laptop, release, `lto = "fat"`, 1,222,791 bars:
-///
-///     k=1  row-major 928 ps/bar  bitmaps  9.6 ps/bar   96.9x
-///     k=2            906         bitmaps 18.1          50.0x
-///     k=4            911         bitmaps 45.4          20.1x
-///     k=8            891         bitmaps 74.5          12.0x
-///
-/// The row-major cost is flat in k -- that is what C-E-02 measures -- while the bitmap
-/// cost grows with k, because k bitmaps must be combined. They would meet somewhere past
-/// k=90, which no frontier reaches, so the transpose wins at every depth that runs.
-///
-/// The floor is FOUR, not twelve. The measured worst case in range is 12x at k=8 and the
-/// budget leaves 3x for a different microarchitecture -- a gate that fails on a slower
-/// runner is a gate that gets ignored. What it refuses is the case that matters: a
-/// transpose that has quietly become a full-column walk again.
-fn the_transposed_column_beats_the_row_major_walk() -> bool {
-    /// The smallest speedup accepted at any k tested.
-    const FLOOR: u128 = 4;
-
+/// Both functions perform one six-word hit test per bar and return the same count;
+/// the owned wrapper exists for reuse across threshold probes, not to add another
+/// candidate-dependent pass. This comparison catches uniform wrapper overhead that
+/// the k-ratios would divide away, while C-E-05 remains the absolute floor budget.
+fn live_column_costs_like_the_fixed_width_reference() -> bool {
     let bars = column(100_000);
-    let vertical = engine::column::Column::transpose(&bars);
+    let column = Column::from_rows(&bars);
+    let n = u128::try_from(bars.len()).unwrap_or(1).max(1);
     let mut ok = true;
-    for k in [1_usize, 4, DRAWN_FROM.len()] {
-        let cand = candidate(k);
-        // Same answer, first. A faster wrong number is not a measurement.
-        let row = support(&bars, &cand);
-        let bmp = vertical.support(&cand);
-        if row != bmp {
-            println!("  C-E-06 k={k:<2} LAYOUTS DISAGREE — row-major {row}, bitmaps {bmp}");
-            ok = false;
-            continue;
+    for k in [1_usize, DRAWN_FROM.len()] {
+        let candidate = candidate(k);
+        let reference_hits = support(&bars, &candidate);
+        let live_hits = column.support(&candidate);
+        if reference_hits != live_hits {
+            refuse(&format!(
+                "C-E-06 support counts disagree at k={k}: reference {reference_hits}, \
+                 live {live_hits}"
+            ));
         }
-        let row_ps = once_ps(|| black_box(support(black_box(&bars), black_box(&cand))));
-        let bmp_ps = once_ps(|| black_box(vertical.support(black_box(&cand))));
-        let times = row_ps.checked_div(bmp_ps).unwrap_or(u128::MAX);
-        let good = times >= FLOOR;
-        println!(
-            "  {:<58} {:>8} ps -> {:>8} ps   {times}x faster, floor {FLOOR}   {}",
-            format!("C-E-06 support at k={k}: row-major -> bitmaps"),
-            row_ps,
-            bmp_ps,
-            if good { "ok" } else { "TOO SLOW" }
+        let reference = once_ps(|| support(black_box(&bars), black_box(&candidate))) / n;
+        let live = support_ps_per_bar(&column, &candidate);
+        ok &= ratio(
+            &format!("C-E-06 fixed-width reference -> live column at k={k}"),
+            reference,
+            live,
         );
-        ok &= good;
     }
     ok
 }
@@ -745,16 +715,16 @@ fn main() {
     );
     let mut ok = true;
     ok &= support_stays_within_its_budget();
-    ok &= the_transposed_column_beats_the_row_major_walk();
+    ok &= live_column_costs_like_the_fixed_width_reference();
     ok &= support_costs_the_same_per_bar_at_every_column_length();
     ok &= support_costs_the_same_per_bar_at_every_depth();
     ok &= support_costs_the_same_whether_bars_match_or_not();
-    ok &= transposed_support_costs_the_same_whether_bars_match_or_not();
+    ok &= fingerprinted_support_costs_the_same_whether_bars_match_or_not();
     ok &= one_join_pair_costs_the_same_at_every_frontier_width();
     ok &= duplicate_rejection_costs_the_same_however_much_is_seen();
     ok &= result_append_costs_the_same_however_many_are_held();
-    ok &= transposed_support_costs_a_constant_per_bitmap_read();
-    ok &= a_ladder_walk_costs_the_same_per_bar_at_every_column_length();
+    ok &= live_support_is_flat_across_the_entire_mask_width();
+    ok &= a_ladder_walk_does_not_get_dearer_per_bar();
     if ok {
         println!("all ratios within the ceiling");
     } else {

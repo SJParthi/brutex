@@ -2,7 +2,8 @@
 //!
 //! # The problem this exists to make affordable
 //!
-//! A time-based exit is decided once: `min(horizon, 15:10)`. A stop-loss or a
+//! A time-based exit is decided once: the exact horizon, or a proved earlier
+//! session square-off. A stop-loss or a
 //! target is **path-dependent** — you must ask, at every bar between entry and
 //! exit, whether a level was touched. Doing that once per candidate level turns
 //! the exit grid into a multiplier on the whole search.
@@ -678,6 +679,37 @@ pub fn crossings(
     side: Side,
     ladders: Ladders<'_>,
 ) -> Crossings {
+    crossings_with(bars, from, to, entry, side, ladders, None)
+}
+
+/// [`crossings`], gated by the execution evaluator's exact per-index verdict.
+///
+/// This is the engine path. The public compatibility function remains useful
+/// for standalone excursion arithmetic, but can see only `Candle::check`'s
+/// record-local refusals. A run/grid must use this form so duplicate timestamps
+/// and accumulator overflows cannot move a peak or fire an order.
+#[must_use]
+pub(crate) fn crossings_checked(
+    bars: &[Candle],
+    from: usize,
+    to: usize,
+    entry: i64,
+    side: Side,
+    ladders: Ladders<'_>,
+    accepted: &[bool],
+) -> Crossings {
+    crossings_with(bars, from, to, entry, side, ladders, Some(accepted))
+}
+
+fn crossings_with(
+    bars: &[Candle],
+    from: usize,
+    to: usize,
+    entry: i64,
+    side: Side,
+    ladders: Ladders<'_>,
+    accepted: Option<&[bool]>,
+) -> Crossings {
     let Ladders {
         stops,
         targets,
@@ -719,18 +751,23 @@ pub fn crossings(
     let mut armed_cursor: Vec<usize> = vec![0; targets.len()];
 
     for offset in 0..=to.saturating_sub(from) {
-        let Some(bar) = bars.get(from.saturating_add(offset)) else {
+        let index = from.saturating_add(offset);
+        let Some(bar) = bars.get(index) else {
             break;
         };
         // A BAR THE ENGINE REFUSED MAY NOT MOVE A RUNNING MAXIMUM.
         //
-        // `Candle::check` is the same predicate `indicators::column::Column::build`
-        // applies, so a record refused there is refused here. Counted rather than
-        // silently skipped: `crate::grid` reads the count and drops the whole
-        // candidate, because a hole in the middle of a path leaves every maximum
-        // after it wrong. See the `refused` field for what one such bar did to a
-        // real audit -- 3,210 paisa to 499,089, and a different exit recommended.
-        if bar.check().is_err() {
+        // The checked engine path supplies the exact `Evaluator::step` bitmap,
+        // including timestamp and accumulator state that `Candle::check` cannot
+        // see. The local check remains only for the public geometry helper that
+        // has no column. Counted rather than silently skipped: `crate::grid`
+        // reads the count and drops the whole candidate, because a hole in the
+        // middle of a path leaves every maximum after it wrong. See the
+        // `refused` field for what one such bar did to a real audit -- 3,210
+        // paisa to 499,089, and a different exit recommended.
+        if accepted.is_some_and(|verdict| !verdict.get(index).copied().unwrap_or(false))
+            || bar.check().is_err()
+        {
             out.refused = out.refused.saturating_add(1);
             continue;
         }
@@ -1071,7 +1108,7 @@ fn ppm_of(move_paisa: i64, entry: i64) -> Ppm {
     reason = "the exception every test module in this workspace takes."
 )]
 mod tests {
-    use super::{Ladder, Ladders, NEVER, Ppm, Side, crossings};
+    use super::{Ladder, Ladders, NEVER, Ppm, Side, crossings, crossings_checked};
     use indicators::{Candle, OI_NULL};
 
     fn bar(minute: i64, low: i64, high: i64) -> Candle {
@@ -1088,6 +1125,38 @@ mod tests {
 
     fn ladder(rungs: &[Ppm]) -> Ladder {
         Ladder::new(rungs.to_vec()).expect("an ascending ladder")
+    }
+
+    /// A statefully refused interior bar cannot move MAE/MFE, raise a trailing
+    /// peak, or fire any order in either direction.
+    #[test]
+    fn rejected_membership_blocks_every_interior_crossing_and_peak() {
+        let bars = [bar(0, 997, 1_003), bar(1, 100, 5_000), bar(2, 997, 1_003)];
+        let stops = ladder(&[10_000]);
+        let targets = ladder(&[10_000]);
+        let trails = ladder(&[10_000]);
+        let ladders = Ladders {
+            stops: &stops,
+            targets: &targets,
+            trails: &trails,
+        };
+        let accepted = [true, false, true];
+
+        for side in [Side::Long, Side::Short] {
+            let unchecked = crossings(&bars, 0, 2, 1_000, side, ladders);
+            assert_eq!(unchecked.stop_at(0), 1, "the poison reaches the stop");
+            assert_eq!(unchecked.target_at(0), 1, "the poison reaches the target");
+
+            let checked = crossings_checked(&bars, 0, 2, 1_000, side, ladders, &accepted);
+            assert_eq!(checked.refused(), 1);
+            assert_eq!(checked.stop_at(0), NEVER);
+            assert_eq!(checked.target_at(0), NEVER);
+            assert_eq!(checked.trail_at(0), NEVER);
+            assert_eq!(checked.trail_peak_at(0), None);
+            assert!(checked.ambiguous().is_empty());
+            assert!(checked.trail_ambiguous().is_empty());
+            assert_eq!(checked.last(), 2, "the accepted suffix is still walked");
+        }
     }
 
     /// NO RUNG SITS ON THE MAXIMUM, AND DEPTH BUYS TIGHTNESS.

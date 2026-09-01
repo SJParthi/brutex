@@ -20,16 +20,19 @@
 //!
 //! | Operation | Cost | How |
 //! |---|---|---|
-//! | append | **O(1)** | seek to end, one write of one stride |
+//! | append | **O(delta + 1) local work** | absorb `delta` records appended by other writers, then seek/write one stride and update one expected-O(1) hash entry |
 //! | read record *i* | **O(1)** | seek to `HEADER + i·STRIDE`, one read |
 //! | count | **O(1)** | `(file_len - HEADER) / STRIDE`, no walk |
-//! | duplicate check | **O(1)** amortised | a `HashSet` of identities, built once at open |
+//! | duplicate check | **expected O(1)** | a `HashMap` of identities, built once at open and caught up under the append lock |
 //!
-//! The duplicate check is the only one that is not O(1) *outright*, and the cost
-//! is stated rather than hidden: building the set is one pass over the file at
-//! open. That pass is O(runs), runs is a few thousand after years of operating,
-//! and it happens once per process — never per bar, never per candidate, so it
-//! is not on the path §3 rule 4 governs.
+//! Building the identity map is one O(runs) pass over the file at open. An
+//! append then takes the exclusive file lock and catches that map up with every
+//! complete record another writer added since this handle last scanned; that
+//! delta can be nonzero and makes the call O(delta + 1), not unconditionally
+//! O(1). The common single-writer path has delta zero. None of this is per bar
+//! or per candidate, so it is not on the path §3 rule 4 governs. Lock waiting,
+//! seek/write and `sync_all` latency are filesystem costs and have no worst-case
+//! O(1) latency claim.
 //!
 //! # Append-only, because §3 rule 8 says so
 //!
@@ -672,6 +675,18 @@ fn write_fresh_header(file: &mut File, path: &Path) -> Result<(), Refusal> {
     Ok(())
 }
 
+fn enforce_read_limit(path: &Path, len: u64, max_bytes: Option<u64>) -> Result<(), Refusal> {
+    if let Some(max_bytes) = max_bytes
+        && len > max_bytes
+    {
+        return Err(format!(
+            "{} is {len} bytes; this bounded results reader accepts at most {max_bytes}. No header or record was read and no partial identity index was built",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
 impl Results {
     /// Opens the results file beneath `root` for READING, and creates nothing.
     ///
@@ -690,7 +705,21 @@ impl Results {
     /// An absent file, named as an absence rather than as a failure, plus every
     /// refusal [`Self::open`] makes about a file that exists.
     pub fn open_read(root: &Path) -> Result<Self, Refusal> {
-        Self::open_with(root, false)
+        Self::open_with(root, false, None)
+    }
+
+    /// Opens for reading only when the ledger fits an explicit byte ceiling.
+    ///
+    /// The measurement is made on the opened handle before the header or any
+    /// record is read.  A caller therefore cannot accidentally build a full
+    /// identity index after a stale path-level metadata preflight.
+    ///
+    /// # Errors
+    ///
+    /// Every refusal from [`Self::open_read`], plus a file larger than
+    /// `max_bytes`.  An over-limit file is not partially indexed.
+    pub fn open_read_bounded(root: &Path, max_bytes: u64) -> Result<Self, Refusal> {
+        Self::open_with(root, false, Some(max_bytes))
     }
 
     /// Opens, or creates, the results file beneath `root`.
@@ -701,7 +730,7 @@ impl Results {
     /// version this build does not know. Each refuses rather than being
     /// repaired: a file that is not this one must not be appended to.
     pub fn open(root: &Path) -> Result<Self, Refusal> {
-        Self::open_with(root, true)
+        Self::open_with(root, true, None)
     }
 
     /// Both openers, because the header, version and scan logic is one hundred
@@ -710,7 +739,7 @@ impl Results {
     /// three places the two genuinely differ: whether the directory is made,
     /// whether the file may be created, and whether an empty file is given a
     /// fresh header or reported as the absence it is.
-    fn open_with(root: &Path, writable: bool) -> Result<Self, Refusal> {
+    fn open_with(root: &Path, writable: bool, max_bytes: Option<u64>) -> Result<Self, Refusal> {
         let dir = root.join("results");
         if writable {
             std::fs::create_dir_all(&dir)
@@ -739,6 +768,7 @@ impl Results {
             .metadata()
             .map_err(|why| format!("the results file could not be measured: {why}"))?
             .len();
+        enforce_read_limit(&path, len, max_bytes)?;
         // The branch YIELDS the version rather than setting a mutable above it:
         // a fresh file is the version this build writes, and an existing one is
         // whatever its header says. Every read below is scoped to that answer.
@@ -841,9 +871,11 @@ impl Results {
         };
         let stride = stride_of(version);
 
-        // ONE PASS, ONCE, AT OPEN. Stated rather than hidden: this is O(runs)
-        // and every other operation on this type is O(1). It is not on the
-        // per-bar or per-candidate path §3 rule 4 governs.
+        // ONE PASS AT OPEN. Stated rather than hidden: this is O(runs). Append
+        // may later perform O(delta) catch-up for records written by another
+        // process; direct reads, counts and already-built index probes do not
+        // scan the ledger. None is on the per-bar or per-candidate path §3 rule
+        // 4 governs.
         //
         // AND IT IS PRE-SIZED, because the count is known before the loop runs.
         // `docs/07-o1-architecture.md` law 2: growth is the ONLY source of O(n)
@@ -934,6 +966,19 @@ impl Results {
         self.seen.contains_key(identity)
     }
 
+    /// The zero-based append-only row index for one identity. **O(1).**
+    ///
+    /// Kept crate-private because public readers need the sealed [`Record`],
+    /// not an address on its own. The result-set commit boundary needs both:
+    /// after an exact rerun re-verifies an existing row, its audit event must
+    /// name the same stable ledger index as a newly appended row.
+    #[must_use]
+    pub(crate) fn index_of_identity(&self, identity: &[u8; 32]) -> Option<u64> {
+        let at = self.seen.get(identity)?;
+        let stride = self.stride();
+        (stride != 0).then(|| at.saturating_sub(HEADER) / stride)
+    }
+
     /// The run with this identity: one hash probe, then one read.
     ///
     /// # This was not expressible, and the offset it needs was already held
@@ -967,21 +1012,27 @@ impl Results {
         let Some(&at) = self.seen.get(identity) else {
             return Ok(None);
         };
-        // THE ORDINAL IS DERIVED FROM THE OFFSET, so this reuses `read` and its
-        // shared lock rather than opening a second path to the same bytes. A
-        // second reader would be a second place for the seal check to drift.
-        let stride = self.stride();
-        if stride == 0 {
+        let Some(index) = self.index_of_identity(identity) else {
             return Err(format!(
                 "the ledger reports a stride of zero, so byte {at} names no \
                  record. This is a header this build cannot address."
             ));
-        }
-        let index = at.saturating_sub(HEADER) / stride;
+        };
+        // THE ORDINAL IS DERIVED FROM THE OFFSET by the same accessor the
+        // commit audit uses, so a report and an event cannot disagree about
+        // which append-only row one identity names. `read` remains the only
+        // path that decodes and checks the seal.
         self.read(index).map(Some)
     }
 
-    /// Appends one run. **O(1)** — a seek to the end and one write.
+    /// Appends one run with O(delta + 1) local work.
+    ///
+    /// `delta` is the number of complete records another cooperating writer
+    /// appended since this handle last scanned. Under the exclusive lock those
+    /// records are read into the identity map before the duplicate check; the
+    /// common single-writer path has `delta == 0`. The final record has fixed
+    /// width, but lock waiting, seek/write and `sync_all` latency are not given
+    /// a worst-case O(1) bound.
     ///
     /// # Errors
     ///
@@ -990,10 +1041,10 @@ impl Results {
     /// run has nothing to add, and overwriting would destroy the first one's
     /// timestamp for no gain.
     ///
-    /// **UNVERIFIED as a measurement.** The bound is argued from the
-    /// shape of the code and no bench in this workspace times it.
-    /// `CLAUDE.md` §3 rule 6: a structural argument is not a
-    /// measurement, however sound it is.
+    /// **UNVERIFIED as a measurement.** The O(delta + 1) shape is argued from
+    /// the code and no bench in this workspace times either the catch-up or the
+    /// filesystem latency. `CLAUDE.md` §3 rule 6: a structural argument is not
+    /// a measurement, however sound it is.
     pub fn append(&mut self, record: &Record) -> Result<u64, Refusal> {
         // AN EXCLUSIVE FILE LOCK, BECAUSE A PROCESS MUTEX GUARDS THE WRONG
         // BOUNDARY.
@@ -1057,6 +1108,31 @@ impl Results {
         }
     }
 
+    /// Repeats the durability barrier for an already-present record.
+    ///
+    /// This is the recovery half of the result-set commit protocol. A process
+    /// can be killed after the complete ledger bytes reach the file but before
+    /// its original `sync_all` returns. An exact rerun reads and verifies that
+    /// row, then calls this barrier before treating the prior append as a
+    /// committed success. No byte is rewritten.
+    pub(crate) fn confirm_durable(&mut self) -> Result<(), Refusal> {
+        self.file
+            .lock()
+            .map_err(|why| format!("the results file could not be locked: {why}"))?;
+        let synced = self
+            .file
+            .sync_all()
+            .map_err(|why| format!("the existing results row could not be flushed to disk: {why}"));
+        let released = self
+            .file
+            .unlock()
+            .map_err(|why| format!("the results file could not be unlocked: {why}"));
+        match (synced, released) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(why), _) | (Ok(()), Err(why)) => Err(why),
+        }
+    }
+
     /// [`Results::append`] with the file lock already held.
     ///
     /// Split out so the lock is released on every path this can leave by,
@@ -1087,17 +1163,13 @@ impl Results {
             // durability it never delivered -- the bytes sat in the page cache
             // and the call reported success.
             //
-            // That is not a cosmetic difference here, because it INVERTS THE ONE
-            // ORDERING THIS MODULE'S CALLER DEPENDS ON. The write order is
-            // ledger, then frontier, then trades, and the reason is stated at the
-            // call site: "a detail row whose run has no ledger row is an orphan.
-            // Writing the ledger first makes that unreachable rather than merely
-            // unlikely." But `frontier.rs` ends its append with `sync_all` and
-            // `trades.rs` with `sync_data`, so BOTH detail files were durable and
-            // the parent they hang off was not. On a power loss the two children
-            // survive and the ledger row does not -- which is precisely the
-            // orphan the ordering exists to make unreachable, arriving by the one
-            // route the ordering cannot see.
+            // That was not cosmetic. At the time, the caller wrote ledger,
+            // frontier, trades, and depended on the first write being durable
+            // before either child. `flush` made the opposite survive a power
+            // loss. D-0404 later reversed the protocol: both detail blocks are
+            // synced first and this ledger row is now the final commit marker.
+            // The barrier remains load-bearing -- a visible marker whose bytes
+            // are not durable can disappear after its already-durable children.
             //
             // THE SYNC IS **NOT** CHAINED HERE, AND CHAINING IT DESTROYED DATA.
             //
@@ -1377,6 +1449,21 @@ mod tests {
                 > 0,
             "open writes the header open_read refused to"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn bounded_read_refuses_before_indexing_an_over_limit_ledger() {
+        let root = root("bounded-read");
+        drop(Results::open(&root).expect("valid ledger header"));
+        let measured = std::fs::metadata(Results::path(&root))
+            .expect("ledger metadata")
+            .len();
+        let why = Results::open_read_bounded(&root, measured.saturating_sub(1))
+            .expect_err("a valid but over-limit ledger refuses");
+        assert!(why.contains(&format!("is {measured} bytes")), "{why}");
+        assert!(why.contains("No header or record was read"), "{why}");
+        assert!(why.contains("no partial identity index"), "{why}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2180,13 +2267,12 @@ mod tests {
     ///
     /// # What it cost
     ///
-    /// The write order is ledger, then frontier, then trades, so that a detail
-    /// row whose run has no ledger row is unreachable rather than merely
-    /// unlikely. `frontier.rs` ends its append with `sync_all` and `trades.rs`
-    /// with `sync_data`, so both detail files were durable and the parent they
-    /// hang off was not -- inverting that ordering at the only layer it could not
-    /// see, and making the orphan reachable again by the one route it does not
-    /// check.
+    /// The write order at the time was ledger, frontier, trades, so both detail
+    /// files could survive while a merely-flushed parent vanished. D-0404 now
+    /// prepares and syncs both details plus their fixed-stride count receipt,
+    /// then appends this row last as the commit marker. The same barrier is
+    /// still required: a marker that can disappear after success is not a
+    /// durable commit.
     ///
     /// A grep and not a brace count: a literal `flush()` inside a string or a
     /// doc comment is text, so only code lines are read -- the lesson several
@@ -2210,12 +2296,11 @@ mod tests {
 
         let syncs = code.iter().filter(|l| l.contains(".sync_all()")).count();
         assert_eq!(
-            syncs, 2,
-            "exactly two durability barriers are expected: one in \
-             `append_locked`, after the record is written and before the offset \
-             is returned, and one after the fresh header is read back. A third \
-             would be per-record work nobody asked for; a first would mean one \
-             of the two was dropped."
+            syncs, 3,
+            "exactly three durability barriers are expected: one in \
+             `append_locked`, one after the fresh header is read back, and one \
+             in `confirm_durable` for recovery of a complete prior write whose \
+             original barrier did not return success."
         );
 
         // AND THE HEADER'S BARRIER COMES AFTER ITS READ-BACK, which is the order

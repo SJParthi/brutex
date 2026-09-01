@@ -93,6 +93,8 @@ vocab = { path = "../vocab", version = "0.1.0" }
 
 axum   = { workspace = true }
 tokio  = { workspace = true }
+serde  = { workspace = true }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

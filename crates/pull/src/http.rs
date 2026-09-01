@@ -2392,7 +2392,9 @@ impl HttpSource {
         if crate::capture::kept(feed, method) >= crate::capture::PER_SLOT {
             return;
         }
-        let Ok(root) = crate::folder::root() else {
+        let Some(root) =
+            crate::capture::root_or_refused(feed, method.word(), crate::folder::root())
+        else {
             return;
         };
         drop(crate::capture::record(&root, feed, method, url, body));
@@ -2739,7 +2741,8 @@ impl HttpSource {
         if crate::capture::unread_kept(feed) >= crate::capture::PER_SLOT {
             return;
         }
-        let Ok(root) = crate::folder::root() else {
+        let Some(root) = crate::capture::root_or_refused(feed, "unreadable", crate::folder::root())
+        else {
             return;
         };
         drop(crate::capture::record_unreadable(

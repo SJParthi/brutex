@@ -55,6 +55,8 @@ pub mod catalog;
 pub mod census;
 pub mod constituents;
 pub mod coverage;
+/// The shared blocking-work, concurrency and byte/row/page bounds for result details.
+pub mod detail;
 pub mod folder;
 /// EVERY TRADE ONE RUN TOOK -- the file that turns seventy-six padlocks
 /// into figures. `runs.bin` records totals; this records the round trips

@@ -104,10 +104,98 @@
 //! the file before the row was written, which is precisely the defect the gate
 //! converts from unfalsifiable to falsifiable and no further.
 
+use std::sync::Arc;
 use vocab::ConditionMask;
 
-use crate::evaluator::Evaluator;
+use crate::anchored::{AnchoredEvaluator, DailyReferenceCensus};
+use crate::evaluator::{EVALUATION_SPEC_V1_LEN, EvaluationSpec, Evaluator};
 use crate::{Candle, Corrupt};
+
+/// Byte length of [`EvaluationSpecFingerprintV1`].
+///
+/// Fixed across machines: integers are explicitly little-endian and the
+/// calendar length is encoded as `u64`, never as platform-width `usize`.
+pub const EVALUATION_SPEC_FINGERPRINT_V1_LEN: usize = EVALUATION_SPEC_V1_LEN;
+
+/// Collision-free canonical V1 fingerprint of one evaluator configuration.
+///
+/// This is deliberately the complete fixed-width record, not a compressed
+/// hash.  A downstream run-identity owner can hash [`Self::as_bytes`] with the
+/// identity algorithm it already owns, while `indicators` keeps its one-arrow
+/// crate graph and cannot introduce a competing digest implementation.  The
+/// bytes include both tolerance values and bases, VWAP availability, every
+/// pattern threshold, and the calendar's exact length and eight day slots.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct EvaluationSpecFingerprintV1([u8; EVALUATION_SPEC_FINGERPRINT_V1_LEN]);
+
+impl EvaluationSpecFingerprintV1 {
+    /// Borrow the complete canonical record for a durable run identity.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; EVALUATION_SPEC_FINGERPRINT_V1_LEN] {
+        &self.0
+    }
+
+    /// Consume the wrapper and return the complete canonical record.
+    #[must_use]
+    pub const fn into_bytes(self) -> [u8; EVALUATION_SPEC_FINGERPRINT_V1_LEN] {
+        self.0
+    }
+}
+
+/// Opaque identity of the evaluator choices that produced a [`Column`].
+///
+/// The inner value is deliberately private: another crate may compare two
+/// tokens, but it cannot manufacture one or edit a single evaluator choice and
+/// call the result the same policy. [`Self::fingerprint_v1`] is the sole durable
+/// read door and exposes the complete canonical record without exposing a
+/// constructor or any independently-editable field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EvaluationSpecToken(EvaluationSpec);
+
+impl EvaluationSpecToken {
+    /// Canonical V1 identity of every evaluator choice sealed by this token.
+    #[must_use]
+    pub fn fingerprint_v1(self) -> EvaluationSpecFingerprintV1 {
+        EvaluationSpecFingerprintV1(self.0.canonical_v1_bytes())
+    }
+}
+
+/// The two evaluation paths expose one commit-on-success column operation.
+///
+/// Regular evaluation reads warmth before `step`.  Anchored evaluation must
+/// first install every daily record strictly before this bar, so its method
+/// returns the warmth observed at that exact boundary alongside the mask.
+trait ColumnEvaluation {
+    fn step_with_warmth(&mut self, bar: &Candle) -> Result<(ConditionMask, bool), Corrupt>;
+
+    fn replay_spec(&self) -> Option<EvaluationSpec>;
+}
+
+impl ColumnEvaluation for Evaluator {
+    fn step_with_warmth(&mut self, bar: &Candle) -> Result<(ConditionMask, bool), Corrupt> {
+        let warm = self.warmed_up();
+        self.step(bar).map(|mask| (mask, warm))
+    }
+
+    fn replay_spec(&self) -> Option<EvaluationSpec> {
+        Some(self.spec())
+    }
+}
+
+impl ColumnEvaluation for AnchoredEvaluator<'_> {
+    fn step_with_warmth(&mut self, bar: &Candle) -> Result<(ConditionMask, bool), Corrupt> {
+        AnchoredEvaluator::step_with_warmth(self, bar)
+    }
+
+    fn replay_spec(&self) -> Option<EvaluationSpec> {
+        // The stored masks are never replayed: reprojection copies them byte for
+        // byte.  The only replay is the execution slice's corruption/acceptance
+        // bitmap, and daily anchors cannot change that verdict.  Keeping the
+        // ordinary four choices lets a strict anchored column move onto exact
+        // one-minute fills without inventing or rebuilding a daily context.
+        Some(self.acceptance_spec())
+    }
+}
 
 /// Where every offered bar went.
 ///
@@ -193,6 +281,38 @@ impl Census {
     }
 }
 
+/// Replay one evaluator configuration over an execution slice and retain only
+/// whether each offered record was accepted.
+///
+/// This deliberately calls [`Evaluator::step`] rather than spelling any
+/// `Corrupt` predicate here. Timestamp ordering and VWAP accumulator overflow
+/// are stateful; a second predicate assembled from `Candle::check` could never
+/// agree with them. The complete mask is discarded, but the verdict and census
+/// are the evaluator's own.
+fn acceptance_of(bars: &[Candle], evaluator: &mut Evaluator) -> (Vec<bool>, Census) {
+    let mut accepted = Vec::with_capacity(bars.len());
+    let mut census = Census::default();
+    for bar in bars {
+        census.offered = census.offered.saturating_add(1);
+        let warm = evaluator.warmed_up();
+        match evaluator.step(bar) {
+            Ok(_) => {
+                accepted.push(true);
+                if warm {
+                    census.swept = census.swept.saturating_add(1);
+                } else {
+                    census.warming = census.warming.saturating_add(1);
+                }
+            }
+            Err(corrupt) => {
+                accepted.push(false);
+                census.charge(corrupt);
+            }
+        }
+    }
+    (accepted, census)
+}
+
 /// One [`ConditionMask`] per swept bar, in the order the bars arrived.
 ///
 /// This is the exact input `engine::Ladder::walk` takes as `bar_bits`.
@@ -213,6 +333,25 @@ pub struct Column {
     sourced: Sourced,
     census: Census,
     first_swept: Option<usize>,
+    /// One verdict per bar of the slice this column CURRENTLY indexes.
+    ///
+    /// Unlike `source`, this includes cold bars and refused bars. A successful
+    /// [`Evaluator::step`] writes `true`; every `Corrupt` arm writes `false`.
+    /// Execution code therefore asks the evaluator's exact verdict in O(1)
+    /// instead of repeating the four bar-local checks and missing the two
+    /// stateful refusals.
+    accepted: Arc<[bool]>,
+    /// Where every execution-slice bar went under the pass that produced
+    /// `accepted`. This equals `census` on a native column and deliberately
+    /// differs after checked reprojection: `census` describes signal bars,
+    /// while this one describes the one-minute execution bars.
+    acceptance_census: Census,
+    /// The caller choices needed to run the same evaluator configuration from
+    /// empty state over a different execution slice.
+    spec: Option<EvaluationSpec>,
+    /// False only for the length-only compatibility reprojection, which cannot
+    /// possibly decide stateful acceptance without seeing the target bars.
+    acceptance_known: bool,
     /// Signals [`Column::reproject`] refused because an EARLIER signal already
     /// owns the execution bar they resolved to. Always zero on a column that has
     /// not been reprojected -- a signal series cannot collide with itself.
@@ -223,6 +362,97 @@ pub struct Column {
     /// facts behind one number, and the caller prints that number with the first
     /// one's wording.
     collided: u64,
+}
+
+/// A signal column built through the causal sealed-daily reference path.
+///
+/// This wrapper keeps the daily join's census beside the ordinary signal-bar
+/// census, so a caller cannot persist one and accidentally omit the other.  The
+/// inner [`Column`] remains the exact shape `engine` consumes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AnchoredColumn {
+    column: Column,
+    references: DailyReferenceCensus,
+}
+
+/// A strict anchored column was asked to admit signal bars with no prior
+/// eligible daily reference.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MissingDailyReference {
+    /// Successfully evaluated signal bars that lacked the reference.
+    pub signal_bars: u64,
+    /// Distinct signal days represented by those bars.
+    pub signal_days: u64,
+}
+
+impl AnchoredColumn {
+    /// Fold `bars` through an [`AnchoredEvaluator`].
+    ///
+    /// Signal bars are still streamed once in timestamp order.  Daily-reference
+    /// movement happens inside the evaluator before each mask and is included in
+    /// [`Self::reference_census`].
+    #[must_use]
+    pub fn build(bars: &[Candle], evaluator: &mut AnchoredEvaluator<'_>) -> Self {
+        let column = Column::build_from(bars, evaluator);
+        Self {
+            column,
+            references: evaluator.reference_census(),
+        }
+    }
+
+    /// Build and refuse the whole column if any accepted signal bar had no
+    /// eligible sealed daily record strictly before its IST day.
+    ///
+    /// This is the shipping admission door.  [`Self::build`] remains useful for
+    /// diagnostics because it returns the masks and the explicit missing-data
+    /// census, but a sweep that requires daily context should use this method so
+    /// an unanchored first day can never reach `engine`.
+    ///
+    /// # Errors
+    ///
+    /// [`MissingDailyReference`] names both affected bars and distinct days.
+    pub fn build_required(
+        bars: &[Candle],
+        evaluator: &mut AnchoredEvaluator<'_>,
+    ) -> Result<Self, MissingDailyReference> {
+        let mut next = *evaluator;
+        let built = Self::build(bars, &mut next).require_daily_reference()?;
+        *evaluator = next;
+        Ok(built)
+    }
+
+    /// Apply strict daily-reference admission to an already diagnostic build.
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::build_required`].
+    pub fn require_daily_reference(self) -> Result<Self, MissingDailyReference> {
+        if self.references.signal_bars_without_reference == 0 {
+            return Ok(self);
+        }
+        Err(MissingDailyReference {
+            signal_bars: self.references.signal_bars_without_reference,
+            signal_days: self.references.signal_days_without_reference,
+        })
+    }
+
+    /// The exact mask/source column the sweep consumes.
+    #[must_use]
+    pub const fn column(&self) -> &Column {
+        &self.column
+    }
+
+    /// Consume the wrapper after its reference census has been persisted.
+    #[must_use]
+    pub fn into_column(self) -> Column {
+        self.column
+    }
+
+    /// Deterministic causal-join accounting.
+    #[must_use]
+    pub const fn reference_census(&self) -> DailyReferenceCensus {
+        self.references
+    }
 }
 
 /// What [`Column::sources`] indexes — and it is TWO different things.
@@ -285,23 +515,24 @@ impl Column {
     /// by row `C-I-06` of `crates/indicators/benches/ratio.rs`.
     #[must_use]
     pub fn build(bars: &[Candle], evaluator: &mut Evaluator) -> Self {
+        Self::build_from(bars, evaluator)
+    }
+
+    /// Shared forward fold for regular and stored-daily-anchored evaluators.
+    fn build_from<E: ColumnEvaluation>(bars: &[Candle], evaluator: &mut E) -> Self {
+        let spec = evaluator.replay_spec();
         let mut bits = Vec::with_capacity(bars.len());
         let mut census = Census::default();
         let mut first_swept = None;
         let mut source: Vec<usize> = Vec::with_capacity(bars.len());
+        let mut accepted: Vec<bool> = Vec::with_capacity(bars.len());
 
         for (index, bar) in bars.iter().enumerate() {
             census.offered = census.offered.saturating_add(1);
 
-            // The verdict for the state BEFORE this bar folds. On 375-bar
-            // sessions this drops one genuinely warm bar per run; on any session
-            // shorter than the 200-candle trend seed it is the only reading that
-            // does not sweep a bar whose EMA200 could not answer. The module doc
-            // carries the measurement and the correction it replaced.
-            let warm = evaluator.warmed_up();
-
-            match evaluator.step(bar) {
-                Ok(mask) => {
+            match evaluator.step_with_warmth(bar) {
+                Ok((mask, warm)) => {
+                    accepted.push(true);
                     if warm {
                         if first_swept.is_none() {
                             first_swept = Some(index);
@@ -315,7 +546,10 @@ impl Column {
                 }
                 // `step` commits on success only, so a refused bar leaves the
                 // evaluator exactly as the previous bar left it.
-                Err(corrupt) => census.charge(corrupt),
+                Err(corrupt) => {
+                    accepted.push(false);
+                    census.charge(corrupt);
+                }
             }
         }
 
@@ -328,11 +562,51 @@ impl Column {
             sourced: Sourced::Signal,
             census,
             first_swept,
+            accepted: accepted.into(),
+            acceptance_census: census,
+            spec,
+            acceptance_known: true,
             // A SIGNAL SERIES CANNOT COLLIDE WITH ITSELF: every bar is its own
             // source, so no two rows can name one index. Only reprojection can
             // put two signals on one execution bar.
             collided: 0,
         }
+    }
+
+    /// Fallibly duplicates this exact column without rebuilding evaluator
+    /// state or silently accepting an allocation abort.
+    ///
+    /// Both owned vectors reserve their complete final capacity before any
+    /// element is copied. The accepted-bar bitmap is already immutable shared
+    /// storage, so duplicating its [`Arc`] does not allocate or change bytes.
+    /// Every remaining field is copied exactly.
+    ///
+    /// # Errors
+    ///
+    /// Returns the allocator's [`std::collections::TryReserveError`] if either
+    /// owned vector cannot reserve its full final capacity. No partial column
+    /// escapes.
+    pub fn try_clone_exact(&self) -> Result<Self, std::collections::TryReserveError> {
+        let mut bits = Vec::new();
+        bits.try_reserve_exact(self.bits.len())?;
+        bits.extend_from_slice(&self.bits);
+
+        let mut source = Vec::new();
+        source.try_reserve_exact(self.source.len())?;
+        source.extend_from_slice(&self.source);
+
+        Ok(Self {
+            bits,
+            source,
+            sourced: self.sourced,
+            census: self.census,
+            first_swept: self.first_swept,
+            accepted: Arc::clone(&self.accepted),
+            acceptance_census: self.acceptance_census,
+            spec: self.spec,
+            acceptance_known: self.acceptance_known,
+            collided: self.collided,
+        })
     }
 
     /// The caller-slice index of each swept bar, parallel to [`Self::bits`].
@@ -391,6 +665,32 @@ impl Column {
         }
     }
 
+    /// Replace only `GapFib` positions 132..=142 in every row.
+    ///
+    /// The replacement is parallel to this column, already aligned by the
+    /// causal exact-minute bridge in [`crate::anchored`].  Clearing before the
+    /// union is load-bearing: an anchored coarse evaluator still folds every
+    /// other signal-local family, but none of its locally-derived `GapFib` bits
+    /// may survive into a stored run.
+    pub(crate) fn replace_gapfib(&mut self, exact: &[ConditionMask]) -> bool {
+        if exact.len() != self.bits.len() {
+            return false;
+        }
+        for (mask, evidence) in self.bits.iter_mut().zip(exact.iter()) {
+            let mut without_local = *mask;
+            let mut only_exact = ConditionMask::ZERO;
+            for position in crate::gap::GapFib::positions() {
+                let position = u32::from(position);
+                without_local = without_local.without_bit(position);
+                if evidence.get(position) {
+                    only_exact = only_exact.with_bit(position);
+                }
+            }
+            *mask = without_local.union(&only_exact);
+        }
+        true
+    }
+
     /// The same conditions, re-indexed onto a DIFFERENT bar series.
     ///
     /// # Why a column has to be able to move series at all
@@ -433,6 +733,14 @@ impl Column {
     /// projection that quietly shortened the column would make a smaller sample
     /// read like a whole one, which is the `CLAUDE.md` §4 fallback.
     ///
+    /// # Stateful execution-bar acceptance
+    ///
+    /// This length-only compatibility door cannot inspect the target slice.
+    /// Its projected column therefore carries `acceptance_known == false` and
+    /// every execution-price lookup refuses. It is safe but deliberately not
+    /// useful for trading. Shipping callers must use [`Self::reproject_checked`],
+    /// which sees the target bars and runs the same evaluator verdict over them.
+    ///
     /// # Errors
     ///
     /// `None` when `onto` is not parallel to this column. That is a caller bug
@@ -446,6 +754,43 @@ impl Column {
     /// operations and this is not one of them.
     #[must_use]
     pub fn reproject(&self, onto: &[Option<usize>], onto_len: usize) -> Option<(Self, u64)> {
+        self.reproject_with(onto, onto_len, Vec::new(), Census::default(), false)
+    }
+
+    /// Re-index this signal column onto `execution` and evaluate every target
+    /// bar under the same caller choices from fresh state.
+    ///
+    /// The masks are copied from the signal series unchanged. Only the
+    /// execution-acceptance bitmap is recomputed, because a coarse signal
+    /// evaluator says nothing about whether a one-minute fill, exit, or
+    /// interior path bar was refused. The fresh pass calls [`Evaluator::step`]
+    /// once per execution bar and stores one bool; every later lookup is one
+    /// bounds-checked read.
+    ///
+    /// `None` when `onto` is not parallel to this column or this column has no
+    /// evaluator specification (only [`Column::default`] has none).
+    #[must_use]
+    pub fn reproject_checked(
+        &self,
+        onto: &[Option<usize>],
+        execution: &[Candle],
+    ) -> Option<(Self, u64)> {
+        let mut evaluator = self.spec?.fresh();
+        let (accepted, census) = acceptance_of(execution, &mut evaluator);
+        self.reproject_with(onto, execution.len(), accepted, census, true)
+    }
+
+    /// The projection itself, parameterised by the independently-produced
+    /// execution verdict so the mapping loop never learns how to validate a
+    /// candle.
+    fn reproject_with(
+        &self,
+        onto: &[Option<usize>],
+        onto_len: usize,
+        accepted: Vec<bool>,
+        acceptance_census: Census,
+        acceptance_known: bool,
+    ) -> Option<(Self, u64)> {
         if onto.len() != self.bits.len() {
             return None;
         }
@@ -520,11 +865,64 @@ impl Column {
                 sourced: Sourced::Fill,
                 census,
                 first_swept,
+                accepted: accepted.into(),
+                acceptance_census,
+                spec: self.spec,
+                acceptance_known,
                 collided,
             },
             dropped,
         ))
     }
+
+    /// Did the evaluator accept execution-slice bar `index`?
+    ///
+    /// `false` for an out-of-range index and for a column produced through the
+    /// length-only compatibility projection. This is the O(1) price/path gate;
+    /// no caller re-runs `Candle::check`, timestamp logic, or VWAP arithmetic.
+    #[must_use]
+    pub fn accepts(&self, index: usize) -> bool {
+        self.acceptance_known && self.accepted.get(index).copied().unwrap_or(false)
+    }
+
+    /// Is there exactly one acceptance verdict per bar in a slice of `len`?
+    #[must_use]
+    pub fn acceptance_covers(&self, len: usize) -> bool {
+        self.acceptance_known && self.accepted.len() == len
+    }
+
+    /// The one shared acceptance bitmap, or `None` when target bars were never
+    /// supplied to the compatibility projection.
+    ///
+    /// Cloning the return value increments an [`Arc`] counter; it does not copy
+    /// the bitmap. `runner::trade::SliceFacts` uses that to carry this exact
+    /// evaluator verdict through every candidate and grid cell without a
+    /// second per-bar allocation.
+    #[must_use]
+    pub fn acceptance(&self) -> Option<Arc<[bool]>> {
+        self.acceptance_known.then(|| Arc::clone(&self.accepted))
+    }
+
+    /// Opaque evaluator-policy identity, or `None` only for a default/legacy
+    /// column that was not built by an evaluator.
+    #[must_use]
+    pub const fn evaluation_spec_token(&self) -> Option<EvaluationSpecToken> {
+        match self.spec {
+            Some(spec) => Some(EvaluationSpecToken(spec)),
+            None => None,
+        }
+    }
+
+    /// Where every bar in the slice this column CURRENTLY indexes went.
+    ///
+    /// On a native column this equals [`Self::census`]. After checked
+    /// reprojection it is the fresh one-minute execution pass, while `census`
+    /// remains the signal-series accounting.
+    #[must_use]
+    pub const fn acceptance_census(&self) -> Census {
+        self.acceptance_census
+    }
+
     /// The column, as `engine::Ladder::walk` wants it.
     #[must_use]
     pub fn bits(&self) -> &[ConditionMask] {
@@ -657,6 +1055,51 @@ pub(super) mod tests {
     /// A run long enough that the column is non-empty.
     fn warm_run() -> Vec<Candle> {
         run(WARM_SESSIONS)
+    }
+
+    #[test]
+    fn fallible_exact_clone_preserves_every_column_field() {
+        let column = Column::build(&warm_run(), &mut evaluator(Availability::Absent));
+        let cloned = column
+            .try_clone_exact()
+            .expect("fixture column allocation fits");
+        assert_eq!(cloned, column);
+    }
+
+    #[test]
+    fn evaluator_spec_fingerprint_is_read_only_and_durable_through_the_token() {
+        let absent = Column::build(&[], &mut evaluator(Availability::Absent));
+        let same = Column::build(&[], &mut evaluator(Availability::Absent));
+        let present = Column::build(&[], &mut evaluator(Availability::Present));
+
+        let absent_fingerprint = absent
+            .evaluation_spec_token()
+            .expect("an evaluator-built column seals its choices")
+            .fingerprint_v1();
+        let same_fingerprint = same
+            .evaluation_spec_token()
+            .expect("an equivalent evaluator seals its choices")
+            .fingerprint_v1();
+        let present_fingerprint = present
+            .evaluation_spec_token()
+            .expect("the changed evaluator seals its choices")
+            .fingerprint_v1();
+
+        assert_eq!(absent_fingerprint, same_fingerprint);
+        assert_ne!(absent_fingerprint, present_fingerprint);
+        assert_eq!(
+            absent_fingerprint.as_bytes().len(),
+            EVALUATION_SPEC_FINGERPRINT_V1_LEN
+        );
+        assert_eq!(
+            absent_fingerprint.into_bytes(),
+            *same_fingerprint.as_bytes(),
+            "borrowing and consuming expose the same complete record"
+        );
+        assert!(
+            Column::default().evaluation_spec_token().is_none(),
+            "a legacy/default column must not invent an evaluator identity"
+        );
     }
 
     /// `sources()` is the only honest map from a column position to a bar.
@@ -870,6 +1313,43 @@ pub(super) mod tests {
             still_firing > 0,
             "no row after the boundary carries a bit, so the test window is dead too and \
              `clear_before` cannot be distinguished from zeroing the whole column"
+        );
+    }
+
+    #[test]
+    fn exact_gap_replacement_clears_every_local_gap_bit_and_no_other_family() {
+        let mut column = Column::build(&warm_run(), &mut evaluator(Availability::Absent));
+        assert!(!column.bits.is_empty(), "the fixture must warm a column");
+        let original = column.clone();
+        assert!(
+            !column.replace_gapfib(&[]),
+            "a non-parallel overlay must be refused"
+        );
+        assert_eq!(
+            column, original,
+            "a refused overlay must not mutate the column"
+        );
+
+        let first = column.bits.first_mut().expect("a warmed row exists");
+        *first = first.with_bit(3);
+        for position in crate::gap::GapFib::positions() {
+            *first = first.with_bit(u32::from(position));
+        }
+        let mut exact = vec![ConditionMask::ZERO; column.bits.len()];
+        let first_exact = exact.first_mut().expect("the parallel row exists");
+        *first_exact = first_exact.with_bit(142);
+        assert!(column.replace_gapfib(&exact));
+        let replaced = *column.bits.first().expect("the replaced row exists");
+        assert!(replaced.get(3), "an unrelated signal-local bit was erased");
+        for position in 132_u32..=141 {
+            assert!(
+                !replaced.get(position),
+                "local GapFib position {position} survived the replacement"
+            );
+        }
+        assert!(
+            replaced.get(142),
+            "the exact-minute overlay bit was not copied"
         );
     }
 
@@ -1159,6 +1639,76 @@ pub(super) mod tests {
         assert_eq!(census.accumulator_too_large, 1);
         assert_eq!(census.refused(), 1);
         assert!(census.reconciles());
+    }
+
+    /// The execution gate is the evaluator's verdict, including the two
+    /// sequence-dependent refusals that `Candle::check` cannot see.
+    #[test]
+    fn acceptance_bitmap_records_a_duplicate_timestamp_in_constant_time_shape() {
+        let mut bars = warm_run();
+        let victim = bars.len().saturating_sub(20);
+        let previous = bars
+            .get(victim.saturating_sub(1))
+            .copied()
+            .expect("the warm fixture has a predecessor");
+        if let Some(bar) = bars.get_mut(victim) {
+            bar.ts_micros = previous.ts_micros;
+        }
+        assert!(
+            bars.get(victim).is_some_and(|bar| bar.check().is_ok()),
+            "one record alone cannot see timestamp ordering"
+        );
+
+        let column = Column::build(&bars, &mut evaluator(Availability::Absent));
+        assert!(column.acceptance_covers(bars.len()));
+        assert!(!column.accepts(victim));
+        assert!(column.accepts(victim.saturating_sub(1)));
+        assert!(column.accepts(victim.saturating_add(1)));
+        assert_eq!(column.acceptance_census().timestamp_not_increasing, 1);
+        assert!(column.acceptance_census().reconciles());
+    }
+
+    /// Checked reprojection runs the source column's same evaluator choices
+    /// afresh over the execution slice; it does not infer acceptance from the
+    /// copied signal rows.
+    #[test]
+    fn checked_reprojection_records_execution_accumulator_refusal() {
+        let signal = Column::build(&warm_run(), &mut evaluator(Availability::Present));
+        let ordinary = bar(20, 0);
+        let huge = Candle::new(
+            ordinary.ts_micros.saturating_add(MINUTE_MICROS),
+            5_000_000_000_000_000_000,
+            5_000_000_000_000_000_000,
+            5_000_000_000_000_000_000,
+            5_000_000_000_000_000_000,
+            1,
+            OI_NULL,
+        );
+        assert!(
+            huge.check().is_ok(),
+            "the refusal is stateful VWAP arithmetic"
+        );
+        let execution = [ordinary, huge, bar(20, 2)];
+        let onto: Vec<Option<usize>> = signal.bits().iter().map(|_| Some(0)).collect();
+        let (checked, _) = signal
+            .reproject_checked(&onto, &execution)
+            .expect("the mapping is parallel to the signal column");
+
+        assert!(checked.acceptance_covers(execution.len()));
+        assert!(checked.accepts(0));
+        assert!(!checked.accepts(1));
+        assert!(checked.accepts(2));
+        assert_eq!(checked.acceptance_census().accumulator_too_large, 1);
+        assert!(checked.acceptance_census().reconciles());
+
+        let (unchecked, _) = signal
+            .reproject(&onto, execution.len())
+            .expect("the compatibility mapping remains parallel");
+        assert!(
+            !unchecked.acceptance_covers(execution.len()) && !unchecked.accepts(0),
+            "a length-only projection must refuse every execution lookup rather \
+             than silently pretending local checks cover stateful corruption"
+        );
     }
 
     #[test]

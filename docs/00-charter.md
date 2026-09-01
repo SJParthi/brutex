@@ -83,14 +83,34 @@ Sources are Indian exchange publications and the vendor documentation cited in
   — 375 bars each, confirmed in the lake. This is the complete set: 1 February
   fell on a weekend in no other year from 2020 to date. Supersedes an earlier
   claim of 2021-01-30 and 2021-02-01; see D-0014. |
+| 2021-02-24 NSE outage | NSE halted all segments from **11:40 IST**, ran a
+  15-minute pre-open from **15:30**, resumed normal trading at **15:45**, and
+  closed the extended session at **17:00**. Therefore the equity normal-market
+  windows are **09:15–11:39** and **15:45–16:59**, totalling **220 minute
+  slots**. This does **not** prove that 220 spot-index bars were published: the
+  same order records NIFTY computation unavailable from 10:06 to 11:43 and
+  does not give one exact availability window for NIFTY, BANKNIFTY and VIX.
+  Their shared 54-bar prefixes ending 10:08 cannot define their own denominator;
+  a generic index completeness audit marks the day unmeasured rather than
+  inventing either a clean session or a vendor-loss count. Primary source:
+  [SEBI Settlement Order SO/AB/EFD2/2023-24/6580](https://www.sebi.gov.in/sebi_data/attachdocs/jun-2023/1687270559560.pdf),
+  paragraphs 1–2; contemporaneous corroboration:
+  [SEBI PR No. 9/2021](https://www.sebi.gov.in/sebi_data/attachdocs/feb-2021/1614256948318.pdf). |
 | Bar timestamp | the **OPEN** (left edge) of its minute. A bar covers the
   half-open window `[t, t + tf)`, left-closed and left-labelled. VERIFIED |
 | Last regular 1-minute bar | **15:29:00 IST**, not 15:30. 09:15 through 15:29
   inclusive is exactly 375 bars, which is the arithmetic that closes it. |
-| Forced exit | 15:20 IST, **inclusive of the 15:20 bar**: a bar is a
-  forced-exit bar iff `bar_open + tf > 15:20`. The 15:19 bar closes exactly at
-  15:20 and is not forced. Generalises to `session_close − 10 min`, which
-  yields 14:35 for the 2025 Muhurat session and 16:50 for 2021-02-24. |
+| Forced exit | **Fixed 15:10 IST product policy for every swept intraday
+  execution, not an exchange-closing-time fact.** Execution bars are stored at
+  their left edge, so the unique accepted `1min` bar stamped **15:09** covers
+  `[15:09, 15:10)` and is the only stored OHLCV record that may price the
+  forced fill. The 15:10 bar contains post-deadline prices and may not be used.
+  A missing, refused, duplicated or otherwise ambiguous 15:09 record has no
+  substitute: no 15:08/15:10 neighbour, delayed next-available minute,
+  interpolation or fabricated tick. A non-regular session without that exact
+  record cannot price a hold that needs forced liquidation, although an
+  earlier exact horizon may still be measured. D-0436 deliberately supersedes
+  the former dynamic `session_close − 10 min` / 15:20 policy. |
 | Tick grid | 2 decimal places |
 | Price storage | paisa integers, `i64` |
 | Track-1 brokerage | none. Spot indices are not tradable; the sweep is
@@ -494,6 +514,19 @@ transcribed.
 These are **snapshots.** NSE rebalances these indices semi-annually and none of
 the five has been checked against a constituent circular. `docs/06-limits.md`
 §11 carries what that costs.
+
+---
+
+## 4e. Statistical procedure sources
+
+These sources govern the named procedure; they do not turn its assumptions
+into a guarantee about this dataset.
+
+| Procedure fact | Primary source | What is and is not carried |
+|---|---|---|
+| CSCV begins with one synchronous `T × N` performance matrix, partitions its rows into an even number `S` of equal-sized disjoint blocks, visits every canonical half-block training set with its exact complement as test, chooses the in-sample maximum under one fixed performance measure, and estimates PBO from how often that winner ranks below the out-of-sample median | Bailey, Borwein, López de Prado and Zhu (2015/2017), *The Probability of Backtest Overfitting*, [author-hosted PDF](https://www.davidhbailey.com/dhbpapers/backtest-prob.pdf), Algorithm 2.3 and §3.1; [journal abstract](https://www.risk.net/journal-of-computational-finance/2471206/the-probability-of-backtest-overfitting) | The synchronous complete-family construction, equal-block complementary enumeration and rank event are carried. The paper says different trading frequencies must be aggregated to one common index, but it does **not** choose this repository's IST observation unit, empty-session treatment, segment count, tie policy, pessimistic-return score, bootstrap seed/draw count or block length. Those remain explicit versioned implementation decisions and cannot be smuggled in as facts from the paper. |
+| Romano--Wolf stepdown controls family-wise error by testing maxima over successively smaller surviving hypothesis sets; a fixed bootstrap distribution makes those critical values monotone | Romano and Wolf (2005), *Exact and Approximate Stepdown Methods for Multiple Hypothesis Testing*, JASA 100(469), 94--108, [publisher DOI](https://doi.org/10.1198/016214504000000539), [author-hosted PDF](https://www.econ.uzh.ch/dam/jcr:ffffffff-935a-b0d6-ffff-ffffd823d949/jasa.pdf), especially §4.2 and Theorem 6 | The construction and its stated asymptotic conditions are carried. It is **not** a distribution-free finite-sample promise for arbitrary strategy returns. The paper explicitly directs dependent data to block bootstrap methods; it does not select this repository's block length. |
+| Candidate adjusted p-values order observed statistics from largest to smallest, count strict exceedances of each surviving-suffix resample maximum with the finite-resample `(+1)/(M+1)` correction, then apply a cumulative maximum; that monotonicity step is essential | Romano and Wolf (2016), *Efficient Computation of Adjusted p-Values for Resampling-Based Stepdown Multiple Testing*, [University of Zurich Working Paper 219](https://www.econ.uzh.ch/apps/workingpapers/wp/econwp219.pdf), Algorithms 3.1 and 4.1 and Remark 4.1 | `runner::bootstrap::romano_wolf_adjusted_p_values_v1` implements that exact-count algorithm over one shared stationary-bootstrap matrix. Exact observed-statistic ties use ascending caller position, and any zero-variance candidate refuses the complete adjusted receipt rather than receiving the strict-exceedance floor. Those two discrete-data rules are D-0460 implementation choices, not claims made by the paper. |
 
 ---
 

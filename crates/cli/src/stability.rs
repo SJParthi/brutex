@@ -38,6 +38,7 @@
 //! a losing period, it is a period the combination did not fire in, and the
 //! report distinguishes them.
 
+use indicators::IST_OFFSET_MICROS;
 use runner::grid::TradeRow;
 
 /// Microseconds in a day.
@@ -45,13 +46,6 @@ const MICROS_PER_DAY: i64 = 86_400 * 1_000_000;
 
 /// One clock hour, in microseconds.
 const MICROS_PER_HOUR: i64 = 3_600 * 1_000_000;
-
-/// India Standard Time, +05:30 from UTC.
-///
-/// Applied BEFORE any division, for the reason `indicators::weekday_bit` gives:
-/// a bar at 09:15 IST is 03:45 UTC the same day, and dividing first files every
-/// morning bar before 05:30 IST into the previous day.
-const IST_OFFSET_MICROS: i64 = 19_800 * 1_000_000;
 
 /// How finely to slice the series.
 ///
@@ -66,7 +60,7 @@ pub enum Grain {
     Quarter,
     /// Calendar month.
     Month,
-    /// Seven days from the epoch's own Thursday — see [`Grain::bucket`].
+    /// One Monday-to-Sunday IST calendar week — see [`Grain::bucket`].
     Week,
     /// One IST trading day.
     Day,
@@ -121,12 +115,9 @@ impl Grain {
     /// civil-calendar arithmetic to one place, [`year_month`], and keeps every
     /// other grain a division.
     ///
-    /// `Week` divides days by seven from the epoch, which was a Thursday. That
-    /// makes a "week" Thursday-to-Wednesday rather than Monday-to-Sunday, and
-    /// the shift is stated rather than corrected: a week boundary that does not
-    /// line up with a weekend still partitions the series evenly, which is all a
-    /// consistency count needs. Correcting it would put a second calendar
-    /// convention in a module that has one.
+    /// `Week` shifts the IST day by three before dividing because the epoch was
+    /// a Thursday. The resulting blocks begin on Monday, the same convention
+    /// used by the durable trade analytics and the operator's trading week.
     #[must_use]
     pub fn bucket(self, ts_micros: i64) -> i64 {
         let day = ts_micros
@@ -137,7 +128,7 @@ impl Grain {
                 .saturating_add(IST_OFFSET_MICROS)
                 .div_euclid(MICROS_PER_HOUR),
             Self::Day => day,
-            Self::Week => day.div_euclid(7),
+            Self::Week => day.saturating_add(3).div_euclid(7),
             Self::Month | Self::Quarter | Self::Half | Self::Year => {
                 let (y, m) = year_month(day);
                 // Months since year zero, then divided into the grain. One
@@ -274,7 +265,7 @@ impl Stability {
 pub fn at(rows: &[TradeRow], grain: Grain) -> Stability {
     let mut buckets: Vec<Bucket> = Vec::new();
     for row in rows {
-        let key = grain.bucket(row.ts_micros);
+        let key = grain.bucket(row.entry_micros);
         let fresh = buckets.last().is_none_or(|b| b.key != key);
         if fresh {
             buckets.push(Bucket {
@@ -286,10 +277,10 @@ pub fn at(rows: &[TradeRow], grain: Grain) -> Stability {
             continue;
         };
         b.trades = b.trades.saturating_add(1);
-        if row.pnl > 0 {
+        if row.worst > 0 {
             b.wins = b.wins.saturating_add(1);
         }
-        b.net = b.net.saturating_add(row.pnl);
+        b.net = b.net.saturating_add(row.worst);
         if row.adverse > b.worst_adverse {
             b.worst_adverse = row.adverse;
         }
@@ -370,10 +361,17 @@ mod tests {
     fn trade(y: i64, m: u32, d: u32, pnl: i64) -> TradeRow {
         TradeRow {
             // 09:15 IST is 03:45 UTC.
-            ts_micros: (day(y, m, d) * 86_400 + 3 * 3600 + 45 * 60) * 1_000_000,
-            pnl,
+            entry_micros: (day(y, m, d) * 86_400 + 3 * 3600 + 45 * 60) * 1_000_000,
+            exit_micros: (day(y, m, d) * 86_400 + 3 * 3600 + 46 * 60) * 1_000_000,
+            best: pnl,
+            worst: pnl,
+            signal_bar: 0,
+            entry_bar: 1,
+            exit_bar: 2,
             adverse: 0,
             adverse_paisa: 0,
+            favourable: 0,
+            favourable_paisa: 0,
         }
     }
 
@@ -506,22 +504,43 @@ mod tests {
     fn the_worst_adverse_is_the_maximum_across_every_period() {
         let rows = vec![
             TradeRow {
-                ts_micros: trade(2020, 1, 2, 0).ts_micros,
-                pnl: 10,
+                entry_micros: trade(2020, 1, 2, 0).entry_micros,
+                exit_micros: trade(2020, 1, 2, 0).exit_micros,
+                best: 10,
+                worst: 10,
+                signal_bar: 0,
+                entry_bar: 1,
+                exit_bar: 2,
                 adverse: 40,
                 adverse_paisa: 40,
+                favourable: 0,
+                favourable_paisa: 0,
             },
             TradeRow {
-                ts_micros: trade(2021, 1, 2, 0).ts_micros,
-                pnl: 10,
+                entry_micros: trade(2021, 1, 2, 0).entry_micros,
+                exit_micros: trade(2021, 1, 2, 0).exit_micros,
+                best: 10,
+                worst: 10,
+                signal_bar: 0,
+                entry_bar: 1,
+                exit_bar: 2,
                 adverse: 900,
                 adverse_paisa: 900,
+                favourable: 0,
+                favourable_paisa: 0,
             },
             TradeRow {
-                ts_micros: trade(2022, 1, 2, 0).ts_micros,
-                pnl: 10,
+                entry_micros: trade(2022, 1, 2, 0).entry_micros,
+                exit_micros: trade(2022, 1, 2, 0).exit_micros,
+                best: 10,
+                worst: 10,
+                signal_bar: 0,
+                entry_bar: 1,
+                exit_bar: 2,
                 adverse: 60,
                 adverse_paisa: 60,
+                favourable: 0,
+                favourable_paisa: 0,
             },
         ];
         let s = at(&rows, Grain::Year);

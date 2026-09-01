@@ -15,10 +15,14 @@
 //!
 //! # What makes it honest
 //!
-//! **The daily rung is the calendar.** A `1day` bar is proof the exchange traded
-//! that day; the first and last minute bar are proof of how long. Nothing is
-//! typed, so nothing can be typed wrong, and the answer widens by itself the
-//! moment an earlier month lands in the store.
+//! **The daily rung normally supplies the calendar.** A `1day` bar is proof the
+//! exchange traded that day; its minute runs describe the windows. The one
+//! exception is 2021-02-24: SEBI's primary record proves normal trading ran
+//! 09:15–11:40 and 15:45–17:00, while every stored series shares the same
+//! truncated 54-bar prefix. `pull::calendar::Calendar::from_observed` applies
+//! that fixed exchange-session override so shared index truncation cannot
+//! rewrite the market timetable. `pull::gaps::classify_spot_index_against`
+//! separately refuses an exact index-bar denominator for that day.
 //!
 //! It is **not** circular, and that is load-bearing: deriving "which days
 //! traded" from the rung being validated would make a failed pull read as a
@@ -48,28 +52,25 @@
 //! # What ONE instrument's bars cannot tell you, measured
 //!
 //! **A calendar derived from a single instrument cannot distinguish a scheduled
-//! break from a vendor hole**, and the number proves it. Run against the
-//! operator's store this reports **623,546** minute bars owed for NIFTY — which
-//! is exactly what NIFTY holds. The 28 minutes genuinely absent become
-//! invisible, because a seven-minute hole at 2023-06-14 12:41 arrives here as
-//! two contiguous runs and is recorded as two windows the exchange offered.
+//! break from a vendor hole.** Before D-0420, the operator's store made that
+//! visible numerically: contiguous runs reported **623,546**, exactly what
+//! NIFTY held; outer spans reported **623,754**; peer union reported **623,574**.
+//! The 28-minute difference was a self-derived hole boundary.
 //!
-//! An earlier draft kept only each day's first and last minute, which reported
-//! **623,754** — over by exactly 180, the two midday breaks of the
-//! disaster-recovery Saturdays. So the two obvious readings bracket the truth of
-//! **623,574** from either side, and neither reaches it:
+//! Primary evidence then proved that all three readings also shared the same
+//! bad premise on 2021-02-24: the 54-bar index prefix was not the exchange
+//! session. Replacing it with SEBI's 220 normal-market slots adds 166 to each
+//! exchange-timetable reading: 623,712 / 623,920 / 623,740 respectively. None
+//! is promoted to an exact spot-index total, because the same order records
+//! unavailable NIFTY computation and no common index-publication interval.
+//! `classify_spot_index_against` therefore withholds that date.
 //!
-//! | Reading | Owed | Error |
-//! |---|---|---|
-//! | Outer span per day | 623,754 | +180, breaks counted as bars |
-//! | Contiguous runs per day | 623,546 | −28, holes counted as breaks |
-//! | Truth | 623,574 | — |
-//!
-//! **The missing input is a second instrument.** NIFTY, BANKNIFTY and INDIAVIX
+//! **The usual missing input is a second instrument.** NIFTY, BANKNIFTY and INDIAVIX
 //! all break 10:00–11:29 on 2024-03-02 — that is the exchange. Only NIFTY breaks
 //! 12:41–12:47 on 2023-06-14 — that is a hole. Three instruments agreeing is the
 //! session; one differing is a loss. That cross-check is not built here, so this
-//! module is honest about sessions and silent about holes, and
+//! module is honest about sessions and silent about holes, except for the one
+//! independently sourced 2021-02-24 session, and
 //! [`crate::calendar_of::derive`] must not be read as a completeness check until
 //! it is. `docs/06-limits.md` carries the same statement.
 //!
@@ -489,10 +490,11 @@ mod against_the_real_store {
     /// operator's machine and on no CI runner. Run it with
     /// `cargo test -p api -- --ignored calendar_of` after a pull.
     ///
-    /// What it pins, all measured by hand on 2026-08-22 before this module
-    /// existed: **1,671** trading days, **623,574** minute bars owed, and the
-    /// five pre-2025 Muhurat sessions answering `OpenLengthUnmeasured` because
-    /// the minute rung never reached them.
+    /// What it pins: **1,671** trading days, **623,712** exchange-timetable
+    /// minute slots derivable from one instrument after the SEBI outage
+    /// override, and the five pre-2025 Muhurat sessions answering
+    /// `OpenLengthUnmeasured` because the minute rung never reached them. This
+    /// is not an index completeness verdict; `gaps` withholds the outage date.
     #[test]
     #[ignore = "reads the operator's real store, absent on CI"]
     fn it_reproduces_the_operators_store() {
@@ -556,11 +558,10 @@ mod against_the_real_store {
         );
         println!("minute bars owed: {owed}");
         assert_eq!(
-            owed, 623_546,
-            "what ONE instrument can prove -- equal to what it holds, because a \
-             hole read as two runs is indistinguishable from a scheduled break. \
-             The truth is 623,574 and reaching it needs a second instrument; \
-             see this module header."
+            owed, 623_712,
+            "one instrument's contiguous runs plus the fixed 166-slot SEBI \
+             exchange-session correction. This is not a common index-bar \
+             denominator; see this module header and D-0420."
         );
     }
 }
@@ -657,9 +658,11 @@ pub fn cached(
 /// entirely: there is no rule to keep in step, only an answer to read.
 ///
 /// `owed` is `null` for a day the exchange traded and this build cannot size —
-/// the five pre-2025 Muhurats. `null` is not `0`: one says nobody has measured
-/// the session, the other says the exchange was shut, and a page that renders
-/// them the same reports a Muhurat as a holiday.
+/// the five pre-2025 Muhurats. `indexOwed` is the same number except on the
+/// 2021-02-24 systems-outage day, where it is `null`: SEBI proves the 220-minute
+/// market session and separately records unavailable NIFTY computation, without
+/// one common NIFTY/BANKNIFTY/VIX publication window. `null` is not `0`: one
+/// says the denominator is unproved, the other says nothing was owed.
 ///
 /// Closed days are **omitted** rather than listed as `owed: 0`. A reader wants
 /// the sessions; the gaps between them are the closed days by construction, and
@@ -688,12 +691,24 @@ pub fn json(calendar: &Calendar) -> String {
             out.push(',');
         }
         first = false;
+        let expected = calendar.expected_bars(day);
         let _ = write!(out, "{{\"day\":{day},\"owed\":");
-        match calendar.expected_bars(day) {
+        match expected {
             Some(bars) => {
                 let _ = write!(out, "{bars}");
             }
             None => out.push_str("null"),
+        }
+        out.push_str(",\"indexOwed\":");
+        if day == pull::calendar::SYSTEMS_OUTAGE_DAY {
+            out.push_str("null");
+        } else {
+            match expected {
+                Some(bars) => {
+                    let _ = write!(out, "{bars}");
+                }
+                None => out.push_str("null"),
+            }
         }
         out.push('}');
     }
@@ -728,16 +743,34 @@ mod wire {
         assert!(wire.contains("\"lastDay\":102"), "{wire}");
         assert!(wire.contains("\"sessions\":2"), "{wire}");
         assert!(
-            wire.contains("{\"day\":100,\"owed\":375}"),
+            wire.contains("{\"day\":100,\"owed\":375,\"indexOwed\":375}"),
             "a full session is sized: {wire}"
         );
         assert!(
-            wire.contains("{\"day\":102,\"owed\":null}"),
+            wire.contains("{\"day\":102,\"owed\":null,\"indexOwed\":null}"),
             "a day that traded and cannot be sized is null, NOT 0: {wire}"
         );
         assert!(
             !wire.contains("\"day\":101"),
             "a closed day is omitted rather than listed as zero: {wire}"
+        );
+    }
+
+    /// **THE EXCHANGE AND SPOT-INDEX DENOMINATORS DIVERGE LOUDLY ON THE
+    /// SYSTEMS-OUTAGE DAY.**
+    #[test]
+    fn the_outage_day_publishes_market_minutes_and_refuses_index_minutes() {
+        let cal = Calendar::from_observed(&[pull::calendar::Observed::from_runs(
+            pull::calendar::SYSTEMS_OUTAGE_DAY,
+            &[(555, 608)],
+        )]);
+        let wire = json(&cal);
+        assert!(
+            wire.contains(&format!(
+                "{{\"day\":{},\"owed\":220,\"indexOwed\":null}}",
+                pull::calendar::SYSTEMS_OUTAGE_DAY
+            )),
+            "220 market minutes are known; a common index count is not: {wire}"
         );
     }
 
@@ -1069,7 +1102,10 @@ mod agreement {
 
         assert!(wire.starts_with('{') && wire.ends_with('}'), "{wire}");
         assert!(wire.contains("\"days\":["), "{wire}");
-        assert!(wire.contains("{\"day\":500,\"owed\":375}"), "{wire}");
+        assert!(
+            wire.contains("{\"day\":500,\"owed\":375,\"indexOwed\":375}"),
+            "{wire}"
+        );
         assert!(
             wire.contains("\"derivedFrom\":[\"NIFTY\",\"INDIAVIX\"]"),
             "{wire}"

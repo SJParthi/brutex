@@ -38,15 +38,15 @@
  */
 
 /**
- * THE `running` MEMBER, AND ALL THIRTEEN FIELDS IT CARRIES.
+ * THE `running` MEMBER, AND ALL FOURTEEN FIELDS IT CARRIES.
  *
  * This listed three — `in_flight`, `report`, `refusal` — because three were
- * what `sweepOutcome` read. `crates/api/src/sweeprun.rs` writes thirteen, and
+ * what `sweepOutcome` read. `crates/api/src/sweeprun.rs` writes fourteen, and
  * the moment `/backtest` reached for a fourth (`run.feed` and
  * `run.underlying`, to ask the frontier route for a top-25) the checker called
  * them properties that do not exist. They exist; this file had never said so.
  *
- * ALL THIRTEEN ARE NAMED EVEN THOUGH THREE ARE READ, which is the rule
+ * ALL FOURTEEN ARE NAMED EVEN THOUGH THREE ARE READ, which is the rule
  * `/ingest`'s own `PilotFeed` states in as many words: a typedef that lists
  * only what today happens to be read is one that has to be edited before the
  * next field can be looked at — and editing it is the step that gets skipped,
@@ -68,6 +68,7 @@
  * @property {number} [to_month]
  * @property {number | null} [support_ppm] The frequent floor, in parts per million.
  * @property {number} [started_micros] Microseconds, the unit `crates/api` writes.
+ * @property {number} [attempt] Opaque exact token shared by status and structural events.
  * @property {number | null} [finished_micros] `null` while the run is in flight.
  * @property {string | null} [report] The rung table, on a run that swept.
  * @property {string | null} [refusal] Why nothing was swept, on a run that did not.

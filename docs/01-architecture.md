@@ -1,6 +1,6 @@
 # 01 — Architecture
 
-Ten crates. Every arrow points one way. The graph is acyclic and the linker
+Thirteen crates. Every arrow points one way. The graph is acyclic and the linker
 enforces it.
 
 ---
@@ -14,18 +14,15 @@ all three the wrong dependencies, and omitted `lake` and `telemetry` altogether 
 see the note at the end of this section for what that cost.
 
 ```
-   core        vocab       greeks      telemetry        four roots: no dependencies
-    │            │                         │
-    ├─ costs     ├─ indicators             │
-    │            └─ engine                 │
-    │                                      │
-    ├──────────── store ───────────────────┤
-    ├──────────── lake ────────────────────┤
-    │               │                      │
-    ├─────────────  pull  ─────────────────┤
-    │               │                      │
-    └───────────── api ────────────────────┘
-                (api also takes pull and store)
+depends on NOTHING          core · vocab · greeks · telemetry
+
+core          <-- costs
+core telemetry <-- store · lake
+core costs greeks store telemetry <-- pull
+core pull store telemetry cli vocab <-- api
+vocab         <-- indicators · engine
+core costs engine indicators vocab <-- runner
+core costs engine indicators pull runner store telemetry <-- cli
 ```
 
 | Crate | Owns | Depends on, measured | Exists |
@@ -42,28 +39,30 @@ see the note at the end of this section for what that cost.
 | `pull` | vendor ingest, rate governor, credential read, option pricing | `core`, `store`, `telemetry`, `costs`, `greeks` | ✓ |
 | `api` | the HTTP surface | `core`, `pull`, `store`, `telemetry`, **`cli`**, **`vocab`** | ✓ |
 | `runner` | the sweep driven end to end: trades, the exit grid, walk-forward, PBO, the bootstrap, the audit | `core`, `vocab`, `indicators`, `engine`, `costs` | ✓ |
-| `cli` | the operator entry point for the sweep: generated **or stored** bars in, ladder walked, report out — `sweep` takes `runner::synthetic`, `sweep-stored` takes one real instrument-month off disk, and a different provenance banner leads each | `runner`, `engine`, `indicators`, `costs`, `core`, `store`, `telemetry` | ✓ |
+| `cli` | the operator entry point for the sweep: generated **or stored** bars in, ladder walked, report out — `sweep` takes `runner::synthetic`, `sweep-stored` takes one real instrument-month off disk, and a different provenance banner leads each | `runner`, `engine`, `indicators`, `costs`, `core`, `pull`, `store`, `telemetry` | ✓ |
 
 **Thirteen crates, all of them real.** (The sentence said eleven while the table
-held twelve; `cli` makes it thirteen — D-0169.) `web/` is a directory at the repository root
-rather than a workspace member — the front end is unrestricted inside it by D-0052
-and D-0053 — and there is **no `cli` crate**, though `CLAUDE.md` §5 still names one.
+held twelve; `cli` makes it thirteen — D-0169.) `web/` is a directory at the
+repository root rather than a workspace member — the front end is unrestricted
+inside it by D-0052 and D-0053. `cli` is a real workspace crate; `web` is not.
 
-### The three arrows that are not what §5 draws
+### The measured graph and its gate
 
-`CLAUDE.md` §5 is law and this document may not correct it, so the difference is
-recorded rather than resolved (D-0095):
+The dependency table is parsed by `core/tests/graph.rs`. The parser reads only
+the `## 1. The graph` section, recognises a crate row only when it begins
+`| \`crate\``, and treats backticked workspace names in the third cell as the
+claimed dependency set. It checks all thirteen members, every normal/dev/build
+dependency spelling, both directions of table/manifest equality, and the
+acyclic property. The ASCII diagram is deliberately not the parser's authority.
 
-* §5 draws `indicators` as a child of `core`. It is a child of **`vocab`**, and of
-  nothing else. `store` used to be its second parent, taken for
-  `store::format::Bar`; `indicators::Candle` replaced that record and the arrow is
-  gone, which is the single change that made the condition layer reusable outside
-  this repository.
-* §5 names a `cli` crate that does not exist, and omits `costs`, `greeks`, `lake`
-  and `telemetry` — four of eleven members.
-* Eight real edges are undrawn there: `store -> telemetry`, `lake -> telemetry`,
-  `pull -> telemetry`, `api -> telemetry`, `api -> pull`, `api -> store`,
-  `costs -> core`, `engine -> vocab`.
+That gate found the direct `cli -> pull` edge omitted here while the manifest
+and `cargo tree -p cli --edges normal --depth 1` both named it. The edge is
+production: stored-run calendar attestation calls `pull::calendar::kind_of`,
+Population V4 civil bounds use `pull::session::Day`, and global replay/VIX
+month identity uses `pull::session::IstMoment`. It does **not** authorize a
+vendor request or network fallback. Stored readers still fail closed on absent
+or invalid calendar/session evidence rather than calling ingest. D-0453 records
+the correction.
 
 The graph is **acyclic**, which is §5's actual requirement, and that much holds.
 
@@ -202,21 +201,72 @@ raw candles ──► validate ──► paisa integers ──► store::append
                                             Evaluator::step  ── one candle at a time
                                                     ▼
                                             bar_bits: [ConditionMask]
-                                              [u64; 6] each = 384 bits, 276 allocated
+                                              [u64; 6] each = 384 bits, 370 allocated
                                                     │
-                                            Ladder::walk
+                                            Ladder::walk_into
                                               k=1 frontier
                                               join + subset-prune
-                                              support, dedup
+                                              fixed-width support; k=1 input dedup
                                               stop at extinction -- no depth parameter
-                                                    ▼
-                                            frequent survivors ──► ranking (NOT BUILT)
-                                                    │              needs a metric; see below
-                                                    ▼
-                                                results file
                                                     │
-                                        api ────────┴──────── web (wasm)
+                              ┌── plain sink: retain each Frontier ──► Sweep
+                              │
+                              └── ranked sink, at each retirement
+                                    lower + next ──► exact closure / trial counts
+                                    score on the execution Column + Forward
+                                    merge into one bounded global top-N heap
+                                    drop lower ──► one fixed-size Tally per depth
+                                                    │
+                                                    ▼
+                                      RankedOutcome + Ranked
+                                      (top, closed_top, lens, counts)
+                                                    │
+                                      exit grid, costs, validation
+                                                    ▼
+                                      result-set persistence
+                       frontier.bin -> chosen-trades.bin -> detail-sets.bin
+                                  -> directory sync -> runs.bin (commit marker)
+                                                    │
+                                            api ────────┴──────── web/
 ```
+
+The newer Step-3 authority path is append-only beside that legacy run path; it
+does not reinterpret an old receipt as provisional:
+
+```
+clean build stamp + existing stored root
+                  │
+                  ▼
+bounded signal + prior-month 1day + prior-month 1min loads
+                  │  complete IST calendars; exact requested 1min subspan
+                  ▼
+attested long/short dynamic grids + naturally-extinct Candidate Universe V1
+                  │  rows sync, Candidate completion last, fresh reopen
+                  ▼
+Pre-Admission Data V1
+                  │  Data sync, Completion last, fresh reopen, exact ID join
+                  ▼
+        [implemented, focused-green D-0475 boundary]
+                  │
+                  ├ - - > aligned trade-period observation authority  (open)
+                  ├ - - > Statistics V2 + finalization/admission       (open)
+                  ├ - - > Execution V2 + Selection V4 reconstruction  (open)
+                  └ - - > eight lists / 200-witness Global Replay V2   (open)
+```
+
+The solid boundary is callable from non-test Rust and accepts no raw bars,
+digest, calendar receipt, commit string, pre-resolved grid or depth. Its daily
+and minute typed loaders reuse the existing canonical converters after the
+month headers enforce explicit cumulative record ceilings. The dashed arrows
+are deliberately not called implemented by the green Candidate/Pre-Admission
+tests: Candidate now derives an in-memory aligned trade/session observation
+capability, but its bounded fixed-stride receipt-last authority and fresh-reopen
+refusal suite are still being implemented, so it cannot yet construct
+production Statistics V2. The first adversarial warm-up findings are closed:
+canonical NSE session identity classifies every daily/signal day, exact
+terminal-minute geometry binds the prior accepted session, and transformed
+allocations are fallible. D-0475 and `docs/06-limits.md` §156 record the exact
+proof, remaining authority gap and cost boundary.
 
 Three properties matter more than the boxes:
 
@@ -227,38 +277,64 @@ Three properties matter more than the boxes:
    thread and every candidate. In the predecessor system this recomputation
    was the dominant cost — roughly eleven thousand times the per-mask cost —
    and it was re-paid per worker per tuple.
-3. **There is no boundary to cross.** Nothing is marshalled between runtimes,
-   so no per-trade materialisation cost exists to be optimised later.
+3. **There is no language-runtime boundary to cross.** The finally selected
+   grid cell is deliberately materialised once into its durable Rust trade
+   rows; that O(selected trades) output cost is not serialization between two
+   engine implementations and is named in `docs/06-limits.md` §111.
+4. **Ranked retention is not result-set retention.** The engine needs the
+   current frontier and the successor it is building; after the successor has
+   decided the lower frontier's exact closure, every lower survivor has already
+   been scored and the frontier is dropped. The result keeps one `Tally` per
+   level and at most `keep` ranked rows. Neither bound is read by the join, so
+   neither can choose the ladder's depth.
 
-### The one box that is not built: ranking
+5. **A recorded run becomes public at one last-written marker.** The frontier
+   and exact chosen-grid trade blocks are variable output, so
+   `detail-sets.bin` records their exact row counts plus selected direction and
+   trade policy, including zero-row results. Those three children are synced,
+   their directory entries are confirmed, and only then is the fixed-stride
+   parent appended to `runs.bin`. Read-only detail paths require the ledger
+   identity plus the matching receipt/count; a pre-marker child stays private,
+   while receipt-less legacy results are refused as unverifiable. The four-file
+   byte layout and recovery states are authoritative in
+   `docs/02-store-format.md` §12 and the non-atomic filesystem limits in
+   `docs/06-limits.md` §98.
 
-`Ladder::walk` returns **frequent** combinations with their hit counts. That is a
-complete answer to "which condition sets occur often enough to be worth looking at",
-and it is not a ranked strategy list. Ranking needs a **score**, and a score is a
-modelling choice `CLAUDE.md` §3 rule 1 will not let this document invent.
+### Ranking is built; its modelling choices stay explicit
 
-What is unblocked and what is not:
+`Ladder::walk_into` still answers the frequency question and does not know what
+a return is. `runner` joins that walk to the bar series and makes the modelling
+choice at the caller-owned boundary. There are two public lenses:
 
-* **Support ranking works today.** `Itemset::hits` is a real number and ordering by
-  it is honest — it answers "how often". It says nothing about whether the
-  combination was *profitable*.
-* **Return-based ranking cannot be built yet, for a reason that is not a design
-  gap.** It needs, per hit, what happened after the bar — a forward return over some
-  horizon, an exit rule, and the cost of the round trip. `crates/costs` supplies the
-  last of those. The first two need **bar data, and there is none on this machine**:
-  every pulled bar was deleted deliberately and permanently. A metric written now
-  could not be run, let alone validated.
-* **The horizon and the exit rule are choices, not derivations.** Fixed N bars, next
-  session's open, a target-or-stop bracket, and a trailing exit are four different
-  strategies that would rank the same vocabulary differently. Picking one silently
-  would be the kind of invention §3 rule 1 exists to prevent, and it would be
-  invisible in the output — the ranked list would look equally authoritative either
-  way.
+* `Lens::Detectability` orders by finite `|t|`, the historical default. A setup
+  preceding a fall therefore competes on the magnitude of its evidence rather
+  than being discarded for having a negative sign.
+* `Lens::Payoff` orders by forward winner/loss payoff, with `|t|` as its evidence
+  tie-break. It exists because a hard top-N cut made under one question cannot
+  be reinterpreted as the other after everything below the cut has gone.
 
-So the ranking metric is **an operator decision, recorded as open**, and it is the
-last thing standing between the vocabulary and a ranked strategy list. Everything
-upstream of it — 234 computable conditions, the mask, the ladder, extinction, the
-cost stack — is built and measured.
+The score is computed **before a frontier is discarded**. Same-series runs use
+the signal column itself. Projected runs pass the one-minute execution column
+and its `Forward` to `run_prepared_ranked_by_reporting`; every frequent mask is
+scored there, so a true execution-series winner cannot be lost merely because
+it fell below a signal-series top-N. All levels feed the same bounded global
+rank heap. The parallel scorer uses bounded worker heaps and merges each into
+that one global cut; it never makes a separate top-N decision per level.
+
+Retirement is also the last instant adjacent frontiers coexist. Equal-support
+immediate supersets decide closure exactly there. The raw trial count is every
+candidate whose support was actually measured — `survivors + infrequent` — and
+the effective count subtracts those exact redundant tests. Historical selection
+semantics remain rank all, cut to top-N, then filter that retained top to
+`closed_top`; closure does not backfill a row from below the cut.
+
+What this first rank does **not** claim is that a forward-edge lens is a final
+exit-rule or net-cost optimum. The exit grid, cost stack and validation still
+run downstream over the bounded ranked set, because horizon, stop, target,
+trail and costs answer a different modelling question. A halted ladder is not a
+smaller valid search: its last non-empty frontier has no successor to certify
+closure, `RankedOutcome::is_complete` is false, and the operator path refuses it
+rather than trading or recording a partial answer.
 
 ---
 
@@ -314,23 +390,27 @@ made seventeen cost claims between them and measured none. D-0103 is the entry;
 | Read bar *i* | O(1) | `base + 32768 + i·56` — see `docs/02-store-format.md` §1 | `C-01` |
 | Read condition bits for bar *i* | O(1) | index into a slice of `ConditionMask`, each `[u64; 6]` = 384 bits | `C-E-01` |
 | Test one candidate against one bar | O(1) | `(bits & mask) == mask`: six ANDs, six XORs, five ORs, one compare — branchless, no early exit | `C-V-01`, `C-V-02`, `C-V-03` |
-| Reject a duplicate candidate | O(1) | one `HashSet` probe on a `Hash + Eq` mask | `C-E-04` |
-| Append one result | O(1) amortised | `Vec::push` | **UNMEASURED**, `C-04` |
+| Reject a duplicate candidate | O(1) expected for the remaining k=1 probe; no probe at k≥2 | one `HashSet` insertion at k=1; the injective prefix join cannot emit duplicates at k≥2. Rust's hash table supplies no adversarial worst-case O(1) guarantee | `C-E-10` measures the historical isolated hit/miss probe; the injectivity tests prove its removal at k≥2 |
+| Append one result | O(1) amortised | `Vec::push`; an individual growth can move the existing allocation, so this is not worst-case O(1) | `C-E-11`, retained as `C-04` |
 | Fold one candle into every module | O(1) | a fixed set of fixed-size states, no allocation; `size_of::<Evaluator>()` asserted at compile time | `C-I-01`, `C-I-02`, `C-I-04` |
 
 **Two rows corrected here rather than left standing.** "Index into a `Vec<u128>`" was
 true when the mask was two words wide and has been wrong since it reached six —
 384 bits, not 128, and a `u128` would have run out of room at position 128 against a
-276-position table. "A filter probe, then a sharded exact confirm" describes a design
-that was never built; the engine does one `HashSet` probe, and claiming a sharded
-confirm made the mechanism sound more careful than it is.
+370-position table. "A filter probe, then a sharded exact confirm" describes a design
+that was never built. At the time of that correction the engine did one `HashSet`
+probe; the later injective prefix join proved the level set redundant and removed
+it at k≥2. Claiming a sharded confirm made the mechanism sound more careful than it
+ever was.
 
-**The three measurements worth reading.** A miss in word 0 against a miss in word 5
-is **0.996×** — six words are read on every call whatever the answer, so there is no
-early exit. A 1-bit candidate against a 234-bit one is **1.037×**, and per bar from
-k=1 to k=8 is **1.117×** — which is what makes §6's absent depth parameter a design
-decision rather than a performance defect. One candle at 200,000 candles folded
-against 1,000 is **1.009×**.
+**The live measurement worth reading.** `Column` now owns one fixed-six-word row mask
+per bar, and `Column::support` calls `ConditionMask::hits` exactly once per row. On
+the 2026-08-30 engine gate, k=1 → k=4 measured **0.971×**, k=1 → k=8 measured
+**0.996×**, and the full representational extreme k=1 → k=384 measured **0.942×**.
+`column::tests::the_live_support_body_is_one_fixed_width_hit_test` is the structural
+half: it refuses the former position/bitmap loop from returning. The old vertical
+layout was Θ(k), measured 7.307× at k=8; that figure is retained as the defect that
+caused the replacement, not as a description of the shipping path.
 
 **A ratio near 1.0 is evidence, not proof.** A compiler may introduce a branch. The
 source-level guarantee is `vocab::mask::hits_does_the_same_work_for_every_input`,

@@ -155,6 +155,9 @@ pub const DEFAULT_KEEP_FILES: u8 = 8;
 /// subsystems exist. Eight is more than the taxonomy has targets today.
 pub const MAX_TARGET_LEVELS: usize = 8;
 
+/// Largest integer JSON/JavaScript transports without rounding.
+const MAX_SAFE_RUN_ID: u64 = 9_007_199_254_740_991;
+
 /// The smallest file bound this crate accepts.
 ///
 /// A bound below one line's worth would roll on nearly every event and turn
@@ -173,7 +176,8 @@ pub enum Emitted {
     Filtered,
     /// It could not be written, and the reason is in [`Sink::health`].
     Dropped,
-    /// No sink is installed. Only [`crate::emit`] returns this.
+    /// No sink is installed. [`crate::emit`] and [`crate::emit_for_run`] return
+    /// this; methods on an already-open [`Sink`] cannot.
     NotInstalled,
 }
 
@@ -610,6 +614,17 @@ pub struct Sink {
     /// measurement, however sound it is.
     run: AtomicU64,
 
+    /// The last opaque correlation id reserved from this log's durable
+    /// sequence space.
+    ///
+    /// Initialised from the last readable sequence number when the sink opens.
+    /// A caller that reserves an id and then writes at least one event carrying
+    /// it therefore makes the next process start strictly above every id still
+    /// present in the log. If no such event lands, there is no old record for a
+    /// later reuse to collide with. This is the exact attempt boundary used by
+    /// the sweep monitor; it does not infer identity from a wall clock.
+    reserved_run: AtomicU64,
+
     /// Set once a roll has failed, and never cleared.
     ///
     /// **THE WINDOW IS DESTROYED BY RE-ATTEMPTING, NOT BY FAILING ONCE.**
@@ -760,6 +775,7 @@ impl Sink {
             keep_files: config.keep_files,
             target_levels: config.target_levels.clone(),
             run: AtomicU64::new(0),
+            reserved_run: AtomicU64::new(seq),
             rotation_broken: AtomicBool::new(false),
             floors: AtomicU16::new(packed(config.min_level, config.fast_floor())),
             inner: Mutex::new(Inner {
@@ -994,6 +1010,21 @@ impl Sink {
         self.run.load(Ordering::Relaxed)
     }
 
+    /// Reserves one non-zero run id from the log's resumed sequence space.
+    ///
+    /// [`None`] after exhausting JavaScript's exact-integer range; rounding on
+    /// the browser boundary would let two distinct attempts compare equal, so
+    /// exhaustion is a refusal rather than a rollover.
+    #[must_use]
+    pub fn reserve_run_id(&self) -> Option<u64> {
+        self.reserved_run
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |held| {
+                held.checked_add(1).filter(|next| *next <= MAX_SAFE_RUN_ID)
+            })
+            .ok()
+            .and_then(|held| held.checked_add(1))
+    }
+
     /// Whether an event at `level` from `target` would be written.
     ///
     /// **THE GATE, WITHOUT AN EVENT TO GATE.** [`Sink::emit`] is a function, so
@@ -1033,6 +1064,16 @@ impl Sink {
     /// Never panics and never propagates a failure; the module documentation
     /// says how a failure is surfaced instead.
     pub fn emit(&self, event: &Event<'_>) -> Emitted {
+        self.emit_for_run(self.run.load(Ordering::Relaxed), event)
+    }
+
+    /// Writes one event under an explicit run id.
+    ///
+    /// Unlike [`Self::set_run`], this changes no shared state. Concurrent work
+    /// can therefore stamp its own structural boundary without overwriting or
+    /// clearing another run's key. Zero has the ordinary "outside a run"
+    /// meaning used by [`Self::emit`].
+    pub fn emit_for_run(&self, run: u64, event: &Event<'_>) -> Emitted {
         // THE FAST REJECT, UNCHANGED. One relaxed atomic load and a comparison
         // against the lowest floor any target could have. With no overrides
         // that value IS the global floor, so a sink that does not use the
@@ -1074,13 +1115,7 @@ impl Sink {
         let at = inner.stamp(now_millis());
         inner.seq = inner.seq.saturating_add(1);
         inner.buf.clear();
-        line(
-            &mut inner.buf,
-            inner.seq,
-            at,
-            self.run.load(Ordering::Relaxed),
-            event,
-        );
+        line(&mut inner.buf, inner.seq, at, run, event);
         let span = u64::try_from(inner.buf.len()).unwrap_or(u64::MAX);
         // CARRIED OUT OF THE CRITICAL SECTION, NOT REPORTED INSIDE IT.
         //
@@ -3236,6 +3271,56 @@ mod tests {
             sink.run(),
             0,
             "and zero clears it rather than being a run id"
+        );
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_explicit_run_stamps_only_its_event_and_never_steals_the_ambient_run() {
+        let dir = scratch("explicit-run");
+        let sink = Sink::open(&Config::new(&dir)).expect("opens");
+        sink.set_run(7);
+        assert!(
+            sink.emit_for_run(11, &Event::info("t", "explicit"))
+                .is_written()
+        );
+        assert_eq!(sink.run(), 7, "the ambient owner was not overwritten");
+        assert!(sink.emit(&Event::info("t", "ambient")).is_written());
+
+        let bytes = std::fs::read(current_path(&dir)).expect("the two events landed");
+        let records: Vec<Record> = bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| Record::decode(line).expect("the sink decodes its own line"))
+            .collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].run, 11, "the explicit event took its own key");
+        assert_eq!(records[1].run, 7, "the next event kept the ambient key");
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reserved_run_ids_resume_strictly_above_every_id_that_reached_the_log() {
+        let dir = scratch("reserved-run");
+        let first = {
+            let sink = Sink::open(&Config::new(&dir)).expect("opens");
+            let first = sink
+                .reserve_run_id()
+                .expect("the id space is not exhausted");
+            assert_ne!(first, 0);
+            assert!(
+                sink.emit_for_run(first, &Event::info("t", "attempt started"))
+                    .is_written()
+            );
+            first
+        };
+        let reopened = Sink::open(&Config::new(&dir)).expect("reopens");
+        let second = reopened
+            .reserve_run_id()
+            .expect("the resumed id space is not exhausted");
+        assert!(
+            second > first,
+            "a restart must not give a retained attempt its id again: {first} then {second}"
         );
         let _ignored = std::fs::remove_dir_all(&dir);
     }

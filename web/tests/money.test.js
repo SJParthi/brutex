@@ -56,10 +56,9 @@ test('a NIFTY-scale quote renders exactly', () => {
   assert.equal(rupee(2_500_005), '25,000.05');
 });
 
-test('the divide never invents or drops a third decimal', () => {
-  // `paisa / 100` always has exactly two decimal places, so there is no third
-  // digit for float error to reach. This walks every hundredth across a decade
-  // of paisa and requires the printed cents to match the integer's last two.
+test('integer quotient and remainder never invent or drop a paisa', () => {
+  // This walks every hundredth across a decade and requires the printed cents
+  // to match the integer's last two without floating-point division.
   for (let p = 0; p < 2000; p += 1) {
     const s = rupee(p);
     const cents = String(p % 100).padStart(2, '0');
@@ -72,13 +71,10 @@ test('a negative paisa keeps its sign', () => {
   assert.equal(rupee(-1), '-0.01');
 });
 
-test('the safe-integer edge is where this stops being exact, and it is far away', () => {
-  // ₹90 billion in paisa. An index quote is six orders of magnitude below it,
-  // so the float divide is safe for every value this page can hold — but the
-  // boundary is pinned so a future caller passing something larger is not
-  // silently wrong.
-  assert.ok(Number.MAX_SAFE_INTEGER / 100 > 9e13, 'the exact range exceeds ₹90 billion');
-  assert.equal(rupee(2_512_345), '25,123.45', 'and an index quote is nowhere near it');
+test('the complete safe-integer boundary retains its exact final paisa', () => {
+  assert.equal(rupee(Number.MAX_SAFE_INTEGER), '9,00,71,99,25,47,409.91');
+  assert.equal(rupee(Number.MIN_SAFE_INTEGER), '-9,00,71,99,25,47,409.91');
+  assert.equal(rupee(Number.MAX_SAFE_INTEGER + 1), '—');
 });
 
 /* ── the em dash, which Intl does not supply ──────────────────────────── */

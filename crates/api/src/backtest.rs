@@ -762,6 +762,23 @@ pub struct Ledger {
     pub refusal: Option<String>,
 }
 
+/// Publish the engine-owned signal surface without a browser-side copy.
+///
+/// The store also holds `1day`, while [`cli::EVERY_RUNG`] is the exact set the
+/// sweep accepts. A suffix test would accept an invented `garbagemin` value and
+/// a hand-kept array would drift the next time the engine changes, so every
+/// response carries this one authority directly.
+fn push_signal_rungs_json(out: &mut String) {
+    out.push('[');
+    for (index, rung) in cli::EVERY_RUNG.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push_str(&render::json_string(rung));
+    }
+    out.push(']');
+}
+
 impl Ledger {
     /// The best COMPLETE run, by the figure selection ranks on.
     ///
@@ -914,6 +931,8 @@ impl Ledger {
         let _ = write!(out, r#","max_runs":{MAX_RUNS}"#);
         let _ = write!(out, r#","halted":{}"#, self.halted_count());
         let _ = write!(out, r#","unsealed":{}"#, self.unsealed_count());
+        out.push_str(r#","signal_rungs":"#);
+        push_signal_rungs_json(&mut out);
         match self.best_complete() {
             Some(run) => {
                 let _ = write!(out, r#","best_complete":{}"#, run.index);
@@ -1218,14 +1237,17 @@ fn respond(
         // sentence rather than as a parse failure on top of a configuration
         // failure.
         Err(why) => {
-            return (
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                json,
-                format!(
-                    r#"{{"path":"","total":0,"scanned":0,"hit_scan_cap":false,"partial_tail":false,"max_runs":{MAX_RUNS},"halted":0,"unsealed":0,"best_complete":null,"refusal":{},"runs":[]}}"#,
-                    render::json_string(&why)
-                ),
+            let mut body = String::with_capacity(384);
+            body.push_str(
+                r#"{"path":"","total":0,"scanned":0,"hit_scan_cap":false,"partial_tail":false,"max_runs":"#,
             );
+            let _ = write!(body, "{MAX_RUNS}");
+            body.push_str(r#", "halted":0,"unsealed":0,"signal_rungs":"#);
+            push_signal_rungs_json(&mut body);
+            body.push_str(r#", "best_complete":null,"refusal":"#);
+            body.push_str(&render::json_string(&why));
+            body.push_str(r#", "runs":[]}"#);
+            return (axum::http::StatusCode::SERVICE_UNAVAILABLE, json, body);
         }
     };
     (
@@ -1946,6 +1968,22 @@ mod tests {
     }
 
     #[test]
+    fn the_json_publishes_the_exact_engine_signal_rungs() {
+        let json = over(file(VERSION, &[record(7, false, 34_302)]), 10).to_json();
+        let values = cli::EVERY_RUNG
+            .iter()
+            .map(|rung| format!(r#""{rung}""#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let expected = format!(r#""signal_rungs":[{values}]"#);
+        assert!(
+            json.contains(&expected),
+            "the wire must borrow cli::EVERY_RUNG rather than approximate it: {json}"
+        );
+        assert!(!json.contains(r#""signal_rungs":["1day""#), "{json}");
+    }
+
+    #[test]
     fn a_refusal_reaches_the_json_as_a_sentence() {
         let json = over(vec![0_u8; 4], 10).to_json();
         assert!(json.contains(r#""refusal":"#));
@@ -1989,6 +2027,12 @@ mod tests {
         assert!(
             body.contains(r#""runs":[]"#) && body.contains(r#""best_complete":null"#),
             "a configuration failure must not also be a parse failure: {body}"
+        );
+        assert!(
+            cli::EVERY_RUNG
+                .iter()
+                .all(|rung| body.contains(&format!(r#""{rung}""#))),
+            "a refusal still has to publish the authority needed to classify rows: {body}"
         );
     }
 

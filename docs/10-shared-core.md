@@ -171,14 +171,17 @@ knows its exit rule, its horizon and its costs.
 
 ## 5. Cost, which is what makes it usable live
 
-Per candle, the shared core does a fixed amount of work with no allocation:
+The streaming evaluator does a fixed amount of work per candle with no
+allocation. The same table separates that path from the candidate-level sweep
+primitives, whose total counts are not constant:
 
 | Operation | Cost | Bounded by |
 |---|---|---|
 Condition lookup | O(1) | direct index into a fixed array of 370 |
 Mask evaluation | O(1) | 6 ANDs, 6 XORs, 5 ORs, 1 compare — branchless, no early exit, identical for a true and a false answer |
+One live candidate/bar support step | O(1) | `engine::column::Column` owns one `[u64; 6]` row mask per bar and calls the fixed-width `hits` exactly once; the complete support count remains O(candles) |
 One candle through every module | O(1) | a fixed set of fixed-size states, no allocation; `size_of::<Evaluator>()` is asserted at compile time |
-Duplicate rejection | O(1) | one `HashSet` probe on a `Hash + Eq` mask |
+Duplicate rejection | O(1) **expected**, not adversarial worst-case | k=1 uses one `HashSet<u32>` insertion; the injective prefix join emits each k≥2 candidate once and therefore needs no dedup set. `HashSet` collisions are not worst-case bounded by this repository |
 
 Nothing in the closure grows with the number of candles fed. That is the property a
 live consumer needs and it is asserted in the build rather than described here:
@@ -194,4 +197,9 @@ done so twice; 48 bytes is two more `Calendar`-sized additions, not many.
 **Stated rather than implied (§3 rule 6):** support counting is O(candles) because it
 *is* the measurement, and the Apriori level join is O(|frontier|²), which is that
 algorithm's documented shape. Neither is a hidden scan, and neither is on the
-per-candle path.
+per-candle path. The live support constant is measured flat from k=1 to k=8
+(0.996× at the far endpoint) and across the complete 384-bit representation
+(0.942× at k=384), while the source guard
+`engine::column::tests::the_live_support_body_is_one_fixed_width_hit_test` pins the
+one-hit-test shape. Those ratios are regression evidence on one machine, not a
+worst-case latency guarantee.
