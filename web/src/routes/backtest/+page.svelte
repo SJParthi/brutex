@@ -110,6 +110,7 @@
   } from '$lib/comparison.js';
   import { validateFrontierPayload } from '$lib/frontier-analytics.js';
   import { decodeMaskWords } from '$lib/mask.js';
+  import { impliedConditions } from '$lib/condition-groups.js';
   import { createRequestGate } from '$lib/request-gate.js';
   import { reduceLiveProgress } from '$lib/live-progress';
   import {
@@ -6984,6 +6985,13 @@
             {@const move = Math.abs(Number(row.mean_milli_paisa) || 0) / 1000}
             {@const n = Number(row.n) || 0}
             {@const wins = Number(row.edge_wins) || 0}
+            <!-- Declared here and not beside the markup they describe: Svelte
+                 requires `{@const}` to be the immediate child of a block. -->
+            {@const decoded = decodeMaskWords(row.mask_words)}
+            {@const names = decoded.ok
+              ? decoded.positions.map((/** @type {number} */ p) => vocab.bits.get(p)?.name ?? '')
+              : []}
+            {@const implied = impliedConditions(names.filter((/** @type {string} */ n) => n))}
             <li class="liverow {row.clears_bar ? 'clears' : ''}">
               <div class="liverow-top">
                 <span class="liverank">{row.rank}</span>
@@ -6999,8 +7007,25 @@
               </div>
               <!-- WHAT THE COMBINATION ACTUALLY IS, which the grid this replaced
                    never showed at all. Named through `/vocab.json`, never a
-                   second copy of the table in JavaScript. -->
-              <div class="liverow-names">{@render conditionNames(row.mask_words)}</div>
+                   second copy of the table in JavaScript.
+
+                   AND WHICH OF THOSE NAMES RESTATE A TIGHTER ONE. On an ordered
+                   ladder two conditions in the same direction are not two
+                   facts: `above s2` and `above s3` both say price is above a
+                   support, and s3 < s2, so the second is implied. Two in
+                   OPPOSITE directions are a band and both matter -- `above s2`
+                   with `below s1` says price sits between them, which is a real
+                   and narrow setup. The implied ones are dimmed and counted,
+                   never dropped: dropping would claim the implication is exact,
+                   and these are tolerance bands rather than bare inequalities. -->
+              <div class="liverow-names">
+                {#if implied.size > 0}
+                  <span class="liveshape"
+                    >{names.length - implied.size} of {names.length} carry the setup</span
+                  >
+                {/if}
+                {@render conditionNames(row.mask_words)}
+              </div>
               <div class="liverow-facts">
                 <span><b>{exact(n)}</b> trades</span>
                 <span><b>{n > 0 ? Math.round((wins / n) * 100) : 0}%</b> won</span>
@@ -10704,6 +10729,21 @@
   .liverow-names {
     font-size: 12.5px;
     line-height: 1.5;
+  }
+  /* HOW MANY OF THE NAMES ARE THE SETUP, and how many restate it. Placed before
+     the names rather than after, because it is the number that tells a reader
+     whether a seven-token row is a seven-condition edge or a four-condition one
+     written at length. */
+  .liveshape {
+    display: inline-block;
+    margin-right: 8px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: var(--acc-soft);
+    color: var(--acc);
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
   }
   .liverow-facts {
     display: flex;
