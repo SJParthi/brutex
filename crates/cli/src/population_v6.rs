@@ -56,7 +56,26 @@ const HEADER_BYTES: usize = 64;
 const RECORD_BYTES: usize = 4_096;
 const RECORD_BYTES_U32: u32 = 4_096;
 const PAYLOAD_BYTES: usize = RECORD_BYTES - 32;
-const CANDIDATE_RECORD_BYTES: usize = CANDIDATE_ROW_STRIDE_V1 as usize;
+/// [`CANDIDATE_ROW_STRIDE_V1`] as the `usize` a record read needs.
+///
+/// # Why an `allow` is honest here and nowhere else
+///
+/// `usize::try_from` is not callable in a `const`, so the cast cannot be made
+/// fallible at this site. What CAN be done is prove it, and the assert below
+/// runs at compile time: a stride that no longer fits a `usize` is a build
+/// failure, not a truncated constant that silently mis-strides every record
+/// read after it. The lint's concern is discharged rather than silenced, and
+/// the `allow` is scoped to this one constant, so the next unproved cast in
+/// this file still fails the build.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "discharged by the const assert on the line below, which is a \
+              compile-time check rather than a comment claiming one."
+)]
+const CANDIDATE_RECORD_BYTES: usize = {
+    assert!(CANDIDATE_ROW_STRIDE_V1 <= usize::MAX as u64);
+    CANDIDATE_ROW_STRIDE_V1 as usize
+};
 const RUNNER_POLICY_BYTES: usize = runner::admission::ADMISSION_POLICY_CANONICAL_LEN_V1;
 const RUNNER_DECISION_BYTES: usize = runner::admission::ADMISSION_DECISION_CANONICAL_LEN_V3;
 const RUNNER_HEADER_BYTES: usize = 12;
@@ -1203,9 +1222,19 @@ fn derive_population_id_from_family_records(
     )
 }
 
+/// The four 32-byte digests one family contributes to a Population V6 identity:
+/// its candidate row, its universe, its completion and its ordering.
+///
+/// Named rather than spelled inline because the inline form is four identical
+/// `[u8; 32]`s in a fixed order, and a reader has no way to tell from the type
+/// which position means which digest -- nor would swapping two of them be a
+/// compile error. The name does not fix that, but it gives the doc comment
+/// somewhere to live.
+type FamilyDigestsV6 = ([u8; 32], [u8; 32], [u8; 32], [u8; 32]);
+
 fn derive_population_id_from_parts(
     value: &SourceRecordV6,
-    families: [([u8; 32], [u8; 32], [u8; 32], [u8; 32]); 2],
+    families: [FamilyDigestsV6; 2],
 ) -> [u8; 32] {
     let [
         (nifty_row, nifty_universe, nifty_completion, nifty_ordered),
@@ -1943,7 +1972,7 @@ impl PopulationV6Ledger {
             return Err("Population V6 data length exceeds bounds or omits header".to_owned());
         }
         let body = metadata.len() - HEADER_BYTES as u64;
-        if body % RECORD_BYTES as u64 != 0 {
+        if !body.is_multiple_of(RECORD_BYTES as u64) {
             return Err("Population V6 data file is ragged".to_owned());
         }
         self.record_count = body / RECORD_BYTES as u64;
@@ -2516,13 +2545,28 @@ pub(crate) struct PopulationV6ProductionSourceV1 {
     candidates: PopulationV6CandidateAuthoritiesV1,
 }
 
+/// Which of the two charter families this Population V6 source actually holds.
+///
+/// # Why every payload is boxed
+///
+/// A `CommittedStoredCandidatePreAdmissionV1` is about 6.4 KiB, so an inline
+/// `Both` made the enum 12,896 bytes -- and `None` still cost all of it,
+/// because an enum is as large as its widest variant. Every move of this token
+/// through the bind/authenticate chain copied that, and the `None` case copied
+/// twelve kilobytes of nothing.
+///
+/// Boxing makes all four variants pointer-sized. The cost is one allocation per
+/// bound family, and the bind happens sixteen times in an all-rung run -- twice
+/// per rung -- never inside a loop over bars or candidates. That is well under
+/// the granularity `CLAUDE.md` §3 rule 4 governs: it is not a per-operation
+/// cost, so it does not touch the O(1) claim either way.
 enum PopulationV6CandidateAuthoritiesV1 {
     Both {
-        nifty: CommittedStoredCandidatePreAdmissionV1,
-        banknifty: CommittedStoredCandidatePreAdmissionV1,
+        nifty: Box<CommittedStoredCandidatePreAdmissionV1>,
+        banknifty: Box<CommittedStoredCandidatePreAdmissionV1>,
     },
-    Nifty(CommittedStoredCandidatePreAdmissionV1),
-    BankNifty(CommittedStoredCandidatePreAdmissionV1),
+    Nifty(Box<CommittedStoredCandidatePreAdmissionV1>),
+    BankNifty(Box<CommittedStoredCandidatePreAdmissionV1>),
     None,
 }
 
@@ -2598,12 +2642,15 @@ fn authenticate_candidate_authorities(
         )
     };
     match candidates {
-        PopulationV6CandidateAuthoritiesV1::Both { nifty, banknifty } => {
-            Ok((Some(authenticate(nifty)?), Some(authenticate(banknifty)?)))
+        PopulationV6CandidateAuthoritiesV1::Both { nifty, banknifty } => Ok((
+            Some(authenticate(nifty.as_ref())?),
+            Some(authenticate(banknifty.as_ref())?),
+        )),
+        PopulationV6CandidateAuthoritiesV1::Nifty(nifty) => {
+            Ok((Some(authenticate(nifty.as_ref())?), None))
         }
-        PopulationV6CandidateAuthoritiesV1::Nifty(nifty) => Ok((Some(authenticate(nifty)?), None)),
         PopulationV6CandidateAuthoritiesV1::BankNifty(banknifty) => {
-            Ok((None, Some(authenticate(banknifty)?)))
+            Ok((None, Some(authenticate(banknifty.as_ref())?)))
         }
         PopulationV6CandidateAuthoritiesV1::None => Ok((None, None)),
     }
@@ -2623,7 +2670,10 @@ pub(crate) fn bind_population_v6_source_v1(
 ) -> Result<PopulationV6ProductionSourceV1, PopulationV6Refusal> {
     bind_population_v6_source(
         finalization,
-        PopulationV6CandidateAuthoritiesV1::Both { nifty, banknifty },
+        PopulationV6CandidateAuthoritiesV1::Both {
+            nifty: Box::new(nifty),
+            banknifty: Box::new(banknifty),
+        },
     )
 }
 
@@ -2633,7 +2683,7 @@ pub(crate) fn bind_population_v6_nifty_evaluated_source_v1(
 ) -> Result<PopulationV6ProductionSourceV1, PopulationV6Refusal> {
     bind_population_v6_source(
         finalization,
-        PopulationV6CandidateAuthoritiesV1::Nifty(nifty),
+        PopulationV6CandidateAuthoritiesV1::Nifty(Box::new(nifty)),
     )
 }
 
@@ -2643,7 +2693,7 @@ pub(crate) fn bind_population_v6_banknifty_evaluated_source_v1(
 ) -> Result<PopulationV6ProductionSourceV1, PopulationV6Refusal> {
     bind_population_v6_source(
         finalization,
-        PopulationV6CandidateAuthoritiesV1::BankNifty(banknifty),
+        PopulationV6CandidateAuthoritiesV1::BankNifty(Box::new(banknifty)),
     )
 }
 

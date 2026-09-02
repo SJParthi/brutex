@@ -704,7 +704,12 @@ fn require_exact_prefix<T: PartialEq>(
     top_ten: &[T],
 ) -> Result<(), String> {
     let prefix_count = top_twenty_five.len().min(TOP_TEN);
-    if top_ten.len() != prefix_count || top_ten != &top_twenty_five[..prefix_count] {
+    // `.get(..)` rather than `[..]`: the range is clamped by the `min` above and
+    // so cannot be out of bounds, but a slice index that is only PROVED safe by
+    // the line above it is one edit away from not being. The `Option` costs
+    // nothing and makes a future edit that breaks the clamp a compile error
+    // here instead of a panic in an operator's run.
+    if top_ten.len() != prefix_count || top_twenty_five.get(..prefix_count) != Some(top_ten) {
         return Err(format!(
             "all-rung {rung_name} Top-10 is not the exact Top-25 prefix"
         ));

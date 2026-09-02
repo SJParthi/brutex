@@ -3876,6 +3876,21 @@ pub(crate) use tests::{
 };
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "the same exception every test module in this workspace takes: a \
+              test that cannot panic cannot fail."
+)]
+#[allow(
+    clippy::indexing_slicing,
+    reason = "the byte-flip loops walk `0..RECORD_BYTES_V2` over an array of \
+              exactly that length, so the index is the loop's own bound. \
+              Rewriting them through `.get()` would add an `Option` arm that no \
+              input can reach, and `CLAUDE.md` §4 bans a test that asserts \
+              nothing -- an unreachable arm is one."
+)]
 mod tests {
     use super::*;
 

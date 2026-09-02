@@ -1656,7 +1656,7 @@ impl PreparedExecutionV4 {
         let mut expected_percentile_offset = 0_u64;
         let mut actual_parameter_index = 0_usize;
         for (family, direction) in expected_order {
-            if self.families[family_index(family)].terminal
+            if family_of(&self.families, family).terminal
                 == ExecutionV4FamilyTerminal::NaturallyExtinct
             {
                 continue;
@@ -4207,6 +4207,30 @@ const fn family_index(family: ExecutionV4Family) -> usize {
     }
 }
 
+/// The one element of a two-family array that `family` names.
+///
+/// # Why this exists beside [`family_index`]
+///
+/// `array[family_index(family)]` is provably in bounds -- a two-variant enum
+/// cannot address a third slot -- but `clippy::indexing_slicing` cannot see
+/// that, and the only ways to quiet it are an `allow` or this. An `allow` would
+/// be worse than the lint: it silences every *other* index in the same file,
+/// including a future one that is genuinely unchecked, which is the "fallback
+/// that hides a failure" `CLAUDE.md` §4 bans.
+///
+/// Destructuring `[T; 2]` is irrefutable and the match is exhaustive, so the
+/// bound is carried by the TYPE rather than by a comment claiming it holds.
+/// The three call sites that already read `.get(family_index(..))` keep doing
+/// so: they need the `Option` because their array is behind a length the
+/// decoder read off disk, and that one really can be short.
+const fn family_of<T>(array: &[T; 2], family: ExecutionV4Family) -> &T {
+    let [nifty, banknifty] = array;
+    match family {
+        ExecutionV4Family::Nifty => nifty,
+        ExecutionV4Family::BankNifty => banknifty,
+    }
+}
+
 fn expected_parameter_count(
     families: &[ExecutionV4FamilyEnvelope; 2],
 ) -> Result<usize, ExecutionV4Refusal> {
@@ -4249,7 +4273,7 @@ fn parameter_id_slots(
     ];
     let mut slots = [[0_u8; 32]; MAX_PARAMETER_RECORDS_PER_BLOCK];
     for (slot, (family, direction)) in slots.iter_mut().zip(order) {
-        if families[family_index(family)].terminal == ExecutionV4FamilyTerminal::Evaluated {
+        if family_of(families, family).terminal == ExecutionV4FamilyTerminal::Evaluated {
             *slot = find_parameter(parameters, family, direction)?.parameter_id;
         }
     }
@@ -5578,7 +5602,7 @@ mod tests {
         let original_parameters = std::mem::take(&mut prepared.parameters);
         let original_percentiles = std::mem::take(&mut prepared.percentiles);
         for mut parameter in original_parameters {
-            if !evaluated[family_index(parameter.family)] {
+            if !family_of(&evaluated, parameter.family) {
                 continue;
             }
             let start = usize::try_from(parameter.percentile_offset)
@@ -5601,7 +5625,7 @@ mod tests {
         }
         prepared
             .dispositions
-            .retain(|row| evaluated[family_index(row.family)]);
+            .retain(|row| *family_of(&evaluated, row.family));
         for (index, row) in prepared.dispositions.iter_mut().enumerate() {
             let parameter = find_parameter(&prepared.parameters, row.family, row.direction)
                 .expect("active topology parameter");
@@ -5622,10 +5646,20 @@ mod tests {
                 .filter(|row| row.family == ExecutionV4Family::BankNifty)
                 .count(),
         ];
-        for (index, family) in prepared.families.iter_mut().enumerate() {
-            if evaluated[index] {
-                let count =
-                    u64::try_from(family_counts[index]).expect("small topology Family count");
+        // ZIPPED RATHER THAN ENUMERATED, and the reason is the same one
+        // `family_of` exists for: `enumerate` yields a `usize` that then
+        // indexes two OTHER fixed arrays, and nothing in the types says the
+        // three walk in step. Zipping three `[T; 2]`s says it structurally --
+        // the loop cannot outrun the shortest, and there is no index to be
+        // wrong.
+        for ((family, &was_evaluated), &family_count) in prepared
+            .families
+            .iter_mut()
+            .zip(evaluated.iter())
+            .zip(family_counts.iter())
+        {
+            if was_evaluated {
+                let count = u64::try_from(family_count).expect("small topology Family count");
                 family.terminal = ExecutionV4FamilyTerminal::Evaluated;
                 family.candidate_count = count;
                 family.evaluated_count = count;

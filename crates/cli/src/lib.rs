@@ -138,6 +138,8 @@ pub mod institutional_evidence;
 /// Durable exact bootstrap statistics bound to institutional-selection identity.
 pub mod institutional_statistics;
 pub mod knobs;
+/// The operator surface for the durable all-rung Step-3 ledger chain.
+mod ledger_all;
 pub mod live;
 /// Complete, fixed-stride candidate populations and their receipt-last commit.
 pub mod population;
@@ -317,6 +319,21 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    min_hits comes from its OWN bar count, because
                                    81 months holds 1,671 daily bars and 623,546
                                    one-minute ones. Every rung is recorded.
+       cli ledger-all   VENDOR FROM_Y FROM_M TO_Y TO_M SUPPORT_PPM MAX_POINTS ROOT
+                                   the DURABLE all-rung run. Sweeps the span on
+                                   all eight rungs and WRITES the ledgers --
+                                   candidate, pre-admission, observation,
+                                   statistics, search lineage, admission,
+                                   finalization, execution and selection -- under
+                                   ROOT, reauthenticating every retained root
+                                   before the next stage reads it.
+                                   It takes no UNDERLYING: this chain commits
+                                   NIFTY and BANKNIFTY as one cross-sectional
+                                   pair per rung, so it needs both.
+                                   MAX_POINTS is the worst single loss you will
+                                   accept, in index points. The report names
+                                   every admission gate it applies AND every one
+                                   it does not.
        cli audit-range  VENDOR UNDERLYING RUNG FROM_Y FROM_M TO_Y TO_M MIN_HITS
                                    sweep a CONTIGUOUS SPAN of months as ONE
                                    series -- the seven-year question, not twelve
@@ -900,6 +917,96 @@ fn range_all_arm(
         (_, _, _, _, Err(why)) => refuse(out, why),
     }
 }
+/// The `sweep-stored` and `audit-stored` arms, which are one arm.
+///
+/// # Why they share a function rather than a comment saying they agree
+///
+/// They took the same six arguments, parsed them in the same order and gave the
+/// same three refusals -- and the older of the two carried a comment promising
+/// exactly that: *"Two commands taking one shape of argument must reject a bad
+/// one identically, or an operator learns two rules."*
+///
+/// A promise in a comment is kept by whoever reads it next. Passing the command
+/// as a function pointer makes the two literally the same code, so a refusal
+/// reworded for one cannot drift from the other -- and it takes forty-six lines
+/// out of a dispatch table `clippy::too_many_lines` had already outgrown.
+fn stored_month_arm(
+    out: &mut String,
+    command: fn(&str, &str, &str, u16, u8, u64) -> String,
+    what: (&str, &str, &str),
+    when: (&str, &str, &str),
+) -> u8 {
+    let (vendor, underlying, rung) = what;
+    let (year, month, min_hits) = when;
+    match (
+        year.parse::<u16>(),
+        month.parse::<u8>(),
+        parse_min_hits(min_hits),
+    ) {
+        (Ok(y), Ok(m), Ok(h)) => {
+            let text = command(vendor, underlying, rung, y, m, h);
+            let refused = carries_refusal(&text);
+            out.push_str(&text);
+            if refused { MISUSED } else { OK }
+        }
+        (Err(_), _, _) => refuse(out, "YEAR must be a number like 2026"),
+        (_, Err(_), _) => refuse(out, "MONTH must be 1..=12"),
+        (_, _, Err(why)) => refuse(out, why),
+    }
+}
+
+/// The `ledger-all` arm, lifted out of [`run`].
+///
+/// # Why it takes no UNDERLYING
+///
+/// Every other stored command takes one, because it sweeps one instrument. This
+/// chain does not: `CLAUDE.md` §1 names two instruments as the engine surface
+/// and the Population V5 pipeline commits BOTH per rung, pairing them as one
+/// cross-sectional statistic. The pair is structural all the way down --
+/// `CandidateFamilyPairV1 { nifty, banknifty }` -- so there is no argument an
+/// operator could pass to ask for one of them, and offering one would be a
+/// promise this chain cannot keep.
+fn ledger_all_arm(
+    out: &mut String,
+    vendor: &str,
+    from: (&str, &str),
+    to: (&str, &str),
+    limits: (&str, &str),
+    root: &str,
+) -> u8 {
+    match (
+        from.0.parse::<u16>(),
+        from.1.parse::<u8>(),
+        to.0.parse::<u16>(),
+        to.1.parse::<u8>(),
+        parse_support_ppm(limits.0),
+        limits.1.parse::<u64>(),
+    ) {
+        (Ok(fy), Ok(fm), Ok(ty), Ok(tm), Ok(support_ppm), Ok(max_points)) if max_points > 0 => {
+            let text = ledger_all::ledger_all(&ledger_all::LedgerAllRequest {
+                vendor,
+                from: (fy, fm),
+                to: (ty, tm),
+                support_ppm,
+                max_points,
+                root: std::path::Path::new(root),
+            });
+            let refused = carries_refusal(&text);
+            out.push_str(&text);
+            if refused { MISUSED } else { OK }
+        }
+        (Err(_), _, _, _, _, _) | (_, _, Err(_), _, _, _) => {
+            refuse(out, "YEAR must be a number like 2026")
+        }
+        (_, Err(_), _, _, _, _) | (_, _, _, Err(_), _, _) => refuse(out, "MONTH must be 1..=12"),
+        (_, _, _, _, Err(why), _) => refuse(out, why),
+        (_, _, _, _, _, _) => refuse(
+            out,
+            "MAX_POINTS must be a whole number of points, 1 or more",
+        ),
+    }
+}
+
 /// The `audit-range` arm, lifted out of [`run`].
 ///
 /// # Why it is a function and not five more lines in the match
@@ -974,58 +1081,11 @@ pub fn run(args: &[String], out: &mut String) -> u8 {
                 (Err(why), _) | (_, Err(why)) => refuse(out, why),
             }
         }
-        [
-            "sweep-stored",
-            vendor,
-            underlying,
-            rung,
-            year,
-            month,
-            min_hits,
-        ] => {
-            match (
-                year.parse::<u16>(),
-                month.parse::<u8>(),
-                parse_min_hits(min_hits),
-            ) {
-                (Ok(y), Ok(m), Ok(h)) => {
-                    let text = sweep_stored(vendor, underlying, rung, y, m, h);
-                    let refused = carries_refusal(&text);
-                    out.push_str(&text);
-                    if refused { MISUSED } else { OK }
-                }
-                (Err(_), _, _) => refuse(out, "YEAR must be a number like 2026"),
-                (_, Err(_), _) => refuse(out, "MONTH must be 1..=12"),
-                (_, _, Err(why)) => refuse(out, why),
-            }
+        ["sweep-stored", feed, under, rung, year, month, hits] => {
+            stored_month_arm(out, sweep_stored, (feed, under, rung), (year, month, hits))
         }
-        [
-            "audit-stored",
-            vendor,
-            underlying,
-            rung,
-            year,
-            month,
-            min_hits,
-        ] => {
-            // The same parse, the same order and the same three refusals as
-            // `sweep-stored` above. Two commands taking one shape of argument
-            // must reject a bad one identically, or an operator learns two rules.
-            match (
-                year.parse::<u16>(),
-                month.parse::<u8>(),
-                parse_min_hits(min_hits),
-            ) {
-                (Ok(y), Ok(m), Ok(h)) => {
-                    let text = audit_stored(vendor, underlying, rung, y, m, h);
-                    let refused = carries_refusal(&text);
-                    out.push_str(&text);
-                    if refused { MISUSED } else { OK }
-                }
-                (Err(_), _, _) => refuse(out, "YEAR must be a number like 2026"),
-                (_, Err(_), _) => refuse(out, "MONTH must be 1..=12"),
-                (_, _, Err(why)) => refuse(out, why),
-            }
+        ["audit-stored", feed, under, rung, year, month, hits] => {
+            stored_month_arm(out, audit_stored, (feed, under, rung), (year, month, hits))
         }
         ["audit-range", v, u, r, fy, fm, ty, tm, mh] => {
             audit_range_arm(out, v, u, r, (fy, fm), (ty, tm), mh)
@@ -1037,6 +1097,9 @@ pub fn run(args: &[String], out: &mut String) -> u8 {
             elite_arm(out, v, u, r, (fy, fm, ty, tm), (pts, n))
         }
         ["range-all", v, u, fy, fm, ty, tm, mh] => range_all_arm(out, v, u, (fy, fm), (ty, tm), mh),
+        ["ledger-all", v, fy, fm, ty, tm, sup, pts, root] => {
+            ledger_all_arm(out, v, (fy, fm), (ty, tm), (sup, pts), root)
+        }
         ["descend", v, u, r, fy, fm, ty, tm, sup, pw] => {
             descend_arm(out, v, u, r, (fy, fm), (ty, tm), sup, pw)
         }
@@ -1096,7 +1159,7 @@ fn unmatched(word: &str, given: usize) -> String {
 /// So it is written down, and `every_command_is_listed_in_both_places` asserts
 /// the list, the dispatch and the usage all name the same set. The duplication
 /// is real; the test is what makes it safe.
-const COMMANDS: [&str; 15] = [
+const COMMANDS: [&str; 16] = [
     "audit",
     "audit-range",
     "audit-stored",
@@ -1104,6 +1167,7 @@ const COMMANDS: [&str; 15] = [
     "auto-stored",
     "descend",
     "elite",
+    "ledger-all",
     "range-all",
     "results",
     "screen",
