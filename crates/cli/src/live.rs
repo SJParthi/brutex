@@ -1347,6 +1347,14 @@ mod tests {
     /// The three answers, and the one that must stay an absence.
     #[test]
     fn freshness_answers_i_do_not_know_rather_than_fine() {
+        // A DAY IS NOT AN ARBITRARY NUMBER, and a future edit that tightens it
+        // fails here rather than in production. The writer publishes ONCE,
+        // immediately before an exit grid that is 87.6% of wall clock, so the
+        // threshold has to clear the longest run anyone in this repository has
+        // measured -- a 60-minute `audit-range`, ~42 minutes of it grid -- by a
+        // margin that makes crossing it a fact rather than a guess about how
+        // long a sweep is allowed to take.
+        const LONGEST_MEASURED_RUN_SECS: u64 = 60 * 60;
         assert_eq!(Freshness::Touched(60).idle_secs(), Some(60));
         assert_eq!(Freshness::Touched(60).is_stale(), Some(false));
         assert_eq!(
@@ -1367,14 +1375,6 @@ mod tests {
              `Census` built by `Default` must not describe healthy runs"
         );
 
-        // A DAY IS NOT AN ARBITRARY NUMBER, and a future edit that tightens it
-        // fails here rather than in production. The writer publishes ONCE,
-        // immediately before an exit grid that is 87.6% of wall clock, so the
-        // threshold has to clear the longest run anyone in this repository has
-        // measured -- a 60-minute `audit-range`, ~42 minutes of it grid -- by a
-        // margin that makes crossing it a fact rather than a guess about how
-        // long a sweep is allowed to take.
-        const LONGEST_MEASURED_RUN_SECS: u64 = 60 * 60;
         assert_eq!(STALE_AFTER_SECS, 86_400);
         assert!(
             STALE_AFTER_SECS >= LONGEST_MEASURED_RUN_SECS.saturating_mul(20),

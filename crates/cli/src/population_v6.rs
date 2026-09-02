@@ -1917,7 +1917,7 @@ impl PopulationV6Ledger {
             if data_created {
                 data_file
                     .write_all(&header())
-                    .and_then(|_| data_file.sync_all())
+                    .and_then(|()| data_file.sync_all())
                     .map_err(|why| format!("cannot initialize Population V6 header: {why}"))?;
                 root_file
                     .sync_all()
@@ -3159,7 +3159,7 @@ impl CommittedStoredPopulationV6 {
                 append_replay(banknifty, expected_banknifty)?;
             }
             (PopulationV6CandidateAuthoritiesV1::Nifty(nifty), Some(expected_nifty), None) => {
-                append_replay(nifty, expected_nifty)?
+                append_replay(nifty, expected_nifty)?;
             }
             (
                 PopulationV6CandidateAuthoritiesV1::BankNifty(banknifty),
@@ -3498,7 +3498,7 @@ mod tests {
             external
                 .seek(SeekFrom::Start(mutation_offset))
                 .and_then(|_| external.write_all(&byte))
-                .and_then(|_| external.sync_all())
+                .and_then(|()| external.sync_all())
                 .map_err(|why| format!("cannot persist Population V6 mutation: {why}"))?;
             drop(external);
             assert!(

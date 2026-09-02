@@ -2170,6 +2170,13 @@ pub struct PreAdmissionDataBoundsV2 {
 
 impl PreAdmissionDataBoundsV2 {
     /// Constructs nonzero bounds large enough for one complete receipt-last pair.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a zero row or byte ceiling, and a byte ceiling too small to hold
+    /// one header plus the two records a complete receipt-last pair needs. There
+    /// is no implicit default; a caller that cannot name a ceiling has not
+    /// decided one.
     pub fn new(max_rows: u64, max_file_bytes: u64) -> Result<Self, PreAdmissionDataRefusal> {
         if max_rows == 0 || max_file_bytes == 0 {
             return Err(format!(
@@ -2266,6 +2273,13 @@ pub struct PreAdmissionDataLedgerV2 {
 
 impl PreAdmissionDataLedgerV2 {
     /// Opens existing V2 files without creating or modifying any path.
+    ///
+    /// # Errors
+    ///
+    /// Refuses an absent or non-directory root, a file whose header does not
+    /// authenticate, a length that is not a whole number of records, or one past
+    /// the admitted ceilings. Reading never creates: a missing file is a refusal
+    /// here, not an empty ledger.
     pub fn open_read(
         root: impl AsRef<Path>,
         bounds: PreAdmissionDataBoundsV2,
@@ -2454,6 +2468,12 @@ impl PreAdmissionDataLedgerV2 {
     }
 
     /// Reopens one completed V2 audit after generation revalidation.
+    ///
+    /// # Errors
+    ///
+    /// Refuses if the file changed generation beneath the open handle, if the
+    /// named authority is absent, or if its reopened record does not
+    /// authenticate against the seal it was written with.
     pub fn reopen_audit(
         &self,
         authority_id: &[u8; 32],

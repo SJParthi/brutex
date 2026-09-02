@@ -1719,10 +1719,10 @@ mod tests {
         .expect("all-rung Execution test bounds are valid")
     }
 
-    fn execution_request<'a>(
-        roots: &'a ControlledExecutionRoots,
+    fn execution_request(
+        roots: &ControlledExecutionRoots,
         bounds: ExecutionV3Bounds,
-    ) -> AllRungStoredExecutionV3Request<'a> {
+    ) -> AllRungStoredExecutionV3Request<'_> {
         AllRungStoredExecutionV3Request {
             one_minute_root: &roots.one_minute,
             one_minute_bounds: bounds,

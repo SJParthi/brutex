@@ -1667,7 +1667,9 @@ fn disposition_from_population_source(
     } else {
         ExecutionV3Terminal::PolicyRefused
     };
-    let selected_exit_digest = runner.selected().map_or([0; 32], |value| value.digest());
+    let selected_exit_digest = runner
+        .selected()
+        .map_or([0; 32], runner::exit_grid_policy::SelectedExitV1::digest);
     let mut row = ExecutionV3DispositionRecord {
         disposition_id: [0; 32],
         population_id: population.population_id(),

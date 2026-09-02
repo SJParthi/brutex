@@ -4147,7 +4147,10 @@ mod tests {
     }
 
     pub(crate) struct StatisticsV3EvaluatedPairFixture {
-        _stored: StoredSuccessFixture,
+        // NOT `_stored`: the underscore said "kept alive, never read", and five
+        // call sites below read it. A name that lies about how a field is used
+        // is worse than no name -- the next reader assumes deleting it is safe.
+        stored: StoredSuccessFixture,
         nifty: CommittedStoredCandidatePreAdmissionV1,
         banknifty: CommittedStoredCandidatePreAdmissionV1,
     }
@@ -4186,7 +4189,7 @@ mod tests {
         let nifty = committed_fixture_family(&stored.source, "NIFTY", &long, &short)?;
         let banknifty = committed_fixture_family(&stored.source, "BANKNIFTY", &long, &short)?;
         Ok(StatisticsV3EvaluatedPairFixture {
-            _stored: stored,
+            stored,
             nifty,
             banknifty,
         })
@@ -4210,7 +4213,7 @@ mod tests {
             procedure,
         )?;
         let statistics = produced.append_and_reopen(
-            &fixture._stored.statistics,
+            &fixture.stored.statistics,
             crate::population_statistics_v3::PopulationStatisticsV3Bounds::new(
                 4,
                 1_000_000,
@@ -4225,7 +4228,7 @@ mod tests {
         let nifty_search = search.nifty().projection()?;
         let banknifty_search = search.banknifty().projection()?;
         let search_lineage = persist_anchored_search_lineage_v4(
-            &fixture._stored.search_lineage,
+            &fixture.stored.search_lineage,
             AnchoredSearchLineageV4Bounds::new(
                 4,
                 8 * crate::anchored_search_lineage_v4::ANCHORED_SEARCH_LINEAGE_V4_MEMBER_BYTES
@@ -4257,7 +4260,7 @@ mod tests {
             &population_admission_policy()?,
         )?;
         let admission = crate::population_admission_v4::commit_population_admission_v4(
-            &fixture._stored.admission,
+            &fixture.stored.admission,
             crate::population_admission_v4::PopulationAdmissionV4Bounds::new(
                 4,
                 1_000_000,
@@ -4267,7 +4270,7 @@ mod tests {
         )?
         .into_authority();
         let finalization = crate::population_finalization_v4::commit_population_finalization_v4(
-            &fixture._stored.finalization,
+            &fixture.stored.finalization,
             crate::population_finalization_v4::PopulationFinalizationV4Bounds::new(
                 4,
                 1_000_000,
@@ -4280,7 +4283,7 @@ mod tests {
             finalization,
             fixture.nifty,
             fixture.banknifty,
-            &fixture._stored.population_v6,
+            &fixture.stored.population_v6,
         )
     }
 

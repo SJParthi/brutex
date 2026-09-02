@@ -1117,12 +1117,6 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
-            let serial = NEXT.fetch_add(1, Ordering::Relaxed);
-            let root = std::env::temp_dir()
-                .join(format!("brutex-provenance-{}-{serial}", std::process::id()));
-            fs::create_dir_all(root.join(".git/objects")).expect("objects");
-            fs::create_dir_all(root.join(".git/refs/heads")).expect("refs");
-
             // `.gitignore` is TRACKED here because it is tracked in the real
             // repository -- `AGENTS.md` §2 admits it by name. It has to be: the
             // walker now takes its exclusions from this file and nowhere else,
@@ -1137,6 +1131,12 @@ mod tests {
                 /logs.pre-wd-black-*\n\
                 /mutants.out*.pre-wd-black-*\n\
                 **/*.log\n";
+            let serial = NEXT.fetch_add(1, Ordering::Relaxed);
+            let root = std::env::temp_dir()
+                .join(format!("brutex-provenance-{}-{serial}", std::process::id()));
+            fs::create_dir_all(root.join(".git/objects")).expect("objects");
+            fs::create_dir_all(root.join(".git/refs/heads")).expect("refs");
+
             let files = [
                 (".gitignore", IGNORE),
                 ("Cargo.toml", b"[workspace]\n".as_slice()),
@@ -1635,7 +1635,7 @@ mod tests {
     ///
     /// Found by the naming this commit added: on a clean tree the refusal read
     /// `an untracked file could affect compilation: web/.svelte-kit/ambient.d.ts`,
-    /// a SvelteKit build directory ignored by `web/.gitignore:2` and therefore
+    /// a `SvelteKit` build directory ignored by `web/.gitignore:2` and therefore
     /// invisible to `git status`. Reading only the root file is a third ignore
     /// policy, one directory further down.
     #[test]

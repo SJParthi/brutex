@@ -1319,7 +1319,9 @@ fn project_execution_row(
         ),
         None => (None, None),
     };
-    let selected_exit_digest = live.selected().map(|selected| selected.digest());
+    let selected_exit_digest = live
+        .selected()
+        .map(runner::exit_grid_policy::SelectedExitV1::digest);
     let expected_side = match candidate.direction() {
         TradeDirectionV1::Long => runner::excursion::Side::Long,
         TradeDirectionV1::Short => runner::excursion::Side::Short,

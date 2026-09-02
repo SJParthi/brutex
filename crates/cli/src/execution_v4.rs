@@ -2020,7 +2020,9 @@ fn disposition_from_population_source(
     } else {
         ExecutionV4Terminal::PolicyRefused
     };
-    let selected_exit_digest = runner.selected().map_or([0; 32], |value| value.digest());
+    let selected_exit_digest = runner
+        .selected()
+        .map_or([0; 32], runner::exit_grid_policy::SelectedExitV1::digest);
     let mut row = ExecutionV4DispositionRecord {
         disposition_id: [0; 32],
         population_id: population.population_id(),
@@ -6576,7 +6578,7 @@ mod tests {
                 .ordered_authenticated_dispositions()
                 .expect("mixed durable dispositions");
             assert_eq!(rows.len(), 8);
-            let expected_family_index = if evaluated[0] { 0 } else { 1 };
+            let expected_family_index = usize::from(!evaluated[0]);
             assert!(
                 rows.iter()
                     .all(|row| family_index(row.family()) == expected_family_index)
