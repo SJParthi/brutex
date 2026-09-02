@@ -223,10 +223,34 @@ function validateRun(candidate, requireSeal) {
     run.months_found > run.months_asked ||
     run.whole_span !== (run.months_found === run.months_asked) ||
     run.bars < 1 ||
-    run.min_hits < 1 ||
-    run.min_hits > run.bars
+    run.min_hits < 1
   ) {
     return { ok: false, why: 'The run contains contradictory span, bar, or support counts.' };
+  }
+  // A THRESHOLD ABOVE THE COLUMN IS LEGAL, AND CALLING IT CONTRADICTORY BLANKED
+  // THE WHOLE PAGE.
+  //
+  // This used to read `run.min_hits > run.bars` in the block above, as a flat
+  // refusal. It is not a contradiction: a support floor higher than the bar
+  // count simply means no condition can be frequent, and the engine reports
+  // that honestly as extinction. MEASURED in the operator's own ledger --
+  // `audit-range ... 20000` over 2024-03 at 1min is 6,855 bars against a 20,000
+  // floor, and it completed with `outcome complete, the frontier went extinct`.
+  // Three such rows sat in `runs.bin`, every one of them truthful, and because
+  // `validateRun`'s caller refuses the ENVELOPE on the first invalid row, the
+  // backtest page showed nothing at all.
+  //
+  // What IS contradictory is a run that claims to have found something it could
+  // not have. If the floor exceeds the column, the ladder cannot admit a single
+  // combination, so `combinations` and `depth` must both be zero. That is the
+  // real invariant and it is the one checked here -- narrower than the old rule
+  // and strictly stronger, because the old one could not have caught a row
+  // claiming depth 8 at an unreachable floor.
+  if (run.min_hits > run.bars && (run.combinations !== 0 || run.depth !== 0)) {
+    return {
+      ok: false,
+      why: 'The run claims combinations at a support floor higher than its own bar count.'
+    };
   }
   if (
     typeof run.identity !== 'string' ||
