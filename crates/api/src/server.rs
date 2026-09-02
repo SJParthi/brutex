@@ -1114,7 +1114,7 @@ async fn instruments_json(
     // FRESH, so a row's bar count moves as a backfill lands. See `census_now`.
     let (censuses, entries) = census_now(&site);
     // ONE PASS OVER THE CENSUS, NOT ONE PER INSTRUMENT. See `bars_by_symbol`.
-    let held = bars_by_symbol(censuses.iter().find(|c| c.vendor == feed), &entries);
+    let held = bars_by_symbol(censuses.iter().find(|c| c.vendor == feed), entries.iter());
     let bars_of =
         |sym: brutex_core::symbol::Symbol| -> u64 { held.get(&sym).copied().unwrap_or(0) };
     listing.sort_unstable_by_key(|(key, _)| {
@@ -3133,20 +3133,44 @@ fn render_window(window: &bars::Window, scanned: bool) -> String {
 /// parts travel together by necessity: the stamps are what makes the other two
 /// trustworthy, and a reader holding the censuses without them cannot tell a
 /// current answer from one taken before the last pull.
+/// # `Arc` on the two payloads, and it is a cost fix rather than a style one
+///
+/// These were plain `Vec`s, and a cache HIT returned `censuses.clone()` and
+/// `entries.clone()` **from inside the mutex guard**. Both are whole-store
+/// structures — one `/store.json` body for a single feed measures 377,735 bytes
+/// — so six production paths serialised a full memcpy against each other, on a
+/// route the console polls every five seconds.
+///
+/// It also neutralised an optimisation already taken elsewhere: `census::
+/// filtered` was deliberately changed to return `Cow::Borrowed` to avoid
+/// copying entries, and `store_html` calls it on entries `census_now` had
+/// cloned one line earlier.
+///
+/// `Arc` makes a hit a refcount bump. Nothing else changes: the payloads are
+/// read-only after construction, every consumer reaches them through `Deref`,
+/// and the stamps stay a plain `Vec` because they are small and compared rather
+/// than handed out.
 pub type CensusCache = std::sync::Mutex<
     Option<(
         Vec<Option<std::time::SystemTime>>,
-        Vec<crate::census::VendorCensus>,
-        Vec<(crate::census::Series, store::path::YearMonth)>,
+        std::sync::Arc<Vec<crate::census::VendorCensus>>,
+        std::sync::Arc<Vec<(crate::census::Series, store::path::YearMonth)>>,
     )>,
 >;
 
-pub(crate) fn census_now(
-    site: &Site,
-) -> (
-    Vec<census::VendorCensus>,
-    Vec<(census::Series, store::path::YearMonth)>,
-) {
+/// What [`census_now`] hands back: the two cached halves, shared not copied.
+///
+/// Named because clippy refuses the inline tuple, and named SEPARATELY from
+/// [`CensusCache`] because the cache also carries the stamps that make these
+/// two trustworthy, and a caller receiving them without the stamps cannot tell
+/// a current answer from one taken before the last pull. Two aliases, two
+/// meanings.
+pub type CensusNow = (
+    std::sync::Arc<Vec<crate::census::VendorCensus>>,
+    std::sync::Arc<Vec<(crate::census::Series, store::path::YearMonth)>>,
+);
+
+pub(crate) fn census_now(site: &Site) -> CensusNow {
     // CACHED ON THE MANIFESTS' OWN STAMPS, because this is FIVE per-request
     // paths and it reads the whole store on every one of them.
     //
@@ -3180,18 +3204,28 @@ pub(crate) fn census_now(
         if let Some((at, censuses, entries)) = held.as_ref()
             && *at == stamps
         {
-            return (censuses.clone(), entries.clone());
+            // A REFCOUNT BUMP, not a whole-store memcpy under the guard. See
+            // `CensusCache` for what this used to cost and why the `Arc` is not
+            // decoration.
+            return (
+                std::sync::Arc::clone(censuses),
+                std::sync::Arc::clone(entries),
+            );
         }
     }
 
-    let censuses = census::read_all(&site.store_root);
-    let entries = census::held_entries(&censuses);
+    let censuses = std::sync::Arc::new(census::read_all(&site.store_root));
+    let entries = std::sync::Arc::new(census::held_entries(&censuses));
     {
         let mut held = site
             .census
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *held = Some((stamps, censuses.clone(), entries.clone()));
+        *held = Some((
+            stamps,
+            std::sync::Arc::clone(&censuses),
+            std::sync::Arc::clone(&entries),
+        ));
     }
     (censuses, entries)
 }

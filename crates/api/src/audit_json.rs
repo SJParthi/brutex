@@ -423,7 +423,7 @@ fn store_block(site: &Site, feed: Vendor, out: &mut String) {
     let mut months: BTreeMap<store::path::YearMonth, (u64, u64)> = BTreeMap::new();
     let mut instrument_months = 0u64;
     let mut bars = 0u64;
-    for (series, month) in &entries {
+    for (series, month) in entries.iter() {
         let Some(rows) = census.and_then(|c| c.rows_for(&series.at(*month))) else {
             continue;
         };
