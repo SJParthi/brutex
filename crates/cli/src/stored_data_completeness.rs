@@ -60,7 +60,22 @@ const MAX_STREAM_RECORDS: u64 = i64::MAX as u64;
 /// Eligibility decisions and market-data bytes are intentionally absent: they
 /// are data and enter the composite run digest separately.  This identity binds
 /// the schema, eligibility rule, exact-minute overlay rule, ordered excluded
-/// IST-day list, and both explicitly supplied integrity states.
+/// IST-day list, both explicitly supplied integrity states, and the
+/// swept-series calendar policy.
+///
+/// # The last term is APPENDED, and it was once missing
+///
+/// `swept_series_calendar_policy` reached the composite run identity as tag 11
+/// of `data_digest_with_daily_reference` before it reached this function, and
+/// for that interval two populations differing ONLY in that policy produced the
+/// same `daily_reference_policy_digest` — the exact defect the field's own doc
+/// comment argues against. The composite digest did distinguish them, so no run
+/// identity ever collided; the POLICY identity alone did not, and this function
+/// is what a sealed population is later re-checked against.
+///
+/// It is hashed after the excluded-day list, so every term above it keeps the
+/// position it already had. Only the digest VALUE changes; the receipt payload
+/// is a fixed 32 bytes either way and `RECEIPT_PAYLOAD_BYTES` is untouched.
 #[must_use]
 pub fn daily_reference_policy_digest_v1(reference: DailyReferenceBinding<'_>) -> [u8; 32] {
     let mut hasher = Hasher::new();
@@ -78,6 +93,7 @@ pub fn daily_reference_policy_digest_v1(reference: DailyReferenceBinding<'_>) ->
     for day in reference.excluded_ist_days {
         hasher.update(&day.to_le_bytes());
     }
+    hasher.update(&reference.swept_series_calendar_policy.to_le_bytes());
     hasher.finalize()
 }
 
@@ -1482,6 +1498,7 @@ mod tests {
                 excluded_ist_days: &EXCLUDED,
                 daily_integrity: ReferenceIntegrity::UnverifiedNoReceipt,
                 minute_integrity: ReferenceIntegrity::UnverifiedNoReceipt,
+                swept_series_calendar_policy: crate::stored::SWEPT_SERIES_CALENDAR_POLICY,
             }
         }
 
@@ -1693,6 +1710,7 @@ mod tests {
             excluded_ist_days: &EXCLUDED,
             daily_integrity: ReferenceIntegrity::UnverifiedNoReceipt,
             minute_integrity: ReferenceIntegrity::UnverifiedNoReceipt,
+            swept_series_calendar_policy: crate::stored::SWEPT_SERIES_CALENDAR_POLICY,
         };
         let data_digest =
             runner::identity::data_digest_with_daily_reference(&signal, &minute_context, reference)

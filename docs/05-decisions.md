@@ -32084,3 +32084,152 @@ for every trade, not only the winners.
 `Horizon::DEFAULT`, about 6 KB at a full-session horizon, joining the eight
 allocations `Crossings::empty` already makes. Read off the type rather than
 measured, and labelled as such per §3 rule 6.
+
+## D-0502
+
+**The charter's non-regular NSE sessions are withheld from every swept series,
+and the calendar receipt was taught to expect their absence in the same change.**
+
+Six of the eight intraday rungs refused over the full 2020-01..2026-07 span. The
+mechanism was named correctly in `crates/indicators/src/anchored.rs`: on a day
+whose session is discontinuous, a coarse bucket's nominal closing minute falls
+inside the break and does not exist, so `MissingClosingMinute` refuses the run.
+MEASURED, single-month `audit-range`, REFUSED vs ok:
+
+```
+         2021-02  2024-03  2024-05  2025-10
+1min       ok       ok       ok       ok
+2min       ok     REFUSED  REFUSED    ok
+3min       ok       ok       ok       ok
+5min     REFUSED    ok       ok       ok
+10min    REFUSED  REFUSED  REFUSED    ok
+15min    REFUSED    ok       ok       ok
+30min    REFUSED  REFUSED  REFUSED    ok
+60min    REFUSED  REFUSED  REFUSED  REFUSED
+```
+
+The four months are the four `CHARTER_NON_REGULAR_IST_DAYS` entries that carry
+intraday bars: `18_682` 2021-02-24 (the systems outage), `19_784` 2024-03-02 and
+`19_861` 2024-05-18 (the disaster-recovery Saturdays), and `20_382` 2025-10-21
+(the 13:45-14:45 afternoon Muhurat). The other five charter days are evening
+Muhurat sessions at 18:00-19:15, wholly outside the pull's [09:15, 15:30)
+window, so no bar of theirs is on disk and none of them refuses anything.
+
+**The operator chose exclusion over the alternatives.** Four days out of roughly
+1,600 is 0.25% of the sample. The two rejected alternatives were splitting each
+affected span at the discontinuity, and rewriting the bucket boundaries per day;
+the first multiplies every span into fragments whose results cannot be compared,
+and the second makes a rung mean different things on different days.
+
+**Substituting a different minute was tried first and four existing tests killed
+it, correctly.** `a_hole_inside_the_session_still_refuses_on_a_stub_rung`,
+`a_session_that_stops_early_refuses_rather_than_mapping_its_last_minute`,
+`an_exactly_dividing_rung_still_refuses_its_one_minute_hole` and
+`exact_minute_overlay_never_substitutes_a_later_minute` exist precisely to stop
+the clamp becoming a fallback. A hole on an ORDINARY day must still refuse, and
+does. This entry does not weaken them: it removes four named days from the
+input, and changes nothing about what happens to a hole on any other day.
+
+### The filter is one act at one place, and that is the design
+
+`SWEPT_SERIES_CALENDAR_POLICY = 1` in `crates/cli/src/stored.rs`. Every bar whose
+IST day appears in the charter list is dropped as the record is decoded, inside
+`load_classified_with_ceiling` — the single function through which `load`,
+`load_span`, `load_daily_context`, `load_exact_minute_context` and both bounded
+twins all decode. The signal series, the exact one-minute `GapFib` context and
+the one-minute execution path are therefore filtered by ONE act and cannot
+disagree about which sessions a run saw.
+
+That placement is the whole point. A day dropped from the signal series and kept
+in the minute series would be a worse defect than the refusal this removes, and
+there is no arrangement of six call sites in which one cannot be forgotten.
+
+**`1day` is exempt.** The daily stream is not swept — it is the previous-day
+anchor evidence, and `daily_eligibility_of` already refuses those records as
+anchors by marking them `DailyEligibility::Excluded`. Filtering it here would
+delete the one place the exclusion is already COUNTED: `daily_reference_note`
+prints `eligible E, explicitly excluded X` off those bytes, and a filtered daily
+stream would report `X = 0` on a span that had excluded two days.
+
+### The half the first attempt missed, and the test that found it
+
+Removing bars without telling the accounting made a complete store measure
+`Incomplete`. MEASURED, from `step3_orchestrator::tests::
+stored_post_training_oos_cohort_is_exact_and_mints_only_opaque_witnesses`:
+
+```
+calendar receipt V2 for 60 seconds over IST days 20362..=20392 is not complete:
+status Incomplete, offered 7500, expected 7560, missing 60, unexpected 0
+```
+
+Sixty buckets: the 13:45-14:45 Muhurat session of IST day 20 382. `pull::calendar`
+models that short session correctly and the receipt duly expected its bars; the
+loader had just removed them. Two Step 3 tests failed and the whole chain
+refused — a second refusal in place of the first, which is not a fix.
+
+`CALENDAR_RECEIPT_POLICY_V2` therefore moves from 2 to 3. Policy 3 keeps every
+rule policy 2 had and adds one classification ahead of them: a charter
+non-regular IST day is **withheld** — it expects zero buckets, and an offered
+timestamp on it refuses.
+
+**A withheld day is not hashed as `DayKind::Closed`.** It carries tag 5, its own.
+A holiday and a withheld drill are different facts about the exchange, and
+collapsing them would let two different calendars produce one digest — the
+defect the receipt exists to prevent. The day's real geometry is still measured,
+into `withheld_buckets`, so the receipt states the SIZE of what it removed rather
+than reporting a bare zero.
+
+**The version is bumped rather than the arm added quietly**, because every
+receipt digest changes. Two receipts over one span under the two rules are
+different evidence, and §3 rule 8 forbids them sharing a version.
+
+**The refusal on an offered withheld bar is the agreement check.** Under a
+correct build the loader removes those bars and none is ever offered, so the
+check never fires — which is exactly why it earns its place. It is the only
+thing that would catch the loader and the receipt disagreeing about which
+sessions a run saw, and a silent acceptance would make `expected = 0` a lie the
+digest then certified.
+
+### Identity, appended and not inserted
+
+`DailyReferenceBinding` gains `swept_series_calendar_policy`, tagged 11 in
+`data_digest_with_daily_reference`. Ten tags existed before it and none moves.
+
+It is a term of its own rather than a bump of `eligibility_policy` because the
+two answer different questions about the same nine days: eligibility decides
+whether a day's OHLC may become the NEXT day's anchor, and this decides whether
+the day's own bars are folded, ranked and traded. A build can change one without
+the other, and under a single version number a later change to either would be
+indistinguishable from a change to the first.
+
+Like `excluded_ist_days`, the VERSION is bound rather than only its consequence:
+a span holding none of the four days computes identical bytes under both
+policies, and two runs that agree by luck are still two different computations.
+
+### Visible, never silent
+
+§3 rule 2 forbids a silent scope change, so the withholding is stated wherever
+the sample size is stated:
+
+- `span_banner` gains a `CHARTER SESSIONS WITHHELD FROM THIS SPAN` block beside
+  `MONTHS MISSING FROM THIS SPAN`, naming the days as dates and counting the
+  bars. The two are deliberately separate: a missing month is a store defect an
+  operator closes by pulling it, and a withheld session is this run's own policy
+  that pulling cannot change. Both shorten the sample.
+- `daily_reference_note` gains a `swept-series calendar policy` line carrying the
+  exact 1min stream's withheld days, so the minute context and the signal series
+  can be seen to have dropped the same days.
+- `load_span` refuses a span emptied ENTIRELY by the calendar with its own
+  sentence rather than the absent-months one, because telling an operator to
+  pull a month already on disk would send them to fix a store that is correct.
+
+### What this does not do
+
+It does not measure a session length, derive an exchange fact, or add a day to
+the charter list — the nine entries remain the sole authority, and §3 rule 1
+holds. It does not touch `CalendarReceiptV1`, which has no production caller. It
+does not change what happens to a hole on an ordinary day. The bench gate is not
+re-run by this entry: the filter is one `position` call over a nine-element
+compile-time array per decoded record, which is a constant multiplier on a loader
+already O(records), and it is none of the five operations §3 rule 4 bounds.
+UNVERIFIED as a measured bound — no bench in this workspace times it. §3 rule 6.

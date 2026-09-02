@@ -38,6 +38,164 @@ use std::path::Path;
 use store::file::{BarFile, StoreError};
 use store::path::{FileKind, StorePath, Timeframe, YearMonth};
 
+/// Version of the rule that keeps charter non-regular sessions out of a swept
+/// series.
+///
+/// # What policy 1 means
+///
+/// Every bar whose IST day appears in
+/// [`indicators::evaluator::CHARTER_NON_REGULAR_IST_DAYS`] is dropped as the
+/// record is decoded, on **every rung except `1day`** — so the signal series,
+/// the exact one-minute `GapFib` context and the one-minute execution path are
+/// filtered by one act and cannot disagree about which sessions a run saw. The
+/// nine days are the sole source; no session length is measured and no exchange
+/// fact is derived, which is what `CLAUDE.md` §3 rule 1 requires.
+///
+/// # Why `1day` is deliberately exempt
+///
+/// The daily stream is not swept — it is the previous-day anchor evidence, and
+/// [`daily_eligibility_of`] already refuses those records as anchors by marking
+/// them [`DailyEligibility::Excluded`]. Dropping them here instead would delete
+/// the one place the exclusion is already COUNTED: `daily_reference_note`
+/// prints `eligible E, explicitly excluded X` off those bytes, and a filtered
+/// daily stream would report `X = 0` on a span that had excluded two days.
+///
+/// # Why it is bound into the run identity
+///
+/// The same argument [`DAILY_ELIGIBILITY_POLICY`] carries. Two runs over one
+/// span, one that swept a disaster-recovery Saturday and one that did not, are
+/// different computations: they fold different bars, produce different masks
+/// and can produce different frontiers. Binding the VERSION rather than only
+/// the resulting bars re-keys even a span that happens to contain none of the
+/// nine days, so a result recorded before this policy existed can never be
+/// handed back as the answer to a question asked under it.
+pub const SWEPT_SERIES_CALENDAR_POLICY: u32 = 1;
+
+/// Which charter non-regular sessions one load removed, and what they cost.
+///
+/// # A fixed-size set, and no allocation
+///
+/// One slot per entry of [`CHARTER_NON_REGULAR_IST_DAYS`], in that array's
+/// order, so the same day met twice in two months cannot be counted as two days
+/// and the count needs neither a set nor an ordering assumption about the bars.
+/// The array is nine long and is checked by a const assertion in
+/// `crates/indicators`, so this type's width is fixed at compile time.
+///
+/// # Cost
+///
+/// [`Self::excludes`] walks at most nine `i64` comparisons, a compile-time
+/// bound, and is called once per decoded record. It is none of the five
+/// operations `CLAUDE.md` §3 rule 4 bounds; the loader it sits in is already
+/// O(records) and this multiplies that by a constant.
+///
+/// **UNVERIFIED as a measured bound.** No bench in this workspace times it, so
+/// the shape above is read from the source rather than measured. §3 rule 6.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CalendarExclusion {
+    /// Whether the day at this slot of [`CHARTER_NON_REGULAR_IST_DAYS`] was met.
+    removed: [bool; CHARTER_NON_REGULAR_IST_DAYS.len()],
+    /// Bars dropped, summed across every removed day.
+    bars: u64,
+}
+
+impl CalendarExclusion {
+    /// Nothing was removed, because nothing was filtered or nothing matched.
+    ///
+    /// The two are deliberately one value here: a `1day` load and an intraday
+    /// load over a clean span both removed nothing, and the caller that
+    /// distinguishes them is the one that chose the rung.
+    #[must_use]
+    pub const fn none() -> Self {
+        Self {
+            removed: [false; CHARTER_NON_REGULAR_IST_DAYS.len()],
+            bars: 0,
+        }
+    }
+
+    /// Should this bar be kept out of the swept series, and record it if so.
+    fn excludes(&mut self, ts_micros: i64) -> bool {
+        let day = indicators::ist_day(ts_micros);
+        let Some(slot) = CHARTER_NON_REGULAR_IST_DAYS
+            .iter()
+            .position(|named| *named == day)
+        else {
+            return false;
+        };
+        if let Some(seen) = self.removed.get_mut(slot) {
+            *seen = true;
+        }
+        self.bars = self.bars.saturating_add(1);
+        true
+    }
+
+    /// Fold another load's removals into this one.
+    fn absorb(&mut self, other: Self) {
+        for (mine, theirs) in self.removed.iter_mut().zip(other.removed) {
+            *mine |= theirs;
+        }
+        self.bars = self.bars.saturating_add(other.bars);
+    }
+
+    /// How many distinct charter days were actually removed.
+    #[must_use]
+    pub fn days(self) -> u32 {
+        u32::try_from(self.removed.iter().filter(|seen| **seen).count()).unwrap_or(u32::MAX)
+    }
+
+    /// How many bars were removed, across every removed day.
+    #[must_use]
+    pub const fn bars(self) -> u64 {
+        self.bars
+    }
+
+    /// Whether this load removed nothing at all.
+    #[must_use]
+    pub fn is_empty(self) -> bool {
+        self.bars == 0 && self.days() == 0
+    }
+
+    /// The removed days themselves, as IST day numbers, in charter order.
+    ///
+    /// Named and not merely counted: an operator reading "two days were removed"
+    /// cannot check that against the charter, and `CLAUDE.md` §3 rule 2 is about
+    /// a scope change being visible rather than merely tallied.
+    #[must_use]
+    pub fn day_numbers(self) -> Vec<i64> {
+        CHARTER_NON_REGULAR_IST_DAYS
+            .iter()
+            .zip(self.removed)
+            .filter_map(|(day, seen)| seen.then_some(*day))
+            .collect()
+    }
+
+    /// The removed days as `YYYY-MM-DD`, in charter order.
+    ///
+    /// # Why a date and not the day number
+    ///
+    /// An operator checking a withheld session against `docs/00-charter.md`
+    /// reads dates; `19_784` is checkable only by someone who already knows the
+    /// answer. The number remains available through [`Self::day_numbers`] for
+    /// the identity and the tests, which want the exact bound value.
+    ///
+    /// A day that will not convert falls back to its raw number rather than
+    /// being dropped or named wrongly. Every charter entry converts today, so
+    /// the fallback is unreachable in practice and is here because silently
+    /// omitting a withheld day would be the invisible scope change §3 rule 2
+    /// forbids.
+    #[must_use]
+    pub fn day_names(self) -> Vec<String> {
+        self.day_numbers()
+            .into_iter()
+            .map(|day| {
+                u32::try_from(day)
+                    .ok()
+                    .and_then(|days| pull::session::Day::from_days(days).ok())
+                    .map_or_else(|| day.to_string(), |date| date.to_string())
+            })
+            .collect()
+    }
+}
+
 /// One instrument-month, and everything the store knew about it.
 ///
 /// The fields are the provenance a report needs. They are returned rather than
@@ -45,7 +203,8 @@ use store::path::{FileKind, StorePath, Timeframe, YearMonth};
 /// figure came from, and a log line cannot be put in a table.
 #[derive(Debug, Clone)]
 pub struct Loaded {
-    /// The bars, oldest first, exactly as the file holds them.
+    /// The bars, oldest first, exactly as the file holds them — less any the
+    /// charter's non-regular sessions supplied. See [`Self::excluded`].
     pub bars: Vec<Candle>,
     /// Which feed wrote them. The first path segment, never inferred.
     pub vendor: Vendor,
@@ -53,6 +212,9 @@ pub struct Loaded {
     pub key: InstrumentKey,
     /// The rung, as its canonical directory word — `1min`, `1day`.
     pub timeframe: &'static str,
+    /// Which charter non-regular sessions this load withheld, and how many bars
+    /// that cost. Always [`CalendarExclusion::none`] on `1day`.
+    pub excluded: CalendarExclusion,
 }
 
 /// Why a load could not happen, in the operator's words.
@@ -498,12 +660,36 @@ pub const CALENDAR_RECEIPT_SCHEMA_V2: u32 = 2;
 
 /// Policy version binding the rung-aware, open-anchored bucket geometry.
 ///
-/// Policy 2 means the exact eight intraday signal rungs, an anchor at the NSE
+/// Policy 2 meant the exact eight intraday signal rungs, an anchor at the NSE
 /// open (09:15 IST), Euclidean bucket assignment, the measured windows from
 /// [`pull::calendar::kind_of`], and a union of the at-most-two bucket intervals
 /// that intersect those windows. It does not reinterpret a coarse bar as a
 /// one-minute bar: each rung receives its own receipt.
-pub const CALENDAR_RECEIPT_POLICY_V2: u32 = 2;
+///
+/// # What policy 3 adds, and why it could not be a silent change
+///
+/// Policy 3 keeps all of that and adds one classification ahead of it: an IST
+/// day named in [`CHARTER_NON_REGULAR_IST_DAYS`] is **withheld** — it expects
+/// zero buckets, and an offered timestamp on it refuses.
+///
+/// This exists because [`SWEPT_SERIES_CALENDAR_POLICY`] removes those days'
+/// bars at the load boundary. Under policy 2 the receipt still expected them,
+/// so a complete store measured `Incomplete` and the whole Step 3 chain
+/// refused. MEASURED before this arm existed: October 2025 at the 60-second
+/// rung reported `offered 7500, expected 7560, missing 60` — the 60 one-minute
+/// buckets of the 13:45–14:45 Muhurat session on IST day 20 382.
+///
+/// **The version is bumped rather than the arm added quietly**, because every
+/// receipt digest changes: a withheld day now contributes a different tag and
+/// a different expected count. Two receipts over one span under the two rules
+/// are different evidence and `CLAUDE.md` §3 rule 8 forbids them sharing a
+/// version.
+///
+/// **A withheld day is NOT hashed as [`DayKind::Closed`].** It gets a tag of
+/// its own. A holiday and a withheld drill are different facts about the
+/// exchange, and collapsing them would let two different calendars produce one
+/// digest — the defect the whole receipt exists to prevent.
+pub const CALENDAR_RECEIPT_POLICY_V2: u32 = 3;
 
 const NSE_OPEN_MINUTE_V2: i64 = 555;
 const CALENDAR_POLICY_DIGEST_DOMAIN_V2: &[u8] = b"brutex.calendar-policy.v2\0";
@@ -607,10 +793,34 @@ pub struct CalendarReceiptV2 {
     missing: u64,
     unexpected: u64,
     status: CalendarStatusV1,
+    withheld_days: u32,
+    withheld_buckets: u64,
     digest: [u8; 32],
 }
 
 impl CalendarReceiptV2 {
+    /// Charter non-regular IST days inside this span, withheld from the sweep.
+    ///
+    /// Zero on a span holding none of them. This counts DAYS IN THE SPAN, not
+    /// days that happened to carry bars: a withheld day the store never held is
+    /// still a day this run declined to sweep, and reporting it only when the
+    /// store had bars would make the number depend on the store rather than on
+    /// the policy.
+    #[must_use]
+    pub const fn withheld_days(self) -> u32 {
+        self.withheld_days
+    }
+
+    /// Buckets those withheld days would have expected at this rung.
+    ///
+    /// The size of what was removed, in the receipt's own unit. It is NOT
+    /// included in [`Self::expected`] — that is the point: `expected` is what
+    /// this run must supply, and a withheld day supplies nothing.
+    #[must_use]
+    pub const fn withheld_buckets(self) -> u64 {
+        self.withheld_buckets
+    }
+
     /// Receipt schema version.
     #[must_use]
     pub const fn schema_version(self) -> u32 {
@@ -859,6 +1069,89 @@ struct OfferedCalendarFactsV2 {
 struct CalendarDayFactsV2 {
     expected: u64,
     unmeasured: bool,
+    /// Buckets this day WOULD have expected had the charter not withheld it.
+    ///
+    /// Counted rather than discarded so the receipt can state the size of what
+    /// it removed. A withheld day that reported only `expected = 0` would be
+    /// indistinguishable from a holiday in the totals, and `CLAUDE.md` §3
+    /// rule 2 is about a scope change being visible.
+    withheld: u64,
+}
+
+/// Is this IST day one the swept-series calendar policy withholds?
+///
+/// The charter list is the sole authority. No session length is measured and
+/// no exchange fact is derived here — §3 rule 1.
+fn withheld_by_charter(day: i64) -> bool {
+    CHARTER_NON_REGULAR_IST_DAYS.contains(&day)
+}
+
+/// Refuse a withheld day's bar that the measured calendar cannot place.
+///
+/// # Why a withheld bar is CHECKED before it is dropped
+///
+/// MEASURED, in the operator's own store: dhan's
+/// `NIFTY/1min/2024-03.bin` holds **6 857** records against zerodha's 6 855,
+/// and the difference is two bars on IST day 19 784 at minutes 600 and 750 —
+/// one past each edge of the measured `555..=599` and `690..=749` windows.
+///
+/// Today those two refuse by name, in [`require_canonical_minute`] and again in
+/// `hash_offered_calendar_v2`. **Both of those run after this loader.** A filter
+/// that dropped every bar on a withheld day would delete a real vendor defect on
+/// its way past and report success — the row `CLAUDE.md` §4 bans outright:
+/// *"A fallback that hides a failure."*
+///
+/// Withholding a session decides which SESSIONS this run sweeps. It is not
+/// permission to stop reading the bytes.
+///
+/// # Why the test is bucket-based and not minute-based
+///
+/// `session.expects(minute)` is the right predicate at `1min` and WRONG at every
+/// coarser rung. On day 19 784 at `60min` the third bucket opens at IST minute
+/// 675, which lies inside the 90-minute break and belongs to no window, yet that
+/// bucket legitimately intersects `690..=749` and is expected. Testing its left
+/// edge against the windows would refuse a correct bar. `expected_buckets_v2` is
+/// the same geometry the receipt uses, so the loader and the receipt agree by
+/// construction rather than by coincidence.
+///
+/// # Cost
+///
+/// Reached only for a bar ON one of the nine charter days — at most a few
+/// hundred bars in the whole 2020..2026 span — so the per-bar bucket derivation
+/// is not on the ordinary load path at all. UNVERIFIED as a measured bound;
+/// read off the source per §3 rule 6.
+fn refuse_uncalendared_withheld_bar(
+    index: u64,
+    ts_micros: i64,
+    rung_seconds: u32,
+) -> Result<(), Refusal> {
+    let Ok(rung_minutes) = rung_minutes_v2(rung_seconds) else {
+        // Not one of the eight swept rungs, so no bucket geometry is defined
+        // for it and there is nothing to check against. `1s` is the only such
+        // rung the store can hold, and it is never swept.
+        return Ok(());
+    };
+    let (day, minute) = exact_ist_minute_v1(ts_micros)?;
+    let bucket = bucket_index_v2(i64::from(minute), rung_minutes);
+    match pull::calendar::kind_of(day) {
+        DayKind::Open(session) => {
+            if expected_buckets_v2(day, session, rung_minutes)?.contains(bucket) {
+                return Ok(());
+            }
+            Err(format!(
+                "record {index} at timestamp {ts_micros} is bucket {bucket} (IST minute {minute}) on withheld IST day {day}, and that bucket intersects no measured NSE session window. The session is withheld from the sweep, but a bar the calendar cannot place is a store defect and is refused rather than dropped"
+            ))
+        }
+        DayKind::Closed => Err(format!(
+            "record {index} at timestamp {ts_micros} is on withheld IST day {day}, which the measured calendar reports closed. A bar on a closed day is a store defect and is refused rather than dropped"
+        )),
+        DayKind::OpenLengthUnmeasured => Err(format!(
+            "record {index} at timestamp {ts_micros} is on withheld IST day {day}, whose session length is unmeasured, so no window can place it. Minute-window authority was not invented and the bar is refused rather than dropped"
+        )),
+        DayKind::Unmeasured => Err(format!(
+            "record {index} at timestamp {ts_micros} is on withheld IST day {day}, outside the canonical NSE calendar's measured range. The bar is refused rather than dropped"
+        )),
+    }
 }
 
 /// Exact eight signal rungs, as whole minutes.
@@ -968,6 +1261,19 @@ where
             ));
         }
 
+        // A BAR ON A WITHHELD DAY IS A DEFECT, NOT DATA, AND IT REFUSES.
+        //
+        // `SWEPT_SERIES_CALENDAR_POLICY` drops these bars at the load boundary,
+        // so under a correct build none is ever offered here. That is exactly
+        // why the check earns its place: it is the only thing that would catch
+        // the loader and the receipt disagreeing about which sessions a run
+        // saw, and a silent acceptance would make the receipt's `expected = 0`
+        // a lie the digest then certified.
+        if withheld_by_charter(day) {
+            return Err(format!(
+                "calendar receipt V2 timestamp {timestamp} is on IST day {day}, a charter non-regular session that policy {SWEPT_SERIES_CALENDAR_POLICY} withholds from every swept series. The loader did not remove it, so the series and the calendar disagree"
+            ));
+        }
         let decision = match pull::calendar::kind_of(day) {
             DayKind::Open(session) => {
                 let expected = expected_buckets_v2(day, session, rung_minutes)?;
@@ -1060,12 +1366,32 @@ fn hash_calendar_day_v2(
 ) -> Result<CalendarDayFactsV2, Refusal> {
     hasher.update(b"D");
     hasher.update(&day.to_le_bytes());
+    // THE WITHHELD ARM IS TESTED FIRST, AND ITS TAG IS ITS OWN.
+    //
+    // Ahead of `kind_of` because a withheld day is Open in the exchange's
+    // calendar — 2024-03-02 is a real 105-bar session — and the question here
+    // is not whether the exchange traded but whether this run swept it. The
+    // day's own geometry is still measured, so `withheld` can state the size
+    // of what was removed instead of reporting a bare zero.
+    if withheld_by_charter(day) {
+        hasher.update(&[5]);
+        let withheld = match pull::calendar::kind_of(day) {
+            DayKind::Open(session) => hash_open_session_v2(day, session, rung_minutes, hasher)?,
+            DayKind::Closed | DayKind::OpenLengthUnmeasured | DayKind::Unmeasured => 0,
+        };
+        return Ok(CalendarDayFactsV2 {
+            expected: 0,
+            unmeasured: false,
+            withheld,
+        });
+    }
     match pull::calendar::kind_of(day) {
         DayKind::Open(session) => {
             hasher.update(&[1]);
             Ok(CalendarDayFactsV2 {
                 expected: hash_open_session_v2(day, session, rung_minutes, hasher)?,
                 unmeasured: false,
+                withheld: 0,
             })
         }
         DayKind::Closed => {
@@ -1073,6 +1399,7 @@ fn hash_calendar_day_v2(
             Ok(CalendarDayFactsV2 {
                 expected: 0,
                 unmeasured: false,
+                withheld: 0,
             })
         }
         DayKind::OpenLengthUnmeasured => {
@@ -1080,6 +1407,7 @@ fn hash_calendar_day_v2(
             Ok(CalendarDayFactsV2 {
                 expected: 0,
                 unmeasured: true,
+                withheld: 0,
             })
         }
         DayKind::Unmeasured => {
@@ -1087,6 +1415,7 @@ fn hash_calendar_day_v2(
             Ok(CalendarDayFactsV2 {
                 expected: 0,
                 unmeasured: true,
+                withheld: 0,
             })
         }
     }
@@ -1199,12 +1528,22 @@ where
         hash_offered_calendar_v2(timestamps, rung_minutes, first_day, last_day, &mut hasher)?;
     let mut expected = 0_u64;
     let mut unmeasured = false;
+    let mut withheld_buckets = 0_u64;
+    let mut withheld_days = 0_u32;
     let mut day = first_day;
     loop {
         let facts = hash_calendar_day_v2(day, rung_minutes, &mut hasher)?;
         expected = expected
             .checked_add(facts.expected)
             .ok_or_else(|| "calendar receipt V2 expected bucket count overflowed u64".to_owned())?;
+        if withheld_by_charter(day) {
+            withheld_days = withheld_days.saturating_add(1);
+            withheld_buckets = withheld_buckets
+                .checked_add(facts.withheld)
+                .ok_or_else(|| {
+                    "calendar receipt V2 withheld bucket count overflowed u64".to_owned()
+                })?;
+        }
         unmeasured |= facts.unmeasured;
         if day == last_day {
             break;
@@ -1235,6 +1574,10 @@ where
     hasher.update(&missing.to_le_bytes());
     hasher.update(&unexpected.to_le_bytes());
     hasher.update(&[status.code()]);
+    // Appended after the status byte, so every term above keeps its position.
+    hasher.update(b"X");
+    hasher.update(&withheld_days.to_le_bytes());
+    hasher.update(&withheld_buckets.to_le_bytes());
     let digest = hasher.finalize();
 
     Ok(CalendarReceiptV2 {
@@ -1248,6 +1591,8 @@ where
         missing,
         unexpected,
         status,
+        withheld_days,
+        withheld_buckets,
         digest,
     })
 }
@@ -1316,6 +1661,14 @@ pub struct ExactMinuteContext {
     pub prior_session_day: i64,
     /// Exact bars observed on that prior session.
     pub prior_session_bars: u32,
+    /// Which charter non-regular sessions the one-minute stream withheld.
+    ///
+    /// Carried so the report can prove the minute context and the signal series
+    /// dropped the SAME days. That is the property `overlay_exact_minute_gapfib`
+    /// depends on: it maps each signal bar's close to an exact minute, and a day
+    /// present in one series and absent from the other would either refuse or,
+    /// worse, resolve against a session the signal series never saw.
+    pub excluded: CalendarExclusion,
 }
 
 /// The only distinction a range loader is allowed to recover from.
@@ -1626,10 +1979,40 @@ fn load_classified_with_ceiling(
             "{underlying} {rung_name} {year}-{month:02} could not reserve space for its {n} committed records: {why}. Nothing was read"
         ))
     })?;
+    // THE CHARTER'S NON-REGULAR SESSIONS ARE WITHHELD HERE, IN ONE PLACE.
+    //
+    // `load` and `load_span` — and therefore `load_daily_context`,
+    // `load_exact_minute_context` and both of their bounded twins — all decode
+    // through this function, so the signal rung, the exact one-minute `GapFib`
+    // context and the one-minute execution path are filtered by one act. That
+    // is the whole reason it is here and not at each sweep entry point: a day
+    // dropped from the signal series and kept in the minute series would be a
+    // worse defect than the refusal this removes, and there is no arrangement
+    // of six call sites in which one cannot be forgotten.
+    //
+    // Reserved before the filter, deliberately: `n` is the committed record
+    // count and the reservation is exact for it, so a month that gives up a
+    // disaster-recovery Saturday over-reserves by that day's bars and allocates
+    // once rather than twice. See `SWEPT_SERIES_CALENDAR_POLICY` for what the
+    // rule is and why `1day` is exempt from it.
+    // Compared as a TYPE, not as its name. Two rungs cannot share a string
+    // today -- `Timeframe::KNOWN`'s ten names are distinct -- but nothing in the
+    // workspace asserts that, and a future rung named "1day" at a different
+    // width would silently escape this filter while `==` would still catch it.
+    let filtered = timeframe != Timeframe::DAY_1;
+    let mut excluded = CalendarExclusion::none();
     for i in 0..n {
         let bar = file.read_record(i).map_err(|why| {
             LoadFailure::Refused(format!("record {i} of {n} could not be read: {why}"))
         })?;
+        if filtered && excluded.excludes(bar.ts_micros) {
+            // CHECKED, THEN DROPPED. Never dropped unchecked -- see
+            // `refuse_uncalendared_withheld_bar` for the measured defect that
+            // would otherwise vanish here.
+            refuse_uncalendared_withheld_bar(i, bar.ts_micros, timeframe.secs())
+                .map_err(LoadFailure::Refused)?;
+            continue;
+        }
         bars.push(Candle {
             ts_micros: bar.ts_micros,
             open: bar.open,
@@ -1646,6 +2029,7 @@ fn load_classified_with_ceiling(
         vendor,
         key,
         timeframe: timeframe.as_str(),
+        excluded,
     })
 }
 
@@ -1710,6 +2094,13 @@ pub struct Span {
     /// Rendered by the caller. A hole moves every figure computed over the span
     /// and the operator has to see it to know that.
     pub missing: Vec<(u16, u8)>,
+    /// Which charter non-regular sessions this span withheld, summed over every
+    /// month it opened. Always [`CalendarExclusion::none`] on `1day`.
+    ///
+    /// Rendered by the caller for the same reason `missing` is: a span that
+    /// dropped a disaster-recovery Saturday is a SHORTER sample, not a corrected
+    /// one, and `CLAUDE.md` §3 rule 2 forbids that being invisible.
+    pub excluded: CalendarExclusion,
 }
 
 impl Span {
@@ -1904,6 +2295,76 @@ pub fn load_span_bounded(
     load_span_with_optional_bound(root, vendor, underlying, rung_name, from, to, Some(bound))
 }
 
+/// Everything an empty span must name about the request that produced it.
+///
+/// Grouped rather than passed as six positional arguments because
+/// [`empty_span_refusal`] takes two `&str` and two `(u16, u8)` in a row, and a
+/// caller that swapped either pair would compile and report the wrong span.
+struct EmptySpan<'a> {
+    underlying: &'a str,
+    rung_name: &'a str,
+    from: (u16, u8),
+    to: (u16, u8),
+    vendor: Vendor,
+    months: usize,
+}
+
+/// Why a span came back with no bars, in the operator's words.
+///
+/// # Why the calendar case is a sentence of its own
+///
+/// A SPAN EMPTIED BY THE CALENDAR IS NAMED AS THAT, NOT AS AN ABSENCE. Both
+/// sentences end in "nothing was read", but the remedies are opposite: an
+/// absent month is fixed by pulling it, and a month present but wholly
+/// withheld is not a store defect at all. Telling an operator to pull a month
+/// that is already on disk would send them to fix a store that is correct —
+/// the same objection `load_classified_with_ceiling` answers for a lock.
+///
+/// The withheld days are NAMED, not merely counted, for the reason
+/// [`CalendarExclusion::day_numbers`] carries: a count cannot be checked
+/// against the charter, and `CLAUDE.md` §3 rule 2 is about a scope change
+/// being visible rather than tallied.
+fn empty_span_refusal(span: &EmptySpan<'_>, excluded: CalendarExclusion) -> Refusal {
+    let &EmptySpan {
+        underlying,
+        rung_name,
+        from,
+        to,
+        vendor,
+        months,
+    } = span;
+    if excluded.is_empty() {
+        return format!(
+            "{underlying} {rung_name} {}-{:02}..{}-{:02} holds no bars for {}: \
+             all {months} month(s) are absent from the store. Nothing was read.",
+            from.0,
+            from.1,
+            to.0,
+            to.1,
+            vendor.as_str(),
+        );
+    }
+    let named = excluded
+        .day_numbers()
+        .iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{underlying} {rung_name} {}-{:02}..{}-{:02} for {} holds bars only on {} charter \
+         non-regular IST session(s) ({named}), and policy {SWEPT_SERIES_CALENDAR_POLICY} keeps \
+         those out of every swept series. {} bar(s) were withheld and none remain. \
+         Nothing was swept.",
+        from.0,
+        from.1,
+        to.0,
+        to.1,
+        vendor.as_str(),
+        excluded.days(),
+        excluded.bars(),
+    )
+}
+
 fn load_span_with_optional_bound(
     root: &Path,
     vendor: Vendor,
@@ -1921,6 +2382,7 @@ fn load_span_with_optional_bound(
     let mut missing: Vec<(u16, u8)> = Vec::new();
     let mut found: u32 = 0;
     let mut admitted_records = 0_u64;
+    let mut excluded = CalendarExclusion::none();
 
     for &(year, month) in &wanted {
         let remaining_records = bound
@@ -1961,6 +2423,12 @@ fn load_span_with_optional_bound(
                     ));
                 }
                 found = found.saturating_add(1);
+                // FOLDED PER MONTH, NOT RE-DERIVED FROM THE ASSEMBLED SPAN.
+                // The bars a charter day contributed are gone by the time this
+                // runs, so a later pass over `bars` could not find them; the
+                // month's own census is the only surviving record of what it
+                // withheld.
+                excluded.absorb(one.excluded);
                 let month_records = u64::try_from(one.bars.len()).map_err(|_| {
                     format!(
                         "{underlying} {rung_name} {year}-{month:02} decoded record count does not fit u64"
@@ -2002,15 +2470,16 @@ fn load_span_with_optional_bound(
     }
 
     if bars.is_empty() {
-        return Err(format!(
-            "{underlying} {rung_name} {}-{:02}..{}-{:02} holds no bars for {}: \
-             all {} month(s) are absent from the store. Nothing was read.",
-            from.0,
-            from.1,
-            to.0,
-            to.1,
-            vendor.as_str(),
-            wanted.len()
+        return Err(empty_span_refusal(
+            &EmptySpan {
+                underlying,
+                rung_name,
+                from,
+                to,
+                vendor,
+                months: wanted.len(),
+            },
+            excluded,
         ));
     }
 
@@ -2022,6 +2491,7 @@ fn load_span_with_optional_bound(
         asked: u32::try_from(wanted.len()).unwrap_or(u32::MAX),
         found,
         missing,
+        excluded,
     })
 }
 
@@ -2415,6 +2885,7 @@ fn exact_minute_context_from_span(
         found: minute.found,
         prior_session_day,
         prior_session_bars,
+        excluded: minute.excluded,
     })
 }
 
@@ -3312,6 +3783,7 @@ mod tests {
             asked: 2,
             found: 2,
             missing: Vec::new(),
+            excluded: CalendarExclusion::none(),
         }
     }
 
@@ -3448,6 +3920,7 @@ mod tests {
             asked: 2,
             found: 2,
             missing: Vec::new(),
+            excluded: CalendarExclusion::none(),
         }
     }
 
@@ -3943,12 +4416,40 @@ mod tests {
         }
     }
 
+    /// Every split and short exception day is WITHHELD, on all eight rungs,
+    /// and the receipt still names the size of what it withheld.
+    ///
+    /// # What this replaced, and why the old assertion had to go
+    ///
+    /// It used to assert that both days reconcile COMPLETE with
+    /// `expected == offered == 105` (and 60). That was true under calendar
+    /// policy 2 and is a contradiction under policy 3: the loader now removes
+    /// those bars, so offering them proves the loader and the calendar
+    /// disagree, and the receipt refuses.
+    ///
+    /// # Both halves of the agreement are pinned here
+    ///
+    /// A test that only checked the empty case would pass against a build that
+    /// silently ACCEPTED a withheld day's bars, which is the failure mode
+    /// `CLAUDE.md` §4 calls a fallback that hides a failure. So the refusal is
+    /// asserted first and the completeness second.
+    ///
+    /// # The counts are the old ones, deliberately
+    ///
+    /// `withheld_buckets` must equal what `expected` was before the policy
+    /// changed — the day's real geometry is still measured, it is merely not
+    /// demanded. Reusing the exact numbers is what proves that.
+    ///
+    /// All four `pull::calendar::IRREGULAR` entries are charter days, so after
+    /// policy 3 no split or short session is reachable from production input at
+    /// all. These two days are the whole population of that geometry.
     #[test]
-    fn calendar_receipt_v2_split_and_short_exceptions_cover_all_eight_rungs() {
+    fn calendar_receipt_v2_withholds_split_and_short_exceptions_on_all_eight_rungs() {
         let split_day = 19_784_i64;
         let short_day = 20_382_i64;
         let split_counts = [105_u64, 54, 35, 21, 12, 7, 5, 3];
         let short_counts = [60_u64, 30, 20, 12, 6, 4, 2, 2];
+        let nothing: [i64; 0] = [];
 
         for (index, (rung_seconds, _)) in CALENDAR_RUNGS_V2.into_iter().enumerate() {
             let split = calendar_bucket_indices_v2(
@@ -3956,28 +4457,44 @@ mod tests {
                 rung_seconds,
                 split_intervals_v2(rung_seconds),
             );
-            let split_receipt = calendar_receipt_v2(&split, rung_seconds, split_day, split_day)
-                .expect("both primary-measured split windows reconcile on this rung");
-            assert_eq!(split_receipt.offered(), split_counts[index]);
-            assert_eq!(split_receipt.expected(), split_counts[index]);
-            assert_eq!(split_receipt.status(), CalendarStatusV1::Complete);
-            split_receipt
-                .require_complete()
-                .expect("the complete split session is admissible");
-
             let short = calendar_bucket_indices_v2(
                 short_day,
                 rung_seconds,
                 short_intervals_v2(rung_seconds),
             );
-            let short_receipt = calendar_receipt_v2(&short, rung_seconds, short_day, short_day)
-                .expect("the measured one-hour exception reconciles on this rung");
-            assert_eq!(short_receipt.offered(), short_counts[index]);
-            assert_eq!(short_receipt.expected(), short_counts[index]);
-            assert_eq!(short_receipt.status(), CalendarStatusV1::Complete);
-            short_receipt
-                .require_complete()
-                .expect("the complete short exception is admissible");
+
+            for (day, offered, expected_withheld) in [
+                (split_day, &split, split_counts[index]),
+                (short_day, &short, short_counts[index]),
+            ] {
+                let why = calendar_receipt_v2(offered, rung_seconds, day, day)
+                    .expect_err("a withheld day's own bars cannot be offered");
+                assert!(
+                    why.contains("withholds from every swept series"),
+                    "rung {rung_seconds} day {day}: {why}"
+                );
+                assert!(
+                    why.contains("the series and the calendar disagree"),
+                    "rung {rung_seconds} day {day}: {why}"
+                );
+
+                let receipt = calendar_receipt_v2(&nothing, rung_seconds, day, day)
+                    .expect("a withheld day expects nothing and therefore reconciles");
+                assert_eq!(receipt.offered(), 0);
+                assert_eq!(receipt.expected(), 0, "a withheld day demands no bucket");
+                assert_eq!(receipt.missing(), 0);
+                assert_eq!(receipt.unexpected(), 0);
+                assert_eq!(receipt.status(), CalendarStatusV1::Complete);
+                assert_eq!(receipt.withheld_days(), 1);
+                assert_eq!(
+                    receipt.withheld_buckets(),
+                    expected_withheld,
+                    "rung {rung_seconds} day {day} must state the size of what it withheld"
+                );
+                receipt
+                    .require_complete()
+                    .expect("a withheld day is admissible evidence, not a hole");
+            }
         }
 
         let two_minute_split = calendar_bucket_indices_v2(split_day, 120, split_intervals_v2(120));

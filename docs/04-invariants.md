@@ -3819,3 +3819,22 @@ physical storage-fault behavior, full workspace gates or a real stored sweep.
 All complete-source authentication, joins, hashing, persistence and reopen are
 bounded but input/file/system proportional. Only fixed-record addressing after
 admission is worst-case O(1), and identity-map lookup is average O(1).
+
+## Charter non-regular sessions are withheld from every swept series — D-0502
+
+| ID | Invariant | Proof | State |
+|---|---|---|---|
+| SC-01 | **Every bar whose IST day appears in `CHARTER_NON_REGULAR_IST_DAYS` is withheld from every swept series, on every rung except `1day`, by one act at one place.** `load_classified_with_ceiling` is the sole decode path for `load`, `load_span`, `load_daily_context`, `load_exact_minute_context` and both bounded twins, so the signal series, the exact one-minute `GapFib` context and the one-minute execution path cannot disagree about which sessions a run saw | `cli::stored` — the filter is inside the single shared decoder; `1day` exemption pinned by `Timeframe::DAY_1` type comparison | Static implementation; the consistency property is structural, not asserted by a focused test |
+| SC-02 | **A withheld day's bar is CHECKED before it is dropped, and a bar the measured calendar cannot place refuses.** The test is `expected_buckets_v2` bucket containment, the same geometry the receipt uses, so the loader and the receipt agree by construction. MEASURED: dhan `NIFTY/1min/2024-03.bin` holds 6 857 records against zerodha's 6 855, the difference being two bars on IST day 19 784 at minutes 600 and 750, one past each measured window edge | `cli::stored::refuse_uncalendared_withheld_bar`; the two out-of-window bars are refused rather than silently dropped, preserving the existing `require_canonical_minute` and `hash_offered_calendar_v2` refusals | Static implementation; focused Cargo proof pending |
+| SC-03 | **Calendar receipt policy 3 expects zero buckets on a withheld day, hashes it under a tag of its own, and refuses any timestamp offered on it.** A withheld day is not hashed as `DayKind::Closed`: a holiday and a withheld drill are different facts and must not share a digest. The day's real geometry is still measured into `withheld_buckets`, so the receipt states the size of what it removed | `cli::stored::tests::calendar_receipt_v2_withholds_split_and_short_exceptions_on_all_eight_rungs` — asserts the refusal on offered bars AND `expected == 0`, `withheld_buckets == {105,54,35,21,12,7,5,3}` / `{60,30,20,12,6,4,2,2}` across all eight rungs | Proven by focused Cargo test |
+| SC-04 | **The swept-series calendar policy reaches the run identity appended, never inserted, and reaches the daily-reference policy identity too.** Tag 11 of `data_digest_with_daily_reference` sits after all ten existing tags; `daily_reference_policy_digest_v1` hashes it after the excluded-day list. Binding the VERSION rather than only its consequence re-keys even a span holding none of the four days | `runner::identity::data_digest_with_daily_reference`; `cli::stored_data_completeness::daily_reference_policy_digest_v1` | Static implementation; focused Cargo proof pending |
+| SC-05 | **The withholding is stated wherever the sample size is stated.** `span_banner` names the withheld days as dates and counts their bars beside `MONTHS MISSING FROM THIS SPAN`; `daily_reference_note` carries the exact 1min stream's withheld days; a span emptied entirely by the calendar refuses with its own sentence rather than the absent-months one | `cli::span_banner`; `cli::daily_reference_note`; `cli::stored::empty_span_refusal` | Static implementation; focused Cargo proof pending |
+
+These rows do not prove the full eight-rung sweep over the real store, and they
+do not re-measure the bench gate. All four `pull::calendar::IRREGULAR` entries
+and all five `LENGTH_UNMEASURED` entries are charter days, so after policy 3 no
+split or short session is reachable from production input at all — the split and
+short bucket geometry in `expected_buckets_v2` remains correct and tested but is
+exercised only by tests. `crates/api`'s five independent store readers are
+deliberately unfiltered: they serve what is ON DISK, which is a different
+question from what a run SWEPT, and the store itself is never modified.

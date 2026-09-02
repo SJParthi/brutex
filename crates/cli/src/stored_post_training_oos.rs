@@ -435,6 +435,7 @@ impl StoredPostTrainingOosCohortV1 {
             excluded_ist_days: &indicators::evaluator::CHARTER_NON_REGULAR_IST_DAYS,
             daily_integrity: ReferenceIntegrity::UnverifiedNoReceipt,
             minute_integrity: ReferenceIntegrity::UnverifiedNoReceipt,
+            swept_series_calendar_policy: crate::stored::SWEPT_SERIES_CALENDAR_POLICY,
         }
     }
 }

@@ -460,6 +460,29 @@ pub struct DailyReferenceBinding<'a> {
     pub daily_integrity: ReferenceIntegrity,
     /// Whether an independent integrity receipt accompanied the minute records.
     pub minute_integrity: ReferenceIntegrity,
+    /// Version of the rule that decides whether an excluded day's own bars may
+    /// enter the SWEPT series at all.
+    ///
+    /// # Why this is a term of its own and not a bump of `eligibility_policy`
+    ///
+    /// The two answer different questions about the same nine days.
+    /// `eligibility_policy` decides whether a day's OHLC may become the NEXT
+    /// day's anchor; this decides whether the day's own bars are folded, ranked
+    /// and traded. A build can change one without changing the other, and under
+    /// a single version number a later change to either would be
+    /// indistinguishable from a change to the first — which is precisely the
+    /// "an identity two different results can share" defect [`Params`]'s own
+    /// `pair_budget` documents.
+    ///
+    /// **Appended, never inserted.** It is the last field here and the last
+    /// tagged term in [`data_digest_with_daily_reference`], so every term above
+    /// it keeps the tag and the position it already had.
+    ///
+    /// Like `excluded_ist_days`, the VERSION is bound rather than only its
+    /// consequence: a span holding none of the excluded days computes identical
+    /// bytes under both policies, and two runs that agree by luck are still two
+    /// different computations.
+    pub swept_series_calendar_policy: u32,
 }
 
 /// Why a three-stream data identity could not be formed.
@@ -511,6 +534,8 @@ pub fn data_digest_with_daily_reference(
     const EXCLUDED_DAYS: u8 = 8;
     const DAILY_INTEGRITY: u8 = 9;
     const MINUTE_INTEGRITY: u8 = 10;
+    /// Appended. Ten tags existed before it and none of them moves.
+    const SWEPT_SERIES_CALENDAR_POLICY: u8 = 11;
 
     if reference.daily_bars.len() != reference.eligibility.len() {
         return Err(DailyBindingRefusal::EligibilityLengthMismatch {
@@ -569,6 +594,11 @@ pub fn data_digest_with_daily_reference(
         &mut hasher,
         MINUTE_INTEGRITY,
         &[reference.minute_integrity.byte()],
+    );
+    term(
+        &mut hasher,
+        SWEPT_SERIES_CALENDAR_POLICY,
+        &reference.swept_series_calendar_policy.to_le_bytes(),
     );
     Ok(hasher.finalize())
 }
@@ -989,6 +1019,7 @@ mod tests {
             excluded_ist_days,
             daily_integrity: ReferenceIntegrity::UnverifiedNoReceipt,
             minute_integrity: ReferenceIntegrity::UnverifiedNoReceipt,
+            swept_series_calendar_policy: 1,
         }
     }
 

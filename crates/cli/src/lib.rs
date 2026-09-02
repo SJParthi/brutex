@@ -1372,6 +1372,7 @@ fn stored_anchored_digest(
             excluded_ist_days: &CHARTER_NON_REGULAR_IST_DAYS,
             daily_integrity: ReferenceIntegrity::UnverifiedNoReceipt,
             minute_integrity: ReferenceIntegrity::UnverifiedNoReceipt,
+            swept_series_calendar_policy: stored::SWEPT_SERIES_CALENDAR_POLICY,
         },
     )
     .map_err(|why| format!("the daily-reference identity binding was refused: {why:?}"))
@@ -1384,11 +1385,29 @@ fn daily_reference_note(
 ) -> String {
     let eligible: usize = daily.eligibility.iter().copied().map(usize::from).sum();
     let excluded = daily.eligibility.len().saturating_sub(eligible);
+    // TWO DIFFERENT EXCLUSIONS SHARE THIS BLOCK, AND CONFLATING THEM WOULD BE A
+    // DEFECT. `explicitly excluded` above counts 1day records refused as an
+    // ANCHOR while their bars remain on the daily stream. The line below counts
+    // bars withheld from the SWEPT series entirely. A day can be both, and the
+    // two numbers answer different questions -- which is exactly why
+    // `SWEPT_SERIES_CALENDAR_POLICY` is a term of its own and not a bump of the
+    // eligibility policy.
+    let withheld = if exact_minute.excluded.is_empty() {
+        "none in this span".to_owned()
+    } else {
+        format!(
+            "{} day(s), {} bar(s): {}",
+            exact_minute.excluded.days(),
+            exact_minute.excluded.bars(),
+            exact_minute.excluded.day_names().join(" "),
+        )
+    };
     format!(
-        "STORED REFERENCE STREAMS\n  daily schema/eligibility policy                {:>10}/{:<10}\n  GapFib exact-minute overlay policy             {:>10}\n  stored 1day records                            {:>10}  eligible {eligible}, explicitly excluded {excluded}\n  daily months found/asked                       {:>10}/{:<10}\n  exact 1min context bars                        {:>10}\n  exact 1min months found/asked                  {:>10}/{:<10}\n  prior exact-minute session                     {:>10}  {} bars\n  daily integrity receipt                        {}\n  minute integrity receipt                       {}\n  causality                                      daily: strictly earlier IST day; GapFib: exact minute ending at signal close\n  GapFib source                                  positions 132..=142 replaced from exact stored 1min only\n\n",
+        "STORED REFERENCE STREAMS\n  daily schema/eligibility policy                {:>10}/{:<10}\n  GapFib exact-minute overlay policy             {:>10}\n  swept-series calendar policy                   {:>10}  exact 1min withheld: {withheld}\n  stored 1day records                            {:>10}  eligible {eligible}, explicitly excluded {excluded}\n  daily months found/asked                       {:>10}/{:<10}\n  exact 1min context bars                        {:>10}\n  exact 1min months found/asked                  {:>10}/{:<10}\n  prior exact-minute session                     {:>10}  {} bars\n  daily integrity receipt                        {}\n  minute integrity receipt                       {}\n  causality                                      daily: strictly earlier IST day; GapFib: exact minute ending at signal close\n  GapFib source                                  positions 132..=142 replaced from exact stored 1min only\n\n",
         stored::DAILY_REFERENCE_SCHEMA,
         stored::DAILY_ELIGIBILITY_POLICY,
         stored::EXACT_MINUTE_GAP_POLICY,
+        stored::SWEPT_SERIES_CALENDAR_POLICY,
         daily.bars.len(),
         daily.found,
         daily.asked,
@@ -4162,6 +4181,25 @@ fn span_banner(
              Pull those months and rerun to close the gap.",
             span.missing.len(),
             names.join(" ")
+        );
+    }
+    // A WITHHELD SESSION IS NAMED TOO, AND IT IS NOT THE SAME HOLE AS A MISSING
+    // MONTH. A missing month is a store defect an operator closes by pulling it;
+    // a withheld session is this run's own policy and pulling cannot change it.
+    // Both shorten the sample, so both are stated, and `CLAUDE.md` §3 rule 2
+    // forbids the second being the quiet one.
+    if !span.excluded.is_empty() {
+        let _ = writeln!(
+            header,
+            "CHARTER SESSIONS WITHHELD FROM THIS SPAN ({} day(s), {} bar(s)): {}\n\
+             Swept-series calendar policy {} keeps NSE non-regular sessions -- \
+             Muhurat, disaster-recovery drills and the 2021-02-24 outage -- out of \
+             every swept series. Every figure below is over a SHORTER sample, not a \
+             corrected one.",
+            span.excluded.days(),
+            span.excluded.bars(),
+            span.excluded.day_names().join(" "),
+            stored::SWEPT_SERIES_CALENDAR_POLICY,
         );
     }
     header

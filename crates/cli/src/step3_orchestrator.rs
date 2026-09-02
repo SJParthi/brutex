@@ -107,7 +107,8 @@ use crate::population_v6::{
 };
 use crate::stored::{
     CalendarReceiptV2, CompleteCalendarReceiptV2, DAILY_ELIGIBILITY_POLICY, DAILY_REFERENCE_SCHEMA,
-    DailyContext, EXACT_MINUTE_GAP_POLICY, ExactMinuteContext, Span, StoredSpanLoadBoundV1,
+    DailyContext, EXACT_MINUTE_GAP_POLICY, ExactMinuteContext, SWEPT_SERIES_CALENDAR_POLICY, Span,
+    StoredSpanLoadBoundV1,
 };
 use crate::stored_post_training_oos::{
     StoredPostTrainingOosCohortV1, StoredPostTrainingOosRequestV1,
@@ -2801,6 +2802,7 @@ impl RetainedStoredExecutionContextV1 {
             excluded_ist_days: &CHARTER_NON_REGULAR_IST_DAYS,
             daily_integrity: ReferenceIntegrity::UnverifiedNoReceipt,
             minute_integrity: ReferenceIntegrity::UnverifiedNoReceipt,
+            swept_series_calendar_policy: SWEPT_SERIES_CALENDAR_POLICY,
         };
         let authorities = StoredFactAuthoritiesV1 {
             verified_commit: VerifiedBuildCommitV1(&self.source_commit),
@@ -2870,6 +2872,7 @@ impl RetainedStoredExecutionContextV1 {
             excluded_ist_days: &CHARTER_NON_REGULAR_IST_DAYS,
             daily_integrity: ReferenceIntegrity::UnverifiedNoReceipt,
             minute_integrity: ReferenceIntegrity::UnverifiedNoReceipt,
+            swept_series_calendar_policy: SWEPT_SERIES_CALENDAR_POLICY,
         };
         let signal_bound = StoredSpanLoadBoundV1::new(self.load_ceilings.signal)
             .map_err(|why| format!("Step 3 Execution V3 signal bound refused: {why}"))?;
@@ -3056,6 +3059,7 @@ fn commit_stored_with_verified_build_v1(
         excluded_ist_days: &CHARTER_NON_REGULAR_IST_DAYS,
         daily_integrity: ReferenceIntegrity::UnverifiedNoReceipt,
         minute_integrity: ReferenceIntegrity::UnverifiedNoReceipt,
+        swept_series_calendar_policy: SWEPT_SERIES_CALENDAR_POLICY,
     };
     let source = CandidateUniverseProductionSourceV1::new(
         resolved.family,

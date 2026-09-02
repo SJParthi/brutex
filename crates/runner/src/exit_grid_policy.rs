@@ -4754,6 +4754,7 @@ mod tests {
             excluded_ist_days: &excluded,
             daily_integrity: crate::identity::ReferenceIntegrity::UnverifiedNoReceipt,
             minute_integrity: crate::identity::ReferenceIntegrity::UnverifiedNoReceipt,
+            swept_series_calendar_policy: 4,
         };
         let digest =
             crate::identity::data_digest_with_daily_reference(&signal, &execution, reference)
@@ -4827,6 +4828,7 @@ mod tests {
             excluded_ist_days: &excluded,
             daily_integrity: crate::identity::ReferenceIntegrity::UnverifiedNoReceipt,
             minute_integrity: crate::identity::ReferenceIntegrity::UnverifiedNoReceipt,
+            swept_series_calendar_policy: 4,
         };
         let instrument = nifty();
         let run_with = |data_digest| crate::identity::Run {

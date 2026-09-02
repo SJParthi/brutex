@@ -4340,6 +4340,7 @@ mod tests {
             excluded_ist_days: &CHARTER_NON_REGULAR_IST_DAYS,
             daily_integrity: runner::identity::ReferenceIntegrity::UnverifiedNoReceipt,
             minute_integrity: runner::identity::ReferenceIntegrity::UnverifiedNoReceipt,
+            swept_series_calendar_policy: crate::stored::SWEPT_SERIES_CALENDAR_POLICY,
         };
         let daily = must(
             MeasuredDailyReferenceV1::measure(reference),
