@@ -47,9 +47,50 @@
 //!   the cheapest row and the one most likely to catch an accidental read of
 //!   surrounding state.
 //!
-//! **Not measured here:** whether any of those costs is *small*. This file
-//! refuses a cost that GROWS. `docs/06-limits.md` is where absolute figures and
-//! the things nobody has timed are recorded.
+//! # The sentence above this one used to end the file, and it was the defect
+//!
+//! It read: *"**Not measured here:** whether any of those costs is small. This
+//! file refuses a cost that GROWS."* That was an honest description of what the
+//! file did and a **hole**, and an O(1) audit of all thirteen crates named it:
+//! `cli` was the only crate whose bench had **no absolute-floor row at all**.
+//! The other twelve each divide a measured cost by a measured FLOOR and refuse a
+//! multiple; this one divided two costs by each other and refused a quotient.
+//!
+//! A quotient cannot see a UNIFORM slowdown. The audit measured exactly that
+//! elsewhere in this workspace: a mask operation **174x slower passed its
+//! crate's ratio rows at 0.98x–1.00x**, because both legs moved together. Every
+//! row above would report `ok` for a `to_bytes` that had become a hundred times
+//! dearer, because C-CLI-04 divides one `to_bytes` by another `to_bytes`. `cli`
+//! is the crate `CLAUDE.md` §5 makes the sweep reachable from, so it was the one
+//! place that regression was structurally uncatchable.
+//!
+//! Two rows close it, against the same one-instruction floor the other benches
+//! use:
+//!
+//! * **C-CLI-05** — **encoding one record costs a bounded multiple of the
+//!   cheapest instruction there is**. `to_bytes` is the crate's cheapest owned
+//!   operation and the most stable to measure: no syscall, no lock, no
+//!   allocation — twenty-nine constant-offset field copies and one `blake3` seal
+//!   over 253 bytes.
+//!
+//! * **C-CLI-06** — **the duplicate probe costs a bounded multiple of the same
+//!   floor**. `CLAUDE.md` §3 rule 4 names duplicate rejection as one of the five
+//!   operations that must be O(1), and `holds` is this crate's spelling of it.
+//!   C-CLI-03 proves the probe does not depend on the ledger; this proves the
+//!   probe is small.
+//!
+//! **Still not measured here:** the two rows that reach the filesystem. A budget
+//! on `read` or `append` would be timing the page cache and the append lock, and
+//! `crates/store` already carries the one absolute row for a record read (C-29).
+//! `docs/06-limits.md` is where absolute figures and the things nobody has timed
+//! are recorded.
+//!
+//! **Neither new id is in gate 14's `cover` table or in
+//! `docs/04-invariants.md` yet.** They are measured and printed here; the table
+//! row and the invariant rows are edits to files this change does not touch, and
+//! adding an id to that table before its invariant row exists fails gate 14's
+//! layer 4 — correctly, as its own comment says: *"the repair is to write the
+//! rows, not to widen the gate"*.
 
 use core::hint::black_box;
 use std::path::PathBuf;
@@ -181,6 +222,207 @@ fn per(reps: u32, elapsed_ns: u128) -> u128 {
     elapsed_ns.saturating_mul(1_000) / u128::from(reps.max(1))
 }
 
+/// How many times a BUDGET measurement is repeated before the minimum is taken.
+///
+/// Forty, the figure `crates/vocab`'s bench uses for the same floor.
+///
+/// # Why the minimum, and why only the budget rows take it
+///
+/// A ratio row divides two costs measured the same way, so a scheduler that
+/// slowed both legs mostly cancels. A budget row does not have that protection:
+/// it compares an ABSOLUTE magnitude, so one preempted sample would report a
+/// regression that is really another process. The scheduler can only ever make a
+/// sample slower, so the smallest observation is the closest thing to the cost of
+/// the work itself — `crates/store`'s bench records measuring that directly,
+/// against a foreign process at 686% CPU: the minimum moved 0.2% across three
+/// runs while the median moved 78%.
+///
+/// The four ratio rows above are deliberately left on their single-sample [`per`]
+/// timing. Changing how they are measured would make this change's numbers
+/// incomparable with the ones already recorded for them, and they are not what
+/// was missing.
+const TRIALS: u32 = 40;
+
+/// Repetitions for a budget site that costs a hash over a few hundred bytes.
+///
+/// Two thousand, the figure `crates/store`'s bench uses. `to_bytes` is a
+/// microsecond-scale call, so this is milliseconds of work per trial — far above
+/// anything `Instant` cannot resolve, and forty trials of it still cost under a
+/// second.
+const REPS_BUDGET: u32 = 2_000;
+
+/// Picoseconds per call, as the MINIMUM over [`TRIALS`] runs of `reps` calls.
+fn cost_ps<T>(reps: u32, mut op: impl FnMut() -> T) -> u128 {
+    let mut best = u128::MAX;
+    for _ in 0..TRIALS {
+        let start = Instant::now();
+        for _ in 0..reps {
+            black_box(op());
+        }
+        let ps = per(reps, start.elapsed().as_nanos());
+        if ps < best {
+            best = ps;
+        }
+    }
+    best
+}
+
+/// How many independent [`cost_ps`] minima the floor takes the minimum OF.
+///
+/// # Measured, and the reason it is not one
+///
+/// The floor at [`TRIALS`] alone read **522, 1156 and 525 ps** on three
+/// consecutive runs of this bench while the numerators it divides moved 0.7%
+/// (`to_bytes`: 258.0, 259.8, 259.0 ns). One trial in three was 2.2x high with
+/// nothing else moving — the signature of a scheduler parking a 10-microsecond
+/// loop on an efficiency core, on a machine at load average 104 across 14 cores.
+///
+/// That error runs in the DANGEROUS direction for a budget. A floor read too
+/// HIGH divides the numerator down and hides a regression; a floor read too LOW
+/// on an idle machine divides it up and could refuse a healthy build. The minimum
+/// is biased toward the true cost, so more rounds move the reading toward the
+/// number an unloaded machine would report — which is the one the budget has to
+/// survive. Five rounds is 200 trials for a measurement that costs milliseconds.
+const FLOOR_ROUNDS: u32 = 5;
+
+/// The machine's own floor: what [`cost_ps`] reports for the cheapest operation
+/// there is, timed by this same loop, in this same build.
+///
+/// # Why the denominator is not part of this crate
+///
+/// It must be something that **cannot move when the numerator does**. A floor
+/// drawn from `results.rs` would be dragged along by the same regression it is
+/// meant to expose, and the budget would read `ok` for the same reason the ratios
+/// do. `wrapping_add` on a black-boxed `u64` is one instruction, it is not part
+/// of `Results` or `Record`, and no change to either can change it — so the
+/// quotient scales with the MACHINE and does not scale with a regression.
+///
+/// The floor is not zero-cost and is not meant to be: it carries this harness's
+/// own loop and `black_box` overhead, which every numerator carries too. That is
+/// what makes it the right unit — "how many of the cheapest thing does this
+/// cost". Same construction as `crates/vocab`, `crates/engine` and
+/// `crates/runner`, so the four numbers are read against each other.
+fn floor_ps() -> u128 {
+    // `unwrap_or(0)` rather than `unwrap`, which this workspace denies. The range
+    // is non-empty so the `None` arm is unreachable, and a zero reaching `budget`
+    // prints UNMEASURABLE and fails rather than dividing.
+    (0..FLOOR_ROUNDS)
+        .map(|_| cost_ps(REPS_FAST, || black_box(1_u64).wrapping_add(black_box(1))))
+        .min()
+        .unwrap_or(0)
+}
+
+/// Prints one budget in floors and returns whether it held.
+///
+/// Separate from [`ratio`] because a breach means something different. A breached
+/// RATIO says the cost depends on the input. A breached BUDGET says the cost rose
+/// for every input at once, which no ratio in this file can report.
+fn budget(label: &str, floor: u128, at_ps: u128, allowed: u128) -> bool {
+    if floor == 0 {
+        println!("  {label:<58} UNMEASURABLE — the floor timed at zero");
+        return false;
+    }
+    let floors = at_ps.saturating_mul(1_000) / floor;
+    let ok = floors <= allowed.saturating_mul(1_000);
+    println!(
+        "  {label:<58} {at_ps:>8} ps = {}.{:03} floors, budget {allowed}   {}",
+        floors / 1_000,
+        floors % 1_000,
+        if ok { "ok" } else { "OVER BUDGET" }
+    );
+    ok
+}
+
+/// **C-CLI-05** — encoding one record costs a bounded multiple of the floor.
+///
+/// The absolute half of C-CLI-04's claim. That row proves `to_bytes` does not
+/// depend on which record it is given; this one proves the constant is small.
+fn the_encode_stays_within_its_budget(floor: u128) -> bool {
+    /// Floors allowed per encoded record.
+    ///
+    /// # Measured
+    ///
+    /// arm64 laptop (14-core M4 Pro, 48 GB), `bench` profile, six consecutive
+    /// runs: **496.367, 496.687, 497.005, 496.247, 497.315, 496.007** floors, at
+    /// a floor of 520–522 ps and an absolute cost of **258.6–259.4 ns** per
+    /// record. Seven earlier runs, before [`FLOOR_ROUNDS`] existed, spread
+    /// 493.411–500.159 on the same absolute numerator. The spread is **1.01x**,
+    /// the tightest in this file, which is what a numerator with no syscall and
+    /// no lock in it looks like.
+    ///
+    /// **The machine was HEAVILY LOADED and the number is an upper bound, not a
+    /// clean floor.** Load average ran 45–104 across 14 cores for every run
+    /// above; `uptime` was read before and after each. That biases the quotient
+    /// UPWARD rather than downward, because the numerator's trials are ~520 µs
+    /// each and the floor's are ~10 µs, so the floor's minimum finds an
+    /// uninterrupted window far more easily than the numerator's does. A budget
+    /// sized on it is therefore loose, not tight — and it is honest about which.
+    ///
+    /// # Why 2,000
+    ///
+    /// The worst observed is 500.159, and **2,000** leaves 4.0x — the same rule
+    /// the other twelve crates' budgets apply. It still refuses the 174x uniform
+    /// regression this row exists for: such an encode would read about 86,300
+    /// floors and be refused by a factor of 43.
+    ///
+    /// A breach is NOT a data dependence; C-CLI-04 is that row. It means every
+    /// record got dearer at once, which a quotient cannot see.
+    const ALLOWED: u128 = 2_000;
+
+    let one = record(1);
+    let at = cost_ps(REPS_BUDGET, || black_box(&one).to_bytes());
+    budget(
+        "C-CLI-05  to_bytes against the instruction floor",
+        floor,
+        at,
+        ALLOWED,
+    )
+}
+
+/// **C-CLI-06** — the duplicate probe costs a bounded multiple of the floor.
+///
+/// `CLAUDE.md` §3 rule 4 names duplicate rejection as one of five operations that
+/// must be constant, and `Results::holds` is this crate's spelling of it.
+/// C-CLI-03 proves the probe does not depend on the ledger's size; only this row
+/// can say the probe is CHEAP, and its doc comment in `results.rs` says outright
+/// that the bound there is argued rather than timed.
+///
+/// The MISS is what is timed, for C-CLI-03's reason: a map that had silently
+/// become a linear search shows its worst case on the identity that is absent,
+/// because it must reach the end before it can answer.
+fn the_duplicate_check_stays_within_its_budget(store: &Results, floor: u128) -> bool {
+    /// Floors allowed per probe.
+    ///
+    /// # Measured
+    ///
+    /// arm64 laptop (14-core M4 Pro, 48 GB), `bench` profile, six consecutive
+    /// runs: **14.980, 16.266, 14.990, 14.969, 15.019, 14.961** floors, at a
+    /// floor of 520–522 ps and an absolute cost of **7.81–8.49 ns** per probe.
+    /// Same load caveat as C-CLI-05: load average 45–104 on 14 cores, so this is
+    /// an upper bound taken under load rather than a clean idle figure.
+    ///
+    /// Fifteen floors is what one `SipHash` of 32 bytes plus one `hashbrown`
+    /// group probe costs, and knowing that number is the only way to notice it
+    /// becoming a hundred and fifty.
+    ///
+    /// # Why 65
+    ///
+    /// The worst observed is 16.266, and **65** leaves 4.0x — the workspace rule.
+    /// A probe that had become a walk over a 1,024-record ledger would read in
+    /// the thousands; a probe 174x dearer would read about 2,800 floors and be
+    /// refused by a factor of 43.
+    const ALLOWED: u128 = 65;
+
+    let absent = record(LARGE + 7).identity;
+    let at = cost_ps(REPS_FAST, || black_box(store).holds(black_box(&absent)));
+    budget(
+        "C-CLI-06  duplicate probe against the instruction floor",
+        floor,
+        at,
+        ALLOWED,
+    )
+}
+
 /// **C-CLI-01** — reading record *i* does not depend on *i*.
 ///
 /// The header says the address is `HEADER + i·STRIDE`, "an add and a multiply".
@@ -285,7 +527,7 @@ fn the_encode_does_not_depend_on_the_ledger_it_joins() -> bool {
 fn main() {
     println!("crates/cli — ratio bench (gate 8)");
     println!(
-        "  ceiling {}.{:03}x on every row\n",
+        "  ceiling {}.{:03}x on every RATIO row; the two budget rows are in floors\n",
         CEILING_PERMILLE / 1_000,
         CEILING_PERMILLE % 1_000
     );
@@ -294,12 +536,21 @@ fn main() {
     let (small, small_root) = ledger("count", SMALL);
 
     // NOT `&&`. Every row must RUN, so a breach in the first does not hide the
-    // state of the other three -- a bench that stops at the first failure tells
-    // an operator less than one that reports all four.
-    let ok = the_read_does_not_depend_on_which_record(&mut big)
+    // state of the other five -- a bench that stops at the first failure tells
+    // an operator less than one that reports all six.
+    let ratios = the_read_does_not_depend_on_which_record(&mut big)
         & the_duplicate_check_does_not_scan_the_ledger(&big)
         & the_count_does_not_depend_on_how_many_there_are(&small, &big)
         & the_encode_does_not_depend_on_the_ledger_it_joins();
+
+    // The floor is taken ONCE and shared, so both budgets are quoted in the same
+    // unit on the same machine in the same run. Two separately measured floors
+    // would make the two rows incomparable for no gain.
+    let floor = floor_ps();
+    println!("\n  the instruction floor is {floor} ps — one black-boxed wrapping_add");
+    let budgets = the_encode_stays_within_its_budget(floor)
+        & the_duplicate_check_stays_within_its_budget(&big, floor);
+    let ok = ratios & budgets;
 
     // The fixtures are temp directories and are removed whether or not a row
     // breached — a bench that leaves state behind makes the NEXT run's numbers
