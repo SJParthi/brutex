@@ -492,10 +492,29 @@ impl Patterns {
         {
             mask = set(mask, 162);
         }
-        if bar0.high == bar1.high && (bar0.bullish() != bar1.bullish()) {
+        // THE PRIOR DIRECTION IS PART OF BOTH ROWS AND WAS TESTED IN NEITHER.
+        //
+        // `docs/03-vocabulary.md` and `vocab::table` spell 169 as "two bars
+        // sharing a high AFTER AN ADVANCE" and 170 as "two bars sharing a low
+        // AFTER A DECLINE". The predicate was `bar0.bullish() != bar1.bullish()`
+        // for both — a colour CHANGE with no direction, which admits either
+        // ordering. So 169 fired on the bearish-then-bullish shape as well,
+        // which is the bottom, and 170 fired on the top; a pair with equal highs
+        // and equal lows set both at once.
+        //
+        // A tweezer top is a reversal of an advance: `bar1` rose, `bar0` turned
+        // down. The bottom is its mirror. `pat_hanging_man` two arms above
+        // already tests `bar1.bearish() && bar0.bullish()` for exactly this
+        // reason, so the omission was inconsistent inside one file.
+        //
+        // This narrows both bits rather than widening them — each now fires on
+        // one shape where it fired on two — and it does not renumber or reuse
+        // anything, which is what §3 rule 8 protects. What changed is that the
+        // code now computes the row the vocabulary already published.
+        if bar0.high == bar1.high && bar1.bullish() && bar0.bearish() {
             mask = set(mask, 169);
         }
-        if bar0.low == bar1.low && (bar0.bullish() != bar1.bullish()) {
+        if bar0.low == bar1.low && bar1.bearish() && bar0.bullish() {
             mask = set(mask, 170);
         }
         if bar1.bearish() && bar0.bullish() && bar0.open > bar1.open {
@@ -2142,7 +2161,17 @@ mod exemplars {
             want: 170,
             name: "pat_tweezer_bottom",
             dark: 169,
-            bars: &[(1000, 1080, 990, 1050), (1070, 1075, 990, 1010)],
+            // THE OLD EXEMPLAR WAS A TOP WEARING THE BOTTOM'S NAME: bullish
+            // then bearish, sharing a low. It passed only because the predicate
+            // tested a colour CHANGE and not a direction, so the same two bars
+            // satisfied both rows. `vocab::table` says 170 is "two bars sharing
+            // a low AFTER A DECLINE" -- the prior bar falls, the current one
+            // turns up -- so the colours are the other way round.
+            //
+            // Lows both 990; highs 1080 and 1075 differ, which is what keeps
+            // 169 dark and makes this a one-row exemplar rather than a pair
+            // that lights both.
+            bars: &[(1050, 1080, 990, 1000), (1010, 1075, 990, 1070)],
         },
         Case {
             want: 171,

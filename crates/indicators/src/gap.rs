@@ -350,16 +350,41 @@ impl GapFib {
     /// is derived from the source rather than chosen: an up gap needs today's first-3
     /// high above yesterday's last-3 high, a down gap needs yesterday's last-3 low
     /// above today's first-3 low. Neither holding means the session did not gap.
+    /// # The two tests are not exclusive, and the doc above assumed they were
+    ///
+    /// "Neither holding means the session did not gap" describes three cases —
+    /// up, down, and neither. There is a fourth: today's first-3 candle
+    /// strictly ENGULFING yesterday's last-3, where `today_high > y_high` and
+    /// `y_low > today_low` both hold.
+    ///
+    /// Written as two sequential `if`s, that fourth case silently became `Up`,
+    /// because `Up` is tested first. Nothing disclosed the tie-break — the
+    /// direction it produced was a property of statement order.
+    ///
+    /// An engulfing open is the OPPOSITE of a gap: price traded continuously
+    /// across yesterday's whole range rather than jumping over part of it, so
+    /// there is no discontinuity for a leg to measure. `x1`/`x2` would then span
+    /// intraday expansion, and every one of the eleven Fibonacci positions
+    /// derived from it would be measuring a move that is not the one the sheet
+    /// names. Refusing it is what the doc above already promised.
+    ///
+    /// The bias this removes is directional: the tie always resolved `Up`, so
+    /// the up ladder fired on sessions the down ladder never saw.
     fn establish(&self) -> Option<GapLeg> {
         let (y_high, y_low) = self.yesterday?;
-        if self.today_high > y_high {
+        let above = self.today_high > y_high;
+        let below = y_low > self.today_low;
+        if above && below {
+            return None;
+        }
+        if above {
             return Some(GapLeg {
                 x1: y_high,
                 x2: self.today_high,
                 direction: Direction::Up,
             });
         }
-        if y_low > self.today_low {
+        if below {
             return Some(GapLeg {
                 x1: y_low,
                 x2: self.today_low,
@@ -460,6 +485,55 @@ mod tests {
     fn ok(g: &mut GapFib, bar: &Candle) -> ConditionMask {
         g.step(bar, tol(), &Calendar::charter())
             .expect("this fixture bar is sane")
+    }
+
+    /// An engulfing open is not a gap in either direction, and used to be `Up`.
+    ///
+    /// The two direction tests are independent, so a session whose first three
+    /// minutes trade both above yesterday's last-3 high AND below its low
+    /// satisfies both. Written as sequential `if`s that resolved to whichever
+    /// was written first, which was `Up` — a direction decided by statement
+    /// order and disclosed nowhere.
+    ///
+    /// The four cases are asserted together rather than the new one alone: what
+    /// is being pinned is that the tests partition, and a test that only
+    /// asserted the engulfing case would pass just as well if `Up` and `Down`
+    /// had swapped underneath it.
+    #[test]
+    fn an_engulfing_open_is_neither_direction_rather_than_up() {
+        let leg_of = |y_high: i64, y_low: i64, today_high: i64, today_low: i64| {
+            GapFib {
+                yesterday: Some((y_high, y_low)),
+                today_high,
+                today_low,
+                ..GapFib::default()
+            }
+            .establish()
+            .map(|leg| leg.direction)
+        };
+
+        // ENGULFING: above yesterday's high AND below its low. Both tests hold.
+        assert_eq!(
+            leg_of(2_450_000, 2_400_000, 2_460_000, 2_390_000),
+            None,
+            "a session that traded across yesterday's whole range did not gap over any of it"
+        );
+        // Only above.
+        assert_eq!(
+            leg_of(2_450_000, 2_400_000, 2_460_000, 2_410_000),
+            Some(Direction::Up)
+        );
+        // Only below.
+        assert_eq!(
+            leg_of(2_450_000, 2_400_000, 2_440_000, 2_390_000),
+            Some(Direction::Down)
+        );
+        // Inside: neither test holds, which the doc already called not a gap.
+        assert_eq!(
+            leg_of(2_450_000, 2_400_000, 2_440_000, 2_410_000),
+            None,
+            "an inside session did not gap either"
+        );
     }
 
     /// The two sheets are one formula. Checked against both branches written out
