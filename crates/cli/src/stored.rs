@@ -1145,9 +1145,30 @@ fn refuse_uncalendared_withheld_bar(
         DayKind::Closed => Err(format!(
             "record {index} at timestamp {ts_micros} is on withheld IST day {day}, which the measured calendar reports closed. A bar on a closed day is a store defect and is refused rather than dropped"
         )),
-        DayKind::OpenLengthUnmeasured => Err(format!(
-            "record {index} at timestamp {ts_micros} is on withheld IST day {day}, whose session length is unmeasured, so no window can place it. Minute-window authority was not invented and the bar is refused rather than dropped"
-        )),
+        // AN UNMEASURED-LENGTH DAY IS DROPPED AND COUNTED, NEVER REFUSED.
+        //
+        // This arm refused once, and the refusal was wrong twice over.
+        //
+        // MEASURED: dhan's `NIFTY/1min/2021-11.bin` holds 43 committed records
+        // on IST day 18 935 at IST minutes 887..929 (14:47-15:29) -- inside the
+        // pull's [09:15, 15:30) window, not the evening Muhurat D-0502 assumed.
+        // Refusing them made `load_classified_with_ceiling` refuse the whole
+        // SPAN, so every dhan range covering 2021-11 died on all eight rungs.
+        // dhan's 1min coverage begins 2021-08, so `range-all dhan NIFTY` could
+        // not run at all. That is a regression the charter policy never
+        // intended and no operator asked for.
+        //
+        // It is also the wrong question. Refusing exists to stop a bar the
+        // calendar CAN place being deleted unseen -- see the `Open` arm. Here
+        // the calendar places nothing: `OpenLengthUnmeasured` means the session
+        // length was never measured, so there is no window to be outside of and
+        // no defect to name. Refusing would not report a fault, it would report
+        // our own missing authority as the vendor's error.
+        //
+        // The day is withheld either way, so the bar is not swept either way.
+        // It is dropped, counted in `CalendarExclusion`, and named by date in
+        // the report -- which is the visibility §3 rule 2 asks for.
+        DayKind::OpenLengthUnmeasured => Ok(()),
         DayKind::Unmeasured => Err(format!(
             "record {index} at timestamp {ts_micros} is on withheld IST day {day}, outside the canonical NSE calendar's measured range. The bar is refused rather than dropped"
         )),

@@ -6259,7 +6259,9 @@ jobs:
           #     global_replay_v2.rs, global_replay_v3.rs, population_statistics_v2
           #     .rs (2 of its 7), population_statistics_v3.rs (1 of 3),
           #     pre_admission_data.rs, selection.rs (raised 1 -> 2), selection_v3
-          #     .rs, selection_v4.rs, selection_v5.rs, stored.rs (3 of its 4),
+          #     .rs, selection_v4.rs, selection_v5.rs, stored.rs (4 of its 5 --
+          #     the fourth is `withheld_by_charter`, a `[i64; 9]::contains` over
+          #     the charter day list, D-0502),
           #     stored_data_completeness.rs.
           #   THE RANGE, two comparisons and no allocation. `(1970..=9999)`,
           #     `(1..=12)`, `(0..1_000_000_000)` on a nanosecond field,
@@ -6269,7 +6271,7 @@ jobs:
           #     population_admission_v2.rs, population_admission_v3.rs,
           #     population_finalization_v2.rs, population_observations_v1.rs,
           #     population_statistics_v2.rs, population_statistics_v3.rs,
-          #     stored.rs (its fourth).
+          #     stored.rs (its fifth).
           #   THE HASH PROBE, one lookup and no scan. `runner/src/lib.rs` and
           #     `runner/src/rank.rs` probe the `HashSet<ConditionMask>` of
           #     redundant masks once per itemset -- the same set those two files
@@ -6317,7 +6319,7 @@ jobs:
           crates/cli/src/selection_v3.rs 1
           crates/cli/src/selection_v4.rs 2
           crates/cli/src/selection_v5.rs 3
-          crates/cli/src/stored.rs 4
+          crates/cli/src/stored.rs 5
           crates/cli/src/stored_data_completeness.rs 1
           crates/core/src/vendor.rs 2
           crates/costs/src/day.rs 2

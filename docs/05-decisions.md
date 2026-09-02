@@ -32111,9 +32111,25 @@ MEASURED, single-month `audit-range`, REFUSED vs ok:
 The four months are the four `CHARTER_NON_REGULAR_IST_DAYS` entries that carry
 intraday bars: `18_682` 2021-02-24 (the systems outage), `19_784` 2024-03-02 and
 `19_861` 2024-05-18 (the disaster-recovery Saturdays), and `20_382` 2025-10-21
-(the 13:45-14:45 afternoon Muhurat). The other five charter days are evening
-Muhurat sessions at 18:00-19:15, wholly outside the pull's [09:15, 15:30)
-window, so no bar of theirs is on disk and none of them refuses anything.
+(the 13:45-14:45 afternoon Muhurat). The other five are evening Muhurat sessions
+at 18:00-19:15, and on **zerodha** no bar of theirs is on disk.
+
+**That last sentence said "no bar of theirs is on disk" without naming a feed,
+and measurement refuted it.** dhan's `NIFTY/1min/2021-11.bin` holds **43
+committed records on IST day 18 935** at IST minutes 887..929 — 14:47-15:29 IST,
+inside the pull's window, not an evening session — and the same day appears in
+all eight dhan rungs for that month. `pull::calendar` classifies 18 935 as
+`OpenLengthUnmeasured`, so no window can place those bars.
+
+The consequence was a real regression, caught by an adversarial audit rather than
+by a test: `refuse_uncalendared_withheld_bar` refused that arm, and because a
+refusal there fails the whole SPAN, every dhan range covering 2021-11 died on all
+eight rungs. dhan's 1min coverage begins 2021-08, so `range-all dhan NIFTY` could
+not run at all. The arm now DROPS and COUNTS instead — refusing exists to stop a
+bar the calendar CAN place being deleted unseen, and on an unmeasured-length day
+the calendar places nothing, so a refusal would report our own missing authority
+as the vendor's error. The `Open` arm, which is where the real out-of-window
+defect lives, still refuses.
 
 **The operator chose exclusion over the alternatives.** Four days out of roughly
 1,600 is 0.25% of the sample. The two rejected alternatives were splitting each
