@@ -5587,7 +5587,15 @@ fn trade_and_screen<'a>(
         text: screened,
         selected,
         priced,
-    } = screen_cascade(bars, column, by_evidence, horizon, rules, validate);
+    } = screen_cascade(
+        bars,
+        column,
+        by_evidence,
+        horizon,
+        rules,
+        recording,
+        validate,
+    );
     let Some(selected) = selected else {
         note_grid_finished(recording, priced.len(), by_evidence.len(), 0);
         return Ok(TradeScreen {
@@ -7821,6 +7829,9 @@ fn screen_cascade<'a>(
     by_evidence: &[&'a runner::rank::Scored],
     horizon: Horizon,
     rules: Rules,
+    // Threaded only so the grid phase can say it is still moving; see
+    // `note_grid_progress`. `None` is a synthetic sweep with no rung to name.
+    recording: Option<Recording<'_>>,
     // Whether to walk the tier ladder when the stated rules find nothing. A
     // SEARCH step passes false: it needs one bit, not 960 priced tiers.
     validate: bool,
@@ -7840,7 +7851,7 @@ fn screen_cascade<'a>(
     // So the stated policy is tried first and named in the output. The tier
     // ladder below it is the fallback — the "what IS there" answer — and not a
     // replacement for the question that was asked.
-    let yours = screen(bars, column, by_evidence, horizon, rules);
+    let yours = screen(bars, column, by_evidence, horizon, rules, recording);
     if yours.selected.is_none() {
         // A SEARCH STEP STOPS HERE, AND THAT IS THE WHOLE COST.
         //
@@ -7957,7 +7968,7 @@ fn screen_cascade<'a>(
     let mut final_priced = yours.priced;
     for (rank, tier) in ladder.iter().enumerate() {
         let rules = tier.rules(top, reference);
-        let body = screen(bars, column, by_evidence, horizon, rules);
+        let body = screen(bars, column, by_evidence, horizon, rules, recording);
         // The typed selection is the same final, post-consistency row the table
         // renders. Rendered wording is diagnostic, never a control protocol.
         if body.selected.is_none() {
@@ -7994,6 +8005,7 @@ fn screen_cascade<'a>(
             by_evidence,
             horizon,
             mildest.rules(top, reference),
+            recording,
         );
         out.push_str(&diagnostic.text);
         replace_priced(&mut final_priced, diagnostic.priced);
@@ -8142,6 +8154,7 @@ fn screen<'a>(
     by_evidence: &[&'a runner::rank::Scored],
     horizon: Horizon,
     rules: Rules,
+    recording: Option<Recording<'_>>,
 ) -> ScreenResult<'a> {
     // Built ONCE for the whole screen: the same ladder judges every combination,
     // and `Levels` only borrows it.
@@ -8221,6 +8234,11 @@ fn screen<'a>(
     // the real pass share this forced-exit table and spacing measurement.
     let facts = runner::trade::SliceFacts::of(bars, column);
     let priced_cap = cap_for_budget(bars, column, horizon, by_evidence, &levels, &facts);
+    // THE PHASE THAT WAS SILENT. Everything above this line is per-run work; the
+    // loop below prices every candidate against the whole exit grid and is where
+    // a multi-hour sweep spends nearly all of its time. It said nothing at all
+    // until it finished -- see `note_grid_progress` for the measurement.
+    let progress = GridProgress::over(by_evidence.len().min(priced_cap), recording);
     let mut rows: Vec<Screened<'_>> = by_evidence
         .par_iter()
         .take(priced_cap)
@@ -8247,6 +8265,10 @@ fn screen<'a>(
             // combination that is mediocre on its own quantiles but strong under the
             // operator's stop can now be found rather than filtered out unseen.
             let g = grid::evaluate_over(bars, column, &scored.mask, horizon, side, levels, &facts);
+            // TICKED HERE AND NOT AT THE END OF THE ARM, because the arm has four
+            // `?` exits below it and a candidate that priced and was then discarded
+            // still cost the grid evaluation this line is measuring.
+            progress.tick();
             // THE BEST VARIANT THAT SATISFIES THE RULES, falling back to the best
             // overall only so a failing combination can still be SHOWN with the rule
             // it broke. Asking `best()` first and judging that was the error: the
@@ -12577,6 +12599,99 @@ fn note_grid_entered(
         recording.and_then(|held| held.attempt),
         &grid_entered_event(recording, bars, candidates, cap, validate),
     );
+}
+
+/// How many progress lines one grid phase emits.
+///
+/// Ten, because the reading an operator needs from this is "it is moving and
+/// roughly where it is", and a hundred lines per rung buys no more of that
+/// while costing eight hundred records a run.
+const GRID_PROGRESS_STEPS: usize = 10;
+
+/// A counter the grid's parallel loop ticks once per candidate.
+///
+/// # Why a type and not four lines in `screen`
+///
+/// The stride arithmetic has two edges that are easy to get wrong in place --
+/// `div_ceil` so the last step cannot land past the end, and a `max(1)` so a
+/// screen with fewer candidates than steps does not divide by zero -- and
+/// `screen` is already at the line cap this workspace enforces. Keeping them
+/// beside the constant they depend on is where a reader will look for them.
+struct GridProgress<'a> {
+    counted: std::sync::atomic::AtomicUsize,
+    total: usize,
+    stride: usize,
+    recording: Option<Recording<'a>>,
+}
+
+impl<'a> GridProgress<'a> {
+    /// A counter over `total` candidates that speaks [`GRID_PROGRESS_STEPS`]
+    /// times.
+    fn over(total: usize, recording: Option<Recording<'a>>) -> Self {
+        Self {
+            counted: std::sync::atomic::AtomicUsize::new(0),
+            total,
+            stride: total.div_ceil(GRID_PROGRESS_STEPS).max(1),
+            recording,
+        }
+    }
+
+    /// Counts one priced candidate and speaks on a stride boundary.
+    ///
+    /// `Relaxed` is the right ordering: nothing is synchronised through this
+    /// counter, it is read only to decide whether to print, and a race that
+    /// prints one tenth twice or skips one costs a log line and nothing else.
+    fn tick(&self) {
+        let done = self
+            .counted
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        if done.is_multiple_of(self.stride) || done == self.total {
+            note_grid_progress(self.recording, done, self.total);
+        }
+    }
+}
+
+/// Says the grid is still moving, roughly ten times per rung.
+///
+/// # Why this exists, measured rather than argued
+///
+/// [`grid_entered_event`]'s own doc already named the defect it half-fixed:
+/// *"an operator watching `/logs` saw the first 12% of a run in detail and then
+/// silence — and a five-hour sweep four hours into its grid looked identical to
+/// one that hung."* The bracket it added says the phase STARTED and later that
+/// it finished; between those two lines there was nothing.
+///
+/// Measured on a live `range-all zerodha NIFTY 2020-01..2026-07`: the 1-minute
+/// rung entered its grid at 12:30:39 with 365 candidates and emitted not one
+/// record for the next twenty minutes at 1,326% CPU. Eight rungs of that is a
+/// page that shows a frozen line for most of a multi-hour run.
+///
+/// # Gate 17, and a correction to what the sibling doc claims
+///
+/// [`grid_entered_event`] says this path is *"`cli`, called once per rung,
+/// holding no loop over bars and none over candidates."* The first half is
+/// true and the second is not: `screen` runs `by_evidence.par_iter()` over
+/// every candidate and calls `grid::evaluate_over` inside it. That loop is the
+/// phase being timed here.
+///
+/// It is still `cli`, which is not on gate 17's silenced list, and the cost is
+/// one relaxed `fetch_add` per candidate — the counter is O(1) and the emit
+/// fires on one candidate in `stride`, not on every one. Gate 17's remedy asks
+/// for *"plain integer counters … emitted ONCE at a structural boundary"*, and
+/// a tenth of a rung is the coarsest boundary that still answers the question.
+fn note_grid_progress(recording: Option<Recording<'_>>, priced: usize, candidates: usize) {
+    let rung = recording.map_or("", |held| held.timeframe);
+    let mut event = telemetry::Event::info("cli.audit", "exit grid progress")
+        .with("rung", rung)
+        .with("priced", u64::try_from(priced).unwrap_or(u64::MAX))
+        .with("candidates", u64::try_from(candidates).unwrap_or(u64::MAX));
+    if let Some(held) = recording {
+        event = event
+            .with("feed", held.feed)
+            .with("underlying", held.underlying);
+    }
+    note_attempt(recording.and_then(|held| held.attempt), &event);
 }
 
 /// The other half of the bracket, and the count the live view cannot carry.
