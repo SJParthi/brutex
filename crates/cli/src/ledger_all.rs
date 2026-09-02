@@ -816,9 +816,27 @@ fn commit_selection(
 /// would be precision that means nothing. What WOULD matter is one set too low
 /// -- a run that refuses halfway -- so they are set high and named here rather
 /// than tuned per ledger and forgotten.
-const CEILING_RECORDS: u64 = 1 << 32;
+///
+/// # The two must agree, and the first draft's did not
+///
+/// Every ledger checks that its byte ceiling can hold its record ceiling at
+/// that ledger's own stride. At 2^32 records the widest of them -- Search V4
+/// lineage, at 1,536 bytes a pair -- needs six terabytes, and the byte ceiling
+/// was one. The run refused with an arithmetic complaint that had nothing to do
+/// with the operator's data:
+///
+/// > member-byte bound 1099511627776 cannot hold 4294967296 pairs
+///
+/// 2^24 records is sixteen million per ledger per rung, which is far more than
+/// a span of this store can produce, and at the widest stride it needs 25 GiB
+/// against a 64 GiB ceiling. The pair is now coherent for every ledger rather
+/// than for most of them.
+const CEILING_RECORDS: u64 = 1 << 24;
 /// The byte ceiling that pairs with [`CEILING_RECORDS`].
-const CEILING_BYTES: u64 = 1 << 40;
+///
+/// 64 GiB. Chosen so the widest ledger's `records * stride` fits with room to
+/// spare -- see [`CEILING_RECORDS`] for the arithmetic that has to hold.
+const CEILING_BYTES: u64 = 1 << 36;
 /// Records per written block, for the ledgers that block their writes.
 const BLOCK_RECORDS: u64 = 4_096;
 
