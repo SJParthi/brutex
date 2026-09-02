@@ -494,9 +494,29 @@ export function validateLedgerPayload(candidate) {
     indexes.add(run.index);
     if (run.halted) halted += 1;
     if (!run.sealed) unsealed += 1;
+    // `trades > 0` IS PART OF THE RULE, AND LEAVING IT OUT REFUSED THE WHOLE
+    // LEDGER.
+    //
+    // The server's `Ledger::best_complete` (crates/api/src/backtest.rs:835)
+    // filters `!halted && sealed && trades > 0`. This recomputation had the
+    // first two and not the third, so the two copies of one rule disagreed the
+    // moment a ledger held only never-traded rows: the server correctly
+    // answered `best_complete: null`, this function picked the lowest-index
+    // row, the mismatch tripped the check below, and the ENTIRE envelope was
+    // refused — every run on the page lost to a disagreement about which of
+    // them was best.
+    //
+    // MEASURED on the operator's ledger: four rows, all `trades: 0`, all sealed,
+    // one halted. Server said null. This said index 0.
+    //
+    // The server's own comment gives the reason the condition exists: a row that
+    // swept and never traded carries `pessimistic: 0`, and zero beats every
+    // genuinely losing run — so on a ledger where nothing profitable was found,
+    // the headline would be a run that made no trade at all.
     if (
       run.sealed &&
       !run.halted &&
+      run.trades > 0 &&
       (best === null ||
         run.pessimistic > best.pessimistic ||
         (run.pessimistic === best.pessimistic && run.index < best.index))

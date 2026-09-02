@@ -1198,21 +1198,68 @@
       why: ''
     };
     try {
-      const response = await ask_(`/trades.json?identity=${encodeURIComponent(identity)}`);
-      const body = await response.json();
-      if (!tradeGate.admits(ticket, openRun?.identity)) return;
-      if (!response.ok) {
+      // EVERY PAGE, NOT JUST THE FIRST — AND THIS WAS SILENTLY CAPPING THE
+      // WHOLE TRADE HALF OF THIS PAGE AT 256 TRADES.
+      //
+      // The request carried no `page`, so the server answered with its default
+      // `MAX_PAGE_ROWS = 256` (crates/api/src/detail.rs:20). `validateTradePayload`
+      // then reconciles `expectedRun.trades !== rows.length` and refuses the
+      // WHOLE payload when they differ (web/src/lib/trade-analytics.js:411).
+      //
+      // So for any run with 257 or more round trips — docs/06-limits.md records
+      // a real 2024-06 run at 816 — average profit, average loss, profit
+      // factor, largest profit, the equity curve, Sharpe, the streaks, the MAE
+      // panels AND the trade table itself all fell through to a padlock. Not
+      // because the engine did not compute them, and not because the route
+      // would not serve them: because this function asked for one page and then
+      // refused the answer for being incomplete.
+      //
+      // `/trades.json` has always paged — it returns `page`, `limit`,
+      // `next_page` and `total_count`. The rows are concatenated in page order
+      // and the assembled body is validated ONCE, so the reconciliation still
+      // holds against the run's own totals rather than being relaxed.
+      //
+      // The guard is a hard stop, not a hope: the route refuses above
+      // `MAX_RESULT_ROWS` trades outright, so a well-formed run needs at most a
+      // handful of pages. A server that returned a cyclic `next_page` would
+      // otherwise spin here forever.
+      const PAGE_GUARD = 64;
+      /** @type {any[]} */
+      const pagedRows = [];
+      /** @type {any} */
+      let body = null;
+      let response = null;
+      let page = 0;
+      for (let hop = 0; hop < PAGE_GUARD; hop += 1) {
+        response = await ask_(
+          `/trades.json?identity=${encodeURIComponent(identity)}&page=${page}`
+        );
+        body = await response.json();
+        if (!tradeGate.admits(ticket, openRun?.identity)) return;
+        if (!response.ok) break;
+        if (!Array.isArray(body?.trades)) break;
+        pagedRows.push(...body.trades);
+        const next = body.next_page;
+        if (next === null || next === undefined || next === page) break;
+        page = Number(next);
+        if (!Number.isSafeInteger(page) || page < 0) break;
+      }
+      if (!response || !response.ok) {
         tradeList = {
           phase: 'failed',
           rows: [],
           periods: null,
           policy: null,
           direction: null,
-          why: body.refusal ?? `/trades.json answered ${response.status}`
+          why: body?.refusal ?? `/trades.json answered ${response?.status ?? 'nothing'}`
         };
         return;
       }
-      const checked = validateTradePayload(body, expectedRun);
+      // The assembled body: every page's rows under the last page's metadata.
+      // `periods` is `periods_scope: "complete-result"` on every page, so it is
+      // the same object each time and taking the last is not a choice.
+      const assembled = Array.isArray(body?.trades) ? { ...body, trades: pagedRows } : body;
+      const checked = validateTradePayload(assembled, expectedRun);
       if (!checked.ok) {
         tradeList = {
           phase: 'failed',
