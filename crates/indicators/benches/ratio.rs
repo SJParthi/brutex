@@ -194,21 +194,28 @@ fn budget(label: &str, floor: u128, at_ps: u128, allowed: u128) -> bool {
 
 /// C-I-05 — one bar's whole evaluation costs a bounded multiple of the floor.
 ///
-/// # JUDGED HERE, PINNED NOWHERE ELSE
+/// # IT WAS JUDGED HERE AND PINNED NOWHERE ELSE, AND BOTH HALVES ARE NOW WRITTEN
 ///
 /// The verdict feeds `main`'s exit status, so gate 8 goes red on a breach. What this row
-/// does not have is a name outside this file. `docs/04-invariants.md` carries `C-I-01`
-/// through `C-I-04` and no `C-I-05`, and gate 14's coverage entry for this crate lists
-/// those same four ids and a floor of five measurement points. This row does not report
-/// through the helper that scan counts, so it contributes nothing to the count either.
+/// used to lack was a name outside this file, and this block said so: *"`docs/04-
+/// invariants.md` carries `C-I-01` through `C-I-04` and no `C-I-05`, and gate 14's
+/// coverage entry for this crate lists those same four ids"*. It then named the repair —
+/// *"a row in `docs/04-invariants.md` and the id added to gate 14's table"* — and recorded
+/// that both files were outside that change.
 ///
-/// Deleting the assertion below therefore deletes the measurement and every static check
-/// stays green. That is gate 12's own admission one level down: a claim can name a proof
-/// that exists, and nothing checks the proof still does anything. `main` holds the rows in
-/// an array of fixed length, so deleting a row WHOLE is a compile error — it cannot see a
-/// row gutted in place. The repair that can is a row in `docs/04-invariants.md` and the id
-/// added to gate 14's table; both files are outside this change and this is recorded
-/// rather than fixed.
+/// **Both have since been made.** D-0298 wrote the `C-I-05` row; gate 14's `indicators`
+/// row now lists `C-I-05` and `C-I-06`, so layer 4 checks that this id is a real invariant
+/// row AND that this bench still carries it. Deleting the assertion below no longer leaves
+/// every static check green: gate 14 goes red on the bench half, gate 10 on the row half.
+///
+/// What that still does NOT catch is a row gutted in place while the id stays in a
+/// comment, because layer 4 matches a bare substring. `main` holds the rows in an array of
+/// fixed length, so deleting a row WHOLE is a compile error; a hollowed body is caught by
+/// neither. That residue is gate 12's own admission one level down — a claim can name a
+/// proof that exists, and nothing checks the proof still does anything.
+///
+/// The measurement-point floor is untouched by any of this: five, and this row does not
+/// report through the helper that scan counts, so it contributes nothing to the count.
 fn a_candle_stays_within_its_budget(floor: u128) -> bool {
     /// Floors allowed for one `step`.
     ///
@@ -274,21 +281,24 @@ fn column_per_bar_ps(n: i64) -> u128 {
 /// after five. A short leg that never warmed would take the no-push branch for
 /// every bar and this row would compare two different code paths.
 ///
-/// # JUDGED HERE, PINNED NOWHERE ELSE — and something cites it
+/// # IT WAS JUDGED HERE AND PINNED NOWHERE ELSE — and something cites it
 ///
-/// As `C-I-05`: the verdict feeds `main`'s exit status, so gate 8 refuses a breach, and
-/// nothing else in the repository names this row. It is absent from
-/// `docs/04-invariants.md` and from gate 14's coverage entry for this crate, whose floor
-/// of five measurement points this file clears with room to spare without it. So the
-/// comparison below can be deleted and every static check stays green.
+/// As `C-I-05`: the verdict feeds `main`'s exit status, so gate 8 refuses a breach. This
+/// block used to add that *"nothing else in the repository names this row. It is absent
+/// from `docs/04-invariants.md` and from gate 14's coverage entry for this crate"*, and
+/// concluded that the comparison below could be deleted with every static check still
+/// green. **Both absences have since been closed** — D-0298 wrote the `C-I-06` row, and
+/// gate 14's `indicators` entry now lists the id — so deleting the comparison now fails
+/// layer 4 on the bench half. The measurement-point floor is unchanged at five, which this
+/// file clears with room to spare either way; the floor bounds measurements, not ids.
 ///
 /// The difference from `C-I-05` is that a production doc block depends on this one:
 /// `crate::column` cites `C-I-06` by id, twice, as the measurement behind its per-bar
 /// cost claim. Gate 12 accepts that citation on the strength of the bench PATH it names
 /// beside the id, and the path exists whatever this file contains — which is precisely
-/// what that module's own doc block says the gate cannot see. The repair is the same one:
-/// a row in `docs/04-invariants.md` and the id in gate 14's table, both outside this
-/// change.
+/// what that module's own doc block says the gate cannot see. Gate 14 now closes the id
+/// half of it: the id must be a row in `docs/04-invariants.md` and must still appear in
+/// this file. A body hollowed out under an unchanged label is what neither gate sees.
 fn the_column_costs_the_same_per_bar_however_long_it_is() -> bool {
     let base = column_per_bar_ps(20_000);
     let at = column_per_bar_ps(200_000);
@@ -616,11 +626,15 @@ fn a_session_rollover_costs_what_an_ordinary_candle_costs() -> bool {
 /// How many rows this bench judges.
 ///
 /// The array in `main` is annotated with it, so removing a row is a type error rather than
-/// a quiet loss of coverage. That is worth a line here because two of the six — `C-I-05`
-/// and `C-I-06`, see their own doc blocks — are named by no invariant row and by no entry
-/// in gate 14's coverage table, and gate 14's measurement-point floor for this crate is
-/// five against the several this file carries. Nothing else in CI would notice their
-/// removal. This notices exactly one shape of removal, the whole-row one, and says so.
+/// a quiet loss of coverage. That was worth a line here because two of the six — `C-I-05`
+/// and `C-I-06`, see their own doc blocks — were named by no invariant row and by no entry
+/// in gate 14's coverage table, so nothing else in CI would have noticed their removal.
+/// **Both are named in both places now**, by D-0298 and by gate 14's `indicators` row, so
+/// this annotation is no longer the only thing standing between a deleted row and a green
+/// build. It still notices exactly one shape of removal, the whole-row one, and it notices
+/// it at COMPILE time rather than at gate time, which is why it stays. Gate 14's
+/// measurement-point floor for this crate is five against the several this file carries,
+/// and it counts measurements rather than ids, so it moved for neither.
 const ROWS: usize = 6;
 
 fn main() {

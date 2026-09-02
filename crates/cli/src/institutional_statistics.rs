@@ -28,6 +28,10 @@
 //! locking and `sync_all` latency are not constant-time claims.  Romano--Wolf
 //! construction remains O(S*N + S log S + B*N + B*S*N) and is not made
 //! constant by this ledger.
+//!
+//! **UNVERIFIED as a measured bound.** No bench in this workspace
+//! times this, so the shape above is read from the source rather
+//! than measured. `CLAUDE.md` §3 rule 6.
 
 use brutex_core::blake3::Hasher;
 use runner::admission::PPM;
@@ -1030,6 +1034,14 @@ impl InstitutionalStatisticsLedgerV1 {
             );
         }
         let mut record_subjects = HashSet::new();
+        // RESERVED BEFORE THE WALK, like `authorities` four lines below and for the
+        // same reason `docs/07-o1-architecture.md` law 2 gives: a set that grows from
+        // zero rehashes on the way up, and `records.len()` is already known here --
+        // it was compared against `completions.len()` immediately above. Fallible,
+        // so an allocation refusal is reported rather than aborting the reopen.
+        record_subjects.try_reserve(records.len()).map_err(|why| {
+            format!("institutional statistics subject index allocation refused: {why}")
+        })?;
         for record in &records {
             if !record_subjects.insert(record.subject_id) {
                 return Err(

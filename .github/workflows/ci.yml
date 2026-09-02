@@ -4865,6 +4865,58 @@ jobs:
           #   Section 7's ban is about prices and this function cannot see one.
           #   It exists so that affordability claim is a function anyone can call
           #   rather than a table anyone must trust.
+          # EIGHT MORE ROWS, AND THE TEST APPLIED TO EVERY ONE OF THEM WAS THE
+          # SAME QUESTION §7 ASKS: is this figure a PRICE, or is it a STATISTIC
+          # over prices? A price is paisa `i64` and never a float; a statistical
+          # value keeps full precision and is never rounded for storage. Every
+          # site below was opened and read against that test, and not one of the
+          # 121 is a price.
+          #
+          #   runner/admission.rs 4 -- a Wilson lower bound, the same shape
+          #     `runner/grid.rs` is already allowed for and with the same three
+          #     ingredients: the `Z = 1.959_964` constant, the trade and win
+          #     COUNTS cast for the arithmetic, and a probability scaled to parts
+          #     per million. Counts are exact in `f64` far past any run this
+          #     engine can hold, and a probability has no paisa representation.
+          #   runner/bootstrap.rs 29 -> 48 -- the module grew the stationary and
+          #     circular block bootstraps, the Romano--Wolf stepdown and the
+          #     studentised statistic. The added occurrences are studentised test
+          #     STATISTICS, p-values, `f64::NEG_INFINITY` seeds for a running
+          #     maximum, a `sqrt` of a period count, sample variance and the
+          #     quantile threshold. `mean_at` reads an `i64` return series and
+          #     divides by a count, which is the ratio §7's second half admits.
+          #     Costs are absent from this module entirely; `crates/costs` owns
+          #     money and this owns a resampling procedure.
+          #   runner/outcome.rs 17 -> 18 -- one more accumulator on the same
+          #     Newey--West and payoff arithmetic the existing entry describes.
+          #     The forward RETURN is paisa `i64` throughout and only the mean,
+          #     the t-statistic and the ratios derived from them are floating.
+          #   runner/validate.rs 1 -- `direction_from_training_edge(mean_paisa:
+          #     f64)`, and the parameter name is why it earns a sentence rather
+          #     than a line. It is not a price: its only production caller passes
+          #     `crate::outcome::edge(..).mean_paisa`, which is the MEAN of the
+          #     forward moves and is the statistic `outcome.rs` is allowed for.
+          #     The function reads its SIGN and returns a `Direction`; nothing is
+          #     stored, rounded or compared against a tick grid.
+          #   cli/institutional_evidence.rs 7 -- the same Wilson interval as
+          #     `runner/admission.rs`, plus `probability_ppm`, which multiplies a
+          #     [0,1] probability by `PPM` and floors it to a `u64`. The float is
+          #     the input being discarded and the integer is what is kept, which
+          #     is the direction of travel `runner/report.rs` is allowed for.
+          #   cli/institutional_statistics.rs 19 -- White's Reality Check and
+          #     Hansen's SPA: an observed statistic, two test statistics and two
+          #     p-values, each stored as `to_bits`/`from_bits` so the RECORD is a
+          #     `u64` and the float exists only either side of it. The remaining
+          #     two are `require_finite` and `require_probability`, which refuse a
+          #     NaN or an out-of-band value by name.
+          #   cli/population_statistics_v2.rs 18, cli/population_statistics_v3.rs
+          #     11 -- the durable statistics ledgers, and the same `to_bits`
+          #     discipline: `statistic`, `probability`, `wilson_lower` and
+          #     `romano_wolf_statistic` are accessors over stored `u64` bit
+          #     patterns, `wilson_lower`/`wilson_lower_v3` are the Wilson interval
+          #     again, and `value()` is a numerator over a denominator. A ratio of
+          #     two counts has no paisa representation, which is the sentence this
+          #     whole rule turns on.
           allow_float='
           crates/api/src/ingest.rs 1
           crates/api/src/server.rs 4
@@ -4878,9 +4930,11 @@ jobs:
           crates/pull/src/tenor.rs 5
           crates/runner/src/grid.rs 4
           crates/runner/src/significance.rs 21
-          crates/runner/src/bootstrap.rs 29
-          crates/runner/src/outcome.rs 17
+          crates/runner/src/admission.rs 4
+          crates/runner/src/bootstrap.rs 48
+          crates/runner/src/outcome.rs 18
           crates/runner/src/report.rs 3
+          crates/runner/src/validate.rs 1
           crates/store/src/format.rs 14
           crates/lake/src/bar.rs 9
           crates/lake/src/reader.rs 3
@@ -4888,6 +4942,10 @@ jobs:
           crates/telemetry/src/encode.rs 1
           crates/telemetry/src/record.rs 1
           crates/cli/src/live.rs 1
+          crates/cli/src/institutional_evidence.rs 7
+          crates/cli/src/institutional_statistics.rs 19
+          crates/cli/src/population_statistics_v2.rs 18
+          crates/cli/src/population_statistics_v3.rs 11
           '
 
           # ---- rule 3. docs/07 law 2: pre-size every map. -------------------
@@ -4958,9 +5016,16 @@ jobs:
           #   api/server.rs 1 -- the `calendars` cache, built empty inside a
           #     `Mutex` at construction and filled lazily per vendor. The count
           #     is not merely unknown, it is zero at that point.
-          #   api/trades.rs 2 -- `blocks`, on a file THIS CALL just created and
-          #     on the reopen path. A file with no blocks has no block count to
-          #     reserve, and the reopen learns it by reading.
+          #   api/trades.rs 2 -- REMOVED, and the reason is where the code went.
+          #     The entry read "`blocks`, on a file THIS CALL just created and on
+          #     the reopen path", and that store no longer lives in `api`: the
+          #     1,033-line per-trade writer moved to `cli::trades` because the
+          #     crate arrow runs `api -> cli` and the trades exist inside
+          #     `cli::audit_bars`. `api/trades.rs` is a READER now and holds no
+          #     map of its own -- its module header says so. This gate reported
+          #     the row as loose on every run; a stale allowance makes the list
+          #     read stronger than it is, so it goes rather than being re-pinned.
+          #     `cli/trades.rs 1` below carries the surviving half of the reason.
           #   pull/src/nse.rs 1 -- `seen`, deduplicating hrefs while scanning one
           #     exchange page. The number of distinct links is what the scan is
           #     for; reserving would need the answer first. Bounded by one HTTP
@@ -4985,16 +5050,131 @@ jobs:
           #
           # This is the same shape `manifest.rs::genesis` is listed for, and its
           # doc comment makes the same argument pointing at docs/06-limits.md §17.
+          #
+          # FORTY-THREE MORE FILES, AND THEY ARE FOUR SHAPES, NOT FORTY-THREE
+          # CASES. The durable-ledger family under `crates/cli` landed after this
+          # rule was last read and every one of its index maps trips the grep.
+          # Each of the 152 sites was opened and put into one of the four groups
+          # below. Exactly one fitted none of them and was FIXED at the source:
+          # `cli/institutional_statistics.rs::record_subjects` grew from an
+          # unreserved zero while `records.len()` sat four lines above it, and now
+          # calls `try_reserve(records.len())` before its walk. Its file still
+          # appears below, because this rule refuses the SPELLING `HashSet::new()`
+          # and the fix is the reservation on the next line -- which is exactly why
+          # every shape-1 entry here needs a sentence rather than a count.
+          #
+          # SHAPE 1 -- ALLOCATION-FREE, THEN A FALLIBLE RESERVATION, ALWAYS BEFORE
+          # THE FIRST INSERT. This is `cli/population.rs`'s and `cli/selection.rs`'s
+          # reason above, and it is the majority: 84 of the 152 sites are a
+          # `HashMap::new()`/`HashSet::new()` binding whose very next statement is
+          # `try_reserve(capacity)` or `reserve_map(..)`, with the capacity taken
+          # from a count the caller already proved -- `(len - HEADER) / STRIDE`,
+          # `records.len()`, `completions.len()`, a declared `bounds` ceiling.
+          # `with_capacity` cannot express that: it aborts on allocation failure,
+          # and these paths return a named refusal instead. Rewriting them to dodge
+          # the grep would trade a reported refusal for an abort, which is the
+          # opposite of what `CLAUDE.md` §4 asks.
+          #
+          # SHAPE 2 -- EMPTY AT CONSTRUCTION BECAUSE NOTHING HAS BEEN READ YET, AND
+          # `scan()` RESERVES BEFORE IT INSERTS. Every ledger in this family opens
+          # by building its handle with an empty index and then calling `scan()` on
+          # the next line; `scan` begins `self.receipts.clear()` (or `.audits`) and
+          # a `try_reserve` against the record count it has just measured from the
+          # file length. The map is genuinely sized ZERO at the construction site --
+          # the file has not been read -- which is `api/trades.rs`'s reason one
+          # layer down. Traced individually: anchored_search_lineage_v2/v3/v4,
+          # candidate_universe, execution_v3, execution_v4, population_admission_v2,
+          # population_admission_v3, population_base_evidence_ledger_v2,
+          # population_finalization_v2, population_finalization_v3, population_v5,
+          # population_v6, pre_admission_data, population_statistics_v2 and
+          # selection_v5 (whose `scan` builds reserved locals and MOVES them in).
+          #
+          # SHAPE 3 -- THE KEY COUNT CANNOT BE COUNTED WITHOUT THE MAP. This is
+          # `api/catalog.rs::build_trigrams`'s reason, restated per site: the map is
+          # keyed by something COARSER than the thing being walked, so its final
+          # size is the number of DISTINCT keys and counting those needs the map.
+          # `api/ladder.rs::earliest` is keyed by `(exchange, segment, symbol)` over
+          # a month list; `api/server.rs::spot_months_by_identity` drops the
+          # timeframe from `(Series, YearMonth)`; `runner/outcome.rs` keys by IST
+          # session DAY over bars; `cli/population.rs::index_blocks`,
+          # `population_admission_v4`, `population_finalization_v4` and
+          # `population_statistics_v3` key by BLOCK over records, and a block's
+          # length is a field inside it, so the block count is not `len / stride`.
+          # `admission_store.rs`'s per-block strategy set is the same thing one
+          # level down. Reserving the walk length instead would trade a reservation
+          # that grows with the store for a key count bounded by the data's shape,
+          # which is the trade `build_trigrams` already refused.
+          #
+          # SHAPE 4 -- THE SIZE IS KNOWN AND IT IS A COMPILE-TIME CONSTANT, or it
+          # is zero. `api/autopilot.rs`'s entry is the zero case and these are its
+          # siblings. `runner/lib.rs` and `runner/rank.rs` are literally
+          # `HashSet::with_capacity(0)` on the arm where the next level does not
+          # exist: the binding carries no `mut`, its only uses are `.len()` and
+          # `.contains()`, and "never inserted into" is therefore enforced by the
+          # borrow checker rather than promised here. `cli/population.rs`'s two
+          # `else { HashMap::new() }` arms are the optional V3 and V4 legacy
+          # receipt files being ABSENT. `all_rung_selection_v5`, `global_replay`,
+          # `global_replay_v2` and `global_replay_v3` build uniqueness sets over
+          # `[T; 8]` and `[T; 16]` arrays and over `CANONICAL_RUNGS_SECONDS`, so
+          # the insert count is eight, sixteen, or eight times the module's own
+          # Top-25 cap -- fixed at compile time in every case. `cli/knobs.rs`'s
+          # process-wide store holds one entry per KNOB, which rule 4's own
+          # `knobs::render` entry below measures at fourteen. `cli/trades.rs` is
+          # the freshly created file, which holds only a header and therefore no
+          # blocks at all.
+          #
+          # WHAT THIS LIST DOES NOT SAY. It does not say any of these maps is
+          # cheap, and it does not say the ledgers' `open` is O(1) -- their own
+          # module headers say the opposite, at length, and gate 12 holds them to
+          # it. It says only that no map here grows from an unreserved zero on a
+          # path where the count was available, which is what law 2 asks.
           allow_unsized='
           crates/api/src/catalog.rs 1
           crates/pull/src/manifest.rs 1
           crates/api/src/autopilot.rs 1
-          crates/api/src/server.rs 1
-          crates/api/src/trades.rs 2
+          crates/api/src/ladder.rs 1
+          crates/api/src/server.rs 2
+          crates/cli/src/admission_store.rs 5
+          crates/cli/src/all_rung_selection_v5.rs 6
+          crates/cli/src/anchored_search_lineage_v2.rs 1
+          crates/cli/src/anchored_search_lineage_v3.rs 1
+          crates/cli/src/anchored_search_lineage_v4.rs 1
+          crates/cli/src/candidate_universe.rs 2
+          crates/cli/src/execution_capability.rs 2
+          crates/cli/src/execution_disposition_v2.rs 4
+          crates/cli/src/execution_v3.rs 8
+          crates/cli/src/execution_v4.rs 9
           crates/cli/src/frontier.rs 1
-          crates/cli/src/population.rs 10
-          crates/cli/src/selection.rs 2
+          crates/cli/src/global_replay.rs 9
+          crates/cli/src/global_replay_v2.rs 10
+          crates/cli/src/global_replay_v3.rs 10
+          crates/cli/src/institutional_statistics.rs 2
+          crates/cli/src/knobs.rs 1
+          crates/cli/src/population.rs 13
+          crates/cli/src/population_admission_v2.rs 6
+          crates/cli/src/population_admission_v3.rs 2
+          crates/cli/src/population_admission_v4.rs 1
+          crates/cli/src/population_base_evidence_ledger_v2.rs 1
+          crates/cli/src/population_base_evidence_v2.rs 1
+          crates/cli/src/population_finalization_v2.rs 4
+          crates/cli/src/population_finalization_v3.rs 2
+          crates/cli/src/population_finalization_v4.rs 2
+          crates/cli/src/population_observations_v1.rs 6
+          crates/cli/src/population_statistics_v2.rs 3
+          crates/cli/src/population_statistics_v3.rs 1
+          crates/cli/src/population_v5.rs 2
+          crates/cli/src/population_v6.rs 3
+          crates/cli/src/pre_admission_data.rs 4
+          crates/cli/src/selection.rs 4
+          crates/cli/src/selection_v3.rs 2
+          crates/cli/src/selection_v4.rs 2
+          crates/cli/src/selection_v5.rs 14
+          crates/cli/src/stored_data_completeness.rs 1
+          crates/cli/src/trades.rs 1
           crates/pull/src/nse.rs 1
+          crates/runner/src/lib.rs 1
+          crates/runner/src/outcome.rs 1
+          crates/runner/src/rank.rs 1
           '
 
           # ---- rule 4. docs/07 layer 12: bounded page, never O(universe). ---
@@ -5360,23 +5540,85 @@ jobs:
           # or approximate rung. This is the named O(T) resolution boundary in
           # docs/06-limits.md section 133, before any later coordinate lookup;
           # none of the three sorts is inside a bar, candidate or cell loop.
+          #
+          # `crates/api/src/server.rs` WAS LISTED TWICE, AT 4 AND AT 2, AND THE
+          # SECOND LINE HAS NEVER BEEN READ. `check` resolves an allowance with
+          # `awk '$1==F{print $2; exit}'`, which stops at the FIRST match, so the
+          # file's real allowance was 4 and the `2` below it was decoration. That
+          # is worse than a wrong number: a reader auditing this list would add 4
+          # and 2, get 6, and believe six sorts were accounted for when four were.
+          # There is one row for that file now and it carries the measured count.
+          #
+          # SEVEN MORE ROWS, EACH TRACED RATHER THAN INFERRED:
+          #
+          #   api/logs.rs 1 -- `both_halves` merges the served and the `cli` tail
+          #     and orders the UNION newest-first. Each half was already capped by
+          #     `telemetry::DEFAULT_KEEP_FILES` and by the query's own limit before
+          #     it arrived, so the slice is at most twice one page and never the
+          #     log. The comment two lines below it says so in the source.
+          #   api/server.rs 4 -> 7 -- the three added are all bounded by a page or
+          #     by a series, not by the universe. `peer_calendar` and the
+          #     `calendar_json` handler order the KEYS of `spot_months_by_identity`,
+          #     which is one entry per distinct spot `(exchange, segment, symbol)`
+          #     -- two swept instruments plus the merged index series, measured at
+          #     35 in `api/coverage.rs`'s own entry above. `spot_months_by_identity`
+          #     and `months_for` order ONE series' months and then `dedup`, which
+          #     is what stops the same month being probed once per rung: measured
+          #     during a live repull at 4,446 wasted probes from a single page.
+          #     Both exist for `CLAUDE.md` §3 rule 5 -- a `HashMap` walk is not
+          #     ordered, and `from` ships the names that voted.
+          #   cli/global_replay_v3.rs 1 -- `schedule_candidates` orders the
+          #     candidates by `(entry_micros, rank, strategy_digest, witness_id,
+          #     candidate_ordinal)` before the occupancy fold. The bound is the
+          #     module's own topology: `TOP_PER_RUNG` per rung across
+          #     `CANONICAL_RUNGS_SECONDS`, both compile-time. It is not the
+          #     candidate universe and not the frequent-itemset count. The order IS
+          #     the procedure -- a single-position schedule read out of time order
+          #     is not a schedule -- so removing the sort makes it wrong, not
+          #     cheaper, which is the argument `significance.rs` already makes.
+          #   cli/population_statistics_v3.rs 1 -- canonicalisation, once per
+          #     authority: `(family_code, family_sequence)` is the order the
+          #     receipt's digest is DEFINED on, and the two family counts were
+          #     checked against the vector's length on the line above. Bounded by
+          #     one authority's candidate count, never by bars.
+          #   runner/bootstrap.rs 1 -> 2 -- the second is `quantile`, and a
+          #     quantile IS an order statistic: the same argument
+          #     `runner/excursion.rs` and `runner/pbo.rs` are already allowed for.
+          #     Its slice is the bootstrap DRAWS, a caller-set replicate count, and
+          #     it is `sort_unstable_by(f64::total_cmp)` and not a `partial_cmp`
+          #     comparator for the NaN reason `rank.rs` records. The first is the
+          #     Romano--Wolf stepdown, whose slice is the strategies being compared
+          #     and whose decreasing order the 2005 procedure is defined on.
+          #   runner/outcome.rs 1 -- `select_nth_unstable` for the MEDIAN bar step,
+          #     which is a selection rather than a sort and is O(n) expected. It is
+          #     reached only from `SliceFacts::with_step`, whose own doc says it
+          #     exists "so its horizon clock and its session boundaries share one
+          #     measurement and no candidate loop can allocate the median sample
+          #     again" -- once per slice, never per candidate and never per bar.
+          #   runner/pbo.rs 1 -> 2 -- the second is the identical median over FOLD
+          #     placements in the bottom-half rate, beside the one already listed.
+          #     Folds are the operator's split count, a handful.
           allow_sort='
           crates/runner/src/audit.rs 1
-          crates/runner/src/bootstrap.rs 1
-          crates/runner/src/pbo.rs 1
+          crates/runner/src/bootstrap.rs 2
+          crates/runner/src/outcome.rs 1
+          crates/runner/src/pbo.rs 2
           crates/runner/src/excursion.rs 1
           crates/pull/src/folder.rs 1
           crates/api/src/bars.rs 2
           crates/api/src/calendar_of.rs 3
           crates/api/src/constituents.rs 2
+          crates/api/src/logs.rs 1
           crates/cli/src/frontier.rs 1
+          crates/cli/src/global_replay_v3.rs 1
           crates/cli/src/knobs.rs 1
+          crates/cli/src/population_statistics_v3.rs 1
           crates/cli/src/trades.rs 1
           crates/cli/src/live.rs 1
           crates/api/src/coverage.rs 1
           crates/api/src/indexmap.rs 1
           crates/api/src/pullrun.rs 1
-          crates/api/src/server.rs 4
+          crates/api/src/server.rs 7
           crates/cli/src/lib.rs 6
           crates/engine/src/lib.rs 2
           crates/pull/src/nseindex.rs 1
@@ -5391,7 +5633,6 @@ jobs:
           crates/api/src/master.rs 1
           crates/api/src/merge.rs 1
           crates/api/src/render.rs 1
-          crates/api/src/server.rs 2
           crates/pull/src/archive.rs 1
           crates/pull/src/manifest.rs 1
           crates/store/src/catalog.rs 1
@@ -5439,9 +5680,36 @@ jobs:
           # shape gate 15 already documents about a gate that spells its banned word out.
           # Declared rather than papered over by rewording the justification, because the
           # justification is the useful artefact and the miscount is the gate's.
+          # `crates/runner/src/rank.rs` 1, AND IT IS NOT `Option::unwrap`. The line is
+          # `let scored = marked.ranked.unwrap();` inside `ordered`, and `marked.ranked`
+          # is a `K: Ranked1` -- this module's own trait, declared 160 lines above it:
+          #
+          #     trait Ranked1: Ord + Sized {
+          #         fn wrap(scored: Scored) -> Self;
+          #         fn unwrap(self) -> Scored;
+          #     }
+          #
+          # Both implementations return the value by move -- `Scored::unwrap` is `self`
+          # and `ByPayoff::unwrap` is `self.0` -- so neither can panic and neither has a
+          # `None` arm to reach. It is the `telemetry::json::Scan::expect` case exactly:
+          # a method whose NAME is a banned spelling, on a type that is not `Result` or
+          # `Option`. Renaming it to satisfy a grep would be the tail wagging the gate,
+          # which is the sentence this rule already uses about the parser.
+          #
+          # `crates/cli/src/all_rung_population_v5.rs` HAD A REAL ONE AND IT WAS FIXED
+          # RATHER THAN LISTED. `sweeper(index)` closed its match with
+          # `unreachable!("canonical all-rung index is bounded by eight")`. The claim was
+          # true -- the only caller walks `CANONICAL_RUNG_NAMES_V1`, which is `RUNG_COUNT`
+          # long -- and it was still the `CLAUDE.md` §4 breach this rule exists for, plus
+          # a coverage region no input could enter. It returns `Option<&Sweeper>` now and
+          # the call site turns `None` into a named refusal carrying the ordinal, so an
+          # authoring mistake surfaces as a message rather than an abort part-way through
+          # a receipt-last transaction. No allowance is added for it, which is the
+          # stronger state -- the same one `crates/pull/src/totp.rs` reached.
           allow_panic='
           crates/api/src/server.rs 2
           crates/pull/src/ssm.rs 1
+          crates/runner/src/rank.rs 1
           crates/telemetry/src/json.rs 5
           crates/telemetry/src/record.rs 4
           '
@@ -5549,10 +5817,52 @@ jobs:
           # on the same ratchet every rule above uses: a third assert in either
           # `declared`, a fifth in `build`, or a first one anywhere else, is a red
           # build and a visible diff on this file.
+          #
+          # THREE MORE, AND ONLY ONE OF THEM IS A RUNTIME ASSERT AT ALL:
+          #
+          #   crates/store/src/file.rs 1
+          #     `read_row::<W>` opens with `const { assert!(W::LEN <= MAX_ROW_LEN,
+          #     ..) }` -- an INLINE CONST BLOCK, evaluated per monomorphisation, so
+          #     a `Row` wider than the stack buffer fails to COMPILE at that line.
+          #     The doc directly above it says exactly that, and says why a
+          #     `debug_assert` would have been wrong: it disappears in release,
+          #     which is where the store runs. The classifier above misses it
+          #     because it recognises `const NAME:` and `const _:` items and a bare
+          #     `const {` block is neither -- a false POSITIVE, which the rule's own
+          #     "what it cannot see" list names as the direction this repository
+          #     errs in.
+          #   crates/cli/src/population_admission_v3.rs 1
+          #     `population_v5_test_canonical_admission_record_for` is a
+          #     `#[cfg(test)]` fn at module scope, so it is never compiled into the
+          #     shipped binary at all. Gate 11's subtraction only drops an inline
+          #     `#[cfg(test)] mod NAME { .. }`; a `#[cfg(test)]` FUNCTION stays in
+          #     scope, which is right -- the scanner cannot tell a test helper from
+          #     a shipping one by shape alone -- and the assert it holds is the
+          #     fixture proving itself against the same embedded verifier reopen
+          #     uses. Its own doc says "not compiled into production".
+          #   crates/cli/src/candidate_universe.rs 1
+          #     THE ONE REAL RUNTIME ASSERT, and it is declared rather than removed
+          #     because the alternative is worse. `put_bytes(raw, offset, bytes)`
+          #     asserts `offset + bytes.len() <= raw.len()` before writing. Traced:
+          #     all forty-odd call sites pass a LITERAL offset (or a literal plus a
+          #     `const` stride) into a fixed-width `[u8; ROW_PAYLOAD_BYTES]` or
+          #     `[u8; RECEIPT_BYTES]`, so the condition is decided entirely by the
+          #     layout constants and no input can move it. Deleting the assert
+          #     leaves the `if let Some(target) = raw.get_mut(..)` below it, which
+          #     would SKIP the write silently -- the fallback that hides a failure
+          #     §4 bans in the same table as the panic. Between a loud abort on an
+          #     authoring error and a silently short record on disk, this rule's own
+          #     law -- degrade loudly or refuse, never die -- prefers the first only
+          #     because the second is not a refusal at all. It is the weakest entry
+          #     in this list and the right fix is a fallible codec, which is a
+          #     change to that module's owner rather than to this file.
           allow_assert='
           crates/core/src/universe.rs 2
           crates/pull/src/manifest.rs 1
           crates/store/src/layout.rs 1
+          crates/store/src/file.rs 1
+          crates/cli/src/candidate_universe.rs 1
+          crates/cli/src/population_admission_v3.rs 1
           '
 
           work=$(mktemp -d)
@@ -5815,12 +6125,50 @@ jobs:
           #     three-stream execution identity, is O(M) in that context, and is
           #     the honest preprocessing limit recorded by section 134 -- never
           #     a fallback lookup in evaluation or replay.
+          # FOUR MORE ROWS, AND TWO OF THEM ARE THE FIXED-WIDTH FIELD CASE THE
+          # `pull/manifest.rs` ENTRY ABOVE ALREADY NAMES:
+          #
+          #   cli/population_admission_v2.rs, cli/population_finalization_v2.rs
+          #     -- one each, and they are the same function under two names:
+          #     `require_remaining_zero` walks the record's trailing RESERVE region
+          #     looking for the first nonzero byte, so it can name the offset in
+          #     the refusal. The slice is `self.bytes[self.cursor..]`, and
+          #     `self.bytes` is one FIXED-STRIDE record -- the bound is the stride,
+          #     a compile-time constant, exactly as it is for the NUL terminator in
+          #     `pull/manifest.rs`. It cannot see a byte past the record, and the
+          #     sibling `require_zero_reserve` on the line above uses `.any()`,
+          #     which this rule does not match, over the identical region.
+          #   cli/lib.rs 2 -> 4 -- the two added are bounded by the same eight the
+          #     existing pair already are, plus the exit grid. `EVERY_RUNG.iter()
+          #     .find(..)` appears at two more call sites (`[&str; 8]`, and the
+          #     refusal beside each prints all eight by name). `rungs.iter().find(
+          #     |r| !EVERY_RUNG.contains(r))` validates the operator's `--rungs`
+          #     argument once before a run starts: each probe is against those same
+          #     eight, and the outer list is one command line. `exits.cells.iter()
+          #     .find(|cell| **cell == selected.cell)` locates the selected cell in
+          #     a REBUILT exit grid, which `runner/grid.rs`'s own rule 4 entry
+          #     bounds at the rung x stop ladders, both compile-time; it runs once
+          #     per admitted candidate at the record step, never inside the sweep.
+          #   runner/validate.rs 2 -- `visible.in_sample_all.iter().position(|v| *v
+          #     == best)` in the two anchored provenance checks. This is the one
+          #     entry here NOT bounded by a compile-time table, and it is written
+          #     down as what it is: the slice is one fold's retained candidate
+          #     placements, which `rank.rs`'s bounded top-N heap caps at `keep` --
+          #     a runtime parameter, not a constant. Two facts make it a declaration
+          #     rather than a defect. It runs once per FOLD at a validation
+          #     boundary, never per bar and never per candidate. And the `.max()`
+          #     immediately above it on the same expression is already a full pass
+          #     over that slice, so deleting the `position` would not change the
+          #     cost -- it would only lose the check that the chosen ordinal IS the
+          #     argmax, which is the whole point of the comparison.
           allow_scan='
           crates/api/src/audit_json.rs 1
           crates/api/src/autopilot.rs 1
           crates/api/src/backtest.rs 1
           crates/api/src/server.rs 7
-          crates/cli/src/lib.rs 2
+          crates/cli/src/lib.rs 4
+          crates/cli/src/population_admission_v2.rs 1
+          crates/cli/src/population_finalization_v2.rs 1
           crates/cli/src/results.rs 1
           crates/pull/src/config.rs 1
           crates/pull/src/fno.rs 1
@@ -5829,6 +6177,7 @@ jobs:
           crates/pull/src/ssm.rs 1
           crates/pull/src/vendor.rs 3
           crates/runner/src/exit_grid_policy.rs 1
+          crates/runner/src/validate.rs 2
           '
 
           # ---- rule 7: the ambiguous membership test -----------------------
@@ -5892,6 +6241,54 @@ jobs:
           #   cli/src/selection.rs 1 -- the same literal eight-element canonical
           #     rung array validates a receipt timeframe. The linear bound is
           #     eight at the source site, independent of receipt count.
+          # TWENTY-ONE MORE ROWS, AND EVERY ONE FALLS IN THE THREE SHAPES THIS
+          # RULE'S PREAMBLE ALREADY NAMES. They arrived with the durable-ledger
+          # family under `crates/cli`, and each was opened and classified before
+          # it was written here:
+          #
+          #   THE FIXED `const` ARRAY, and it is the same array almost every time.
+          #     `CANONICAL_RUNGS`, `CANONICAL_RUNGS_SECONDS`,
+          #     `CANDIDATE_SIGNAL_RUNGS_SECONDS_V1`, `GLOBAL_REPLAY_V2_RUNGS_SECONDS`
+          #     and `crate::EVERY_RUNG` are all `[_; 8]`, the eight timeframes §1
+          #     names, and several sites spell the same eight as a literal array
+          #     inline. Two spell TEN -- `[.., 7_200, 14_400]` -- which is the
+          #     eight plus the two coarser rungs those two ledgers accept as
+          #     stored input. `crates/indicators`' `CHARTER_NON_REGULAR_IST_DAYS`
+          #     is `[i64; 9]`, the charter's own list of non-regular sessions.
+          #     Files: batch.rs, candidate_universe.rs, execution_capability.rs,
+          #     global_replay_v2.rs, global_replay_v3.rs, population_statistics_v2
+          #     .rs (2 of its 7), population_statistics_v3.rs (1 of 3),
+          #     pre_admission_data.rs, selection.rs (raised 1 -> 2), selection_v3
+          #     .rs, selection_v4.rs, selection_v5.rs, stored.rs (3 of its 4),
+          #     stored_data_completeness.rs.
+          #   THE RANGE, two comparisons and no allocation. `(1970..=9999)`,
+          #     `(1..=12)`, `(0..1_000_000_000)` on a nanosecond field,
+          #     `(2..=64)` on a segment count, `(0.0..=1.0)` on a probability and
+          #     `(0..=PPM)` on a parts-per-million placement. Files:
+          #     institutional_evidence.rs, institutional_statistics.rs,
+          #     population_admission_v2.rs, population_admission_v3.rs,
+          #     population_finalization_v2.rs, population_observations_v1.rs,
+          #     population_statistics_v2.rs, population_statistics_v3.rs,
+          #     stored.rs (its fourth).
+          #   THE HASH PROBE, one lookup and no scan. `runner/src/lib.rs` and
+          #     `runner/src/rank.rs` probe the `HashSet<ConditionMask>` of
+          #     redundant masks once per itemset -- the same set those two files
+          #     are allowed a `with_capacity(0)` for under rule 3, on the arm
+          #     where it is empty. `runner/src/outcome.rs` probes a
+          #     `HashSet<i64>` of proved session days.
+          #
+          # THREE SITES ARE NONE OF THE THREE AND ARE DECLARED AS WHAT THEY ARE:
+          # `seen_ranks.contains(&false)` in population_statistics_v2.rs (twice)
+          # and population_statistics_v3.rs (once) walks a `Vec<bool>` of length
+          # one-per-candidate asking whether ANY Romano--Wolf rank is still
+          # unfilled. That is a completeness question over a permutation, so it is
+          # O(candidates) by definition and no data structure makes it cheaper --
+          # the same "removing it makes it wrong, not cheaper" argument rule 4
+          # carries about Benjamini-Hochberg. It runs once per authority
+          # validation, never per bar and never per candidate. The fourth odd one
+          # is `[a, b, c, d, e].contains(&0)` in population_statistics_v2.rs,
+          # which is a five-element array literal checking that five declared
+          # bounds are all nonzero.
           allow_member='
           crates/api/src/assets.rs 1
           crates/api/src/calendar_of.rs 1
@@ -5900,9 +6297,28 @@ jobs:
           crates/api/src/merge.rs 1
           crates/api/src/server.rs 4
           crates/api/src/sweeprun.rs 5
+          crates/cli/src/batch.rs 1
+          crates/cli/src/candidate_universe.rs 1
+          crates/cli/src/execution_capability.rs 1
+          crates/cli/src/global_replay_v2.rs 1
+          crates/cli/src/global_replay_v3.rs 1
+          crates/cli/src/institutional_evidence.rs 2
+          crates/cli/src/institutional_statistics.rs 1
           crates/cli/src/lib.rs 3
           crates/cli/src/population.rs 3
-          crates/cli/src/selection.rs 1
+          crates/cli/src/population_admission_v2.rs 2
+          crates/cli/src/population_admission_v3.rs 2
+          crates/cli/src/population_finalization_v2.rs 2
+          crates/cli/src/population_observations_v1.rs 1
+          crates/cli/src/population_statistics_v2.rs 7
+          crates/cli/src/population_statistics_v3.rs 3
+          crates/cli/src/pre_admission_data.rs 2
+          crates/cli/src/selection.rs 2
+          crates/cli/src/selection_v3.rs 1
+          crates/cli/src/selection_v4.rs 2
+          crates/cli/src/selection_v5.rs 3
+          crates/cli/src/stored.rs 4
+          crates/cli/src/stored_data_completeness.rs 1
           crates/core/src/vendor.rs 2
           crates/costs/src/day.rs 2
           crates/engine/src/lib.rs 1
@@ -5911,6 +6327,9 @@ jobs:
           crates/pull/src/fnowork.rs 1
           crates/pull/src/pricing.rs 2
           crates/runner/src/closed.rs 1
+          crates/runner/src/lib.rs 1
+          crates/runner/src/outcome.rs 1
+          crates/runner/src/rank.rs 1
           crates/runner/src/split.rs 1
           crates/telemetry/src/json.rs 3
           crates/telemetry/src/tail.rs 1
@@ -6201,7 +6620,35 @@ jobs:
           # phrase that put `trade.rs` here, and `manifest.rs`'s two blocks now
           # say UNVERIFIED in their own words. An entry nobody can trace to a
           # refusal is the stale declaration gate 1d refuses, so both go.
-          allow_claim=''
+          #
+          # IT IS NOT EMPTY ANY MORE, AND THE ONE ENTRY IS A COORDINATION FACT
+          # RATHER THAN A COST ONE. The sweep that answered this gate's 141 other
+          # refusals could not touch `crates/cli/src/lib.rs`: another session held
+          # that file across the whole change, and a tree two sessions share cannot
+          # have one of them editing the other's file. This entry is the REPORT, in
+          # the same sense the `pull/totp.rs` and `api/logs.rs` entries elsewhere in
+          # this workflow are, and it names both blocks and the edit each needs so
+          # its owner can close them in one pass and delete the row:
+          #
+          #   :7299 `base_win_rate_bp` -- NOT A COST CLAIM AT ALL. The trigger is
+          #     `\bflat\b` and every use of the word in that block is the English
+          #     one: "a flat window is a win for NEITHER side", "6.98% of decided
+          #     windows are flat". The `notclaim` noun list below scrubs `flat bar`
+          #     and the `A flat` clause scrubs the heading, and "windows are flat"
+          #     survives both because the word is the PREDICATE there and no noun
+          #     follows it. This is the heuristic being wrong in the direction this
+          #     gate's own preamble says it eventually will be. Widening the noun
+          #     list does not reach a trailing `flat`, so the honest repair is here
+          #     rather than in a longer regex.
+          #   :12922 `note_grid_progress` -- A REAL CLAIM AND A REAL GAP. It says
+          #     "the counter is O(1) and the emit fires on one candidate in
+          #     `stride`, not on every one", and nothing measures either half:
+          #     `crates/cli/benches/ratio.rs` has four rows and all four are the
+          #     results ledger. One `UNVERIFIED` in that block closes it, and that
+          #     is a one-line edit for whoever owns the file next.
+          allow_claim='
+          crates/cli/src/lib.rs 2
+          '
 
           inv=docs/04-invariants.md
           work=$(mktemp -d)
@@ -6641,13 +7088,34 @@ jobs:
           # Extended to every printed label that also has a `| ID |` row, which
           # is exactly what layer 4 below requires. D-0209.
           #
-          # THREE PRINTED LABELS ARE DELIBERATELY ABSENT: C-V-05, C-I-05 and
-          # C-I-06 are measured and printed by their benches and appear in
-          # docs/04-invariants.md NOWHERE. Listing them here would fail layer 4,
-          # which is correct -- the repair is to write the rows, not to widen
-          # the gate. Until then they are a measurement with no claim, the
-          # inverse of what gate 12 forbids, and they are named here rather than
-          # left as a silent shortfall.
+          # THREE PRINTED LABELS WERE DELIBERATELY ABSENT AND ARE NOW LISTED,
+          # BECAUSE THE REPAIR THIS PARAGRAPH DEMANDED HAS LANDED. It read:
+          # "C-V-05, C-I-05 and C-I-06 are measured and printed by their benches
+          # and appear in docs/04-invariants.md NOWHERE. Listing them here would
+          # fail layer 4, which is correct -- the repair is to write the rows,
+          # not to widen the gate." D-0298 wrote the three rows. MEASURED on
+          # this tree: `grep -cE '^\| *ID *\|' docs/04-invariants.md` returns 1
+          # for each of the three, and each id appears in its own bench on 7, 6
+          # and 4 lines respectively -- so layer 4 passes on all three, having
+          # refused them before the rows existed.
+          #
+          # The sentence is corrected rather than deleted. An absence that was
+          # named and then closed is exactly what this file keeps legible, and
+          # leaving the ids out now would be the OTHER half of the blindness the
+          # paragraph above records: a row the TABLE does not name is unchecked
+          # however well documented it is. C-I-05's own doc block asked for this
+          # in these words -- "The repair that can is a row in
+          # `docs/04-invariants.md` and the id added to gate 14's table" -- and
+          # this is that id.
+          #
+          # ONE PRINTED-LOOKING LABEL IS STILL ABSENT ON PURPOSE, and it is not
+          # a shortfall. `crates/runner/benches/ratio.rs` contains `C-E-01`, but
+          # only as prose -- "it is [`engine`]'s to bound, and `C-E-01` bounds
+          # it" -- and the id is already listed on the `engine` row, where the
+          # measurement is. Layer 4 matches a bare substring, so adding it to
+          # the `runner` row would go green while asserting that `runner`
+          # re-measures a bound it merely cites. That is the guessing gate the
+          # paragraph above refuses, one id at a time.
           #
           # min_points stay pinned at what each bench carried when its row was
           # added -- api 4, costs 27 -- because they bound the MEASUREMENT
@@ -6661,8 +7129,8 @@ jobs:
           lake      crates/lake/benches/ratio.rs      6  C-L-01 C-L-02 C-L-03 C-L-04
           telemetry crates/telemetry/benches/ratio.rs 6  C-T-01 C-T-01b C-T-02 C-T-03 C-T-04
           greeks    crates/greeks/benches/ratio.rs    6  C-G-01 C-G-02 C-G-03 C-G-05
-          vocab     crates/vocab/benches/ratio.rs     7  C-V-01 C-V-02 C-V-03 C-V-04 C-V-06
-          indicators crates/indicators/benches/ratio.rs 5  C-I-01 C-I-02 C-I-03 C-I-04
+          vocab     crates/vocab/benches/ratio.rs     7  C-V-01 C-V-02 C-V-03 C-V-04 C-V-05 C-V-06
+          indicators crates/indicators/benches/ratio.rs 5  C-I-01 C-I-02 C-I-03 C-I-04 C-I-05 C-I-06
           engine    crates/engine/benches/ratio.rs    4  C-E-01 C-E-02 C-E-03 C-E-04 C-E-05 C-E-06 C-E-07 C-E-08 C-E-09 C-E-10 C-E-11
           runner    crates/runner/benches/ratio.rs    3  C-R-01 C-R-02 C-R-03 C-R-04
           cli       crates/cli/benches/ratio.rs       4  C-CLI-01 C-CLI-02 C-CLI-03 C-CLI-04

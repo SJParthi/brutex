@@ -39,6 +39,8 @@
 //! three, not daily OHLC.  [`GapReferenceSource`] exposes that boundary so a
 //! caller cannot mistake this path for an external `GapFib` anchor.
 
+use std::collections::HashMap;
+
 use crate::daily::{DailyLevels, Unusable};
 use crate::evaluator::{Calendar, Evaluator, Widths};
 use crate::gap::GapFib;
@@ -551,24 +553,46 @@ fn ist_micros_of_day(ts_micros: i64) -> i64 {
         .rem_euclid(crate::MICROS_PER_DAY)
 }
 
-/// The last stored one-minute bar of one IST day, or `None` when that day has none.
+/// The last stored one-minute bar of every IST day the exact-minute context holds.
 ///
-/// The cadence check in [`overlay_exact_minute_gapfib`] has already proved
-/// `exact_minute` strictly increasing, so `ist_day` is non-decreasing across it and
-/// `day` splits the slice into a prefix and a suffix. That monotonicity is what makes
-/// `partition_point` legal here rather than merely convenient: it is a binary search,
-/// and a binary search over an unordered slice is a wrong answer rather than a slow
-/// one.
+/// # This was a binary search, and the search sat inside a per-signal-bar loop
 ///
-/// O(log n) probes, no allocation, and no dependence on the SIGNAL slice being
-/// ordered. A forward scan from the join cursor would be cheaper on well-formed input
-/// and unbounded on input this function does not check.
-fn last_stored_minute_of_day(exact_minute: &[Candle], day: i64) -> Option<i64> {
-    let past = exact_minute.partition_point(|bar| crate::ist_day(bar.ts_micros) <= day);
-    exact_minute
-        .get(past.checked_sub(1)?)
-        .filter(|bar| crate::ist_day(bar.ts_micros) == day)
-        .map(|bar| bar.ts_micros)
+/// It used to be `last_stored_minute_of_day(exact_minute, day)`, one
+/// `slice::partition_point` per short day-final signal bucket — `O(log minutes)`
+/// probes against a slice that grows with every month ingested, called from inside
+/// the `for (source, signal_bar) in signal.iter().enumerate()` loop below. Gate 11
+/// rule 1 refuses that spelling without exception and `docs/07-o1-architecture.md`
+/// layer 4 is why: the frequency was small — one bucket per day per rung — but the
+/// COST of each lookup tracked the size of the store, which is the shape the rule
+/// exists to remove rather than to bound.
+///
+/// # What replaces it, and why the shape is not a second walk
+///
+/// The pair walk below is `exact_minute`'s own cadence pass, which already visits
+/// every bar exactly once. `day_last` records `(day, last ts)` by overwriting the
+/// tail entry while the day holds and pushing when it changes — legal because the
+/// caller has already proved `exact_minute` strictly increasing, so `ist_day` is
+/// non-decreasing and a day's bars are contiguous. The map is then built at the
+/// EXACT size `day_last` measured, which is the day count and never the minute
+/// count: `docs/07-o1-architecture.md` law 2 asks for a reservation and reserving
+/// one slot per minute would over-reserve by the session length.
+///
+/// Lookup afterwards is one hash probe, so the per-signal-bar cost no longer
+/// depends on how many minutes are in scope. Total work is `O(minutes)` once and
+/// `O(1)` per query; the extra space is `O(days)`. **UNVERIFIED as a measured
+/// bound** — no row in `crates/indicators/benches/ratio.rs` covers this overlay.
+fn last_stored_minute_by_day(exact_minute: &[Candle]) -> HashMap<i64, i64> {
+    let mut day_last: Vec<(i64, i64)> = Vec::new();
+    for bar in exact_minute {
+        let day = crate::ist_day(bar.ts_micros);
+        match day_last.last_mut() {
+            Some(seen) if seen.0 == day => seen.1 = bar.ts_micros,
+            _ => day_last.push((day, bar.ts_micros)),
+        }
+    }
+    let mut by_day = HashMap::with_capacity(day_last.len());
+    by_day.extend(day_last);
+    by_day
 }
 
 /// Replace a signal column's `GapFib` family with exact stored one-minute evidence.
@@ -690,6 +714,11 @@ pub fn overlay_exact_minute_gapfib(
         minute_masks.push(mask);
     }
 
+    // BUILT ONCE, OUTSIDE THE LOOP THAT ASKS IT. The lookup below used to be a
+    // `partition_point` over the whole minute context, so its cost tracked the
+    // months in scope. See [`last_stored_minute_by_day`].
+    let last_minute_by_day = last_stored_minute_by_day(exact_minute);
+
     let mut exact_by_source = Vec::with_capacity(signal.len());
     let mut cursor = 0_usize;
     for (source, signal_bar) in signal.iter().enumerate() {
@@ -709,7 +738,9 @@ pub fn overlay_exact_minute_gapfib(
             // and so would be a branch no test could take: `last` is on `signal_day` and
             // the condition above puts `demanded`'s minute-of-day past EVERY minute-of-
             // day in the evidence, `last`'s included, so `last < demanded` follows.
-            last_stored_minute_of_day(exact_minute, signal_day)
+            last_minute_by_day
+                .get(&signal_day)
+                .copied()
                 .filter(|last| *last >= signal_bar.ts_micros)
                 .unwrap_or(demanded)
         } else {

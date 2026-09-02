@@ -151,17 +151,33 @@ pub(crate) struct AllRungStoredPopulationV5Request<'a> {
 }
 
 impl AllRungStoredPopulationV5Request<'_> {
-    fn sweeper(&self, index: usize) -> &Sweeper {
+    /// The sweeper named by one canonical rung ordinal, or `None` past the eighth.
+    ///
+    /// # It refuses rather than dying, and the arm it replaces could not be covered
+    ///
+    /// The ninth arm was `unreachable!("canonical all-rung index is bounded by
+    /// eight")`. The claim is true — the only production caller walks
+    /// `CANONICAL_RUNG_NAMES_V1`, which is `RUNG_COUNT` long — but `CLAUDE.md` §4
+    /// asks code to degrade loudly or refuse and never to die, and gate 11 rule 5
+    /// refuses the spelling for that reason. The arm also cost the crate a region
+    /// no input could enter, which the 100% coverage floor in §9 cannot close: a
+    /// panic no caller can provoke is a line no test can reach.
+    ///
+    /// `None` is the honest answer instead. Both call sites turn it into a named
+    /// refusal carrying the ordinal, so an authoring mistake in the phase-one walk
+    /// surfaces as a message rather than an abort mid-transaction — which matters
+    /// here more than usual, because an abort would strand a receipt-last append.
+    fn sweeper(&self, index: usize) -> Option<&Sweeper> {
         match index {
-            0 => self.one_minute_sweeper,
-            1 => self.two_minute_sweeper,
-            2 => self.three_minute_sweeper,
-            3 => self.five_minute_sweeper,
-            4 => self.ten_minute_sweeper,
-            5 => self.fifteen_minute_sweeper,
-            6 => self.thirty_minute_sweeper,
-            7 => self.sixty_minute_sweeper,
-            _ => unreachable!("canonical all-rung index is bounded by eight"),
+            0 => Some(self.one_minute_sweeper),
+            1 => Some(self.two_minute_sweeper),
+            2 => Some(self.three_minute_sweeper),
+            3 => Some(self.five_minute_sweeper),
+            4 => Some(self.ten_minute_sweeper),
+            5 => Some(self.fifteen_minute_sweeper),
+            6 => Some(self.thirty_minute_sweeper),
+            7 => Some(self.sixty_minute_sweeper),
+            _ => None,
         }
     }
 }
@@ -525,6 +541,10 @@ struct CandidateFamilyPairV1 {
 /// O(1).  It performs exactly sixteen naturally-extinct Candidate sweeps plus
 /// eight bounded successor chains.  Fixed rung/family dispatch and root lookup
 /// are O(1); retained evidence is proportional to the admitted bounded inputs.
+///
+/// **UNVERIFIED as a measured bound.** No bench in this workspace
+/// times this, so the shape above is read from the source rather
+/// than measured. `CLAUDE.md` §3 rule 6.
 #[allow(
     clippy::too_many_lines,
     reason = "the fixed two-phase eight-rung transaction is kept visible as one indivisible authority door"
@@ -539,6 +559,13 @@ pub(crate) fn commit_all_rung_stored_population_v5(
     // before any successor ledger reader is retained.
     let mut candidate_pairs = Vec::with_capacity(RUNG_COUNT);
     for (index, rung_name) in CANONICAL_RUNG_NAMES_V1.iter().copied().enumerate() {
+        // NAMED, NOT ASSUMED. `CANONICAL_RUNG_NAMES_V1` is `RUNG_COUNT` long and
+        // `sweeper` answers every ordinal below it, so this refusal is unreachable
+        // on the shipped tables -- but it is a refusal and not a panic, for the
+        // reason [`AllRungStoredPopulationV5Request::sweeper`] records.
+        let sweeper = request.sweeper(index).ok_or_else(|| {
+            format!("all-rung ordinal {index} ({rung_name}) names no canonical sweeper")
+        })?;
         roots.require_same(&format!(
             "before {rung_name} NIFTY Candidate/Pre-Admission commit"
         ))?;
@@ -550,7 +577,7 @@ pub(crate) fn commit_all_rung_stored_population_v5(
                 rung_name,
                 from: request.from,
                 to: request.to,
-                sweeper: request.sweeper(index),
+                sweeper,
                 horizon: request.horizon,
                 widths: request.widths,
                 availability: request.availability,
@@ -573,7 +600,7 @@ pub(crate) fn commit_all_rung_stored_population_v5(
                 rung_name,
                 from: request.from,
                 to: request.to,
-                sweeper: request.sweeper(index),
+                sweeper,
                 horizon: request.horizon,
                 widths: request.widths,
                 availability: request.availability,
@@ -680,6 +707,10 @@ pub(crate) fn commit_all_rung_stored_population_v5(
 /// receipt-last file transactions. Its time and retained space grow with the
 /// authenticated Population/file bytes. Only fixed eight-rung dispatch and
 /// fixed-stride record addressing are O(1) in rung/candidate count.
+///
+/// **UNVERIFIED as a measured bound.** No bench in this workspace
+/// times this, so the shape above is read from the source rather
+/// than measured. `CLAUDE.md` §3 rule 6.
 #[allow(
     clippy::too_many_lines,
     reason = "the literal eight-rung move order is the authority and must remain reviewable"
