@@ -252,11 +252,12 @@
    * The cast sits INSIDE `$state(...)` for the reason the block above gives.
    */
   let liveTop = $state(
-    /** @type {{ phase: string, rows: any[], trials: number, barMilli: number, stale: boolean, why: string }} */ ({
+    /** @type {{ phase: string, rows: any[], trials: number, barMilli: number, idleSecs: number, stale: boolean, why: string }} */ ({
       phase: 'idle',
       rows: [],
       trials: 0,
       barMilli: 0,
+      idleSecs: 0,
       stale: false,
       why: ''
     })
@@ -283,12 +284,26 @@
       }
       const body = await response.json();
       const runs = Array.isArray(body?.runs) ? body.runs : [];
-      // THE FRESHEST RUN, and freshness is the file's own claim. `stale` is set
-      // by the server when the heap has not moved for long enough that the run
-      // is probably gone; picking a stale run over a live one would show the
-      // PREVIOUS sweep's winners during this one, which is the exact defect
-      // `live.rs` exists to remove.
-      const best = runs.find((/** @type {any} */ r) => r && r.stale === false) ?? runs[0] ?? null;
+      // THE FRESHEST RUN BY `idle_secs`, NOT THE FIRST ONE THAT IS NOT STALE.
+      //
+      // This first read `runs.find(r => r.stale === false)`, and MEASURED
+      // against the real endpoint that picks the wrong run: `/live.json` served
+      // six runs, and the first with `stale: false` had `idle_secs: 967` — a
+      // heap sixteen minutes cold, belonging to a sweep that had already been
+      // killed. `stale` is a generous flag, not a freshness ordering, so the
+      // panel would have shown a DEAD run's winners while a live one was still
+      // walking its ladder. That is precisely the defect `live.rs` exists to
+      // remove, reintroduced one layer up.
+      //
+      // `idle_secs` is seconds since the heap last MOVED, so the smallest one is
+      // the run doing work now. Ties keep the server's order, which is stable.
+      const fresh = runs
+        .filter((/** @type {any} */ r) => r && Array.isArray(r.rows))
+        .sort(
+          (/** @type {any} */ a, /** @type {any} */ b) =>
+            (Number(a.idle_secs) || 0) - (Number(b.idle_secs) || 0)
+        );
+      const best = fresh[0] ?? null;
       if (!best || !Array.isArray(best.rows)) {
         liveTop = { phase: 'empty', rows: [], trials: 0, barMilli: 0, stale: false, why: '' };
         return;
@@ -298,6 +313,9 @@
         rows: best.rows.slice(0, 25),
         trials: Number(best.trials) || 0,
         barMilli: Number(best.bar_milli) || 0,
+        // RENDERED, NOT JUST USED TO CHOOSE. A reader has to be able to see
+        // that these rows are seconds old rather than trust that they are.
+        idleSecs: Number(best.idle_secs) || 0,
         stale: best.stale === true,
         why: ''
       };
@@ -6796,44 +6814,128 @@
          itself rises with the number of hypotheses tested, so a row that leads
          this table can still be nothing. -->
     {#if liveTop.phase === 'ready' && liveTop.rows.length > 0}
+      {@const proved = liveTop.rows.filter((/** @type {any} */ r) => r.clears_bar).length}
+      {@const bar = liveTop.barMilli / 1000}
+      <!-- DECLARED HERE AND NOT INSIDE THE PANEL DIV: Svelte requires `{@const}`
+           to be the immediate child of a block, and putting these two beside
+           the markup they describe failed the build outright. -->
+      {@const lead = liveTop.rows[0]}
+      {@const leadT = Math.abs(lead?.t_milli ?? 0) / 1000}
       <div class="livetop">
+        <!-- THE PLAIN-ENGLISH ANSWER FIRST, THEN THE EVIDENCE.
+             This block first rendered a nine-column table of |t|, mean paisa and
+             basis points with no combination NAMES in it at all -- the one thing
+             a reader actually wants -- and no sentence saying what any of it
+             meant. A reader could not tell a finished answer from an empty one.
+             The headline states the only fact that matters, and every row leads
+             with what the combination IS. -->
         <p class="livetop-head">
-          <b>Best so far</b>
+          <b>Best combinations so far</b>
           <span class="dim">
-            · {exact(liveTop.trials)} weighed · bar |t| ≥ {(liveTop.barMilli / 1000).toFixed(2)}
-            {#if liveTop.stale}· <span class="pill warn">stale</span>{/if}
+            · {exact(liveTop.trials)} tested · updated {liveTop.idleSecs < 60
+              ? `${liveTop.idleSecs}s`
+              : `${Math.floor(liveTop.idleSecs / 60)}m`} ago
+            {#if liveTop.stale || liveTop.idleSecs > 120}
+              <span class="pill warn">not moving</span>
+            {/if}
           </span>
         </p>
-        <div class="livetop-scroll">
-          <table class="livetop-table">
-            <thead>
-              <tr>
-                <th>#</th><th>side</th><th>hits</th><th>trades</th>
-                <th>|t|</th><th>mean paisa</th><th>payoff</th><th>wins</th><th>clears bar</th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each liveTop.rows as row (row.rank)}
-                <tr class={row.clears_bar ? 'clears' : ''}>
-                  <td>{row.rank}</td>
-                  <td>{row.direction}</td>
-                  <td>{exact(row.hits)}</td>
-                  <td>{exact(row.n)}</td>
-                  <td>{(Math.abs(row.t_milli) / 1000).toFixed(3)}</td>
-                  <td>{(row.mean_milli_paisa / 1000).toFixed(1)}</td>
-                  <td>{row.payoff_bp} bp</td>
-                  <td>{exact(row.edge_wins)}</td>
-                  <td>{row.clears_bar ? 'YES' : 'no'}</td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
+        <!-- KEY STATS FOR THE LEADING COMBINATION.
+             `mean_paisa` is the MEAN FORWARD MOVE and `runner::outcome` derives
+             the side from its sign (`mean_paisa < 0.0` is a short), so the move
+             is always in the trade's favour and its magnitude is the edge. It
+             is called a MOVE and never a PnL: this heap is `ranked_only` with
+             `priced: 0`, so no exit variant, no slippage and no cost has been
+             applied to it yet. Labelling it profit would be a number the engine
+             has not computed. -->
+        <div class="keystats">
+          <div class="keystat">
+            <p class="k">Average move per trade</p>
+            <p class="v up">
+              {(Math.abs(lead?.mean_milli_paisa ?? 0) / 1000).toFixed(1)}<span class="u"> paisa</span>
+            </p>
+          </div>
+          <div class="keystat">
+            <p class="k">Winning trades</p>
+            <p class="v">
+              {lead?.n > 0 ? ((lead.edge_wins / lead.n) * 100).toFixed(2) : '0.00'}%<span class="u">
+                {exact(lead?.edge_wins ?? 0)}/{exact(lead?.n ?? 0)}</span
+              >
+            </p>
+          </div>
+          <div class="keystat">
+            <p class="k">Evidence</p>
+            <p class="v {lead?.clears_bar ? 'up' : 'dn'}">
+              {leadT.toFixed(2)}<span class="u"> needs {bar.toFixed(2)}</span>
+            </p>
+          </div>
+          <div class="keystat">
+            <p class="k">Proved so far</p>
+            <p class="v {proved > 0 ? 'up' : ''}">
+              {proved}<span class="u"> of {liveTop.rows.length} kept</span>
+            </p>
+          </div>
         </div>
+        <p class="livetop-verdict {proved > 0 ? 'yes' : 'not-yet'}">
+          {#if proved > 0}
+            <b>{proved} of {liveTop.rows.length} have proved themselves.</b> They beat the evidence
+            bar of {bar.toFixed(2)} for this run, so they are real patterns rather than luck.
+          {:else}
+            <b>None have proved themselves yet.</b> Each needs an evidence score above
+            <b>{bar.toFixed(2)}</b>, and the best so far is {leadT.toFixed(2)}. That bar rises as
+            more combinations are tested — it is what stops the luckiest of millions being mistaken
+            for a finding.
+          {/if}
+        </p>
+        <ol class="livelist">
+          {#each liveTop.rows.slice(0, 10) as row (row.rank)}
+            {@const t = Math.abs(row.t_milli) / 1000}
+            <li class="liverow {row.clears_bar ? 'clears' : ''}">
+              <div class="liverow-top">
+                <span class="liverank">{row.rank}</span>
+                <span class="liveside {row.direction}"
+                  >{row.direction === 'short' ? 'sell' : 'buy'}</span
+                >
+                <span class="livemove"
+                  >{(Math.abs(row.mean_milli_paisa) / 1000).toFixed(1)} paisa/trade</span
+                >
+                {#if row.clears_bar}
+                  <span class="pill good">proved</span>
+                {:else}
+                  <span class="pill flat">not proved yet</span>
+                {/if}
+              </div>
+              <!-- WHAT THE COMBINATION ACTUALLY IS, which the grid this replaced
+                   never showed at all. Named through `/vocab.json`, never a
+                   second copy of the table in JavaScript. -->
+              <div class="liverow-names">{@render conditionNames(row.mask_words)}</div>
+              <div class="liverow-facts">
+                <span><b>{exact(row.n)}</b> trades</span>
+                <span
+                  ><b>{row.n > 0 ? Math.round((row.edge_wins / row.n) * 100) : 0}%</b> won</span
+                >
+                <span>fires on <b>{exact(row.hits)}</b> bars</span>
+                <span>evidence <b>{t.toFixed(2)}</b> of {bar.toFixed(2)}</span>
+              </div>
+              <div
+                class="livebar"
+                role="img"
+                aria-label="evidence {t.toFixed(2)} against a bar of {bar.toFixed(2)}"
+              >
+                <span
+                  class="livebar-fill"
+                  style="width:{Math.max(1, Math.min(100, (t / (bar || 1)) * 100))}%"
+                ></span>
+              </div>
+            </li>
+          {/each}
+        </ol>
         <p class="livetop-foot dim">
-          Ordered by <b>|t|</b> — absolute, so a setup that precedes a fall ranks beside one that
-          precedes a rise; the sign is in <b>mean paisa</b>. Rank is not a finding: a row counts
-          only where <b>clears bar</b> says YES, and that bar rises with every hypothesis the run
-          tests. Rewritten only when the top actually moves.
+          <b>Move, not profit.</b> These rows are ranked but not yet priced — no exit, slippage or
+          cost has been applied, so the figure above is the average forward move the setup caught,
+          not what you would have kept. <b>Order</b> is by evidence strength, counting a setup that
+          predicts a fall the same as one predicting a rise. Leading this list is not a result on
+          its own: a combination counts only once it passes the evidence bar.
         </p>
       </div>
     {:else if liveTop.phase === 'failed'}
@@ -10398,48 +10500,121 @@
     border-bottom: 1px solid var(--n4);
     font-size: 13px;
   }
-  /* THE TABLE SCROLLS INSIDE ITS OWN BOX. Nine columns on a narrow window must
-     not make the PAGE scroll sideways. */
-  .livetop-scroll {
-    overflow-x: auto;
-  }
-  .livetop-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-variant-numeric: tabular-nums;
-    font-size: 12px;
-  }
-  .livetop-table th,
-  .livetop-table td {
-    padding: 5px 12px;
-    text-align: right;
-    white-space: nowrap;
-  }
-  .livetop-table th:nth-child(2),
-  .livetop-table td:nth-child(2),
-  .livetop-table th:last-child,
-  .livetop-table td:last-child {
-    text-align: left;
-  }
-  .livetop-table thead th {
+  /* KEY STATS, THE SHAPE TRADINGVIEW USES ON A STRATEGY REPORT: a plain label
+     over one big number with its unit, four across, wrapping on a narrow
+     window. This replaced a nine-column grid of |t|, mean paisa and basis
+     points that carried no combination NAMES and no sentence saying what any
+     of it meant -- unreadable by anyone who had not written the engine. */
+  .keystats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 14px 26px;
+    padding: 14px;
     border-bottom: 1px solid var(--n4);
+  }
+  .keystat .k {
+    margin: 0 0 3px;
+    font-size: 12px;
     color: var(--n9);
+  }
+  .keystat .v {
+    margin: 0;
+    font-size: 21px;
     font-weight: 600;
+    line-height: 1.15;
+    font-variant-numeric: tabular-nums;
   }
-  .livetop-table tbody tr:nth-child(even) {
-    background: var(--n2);
+  .keystat .v .u {
+    font-size: 12px;
+    font-weight: 400;
+    color: var(--n9);
   }
-  /* A ROW THAT CLEARS THE BAR IS THE ONLY ONE THAT COUNTS, so it is the only
-     one marked. Marking every row by rank would say the opposite. */
-  /* `--up` / `--up-soft`, NOT `--good`. This block first wrote `var(--good-soft)`
-     and `var(--good)`, and NEITHER TOKEN EXISTS in `src/lib/theme.css` -- an
-     undefined custom property resolves to nothing, so the one row that matters
-     would have rendered with a transparent background and inherited ink. The
-     build does not catch that; only reading the token table does. */
-  .livetop-table tbody tr.clears {
-    background: var(--up-soft);
+  .keystat .v.up {
     color: var(--up);
+  }
+  .keystat .v.dn {
+    color: var(--down);
+  }
+  .livelist {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .liverow {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 11px 14px;
+    border-bottom: 1px solid var(--n4);
+  }
+  /* `--up-soft`, NOT `--good-soft`. The first draft used `var(--good-soft)` and
+     `var(--good)`, and NEITHER EXISTS in src/lib/theme.css -- an undefined
+     custom property resolves to nothing, so the one row that matters would have
+     rendered transparent. The build does not catch that. */
+  .liverow.clears {
+    background: var(--up-soft);
+  }
+  .liverow-top {
+    display: flex;
+    align-items: baseline;
+    gap: 9px;
+    flex-wrap: wrap;
+  }
+  .liverank {
+    min-width: 20px;
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--n9);
+    font-variant-numeric: tabular-nums;
+  }
+  .liveside {
+    font-size: 12px;
     font-weight: 600;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+  }
+  .liveside.short {
+    color: var(--down);
+  }
+  .liveside.long {
+    color: var(--up);
+  }
+  .livemove {
+    font-size: 13px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--up);
+  }
+  .liverow-names {
+    font-size: 12.5px;
+    line-height: 1.5;
+  }
+  .liverow-facts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px 16px;
+    font-size: 12px;
+    color: var(--n9);
+    font-variant-numeric: tabular-nums;
+  }
+  .liverow-facts b {
+    color: var(--n11);
+  }
+  /* EVIDENCE AGAINST ITS BAR, AS A LENGTH. A number a reader must compare with
+     another number is a comparison most readers will not make. */
+  .livebar {
+    height: 4px;
+    border-radius: 2px;
+    background: var(--n4);
+    overflow: hidden;
+  }
+  .livebar-fill {
+    display: block;
+    height: 100%;
+    background: var(--n9);
+  }
+  .liverow.clears .livebar-fill {
+    background: var(--up);
   }
   .livetop-foot {
     margin: 0;
