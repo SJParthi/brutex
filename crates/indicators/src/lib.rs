@@ -314,6 +314,59 @@ pub enum Corrupt {
     /// reason as [`Corrupt::NegativeVolume`] for why it now surfaces rather than being
     /// swallowed.
     AccumulatorTooLarge,
+    /// A price is not strictly positive. An instrument this crate sweeps cannot
+    /// trade at or below zero.
+    ///
+    /// # The all-zero bar the store ACCEPTS
+    ///
+    /// [`Corrupt::RangeOverflows`] records that D-0143 added
+    /// `open|high|low|close >= 0` to `store::format::ohlc_is_sane`, which stops
+    /// a negative bar at the write boundary. It does not stop a ZERO one, and
+    /// that predicate's own doc says so in as many words: an all-zero record
+    /// satisfies it. So `o = h = l = c = 0` reaches the sweep *through the
+    /// store*, not merely from a caller that skipped it.
+    ///
+    /// Every ordering guard above passes it. `high < low` is `0 < 0`, false.
+    /// The subtraction is `0 - 0`. Containment is four comparisons of zero
+    /// against zero. It is a well-formed bar by every test this function had.
+    ///
+    /// # What it costs, measured
+    ///
+    /// One such bar placed at day 3 of a twenty-session fixture, swept at a
+    /// support floor of 150 hits:
+    ///
+    /// | | clean | one zero bar |
+    /// |---|---|---|
+    /// | records refused | 0 | **0** |
+    /// | `Outcome::is_complete()` | true | **true** |
+    /// | masks differing | — | **1,467 of 5,624** |
+    /// | one condition's support | 210 hits | 154 |
+    /// | that condition's best-case P&L | 237,810 paisa | **174,394** |
+    ///
+    /// **A 26.7% divergence in reported profit, with a refusal count of zero
+    /// and a complete outcome.** The contamination window measured at exactly
+    /// five sessions, which is the `prev5` depth. The mechanism is that a zero
+    /// low becomes the session extreme, so the Fibonacci ladder, CPR, ORB and
+    /// every derived level are measured against a range of millions of paisa
+    /// instead of about fourteen hundred — and `close_the_books` carries it
+    /// forward into `yesterday` and `prev5`.
+    ///
+    /// That is the failure `CLAUDE.md` §4 bans by name: not a crash, not a
+    /// refusal, but a wrong number wearing a complete run's clothes.
+    ///
+    /// # Not currently live, and the guard is the point
+    ///
+    /// All 4,887,858 bars in the 2,707 files of the operator's store were
+    /// scanned: zero all-zero records, zero negative, zero ordering breaks. The
+    /// defect was the missing guard rather than the data — and a guarantee that
+    /// holds only because nobody has yet written such a record is the kind
+    /// [`Corrupt::RangeOverflows`] already refuses to rely on.
+    ///
+    /// All four fields are tested, not `low` alone, for the reason
+    /// `ohlc_is_sane` gives for the same choice: this predicate must not depend
+    /// on another clause of itself being true, or a later edit to the ordering
+    /// guards silently widens what a price may be.
+    PriceNotPositive,
 }
 
 /// The current-session Fibonacci anchors, and the eleven bits they decide.

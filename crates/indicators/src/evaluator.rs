@@ -714,6 +714,55 @@ impl Evaluator {
         {
             return Err(Corrupt::PriceOutsideRange);
         }
+        // ARE THESE PRICES AT ALL. Every guard above is RELATIVE — `high < low`,
+        // a subtraction, four containment comparisons — and `o = h = l = c = 0`
+        // satisfies all of them. The store accepts it too: D-0143 added `>= 0`
+        // to `ohlc_is_sane`, which stops a negative bar and not a zero one, and
+        // that predicate's own doc says an all-zero record satisfies it. So this
+        // arrives THROUGH the store, not only from a caller that skipped it.
+        //
+        // Measured cost of one such bar in a twenty-session fixture: 1,467 of
+        // 5,624 masks changed and a 26.7% move in one condition's reported
+        // profit, with zero refusals and `is_complete() == true`. See
+        // [`Corrupt::PriceNotPositive`] for the table and the mechanism.
+        //
+        // # Why it runs LAST of the four and not first
+        //
+        // "Are these prices at all" reads like it should precede "are they
+        // ordered", and placing it first renamed four existing refusals: a
+        // record with `low = i64::MIN` is both non-positive AND
+        // range-overflowing, and first place turned every one of those into this
+        // variant. That is not a new guard but a rewrite of an old one, and
+        // `Corrupt::RangeOverflows`'s doc argues at length for keeping that
+        // refusal reachable. Last place makes this strictly additive: every
+        // record refused before is refused for the reason it always was, and
+        // this catches only what previously passed all four.
+        //
+        // # Why ZERO and not `<= 0`, which is the weaker test and the honest one
+        //
+        // `<= 0` is the guard this wants to be, and it costs a real branch. A
+        // session's span cannot overflow `i64` once every price is positive —
+        // `high <= i64::MAX` and `low >= 1` bound it at `i64::MAX - 1` — so
+        // `close_the_books`' span-overflow handling becomes unreachable through
+        // `step`, along with the three tests that reach it by opening a session
+        // at `-i64::MAX/2`. Trading a defensive branch for a wider guard is not
+        // obviously the better deal, and CLAUDE.md §9's coverage floor makes it
+        // a cost rather than a preference.
+        //
+        // Zero is the case that is REACHABLE THROUGH THE STORE and the case that
+        // was measured. `ohlc_is_sane` refuses a negative bar at the write
+        // boundary (D-0143) and accepts an all-zero one; its own doc says so.
+        //
+        // **The residual, stated rather than papered over:** an ordered
+        // all-negative record handed to this crate DIRECTLY — never through a
+        // store file — still passes every clause here. It is refused at the
+        // write boundary, which per `Corrupt::RangeOverflows`' own reasoning is
+        // not a guarantee this crate may assume. Closing it needs the span
+        // arithmetic to stop depending on negatives being representable, and
+        // that is a change to `close_the_books`, not to this guard.
+        if bar.open == 0 || bar.high == 0 || bar.low == 0 || bar.close == 0 {
+            return Err(Corrupt::PriceNotPositive);
+        }
         // Ordering, and it was also missing. The rollover below triggers on
         // `today != self.day` — an inequality — so a receding timestamp closes the
         // books on a LATER session and installs it as `yesterday`. Every level the

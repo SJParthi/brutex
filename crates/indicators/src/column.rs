@@ -225,10 +225,12 @@ pub struct Census {
     pub negative_volume: u64,
     /// [`Corrupt::AccumulatorTooLarge`].
     pub accumulator_too_large: u64,
+    /// [`Corrupt::PriceNotPositive`].
+    pub price_not_positive: u64,
 }
 
 impl Census {
-    /// Every bar refused as not-a-bar, across all six reasons.
+    /// Every bar refused as not-a-bar, across all seven reasons.
     #[must_use]
     pub const fn refused(&self) -> u64 {
         self.high_below_low
@@ -237,6 +239,7 @@ impl Census {
             .saturating_add(self.timestamp_not_increasing)
             .saturating_add(self.negative_volume)
             .saturating_add(self.accumulator_too_large)
+            .saturating_add(self.price_not_positive)
     }
 
     /// Did every offered bar land in exactly one bucket?
@@ -276,6 +279,9 @@ impl Census {
             }
             Corrupt::AccumulatorTooLarge => {
                 self.accumulator_too_large = self.accumulator_too_large.saturating_add(1);
+            }
+            Corrupt::PriceNotPositive => {
+                self.price_not_positive = self.price_not_positive.saturating_add(1);
             }
         }
     }
@@ -340,6 +346,10 @@ pub struct Column {
     /// Execution code therefore asks the evaluator's exact verdict in O(1)
     /// instead of repeating the four bar-local checks and missing the two
     /// stateful refusals.
+    ///
+    /// **UNVERIFIED as a measured bound.** No bench in this workspace
+    /// times this, so the shape above is read from the source rather
+    /// than measured. `CLAUDE.md` §3 rule 6.
     accepted: Arc<[bool]>,
     /// Where every execution-slice bar went under the pass that produced
     /// `accepted`. This equals `census` on a native column and deliberately
@@ -880,6 +890,10 @@ impl Column {
     /// `false` for an out-of-range index and for a column produced through the
     /// length-only compatibility projection. This is the O(1) price/path gate;
     /// no caller re-runs `Candle::check`, timestamp logic, or VWAP arithmetic.
+    ///
+    /// **UNVERIFIED as a measured bound.** No bench in this workspace
+    /// times this, so the shape above is read from the source rather
+    /// than measured. `CLAUDE.md` §3 rule 6.
     #[must_use]
     pub fn accepts(&self, index: usize) -> bool {
         self.acceptance_known && self.accepted.get(index).copied().unwrap_or(false)
@@ -1529,6 +1543,96 @@ pub(super) mod tests {
              by `()` passes this test"
         );
         assert!(kept > 0, "and must keep something, or `>` passes it");
+    }
+
+    #[test]
+    /// An all-zero bar is refused, and refusing it is what keeps the masks
+    /// around it honest.
+    ///
+    /// # Why this test exists rather than a comment
+    ///
+    /// The record `o = h = l = c = 0` passed every guard the evaluator had.
+    /// `high < low` is `0 < 0`; the subtraction is `0 - 0`; containment is four
+    /// comparisons of zero against zero. It also passes
+    /// `store::format::ohlc_is_sane`, whose own doc says an all-zero record
+    /// satisfies it — so this arrives THROUGH the store, not only from a caller
+    /// that skipped it.
+    ///
+    /// Measured before the guard: one such bar in a twenty-session fixture
+    /// changed 1,467 of 5,624 masks and moved one condition's reported profit by
+    /// 26.7%, with a refusal count of zero and a complete outcome. The mechanism
+    /// is that a zero low becomes the session extreme, so every derived level is
+    /// measured against a range of millions of paisa instead of hundreds — and
+    /// `close_the_books` carries that forward for five sessions.
+    ///
+    /// The second half is the one that would catch a regression that "fixed"
+    /// this by clamping: the bars AFTER the zero must be bit-identical to a run
+    /// that never saw it. A refusal that still let the poison into
+    /// `close_the_books` would pass the count and fail the masks.
+    #[test]
+    fn a_zero_priced_bar_is_refused_and_leaves_the_masks_around_it_untouched() {
+        let clean = run(8);
+        assert!(clean.len() > 400, "the fixture must span sessions");
+
+        let victim = 3 * BARS_PER_SESSION + 10;
+        let at = clean.get(victim).map_or(0, |c| c.ts_micros);
+        assert!(at > 0, "the victim index must be inside the fixture");
+
+        let mut poisoned = clean.clone();
+        if let Some(slot) = poisoned.get_mut(victim) {
+            *slot = Candle::new(at, 0, 0, 0, 0, 0, OI_NULL);
+        }
+        // The same series with the bar simply ABSENT. `Evaluator::stepped` takes
+        // `self` by value, so a refused record is documented to leave no trace —
+        // which means refusing it and it never existing must be the same run.
+        let mut removed = clean.clone();
+        removed.remove(victim);
+
+        let poisoned_column = {
+            let mut ev = evaluator(Availability::Absent);
+            Column::build(&poisoned, &mut ev)
+        };
+        let removed_column = {
+            let mut ev = evaluator(Availability::Absent);
+            Column::build(&removed, &mut ev)
+        };
+        let clean_column = {
+            let mut ev = evaluator(Availability::Absent);
+            Column::build(&clean, &mut ev)
+        };
+
+        // IT IS COUNTED, AND UNDER ITS OWN NAME.
+        assert_eq!(
+            poisoned_column.acceptance_census().price_not_positive,
+            1,
+            "the zero bar must be charged to its own bucket, not a neighbour's"
+        );
+        assert_eq!(
+            clean_column.acceptance_census().price_not_positive,
+            0,
+            "and a clean run must not report one"
+        );
+        assert_eq!(
+            poisoned_column.acceptance_census().refused(),
+            clean_column.acceptance_census().refused().saturating_add(1),
+            "exactly one more refusal than the clean run, so `refused()` counts \
+             the new bucket"
+        );
+
+        // AND IT COMMITS NOTHING — refused is byte-identical to absent.
+        assert_eq!(
+            poisoned_column.bits(),
+            removed_column.bits(),
+            "a refused bar must leave no trace: the masks after it differ from \
+             the same series with the bar simply removed, so the refusal \
+             happened after the damage"
+        );
+        assert!(
+            poisoned_column.bits().len() > 300,
+            "the comparison must reach the sessions after the poison or it \
+             proves nothing: {} rows",
+            poisoned_column.bits().len()
+        );
     }
 
     #[test]

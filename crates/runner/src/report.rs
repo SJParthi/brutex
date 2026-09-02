@@ -718,6 +718,7 @@ fn bars(out: &mut String, census: Census) {
         ),
         ("  negative volume", census.negative_volume),
         ("  accumulator too large", census.accumulator_too_large),
+        ("  price not positive", census.price_not_positive),
     ] {
         if n > 0 {
             row(out, name, &n.to_string(), "");

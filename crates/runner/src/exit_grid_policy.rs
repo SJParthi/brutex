@@ -238,6 +238,10 @@ impl ExecutionRunV1 {
     /// Durable pre-admission adapters use this O(1) accessor to reconcile the
     /// exact execution stream they persist; it does not expose or rehash the
     /// candles.
+    ///
+    /// **UNVERIFIED as a measured bound.** No bench in this workspace
+    /// times this, so the shape above is read from the source rather
+    /// than measured. `CLAUDE.md` §3 rule 6.
     #[must_use]
     pub const fn execution_digest(&self) -> [u8; 32] {
         self.execution_digest
@@ -1073,6 +1077,10 @@ impl ValidatedExitGridV1<'_> {
     /// This is an O(1) copy of the digest minted during validation. Durable
     /// adapters use it to bind one candidate row to that already-validated
     /// evaluation without scanning the grid a second time.
+    ///
+    /// **UNVERIFIED as a measured bound.** No bench in this workspace
+    /// times this, so the shape above is read from the source rather
+    /// than measured. `CLAUDE.md` §3 rule 6.
     #[must_use]
     pub const fn evaluation_digest(&self) -> [u8; 32] {
         self.evaluation_digest
@@ -1082,6 +1090,10 @@ impl ValidatedExitGridV1<'_> {
     ///
     /// This is an O(1) identity check.  It lets a downstream adapter retain the
     /// single O(G) validation boundary instead of rebuilding it once per cell.
+    ///
+    /// **UNVERIFIED as a measured bound.** No bench in this workspace
+    /// times this, so the shape above is read from the source rather
+    /// than measured. `CLAUDE.md` §3 rule 6.
     #[must_use]
     pub fn is_evaluation(&self, evaluated: &EvaluatedExitGridV1) -> bool {
         core::ptr::eq(self.evaluated, evaluated)
@@ -1777,6 +1789,10 @@ impl ResolvedExitGridV1 {
     }
 
     /// Row-major O(1) admission bitmap for exact stop-target coordinates.
+    ///
+    /// **UNVERIFIED as a measured bound.** No bench in this workspace
+    /// times this, so the shape above is read from the source rather
+    /// than measured. `CLAUDE.md` §3 rule 6.
     #[must_use]
     pub(crate) fn ratio_bitmap(&self) -> &[bool] {
         &self.ratio_bitmap
@@ -1817,6 +1833,10 @@ impl ResolvedExitGridV1 {
     /// that `bars` are the exact TRAINING bytes bound by this resolution, then
     /// uses one cached crossing table per candidate and O(1) ratio admission in
     /// [`crate::grid`]. No candidate-local ladder is derived a second time.
+    ///
+    /// **UNVERIFIED as a measured bound.** No bench in this workspace
+    /// times this, so the shape above is read from the source rather
+    /// than measured. `CLAUDE.md` §3 rule 6.
     ///
     /// # Errors
     ///
@@ -1987,6 +2007,10 @@ impl ResolvedExitGridV1 {
     /// identity and refusal count. This later admission is O(1): one canonical
     /// row-offset lookup, one checked cell index and one policy bitmap read.
     ///
+    /// **UNVERIFIED as a measured bound.** No bench in this workspace
+    /// times this, so the shape above is read from the source rather
+    /// than measured. `CLAUDE.md` §3 rule 6.
+    ///
     /// # Errors
     ///
     /// Refuses a torn/incomplete evaluation, a coordinate outside the resolved
@@ -2026,6 +2050,10 @@ impl ResolvedExitGridV1 {
     /// O(1): one row-offset lookup, one checked cell lookup, and a fixed six-
     /// reason policy fold after the caller retained the O(G) validation
     /// capability.
+    ///
+    /// **UNVERIFIED as a measured bound.** No bench in this workspace
+    /// times this, so the shape above is read from the source rather
+    /// than measured. `CLAUDE.md` §3 rule 6.
     ///
     /// # Errors
     ///
@@ -3952,6 +3980,11 @@ fn put_census(h: &mut Hasher, census: indicators::column::Census) {
     put_u64(h, census.timestamp_not_increasing);
     put_u64(h, census.negative_volume);
     put_u64(h, census.accumulator_too_large);
+    // APPENDED, never inserted. The census buckets are folded in declaration
+    // order and a run identity that reordered them would collide two different
+    // censuses onto one hash -- `CLAUDE.md` §3 rule 8's append-only rule applied
+    // to the fold rather than to a bit table.
+    put_u64(h, census.price_not_positive);
 }
 
 fn put_option_usize(h: &mut Hasher, value: Option<usize>) {
