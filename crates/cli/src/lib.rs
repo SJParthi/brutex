@@ -1946,6 +1946,40 @@ fn sweep_stored_inner(
             .with("halted", outcome.sweep.halted.is_some()),
     );
 
+    // THE IDENTITY IS NOW RECORDED, NOT ONLY PRINTED. §3 rule 3 is "no
+    // computation without that identity recorded", and this verb built the full
+    // nine-term identity, emitted it, rendered it, and appended nothing. The
+    // ledger on this machine was 16 bytes — a header — after every stored sweep
+    // anyone had run.
+    //
+    // A refusal to record is reported and does NOT discard the sweep: the bars
+    // were read and the ladder was walked, and a run that cannot be filed is
+    // still a run whose numbers an operator asked for. What it must not do is
+    // stay silent about it, which is why the reason is pushed into the report
+    // rather than dropped.
+    match record_swept_run(
+        Recording {
+            root: &root,
+            feed: vendor.as_str(),
+            underlying,
+            timeframe: rung,
+            from: (year, month),
+            to: (year, month),
+            attempt: None,
+            months_asked: 1,
+            months_found: 1,
+        },
+        &id,
+        &outcome,
+        u64::try_from(loaded.bars.len()).unwrap_or(u64::MAX),
+        min_hits,
+    ) {
+        Ok((report, _committed)) => out.push_str(&report),
+        Err(why) => {
+            let _ = writeln!(out, "\n{NOT_RECORDED}: {why}\n");
+        }
+    }
+
     out.push('\n');
     out.push_str(&runner::report::render_ranked(&outcome, Some(&id)));
     // THE ANSWER, NOT JUST THE SEARCH. `render` reports how MANY combinations
@@ -4535,11 +4569,27 @@ fn append_condition_names(out: &mut String, record: &crate::results::Record) {
 /// win. A halted ladder's total is not comparable with a complete one's: it
 /// covers less of the search while its combination count looks larger.
 fn best_complete_line(rows: &[crate::results::Record]) -> String {
-    let complete: Vec<&crate::results::Record> = rows.iter().filter(|r| r.halted == 0).collect();
+    // AND `trades == 0` MUST NOT WIN EITHER, for the same reason `halted` must
+    // not: it is not a worse total, it is NO total.
+    //
+    // `crates/cli/src/frontier.rs` already fixed this convention — "`trades ==
+    // 0` is the only value that says so", and its `priced` field is literally
+    // `self.trades > 0`. This ranker did not know it. A row that swept and
+    // never traded carries `pessimistic: 0` from `record_run`'s
+    // `chosen.map_or(0, ..)`, and zero beats every genuinely losing run, so on
+    // a ledger where nothing profitable was found the BEST COMPLETE RUN line
+    // would name a run that made no trade at all.
+    //
+    // Latent today only because nothing writes an unpriced row yet. It is fixed
+    // before that changes rather than after.
+    let complete: Vec<&crate::results::Record> = rows
+        .iter()
+        .filter(|r| r.halted == 0 && r.trades > 0)
+        .collect();
     let Some(best) = complete.iter().max_by_key(|r| r.pessimistic) else {
-        return "  NO COMPLETE RUN to rank: every matching row halted on a \
-                budget, so no total here is comparable with another. Raise \
-                MIN_HITS and rerun.\n"
+        return "  NO COMPLETE RUN to rank: every matching row either halted on \
+                a budget or traded nothing, so no total here is comparable with \
+                another. Raise MIN_HITS and rerun.\n"
             .to_owned();
     };
     format!(
@@ -11925,18 +11975,67 @@ fn ensure_run_record(
     }
 }
 
+/// Appends the ledger row for a run that SWEPT and did not trade.
+///
+/// # Why this exists, and what `runs.bin` looked like without it
+///
+/// `sweep-stored`, `sweep-all`, `audit-stored` and `auto-stored` each build the
+/// full nine-term run identity §3 rule 3 demands, print it, and then discarded
+/// it. The rule is "**No computation without that identity recorded**", and on
+/// this machine the evidence was unambiguous: `results/runs.bin` was **16
+/// bytes** — a header and not one row — beside four live detail files. Every
+/// stored sweep anyone had ever run left nothing behind but a log line.
+///
+/// The reason was structural rather than an oversight: `record_all` wants a
+/// `Recorded`, which carries a selected exit cell, a direction, a priced map and
+/// the chosen trade rows. A sweep that does not trade has none of those, so the
+/// only recording path in the crate could not be reached from half its verbs.
+///
+/// # What a swept row asserts, and what it deliberately does not
+///
+/// It asserts the identity, the span, the months found, the combination count,
+/// the depth and whether the ladder halted — everything the sweep actually
+/// measured. It asserts `trades: 0`, which `crates/cli/src/frontier.rs` already
+/// defines as the unpriced marker, and both "best complete run" rankers now
+/// skip. Its `mask_words` are all-zero because no combination was chosen, and
+/// naming one would invent the trade the row exists to say did not happen.
+///
+/// # Errors
+///
+/// Whatever `ensure_run_record` refuses: a colliding identity whose stored
+/// deterministic fields differ from this run's.
+fn record_swept_run(
+    into: Recording<'_>,
+    id: &runner::identity::RunId,
+    outcome: &runner::RankedOutcome,
+    bars: u64,
+    min_hits: u64,
+) -> Result<(String, Committed), String> {
+    record_run(into, id, outcome, None, bars, min_hits, [0; 6])
+}
+
 fn record_run(
     into: Recording<'_>,
     id: &runner::identity::RunId,
     outcome: &runner::RankedOutcome,
-    selected: &runner::grid::Cell,
+    // `None` IS A REAL ANSWER, and every money field below already reads it
+    // that way: each is `chosen.map_or(0, ..)`. What the parameter said before
+    // was `&Cell` — a trade is compulsory — while the body was written for a
+    // run that has none. `sweep-stored` and `sweep-all` sweep without trading,
+    // so requiring a cell is what kept them out of the ledger entirely.
+    //
+    // A row with `trades == 0` is the unpriced marker `crates/cli/src/frontier.rs`
+    // already defines: "the only value that says so". Both rankers now skip it.
+    selected: Option<&runner::grid::Cell>,
     bars: u64,
     min_hits: u64,
     // The combination this run traded, so the ledger can name it. A run identity
-    // is a hash and cannot be turned back into conditions.
+    // is a hash and cannot be turned back into conditions. All-zero for a run
+    // that traded nothing: there is no combination to name, and naming one
+    // would be inventing the trade the row exists to say did not happen.
     mask_words: [u64; 6],
 ) -> Result<(String, Committed), String> {
-    let chosen = Some(selected);
+    let chosen = selected;
     let rung =
         |slot: Option<usize>| -> i16 { slot.and_then(|v| i16::try_from(v).ok()).unwrap_or(-1) };
     let record = results::Record {
@@ -13790,7 +13889,7 @@ fn record_all_attempt(
             into,
             run_id,
             what.outcome,
-            &what.selected,
+            Some(&what.selected),
             what.bars,
             what.min_hits,
             what.mask_words,

@@ -822,9 +822,17 @@ impl Ledger {
     /// the doc comment above states, which the chain did not.
     #[must_use]
     pub fn best_complete(&self) -> Option<&Run> {
+        // AND `trades > 0`, for the same reason `!halted` is here.
+        //
+        // A row that swept and never traded carries `pessimistic: 0`, and zero
+        // beats every genuinely losing run — so on a ledger where nothing
+        // profitable was found, the browser's headline would be a run that made
+        // no trade. `crates/cli/src/frontier.rs` already treats `trades == 0`
+        // as the unpriced marker ("the only value that says so"); this ranker
+        // did not, and neither did `cli`'s own `best_complete_line`.
         self.runs
             .iter()
-            .filter(|run| !run.halted && run.sealed)
+            .filter(|run| !run.halted && run.sealed && run.trades > 0)
             .max_by_key(|run| (run.pessimistic, std::cmp::Reverse(run.index)))
     }
 
