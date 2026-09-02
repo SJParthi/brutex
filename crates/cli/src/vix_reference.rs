@@ -356,7 +356,7 @@ mod tests {
         (root, file_path)
     }
 
-    fn overwrite_i64(file_path: &Path, record: u64, field: u64, value: i64) {
+    fn overwrite_i64(file_path: &Path, record: u64, field: u64, value: i64, n_valid: u64) {
         let file = OpenOptions::new()
             .write(true)
             .open(file_path)
@@ -369,6 +369,54 @@ mod tests {
         file.write_all_at(&value.to_le_bytes(), offset)
             .expect("fixture corruption lands");
         file.sync_all().expect("fixture corruption is visible");
+        drop(file);
+        // AND RESEALED, so these tests keep testing what they are named for.
+        //
+        // Reads now verify the block checksum, which catches a poked byte
+        // before any semantic check runs. That is the point of the checksum --
+        // but unresealed it would leave `reordered_unique_timestamps_are_refused`
+        // and its two siblings asserting on a checksum message and never
+        // reaching the timestamp, OHLC and count rules they exist to prove.
+        //
+        // A corruption that arrives with a MATCHING seal is also the harder
+        // case and the one worth proving here: the bytes are internally
+        // consistent -- exactly what a vendor sending bad data produces, since
+        // it would have been sealed correctly on the way in -- and the reader
+        // has to refuse them on their meaning alone.
+        //
+        // The checksum's own path is covered separately, by
+        // `store::file::tests::a_flipped_byte_in_a_committed_block_is_refused_and_names_the_block`.
+        reseal_block(file_path, n_valid);
+    }
+
+    /// Recomputes the committed block seal after a fixture edits a record.
+    ///
+    /// Built from the public primitives the writer itself uses --
+    /// `Layout::covered_byte_range` and `block::seal` -- rather than from a
+    /// reseal entry point on `BarFile`. A public "make the checksum match
+    /// whatever the bytes are now" is a rubber stamp, and the one caller that
+    /// wants it is a test fixture.
+    fn reseal_block(file_path: &Path, n_valid: u64) {
+        let (from, to) = Layout::CURRENT
+            .covered_byte_range(0, n_valid)
+            .expect("fixture block 0 has a covered range");
+        let len = usize::try_from(to.saturating_sub(from)).expect("covered range fits usize");
+        let mut covered = vec![0_u8; len];
+        let bars = OpenOptions::new()
+            .read(true)
+            .open(file_path)
+            .expect("fixture file opens to reseal");
+        bars.read_exact_at(&mut covered, from)
+            .expect("the committed block reads back");
+        let seal = store::block::seal(Layout::CURRENT, n_valid, 0, &covered)
+            .expect("the edited block seals");
+        let sidecar = file_path.with_extension("crc");
+        OpenOptions::new()
+            .write(true)
+            .open(&sidecar)
+            .expect("fixture sidecar opens")
+            .write_all_at(&seal.to_le_bytes(), 0)
+            .expect("the fresh seal lands");
     }
 
     #[test]
@@ -459,7 +507,7 @@ mod tests {
         let first = ist_minute(2026, 8, 3, 9 * 60 + 15);
         let bars = [bar(first, 0), bar(first + MICROS_PER_MINUTE, 1)];
         let (root, file_path) = seed("duplicate", Vendor::Dhan, &bars);
-        overwrite_i64(&file_path, 1, 0, first);
+        overwrite_i64(&file_path, 1, 0, first, 2);
 
         let why = VixReferenceMonth::open(&root, Vendor::Dhan, month())
             .expect_err("the duplicate must not overwrite the first slot");
@@ -478,7 +526,7 @@ mod tests {
             bar(first + 2 * MICROS_PER_MINUTE, 2),
         ];
         let (root, file_path) = seed("reordered", Vendor::Dhan, &bars);
-        overwrite_i64(&file_path, 1, 0, first + 3 * MICROS_PER_MINUTE);
+        overwrite_i64(&file_path, 1, 0, first + 3 * MICROS_PER_MINUTE, 3);
 
         let why = VixReferenceMonth::open(&root, Vendor::Dhan, month())
             .expect_err("reordered evidence must not publish an index");
@@ -490,13 +538,13 @@ mod tests {
     fn post_write_ohlc_and_count_corruption_are_refused() {
         let first = ist_minute(2026, 8, 3, 9 * 60 + 15);
         let (ohlc_root, ohlc_path) = seed("bad-ohlc", Vendor::Dhan, &[bar(first, 0)]);
-        overwrite_i64(&ohlc_path, 0, 16, 1);
+        overwrite_i64(&ohlc_path, 0, 16, 1, 1);
         let why = VixReferenceMonth::open(&ohlc_root, Vendor::Dhan, month())
             .expect_err("an impossible high is corrupt");
         assert!(why.contains("OHLC is corrupt"), "{why}");
 
         let (count_root, count_path) = seed("bad-count", Vendor::Dhan, &[bar(first, 0)]);
-        overwrite_i64(&count_path, 0, 40, -1);
+        overwrite_i64(&count_path, 0, 40, -1, 1);
         let why = VixReferenceMonth::open(&count_root, Vendor::Dhan, month())
             .expect_err("negative volume is corrupt");
         assert!(why.contains("counts are corrupt"), "{why}");

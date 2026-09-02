@@ -75,6 +75,21 @@
 //! a record of one that happened, and [`Live::finish`] removes it when the real
 //! rows land.
 //!
+//! # A KILLED RUN LEAVES ITS FILE, AND THIS MODULE CANNOT REMOVE IT
+//!
+//! [`Live::finish`] is the only remover and it runs only on the success path.
+//! There is no `Drop`, so SIGTERM, SIGKILL and a closed terminal each leave a
+//! file behind that says a search is in flight forever. MEASURED on 2026-09-01:
+//! one 6,840-byte file -- 25 rows, last written 21:41 -- was still being served
+//! as a running sweep hours after the process that wrote it was gone.
+//!
+//! [`census`] now dates every file it reads and [`Freshness`] carries the
+//! answer, but read [`STALE_AFTER_SECS`] before trusting it. The writer
+//! publishes ONCE, immediately before the exit grid, so an untouched file is the
+//! normal state for 87.6% of a healthy run's wall clock. mtime can say "nothing
+//! has written here since yesterday". It cannot say "this run is dead", and
+//! nothing below pretends otherwise.
+//!
 //! # One file per run identity, and therefore no lock
 //!
 //! `range_over` walks eight rungs at once. A single shared file would need the
@@ -135,6 +150,57 @@ const SUMMARY_BYTES: usize = 24;
 
 /// Where row zero starts.
 const ROWS_AT: usize = HEADER_BYTES + SUMMARY_BYTES;
+
+/// How long a live file may sit untouched before [`census`] calls it STALE.
+///
+/// # The signal is mtime, and mtime is the WRONG signal
+///
+/// What follows is the honest half-answer, and the whole reason it is a day.
+///
+/// [`Live::finish`] is the only remover and it runs only on the success path.
+/// A killed run therefore leaves a file claiming a search is in flight, forever.
+///
+/// The obvious remedy is to time the file out, and the obvious remedy is wrong,
+/// because of what the writer actually does: **the file is written exactly twice
+/// and then deleted.** [`Live::open`] publishes an empty one, `publish_ranked`
+/// publishes the ranked rows ONCE immediately before the exit grid, and
+/// [`Live::finish`] removes it at the end. This module's own header computes
+/// ~400 rewrites for an 84-million-candidate run; that is what the FORMAT
+/// affords, not what the caller does.
+///
+/// So the mtime of a perfectly healthy live file is pinned at the instant the
+/// exit grid started -- and the exit grid is **87.6% of a run's wall clock**,
+/// measured by sampling a real `range-all`: 18,068 samples in the grid against
+/// 1,403 in the sweep and 887 everywhere else. Silence on this file is not a
+/// symptom. It is the normal state for the overwhelming majority of every run,
+/// by construction.
+///
+/// A threshold cannot separate "killed" from "pricing". It can only separate
+/// "recently" from "long ago". Marking a healthy nine-hour grid dead is worse
+/// than the bug it would be fixing, because a flag an operator learns to ignore
+/// is a flag that is not there.
+///
+/// # Why a day, and what crossing it does NOT claim
+///
+/// The longest run recorded anywhere in this repository is a 60-minute
+/// `audit-range` whose grid phase was about 42 minutes of that. A day is 24x
+/// the longest measured run and ~34x the longest measured grid, so crossing it
+/// is not a judgement about how long a sweep is allowed to take. It is the flat
+/// statement *nothing has written here since yesterday*, which an operator can
+/// act on without knowing anything about the run at all.
+///
+/// [`Freshness`] carries the measured idle seconds either way, so a caller that
+/// wants a tighter line has the raw number and does not need this one.
+///
+/// # The correct fix is a heartbeat, and it is not in this module
+///
+/// Silence would mean something if the grid loop touched the file on a
+/// schedule. That is a call inside the exit grid in `crates/cli/src/lib.rs`,
+/// not a reader here, and until it exists NO reader can answer "is this run
+/// alive" -- only "when was this file last written". §3 rule 6: the limit is
+/// stated rather than papered over with a shorter timeout that would look
+/// decisive and be wrong.
+pub const STALE_AFTER_SECS: u64 = 24 * 60 * 60;
 
 /// What a run has found so far, and what it must clear.
 ///
@@ -326,8 +392,20 @@ impl Live {
     ///
     /// Called after [`crate::record_all`] has written the ledger, the frontier
     /// and the trades. A live file that outlives its run is a claim that a search
-    /// is still going when it is not, and `/live.json` cannot tell the difference
-    /// from the file alone.
+    /// is still going when it is not.
+    ///
+    /// # It is the ONLY remover, and it runs only on the success path
+    ///
+    /// There is no `Drop` impl on [`Live`], so a run ended by SIGTERM, SIGKILL
+    /// or a closed terminal never reaches this method and leaves its file
+    /// behind permanently. MEASURED on 2026-09-01: a 6,840-byte file -- 25 rows,
+    /// written at 21:41 -- was still served as an in-flight run hours later.
+    ///
+    /// [`census`] dates what it reads and [`Freshness`] reports it, which is a
+    /// half-answer and is documented as one on [`STALE_AFTER_SECS`]: the file is
+    /// published once and then sits untouched for the 87.6% of a run the exit
+    /// grid occupies, so mtime cannot tell a killed run from a pricing one. This
+    /// method staying the only remover is why that half-answer is needed at all.
     ///
     /// # Errors
     ///
@@ -348,6 +426,77 @@ impl Live {
     }
 }
 
+/// How long ago a live file was last written, and what that does and does not
+/// prove.
+///
+/// **No variant here says a process is alive.** A run killed one second ago
+/// leaves a file that is [`Self::Touched`], and a healthy run deep in the exit
+/// grid eventually leaves one that is [`Self::Stale`] -- see
+/// [`STALE_AFTER_SECS`] for why mtime cannot do better than that, and for the
+/// heartbeat that would. Each variant is a statement about the FILE.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Freshness {
+    /// Written `secs` ago, which is less than [`STALE_AFTER_SECS`]. Something
+    /// wrote here recently; it does not follow that anything is writing here
+    /// now.
+    Touched(u64),
+    /// Not written for `secs`, which is at least [`STALE_AFTER_SECS`]. Evidence
+    /// of an abandoned run, not proof of one.
+    Stale(u64),
+    /// No modification time could be read, or the file claims to have been
+    /// written in the FUTURE -- a clock that moved, or a store on a filesystem
+    /// that keeps no time.
+    ///
+    /// Its own state rather than folded into "recent", which is the distinction
+    /// the rest of this module exists to preserve: "I could not look" and
+    /// "there is nothing to see" are two facts, and rendering them identically
+    /// is the failure `CLAUDE.md` §4 bans.
+    #[default]
+    Unknown,
+}
+
+impl Freshness {
+    /// Seconds since the last write, or [`None`] when there is no answer.
+    #[must_use]
+    pub const fn idle_secs(self) -> Option<u64> {
+        match self {
+            Self::Touched(secs) | Self::Stale(secs) => Some(secs),
+            Self::Unknown => None,
+        }
+    }
+
+    /// Whether this file crossed [`STALE_AFTER_SECS`].
+    ///
+    /// [`None`] when the file could not be dated -- **not** `false`, which
+    /// would report a measurement nobody took as a clean bill of health.
+    #[must_use]
+    pub const fn is_stale(self) -> Option<bool> {
+        match self {
+            Self::Touched(_) => Some(false),
+            Self::Stale(_) => Some(true),
+            Self::Unknown => None,
+        }
+    }
+}
+
+/// One live file, decoded, plus the one fact the format itself does not carry.
+///
+/// A bare `(identity, summary, rows)` tuple until 2026-09-01, and the fourth
+/// member is why it is a struct now: four positions at a call site are four
+/// things a reader has to count rather than read.
+#[derive(Clone, Debug)]
+pub struct Run {
+    /// The nine-term run identity, from row zero or -- for a file that has
+    /// found nothing yet -- from the filename.
+    pub identity: [u8; 32],
+    /// What the run has weighed so far and the bar its rows must clear.
+    pub summary: Summary,
+    /// The ranked prefix that decoded, best first.
+    pub rows: Vec<Row>,
+    /// When the file was last written, judged against [`STALE_AFTER_SECS`].
+    pub freshness: Freshness,
+}
+
 /// Every run with a live file right now, in identity order.
 ///
 /// NOT "newest activity first", which this said while sorting by identity. The
@@ -355,6 +504,11 @@ impl Live {
 /// activity order could be computed from -- and a caller trusting that wording
 /// would render a three-week-old abandoned file at the top because its identity
 /// happens to start with a zero byte.
+///
+/// **It DROPS [`Freshness`].** The file's modification time is not in the tuple
+/// and cannot be, so a caller here cannot tell a run that is being written from
+/// one abandoned in April. Any surface an operator watches during a run wants
+/// [`census`] instead, for this reason and for the two below.
 ///
 /// # Errors
 ///
@@ -365,7 +519,11 @@ impl Live {
 /// should use [`census`] instead.
 #[must_use]
 pub fn current(root: &Path) -> Vec<([u8; 32], Summary, Vec<Row>)> {
-    census(root).runs
+    census(root)
+        .runs
+        .into_iter()
+        .map(|run| (run.identity, run.summary, run.rows))
+        .collect()
 }
 
 /// What could be read, and what could not.
@@ -382,10 +540,42 @@ pub fn current(root: &Path) -> Vec<([u8; 32], Summary, Vec<Row>)> {
 #[derive(Clone, Debug, Default)]
 pub struct Census {
     /// Every live file that decoded, in identity order.
-    pub runs: Vec<([u8; 32], Summary, Vec<Row>)>,
-    /// Files present that did not decode as a live file of this version:
-    /// wrong magic, unknown version, short header, or an unreadable count.
+    pub runs: Vec<Run>,
+    /// Entries NAMED like a live file whose bytes are not one: wrong magic,
+    /// unknown version, short header, or an unreadable count.
+    ///
+    /// This is the corruption count, and it is now only that. See
+    /// [`Self::strays`] for what used to land here and should not have.
     pub skipped: u32,
+    /// Directory entries that are not a live file's NAME at all -- anything
+    /// but 64 hex characters and `.bin`.
+    ///
+    /// Counted apart from [`Self::skipped`] because they are a different fact
+    /// and `/live.json` publishes `skipped` as *"something is there and I
+    /// cannot read it"* -- a corruption alarm. The commonest entry here is not
+    /// a corruption at all: [`Live::publish`] names its temp file
+    /// `<hex>.<pid>.tmp`, so a run killed between the write and the rename
+    /// leaves a COMPLETE, VALID live file under a name that is not a run's.
+    ///
+    /// Before the name filter that was worse than a false alarm. A `.tmp`
+    /// carrying rows decoded fine, took its identity from row zero, and listed
+    /// **the same run twice**; an empty one -- the header-only file
+    /// [`Live::open`] writes -- failed [`identity_from_name`] and inflated the
+    /// corruption count instead.
+    pub strays: u32,
+    /// Runs whose file has not been written for at least [`STALE_AFTER_SECS`].
+    ///
+    /// **Read that constant before reporting this number as dead runs.** It is
+    /// "not written since yesterday", which is evidence and is not proof: the
+    /// writer publishes once and the exit grid is 87.6% of a healthy run.
+    pub stale: u32,
+    /// Runs whose file carries no usable modification time, so the staleness
+    /// question has no answer for them.
+    ///
+    /// Present so that `stale: 0` cannot be read as "and every file was
+    /// checked". A count of unanswered questions beside a count of answers is
+    /// the same discipline [`Self::skipped`] applies to the bytes.
+    pub undated: u32,
     /// False when the live directory itself could not be listed. Distinct from
     /// an empty directory, which lists fine and yields no runs.
     pub listed: bool,
@@ -394,6 +584,24 @@ pub struct Census {
 /// Reads the live directory, counting what it could not show.
 #[must_use]
 pub fn census(root: &Path) -> Census {
+    census_at(root, std::time::SystemTime::now())
+}
+
+/// [`census`], with the instant staleness is judged against passed in.
+///
+/// **Split so a test can state a clock it cannot cause.** [`STALE_AFTER_SECS`]
+/// is a day and a test that waited for it would not be a test; nothing in this
+/// workspace may name `filetime`, so backdating a file is not on offer either.
+/// Moving `now` is the same arithmetic seen from the other end, and it reaches
+/// all three [`Freshness`] arms: forward for [`Freshness::Stale`], backward for
+/// [`Freshness::Unknown`] -- a file written after the instant it is judged at is
+/// exactly the clock-moved case that variant exists for.
+///
+/// The clock is read ONCE for the whole walk, deliberately. Two runs judged
+/// against two different instants can be ordered by the reads rather than by
+/// the files, and §3 rule 5 applies to a page's rows as much as to a total.
+#[must_use]
+pub fn census_at(root: &Path, now: std::time::SystemTime) -> Census {
     let entries = match std::fs::read_dir(Live::dir(root)) {
         Ok(entries) => entries,
         // A live directory that does not exist is a store where nothing has
@@ -403,24 +611,43 @@ pub fn census(root: &Path) -> Census {
         // volume that went away mid-sweep.
         Err(why) if why.kind() == std::io::ErrorKind::NotFound => {
             return Census {
-                runs: Vec::new(),
-                skipped: 0,
                 listed: true,
+                ..Census::default()
             };
         }
         Err(_) => {
             return Census {
-                runs: Vec::new(),
-                skipped: 0,
                 listed: false,
+                ..Census::default()
             };
         }
     };
-    let mut runs = Vec::new();
+    let mut runs: Vec<Run> = Vec::new();
     let mut skipped: u32 = 0;
+    let mut strays: u32 = 0;
+    let mut stale: u32 = 0;
+    let mut undated: u32 = 0;
     for entry in entries.flatten() {
-        if let Some(one) = read_one(&entry.path()) {
-            runs.push(one);
+        let path = entry.path();
+        // A NAME THAT IS NOT A RUN'S IS NOT A CORRUPT RUN, and the reader used
+        // to iterate every entry with no filter at all. See `Census::strays`.
+        //
+        // THE FILTER AND THE PARSE ARE ONE CALL, deliberately. A separate
+        // `is_live_name` predicate beside `identity_from_name` would be two
+        // spellings of one rule, free to disagree the first time either is
+        // edited -- and `read_one` would then re-derive from the name a second
+        // time. The name is decided here, once, and handed down.
+        let Some(named) = identity_from_name(&path) else {
+            strays = strays.saturating_add(1);
+            continue;
+        };
+        if let Some(run) = read_one(&path, named, now) {
+            match run.freshness {
+                Freshness::Stale(_) => stale = stale.saturating_add(1),
+                Freshness::Unknown => undated = undated.saturating_add(1),
+                Freshness::Touched(_) => {}
+            }
+            runs.push(run);
         } else {
             skipped = skipped.saturating_add(1);
         }
@@ -428,11 +655,36 @@ pub fn census(root: &Path) -> Census {
     // Deterministic order, because two runs finishing in the same millisecond
     // must not swap places between two polls of the same page. The identity is
     // the key nothing else shares.
-    runs.sort_by_key(|(identity, _, _)| *identity);
+    runs.sort_by_key(|run| run.identity);
     Census {
         runs,
         skipped,
+        strays,
+        stale,
+        undated,
         listed: true,
+    }
+}
+
+/// When a file was last written, judged against [`STALE_AFTER_SECS`].
+fn freshness_of(meta: &std::fs::Metadata, now: std::time::SystemTime) -> Freshness {
+    // BOTH FAILURES ARE ONE ANSWER, and they are collapsed with combinators
+    // rather than two `else` arms so this function holds no branch a test
+    // cannot reach -- `modified` is infallible on every platform this runs on.
+    //
+    // The second failure is the interesting one: `duration_since` refuses when
+    // the file was written AFTER `now`, which is a clock that moved. Reading
+    // that refusal as zero seconds would report the most suspicious file on the
+    // disk as the healthiest one on it.
+    match meta
+        .modified()
+        .ok()
+        .and_then(|written| now.duration_since(written).ok())
+        .map(|idle| idle.as_secs())
+    {
+        Some(secs) if secs >= STALE_AFTER_SECS => Freshness::Stale(secs),
+        Some(secs) => Freshness::Touched(secs),
+        None => Freshness::Unknown,
     }
 }
 
@@ -442,7 +694,14 @@ pub fn census(root: &Path) -> Census {
 /// larger than the bytes present is SKIPPED rather than refused: this directory
 /// is transient by design and a half-written file is an ordinary state, not a
 /// corruption to report.
-fn read_one(path: &Path) -> Option<([u8; 32], Summary, Vec<Row>)> {
+///
+/// `named` is the identity [`identity_from_name`] already parsed out of the
+/// path -- passed in rather than re-derived, because the caller had to parse it
+/// to decide this entry was a live file at all.
+///
+/// `now` is the instant [`Freshness`] is measured against; it is the caller's
+/// so that every run in one census is dated by one clock read.
+fn read_one(path: &Path, named: [u8; 32], now: std::time::SystemTime) -> Option<Run> {
     let mut file = File::open(path).ok()?;
     let mut header = [0_u8; HEADER_BYTES];
     file.read_exact(&mut header).ok()?;
@@ -465,7 +724,13 @@ fn read_one(path: &Path) -> Option<([u8; 32], Summary, Vec<Row>)> {
     // last and is therefore never ahead of the rows -- but a file truncated by a
     // crashed process can be shorter than its own header claims, and reading
     // that as rows would decode whatever follows.
-    let len = file.metadata().ok()?.len();
+    //
+    // ONE `metadata` CALL SERVES BOTH the length check and the modification
+    // time. Two calls would be two answers about one file, and this module has
+    // recorded what that costs.
+    let meta = file.metadata().ok()?;
+    let len = meta.len();
+    let freshness = freshness_of(&meta, now);
     let available = usize::try_from(len.saturating_sub(ROWS_AT as u64)).ok()? / STRIDE_BYTES;
     let readable = count.min(available);
 
@@ -513,15 +778,46 @@ fn read_one(path: &Path) -> Option<([u8; 32], Summary, Vec<Row>)> {
     if rows.is_empty() {
         // A started-but-empty file is a real state -- a run that has not yet
         // found anything -- and the identity comes from the FILENAME, which is
-        // where it is written before any row exists.
-        identity = identity_from_name(path)?;
+        // where it is written before any row exists. The caller parsed it.
+        identity = named;
     }
-    Some((identity, summary, rows))
+    Some(Run {
+        identity,
+        summary,
+        rows,
+        freshness,
+    })
 }
 
-/// The identity a live file is named for.
+/// The identity a live file is named for, and [`census_at`]'s name filter.
+///
+/// # It requires `.bin` now, and a killed writer is why
+///
+/// This read `file_stem` and so answered the same for `<hex>.bin` and for
+/// `<hex>.tmp`. [`Live::publish`] writes `<hex>.<pid>.tmp` and renames it over
+/// the real name, so a writer killed in that window leaves a **complete, valid
+/// live file** under a temp name -- and the reader, which iterated every
+/// directory entry with no filter at all, then either listed the same run TWICE
+/// (when the temp file carried rows, whose row-zero identity it trusted) or
+/// counted it as a corrupt file (when it was the header-only file
+/// [`Live::open`] writes, whose `<hex>.<pid>` stem parses to nothing).
+///
+/// Neither is true. `<hex>.<pid>` is 64 characters plus a dot plus digits, so
+/// requiring the whole NAME to be 64 hex characters and `.bin` refuses it on
+/// its face -- and refuses `<hex>`, `<hex>.tmp`, `notes.bin` and a
+/// subdirectory with it.
+///
+/// # Why the whole check lives here rather than beside the walk
+///
+/// [`census_at`] filters by calling this and keeping the answer, so there is
+/// one rule and it is parsed once. A predicate beside a parser is two spellings
+/// of one fact -- the shape this repository has recorded the cost of more than
+/// once.
 fn identity_from_name(path: &Path) -> Option<[u8; 32]> {
-    let stem = path.file_stem()?.to_str()?;
+    let stem = path
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)?
+        .strip_suffix(".bin")?;
     if stem.len() != 64 {
         return None;
     }
@@ -615,9 +911,29 @@ pub fn expected_rewrites(keep: u64, weighed: u64) -> u64 {
               state the same fact twice."
 )]
 mod tests {
-    use super::{Live, MAGIC, ROWS_AT, Summary, VERSION, current, expected_rewrites};
+    use super::{
+        Freshness, Live, MAGIC, ROWS_AT, STALE_AFTER_SECS, Summary, VERSION, census, census_at,
+        current, expected_rewrites,
+    };
     use crate::frontier::Row;
     use crate::frontier::STRIDE_BYTES;
+
+    /// One file name of the only shape the reader admits: sixty-four hex
+    /// characters and `.bin`, the byte repeated thirty-two times.
+    ///
+    /// A test that wants a file `census` will actually OPEN has to name it like
+    /// one. Before the name filter any string would do, which is why three
+    /// fixtures below had to be renamed -- they were about to start proving
+    /// something other than what they are named for.
+    fn hex_name(byte: u8) -> String {
+        use core::fmt::Write as _;
+        let mut out = String::with_capacity(68);
+        for _ in 0..32 {
+            let _ = write!(out, "{byte:02x}");
+        }
+        out.push_str(".bin");
+        out
+    }
 
     /// A row with every field named, because `Row` has no `Default` -- it is
     /// built from a `Scored` and a grid `Cell` in production, and a test that
@@ -766,18 +1082,20 @@ mod tests {
         live.publish(&[row(good, 1, 4_000)], Summary::default())
             .expect("writable");
 
+        // THE NAMES ARE HEX, and that is load-bearing rather than cosmetic.
+        // These fixtures were called `not-a-live-file.bin`, `truncated.bin` and
+        // `future.bin`, so after the name filter they would have been counted
+        // as STRAYS and this test would have stopped exercising the corruption
+        // path it is named for -- passing for the wrong reason.
         let dir = Live::dir(root.path());
-        std::fs::write(
-            dir.join("not-a-live-file.bin"),
-            b"BRUTEXFR\x03\0\0\0\0\0\0\0",
-        )
-        .expect("writable");
-        std::fs::write(dir.join("truncated.bin"), b"BRU").expect("writable");
+        let foreign = dir.join(hex_name(0xa1));
+        std::fs::write(&foreign, b"BRUTEXFR\x03\0\0\0\0\0\0\0").expect("writable");
+        std::fs::write(dir.join(hex_name(0xb2)), b"BRU").expect("writable");
         // Right magic, wrong version: a process from another build.
         let mut wrong = Vec::from(b"BRUTEXLV");
         wrong.extend_from_slice(&99_u32.to_le_bytes());
         wrong.extend_from_slice(&[0_u8; 4]);
-        std::fs::write(dir.join("future.bin"), &wrong).expect("writable");
+        std::fs::write(dir.join(hex_name(0xc3)), &wrong).expect("writable");
 
         let seen = current(root.path());
         assert_eq!(
@@ -786,6 +1104,17 @@ mod tests {
             "three unreadable files are skipped and the real one still reads"
         );
         assert_eq!(seen[0].2[0].t_milli, 4_000);
+
+        // AND THEY ARE COUNTED AS CORRUPTION, not as strays: each carries a
+        // live file's name and does not carry a live file's bytes, which is
+        // exactly the fact `skipped` publishes.
+        let census = census(root.path());
+        assert_eq!(census.skipped, 3, "three named files would not decode");
+        assert_eq!(
+            census.strays, 0,
+            "and none of them is a stray -- every name here is one this reader \
+             is right to have opened"
+        );
     }
 
     /// A row that does not seal is not decoded, and a hex-looking name is not
@@ -843,12 +1172,214 @@ mod tests {
         body.extend_from_slice(&Summary::default().to_bytes());
         std::fs::write(&forged, &body).expect("writable");
 
-        let after = current(root.path());
+        let after = census(root.path());
         assert_eq!(
-            after.len(),
+            after.runs.len(),
             1,
             "a filename that is not lowercase hex is not an identity, however \
              willingly `from_str_radix` parses it"
+        );
+        assert_eq!(
+            (after.strays, after.skipped),
+            (1, 0),
+            "and it is a STRAY rather than a corrupt file: the bytes are a \
+             perfectly good live file, the name is not a run's"
+        );
+    }
+
+    /// A temp file left by a killed writer is neither a run nor a corruption.
+    ///
+    /// # The two ways this went wrong, and both were silent
+    ///
+    /// [`Live::publish`] writes `<hex>.<pid>.tmp` and renames it over
+    /// `<hex>.bin`. A process killed between the two leaves a **complete,
+    /// valid live file** under the temp name, and the reader iterated every
+    /// directory entry with no filter at all. So:
+    ///
+    /// * a temp file carrying ROWS decoded, took its identity from row zero,
+    ///   and listed **the same run twice** -- two entries, one identity, and a
+    ///   stable sort ordering them by `read_dir`;
+    /// * an EMPTY one -- the header-only file [`Live::open`] writes -- failed
+    ///   the name parse and landed in `skipped`, which `/live.json` publishes
+    ///   as *"something is there and I cannot read it"*. A false corruption
+    ///   alarm about a file that is not corrupt.
+    #[test]
+    fn a_temp_file_from_a_killed_writer_is_a_stray_and_not_a_second_run() {
+        let root = tempdir();
+        let identity = [0x5a_u8; 32];
+        let mut live = Live::open(root.path(), &identity).expect("writable");
+        live.publish(
+            &[row(identity, 1, 4_000), row(identity, 2, 3_000)],
+            Summary::default(),
+        )
+        .expect("writable");
+
+        // KILLED BETWEEN THE FLUSH AND THE RENAME. The bytes are exactly the
+        // real file's -- that is the point, and it is why "is it decodable"
+        // cannot be the test.
+        let real = Live::path(root.path(), &identity);
+        let bytes = std::fs::read(&real).expect("readable");
+        let temp = real.with_extension(format!("{}.tmp", std::process::id()));
+        std::fs::write(&temp, &bytes).expect("writable");
+
+        // AND A SECOND ONE THAT IS EMPTY, which is the shape `Live::open`
+        // writes and the shape that used to inflate the corruption count.
+        let other = Live::path(root.path(), &[0x6b_u8; 32]).with_extension("99999.tmp");
+        let mut empty = Vec::from(MAGIC);
+        empty.extend_from_slice(&VERSION.to_le_bytes());
+        empty.extend_from_slice(&[0_u8; 4]);
+        empty.extend_from_slice(&Summary::default().to_bytes());
+        std::fs::write(&other, &empty).expect("writable");
+
+        let census = census(root.path());
+        assert_eq!(
+            census.runs.len(),
+            1,
+            "one run has one file, whatever else is beside it -- a temp copy \
+             listed the same identity twice"
+        );
+        assert_eq!(
+            census.runs.first().map(|run| run.identity),
+            Some(identity),
+            "and it is the run the real name belongs to"
+        );
+        assert_eq!(
+            census.skipped, 0,
+            "a stray temp file is NOT a corrupt file, and `skipped` is the \
+             alarm that says one is there"
+        );
+        assert_eq!(
+            census.strays, 2,
+            "both temp files are counted, and counted apart -- an uncounted \
+             stray would be the silent skip this type exists to refuse"
+        );
+    }
+
+    /// A file nothing has written for a day is marked, and an undatable one is
+    /// marked UNKNOWN rather than healthy.
+    ///
+    /// # What this does not prove, and why the threshold is a day
+    ///
+    /// `publish_ranked` publishes ONCE, immediately before an exit grid that is
+    /// 87.6% of a run's wall clock, so an untouched live file is the normal
+    /// state for most of a healthy run. mtime can only say when the file was
+    /// last written; it cannot say whether the process is alive. See
+    /// [`STALE_AFTER_SECS`] for the heartbeat that could.
+    #[test]
+    fn a_file_untouched_for_a_day_is_stale_and_an_undatable_one_is_unknown() {
+        let root = tempdir();
+        let identity = [0x2b_u8; 32];
+        let mut live = Live::open(root.path(), &identity).expect("writable");
+        live.publish(&[row(identity, 1, 4_000)], Summary::default())
+            .expect("writable");
+
+        // A SECOND OF MARGIN, because a filesystem's timestamp granularity is
+        // not this test's business. The claim being made is "well under a day",
+        // not "exactly zero seconds", and a store whose mtime lands a tick
+        // ahead of `SystemTime::now()` would otherwise read as a clock that
+        // moved and fail here for a reason that is not the subject.
+        let now = std::time::SystemTime::now()
+            .checked_add(std::time::Duration::from_secs(1))
+            .expect("a clock that can be moved a second forward");
+        let fresh = census_at(root.path(), now);
+        assert_eq!(fresh.runs.len(), 1);
+        assert_eq!((fresh.stale, fresh.undated), (0, 0), "just written");
+        let first = fresh.runs.first().expect("the run");
+        assert_eq!(first.freshness.is_stale(), Some(false));
+        assert!(
+            first
+                .freshness
+                .idle_secs()
+                .is_some_and(|s| s < STALE_AFTER_SECS),
+            "the idle seconds are MEASURED and travel with the run, so a caller \
+             wanting a tighter line than a day does not need this one: {:?}",
+            first.freshness
+        );
+
+        // A DAY AND AN HOUR LATER. Moving `now` is the only spelling available:
+        // nothing in this workspace may name `filetime`, and a test that waited
+        // out `STALE_AFTER_SECS` would not be a test.
+        let later = now
+            .checked_add(std::time::Duration::from_secs(STALE_AFTER_SECS + 3_600))
+            .expect("a clock that can be moved a day forward");
+        let aged = census_at(root.path(), later);
+        assert_eq!(aged.stale, 1, "nothing has written here since yesterday");
+        assert_eq!(aged.undated, 0);
+        let one = aged.runs.first().expect("the run");
+        assert_eq!(one.freshness.is_stale(), Some(true));
+        assert!(
+            one.freshness
+                .idle_secs()
+                .is_some_and(|s| s >= STALE_AFTER_SECS),
+            "{:?}",
+            one.freshness
+        );
+        assert_eq!(
+            one.rows.len(),
+            1,
+            "and the rows are untouched by any of it -- staleness is a fact \
+             about the file, never a filter on what it holds"
+        );
+
+        // A CLOCK THAT MOVED. Judged against an instant BEFORE the write, the
+        // file claims to have been written in the future -- which is the state
+        // `Unknown` exists for, and the state a `false` would have hidden.
+        let confused = census_at(root.path(), std::time::SystemTime::UNIX_EPOCH);
+        assert_eq!(
+            confused.undated, 1,
+            "a file that cannot be dated is COUNTED, so `stale: 0` cannot be \
+             read as 'and every file was checked'"
+        );
+        assert_eq!(
+            confused.stale, 0,
+            "and it is not counted stale on a question nobody answered"
+        );
+        let none = confused.runs.first().expect("the run");
+        assert_eq!(
+            none.freshness.is_stale(),
+            None,
+            "NOT `Some(false)`: that would publish a measurement nobody took as \
+             a clean bill of health"
+        );
+        assert_eq!(none.freshness.idle_secs(), None);
+    }
+
+    /// The three answers, and the one that must stay an absence.
+    #[test]
+    fn freshness_answers_i_do_not_know_rather_than_fine() {
+        assert_eq!(Freshness::Touched(60).idle_secs(), Some(60));
+        assert_eq!(Freshness::Touched(60).is_stale(), Some(false));
+        assert_eq!(
+            Freshness::Stale(STALE_AFTER_SECS).idle_secs(),
+            Some(STALE_AFTER_SECS)
+        );
+        assert_eq!(Freshness::Stale(STALE_AFTER_SECS).is_stale(), Some(true));
+        assert_eq!(Freshness::Unknown.idle_secs(), None);
+        assert_eq!(
+            Freshness::Unknown.is_stale(),
+            None,
+            "the whole point of the variant"
+        );
+        assert_eq!(
+            Freshness::default(),
+            Freshness::Unknown,
+            "and the DEFAULT answer is 'I do not know', never 'fine' -- a \
+             `Census` built by `Default` must not describe healthy runs"
+        );
+
+        // A DAY IS NOT AN ARBITRARY NUMBER, and a future edit that tightens it
+        // fails here rather than in production. The writer publishes ONCE,
+        // immediately before an exit grid that is 87.6% of wall clock, so the
+        // threshold has to clear the longest run anyone in this repository has
+        // measured -- a 60-minute `audit-range`, ~42 minutes of it grid -- by a
+        // margin that makes crossing it a fact rather than a guess about how
+        // long a sweep is allowed to take.
+        const LONGEST_MEASURED_RUN_SECS: u64 = 60 * 60;
+        assert_eq!(STALE_AFTER_SECS, 86_400);
+        assert!(
+            STALE_AFTER_SECS >= LONGEST_MEASURED_RUN_SECS.saturating_mul(20),
+            "a threshold near the length of a real run marks healthy sweeps \
+             dead, and a flag an operator learns to ignore is not a flag"
         );
     }
 

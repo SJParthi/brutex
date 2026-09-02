@@ -186,13 +186,16 @@ Duplicate rejection | O(1) **expected**, not adversarial worst-case | k=1 uses o
 Nothing in the closure grows with the number of candles fed. That is the property a
 live consumer needs and it is asserted in the build rather than described here:
 `const _: () = assert!(size_of::<Evaluator>() <= 1824)` fails if any module starts
-accumulating. It measures 1776 bytes today, so the assertion has 48 bytes of slack and is
+accumulating. It measures 1792 bytes today, so the assertion has 32 bytes of slack and is
 a live guard rather than a rounded-up number that could never fire — it was 1664 until the
 non-regular-session `Calendar` was added, 1728 before the growth after that, 1744 before
-the crossing family added one `Option<ConditionMask>`, whose
-cause is not recorded here because it was not measured here. The test that reads this
+the crossing family added one `Option<ConditionMask>`, and 1776 before the charter's ninth
+non-regular day (2021-02-24, the NSE outage) widened `Calendar` by one `i64` and its
+padding. The test that reads this
 number is what refused each stale figure rather than a reader noticing, and it has now
-done so twice; 48 bytes is two more `Calendar`-sized additions, not many.
+done so three times; **32 bytes is ONE more `Calendar`-sized addition, not two.** The next
+non-regular day this charter records will fail that assertion rather than pass it, which
+is the guard doing its job — raise the ceiling in the same commit, deliberately.
 
 **Stated rather than implied (§3 rule 6):** support counting is O(candles) because it
 *is* the measurement, and the Apriori level join is O(|frontier|²), which is that

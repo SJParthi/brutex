@@ -75,33 +75,65 @@
 //!   was the alternative, and it was rejected because a crashed writer would
 //!   leave a stale lock that only an operator could clear.
 //!
-//! # This build writes files with no block checksums, on purpose
+//! # This build seals block checksums AND checks them on the way back out
 //!
-//! [`crate::format::FLAG_CHECKSUMS`] is clear in every file this module
-//! creates, and the [`crate::path::FileKind::Checksums`] sidecar is not
-//! created. `docs/02-store-format.md` §6 provides for exactly that state: a
-//! file whose flag is clear carries no sidecar and a verification request
-//! against it is **refused** rather than answered, which
-//! [`crate::block::verify`] already does by returning
-//! [`crate::format::FormatError::ChecksumsAbsent`].
+//! **This section said the opposite of both halves and it was wrong twice
+//! over, in sequence.** It read "this build writes files with no block
+//! checksums, on purpose", which stopped being true when `initialise` began
+//! setting [`crate::format::FLAG_CHECKSUMS`] — `BarFile::validated`'s own
+//! comment says so in as many words. What replaced the hole was HALF a
+//! mechanism: every commit sealed a sidecar and **no read path ever opened
+//! one**, so the bytes were there, they were correct, and nothing looked at
+//! them. Measured on the operator's store: 2,707 `.bin` files, 2,707 `.crc`
+//! sidecars, every header carrying the flag, every sidecar exactly
+//! `4 · ceil(n_valid / 73)` bytes, and a hand-recomputed CRC-32C of a real
+//! block equal to the number stored for it. A single flipped bit in a real
+//! `high` was swept as a price.
 //!
-//! It is a hole and it is named as one. What it costs: a lost write to the
-//! record extent is undetectable, because an all-zero record is a legal flat
-//! bar. What closing it needs is *not* more code here — it is a sidecar entry
-//! that says which record count it covers. The tail block's checksum domain is
-//! a function of `n_valid` ([`crate::layout::Layout::covered_byte_range`]), so
-//! a writer that re-seals the tail block on every commit has a window between
-//! the sidecar write and the header commit in which a crash leaves an entry
-//! computed over a record count the header does not yet claim — and the next
-//! reader reports a healthy file as corrupt. Inventing an entry format to close
-//! that is a `docs/02-store-format.md` change with a decision entry behind it,
-//! not something to slip into a writer.
+//! Both halves are wired now. `BarFile::seal_committed` writes the sidecar
+//! between the records and the header commit, and `BarFile::verify_block_of`
+//! reads it back on the first touch of each block, refusing by name with
+//! [`StoreError::BlockChecksum`] when the committed bytes are not the bytes
+//! that were sealed.
+//!
+//! **A file born WITHOUT the flag still reads, and that is not a hole being
+//! left open.** `docs/02-store-format.md` §6 provides for exactly that state,
+//! and §3 rule 8's append-only discipline says what a file was born with is
+//! what it carries: its records were never sealed, so there is nothing to
+//! check them against and "unverified" is the honest answer rather than a
+//! refusal. What is refused is the *other* shape — a file whose header claims
+//! checksums and whose sidecar is absent or too short — because there the
+//! answer is not "there was nothing to verify against", it is "the thing that
+//! would have verified this is missing".
+//!
+//! # The one window in which a healthy file is called corrupt, stated plainly
+//!
+//! This paragraph used to be a prediction and it is now a live limit, so it is
+//! kept rather than deleted. The tail block's checksum domain is a function of
+//! `n_valid` ([`crate::layout::Layout::covered_byte_range`]), and
+//! [`BarFile::append`] writes the records, then the sidecar, then the header —
+//! an ordering [`BarFile::append`] argues for at its own call site. A crash
+//! *between* the sidecar and the header therefore leaves the tail block's
+//! entry computed over a record count the header does not yet claim, and the
+//! next reader of that block computes over the shorter, older extent and gets
+//! a number that cannot match. It is a **false refusal**, loud and named, of
+//! one block of one month.
+//!
+//! It is not silent, it loses nothing, and it repairs itself: the next append
+//! writes at `offset_of(n_valid)` and `BarFile::seal_committed` re-seals from
+//! `block_of(first_index)` — which is that same tail block — so the sidecar and
+//! the header agree again. Closing it properly needs a sidecar entry that names
+//! the record count it covers, which is a `docs/02-store-format.md` change with
+//! a decision entry behind it, not something to slip into a writer. Refusing
+//! loudly in the meantime is `CLAUDE.md` §4's other arm; passing the block
+//! because a mismatch *might* be this case is the fallback it bans.
 
 use std::fmt;
 use std::fs::{self, File, TryLockError};
 use std::io::{self, ErrorKind};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::format::{
     Bar, FormatError, GREEK_LEN, HEADER_LEN, MAX_SLOT_COUNT, OVERLAY_LEN, RECORD_LEN, Row,
@@ -152,6 +184,23 @@ const _: () = assert!(HEADER_LEN <= 32_768);
 const REGION_LEN_U64: u64 = 32_768;
 
 const _: () = assert!(REGION_LEN_U64 == 32_768);
+
+/// "This handle has verified no block yet", in [`BarFile::verified`].
+///
+/// **A sentinel and not a wrapped index, and the difference is checkable.** A
+/// block index is `record_index / records_per_block` and the divisor is at
+/// least one — [`Layout::declare`] refuses a zero as
+/// [`FormatError::DegenerateLayout`], because it would be a division fault —
+/// so the largest block any index can name is `u64::MAX / 1`. At the bar
+/// geometry the divisor is 73 and the ceiling is `u64::MAX / 73`, roughly
+/// 2.5 × 10^17, which is 73 times more records than a `u64` file offset can
+/// address anyway. Reaching this value therefore needs a record index of
+/// `u64::MAX` at a one-record block, and `Layout::offset_of` refuses that as
+/// [`FormatError::OffsetOverflow`] long before a read gets here.
+///
+/// The alternative was an `Option<u64>` behind a lock, which is a lock on the
+/// read path to express a value that already has a spare bit pattern.
+const NO_BLOCK: u64 = u64::MAX;
 
 /// Which syscall refused, so an error names the operation and not only the
 /// path.
@@ -384,6 +433,59 @@ pub enum StoreError {
         /// Seconds per bar the path names.
         asked: u32,
     },
+    /// A committed block's bytes are not the bytes that were sealed.
+    ///
+    /// # The one refusal nothing else in this crate can make
+    ///
+    /// Every other variant here is a disagreement between two things that are
+    /// both still readable — the header and the length, the header and the
+    /// path, the batch and what is committed. This one is about bytes that
+    /// **look exactly like data**. An all-zero [`Bar`] satisfies
+    /// `ohlc_is_sane`, and its `open_interest` of zero is a real zero rather
+    /// than [`crate::format::OI_NULL`]; a single flipped bit in a `high` of
+    /// 238,600 paisa gives 2,335,752 paisa, which still satisfies
+    /// `high >= open`, `high >= low` and `high >= close` and therefore clears
+    /// every sanity check this workspace has. No range test, no header field
+    /// and no downstream reader can tell that extent from a price. The
+    /// checksum can, and this is it saying so.
+    ///
+    /// Carries the same three numbers [`crate::format::FormatError::BlockChecksum`]
+    /// does, plus the file — `StoreError` is the layer that knows which month
+    /// this was, and an operator holding "block 4 does not match" without a
+    /// path has to go and find out which of 2,707 files it was about.
+    BlockChecksum {
+        /// The bar file whose block failed.
+        path: PathBuf,
+        /// Which checksum block. Records `block · 73 ..` at the bar geometry.
+        block: u64,
+        /// The checksum the sidecar carries — what the bytes were when they
+        /// were committed.
+        stored: u32,
+        /// The checksum the committed bytes produce now.
+        computed: u32,
+    },
+    /// The header declares block checksums and the sidecar is not there.
+    ///
+    /// **Not the same fact as a file that carries no checksums at all**, and
+    /// the distinction is the one [`crate::format::FormatError::ChecksumsAbsent`]
+    /// exists to draw: a file born without [`crate::format::FLAG_CHECKSUMS`]
+    /// has records nobody sealed, so "unverified" is the honest answer and it
+    /// still reads. A file whose header says it WAS sealed and whose `.crc` is
+    /// gone is missing the only thing that could check it, and serving its
+    /// records as though the flag had never been set would be the fallback
+    /// `CLAUDE.md` §4 bans — it reads as safe and refuses nothing.
+    ///
+    /// A sidecar that exists but is too short is [`Self::ShortRead`] naming
+    /// the sidecar, its offset and the bytes it owed, which is the same
+    /// refusal by the ordinary door.
+    ChecksumsMissing {
+        /// The bar file, whose header declares the checksums.
+        path: PathBuf,
+        /// The sidecar that is not beside it.
+        sidecar: PathBuf,
+        /// The block a read wanted verified.
+        block: u64,
+    },
     /// A record index at or past the commit counter.
     ///
     /// Bytes past `n_valid` are not "empty", they are **not there**: they may
@@ -455,16 +557,89 @@ fn write_impossible_count(
     )
 }
 
+/// The [`StoreError::NotABarPath`] sentence.
+///
+/// Lifted out for [`write_impossible_count`]'s reason and no other: that match
+/// sat at exactly one hundred code lines, which is the ceiling itself, so the
+/// two checksum arms below could only be added by taking lines back out. Four
+/// sentences moved here and **not one word of any of them changed** —
+/// `crates/store/tests/write.rs` asserts several of them verbatim, and a
+/// reworded refusal would be a silent test failure dressed as a refactor.
+fn write_not_a_bar_path(f: &mut fmt::Formatter<'_>, found: FileKind) -> fmt::Result {
+    write!(
+        f,
+        "path names the {} sibling, not the records",
+        found.extension()
+    )
+}
+
+/// The [`StoreError::NotADirectory`] sentence. See [`write_not_a_bar_path`].
+fn write_not_a_directory(f: &mut fmt::Formatter<'_>, path: &Path, action: Action) -> fmt::Result {
+    write!(
+        f,
+        "a path component of {} is not a directory, {action} it",
+        path.display()
+    )
+}
+
+/// The [`StoreError::TimeframeMismatch`] sentence. See [`write_not_a_bar_path`].
+fn write_timeframe_mismatch(
+    f: &mut fmt::Formatter<'_>,
+    path: &Path,
+    stored: u32,
+    asked: u32,
+) -> fmt::Result {
+    write!(
+        f,
+        "{} holds {stored}-second bars, not {asked}",
+        path.display()
+    )
+}
+
+/// The [`StoreError::BlockChecksum`] sentence.
+///
+/// Both numbers, always, and in the order the file's own history reads: what
+/// the sidecar sealed, then what the bytes say now. A refusal carrying one of
+/// them tells an operator that something is wrong and nothing about what.
+fn write_block_checksum(
+    f: &mut fmt::Formatter<'_>,
+    path: &Path,
+    block: u64,
+    stored: u32,
+    computed: u32,
+) -> fmt::Result {
+    write!(
+        f,
+        "{} block {block} was sealed {stored:#010x} and now reads \
+         {computed:#010x}; those are not the bytes that were committed",
+        path.display()
+    )
+}
+
+/// The [`StoreError::ChecksumsMissing`] sentence.
+///
+/// Names both files on purpose. The month is what an operator is looking for
+/// and the sidecar is what is actually gone, and a refusal naming only one of
+/// them sends them to the wrong file.
+fn write_checksums_missing(
+    f: &mut fmt::Formatter<'_>,
+    path: &Path,
+    sidecar: &Path,
+    block: u64,
+) -> fmt::Result {
+    write!(
+        f,
+        "{} declares block checksums and {} is not there, so block {block} \
+         cannot be verified and its records are not served",
+        path.display(),
+        sidecar.display()
+    )
+}
+
 impl fmt::Display for StoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NotABarPath { found } => {
-                write!(
-                    f,
-                    "path names the {} sibling, not the records",
-                    found.extension()
-                )
-            }
+            Self::NotABarPath { found } => write_not_a_bar_path(f, *found),
             Self::Locked { path } => {
                 write!(f, "another writer holds {}", path.display())
             }
@@ -480,13 +655,7 @@ impl fmt::Display for StoreError {
             Self::IsADirectory { path, action } => {
                 write!(f, "{} is a directory, {action} it", path.display())
             }
-            Self::NotADirectory { path, action } => {
-                write!(
-                    f,
-                    "a path component of {} is not a directory, {action} it",
-                    path.display()
-                )
-            }
+            Self::NotADirectory { path, action } => write_not_a_directory(f, path, *action),
             Self::Missing { path, action } => {
                 write!(f, "{} does not exist, {action} it", path.display())
             }
@@ -535,11 +704,18 @@ impl fmt::Display for StoreError {
                 path,
                 stored,
                 asked,
-            } => write!(
-                f,
-                "{} holds {stored}-second bars, not {asked}",
-                path.display()
-            ),
+            } => write_timeframe_mismatch(f, path, *stored, *asked),
+            Self::BlockChecksum {
+                path,
+                block,
+                stored,
+                computed,
+            } => write_block_checksum(f, path, *block, *stored, *computed),
+            Self::ChecksumsMissing {
+                path,
+                sidecar,
+                block,
+            } => write_checksums_missing(f, path, sidecar, *block),
             Self::NotCommitted { index, n_valid } => {
                 write!(f, "record {index} is past the {n_valid} committed")
             }
@@ -625,7 +801,64 @@ pub struct BarFile {
     /// So a reader must ask the FLAG, never the field, and say "unverified"
     /// rather than "verified" for a file that has none — which is exactly the
     /// distinction [`crate::format::FLAG_CHECKSUMS`]' own documentation draws.
+    ///
+    /// # `None` said TWO things and only one of them was this one
+    ///
+    /// It also meant "the header declares checksums and the `.crc` beside it is
+    /// not there", which is the read door's answer for a month whose sidecar was
+    /// deleted. Those two states demand opposite behaviour — one reads and one
+    /// refuses — and a single `None` cannot tell them apart, which is why
+    /// [`Self::crc_path`] exists beside this rather than being derived from it.
     checksums: Option<File>,
+    /// Where the sidecar is, and **`Some` exactly when the header declares one**.
+    ///
+    /// Filled in `Self::validated` inside the `FLAG_CHECKSUMS` branch and
+    /// nowhere else, so asking this is asking the flag with the path already in
+    /// hand. That pairing is what makes the two `None`s above separable:
+    ///
+    /// | `crc_path` | `checksums` | What it means | What a read does |
+    /// |---|---|---|---|
+    /// | `None` | `None` | born without the flag; nothing sealed these records | reads, unverified |
+    /// | `Some` | `Some` | sealed, and the sidecar is open | verifies each block once |
+    /// | `Some` | `None` | sealed, and the sidecar is gone | refuses, naming both files |
+    ///
+    /// The fourth row cannot happen: the flag branch refuses with
+    /// [`StoreError::NotABarPath`] when it is handed no path at all.
+    crc_path: Option<PathBuf>,
+    /// The last checksum block this handle verified, or [`NO_BLOCK`].
+    ///
+    /// # Why a single block index and not a set of them
+    ///
+    /// Verification has to be **lazy** — `Self::validated`'s own comment is that
+    /// checking every block at open would make opening a month O(file), and
+    /// `CLAUDE.md` §3 rule 4 bounds the per-operation cost. Lazy means a read
+    /// path decides, and a read path that re-verified on every record would
+    /// checksum 4,088 bytes per 56-byte record: seventy-three times the work,
+    /// per bar, for an answer it computed one bar ago.
+    ///
+    /// So the answer is remembered, and this is the cheapest thing that can
+    /// remember it. One relaxed load and one comparison, no allocation at open
+    /// and none ever, which is what keeps the O(1) open the constraint asks for.
+    /// A `HashSet` of verified blocks would be the general answer and it is not
+    /// available here: CI gate 11 rule 3 refuses `HashSet::new()` in shipping
+    /// source outright, and rule 7 refuses the `.contains(&…)` that would probe
+    /// it — both for the reason this field is sized the way it is.
+    ///
+    /// # What it therefore does NOT do, said rather than left to be found
+    ///
+    /// A **run** of reads inside one block verifies it once, which covers every
+    /// access pattern this store actually has: `cli::stored` walks `0..n_valid`
+    /// in order, `api::bars::page` walks a window in order, and the bench reads
+    /// one index two thousand times. A pattern that ALTERNATES between two
+    /// blocks re-verifies on each alternation — the bisection in
+    /// [`first_at_or_after`] is the one that can, at fourteen probes for a
+    /// one-minute month. That is bounded per read and it is a cost, not a
+    /// correctness hole: a re-verification reaches the same verdict.
+    ///
+    /// `AtomicU64` rather than a `Cell`, because it is the only shape that keeps
+    /// `BarFile` `Sync` — a reader shared across threads must not become a
+    /// compile error in a caller because a cache moved in here.
+    verified: AtomicU64,
     /// The advisory lock, held for its **drop** and never read again.
     ///
     /// Underscored because that is what it is: closing this descriptor is what
@@ -1127,12 +1360,31 @@ impl BarFile {
         // and make `open` O(file) — `crate::block`'s whole domain is the
         // committed prefix, so a full file is a full read. `CLAUDE.md` §3 rule 4
         // bounds the PER-OPERATION cost, and opening a month is one operation.
-        // The verification pass is `crate::scrub`'s, which exists to be O(file)
-        // because that is the question it answers.
-        let checksums = if header.flags & crate::format::FLAG_CHECKSUMS == 0 {
-            None
-        } else {
-            let at = crc_path.ok_or(StoreError::NotABarPath {
+        //
+        // THIS COMMENT USED TO END "the verification pass is `crate::scrub`'s,
+        // which exists to be O(file) because that is the question it answers",
+        // AND `crates/store/src/scrub.rs` HAS NEVER EXISTED. `lib.rs` declares
+        // block, catalog, crc, file, format, header, layout and path, and that
+        // is the whole list. So the sentence did not defer the verification to
+        // somewhere else; it deferred it to nowhere, and a reader who went
+        // looking for the pass that checks these bytes would find the module
+        // absent and have no way to tell a missing file from a missing feature.
+        //
+        // What actually verifies is `Self::verify_block_of`, on the read path,
+        // one block at a time on the first touch of each — the lazy half of the
+        // same argument this comment makes for not doing it here. An O(file)
+        // pass over a whole month is still a reasonable thing to want and is
+        // still not written; when it is, it can call the same
+        // `crate::block::verify` this does and this comment can name it.
+        //
+        // ASKED ONCE, THROUGH THE HEADER'S OWN PREDICATE. This read
+        // `header.flags & crate::format::FLAG_CHECKSUMS == 0` open-coded, which
+        // is a second spelling of `Header::checksums_present` — and the field
+        // below has to ask the same question, so a second reader of the same bit
+        // would have been a third spelling. One `let`, used twice.
+        let sealed = header.checksums_present();
+        let checksums = if sealed {
+            let at = crc_path.as_ref().ok_or(StoreError::NotABarPath {
                 found: FileKind::Checksums,
             })?;
             // A READ DOOR OPENS IT READ-ONLY, AND AN ABSENT SIDECAR IS AN
@@ -1142,13 +1394,15 @@ impl BarFile {
             // `None` here and verification reports that it cannot check rather
             // than checking against zeros it just wrote.
             match access {
-                Access::Write => Some(fault(open_rw(&at), &at, Action::Open)?),
-                Access::Read => match open_read(&at) {
+                Access::Write => Some(fault(open_rw(at), at, Action::Open)?),
+                Access::Read => match open_read(at) {
                     Ok(file) => Some(file),
                     Err(why) if why.kind() == io::ErrorKind::NotFound => None,
-                    Err(why) => return Err(classify(&at, Action::Open, &why)),
+                    Err(why) => return Err(classify(at, Action::Open, &why)),
                 },
             }
+        } else {
+            None
         };
         Ok(Self {
             bars,
@@ -1156,6 +1410,15 @@ impl BarFile {
             layout,
             header,
             checksums,
+            // THE PATH IS KEPT ONLY WHEN THE FLAG IS SET, which is the whole
+            // mechanism behind `crc_path`'s three-row table. `crc_path` is in
+            // scope here whether the flag was set or not — the doors compose it
+            // from `crate::path` unconditionally — so keeping it as it arrived
+            // would make `Some` mean "somebody could name a sidecar" instead of
+            // "this file was sealed", and the read path could no longer tell an
+            // unsealed month from a sealed one that lost its `.crc`.
+            crc_path: if sealed { crc_path } else { None },
+            verified: AtomicU64::new(NO_BLOCK),
             _lock: lock,
         })
     }
@@ -1197,6 +1460,23 @@ impl BarFile {
         };
         let first = self.layout.block_of(first_index);
         let last = self.layout.blocks_for(n_valid);
+
+        // WHAT THIS APPEND RE-SEALS, THIS HANDLE HAS NOT VERIFIED.
+        //
+        // The tail block's checksum domain is a function of `n_valid`
+        // (`Layout::covered_byte_range`), so the block a read verified at the
+        // OLD counter is being sealed here over a longer extent and a different
+        // number. A cache that survived this append would let the next read of
+        // that block skip the check — and the bytes it would be skipping are
+        // precisely the ones this call just wrote.
+        //
+        // Cleared rather than narrowed to `first..last`, because
+        // `BarFile::verified` remembers one block and not a set: there is
+        // nothing to intersect with, and "forget it" is the whole operation.
+        // One relaxed store, off the read path entirely — this runs once per
+        // commit, never per record.
+        self.verified.store(NO_BLOCK, Ordering::Relaxed);
+
         for block in first..last {
             // BLOCK FIRST, COUNTER SECOND — and `block::seal` below takes them
             // the OTHER WAY ROUND. Two adjacent `u64`s in each signature, so a
@@ -1544,9 +1824,24 @@ impl BarFile {
     /// shape and is exactly wrong — it disappears in release, which is where
     /// the store runs.
     ///
+    /// # The record is READ first and the block is verified second
+    ///
+    /// Both orders refuse the same records — nothing is returned until
+    /// [`Self::verify_block_of`] has passed — so the choice is only about which
+    /// refusal an operator is handed for a file that is BOTH truncated and
+    /// checksummed. Reading first names the record: `ShortRead` at that record's
+    /// own offset, owing that record's own bytes, which is the sentence
+    /// `crates/store/tests/write.rs` asserts and the one that answers "is the
+    /// bar I asked for there". Verifying first would name the block's offset and
+    /// the block's length for every index inside it, so a caller walking a month
+    /// would be told the same thing 73 times about 73 different records.
+    ///
     /// # Errors
     ///
     /// [`StoreError`] for an unreadable offset or a short read.
+    /// [`StoreError::BlockChecksum`] when the record's block is not the bytes
+    /// that were sealed, and [`StoreError::ChecksumsMissing`] when the file
+    /// claims a sidecar it no longer has — see [`Self::verify_block_of`].
     fn read_row<W: Row>(&self, index: u64) -> Result<W, StoreError> {
         const {
             assert!(
@@ -1562,7 +1857,129 @@ impl BarFile {
             n_valid: self.header.n_valid,
         })?;
         read_fully(&self.bars, &self.bars_path, at, image)?;
-        refused(W::read_from(image), &self.bars_path)
+        let row = refused(W::read_from(image), &self.bars_path)?;
+        // THE ONE LINE THAT MAKES THE SIDECAR MEAN ANYTHING.
+        //
+        // Every read in this crate funnels through here — `read_record`,
+        // `first_at_or_after`'s bisection, `already_stored`'s comparison,
+        // `suffix_that_follows`' overlap — so this is the single place the check
+        // has to go for none of them to serve an unverified byte.
+        self.verify_block_of(index)?;
+        Ok(row)
+    }
+
+    /// Verifies the checksum block record `index` lives in, once per run of
+    /// reads inside it.
+    ///
+    /// # The defect this closes, measured rather than reasoned about
+    ///
+    /// Every commit sealed a block and **no read path opened a sidecar**. On the
+    /// operator's store: 2,707 `.bin` files, 2,707 `.crc` sidecars, every header
+    /// carrying [`crate::format::FLAG_CHECKSUMS`], every sidecar exactly
+    /// `4 · ceil(n_valid / 73)` bytes, and a hand-recomputed CRC-32C of a real
+    /// block equal to the number stored beside it. The data was right and
+    /// nothing looked at it. Flipping bit 21 of a real `high` of 238,600 paisa
+    /// gives 2,335,752 paisa, which still satisfies `high >= open`, `high >= low`
+    /// and `high >= close` — so it clears `Bar::ohlc_is_sane` AND `Candle::check`
+    /// and enters a sweep as a price. This is the only thing in the workspace
+    /// that can say otherwise.
+    ///
+    /// # Three states, and only one of them refuses for want of a sidecar
+    ///
+    /// * **No flag.** The file was born unsealed, `crc_path` is `None`, and this
+    ///   returns `Ok` without a syscall. `docs/02-store-format.md` §6 provides
+    ///   for exactly that, and §3 rule 8 says the flag is not added later — a
+    ///   sidecar written for it now would cover the tail while claiming the
+    ///   file, which converts "unverified" into a false "verified".
+    /// * **Flag, and the sidecar is open.** Four bytes at `block · 4`, then
+    ///   [`crate::block::verify`] over the covered range.
+    /// * **Flag, and the sidecar is gone.** [`StoreError::ChecksumsMissing`].
+    ///   Serving the records as though the flag had never been set is the
+    ///   `CLAUDE.md` §4 fallback that reads as safe and refuses nothing.
+    ///
+    /// A sidecar that is present but too short is
+    /// [`StoreError::ShortRead`] naming the `.crc`, which is what a zero-byte
+    /// one produces — better than the false `BlockChecksum` a zero sum read
+    /// against a real block would have given.
+    ///
+    /// # Cost
+    ///
+    /// One `pread` of four bytes and one CRC-32C over at most
+    /// [`Layout::block_len`] — 4,088 bytes at the bar geometry — on the FIRST
+    /// touch of a block, and one relaxed load on every touch after it. A forward
+    /// walk of a month therefore pays this once per 73 records, never once per
+    /// record. It is not free and is not claimed to be: `CLAUDE.md` §3 rule 4
+    /// bounds the per-operation cost and this is bounded by the block, which is
+    /// a constant of the format and not a function of the file.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::BlockChecksum`] naming the file, the block and both
+    /// numbers. [`StoreError::ChecksumsMissing`] naming both files.
+    /// [`StoreError::ShortRead`] for a sidecar too short to hold this block's
+    /// entry, [`StoreError::Format`] if the geometry refuses the block, and
+    /// anything the host refuses reading either file.
+    fn verify_block_of(&self, index: u64) -> Result<(), StoreError> {
+        // ASKED OF THE PATH, WHICH IS ASKED OF THE FLAG. `crc_path` is `Some`
+        // exactly when `validated` saw `FLAG_CHECKSUMS`, so this is the header's
+        // answer with the sidecar's name already in hand — which the refusal
+        // below needs and `Header::checksums_present()` alone could not give.
+        let Some(at) = self.crc_path.as_ref() else {
+            return Ok(());
+        };
+        let block = self.layout.block_of(index);
+        if self.verified.load(Ordering::Relaxed) == block {
+            return Ok(());
+        }
+        let Some(crc) = self.checksums.as_ref() else {
+            return Err(StoreError::ChecksumsMissing {
+                path: self.bars_path.clone(),
+                sidecar: at.clone(),
+                block,
+            });
+        };
+
+        // THE COVERED RANGE, NOT THE NOMINAL BLOCK. The tail block holds only
+        // the records the counter covers, so its nominal 4,088 bytes end past
+        // EOF for 72 of every 73 states a file passes through — `seal_committed`
+        // makes the same distinction, against the same counter, which is what
+        // makes the two answers equal rather than merely similar.
+        let (start, end) = refused(
+            self.layout.covered_byte_range(block, self.header.n_valid),
+            &self.bars_path,
+        )?;
+        let span = usize::try_from(end.saturating_sub(start)).map_err(|_| StoreError::Format {
+            path: self.bars_path.clone(),
+            source: FormatError::OffsetOverflow,
+        })?;
+        let mut bytes = vec![0u8; span];
+        read_fully(&self.bars, &self.bars_path, start, &mut bytes)?;
+
+        // FOUR BYTES AT `block * 4`, AND THE `.crc` IS THE PATH A FAILURE HERE
+        // NAMES. A short sidecar is a short read of the SIDECAR, not of the
+        // month, and telling an operator the bar file ran out of bytes when it
+        // is the checksum file that did would send them to the wrong disk.
+        let mut sum = [0u8; 4];
+        read_fully(crc, at, block.saturating_mul(4), &mut sum)?;
+        let stored = u32::from_le_bytes(sum);
+
+        // `block::verify` AND NOT A COMPARISON WRITTEN HERE. It is the function
+        // `crates/store/tests/fault.rs` walks every bit of every byte against,
+        // and it owns the `store.block` telemetry line that makes a mismatch
+        // visible in `/logs` as well as in the return value. A second comparison
+        // in this module would be a second answer to one question.
+        let checked = crate::block::verify(&self.header, self.layout, block, &bytes, stored);
+        if let Err(FormatError::BlockChecksum { computed, .. }) = checked {
+            return Err(StoreError::BlockChecksum {
+                path: self.bars_path.clone(),
+                block,
+                stored,
+                computed,
+            });
+        }
+        refused(checked, &self.bars_path)?;
+        self.verified.store(block, Ordering::Relaxed);
+        Ok(())
     }
 
     /// The part of `batch` that follows what is committed, when the part that
@@ -2501,6 +2918,59 @@ mod tests {
         )
     }
 
+    /// Reopens a month through the READER's sidecar policy.
+    ///
+    /// [`reopen`] above is the writer's door and its `open_rw` carries
+    /// `create(true)`, so a month whose `.crc` has been taken away gets a
+    /// zero-byte one back — which would hide the exact state four of the tests
+    /// below are about. `Access::Read` creates nothing, which is the
+    /// distinction that type exists to carry.
+    fn reopen_readonly(path: &Path) -> Result<BarFile, StoreError> {
+        let bars = open_rw(path).expect("the month is there");
+        let len = bars.metadata().expect("a length").len();
+        BarFile::validated(
+            bars,
+            path.to_path_buf(),
+            Some(path.with_extension("crc")),
+            None,
+            len,
+            SYMBOL,
+            60,
+            Layout::KNOWN,
+            super::Access::Read,
+        )
+    }
+
+    /// The `.crc` beside a `.bin`, as `crate::path` composes it for a real
+    /// store.
+    fn sidecar_of(path: &Path) -> PathBuf {
+        path.with_extension("crc")
+    }
+
+    /// The checksum the sidecar carries for `block`.
+    fn sealed_sum(path: &Path, block: usize) -> u32 {
+        let bytes = std::fs::read(sidecar_of(path)).expect("the sidecar is on disk");
+        let at = block * 4;
+        u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+    }
+
+    /// The checksum `block`'s committed bytes actually produce right now.
+    fn live_sum(path: &Path, block: u64, n_valid: u64) -> u32 {
+        let bytes = std::fs::read(path).expect("the month reads");
+        let (start, end) = Layout::V2
+            .covered_byte_range(block, n_valid)
+            .expect("a committed block has a covered range");
+        let start = usize::try_from(start).expect("an offset that fits");
+        let end = usize::try_from(end).expect("an offset that fits");
+        crate::crc::crc32c(&bytes[start..end])
+    }
+
+    /// Removes a month and the sidecar beside it.
+    fn scrub_month(path: &Path) {
+        let _ignored = std::fs::remove_file(path);
+        let _ignored = std::fs::remove_file(sidecar_of(path));
+    }
+
     #[test]
     fn the_discarded_count_is_the_bytes_past_the_counter() {
         // The identity `bytes_past_the_counter` is written to satisfy, against
@@ -2743,6 +3213,413 @@ mod tests {
             }),
             "the read's refusal travels, and is not flattened into None"
         );
+    }
+
+    // =======================================================================
+    // The read path verifies the sidecar the write path seals
+    //
+    // Every test below takes `crate::emits::hold_the_sink()`, and the torn-tail
+    // test above says why: they commit, and two of them drive a real checksum
+    // mismatch, so they reach `store.append` and `store.block` on the
+    // process-wide sink `crate::emits` installs and counts. A test in this
+    // binary that reaches a `telemetry::emit` without the guard puts its
+    // records inside that count and makes it depend on the scheduler.
+    // =======================================================================
+
+    /// A clean month verifies, and against the numbers actually on disk.
+    ///
+    /// The second half is what stops this passing vacuously. A reader that
+    /// verified nothing would also return every record, so the sidecar's own
+    /// bytes are compared against a checksum this test recomputes from the
+    /// month — three blocks of it, so the tail block's shorter covered range is
+    /// exercised beside two whole ones.
+    #[test]
+    fn a_clean_month_reads_every_record_and_the_sums_on_disk_are_the_live_ones() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+
+        let (path, mut file) = month("cleanverify");
+        let held: Vec<Bar> = (0..150).map(bar).collect();
+        assert_eq!(
+            file.append(&held),
+            Ok(Appended::Committed {
+                first_index: 0,
+                n_valid: 150,
+            })
+        );
+        drop(file);
+
+        // 150 records is three blocks — 73, 73 and 4 — so the sidecar is
+        // exactly `4 * ceil(150 / 73)` bytes. This is the shape measured on
+        // every one of the operator's 2,707 months.
+        assert_eq!(
+            std::fs::metadata(sidecar_of(&path))
+                .expect("a length")
+                .len(),
+            12,
+            "three blocks, one four-byte checksum each"
+        );
+
+        let reader = reopen_readonly(&path).expect("a clean month opens");
+        for block in 0..3u64 {
+            assert_eq!(
+                sealed_sum(&path, usize::try_from(block).expect("a small block")),
+                live_sum(&path, block, 150),
+                "block {block}: the sidecar holds the checksum its bytes produce"
+            );
+        }
+        for (ordinal, want) in held.iter().enumerate() {
+            let index = u64::try_from(ordinal).expect("an index that fits");
+            assert_eq!(reader.read_record(index), Ok(*want), "record {index}");
+        }
+        drop(reader);
+        scrub_month(&path);
+    }
+
+    /// One flipped bit in a committed record is refused, by name and by block.
+    ///
+    /// **The bar this produces is still SANE**, which is the whole reason the
+    /// checksum has to be the thing that catches it: `high` grows and the three
+    /// comparisons `Bar::ohlc_is_sane` makes — `high >= open`, `high >= low`,
+    /// `high >= close` — all still hold, so nothing downstream of the bytes can
+    /// tell this from a price. Asserted here rather than assumed, because a
+    /// flip that made the bar insane would have this test passing for the wrong
+    /// reason.
+    #[test]
+    fn a_flipped_byte_in_a_committed_block_is_refused_and_names_the_block() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+
+        let (path, mut file) = month("bitflip");
+        assert_eq!(
+            file.append(&[bar(0), bar(1), bar(2)]),
+            Ok(Appended::Committed {
+                first_index: 0,
+                n_valid: 3,
+            })
+        );
+        drop(file);
+        let stored = sealed_sum(&path, 0);
+
+        // ONE BIT OF RECORD 1'S `high`, AND A BIT THAT IS CURRENTLY CLEAR.
+        //
+        // The field sits at offset 16 of the 56-byte record — `Bar::image`
+        // writes ts, open, then high, little-endian — so byte 18 of the record
+        // carries bits 16..=23. `bar(1).high` is 2,345,901, whose bit 23 is
+        // clear, so this SETS it and the price grows by 8,388,608 paisa.
+        //
+        // The direction is the whole point. Clearing a set bit would drop
+        // `high` below `open` and `ohlc_is_sane` would catch it — which would
+        // make this test pass for the opposite reason to the one it is about.
+        let mut bytes = std::fs::read(&path).expect("the month reads");
+        let at = usize::try_from(Layout::V2.offset_of(1).expect("an offset"))
+            .expect("an offset that fits");
+        let damaged = at + 18;
+        bytes[damaged] ^= 0b1000_0000;
+        std::fs::write(&path, &bytes).expect("the month writes");
+
+        let computed = live_sum(&path, 0, 3);
+        assert_ne!(computed, stored, "the premise: the bytes changed");
+
+        let reader = reopen_readonly(&path).expect("a damaged block still OPENS");
+        assert_eq!(reader.records(), 3, "and the header is untouched");
+        assert_eq!(
+            reader.read_record(1),
+            Err(StoreError::BlockChecksum {
+                path: path.clone(),
+                block: 0,
+                stored,
+                computed,
+            }),
+            "the refusal names the file, the block and both numbers"
+        );
+
+        // AND THE SANITY CHECKS WOULD ALL HAVE PASSED. Read the damaged record
+        // out of the bytes directly, past the reader that now refuses it: this
+        // is the bar a sweep would have been handed.
+        let record = bytes.get(at..at + 56).expect("record 1 is inside the file");
+        let smuggled = Bar::decode(record).expect("a legal 56-byte record");
+        assert!(
+            smuggled.ohlc_is_sane(),
+            "the flipped bar is still SANE — {smuggled:?} — which is why no \
+             range check anywhere in this workspace can catch it"
+        );
+        assert_ne!(smuggled, bar(1), "and it is not the bar that was written");
+
+        // Every record of the block is refused, not only the damaged one. The
+        // checksum's domain is the block, so "which record" is a question it
+        // cannot answer and does not pretend to.
+        assert!(
+            matches!(reader.read_record(0), Err(StoreError::BlockChecksum { .. })),
+            "an undamaged record of a damaged block is refused too"
+        );
+        drop(reader);
+        scrub_month(&path);
+    }
+
+    /// A month born without the flag reads, and no sidecar is invented for it.
+    ///
+    /// `initialise` sets `FLAG_CHECKSUMS` unconditionally, so this month is
+    /// written by hand — it is the file every build before the writer was fixed
+    /// produced. §3 rule 8: what a file was born with is what it carries, and
+    /// sealing its tail now would cover part of it while claiming the whole,
+    /// which converts "unverified" into a false "verified".
+    #[test]
+    fn a_month_born_without_the_checksum_flag_still_reads_and_gains_no_sidecar() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+
+        let path = scratch("unsealed");
+        scrub_month(&path);
+        let bars = open_rw(&path).expect("a temp path opens");
+        let genesis = crate::header::Header::genesis_at(Layout::CURRENT, SYMBOL, 60, 0);
+        let commit = genesis.commit().expect("the genesis header commits");
+        let region = vec![0u8; 32_768];
+        write_fully(&bars, &path, 0, &region).expect("the header region");
+        write_fully(&bars, &path, commit.offset, &commit.bytes).expect("the genesis slot");
+        drop(bars);
+
+        let mut file = reopen(&path).expect("an unsealed month opens");
+        assert!(
+            !file.header().checksums_present(),
+            "the premise: this file declares no checksums"
+        );
+        assert_eq!(
+            file.append(&[bar(0), bar(1)]),
+            Ok(Appended::Committed {
+                first_index: 0,
+                n_valid: 2,
+            })
+        );
+        assert_eq!(file.read_record(1), Ok(bar(1)), "it reads, unverified");
+        assert!(
+            !sidecar_of(&path).exists(),
+            "and nothing sealed a tail it would then claim covered the file"
+        );
+        drop(file);
+        scrub_month(&path);
+    }
+
+    /// A block is verified once per handle, not once per record.
+    ///
+    /// **The sidecar is broken UNDER the open handle**, which is what makes
+    /// this an observation rather than an argument. A reader that checked per
+    /// record would read the new bytes and refuse; one that remembers the block
+    /// it verified never goes back to the disk. The fresh handle at the end is
+    /// the control: it proves the damage is real and that the reads above were
+    /// cached rather than unchecked.
+    #[test]
+    fn a_block_is_verified_once_per_handle_and_not_once_per_record() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+
+        let (path, mut file) = month("onceperblock");
+        let held: Vec<Bar> = (0..3).map(bar).collect();
+        assert_eq!(
+            file.append(&held),
+            Ok(Appended::Committed {
+                first_index: 0,
+                n_valid: 3,
+            })
+        );
+        drop(file);
+
+        let reader = reopen_readonly(&path).expect("the month opens");
+        assert_eq!(
+            reader.read_record(0),
+            Ok(bar(0)),
+            "the first read of block 0 verifies it"
+        );
+
+        std::fs::write(sidecar_of(&path), 0xDEAD_BEEFu32.to_le_bytes())
+            .expect("the sidecar is writable");
+        assert_eq!(
+            reader.read_record(1),
+            Ok(bar(1)),
+            "the second record of an already-verified block is not re-checked"
+        );
+        assert_eq!(reader.read_record(2), Ok(bar(2)), "nor the third");
+        drop(reader);
+
+        let fresh = reopen_readonly(&path).expect("the month still opens");
+        assert!(
+            matches!(fresh.read_record(0), Err(StoreError::BlockChecksum { .. })),
+            "a new handle checks block 0 against the sidecar as it now stands, \
+             so the three reads above were cached and not unchecked"
+        );
+        drop(fresh);
+        scrub_month(&path);
+    }
+
+    /// Opening a month reads no sidecar byte, however damaged the sidecar is.
+    ///
+    /// This is `Self::validated`'s O(1) open, asserted rather than argued.
+    /// Every one of the eighty records below is unverifiable and the open says
+    /// nothing about it, because it did not look; the refusal arrives at the
+    /// first READ, and it arrives per block — record 0 and record 73 are in
+    /// different blocks and are refused separately.
+    #[test]
+    fn opening_a_month_verifies_nothing_and_the_first_read_of_each_block_does() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+
+        let (path, mut file) = month("lazyopen");
+        let held: Vec<Bar> = (0..80).map(bar).collect();
+        assert_eq!(
+            file.append(&held),
+            Ok(Appended::Committed {
+                first_index: 0,
+                n_valid: 80,
+            })
+        );
+        drop(file);
+        assert_eq!(
+            std::fs::metadata(sidecar_of(&path))
+                .expect("a length")
+                .len(),
+            8,
+            "eighty records is two blocks — seventy-three and seven"
+        );
+
+        // Both sums replaced with zeros, which is exactly what a zero-byte
+        // sidecar created by a read door would have produced.
+        std::fs::write(sidecar_of(&path), [0u8; 8]).expect("the sidecar is writable");
+
+        let reader = reopen_readonly(&path).expect("the open is not a verification pass");
+        assert_eq!(reader.records(), 80, "and it answers from the header alone");
+        for block in 0..2u64 {
+            let index = block * 73;
+            assert_eq!(
+                reader.read_record(index),
+                Err(StoreError::BlockChecksum {
+                    path: path.clone(),
+                    block,
+                    stored: 0,
+                    computed: live_sum(&path, block, 80),
+                }),
+                "record {index} sits in block {block} and is refused for it"
+            );
+        }
+        drop(reader);
+        scrub_month(&path);
+    }
+
+    /// A sealed month whose sidecar is gone refuses the READ, never the open.
+    ///
+    /// Both halves matter. `crates/store/tests/write.rs` asserts that the read
+    /// door opens such a month and creates nothing, and that stays true. What
+    /// changes is what a read of it does: a file whose header says it was
+    /// sealed and whose `.crc` is missing has lost the only thing that could
+    /// check it, and serving the records as though the flag had never been set
+    /// is the §4 fallback that reads as safe and refuses nothing.
+    #[test]
+    fn a_sealed_month_whose_sidecar_is_gone_refuses_the_read_and_not_the_open() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+
+        let (path, mut file) = month("nosidecar");
+        assert_eq!(
+            file.append(&[bar(0)]),
+            Ok(Appended::Committed {
+                first_index: 0,
+                n_valid: 1,
+            })
+        );
+        drop(file);
+
+        let sidecar = sidecar_of(&path);
+        assert!(sidecar.exists(), "the premise: the append sealed one");
+        std::fs::remove_file(&sidecar).expect("take the sidecar away");
+
+        let reader = reopen_readonly(&path).expect("the month opens without its sidecar");
+        assert_eq!(reader.records(), 1, "and the header still answers");
+        assert_eq!(
+            reader.read_record(0),
+            Err(StoreError::ChecksumsMissing {
+                path: path.clone(),
+                sidecar: sidecar.clone(),
+                block: 0,
+            }),
+            "the refusal names the month AND the file that is not beside it"
+        );
+        drop(reader);
+        scrub_month(&path);
+    }
+
+    /// A sidecar too short for the block is a short read OF THE SIDECAR.
+    ///
+    /// The path in the refusal is the `.crc` and not the `.bin`, and that is
+    /// the point of naming it separately: telling an operator the bar file ran
+    /// out of bytes when it is the checksum file that did sends them to the
+    /// wrong file. It is also strictly better than what the zero-byte sidecar
+    /// was feared to produce — a zero sum read against a real block, reported
+    /// as a false `BlockChecksum`.
+    #[test]
+    fn a_sidecar_too_short_to_hold_the_block_is_a_short_read_of_the_sidecar() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+
+        let (path, mut file) = month("shortsidecar");
+        assert_eq!(
+            file.append(&[bar(0), bar(1)]),
+            Ok(Appended::Committed {
+                first_index: 0,
+                n_valid: 2,
+            })
+        );
+        drop(file);
+
+        let sidecar = sidecar_of(&path);
+        std::fs::write(&sidecar, b"").expect("empty the sidecar");
+        let reader = reopen_readonly(&path).expect("the month opens");
+        assert_eq!(
+            reader.read_record(0),
+            Err(StoreError::ShortRead {
+                path: sidecar.clone(),
+                offset: 0,
+                asked: 4,
+                read: 0,
+            }),
+            "the sidecar is what ran out of bytes, and it is what is named"
+        );
+        drop(reader);
+        scrub_month(&path);
+    }
+
+    /// An append re-seals the tail block, and the handle forgets it.
+    ///
+    /// The tail block's checksum domain is a function of `n_valid`, so the
+    /// block a read verified at three records is being sealed over five when
+    /// the next append lands in it. A cache that survived the commit would let
+    /// the following read skip the check — and the bytes it would skip are the
+    /// ones that append just wrote.
+    #[test]
+    fn an_append_makes_this_handle_forget_the_block_it_re_sealed() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+
+        let (path, mut file) = month("resealforget");
+        assert_eq!(
+            file.append(&[bar(0), bar(1), bar(2)]),
+            Ok(Appended::Committed {
+                first_index: 0,
+                n_valid: 3,
+            })
+        );
+        assert_eq!(file.read_record(2), Ok(bar(2)), "block 0 is verified here");
+        assert_eq!(
+            file.append(&[bar(3), bar(4)]),
+            Ok(Appended::Committed {
+                first_index: 3,
+                n_valid: 5,
+            })
+        );
+
+        // The sidecar now carries the sum for FIVE records. Break it, and a
+        // handle that still believed block 0 verified would read straight past
+        // the damage.
+        std::fs::write(sidecar_of(&path), 0u32.to_le_bytes()).expect("the sidecar is writable");
+        assert!(
+            matches!(
+                file.read_record(4),
+                Err(StoreError::BlockChecksum { block: 0, .. })
+            ),
+            "the commit dropped this handle's memory of block 0"
+        );
+        drop(file);
+        scrub_month(&path);
     }
 }
 

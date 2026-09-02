@@ -89,7 +89,11 @@ const PARAMETER_PAYLOAD_BYTES: usize = EXECUTION_V4_PARAMETER_BYTES - SEAL_BYTES
 const PERCENTILE_PAYLOAD_BYTES: usize = EXECUTION_V4_PERCENTILE_BYTES - SEAL_BYTES;
 const DISPOSITION_PAYLOAD_BYTES: usize = EXECUTION_V4_DISPOSITION_BYTES - SEAL_BYTES;
 const COMPLETION_PAYLOAD_BYTES: usize = EXECUTION_V4_COMPLETION_BYTES - SEAL_BYTES;
-const EVALUATION_FINGERPRINT_BYTES: usize = 155;
+// DERIVED, NOT COPIED. This was a literal `155`, a second copy of a width that
+// `indicators::column` owns -- so when the charter gained its ninth non-regular
+// day the fingerprint grew to 163 here and stayed 155 there. One fact, one
+// place; the compiler now carries the change instead of a reader noticing it.
+const EVALUATION_FINGERPRINT_BYTES: usize = indicators::column::EVALUATION_SPEC_FINGERPRINT_V1_LEN;
 const READ_CHUNK_BYTES: usize = 16 * 1_024;
 const MAX_PARAMETER_RECORDS_PER_BLOCK: usize = 4;
 const MATRIX_CELLS: usize = 16;

@@ -156,9 +156,25 @@ pub(crate) fn count(name: &str) -> Option<u64> {
 /// exact silent fallback this module exists to expose, one step after parsing.
 #[must_use]
 pub(crate) fn count_usize(name: &str) -> Option<usize> {
+    count_usize_within(name, usize::MAX)
+}
+
+/// [`count_usize`], refusing anything above `ceiling`.
+///
+/// **An unbounded count is a way to kill the process from a text box.** Three
+/// knobs reach a `with_capacity` before a single bar is scored -- the priced
+/// cap, the candidate ceiling and the forward horizon -- and the browser wires
+/// all three to free-text fields with no numeric validation at the HTTP layer.
+/// A `Marked<Scored>` is ~136 bytes, so `1_000_000_000` asks the allocator for
+/// 136 GB, and an allocation failure calls `abort()`: not a panic, not
+/// catchable, no refusal, no log line. The server simply disappears.
+///
+/// `grid_rungs` was given a ceiling after a documented 935 GB abort. Its three
+/// siblings were not. This is that guard, shared.
+pub(crate) fn count_usize_within(name: &str, ceiling: usize) -> Option<usize> {
     let raw = var(name)?;
     match raw.trim().parse::<usize>() {
-        Ok(n) if n > 0 => Some(n),
+        Ok(n) if n > 0 && n <= ceiling => Some(n),
         _ => {
             refuse(name, &raw);
             None

@@ -140,24 +140,31 @@ fn set_side(mask: ConditionMask, value: i64, level: i64, above: u16, below: u16)
 /// # Why a set of dates and not a rule
 ///
 /// A Muhurat date cannot be derived — it is set by the exchange each year against the Hindu
-/// calendar — so §3 rule 1 forbids computing one. The charter records six as **VERIFIED**
-/// and those six are what this holds. A seventh must be added here when the exchange
+/// calendar — so §3 rule 1 forbids computing one. Neither can a DR drill or an outage: all
+/// three are announcements, not arithmetic. The charter records SIX Muhurats as **VERIFIED**
+/// and those six are the first six entries. A seventh must be added here when the exchange
 /// announces it, and until then the engine treats it as a regular session, which is the
 /// honest failure: wrong in the same direction as before, on one day, and visible.
 ///
 /// # Why the exposure is smaller than it looks, and still real
 ///
-/// Five of the six never reach disk. `pull::fetch::land` drops every minute bar whose IST
-/// minute-of-day falls outside `[09:15, 15:30)`, and the 2020–2024 sessions are all
-/// **evening** sessions at 18:00 or later — so the pull accidentally implements this rule,
-/// for the unrelated reason that it hardcodes a 15:30 close.
+/// Five of the six Muhurats never reach disk. `pull::fetch::land` drops every minute bar
+/// whose IST minute-of-day falls outside `[09:15, 15:30)`, and the 2020–2024 sessions are
+/// all **evening** sessions at 18:00 or later — so the pull accidentally implements this
+/// rule, for the unrelated reason that it hardcodes a 15:30 close.
 ///
 /// **2025-10-21 is the exception and it is why this is not merely tidiness.** The charter
 /// records it as "an afternoon session, not an evening one", 13:45–14:45 IST: every one of
 /// its 60 bars sits inside the pull's window, so it lands, it becomes the previous-day
 /// anchor, and the prohibition is broken on it. Afternoon Muhurats are now the live
 /// pattern, which makes this forward-looking rather than historical.
-pub const CHARTER_NON_REGULAR_IST_DAYS: [i64; 8] = [
+///
+/// # It is nine now, and the ninth is not a ceremony either
+///
+/// The 2021-02-24 systems outage is the third kind of day on this list: not a Muhurat, not
+/// a drill, but a **regular session that stopped**. It is here for the identical mechanism,
+/// and the mechanism is the only thing the list is about.
+pub const CHARTER_NON_REGULAR_IST_DAYS: [i64; 9] = [
     18_580, // 2020-11-14, 18:15–19:15 IST
     18_935, // 2021-11-04, 18:15–19:15
     19_289, // 2022-10-24, 18:15–19:15
@@ -189,6 +196,29 @@ pub const CHARTER_NON_REGULAR_IST_DAYS: [i64; 8] = [
     // ceremony, never its position in the week.
     19_784, // 2024-03-02 Sat, 09:15–09:59 + 11:30–12:29 — disaster recovery
     19_861, // 2024-05-18 Sat, same shape — disaster recovery
+    // THE SYSTEMS-OUTAGE DAY, and it is neither a ceremony nor a drill.
+    //
+    // 2021-02-24 was an ordinary Wednesday that STOPPED. `docs/00-charter.md`
+    // §3 records the exchange's own account: all segments halted, a 15-minute
+    // pre-open from 15:30, normal trading resumed 15:45 and the extended
+    // session closed 17:00. The reopening is entirely outside the pull's
+    // [09:15, 15:30) window, so ingest drops it -- correctly, and permanently:
+    // re-pulling cannot recover a bar the window excludes.
+    //
+    // WHAT IS ACTUALLY ON DISK, measured by decoding
+    // `zerodha/NSE/INDEX/NIFTY/1min/2021-02.bin` (n_valid 7179 = 19 x 375 + 54):
+    // FIFTY-FOUR bars, 09:15-10:08, and the next record in the file is
+    // 2021-02-25 09:15. A 54-minute stub is a shorter session than the Muhurat
+    // hour above it, and without this row it was Eligible: it became the
+    // previous-day anchor for 2021-02-25, moved the whole 44-position pivot
+    // ladder and both previous-day Fibonacci ladders, and stayed inside
+    // `Prev5` for five sessions.
+    //
+    // It is the SAME mechanism as the two Saturdays, arrived at from the
+    // opposite direction -- they are days the exchange never meant to be
+    // normal, this is a day it did. What disqualifies a session here is that
+    // its OHLC does not describe a regular day, never why it does not.
+    18_682, // 2021-02-24 Wed, 09:15–10:08 on disk — the NSE systems outage
 ];
 
 /// Which IST days are not regular sessions.
@@ -207,7 +237,7 @@ pub const CHARTER_NON_REGULAR_IST_DAYS: [i64; 8] = [
 /// unaccompanied, which is exactly what that gate exists to catch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Calendar {
-    days: [i64; 8],
+    days: [i64; 9],
     len: usize,
 }
 
@@ -218,7 +248,11 @@ impl Default for Calendar {
 }
 
 impl Calendar {
-    /// The six dates `docs/00-charter.md` §3 records as VERIFIED.
+    /// The nine days `docs/00-charter.md` §3 records as VERIFIED non-regular sessions.
+    ///
+    /// Six Muhurats, two disaster-recovery Saturdays, and the 2021-02-24 systems outage.
+    /// The array is FULL: there is no free slot left, so a tenth date is a type change and
+    /// a tenth const assertion, not an edit to one literal.
     #[must_use]
     pub const fn charter() -> Self {
         // Written out rather than copied from `CHARTER_NON_REGULAR_IST_DAYS` in a loop: the
@@ -227,9 +261,9 @@ impl Calendar {
         // documented source.
         Self {
             days: [
-                18_580, 18_935, 19_289, 19_673, 20_028, 20_382, 19_784, 19_861,
+                18_580, 18_935, 19_289, 19_673, 20_028, 20_382, 19_784, 19_861, 18_682,
             ],
-            len: 8,
+            len: 9,
         }
     }
 
@@ -240,7 +274,7 @@ impl Calendar {
     #[must_use]
     pub const fn all_regular() -> Self {
         Self {
-            days: [0; 8],
+            days: [0; 9],
             len: 0,
         }
     }
@@ -252,13 +286,19 @@ impl Calendar {
     }
 }
 
-/// The two spellings of the charter's six agree.
+/// The two spellings of the charter's nine agree.
 ///
 /// `Calendar::charter` writes the days out because a `const fn` cannot index an array
 /// under this workspace's lints. That duplication is only safe if something compares them,
 /// and a const assertion is the only thing that can compare them before the code runs.
+///
+/// **One assertion per slot, and that is deliberate.** A loop cannot be written here, and a
+/// length check alone would pass while two entries were transposed — which changes nothing
+/// this crate computes but DOES change `runner::identity`, because the days are hashed in
+/// array order. Adding a date means adding a line here; there is no arrangement in which
+/// forgetting it still compiles.
 const _: () = {
-    assert!(CHARTER_NON_REGULAR_IST_DAYS.len() == 8);
+    assert!(CHARTER_NON_REGULAR_IST_DAYS.len() == 9);
     let c = Calendar::charter();
     assert!(c.len == CHARTER_NON_REGULAR_IST_DAYS.len());
     assert!(c.days[0] == CHARTER_NON_REGULAR_IST_DAYS[0]);
@@ -269,6 +309,7 @@ const _: () = {
     assert!(c.days[5] == CHARTER_NON_REGULAR_IST_DAYS[5]);
     assert!(c.days[6] == CHARTER_NON_REGULAR_IST_DAYS[6]);
     assert!(c.days[7] == CHARTER_NON_REGULAR_IST_DAYS[7]);
+    assert!(c.days[8] == CHARTER_NON_REGULAR_IST_DAYS[8]);
 };
 
 /// Every module, and the session bookkeeping that feeds the ones needing yesterday.
@@ -380,7 +421,14 @@ pub(crate) struct EvaluationSpec {
 /// `indicators` only its `vocab` dependency, so the identity-owning caller may
 /// feed these exact bytes into its approved digest without this crate gaining a
 /// second identity implementation.
-pub(crate) const EVALUATION_SPEC_V1_LEN: usize = 155;
+///
+/// **It was 155 and is now 163, because the calendar gained a ninth slot.** Every
+/// slot is encoded, not just the used ones, so the record width moves whenever
+/// [`Calendar`] does. That is the price of making a malformed internal value
+/// distinguishable rather than normalising it, and it is paid here rather than by a
+/// reader who cannot tell a short calendar from a truncated record. Every caller
+/// that pins this width in a fixed on-disk layout must move with it.
+pub(crate) const EVALUATION_SPEC_V1_LEN: usize = 163;
 
 impl EvaluationSpec {
     /// A state-empty evaluator under exactly the choices this spec captured.
@@ -404,7 +452,7 @@ impl EvaluationSpec {
     /// - VWAP-availability tag;
     /// - all six signed little-endian pattern thresholds, declaration order;
     /// - calendar length as little-endian `u64`;
-    /// - all eight signed little-endian calendar day slots, array order.
+    /// - all nine signed little-endian calendar day slots, array order.
     ///
     /// Base tags are `0 = unspecified`, `1 = session range`, `2 = CPR width`;
     /// availability is `0 = absent`, `1 = present`.  Explicit tags keep the
@@ -524,7 +572,7 @@ impl Evaluator {
 
     /// An evaluator with an explicit non-regular-session calendar.
     ///
-    /// [`Self::new`] uses [`Calendar::charter`], which is the right default: the six dates
+    /// [`Self::new`] uses [`Calendar::charter`], which is the right default: the nine days
     /// are recorded VERIFIED in `docs/00-charter.md` §3, so defaulting to them needs no
     /// invention, and a caller who forgets this parameter gets the sourced behaviour rather
     /// than the contaminated one. [`Calendar::all_regular`] is available for a slice that
@@ -1293,9 +1341,9 @@ mod tests {
             },
             calendar: Calendar {
                 days: [
-                    18_580, 18_935, 19_289, 19_673, 20_028, 20_382, 19_784, 19_861,
+                    18_580, 18_935, 19_289, 19_673, 20_028, 20_382, 19_784, 19_861, 18_682,
                 ],
-                len: 8,
+                len: 9,
             },
         };
         let bytes = baseline.canonical_v1_bytes();
@@ -1384,9 +1432,9 @@ mod tests {
             },
             calendar: Calendar {
                 days: [
-                    18_580, 18_935, 19_289, 19_673, 20_028, 20_382, 19_784, 19_861,
+                    18_580, 18_935, 19_289, 19_673, 20_028, 20_382, 19_784, 19_861, 18_682,
                 ],
-                len: 8,
+                len: 9,
             },
         };
 
@@ -1522,11 +1570,19 @@ mod tests {
 
     /// A regular day is regular, and the calendar's zero padding is not a holiday.
     ///
-    /// `Calendar` stores `[i64; 8]` with a `len`, and `charter()` fills six and leaves two
-    /// zeros. Dropping `.take(self.len)` from `is_non_regular` makes **IST day 0** --
-    /// 1970-01-01 -- non-regular, and nothing asserted that a regular day is regular. The
-    /// observable consequence measured by an audit: a session on 1970-01-01 flips
-    /// `has_yesterday` from true to false and `sessions_completed` from 1 to 0.
+    /// `Calendar` stores `[i64; 9]` with a `len`. Dropping `.take(self.len)` from
+    /// `is_non_regular` makes **IST day 0** -- 1970-01-01 -- non-regular, and nothing
+    /// asserted that a regular day is regular. The observable consequence measured by an
+    /// audit: a session on 1970-01-01 flips `has_yesterday` from true to false and
+    /// `sessions_completed` from 1 to 0.
+    ///
+    /// **`charter()` no longer has padding, and `all_regular()` is now the whole of this
+    /// test's teeth.** It used to fill six of eight slots, so the two trailing zeros were
+    /// what the `charter` half caught the missing `.take(len)` with. The ninth date filled
+    /// the array, and on a full array that mutation is EQUIVALENT under `charter()` -- the
+    /// `all_regular()` half, nine zeros behind `len: 0`, is the only half that still kills
+    /// it. Said plainly so the next date added here does not quietly remove the last
+    /// witness: if `all_regular` ever goes, so does the proof.
     ///
     /// Both directions are checked, and `all_regular()` too, because a calendar that says
     /// "no" to everything would satisfy only half of this.
@@ -1547,7 +1603,7 @@ mod tests {
         for day in CHARTER_NON_REGULAR_IST_DAYS {
             assert!(
                 charter.is_non_regular(day),
-                "IST day {day} IS one of the charter's six and must be named"
+                "IST day {day} IS one of the charter's nine and must be named"
             );
         }
 
@@ -2299,7 +2355,7 @@ mod tests {
     /// vacuous.
     #[test]
     fn a_non_regular_session_never_becomes_the_previous_day_anchor() {
-        // Day 20_382 is 2025-10-21, the afternoon Muhurat, and the one of the charter's six
+        // Day 20_382 is 2025-10-21, the afternoon Muhurat, and the one of the charter's nine
         // whose bars pass the pull's 09:15–15:30 window and therefore reach disk.
         let short_day = 20_382_i64;
         let session = |day: i64, bars: i64, base: i64| -> Vec<Candle> {
@@ -2471,6 +2527,153 @@ mod tests {
             any,
             "a non-regular session emitted nothing at all, so the fix silenced a real hour \
              of trading instead of merely keeping it out of the anchors"
+        );
+    }
+
+    /// The 2021-02-24 outage stub is not the anchor for 2021-02-25.
+    ///
+    /// # Why this is a separate test from the Muhurat one above
+    ///
+    /// The Muhurat tests use a 60-bar session on a day the exchange declared a holiday. This
+    /// is the opposite case and it is the one that was missed for longer: **an ordinary
+    /// Wednesday that stopped.** IST day 18_682 was a normal session until it halted; the
+    /// reopening ran 15:45–17:00 and is entirely outside the pull's `[09:15, 15:30)` window,
+    /// so ingest drops it and re-pulling can never recover it.
+    ///
+    /// MEASURED in the operator's own store, `zerodha/NSE/INDEX/NIFTY/1min/2021-02.bin`:
+    /// `n_valid` is 7,179, which is 19 × 375 + 54, and record 6,375 is stamped 09:15 while
+    /// record 6,428 is stamped 10:08 and record 6,429 is 2021-02-25 09:15. **Fifty-four
+    /// bars**, and nothing after them. The fixture below uses that exact count rather than a
+    /// round number, because 54 is the fact and 60 would be a Muhurat's.
+    ///
+    /// A 54-minute stub is a SHORTER session than the Muhurat hour the calendar already
+    /// refuses, so treating it as a regular anchor was strictly the larger error. Both
+    /// directions are driven for the reason the Muhurat test drives both: with
+    /// `all_regular` the stub must MOVE the ladder, or this assertion would pass with the
+    /// date removed from the constant again.
+    #[test]
+    fn the_outage_stub_never_becomes_the_next_days_anchor() {
+        // 2021-02-24. `pull::calendar::SYSTEMS_OUTAGE_DAY` is the same number, and
+        // `the_nine_non_regular_days_are_the_charter_dates` derives it from the date.
+        let outage_day = 18_682_i64;
+        assert!(
+            CHARTER_NON_REGULAR_IST_DAYS.contains(&outage_day),
+            "2021-02-24 is IST day {outage_day} and the constant does not name it, so its \
+             54-bar stub is the previous-day anchor for 2021-02-25"
+        );
+
+        let session = |day: i64, bars: i64, base: i64| -> Vec<Candle> {
+            (0..bars)
+                .map(|m| {
+                    let p = base + (m % 37) * 100;
+                    Candle {
+                        ts_micros: day * DAY_MICROS + IST_OPEN_UTC_MICROS + m * MINUTE_MICROS,
+                        open: p,
+                        high: p + 400,
+                        low: p - 400,
+                        close: p + 100,
+                        volume: 0,
+                        open_interest: i64::MIN,
+                    }
+                })
+                .collect()
+        };
+
+        let before = session(outage_day - 1, 375, 2_500_000);
+        // FIFTY-FOUR, and at a level far from the day before it so the two anchors cannot
+        // coincide by accident. A stub whose OHLC happened to equal the full day's would
+        // make every assertion below vacuous.
+        let stub = session(outage_day, 54, 1_400_000);
+        let after = session(outage_day + 1, 375, 2_500_000);
+
+        let run = |calendar: Calendar, include_stub: bool| -> Vec<Vec<u16>> {
+            let mut e = Evaluator::with_calendar(
+                widths(),
+                Availability::Absent,
+                Thresholds::CLASSICAL,
+                calendar,
+            );
+            for c in &before {
+                e.step(c).expect("a sane candle");
+            }
+            if include_stub {
+                for c in &stub {
+                    e.step(c).expect("a sane candle");
+                }
+            }
+            let anchored = crate::daily::positions();
+            after
+                .iter()
+                .map(|c| {
+                    let mask = e.step(c).expect("a sane candle");
+                    anchored
+                        .iter()
+                        .copied()
+                        .filter(|p| mask.get(u32::from(*p)))
+                        .collect()
+                })
+                .collect()
+        };
+
+        assert_eq!(
+            run(Calendar::charter(), true),
+            run(Calendar::charter(), false),
+            "the session after the outage reports different PIVOT positions when the 54-bar \
+             stub is fed, so the stub is still reaching the previous-day anchor"
+        );
+        assert_ne!(
+            run(Calendar::all_regular(), true),
+            run(Calendar::charter(), false),
+            "declaring the outage day regular moved no pivot position, so the calendar is \
+             not being consulted and the assertion above would pass with 18_682 removed"
+        );
+    }
+
+    /// The outage stub does not advance the five-session rolling window either.
+    ///
+    /// The second of charter §3's three prohibitions, on the ninth date. `Prev5` is what
+    /// positions 110–120 are measured against, so a 54-bar OHLC entering it contaminates
+    /// them for five more sessions — which is exactly the span the finding named.
+    #[test]
+    fn the_outage_stub_does_not_advance_the_rolling_window() {
+        let outage_day = 18_682_i64;
+        let mut e = Evaluator::new(widths(), Availability::Absent, Thresholds::CLASSICAL);
+        let feed = |e: &mut Evaluator, day: i64, bars: i64, base: i64| {
+            for m in 0..bars {
+                let p = base + (m % 37) * 100;
+                let bar = Candle {
+                    ts_micros: day * DAY_MICROS + IST_OPEN_UTC_MICROS + m * MINUTE_MICROS,
+                    open: p,
+                    high: p + 400,
+                    low: p - 400,
+                    close: p + 100,
+                    volume: 0,
+                    open_interest: i64::MIN,
+                };
+                e.step(&bar).expect("a sane candle");
+            }
+        };
+
+        feed(&mut e, outage_day - 2, 375, 2_500_000);
+        feed(&mut e, outage_day - 1, 375, 2_600_000);
+        let sessions_before = e.sessions_completed();
+        let had_yesterday = e.has_yesterday();
+
+        // The stub, then one bar on the day after it — the rollover that would push the
+        // 54-bar session into `Prev5`.
+        feed(&mut e, outage_day, 54, 1_400_000);
+        feed(&mut e, outage_day + 1, 1, 2_500_000);
+
+        assert_eq!(
+            e.sessions_completed(),
+            sessions_before + 1,
+            "the rolling window advanced twice across the outage stub and the regular day \
+             after it, so a 54-bar OHLC entered Prev5"
+        );
+        assert_eq!(
+            e.has_yesterday(),
+            had_yesterday,
+            "yesterday came or went unexpectedly across the outage day"
         );
     }
 
@@ -2911,11 +3114,11 @@ mod tests {
         );
     }
 
-    /// The six non-regular dates are the charter's six, derived rather than trusted.
+    /// The nine non-regular dates are the charter's nine, derived rather than trusted.
     ///
     /// # Why this test exists
     ///
-    /// `CHARTER_NON_REGULAR_IST_DAYS` is six hand-transcribed integers. A verification sweep
+    /// `CHARTER_NON_REGULAR_IST_DAYS` is nine hand-transcribed integers. A verification sweep
     /// changed 2023-11-12 from `19_673` to `19_674` in **both** spellings — so the const
     /// assertion that holds the two in agreement still passed — and **nothing caught it.**
     ///
@@ -2928,8 +3131,18 @@ mod tests {
     /// code with the constant. `crates/indicators` declares one dependency and it is `vocab`,
     /// so there is no date library to reach for — which is why this is written out. The
     /// charter's §3 table is the source for the dates themselves.
+    ///
+    /// # `docs/04-invariants.md` IF-18 names this test and names it WRONG
+    ///
+    /// The row reads `the_six_non_regular_days_are_the_charter_dates`, and no function of
+    /// that name has existed since the two disaster-recovery Saturdays were added — the
+    /// name was already `the_eight_..` before this change. CI gate 10 checks that an
+    /// invariant row names a function that exists in the crate it names, so that row was
+    /// pointing at nothing already. Renaming eight to nine leaves the gate exactly where it
+    /// was and makes the name true; the row itself is a `docs/04-invariants.md` edit and is
+    /// recorded as owed rather than done here.
     #[test]
-    fn the_eight_non_regular_days_are_the_charter_dates() {
+    fn the_nine_non_regular_days_are_the_charter_dates() {
         /// Days from 1970-01-01 to the given date, by Howard Hinnant's civil-from-days
         /// inverse. Shares nothing with the constant under test.
         const fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
@@ -2952,12 +3165,15 @@ mod tests {
         );
 
         // docs/00-charter.md §3, "Muhurat (Diwali) session ... Verified dates".
-        // SIX MUHURATS, THEN THE TWO DISASTER-RECOVERY SATURDAYS. The list ran to
-        // six while the constant held eight, so the two days added last were
-        // checked by nothing -- and they are the two whose day numbers were
-        // derived by hand rather than read off the charter. `days_from_civil`
-        // recomputing them from the calendar date is the independent check.
-        let charter: [(i64, i64, i64); 8] = [
+        // SIX MUHURATS, THEN THE TWO DISASTER-RECOVERY SATURDAYS, THEN THE
+        // SYSTEMS-OUTAGE DAY. The list ran to six while the constant held eight, so
+        // the two days added last were checked by nothing -- and they are the two
+        // whose day numbers were derived by hand rather than read off the charter.
+        // `days_from_civil` recomputing them from the calendar date is the
+        // independent check, and it is why this array must grow whenever the
+        // constant does: an entry the loop never reaches is an entry nothing checks,
+        // which is the exact hole this test was written to close.
+        let charter: [(i64, i64, i64); 9] = [
             (2020, 11, 14),
             (2021, 11, 4),
             (2022, 10, 24),
@@ -2966,13 +3182,20 @@ mod tests {
             (2025, 10, 21),
             (2024, 3, 2),
             (2024, 5, 18),
+            (2021, 2, 24),
         ];
+        assert_eq!(
+            charter.len(),
+            CHARTER_NON_REGULAR_IST_DAYS.len(),
+            "a date added to the constant and not to this array is checked by nothing, \
+             which is the defect this test exists to catch"
+        );
         for (i, (y, m, d)) in charter.iter().enumerate() {
             let want = days_from_civil(*y, *m, *d);
             let got = CHARTER_NON_REGULAR_IST_DAYS
                 .get(i)
                 .copied()
-                .expect("six dates, six entries");
+                .expect("nine dates, nine entries");
             assert_eq!(
                 got, want,
                 "entry {i} is {got} and {y}-{m:02}-{d:02} is day {want}. A transcription \
@@ -2982,7 +3205,7 @@ mod tests {
             // And the constant is actually consulted for that day.
             assert!(
                 Calendar::charter().is_non_regular(want),
-                "{y}-{m:02}-{d:02} is in the charter's six and the calendar does not know it"
+                "{y}-{m:02}-{d:02} is in the charter's nine and the calendar does not know it"
             );
             // The day before and after are regular, which is what stops a fix that marks a
             // whole week non-regular from passing.
@@ -3141,7 +3364,7 @@ mod tests {
         );
     }
 
-    /// `Calendar::default()` is the charter's six, not an empty calendar.
+    /// `Calendar::default()` is the charter's nine, not an empty calendar.
     ///
     /// # Two things this closes, both found by a verification sweep
     ///
@@ -3155,13 +3378,20 @@ mod tests {
     /// constructor gets the sourced behaviour or the contaminated one. An empty default would
     /// silently restore the defect D-0110 fixed for every consumer that wrote
     /// `Calendar::default()`.
+    ///
+    /// **The name says six and the list is nine.** It is left alone deliberately:
+    /// `docs/04-invariants.md` IF-21 names this function, CI gate 10 checks that the
+    /// named function exists in this crate, and that document is not editable from
+    /// here. Renaming it and the row is one change, not two, and doing half of it turns
+    /// a green gate red for a spelling. The count this test asserts is
+    /// `Calendar::charter()` itself, so nothing it proves depends on the number.
     #[test]
     fn the_default_calendar_is_the_charters_six_and_not_an_empty_one() {
         let d = Calendar::default();
         assert_eq!(
             d,
             Calendar::charter(),
-            "`Calendar::default()` is not the charter's six, so a caller reaching for the \
+            "`Calendar::default()` is not the charter's nine, so a caller reaching for the \
              obvious constructor gets a calendar that lets a Muhurat session become the \
              previous-day anchor — the defect D-0110 fixed"
         );

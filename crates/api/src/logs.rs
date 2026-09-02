@@ -461,36 +461,92 @@ pub async fn logs_page(uri: axum::http::Uri) -> axum::response::Html<String> {
              on stdout at startup.</p>",
         ));
     };
-    axum::response::Html(page_over(&dir, &asked, sink_health().as_ref()))
+    // THE SECOND HALF IS RESOLVED FROM THE STORE, exactly as `logs_json` does
+    // it. Bound to a local rather than written inline so the `Option<PathBuf>`
+    // it borrows from plainly outlives the call -- and named `cli_dir` rather
+    // than `cli`, which is a crate this one depends on.
+    let cli_dir = crate::server::store_dir().ok().map(|s| cli_half(&s));
+    axum::response::Html(page_over(
+        &dir,
+        cli_dir.as_deref(),
+        &asked,
+        sink_health().as_ref(),
+    ))
 }
 
-/// The page body, over a directory a caller names — split for the reason
+/// The page body, over the directories a caller names — split for the reason
 /// [`json_over`] is.
-fn page_over(dir: &std::path::Path, asked: &Asked, health: Option<&telemetry::Health>) -> String {
-    let tail = telemetry::tail(dir, telemetry::DEFAULT_KEEP_FILES, &asked.query);
-    page_of(&tail, asked, health, dir)
+///
+/// # It read ONE directory, and every `cli` event was invisible on the page
+/// that exists to show them
+///
+/// [`both_halves`] was written for exactly this and was wired only to
+/// [`json_over`]. So `/logs.json` merged the server's directory with
+/// `<store>/logs/cli` and `/logs` — the surface an operator actually opens —
+/// walked the server's alone. MEASURED on 2026-09-01: the page showed nothing
+/// newer than 31 August while **66 sweep events sat unread** in
+/// `<store>/logs/cli/events.ndjson`, and every `cli` run printed *"The /logs
+/// page walks BOTH halves … so these events appear there"* the whole time.
+///
+/// **The test that guarded it asserted on the wrong function.**
+/// `the_page_shows_the_cli_half_and_not_only_the_servers` is named for the page
+/// and drove `json_over`, which never had the defect. That is how this survived
+/// being written down twice; the test drives [`page_over`] now.
+fn page_over(
+    dir: &std::path::Path,
+    cli_dir: Option<&std::path::Path>,
+    asked: &Asked,
+    health: Option<&telemetry::Health>,
+) -> String {
+    let tail = both_halves(dir, cli_dir, &asked.query);
+    page_of(&tail, asked, health, (dir, cli_dir))
 }
 
 /// [`page_over`] over a walk a caller already has — split for [`json_of`]'s
 /// reason, and the two must stay in step: a flag reported by one surface and
 /// not the other is a reader who gets a different answer depending on which URL
 /// they happened to open.
+///
+/// `read` is the pair of directories the walk covered, in [`json_of`]'s order
+/// and for its reason: a page that names one of two directories invites the
+/// reader to conclude the other was empty.
 fn page_of(
     tail: &telemetry::Tail,
     asked: &Asked,
     health: Option<&telemetry::Health>,
-    dir: &std::path::Path,
+    read: (&std::path::Path, Option<&std::path::Path>),
 ) -> String {
     let mut body = String::new();
     let _ = write!(
         body,
         "<p class=\"lead\">{} event(s) · {} byte(s) read from {} file(s) · \
-         <code>{}</code></p>",
+         <code>{}</code>",
         tail.records.len(),
         tail.bytes_read,
         tail.files_read,
-        render::escape(&dir.display().to_string()),
+        render::escape(&read.0.display().to_string()),
     );
+    // BOTH DIRECTORIES ARE NAMED, for the reason `json_of` serves both: the
+    // walk covers two and a page that names one lets a reader conclude the
+    // other was empty — which is the reading that made this defect invisible
+    // for as long as it lasted.
+    match read.1 {
+        Some(cli) => {
+            let _ = write!(
+                body,
+                " and <code>{}</code></p>",
+                render::escape(&cli.display().to_string()),
+            );
+        }
+        // NOT SILENCE. No store root resolved means the `cli` half was never
+        // opened, and a page that said nothing would be reporting "no terminal
+        // events" in the same words it uses for "there were none" — the
+        // fallback that hides a failure CLAUDE.md §4 bans.
+        None => body.push_str(
+            " · <b>the cli half was NOT read</b> — no store root resolved, so \
+             nothing a terminal-run sweep wrote is below.</p>",
+        ),
+    }
 
     body.push_str(&health_banner(health));
 
@@ -1027,7 +1083,7 @@ mod tests {
             "the walk's own limits travel with the answer: {json}"
         );
 
-        let page = page_over(&dir, &asked, None);
+        let page = page_over(&dir, Some(&dir.join(super::CLI_SUBDIR)), &asked, None);
         assert!(page.contains("BANKNIFTY"), "{page}");
         assert!(
             page.contains("class=\"fault\""),
@@ -1063,7 +1119,7 @@ mod tests {
         );
 
         let asked = asked("limit=10");
-        let page = page_over(&dir, &asked, None);
+        let page = page_over(&dir, Some(&dir.join(super::CLI_SUBDIR)), &asked, None);
         assert!(
             page.contains("When (IST)"),
             "the column says which clock it is: {page}"
@@ -1097,7 +1153,25 @@ mod tests {
         );
     }
 
-    /// A level floor keeps the quieter events out of the answer.
+    /// **The PAGE shows the `cli` half — and this test used to prove it about
+    /// the JSON.**
+    ///
+    /// # The defect the test's own name describes, and did not cover
+    ///
+    /// `both_halves` was wired to `json_over` alone. `page_over` called
+    /// `telemetry::tail` on the server's directory and nothing else, so `/logs`
+    /// — the surface an operator opens — showed one half while `/logs.json`
+    /// showed two. MEASURED on 2026-09-01: the page showed nothing newer than
+    /// 31 August while **66 sweep events sat unread** in
+    /// `<store>/logs/cli/events.ndjson`, and every `cli` run printed *"The
+    /// /logs page walks BOTH halves … so these events appear there. D-0301."*
+    ///
+    /// This test was named `the_page_shows_the_cli_half…` and asserted on
+    /// `json_over`. **A test that guards the wrong function is how a defect
+    /// written down twice survives being written down twice**: the name says
+    /// the property is covered, the assertion covers the surface that already
+    /// had it, and nothing red ever appears. Both surfaces are driven below,
+    /// and the page is asserted first because it is the one that was wrong.
     #[test]
     fn the_page_shows_the_cli_half_and_not_only_the_servers() {
         // THE REPRODUCED CASE, printed by `cli` on every single run:
@@ -1121,6 +1195,31 @@ mod tests {
             "cli.sweep",
             "the terminal said this",
         ));
+
+        // THE PAGE FIRST, because the page is what was broken. `page_over` is
+        // the function `logs_page` calls; asserting on `json_over` here proved
+        // a property that surface already had.
+        let page = page_over(
+            &dir,
+            Some(&dir.join(super::CLI_SUBDIR)),
+            &asked("limit=10"),
+            None,
+        );
+        assert!(
+            page.contains("the terminal said this"),
+            "THE DEFECT: `/logs` walked the server's directory alone, so every \
+             event a terminal-run sweep wrote was on disk and invisible on the \
+             page that exists to show it: {page}"
+        );
+        assert!(
+            page.contains("the server said this"),
+            "and the server's half must not be lost to the merge: {page}"
+        );
+        assert!(
+            page.contains(&dir.join(super::CLI_SUBDIR).display().to_string()),
+            "the page names the second directory it read in full, so a reader \
+             can tell an empty half from an unread one: {page}"
+        );
 
         let json = json_over(
             &dir,
@@ -1295,7 +1394,12 @@ mod tests {
     #[test]
     fn an_empty_log_names_the_level_that_would_show_more() {
         let (dir, _sink) = sink_in("empty");
-        let page = page_over(&dir, &asked("limit=10"), None);
+        let page = page_over(
+            &dir,
+            Some(&dir.join(super::CLI_SUBDIR)),
+            &asked("limit=10"),
+            None,
+        );
         assert!(
             page.contains("BRUTEX_LOG_LEVEL=debug"),
             "a quiet log is the ordinary state and the page must say what to \
@@ -1318,7 +1422,12 @@ mod tests {
         // A TARGET FILTER. The write floor is not the cause and is not the cure,
         // but debug lines could still be admitted by the reader, so the write
         // hint is allowed to stay beside the real reason.
-        let by_target = page_over(&dir, &asked("limit=10&target=pull.http"), None);
+        let by_target = page_over(
+            &dir,
+            Some(&dir.join(super::CLI_SUBDIR)),
+            &asked("limit=10&target=pull.http"),
+            None,
+        );
         assert!(
             by_target.contains("the filters in force"),
             "the page must say the filters are why it is empty: {by_target}"
@@ -1330,7 +1439,12 @@ mod tests {
 
         // A LEVEL FILTER ABOVE DEBUG. Raising the write floor cannot help, so the
         // suggestion must not appear at all.
-        let by_level = page_over(&dir, &asked("limit=10&level=warn"), None);
+        let by_level = page_over(
+            &dir,
+            Some(&dir.join(super::CLI_SUBDIR)),
+            &asked("limit=10&level=warn"),
+            None,
+        );
         assert!(
             by_level.contains("the filters in force"),
             "the level filter is named as the cause: {by_level}"
@@ -1342,7 +1456,12 @@ mod tests {
         );
 
         // A RUN FILTER.
-        let by_run = page_over(&dir, &asked("limit=10&run=42"), None);
+        let by_run = page_over(
+            &dir,
+            Some(&dir.join(super::CLI_SUBDIR)),
+            &asked("limit=10&run=42"),
+            None,
+        );
         assert!(
             by_run.contains("42"),
             "the run narrowed to is named: {by_run}"
@@ -1350,7 +1469,12 @@ mod tests {
 
         // AND THE UNFILTERED CASE IS UNCHANGED — the original wording still
         // applies when nothing the reader chose is responsible.
-        let plain = page_over(&dir, &asked("limit=10"), None);
+        let plain = page_over(
+            &dir,
+            Some(&dir.join(super::CLI_SUBDIR)),
+            &asked("limit=10"),
+            None,
+        );
         assert!(
             plain.contains("BRUTEX_LOG_LEVEL=debug") && !plain.contains("the filters in force"),
             "with no filter the write floor IS the thing to change: {plain}"
@@ -1700,7 +1824,7 @@ mod tests {
             &every,
             &asked("limit=10"),
             None,
-            std::path::Path::new("/tmp/x"),
+            (std::path::Path::new("/tmp/x"), None),
         );
         for want in [
             "NOT everything there is",
@@ -1716,10 +1840,44 @@ mod tests {
                 &walk(Vec::new()),
                 &asked(""),
                 None,
-                std::path::Path::new("/tmp/x")
+                (std::path::Path::new("/tmp/x"), None)
             )
             .contains("<ul class=\"notes\">"),
             "and a clean walk renders no note list at all"
+        );
+
+        // THE PAIR IS RENDERED AS A PAIR. A page that names one of two
+        // directories lets a reader conclude the other was empty, and `None`
+        // has to SAY it was never opened rather than say nothing at all.
+        let both = page_of(
+            &walk(Vec::new()),
+            &asked(""),
+            None,
+            (
+                std::path::Path::new("/tmp/served"),
+                Some(std::path::Path::new("/tmp/served/cli")),
+            ),
+        );
+        assert!(
+            both.contains("<code>/tmp/served</code>")
+                && both.contains("<code>/tmp/served/cli</code>"),
+            "both halves of the walk are named on the page, and each in its own \
+             element — one path that happens to be a prefix of the other must \
+             not be able to satisfy this by itself: {both}"
+        );
+        assert!(
+            !both.contains("was NOT read"),
+            "and a half that WAS read is not announced as missing: {both}"
+        );
+        assert!(
+            page_of(
+                &walk(Vec::new()),
+                &asked(""),
+                None,
+                (std::path::Path::new("/tmp/served"), None)
+            )
+            .contains("the cli half was NOT read"),
+            "an unresolved store root is named, not rendered as an empty half"
         );
     }
 

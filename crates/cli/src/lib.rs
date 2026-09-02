@@ -346,7 +346,10 @@ cannot bypass that proof; when set it must exactly equal clean HEAD.
 /// script distinguishing them is the point of having two codes.
 fn verify_arm(out: &mut String, feed: &str, underlying: &str) -> u8 {
     let report = verify(feed, underlying);
-    let failed = report.contains("FAIL");
+    // A REFUSAL IS A FAILURE. This tested `contains("FAIL")` alone, and a
+    // refusal -- an unknown feed, an unswept instrument -- contains no such
+    // word, so `cli verify ... && deploy` DEPLOYED. On the gate command.
+    let failed = report.contains("FAIL") || carries_refusal(&report);
     out.push_str(&report);
     if failed { FAILED } else { OK }
 }
@@ -401,7 +404,7 @@ fn auto_stored_arm(
         return MISUSED;
     };
     let text = auto_stored(vendor, underlying, rung, (fy, fm), (ty, tm));
-    let refused = text.starts_with("refused:");
+    let refused = carries_refusal(&text);
     out.push_str(&text);
     if refused { MISUSED } else { OK }
 }
@@ -513,7 +516,7 @@ fn elite_arm(
             // needs to know a price.
             let text =
                 elite_descend_in_points(vendor, underlying, rung, (fy, fm), (ty, tm), pts, n);
-            let refused = text.starts_with("refused");
+            let refused = carries_refusal(&text);
             out.push_str(&text);
             if refused { MISUSED } else { OK }
         }
@@ -572,6 +575,18 @@ fn screen_arm(
             if n == 0 {
                 return refuse(out, "TOP must be 1 or more");
             }
+            // THE THIRD NUMBER, VALIDATED LIKE THE OTHER TWO. `pts` and `n`
+            // were checked and `rr` was not, so a negative MIN_RR reached
+            // `Rules::min_rr_bp` and `admits` compared `rr_bp >= -500` --
+            // satisfied by every cell, since a reward-to-risk is never
+            // negative. The rule was silently vacuous while the banner above
+            // the table still listed it as enforced.
+            if rr < 0 {
+                return refuse(
+                    out,
+                    "MIN_RR is hundredths and cannot be negative; 0 drops the rule",
+                );
+            }
             // CONVERTED AGAINST THESE BARS, exactly as the `elite` arm above
             // already does. This read `points_to_ppm(pts)` -- a hardcoded
             // 25,000 -- so `screen NIFTY 20` and `screen SOMESTOCK 20` printed
@@ -625,7 +640,7 @@ fn screen_arm(
                     validate: validate_from_env(),
                 },
             );
-            let refused = text.starts_with("refused: ");
+            let refused = carries_refusal(&text);
             out.push_str(&text);
             if refused { MISUSED } else { OK }
         }
@@ -781,7 +796,7 @@ fn sweep_all_arm(out: &mut String, vendor: &str, rung: &str, min_hits: &str) -> 
     match parse_min_hits(min_hits) {
         Ok(h) => {
             let text = batch::sweep_all(vendor, rung, h);
-            let refused = text.starts_with("refused: ");
+            let refused = carries_refusal(&text);
             out.push_str(&text);
             if refused { MISUSED } else { OK }
         }
@@ -833,7 +848,7 @@ fn descend_arm(
                 );
             }
             let text = descend(vendor, underlying, rung, (fy, fm), (ty, tm), h, w);
-            let refused = text.starts_with("refused: ");
+            let refused = carries_refusal(&text);
             out.push_str(&text);
             if refused { MISUSED } else { OK }
         }
@@ -874,7 +889,7 @@ fn range_all_arm(
     ) {
         (Ok(fy), Ok(fm), Ok(ty), Ok(tm), Ok(h)) => {
             let text = range_all(vendor, underlying, (fy, fm), (ty, tm), Some(h));
-            let refused = text.starts_with("refused: ");
+            let refused = carries_refusal(&text);
             out.push_str(&text);
             if refused { MISUSED } else { OK }
         }
@@ -915,7 +930,7 @@ fn audit_range_arm(
     ) {
         (Ok(fy), Ok(fm), Ok(ty), Ok(tm), Ok(h)) => {
             let text = audit_range(vendor, underlying, rung, (fy, fm), (ty, tm), h);
-            let refused = text.starts_with("refused: ");
+            let refused = carries_refusal(&text);
             out.push_str(&text);
             if refused { MISUSED } else { OK }
         }
@@ -941,16 +956,20 @@ pub fn run(args: &[String], out: &mut String) -> u8 {
         ["sweep", sessions, min_hits] => match (parse_sessions(sessions), parse_min_hits(min_hits))
         {
             (Ok(s), Ok(m)) => {
-                out.push_str(&sweep(s, m));
-                OK
+                let text = sweep(s, m);
+                let code = if carries_refusal(&text) { FAILED } else { OK };
+                out.push_str(&text);
+                code
             }
             (Err(why), _) | (_, Err(why)) => refuse(out, why),
         },
         ["audit", sessions, min_hits] => {
             match (parse_sessions(sessions), parse_min_hits(min_hits)) {
                 (Ok(s), Ok(m)) => {
-                    out.push_str(&audit_run(s, m));
-                    OK
+                    let text = audit_run(s, m);
+                    let code = if carries_refusal(&text) { FAILED } else { OK };
+                    out.push_str(&text);
+                    code
                 }
                 (Err(why), _) | (_, Err(why)) => refuse(out, why),
             }
@@ -971,7 +990,7 @@ pub fn run(args: &[String], out: &mut String) -> u8 {
             ) {
                 (Ok(y), Ok(m), Ok(h)) => {
                     let text = sweep_stored(vendor, underlying, rung, y, m, h);
-                    let refused = text.starts_with("refused: ");
+                    let refused = carries_refusal(&text);
                     out.push_str(&text);
                     if refused { MISUSED } else { OK }
                 }
@@ -999,7 +1018,7 @@ pub fn run(args: &[String], out: &mut String) -> u8 {
             ) {
                 (Ok(y), Ok(m), Ok(h)) => {
                     let text = audit_stored(vendor, underlying, rung, y, m, h);
-                    let refused = text.starts_with("refused: ");
+                    let refused = carries_refusal(&text);
                     out.push_str(&text);
                     if refused { MISUSED } else { OK }
                 }
@@ -1670,6 +1689,7 @@ fn sweep_stored_inner(
     month: u8,
     min_hits: u64,
 ) -> Result<String, stored::Refusal> {
+    swept_rung(rung)?;
     // THE COMMIT IS CHECKED FIRST, BEFORE ANY BAR IS READ. §3 rule 3 is "no
     // computation without that identity recorded", so a build that cannot be
     // identified must refuse BEFORE it computes, not sweep and then apologise.
@@ -1981,6 +2001,7 @@ fn auto_stored_inner(
     from: (u16, u8),
     to: (u16, u8),
 ) -> Result<String, stored::Refusal> {
+    swept_rung(rung)?;
     // Before any bar is read, for the reason `sweep_stored_inner` gives: §3
     // rule 3 forbids computation without a recordable identity, so a build that
     // cannot be identified refuses first rather than sweeping and apologising.
@@ -3476,6 +3497,7 @@ fn audit_stored_inner(
     month: u8,
     min_hits: u64,
 ) -> Result<String, stored::Refusal> {
+    swept_rung(rung)?;
     // COMMIT FIRST, BEFORE A BAR IS READ — the order `sweep_stored` uses and for
     // the identical reason: a build that cannot be identified must refuse BEFORE
     // it computes, not compute and then apologise.
@@ -3983,6 +4005,7 @@ fn audit_range_inner(
     min_hits: u64,
     attempt: Option<u64>,
 ) -> Result<String, stored::Refusal> {
+    swept_rung(rung)?;
     // COMMIT FIRST, BEFORE A BAR IS READ, for the reason `audit_stored_inner`
     // gives: a build that cannot be identified must refuse BEFORE it computes.
     let commit = commit_stamp().ok_or_else(|| {
@@ -5194,7 +5217,14 @@ pub fn results_list(feed: Option<&str>, underlying: Option<&str>) -> String {
         Ok(root) => root,
         Err(why) => return format!("refused: {why}\n"),
     };
-    let mut store = match crate::results::Results::open(&root) {
+    // OPEN_READ, BECAUSE THIS IS A LISTING. `Results::open` calls
+    // `create_dir_all` and makes the very ledger this command reports as
+    // empty -- so `cli results` against a store with no `results/` printed
+    // "Nothing has been recorded yet" over a file it had just written, and
+    // failed outright on a read-only store while `cli top` succeeded.
+    // `open_read` exists for exactly this; `top_at` was moved to it and this,
+    // the sibling the same comment calls "the third and last", was not.
+    let mut store = match crate::results::Results::open_read(&root) {
         Ok(store) => store,
         Err(why) => return format!("refused: {why}\n"),
     };
@@ -5378,6 +5408,30 @@ fn support_from_knob() -> Option<u64> {
 pub const EVERY_RUNG: [&str; 8] = [
     "1min", "2min", "3min", "5min", "10min", "15min", "30min", "60min",
 ];
+
+/// The rung, refused unless it is one the engine actually sweeps.
+///
+/// **`stored::rung` admits TEN and the engine sweeps EIGHT, and only two of the
+/// fifteen verbs knew the difference.** `1day` is stored, readable and
+/// legitimately served -- and a daily signal bar acts on a condition that was
+/// not knowable until the session it describes had already closed, which is the
+/// look-ahead section 3 rule 7 forbids. `1s` is admitted by the store for a span
+/// nobody can sweep. The guard belongs at each sweep entry point and not in
+/// `stored::rung`, because reading a daily bar is legal and sweeping one is not.
+///
+/// # Errors
+///
+/// Names the rung asked for and the eight that are swept.
+fn swept_rung(rung: &str) -> Result<(), stored::Refusal> {
+    if EVERY_RUNG.contains(&rung) {
+        return Ok(());
+    }
+    Err(format!(
+        "`{rung}` is not a rung this engine sweeps. The eight are: {}. It is \
+         stored and readable and it is not swept. Nothing was read.",
+        EVERY_RUNG.join(", ")
+    ))
+}
 
 /// The final admitted candidate and its exact chosen-grid materialization.
 ///
@@ -6526,7 +6580,13 @@ fn screen_cap() -> usize {
     // reachable from an unauthenticated POST through the browser's knobs table,
     // where the field is free text, and a value that could not be used used to
     // become ten thousand with nothing said.
-    crate::knobs::count_usize("BRUTEX_SCREEN_CAP").unwrap_or(DEFAULT)
+    // BOUNDED. This reaches `Heap::with_capacity(keep)` before a single bar is
+    // scored, and a `Marked<Scored>` is ~136 bytes, so an unbounded value asks
+    // the allocator for hundreds of gigabytes and `abort()`s the process --
+    // taking every other request and any in-flight sweep with it. The browser
+    // wires this to a free-text field.
+    const CEILING: usize = 10_000_000;
+    crate::knobs::count_usize_within("BRUTEX_SCREEN_CAP", CEILING).unwrap_or(DEFAULT)
 }
 
 /// The cap for this rung: the operator's count, or one measured to fit a budget.
@@ -8480,9 +8540,14 @@ fn why_refused(cell: &grid::Cell, rules: Rules, steady: bool) -> &'static str {
     // Order matters: the first rule broken is the one named, and they are
     // checked cheapest first. A row can break several and an operator only
     // needs one to act on.
-    if cell.worst_mae > rules.max_mae_ppm {
+    // AND A RULE THAT IS OFF CANNOT REFUSE A ROW. `max_mae_ppm` defaults to
+    // ZERO, which `Rules::admits` reads as "no stop ceiling" -- but this test
+    // has no such guard, so `worst_mae > 0` is true of every row that ever
+    // moved against entry, and EVERY refusal was blamed on a rule that was not
+    // running. The same holds for the ratio floor at zero.
+    if rules.max_mae_ppm > 0 && cell.worst_mae > rules.max_mae_ppm {
         "MAE"
-    } else if cell.reward_to_risk_bp() < rules.min_rr_bp {
+    } else if rules.min_rr_bp > 0 && cell.reward_to_risk_bp() < rules.min_rr_bp {
         "R:R"
     } else if cell.win_rate_bp() < rules.min_win_rate_bp {
         "win%"
@@ -8533,14 +8598,32 @@ fn hundredths_of(n: i64) -> String {
 /// The point figure assumes a 25,000 index, which is stated rather than implied:
 /// it is a reading aid and not a measurement.
 fn ppm_as_percent(ppm: i64) -> String {
+    // `off`, LIKE `bp_as_percent`. Zero means the rule is not applied --
+    // `Rules::admits` reads it that way -- and printing `0.00%` announced the
+    // strictest possible stop above a table where no stop ceiling ran at all.
+    if ppm == 0 {
+        return "off".to_owned();
+    }
+    // AND THE SIGN SURVIVES. `unsigned_abs` dropped it, so a negative rendered
+    // as its own magnitude.
+    let sign = if ppm < 0 { "-" } else { "" };
     let hundredths = ppm.unsigned_abs() / 100;
-    format!("{}.{:02}%", hundredths / 100, hundredths % 100)
+    format!("{sign}{}.{:02}%", hundredths / 100, hundredths % 100)
 }
 
 /// One rung's row in the comparison table.
 struct RungRow {
     rung: &'static str,
     outcome: Result<crate::results::Record, String>,
+    /// Months the range asked for that the store does not hold.
+    ///
+    /// **Carried because `one_rung` loaded them and threw them away.** `Span`
+    /// populates `missing` and its own doc says "a hole moves every figure
+    /// computed over the span and the operator has to see it" -- and
+    /// `audit-range` and `screen` both print it. This table did not, so an
+    /// eight-rung comparison headed with the span you asked for could be
+    /// computed over a shorter one with nothing saying so.
+    missing: Vec<(u16, u8)>,
 }
 
 /// Exact context shared by one rung's structural progress boundaries.
@@ -8716,6 +8799,7 @@ fn one_rung(
             return RungRow {
                 rung,
                 outcome: Err(first_line(why)),
+                missing: Vec::new(),
             };
         }
     };
@@ -8725,6 +8809,7 @@ fn one_rung(
             return RungRow {
                 rung,
                 outcome: Err(first_line(why)),
+                missing: Vec::new(),
             };
         }
     };
@@ -8734,10 +8819,13 @@ fn one_rung(
             return RungRow {
                 rung,
                 outcome: Err(first_line(why)),
+                missing: Vec::new(),
             };
         }
     };
     let bars = span.bars.len();
+    // KEPT BEFORE THE SPAN IS CONSUMED, so the table can name the holes.
+    let missing = span.missing.clone();
     // DERIVED FROM THIS RUNG'S OWN BARS WHEN NOBODY NAMES A SUPPORT.
     //
     // `None` is not a default hiding in an `Option`; it is the ABSENCE of a
@@ -8835,6 +8923,7 @@ fn one_rung(
                     return RungRow {
                         rung,
                         outcome: Err(first_line(why)),
+                        missing: Vec::new(),
                     };
                 }
             };
@@ -8850,6 +8939,7 @@ fn one_rung(
                 return RungRow {
                     rung,
                     outcome: Err(first_line(why)),
+                    missing: Vec::new(),
                 };
             }
         };
@@ -8859,6 +8949,7 @@ fn one_rung(
                 return RungRow {
                     rung,
                     outcome: Err(first_line(why)),
+                    missing: Vec::new(),
                 };
             }
         };
@@ -8869,6 +8960,7 @@ fn one_rung(
                 return RungRow {
                     rung,
                     outcome: Err(first_line(why)),
+                    missing: Vec::new(),
                 };
             }
         };
@@ -8964,7 +9056,11 @@ fn one_rung(
         outcome.as_ref().err().map_or("", String::as_str),
     );
 
-    RungRow { rung, outcome }
+    RungRow {
+        rung,
+        outcome,
+        missing,
+    }
 }
 
 /// Trading weeks a month holds, times one hundred.
@@ -9246,6 +9342,9 @@ fn elite_descend_with_attempt(
     );
 
     let mut last_page: Option<String> = None;
+    // THE FIRST REFUSAL, KEPT, because a walk where every step refused has no
+    // page to show and `exhausted_walk` would otherwise report the market.
+    let mut first_refusal: Option<String> = None;
     for (step, support) in ladder.iter().enumerate() {
         // PROGRESS TO STDERR as each step lands, for the reason `descend`
         // records: a walk that buffers its whole output prints nothing for
@@ -9281,25 +9380,94 @@ fn elite_descend_with_attempt(
             out.push_str(&validated_at(question, *support, policy, &page));
             return out;
         }
+        // ONE PREDICATE FOR BOTH DECISIONS, which is the defect this replaces.
+        // The line above tested `"refused: "` with the colon while the keep
+        // below tested `"refused"` without it, so a step that refused with
+        // `refused before the ceiling ...` was correctly WITHHELD from
+        // `last_page` and yet printed as a bare `nothing admitted` naming no
+        // reason at all. Two spellings of one question cannot both be right.
+        let refusal = refusal_reason(&page);
         let _ = writeln!(
             out,
             "  {support:>9} ppm — nothing admitted{}",
-            if page.starts_with("refused: ") {
-                format!(" ({})", page.lines().next().unwrap_or_default())
-            } else {
-                String::new()
+            match refusal {
+                Some(why) => format!(" ({why})"),
+                None => String::new(),
             }
         );
         // KEPT ONLY IF IT IS A REPORT. A refusal carries no rows and no tier
         // ladder, so keeping one would replace "what is there" with "why this
         // step could not run", which is a different answer.
-        if !page.starts_with("refused") {
-            last_page = Some(page);
+        match refusal {
+            Some(why) => {
+                if first_refusal.is_none() {
+                    first_refusal = Some(why.to_owned());
+                }
+            }
+            None => last_page = Some(page),
         }
     }
 
-    exhausted_walk(&mut out, floor, last_page.as_deref());
+    match last_page.as_deref() {
+        // NOT A STATEMENT ABOUT THE MARKET. Every step refused before a single
+        // row was measured against the rules, so saying "nothing passed" would
+        // report a verdict on the rules that was never reached -- the failure
+        // wearing a success's clothes section 4 bans. Measured: on 60min, 30min
+        // and 3min every step of this walk refused on a missing minute, and the
+        // summary still told the operator their rules were too strict.
+        None => refused_walk(&mut out, ladder.len(), first_refusal.as_deref()),
+        Some(page) => exhausted_walk(&mut out, floor, Some(page)),
+    }
     out
+}
+
+/// The reason a rendered step refused, or `None` if the step is a report.
+///
+/// **One predicate, because there were two.** `screen_step` renders a refusal
+/// two ways -- `refused: <why>` from the argument and span checks, and
+/// `refused before the ceiling ...` from the walk itself -- and a test for the
+/// first spelling silently classified the second as a report.
+fn refusal_reason(page: &str) -> Option<&str> {
+    // AT COLUMN ZERO, and that is load-bearing. A completed report prints
+    // `  refused    0` INDENTED inside its BARS block; a refusal starts hard
+    // left. Trimming first would classify every successful sweep as refused.
+    page.lines().find(|line| line.starts_with("refused"))
+}
+
+/// Whether a rendered report carries a refusal anywhere in it.
+///
+/// **Four command arms decided this four ways and three were wrong.**
+/// `verify_arm` tested `contains("FAIL")`, which a refusal never contains, so
+/// `cli verify ... && deploy` DEPLOYED on a refused feed -- on the one command
+/// whose entire purpose is to gate. `descend_arm` tested
+/// `starts_with("refused: ")` against a page that opens with the provenance
+/// banner, so the prefix could never match. `sweep` and `audit` stringified
+/// their body's result and hardcoded success. All four now ask this.
+fn carries_refusal(text: &str) -> bool {
+    refusal_reason(text).is_some()
+}
+
+/// Every step refused, so there is no page and no verdict on the rules.
+fn refused_walk(out: &mut String, steps: usize, first_refusal: Option<&str>) {
+    let _ = writeln!(
+        out,
+        "\n  NO STEP EVALUATED A SINGLE ROW. All {steps} supports in the ladder \
+         refused before the rules\n  were applied, so this is a statement about \
+         the DATA, not about the market. Nothing\n  here says your rules are too \
+         strict -- they were never reached."
+    );
+    match first_refusal {
+        Some(why) => {
+            let _ = writeln!(out, "\n  The first refusal was:\n    {why}");
+        }
+        None => {
+            let _ = writeln!(
+                out,
+                "\n  No step named a reason, which is itself a defect: a refusal \
+                 that cannot say why\n  is one an operator cannot act on."
+            );
+        }
+    }
 }
 
 /// [`elite_descend`], with the stop ceiling stated in INDEX POINTS.
@@ -10155,6 +10323,26 @@ fn range_over_inner(
             }
         }
     }
+    // AND THE HOLES ARE NAMED, not just counted. The `months` column above
+    // shows `found/asked`, so a short span is VISIBLE -- but a reader cannot
+    // act on `61/80` without knowing WHICH nineteen are absent, and every
+    // figure on that row was computed without them. `audit-range` and `screen`
+    // both name them through `span_banner`; this table counted and stopped.
+    //
+    // Named once for the whole table rather than per rung: the rungs share one
+    // span, so the same months are missing from every row that read any.
+    if let Some(missing) = rows.iter().map(|row| &row.missing).find(|m| !m.is_empty()) {
+        let _ = writeln!(
+            out,
+            "\n  MONTHS MISSING FROM THIS SPAN ({}): {}",
+            missing.len(),
+            missing
+                .iter()
+                .map(|(y, m)| format!("{y}-{m:02}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+    }
     let _ = writeln!(
         out,
         "\n  `worst` and `best` are the CHOSEN exit variant's total in paisa \
@@ -10321,6 +10509,7 @@ fn screen_range_inner(
     policy: Policy,
     attempt: Option<u64>,
 ) -> Result<String, stored::Refusal> {
+    swept_rung(rung)?;
     let (from, to) = span;
     let Policy {
         rules,
@@ -11076,6 +11265,13 @@ fn ceiling_asked() -> Result<usize, String> {
         Some(raw) => {
             let text = raw;
             match text.trim().parse::<usize>() {
+                Ok(n) if n > whole_machine_ceiling().saturating_mul(64) => Err(format!(
+                    "BRUTEX_CEILING is `{text}`, which is more than 64x what \
+                     this machine derives ({}). The candidate ceiling is the \
+                     bound that stops a runaway sweep being OOM-killed, so a \
+                     value this large switches off the only defence there is.",
+                    whole_machine_ceiling()
+                )),
                 Ok(0) | Err(_) => Err(format!(
                     "BRUTEX_CEILING is `{text}`, which is not a candidate count \
                      of 1 or more. It is roughly the bytes you can spare divided \
@@ -12182,6 +12378,20 @@ fn horizon_for(bars: &[indicators::Candle], on_execution_series: bool) -> Horizo
     // `Horizon::bars` also rejects zero: "the return over the next no bars" is
     // not a question, and it must be surfaced for the same reason as a parse
     // failure.
+    // TAKEN VERBATIM, and the unbounded-allocation defect this appears to
+    // invite is fixed where it actually lives.
+    //
+    // `BRUTEX_HORIZON_BARS` is reachable from a free-text field in the browser
+    // and `Horizon::bars` rejects only ZERO, so `4294967295` reserved 68.7 GB
+    // in `runner::outcome::edge` -- once per frequent itemset, across every
+    // rayon thread -- and an allocation failure calls `abort()`: no refusal, no
+    // log line, the process gone. That reservation is now clamped at its own
+    // site, where the slice length is known.
+    //
+    // Clamping HERE instead was tried and reverted: an explicit count is the
+    // operator's number, and a horizon of one whole session over a short
+    // fixture is a legitimate question. Answering a different one quietly is
+    // the defect this file spends most of its comments refusing.
     if let Some(horizon) = asked.parse::<u32>().ok().and_then(Horizon::bars) {
         horizon
     } else {

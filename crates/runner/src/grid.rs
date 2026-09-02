@@ -3820,7 +3820,19 @@ fn mean_excursions(cell: &mut Cell, adverse_won: i64, gain_won: i64, adverse_all
     }
     if cell.trades > 0 {
         let m = i64::try_from(cell.trades).unwrap_or(1).max(1);
-        cell.all_mae = adverse_all / m;
+        // ROUNDED UP, BECAUSE THIS IS A DENOMINATOR AND THE ONE THAT RANKS.
+        //
+        // `edge_ratio` is `winner_mfe * 100 / all_mae`, and `Grid::sharpest`
+        // ranks on it. Flooring a mean adverse excursion at ppm scale turns 1.9
+        // into 1, which nearly DOUBLES the ratio -- and it does that precisely
+        // to the calm, tight-looking candidates whose adverse moves are small,
+        // which are the ones that already look most attractive.
+        //
+        // Every input here is non-negative (`peak` clamps at 0 and refuses a
+        // non-positive entry), so a ceiling division cannot flip a sign, and
+        // rounding a denominator UP can only make the ratio smaller. That is
+        // the safe direction: it can understate an edge, never invent one.
+        cell.all_mae = adverse_all.saturating_add(m.saturating_sub(1)) / m;
     }
 }
 
@@ -3906,6 +3918,8 @@ fn realised(
                 };
             };
             let (exit, gapped) = level_fill(bar, resting, level.kind, side, true);
+            // A STOP FILLS WORSE THAN ITS TRIGGER, under the pessimistic reading.
+            let exit = stop_slippage(exit, bar, side, level.kind, gapped, pessimistic);
             let paisa = match side {
                 Side::Long => exit.saturating_sub(fills.charged),
                 Side::Short => fills.charged.saturating_sub(exit),
@@ -3986,6 +4000,8 @@ fn realised(
                 };
             };
             let (exit, gapped) = level_fill(bar, resting, Resting::Stop, side, rested_at_open);
+            // A TRAIL IS A STOP, so it slips like one. Same arm, same reason.
+            let exit = stop_slippage(exit, bar, side, Resting::Stop, gapped, pessimistic);
             let paisa = match side {
                 Side::Long => exit.saturating_sub(fills.charged),
                 Side::Short => fills.charged.saturating_sub(exit),
@@ -4451,6 +4467,70 @@ fn level_fill(
         return (resting, false);
     }
     (bar.open, true)
+}
+
+/// A stop's fill, worsened to the bar's adverse extreme under the pessimistic
+/// reading.
+///
+/// **A stop was booked at its trigger, which assumed away the only slippage
+/// that exists here.** A target is a limit order: it fills at its level or
+/// better, so the level is the honest price. A stop is an instruction to LEAVE
+/// — once touched it is a market order and fills at whatever is there next,
+/// never better than the trigger. Booking it at the trigger understated every
+/// losing trade and therefore overstated every reward-to-risk. Measured on this
+/// module's own fixture: `worst_trade` −1,600 → −2,100, ratio 1.75 → 1.33.
+///
+/// # No tick, and that is the operator's own rule
+///
+/// The four numbers of the bar are the whole of what is known. A fixed tick of
+/// slippage would be a number nobody measured, invented at the one point where
+/// it flatters nothing and is hardest to notice — §3 rule 1. The bar's adverse
+/// extreme is a price the market actually printed.
+///
+/// # Only the pessimistic reading
+///
+/// This is a bound, not an estimate. The optimistic reading keeps the trigger,
+/// so the two readings bracket the fill instead of agreeing on a guess, and the
+/// spread between them is the uncertainty made visible rather than resolved.
+///
+/// # Not on a gap, because the open IS the adverse price there
+///
+/// `level_fill` already answers a gapped bar with the open and says so through
+/// `gapped`. That is not an optimistic answer needing correction: when the bar
+/// opens through the level the order becomes marketable at the FIRST PRINT, and
+/// the first print is the open. Worsening it to the bar's later low would price
+/// a fill the position could not have waited for — it was already out. So
+/// slippage is the intrabar case only: the level was touched mid-bar, and where
+/// between the trigger and the extreme it filled is what nobody can know.
+const fn stop_slippage(
+    exit: i64,
+    bar: &Candle,
+    side: Side,
+    kind: Resting,
+    gapped: bool,
+    pessimistic: bool,
+) -> i64 {
+    if gapped || !pessimistic || !matches!(kind, Resting::Stop) {
+        return exit;
+    }
+    match side {
+        // A long exits by SELLING, so its adverse extreme is the low; a short
+        // exits by buying, so it is the high.
+        Side::Long => {
+            if bar.low < exit {
+                bar.low
+            } else {
+                exit
+            }
+        }
+        Side::Short => {
+            if bar.high > exit {
+                bar.high
+            } else {
+                exit
+            }
+        }
+    }
 }
 
 /// The worst the path went against the position, in parts per million.
@@ -5952,10 +6032,24 @@ mod tests {
 
             let equal_bar = candle(0, resting, 130_000, 70_000, resting);
             let equal = super::realised(&[equal_bar], 0, 0, fills, side, ended, Some(level), true);
+            // A TARGET KEEPS THE LEVEL, A STOP TAKES THE BAR. Opening exactly
+            // on the order is not a gap — it was marketable from the first
+            // print, which is why `gapped` stays false below. But a stop is a
+            // market order from that print onward, and under the pessimistic
+            // reading it is priced at how far the bar actually ran against the
+            // position (70,000 for a long, 130,000 for a short), not at the
+            // trigger it happened to open on. A target is a limit order and
+            // fills at its level or better, so it is untouched.
+            let expected = match kind {
+                super::Resting::Target => money(resting),
+                super::Resting::Stop => match side {
+                    Side::Long => money(70_000),
+                    Side::Short => money(130_000),
+                },
+            };
             assert_eq!(
-                equal.paisa,
-                money(resting),
-                "{name}: equality fills the level"
+                equal.paisa, expected,
+                "{name}: a target keeps the level, a stop takes the bar's extreme"
             );
             assert!(
                 !equal.gapped,
@@ -5965,10 +6059,13 @@ mod tests {
             let retrace_bar = candle(0, 100_000, 130_000, 70_000, 100_000);
             let retrace =
                 super::realised(&[retrace_bar], 0, 0, fills, side, ended, Some(level), true);
+            // Same rule on the intrabar touch, and this is the ordinary case:
+            // the bar opened away from the order and reached it later, so the
+            // fill is somewhere between the trigger and the extreme and only
+            // the extreme is a price the market actually printed.
             assert_eq!(
-                retrace.paisa,
-                money(resting),
-                "{name}: later touch fills the level"
+                retrace.paisa, expected,
+                "{name}: a later touch fills a target at its level and a stop at the bar"
             );
             assert!(!retrace.gapped, "{name}: approach then touch is not a gap");
         }
@@ -6143,9 +6240,14 @@ mod tests {
         let never = crate::excursion::Ladder::new(vec![900_000]).expect("one unreachable rung");
         let targets = crate::excursion::Ladder::new(vec![50_000]).expect("one target rung");
         let trails = crate::excursion::Ladder::new(vec![40_000]).expect("one trail rung");
+        // THE NON-GAPPED ROWS PRICE THE TRAIL AT THE BAR'S LOW, not at the trail
+        // level: a trail is a stop, and a stop that is touched intrabar fills
+        // somewhere between its trigger and the extreme. -10,000 rather than
+        // -4,000. The gapped rows are unchanged -- there the open IS the
+        // adverse price and slippage does not apply.
         for (side, open, pessimistic, optimistic, gapped, ambiguous, trailed, targeted) in [
-            (Side::Long, 100_000, -4_000, 5_000, 0, 1, 1, 0),
-            (Side::Short, 100_000, -4_000, 5_000, 0, 1, 1, 0),
+            (Side::Long, 100_000, -10_000, 5_000, 0, 1, 1, 0),
+            (Side::Short, 100_000, -10_000, 5_000, 0, 1, 1, 0),
             (Side::Long, 90_000, -10_000, -10_000, 1, 0, 1, 0),
             (Side::Short, 110_000, -10_000, -10_000, 1, 0, 1, 0),
             (Side::Long, 110_000, 10_000, 10_000, 1, 0, 0, 1),
@@ -6209,8 +6311,8 @@ mod tests {
         let fixed = crate::excursion::Ladder::new(vec![50_000]).expect("one fixed rung");
         let trails = crate::excursion::Ladder::new(vec![40_000]).expect("one trail rung");
         for (side, open, pessimistic, optimistic, gapped, ambiguous, stopped, trailed, targeted) in [
-            (Side::Long, 100_000, -4_000, 5_000, 0, 1, 0, 1, 0),
-            (Side::Short, 100_000, -4_000, 5_000, 0, 1, 0, 1, 0),
+            (Side::Long, 100_000, -10_000, 5_000, 0, 1, 0, 1, 0),
+            (Side::Short, 100_000, -10_000, 5_000, 0, 1, 0, 1, 0),
             (Side::Long, 90_000, -10_000, -10_000, 1, 1, 1, 0, 0),
             (Side::Short, 110_000, -10_000, -10_000, 1, 1, 1, 0, 0),
             (Side::Long, 110_000, 10_000, 10_000, 1, 0, 0, 0, 1),
@@ -6341,9 +6443,13 @@ mod tests {
         // 40,000 ppm OF THE ENTRY is 4,000 — not 4,200, which is 40,000 ppm of
         // the peak. The old figures pinned the wrong basis: a fill for an order
         // that, on the basis the rung was tested in, was never touched.
+        // AND THEN SLIPPED. A trail is a stop, so under the pessimistic reading
+        // it is priced at the exit bar's low (100,500) rather than at the trail
+        // level it was triggered on. 500, not 1,000.
         assert_eq!(
-            priced_pess, 1_000,
-            "105,000 peak less 4,000 (40,000 ppm of the 100,000 ENTRY), less \
+            priced_pess, 500,
+            "the exit bar's low, the trail having been triggered at 105,000 \
+             peak less 4,000 (40,000 ppm of the 100,000 ENTRY), less \
              that entry"
         );
         assert_eq!(
@@ -6720,12 +6826,26 @@ mod tests {
 
         // 1_003_000 target level, entered at 1_000_200; 999_000 stop level,
         // entered at 1_000_600. Both fills are inside their bar's range.
+        //
+        // THE TARGET KEEPS ITS LEVEL AND THE STOP DOES NOT. A target is a limit
+        // order: it fills at 1_003_000 or better, so `min_win` is unchanged. A
+        // stop is a market order once touched and fills at whatever is there
+        // next, so it is priced at the bar's adverse extreme rather than at
+        // 999_000 -- and `worst_trade` moved -1,600 -> -2,100 accordingly.
+        //
+        // That single change is worth stating plainly: the reward-to-risk this
+        // fixture reports fell 1.75 -> 1.33, a 24% overstatement removed. Every
+        // losing trade in every report carried the same flattery.
         assert_eq!(a.min_win, 2_800, "the target level less the WORSE entry");
-        assert_eq!(a.worst_trade, -1_600, "the stop level less the WORSE entry");
+        assert_eq!(
+            a.worst_trade, -2_100,
+            "the bar's adverse extreme less the WORSE entry, not the stop level"
+        );
         assert_eq!(
             a.reward_to_risk_bp(),
-            175,
-            "2,800 over 1,600. The defect reported 300 -- the ladder's own axis"
+            133,
+            "2,800 over 2,100. The defect reported 300 -- the ladder's own axis \
+             -- and booking the stop at its trigger then reported 175"
         );
         assert!(
             a.reward_to_risk_bp() < 300,
@@ -6751,9 +6871,17 @@ mod tests {
     #[test]
     fn the_entry_spread_is_the_whole_fill_cost_of_a_level_exit() {
         let cell = one_to_three_cell(200, 600);
+        // 1,300, NOT 800, AND THE EXTRA 500 IS THE STOP'S OWN SLIPPAGE.
+        //
+        // `fill_cost` is the distance between the two readings -- "the whole
+        // knowable spread" -- and booking a stop at its trigger asserted that
+        // an exit carried no uncertainty at all. It does: the pessimistic
+        // reading now prices the stop at the bar's adverse extreme and the
+        // optimistic one still takes the trigger, so the exit contributes 500
+        // of genuinely unknowable fill alongside the 800 of entry spread.
         assert_eq!(
-            cell.fill_cost, 800,
-            "200 on the target's entry bar and 600 on the stop's, and nothing else"
+            cell.fill_cost, 1_300,
+            "200 and 600 on the two entry bars, plus 500 the stop's exit cannot pin"
         );
         assert_eq!(
             cell.gapped, 0,

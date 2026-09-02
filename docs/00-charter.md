@@ -80,9 +80,40 @@ Sources are Indian exchange publications and the vendor documentation cited in
   See `docs/05-decisions.md` and `docs/11-findings.md`. |
 | Special weekend sessions | Union Budget sessions falling on a weekend, run at
   full regular hours. **2020-02-01 (Sat), 2025-02-01 (Sat), 2026-02-01 (Sun)**
-  — 375 bars each, confirmed in the lake. This is the complete set: 1 February
-  fell on a weekend in no other year from 2020 to date. Supersedes an earlier
-  claim of 2021-01-30 and 2021-02-01; see D-0014. |
+  — 375 bars each, confirmed in the lake and re-MEASURED by decoding
+  `zerodha/NSE/INDEX/NIFTY/1min/2020-02.bin`, `2025-02.bin` and `2026-02.bin`:
+  in each the session's first record is stamped 09:15, its 375th 15:29, and its
+  376th is the following trading day. This is the complete set OF BUDGET
+  weekend sessions: 1 February fell on a weekend in no other year from 2020 to
+  date. Supersedes an earlier claim of 2021-01-30 and 2021-02-01; see D-0014. |
+| 2024-01-20 (Sat) | A **full regular session on a Saturday**, and it is neither
+  a Budget day nor a disaster-recovery drill. MEASURED by decoding
+  `zerodha/NSE/INDEX/NIFTY/1min/2024-01.bin`: the month holds 8,250 minute bars
+  = 22 × 375, record 5,625 is stamped 09:15 on 2024-01-20, record 5,999 is
+  15:29, and record 6,000 is 2024-01-23 09:15. **375 bars, 09:15–15:29.**
+  **WHY the exchange traded that Saturday is UNVERIFIED** — no circular is
+  cited here and none is guessed; what is recorded is the shape on disk.
+  Because it is a full regular session it correctly REMAINS an ordinary
+  previous-day anchor and is deliberately **not** in
+  `CHARTER_NON_REGULAR_IST_DAYS`: what disqualifies a day from that list is that
+  its OHLC does not describe a regular session, and this one's does. It was
+  absent from this table while the calendar bitset already held it, which made
+  the derived count below wrong; that is a documentation defect and was never an
+  engine one. |
+| Weekend sessions on disk | **Six, totalling 1,710 one-minute bars**, all
+  MEASURED in the operator's own store rather than counted from this table:
+  three Budget sessions at 375 each (1,125), two disaster-recovery Saturdays at
+  105 each (210), and 2024-01-20 at 375. Against **618,296** `1min` NIFTY bars
+  — the `zerodha` feed's 81 month files, counted as `(length − 32768) / 56` —
+  that is **0.28%** of the series. The same denominator puts the superseded
+  1,335 at 0.216%, which is where the previously stated 0.21% came from; the
+  denominator was right and the numerator was not. The earlier figure of five
+  sessions and 1,335 bars omitted 2024-01-20 entirely. NSE trades on a
+  weekend more often than "weekday" implies, and `indicators::weekday_bit`
+  therefore leaves all five weekday positions false on every one of these bars —
+  honest under `docs/03-vocabulary.md` §4, and not free: those bars sit in a
+  weekday-conditioned candidate's support DENOMINATOR and never in its
+  numerator. |
 | 2021-02-24 NSE outage | NSE halted all segments from **11:40 IST**, ran a
   15-minute pre-open from **15:30**, resumed normal trading at **15:45**, and
   closed the extended session at **17:00**. Therefore the equity normal-market
@@ -95,7 +126,22 @@ Sources are Indian exchange publications and the vendor documentation cited in
   inventing either a clean session or a vendor-loss count. Primary source:
   [SEBI Settlement Order SO/AB/EFD2/2023-24/6580](https://www.sebi.gov.in/sebi_data/attachdocs/jun-2023/1687270559560.pdf),
   paragraphs 1–2; contemporaneous corroboration:
-  [SEBI PR No. 9/2021](https://www.sebi.gov.in/sebi_data/attachdocs/feb-2021/1614256948318.pdf). |
+  [SEBI PR No. 9/2021](https://www.sebi.gov.in/sebi_data/attachdocs/feb-2021/1614256948318.pdf).
+  **What is on disk is 54 bars, 09:15–10:08, and it is IST day 18,682.**
+  MEASURED by decoding `zerodha/NSE/INDEX/NIFTY/1min/2021-02.bin`: `n_valid` is
+  7,179, which is 19 × 375 + 54; record 6,375 is stamped 09:15, record 6,428 is
+  10:08, and record 6,429 is 2021-02-25 09:15. The 15:45–17:00 reopening is
+  entirely outside the pull's `[09:15, 15:30)` window, so ingest drops it — and
+  correctly: re-pulling can never recover a bar the window excludes.
+  **That 54-minute stub is therefore in `CHARTER_NON_REGULAR_IST_DAYS`, for the
+  identical reason the two DR Saturdays are.** It is a SHORTER session than the
+  Muhurat hour the list already refuses, so treating it as regular was strictly
+  the larger error: without the entry it became the previous-day anchor for
+  2021-02-25, moved the whole 44-position pivot ladder and both previous-day
+  Fibonacci ladders, and stayed inside `Prev5` for five sessions. Note the
+  distinction the list turns on — a Muhurat and a DR drill are days the exchange
+  never meant to be normal, this is a day it did. What disqualifies a session is
+  that its OHLC does not describe a regular day, never why it does not. |
 | Bar timestamp | the **OPEN** (left edge) of its minute. A bar covers the
   half-open window `[t, t + tf)`, left-closed and left-labelled. VERIFIED |
 | Last regular 1-minute bar | **15:29:00 IST**, not 15:30. 09:15 through 15:29

@@ -1100,12 +1100,25 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
     // `H = 15` to buy the same `sqrt(H)`, and the discarded ones carry real
     // information about the mean.
     let horizon_bars = forward.horizon().as_bars() as usize;
-    // Bounded by the HORIZON, which is a run parameter, not by the data. At the
-    // default it is fifteen entries. One allocation per call, and `edge` is
-    // called once per FREQUENT itemset -- the survivors -- rather than per
-    // candidate pair, which is where the sweep's cost actually is.
+    // Bounded by the HORIZON **AND BY THE DATA**, and the second half is what
+    // this line was missing.
+    //
+    // The horizon is a run parameter reachable from a free-text field in the
+    // browser and from `BRUTEX_HORIZON_BARS`, and `Horizon::bars` rejects only
+    // ZERO. So `4294967295` reserved 68.7 GB of `(usize, f64)` here -- once per
+    // FREQUENT itemset, across every rayon thread -- and an allocation failure
+    // calls `abort()`, which is not a panic and cannot be caught: the process
+    // disappears with no refusal and no log line.
+    //
+    // The queue can never hold more than one entry per bar in the window, so
+    // reserving past the slice length buys nothing at any horizon. Clamping
+    // here rather than at the parse keeps an explicit count VERBATIM -- asking
+    // for a whole session over a short fixture is a legitimate question, and
+    // answering a different one quietly would be its own defect.
     let mut recent: std::collections::VecDeque<(usize, f64)> =
-        std::collections::VecDeque::with_capacity(horizon_bars);
+        std::collections::VecDeque::with_capacity(
+            horizon_bars.min(forward.measured().saturating_add(1)),
+        );
     // Uncentered, because the mean is not known until the walk ends. The three
     // together reconstruct the centered weighted cross-sum exactly:
     // `Σ w (x_i - m)(x_j - m) = A - m·B + m²·C`.

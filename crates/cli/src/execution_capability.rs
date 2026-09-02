@@ -61,7 +61,13 @@ const PARAMETER_MAGIC: [u8; 8] = *b"BRUTXEP1";
 const PERCENTILE_MAGIC: [u8; 8] = *b"BRUTXEG1";
 const CAPABILITY_MAGIC: [u8; 8] = *b"BRUTXEC1";
 const COMPLETION_MAGIC: [u8; 8] = *b"BRUTXEF1";
-const PARAMETER_PAYLOAD_BYTES: usize = 608;
+// 616, NOT 608. The payload carries the evaluation-spec fingerprint, and that
+// widened 155 -> 163 when the charter gained its ninth non-regular day
+// (2021-02-24, the NSE outage). Left at 608 this is not a compile error -- the
+// encoder writes its trailing reserve at offset 608 into a 608-byte buffer and
+// returns "execution encoder reserve exceeded its record", refusing EVERY
+// parameter write at runtime.
+const PARAMETER_PAYLOAD_BYTES: usize = 616;
 const PERCENTILE_PAYLOAD_BYTES: usize = 96;
 const CAPABILITY_PAYLOAD_BYTES: usize = 288;
 const COMPLETION_PAYLOAD_BYTES: usize = 384;
@@ -88,11 +94,16 @@ const FORCED_EXIT_POLICY_TAG: u8 = 1;
 const ENTRY_DELAY_MINUTES: u16 = 1;
 const FORCED_EXIT_IST_MINUTE: u16 = 15 * 60 + 10;
 
-const _: () = assert!(EXECUTION_PARAMETER_STRIDE == 640);
+const _: () = assert!(EXECUTION_PARAMETER_STRIDE == 648);
 const _: () = assert!(EXECUTION_PERCENTILE_STRIDE == 128);
 const _: () = assert!(EXECUTION_CAPABILITY_STRIDE == 320);
 const _: () = assert!(EXECUTION_COMPLETION_STRIDE == 416);
-const _: () = assert!(EVALUATION_SPEC_FINGERPRINT_V1_LEN == 155);
+// 163, NOT 155. The fingerprint carries the calendar, and the charter gained a
+// ninth non-regular day (2021-02-24, the NSE outage) -- one more `i64`, so eight
+// more bytes. That the constant had to move is the point: a run swept under a
+// different calendar is a different run, and section 3 rule 3 makes the calendar
+// part of what names it.
+const _: () = assert!(EVALUATION_SPEC_FINGERPRINT_V1_LEN == 163);
 const _: () = assert!(FORCED_EXIT_MINUTE == 910);
 
 /// Stable identity of the exact next-minute and fixed-close execution law.
@@ -3877,7 +3888,13 @@ mod tests {
         let parameters = parameters(TradeDirectionV1::Long, 13);
         let scalar = ParameterScalarV1::from_parameters(&parameters).expect("scalar");
         let mut parameter_bytes = scalar.to_bytes().expect("parameter bytes");
-        parameter_bytes[347] = 99;
+        // 355, NOT 347. `direction` sits immediately after the evaluation-spec
+        // fingerprint, and that widened 155 -> 163 when the charter gained its
+        // ninth non-regular day -- so this byte and every field below it moved
+        // by eight. Derived from the width rather than retyped, so the next
+        // calendar entry moves it again without anyone noticing it should.
+        let direction_at = 192 + EVALUATION_SPEC_FINGERPRINT_V1_LEN;
+        parameter_bytes[direction_at] = 99;
         reseal::<PARAMETER_PAYLOAD_BYTES, EXECUTION_PARAMETER_STRIDE>(&mut parameter_bytes);
         assert!(
             ParameterScalarV1::from_bytes(&parameter_bytes)

@@ -970,7 +970,36 @@ fn a_truncation_under_an_open_handle_is_a_short_read() {
         .set_len(HEADER_LEN + 5 * RECORD_STRIDE)
         .unwrap();
 
-    assert_eq!(file.read_record(4), Ok(bar(4)), "the records still there");
+    // RECORD 4 IS PHYSICALLY THERE AND IS STILL REFUSED, and that changed when
+    // reads began verifying the block checksum.
+    //
+    // This used to assert `Ok(bar(4))` — "the records still there". They are.
+    // But a checksum covers a BLOCK, and this block's domain is the ten records
+    // the header commits, of which five are gone. So the seal cannot be
+    // recomputed, and serving record 4 would be serving a record whose
+    // integrity nobody can check while the file's own header says it was
+    // sealed. That is the fallback §4 bans, and it is the reason the checksum
+    // is read at all.
+    //
+    // It refuses at the block's extent, not at the record's: `offset` is where
+    // the covered range runs past the file, and `asked == read == 280` is the
+    // five records that survive against the ten the seal needs.
+    let truncated = HEADER_LEN + 5 * RECORD_STRIDE;
+    assert_eq!(
+        file.read_record(4),
+        Err(StoreError::ShortRead {
+            path: bars.clone(),
+            offset: truncated,
+            asked: 5 * RECORD_LEN,
+            read: 5 * RECORD_LEN,
+        }),
+        "a block that cannot be verified is not served, even where its bytes survive"
+    );
+    // AND A RECORD THAT IS GONE REFUSES EARLIER, at its own offset rather than
+    // the block's. Reads verify AFTER fetching the record, deliberately, to
+    // keep the blast radius small — so record 9's bytes are missed first and
+    // the block seal is never reached. Two different refusals for two different
+    // facts: "this record is not there" and "this block cannot be checked".
     assert_eq!(
         file.read_record(9),
         Err(StoreError::ShortRead {

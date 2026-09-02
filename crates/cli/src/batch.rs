@@ -203,12 +203,67 @@ impl Tally {
 /// Returns the rendered report. A month that refuses is recorded and the walk
 /// continues: one unreadable file must not abandon 53,999 others, which is the
 /// same reasoning `store::catalog` applies to an unreadable subdirectory.
+///
+/// The feed and the rung are both validated before anything is read — see
+/// [`swept_rung`] for why an unvalidated rung was worse than an unvalidated
+/// feed, and for why `1day` and `1s` are refused here while remaining perfectly
+/// legal to load.
 #[must_use]
 pub fn sweep_all(vendor_word: &str, rung: &str, min_hits: u64) -> String {
     match run(vendor_word, rung, min_hits) {
         Ok(text) => text,
         Err(why) => format!("refused: {why}\n"),
     }
+}
+
+/// The rung word, refused unless the store carries it **and** the engine sweeps it.
+///
+/// # The refusal this replaces was a clean success
+///
+/// [`sweep_under`] filters the catalog on `h.timeframe.as_str() == rung` and
+/// nothing validated the word first. So `cli sweep-all dhan 5sec 5` walked the
+/// whole catalog, matched nothing, printed
+/// `0 swept · 0 refused · 0 bars · 0 combinations kept` and exited **0** — the
+/// exact bytes an empty store prints. A typo and a fresh clone were
+/// indistinguishable, which is the failure wearing a success's clothes
+/// `CLAUDE.md` §4 bans. `sweep-stored` has always refused the same word by name;
+/// this command was the one that did not.
+///
+/// # Two questions, asked in this order because they have two different answers
+///
+/// [`stored::rung`] answers *"is this a rung at all"* against the store's own
+/// `Timeframe::KNOWN`, so `5sec` is told the words that exist. [`crate::EVERY_RUNG`]
+/// then answers *"is it one this engine SWEEPS"*, and that is EIGHT of those ten.
+///
+/// The order is load-bearing rather than stylistic: `EVERY_RUNG` is a strict
+/// subset of `Timeframe::KNOWN`, so asking it first would make the store's own
+/// refusal unreachable — a branch no input could take, which is the untestable
+/// dead region this workspace's coverage floor exists to refuse.
+///
+/// # `1day` and `1s` are STORED and are not SWEPT
+///
+/// [`crate::EVERY_RUNG`]'s own doc gives the reason and it is `CLAUDE.md` §3
+/// rule 7: a daily signal bar acts on a condition that was not knowable until
+/// the session it describes had already closed. `1s` is absent for the other
+/// reason — nothing has measured what a second-resolution span costs, and §3
+/// rule 6 says an unmeasured bound is not a bound. Both have real directories
+/// and both were swept here.
+///
+/// The guard is at this ENTRY POINT and deliberately not inside
+/// [`stored::rung`], which is shared with the readers that must keep `1day`:
+/// `stored::load_daily_context` opens it on every stored sweep. Narrowing the
+/// shared parser would break a correct caller to fix an incorrect one.
+fn swept_rung(rung: &str) -> Result<(), String> {
+    // Is it a rung the store carries? The refusal names the ten that exist.
+    stored::rung(rung)?;
+    if !crate::EVERY_RUNG.contains(&rung) {
+        return Err(format!(
+            "`{rung}` is not a rung this engine sweeps. The eight are: {}. \
+             It is stored and readable and it is not swept. Nothing was read.",
+            crate::EVERY_RUNG.join(", ")
+        ));
+    }
+    Ok(())
 }
 
 /// The fallible half, so the caller above has exactly one refusal shape.
@@ -226,6 +281,12 @@ fn run(vendor_word: &str, rung: &str, min_hits: u64) -> Result<String, String> {
     // Parsed here as well as in sweep_under so a bad feed name refuses BEFORE
     // the store is touched, which is what an operator typing a typo expects.
     crate::parse_vendor(vendor_word)?;
+    // AND SO IS THE RUNG, for exactly the same reason and for a worse failure:
+    // an unvalidated feed at least refused somewhere, while an unvalidated rung
+    // matched nothing and reported that as a completed run. Checked in both
+    // places on the vendor's own precedent — here so a typo never reaches the
+    // store, and in `sweep_under` so no caller of the body can skip it.
+    swept_rung(rung)?;
     let root = crate::store_root()?;
     sweep_under(&root, vendor_word, rung, min_hits, commit)
 }
@@ -243,6 +304,9 @@ fn sweep_under(
     commit: &str,
 ) -> Result<String, String> {
     let vendor = crate::parse_vendor(vendor_word)?;
+    // BEFORE THE WALK, so an unknown or unswept rung costs no `read_dir` at all
+    // and the report it cannot produce is never started.
+    swept_rung(rung)?;
     let holdings = catalog::walk(root).map_err(|why| why.to_string())?;
     let wanted: Vec<&Held> = holdings
         .held
@@ -706,6 +770,105 @@ mod tests {
         let why = sweep_under(&root, "nosuchfeed", "1min", 100, "deadbeef")
             .expect_err("an unknown feed refuses");
         assert!(why.contains("nosuchfeed"), "the refusal names it: {why}");
+    }
+
+    /// **An unknown rung refuses by name, instead of reporting a clean run.**
+    ///
+    /// `sweep-all dhan 5sec 5` filtered the catalog on raw string equality with
+    /// nothing validating the word, so it walked the whole store, matched
+    /// nothing, printed `0 swept · 0 refused · 0 bars · 0 combinations kept` and
+    /// exited 0. Those are the exact bytes an empty store prints, so a typo and
+    /// a fresh clone were indistinguishable — and `sweep-stored` refused the
+    /// same word by name the whole time.
+    #[test]
+    fn an_unknown_rung_is_refused_by_name_and_not_reported_as_an_empty_store() {
+        let root = scratch("badrung");
+        // A month IS present, so a report would have had something to reconcile
+        // against and the old zeroes were never "there was nothing here".
+        let full = root.join("bars/groww/NSE/INDEX/NIFTY/1min/2026-08.bin");
+        std::fs::create_dir_all(full.parent().expect("has a parent")).expect("creatable");
+        std::fs::write(&full, b"x").expect("writable");
+
+        let why = sweep_under(&root, "groww", "5sec", 100, "deadbeef")
+            .expect_err("an unknown rung is not a sweep of nothing");
+        assert!(
+            why.contains("5sec"),
+            "the refusal names what was typed: {why}"
+        );
+        assert!(
+            why.contains("not a rung this store carries"),
+            "and answers the first question, which is whether it exists: {why}"
+        );
+        assert!(!why.contains("0 swept"), "and is never a report: {why}");
+    }
+
+    /// The empty word is the same refusal, not a filter that matches nothing.
+    #[test]
+    fn an_empty_rung_word_is_refused_rather_than_matching_every_nothing() {
+        let root = scratch("emptyrung");
+        let why = sweep_under(&root, "groww", "", 100, "deadbeef")
+            .expect_err("the empty word is not a rung");
+        assert!(
+            why.contains("not a rung this store carries"),
+            "an absent argument is refused like any other bad one: {why}"
+        );
+    }
+
+    /// **`1day` and `1s` are stored, are readable, and are NOT swept here.**
+    ///
+    /// `stored::rung` admits all ten of `Timeframe::KNOWN` because non-sweep
+    /// readers need `1day` — the daily context of every stored sweep is opened
+    /// through it. `crate::EVERY_RUNG` is the eight this engine sweeps, and this
+    /// command was one of the doors that swept the other two anyway: a daily
+    /// signal bar acts on a condition that was not knowable until the session it
+    /// describes had closed, which is the look-ahead `CLAUDE.md` §3 rule 7
+    /// forbids.
+    #[test]
+    fn the_two_stored_but_unswept_rungs_are_refused_by_name() {
+        let root = scratch("unswept");
+        for word in ["1day", "1s"] {
+            let full = root
+                .join("bars/groww/NSE/INDEX/NIFTY")
+                .join(word)
+                .join("2026-08.bin");
+            std::fs::create_dir_all(full.parent().expect("has a parent")).expect("creatable");
+            std::fs::write(&full, b"x").expect("writable");
+
+            let why = sweep_under(&root, "groww", word, 100, "deadbeef")
+                .expect_err("a stored rung this engine does not sweep");
+            assert!(why.contains(word), "the refusal names it: {why}");
+            assert!(
+                why.contains("is not a rung this engine sweeps"),
+                "and names the surface it is outside of: {why}"
+            );
+            assert!(
+                why.contains("1min, 2min, 3min, 5min, 10min, 15min, 30min, 60min"),
+                "and lists the eight that are inside it: {why}"
+            );
+            assert!(
+                !why.contains("not a rung this store carries"),
+                "{word} IS carried by the store, and saying otherwise would send \
+                 the operator to pull a month they already have: {why}"
+            );
+        }
+    }
+
+    /// Every rung the engine does sweep still reaches the walk.
+    ///
+    /// The other half of the guard. A check that refused a legal rung would be
+    /// a worse defect than the one it replaced, and `EVERY_RUNG` is iterated
+    /// rather than retyped so appending a ninth cannot leave this behind.
+    #[test]
+    fn all_eight_swept_rungs_cross_the_guard_and_reach_the_report() {
+        let root = scratch("eight");
+        for rung in crate::EVERY_RUNG {
+            let text = sweep_under(&root, "groww", rung, 100, "deadbeef")
+                .expect("a rung the engine sweeps must reach the walk");
+            assert!(
+                text.contains("0 swept · 0 refused"),
+                "{rung} reached an empty store and reported it: {text}"
+            );
+        }
     }
 
     /// A report whose tally does not reconcile says so in the report itself.

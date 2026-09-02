@@ -1332,18 +1332,73 @@ impl From<Refusal> for LoadFailure {
 /// `Timeframe::KNOWN` is the store's own declared list, so a rung added there is
 /// selectable here with no edit. The refusal names every legal word rather than
 /// saying "unknown": a caller who typed `1hour` needs to be told it is `60min`.
-fn rung(name: &str) -> Result<Timeframe, Refusal> {
+///
+/// # Ten words, and the engine sweeps EIGHT of them
+///
+/// This answers *"is this a rung the store carries"* and deliberately not *"is
+/// it a rung the engine sweeps"*. `1day` and `1s` are in `Timeframe::KNOWN`,
+/// have real directories, and are legitimately read by non-sweep callers —
+/// [`load_daily_context`] opens `1day` on every stored sweep. Narrowing this
+/// list to [`crate::EVERY_RUNG`] would break those correct callers to fix an
+/// incorrect one, so the sweep guard belongs at each sweep ENTRY POINT and not
+/// in the shared parser. `batch::swept_rung` is that guard for `sweep-all`,
+/// which is why this is crate-visible rather than private.
+pub(crate) fn rung(name: &str) -> Result<Timeframe, Refusal> {
     Timeframe::KNOWN
         .iter()
         .copied()
         .find(|t| t.as_str() == name)
         .ok_or_else(|| {
             let known: Vec<&str> = Timeframe::KNOWN.iter().map(|t| t.as_str()).collect();
+            // Clipped for the reason [`clipped`] gives, and here as well as in
+            // `swept_index` because the rung is the SAME command's next
+            // argument: fixing one echo and leaving its neighbour would mean an
+            // operator's typo is truncated or not depending on which word they
+            // mistyped.
             format!(
-                "`{name}` is not a rung this store carries. The rungs are: {}.",
+                "`{}` is not a rung this store carries. The rungs are: {}.",
+                clipped(name),
                 known.join(", ")
             )
         })
+}
+
+/// The most of a caller-supplied word that belongs inside a refusal.
+///
+/// # Why a refusal has to cut its own input
+///
+/// `underlying` arrives from a command line or an HTTP body and is bounded by
+/// neither. A 10,000-character argument was echoed back WHOLE into
+/// [`swept_index`]'s refusal, and the caller then prints roughly a hundred
+/// further lines of usage under it — so the one sentence naming the mistake was
+/// pushed off the operator's screen by their own typo. The word is evidence, not
+/// a payload: sixty-four characters are enough to recognise what was typed, and
+/// short enough that the sentence and the usage block both stay readable.
+///
+/// A `Symbol` holds at most [`brutex_core::symbol::SYMBOL_CAPACITY`] bytes, so
+/// nothing this cut removes could ever have been a legal instrument — the only
+/// strings it shortens are ones already being refused.
+///
+/// Cut at CHARACTERS and never at bytes, so the cut cannot land inside one and
+/// produce a refusal that is not valid UTF-8 text. Same reasoning, and the same
+/// shape, as `pull::http`'s own body trim.
+///
+/// # Cost
+///
+/// O(1) in the length of `word`, not O(len). `take` stops at 64 characters and
+/// `nth` stops at the 65th, so a one-megabyte argument is read for 65 characters
+/// and dropped. That matters because the input is exactly the thing that is not
+/// bounded; a cut that had to walk what it refuses would be a second way to make
+/// an oversized word expensive.
+fn clipped(word: &str) -> String {
+    /// Characters of the offending word a refusal keeps.
+    const KEEP: usize = 64;
+
+    let mut out: String = word.chars().take(KEEP).collect();
+    if word.chars().nth(KEEP).is_some() {
+        out.push('…');
+    }
+    out
 }
 
 /// One of the exact two spot indices this engine is allowed to sweep.
@@ -1354,9 +1409,24 @@ fn rung(name: &str) -> Result<Timeframe, Refusal> {
 /// surface. Every stored-sweep entry door comes through this helper so the
 /// authoritative allow-list remains [`InstrumentKey::SWEPT`], not a second
 /// string list in the CLI or API.
+///
+/// Both refusals name the word through [`clipped`] rather than interpolating it
+/// raw. The first arm is the one an unbounded argument actually reaches —
+/// `Symbol::new` refuses anything past its capacity, so a 10,000-character word
+/// fails there — and the second is clipped for the same reason rather than
+/// because it can grow: two refusal sites for one field must not disagree about
+/// how much of it they will print, which is why they share one value rather than
+/// each calling the cut.
+///
+/// That value is built EAGERLY, on the success path too. It is at most 67 bytes
+/// and this function runs once per instrument-month load, never per bar and
+/// never per candidate, so it is not one of the five operations `CLAUDE.md` §3
+/// rule 4 bounds. Buying that with a predictable shape — one clip, both
+/// sentences, no way for them to drift — is the better trade.
 fn swept_index(underlying: &str) -> Result<InstrumentKey, Refusal> {
+    let named = clipped(underlying);
     let key = InstrumentKey::index(Exchange::Nse, underlying)
-        .map_err(|why| format!("`{underlying}` is not an index this engine sweeps: {why}"))?;
+        .map_err(|why| format!("`{named}` is not an index this engine sweeps: {why}"))?;
     key.require_sweepable().map_err(|why| {
         let allowed = InstrumentKey::SWEPT
             .iter()
@@ -1364,7 +1434,7 @@ fn swept_index(underlying: &str) -> Result<InstrumentKey, Refusal> {
             .collect::<Vec<_>>()
             .join(", ");
         format!(
-            "`{underlying}` is not an instrument this engine sweeps: {why}. \
+            "`{named}` is not an instrument this engine sweeps: {why}. \
              The exact sweep surface is {allowed}. Nothing was read."
         )
     })?;
@@ -1458,6 +1528,19 @@ fn load_classified_with_ceiling(
     // `fnv1a(symbol) as u32` into the header, and `open_existing` compares what
     // it is handed against what it finds. Computing it any other way here would
     // make every file refuse to open with a mismatch that named nothing real.
+    //
+    // HASHED FROM `key`, NOT FROM THE CALLER'S STRING, AND THAT WAS A REAL BUG.
+    //
+    // `swept_index` above normalises through `Symbol::new`, which UPPER-CASES —
+    // vendors are not consistent about case and `nifty` and `NIFTY` are the same
+    // instrument. `StorePath::for_key` therefore resolved `.../NIFTY/...` while
+    // this line hashed the raw `underlying`, so `cli sweep-stored dhan nifty
+    // 1min 2026 1` opened the RIGHT file and was then refused by it:
+    // `…/NIFTY/1min/2026-01.bin holds symbol 433894009, not 1196260313` — two
+    // numbers naming nothing, sending an operator to audit a store that was
+    // correct when they had made a typo. `pull::ingest` hashes
+    // `symbol.as_str()` off its own `Symbol`, so the canonical form is what is
+    // on disk and the canonical form is what must be asked for here.
     #[expect(
         clippy::cast_possible_truncation,
         reason = "the id IS the low 32 bits of the FNV-1a hash — `pull::ingest` \
@@ -1466,7 +1549,7 @@ fn load_classified_with_ceiling(
                   here would compute a different number and every file would \
                   refuse to open with a mismatch that named nothing real."
     )]
-    let symbol_id = brutex_core::universe::fnv1a(underlying) as u32;
+    let symbol_id = brutex_core::universe::fnv1a(key.underlying.as_str()) as u32;
 
     // THE ADVICE USED TO BE WRONG FOR SIX OF THE SEVEN CAUSES.
     //
@@ -2570,6 +2653,108 @@ mod tests {
         }
     }
 
+    /// **A lower-case instrument loads. It used to refuse as file corruption.**
+    ///
+    /// `swept_index` normalises the symbol for the PATH — `Symbol::new`
+    /// upper-cases, because vendors are not consistent about case — while the
+    /// header check hashed the caller's RAW string. So `nifty` resolved to
+    /// `.../NIFTY/...`, opened the correct file, and was refused by it with
+    /// `holds symbol 433894009, not 1196260313`: two numbers naming nothing,
+    /// sending an operator to audit a store that was right when they had made a
+    /// typo. The bars come back now, and they are the same bars.
+    #[test]
+    fn a_lower_case_instrument_reads_the_same_month_as_its_canonical_name() {
+        let r = seeded("case", Vendor::Dhan, 5);
+
+        let upper = load(&r, Vendor::Dhan, "NIFTY", "1min", 2026, 8)
+            .expect("the canonical name is what the fixture wrote");
+        let lower = load(&r, Vendor::Dhan, "nifty", "1min", 2026, 8)
+            .expect("the same instrument, typed in the case an operator types");
+
+        assert_eq!(
+            lower.bars.len(),
+            upper.bars.len(),
+            "one file, one answer, whatever case the operator happened to type"
+        );
+        assert_eq!(
+            lower.key.underlying.as_str(),
+            "NIFTY",
+            "and it comes back under the canonical name the store files it as"
+        );
+        for (a, b) in lower.bars.iter().zip(upper.bars.iter()) {
+            assert_eq!(a.ts_micros, b.ts_micros, "the same records, in order");
+            assert_eq!(a.close, b.close);
+        }
+    }
+
+    /// Mixed case too, and it never names two bare hashes at an operator.
+    ///
+    /// Separate from the equality above because a regression here would still
+    /// OPEN the right file. What it would produce is the `holds symbol` refusal,
+    /// and that sentence — not the missing bars — is the defect.
+    #[test]
+    fn a_mixed_case_instrument_never_refuses_with_a_symbol_id_mismatch() {
+        let r = seeded("case-mixed", Vendor::Dhan, 3);
+        let loaded = load(&r, Vendor::Dhan, "NiFtY", "1min", 2026, 8)
+            .expect("the store is correct and the caller only typed a case");
+        assert_eq!(loaded.bars.len(), 3, "mixed case reads the same month");
+        assert_eq!(loaded.key.underlying.as_str(), "NIFTY");
+    }
+
+    /// **An unbounded argument is cut before it reaches the refusal.**
+    ///
+    /// The refusal is followed by roughly a hundred lines of usage, so echoing
+    /// a 10,000-character word whole pushed the one sentence naming the mistake
+    /// off the operator's screen with their own typo.
+    #[test]
+    fn an_enormous_instrument_word_is_clipped_out_of_its_own_refusal() {
+        let huge = "N".repeat(10_000);
+        let why = load(&root("huge"), Vendor::Dhan, &huge, "1min", 2026, 8)
+            .expect_err("nothing that long is an instrument");
+
+        assert!(
+            why.contains("is not an index this engine sweeps"),
+            "it is still refused by the same named sentence as any typo: {why}"
+        );
+        assert!(
+            why.chars().count() < 400,
+            "the whole refusal stays readable, and was {} characters: {why}",
+            why.chars().count()
+        );
+        assert!(why.contains('…'), "and says that it cut something: {why}");
+        let untruncated = "N".repeat(100);
+        assert!(
+            !why.contains(untruncated.as_str()),
+            "the argument itself is not echoed back whole: {why}"
+        );
+    }
+
+    /// The rung word is cut the same way, being the same command's next field.
+    ///
+    /// Clipping one argument of a six-argument command and not its neighbour
+    /// would make truncation depend on which word the operator mistyped.
+    #[test]
+    fn an_enormous_rung_word_is_clipped_out_of_its_own_refusal_too() {
+        let huge = "m".repeat(10_000);
+        let why = load(&root("huge-rung"), Vendor::Dhan, "NIFTY", &huge, 2026, 8)
+            .expect_err("nothing that long is a rung");
+        assert!(why.contains("not a rung this store carries"), "{why}");
+        assert!(why.contains('…'), "and the word is marked as cut: {why}");
+        assert!(why.chars().count() < 400, "and stays readable: {why}");
+    }
+
+    /// A word that fits is printed exactly, with nothing appended.
+    ///
+    /// The other half of the cut: a clip that marked every refusal would teach
+    /// an operator to ignore the mark.
+    #[test]
+    fn a_short_instrument_word_is_quoted_whole_and_unmarked() {
+        let why = load(&root("short"), Vendor::Dhan, "RELIANCE", "1min", 2026, 8)
+            .expect_err("an equity is not a swept index");
+        assert!(why.contains("RELIANCE"), "quoted in full: {why}");
+        assert!(!why.contains('…'), "and never marked as cut: {why}");
+    }
+
     #[test]
     fn a_month_that_is_not_a_month_is_refused_before_any_path_is_built() {
         let why =
@@ -3108,7 +3293,13 @@ mod tests {
         );
         assert_eq!(DAILY_REFERENCE_SCHEMA, 1);
         assert_eq!(DAILY_ELIGIBILITY_POLICY, 1);
-        assert_eq!(CHARTER_NON_REGULAR_IST_DAYS.len(), 8);
+        // NINE, since 2021-02-24 joined them: the NSE outage day traded 09:15
+        // to 10:08, halted, and reopened outside the storable window, so the
+        // store holds a 54-minute stub. Left eligible, that stub became the
+        // previous-day anchor for 2021-02-25 and moved the whole 44-position
+        // pivot ladder for five sessions -- the same mechanism the two
+        // disaster-recovery Saturdays were excluded for.
+        assert_eq!(CHARTER_NON_REGULAR_IST_DAYS.len(), 9);
     }
 
     #[test]
