@@ -399,6 +399,10 @@ fn hash_calendar_day_v1(
 /// window walk are bounded by the calendar's fixed [`MAX_WINDOWS`]. This is a
 /// structural bound, not a benchmark measurement.
 ///
+/// **UNVERIFIED as a measured bound.** No bench in this workspace
+/// times this, so the shape above is read from the source rather
+/// than measured. `CLAUDE.md` §3 rule 6.
+///
 /// # Errors
 ///
 /// A named [`Refusal`] for a backward or over-limit requested span, a malformed
@@ -520,6 +524,10 @@ const CALENDAR_POLICY_RUNGS_V2: [u32; 8] = [60, 120, 180, 300, 600, 900, 1_800, 
 /// Each open day hashes at most [`MAX_WINDOWS`] windows.  This is run-boundary
 /// provenance work, not a sweep inner-loop primitive, and is deliberately not
 /// described as total O(1) work.
+///
+/// **UNVERIFIED as a measured bound.** No bench in this workspace
+/// times this, so the shape above is read from the source rather
+/// than measured. `CLAUDE.md` §3 rule 6.
 #[must_use]
 pub fn calendar_policy_digest_v2() -> [u8; 32] {
     let mut hasher = brutex_core::blake3::Hasher::new();
@@ -1100,6 +1108,10 @@ fn hash_calendar_day_v2(
 /// [`MAX_WINDOWS`] (currently two). This is a structural bound, not a measured
 /// benchmark result.
 ///
+/// **UNVERIFIED as a measured bound.** No bench in this workspace
+/// times this, so the shape above is read from the source rather
+/// than measured. `CLAUDE.md` §3 rule 6.
+///
 /// # Errors
 ///
 /// A named [`Refusal`] for an unsupported rung, backward or over-limit span,
@@ -1125,6 +1137,10 @@ pub fn calendar_receipt_v2(
 /// collected timestamp slice.  Keeping the projection internal to this walk
 /// lets `CandidateUniverse` and pre-admission source builders prove that their
 /// exact OHLCV streams match their calendar receipts in O(1) auxiliary space.
+///
+/// **UNVERIFIED as a measured bound.** No bench in this workspace
+/// times this, so the shape above is read from the source rather
+/// than measured. `CLAUDE.md` §3 rule 6.
 ///
 /// # Errors
 ///
@@ -1390,6 +1406,10 @@ pub(crate) fn rung(name: &str) -> Result<Timeframe, Refusal> {
 /// and dropped. That matters because the input is exactly the thing that is not
 /// bounded; a cut that had to walk what it refuses would be a second way to make
 /// an oversized word expensive.
+///
+/// **UNVERIFIED as a measured bound.** No bench in this workspace
+/// times this, so the shape above is read from the source rather
+/// than measured. `CLAUDE.md` §3 rule 6.
 fn clipped(word: &str) -> String {
     /// Characters of the offending word a refusal keeps.
     const KEEP: usize = 64;
@@ -1864,6 +1884,10 @@ pub fn load_span(
 /// admission is O(1) per month. This is a resource ceiling, not a claim that
 /// assembling the span is O(1).
 ///
+/// **UNVERIFIED as a measured bound.** No bench in this workspace
+/// times this, so the shape above is read from the source rather
+/// than measured. `CLAUDE.md` §3 rule 6.
+///
 /// # Errors
 ///
 /// Every [`load_span`] refusal plus a named pre-allocation refusal when a
@@ -1947,7 +1971,27 @@ fn load_span_with_optional_bound(
                         "{underlying} {rung_name} assembled record count overflowed u64 at {year}-{month:02}"
                     )
                 })?;
-                bars.try_reserve_exact(one.bars.len()).map_err(|why| {
+                // `try_reserve` AND NOT `try_reserve_exact`, and the difference
+                // is the whole cost of assembling a span.
+                //
+                // `try_reserve_exact` reserves exactly the additional capacity
+                // asked for, so after every month `capacity == len` and the NEXT
+                // month's reservation reallocates and memcpys everything
+                // accumulated so far. Total bytes copied is B x M / 2 rather
+                // than B: over the operator's 81-month one-minute span that is
+                // roughly 68 MB of bars copied about forty times, some 2.7 GB of
+                // memcpy, twice per rung because `one_rung` loads the span again.
+                //
+                // It also made this function's own stated cost false. The `Cost`
+                // section above says "O(M + B) time", which is what `try_reserve`
+                // delivers -- amortised growth, each bar moved a constant number
+                // of times -- and not what exact reservation did.
+                //
+                // The two `try_reserve_exact` calls elsewhere in this module are
+                // correct and stay: they reserve a capacity computed ONCE for a
+                // vector that is then filled, where exact is the right ask and
+                // there is no second reservation to trigger a copy.
+                bars.try_reserve(one.bars.len()).map_err(|why| {
                     format!(
                         "{underlying} {rung_name} could not reserve the assembled span for {year}-{month:02}'s {month_records} committed records: {why}. Nothing was swept"
                     )
@@ -2248,6 +2292,10 @@ pub fn load_daily_context(
 /// admitted daily records.  The committed record ceiling is checked in O(1)
 /// per month before that month's records are allocated.
 ///
+/// **UNVERIFIED as a measured bound.** No bench in this workspace
+/// times this, so the shape above is read from the source rather
+/// than measured. `CLAUDE.md` §3 rule 6.
+///
 /// # Errors
 ///
 /// Every [`load_daily_context`] semantic refusal plus the named
@@ -2408,6 +2456,10 @@ pub fn load_exact_minute_context(
 /// O(M + B) time and O(M + B) returned space for M requested months and B
 /// admitted minute records.  The committed record ceiling is checked in O(1)
 /// per month before that month's records are allocated.
+///
+/// **UNVERIFIED as a measured bound.** No bench in this workspace
+/// times this, so the shape above is read from the source rather
+/// than measured. `CLAUDE.md` §3 rule 6.
 ///
 /// # Errors
 ///
@@ -4144,5 +4196,59 @@ mod tests {
         from_bars
             .require_complete()
             .expect("all seven regular-session hour buckets were supplied");
+    }
+
+    /// The multi-month accumulator grows amortised, not exactly.
+    ///
+    /// # Why a source-shape test
+    ///
+    /// `try_reserve_exact` and `try_reserve` produce the IDENTICAL span — same
+    /// bars, same order, same bytes — so no behavioural test can tell them
+    /// apart. The only difference is how many times each bar is memcpy'd on the
+    /// way in: exact reservation leaves `capacity == len` after every month, so
+    /// the next month reallocates and copies everything accumulated, giving
+    /// `B x M / 2` bytes moved instead of `B`.
+    ///
+    /// A timing test would be the direct proof and is not available: this
+    /// machine has been at load average 40-104 on 14 cores throughout, and the
+    /// difference is memory bandwidth, which is exactly what a loaded machine
+    /// destroys. So the shape is pinned instead, with the reason attached.
+    ///
+    /// This also guards the `Cost` section's claim of "O(M + B) time", which
+    /// exact reservation made false.
+    ///
+    /// Scoped to the accumulating loop. The module's other two
+    /// `try_reserve_exact` calls are correct — each reserves a capacity computed
+    /// once for a vector that is then filled — and must not fail this.
+    #[test]
+    fn the_multi_month_span_accumulator_reserves_amortised_and_not_exactly() {
+        let source = include_str!("stored.rs");
+        let anchor = "let mut bars: Vec<Candle> = Vec::new();";
+        let at = source
+            .find(anchor)
+            .expect("the span accumulator must still start from an empty Vec");
+        let rest = source.get(at..).unwrap_or_default();
+        let end = rest
+            .find("if bars.is_empty() {")
+            .expect("the accumulating loop must still end at the emptiness check");
+        let body = rest.get(..end).unwrap_or_default();
+
+        assert!(
+            body.len() > 800,
+            "the scan found a {}-byte body, so the anchors moved and this test \
+             would pass over nothing",
+            body.len()
+        );
+        assert!(
+            body.contains("bars.try_reserve(one.bars.len())"),
+            "the accumulator must reserve with amortised growth"
+        );
+        assert!(
+            !body.contains("bars.try_reserve_exact("),
+            "an exact reservation inside this loop leaves capacity == len after \
+             every month, so the next month memcpys the whole span again -- \
+             B x M / 2 bytes moved instead of B, and it makes this function's \
+             own stated O(M + B) cost false"
+        );
     }
 }
