@@ -239,3 +239,55 @@ the semantic correction and static Rust/tests are present, but the focused
 serialized Cargo proof is still pending. This post-audit append is deliberately
 outside the immutable 2026-08-11 sweep tables and their guarded 111-row digest;
 it neither deletes nor silently repurposes an earlier finding row.
+
+## Post-audit append — 2026-09-02, surfaced by wiring `ledger-all`
+
+**The dhan feed holds a NIFTY 1-minute bar inside the 2024-03-02 midday break,
+and no command on the live path reports it.**
+
+Severity `wrong`. **COSTS**: a bar that no session traded enters the column, so
+every mask evaluated at that row is evidence from a minute the exchange was shut.
+
+2024-03-02 is an NSE disaster-recovery Saturday and it traded **two** windows,
+09:15–09:59 and 11:30–12:29 — 45 + 60 = 105 bars. Both `pull::calendar`
+(`Observed::from_runs(19_784, &[(555, 599), (690, 749)])`, and its own test
+asserting *"45 + 60, not 195"*) and `indicators::evaluator` (`19_784, // 2024-03-02
+Sat, 09:15–09:59 + 11:30–12:29 — disaster recovery`) record it correctly. The
+store does not agree with them.
+
+Driving `cli ledger-all dhan 2024 3 2024 3 …` refuses with
+
+> calendar receipt V2 timestamp 1709353800000000 is bucket 45 on measured open
+> IST day 19784, but that bucket intersects no measured session window
+
+1709353800000000 µs is 2024-03-02 10:00:00 IST — bucket 45 counting from the
+09:15 open, the **first minute of the break**. The receipt is built by
+`stored::calendar_receipt_v2_for_bars`, which maps `bar.ts_micros` straight off
+the loaded span, so the timestamp is a bar the store actually holds.
+
+**It is feed-specific, and that is the point.** The same command over the same
+month:
+
+| feed | 2024-03 |
+|---|---|
+| `dhan` | refuses — bar at 10:00, outside both windows |
+| `zerodha` | clean; runs through to Search V4 replay |
+| `truedata`, `gdfl`, `groww` | no bars for the month |
+
+Two vendors redistributing one NSE feed disagree about whether a minute exists.
+`CLAUDE.md` §3 rule 3 added `feed` as the ninth term of the run identity for
+exactly this, and this is the first measured instance of the two differing on
+something other than their bytes.
+
+**Nothing on the live path catches it.** `cli verify dhan NIFTY` passes every
+content check it makes — strictly-increasing time, byte-identical reruns, no
+look-ahead, clean refusals — because none of them asks whether a bar's minute is
+inside a measured session window. The check exists only in `calendar_receipt_v2`,
+which until `ledger-all` had no caller that ran.
+
+Disposition: **OPEN**. The bar count for day 19784 in the dhan store has not been
+measured, so it is not yet known whether this is one stray minute or the whole
+90-minute break; and whether the correct repair is to drop the out-of-window
+bars or to re-pull the day is a decision for the operator, not this ledger. What
+is settled is that the anomaly is real, reproducible, confined to one feed, and
+invisible to every command that shipped before this one.

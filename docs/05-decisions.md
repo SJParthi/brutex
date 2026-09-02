@@ -31903,3 +31903,75 @@ joining, hashing, encoding, synchronization and reopen are bounded but
 input/file/system proportional. Fixed-record address arithmetic alone is
 worst-case O(1); identity-map lookup is average O(1). No whole-authority O(1)
 time, space or latency guarantee is made.
+
+## D-0499
+
+**`ledger-all` is the operator surface for the all-rung Step-3 ledger chain, and
+the admission policy it needs is the operator's to supply.**
+
+`crates/cli/src/all_rung_population_v5.rs` and `all_rung_selection_v5.rs` hold a
+complete Population V5 → Execution V3 → Selection V5 pipeline that writes a
+durable, reauthenticated ledger for all eight intraday rungs. Its three entry
+points had **zero callers, tests included**. The fourteen tests in those two
+files each exercise a helper; the composed chain had never once run.
+
+The absence was deliberate and the tree recorded it.
+`AnchoredSearchLineageV4Bounds::new` carries
+`expect(dead_code, reason = "the authoritative CLI surface will construct
+explicit Search V4 bounds in Step 4")`. `crates/cli/src/ledger_all.rs` is that
+surface, reached by `cli ledger-all VENDOR FROM_Y FROM_M TO_Y TO_M SUPPORT_PPM
+MAX_POINTS ROOT`.
+
+**It takes no `UNDERLYING`, and that is structural rather than a choice.** The
+chain commits NIFTY and BANKNIFTY per rung and pairs them —
+`CandidateFamilyPairV1 { nifty, banknifty }`, `StoredSearchPairV4 { nifty,
+banknifty }` — and the Statistics V2 stage consumes both families as one cross
+section. There is no argument an operator could pass to ask for one of them, and
+offering one would promise something the pipeline cannot do. §1's engine surface
+is unchanged: this verb needs both instruments because the statistic does.
+
+**The thirty-nine admission gates come from the operator, not from this
+repository.** A census found every construction of all three policy objects
+inside a `#[cfg(test)]` module — twenty-five `AdmissionPolicyV1`, fourteen
+`ExitGridPolicyV1`, every `RankingPolicyV1` — and no gate value appears anywhere
+under `docs/`. These thresholds decide what the engine is willing to trade;
+choosing them here would be the invention §3 rule 1 forbids, wearing wiring's
+clothes.
+
+So two gates carry values with a stated source — the `MAX_POINTS` ceiling at 100
+paisa per index point, and the three-times reward-to-risk floor — and the other
+thirty-seven are read from `BRUTEX_ADMIT_<GATE>`. When any is unset the run
+refuses with the whole worksheet: every missing gate beside the variable that
+answers it, plus the two already answered and the sentence that decided each.
+
+**There is no "off", and the first draft of this file assumed there was.**
+`AdmissionPolicyDraftV1`'s fields are `Option`, which reads exactly like a gate
+that can be disabled with `None`. `AdmissionPolicyV1::new` calls `required` on
+all thirty-nine. The first version set two and left thirty-seven `None`,
+documenting them as "OFF, not defaulted"; it could never have constructed a
+policy at all, and no test caught it because no test built one. Running the verb
+against the real store did, in under a second, before it read a bar.
+
+**What a run does today.** With every gate supplied it opens the store, folds
+the real 1-minute NIFTY column, sweeps it, and refuses inside Search V4's
+out-of-sample replay when the cohort is degenerate. It has not yet been driven
+to a committed ledger, because the store holds **no BANKNIFTY bars at any
+feed** — so a full run stops, by name, at `all-rung 1min BANKNIFTY refused`,
+after genuinely computing the NIFTY half. That is the correct answer to the data
+that exists, and §3 rule 6 asks for it to be stated rather than papered over.
+
+Two resource bounds were wrong and are corrected here, both found by running
+rather than reading: a record ceiling of 2^32 against a byte ceiling of 2^40,
+which no ledger at the widest stride could satisfy; and an exit-cell guard of
+1,000 that refused the 1,089-cell ladder written three lines above it — a
+compute bound silently deciding a policy.
+
+**Wiring it found a store anomaly on its first real run.** `cli ledger-all dhan
+2024 3 2024 3` refuses with a calendar receipt V2 timestamp at bucket 45 of IST
+day 19784 — 2024-03-02 10:00, the first minute of the disaster-recovery
+Saturday's midday break, which `pull::calendar` and `indicators::evaluator` both
+correctly record as untraded. The same month on `zerodha` is clean and runs
+through to Search V4. `cli verify dhan NIFTY` passes every check it makes,
+because none of them asks whether a bar's minute falls inside a measured session
+window — that question is only asked by `calendar_receipt_v2`, which had no
+caller that ran until this verb. `docs/11-findings.md` carries the row.
