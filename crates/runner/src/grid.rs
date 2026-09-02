@@ -1770,21 +1770,53 @@ fn exit_fill(bars: &[Candle], index: usize, side: Side, pessimistic: bool) -> Op
 /// four deep and two families of cell were refused. The number is
 /// [`variants`]'s, and this sentence is a pointer rather than a third copy.
 ///
-/// It also said "`O(1)` exit lookups", which is true of the decision and hides
-/// what is measured beside it: [`peak_adverse`] and [`peak_favourable`] are each
-/// `for i in from..=to` over the held window, and `one_variant` calls both for
-/// every profitable candidate in every cell. So the real bar-visit count carries
-/// a `2 × variants × winners × span` term that no version of this block has ever
-/// mentioned. It is honest work — the MAE and MFE of the winners are reported —
-/// but it is not constant and it was documented as though it were.
+/// It also said "`O(1)` exit lookups", which is true of the decision and hid
+/// what was measured beside it: [`peak_adverse`] and [`peak_favourable`] are
+/// each `for i in from..=to` over the held window, `one_variant` called both
+/// inside the cell loop, and so the real bar-visit count carried a
+/// `variants × trades × span` term for the adverse walk and a
+/// `variants × winners × span` term for the favourable one. (Earlier drafts of
+/// this block wrote the pair as `2 × variants × winners × span`. That understated
+/// it: the adverse walk is outside the `pess > 0` gate on purpose, so it ran for
+/// every priced trade and not for the winners alone.) It was honest work — the
+/// MAE and MFE are reported — but it was not constant and it was documented as
+/// though it were.
 ///
-/// UNVERIFIED as a measured figure: no bench row covers this crate's grid. That
-/// is the same admission as before and it is now attached to the right claim.
+/// # The reduction, TAKEN, and what survives of the term
 ///
-/// The reduction is available and not taken here: [`crate::excursion::crossings`]
-/// already accumulates running `mae`/`mfe` and discards them, and because both
-/// are running MAXIMA the value at offset `d` IS `peak(entry, entry + d)`.
-/// Recording them per offset would turn each of these walks into an index.
+/// [`crate::excursion::Crossings`] already walked exactly that window, once per
+/// candidate, before any variant was priced. It now records the running extreme
+/// PRICE at every offset, and `one_variant` reads
+/// [`crate::excursion::Crossings::adverse_ppm_at`] and
+/// [`crate::excursion::Crossings::favourable_ppm_at`] at the offset the exit was
+/// built from. Both `variants ×` terms are gone: neither walk is per cell any
+/// more, and the two together cost `2 × trades × span` — the bars the crossing
+/// walk was visiting anyway, with no second pass added.
+///
+/// **The extreme price and not `mae`/`mfe`, which is the part that had to be got
+/// right.** The obvious reduction was to record the running maxima the walk
+/// already keeps; they are maxima, so the value at offset `d` IS
+/// `peak(entry, entry + d)`. It would have been WRONG here. Those are ppm of the
+/// one entry the crossing walk was given, and these two call sites measure from
+/// two different prices on purpose — the adverse from `entry_pess`, the
+/// favourable from `entry_opt` — so a stop requirement is not understated by a
+/// best-case entry. A running extreme price carries no base, so each caller
+/// still supplies its own.
+///
+/// **What survives the reduction, named rather than rounded off:** PASS TWO
+/// below still calls both scans, once per trade, and cannot stop. Its scans are
+/// what BUILDS the excursion sample [`Ladder::from_excursions`] places the rungs
+/// on, and a `Crossings` cannot be constructed without the ladders it would then
+/// be asked to produce. That term is `2 × trades × span` per `evaluate` call and
+/// carries no `variants` factor, which is why it was never the one being paid.
+///
+/// UNVERIFIED as a measured figure: no bench row covers this crate's grid. The
+/// before and after are read off the loops, not off an instrument. What IS
+/// measured is that the answer did not move —
+/// `the_indexed_excursion_equals_the_scan_it_replaced` compares the index
+/// against the scan bar for bar, and
+/// `the_grid_over_the_wide_bar_fixture_is_byte_stable` pins a fingerprint of a
+/// whole grid taken before the change.
 #[must_use]
 #[allow(
     clippy::too_many_lines,
@@ -3662,7 +3694,22 @@ fn one_variant(
         // more than N points against me", and a trade entered at the adverse
         // extreme runs further against than the same trade entered at the open.
         // Measuring it from the best entry understated every stop requirement.
-        let went_against = peak_adverse(bars, c.entry, exit, c.entry_pess, side);
+        //
+        // AN INDEX, AND IT WAS A SECOND WALK OVER A WINDOW ALREADY WALKED.
+        //
+        // `peak_adverse(bars, c.entry, exit, ..)` is `for i in from..=to`, and it
+        // stood inside the cell loop — so the grid's real bar-visit count
+        // carried a `variants × trades × span` term. `c.cross` already walked
+        // exactly these bars once, for this candidate, before any variant was
+        // priced; it now records the running extreme PRICE at every offset, so
+        // the same figure is two loads and a division. `pess_off` is the offset
+        // `exit` was built from, which is why no bar index appears here.
+        //
+        // The base did NOT move: the extremes carry no entry, so this still
+        // measures from `entry_pess` and the favourable read below still
+        // measures from `entry_opt`. See `Crossings::adverse_ppm_at` for why
+        // recording `mae` itself would have collapsed the two into one.
+        let went_against = c.cross.adverse_ppm_at(pess_off, c.entry_pess, side);
         adverse_on_all = adverse_on_all.saturating_add(went_against);
         // THE MAXIMUM, NOT THE SUM. A stop is placed once and every trade must
         // survive it, so the figure that decides whether a stop is survivable is
@@ -3700,9 +3747,16 @@ fn one_variant(
         // Winners already need their favourable excursion for the cell. A
         // requested detail row needs it for every trade; compute it exactly on
         // that path rather than leave the durable row implying the figure was
-        // unavailable. The ordinary fold still avoids the scan for a loser.
+        // unavailable.
+        //
+        // THE GUARD IS KEPT THOUGH IT NO LONGER SAVES A SCAN. It used to read
+        // "the ordinary fold still avoids the scan for a loser", and there is no
+        // scan left to avoid — this is the same indexed read as the adverse line
+        // above. What it still buys is a division, and what it buys that matters
+        // more is that `went_for` stays exactly zero for a loser nobody asked a
+        // row for, which is the value every banked result was folded with.
         let went_for = if pess > 0 || trades.is_some() {
-            peak_favourable(bars, c.entry, exit, c.entry_opt, side)
+            c.cross.favourable_ppm_at(pess_off, c.entry_opt, side)
         } else {
             0
         };
@@ -5361,6 +5415,483 @@ mod tests {
             .collect();
         let column = Column::build(&bars, &mut evaluator());
         (bars, column)
+    }
+
+    /// The three ladders the excursion equivalence tests measure against.
+    ///
+    /// Their VALUES are irrelevant to what is being proved — the prefix extremes
+    /// are prices and no rung enters them — but a `Crossings` cannot be built
+    /// without a ladder, and `Ladder::new` refuses an empty or non-ascending set.
+    fn probe_ladder(rungs: &[i64]) -> Ladder {
+        Ladder::new(rungs.to_vec()).expect("an ascending ladder")
+    }
+
+    /// One window, every offset in it, both readings — the whole equality.
+    ///
+    /// A helper and not four lines pasted at each call, because the thing under
+    /// test IS an equality: a second copy that drifted would assert the new code
+    /// against itself and pass.
+    fn scan_equals_index(
+        bars: &[indicators::Candle],
+        cross: &crate::excursion::Crossings,
+        window: (usize, usize),
+        base: i64,
+        side: Side,
+    ) {
+        let (from, to) = window;
+        for offset in 0..=to.saturating_sub(from) {
+            let at = from.saturating_add(offset);
+            assert_eq!(
+                cross.adverse_ppm_at(offset, base, side),
+                super::peak_adverse(bars, from, at, base, side),
+                "adverse {side:?}: window {from}..={to}, offset {offset}, entry {base}"
+            );
+            assert_eq!(
+                cross.favourable_ppm_at(offset, base, side),
+                super::peak_favourable(bars, from, at, base, side),
+                "favourable {side:?}: window {from}..={to}, offset {offset}, entry {base}"
+            );
+        }
+    }
+
+    /// THE INDEXED EXCURSION IS THE SCAN IT REPLACED, BAR FOR BAR.
+    ///
+    /// # Why this test is permanent and why it is exhaustive rather than sampled
+    ///
+    /// [`one_variant`] used to walk `from..=to` twice per candidate per CELL to
+    /// get its adverse and favourable excursions. It now indexes
+    /// [`crate::excursion::Crossings`]'s prefix extremes. Those two figures
+    /// decide `worst_mae`, `winner_mae`, `winner_mfe`, `all_mae` and every
+    /// emitted trade row — which is to say they decide what an operator is told
+    /// a combination risked. An optimisation there is worth having only while it
+    /// is provably the same arithmetic, so the proof is the test and not the
+    /// argument in the doc comment.
+    ///
+    /// Every offset of every window is checked, not a sample: the failure this
+    /// guards against is an off-by-one in the prefix or a clamp at the end, and
+    /// both hide from a sampled offset.
+    ///
+    /// # The five shapes named separately, because each broke something once
+    ///
+    /// * **`from > to`** — the scan refuses before it reads a bar; the index has
+    ///   no slot to clamp to and must say zero rather than answer from bar
+    ///   `from`.
+    /// * **`entry <= 0`** — as the base, where the answer is zero, and as the
+    ///   price the WALK was handed, which used to return early and leave the
+    ///   tables empty. See the `odd` fixture below for why that was reachable.
+    /// * **a single-bar window** — `len` zero, where the running extreme is the
+    ///   seed and the first bar at once.
+    /// * **a refused bar mid-window** — `holed`, where both the scan and the walk
+    ///   must step over it and leave the extremes where they stood.
+    /// * **a window ending at the forced 15:10 square-off** — the last offset a
+    ///   real hold can reach, and the one a clamp would hide behind.
+    #[test]
+    fn the_indexed_excursion_equals_the_scan_it_replaced() {
+        let clean = crate::synthetic::sessions(3);
+        // ONE BAR MID-HOLD THAT IS NOT A BAR. `high < low` is the first refusal
+        // `Candle::check` names, and it is the one that cost a real audit a
+        // factor of 155. The scan skipped such a bar and so does the walk; if the
+        // two ever skip differently every figure after the hole diverges.
+        let mut holed = clean.clone();
+        for hole in [200_usize, 740] {
+            let Some(slot) = holed.get_mut(hole) else {
+                continue;
+            };
+            *slot = indicators::Candle::new(slot.ts_micros, 0, 0, 1, 0, 1, indicators::OI_NULL);
+        }
+        assert!(
+            holed.get(200).is_some_and(|b| b.check().is_err()),
+            "the hole has to be a refusal or this fixture proves nothing"
+        );
+
+        let stops = probe_ladder(&[10, 20, 40, 80]);
+        let targets = probe_ladder(&[15, 30, 60, 120]);
+        let trails = probe_ladder(&[5, 25, 50, 100]);
+        let ladders = Ladders {
+            stops: &stops,
+            targets: &targets,
+            trails: &trails,
+        };
+
+        for bars in [&clean, &holed] {
+            for side in [Side::Long, Side::Short] {
+                for from in (0..bars.len()).step_by(97) {
+                    let (pess, opt) = super::entry_fills(bars, from, side);
+                    for len in [0_usize, 1, 2, 5, 15, 61, 179] {
+                        let to = from.saturating_add(len).min(bars.len().saturating_sub(1));
+                        // The walk is handed the OPEN, exactly as all three
+                        // production sites hand it, and then zero — the entry
+                        // the early return used to swallow.
+                        for walk_entry in [opt, 0] {
+                            let cross = crate::excursion::crossings(
+                                bars, from, to, walk_entry, side, ladders,
+                            );
+                            // `i64::MAX` is here for the saturation: the scan
+                            // took `entry.saturating_sub(low)` per bar and the
+                            // index takes it once, against the running minimum.
+                            for base in [pess, opt, 0, -7, 1, i64::MAX] {
+                                scan_equals_index(bars, &cross, (from, to), base, side);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// AN EMPTY RANGE, where the index has no slot to clamp to.
+    ///
+    /// One of the five shapes
+    /// [`the_indexed_excursion_equals_the_scan_it_replaced`] enumerates, split
+    /// out because that function reached `clippy::too_many_lines` and because a
+    /// named failure is worth more than a line number inside a long one.
+    ///
+    /// The scan refuses `from > to` before it reads a bar. The index must say
+    /// zero rather than answer from bar `from`, which is what an unguarded
+    /// clamp to slot zero would do.
+    #[test]
+    fn the_indexed_excursion_answers_zero_for_an_empty_range() {
+        let clean = crate::synthetic::sessions(1);
+        let stops = probe_ladder(&[10, 20, 40, 80]);
+        let targets = probe_ladder(&[15, 30, 60, 120]);
+        let trails = probe_ladder(&[5, 25, 50, 100]);
+        let ladders = Ladders {
+            stops: &stops,
+            targets: &targets,
+            trails: &trails,
+        };
+        for side in [Side::Long, Side::Short] {
+            let cross = crate::excursion::crossings(&clean, 40, 9, 2_500_000, side, ladders);
+            for base in [2_500_000_i64, 0, -1] {
+                assert_eq!(
+                    cross.adverse_ppm_at(0, base, side),
+                    super::peak_adverse(&clean, 40, 9, base, side),
+                    "{side:?}: an empty range has no excursion to index"
+                );
+                assert_eq!(
+                    cross.favourable_ppm_at(0, base, side),
+                    super::peak_favourable(&clean, 40, 9, base, side),
+                    "{side:?}: an empty range has no excursion to index"
+                );
+                assert_eq!(
+                    cross.adverse_ppm_at(0, base, side),
+                    0,
+                    "{side:?}: and the answer is zero, not bar 40's own move"
+                );
+            }
+        }
+    }
+
+    /// A WINDOW ENDING AT THE FORCED 15:10 SQUARE-OFF.
+    ///
+    /// One of the five shapes
+    /// [`the_indexed_excursion_equals_the_scan_it_replaced`] enumerates. It is
+    /// the LAST offset a real hold can reach, which is the one a clamp at the
+    /// end of the prefix would hide behind: an index that silently answered from
+    /// the second-to-last slot would be right everywhere except at the exit that
+    /// closes every overrunning trade in the engine.
+    ///
+    /// `crate::synthetic` starts every session at 09:15, so the 15:09 bar — the
+    /// only stored record that can price the fixed 15:10 deadline, and therefore
+    /// the last bar `crate::trade` will hold a position to — is minute 354 of
+    /// its own session. Derived below from the same `crate::outcome` bounds the
+    /// engine uses rather than typed in, so the fixture cannot drift away from
+    /// the policy while still asserting the number a reader can check.
+    #[test]
+    fn the_indexed_excursion_holds_to_the_forced_square_off() {
+        let clean = crate::synthetic::sessions(2);
+        let stops = probe_ladder(&[10, 20, 40, 80]);
+        let targets = probe_ladder(&[15, 30, 60, 120]);
+        let trails = probe_ladder(&[5, 25, 50, 100]);
+        let ladders = Ladders {
+            stops: &stops,
+            targets: &targets,
+            trails: &trails,
+        };
+        let column = Column::build(&clean, &mut evaluator());
+        let facts = crate::trade::SliceFacts::of(&clean, &column);
+        let square_off = facts
+            .exits()
+            .get(340)
+            .copied()
+            .flatten()
+            .map(|s| s.bar)
+            .expect("a mid-session bar has a square-off row");
+        assert_eq!(
+            square_off, 354,
+            "09:15 plus 354 minutes is 15:09, the last fillable bar"
+        );
+        for side in [Side::Long, Side::Short] {
+            for from in [354_usize, 353, 339, 294] {
+                let (pess, opt) = super::entry_fills(&clean, from, side);
+                let cross =
+                    crate::excursion::crossings(&clean, from, square_off, opt, side, ladders);
+                for base in [pess, opt] {
+                    scan_equals_index(&clean, &cross, (from, square_off), base, side);
+                }
+            }
+        }
+    }
+
+    /// THE BAR THAT MADE THE EARLY RETURN A DEFECT AND NOT A SHORTCUT.
+    ///
+    /// One of the five shapes
+    /// [`the_indexed_excursion_equals_the_scan_it_replaced`] enumerates, and the
+    /// one that decided the design.
+    ///
+    /// `costs::fill::Bar::new` deliberately admits a low at or below zero — its
+    /// own doc says a degenerate low is absorbed rather than refused, so a
+    /// single malformed bar is a conservative fill and not a crash. A record
+    /// with `low <= open <= 0 < high` therefore passes `Candle::check` AND the
+    /// fill bracket. [`entry_fills`] prices its WORST entry at a printed extreme,
+    /// which is positive, and its BEST at the open, which is not a price at all
+    /// — and the open is what the crossing walk is handed.
+    ///
+    /// `crate::excursion::crossings` used to return early on a non-positive
+    /// entry. Left that way, the tables would be empty while [`one_variant`]
+    /// still asked them for an adverse excursion measured from the POSITIVE
+    /// worst fill, and the answer would be zero for a path that moved. That is
+    /// `worst_mae` — the figure "did any single trade ever run more than N points
+    /// against me" is read off — reporting nothing at all.
+    #[test]
+    fn the_indexed_excursion_survives_a_non_positive_entry_fill() {
+        let stops = probe_ladder(&[10, 20, 40, 80]);
+        let targets = probe_ladder(&[15, 30, 60, 120]);
+        let trails = probe_ladder(&[5, 25, 50, 100]);
+        let ladders = Ladders {
+            stops: &stops,
+            targets: &targets,
+            trails: &trails,
+        };
+        let odd = vec![
+            indicators::Candle::new(0, 0, 50_000, -10_000, 0, 10, indicators::OI_NULL),
+            indicators::Candle::new(60_000_000, 0, 90_000, -30_000, 0, 10, indicators::OI_NULL),
+        ];
+        for side in [Side::Long, Side::Short] {
+            let (pess, opt) = super::entry_fills(&odd, 0, side);
+            assert_eq!(
+                opt, 0,
+                "{side:?}: the best entry fill is this bar's open, which is not a price"
+            );
+            let cross = crate::excursion::crossings(&odd, 0, 1, opt, side, ladders);
+            for base in [pess, opt, 5_000] {
+                scan_equals_index(&odd, &cross, (0, 1), base, side);
+            }
+            assert!(
+                cross.adverse_ppm_at(1, 5_000, side) > 0,
+                "{side:?}: a walk entered at a non-positive open still has to \
+                 answer for a positive one, and this path moved"
+            );
+        }
+
+        // AND IT MOVES NOTHING ELSE, WHICH IS THE OTHER HALF OF THE CHANGE.
+        //
+        // Before the prefix existed, a non-positive entry returned
+        // `Crossings::empty` without reading a bar. The walk now runs, so
+        // `refused` and `last` have to be held at `empty`'s values BY A GUARD --
+        // and those two are exactly what `blocks_without_pricing` and the exit
+        // lookups read. A walk that started counting refusals on a degenerate
+        // entry would begin dropping paths the engine used to price, which is a
+        // different set of trades and a different total.
+        //
+        // The priced pair below is the control: the same bars, the same window,
+        // a positive entry, and both counters DO move. Without it this would
+        // assert only that the fixture is quiet.
+        let mut holed = odd.clone();
+        holed.insert(
+            1,
+            indicators::Candle::new(30_000_000, 0, 0, 1, 0, 1, indicators::OI_NULL),
+        );
+        assert!(
+            holed.get(1).is_some_and(|b| b.check().is_err()),
+            "the middle bar has to be a refusal or the control proves nothing"
+        );
+        for side in [Side::Long, Side::Short] {
+            let degenerate = crate::excursion::crossings(&holed, 0, 2, 0, side, ladders);
+            assert_eq!(
+                (degenerate.refused(), degenerate.last()),
+                (0, 0),
+                "{side:?}: a non-positive entry may fill the extremes and move \
+                 neither counter"
+            );
+            let priced = crate::excursion::crossings(&holed, 0, 2, 5_000, side, ladders);
+            assert_eq!(
+                (priced.refused(), priced.last()),
+                (1, 2),
+                "{side:?}: the same bars with a real entry do move both, so the \
+                 pair above is about the entry and not about the fixture"
+            );
+        }
+    }
+
+    /// AN UNBOUNDED `to` RESERVES FROM THE SLICE, NEVER FROM THE CALLER.
+    ///
+    /// `crate::excursion::crossings` is public and its `to` is a caller's
+    /// number. The prefix tables are reserved, and a reservation taken from
+    /// `to - from` rather than from what the slice can actually supply would ask
+    /// for `usize::MAX` slots and take the process down — on an argument the
+    /// walk itself shrugs off at its first `bars.get`.
+    ///
+    /// This test kills that by running it: `Vec::with_capacity` refuses a
+    /// capacity that overflows, so a reservation from `to` fails here loudly
+    /// instead of in a sweep. The equality beside it is the second half — the
+    /// walk must still answer for the whole slice, clamped at its end, exactly
+    /// as the scan's own `break` on a missing bar left it.
+    #[test]
+    fn an_unbounded_to_reserves_from_the_slice_and_not_from_the_caller() {
+        let clean = crate::synthetic::sessions(1);
+        let stops = probe_ladder(&[10, 20, 40, 80]);
+        let targets = probe_ladder(&[15, 30, 60, 120]);
+        let trails = probe_ladder(&[5, 25, 50, 100]);
+        let ladders = Ladders {
+            stops: &stops,
+            targets: &targets,
+            trails: &trails,
+        };
+        for side in [Side::Long, Side::Short] {
+            let (pess, opt) = super::entry_fills(&clean, 0, side);
+            let cross = crate::excursion::crossings(&clean, 0, usize::MAX, opt, side, ladders);
+            for base in [pess, opt] {
+                for offset in [usize::MAX, clean.len(), clean.len().saturating_sub(1), 0] {
+                    assert_eq!(
+                        cross.adverse_ppm_at(offset, base, side),
+                        super::peak_adverse(&clean, 0, offset, base, side),
+                        "adverse {side:?}: unbounded window, offset {offset}, entry {base}"
+                    );
+                    assert_eq!(
+                        cross.favourable_ppm_at(offset, base, side),
+                        super::peak_favourable(&clean, 0, offset, base, side),
+                        "favourable {side:?}: unbounded window, offset {offset}, entry {base}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The one precondition the index carries, and the guard that supplies it.
+    ///
+    /// The prefix extremes skip a bar the WALK refused, and the scan they
+    /// replace skipped only a bar `Candle::check` refused. The two skip sets
+    /// differ exactly when the engine's per-index verdict rejects a bar `check`
+    /// accepts — so this shows the divergence is real AND that it is impossible
+    /// to reach, because such a path reports a refusal and
+    /// [`blocks_without_pricing`] drops it before any variant is priced.
+    ///
+    /// Asserting the difference rather than hiding it: a test that only checked
+    /// the counter would leave a reader unable to see why the counter matters.
+    #[test]
+    fn a_verdict_only_refusal_diverges_and_is_therefore_never_priced() {
+        // The middle bar carries the extreme in both directions and passes every
+        // record-local check, so only the verdict can exclude it.
+        let bars = vec![
+            candle(0, 2_500_000, 2_500_100, 2_499_900, 2_500_000),
+            candle(1, 2_500_000, 2_600_000, 2_400_000, 2_500_000),
+            candle(2, 2_500_000, 2_500_100, 2_499_900, 2_500_000),
+        ];
+        for bar in &bars {
+            assert!(bar.check().is_ok(), "every bar here is a bar");
+        }
+        let stops = probe_ladder(&[10, 20, 40, 80]);
+        let targets = probe_ladder(&[15, 30, 60, 120]);
+        let trails = probe_ladder(&[5, 25, 50, 100]);
+        let ladders = Ladders {
+            stops: &stops,
+            targets: &targets,
+            trails: &trails,
+        };
+        let accepted = [true, false, true];
+        for side in [Side::Long, Side::Short] {
+            let cross = crossings_checked(&bars, 0, 2, 2_500_000, side, ladders, &accepted);
+            assert_eq!(
+                cross.refused(),
+                1,
+                "{side:?}: the verdict's refusal has to be counted or the guard \
+                 has nothing to read"
+            );
+            assert_ne!(
+                cross.adverse_ppm_at(2, 2_500_000, side),
+                super::peak_adverse(&bars, 0, 2, 2_500_000, side),
+                "{side:?}: the index excludes the refused bar and the scan does \
+                 not -- which is exactly why a path carrying one is dropped \
+                 rather than priced"
+            );
+            let mut open_until = None;
+            let dropped = super::blocks_without_pricing(
+                &super::Candidate {
+                    signal: 0,
+                    entry: 0,
+                    time_exit: 2,
+                    block_only: false,
+                    cross,
+                    entry_pess: 2_500_100,
+                    entry_opt: 2_500_000,
+                },
+                &mut open_until,
+            );
+            assert!(
+                dropped,
+                "{side:?}: a path with a refused bar must never reach a cell"
+            );
+        }
+    }
+
+    /// FNV-1a over a rendering, so no field can be left out of a fingerprint.
+    fn fingerprint(text: &str) -> u64 {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in text.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        hash
+    }
+
+    /// A WHOLE GRID, PINNED, SO NO OPTIMISATION CAN MOVE ONE PAISA UNNOTICED.
+    ///
+    /// `CLAUDE.md` §3 rule 5 asks for byte-for-byte reruns, and every other test
+    /// in this module asserts one property at a time — a change that moved a
+    /// figure no assertion happens to name would pass all of them. This hashes
+    /// the `Debug` rendering of two complete grids, which is every cell and every
+    /// field of it, with no field list to forget to extend.
+    ///
+    /// **The number was taken BEFORE the excursion scan became an index** and is
+    /// unchanged after it, which is the strongest evidence available that the
+    /// reduction moved work and not an answer.
+    ///
+    /// If a deliberate change to the grid's arithmetic makes this fail, the fix
+    /// is to satisfy `the_indexed_excursion_equals_the_scan_it_replaced` and the
+    /// rest of this module first, then re-take the number and say in the commit
+    /// which figure moved and why. Re-taking it to get green, without that, is
+    /// the failure wearing a success's clothes that `CLAUDE.md` §4 bans.
+    #[test]
+    fn the_grid_over_the_wide_bar_fixture_is_byte_stable() {
+        let (bars, column) = swept_with_wide_bars();
+        let mask = ConditionMask::default();
+        let long = evaluate(&bars, &column, &mask, h(15), Side::Long, Levels::derived(4));
+        let short = evaluate(
+            &bars,
+            &column,
+            &mask,
+            h(15),
+            Side::Short,
+            Levels::derived(4),
+        );
+        // Rendered rather than field-listed, and asserted alongside two plain
+        // counts so a reader is not left with only a hash to look at.
+        assert!(
+            !long.cells.is_empty() && !short.cells.is_empty(),
+            "an empty grid would make the fingerprint below meaningless"
+        );
+        assert_eq!(
+            (long.cells.len(), short.cells.len()),
+            (260, 500),
+            "the cell count is the grid's shape and it must not move either"
+        );
+        let rendered = format!("{long:?}\n{short:?}");
+        assert_eq!(
+            fingerprint(&rendered),
+            4_541_430_464_614_536_018,
+            "every cell of both grids, byte for byte"
+        );
     }
 
     #[test]

@@ -32024,3 +32024,63 @@ and the unset-gate refusal are drivable because `parse_vendor` refuses before
 22 fire only after a real span has loaded; their field content is proven by the
 builder tests, their reach is not, and no store fixture exists on that path
 today. LG-08 carries that as a partial rather than a tick.
+
+## D-0501
+
+**The exit grid records the running extreme PRICE per offset, not the running
+`mae`/`mfe`, and the difference is whether risk stays pessimistic.**
+
+`evaluate`'s own doc comment named this reduction and named it wrongly. Its
+words were: *"`crate::excursion::crossings` already accumulates running
+`mae`/`mfe` and discards them, and because both are running MAXIMA the value at
+offset `d` IS `peak(entry, entry + d)`. Recording them per offset would turn
+each of these walks into an index."*
+
+The first half is right and the prescription is not. `crossings_with`'s running
+`mae`/`mfe` are parts per million **of the one entry price the walk is given**,
+`entry_opt`, the execution bar's open. `one_variant` measures its two excursions
+from **two different prices, on purpose**:
+
+- `peak_adverse(.., c.entry_pess, ..)` — the WORST entry fill
+- `peak_favourable(.., c.entry_opt, ..)` — the open
+
+Recording `mae` itself would therefore have re-based `worst_mae` from
+`entry_pess` onto `entry_opt`, silently. That is not a rounding difference: it
+understates the adverse excursion, and `worst_mae` is the figure every stop rule
+is judged against and the one `Rules::admits` tests against `max_mae_ppm`. A
+reduction that makes a run look less risky than it was is the failure §4 bans,
+arrived at by following a comment rather than reading the callers.
+
+**What is recorded instead:** the running extreme price, `low_run` and
+`high_run`, in paisa, carrying no base at all. Two series answer all four
+questions, because a long's adverse extreme and a short's favourable one are the
+same low, and each caller applies its own entry at the read.
+
+Exactness is not asserted but argued: `entry.saturating_sub(·)` is monotone
+non-increasing in the low, so `max(entry − lowᵢ)` equals `entry − min(lowᵢ)`,
+and the ppm conversion is the same `i128` widen, truncating divide and
+`i64::MAX` saturation the scan's tail already spelled out. EB-06 pins it
+exhaustively; the whole grid's fingerprint over the wide-bar fixture is
+identical before and after.
+
+**One guard was removed, and it was reachable.** `crossings_with` returned early
+on `entry <= 0`. `costs::fill::Bar::new` deliberately admits a low at or below
+zero, so a bar with `low ≤ open ≤ 0 < high` passes every check and
+`entry_fills` yields a positive worst fill beside a non-positive open. The
+tables would have been empty while `one_variant` asked for an adverse excursion
+from the positive fill. The walk now runs for the extremes, holding `refused`
+and `last` at their `empty()` values.
+
+**What the reduction removes and what remains.** Gone: `variants × trades ×
+span` on the adverse side and `variants × winners × span` on the favourable one.
+Remaining: `2 × trades × span` in pass two, with no `variants` factor — those
+scans build the very sample the ladders are derived from, and a `Crossings`
+needs those ladders to exist. The doc block above `evaluate` now says this and
+corrects its own `2 × variants × winners × span` figure, which was itself
+understated: the adverse walk sat outside the `pess > 0` gate and therefore ran
+for every trade, not only the winners.
+
+**Space:** `2 · (span + 1) · 8` bytes per candidate — 256 B at
+`Horizon::DEFAULT`, about 6 KB at a full-session horizon, joining the eight
+allocations `Crossings::empty` already makes. Read off the type rather than
+measured, and labelled as such per §3 rule 6.

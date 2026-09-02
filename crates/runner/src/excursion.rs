@@ -404,6 +404,37 @@ pub struct Crossings {
     refused: usize,
     /// The last offset walked, so a lookup can say "held to the end".
     last: usize,
+    /// The LOWEST LOW seen from the entry bar up to each offset, in paisa.
+    ///
+    /// One slot per offset actually walked, so `low_run[d]` is
+    /// `min(low)` over the accepted bars of `bars[from ..= from + d]`.
+    ///
+    /// # A PRICE, and not a ppm, which is the whole reason it is usable twice
+    ///
+    /// `mae` and `mfe` are already accumulated by the walk below and already
+    /// running maxima, so the value at offset `d` IS the excursion over
+    /// `from ..= from + d`. Recording *those* would have been the obvious
+    /// reduction and it would have been half a reduction: they are ppm of the
+    /// ONE entry price this walk was given, and `crate::grid` measures its two
+    /// excursions from two DIFFERENT prices — the adverse one from the worst
+    /// entry fill, the favourable one from the open — precisely so a stop
+    /// requirement is not understated by a best-case entry.
+    ///
+    /// The running extreme PRICE carries no base at all, so
+    /// [`Self::adverse_ppm_at`] and [`Self::favourable_ppm_at`] each apply
+    /// their caller's own entry, and the two readings stay as far apart as they
+    /// were. Two series suffice for both sides, because a long's adverse
+    /// extreme and a short's favourable one are the same low.
+    ///
+    /// Seeded [`i64::MAX`] so an offset before the first accepted bar yields a
+    /// non-positive move and therefore zero — the same answer the scan gives
+    /// from its `worst = 0`.
+    low_run: Vec<i64>,
+    /// The HIGHEST HIGH seen from the entry bar up to each offset, in paisa.
+    ///
+    /// The mirror of `Self::low_run`; seeded [`i64::MIN`] for the same
+    /// reason.
+    high_run: Vec<i64>,
 }
 
 /// A rung that the path never reached.
@@ -417,11 +448,18 @@ impl Crossings {
     /// tables are `targets.len()` rows of `trails.len()` because arming indexes
     /// the TARGET ladder — see [`Self::armed`].
     ///
-    /// A path that is never walked — a non-positive entry, or an empty range —
-    /// returns exactly this, so every rung reads [`NEVER`] and every anchor
-    /// reads `None`. That is the honest answer for a trade with no path, and it
-    /// is why the guard in [`crossings`] can return early without a second
-    /// construction.
+    /// A path that is never walked — an empty range — returns exactly this, so
+    /// every rung reads [`NEVER`] and every anchor reads `None`. That is the
+    /// honest answer for a trade with no path, and it is why the guard in
+    /// [`crossings`] can return early without a second construction.
+    ///
+    /// **A non-positive entry used to return this too, and no longer does.** It
+    /// still yields exactly these RUNG tables — every ppm is measured against
+    /// the entry, so a non-positive one leaves every running maximum at zero
+    /// and no cursor can advance — but the walk now runs anyway to fill
+    /// `Self::low_run` and `Self::high_run`, which are prices and mean
+    /// something without it. See [`crossings_with`] for why the difference is
+    /// reachable rather than theoretical.
     fn empty(ladders: Ladders<'_>) -> Self {
         let Ladders {
             stops,
@@ -444,6 +482,8 @@ impl Crossings {
             trail_count: trails.len(),
             refused: 0,
             last: 0,
+            low_run: Vec::new(),
+            high_run: Vec::new(),
         }
     }
 
@@ -613,6 +653,78 @@ impl Crossings {
     pub const fn refused(&self) -> usize {
         self.refused
     }
+
+    /// The worst the path had gone AGAINST `entry` by offset `offset`, in ppm.
+    ///
+    /// # An index, and it replaced a scan
+    ///
+    /// `crate::grid::one_variant` called a `for i in from..=to` walk here, once
+    /// per profitable candidate per cell, so the grid's real bar-visit count
+    /// carried a `variants × trades × span` term. This is two indexed reads, a
+    /// subtraction and one division — layer 5 of `docs/07-o1-architecture.md`,
+    /// the address computed rather than searched.
+    ///
+    /// # It is EXACTLY that scan, and the equality is the point
+    ///
+    /// The scan took `max(0, max over bars of (entry − low))` in paisa and
+    /// converted once at the end. `entry.saturating_sub(·)` is monotone
+    /// non-increasing in the low, so that maximum is
+    /// `entry.saturating_sub(min low)` — which is what `Self::low_run` holds.
+    /// The conversion is the same `ppm_of` the scan's own tail spelled out,
+    /// down to the `i128` widening, the truncating division and the
+    /// [`i64::MAX`] saturation.
+    ///
+    /// `crate::grid::the_indexed_excursion_equals_the_scan_it_replaced` asserts
+    /// the equality bar for bar over a real-shaped fixture rather than leaving
+    /// it as this argument.
+    ///
+    /// # The one precondition, and `crate::grid` guarantees it
+    ///
+    /// The tables skip a bar this walk REFUSED, and the scan skipped only a bar
+    /// `indicators::Candle::check` refused. The two skip sets differ exactly
+    /// when the caller supplied an acceptance verdict that rejected a bar
+    /// `check` accepts — and such a path has [`Self::refused`] above zero, which
+    /// `crate::grid::blocks_without_pricing` drops before any variant is priced.
+    /// On a path with no refusal the sets are both empty and the equality is
+    /// unconditional.
+    ///
+    /// An `offset` past the walked window clamps to its end, which is where the
+    /// scan's own `break` on a missing bar left it. A window that was never
+    /// walked, or a non-positive `entry`, reads zero.
+    #[must_use]
+    pub fn adverse_ppm_at(&self, offset: usize, entry: i64, side: Side) -> Ppm {
+        self.peak_ppm_at(offset, entry, side, true)
+    }
+
+    /// The best the path had gone FOR `entry` by offset `offset`, in ppm.
+    ///
+    /// The mirror of [`Self::adverse_ppm_at`]; every word there applies, with
+    /// `Self::high_run` in place of the low for a long.
+    #[must_use]
+    pub fn favourable_ppm_at(&self, offset: usize, entry: i64, side: Side) -> Ppm {
+        self.peak_ppm_at(offset, entry, side, false)
+    }
+
+    /// One extreme of the walked prefix, resolved against a caller's entry.
+    ///
+    /// `side` decides which running extreme hurts: a long is hurt by the low
+    /// and helped by the high, a short the other way round, which is why two
+    /// series answer four questions.
+    fn peak_ppm_at(&self, offset: usize, entry: i64, side: Side, adverse: bool) -> Ppm {
+        // Nothing was walked. The scan's `worst` never left zero.
+        let Some(last) = self.low_run.len().checked_sub(1) else {
+            return 0;
+        };
+        let at = offset.min(last);
+        let (Some(&low), Some(&high)) = (self.low_run.get(at), self.high_run.get(at)) else {
+            return 0;
+        };
+        let move_paisa = match (side, adverse) {
+            (Side::Long, true) | (Side::Short, false) => entry.saturating_sub(low),
+            (Side::Long, false) | (Side::Short, true) => high.saturating_sub(entry),
+        };
+        ppm_of(move_paisa, entry)
+    }
 }
 
 /// Which way the position is facing.
@@ -668,8 +780,26 @@ pub enum Side {
 /// four. It is stated because a space cost that appears only at a rung count
 /// nobody has run is exactly the kind that is discovered by running out.
 ///
+/// **It grew again, by `2 · span` slots, and the trade is stated rather than
+/// assumed.** `Crossings::low_run` and `Crossings::high_run` hold one `i64`
+/// each per offset walked, so the type is now
+/// `Θ(S + T + R + T·R + 2·span)` where `span = to − from + 1`, capped at the
+/// bars the slice actually holds. Two allocations join the eight
+/// `Crossings::empty` already makes.
+///
+/// Read off the type and the shipped horizon, NOT measured — `CLAUDE.md` §3
+/// rule 6: at `Horizon::DEFAULT` of fifteen bars that is 16 × 2 × 8 = **256
+/// bytes per candidate**, and at a whole 375-bar session horizon it is **6.0 KB**.
+/// The candidate vector is local to one grid evaluation, so the live total is
+/// paths-in-one-slice × that figure and not masks × it.
+///
+/// What it buys is stated at [`Crossings::adverse_ppm_at`]: `crate::grid` walked
+/// this same window again, once or twice per candidate per CELL, and now indexes
+/// instead. The bytes are per candidate; the walks removed were per candidate
+/// per variant.
+///
 /// UNVERIFIED as measured figures: no bench row covers this crate, in time or
-/// in space. Both are read off the loop and the type, not off an instrument.
+/// in space. All are read off the loop and the type, not off an instrument.
 #[must_use]
 pub fn crossings(
     bars: &[Candle],
@@ -701,6 +831,107 @@ pub(crate) fn crossings_checked(
     crossings_with(bars, from, to, entry, side, ladders, Some(accepted))
 }
 
+/// Reserve the prefix tables from what can actually be walked.
+///
+/// **NEVER from `to - from`.** [`crossings`] is public and `to` is a caller's
+/// number, so a reservation taken from it would abort the process on an
+/// argument the loop itself shrugs off at the first `bars.get` — the walk stops
+/// where the slice does, and so does the reservation.
+fn reserve_prefix(out: &mut Crossings, bars: &[Candle], from: usize, to: usize) {
+    let reach = to
+        .saturating_sub(from)
+        .saturating_add(1)
+        .min(bars.len().saturating_sub(from));
+    out.low_run = Vec::with_capacity(reach);
+    out.high_run = Vec::with_capacity(reach);
+}
+
+/// The running price extremes `Crossings::low_run` and
+/// `Crossings::high_run` are folded from.
+///
+/// In PAISA and carrying no entry, which is the whole reason one pair of series
+/// answers four questions: a long's adverse extreme and a short's favourable one
+/// are the same low, and `crate::grid` measures its two excursions from two
+/// different entry prices. See [`Crossings::adverse_ppm_at`].
+struct Extremes {
+    /// The lowest low accepted so far.
+    low: i64,
+    /// The highest high accepted so far.
+    high: i64,
+}
+
+impl Extremes {
+    /// Seeded so that an offset before the first accepted bar yields a
+    /// non-positive move, which `ppm_of` reports as zero — the same answer the
+    /// scan gave from a `worst` nothing had raised.
+    const fn new() -> Self {
+        Self {
+            low: i64::MAX,
+            high: i64::MIN,
+        }
+    }
+
+    /// Fold one bar and record the result at this offset.
+    ///
+    /// **One slot per offset, accepted or not, so the offset IS the index.** A
+    /// refused bar leaves the extremes where they stood, which is exactly what
+    /// the scan's own `continue` did to its running maximum — and recording no
+    /// slot for it instead would shift every later offset by one.
+    fn record(&mut self, out: &mut Crossings, bar: &Candle, accepted: bool) {
+        if accepted {
+            self.low = self.low.min(bar.low);
+            self.high = self.high.max(bar.high);
+        }
+        out.low_run.push(self.low);
+        out.high_run.push(self.high);
+    }
+}
+
+/// Record this bar's extremes and say whether it may move a rung.
+///
+/// Split out for the reason [`cross_rungs`] and [`cross_armed_rows`] are: the
+/// walk would otherwise exceed `clippy::too_many_lines`. Nothing is hidden — the
+/// caller still owns every piece of state and still writes `out.last` itself.
+///
+/// # A BAR THE ENGINE REFUSED MAY NOT MOVE A RUNNING MAXIMUM
+///
+/// The checked engine path supplies the exact `Evaluator::step` bitmap,
+/// including timestamp and accumulator state that `Candle::check` cannot see.
+/// The local check remains only for the public geometry helper that has no
+/// column. Counted rather than silently skipped: `crate::grid` reads the count
+/// and drops the whole candidate, because a hole in the middle of a path leaves
+/// every maximum after it wrong. See [`Crossings::refused`] for what one such
+/// bar did to a real audit — 3,210 paisa to 499,089, and a different exit
+/// recommended.
+///
+/// # Two ways to be skipped, and only one of them is COUNTED
+///
+/// A refused bar is counted. A walk with a non-positive `entry` skips every bar
+/// and counts none: `crate::grid` reads [`Crossings::refused`] and
+/// [`Crossings::last`] to decide whether a path is priced at all, so moving
+/// either would change which trades are taken. The extremes are recorded in both
+/// cases, because they are prices and mean something without an entry.
+fn admit(
+    out: &mut Crossings,
+    extremes: &mut Extremes,
+    bar: &Candle,
+    verdict: (Option<&[bool]>, usize),
+    priced: bool,
+) -> bool {
+    let (accepted, index) = verdict;
+    let refused = accepted.is_some_and(|seen| !seen.get(index).copied().unwrap_or(false))
+        || bar.check().is_err();
+    extremes.record(out, bar, !refused);
+    if !priced {
+        return false;
+    }
+    if refused {
+        out.refused = out.refused.saturating_add(1);
+        return false;
+    }
+    true
+}
+
 fn crossings_with(
     bars: &[Candle],
     from: usize,
@@ -716,9 +947,29 @@ fn crossings_with(
         trails,
     } = ladders;
     let mut out = Crossings::empty(ladders);
-    if entry <= 0 || from > to {
+    if from > to {
         return out;
     }
+    // THE PREFIX EXTREMES ARE WALKED EVEN FOR A NON-POSITIVE ENTRY, and that is
+    // not defensiveness — the case is reachable and it moves money.
+    //
+    // `costs::fill::Bar::new` deliberately admits a low at or below zero, so a
+    // bar with `low <= open <= 0 < high` is a bar every check in this workspace
+    // accepts. `crate::grid::entry_fills` then prices the WORST entry at the
+    // high, which is positive, and the BEST at the open, which is not — and the
+    // open is what this walk is handed. Returning early on it would leave the
+    // tables empty while `crate::grid` still asks them for an adverse excursion
+    // measured from the positive worst fill, and it would answer zero.
+    //
+    // Every rung table is unaffected: `ppm_of` is zero for a non-positive
+    // entry, so `mae`, `mfe`, `give_back` and every armed retreat stay at zero,
+    // no cursor can advance past a rung — `Ladder` carries none at zero — and
+    // `refused` and `last` are held at their `empty` values by the guard below.
+    // The result is byte-identical to what the early return produced, plus two
+    // series of prices that never needed an entry to mean something.
+    let priced = entry > 0;
+    reserve_prefix(&mut out, bars, from, to);
+    let mut extremes = Extremes::new();
 
     // Cursors into the three ladders. All only advance: once a rung is crossed
     // it stays crossed, because MAE, MFE and the trailing give-back are all
@@ -755,20 +1006,9 @@ fn crossings_with(
         let Some(bar) = bars.get(index) else {
             break;
         };
-        // A BAR THE ENGINE REFUSED MAY NOT MOVE A RUNNING MAXIMUM.
-        //
-        // The checked engine path supplies the exact `Evaluator::step` bitmap,
-        // including timestamp and accumulator state that `Candle::check` cannot
-        // see. The local check remains only for the public geometry helper that
-        // has no column. Counted rather than silently skipped: `crate::grid`
-        // reads the count and drops the whole candidate, because a hole in the
-        // middle of a path leaves every maximum after it wrong. See the
-        // `refused` field for what one such bar did to a real audit -- 3,210
-        // paisa to 499,089, and a different exit recommended.
-        if accepted.is_some_and(|verdict| !verdict.get(index).copied().unwrap_or(false))
-            || bar.check().is_err()
-        {
-            out.refused = out.refused.saturating_add(1);
+        // A BAR THE ENGINE REFUSED MAY NOT MOVE A RUNNING MAXIMUM, and a
+        // non-positive entry may move nothing but the extremes. See [`admit`].
+        if !admit(&mut out, &mut extremes, bar, (accepted, index), priced) {
             continue;
         }
         out.last = offset;
