@@ -214,6 +214,12 @@ const STATED_REWARD_RISK_HUNDREDTHS: i64 = 300;
 /// The same floor expressed in ppm, for the admission gate that wants it there.
 const STATED_REWARD_RISK_PPM: u64 = 3_000_000;
 
+/// How many exit cells one side may price.
+///
+/// Sixteen thousand against the five-step ladder's 1,089, so the guard bounds a
+/// runaway rather than the ladder written beside it.
+const EXIT_CELL_CEILING: u64 = 16_384;
+
 /// Builds the exit-grid policy for one side from the operator's stated ceiling.
 ///
 /// # What is stated and what is shape
@@ -248,7 +254,14 @@ fn exit_policy(side: Side) -> Result<ExitGridPolicyV1, String> {
         // operator rule names one -- only the floor was stated.
         RatioLimitsV1::new(STATED_REWARD_RISK_HUNDREDTHS, i64::MAX, u64::MAX)
             .map_err(|why| format!("exit ratio limits refused: {why:?}"))?,
-        1_000,
+        // A COMPUTE GUARD, not a policy. It caps how many exit cells one side
+        // may price, and the LADDER above is what decides which cells those
+        // are. Set to a thousand it refused the ladder it was written beside --
+        // `CellLimitExceeded { needed: 1089, max: 1000 }` -- which is a policy
+        // silently trimmed by a resource bound, exactly backwards. Sized so the
+        // five-step ladder fits with room, and a ladder that outgrows THIS
+        // should raise it deliberately rather than lose cells to it.
+        EXIT_CELL_CEILING,
         ExitGridSelectorV1::GuaranteedFloor,
         printed_ohlcv_cost_model_id_v1(),
         ForcedStopV1::Disabled,
