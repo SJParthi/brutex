@@ -2450,7 +2450,122 @@ const STOP_FLOOR_POINTS: i64 = 5;
 /// Points are counted in HALVES so 7.5 is expressible in integers — §7 keeps
 /// floats out of anything compared, and a ladder printed beside a rule is
 /// compared by the person reading it.
+/// The stop ladder, collapsed to one level when the operator has stated one.
+///
+/// # A stated stop is a given, not a hypothesis
+///
+/// `stop_ladder_ppm` derives its rungs from the bars: the cap is the 90th
+/// percentile of bar range and the floor the 25th. That is the right ladder for
+/// "what stop does this data support" and the wrong one for an operator who has
+/// already decided. When `BRUTEX_MAX_MAE_PPM` is set, it was being passed as a
+/// FORCED rung and the derived ladder was searched beside it — so a run under a
+/// stated fifty-point stop also priced eight stops the operator had ruled out,
+/// and then reported the best of all nine.
+///
+/// This is the same defect the `forced` rung was introduced to fix, one level
+/// up. That comment records it exactly: *"`max_mae_ppm` was a post-hoc test …
+/// So the question the engine answered was 'did this signal HAPPEN to keep
+/// every trade inside twenty points', which almost nothing does — and never
+/// 'does this signal work WITH a twenty point stop'."* Passing the level as a
+/// rung answered the second question. Leaving the ladder in place meant the
+/// engine went on answering the first one too, and ranking across both.
+///
+/// # What it costs and what it buys — and it is NOT wall clock
+///
+/// `grid::variants` is `(S+1)·[(T+1)(R+1) + T(T+1)/2 · R(R+1)/2]`, so the stop
+/// axis is a MULTIPLIER on every other axis. Collapsing `S` from eight rungs to
+/// one takes the factor from nine to two — **12,393 cells per candidate to
+/// 2,754**, exactly 4.5x.
+///
+/// **That 4.5x does not reach the clock, and this paragraph replaces one that
+/// claimed it did.** The earlier text said the one-minute rung fell from about
+/// 8.4 hours to about 1.9, and it was wrong twice over: it quoted the
+/// pre-fifth-axis formula `(S+1)·[(T+1) + R·(T+1)(T+2)/2]`, which has not been
+/// the live one since `Cell::tsl` and `Cell::ttp` were split; and it ignored
+/// `grid::thin_to_budget`, which caps the whole grid at 24,000 cells by
+/// SHRINKING THE TARGET AXIS to fit. Free the stop axis and the budget is
+/// immediately re-spent on targets: measured on the one-minute shape, `T` goes
+/// from about 27 to about 68 and the reservation stays around 23,500 either way.
+///
+/// So what the collapse actually buys is **target resolution and an answer to
+/// the right question**, not time:
+///
+/// - every target is `stop × ratio` (`grid::ratio_targets`), so with one stop
+///   the target ladder stops being a mush of absolute distances and becomes a
+///   pure reward-to-risk ladder — which is the axis a stated stop is chosen on;
+/// - it is less overfit, because the reported total is the maximum over the
+///   cells and there are fewer maxima to pick from.
+///
+/// The trailing ladders are untouched: `trails = ladder_of(&favourable)` reads
+/// the favourable-excursion distribution and never mentions the stop. A stated
+/// stop therefore reduces SL and TP and leaves TSL and TTP to the sweep, which
+/// is the right split — the operator knows their stop and does not know their
+/// give-back.
+///
+/// What is LOST is the search itself. A stated stop cannot discover that this
+/// setup only works at fifteen points, because fifteen is no longer offered.
+/// That is the operator's trade to make, which is why it happens only when they
+/// state one — with neither knob set the derived ladder is unchanged.
 fn stop_ladder_ppm(bars: &[indicators::Candle]) -> Vec<i64> {
+    if let Some(stated) = stated_stop_ppm(bars) {
+        return vec![stated];
+    }
+    stop_ladder_derived(bars)
+}
+
+/// The operator's stated stop in ppm, from either knob, resolved ONCE.
+///
+/// # Why points exist beside ppm, and why points win
+///
+/// `BRUTEX_MAX_MAE_PPM` is denominated in parts per million of
+/// [`reference_price`], which is `(min low + max high)/2` **over the span being
+/// swept**. That makes a ppm knob span-relative, and over a long span it does
+/// not mean what an operator thinks it means. Measured on the real store for
+/// 2020-01 to 2026-08, the March-2020 low is inside the span and the reference
+/// is about 1,694,272 paisa — so `2000` ppm is **33.9 points, not 50**, and the
+/// fifty points the operator asked for is `2951`. Nobody can be expected to
+/// re-derive that per span, and a knob whose meaning moves with the date range
+/// is the kind of silent wrongness `CLAUDE.md` §4 bans.
+///
+/// `BRUTEX_MAX_STOP_POINTS` states the stop in index points and converts here,
+/// against the bars actually in hand. Fifty means fifty on every rung and every
+/// span. This is the same conversion `screen` and `elite` already do for their
+/// `MAX_POINTS` argument via `ceiling_in_ppm`; those verbs take it positionally
+/// and the range verbs have no such argument, so the knob is how a `range-all`
+/// states it at all.
+///
+/// # One resolver, because two would drift
+///
+/// The stop reaches the grid by TWO routes: this ladder, and `Levels::forced`,
+/// which is built from `Rules::max_mae_ppm`. If the points knob moved only one
+/// of them the grid would be handed a ladder saying fifty points and a forced
+/// rung saying something else, and `merged` would dutifully sweep both. So
+/// [`Rules::derived`] calls this same function, and the two cannot disagree by
+/// construction rather than by review.
+///
+/// Points are checked first and ppm is the fallback: an operator who sets both
+/// has stated the same thing twice, and the one in the units they think in is
+/// the one that survives. Zero or negative is UNSET in both — that is already
+/// `Rules::operator`'s reading of `max_mae_ppm`, where zero drops the rule
+/// rather than inventing a zero-width stop.
+fn stated_stop_ppm(bars: &[indicators::Candle]) -> Option<i64> {
+    if let Some(points) = Rules::stated("BRUTEX_MAX_STOP_POINTS").filter(|p| *p > 0) {
+        // A points value so small it converts to nothing is not a stop; fall
+        // through to ppm rather than pinning the ladder at zero.
+        let ppm = points_to_ppm_at(points, reference_price(bars));
+        if ppm > 0 {
+            return Some(ppm);
+        }
+    }
+    Rules::stated("BRUTEX_MAX_MAE_PPM").filter(|ppm| *ppm > 0)
+}
+
+/// The ladder the BARS support, with no operator rule applied.
+///
+/// Split out of [`stop_ladder_ppm`] so the stated-stop branch above reads as one
+/// line and this keeps its own reasoning. Called directly by the tests that
+/// measure the derivation itself, which must not see a knob.
+fn stop_ladder_derived(bars: &[indicators::Candle]) -> Vec<i64> {
     let reference = reference_price(bars);
 
     // IN HALVES DERIVED FROM PAISA, NOT FROM ROUNDED POINTS.
@@ -2891,8 +3006,17 @@ const _GRID_COST_TABLE: () = ();
 
 /// How many exit settings the audit's grid actually evaluates.
 ///
-/// `grid::variants` is `(S+1)·[ (T+1) + R·(T+1)(T+2)/2 ]`, which at four rungs
-/// is **325 cells and not 256**.
+/// `grid::variants` is `(S+1)·[ (T+1)(R+1) + T(T+1)/2 · R(R+1)/2 ]`, which at
+/// four rungs is **625 cells and not 256**.
+///
+/// **This line stated the formula two revisions stale**, as
+/// `(S+1)·[(T+1) + R·(T+1)(T+2)/2]` giving 325 — the shape it had before
+/// `Cell::tsl` and `Cell::ttp` were split into separate fields. That split is
+/// recorded a few lines down as the SECOND of the two moves this comment says
+/// the build caught, so the doc described the move and then kept the number
+/// from before it. `grid::variants` itself pins 625 at four rungs in its own
+/// test, and `grid.rs`'s copy of the formula was correct throughout: where a
+/// gate checks one copy and prose carries the other, believe the gate.
 ///
 /// # This number moved TWICE, and the build caught it both times
 ///
@@ -3762,6 +3886,30 @@ fn audit_stored_inner(
     );
     header.push_str(&daily_reference_note(&daily, &exact_minute));
     let bars = u64::try_from(loaded.bars.len()).unwrap_or(u64::MAX);
+    // THE FLOORS ARE MEASURED OFF THESE BARS, not frozen into a `const`.
+    //
+    // This read `Rules::BASELINE` -- eight literals, of which two were live
+    // policy: a `max_mae_ppm` of 2,000 and a `min_rr_bp` of 200. Those are a
+    // stop and a reward-to-risk rule nobody typed, applied to REAL market data,
+    // and the second is a fixed 2:1 requirement of exactly the kind the
+    // operator's standing rule forbids: *"we should never ever have this static
+    // fixed rule ... always make everything runtime dynamic"*.
+    //
+    // `Rules::derived` measures four of the eight off the series itself -- the
+    // win-rate floor from the bars' own base rate, the reward-to-risk floor from
+    // break-even AT that rate, the weakest-period floor from the same base rate,
+    // and the drawdown floor from buy-and-hold's own ratio on these bars. It was
+    // sitting twenty lines from this call and reachable from only two of the
+    // nine verbs.
+    //
+    // It must be built HERE, before `loaded.bars` moves into `audit_bars` on the
+    // next line. `on_execution_series` is false: this verb sweeps one stored
+    // instrument-month on its own series and has no separate execution rung.
+    //
+    // The stop is no longer forced at 2,000 ppm. An operator who wants one says
+    // so -- and `BRUTEX_MAX_STOP_POINTS` now states it in index points, which
+    // 2,000 ppm never did on a span whose reference is not 25,000.
+    let derived_rules = Rules::derived(&loaded.bars, horizon_for(&loaded.bars, false));
     let report = audit_bars(
         evaluator(),
         loaded.bars,
@@ -3802,7 +3950,7 @@ fn audit_stored_inner(
                 months_asked: 1,
                 months_found: 1,
             }),
-            rules: Rules::BASELINE,
+            rules: derived_rules,
             // The historical cut, unchanged. `Payoff` is reached only by an
             // operator who typed `elite`.
             // The environment's ceiling: an operator-facing command must not
@@ -6155,6 +6303,17 @@ impl Rules {
     #[must_use]
     pub fn derived(bars: &[indicators::Candle], horizon: Horizon) -> Self {
         let mut rules = Self::operator();
+        // THE STATED STOP IS RESOLVED BEFORE THE EARLY RETURN BELOW, and that
+        // placement is the point. `Self::operator` reads only the ppm knob,
+        // because it has no bars to convert points against; this does have
+        // them. `stop_ladder_ppm` resolves the same two knobs through the same
+        // function, so the ladder and `Levels::forced` -- built from this field
+        // -- state one number rather than two. A short span that cannot
+        // establish a base win rate returns early, and a stop the operator
+        // stated is not a thing to drop on the way out.
+        if let Some(ppm) = stated_stop_ppm(bars) {
+            rules.max_mae_ppm = ppm;
+        }
         let Some(base_bp) = base_win_rate_bp(bars, horizon) else {
             return rules;
         };
@@ -6556,10 +6715,36 @@ fn tiers(bars: &[indicators::Candle], trades: u64) -> Vec<Tier> {
                     max_points,
                     min_rr_bp,
                     min_win_rate_bp,
-                    // 1,000 while the win rate is demanding, easing to 500 once
-                    // it is not: a rate of 40% over 500 trades is a real
-                    // measurement, and 95% over 200 is not.
-                    min_trades: if min_win_rate_bp >= 8_000 { 1_000 } else { 500 },
+                    // THE SAMPLE THIS TIER CANNOT BE JUDGED BELOW, derived.
+                    //
+                    // This was `if min_win_rate_bp >= 8_000 { 1_000 } else { 500 }`
+                    // -- two invented trade counts branching on an invented win
+                    // rate, on a path every screening verb reaches. It is the
+                    // shape the operator's standing rule names: *"no expected
+                    // static fixed winning percentage"*.
+                    //
+                    // The derivable question is not "how many trades feel like
+                    // enough" but "below how many can NOTHING clear this tier".
+                    // `Tier::rules` sets `min_assurance_bp` to this same rate,
+                    // and the Wilson bound rises with the sample, so a PERFECT
+                    // record is the best any row can offer at a given size: the
+                    // smallest `n` at which `n` of `n` clears the bar is a hard
+                    // floor below which every row fails regardless of merit.
+                    //
+                    // Always terminates -- a perfect record's bound tends to
+                    // 100%, so the pair is satisfiable for every rate on the
+                    // ladder, unlike `(rate, rate)` which never is.
+                    //
+                    // It is also much smaller than 1,000, and that is correct
+                    // rather than lax: `Rules::min_assurance_bp` already records
+                    // that with a bound in place "the honest `min_trades` is
+                    // small or zero, because the bound already refuses what a
+                    // floor was standing in for". The floor stops standing in.
+                    min_trades: runner::grid::trades_needed_for(
+                        10_000,
+                        min_win_rate_bp,
+                        TRADES_SEARCH_CEILING,
+                    ),
                 });
             }
         }
@@ -7236,9 +7421,26 @@ impl Screened<'_> {
     }
 }
 
+/// The best row that satisfies the rules, searched over ALL rows and not the
+/// page.
+///
+/// # Why the `take(top)` that stood here was load-bearing on the old sort
+///
+/// This read `.take(rules.top).find(|row| row.admitted)`, and it was correct
+/// only because the ranking put every admitted row first: if anything passed,
+/// it was on the first page by construction, so "first admitted in the top N"
+/// and "best admitted overall" were the same row.
+///
+/// The ranking now sorts on the objective alone, so admitted rows sit wherever
+/// they earned. Keeping `take(top)` would have made a run record NOTHING
+/// whenever the rows that passed happened to rank below the tenth -- a silent
+/// empty result that looks exactly like "nothing passed", which is the failure
+/// wearing a success's clothes that `CLAUDE.md` §4 bans.
+///
+/// Rows are still in objective order, so `find` still returns the HIGHEST
+/// earning admitted row. Only the horizon changed.
 fn final_selection<'a>(rows: &[Screened<'a>], rules: Rules) -> Option<ScreenSelection<'a>> {
     rows.iter()
-        .take(rules.top)
         .find(|row| row.admitted)
         .map(|row| ScreenSelection {
             scored: row.scored,
@@ -8390,7 +8592,29 @@ fn screen<'a>(
         priced.insert(row.scored.mask.words(), row.cell);
     }
 
-    rows.sort_by_key(|r| (!r.admitted, core::cmp::Reverse(r.cell.pessimistic)));
+    // THE OBJECTIVE IS THE RANKING, AND A RULE IS NOT THE OBJECTIVE.
+    //
+    // This key was `(!r.admitted, Reverse(pessimistic))`, which is lexicographic
+    // on a BOOLEAN: every row satisfying the rules sorted above every row that
+    // did not, whatever the two earned. With `take(top)` that meant a single
+    // threshold missed by one basis point could hide the most profitable
+    // combination in the span behind ten mediocre ones -- the rules were not
+    // labelling the ranking, they WERE the ranking, and `pessimistic` only broke
+    // ties inside each group.
+    //
+    // It was also SELF-FULFILLING. `measure_top` below measures consistency for
+    // the rows ALREADY in the top N, so a row a threshold sank was never
+    // measured, and an unmeasured row could never climb back. The threshold
+    // decided the outcome and the outcome then confirmed the threshold.
+    //
+    // Sorting on the objective alone is the operator's stated aim -- maximise
+    // the top N per timeframe -- and it costs nothing in safety, because
+    // `admitted` survives as a REPORTED column: a row that broke a rule is now
+    // ranked where it earned and printed with the rule it broke, rather than
+    // sunk somewhere the reader will not look. Total P&L is volume times edge,
+    // so this ranking does not reward a small sample either; the fluke risk a
+    // floor stands in for belongs to win-RATE rankings, not to this one.
+    rows.sort_by_key(|r| core::cmp::Reverse(r.cell.pessimistic));
 
     measure_top(&mut rows, bars, column, horizon, rules);
 
@@ -8408,7 +8632,11 @@ fn screen<'a>(
             }
         }
     }
-    rows.sort_by_key(|r| (!r.admitted, core::cmp::Reverse(r.cell.pessimistic)));
+    // THE RE-SORT THAT STOOD HERE IS GONE, and its absence is the point. It
+    // existed because the loop above flips `admitted`, which the old key read.
+    // The key no longer reads it, and `measure_top` mutates in place without
+    // reordering, so re-sorting on an unchanged key would be dead work that
+    // reads as though something still moved.
 
     let passed = rows.iter().filter(|r| r.admitted).count();
     let mut out = rules_banner(rules, passed, rows.len());
@@ -14462,6 +14690,69 @@ mod tests {
     /// Driven through `audit_run`, which reaches `audit_bars` on generated bars
     /// with a threshold nothing meets, so it is the cheapest complete render in
     /// this suite.
+    /// A stated stop collapses the ladder; an unstated one leaves it alone.
+    ///
+    /// The stop axis is a MULTIPLIER on the whole exit grid — `grid::variants`
+    /// is `(S+1)·[(T+1)(R+1) + T(T+1)/2 · R(R+1)/2]` — so at eight rungs this is
+    /// the difference between 12,393 cells per candidate and 2,754, exactly the
+    /// 9/2 the `(S+1)` factor moves by.
+    ///
+    /// **It is NOT a wall-clock difference**, and an earlier version of this
+    /// comment said it was, quoting 8.4 hours against 1.9 on a formula two
+    /// revisions stale. `grid::thin_to_budget` caps the grid at 24,000 cells by
+    /// shrinking the TARGET axis, so a freed stop axis is re-spent on target
+    /// resolution rather than returned as time. The measured shape is ~23,500
+    /// cells reserved either way; what changes is that `T` roughly doubles and
+    /// the target ladder becomes a pure reward-to-risk ladder.
+    ///
+    /// BOTH halves are asserted, and the second is the one that matters more: a
+    /// collapse that fired without a stated stop would silently reduce every
+    /// run in the repository to a single stop nobody chose, which is a far worse
+    /// defect than the one being fixed.
+    #[test]
+    fn a_stated_stop_is_the_ladder_and_an_unstated_one_leaves_it_derived() {
+        let _serial = crate::knobs::serially();
+        crate::knobs::clear_all();
+
+        let bars = runner::synthetic::sessions(3);
+
+        // UNSTATED: the derived ladder, untouched.
+        let derived = crate::stop_ladder_ppm(&bars);
+        assert_eq!(
+            derived,
+            crate::stop_ladder_derived(&bars),
+            "with no stop stated the ladder must be exactly what the bars support"
+        );
+        assert!(
+            derived.len() > 1,
+            "and that ladder must have rungs to collapse, or this test proves \
+             nothing about the collapse: {derived:?}"
+        );
+
+        // STATED: one rung, and it is the operator's number rather than a
+        // rounding of it. 2,000 ppm is fifty index points at a NIFTY near
+        // 25,000, which is the operator's own stated ceiling.
+        crate::knobs::set("BRUTEX_MAX_MAE_PPM", "2000");
+        assert_eq!(
+            crate::stop_ladder_ppm(&bars),
+            vec![2_000],
+            "a stated stop is a given, so it is the whole ladder -- searching \
+             the derived rungs beside it prices stops the operator ruled out \
+             and then reports the best of all of them"
+        );
+
+        // ZERO IS NOT A STOP, it is the knob's own "unset" value -- `Rules::
+        // operator` defaults `max_mae_ppm` to 0 and `forced` tests `> 0`. A
+        // collapse to a zero-point stop would exit every trade instantly.
+        crate::knobs::set("BRUTEX_MAX_MAE_PPM", "0");
+        assert_eq!(
+            crate::stop_ladder_ppm(&bars),
+            derived,
+            "zero means unset, not a zero-width stop"
+        );
+        crate::knobs::clear_all();
+    }
+
     #[test]
     fn a_knob_this_run_could_not_use_is_named_beneath_the_banner() {
         let _serial = crate::knobs::serially();
