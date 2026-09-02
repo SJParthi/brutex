@@ -3919,7 +3919,7 @@ fn realised(
             };
             let (exit, gapped) = level_fill(bar, resting, level.kind, side, true);
             // A STOP FILLS WORSE THAN ITS TRIGGER, under the pessimistic reading.
-            let exit = stop_slippage(exit, bar, side, level.kind, gapped, pessimistic);
+            let exit = stop_slippage(exit, bar, side, level.kind, pessimistic);
             let paisa = match side {
                 Side::Long => exit.saturating_sub(fills.charged),
                 Side::Short => fills.charged.saturating_sub(exit),
@@ -4001,7 +4001,7 @@ fn realised(
             };
             let (exit, gapped) = level_fill(bar, resting, Resting::Stop, side, rested_at_open);
             // A TRAIL IS A STOP, so it slips like one. Same arm, same reason.
-            let exit = stop_slippage(exit, bar, side, Resting::Stop, gapped, pessimistic);
+            let exit = stop_slippage(exit, bar, side, Resting::Stop, pessimistic);
             let paisa = match side {
                 Side::Long => exit.saturating_sub(fills.charged),
                 Side::Short => fills.charged.saturating_sub(exit),
@@ -4493,24 +4493,42 @@ fn level_fill(
 /// so the two readings bracket the fill instead of agreeing on a guess, and the
 /// spread between them is the uncertainty made visible rather than resolved.
 ///
-/// # Not on a gap, because the open IS the adverse price there
+/// # A gap is charged too, and the earlier version of this exempted it
 ///
-/// `level_fill` already answers a gapped bar with the open and says so through
-/// `gapped`. That is not an optimistic answer needing correction: when the bar
-/// opens through the level the order becomes marketable at the FIRST PRINT, and
-/// the first print is the open. Worsening it to the bar's later low would price
-/// a fill the position could not have waited for — it was already out. So
-/// slippage is the intrabar case only: the level was touched mid-bar, and where
-/// between the trigger and the extreme it filled is what nobody can know.
+/// This function used to return early on `gapped`, under the argument that when
+/// a bar opens through the level "the order becomes marketable at the FIRST
+/// PRINT, and the first print is the open", so worsening it would price a fill
+/// the position could not have waited for.
+///
+/// The mechanism in that sentence is right and the BOUND it draws is wrong.
+/// Becoming marketable at the open is not the same as filling at the open: a
+/// market order into a bar that has already jumped fills at whatever is there,
+/// which is exactly the slippage the intrabar case charges. The open is where
+/// the fill cannot be BETTER than; it is not where it cannot be worse than.
+///
+/// The exemption was disprovable without any market knowledge, by moving the
+/// open one paisa. Long, stop resting at 90,000, bar low 70,000:
+///
+/// | open | gapped | booked exit | booked loss |
+/// |---|---|---|---|
+/// | 90,000 | no | 70,000 | −30,000 |
+/// | 89,999 | yes | 89,999 | −10,001 |
+///
+/// One paisa WORSE on the open improved the booked loss by 19,999. A bound that
+/// jumps in the favourable direction as the input worsens is not a bound. Both
+/// rows now book 70,000.
+///
+/// `gapped` is still carried and still reported — `level_fill` sets it, the exit
+/// grid policy caps the count, and `Cell::gapped` renders it. What it no longer
+/// does is decide the price.
 const fn stop_slippage(
     exit: i64,
     bar: &Candle,
     side: Side,
     kind: Resting,
-    gapped: bool,
     pessimistic: bool,
 ) -> i64 {
-    if gapped || !pessimistic || !matches!(kind, Resting::Stop) {
+    if !pessimistic || !matches!(kind, Resting::Stop) {
         return exit;
     }
     match side {
@@ -6023,11 +6041,28 @@ mod tests {
 
             let gap_bar = candle(0, gap_open, 130_000, 70_000, 100_000);
             let gap = super::realised(&[gap_bar], 0, 0, fills, side, ended, Some(level), true);
-            assert_eq!(
-                gap.paisa,
-                money(gap_open),
-                "{name}: first print is the fill"
-            );
+            // A TARGET GAPS TO ITS OPEN; A STOP IS STILL BOUNDED BY THE BAR.
+            //
+            // The two orders are not symmetric and this is where it shows. A
+            // target is a LIMIT: it fills at its level or better, and a bar that
+            // opens through it fills at the open — better than the level, and
+            // that is the end of it. A stop is a MARKET order from the moment it
+            // is touched, so opening through it says the fill cannot be better
+            // than the open; it says nothing about how much worse.
+            //
+            // This assertion used to expect `money(gap_open)` for both, which
+            // gave a gapped stop zero slippage while a stop merely touched on
+            // the same bar was charged the whole way to the extreme. Moving the
+            // open one paisa then improved the booked loss by ~20,000.
+            let expected = match kind {
+                super::Resting::Target => money(gap_open),
+                super::Resting::Stop => money(if matches!(side, Side::Long) {
+                    70_000
+                } else {
+                    130_000
+                }),
+            };
+            assert_eq!(gap.paisa, expected, "{name}: gapped fill");
             assert!(gap.gapped, "{name}: a later retrace cannot erase the gap");
 
             let equal_bar = candle(0, resting, 130_000, 70_000, resting);
@@ -6098,9 +6133,19 @@ mod tests {
                     None,
                     true,
                 );
+                // −20,000 AND NOT −10,000, because `stop_slippage` no longer
+                // exempts a gap. The open (90,000 long / 110,000 short) is
+                // where the fill cannot be BETTER than; the bar's adverse
+                // extreme (80,000 / 120,000) is where it cannot be worse. Under
+                // the pessimistic reading the bound is the extreme, exactly as
+                // it already was for a level touched mid-bar.
+                //
+                // `gapped` is still asserted below: the flag still records that
+                // the order was crossed at the open. What it no longer does is
+                // decide the price.
                 assert_eq!(
-                    priced.paisa, -10_000,
-                    "{kind:?}/{side:?}: the open printed the loss"
+                    priced.paisa, -20_000,
+                    "{kind:?}/{side:?}: a gapped trail is bounded by the bar's adverse extreme"
                 );
                 assert!(
                     priced.gapped,
