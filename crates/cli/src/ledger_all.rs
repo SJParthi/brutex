@@ -33,15 +33,27 @@
 //!
 //! * A gate whose value the operator has **stated** is set, and
 //!   [`ActiveGate`] records the sentence it came from.
-//! * A gate whose value is **derived from this run's own arguments or data** is
-//!   set, and the derivation is named.
-//! * Every other gate is `None` -- **off**, not defaulted -- and
-//!   [`render_gate_census`] prints each one by name.
+//! * A gate whose value is **derived from this run's own arguments** is set,
+//!   and the derivation is named.
+//! * Every other gate is read from `BRUTEX_ADMIT_<GATE>`, and when one is unset
+//!   the run refuses with [`unset_gate_worksheet`] -- every missing gate at
+//!   once, each beside the variable that would answer it.
 //!
-//! `None` here is the ABSENCE of a threshold, which is exactly what §3 rule 6
-//! asks a report to admit to. A constant would be somebody's guess compiled
-//! into the binary and invisible in the output; a named disabled gate is a
-//! question the operator can answer with an argument.
+//! # There is no "off"
+//!
+//! `AdmissionPolicyDraftV1`'s fields are `Option`, which reads like a gate can
+//! be disabled by leaving it `None`. **It cannot.** `AdmissionPolicyV1::new`
+//! calls `required` on all thirty-nine and refuses an absent one by name, so a
+//! run needs every number. This module found that out the way it should be
+//! found out -- by running the verb against the real store and reading the
+//! refusal -- and the first draft of this file, which set two gates and left
+//! thirty-seven `None` believing they were off, could never have constructed a
+//! policy at all.
+//!
+//! Two gates have values today: the `MAX_POINTS` ceiling and the stated
+//! three-times reward-to-risk floor. The other thirty-seven are questions only
+//! the operator can answer, and until they do this verb refuses rather than
+//! guessing -- which is what §3 rule 6 asks of a bound that cannot be met.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -246,15 +258,90 @@ fn exit_policy(side: Side) -> Result<ExitGridPolicyV1, String> {
     .map_err(|why| format!("exit grid policy refused: {why:?}"))
 }
 
-/// The admission policy, and the census of what it does NOT check.
+/// Resolves one gate per call and remembers the ones nobody answered.
 ///
-/// Returns the policy beside the gates it actually applies, so the caller can
-/// print both. Thirty-nine gates exist; this sets the four the operator's own
-/// rules and this run's arguments determine, and leaves thirty-five off.
+/// # Why a collector and not a chain of `?`
+///
+/// Returning on the first missing gate would name one, the operator would set
+/// it, and the next run would name the second -- thirty-seven runs to discover
+/// thirty-seven numbers. Collecting every miss lets one refusal print the whole
+/// worksheet.
+struct GateResolver {
+    missing: Vec<&'static str>,
+    active: Vec<ActiveGate>,
+}
+
+impl GateResolver {
+    const fn new() -> Self {
+        Self {
+            missing: Vec::new(),
+            active: Vec::new(),
+        }
+    }
+
+    /// The knob a gate is read from: `min_support_hits` -> `BRUTEX_ADMIT_...`.
+    fn knob_of(name: &str) -> String {
+        format!("BRUTEX_ADMIT_{}", name.to_ascii_uppercase())
+    }
+
+    /// One gate, from its knob or from a value the operator already stated.
+    ///
+    /// `stated` is not a default. It is a value with a SOURCE, and `because`
+    /// carries that source into the report. A gate with no stated value and no
+    /// knob is recorded as missing rather than filled in.
+    fn gate<T: std::str::FromStr + std::fmt::Display>(
+        &mut self,
+        name: &'static str,
+        stated: Option<(T, &'static str)>,
+    ) -> Option<T> {
+        if let Some(raw) = crate::knobs::var(&Self::knob_of(name)) {
+            if let Ok(parsed) = raw.trim().parse::<T>() {
+                self.active.push(ActiveGate {
+                    name,
+                    value: parsed.to_string(),
+                    because: "set by its BRUTEX_ADMIT_ knob",
+                });
+                return Some(parsed);
+            }
+            // A knob that is SET and unparseable is a miss, not a fallback to
+            // the stated value. Silently ignoring a typo would apply a
+            // threshold the operator did not ask for while their own value sat
+            // in the environment unread -- the fallback that hides a failure
+            // `CLAUDE.md` §4 bans.
+            self.missing.push(name);
+            return None;
+        }
+        let Some((value, because)) = stated else {
+            self.missing.push(name);
+            return None;
+        };
+        self.active.push(ActiveGate {
+            name,
+            value: value.to_string(),
+            because,
+        });
+        Some(value)
+    }
+}
+
+/// The admission policy, built from what the operator has actually said.
+///
+/// # Every gate is required, and that is the runner's rule, not this file's
+///
+/// `AdmissionPolicyDraftV1`'s fields are `Option`, which reads like "off when
+/// `None`". They are not: `AdmissionPolicyV1::new` calls `required` on all
+/// thirty-nine and refuses an absent one by name. There is no partial policy
+/// and no gate that can be left unanswered -- a run needs all thirty-nine
+/// numbers, and thirty-seven of them are nowhere in this repository, its
+/// documents or its decision ledger.
+///
+/// So this reads each from `BRUTEX_ADMIT_<GATE>` and, when any is unset,
+/// refuses with the whole worksheet rather than the first name the runner
+/// happened to check.
 ///
 /// # Errors
 ///
-/// Refuses if the runner rejects the draft.
+/// Names every unresolved gate and the knob that would answer it.
 fn admission_policy(
     request: &LedgerAllRequest<'_>,
 ) -> Result<(AdmissionPolicyV1, Vec<ActiveGate>), String> {
@@ -263,86 +350,120 @@ fn admission_policy(
         .checked_mul(PAISA_PER_POINT)
         .ok_or_else(|| format!("MAX_POINTS {} overflows paisa", request.max_points))?;
 
-    let active = vec![
-        ActiveGate {
-            name: "max_worst_trade_loss_paisa",
-            value: max_loss_paisa.to_string(),
-            because: "MAX_POINTS argument, converted at 100 paisa per index point",
-        },
-        ActiveGate {
-            name: "min_worst_reward_risk_ppm",
-            value: STATED_REWARD_RISK_PPM.to_string(),
-            because: "the stated rule: smallest win at least three times the largest loss",
-        },
-    ];
+    let mut r = GateResolver::new();
+    let draft = AdmissionPolicyDraftV1 {
+        // THE TWO THE OPERATOR HAS STATED. Both carry the sentence they came
+        // from, so a reader of the report can check the number against the rule
+        // rather than taking it on trust.
+        max_worst_trade_loss_paisa: r.gate(
+            "max_worst_trade_loss_paisa",
+            Some((
+                max_loss_paisa,
+                "MAX_POINTS argument, at 100 paisa per index point",
+            )),
+        ),
+        min_worst_reward_risk_ppm: r.gate(
+            "min_worst_reward_risk_ppm",
+            Some((
+                STATED_REWARD_RISK_PPM,
+                "stated rule: smallest win at least three times the largest loss",
+            )),
+        ),
+        // AND THE THIRTY-SEVEN NOBODY HAS. Each is read from its own knob and
+        // named in the refusal when it is not set.
+        min_support_hits: r.gate("min_support_hits", None),
+        min_independent_sessions: r.gate("min_independent_sessions", None),
+        min_trades: r.gate("min_trades", None),
+        max_mae_paisa: r.gate("max_mae_paisa", None),
+        min_win_rate_ppm: r.gate("min_win_rate_ppm", None),
+        min_wilson_win_rate_ppm: r.gate("min_wilson_win_rate_ppm", None),
+        min_return_drawdown_ppm: r.gate("min_return_drawdown_ppm", None),
+        min_weakest_period_return_paisa: r.gate("min_weakest_period_return_paisa", None),
+        max_pbo_ppm: r.gate("max_pbo_ppm", None),
+        max_fwer_p_value_ppm: r.gate("max_fwer_p_value_ppm", None),
+        max_spa_p_value_ppm: r.gate("max_spa_p_value_ppm", None),
+        min_decided_folds: r.gate("min_decided_folds", None),
+        max_ambiguous_fill_rate_ppm: r.gate("max_ambiguous_fill_rate_ppm", None),
+        max_gap_affected_rate_ppm: r.gate("max_gap_affected_rate_ppm", None),
+        max_session_concentration_ppm: r.gate("max_session_concentration_ppm", None),
+        max_largest_trade_profit_share_ppm: r.gate("max_largest_trade_profit_share_ppm", None),
+        max_drawdown_paisa: r.gate("max_drawdown_paisa", None),
+        max_losing_trade_rate_ppm: r.gate("max_losing_trade_rate_ppm", None),
+        max_losing_trades: r.gate("max_losing_trades", None),
+        min_pessimistic_profit_paisa: r.gate("min_pessimistic_profit_paisa", None),
+        min_winning_trades: r.gate("min_winning_trades", None),
+        min_average_win_paisa: r.gate("min_average_win_paisa", None),
+        max_average_loss_paisa: r.gate("max_average_loss_paisa", None),
+        min_profit_factor_ppm: r.gate("min_profit_factor_ppm", None),
+        max_consecutive_losing_streak: r.gate("max_consecutive_losing_streak", None),
+        min_consecutive_winning_streak: r.gate("min_consecutive_winning_streak", None),
+        min_bootstrap_draws: r.gate("min_bootstrap_draws", None),
+        min_bootstrap_strategies: r.gate("min_bootstrap_strategies", None),
+        min_bootstrap_periods: r.gate("min_bootstrap_periods", None),
+        min_pbo_contributing_folds: r.gate("min_pbo_contributing_folds", None),
+        max_pbo_unrankable_folds: r.gate("max_pbo_unrankable_folds", None),
+        min_profitable_oos_folds: r.gate("min_profitable_oos_folds", None),
+        min_oos_pessimistic_return_paisa: r.gate("min_oos_pessimistic_return_paisa", None),
+        max_white_reality_p_value_ppm: r.gate("max_white_reality_p_value_ppm", None),
+        require_white_reality_rejection: r.gate("require_white_reality_rejection", None),
+        max_romano_wolf_p_value_ppm: r.gate("max_romano_wolf_p_value_ppm", None),
+        require_romano_wolf_rejection: r.gate("require_romano_wolf_rejection", None),
+    };
 
-    let policy = AdmissionPolicyV1::new(AdmissionPolicyDraftV1 {
-        max_worst_trade_loss_paisa: Some(max_loss_paisa),
-        min_worst_reward_risk_ppm: Some(STATED_REWARD_RISK_PPM),
-        ..blank_draft()
-    })
-    .map_err(|why| format!("admission policy refused: {why:?}"))?;
-    Ok((policy, active))
-}
-
-/// A draft with every gate off.
-///
-/// # Why this is spelled out and not `Default::default()`
-///
-/// `AdmissionPolicyDraftV1` deliberately has no `Default`, and that is the
-/// right call: a defaulted trading policy is a policy nobody chose. Writing the
-/// thirty-nine `None`s by hand keeps that property while still letting this
-/// module say "all off except these" in one place, and a gate added to the
-/// runner becomes a compile error here rather than a silently-off gate.
-fn blank_draft() -> AdmissionPolicyDraftV1 {
-    AdmissionPolicyDraftV1 {
-        min_support_hits: None,
-        min_independent_sessions: None,
-        min_trades: None,
-        max_mae_paisa: None,
-        min_worst_reward_risk_ppm: None,
-        min_win_rate_ppm: None,
-        min_wilson_win_rate_ppm: None,
-        min_return_drawdown_ppm: None,
-        min_weakest_period_return_paisa: None,
-        max_pbo_ppm: None,
-        max_fwer_p_value_ppm: None,
-        max_spa_p_value_ppm: None,
-        min_decided_folds: None,
-        max_ambiguous_fill_rate_ppm: None,
-        max_gap_affected_rate_ppm: None,
-        max_session_concentration_ppm: None,
-        max_largest_trade_profit_share_ppm: None,
-        max_drawdown_paisa: None,
-        max_worst_trade_loss_paisa: None,
-        max_losing_trade_rate_ppm: None,
-        max_losing_trades: None,
-        min_pessimistic_profit_paisa: None,
-        min_winning_trades: None,
-        min_average_win_paisa: None,
-        max_average_loss_paisa: None,
-        min_profit_factor_ppm: None,
-        max_consecutive_losing_streak: None,
-        min_consecutive_winning_streak: None,
-        min_bootstrap_draws: None,
-        min_bootstrap_strategies: None,
-        min_bootstrap_periods: None,
-        min_pbo_contributing_folds: None,
-        max_pbo_unrankable_folds: None,
-        min_profitable_oos_folds: None,
-        min_oos_pessimistic_return_paisa: None,
-        max_white_reality_p_value_ppm: None,
-        require_white_reality_rejection: None,
-        max_romano_wolf_p_value_ppm: None,
-        require_romano_wolf_rejection: None,
+    if !r.missing.is_empty() {
+        return Err(unset_gate_worksheet(&r));
     }
+    let policy = AdmissionPolicyV1::new(draft)
+        .map_err(|why| format!("admission policy refused: {why:?}"))?;
+    Ok((policy, r.active))
 }
 
-/// Every gate name the runner offers, in declaration order.
+/// The refusal an operator gets when a gate has no value.
 ///
-/// Used only to print what is OFF. It is a literal list rather than something
-/// derived, because Rust cannot enumerate a struct's fields at runtime -- and
-/// the same test that pins [`blank_draft`] pins this beside it.
+/// # Why this is long
+///
+/// It is the shortest thing that is not a lie. The alternative -- refusing with
+/// `MinSupportHits Absent`, which is what the runner says on its own -- is true
+/// and useless: it names one of thirty-seven and gives no way to answer it.
+fn unset_gate_worksheet(resolver: &GateResolver) -> String {
+    let mut why = String::new();
+    let _ = writeln!(
+        why,
+        "{} of {} admission gates have no value, and the runner requires ALL of them.",
+        resolver.missing.len(),
+        ALL_GATES.len()
+    );
+    why.push_str(
+        "\nThese are thresholds that decide what this engine is willing to trade. Not one\n\
+         of them is named in this repository, in docs/, or in the decision ledger -- every\n\
+         construction of an admission policy in the workspace is a test fixture. Choosing\n\
+         them here would be inventing a trading policy and printing it as though somebody\n\
+         had decided it.\n\n\
+         Set each as an environment variable and run again:\n\n",
+    );
+    for name in &resolver.missing {
+        let _ = writeln!(why, "  {}=", GateResolver::knob_of(name));
+    }
+    if !resolver.active.is_empty() {
+        why.push_str("\nAlready answered:\n");
+        for gate in &resolver.active {
+            let _ = writeln!(
+                why,
+                "  {:<36} {:>12}   {}",
+                gate.name, gate.value, gate.because
+            );
+        }
+    }
+    why
+}
+
+/// Every gate the runner requires, in declaration order.
+///
+/// Used to size the worksheet -- "31 of 39" means something only if the 39 is
+/// the runner's own count. It is a literal list because Rust cannot enumerate a
+/// struct's fields at runtime, and
+/// [`the_gate_census_names_every_gate_the_draft_carries`] pins the count
+/// against the draft this module fills in.
 const ALL_GATES: [&str; 39] = [
     "min_support_hits",
     "min_independent_sessions",
@@ -385,39 +506,25 @@ const ALL_GATES: [&str; 39] = [
     "require_romano_wolf_rejection",
 ];
 
-/// Prints which gates this run applies and which it does not.
+/// Prints every gate this run applies and where its value came from.
 ///
-/// Both halves matter. A report that listed only the active gates would read as
-/// a policy; listing the thirty-five that are off is what stops it being
-/// mistaken for one.
+/// Reached only once all thirty-nine resolve, so there is no "not applied" half
+/// to print -- an unresolved gate refuses the run in
+/// [`unset_gate_worksheet`] instead. What this shows is PROVENANCE: two values
+/// carry the sentence that decided them and the rest name the knob they were
+/// read from, so nothing in the policy is a number without a source.
 fn render_gate_census(out: &mut String, active: &[ActiveGate]) {
-    out.push_str("\nADMISSION GATES APPLIED BY THIS RUN\n");
+    let _ = writeln!(
+        out,
+        "\nADMISSION GATES -- all {} applied, and where each value came from",
+        ALL_GATES.len()
+    );
     for gate in active {
         let _ = writeln!(
             out,
-            "  {:<34} {:>14}   {}",
+            "  {:<36} {:>14}   {}",
             gate.name, gate.value, gate.because
         );
-    }
-
-    let off: Vec<&str> = ALL_GATES
-        .iter()
-        .copied()
-        .filter(|name| !active.iter().any(|gate| gate.name == *name))
-        .collect();
-    let _ = writeln!(
-        out,
-        "\nADMISSION GATES NOT APPLIED -- {} of {}",
-        off.len(),
-        ALL_GATES.len()
-    );
-    out.push_str(
-        "  These are OFF, not defaulted. Nothing in this repository or in any\n\
-         \x20 instruction on record names a value for them, and inventing one would\n\
-         \x20 make this report claim a standard it never checked.\n",
-    );
-    for chunk in off.chunks(3) {
-        let _ = writeln!(out, "    {}", chunk.join(", "));
     }
 }
 
@@ -721,7 +828,7 @@ const BLOCK_RECORDS: u64 = 4_096;
 ///
 /// This is a RESOLUTION, not a threshold: more draws narrow the confidence
 /// interval and none of them decide what passes, because every gate that would
-/// read a bootstrap p-value is off in [`blank_draft`]. It is named here so that
+/// read a bootstrap p-value is answered by its own knob. It is named here so that
 /// when one of those gates IS turned on, the number it depends on is visible
 /// rather than buried.
 const BOOTSTRAP_DRAWS: u64 = 1_000;
@@ -848,7 +955,7 @@ fn build_sweepers(
               test that cannot panic cannot fail."
 )]
 mod tests {
-    use super::{ALL_GATES, LEDGER_RUNGS, LedgerTree, PAISA_PER_POINT, blank_draft};
+    use super::{ALL_GATES, LEDGER_RUNGS, LedgerAllRequest, LedgerTree, PAISA_PER_POINT};
 
     /// The rung list here and the one the population chain walks are the same
     /// eight words in the same order.
@@ -871,7 +978,7 @@ mod tests {
 
     /// Every gate the runner offers is named in `ALL_GATES`.
     ///
-    /// `blank_draft` sets thirty-nine fields and `ALL_GATES` lists thirty-nine
+    /// `admission_policy` fills thirty-nine fields and `ALL_GATES` lists thirty-nine
     /// names. Rust cannot check that they are the SAME thirty-nine, so this
     /// pins the count and the module doc explains why a mismatch matters: a
     /// gate missing from the list is one the census would silently not report
@@ -887,12 +994,54 @@ mod tests {
 
     /// A blank draft turns nothing on.
     #[test]
-    fn a_blank_draft_applies_no_gate_at_all() {
-        let draft = blank_draft();
-        assert!(draft.min_support_hits.is_none());
-        assert!(draft.max_worst_trade_loss_paisa.is_none());
-        assert!(draft.min_worst_reward_risk_ppm.is_none());
-        assert!(draft.require_romano_wolf_rejection.is_none());
+    fn an_unanswered_gate_refuses_with_its_own_knob_named() {
+        let request = LedgerAllRequest {
+            vendor: "dhan",
+            from: (2024, 1),
+            to: (2024, 1),
+            support_ppm: 200_000,
+            max_points: 50,
+            root: std::path::Path::new("/nonexistent"),
+        };
+        let why = super::admission_policy(&request)
+            .err()
+            .expect("thirty-seven gates have no value, so this cannot build a policy");
+
+        // THE COUNT, so a gate quietly gaining a default is a failure here.
+        assert!(
+            why.contains("37 of 39 admission gates have no value"),
+            "the refusal must say how many are unanswered, got:\n{why}"
+        );
+        // A KNOB PER MISSING GATE, spelled exactly as the operator must set it.
+        assert!(
+            why.contains("BRUTEX_ADMIT_MIN_SUPPORT_HITS="),
+            "the refusal must name the variable that answers each gate, got:\n{why}"
+        );
+        assert!(
+            why.contains("BRUTEX_ADMIT_REQUIRE_ROMANO_WOLF_REJECTION="),
+            "the last gate must be named too, got:\n{why}"
+        );
+        // AND THE TWO THAT ARE ANSWERED, with the sentence that decided them.
+        assert!(
+            why.contains("max_worst_trade_loss_paisa") && why.contains("5000"),
+            "fifty points is five thousand paisa and the report must show it, got:\n{why}"
+        );
+    }
+
+    /// A gate set through its knob is read, and stops being missing.
+    #[test]
+    fn a_knob_answers_its_gate() {
+        // The knob layer reads the process environment, so this asserts the
+        // NAME rather than setting it: a test that mutated the environment
+        // would race every other test in this binary.
+        assert_eq!(
+            super::GateResolver::knob_of("min_support_hits"),
+            "BRUTEX_ADMIT_MIN_SUPPORT_HITS"
+        );
+        assert_eq!(
+            super::GateResolver::knob_of("require_romano_wolf_rejection"),
+            "BRUTEX_ADMIT_REQUIRE_ROMANO_WOLF_REJECTION"
+        );
     }
 
     /// Fifty points is five thousand paisa, not fifty.
