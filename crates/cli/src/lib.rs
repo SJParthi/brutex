@@ -14761,10 +14761,26 @@ mod tests {
         // written. Kept as prose because the refusals carry no error type to
         // match on, but the entries are now the SHORTEST stable substring of
         // each cause rather than a fragment of one phrasing of it.
-        const GATES: [&str; 3] = [
+        // A FOURTH GATE, ADDED BECAUSE THE TEST ASKED FOR IT BY NAME.
+        //
+        // Its own panic reads *"Add it to GATES and say why it is a gate"*, and
+        // the cause a fresh CI runner produces is the store root itself: there
+        // is no `~/.brutex/store` there, so both commands stop before they can
+        // reach a month or a feed. That IS a gate by this test's definition —
+        // it fires before either command computes anything, and both must stop
+        // at it together, which is the property being asserted.
+        //
+        // It is not a hole being papered over. The point of the list is that
+        // whatever gate fires, `sweep-stored` and `audit-stored` fire at the
+        // SAME one; an `audit-stored` that reached past an absent store would
+        // compute before it could record an identity. Leaving the cause out
+        // meant the test could only run on a machine that happened to have a
+        // store, which is the same defect `crates/api`'s serve test had.
+        const GATES: [&str; 4] = [
             "BRUTEX_COMMIT",
             "is not a feed this build knows",
             "could not be read from the store",
+            "could not be canonicalized",
         ];
         for (vendor, underlying, rung, year, month) in [
             // A month no store holds.
@@ -15919,13 +15935,22 @@ mod tests {
         } else {
             // A STAMPED BUILD PASSES THAT GATE and reaches the store, which is
             // the second refusal and the one an operator actually sees. Asserted
-            // on the month echoed back rather than on the refusal's prose: §4
+            // on the SUBJECT echoed back rather than on the refusal's prose: §4
             // requires it to name what was wrong, and the argument is the part
             // that cannot drift when the wording is improved.
+            //
+            // TWO SUBJECTS, BECAUSE THERE ARE TWO STORES A MACHINE CAN HAVE.
+            // On a machine with a store the subject is the month — 1970-01 is
+            // in no store. On a fresh CI runner there is no `~/.brutex/store`
+            // at all, so the store root itself is what could not be read, and
+            // naming it is the correct refusal rather than a lesser one. The
+            // earlier version asserted the month alone, which made this a test
+            // of whether the machine happened to have a store.
             assert!(
-                out.contains("1970-01"),
-                "a stamped build must get past the identity gate and refuse for \
-                 the month it could not read: {out}"
+                out.contains("1970-01") || out.contains("store root"),
+                "a stamped build must get past the identity gate and name what \
+                 it could not read -- the month, or the store root that is not \
+                 there: {out}"
             );
             assert!(
                 !out.contains("commit stamp"),
