@@ -1970,7 +1970,7 @@ fn sweep_stored_inner(
             months_found: 1,
         },
         &id,
-        &outcome,
+        &outcome.sweep,
         u64::try_from(loaded.bars.len()).unwrap_or(u64::MAX),
         min_hits,
     ) {
@@ -3777,7 +3777,31 @@ fn audit_stored_inner(
             }),
             execution,
             native_minute_execution: loaded.timeframe == EXECUTION_RUNG,
-            recording: None,
+            // RECORDED, WHERE IT USED TO BE `None`.
+            //
+            // This verb sweeps AND trades a real stored month, and it built the
+            // full nine-term identity twenty lines above to name what it was
+            // about to do -- then passed `None` here, so `audit_bars` computed
+            // an answer and filed nothing. §3 rule 3 is "no computation without
+            // that identity recorded", and `results/runs.bin` on this machine
+            // was sixteen bytes because of exactly this and its three siblings.
+            //
+            // A single month is a span of one: `from` and `to` are the same
+            // `(year, month)`, and `months_asked`/`months_found` are both 1
+            // because `load_stored_month` refused already if the month was not
+            // there. `attempt` is `None` -- this verb takes no support ladder,
+            // so there is one attempt and nothing to number.
+            recording: Some(Recording {
+                root: &root,
+                feed: vendor.as_str(),
+                underlying,
+                timeframe: rung,
+                from: (year, month),
+                to: (year, month),
+                attempt: None,
+                months_asked: 1,
+                months_found: 1,
+            }),
             rules: Rules::BASELINE,
             // The historical cut, unchanged. `Payoff` is reached only by an
             // operator who typed `elite`.
@@ -12007,17 +12031,21 @@ fn ensure_run_record(
 fn record_swept_run(
     into: Recording<'_>,
     id: &runner::identity::RunId,
-    outcome: &runner::RankedOutcome,
+    sweep: &engine::keep::Streamed,
     bars: u64,
     min_hits: u64,
 ) -> Result<(String, Committed), String> {
-    record_run(into, id, outcome, None, bars, min_hits, [0; 6])
+    record_run(into, id, sweep, None, bars, min_hits, [0; 6])
 }
 
 fn record_run(
     into: Recording<'_>,
     id: &runner::identity::RunId,
-    outcome: &runner::RankedOutcome,
+    // THE SWEEP HALF ONLY. `record_run` reads three fields --
+    // `streamed`, `depth()` and `halted` -- and all three are on `Streamed`.
+    // Taking the whole `RankedOutcome` meant `sweep-all`, which never ranks,
+    // could not call this at all.
+    sweep: &engine::keep::Streamed,
     // `None` IS A REAL ANSWER, and every money field below already reads it
     // that way: each is `chosen.map_or(0, ..)`. What the parameter said before
     // was `&Cell` — a trade is compulsory — while the body was written for a
@@ -12058,14 +12086,14 @@ fn record_run(
         months_found: into.months_found,
         bars,
         min_hits,
-        combinations: outcome.sweep.streamed,
-        depth: u32::try_from(outcome.sweep.depth()).unwrap_or(u32::MAX),
+        combinations: sweep.streamed,
+        depth: u32::try_from(sweep.depth()).unwrap_or(u32::MAX),
         // ONE BYTE THAT CHANGES HOW EVERY OTHER FIELD READS. A halted sweep's
         // `depth` is PARTIAL and its `combinations` covers less of the ladder
         // than the number suggests, so a row without this flag would rank a
         // truncated search against complete ones as though they were the same
         // kind of thing.
-        halted: u8::from(outcome.sweep.halted.is_some()),
+        halted: u8::from(sweep.halted.is_some()),
         trades: chosen.map_or(0, |c| c.trades),
         pessimistic: chosen.map_or(0, |c| c.pessimistic),
         optimistic: chosen.map_or(0, |c| c.optimistic),
@@ -13888,7 +13916,7 @@ fn record_all_attempt(
         let ledger = record_run(
             into,
             run_id,
-            what.outcome,
+            &what.outcome.sweep,
             Some(&what.selected),
             what.bars,
             what.min_hits,
