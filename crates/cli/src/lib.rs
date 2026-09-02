@@ -4403,6 +4403,13 @@ fn audit_range_inner(
                 u64::try_from(span.missing.len()).unwrap_or(u64::MAX),
             )
             .with("bars", u64::try_from(span.bars.len()).unwrap_or(u64::MAX))
+            // THE TWELFTH AND ELEVENTH FIELDS, AND THE EVENT IS NOW FULL.
+            // `telemetry::event::MAX_FIELDS` is 12: a thirteenth is counted and
+            // DROPPED, so nothing further may be added here without removing
+            // something. The `/logs` page walks fields generically, so these
+            // two appear there with no change to `crates/api`.
+            .with("withheld_days", u64::from(span.excluded.days()))
+            .with("withheld_bars", span.excluded.bars())
             .with("min_hits", min_hits),
     );
 
@@ -9167,6 +9174,16 @@ struct RungRow {
     /// eight-rung comparison headed with the span you asked for could be
     /// computed over a shorter one with nothing saying so.
     missing: Vec<(u16, u8)>,
+    /// Charter sessions this rung's span withheld.
+    ///
+    /// **Carried for the same reason `missing` is, and it was the worse gap.**
+    /// `audit-range` and `screen` print the withholding through `span_banner`;
+    /// `range-all` printed it nowhere at all — and `range-all` is the verb an
+    /// operator actually runs to sweep every rung. A table headed with a span
+    /// 2020-01..2026-07 was computed over four fewer sessions with nothing on
+    /// the page saying so, which is exactly the invisible scope change
+    /// `CLAUDE.md` §3 rule 2 forbids. D-0502.
+    excluded: stored::CalendarExclusion,
 }
 
 /// Exact context shared by one rung's structural progress boundaries.
@@ -9359,6 +9376,7 @@ fn one_rung(
                 rung,
                 outcome: Err(first_line(why)),
                 missing: Vec::new(),
+                excluded: stored::CalendarExclusion::none(),
             };
         }
     };
@@ -9369,6 +9387,7 @@ fn one_rung(
                 rung,
                 outcome: Err(first_line(why)),
                 missing: Vec::new(),
+                excluded: stored::CalendarExclusion::none(),
             };
         }
     };
@@ -9379,12 +9398,16 @@ fn one_rung(
                 rung,
                 outcome: Err(first_line(why)),
                 missing: Vec::new(),
+                excluded: stored::CalendarExclusion::none(),
             };
         }
     };
     let bars = span.bars.len();
     // KEPT BEFORE THE SPAN IS CONSUMED, so the table can name the holes.
     let missing = span.missing.clone();
+    // KEPT FOR THE SAME REASON, and it is `Copy`, so this costs a memcpy of a
+    // nine-bool array and a u64 rather than a clone.
+    let excluded = span.excluded;
     // DERIVED FROM THIS RUNG'S OWN BARS WHEN NOBODY NAMES A SUPPORT.
     //
     // `None` is not a default hiding in an `Option`; it is the ABSENCE of a
@@ -9483,6 +9506,7 @@ fn one_rung(
                         rung,
                         outcome: Err(first_line(why)),
                         missing: Vec::new(),
+                        excluded: stored::CalendarExclusion::none(),
                     };
                 }
             };
@@ -9499,6 +9523,7 @@ fn one_rung(
                     rung,
                     outcome: Err(first_line(why)),
                     missing: Vec::new(),
+                    excluded: stored::CalendarExclusion::none(),
                 };
             }
         };
@@ -9509,6 +9534,7 @@ fn one_rung(
                     rung,
                     outcome: Err(first_line(why)),
                     missing: Vec::new(),
+                    excluded: stored::CalendarExclusion::none(),
                 };
             }
         };
@@ -9520,6 +9546,7 @@ fn one_rung(
                     rung,
                     outcome: Err(first_line(why)),
                     missing: Vec::new(),
+                    excluded: stored::CalendarExclusion::none(),
                 };
             }
         };
@@ -9643,6 +9670,7 @@ fn one_rung(
         rung,
         outcome,
         missing,
+        excluded,
     }
 }
 
@@ -10988,6 +11016,26 @@ fn range_over_inner(
                 .map(|(y, m)| format!("{y}-{m:02}"))
                 .collect::<Vec<_>>()
                 .join(" ")
+        );
+    }
+    // AND THE SESSIONS THIS RUN DECLINED TO SWEEP, for the same reason and on
+    // the same terms. Named once for the whole table because the rungs share
+    // one span; the BAR count is this rung's own, so the first nonempty row is
+    // reported and the day list -- which is span-wide -- is what carries.
+    if let Some(excluded) = rows
+        .iter()
+        .map(|row| row.excluded)
+        .find(|e| !stored::CalendarExclusion::is_empty(*e))
+    {
+        let _ = writeln!(
+            out,
+            "\n  CHARTER SESSIONS WITHHELD FROM THIS SPAN ({} day(s)): {}\n  \
+             Swept-series calendar policy {} keeps NSE non-regular sessions out of every\n  \
+             swept series. Every row above is over a SHORTER sample, not a corrected one,\n  \
+             and pulling cannot close this gap -- it is this run's own policy.",
+            excluded.days(),
+            excluded.day_names().join(" "),
+            stored::SWEPT_SERIES_CALENDAR_POLICY,
         );
     }
     let _ = writeln!(
