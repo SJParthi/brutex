@@ -1750,12 +1750,99 @@ pub async fn run_json(
         Err(poisoned) => poisoned.into_inner(),
     };
     let body = held.as_ref().map_or_else(
-        // NO SWEEP IS A STATE, NOT AN ABSENCE. A page that got `null` would
-        // have to decide what that meant; this says it.
-        || r#"{"running":null,"why":"no sweep has been started from this console"}"#.to_owned(),
+        // NO SWEEP IN THIS PROCESS IS NOT NO SWEEP. The slot above is one
+        // server's `Mutex`, so it knows only about runs the browser itself
+        // started -- and this module's own header says so: *"the slot below
+        // does not prevent that -- it is one server's slot"*.
+        //
+        // The operator runs long sweeps from the CLI, which cannot reach this
+        // memory. The page then read `"running":null` and drew an idle console
+        // over a machine at 1,300% CPU four hours into a grid. That is the
+        // failure wearing a success's clothes `CLAUDE.md` §4 bans: not a
+        // missing feature, but a POSITIVE statement that nothing is running,
+        // made by a surface that had not looked.
+        //
+        // The store is the shared thing, so the fallback reads it.
+        elsewhere_json,
         |progress| format!(r#"{{"running":{}}}"#, progress.to_json()),
     );
     (axum::http::StatusCode::OK, json_headers(), body)
+}
+
+/// The answer when nothing is running anywhere this process can see.
+const NO_SWEEP: &str = r#"{"running":null,"why":"no sweep has been started from this console"}"#;
+
+/// The target `cli` stamps on the records a sweep emits as it advances.
+///
+/// `cli.audit` and not `cli.sweep`: the sweep verbs render through `audit_bars`,
+/// which is where both the per-rung bracket and the ten-per-rung grid progress
+/// records are emitted. `cli.sweep` covers the synthetic verbs, which never run
+/// here.
+const CLI_SWEEP_TARGET: &str = "cli.audit";
+
+/// How long a silence may run before the page should doubt the sweep.
+///
+/// Reported TO the page rather than applied here, because this cannot tell a
+/// stopped sweep from a stretch that emits nothing, and deciding which would be
+/// inventing the distinction. Fifteen minutes is longer than the widest measured
+/// gap between records on a live `range-all` — the one-minute rung went twenty
+/// minutes silent BEFORE grid progress existed, and ten records per rung is what
+/// closed it.
+const STALE_AFTER_MILLIS: i64 = 15 * 60 * 1_000;
+
+/// A sweep this process did not start, recovered from the telemetry log.
+///
+/// # Why the log and not the ledger
+///
+/// `results/runs.bin` gains a row when a rung FINISHES. A sweep four hours into
+/// its first rung has written nothing there, which is exactly the case the
+/// console needs to show. The telemetry log is the only surface a running CLI
+/// sweep touches WHILE it runs — one record per rung entered and ten more as
+/// the grid advances — so it is where "still moving" lives.
+///
+/// # It reports what it can prove and nothing more
+///
+/// `running` is deliberately NOT `Progress::to_json`'s shape. A `Progress`
+/// carries a `Kind`, an attempt number and a support ppm this process never
+/// chose and cannot read off a log line without inventing them. Naming the
+/// source in `where` lets the page say *"a sweep is running outside this
+/// console"* instead of implying it owns one.
+fn elsewhere_json() -> String {
+    crate::logs::cli_log_dir().map_or_else(
+        || NO_SWEEP.to_owned(),
+        |dir| elsewhere_over(&dir, now_micros() / 1_000),
+    )
+}
+
+/// What [`elsewhere_json`] says, with the directory and the clock handed in.
+///
+/// Split out because the outer function reads `BRUTEX_STORE` through a process
+/// global and stamps the wall clock, and a test that has to set both can only
+/// run alone. This takes them, so the behaviour is testable without a global and
+/// the age arithmetic is checkable against a fixed `now`.
+fn elsewhere_over(dir: &std::path::Path, now_millis: i64) -> String {
+    let tail = telemetry::tail(
+        dir,
+        telemetry::DEFAULT_KEEP_FILES,
+        &telemetry::Query {
+            target: Some(CLI_SWEEP_TARGET.to_owned()),
+            ..telemetry::Query::last(1)
+        },
+    );
+    let Some(last) = tail.records.last() else {
+        return NO_SWEEP.to_owned();
+    };
+    // Clamped at zero: a store written by a machine whose clock is ahead must
+    // not report a sweep in the future.
+    let age = now_millis.saturating_sub(last.at_unix_millis).max(0);
+    format!(
+        r#"{{"running":{{"where":"cli","run":{},"message":{},"at_unix_millis":{},"age_millis":{},"stale_after_millis":{}}}}}"#,
+        last.run,
+        crate::logs::quoted(&last.message),
+        last.at_unix_millis,
+        age,
+        STALE_AFTER_MILLIS,
+    )
 }
 
 /* ==================================================================
@@ -3718,5 +3805,70 @@ mod tests {
         ] {
             assert!(!why.why().is_empty(), "{why:?} has no sentence");
         }
+    }
+
+    /// A CLI sweep is visible to the console even though this process did not
+    /// start it.
+    ///
+    /// The slot `run_json` reads is one server's `Mutex`, so before this the
+    /// page drew an idle console over a machine hours into a grid — a POSITIVE
+    /// claim that nothing was running, made by a surface that had not looked.
+    ///
+    /// All three halves are asserted, and the two negative ones matter as much:
+    /// a fallback that reported a sweep whenever the log had EVER been written,
+    /// or whenever ANY record existed, is the same defect pointing the other
+    /// way.
+    #[test]
+    fn a_sweep_running_outside_this_process_is_reported_from_the_log() {
+        let dir = crate::scratch::path("sweeprun-elsewhere");
+        let _ignored = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+
+        // AN EMPTY LOG IS NOT A RUNNING SWEEP.
+        assert_eq!(
+            super::elsewhere_over(&dir, 1_000_000),
+            super::NO_SWEEP,
+            "a store nobody has swept in must say so, not guess"
+        );
+
+        let sink = telemetry::Sink::open(
+            &telemetry::Config::new(&dir).with_min_level(telemetry::Level::Trace),
+        )
+        .expect("opens");
+
+        // NOR IS A RECORD ON ANOTHER TARGET. Every served page emits one, so
+        // without this the console would report itself as a running sweep.
+        let _ = sink.emit(&telemetry::Event::info("api.serve", "not a sweep"));
+        assert_eq!(
+            super::elsewhere_over(&dir, 1_000_000),
+            super::NO_SWEEP,
+            "only the sweep target counts, or serving the page reads as a run"
+        );
+
+        let _ = sink.emit(&telemetry::Event::info(
+            super::CLI_SWEEP_TARGET,
+            r#"exit grid "entered""#,
+        ));
+        let json = super::elsewhere_over(&dir, i64::MAX);
+        assert!(
+            json.contains(r#""where":"cli""#),
+            "the page must be told the sweep is not this console's: {json}"
+        );
+        assert!(
+            json.contains(r#"\"entered\""#),
+            "a message carrying a quote must be escaped, or the body does not \
+             parse and the page reads a running sweep as unknown: {json}"
+        );
+        assert!(
+            json.contains(r#""stale_after_millis":900000"#),
+            "the window is reported so the page decides, not this: {json}"
+        );
+
+        // A CLOCK BEHIND THE STORE'S must not read as a sweep in the future.
+        let skewed = super::elsewhere_over(&dir, 0);
+        assert!(
+            skewed.contains(r#""age_millis":0"#),
+            "age is clamped at zero under clock skew: {skewed}"
+        );
     }
 }

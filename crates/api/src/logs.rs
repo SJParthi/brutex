@@ -246,6 +246,32 @@ fn cli_half(store: &std::path::Path) -> std::path::PathBuf {
     store.join("logs").join(CLI_SUBDIR)
 }
 
+/// Where a CLI-run command writes its records, for a caller outside this module.
+///
+/// `cli_half` needs the store root and `log_dir` returns the SERVED half, so
+/// every caller wanting the other half repeated the same two lines. Two of them
+/// already existed here (`logs_json` and `logs_page`); `sweeprun::run_json` is
+/// the third, and it is in another module.
+///
+/// Returns `None` for the same reason those two do -- the store may not be
+/// configured -- and never creates: a reader that creates a directory reports a
+/// sweep's log as present when nothing has ever written one.
+#[must_use]
+pub fn cli_log_dir() -> Option<std::path::PathBuf> {
+    crate::server::store_dir().ok().map(|s| cli_half(&s))
+}
+
+/// One log field, JSON-escaped, for a caller building a response by hand.
+///
+/// A log MESSAGE is the one string in this crate that an operator's own data
+/// reaches: a refusal quotes a vendor's text, a path, a store error. Pasting it
+/// into a response with `format!` and no escape is how a stray quote turns a
+/// JSON body into a parse error the page reports as "sweep unknown".
+#[must_use]
+pub fn quoted(raw: &str) -> String {
+    crate::render::json_string(raw)
+}
+
 /// The subdirectory `cli` appends to, beside the server's own.
 ///
 /// `crates/cli`'s `log_dir` resolves `<store>/logs/cli` and its banner has said
