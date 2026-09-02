@@ -3122,17 +3122,42 @@ jobs:
           #     into `out` and handed back as a String, and a run that is still
           #     walking has nowhere to have written a log yet. stderr is what a
           #     watching operator has; the report is what they get afterwards.
+          # TWO MORE, and both are the same category as the last one above: a
+          # print that CANNOT emit because there is no sink yet.
+          #
+          #   api/src/server.rs eprintln! 7 -> 8. Measured: eight sites, five of
+          #     which call `telemetry::emit` at `Level::Error` immediately
+          #     above. THREE DO NOT, and the reason is one line number:
+          #     `telemetry::install` is at server.rs:14892, and all three --
+          #     14443 (`run_from`, the store root would not resolve), 14842 (the
+          #     bound listener's local address would not read) and 14855 (the
+          #     store root again, inside the serve arm) -- run BEFORE it. An
+          #     emit there writes to nothing. Requiring one would be requiring a
+          #     record the process has no way to keep, which is a worse lie than
+          #     the missing line: it would look declared and land nowhere.
+          #     These three are the startup boundary this gate's own remedy
+          #     names -- stderr is what a watching operator has, and there is no
+          #     file yet to hand them afterwards.
+          #
+          #   cli/src/main.rs println! 1 -> 2. Neither is a diagnostic. One is
+          #     `refused: {why}` from `preflight_store_root`, which runs before
+          #     any sink is installed for the same reason as above; the other
+          #     names where the events went, and prints on SUCCESS too -- its
+          #     own comment records why: "a run whose events landed somewhere
+          #     `/logs` does not read looked exactly like a run that was fully
+          #     observable". Both are CLI contract to the operator, the same
+          #     category as `server.rs`'s usage text already declared here.
           declared='api/src/calendar_of.rs:println!:2
           api/src/constituents.rs:println!:2
           api/src/server.rs:println!:16
-          api/src/server.rs:eprintln!:7
+          api/src/server.rs:eprintln!:8
           api/src/server.rs:print!:1
           core/src/universe.rs:println!:2
           core/src/vendor.rs:println!:1
           pull/src/pricing.rs:println!:1
           cli/src/lib.rs:eprintln!:3
           cli/src/main.rs:print!:1
-          cli/src/main.rs:println!:1
+          cli/src/main.rs:println!:2
           greeks/src/bsm.rs:println!:4
           greeks/src/normal.rs:println!:3
           greeks/src/solver.rs:println!:5
