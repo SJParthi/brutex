@@ -5570,6 +5570,76 @@ mod tests {
         );
     }
 
+    /// The short direction is exercised, and it is not the long one.
+    ///
+    /// Invariant `R-03`. Every other walk-forward test in this module passes
+    /// `Direction::Long`, so the `Short` arm was never entered by the suite at
+    /// all — the row records that a `panic!` planted in `side_of`'s `Short` arm
+    /// survived a full green run.
+    ///
+    /// # Why the second half is asserted on `side_of` and not on the folds
+    ///
+    /// The row also asks that "a direction accepted and then ignored fails it",
+    /// and the obvious reading — compare the two walks' folds — cannot express
+    /// it. Measured: on `sessions(12)` the long and short walks return fold for
+    /// fold IDENTICAL results, with 12,531 candidates considered and priced in
+    /// fold 1 and an exit chosen in both.
+    ///
+    /// That is not a dropped direction. `FoldResult` carries split geometry
+    /// (`train_bars`, `purged`, `test_bars`), counts from a sweep that is the
+    /// same for either side, and `chosen_exit` — which is `grid::Chosen`, the
+    /// stop/target/tsl/ttp RUNG INDICES and no money. Two directions selecting
+    /// the same rungs is ordinary. `Validated` exposes nothing else.
+    ///
+    /// So the surface cannot answer the question, and asserting inequality on
+    /// it would have pinned a coincidence. What CAN be asserted is the thing the
+    /// row actually names: the arm is entered, and the two directions do not map
+    /// to one side.
+    #[test]
+    fn a_short_walk_forward_runs_and_is_not_the_long_one() {
+        let bars = crate::synthetic::sessions(12);
+        let short = walk_forward(&bars, h(15), 3, Direction::Short, &sweeper(), evaluator);
+
+        // IT RAN. The arm is entered, folds are built, and each trains on
+        // something — the half a planted `panic!` would have caught.
+        assert_eq!(
+            short.folds.len(),
+            3,
+            "three splits must yield three folds on the short side too"
+        );
+        for fold in &short.folds {
+            assert!(
+                fold.train_bars > 0,
+                "a short fold must train on something: fold {}",
+                fold.index
+            );
+        }
+        assert!(
+            short.refused.is_none(),
+            "the short walk must not refuse: {:?}",
+            short.refused
+        );
+
+        // AND IT IS NOT THE LONG ONE. `side_of` is the single point where the
+        // caller's direction becomes the side every excursion and fill is
+        // measured against; a direction accepted and then ignored is exactly a
+        // `side_of` that collapses both arms onto one value.
+        assert_eq!(
+            super::side_of(Direction::Long),
+            crate::excursion::Side::Long
+        );
+        assert_eq!(
+            super::side_of(Direction::Short),
+            crate::excursion::Side::Short
+        );
+        assert_ne!(
+            super::side_of(Direction::Long),
+            super::side_of(Direction::Short),
+            "two directions that map to one side are a direction the walk \
+             accepted and then ignored"
+        );
+    }
+
     #[test]
     fn a_walk_forward_never_judges_a_choice_on_a_bar_it_was_chosen_on() {
         // THE WHOLE POINT. Every fold's test window must start strictly after

@@ -19224,6 +19224,62 @@ mod derived_floor_tests {
     use crate::knobs::serially;
     use indicators::Candle;
 
+    /// Every stored operator path folds BOTH series into its identity.
+    ///
+    /// Invariants `X-18` and `UE-05`. `runner::identity` proves the composition
+    /// — that a two-series digest domain-separates the signal and execution
+    /// slices, and that changing one hidden interior minute re-keys the run.
+    /// What neither of those tests can prove is that this crate CALLS it: a
+    /// stored verb that loaded an execution series and then hashed the signal
+    /// bars alone would key two different runs identically, and every identity
+    /// test in `runner` would still pass.
+    ///
+    /// # Why the source and not a run
+    ///
+    /// The property is "every one of them", and there is no value at runtime
+    /// that says how many paths exist. A behavioural test can only ever assert
+    /// the paths somebody remembered to add to it, which is the failure mode
+    /// this row exists to close — a fifth verb added next year would not fail
+    /// it. Reading the construction sites out of the source counts them all,
+    /// including ones written after this test.
+    ///
+    /// It matches `data_digest:` against the composing function by name rather
+    /// than parsing Rust. That is deliberately shallow: it cannot prove the
+    /// arguments are the right slices, and it does not claim to. What it
+    /// catches is the one edit that would break the invariant silently —
+    /// swapping the two-series digest for a one-series one at a site that loads
+    /// both.
+    #[test]
+    fn every_stored_two_series_operator_path_binds_execution_into_identity() {
+        let source = include_str!("lib.rs");
+        // BUILT FROM TWO PIECES SO THE NEEDLE IS NOT IN THE HAYSTACK. Written
+        // as one literal it appears in this file -- inside this test -- and the
+        // scan matched itself, at a site with no `Run` literal to close.
+        let needle = concat!("let id = ", "identity(&Run {");
+        let sites: Vec<usize> = source.match_indices(needle).map(|(at, _)| at).collect();
+        assert!(
+            sites.len() >= 4,
+            "this file built four stored run identities when the invariant was \
+             written; finding fewer means a path moved and this test is now \
+             looking at the wrong thing, not that the property improved"
+        );
+        for at in sites {
+            // The struct literal is short and `data_digest` is inside it, so a
+            // window rather than a brace walk: braces live in strings and this
+            // file has plenty of both.
+            let window = &source[at..source.len().min(at + 6_000)];
+            let (before_end, _) = window
+                .split_once("});")
+                .expect("a `Run` literal is closed within six thousand bytes");
+            assert!(
+                before_end.contains("data_digest: stored_anchored_digest("),
+                "a stored run identity derives its data term from something \
+                 other than the two-series composition, so a coarse run and the \
+                 execution slice under it would key alike:\n{before_end}"
+            );
+        }
+    }
+
     /// 09:15 IST on 2024-01-01, in epoch microseconds.
     ///
     /// The stamp matters: `runner::outcome::forward` REFUSES a window that would
