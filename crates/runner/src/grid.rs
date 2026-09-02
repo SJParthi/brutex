@@ -2080,6 +2080,10 @@ fn evaluate_timed(
 /// expensive per-cell sequence walk reads one boolean by checked index; it
 /// never scans the pair set. Stop-only, target-only and all-none rows are
 /// always present, exactly as in the historical derived-grid loop.
+///
+/// **UNVERIFIED as a measured bound.** No bench in this workspace
+/// times this, so the shape above is read from the source rather
+/// than measured. `CLAUDE.md` §3 rule 6.
 #[expect(
     clippy::too_many_arguments,
     reason = "bars/side/trades/facts are the priced sample; three ladders and their ratio admission are the exact grid; the pre-reserved cell vector carries the caller's allocation policy"
@@ -2995,6 +2999,36 @@ pub fn with_levels(
     with_levels_v1(bars, column, mask, horizon, side, ladders, variant).cell
 }
 
+/// [`with_levels`] with the slice facts hoisted out, for a loop over candidates.
+///
+/// Pairs with `with_levels` exactly as `evaluate_over` pairs with
+/// `evaluate_with` and `walk_over` with `walk`: the convenience form builds
+/// [`crate::trade::SliceFacts`] per call, this one takes them. Build them once
+/// outside the loop — they are a function of the bars and the column, and
+/// nothing about a candidate changes them. See [`levelled_over`] for the
+/// measured cost of not doing so.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "eight, and the eighth is the hoisted facts; the seven before it \
+              are `with_levels`'s public signature, unchanged"
+)]
+#[must_use]
+pub fn with_levels_over(
+    bars: &[Candle],
+    column: &Column,
+    mask: &ConditionMask,
+    horizon: Horizon,
+    side: Side,
+    ladders: Ladders<'_>,
+    variant: Chosen,
+    facts: &crate::trade::SliceFacts,
+) -> Option<Cell> {
+    levelled_over(
+        bars, column, mask, horizon, side, ladders, variant, None, facts,
+    )
+    .cell
+}
+
 /// [`with_levels`] and [`per_trade`] share this; only the collector differs.
 #[expect(
     clippy::too_many_arguments,
@@ -3014,7 +3048,49 @@ fn levelled(
     trades: Option<&mut Vec<TradeRow>>,
 ) -> ReplayOutcomeV1 {
     let facts = crate::trade::SliceFacts::of(bars, column);
-    let timed = crate::trade::walk_over(bars, column, mask, horizon, direction_of(side), &facts);
+    levelled_over(
+        bars, column, mask, horizon, side, ladders, variant, trades, &facts,
+    )
+}
+
+/// [`levelled`] with the slice facts handed in, for a loop over candidates.
+///
+/// # The door this opens, and the loop that needed it
+///
+/// [`crate::trade::SliceFacts`] is candidate-INDEPENDENT: it is a function of
+/// the bars and the column alone. Its own doc says the type exists so that *"a
+/// loop over candidates must hoist the facts"*, and `evaluate`/`evaluate_over`
+/// and `walk`/`walk_over` both offer exactly this pair for exactly that reason.
+///
+/// `with_levels` had no such door, so `validate.rs`'s out-of-sample pass —
+/// `scored.par_iter().map(|candidate| with_levels(..))` — rebuilt the facts once
+/// per candidate. Each rebuild is O(B): a `HashMap` reserved at `bars.len()`
+/// plus that many hashed inserts, two `Vec<u64>` of `B + 1`, a
+/// `Vec<Option<SquareOff>>` of `B`, and a second full pass for
+/// `median_step_micros_over`. Over C candidates that is **O(C × B)** to compute
+/// the same answer C times.
+///
+/// The guard written to prevent this (`trade.rs`'s source-shape test) covers
+/// `walk_core` only, which is why `levelled` slipped past it.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "nine, and the ninth is the hoisted facts. The eight before it are \
+              `levelled`'s own, which this exists to pass through unchanged; \
+              bundling them would reshape a private helper to avoid a lint \
+              about the parameter that removes an O(C x B) term"
+)]
+fn levelled_over(
+    bars: &[Candle],
+    column: &Column,
+    mask: &ConditionMask,
+    horizon: Horizon,
+    side: Side,
+    ladders: Ladders<'_>,
+    variant: Chosen,
+    trades: Option<&mut Vec<TradeRow>>,
+    facts: &crate::trade::SliceFacts,
+) -> ReplayOutcomeV1 {
+    let timed = crate::trade::walk_over(bars, column, mask, horizon, direction_of(side), facts);
     if timed.occupancy.is_empty() {
         return ReplayOutcomeV1 {
             cell: None,

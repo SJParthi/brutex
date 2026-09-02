@@ -4668,6 +4668,26 @@ fn walk_forward_core(
                 // order. `crate::pbo` ranks that vector positionally against
                 // `in_sample_all`, so an order change here would silently
                 // mis-pair every candidate with another's out-of-sample score.
+                // HOISTED, because it is the same answer every time.
+                //
+                // `with_levels` builds `SliceFacts` per call, so this loop
+                // rebuilt them once per candidate: an O(B) `HashMap` reserved at
+                // `bars.len()` with that many hashed inserts, two `Vec<u64>` of
+                // `B + 1`, a `Vec<Option<SquareOff>>` of `B`, and a second full
+                // pass for the median step — O(C x B) to compute one
+                // candidate-INDEPENDENT value C times.
+                //
+                // `SliceFacts`' own doc says the type exists so that "a loop
+                // over candidates must hoist the facts", and `evaluate_over`
+                // and `walk_over` are that door for their callers.
+                // `with_levels` had none until `with_levels_over`, which is why
+                // the source-shape guard written for this — it checks
+                // `walk_core` — never saw this loop.
+                //
+                // Determinism is untouched: the facts are a pure function of
+                // `trade_test` and `confined`, both borrowed immutably here and
+                // unchanged by the loop.
+                let test_facts = crate::trade::SliceFacts::of(trade_test, confined);
                 oos_exact = scored
                     .par_iter()
                     .map(|candidate| {
@@ -4689,7 +4709,7 @@ fn walk_forward_core(
                         // window scores 0, exactly as before: `with_levels`
                         // returns `None` on an empty trade set, and 0 is the
                         // level-less total of no trades rather than a sentinel.
-                        let pessimistic = crate::grid::with_levels(
+                        let pessimistic = crate::grid::with_levels_over(
                             trade_test,
                             confined,
                             &candidate.mask,
@@ -4702,6 +4722,7 @@ fn walk_forward_core(
                                 trails: &candidate.pick.trails,
                             },
                             candidate.pick.rungs,
+                            &test_facts,
                         )
                         .map(|cell| cell.pessimistic);
                         CandidateOosV2 { pessimistic }
@@ -6972,5 +6993,60 @@ mod tests {
                 Err(super::AnchoredSearchValidationRefusalV4::SealMismatch)
             ));
         }
+    }
+
+    /// The out-of-sample loop must not rebuild the slice facts per candidate.
+    ///
+    /// # Why a source-shape test and not a timing one
+    ///
+    /// The defect is invisible to every behavioural test: rebuilding
+    /// `SliceFacts` per candidate produces the IDENTICAL answer, just O(C)
+    /// times over. Only the shape of the call distinguishes the two, and a
+    /// timing test on a machine this session has seen at load average 76
+    /// measures the machine.
+    ///
+    /// `trade.rs` already guards `walk_core` this way, and that guard is
+    /// precisely why this one is needed: it names one function, so `levelled` —
+    /// which `with_levels` calls and which built the facts itself — was never in
+    /// its scope. The fix was `with_levels_over`, matching the
+    /// `evaluate`/`evaluate_over` and `walk`/`walk_over` pairs.
+    ///
+    /// Scoped to the `par_iter` body rather than the file, so an unrelated
+    /// `with_levels` elsewhere in this module does not fail it.
+    #[test]
+    fn the_out_of_sample_pass_hoists_the_slice_facts_out_of_its_candidate_loop() {
+        let source = include_str!("validate.rs");
+        let anchor = "let test_facts = crate::trade::SliceFacts::of(trade_test, confined);";
+        let at = source
+            .find(anchor)
+            .expect("the out-of-sample pass must build the facts ONCE, before its loop");
+        let rest = source.get(at..).unwrap_or_default();
+        let end = rest
+            .find(".collect();")
+            .expect("the hoisted facts must be followed by the collecting loop");
+        let body = rest.get(..end).unwrap_or_default();
+
+        assert!(
+            body.len() > 500,
+            "the scan found a {}-byte body, so the anchors moved and this test \
+             would pass over nothing",
+            body.len()
+        );
+        assert!(
+            body.contains("with_levels_over("),
+            "the loop must call the hoisted door"
+        );
+        // EVERYTHING AFTER THE ANCHOR is the loop. The convenience form
+        // `with_levels` builds its own facts, so a single occurrence in here is
+        // one rebuild per candidate -- the exact defect. Slicing past the anchor
+        // matters: `body` begins WITH the hoisted build, so a check against the
+        // whole body would match the correct line and assert nothing.
+        let inner = body.get(anchor.len()..).unwrap_or_default();
+        assert!(
+            !inner.contains("SliceFacts::of("),
+            "nothing inside the candidate loop may build slice facts: they are a \
+             function of the bars and the column, and rebuilding them per \
+             candidate is the O(C x B) term this hoist removed"
+        );
     }
 }

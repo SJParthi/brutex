@@ -379,6 +379,10 @@ pub struct SliceFacts {
     /// Prefix count of timestamp gaps that do not equal `step_micros`.
     /// This turns “is every execution minute present on the held path?” into
     /// the same two-read O(1) check as evaluator acceptance.
+    ///
+    /// **UNVERIFIED as a measured bound.** No bench in this workspace
+    /// times this, so the shape above is read from the source rather
+    /// than measured. `CLAUDE.md` §3 rule 6.
     broken_prefix: Vec<u64>,
     /// Accepted bars by exact timestamp. Built once per slice so an exit at a
     /// wall-clock deadline is a lookup rather than an H-bar scan.
