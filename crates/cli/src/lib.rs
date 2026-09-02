@@ -10465,8 +10465,49 @@ fn range_over_inner(
          complete one.\n  Every row above is a stored record; nothing here was \
          computed twice."
     );
+    out.push_str(IN_SAMPLE_WARNING);
     out
 }
+
+/// What every number in the all-rung table is, said plainly.
+///
+/// # Why this is on the table and not only in the long report
+///
+/// The engine ALREADY says this, honestly and at length -- `runner::audit`
+/// prints *"NON-AUTHORITATIVE: this is not CSCV/PBO and cannot establish lack
+/// of overfitting, generalisation or profitability"*, and `grid_exposure` names
+/// the uncharged grid axis outright. `range-all` computes all of it and then
+/// throws the text away: *"The long report is DISCARDED on purpose: nine of
+/// them is six thousand lines."*
+///
+/// So the walk-forward, the PBO and the bootstrap are paid for on every rung
+/// and reach the operator on none of them. `results::Record` has no field for a
+/// fold, a p-value or a PBO, so the row read back carries none either. What
+/// survives to the terminal is the maximum, with every qualifier removed --
+/// which is the shape `CLAUDE.md` §4 bans: a number that reads as an answer
+/// because the sentence that bounded it was dropped somewhere upstream.
+///
+/// # The three facts, and why each is on its own line
+///
+/// **Selection and reporting use the same bars.** `screen` evaluates the grid
+/// over `bars`, picks the best cell, and reports that cell's own totals -- one
+/// slice, no split. **The grid is not small**: the width table in this file
+/// records 12,393 cells per combination at the eight-rung default. **And the
+/// ladders are fitted too** -- `grid.rs` places the stop and target rungs on the
+/// distribution of the very trades they are then measured against.
+///
+/// Naming the count matters more than the adjective. "In sample" is a phrase an
+/// operator can nod past; "the best of 12,393 variants, chosen and scored on
+/// one slice" is a number they can weigh.
+const IN_SAMPLE_WARNING: &str = "\n  \
+    IN SAMPLE. `worst` and `best` are the best of ~12,393 exit variants per\n  \
+    combination, and the variant was CHOSEN on the same bars it is SCORED on.\n  \
+    The stop and target ladders are placed on those same trades' own\n  \
+    excursions. No out-of-sample split separates the choosing from the\n  \
+    reporting, and no multiple-comparison correction reaches this table --\n  \
+    `range-all` computes the walk-forward, the PBO and the bootstrap per rung\n  \
+    and discards the report that carries them. Treat these totals as an upper\n  \
+    bound on what the setup did, not as an estimate of what it will do.\n";
 
 /// The record just written for this exact run, read back from the store.
 ///
