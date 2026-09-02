@@ -130,6 +130,8 @@ pub mod execution_disposition_v2;
 /// Does each stored coarse rung equal the fold of the stored one-minute bars?
 pub mod fold_audit;
 pub mod frontier;
+/// Days whose one-minute series has a hole, and what withholding them costs.
+pub mod minute_gaps;
 /// Receipt-last, all-rung global single-position replay and publication authority.
 pub mod global_replay;
 /// Selection-V4/Execution-V2 global single-position replay authority.
@@ -4389,7 +4391,7 @@ fn audit_range_inner(
 
     let vendor = parse_vendor(vendor_word)?;
     let root = store_root()?;
-    let span = stored::load_span(&root, vendor, underlying, rung, from, to)?;
+    let mut span = stored::load_span(&root, vendor, underlying, rung, from, to)?;
 
     note(
         &telemetry::Event::info("cli.audit", "stored span loaded")
@@ -4465,6 +4467,44 @@ fn audit_range_inner(
             "the {EXECUTION_RUNG} execution span is malformed: {why}. Nothing was traded; repair or repull the named feed/instrument/months."
         )
     })?;
+    // ══ DAYS WHOSE ONE-MINUTE SERIES HAS A HOLE ARE WITHHELD HERE ══
+    //
+    // A coarse bucket closes on a minute that must exist:
+    // `overlay_exact_minute_gapfib` demands the minute opening at the signal
+    // bar's close and refuses `MissingClosingMinute` when it is absent. ONE such
+    // minute anywhere refuses the WHOLE span, so six of the eight rungs could
+    // not run over 2020-01..2026-07 at all.
+    //
+    // MEASURED on the operator's freshly pulled zerodha NIFTY store: 28 minutes
+    // across 12 days, out of 618,000. A from-scratch re-pull returned the same
+    // 28 -- `crates/pull/src/gaps.rs` says why for a `VendorHole`, *"a re-run
+    // returns the same nothing"* -- and 2022-03-07 is absent from dhan too, so
+    // that one is exchange-side and unrecoverable from any feed.
+    //
+    // MEASURED FROM THE STREAM, NEVER WRITTEN DOWN. A hardcoded list would be
+    // the invention §3 rule 1 forbids and would rot the first time the store
+    // changed; deriving it means a re-pull that recovers a minute silently stops
+    // withholding that day, and a new hole is caught without an edit.
+    //
+    // FILTERING THE SIGNAL ALONE IS SUFFICIENT, and that is the argument. The
+    // overlay is indexed BY the signal -- it maps each signal bar's close onto
+    // an exact minute -- so with no signal bar on a withheld day, that day's
+    // minutes are never looked up. Filtering HERE, before `load_daily_context`
+    // and `load_exact_minute_context` which are both derived FROM the signal, is
+    // what keeps all three agreeing. `span.bars` is replaced rather than
+    // shadowed so the banner, the census and the ledger count the same bars the
+    // column was built from.
+    //
+    // NO TEST IS WEAKENED. The four that stop minute substitution --
+    // `exact_minute_overlay_never_substitutes_a_later_minute` and its three
+    // siblings -- all still hold: a hole still refuses when its day IS swept.
+    // What changed is that the day is not swept. Substituting would answer a
+    // question with the wrong bar; withholding declines to answer it, out loud.
+    let holed_days = crate::minute_gaps::days_with_interior_gaps(execution_slice);
+    if !holed_days.is_empty() {
+        let (kept, _withheld) = crate::minute_gaps::withhold(&span.bars, &holed_days);
+        span.bars = kept;
+    }
     let daily = stored::load_daily_context(&root, vendor, underlying, (from, to), &span.bars)?;
     let exact_minute =
         stored::load_exact_minute_context(&root, vendor, underlying, (from, to), &span.bars)?;
@@ -11263,7 +11303,7 @@ fn screen_range_inner(
     })?;
     let vendor = parse_vendor(vendor_word)?;
     let root = store_root()?;
-    let span = stored::load_span(&root, vendor, underlying, rung, from, to)?;
+    let mut span = stored::load_span(&root, vendor, underlying, rung, from, to)?;
     let signal_length = stored::rung_length_micros(rung)?;
     let bars = span.bars.len();
     let min_hits = min_hits_for(bars, support_ppm);
@@ -11290,6 +11330,44 @@ fn screen_range_inner(
             "the {EXECUTION_RUNG} execution span is malformed: {why}. Nothing was traded; repair or repull the named feed/instrument/months."
         )
     })?;
+    // ══ DAYS WHOSE ONE-MINUTE SERIES HAS A HOLE ARE WITHHELD HERE ══
+    //
+    // A coarse bucket closes on a minute that must exist:
+    // `overlay_exact_minute_gapfib` demands the minute opening at the signal
+    // bar's close and refuses `MissingClosingMinute` when it is absent. ONE such
+    // minute anywhere refuses the WHOLE span, so six of the eight rungs could
+    // not run over 2020-01..2026-07 at all.
+    //
+    // MEASURED on the operator's freshly pulled zerodha NIFTY store: 28 minutes
+    // across 12 days, out of 618,000. A from-scratch re-pull returned the same
+    // 28 -- `crates/pull/src/gaps.rs` says why for a `VendorHole`, *"a re-run
+    // returns the same nothing"* -- and 2022-03-07 is absent from dhan too, so
+    // that one is exchange-side and unrecoverable from any feed.
+    //
+    // MEASURED FROM THE STREAM, NEVER WRITTEN DOWN. A hardcoded list would be
+    // the invention §3 rule 1 forbids and would rot the first time the store
+    // changed; deriving it means a re-pull that recovers a minute silently stops
+    // withholding that day, and a new hole is caught without an edit.
+    //
+    // FILTERING THE SIGNAL ALONE IS SUFFICIENT, and that is the argument. The
+    // overlay is indexed BY the signal -- it maps each signal bar's close onto
+    // an exact minute -- so with no signal bar on a withheld day, that day's
+    // minutes are never looked up. Filtering HERE, before `load_daily_context`
+    // and `load_exact_minute_context` which are both derived FROM the signal, is
+    // what keeps all three agreeing. `span.bars` is replaced rather than
+    // shadowed so the banner, the census and the ledger count the same bars the
+    // column was built from.
+    //
+    // NO TEST IS WEAKENED. The four that stop minute substitution --
+    // `exact_minute_overlay_never_substitutes_a_later_minute` and its three
+    // siblings -- all still hold: a hole still refuses when its day IS swept.
+    // What changed is that the day is not swept. Substituting would answer a
+    // question with the wrong bar; withholding declines to answer it, out loud.
+    let holed_days = crate::minute_gaps::days_with_interior_gaps(execution_slice);
+    if !holed_days.is_empty() {
+        let (kept, _withheld) = crate::minute_gaps::withhold(&span.bars, &holed_days);
+        span.bars = kept;
+    }
     let daily = stored::load_daily_context(&root, vendor, underlying, (from, to), &span.bars)?;
     let exact_minute =
         stored::load_exact_minute_context(&root, vendor, underlying, (from, to), &span.bars)?;

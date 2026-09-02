@@ -138,7 +138,7 @@ pub fn compare(rung: Timeframe, minutes: &[Bar], stored: &[Bar]) -> RungVerdict 
     });
     let mut disagreements = Vec::new();
     let mut elided = 0_u64;
-    let mut push = |d: Disagreement, found: &mut Vec<Disagreement>, elided: &mut u64| {
+    let push = |d: Disagreement, found: &mut Vec<Disagreement>, elided: &mut u64| {
         if found.len() < MAX_REPORTED {
             found.push(d);
         } else {
