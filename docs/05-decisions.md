@@ -31975,3 +31975,52 @@ through to Search V4. `cli verify dhan NIFTY` passes every check it makes,
 because none of them asks whether a bar's minute falls inside a measured session
 window — that question is only asked by `calendar_receipt_v2`, which had no
 caller that ran until this verb. `docs/11-findings.md` carries the row.
+
+## D-0500
+
+**`ledger-all` and `ledger-v6` emit on target `cli.ledger`, once per structural
+boundary, and the boundary is the rung rather than the candidate.**
+
+Both verbs emitted **zero telemetry events of any kind**. Measured: of 56 modules
+in `crates/cli`, exactly two — `lib.rs` and `batch.rs` — contained a
+`telemetry::Event`. So a `ledger-all` run produced no live file, no log record
+and nothing any HTTP surface could read; an operator watching a multi-hour run
+saw a frozen page and had only terminal text.
+
+That is the standing observability requirement failing on its own terms: *if it
+runs, it must be auditable, logged, visualised and reachable.* `/logs` already
+covered the pull half of the data path and the `cli.audit` half of the sweep,
+and D-0226 records adding `telemetry` to `cli` for exactly this reason. The
+ledger chain was simply never wired.
+
+**The target is `cli.ledger`, and the prefix is load-bearing.**
+`telemetry::Query`'s target filter matches an exact target OR a prefix followed
+by a dot, so `cli.ledger` is reached for free by `/logs`' `CLI_SUBDIR` and by
+`/backtest/run.json`'s `CLI_SWEEP_TARGET = "cli"`. No API change was needed, and
+a fourth `cli.*` target does not widen any allowlist.
+
+**The granularity is what makes it gate-17-safe, and it is structural rather
+than a promise to be careful.** Gate 17 silences `vocab engine indicators
+runner` because those hold the loops; its rule is not "each call is cheap" but
+"the innermost loop calls nothing at all". Neither ledger module holds a loop
+over a bar, a candidate or a grid cell — every loop walks a compile-time array,
+`LEDGER_RUNGS` (8), `ROUTE_FAMILIES` (2) or `ALL_GATES` (39). A whole run
+therefore emits 17 events (`ledger-all`) or 43 (`ledger-v6`) whether the span is
+one month or eighty. Nothing is computed solely to be logged: the counts come
+from values the report already prints.
+
+**Two limits are recorded rather than left to be discovered.**
+
+`ledger-all` reports **three stage boundaries, not twenty-four**, because
+`commit_all_rung_stored_population_v5` and its Execution V3 and Selection V5
+successors each walk all eight rungs internally and return one value. Per-rung
+events inside those stages would have to be emitted from
+`all_rung_population_v5.rs` and `all_rung_selection_v5.rs`. `ledger-v6` drives
+its own rung loop and does report per rung and per family.
+
+**5 of 27 call sites are proven to reach a file.** Both verbs' start and refusal
+and the unset-gate refusal are drivable because `parse_vendor` refuses before
+`store_root`, before a directory is created and before a bar is read. The other
+22 fire only after a real span has loaded; their field content is proven by the
+builder tests, their reach is not, and no store fixture exists on that path
+today. LG-08 carries that as a partial rather than a tick.

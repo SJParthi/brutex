@@ -50,8 +50,9 @@ use crate::execution_v4::{
 };
 use crate::ledger_all::{
     BLOCK_RECORDS, BOOTSTRAP_BLOCK, BOOTSTRAP_DRAWS, BOOTSTRAP_SEED, CEILING_BYTES,
-    CEILING_RECORDS, LEDGER_RUNGS, LedgerAllRequest, admission_policy, build_sweepers,
-    candidate_bounds, exit_policy, render_gate_census,
+    CEILING_RECORDS, LEDGER_RUNGS, LEDGER_TARGET, LedgerAllRequest, admission_policy,
+    build_sweepers, candidate_bounds, exit_policy, render_gate_census, run_finished_event,
+    run_refused_event, run_started_event, rung_refused_event,
 };
 use crate::population_admission_v4::PopulationAdmissionV4Bounds;
 use crate::population_finalization_v4::PopulationFinalizationV4Bounds;
@@ -85,6 +86,94 @@ const ROUTE_STAGES: [&str; 6] = [
     "finalization",
     "population",
 ];
+
+/// The verb word `ledger-v6` stamps on every event it emits.
+pub(crate) const LEDGER_V6_VERB: &str = "ledger-v6";
+
+/// The candidate/pre-admission phase, as the `stage` field spells it.
+const CANDIDATE_STAGE: &str = "candidates";
+
+/// The V6 successor route, as the `stage` field spells it.
+const ROUTE_STAGE: &str = "population-v6-route";
+
+// WHY THIS VERB REPORTS PER RUNG AND PER FAMILY, AND `ledger-all` DOES NOT.
+//
+// `crate::ledger_all` drives three successor commits that each walk the eight
+// rungs internally, so the finest boundary reachable from that file is a stage.
+// This file drives its own loop: eight rungs, and two families inside each. The
+// per-family commit is where the sweep actually happens and where a multi-hour
+// run spends its time, so it is exactly the boundary an operator watching a
+// live page needs.
+//
+// IT IS STILL NOT A LOOP GATE 17 IS ABOUT. Sixteen iterations, fixed by
+// `LEDGER_RUNGS` and `ROUTE_FAMILIES`, both compile-time constants -- the count
+// does not move with bars, candidates or grid cells. A whole `ledger-v6` run
+// emits forty-three events over what may be eighty months of data.
+
+/// One rung's route opening, before its two families are committed.
+fn rung_started_event(rung: &str, index: usize) -> telemetry::Event<'_> {
+    telemetry::Event::info(LEDGER_TARGET, "rung route started")
+        .with("verb", LEDGER_V6_VERB)
+        .with("stage", ROUTE_STAGE)
+        .with("rung", rung)
+        .with("rung_index", index)
+        .with("rungs", LEDGER_RUNGS.len())
+}
+
+/// One family's Candidate/Pre-Admission authority committed for one rung.
+///
+/// Sixteen of these in a whole run -- eight rungs by two families -- and each
+/// one is the end of a real sweep rather than a step inside one.
+fn family_committed_event<'a>(rung: &'a str, underlying: &'a str) -> telemetry::Event<'a> {
+    telemetry::Event::info(LEDGER_TARGET, "family candidates committed")
+        .with("verb", LEDGER_V6_VERB)
+        .with("stage", CANDIDATE_STAGE)
+        .with("rung", rung)
+        .with("underlying", underlying)
+}
+
+/// One family refusing, with the family named beside the reason.
+///
+/// The family is its own field rather than only a word inside `why`, because
+/// the refusal an operator actually meets today is BANKNIFTY having no bars at
+/// any feed -- and a log they can filter by `underlying` answers "is it always
+/// the same family" without reading prose.
+fn family_refused_event<'a>(
+    rung: &'a str,
+    underlying: &'a str,
+    why: &'a str,
+) -> telemetry::Event<'a> {
+    telemetry::Event::warn(LEDGER_TARGET, "family refused")
+        .with("verb", LEDGER_V6_VERB)
+        .with("stage", CANDIDATE_STAGE)
+        .with("rung", rung)
+        .with("underlying", underlying)
+        .with("why", why)
+}
+
+/// One rung's V6 route committed, carrying the summary the report prints.
+///
+/// Every field is read from `summary`, which the route already returned from a
+/// reauthenticated projection, and `admission` is the same short identity the
+/// terminal row prints -- computed once and used twice. Nothing here is
+/// calculated in order to be logged.
+fn route_committed_event<'a>(
+    rung: &'a str,
+    summary: &crate::step3_orchestrator::StoredPopulationV6SummaryV1,
+    admission: &'a str,
+) -> telemetry::Event<'a> {
+    telemetry::Event::info(LEDGER_TARGET, "rung route committed")
+        .with("verb", LEDGER_V6_VERB)
+        .with("stage", ROUTE_STAGE)
+        .with("rung", rung)
+        .with("decisions", summary.decisions)
+        .with("candidates", summary.candidate_count)
+        .with("nifty_candidates", summary.nifty_candidates)
+        .with("banknifty_candidates", summary.banknifty_candidates)
+        .with("nifty_terminal", summary.nifty_terminal)
+        .with("banknifty_terminal", summary.banknifty_terminal)
+        .with("admission", admission)
+}
 
 /// One rung's six stage roots plus its Execution V4 root.
 struct RungRoots {
@@ -161,6 +250,11 @@ pub(crate) fn ledger_v6(request: &LedgerAllRequest<'_>) -> String {
         request.support_ppm,
         request.max_points
     );
+    // BEFORE THE FIRST REFUSAL, for the reason `ledger_all` states at its own
+    // call site: a run that refuses on its vendor word never reaches a rung,
+    // and a page with no events at all cannot distinguish that from a run
+    // nobody started.
+    crate::note(&run_started_event(LEDGER_V6_VERB, request));
 
     match run_route(request, &mut out) {
         Ok(rungs) => {
@@ -169,9 +263,11 @@ pub(crate) fn ledger_v6(request: &LedgerAllRequest<'_>) -> String {
                 "\nCOMMITTED. {rungs} of {} rungs wrote a complete Execution V4 authority.",
                 LEDGER_RUNGS.len()
             );
+            crate::note(&run_finished_event(LEDGER_V6_VERB, rungs));
         }
         Err(why) => {
             let _ = writeln!(out, "\nrefused: {why}");
+            crate::note(&run_refused_event(LEDGER_V6_VERB, &why));
         }
     }
     out
@@ -188,8 +284,8 @@ fn run_route(request: &LedgerAllRequest<'_>, out: &mut String) -> Result<usize, 
     let vendor = crate::parse_vendor(request.vendor)?;
     let source_root = crate::store_root().map_err(|why| format!("stored source root: {why}"))?;
 
-    let sweepers = build_sweepers(&source_root, vendor, request)?;
-    let (admission, active_gates) = admission_policy(request)?;
+    let sweepers = build_sweepers(&source_root, vendor, request, LEDGER_V6_VERB)?;
+    let (admission, active_gates) = admission_policy(request, LEDGER_V6_VERB)?;
     render_gate_census(out, &active_gates);
 
     let long_exit = exit_policy(runner::excursion::Side::Long)?;
@@ -198,8 +294,11 @@ fn run_route(request: &LedgerAllRequest<'_>, out: &mut String) -> Result<usize, 
     let bounds = candidate_bounds()?;
 
     let mut committed = 0_usize;
-    for (rung, sweeper) in LEDGER_RUNGS.into_iter().zip(sweepers.iter()) {
-        let roots = RungRoots::create(request.root, rung)?;
+    for (index, (rung, sweeper)) in LEDGER_RUNGS.into_iter().zip(sweepers.iter()).enumerate() {
+        crate::note(&rung_started_event(rung, index));
+        let roots = RungRoots::create(request.root, rung).inspect_err(|why| {
+            crate::note(&rung_refused_event(LEDGER_V6_VERB, ROUTE_STAGE, rung, why));
+        })?;
 
         // PHASE ONE, PER FAMILY. Identical to what `ledger-all` runs, and
         // deliberately so: the candidate ledger is keyed by universe identity
@@ -228,7 +327,15 @@ fn run_route(request: &LedgerAllRequest<'_>, out: &mut String) -> Result<usize, 
                     bounds,
                 },
             )
-            .map_err(|why| format!("v6 {rung} {underlying} refused: {why}"))?;
+            .map_err(|why| {
+                let refusal = format!("v6 {rung} {underlying} refused: {why}");
+                crate::note(&family_refused_event(rung, underlying, &refusal));
+                refusal
+            })?;
+            // ONE EVENT PER FAMILY PER RUNG -- sixteen for the run, and never
+            // one per candidate. The sweep that just finished evaluated
+            // millions of (bar, mask) pairs and logged none of them.
+            crate::note(&family_committed_event(rung, underlying));
             families.push(committed_family);
         }
         let [nifty, banknifty]: [_; 2] = families
@@ -240,7 +347,16 @@ fn run_route(request: &LedgerAllRequest<'_>, out: &mut String) -> Result<usize, 
             banknifty,
             &route_for(rung, &roots, &admission)?,
         )
-        .map_err(|why| format!("v6 {rung} route refused: {why}"))?;
+        .map_err(|why| {
+            let refusal = format!("v6 {rung} route refused: {why}");
+            crate::note(&rung_refused_event(
+                LEDGER_V6_VERB,
+                ROUTE_STAGE,
+                rung,
+                &refusal,
+            ));
+            refusal
+        })?;
 
         committed = committed.saturating_add(1);
         if committed == 1 {
@@ -251,6 +367,11 @@ fn run_route(request: &LedgerAllRequest<'_>, out: &mut String) -> Result<usize, 
             );
         }
         let (_execution, summary) = committed_route;
+        // HOISTED SO IT IS COMPUTED ONCE AND USED TWICE -- the terminal row
+        // below and the event beneath it name the same block. A second
+        // `short_id` call solely to fill a log field would be the value
+        // computed only to be logged that this file refuses.
+        let admission_short = short_id(&summary.admission_block);
         let _ = writeln!(
             out,
             "  {:<6}  {:>9}  {:>7}  {:>9}  {:>9}  {:>4}/{:<4}  {:>9}\n         \
@@ -275,12 +396,13 @@ fn run_route(request: &LedgerAllRequest<'_>, out: &mut String) -> Result<usize, 
             out,
             "         admission {}  statistics {}  ordered {}\n         \
              universes  NIFTY {}  BANKNIFTY {}",
-            short_id(&summary.admission_block),
+            admission_short,
             short_id(&summary.statistics_authority),
             short_id(&summary.ordered_candidates),
             short_id(&summary.nifty_universe),
             short_id(&summary.banknifty_universe),
         );
+        crate::note(&route_committed_event(rung, &summary, &admission_short));
     }
     Ok(committed)
 }
@@ -421,7 +543,179 @@ fn execution_v4_bounds(rung: &str) -> Result<ExecutionV4Bounds, String> {
               test that cannot panic cannot fail."
 )]
 mod tests {
-    use super::{ROUTE_FAMILIES, ROUTE_STAGES, RungRoots, execution_v4_bounds, lineage_bounds};
+    use super::{
+        LEDGER_V6_VERB, ROUTE_FAMILIES, ROUTE_STAGES, RungRoots, execution_v4_bounds,
+        lineage_bounds,
+    };
+    use crate::ledger_all::tests::{counts, landed, mark, says};
+
+    /// A summary with every count distinct, so a field crossed with another is
+    /// a failure rather than a coincidence.
+    fn sample_summary() -> crate::step3_orchestrator::StoredPopulationV6SummaryV1 {
+        crate::step3_orchestrator::StoredPopulationV6SummaryV1 {
+            draws: 1_000,
+            seed: 1,
+            block_length: 2,
+            candidate_count: 512,
+            nifty_terminal: "Admitted",
+            banknifty_terminal: "Extinct",
+            nifty_candidates: 500,
+            banknifty_candidates: 12,
+            decisions: 37,
+            admission_block: [0xab; 32],
+            statistics_authority: [0xcd; 32],
+            ordered_candidates: [0xef; 32],
+            nifty_universe: [0x01; 32],
+            banknifty_universe: [0x02; 32],
+        }
+    }
+
+    /// Every V6 boundary names its verb, its rung and stays inside the ceiling.
+    ///
+    /// The rung is the field this route exists to carry: `ledger-all` can only
+    /// report per stage because its successors walk the eight rungs internally,
+    /// and this verb drives its own loop. An event here without a `rung` would
+    /// throw away the only thing the finer granularity bought.
+    #[test]
+    fn every_v6_boundary_names_its_rung_and_stays_inside_the_field_ceiling() {
+        let summary = sample_summary();
+        let events = [
+            super::rung_started_event("5min", 3),
+            super::family_committed_event("5min", "NIFTY"),
+            super::route_committed_event("5min", &summary, "abababababababab"),
+        ];
+        for event in &events {
+            assert_eq!(event.target(), "cli.ledger", "{}", event.message());
+            assert_eq!(event.level(), telemetry::Level::Info, "{}", event.message());
+            assert_eq!(
+                event.dropped_fields(),
+                0,
+                "{} outgrew the field ceiling",
+                event.message()
+            );
+            assert!(event.fields().len() <= telemetry::MAX_FIELDS);
+            for (name, value) in [
+                ("verb", telemetry::Value::Str(LEDGER_V6_VERB)),
+                ("rung", telemetry::Value::Str("5min")),
+            ] {
+                assert!(
+                    event
+                        .fields()
+                        .iter()
+                        .any(|&(field, carried)| field == name && carried == value),
+                    "{} omitted {name}",
+                    event.message()
+                );
+            }
+        }
+
+        // THE ROUTE'S OWN NUMBERS, every one of them read from the summary the
+        // route already returned and the report already prints.
+        assert_eq!(
+            super::route_committed_event("5min", &summary, "abababababababab").fields(),
+            [
+                ("verb", telemetry::Value::Str("ledger-v6")),
+                ("stage", telemetry::Value::Str("population-v6-route")),
+                ("rung", telemetry::Value::Str("5min")),
+                ("decisions", telemetry::Value::Uint(37)),
+                ("candidates", telemetry::Value::Uint(512)),
+                ("nifty_candidates", telemetry::Value::Uint(500)),
+                ("banknifty_candidates", telemetry::Value::Uint(12)),
+                ("nifty_terminal", telemetry::Value::Str("Admitted")),
+                ("banknifty_terminal", telemetry::Value::Str("Extinct")),
+                ("admission", telemetry::Value::Str("abababababababab")),
+            ]
+        );
+        assert_eq!(
+            super::rung_started_event("60min", 7).fields(),
+            [
+                ("verb", telemetry::Value::Str("ledger-v6")),
+                ("stage", telemetry::Value::Str("population-v6-route")),
+                ("rung", telemetry::Value::Str("60min")),
+                ("rung_index", telemetry::Value::Uint(7)),
+                ("rungs", telemetry::Value::Uint(8)),
+            ]
+        );
+    }
+
+    /// A refused family is a warning that names the family and the reason.
+    ///
+    /// The family is a field of its own because the refusal an operator meets
+    /// today is BANKNIFTY having no bars at any feed, and a log they can filter
+    /// by `underlying` answers "is it always the same family" without reading
+    /// prose.
+    #[test]
+    fn a_refused_family_is_a_warning_that_names_the_family() {
+        let why = "v6 1min BANKNIFTY refused: no stored bars";
+        let event = super::family_refused_event("1min", "BANKNIFTY", why);
+        assert_eq!(event.target(), "cli.ledger");
+        assert_eq!(event.level(), telemetry::Level::Warn);
+        assert_eq!(event.dropped_fields(), 0);
+        assert_eq!(
+            event.fields(),
+            [
+                ("verb", telemetry::Value::Str("ledger-v6")),
+                ("stage", telemetry::Value::Str("candidates")),
+                ("rung", telemetry::Value::Str("1min")),
+                ("underlying", telemetry::Value::Str("BANKNIFTY")),
+                ("why", telemetry::Value::Str(why)),
+            ]
+        );
+    }
+
+    /// The `ledger-v6` run boundaries reach a file, driven through the verb.
+    ///
+    /// Drives the real verb, for the reason `ledger_all`'s own file-landing
+    /// test states: a hand-built event on a sink proves the sink and says
+    /// nothing about the call site. An unknown feed refuses inside
+    /// `parse_vendor`, which `run_route` calls first, so this exercises the
+    /// opening and closing boundaries without opening the operator's store.
+    ///
+    /// # What this cannot reach, said rather than implied
+    ///
+    /// The per-rung, per-family and per-route events are emitted only after a
+    /// real span has loaded, so no test in this binary drives them: their
+    /// fields are proven above and their reach is not. Making them reachable
+    /// needs a store fixture on this path, which does not exist today.
+    /// `CLAUDE.md` §3 rule 6.
+    #[test]
+    fn the_ledger_v6_run_boundaries_reach_the_log_file() {
+        let request = crate::ledger_all::LedgerAllRequest {
+            vendor: "no-such-feed",
+            from: (2024, 1),
+            to: (2024, 12),
+            support_ppm: 200_000,
+            max_points: 50,
+            root: std::path::Path::new("/nonexistent"),
+        };
+        let from = mark();
+        let report = super::ledger_v6(&request);
+
+        assert!(
+            report.contains("refused:"),
+            "an unknown feed must refuse rather than sweep: {report}"
+        );
+        let started = landed(from, "ledger run started");
+        assert!(
+            started
+                .iter()
+                .any(|record| says(record, "verb", "ledger-v6")
+                    && says(record, "feed", "no-such-feed")
+                    && counts(record, "rungs", 8)),
+            "the opening boundary must reach the file under this verb's own \
+             name, got {started:?}"
+        );
+        let refused = landed(from, "ledger run refused");
+        assert!(
+            refused
+                .iter()
+                .any(|record| record.level == telemetry::Level::Warn
+                    && says(record, "verb", "ledger-v6")
+                    && says(record, "why", "is not a feed this build knows")),
+            "the refusal must reach the file as a warning naming its reason, \
+             got {refused:?}"
+        );
+    }
 
     /// The family order is the one every V6 successor demands.
     ///

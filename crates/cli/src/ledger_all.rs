@@ -352,11 +352,16 @@ impl GateResolver {
 /// refuses with the whole worksheet rather than the first name the runner
 /// happened to check.
 ///
+/// `verb` is stamped on the two events this resolution emits -- one per run,
+/// never one per gate -- so that a log filtered to `cli.ledger` says which verb
+/// asked and whether the thirty-nine were answered.
+///
 /// # Errors
 ///
 /// Names every unresolved gate and the knob that would answer it.
 pub(crate) fn admission_policy(
     request: &LedgerAllRequest<'_>,
+    verb: &str,
 ) -> Result<(AdmissionPolicyV1, Vec<ActiveGate>), String> {
     let max_loss_paisa = request
         .max_points
@@ -424,10 +429,19 @@ pub(crate) fn admission_policy(
     };
 
     if !r.missing.is_empty() {
+        // ONE EVENT FOR THE WHOLE WORKSHEET, not one per unanswered gate. The
+        // resolution above walks thirty-nine gates; logging inside that walk
+        // would be the per-member shape gate 17 exists to refuse, and the count
+        // is the fact an operator acts on.
+        crate::note(&gates_refused_event(verb, r.missing.len()));
         return Err(unset_gate_worksheet(&r));
     }
-    let policy = AdmissionPolicyV1::new(draft)
-        .map_err(|why| format!("admission policy refused: {why:?}"))?;
+    let policy = AdmissionPolicyV1::new(draft).map_err(|why| {
+        let refusal = format!("admission policy refused: {why:?}");
+        crate::note(&stage_refused_event(verb, "admission-policy", &refusal));
+        refusal
+    })?;
+    crate::note(&gates_resolved_event(verb, r.active.len()));
     Ok((policy, r.active))
 }
 
@@ -541,6 +555,194 @@ pub(crate) fn render_gate_census(out: &mut String, active: &[ActiveGate]) {
     }
 }
 
+/// The target every `ledger-all` and `ledger-v6` event carries.
+///
+/// # Why one target, and why it begins with `cli.`
+///
+/// `/backtest/run.json` filters the tail on the `cli` prefix and `/logs` walks
+/// the CLI's own directory, so a target under `cli.` reaches both surfaces with
+/// no change on the server side. It is not `cli.audit`: that target already
+/// means `range-all`'s rung lifecycle, and a second meaning on one target would
+/// hand an operator's filter two unrelated runs interleaved.
+pub(crate) const LEDGER_TARGET: &str = "cli.ledger";
+
+/// The verb word `ledger-all` stamps on every event it emits.
+pub(crate) const LEDGER_ALL_VERB: &str = "ledger-all";
+
+/// The Population V5 stage, as the `stage` field spells it.
+const POPULATION_STAGE: &str = "population-v5";
+/// The Execution V3 stage, as the `stage` field spells it.
+const EXECUTION_STAGE: &str = "execution-v3";
+/// The Selection V5 stage, as the `stage` field spells it.
+const SELECTION_STAGE: &str = "selection-v5";
+/// The support-sizing step, as [`rung_refused_event`]'s `stage` field spells it.
+const SIZING_STAGE: &str = "support-sizing";
+
+// WHERE THESE EVENTS ARE ALLOWED TO BE, AND WHY THIS IS THE AFFORDABLE PLACE.
+//
+// CI gate 17 forbids `telemetry::` outright in `vocab`, `engine`, `indicators`
+// and `runner`, because those hold the loops: the sweep evaluates
+// `(bits & mask) == mask` per (bar, combination) and the exit grid prices per
+// cell. Its rule is not "each call is cheap" -- a filtered emit genuinely is --
+// it is "the innermost loop calls nothing at all", because a billion O(1) calls
+// is still a billion calls.
+//
+// `cli` is not on that list and must never be added to one, and the reason is
+// structural rather than a favour: **no loop in this file iterates a bar, a
+// candidate or a grid cell.** Every loop here is over a FIXED, CHARTER-SIZED
+// list -- eight rungs, two families, thirty-nine gates -- so the event count of
+// a whole `ledger-all` run is seventeen and of a whole `ledger-v6` run is
+// forty-three, whether the span is one month or eighty. That is the
+// "per k-level, per instrument, per run" granularity gate 17's own comment
+// prescribes as affordable, and it is bounded by constants in this file rather
+// than by the operator's data.
+//
+// WHAT THIS DELIBERATELY CANNOT SEE, stated rather than left for a reader to
+// discover. `commit_all_rung_stored_population_v5`, its Execution V3 successor
+// and its Selection V5 successor each walk all eight rungs INTERNALLY and
+// return one committed value. So `ledger-all` reports three stage boundaries,
+// not twenty-four: a per-rung event inside those stages would have to be
+// emitted from `all_rung_population_v5.rs`, which is not this file. `ledger-v6`
+// drives its own rung loop and therefore does report per rung and per family.
+// `CLAUDE.md` §3 rule 6: the coarser half is named, not implied.
+
+/// The event that opens a run, before anything is loaded or created.
+///
+/// Carries the whole request because a run is found in a log by its span and
+/// its feed, and an operator reading `/logs` has no other handle on it.
+pub(crate) fn run_started_event<'a>(
+    verb: &'a str,
+    request: &'a LedgerAllRequest<'a>,
+) -> telemetry::Event<'a> {
+    telemetry::Event::info(LEDGER_TARGET, "ledger run started")
+        .with("verb", verb)
+        .with("feed", request.vendor)
+        .with("from_year", u64::from(request.from.0))
+        .with("from_month", u64::from(request.from.1))
+        .with("to_year", u64::from(request.to.0))
+        .with("to_month", u64::from(request.to.1))
+        .with("support_ppm", request.support_ppm)
+        .with("max_points", request.max_points)
+        .with("rungs", LEDGER_RUNGS.len())
+}
+
+/// The event that closes a run that committed.
+///
+/// `written` is the count the report already prints -- blocks written rather
+/// than byte-identically reused -- so a rerun that is idempotent under §3 rule 5
+/// is visible in the log as a zero without anybody opening the ledger.
+pub(crate) fn run_finished_event(verb: &str, written: usize) -> telemetry::Event<'_> {
+    telemetry::Event::info(LEDGER_TARGET, "ledger run finished")
+        .with("verb", verb)
+        .with("written_rungs", written)
+        .with("rungs", LEDGER_RUNGS.len())
+}
+
+/// The event that closes a run that refused, carrying the reason.
+///
+/// A `Warn` and not an `Info`, so that the default `Info` floor still keeps it
+/// and a filter for trouble finds it. `CLAUDE.md` §4 bans a failure that is
+/// invisible, and a verb whose only refusal channel is a terminal nobody
+/// attached is exactly that.
+pub(crate) fn run_refused_event<'a>(verb: &'a str, why: &'a str) -> telemetry::Event<'a> {
+    telemetry::Event::warn(LEDGER_TARGET, "ledger run refused")
+        .with("verb", verb)
+        .with("why", why)
+}
+
+/// One stage of the chain opening.
+pub(crate) fn stage_started_event<'a>(verb: &'a str, stage: &'a str) -> telemetry::Event<'a> {
+    telemetry::Event::info(LEDGER_TARGET, "stage started")
+        .with("verb", verb)
+        .with("stage", stage)
+        .with("rungs", LEDGER_RUNGS.len())
+}
+
+/// One stage of the chain closing, with the blocks it actually wrote.
+pub(crate) fn stage_finished_event<'a>(
+    verb: &'a str,
+    stage: &'a str,
+    written: usize,
+) -> telemetry::Event<'a> {
+    telemetry::Event::info(LEDGER_TARGET, "stage finished")
+        .with("verb", verb)
+        .with("stage", stage)
+        .with("written_rungs", written)
+        .with("rungs", LEDGER_RUNGS.len())
+}
+
+/// One stage refusing, named, so the log says WHICH stage stopped the run.
+pub(crate) fn stage_refused_event<'a>(
+    verb: &'a str,
+    stage: &'a str,
+    why: &'a str,
+) -> telemetry::Event<'a> {
+    telemetry::Event::warn(LEDGER_TARGET, "stage refused")
+        .with("verb", verb)
+        .with("stage", stage)
+        .with("why", why)
+}
+
+/// One rung's support threshold, resolved against that rung's own bar count.
+///
+/// Every number here was computed to BUILD the sweeper and is read rather than
+/// derived for the log: `bars` is the span this rung loaded, `min_hits` is what
+/// [`crate::min_hits_for`] returned from it, and `support_ppm` is the
+/// operator's own argument. An operator watching a long run learns from this
+/// line both that the rung's span loaded and what threshold it will be swept at
+/// -- the two facts that decide whether the answer will be empty.
+pub(crate) fn rung_sized_event<'a>(
+    verb: &'a str,
+    rung: &'a str,
+    bars: usize,
+    min_hits: u64,
+    support_ppm: u64,
+) -> telemetry::Event<'a> {
+    telemetry::Event::info(LEDGER_TARGET, "rung support sized")
+        .with("verb", verb)
+        .with("stage", SIZING_STAGE)
+        .with("rung", rung)
+        .with("bars", bars)
+        .with("min_hits", min_hits)
+        .with("support_ppm", support_ppm)
+}
+
+/// One rung refusing at a named step, carrying the reason it gave.
+pub(crate) fn rung_refused_event<'a>(
+    verb: &'a str,
+    stage: &'a str,
+    rung: &'a str,
+    why: &'a str,
+) -> telemetry::Event<'a> {
+    telemetry::Event::warn(LEDGER_TARGET, "rung refused")
+        .with("verb", verb)
+        .with("stage", stage)
+        .with("rung", rung)
+        .with("why", why)
+}
+
+/// Every admission gate answered, and the run may proceed.
+pub(crate) fn gates_resolved_event(verb: &str, resolved: usize) -> telemetry::Event<'_> {
+    telemetry::Event::info(LEDGER_TARGET, "admission gates resolved")
+        .with("verb", verb)
+        .with("resolved", resolved)
+        .with("gates", ALL_GATES.len())
+}
+
+/// Gates with no value, counted, so the refusal is in the log and not only in
+/// the worksheet the terminal printed.
+///
+/// The whole worksheet is deliberately NOT a field: it is thirty-seven lines
+/// and would be cut at [`telemetry::MAX_STR_VALUE_BYTES`], leaving a truncated
+/// list that looks complete. The count is exact and the terminal report carries
+/// the names.
+pub(crate) fn gates_refused_event(verb: &str, missing: usize) -> telemetry::Event<'_> {
+    telemetry::Event::warn(LEDGER_TARGET, "admission gates unset")
+        .with("verb", verb)
+        .with("missing", missing)
+        .with("gates", ALL_GATES.len())
+}
+
 /// Runs the durable all-rung Step-3 chain and returns the operator's report.
 ///
 /// # What it writes
@@ -571,6 +773,11 @@ pub(crate) fn ledger_all(request: &LedgerAllRequest<'_>) -> String {
         request.support_ppm,
         request.max_points
     );
+    // THE FIRST EVENT IS BEFORE THE FIRST REFUSAL, ON PURPOSE. A run that
+    // refuses on its vendor word never reaches a stage, and an operator whose
+    // page showed nothing at all could not tell that from a run that never
+    // started. One event here means every run appears in the log.
+    crate::note(&run_started_event(LEDGER_ALL_VERB, request));
 
     match run_chain(request, &mut out) {
         Ok(written) => {
@@ -580,9 +787,11 @@ pub(crate) fn ledger_all(request: &LedgerAllRequest<'_>) -> String {
                  byte-identically reused.",
                 LEDGER_RUNGS.len()
             );
+            crate::note(&run_finished_event(LEDGER_ALL_VERB, written));
         }
         Err(why) => {
             let _ = writeln!(out, "\nrefused: {why}");
+            crate::note(&run_refused_event(LEDGER_ALL_VERB, &why));
         }
     }
     out
@@ -601,13 +810,14 @@ fn run_chain(request: &LedgerAllRequest<'_>, out: &mut String) -> Result<usize, 
     let source_root = crate::store_root().map_err(|why| format!("stored source root: {why}"))?;
     let tree = LedgerTree::create(request.root)?;
 
-    let sweepers = build_sweepers(&source_root, vendor, request)?;
-    let (admission, active_gates) = admission_policy(request)?;
+    let sweepers = build_sweepers(&source_root, vendor, request, LEDGER_ALL_VERB)?;
+    let (admission, active_gates) = admission_policy(request, LEDGER_ALL_VERB)?;
     render_gate_census(out, &active_gates);
 
     let ranking = RankingPolicyV1::new(Weights::equal())
         .map_err(|why| format!("ranking policy refused: {why:?}"))?;
 
+    crate::note(&stage_started_event(LEDGER_ALL_VERB, POPULATION_STAGE));
     let population = commit_population(&Stage1 {
         source_root: source_root.as_path(),
         tree: &tree,
@@ -615,16 +825,42 @@ fn run_chain(request: &LedgerAllRequest<'_>, out: &mut String) -> Result<usize, 
         request,
         sweepers: &sweepers,
         admission: &admission,
+    })
+    .inspect_err(|why| {
+        crate::note(&stage_refused_event(LEDGER_ALL_VERB, POPULATION_STAGE, why));
     })?;
     // WRITTEN VERSUS REUSED, AT EVERY STAGE AND NOT JUST THE LAST. A rerun over
     // an unchanged span should write nothing at all -- that is what §3 rule 5's
     // idempotence means on disk -- and reporting only the Selection count hid
     // the two stages where a spurious rewrite would actually show up first.
     let population_written = population.written_rung_count();
-    let execution = commit_execution(population, &tree)?;
+    crate::note(&stage_finished_event(
+        LEDGER_ALL_VERB,
+        POPULATION_STAGE,
+        population_written,
+    ));
+
+    crate::note(&stage_started_event(LEDGER_ALL_VERB, EXECUTION_STAGE));
+    let execution = commit_execution(population, &tree).inspect_err(|why| {
+        crate::note(&stage_refused_event(LEDGER_ALL_VERB, EXECUTION_STAGE, why));
+    })?;
     let execution_written = execution.written_rung_count();
-    let selection = commit_selection(execution, &tree, ranking)?;
+    crate::note(&stage_finished_event(
+        LEDGER_ALL_VERB,
+        EXECUTION_STAGE,
+        execution_written,
+    ));
+
+    crate::note(&stage_started_event(LEDGER_ALL_VERB, SELECTION_STAGE));
+    let selection = commit_selection(execution, &tree, ranking).inspect_err(|why| {
+        crate::note(&stage_refused_event(LEDGER_ALL_VERB, SELECTION_STAGE, why));
+    })?;
     let selection_written = selection.written_rung_count();
+    crate::note(&stage_finished_event(
+        LEDGER_ALL_VERB,
+        SELECTION_STAGE,
+        selection_written,
+    ));
     let _ = writeln!(
         out,
         "\nBLOCKS WRITTEN RATHER THAN BYTE-IDENTICALLY REUSED, of {} rungs each\n  \
@@ -1027,6 +1263,14 @@ fn execution_bounds() -> Result<ExecutionV3Bounds, String> {
 /// operator's support in ppm and resolving it against each rung's own bars asks
 /// the same question eight times.
 ///
+/// # What it logs, and why the loop may
+///
+/// One event per rung, eight for the whole run, each at the moment that rung's
+/// span has loaded and its threshold is known. The loop is over
+/// [`LEDGER_RUNGS`] -- a fixed eight -- and not over the bars it just counted,
+/// so the event count does not move with the operator's span. Gate 17's rule is
+/// about the loop over bars, and there is none here.
+///
 /// # Errors
 ///
 /// Refuses if a rung's span cannot be loaded or its ladder rejected. A rung
@@ -1036,6 +1280,7 @@ pub(crate) fn build_sweepers(
     root: &Path,
     vendor: Vendor,
     request: &LedgerAllRequest<'_>,
+    verb: &str,
 ) -> Result<[Sweeper; 8], String> {
     let mut sweepers = Vec::with_capacity(LEDGER_RUNGS.len());
     for rung in LEDGER_RUNGS {
@@ -1047,10 +1292,23 @@ pub(crate) fn build_sweepers(
         let span = crate::stored::load_span(root, vendor, "NIFTY", rung, request.from, request.to)
             .map_err(|why| {
                 let first = why.lines().next().unwrap_or("").to_owned();
-                format!("{rung} span refused: {first}")
+                let refusal = format!("{rung} span refused: {first}");
+                crate::note(&rung_refused_event(verb, SIZING_STAGE, rung, &refusal));
+                refusal
             })?;
         let min_hits = crate::min_hits_for(span.bars.len(), request.support_ppm);
-        let ladder = crate::ladder_for(min_hits).map_err(|why| format!("{rung} ladder: {why}"))?;
+        let ladder = crate::ladder_for(min_hits).map_err(|why| {
+            let refusal = format!("{rung} ladder: {why}");
+            crate::note(&rung_refused_event(verb, SIZING_STAGE, rung, &refusal));
+            refusal
+        })?;
+        crate::note(&rung_sized_event(
+            verb,
+            rung,
+            span.bars.len(),
+            min_hits,
+            request.support_ppm,
+        ));
         sweepers.push(Sweeper::new(ladder));
     }
     // AN ARRAY, so the caller destructures instead of indexing. Eight named
@@ -1070,8 +1328,331 @@ pub(crate) fn build_sweepers(
     reason = "the same exception every test module in this workspace takes: a \
               test that cannot panic cannot fail."
 )]
-mod tests {
-    use super::{ALL_GATES, LEDGER_RUNGS, LedgerAllRequest, LedgerTree, PAISA_PER_POINT};
+pub(crate) mod tests {
+    use super::{
+        ALL_GATES, LEDGER_ALL_VERB, LEDGER_RUNGS, LEDGER_TARGET, LedgerAllRequest, LedgerTree,
+        PAISA_PER_POINT,
+    };
+
+    /// The one telemetry sink this crate's test binary installs.
+    ///
+    /// # Why install-or-adopt, and why it is shared with `ledger_v6`
+    ///
+    /// `telemetry::install` refuses a second call by design -- two sinks on one
+    /// directory would each keep their own byte count and each would roll the
+    /// other's file away -- so a test binary gets exactly ONE sink and every
+    /// test that wants to observe a production emit has to assert against that
+    /// one. This is that single point, and `crate::ledger_v6`'s tests call it
+    /// rather than opening a second: whichever test arrives first creates it
+    /// and the rest read it back.
+    ///
+    /// The directory is cleared once, under a [`std::sync::Once`], and never
+    /// per call: a second thread clearing it after the first had opened its
+    /// file would unlink the inode out from under a live descriptor, and every
+    /// record written afterwards would go somewhere no reader can find.
+    ///
+    /// The floor is left at the default `Info`. Every event these two verbs
+    /// emit is `Info` or `Warn`, so no assertion here is secretly an assertion
+    /// about the floor.
+    pub(crate) fn sink() -> &'static telemetry::Sink {
+        static PREPARED: std::sync::Once = std::sync::Once::new();
+        let dir =
+            std::env::temp_dir().join(format!("brutex-cli-ledger-events-{}", std::process::id()));
+        PREPARED.call_once(|| {
+            let _ignored = std::fs::remove_dir_all(&dir);
+        });
+        match telemetry::install(&telemetry::Config::new(&dir)) {
+            Ok(installed) => installed,
+            Err(_refused) => telemetry::global()
+                .expect("install either created the sink or named the one already there"),
+        }
+    }
+
+    /// The sequence number the next record written to [`sink`] will carry.
+    ///
+    /// Taken immediately before a production call, so a record found afterwards
+    /// is one THIS call wrote rather than one a concurrent test left behind.
+    pub(crate) fn mark() -> u64 {
+        sink().health().next_seq
+    }
+
+    /// Every `cli.ledger` record from sequence `from` onward carrying `message`.
+    ///
+    /// Read back through [`telemetry::tail`] -- the shipped reader `/logs`
+    /// renders from -- rather than by parsing the file here, so a test cannot
+    /// pass against bytes the real reader would refuse. Filtered on `seq` and
+    /// not on time, for the reason `api::emitted` measured: the clock is read
+    /// before the lock is taken, so two parallel tests can be ordered one way
+    /// by their timestamps and the other way in the file.
+    pub(crate) fn landed(from: u64, message: &str) -> Vec<telemetry::Record> {
+        let sink = sink();
+        let dir = sink
+            .path()
+            .parent()
+            .expect("the sink writes its file inside a directory")
+            .to_path_buf();
+        let query = telemetry::Query::last(telemetry::MAX_LIMIT).from_target(LEDGER_TARGET);
+        telemetry::tail(&dir, sink.keep_files(), &query)
+            .records
+            .into_iter()
+            .filter(|record| record.seq >= from && record.message == message)
+            .collect()
+    }
+
+    /// Whether a string field on a landed record carries `needle`.
+    ///
+    /// A `contains` rather than an equality because the sink cuts a string
+    /// value at [`telemetry::MAX_STR_VALUE_BYTES`] and says so; every needle
+    /// used here sits in the leading component, which no cut can remove.
+    pub(crate) fn says(record: &telemetry::Record, key: &str, needle: &str) -> bool {
+        record
+            .field(key)
+            .and_then(telemetry::OwnedValue::as_str)
+            .is_some_and(|got| got.contains(needle))
+    }
+
+    /// Whether an integer field on a landed record carries exactly `want`.
+    pub(crate) fn counts(record: &telemetry::Record, key: &str, want: u64) -> bool {
+        record.field(key).and_then(telemetry::OwnedValue::as_u64) == Some(want)
+    }
+
+    /// A request that refuses before it can touch the store.
+    ///
+    /// `run_chain` and `run_route` both parse the vendor word FIRST, so an
+    /// unknown feed refuses before `store_root`, before any directory is
+    /// created and before a single bar is read. That is what makes the two
+    /// run-boundary tests below drivable at all: they exercise the real verb
+    /// end to end and never open the operator's store.
+    fn unreachable_feed_request() -> LedgerAllRequest<'static> {
+        LedgerAllRequest {
+            vendor: "no-such-feed",
+            from: (2024, 1),
+            to: (2024, 12),
+            support_ppm: 200_000,
+            max_points: 50,
+            root: std::path::Path::new("/nonexistent"),
+        }
+    }
+
+    /// Every boundary event names its verb, its target and stays whole.
+    ///
+    /// `dropped_fields` is asserted rather than assumed: `telemetry::Event`
+    /// COUNTS a thirteenth field instead of keeping it, so an event that grew
+    /// past the ceiling would still emit and would silently be missing the
+    /// field an operator filters on.
+    #[test]
+    fn every_ledger_boundary_is_targeted_typed_and_inside_the_field_ceiling() {
+        let request = LedgerAllRequest {
+            vendor: "dhan",
+            from: (2024, 1),
+            to: (2024, 12),
+            support_ppm: 200_000,
+            max_points: 50,
+            root: std::path::Path::new("/nonexistent"),
+        };
+        let events = [
+            super::run_started_event(LEDGER_ALL_VERB, &request),
+            super::run_finished_event(LEDGER_ALL_VERB, 8),
+            super::stage_started_event(LEDGER_ALL_VERB, super::POPULATION_STAGE),
+            super::stage_finished_event(LEDGER_ALL_VERB, super::EXECUTION_STAGE, 3),
+            super::rung_sized_event(LEDGER_ALL_VERB, "15min", 41_000, 8_200, 200_000),
+            super::gates_resolved_event(LEDGER_ALL_VERB, ALL_GATES.len()),
+        ];
+        for event in &events {
+            assert_eq!(event.target(), LEDGER_TARGET, "{}", event.message());
+            assert_eq!(
+                event.level(),
+                telemetry::Level::Info,
+                "{} is progress, not trouble",
+                event.message()
+            );
+            assert_eq!(
+                event.dropped_fields(),
+                0,
+                "{} outgrew the field ceiling",
+                event.message()
+            );
+            assert!(event.fields().len() <= telemetry::MAX_FIELDS);
+            assert!(
+                event.fields().iter().any(|&(name, value)| name == "verb"
+                    && value == telemetry::Value::Str(LEDGER_ALL_VERB)),
+                "{} must say which verb emitted it",
+                event.message()
+            );
+        }
+
+        // THE WHOLE SPAN, FIELD FOR FIELD. A run is found in a log by its feed
+        // and its months; an opening event missing one of them is an event an
+        // operator cannot correlate to the run they are watching.
+        assert_eq!(
+            super::run_started_event(LEDGER_ALL_VERB, &request).fields(),
+            [
+                ("verb", telemetry::Value::Str("ledger-all")),
+                ("feed", telemetry::Value::Str("dhan")),
+                ("from_year", telemetry::Value::Uint(2024)),
+                ("from_month", telemetry::Value::Uint(1)),
+                ("to_year", telemetry::Value::Uint(2024)),
+                ("to_month", telemetry::Value::Uint(12)),
+                ("support_ppm", telemetry::Value::Uint(200_000)),
+                ("max_points", telemetry::Value::Uint(50)),
+                ("rungs", telemetry::Value::Uint(8)),
+            ]
+        );
+        // AND THE ONE AN OPERATOR WATCHES DURING A LONG RUN: the rung, the bars
+        // that rung actually loaded, and the threshold those bars resolved to.
+        assert_eq!(
+            super::rung_sized_event(LEDGER_ALL_VERB, "15min", 41_000, 8_200, 200_000).fields(),
+            [
+                ("verb", telemetry::Value::Str("ledger-all")),
+                ("stage", telemetry::Value::Str("support-sizing")),
+                ("rung", telemetry::Value::Str("15min")),
+                ("bars", telemetry::Value::Uint(41_000)),
+                ("min_hits", telemetry::Value::Uint(8_200)),
+                ("support_ppm", telemetry::Value::Uint(200_000)),
+            ]
+        );
+        assert_eq!(
+            super::stage_finished_event(LEDGER_ALL_VERB, super::SELECTION_STAGE, 3).fields(),
+            [
+                ("verb", telemetry::Value::Str("ledger-all")),
+                ("stage", telemetry::Value::Str("selection-v5")),
+                ("written_rungs", telemetry::Value::Uint(3)),
+                ("rungs", telemetry::Value::Uint(8)),
+            ]
+        );
+    }
+
+    /// A refusal is a warning that carries its reason, at every boundary.
+    ///
+    /// `CLAUDE.md` §4 bans a failure that is invisible. A refused stage that
+    /// emitted at `Info`, or emitted without `why`, would be in the file and
+    /// still useless: an operator filtering for trouble would not see it, and
+    /// one who did could not tell what stopped the run.
+    #[test]
+    fn every_refused_boundary_is_a_warning_that_names_its_reason() {
+        let why = "1min span refused: no stored bars for BANKNIFTY";
+        let refusals = [
+            super::run_refused_event(LEDGER_ALL_VERB, why),
+            super::stage_refused_event(LEDGER_ALL_VERB, super::POPULATION_STAGE, why),
+            super::rung_refused_event(LEDGER_ALL_VERB, super::SIZING_STAGE, "1min", why),
+        ];
+        for event in &refusals {
+            assert_eq!(event.target(), LEDGER_TARGET);
+            assert_eq!(
+                event.level(),
+                telemetry::Level::Warn,
+                "{} must survive a filter for trouble",
+                event.message()
+            );
+            assert!(
+                event
+                    .fields()
+                    .iter()
+                    .any(|&(name, value)| name == "why" && value == telemetry::Value::Str(why)),
+                "{} must carry the reason it refused",
+                event.message()
+            );
+            assert_eq!(event.dropped_fields(), 0);
+        }
+        assert_eq!(
+            super::rung_refused_event(LEDGER_ALL_VERB, super::SIZING_STAGE, "1min", why).fields(),
+            [
+                ("verb", telemetry::Value::Str("ledger-all")),
+                ("stage", telemetry::Value::Str("support-sizing")),
+                ("rung", telemetry::Value::Str("1min")),
+                ("why", telemetry::Value::Str(why)),
+            ]
+        );
+        // THE COUNT AND NOT THE WORKSHEET. Thirty-seven names would be cut at
+        // the string ceiling and would leave a truncated list looking complete.
+        let gates = super::gates_refused_event(LEDGER_ALL_VERB, 37);
+        assert_eq!(gates.level(), telemetry::Level::Warn);
+        assert_eq!(
+            gates.fields(),
+            [
+                ("verb", telemetry::Value::Str("ledger-all")),
+                ("missing", telemetry::Value::Uint(37)),
+                ("gates", telemetry::Value::Uint(39)),
+            ]
+        );
+    }
+
+    /// The `ledger-all` run boundaries reach a file, driven through the verb.
+    ///
+    /// # Why this drives `ledger_all` rather than building an event
+    ///
+    /// A hand-built event emitted onto a local sink proves the sink works and
+    /// says nothing about the call site. `telemetry::emit` answers
+    /// `NotInstalled` when nothing is installed and `crate::note` discards that
+    /// answer, so before this test the emit calls could have been deleted
+    /// wholesale and every other assertion in this file would still have
+    /// passed. This drives the real verb and reads the real file.
+    #[test]
+    fn the_ledger_all_run_boundaries_reach_the_log_file() {
+        let request = unreachable_feed_request();
+        let from = mark();
+        let report = super::ledger_all(&request);
+
+        assert!(
+            report.contains("refused:"),
+            "an unknown feed must refuse rather than sweep: {report}"
+        );
+        let started = landed(from, "ledger run started");
+        assert!(
+            started
+                .iter()
+                .any(|record| says(record, "verb", "ledger-all")
+                    && says(record, "feed", "no-such-feed")
+                    && counts(record, "support_ppm", 200_000)),
+            "the opening boundary must reach the file before the first refusal, \
+             got {started:?}"
+        );
+        let refused = landed(from, "ledger run refused");
+        assert!(
+            refused
+                .iter()
+                .any(|record| record.level == telemetry::Level::Warn
+                    && says(record, "verb", "ledger-all")
+                    && says(record, "why", "is not a feed this build knows")),
+            "the refusal must reach the file as a warning naming its reason, \
+             got {refused:?}"
+        );
+    }
+
+    /// The unset-gate refusal reaches a file, driven through the resolution.
+    ///
+    /// This is the refusal an operator meets on their first `ledger-all` run,
+    /// and until now it existed only as terminal text.
+    #[test]
+    fn the_unset_gate_refusal_reaches_the_log_file() {
+        let request = LedgerAllRequest {
+            vendor: "dhan",
+            from: (2024, 1),
+            to: (2024, 1),
+            support_ppm: 200_000,
+            max_points: 50,
+            root: std::path::Path::new("/nonexistent"),
+        };
+        let from = mark();
+        let why = super::admission_policy(&request, LEDGER_ALL_VERB)
+            .err()
+            .expect("thirty-seven gates have no value, so this cannot build a policy");
+        assert!(
+            why.contains("37 of 39 admission gates have no value"),
+            "{why}"
+        );
+
+        let records = landed(from, "admission gates unset");
+        assert!(
+            records
+                .iter()
+                .any(|record| record.level == telemetry::Level::Warn
+                    && says(record, "verb", "ledger-all")
+                    && counts(record, "missing", 37)
+                    && counts(record, "gates", 39)),
+            "the gate refusal must reach the file with its exact count, got {records:?}"
+        );
+    }
 
     /// The rung list here and the one the population chain walks are the same
     /// eight words in the same order.
@@ -1119,7 +1700,7 @@ mod tests {
             max_points: 50,
             root: std::path::Path::new("/nonexistent"),
         };
-        let why = super::admission_policy(&request)
+        let why = super::admission_policy(&request, LEDGER_ALL_VERB)
             .err()
             .expect("thirty-seven gates have no value, so this cannot build a policy");
 
