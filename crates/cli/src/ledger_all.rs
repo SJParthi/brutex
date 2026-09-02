@@ -124,7 +124,7 @@ const PAISA_PER_POINT: u64 = 100;
 /// The provenance string is not decoration. `CLAUDE.md` §3 rule 1 asks every
 /// number to be traceable, and a threshold printed without its source is
 /// indistinguishable from one somebody guessed.
-struct ActiveGate {
+pub(crate) struct ActiveGate {
     name: &'static str,
     value: String,
     because: &'static str,
@@ -155,10 +155,10 @@ pub(crate) struct LedgerAllRequest<'a> {
 /// tree, so two leaves differ by construction. Execution and Selection roots
 /// additionally end in their own rung word, because their admission checks the
 /// final path component against the field name it was passed as.
-struct LedgerTree {
-    authority: PathBuf,
-    execution: [PathBuf; 8],
-    selection: [PathBuf; 8],
+pub(crate) struct LedgerTree {
+    pub(crate) authority: PathBuf,
+    pub(crate) execution: [PathBuf; 8],
+    pub(crate) selection: [PathBuf; 8],
 }
 
 impl LedgerTree {
@@ -170,7 +170,7 @@ impl LedgerTree {
     /// requires every one of these to exist already, so creating them here is
     /// not a convenience -- it is the difference between a verb an operator can
     /// run and one that refuses until they have run `mkdir` eighteen times.
-    fn create(root: &Path) -> Result<Self, String> {
+    pub(crate) fn create(root: &Path) -> Result<Self, String> {
         let authority = root.join("authority");
         let execution_parent = root.join("execution");
         let selection_parent = root.join("selection");
@@ -235,7 +235,7 @@ const EXIT_CELL_CEILING: u64 = 16_384;
 ///
 /// Refuses if the percentile ladder, ratio limits or the policy itself reject
 /// the values -- each of which names which term it objected to.
-fn exit_policy(side: Side) -> Result<ExitGridPolicyV1, String> {
+pub(crate) fn exit_policy(side: Side) -> Result<ExitGridPolicyV1, String> {
     let mut ladder = Vec::with_capacity(5);
     for step in 1..=5_u32 {
         ladder.push(
@@ -355,7 +355,7 @@ impl GateResolver {
 /// # Errors
 ///
 /// Names every unresolved gate and the knob that would answer it.
-fn admission_policy(
+pub(crate) fn admission_policy(
     request: &LedgerAllRequest<'_>,
 ) -> Result<(AdmissionPolicyV1, Vec<ActiveGate>), String> {
     let max_loss_paisa = request
@@ -526,7 +526,7 @@ const ALL_GATES: [&str; 39] = [
 /// [`unset_gate_worksheet`] instead. What this shows is PROVENANCE: two values
 /// carry the sentence that decided them and the rest name the knob they were
 /// read from, so nothing in the policy is a number without a source.
-fn render_gate_census(out: &mut String, active: &[ActiveGate]) {
+pub(crate) fn render_gate_census(out: &mut String, active: &[ActiveGate]) {
     let _ = writeln!(
         out,
         "\nADMISSION GATES -- all {} applied, and where each value came from",
@@ -844,14 +844,14 @@ fn commit_selection(
 /// a span of this store can produce, and at the widest stride it needs 25 GiB
 /// against a 64 GiB ceiling. The pair is now coherent for every ledger rather
 /// than for most of them.
-const CEILING_RECORDS: u64 = 1 << 24;
+pub(crate) const CEILING_RECORDS: u64 = 1 << 24;
 /// The byte ceiling that pairs with [`CEILING_RECORDS`].
 ///
 /// 64 GiB. Chosen so the widest ledger's `records * stride` fits with room to
 /// spare -- see [`CEILING_RECORDS`] for the arithmetic that has to hold.
-const CEILING_BYTES: u64 = 1 << 36;
+pub(crate) const CEILING_BYTES: u64 = 1 << 36;
 /// Records per written block, for the ledgers that block their writes.
-const BLOCK_RECORDS: u64 = 4_096;
+pub(crate) const BLOCK_RECORDS: u64 = 4_096;
 
 /// Stationary-bootstrap draws for the Statistics V2 procedure.
 ///
@@ -862,18 +862,18 @@ const BLOCK_RECORDS: u64 = 4_096;
 /// read a bootstrap p-value is answered by its own knob. It is named here so that
 /// when one of those gates IS turned on, the number it depends on is visible
 /// rather than buried.
-const BOOTSTRAP_DRAWS: u64 = 1_000;
+pub(crate) const BOOTSTRAP_DRAWS: u64 = 1_000;
 /// The deterministic bootstrap seed. Zero is a valid explicit seed; this is not.
-const BOOTSTRAP_SEED: u64 = 1;
+pub(crate) const BOOTSTRAP_SEED: u64 = 1;
 /// Block length for the stationary bootstrap, in periods.
-const BOOTSTRAP_BLOCK: u64 = 2;
+pub(crate) const BOOTSTRAP_BLOCK: u64 = 2;
 
 /// Candidate, Pre-Admission and stored-load ceilings.
 ///
 /// # Errors
 ///
 /// Refuses if any ceiling is rejected as zero or too small for one record.
-fn candidate_bounds() -> Result<StoredCandidatePreAdmissionBoundsV1, String> {
+pub(crate) fn candidate_bounds() -> Result<StoredCandidatePreAdmissionBoundsV1, String> {
     let span = |what: &str| {
         StoredSpanLoadBoundV1::new(CEILING_RECORDS)
             .map_err(|why| format!("{what} stored-load bound: {why:?}"))
@@ -947,7 +947,7 @@ fn execution_bounds() -> Result<ExecutionV3Bounds, String> {
 /// Refuses if a rung's span cannot be loaded or its ladder rejected. A rung
 /// with no stored bars is named, not skipped: a silent skip would produce a
 /// seven-rung answer in an eight-rung report.
-fn build_sweepers(
+pub(crate) fn build_sweepers(
     root: &Path,
     vendor: Vendor,
     request: &LedgerAllRequest<'_>,

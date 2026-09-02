@@ -79,6 +79,31 @@ use crate::pre_admission_data::{
     PreAdmissionDataV1, PreAdmissionProductionCommitV2, ProducedPreAdmissionDataV2,
     produce_pre_admission_data_v1, produce_pre_admission_data_v2,
 };
+// THE V6 SUCCESSOR ROUTE. Every name below is the V4/V6 counterpart of a V3/V5
+// one already imported above; the two routes share phase one and nothing after
+// it, so they need two disjoint sets of successors rather than one generic set.
+use crate::execution_v4::{
+    CommittedStoredExecutionV4, ExecutionV4Bounds, commit_stored_execution_v4,
+};
+use crate::population_admission_v4::{
+    PopulationAdmissionV4Bounds, commit_population_admission_v4, prepare_population_admission_v4,
+};
+use crate::population_finalization_v4::{
+    PopulationFinalizationV4Bounds, commit_population_finalization_v4,
+};
+use crate::population_observations_v1::{
+    ObservationAuthorityBoundsV2, produce_natural_extinction_observation_v2,
+};
+use crate::population_statistics_v3::{
+    PopulationStatisticsV3Bounds, ProducedPopulationStatisticsV3,
+    produce_all_extinct_population_statistics_v3, produce_evaluated_population_statistics_v3,
+    produce_mixed_population_statistics_v3,
+};
+use crate::population_v6::{
+    PopulationV6Bounds, bind_population_v6_all_extinct_source_v1,
+    bind_population_v6_banknifty_evaluated_source_v1, bind_population_v6_nifty_evaluated_source_v1,
+    bind_population_v6_source_v1, commit_population_v6,
+};
 use crate::stored::{
     CalendarReceiptV2, CompleteCalendarReceiptV2, DAILY_ELIGIBILITY_POLICY, DAILY_REFERENCE_SCHEMA,
     DailyContext, EXACT_MINUTE_GAP_POLICY, ExactMinuteContext, Span, StoredSpanLoadBoundV1,
@@ -2045,6 +2070,256 @@ impl AdmittedObservationStatisticsRootsV2 {
 /// preparation failure, or any Observation-to-Statistics crosswire.  A
 /// receipt-last Observation append may remain as a recoverable prefix if the
 /// later Statistics stage refuses; no success capability escapes.
+/// The six roots and six ceilings one rung's V6 successor route writes under.
+///
+/// # Why the V6 route is a separate function and not a flag on the V5 one
+///
+/// The two routes share phase one — one Candidate/Pre-Admission commit per
+/// family — and diverge completely after it. V5 goes Observation/Statistics V2
+/// → Admission V3 → Finalization V3 → Population V5 → Execution V3; V6 goes
+/// Statistics V3 → Admission V4 → Finalization V4 → Population V6 → Execution
+/// V4. They write different records to different files and their capability
+/// types do not convert, so a boolean would select between two disjoint bodies
+/// and every root in this struct would be dead on one side of it.
+pub(crate) struct StoredPopulationV6RouteV1<'a> {
+    /// Existing Observation V2 root.
+    ///
+    /// Written to only when a family is naturally extinct: the extinct arms of
+    /// Statistics V3 take an `ObservationAuthorityCommitV2`, so the extinction
+    /// authority has to be a committed ledger record before it can be offered
+    /// as a statistics source. When both families evaluate, this root is
+    /// admitted and left empty.
+    pub(crate) observation_root: &'a Path,
+    /// Observation V2 ledger ceilings.
+    pub(crate) observation_bounds: ObservationAuthorityBoundsV2,
+    /// Existing Statistics V3 root.
+    pub(crate) statistics_root: &'a Path,
+    /// Existing Search V4 lineage root.
+    pub(crate) lineage_root: &'a Path,
+    /// Existing Admission V4 root.
+    pub(crate) admission_root: &'a Path,
+    /// Existing Finalization V4 root.
+    pub(crate) finalization_root: &'a Path,
+    /// Existing Population V6 root.
+    pub(crate) population_root: &'a Path,
+    /// Existing Execution V4 root.
+    pub(crate) execution_root: &'a Path,
+    /// Statistics V3 ledger ceilings.
+    pub(crate) statistics_bounds: PopulationStatisticsV3Bounds,
+    /// Search V4 lineage ledger ceilings.
+    pub(crate) lineage_bounds: AnchoredSearchLineageV4Bounds,
+    /// Admission V4 ledger ceilings.
+    pub(crate) admission_bounds: PopulationAdmissionV4Bounds,
+    /// Finalization V4 ledger ceilings.
+    pub(crate) finalization_bounds: PopulationFinalizationV4Bounds,
+    /// Population V6 ledger ceilings.
+    pub(crate) population_bounds: PopulationV6Bounds,
+    /// Execution V4 ledger ceilings.
+    pub(crate) execution_bounds: ExecutionV4Bounds,
+    /// Explicit deterministic Statistics procedure.
+    pub(crate) procedure: PopulationStatisticsProcedureV2,
+    /// Exact Runner admission policy.
+    pub(crate) policy: &'a AdmissionPolicyV1,
+}
+
+/// Commits the whole V6 successor route for one rung's candidate pair.
+///
+/// # The three-way dispatch, and why it is not an implementation detail
+///
+/// A family that produced no candidate is **naturally extinct**, and that is a
+/// different fact from a family that produced some. Statistics V3 offers three
+/// producers for exactly this and Population V6 four binders, and choosing
+/// between them is the whole reason both sets exist:
+///
+/// * both families evaluated → `produce_evaluated_population_statistics_v3`
+/// * one evaluated, one extinct → `produce_mixed_population_statistics_v3`
+/// * neither → `produce_all_extinct_population_statistics_v3`
+///
+/// The extinct arms read the V2 Pre-Admission record, which carries the
+/// extinction/closure reconciliation — the proof that a family produced nothing
+/// *because the ladder went extinct*, not because nobody asked it. That is why
+/// the candidate commit now retains V2 beside V1.
+///
+/// Collapsing the three into one would mean either refusing an extinct family
+/// (losing the rung entirely at high support) or treating it as an evaluated
+/// family with zero rows (inventing a measurement of nothing). Both are worse
+/// than the dispatch.
+///
+/// # Errors
+///
+/// Names the stage that refused. Every root is admitted before its own write
+/// and reauthenticated after it, so a root substituted mid-route refuses rather
+/// than being written through.
+pub(crate) fn commit_stored_population_v6_route(
+    nifty_source: CommittedStoredCandidatePreAdmissionV1,
+    banknifty_source: CommittedStoredCandidatePreAdmissionV1,
+    route: &StoredPopulationV6RouteV1<'_>,
+) -> Result<CommittedStoredExecutionV4, Step3OrchestratorRefusal> {
+    let (_base_evidence, mut base_reader) =
+        reopen_paired_base_evidence_v2(&nifty_source, &banknifty_source)?;
+    let nifty = nifty_source.candidate_pre_admission();
+    let banknifty = banknifty_source.candidate_pre_admission();
+    require_canonical_observation_family_order_v2(
+        nifty.observations().family(),
+        banknifty.observations().family(),
+    )?;
+
+    // EXTINCT MEANS THE LADDER EMPTIED, and the Candidate row count is where
+    // that is recorded. It is read from the freshly reopened audit rather than
+    // the in-process preparation, so the branch is decided by what is on disk.
+    let nifty_evaluated = nifty.candidate_audit().row_count() != 0;
+    let banknifty_evaluated = banknifty.candidate_audit().row_count() != 0;
+
+    let produced = produce_route_statistics_v3(
+        (nifty, nifty_evaluated),
+        (banknifty, banknifty_evaluated),
+        route,
+    )?;
+    let statistics_commit = produced
+        .append_and_reopen(route.statistics_root, route.statistics_bounds)
+        .map_err(|why| format!("Step 3 Statistics V3 receipt-last commit refused: {why}"))?;
+    let statistics = produced
+        .authenticated_admission_source(statistics_commit)
+        .map_err(|why| format!("Step 3 Statistics V3 admission source refused: {why}"))?;
+
+    let search = StoredSearchPairV4 {
+        nifty: nifty_source.search.clone(),
+        banknifty: banknifty_source.search.clone(),
+    };
+    let nifty_projection = search.nifty().projection()?;
+    let banknifty_projection = search.banknifty().projection()?;
+    let lineage = persist_anchored_search_lineage_v4(
+        route.lineage_root,
+        route.lineage_bounds,
+        &nifty_projection,
+        &banknifty_projection,
+    )
+    .map_err(|why| format!("Step 3 V6 Search V4 lineage commit refused: {why}"))?
+    .authority();
+
+    let nifty_audit = nifty.candidate_audit();
+    let banknifty_audit = banknifty.candidate_audit();
+    let prepared = prepare_population_admission_v4(
+        &statistics,
+        &nifty_audit,
+        &banknifty_audit,
+        &mut base_reader,
+        &search,
+        &lineage,
+        route.policy,
+    )
+    .map_err(|why| format!("Step 3 Population Admission V4 preparation refused: {why}"))?;
+    let admission =
+        commit_population_admission_v4(route.admission_root, route.admission_bounds, prepared)
+            .map_err(|why| format!("Step 3 Population Admission V4 commit refused: {why}"))?
+            .into_authority();
+
+    let finalization = commit_population_finalization_v4(
+        route.finalization_root,
+        route.finalization_bounds,
+        admission,
+    )
+    .map_err(|why| format!("Step 3 Population Finalization V4 commit refused: {why}"))?
+    .into_authority();
+
+    // THE SAME THREE-WAY DECISION, ASKED AGAIN OF THE BINDERS. Population V6
+    // carries which families it holds in its own type
+    // (`PopulationV6CandidateAuthoritiesV1`), so the extinct arms bind fewer
+    // authorities rather than binding empty ones.
+    let source = match (nifty_evaluated, banknifty_evaluated) {
+        (true, true) => bind_population_v6_source_v1(finalization, nifty_source, banknifty_source),
+        (true, false) => bind_population_v6_nifty_evaluated_source_v1(finalization, nifty_source),
+        (false, true) => {
+            bind_population_v6_banknifty_evaluated_source_v1(finalization, banknifty_source)
+        }
+        (false, false) => bind_population_v6_all_extinct_source_v1(finalization),
+    }
+    .map_err(|why| format!("Step 3 Population V6 bind refused: {why}"))?;
+
+    let population = commit_population_v6(route.population_root, route.population_bounds, source)
+        .map_err(|why| format!("Step 3 Population V6 commit refused: {why}"))?
+        .into_authority();
+
+    commit_stored_execution_v4(route.execution_root, route.execution_bounds, population)
+        .map_err(|why| format!("Step 3 Execution V4 commit refused: {why}"))
+}
+
+/// Picks the Statistics V3 producer this rung's pair of families calls for.
+///
+/// # Errors
+///
+/// Names the producer that refused, and the family whose V2 Pre-Admission could
+/// not prove natural extinction.
+fn produce_route_statistics_v3(
+    nifty: (&CommittedCandidatePreAdmissionV1, bool),
+    banknifty: (&CommittedCandidatePreAdmissionV1, bool),
+    route: &StoredPopulationV6RouteV1<'_>,
+) -> Result<ProducedPopulationStatisticsV3, Step3OrchestratorRefusal> {
+    let (nifty, nifty_evaluated) = nifty;
+    let (banknifty, banknifty_evaluated) = banknifty;
+    // COMMITTED, NOT JUST PRODUCED. The extinct arms take an
+    // `ObservationAuthorityCommitV2`, so an extinction authority is only a
+    // statistics source once it is a durable ledger record -- the same
+    // receipt-last discipline every other stage on this route follows.
+    let extinction = |family: &CommittedCandidatePreAdmissionV1, name: &str| {
+        let (produced, commit) = family.pre_admission_v2();
+        let authority =
+            produce_natural_extinction_observation_v2(produced, commit).map_err(|why| {
+                format!("Step 3 {name} natural-extinction observation refused: {why}")
+            })?;
+        let committed = authority
+            .append_and_reopen(route.observation_root, route.observation_bounds)
+            .map_err(|why| {
+                format!("Step 3 {name} Observation V2 receipt-last commit refused: {why}")
+            })?;
+        Ok::<_, Step3OrchestratorRefusal>((authority, committed))
+    };
+
+    match (nifty_evaluated, banknifty_evaluated) {
+        (true, true) => produce_evaluated_population_statistics_v3(
+            nifty.observations(),
+            nifty.pre_admission_audit(),
+            banknifty.observations(),
+            banknifty.pre_admission_audit(),
+            route.procedure,
+        )
+        .map_err(|why| format!("Step 3 Statistics V3 evaluated pair refused: {why}")),
+        (true, false) => {
+            let (extinct, commit) = extinction(banknifty, "BANKNIFTY")?;
+            produce_mixed_population_statistics_v3(
+                nifty.observations(),
+                nifty.pre_admission_audit(),
+                &extinct,
+                &commit,
+                route.procedure,
+            )
+            .map_err(|why| format!("Step 3 Statistics V3 mixed pair refused: {why}"))
+        }
+        (false, true) => {
+            let (extinct, commit) = extinction(nifty, "NIFTY")?;
+            produce_mixed_population_statistics_v3(
+                banknifty.observations(),
+                banknifty.pre_admission_audit(),
+                &extinct,
+                &commit,
+                route.procedure,
+            )
+            .map_err(|why| format!("Step 3 Statistics V3 mixed pair refused: {why}"))
+        }
+        (false, false) => {
+            let (nifty_extinct, nifty_commit) = extinction(nifty, "NIFTY")?;
+            let (banknifty_extinct, banknifty_commit) = extinction(banknifty, "BANKNIFTY")?;
+            produce_all_extinct_population_statistics_v3(
+                &nifty_extinct,
+                &nifty_commit,
+                &banknifty_extinct,
+                &banknifty_commit,
+            )
+            .map_err(|why| format!("Step 3 Statistics V3 all-extinct pair refused: {why}"))
+        }
+    }
+}
+
 pub(crate) fn commit_stored_observation_statistics_v2(
     nifty_source: CommittedStoredCandidatePreAdmissionV1,
     banknifty_source: CommittedStoredCandidatePreAdmissionV1,

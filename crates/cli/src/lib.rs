@@ -140,6 +140,8 @@ pub mod institutional_statistics;
 pub mod knobs;
 /// The operator surface for the durable all-rung Step-3 ledger chain.
 mod ledger_all;
+/// The operator surface for the all-rung Step-4 successor route.
+mod ledger_v6;
 pub mod live;
 /// Complete, fixed-stride candidate populations and their receipt-last commit.
 pub mod population;
@@ -334,6 +336,17 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    accept, in index points. The report names
                                    every admission gate it applies AND every one
                                    it does not.
+       cli ledger-v6    VENDOR FROM_Y FROM_M TO_Y TO_M SUPPORT_PPM MAX_POINTS ROOT
+                                   the SAME sweep as ledger-all, taken down the
+                                   Step-4 successor route instead: Statistics V3,
+                                   Admission V4, Finalization V4, Population V6,
+                                   Execution V4.
+                                   V6 records which families went NATURALLY
+                                   EXTINCT -- a ladder that emptied produced no
+                                   candidate, and V5 can only refuse the rung.
+                                   It stops at Execution V4: there is no
+                                   Selection V6 yet, and selection_v5 reads an
+                                   Execution V3 authority it cannot accept.
        cli audit-range  VENDOR UNDERLYING RUNG FROM_Y FROM_M TO_Y TO_M MIN_HITS
                                    sweep a CONTIGUOUS SPAN of months as ONE
                                    series -- the seven-year question, not twelve
@@ -973,6 +986,11 @@ fn ledger_all_arm(
     to: (&str, &str),
     limits: (&str, &str),
     root: &str,
+    // ONE ARM FOR BOTH ROUTES, because the two take the same eight arguments,
+    // parse them in the same order and give the same four refusals. Two copies
+    // of that would be the drift `stored_month_arm` above exists to have already
+    // fixed once.
+    v6: bool,
 ) -> u8 {
     match (
         from.0.parse::<u16>(),
@@ -983,14 +1001,19 @@ fn ledger_all_arm(
         limits.1.parse::<u64>(),
     ) {
         (Ok(fy), Ok(fm), Ok(ty), Ok(tm), Ok(support_ppm), Ok(max_points)) if max_points > 0 => {
-            let text = ledger_all::ledger_all(&ledger_all::LedgerAllRequest {
+            let request = ledger_all::LedgerAllRequest {
                 vendor,
                 from: (fy, fm),
                 to: (ty, tm),
                 support_ppm,
                 max_points,
                 root: std::path::Path::new(root),
-            });
+            };
+            let text = if v6 {
+                ledger_v6::ledger_v6(&request)
+            } else {
+                ledger_all::ledger_all(&request)
+            };
             let refused = carries_refusal(&text);
             out.push_str(&text);
             if refused { MISUSED } else { OK }
@@ -1098,7 +1121,10 @@ pub fn run(args: &[String], out: &mut String) -> u8 {
         }
         ["range-all", v, u, fy, fm, ty, tm, mh] => range_all_arm(out, v, u, (fy, fm), (ty, tm), mh),
         ["ledger-all", v, fy, fm, ty, tm, sup, pts, root] => {
-            ledger_all_arm(out, v, (fy, fm), (ty, tm), (sup, pts), root)
+            ledger_all_arm(out, v, (fy, fm), (ty, tm), (sup, pts), root, false)
+        }
+        ["ledger-v6", v, fy, fm, ty, tm, sup, pts, root] => {
+            ledger_all_arm(out, v, (fy, fm), (ty, tm), (sup, pts), root, true)
         }
         ["descend", v, u, r, fy, fm, ty, tm, sup, pw] => {
             descend_arm(out, v, u, r, (fy, fm), (ty, tm), sup, pw)
@@ -1159,7 +1185,7 @@ fn unmatched(word: &str, given: usize) -> String {
 /// So it is written down, and `every_command_is_listed_in_both_places` asserts
 /// the list, the dispatch and the usage all name the same set. The duplication
 /// is real; the test is what makes it safe.
-const COMMANDS: [&str; 16] = [
+const COMMANDS: [&str; 17] = [
     "audit",
     "audit-range",
     "audit-stored",
@@ -1168,6 +1194,7 @@ const COMMANDS: [&str; 16] = [
     "descend",
     "elite",
     "ledger-all",
+    "ledger-v6",
     "range-all",
     "results",
     "screen",
