@@ -14,6 +14,23 @@
 //! persistence, synchronization and filesystem latency remain input- or
 //! system-dependent and are not O(1).
 
+// EVERY FIELD ENDS IN `_minute`, AND THAT IS THE DESIGN. This module's own doc
+// says it: "There is deliberately no array constructor, iterator constructor,
+// `Default`, shared root or shared bound: a caller must name all eight
+// destinations and all eight resource ceilings." Root admission then checks
+// each final path component against the field name it arrived as, so the
+// postfix is what makes swapping `thirty_minute` and `three_minute` a refusal
+// instead of a silent crosswire.
+//
+// Renaming them to satisfy `struct_field_names` would either collapse the eight
+// into an array -- removing the compile-time arity the doc above is about -- or
+// leave eight fields whose names no longer say which rung they are. `expect`
+// rather than `allow` so that a future struct here which does NOT have the
+// eight-rung shape fails the build instead of inheriting the exemption.
+#![expect(
+    clippy::struct_field_names,
+    reason = "the eight-rung postfix is the arity check; see the module doc above"
+)]
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -171,7 +188,7 @@ impl CommittedStoredAllRungSelectionV5 {
                 &mut self.selections.one_minute,
                 &self.topology,
                 self.bounds.one_minute,
-                self.receipts.one_minute,
+                &self.receipts.one_minute,
                 self.ranking_policy,
                 60,
                 "1min",
@@ -180,7 +197,7 @@ impl CommittedStoredAllRungSelectionV5 {
                 &mut self.selections.two_minute,
                 &self.topology,
                 self.bounds.two_minute,
-                self.receipts.two_minute,
+                &self.receipts.two_minute,
                 self.ranking_policy,
                 120,
                 "2min",
@@ -189,7 +206,7 @@ impl CommittedStoredAllRungSelectionV5 {
                 &mut self.selections.three_minute,
                 &self.topology,
                 self.bounds.three_minute,
-                self.receipts.three_minute,
+                &self.receipts.three_minute,
                 self.ranking_policy,
                 180,
                 "3min",
@@ -198,7 +215,7 @@ impl CommittedStoredAllRungSelectionV5 {
                 &mut self.selections.five_minute,
                 &self.topology,
                 self.bounds.five_minute,
-                self.receipts.five_minute,
+                &self.receipts.five_minute,
                 self.ranking_policy,
                 300,
                 "5min",
@@ -207,7 +224,7 @@ impl CommittedStoredAllRungSelectionV5 {
                 &mut self.selections.ten_minute,
                 &self.topology,
                 self.bounds.ten_minute,
-                self.receipts.ten_minute,
+                &self.receipts.ten_minute,
                 self.ranking_policy,
                 600,
                 "10min",
@@ -216,7 +233,7 @@ impl CommittedStoredAllRungSelectionV5 {
                 &mut self.selections.fifteen_minute,
                 &self.topology,
                 self.bounds.fifteen_minute,
-                self.receipts.fifteen_minute,
+                &self.receipts.fifteen_minute,
                 self.ranking_policy,
                 900,
                 "15min",
@@ -225,7 +242,7 @@ impl CommittedStoredAllRungSelectionV5 {
                 &mut self.selections.thirty_minute,
                 &self.topology,
                 self.bounds.thirty_minute,
-                self.receipts.thirty_minute,
+                &self.receipts.thirty_minute,
                 self.ranking_policy,
                 1_800,
                 "30min",
@@ -234,7 +251,7 @@ impl CommittedStoredAllRungSelectionV5 {
                 &mut self.selections.sixty_minute,
                 &self.topology,
                 self.bounds.sixty_minute,
-                self.receipts.sixty_minute,
+                &self.receipts.sixty_minute,
                 self.ranking_policy,
                 3_600,
                 "60min",
@@ -562,7 +579,7 @@ fn commit_selection_rung(
         &mut selection,
         topology,
         bounds,
-        receipts,
+        &receipts,
         policy,
         expected_rung,
         rung_name,
@@ -617,7 +634,7 @@ fn require_committed_selection_rung(
     selection: &mut CommittedStoredSelectionV5,
     topology: &AllRungSelectionTopologyToken,
     expected_bounds: SelectionV5Bounds,
-    expected_receipts: RungSelectionV5Receipts,
+    expected_receipts: &RungSelectionV5Receipts,
     policy: RankingPolicyV1,
     expected_rung: u32,
     rung_name: &str,

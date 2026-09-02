@@ -3931,10 +3931,10 @@ impl PreparedPopulationStatisticsV2 {
 /// that cannot produce exact finite-resample evidence.
 pub(crate) fn prepare_single_family_statistics_v3(
     observations: &CandidateFamilyObservationsV1,
-    pre_admission: PreAdmissionDataReopenAuditV1,
+    pre_admission: &PreAdmissionDataReopenAuditV1,
     procedure: PopulationStatisticsProcedureV2,
 ) -> Result<SingleFamilyStatisticsV3Projection, PopulationStatisticsV2Refusal> {
-    require_observation_pre_admission_source(observations, &pre_admission, observations.family())?;
+    require_observation_pre_admission_source(observations, pre_admission, observations.family())?;
     if observations.candidate_count() == 0 {
         return Err(
             "Statistics V3 evaluated-family projection received a zero Candidate family".to_owned(),

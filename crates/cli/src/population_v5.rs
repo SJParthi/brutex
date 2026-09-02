@@ -1164,7 +1164,7 @@ impl PopulationV5ExecutionV3SourceV1 {
     }
 
     fn from_authenticated_sources(
-        receipt: PopulationV5StructuralReceipt,
+        receipt: &PopulationV5StructuralReceipt,
         rows: Vec<PopulationV5SuccessorRow>,
         pair: StoredCandidateExecutionReplayPairV1,
     ) -> Result<Self, PopulationV5Refusal> {
@@ -1261,7 +1261,7 @@ impl PopulationV5ExecutionV3SourceV1 {
             });
         }
         Ok(Self {
-            receipt,
+            receipt: *receipt,
             parameters: [nifty_long, nifty_short, banknifty_long, banknifty_short],
             rows: joined,
         })
@@ -2710,7 +2710,7 @@ impl CommittedStoredPopulationV5 {
             .execution_v3_replay_pair()
             .map_err(|why| format!("Population V5 Execution V3 replay source refused: {why}"))?;
         let source = PopulationV5ExecutionV3SourceV1::from_authenticated_sources(
-            receipt,
+            &receipt,
             rows_before,
             pair,
         )?;

@@ -1405,7 +1405,7 @@ fn project_execution_row(
         population.status(),
         candidate.support_hits(),
         top_metrics,
-        population.admission().comparison_values(),
+        &population.admission().comparison_values(),
     )?;
 
     Ok(SelectionV5SourceRow {
@@ -1430,7 +1430,7 @@ fn validate_authenticated_metrics(
     status: AdmissionV3Status,
     support_hits: u64,
     metrics: TopMetricsV1,
-    values: runner::admission::AdmissionEvidenceValuesV1,
+    values: &runner::admission::AdmissionEvidenceValuesV1,
 ) -> Result<(), SelectionV5Refusal> {
     let trades = metrics
         .winning_trades

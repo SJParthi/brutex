@@ -1968,7 +1968,7 @@ impl PreAdmissionDataV2 {
     }
 
     fn validate(self) -> Result<(), PreAdmissionDataRefusal> {
-        validate_v2_core(self.core)?;
+        validate_v2_core(&self.core)?;
         validate_v2_reconciliation(self.core.candidate_row_count, self.candidate_reconciliation)?;
         if derive_authority_id_v2(&self) != self.core.authority_id {
             return Err("pre-admission V2 authority identity does not match its fields".to_owned());
@@ -1979,7 +1979,7 @@ impl PreAdmissionDataV2 {
     fn record(self, kind: RecordKindV2) -> Result<[u8; RECORD_BYTES_V2], PreAdmissionDataRefusal> {
         self.validate()?;
         let mut payload = [0_u8; PAYLOAD_BYTES_V2];
-        encode_v2_core(&mut payload, self.core, kind)?;
+        encode_v2_core(&mut payload, &self.core, kind)?;
         encode_v2_reconciliation(
             &mut payload,
             CORE_PAYLOAD_BYTES_V2,
@@ -2801,7 +2801,7 @@ pub(crate) fn produce_pre_admission_data_v2(
     Ok(ProducedPreAdmissionDataV2 { value })
 }
 
-fn validate_v2_core(core: PreAdmissionDataV1) -> Result<(), PreAdmissionDataRefusal> {
+fn validate_v2_core(core: &PreAdmissionDataV1) -> Result<(), PreAdmissionDataRefusal> {
     require_nonzero("pre-admission V2 authority", core.authority_id)?;
     require_nonzero(
         "pre-admission V2 Candidate universe",
@@ -2994,7 +2994,7 @@ fn same_semantics_v2(left: &PreAdmissionDataV2, right: &PreAdmissionDataV2) -> b
 
 fn encode_v2_core(
     payload: &mut [u8],
-    core: PreAdmissionDataV1,
+    core: &PreAdmissionDataV1,
     kind: RecordKindV2,
 ) -> Result<(), PreAdmissionDataRefusal> {
     put_u32(payload, 0, RECORD_VERSION_V2)?;

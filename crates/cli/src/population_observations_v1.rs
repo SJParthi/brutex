@@ -3028,8 +3028,8 @@ struct ObservationAuthorityDataV2 {
 impl ObservationAuthorityDataV2 {
     fn from_authenticated_source(
         pre_admission_record_index: u64,
-        source: PreAdmissionDataV2,
-        source_record: [u8; PRE_ADMISSION_OBSERVATION_SOURCE_BYTES_V2],
+        source: &PreAdmissionDataV2,
+        source_record: &[u8; PRE_ADMISSION_OBSERVATION_SOURCE_BYTES_V2],
     ) -> Result<Self, String> {
         let mut value = Self {
             record_sequence: 0,
@@ -3038,8 +3038,8 @@ impl ObservationAuthorityDataV2 {
             observation_row_count: 0,
             disposition: ObservationAuthorityDispositionV2::NaturallyExtinct,
             policy_digest: observation_v2_policy_digest(),
-            source,
-            source_record,
+            source: *source,
+            source_record: *source_record,
         };
         value.authority_id = observation_v2_authority_id(&value);
         value.validate()?;
@@ -3206,7 +3206,7 @@ impl ProducedObservationAuthorityV2 {
     ) -> Result<ObservationNaturalExtinctionSourceV2, String> {
         self.value.validate()?;
         let audit = commit.audit();
-        let expected = observation_v2_audit(self.value.with_sequence(audit.record_sequence()))?;
+        let expected = observation_v2_audit(&self.value.with_sequence(audit.record_sequence()))?;
         if audit != expected {
             return Err(
                 "Statistics V3 received an Observation V2 commit from a foreign production"
@@ -3228,7 +3228,7 @@ impl ProducedObservationAuthorityV2 {
     ) -> Result<ObservationAuthorityCommitV2, String> {
         let root = root.as_ref();
         let mut ledger = ObservationAuthorityLedgerV2::open(root, bounds)?;
-        let committed = ledger.append_data(self.value)?;
+        let committed = ledger.append_data(&self.value)?;
         let expected = committed.audit();
         drop(ledger);
         let mut reopened = ObservationAuthorityLedgerV2::open_read(root, bounds)?;
@@ -3268,8 +3268,8 @@ pub(crate) fn produce_natural_extinction_observation_v2(
     Ok(ProducedObservationAuthorityV2 {
         value: ObservationAuthorityDataV2::from_authenticated_source(
             audit.data_record_index(),
-            source,
-            source_record,
+            &source,
+            &source_record,
         )?,
     })
 }
@@ -3388,7 +3388,7 @@ impl ObservationAuthorityLedgerV2 {
 
     fn append_data(
         &mut self,
-        prepared: ObservationAuthorityDataV2,
+        prepared: &ObservationAuthorityDataV2,
     ) -> Result<ObservationAuthorityCommitV2, String> {
         if !self.writable {
             return Err("read-only Observation V2 ledger cannot append".to_owned());
@@ -3401,7 +3401,7 @@ impl ObservationAuthorityLedgerV2 {
                 .get(&prepared.authority_id)
                 .copied()
                 .ok_or_else(|| "Observation V2 audit lost its Data record".to_owned())?;
-            if !existing_data.same_semantics(prepared) {
+            if !existing_data.same_semantics(*prepared) {
                 return Err("Observation V2 identity aliases foreign semantic bytes".to_owned());
             }
             return Ok(ObservationAuthorityCommitV2::Reused(existing));
@@ -3412,7 +3412,7 @@ impl ObservationAuthorityLedgerV2 {
             return Err("Observation V2 authority count exceeds configured maximum".to_owned());
         }
         let data = if let Some(orphan) = self.orphan {
-            if !orphan.same_semantics(prepared) {
+            if !orphan.same_semantics(*prepared) {
                 return Err("Observation V2 trailing Data belongs to a foreign source".to_owned());
             }
             orphan
@@ -3435,7 +3435,7 @@ impl ObservationAuthorityLedgerV2 {
             .and_then(|_| self.file.write_all(&completion))
             .and_then(|()| self.file.sync_data())
             .map_err(|why| format!("cannot sync Observation V2 Completion: {why}"))?;
-        let audit = observation_v2_audit(data)?;
+        let audit = observation_v2_audit(&data)?;
         self.audits.insert(data.authority_id, audit);
         self.data_by_id.insert(data.authority_id, data);
         self.orphan = None;
@@ -3528,7 +3528,7 @@ fn observation_v2_header() -> [u8; AUTHORITY_V2_HEADER_BYTES] {
 }
 
 fn observation_v2_audit(
-    data: ObservationAuthorityDataV2,
+    data: &ObservationAuthorityDataV2,
 ) -> Result<ObservationAuthorityAuditV2, String> {
     let data_record = data.record(AUTHORITY_V2_DATA_KIND)?;
     let completion_record = data.record(AUTHORITY_V2_COMPLETION_KIND)?;
@@ -3611,7 +3611,7 @@ fn scan_observation_v2_file(
                         "Observation V2 Completion differs from adjacent Data semantics".to_owned(),
                     );
                 }
-                let audit = observation_v2_audit(data)?;
+                let audit = observation_v2_audit(&data)?;
                 if audits.insert(data.authority_id, audit).is_some()
                     || data_by_id.insert(data.authority_id, data).is_some()
                 {
@@ -4244,13 +4244,13 @@ mod tests {
             .expect("foreign zero source prepares");
         assert!(
             ledger
-                .append_data(foreign.value)
+                .append_data(&foreign.value)
                 .expect_err("foreign source cannot bless trailing Data")
                 .contains("foreign source")
         );
         assert!(matches!(
             ledger
-                .append_data(orphan)
+                .append_data(&orphan)
                 .expect("exact orphan retry appends only Completion"),
             ObservationAuthorityCommitV2::Written(_)
         ));

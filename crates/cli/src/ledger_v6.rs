@@ -238,53 +238,7 @@ fn run_route(request: &LedgerAllRequest<'_>, out: &mut String) -> Result<usize, 
         let committed_route = commit_stored_population_v6_route(
             nifty,
             banknifty,
-            &StoredPopulationV6RouteV1 {
-                observation_root: roots.observation.as_path(),
-                observation_bounds: ObservationAuthorityBoundsV2::new(
-                    CEILING_RECORDS,
-                    CEILING_BYTES,
-                )
-                .map_err(|why| format!("v6 {rung} observation bounds: {why}"))?,
-                statistics_root: roots.statistics.as_path(),
-                lineage_root: roots.lineage.as_path(),
-                admission_root: roots.admission.as_path(),
-                finalization_root: roots.finalization.as_path(),
-                population_root: roots.population.as_path(),
-                execution_root: roots.execution.as_path(),
-                statistics_bounds: PopulationStatisticsV3Bounds::new(
-                    CEILING_RECORDS,
-                    CEILING_RECORDS,
-                    CEILING_BYTES,
-                )
-                .map_err(|why| format!("v6 {rung} statistics bounds: {why}"))?,
-                lineage_bounds: lineage_bounds(rung)?,
-                admission_bounds: PopulationAdmissionV4Bounds::new(
-                    CEILING_RECORDS,
-                    CEILING_RECORDS,
-                    CEILING_BYTES,
-                )
-                .map_err(|why| format!("v6 {rung} admission bounds: {why}"))?,
-                finalization_bounds: PopulationFinalizationV4Bounds::new(
-                    CEILING_RECORDS,
-                    CEILING_RECORDS,
-                    CEILING_BYTES,
-                )
-                .map_err(|why| format!("v6 {rung} finalization bounds: {why}"))?,
-                population_bounds: PopulationV6Bounds::new(
-                    CEILING_RECORDS,
-                    CEILING_RECORDS,
-                    CEILING_BYTES,
-                )
-                .map_err(|why| format!("v6 {rung} population bounds: {why}"))?,
-                execution_bounds: execution_v4_bounds(rung)?,
-                procedure: PopulationStatisticsProcedureV2::new(
-                    BOOTSTRAP_DRAWS,
-                    BOOTSTRAP_SEED,
-                    BOOTSTRAP_BLOCK,
-                )
-                .map_err(|why| format!("v6 {rung} statistics procedure: {why:?}"))?,
-                policy: &admission,
-            },
+            &route_for(rung, &roots, &admission)?,
         )
         .map_err(|why| format!("v6 {rung} route refused: {why}"))?;
 
@@ -329,6 +283,66 @@ fn run_route(request: &LedgerAllRequest<'_>, out: &mut String) -> Result<usize, 
         );
     }
     Ok(committed)
+}
+
+/// One rung's six roots and six sets of ceilings, assembled.
+///
+/// # Why this is its own function
+///
+/// It is fifty lines of `Bounds::new(...)?` and nothing else, and inside the
+/// rung loop it buried the three things that loop actually does: commit two
+/// families, run the route, print a row. `clippy::too_many_lines` caught it,
+/// and the cap was right — a reader looking for the loop's shape had to scroll
+/// past six ledgers' worth of ceilings to find it.
+///
+/// # Errors
+///
+/// Names the rung and the ledger whose ceilings were refused.
+fn route_for<'a>(
+    rung: &str,
+    roots: &'a RungRoots,
+    policy: &'a runner::admission::AdmissionPolicyV1,
+) -> Result<StoredPopulationV6RouteV1<'a>, String> {
+    Ok(StoredPopulationV6RouteV1 {
+        observation_root: roots.observation.as_path(),
+        observation_bounds: ObservationAuthorityBoundsV2::new(CEILING_RECORDS, CEILING_BYTES)
+            .map_err(|why| format!("v6 {rung} observation bounds: {why}"))?,
+        statistics_root: roots.statistics.as_path(),
+        lineage_root: roots.lineage.as_path(),
+        admission_root: roots.admission.as_path(),
+        finalization_root: roots.finalization.as_path(),
+        population_root: roots.population.as_path(),
+        execution_root: roots.execution.as_path(),
+        statistics_bounds: PopulationStatisticsV3Bounds::new(
+            CEILING_RECORDS,
+            CEILING_RECORDS,
+            CEILING_BYTES,
+        )
+        .map_err(|why| format!("v6 {rung} statistics bounds: {why}"))?,
+        lineage_bounds: lineage_bounds(rung)?,
+        admission_bounds: PopulationAdmissionV4Bounds::new(
+            CEILING_RECORDS,
+            CEILING_RECORDS,
+            CEILING_BYTES,
+        )
+        .map_err(|why| format!("v6 {rung} admission bounds: {why}"))?,
+        finalization_bounds: PopulationFinalizationV4Bounds::new(
+            CEILING_RECORDS,
+            CEILING_RECORDS,
+            CEILING_BYTES,
+        )
+        .map_err(|why| format!("v6 {rung} finalization bounds: {why}"))?,
+        population_bounds: PopulationV6Bounds::new(CEILING_RECORDS, CEILING_RECORDS, CEILING_BYTES)
+            .map_err(|why| format!("v6 {rung} population bounds: {why}"))?,
+        execution_bounds: execution_v4_bounds(rung)?,
+        procedure: PopulationStatisticsProcedureV2::new(
+            BOOTSTRAP_DRAWS,
+            BOOTSTRAP_SEED,
+            BOOTSTRAP_BLOCK,
+        )
+        .map_err(|why| format!("v6 {rung} statistics procedure: {why:?}"))?,
+        policy,
+    })
 }
 
 /// The first eight bytes of a 32-byte identity, in hex.

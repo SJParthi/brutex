@@ -1426,7 +1426,7 @@ struct ExecutionV4FamilyEnvelope {
 
 impl ExecutionV4FamilyEnvelope {
     fn from_population(
-        value: PopulationV6FamilyProjectionV1,
+        value: &PopulationV6FamilyProjectionV1,
         expected_family: ExecutionV4Family,
     ) -> Result<Self, ExecutionV4Refusal> {
         let family = execution_family_from_admission(value.family());
@@ -1523,9 +1523,9 @@ impl PreparedExecutionV4 {
         let selection_families = upstream_families;
         let [nifty_family, banknifty_family] = upstream_families;
         let families = [
-            ExecutionV4FamilyEnvelope::from_population(nifty_family, ExecutionV4Family::Nifty)?,
+            ExecutionV4FamilyEnvelope::from_population(&nifty_family, ExecutionV4Family::Nifty)?,
             ExecutionV4FamilyEnvelope::from_population(
-                banknifty_family,
+                &banknifty_family,
                 ExecutionV4Family::BankNifty,
             )?,
         ];
@@ -2676,7 +2676,7 @@ impl ExecutionV4Ledger {
         self.require_unchanged()?;
         prepared.validate(self.bounds)?;
         if let Some(existing) = self.receipts.get(&prepared.population_id).copied() {
-            return self.reuse_existing(prepared, existing);
+            return self.reuse_existing(prepared, &existing);
         }
         let trailing = self.trailing.clone().unwrap_or(TrailingExecutionV4 {
             first_parameter_record: self.parameter_records,
@@ -2734,7 +2734,7 @@ impl ExecutionV4Ledger {
     fn reuse_existing(
         &mut self,
         prepared: &PreparedExecutionV4,
-        existing: ExecutionV4StructuralReceipt,
+        existing: &ExecutionV4StructuralReceipt,
     ) -> Result<ExecutionV4StructuralCommit, ExecutionV4Refusal> {
         let parameters =
             self.read_parameters(existing.first_parameter_record, existing.parameter_count)?;
@@ -2782,7 +2782,7 @@ impl ExecutionV4Ledger {
         }
         sync_directory(&self.root_file, &self.root)?;
         self.require_unchanged()?;
-        Ok(ExecutionV4StructuralCommit::Reused(existing))
+        Ok(ExecutionV4StructuralCommit::Reused(*existing))
     }
 
     fn require_exact_prefix(
@@ -2992,7 +2992,7 @@ impl ExecutionV4Ledger {
 
     fn require_exact_prepared(
         &mut self,
-        receipt: ExecutionV4StructuralReceipt,
+        receipt: &ExecutionV4StructuralReceipt,
         prepared: &PreparedExecutionV4,
     ) -> Result<(), ExecutionV4Refusal> {
         let parameters =
@@ -3025,7 +3025,7 @@ impl ExecutionV4Ledger {
 
     fn authenticated_disposition(
         &mut self,
-        receipt: ExecutionV4StructuralReceipt,
+        receipt: &ExecutionV4StructuralReceipt,
         global_sequence: u64,
     ) -> Result<ExecutionV4SuccessorDisposition, ExecutionV4Refusal> {
         if global_sequence >= receipt.disposition_count {
@@ -3039,7 +3039,7 @@ impl ExecutionV4Ledger {
             .map_err(|why| format!("cannot take Execution V4 disposition lock: {why}"))?;
         let result = (|| {
             self.require_unchanged()?;
-            if self.receipts.get(&receipt.population_id) != Some(&receipt) {
+            if self.receipts.get(&receipt.population_id) != Some(receipt) {
                 return Err("Execution V4 receipt is no longer indexed exactly".to_owned());
             }
             let physical = checked_end(
@@ -3073,14 +3073,14 @@ impl ExecutionV4Ledger {
 
     fn authenticated_dispositions(
         &mut self,
-        receipt: ExecutionV4StructuralReceipt,
+        receipt: &ExecutionV4StructuralReceipt,
     ) -> Result<Vec<ExecutionV4SuccessorDisposition>, ExecutionV4Refusal> {
         self.lock_file
             .lock_shared()
             .map_err(|why| format!("cannot take Execution V4 bulk lock: {why}"))?;
         let result = (|| {
             self.require_unchanged()?;
-            if self.receipts.get(&receipt.population_id) != Some(&receipt) {
+            if self.receipts.get(&receipt.population_id) != Some(receipt) {
                 return Err("Execution V4 bulk receipt is no longer indexed exactly".to_owned());
             }
             let completion = ExecutionV4CompletionRecord::decode(&read_fixed_at(
@@ -3101,7 +3101,7 @@ impl ExecutionV4Ledger {
                 &dispositions,
                 &completion,
                 self.bounds,
-            )? != receipt
+            )? != *receipt
             {
                 return Err("Execution V4 bulk block differs from exact receipt".to_owned());
             }
@@ -3157,13 +3157,13 @@ impl ExecutionV4Authority {
         global_sequence: u64,
     ) -> Result<ExecutionV4SuccessorDisposition, ExecutionV4Refusal> {
         self.ledger
-            .authenticated_disposition(self.receipt, global_sequence)
+            .authenticated_disposition(&self.receipt, global_sequence)
     }
 
     pub(crate) fn ordered_authenticated_dispositions(
         &mut self,
     ) -> Result<Vec<ExecutionV4SuccessorDisposition>, ExecutionV4Refusal> {
-        self.ledger.authenticated_dispositions(self.receipt)
+        self.ledger.authenticated_dispositions(&self.receipt)
     }
 }
 
@@ -3672,7 +3672,7 @@ fn persist_prepared(
     if reopened != writer_receipt {
         return Err("Execution V4 fresh reopen receipt differs from writer receipt".to_owned());
     }
-    reader.require_exact_prepared(reopened, prepared)?;
+    reader.require_exact_prepared(&reopened, prepared)?;
     let authority = ExecutionV4Authority {
         receipt: reopened,
         ledger: reader,

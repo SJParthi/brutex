@@ -1287,7 +1287,7 @@ impl PreparedExecutionV3 {
             .map_err(|why| format!("cannot reserve Execution V3 parameters: {why}"))?;
         for facts in source.parameters() {
             let (parameter, mut segment) = parameter_from_population_source(
-                receipt,
+                &receipt,
                 facts,
                 usize_to_u64(percentiles.len(), "percentile offset")?,
             )?;
@@ -1510,7 +1510,7 @@ impl PreparedExecutionV3 {
 }
 
 fn parameter_from_population_source(
-    receipt: crate::population_v5::PopulationV5StructuralReceipt,
+    receipt: &crate::population_v5::PopulationV5StructuralReceipt,
     facts: &CandidateExecutionParameterFactsV1,
     percentile_offset: u64,
 ) -> Result<(ExecutionV3ParameterRecord, Vec<ExecutionV3PercentileRecord>), ExecutionV3Refusal> {

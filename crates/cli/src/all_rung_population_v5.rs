@@ -15,6 +15,23 @@
 //! No caller supplies a rung list, family list, raw row, digest, identifier or
 //! detached projection.
 
+// EVERY FIELD ENDS IN `_minute`, AND THAT IS THE DESIGN. This module's own doc
+// says it: "There is deliberately no array constructor, iterator constructor,
+// `Default`, shared root or shared bound: a caller must name all eight
+// destinations and all eight resource ceilings." Root admission then checks
+// each final path component against the field name it arrived as, so the
+// postfix is what makes swapping `thirty_minute` and `three_minute` a refusal
+// instead of a silent crosswire.
+//
+// Renaming them to satisfy `struct_field_names` would either collapse the eight
+// into an array -- removing the compile-time arity the doc above is about -- or
+// leave eight fields whose names no longer say which rung they are. `expect`
+// rather than `allow` so that a future struct here which does NOT have the
+// eight-rung shape fails the build instead of inheriting the exemption.
+#![expect(
+    clippy::struct_field_names,
+    reason = "the eight-rung postfix is the arity check; see the module doc above"
+)]
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 
@@ -373,56 +390,56 @@ impl CommittedStoredAllRungExecutionV3 {
         require_committed_execution_rung_v1(
             &mut self.executions.one_minute,
             self.bounds.one_minute,
-            self.receipts.one_minute,
+            &self.receipts.one_minute,
             60,
             "1min",
         )?;
         require_committed_execution_rung_v1(
             &mut self.executions.two_minute,
             self.bounds.two_minute,
-            self.receipts.two_minute,
+            &self.receipts.two_minute,
             120,
             "2min",
         )?;
         require_committed_execution_rung_v1(
             &mut self.executions.three_minute,
             self.bounds.three_minute,
-            self.receipts.three_minute,
+            &self.receipts.three_minute,
             180,
             "3min",
         )?;
         require_committed_execution_rung_v1(
             &mut self.executions.five_minute,
             self.bounds.five_minute,
-            self.receipts.five_minute,
+            &self.receipts.five_minute,
             300,
             "5min",
         )?;
         require_committed_execution_rung_v1(
             &mut self.executions.ten_minute,
             self.bounds.ten_minute,
-            self.receipts.ten_minute,
+            &self.receipts.ten_minute,
             600,
             "10min",
         )?;
         require_committed_execution_rung_v1(
             &mut self.executions.fifteen_minute,
             self.bounds.fifteen_minute,
-            self.receipts.fifteen_minute,
+            &self.receipts.fifteen_minute,
             900,
             "15min",
         )?;
         require_committed_execution_rung_v1(
             &mut self.executions.thirty_minute,
             self.bounds.thirty_minute,
-            self.receipts.thirty_minute,
+            &self.receipts.thirty_minute,
             1_800,
             "30min",
         )?;
         require_committed_execution_rung_v1(
             &mut self.executions.sixty_minute,
             self.bounds.sixty_minute,
-            self.receipts.sixty_minute,
+            &self.receipts.sixty_minute,
             3_600,
             "60min",
         )?;
@@ -821,7 +838,7 @@ fn commit_execution_rung_v1(
     require_committed_execution_rung_v1(
         &mut execution,
         bounds,
-        receipts,
+        &receipts,
         expected_rung_seconds,
         rung_name,
     )?;
@@ -833,7 +850,7 @@ fn commit_execution_rung_v1(
 fn require_committed_execution_rung_v1(
     execution: &mut CommittedStoredExecutionV3,
     expected_bounds: ExecutionV3Bounds,
-    expected_receipts: RungExecutionV3ReceiptsV1,
+    expected_receipts: &RungExecutionV3ReceiptsV1,
     expected_rung_seconds: u32,
     rung_name: &str,
 ) -> Result<(), String> {
@@ -841,7 +858,7 @@ fn require_committed_execution_rung_v1(
     let execution_receipt_before = execution.structural_receipt();
     require_execution_receipt_join_v1(
         rung_name,
-        expected_receipts.population,
+        &expected_receipts.population,
         expected_receipts.execution,
         execution_receipt_before,
     )?;
@@ -851,7 +868,7 @@ fn require_committed_execution_rung_v1(
         .map_err(|why| format!("all-rung {rung_name} retained Population refused: {why}"))?;
     require_execution_source_rung_v1(
         &source,
-        expected_receipts.population,
+        &expected_receipts.population,
         expected_rung_seconds,
         rung_name,
     )?;
@@ -900,11 +917,11 @@ fn require_committed_execution_rung_v1(
 
 fn require_execution_source_rung_v1(
     source: &PopulationV5ExecutionV3SourceV1,
-    expected_receipt: PopulationV5StructuralReceipt,
+    expected_receipt: &PopulationV5StructuralReceipt,
     expected_rung_seconds: u32,
     rung_name: &str,
 ) -> Result<(), String> {
-    if source.receipt() != expected_receipt {
+    if source.receipt() != *expected_receipt {
         return Err(format!(
             "all-rung {rung_name} Execution source carries a foreign Population receipt"
         ));
@@ -949,7 +966,7 @@ fn require_execution_bounds_v1(
 
 fn require_execution_receipt_join_v1(
     rung_name: &str,
-    expected_population: PopulationV5StructuralReceipt,
+    expected_population: &PopulationV5StructuralReceipt,
     expected_execution: ExecutionV3StructuralReceipt,
     actual_execution: ExecutionV3StructuralReceipt,
 ) -> Result<(), String> {

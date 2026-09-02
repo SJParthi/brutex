@@ -1146,7 +1146,7 @@ pub(crate) fn produce_mixed_population_statistics_v3(
     procedure: PopulationStatisticsProcedureV2,
 ) -> Result<ProducedPopulationStatisticsV3, PopulationStatisticsV3Refusal> {
     let projection =
-        prepare_single_family_statistics_v3(evaluated, evaluated_pre_admission, procedure)?;
+        prepare_single_family_statistics_v3(evaluated, &evaluated_pre_admission, procedure)?;
     let extinct_source = extinct.authenticated_statistics_v3_source(extinct_commit)?;
     if evaluated.family() == extinct_source.audit().family() {
         return Err("Statistics V3 mixed authority repeats one index family".to_owned());
@@ -1186,9 +1186,9 @@ pub(crate) fn produce_evaluated_population_statistics_v3(
         );
     }
     let nifty_projection =
-        prepare_single_family_statistics_v3(nifty, nifty_pre_admission, procedure)?;
+        prepare_single_family_statistics_v3(nifty, &nifty_pre_admission, procedure)?;
     let banknifty_projection =
-        prepare_single_family_statistics_v3(banknifty, banknifty_pre_admission, procedure)?;
+        prepare_single_family_statistics_v3(banknifty, &banknifty_pre_admission, procedure)?;
     let common = CommonSourceV3::from_v1(nifty_pre_admission.value())
         .require_equal(CommonSourceV3::from_v1(banknifty_pre_admission.value()))?;
     let (nifty_family, mut candidates) =
