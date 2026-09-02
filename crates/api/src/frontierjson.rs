@@ -635,7 +635,12 @@ mod tests {
 
     #[test]
     fn a_request_without_an_identity_is_refused() {
-        let dir = std::env::temp_dir().join("brutex-api-frontier-none");
+        // Named for this process: gate 23 clause C. This path is never created
+        // -- the request is refused before it is opened -- but a fixed `/tmp`
+        // name is a shared name whether or not this test happens to write to it,
+        // and the next edit that DOES write is the one that would collide.
+        let dir =
+            std::env::temp_dir().join(format!("brutex-api-frontier-none-{}", std::process::id()));
         let (status, _, body) = respond(Ok(dir), "");
         assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
         assert!(

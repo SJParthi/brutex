@@ -1173,7 +1173,13 @@ mod tests {
     /// The tree lays out eighteen distinct directories, none aliasing another.
     #[test]
     fn the_tree_lays_out_eight_disjoint_roots_per_stage() {
-        let temp = std::env::temp_dir().join("brutex-ledger-all-tree-test");
+        // THE PROCESS ID IS IN THE NAME, and gate 23 clause C is right to
+        // insist. A fixed `/tmp` name is one directory shared by every
+        // concurrent run of this suite, and this test CREATES and then DELETES
+        // the tree it names -- so two runs would delete each other's fixtures
+        // and fail for a reason neither of them contains.
+        let temp =
+            std::env::temp_dir().join(format!("brutex-ledger-all-tree-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp);
         let tree = LedgerTree::create(&temp).expect("the tree is creatable under a temp root");
 

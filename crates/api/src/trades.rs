@@ -738,7 +738,11 @@ mod tests {
     /// A missing or malformed identity is refused rather than guessed at.
     #[test]
     fn a_request_without_an_identity_is_refused() {
-        let dir = std::env::temp_dir().join("brutex-api-trades-none");
+        // Named for this process, for the reason given in `frontierjson`'s twin
+        // of this test: gate 23 clause C polices the NAME, not whether this
+        // particular assertion reaches the filesystem.
+        let dir =
+            std::env::temp_dir().join(format!("brutex-api-trades-none-{}", std::process::id()));
         let (status, _, body) = respond(Ok(dir), "");
         assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
         assert!(

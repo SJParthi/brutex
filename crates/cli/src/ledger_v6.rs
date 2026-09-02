@@ -436,7 +436,11 @@ mod tests {
     /// Each rung lays out seven distinct roots, none aliasing another.
     #[test]
     fn a_rung_lays_out_seven_disjoint_stage_roots() {
-        let temp = std::env::temp_dir().join("brutex-ledger-v6-roots-test");
+        // Named for this process, for the reason gate 23 clause C gives: the
+        // test creates and removes the tree, so a fixed name lets two
+        // concurrent runs delete each other's fixtures.
+        let temp =
+            std::env::temp_dir().join(format!("brutex-ledger-v6-roots-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp);
         let roots = RungRoots::create(&temp, "1min").expect("the rung tree is creatable");
 

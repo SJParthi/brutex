@@ -25,12 +25,23 @@ fn bin() -> std::path::PathBuf {
 /// One binary invocation with an already-existing store root.
 ///
 /// Production must refuse a missing root before dispatch. These tests exercise
-/// commands rather than that refusal, so they explicitly point the process at
-/// the operating system's existing temporary directory and give each process
-/// its own log directory.
+/// commands rather than that refusal, so they point the process at a root that
+/// exists and give each process its own log directory.
+///
+/// # Why the root is per-process now
+///
+/// It was the bare `std::env::temp_dir()`, which every concurrent run of this
+/// suite shares — and gate 23 clause C refuses a fixed temporary name for
+/// exactly that reason. The log directory beside it was already per-process,
+/// so the store was the odd one out rather than a deliberate exception.
+///
+/// Created rather than assumed: the whole point of naming it is that it is not
+/// the one directory the operating system guarantees already exists.
 fn command(tag: &str) -> Command {
+    let root = std::env::temp_dir().join(format!("brutex-cli-binary-store-{}", std::process::id()));
+    let _made = std::fs::create_dir_all(&root);
     let mut command = Command::new(bin());
-    command.env("BRUTEX_STORE", std::env::temp_dir());
+    command.env("BRUTEX_STORE", &root);
     command.env(
         "BRUTEX_LOG_DIR",
         std::env::temp_dir().join(format!(
