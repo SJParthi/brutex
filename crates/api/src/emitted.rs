@@ -1476,7 +1476,7 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     /// Two more joined them with the batch that closed the adversarial sweep's
     /// silent-startup findings: `api.server the server stopped after serving a
     /// DEGRADED universe`, driven directly through `stopped_over(Ok(()),
-    /// false)`, and `api.serve refused: another instance is serving this store`,
+    /// false)`, and `api.serve refused: this store cannot be served`,
     /// driven by the second-server test in `server::tests` — which holds the
     /// store's own lock file on a handle of its own, so the refusal is the OS's
     /// and needs no second process.

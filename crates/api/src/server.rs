@@ -14086,11 +14086,24 @@ fn sole_server(store_root: &Path, addr: std::net::SocketAddr) -> Result<ServeLoc
     match take_serve_lock(store_root, addr) {
         Ok(lock) => Ok(lock),
         Err(why) => {
+            // THE MESSAGE NAMED ONE CAUSE AND THIS ARM HAS FOUR.
+            //
+            // `take_serve_lock` refuses a store root that does not exist, one
+            // that is not a directory, one whose physical path will not
+            // resolve, and one another instance already holds — and every one
+            // of them was reported as "another instance is serving this store".
+            // On a machine with no store at all that record sent an operator
+            // hunting for a second server that was never running.
+            //
+            // The `why` beside it always carried the true sentence, so nothing
+            // was lost from the FILE; what was wrong was the line the reader
+            // sees first. `CLAUDE.md` §4 asks a refusal to name its reason, and
+            // a message that names a different one is worse than a generic one.
             let _noted = telemetry::emit(
                 &telemetry::Event::new(
                     telemetry::Level::Error,
                     "api.serve",
-                    "refused: another instance is serving this store",
+                    "refused: this store cannot be served",
                 )
                 .with("why", telemetry::Value::Str(&why)),
             );
@@ -15841,11 +15854,8 @@ mod tests {
         )
         .await;
         assert_eq!(code, FAILED, "a second server is a refusal to run");
-        let landed = crate::emitted::landed(
-            from,
-            "api.serve",
-            "refused: another instance is serving this store",
-        );
+        let landed =
+            crate::emitted::landed(from, "api.serve", "refused: this store cannot be served");
         assert!(
             landed.iter().any(|record| {
                 record.level == telemetry::Level::Error
@@ -19368,13 +19378,49 @@ mod tests {
         // it would race every other test in this binary. So the expectation
         // takes the environment as it finds it, exactly as it already does for
         // the masters, and BOTH branches assert something.
-        let busy = store_dir().is_ok_and(|root| {
-            std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(root.join("serve.lock"))
-                .is_ok_and(|file| file.try_lock().is_err())
-        });
+        // AND "THE STORE HAS A VERDICT TOO" HAD ONLY HALF OF ITS OWN ARGUMENT.
+        //
+        // The paragraph above is right that a serve can refuse on the store
+        // rather than the masters, and it handled exactly one way that happens:
+        // another instance holding the lock, which is the state this developer's
+        // machine is in all day. A fresh CI runner is in the OTHER state — there
+        // is no `~/.brutex/store` at all — and `take_serve_lock` refuses that
+        // just as loudly. The expectation below is computed from the masters
+        // alone, so on a runner with clean fixtures and no store it asserted
+        // DEGRADED against a refusal and read `left: 1, right: 3`.
+        //
+        // That is the same class of defect the masters paragraph describes: an
+        // assertion about the machine wearing an assertion about the code. Both
+        // store refusals are now branches, and both assert.
+        // ON DISK, NOT RESOLVED. `store_dir` answers "what path is configured",
+        // which succeeds for a path that is not there -- it is
+        // `take_serve_lock` that stats it. Asking the resolver instead of the
+        // filesystem is why the first version of this branch never fired on the
+        // very runner it was written for.
+        let root = store_dir().ok().filter(|root| root.is_dir());
+        let Some(root) = root else {
+            assert_eq!(
+                run(&argv(&["serve", "127.0.0.1:0"]), fired()).await,
+                FAILED,
+                "a store root that is not there is refused, not created"
+            );
+            let refused =
+                crate::emitted::landed(from, "api.serve", "refused: this store cannot be served");
+            assert!(
+                refused.iter().any(|record| {
+                    record.level == telemetry::Level::Error
+                        && crate::emitted::says(record, "why", "does not exist or cannot be read")
+                }),
+                "and the refusal names the ABSENT store rather than a second server \
+                 that was never running: {refused:?}"
+            );
+            return;
+        };
+        let busy = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(root.join("serve.lock"))
+            .is_ok_and(|file| file.try_lock().is_err());
         if busy {
             // A HELD STORE IS A REFUSAL AND IT NAMES THE HOLDER. This is the
             // same path `run_refuses_a_store_another_server_holds` pins; what is
@@ -19386,11 +19432,8 @@ mod tests {
                 FAILED,
                 "a store another server is already serving is refused, not shared"
             );
-            let refused = crate::emitted::landed(
-                from,
-                "api.serve",
-                "refused: another instance is serving this store",
-            );
+            let refused =
+                crate::emitted::landed(from, "api.serve", "refused: this store cannot be served");
             assert!(
                 refused.iter().any(|record| {
                     record.level == telemetry::Level::Error

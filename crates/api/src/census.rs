@@ -367,7 +367,7 @@ pub fn read_all(root: &Path) -> Vec<VendorCensus> {
         Ok(_) => {
             return unreadable_root(
                 root,
-                format!(
+                &format!(
                     "configured store root {} is not a directory",
                     root.display()
                 ),
@@ -376,7 +376,7 @@ pub fn read_all(root: &Path) -> Vec<VendorCensus> {
         Err(error) => {
             return unreadable_root(
                 root,
-                format!(
+                &format!(
                     "configured store root {} is unavailable: {error}",
                     root.display()
                 ),
@@ -394,14 +394,17 @@ pub fn read_all(root: &Path) -> Vec<VendorCensus> {
 /// `Vendor::ALL` is a compile-time-bounded set, so this is constant work with
 /// respect to store size. Keeping the manifest paths in each row preserves the
 /// existing operator surface while making the shared root failure explicit.
-fn unreadable_root(root: &Path, reason: String) -> Vec<VendorCensus> {
+/// `&str` rather than `String`: the body clones it once per vendor anyway, so
+/// taking ownership only moved the caller's allocation one frame closer to
+/// being cloned five times and dropped.
+fn unreadable_root(root: &Path, reason: &str) -> Vec<VendorCensus> {
     Vendor::ALL
         .into_iter()
         .map(|vendor| VendorCensus {
             vendor,
             path: manifest_path(root, vendor),
             state: Census::Unreadable {
-                reason: reason.clone(),
+                reason: reason.to_owned(),
             },
         })
         .collect()
