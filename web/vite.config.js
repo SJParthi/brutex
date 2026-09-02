@@ -56,6 +56,12 @@ const ROUTES = [
 	'/indexmap.json',
 	'/store.json',
 	'/audit.json',
+	// THE IN-FLIGHT TOP-N HEAP the backtest page polls while a sweep runs.
+	// Registered in `crates/api/src/server.rs` and missing from this list when
+	// the panel that reads it shipped — the third consecutive feature to arrive
+	// end to end without this file being the place it also had to land, which
+	// is exactly what `tests/proxy.test.js` exists to catch and did.
+	'/live.json',
 	// THE RESULTS LEDGER. Its page at `/backtest` is a SvelteKit route and is
 	// deliberately NOT listed here, for the reason the `/audit` note below
 	// gives at length: a path that appears in this list is answered by Rust in

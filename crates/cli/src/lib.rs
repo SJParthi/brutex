@@ -127,6 +127,8 @@ pub mod candidate_universe;
 pub mod execution_capability;
 /// Receipt-last execution outcome for every complete Population V4 row.
 pub mod execution_disposition_v2;
+/// Does each stored coarse rung equal the fold of the stored one-minute bars?
+pub mod fold_audit;
 pub mod frontier;
 /// Receipt-last, all-rung global single-position replay and publication authority.
 pub mod global_replay;

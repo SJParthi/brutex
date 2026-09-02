@@ -183,9 +183,19 @@ test('the drill-down owns the reference dark ramp and selection is not confused 
 
 test('trade analytics is admitted before publication and a refusal is visible across the report', () => {
   const fetch = between(page, 'async function fetchTrades(identity)', 'Everything the reference');
-  const admission = fetch.indexOf('validateTradePayload(body, expectedRun)');
+  // THE DOOR, NOT THE VARIABLE NAME. This pinned the literal
+  // `validateTradePayload(body, expectedRun)`, and `fetchTrades` now pages
+  // `/trades.json` and validates the ASSEMBLED body — one call over every page's
+  // rows rather than one call over the first page's. The property under test is
+  // that the response crosses the admission door before any row is published,
+  // and that is unchanged; the argument's name is not the property.
+  const admission = fetch.search(/validateTradePayload\(\w+, expectedRun\)/);
   const publication = fetch.indexOf('rows: checked.rows');
   assert.ok(admission >= 0, 'the response must cross the exact-integer admission door');
+  // AND EVERY PAGE IS FETCHED, which is the defect that made the door moot: a
+  // single-page request on a 257+ trade run reconciled short and refused the
+  // whole payload, sending every trade-derived figure to a padlock.
+  assert.match(fetch, /next_page/, 'the paged resource must be paged');
   assert.ok(publication > admission, 'validated rows alone may enter report state');
   assert.match(fetch, /policy: checked\.policy/);
   assert.match(fetch, /direction: checked\.direction/);

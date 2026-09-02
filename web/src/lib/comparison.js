@@ -647,12 +647,20 @@ export function supportBasisPoints(run) {
  * @returns {string | null}
  */
 export function supportRatioKey(run) {
+  // THE THIRD COPY, and `min_hits > bars` is dropped here for the same reason
+  // it was dropped from `validateRun` and `classifyAgainst`: a support floor
+  // above the bar count is a legal run that found nothing, not a malformed one.
+  //
+  // It matters more here than it looks. This function is the comparison
+  // IDENTITY — returning `null` puts a run in no support group at all, so two
+  // extinct runs at the same floor over the same column could not be compared
+  // with each other either. The ratio is exact and meaningful whether or not it
+  // exceeds one: `20000 / 6855` reduces and compares exactly as `1 / 2` does.
   if (
     !Number.isSafeInteger(run?.bars) ||
     run.bars <= 0 ||
     !Number.isSafeInteger(run?.min_hits) ||
-    run.min_hits < 1 ||
-    run.min_hits > run.bars
+    run.min_hits < 1
   ) {
     return null;
   }
@@ -727,7 +735,22 @@ function classifyAgainst(run, signalRungs) {
     run?.to_month <= 12 &&
     run?.months_asked > 0 &&
     run?.months_found <= run?.months_asked;
-  const supportCountsAreUsable = run?.bars > 0 && run?.min_hits <= run?.bars;
+  // THE SECOND COPY OF `min_hits <= bars`, AND FIXING ONLY THE FIRST LEFT THIS
+  // ONE LYING ABOUT WHY.
+  //
+  // `validateRun` above no longer refuses a support floor higher than the bar
+  // count — it is a legal, truthful run that went extinct because nothing could
+  // be frequent. This predicate still refused it, and mapped it to
+  // MISSING_NUMERIC_RESULTS, whose reason reads "One or more numbers needed for
+  // an honest comparison are missing, invalid, or not exactly representable by
+  // this browser". Every one of those numbers was present, valid and exact.
+  // Naming a correct row as broken, and misdescribing why, is the fallback that
+  // hides a failure `CLAUDE.md` §4 bans — the row is not unusable, it simply
+  // found nothing.
+  //
+  // What remains checked is the part that is genuinely required for a
+  // COMPARISON: a run with no bars has no support ratio to compare on.
+  const supportCountsAreUsable = run?.bars > 0;
   if (!displayedIntegersAreUsable || !calendarFieldsAreUsable || !supportCountsAreUsable) {
     return STATUS[COMPARISON_STATUS.MISSING_NUMERIC_RESULTS];
   }

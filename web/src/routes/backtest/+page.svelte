@@ -297,15 +297,43 @@
       //
       // `idle_secs` is seconds since the heap last MOVED, so the smallest one is
       // the run doing work now. Ties keep the server's order, which is stable.
+      // AN UNDATED RUN IS THE OLDEST CANDIDATE, NOT THE FRESHEST.
+      //
+      // This sorted on `Number(a.idle_secs) || 0`, and `/live.json` documents
+      // that `idle_secs` and `stale` are **null** when the heap file cannot be
+      // dated (crates/api/src/livejson.rs:144). `Number(null)` is 0, so an
+      // undated run sorted to the FRONT and won — and `stale: null` fails
+      // `=== true`, so it did not even carry the "not moving" pill. That is the
+      // "shows a dead run's winners" defect the comment here claims to fix,
+      // reintroduced through the null case one line below the claim.
+      //
+      // Undated now sorts last. A run with no rows is also dropped: a freshly
+      // started sweep whose heap is still empty would otherwise blank the panel
+      // while an older run with real rows sat right behind it.
+      const freshness = (/** @type {any} */ r) => {
+        const idle = Number(r?.idle_secs);
+        return Number.isFinite(idle) ? idle : Number.MAX_SAFE_INTEGER;
+      };
       const fresh = runs
-        .filter((/** @type {any} */ r) => r && Array.isArray(r.rows))
-        .sort(
-          (/** @type {any} */ a, /** @type {any} */ b) =>
-            (Number(a.idle_secs) || 0) - (Number(b.idle_secs) || 0)
-        );
+        .filter(
+          (/** @type {any} */ r) => r && Array.isArray(r.rows) && r.rows.length > 0
+        )
+        .sort((/** @type {any} */ a, /** @type {any} */ b) => freshness(a) - freshness(b));
       const best = fresh[0] ?? null;
       if (!best || !Array.isArray(best.rows)) {
-        liveTop = { phase: 'empty', rows: [], trials: 0, barMilli: 0, stale: false, why: '' };
+        // `idleSecs` IS REQUIRED BY THE CAST AND WAS OMITTED HERE. `checkJs` and
+        // `strict` are on and CI gate W3 fails the build above zero
+        // `svelte-check` errors, so a field missing from one of four
+        // construction sites is a red build, not a warning.
+        liveTop = {
+          phase: 'empty',
+          rows: [],
+          trials: 0,
+          barMilli: 0,
+          idleSecs: 0,
+          stale: false,
+          why: ''
+        };
         return;
       }
       liveTop = {
@@ -2275,9 +2303,14 @@
         // ONE LAST READ, so the finished state shows every rung's outcome
         // rather than freezing on whatever the last poll happened to catch.
         fetchLive(next.run);
-        // ONE FINAL READ OF THE HEAP TOO, so the panel freezes on the run's
-        // real best rows rather than on whatever the last 2-second tick caught.
-        fetchLiveTop();
+        // NO FINAL `fetchLiveTop()` HERE, AND THE ONE THAT WAS HERE WAS DEAD.
+        //
+        // It claimed to make "the panel freeze on the run's real best rows".
+        // It cannot: the panel is inside `{#if sweep.phase === 'running'}`, so
+        // by the time this branch runs the panel is already unmounted and the
+        // reply lands in state nothing reads. It was one wasted request per
+        // run, justified by a comment describing an effect it did not have.
+        // The finished run's ranked rows are `fetchTop`'s job, below.
         // AND THE RANKED COMBINATIONS, which is what was actually being asked
         // for. `fetchLedger` re-reads one row per run; this reads the twenty-five
         // rows behind each of them. Fired together and awaited by neither,
@@ -6935,17 +6968,29 @@
           {/if}
         </p>
         <ol class="livelist">
-          {#each liveTop.rows.slice(0, 10) as row (row.rank)}
-            {@const t = Math.abs(row.t_milli) / 1000}
+          {#each liveTop.rows.slice(0, 10) as row, at (`${row.rank ?? 'x'}-${at}`)}
+            <!-- `?? 0`, AND WITHOUT IT A MISSING FIELD DREW MAXIMUM CONFIDENCE.
+                 `Math.abs(undefined)` is NaN, `Math.max(1, Math.min(100, NaN))`
+                 is NaN, and `style="width:NaN%"` is an invalid declaration the
+                 browser DROPS. `.livebar-fill` is `display: block` inside an
+                 `overflow: hidden` box, so with no width it fills its
+                 container: a row with absent evidence rendered a FULL bar. The
+                 one number on this panel that says "believe this" was the one
+                 that failed open.
+
+                 The key is the index too. `row.rank` alone throws on a
+                 duplicate, and Svelte kills the whole block when it does. -->
+            {@const t = Math.abs(Number(row.t_milli) || 0) / 1000}
+            {@const move = Math.abs(Number(row.mean_milli_paisa) || 0) / 1000}
+            {@const n = Number(row.n) || 0}
+            {@const wins = Number(row.edge_wins) || 0}
             <li class="liverow {row.clears_bar ? 'clears' : ''}">
               <div class="liverow-top">
                 <span class="liverank">{row.rank}</span>
                 <span class="liveside {row.direction}"
                   >{row.direction === 'short' ? 'sell' : 'buy'}</span
                 >
-                <span class="livemove"
-                  >{(Math.abs(row.mean_milli_paisa) / 1000).toFixed(1)} paisa/trade</span
-                >
+                <span class="livemove">{move.toFixed(1)} paisa/trade</span>
                 {#if row.clears_bar}
                   <span class="pill good">proved</span>
                 {:else}
@@ -6957,10 +7002,8 @@
                    second copy of the table in JavaScript. -->
               <div class="liverow-names">{@render conditionNames(row.mask_words)}</div>
               <div class="liverow-facts">
-                <span><b>{exact(row.n)}</b> trades</span>
-                <span
-                  ><b>{row.n > 0 ? Math.round((row.edge_wins / row.n) * 100) : 0}%</b> won</span
-                >
+                <span><b>{exact(n)}</b> trades</span>
+                <span><b>{n > 0 ? Math.round((wins / n) * 100) : 0}%</b> won</span>
                 <span>fires on <b>{exact(row.hits)}</b> bars</span>
                 <span>evidence <b>{t.toFixed(2)}</b> of {bar.toFixed(2)}</span>
               </div>
@@ -10546,6 +10589,32 @@
     padding: 9px 12px;
     border-bottom: 1px solid var(--n4);
     font-size: 13px;
+  }
+  /* THE ANSWER IN A SENTENCE, ABOVE THE EVIDENCE.
+     These three selectors were in the markup and NEVER DEFINED. The panel's
+     headline -- the one line that says whether anything has proved itself --
+     rendered with default paragraph margins, no padding, and NO COLOUR
+     DIFFERENCE between "proved" and "none yet", flush against the panel border
+     while every sibling had padding. Gate W4 reports UNUSED css; a class used
+     and never defined is invisible to it, to the build, and to a reader who did
+     not know what it was supposed to look like. */
+  .livetop-verdict {
+    margin: 0;
+    padding: 11px 14px;
+    border-bottom: 1px solid var(--n4);
+    font-size: 13.5px;
+    line-height: 1.55;
+  }
+  .livetop-verdict.yes {
+    background: var(--up-soft);
+    color: var(--up);
+  }
+  .livetop-verdict.not-yet {
+    background: var(--n2);
+    color: var(--n9);
+  }
+  .livetop-verdict b {
+    color: inherit;
   }
   /* KEY STATS, THE SHAPE TRADINGVIEW USES ON A STRATEGY REPORT: a plain label
      over one big number with its unit, four across, wrapping on a narrow
